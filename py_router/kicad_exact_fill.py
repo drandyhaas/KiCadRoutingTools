@@ -845,9 +845,15 @@ def exact_clusters(pcb_data, net_id: int, islands,
         _th = pad_is_plated_through(p)
         lookup_layers = (None,) if _th or '*.Cu' in p.layers else tuple(cu)
         for lyr in lookup_layers:
+            # The plain tolerance: _cluster_points' pad rung measures from
+            # the pad's COPPER, shape-accurately. Inflating it by the pad's
+            # half-size (the circle this lookup used before the rung
+            # existed) reached copper that does not touch the pad: ddr5
+            # GND's 0.35x2.5 J1.177 finger joined a via 1.40 mm off its
+            # copper, so the exact source reported no link for a pad KiCad
+            # grades open, and the oracle saw it only through kicad-cli.
             _, root = _cluster_points(pcb_data, net_id, p.global_x,
-                                      p.global_y, lyr, comps, tol=tolerance
-                                      + max(p.size_x, p.size_y) / 2.0)
+                                      p.global_y, lyr, comps, tol=tolerance)
             if root is not None:
                 union(pnode, ('c', root))
                 break

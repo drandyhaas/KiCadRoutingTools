@@ -24,9 +24,8 @@ EXACTLY ONCE is BROKEN, never skipped; `preflight()` runs right after `ROWS`.
 Edits are `str.replace(old, new, 1)`; anchors are LF and translated to the
 target's own ending. A witness is `(test file, case-name substring...)`.
 
-Not covered by a row: `hard_blocked`'s gate clause (`hard_blocked` has no
-production caller; it mirrors `cost()` for tests) and the proximity filter
-(`FANOUT_TETHER_RULES`), which no fixture intent declares.
+Not covered by a row: the proximity filter (`FANOUT_TETHER_RULES`), which no
+fixture intent declares.
 """
 from __future__ import annotations
 

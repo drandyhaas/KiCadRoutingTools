@@ -50,7 +50,6 @@ from kicad_parser import parse_kicad_pcb                       # noqa: E402
 from placement import quench as Q                              # noqa: E402
 from placement.quench import QuenchState                       # noqa: E402
 from placement.legality import CONTAINMENT_FRAC                # noqa: E402
-import routing_defaults as defaults                            # noqa: E402
 
 SKIP_EXIT = 77
 ULX3S = os.path.join(ROOT, 'kicad_files', 'ulx3s.kicad_pcb')
@@ -78,10 +77,7 @@ def check(name, cond, detail=''):
 
 def state(path):
     return QuenchState(parse_kicad_pcb(path), path, clearance=0.15,
-                       board_edge_clearance=0.55, crossing_penalty=10.0,
-                       halo_base=0.5, halo_coef=0.25, halo_weight=2.0,
-                       edge_halo=2.0, edge_weight=2.0,
-                       grid_step=defaults.GRID_STEP, length_weight=1.0)
+                       board_edge_clearance=0.55)
 
 
 def main():

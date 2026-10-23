@@ -29,7 +29,11 @@ Design constraints (#331/#371 review):
     compute limits (grid, window margin, cell budget, max attempts) are
     the RESCUE_* constants in routing_defaults. Gap LENGTH is deliberately
     unbounded (#516): the cell budget is what bounds compute — a longer
-    gap gets a coarser grid, not a bigger search.
+    gap gets a coarser grid, not a bigger search. A WIDE net's rung is
+    bounded the same way (RESCUE_MAX_MARGIN_CELLS, _bound_rung_margin): its
+    width rides the search as a track margin whose cost grows with its
+    square, so a rung whose margin is too wide gets a coarser grid -- never
+    coarser than the run's own.
   - Always on, no flags: lives inside batch_route so the CLI and the GUI
     plugin share it (CLAUDE.md parity rule). Set KICAD_NET_RESCUE=0 to
     disable for A/B debugging.
@@ -345,14 +349,18 @@ def _net_component_info(pcb_data, net_id):
         else:
             cid = next_unique
             next_unique -= 1
-        comp_points.setdefault(cid, []).append((pad.global_x, pad.global_y))
+        # #1279: a sense pad is never a join point (its branch joins the
+        # net at the join pad only); it still counts toward its component.
+        pts = comp_points.setdefault(cid, [])
+        if not pad.sense:
+            pts.append((pad.global_x, pad.global_y))
         comp_pads.setdefault(cid, []).append(pad)
     # Segment endpoints of PAD-bearing components are join points too (the
     # gap usually ends at a stub tip, not at the far pad - bitaxe RST_N's
     # remaining gap was 0.25mm off the pad while the trunk crossed the board).
     for si, seg in enumerate(net_segments):
         cid = uf.find(2 * si)  # segment i's endpoints are point ids 2i/2i+1
-        if cid in comp_pads:
+        if cid in comp_pads and not seg.sense:
             comp_points[cid].append((seg.start_x, seg.start_y))
             comp_points[cid].append((seg.end_x, seg.end_y))
     # #545 F11: the components' VIAS are join points too (graph-authoritative
@@ -369,7 +377,8 @@ def _net_component_info(pcb_data, net_id):
                 _v = net_vias[vidx]
             except (IndexError, TypeError):
                 continue
-            comp_points[cid].append((_v.x, _v.y))
+            if not _v.sense:
+                comp_points[cid].append((_v.x, _v.y))
     return len(comp_pads), comp_points, comp_pads
 
 
@@ -606,7 +615,33 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
                                     power_net_widths=power_widths,
                                     via_size=v_dia, via_drill=v_drill,
                                     max_iterations=max_iters))
-    return rungs
+    return [_bound_rung_margin(r, net_id, config.grid_step) for r in rungs]
+
+
+def _bound_rung_margin(cfg, net_id, run_grid):
+    """Coarsen ONE rung's grid until the rescued net's A* track margin fits
+    RESCUE_MAX_MARGIN_CELLS, never past the run's own grid.
+
+    A rung routes a wide (power / impedance) net as a track MARGIN over the
+    width its map is stamped at, and the router's swept-capsule test scans
+    (2*ceil(r)+1)^2 cells per neighbour for a margin of r cells. The margin
+    scales with 1/grid, so the fine rescue grid made a wide net's rescue
+    hundreds of times slower than its main route (found reviewing #1282:
+    splitflap +12V at 2.5 mm over a 0.3 mm stamp is a 63-cell margin at
+    0.025 mm -- 149k steps in 340 s; the same gap stamped at 2.5 mm, margin
+    0: 40k steps in 0.3 s -- so a run under --escalation off went 8 hours
+    without finishing). A rung under the bound is returned unchanged, so
+    every narrow net, and a 1 mm rail over the 0.127 mm floor (25 cells,
+    watchy VBUS's default-policy rescue), rescues exactly as before; a
+    coarser rung's window is smaller in cells, so the cell budget
+    _choose_grid enforced still holds."""
+    g = cfg.grid_step
+    while (max(cfg.track_margins_for_net(net_id), default=0.0)
+           > defaults.RESCUE_MAX_MARGIN_CELLS + 1e-9
+           and g * 2 <= run_grid + 1e-9):
+        g *= 2
+        cfg = replace(cfg, grid_step=g)
+    return cfg
 
 
 def _fence_window(obstacles, window, cfg):
@@ -638,10 +673,48 @@ def _fence_window(obstacles, window, cfg):
                                     track_expand, via_expand)
 
 
+def seed_rows(points, cfg, window):
+    """`points` ((x, y[, layer]) board mm) as endpoint-override rows
+    (gx, gy, layer_idx, x, y) on `cfg`'s grid, inside `window`'s bounds. A
+    point with no layer (a via, a plated barrel) or '*.Cu' seeds every routed
+    layer; a point on a layer this rung does not route seeds nothing."""
+    from routing_config import GridCoord
+    coord = GridCoord(cfg.grid_step)
+    idx = {name: i for i, name in enumerate(cfg.layers)}
+    bb = window.board_info.board_bounds
+    rows, seen = [], set()
+    for p in points or ():
+        x, y = float(p[0]), float(p[1])
+        lay = p[2] if len(p) > 2 else None
+        if bb and not (bb[0] <= x <= bb[2] and bb[1] <= y <= bb[3]):
+            continue
+        if lay is None or '*' in str(lay):
+            lis = range(len(cfg.layers))
+        elif lay in idx:
+            lis = (idx[lay],)
+        else:
+            continue
+        gx, gy = coord.to_grid(x, y)
+        for li in lis:
+            if (gx, gy, li) not in seen:
+                seen.add((gx, gy, li))
+                rows.append((gx, gy, li, x, y))
+    return rows
+
+
 def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
-                  strict_endpoints: bool = False, island_points=None):
+                  strict_endpoints: bool = False, island_points=None,
+                  endpoints=None):
     """Try to route one gap inside a scoped window. Returns (result, cfg_used)
     or (None, None). Routes through free space only - no rip-up.
+
+    endpoints: (source_points, target_points), (x, y[, layer]) board mm --
+    the copper the caller already KNOWS each side of the gap is (the
+    oracle's exact-fill clusters). Each rung then routes those seeds to
+    each other on their own layers instead of deriving the sides from the
+    net's copper near the gap, which is layer-blind and can only see tracks,
+    pads and vias -- never the fill a plane link has to reach. A rung whose
+    window holds no seed of a side is skipped.
 
     strict_endpoints (#570): when the anchor split cannot resolve the gap's
     two sides, FAIL instead of falling back to the window's largest-two
@@ -761,10 +834,17 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
         # trunk half parked in the fence ring; the BGA ball was never aimed
         # at, so the small-via rungs never even pointed at the pocket).
         from connectivity import get_net_endpoints_anchor_split
-        src_over, tgt_over, split_err = get_net_endpoints_anchor_split(
-            window, net_id, cfg, (ax, ay), (bx, by),
-            island_points=island_points)
+        if endpoints is not None:
+            src_over = seed_rows(endpoints[0], cfg, window)
+            tgt_over = seed_rows(endpoints[1], cfg, window)
+            split_err = None if (src_over and tgt_over) else 'no seed'
+        else:
+            src_over, tgt_over, split_err = get_net_endpoints_anchor_split(
+                window, net_id, cfg, (ax, ay), (bx, by),
+                island_points=island_points)
         if split_err:
+            if endpoints is not None:
+                continue
             if strict_endpoints:
                 # #570: no anchors for THIS gap's sides -> nothing this
                 # window can honestly route. Do not weld a random pair.
@@ -873,6 +953,34 @@ def _unconnected_pads_info(comp_pads):
                         'pad_number': p.pad_number,
                         'x': p.global_x, 'y': p.global_y})
     return out
+
+
+def _fold_into_result(state, prev, merged):
+    """Fold `merged`'s copper into `prev`, the net's AUTHORITATIVE result.
+
+    A separate entry in state.results is dropped by route.py's #87
+    superseded-result filter (only routed_results survive), so the copper
+    joins `prev`, and a later rip takes it with the rest of the net. But a
+    pre-existing net put back by a restore is authoritative through its
+    custody registration (`is_existing_route`), which is NOT on the
+    write-list: its copper is the input file's, written verbatim. Copper
+    folded into it alone was written by nobody, and the orphan pass then
+    deleted it from the board (vis_nir_spec: a GND tap retry ripped
+    Net-(J11-D--PadA7), the escalation reconnected the restored net, and the
+    file shipped it open). That copper also rides an entry of its own,
+    `extends` naming `prev`, which the filter keeps while `prev` is the
+    net's result.
+    """
+    segs = list(merged['new_segments'])
+    vias = list(merged['new_vias'])
+    prev['new_segments'] = list(prev.get('new_segments') or []) + segs
+    prev['new_vias'] = list(prev.get('new_vias') or []) + vias
+    if (segs or vias) and not any(r is prev for r in state.results):
+        state.results.append({'net_name': merged.get('net_name'),
+                              'net_id': merged['net_id'],
+                              'new_segments': segs, 'new_vias': vias,
+                              'iterations': merged.get('iterations', 0),
+                              'extends': prev})
 
 
 def _find_cap_relocation(pcb_data, fp, extra_avoid_vias, extra_avoid_segs,
@@ -1106,6 +1214,10 @@ def cap_move_reweld_spec(config, pcb_data, moves) -> dict:
         'net_widths_by_name': oracle_net_widths_by_name(
             config, pcb_data.nets, fields=('power_net_widths',)),
         'net_clearances_by_name': config.net_clearances_by_name(pcb_data.nets),
+        # #1290: the run's resolved edge floor and #581 same-net pad via
+        # clearance -- a re-weld is this run's copper like any other.
+        'board_edge_clearance': config.board_edge_clearance,
+        'same_net_pad_clearance': config.same_net_pad_clearance,
     }
 
 
@@ -1565,9 +1677,17 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     used_cfg.net_via(net_id)[0] < config.net_via(net_id)[0] - 1e-9:
                 stepped_vias.append((used_cfg.net_via(net_id)[0],
                                      len(result['new_vias'])))
+            # Print the NET's width, not the board default: a 0.8 mm rail's gap
+            # logged "track 0.09" while its segments shipped at 0.1/0.2 (the
+            # ledger row said so; the line contradicted it).
+            _seg_w = sorted({round(float(getattr(sg, 'width', 0.0)), 4)
+                             for sg in result['new_segments']
+                             if getattr(sg, 'width', None)})
+            _seg_txt = ('/'.join(f'{w:g}' for w in _seg_w) if _seg_w
+                        else f'{used_cfg.track_width:g}')
             print(f"    {GREEN}rescued a gap{RESET}: grid {used_cfg.grid_step:g}, "
                   f"clearance {used_cfg.clearance:g}, track "
-                  f"{used_cfg.track_width:g} ({len(result['new_segments'])} segs, "
+                  f"{_seg_txt} ({len(result['new_segments'])} segs, "
                   f"{len(result.get('new_vias', []))} vias, "
                   f"{result.get('iterations', 0)} iters)")
 
@@ -1643,10 +1763,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             # rescue_succeeded fully_connected=True while the file stayed
             # open; reproduced deterministically on the parity board).
             prev = routed_results[net_id]
-            prev['new_segments'] = (list(prev.get('new_segments') or [])
-                                    + list(merged['new_segments']))
-            prev['new_vias'] = (list(prev.get('new_vias') or [])
-                                + list(merged['new_vias']))
+            _fold_into_result(state, prev, merged)
             prev_failed = prev.get('failed_pads_info') or []
             still = ({} if fully else
                      {(p['component_ref'], p['pad_number'])
@@ -2080,10 +2197,7 @@ def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
             # net's AUTHORITATIVE result (a separate entry is dropped by the
             # #87 superseded-result filter -- the rescue's partial-branch
             # lesson). Fully connected now, so the pad debt clears.
-            prev['new_segments'] = (list(prev.get('new_segments') or [])
-                                    + list(merged['new_segments']))
-            prev['new_vias'] = (list(prev.get('new_vias') or [])
-                                + list(merged['new_vias']))
+            _fold_into_result(state, prev, merged)
             prev_failed = prev.get('failed_pads_info') or []
             if prev_failed:
                 prev['failed_pads_info'] = []

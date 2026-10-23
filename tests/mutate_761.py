@@ -187,9 +187,9 @@ ROWS = [
      '        pass',
      (T761,), 'KILLED'),
     ('quench-passes-no-board-floor', 'quench',
-     """            _npth = legality.resolve_npth_floor(pcb_data, pcb_file,
-                                                _npth_notes)""",
-     '            _npth = None',
+     """        _npth = legality.resolve_npth_floor(pcb_data, pcb_file,
+                                            _npth_notes)""",
+     '        _npth = None',
      (T761,), 'KILLED'),
 
     # ---- the disclosure ------------------------------------------------

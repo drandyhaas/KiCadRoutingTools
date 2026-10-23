@@ -14,6 +14,10 @@ scripts themselves read these modules' constants at each run) and every module r
    rules.install of the same rules): every module-level numeric constant, compared by float.hex.
 2. The check is live: with nothing supplied the constants differ from FRESH (braid.TRACK among them), and an install of
    DEFAULT leaves them as a plain import has them.
+
+Where ortools is not installed (the suite's image), a module whose import needs it (whole_solve, which the ends
+model's solve check imports into the step's process) cannot be imported at all: it is left out and NAMED, and every
+other module checked. Where ortools is installed, every import must succeed.
 """
 import ast
 import json
@@ -25,6 +29,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 AWX = os.path.join(os.path.dirname(HERE), 'awx')
 FAIL = []
+try:
+    import ortools  # noqa: F401
+    NO_CP = False
+except ImportError:
+    NO_CP = True                # (no ortools: a module whose import needs it is left out, by name)
 
 # the recorded zynq chain's sizes: lanes 0.15, escapes 0.12, clearance 0.09, via 0.45/0.3
 SIZES = dict(clearance=0.09, track_width=0.15, via_size=0.45, via_drill=0.3)
@@ -33,23 +42,32 @@ FAN_TRACK = 0.12
 CHILD = r'''
 import contextlib, io, json, os, sys, types
 AWX, mods, mode, sizes, fan = sys.argv[1], sys.argv[2].split(','), sys.argv[3], json.loads(sys.argv[4]), float(sys.argv[5])
+no_cp = sys.argv[6] == '1'
 sys.path.insert(0, AWX); sys.path.insert(0, os.path.join(AWX, '..', 'py_router'))
 os.chdir(AWX)
 import importlib
 import rules
+skipped = []
 with contextlib.redirect_stdout(io.StringIO()):
     for m in mods:
-        importlib.import_module(m)
+        try:
+            importlib.import_module(m)
+        except ModuleNotFoundError as e:
+            if not (no_cp and (e.name or '').split('.')[0] == 'ortools'):
+                raise
+            skipped.append(m)
 if mode == 'installed':
     rules.install(rules.Rules.from_router_config(types.SimpleNamespace(**sizes), fan_track=fan))
 elif mode == 'default':
     rules.install(rules.DEFAULT)
 out = {}
 for m in mods:
+    if m in skipped:
+        continue
     mod = sys.modules[m]
     out[m] = {k: float(v).hex() for k, v in vars(mod).items()
               if k.lstrip('_').isupper() and isinstance(v, (int, float)) and not isinstance(v, bool)}
-print(json.dumps(out, sort_keys=True))
+print(json.dumps({'mods': out, 'skipped': skipped}, sort_keys=True))
 '''
 
 
@@ -94,12 +112,13 @@ def run(mods, mode, supplied):
     if supplied:
         env[rules.SETTING] = rules.as_setting(rules.Rules.from_router_config(
             __import__('types').SimpleNamespace(**SIZES), fan_track=FAN_TRACK))
-    r = subprocess.run([sys.executable, '-c', CHILD, AWX, ','.join(mods), mode, json.dumps(SIZES), str(FAN_TRACK)],
-                       capture_output=True, text=True, env=env)
+    r = subprocess.run([sys.executable, '-c', CHILD, AWX, ','.join(mods), mode, json.dumps(SIZES), str(FAN_TRACK),
+                        '1' if NO_CP else '0'], capture_output=True, text=True, env=env)
     if r.returncode:
         print(r.stderr[-2000:])
         raise SystemExit(f'BROKEN TEST: the {mode} import died (exit {r.returncode})')
-    return json.loads(r.stdout.strip().splitlines()[-1])
+    got = json.loads(r.stdout.strip().splitlines()[-1])
+    return got['mods'], got['skipped']
 
 
 def diff(a, b):
@@ -114,10 +133,12 @@ def diff(a, b):
 def main():
     mods = library_modules()
     print(f'{len(mods)} modules the whole route loads: {", ".join(mods)}')
-    fresh = run(mods, 'plain', supplied=True)
-    installed = run(mods, 'installed', supplied=False)
-    plain = run(mods, 'plain', supplied=False)
-    default = run(mods, 'default', supplied=False)
+    (fresh, s1), (installed, s2), (plain, s3), (default, s4) = (
+        run(mods, 'plain', supplied=True), run(mods, 'installed', supplied=False),
+        run(mods, 'plain', supplied=False), run(mods, 'default', supplied=False))
+    if s1:
+        print(f'  not checked here, their import needs ortools (not installed): {", ".join(s1)}')
+    check(s1 == s2 == s3 == s4, 'every run left out the same modules')
     d = diff(fresh, installed)
     check(not d, 'an install leaves every module as a fresh import under the supplied rules does'
           + (f' -- differ: {", ".join(d[:12])}' if d else ''))

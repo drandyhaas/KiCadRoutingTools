@@ -25,29 +25,40 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 - **Collision-free routing** - Automatic layer assignment to avoid conflicts
 - **Multi-layer support** - Distributes routes evenly across available layers
 - **Adjacent same-net optimization** - Connects neighboring pads on same net directly
-- **Existing fanout detection** - Skips pads that already have fanouts
+- **Existing fanout detection** - With `--check-for-previous`, skips pads that already have fanouts
+- **Spare pins skipped** - A net with one pad on the whole board (an NC ball) gets no escape; it would only burn a channel (`skipped_nc` in the summary)
 - **Via management** - Adds vias only for SMD pads on non-top layers (through-hole pads connect all layers)
-- **Under-pad escape for dense arrays** - An alternate engine (`--escape-method underpad`) that escapes fully-populated BGAs the channel router can't (see [Escape methods](#escape-methods))
+- **Under-pad escape for dense arrays** - An alternate engine (`underpad`, tried automatically by the default `auto`) that escapes fully-populated BGAs the channel router can't (see [Escape methods](#escape-methods))
+- **Plane balls dropped to vias, or served by the pour** - see [Plane-ball drops](#plane-ball-drops-424)
+- **Board rules honoured** - the board's per-layer `.kicad_dru` clearance rules (#498: the
+  escape clearance is floored at the largest rule on the escape layers), the project's
+  same-net-pad record (#581), and the fab floors and escalation policy every routing step
+  shares (`--fab-tier` / `--escalation`, below). Net classes are not read: the escape runs
+  at `--clearance` throughout
+- **Staggered packages refused** - a staggered no-lead array (AQFN and friends) is not a
+  ball grid: its rows read at half the real pitch. bga_fanout stops in a second and prints
+  the `qfn_fanout.py ... --escape-method underpad --allow-via-in-pad` command that handles
+  it (#500; `KICAD_ALLOW_STAGGERED_BGA=1` runs anyway)
 
 ## Usage
 
 ```bash
 # Basic fanout
-python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb
+python3 py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb
 
 # With net filter (include pattern)
-python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb --nets "*DATA*"
+python3 py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # With exclusion pattern (all nets except GND and VCC)
-python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
+python3 py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
     --nets "*" "!GND" "!VCC"
 
 # Differential pairs
-python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component IC1 --output kicad_files/output.kicad_pcb \
+python3 py_router/bga_fanout.py kicad_files/input.kicad_pcb --component IC1 --output kicad_files/output.kicad_pcb \
     --nets "*lvds*" --diff-pairs "*lvds*" --primary-escape vertical
 
 # Specify layers
-python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
+python3 py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
     --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu
 ```
 
@@ -69,10 +80,10 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--component`, `-c` | Component reference | Auto-detect BGA |
-| `--output`, `-o` | Output PCB file | fanout_test.kicad_pcb |
+| `--component`, `-c` | Component reference | Auto-detect BGA (the first one found) |
+| `--output`, `-o` | Output PCB file | kicad_files/fanout_test.kicad_pcb |
 | `--layers`, `-l` | Routing layers | F.Cu B.Cu |
-| `--track-width`, `-w` | Track width (mm) | 0.3 |
+| `--track-width`, `--width`, `-w` | Track width (mm) | 0.3 |
 | `--clearance` | Track clearance (mm) | 0.25 |
 | `--via-size` | Via outer diameter (mm) | 0.5 |
 | `--via-drill` | Via drill size (mm) | 0.3 |
@@ -85,8 +96,22 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--rebalance-escape` | Rebalance escape directions | False |
 | `--check-for-previous` | Skip existing fanouts | False |
 | `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
-| `--escape-method` | `channel` (default), `underpad` (dense arrays) or `dogbone` (gap vias) | channel |
+| `--escape-method` | `auto`, `channel`, `underpad` (dense arrays) or `dogbone` (gap vias); see [Escape methods](#escape-methods) | auto |
 | `--plane-drop` | `auto` = drop a via for every excluded plane-net ball after the signal escape (#424); `off` disables. `KICAD_FANOUT_PLANE_DROP=0/1` overrides either | auto |
+| `--plane-net-layers` | The future plane plan, `NET:LAYER[,LAYER...]` per plane net (e.g. `GND:In1.Cu,In4.Cu P3.3V:In2.Cu`): a ball the declared pour will reach on its own layer gets no drop via (see [Plane-ball drops](#plane-ball-drops-424)) | none |
+| `--same-net-pad-clearance` | `> 0` forbids via-in-pad: under-pad escapes and plane drops run dog-bone, a ball with no legal off-pad site fails visibly, and the value is recorded in the sibling `.kicad_pro` for later steps (#581). `-1` allows via-in-pad | the project's record, else allowed |
+| `--grid-step` | Routing grid step (mm); escape stub ends are snapped to it (#149). Match the `--grid-step` you give `route.py` | 0.1 |
+| `--layer-costs` | One cost per `--layers` entry, route.py semantics (#288): negative = no escape copper on that layer (e.g. a future plane layer), otherwise a weight in [1, 1000]; the channel engine fills cheaper layers first | none |
+| `--add-teardrops` | Add teardrop settings to all pads and vias in the output | False |
+
+The fab floor and escalation flags every routing step shares (`--fab-tier`,
+`--fab-overrides`, `--escalation`, `--clearance-ceiling`, `--strict-sizes`) and
+the post-run DRC-settings flags (`--no-fix-drc-settings`,
+`--relax-drc-severities`, `--keep-thermal`, `--enable-used-layers`) are
+described in [Configuration](../../docs/configuration.md#fab-tier-options). A
+fan-out whose via cannot fit the pitch at the standard floor may escalate to the
+advanced one under the default `--fab-tier auto`; it is warned and counted in
+`JSON_SUMMARY.design_rules`.
 
 ### Sizing the escape via to the pitch (issue #158)
 
@@ -120,13 +145,32 @@ via through the finished ball field (the #360 failure class). Existing same-net
 connections are respected, so re-runs are idempotent; per-net counts are
 reported in `JSON_SUMMARY.plane_drop`. Disable with `--plane-drop off`;
 `KICAD_FANOUT_PLANE_DROP=0/1` overrides the flag either way (the
-recorded-manifest A/B switch).
+recorded-manifest A/B switch). With `--same-net-pad-clearance > 0` there is no
+via-in-pad fallback: a ball with no free gap is left for the route step.
+
+**Pour-direct.** A ball needs no drop via at all when a pour of its own net
+already reaches it on the ball's own copper layer (the main fill component, not
+an islet): the fill connects it, as human boards do for rail balls under an
+outer-layer flood. A ball the fill just misses gets a short surface track into
+the fill instead of a via (#652). `--plane-net-layers` extends this to pours
+that do not exist yet: each declared (net, layer) is modelled as a board-sized
+zone filled against the copper present now, and a ball that predicted fill
+reaches skips its via. The per-net report counts these as `pour`.
+
+**A pour-served ball is a promise (#678).** Each one is recorded, keyed
+`"REF.PAD"`, in the output's `kicad_routing_tools.pour_served_pads` record (the
+sibling `.kicad_pro`, merged across a chain's fanout steps). The route step's
+in-run plane finalize audits every promise after routing; see
+[route-plane.md](../../docs/route-plane.md).
 
 ## Escape methods
 
 `--escape-method` selects the fanout engine:
 
-- **`channel`** (default) - the 45°-stub + channel router. Each ball jogs to a
+- **`auto`** (default) - runs `channel` first and, if it drops any ball,
+  retries with `underpad` and keeps whichever escapes more (#288).
+
+- **`channel`** - the 45°-stub + channel router. Each ball jogs to a
   routing channel between the ball rows and runs out to the boundary. Full
   differential-pair support. Best for sparse/medium BGAs and signal-grouped escapes.
 
@@ -181,10 +225,17 @@ recorded-manifest A/B switch).
     Keep-out disks are stamped against the pad/via's true coordinate, so a
     clear grid cell genuinely guarantees the clearance (no more few-µm
     VIA-SEGMENT quantization grazes).
+  - **Existing tracks are obstacles whichever way they were drawn** (#1315):
+    a board segment counts when its extent, grown by its keep-out, reaches the
+    escape window, so a foreign track running INTO the ball field from outside
+    blocks the escapes it crosses (on a layer this fanout routes) and the via
+    sites it passes (on any copper layer, since a barrel spans the stack). The
+    test used to be the segment's start point, which made such a track
+    invisible or not depending on which end KiCad wrote first.
 
 ```bash
 # Dense BGA that the channel router can't fully escape (diff pairs escaped coupled)
-python py_router/bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
+python3 py_router/bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
     --layers F.Cu In1.Cu In2.Cu B.Cu --diff-pairs "*" \
     --escape-method underpad --via-size 0.35 --track-width 0.12 --clearance 0.1
 ```
@@ -251,25 +302,29 @@ to nudge those caps clear and pull each pad toward its nearest same-net ball
 (so a power/GND via dropped there later shares the via):
 
 ```bash
-python py_placer/place_fanout_clearance.py out.kicad_pcb capclean.kicad_pcb --clearance 0.1
+python3 py_placer/place_fanout_clearance.py out.kicad_pcb capclean.kicad_pcb --clearance 0.1
 ```
 
 Use the same `--clearance` as the fanout. It only moves 2-pad caps near a BGA,
-never overlaps caps, and is a no-op when nothing collides — so run it after
-each fanout, before signal routing. (GUI: the "Optimize decoupling cap
-placement" checkbox on the BGA fanout tab does this automatically.)
+never overlaps caps, and is a no-op when nothing collides. The pass is
+board-global (it reads every via and every BGA), so run it **once, after all
+fanouts**, before signal routing: per-BGA runs compound the displacement. (GUI:
+the "Optimize decoupling cap placement" checkbox on the BGA fanout tab does this
+automatically.)
 
 ## Module Structure
 
 ```
 bga_fanout/
 ├── __init__.py          # Main fanout logic and public API
-├── types.py             # Data types: Track, BGAGrid, FanoutRoute, etc.
+├── types.py             # Data types: Channel, BGAGrid, DiffPairPads, FanoutRoute, create_track
 ├── escape.py            # Escape channel finding and assignment
 ├── reroute.py           # Collision resolution and rerouting
 ├── layer_balance.py     # Layer rebalancing for even distribution
 ├── layer_assignment.py  # Layer assignment for collision avoidance
-├── underpad.py          # Under-pad grid escape engine (dense arrays, #122)
+├── underpad.py          # Under-pad grid escape engine (dense arrays, #122), plane drops
+├── rotate_frame.py      # Non-orthogonal parts: route in the footprint's own frame (#137)
+├── flip_frame.py        # Back-side parts: route the board turned over, mirror back
 ├── tracks.py            # Track generation and collision detection
 ├── geometry.py          # 45° stub and jog calculations
 ├── collision.py         # Low-level collision detection utilities
@@ -290,6 +345,23 @@ bga_fanout/
 - **`BGAGrid`** - Analyzes BGA pad grid geometry
 - **`FanoutRoute`** - Represents a single pad's fanout route
 - **`Channel`** - Routing channel between pad rows/columns
+
+## Output
+
+The fanned board is written to `--output` (passed through unchanged when there
+is nothing to fan, so a chain always has a next input), and the run ends with a
+`JSON_SUMMARY:` line: `requested` / `escaped` / `failed` / `unescaped_nets`
+(balls actually attempted, so skipped plane balls and already-fanned nets are
+not counted), `skipped_nc`, `clearance`, `track_width`, `layers`, `drc_grazes`
+(a `check_drc` pass over the output at `--clearance`: `pad_via`,
+`via_segment`, `pad_segment`, `segment_segment`, `total`; #130),
+`min_clearance_used`, `deferred_fanout_nets` (nets deliberately left for the
+route step; empty by default), `plane_drop` (per-net
+`gap`/`in_pad`/`existing`/`pour`/`failed` counts and the promised
+`pour_served_pads`), `env_knobs`, and `design_rules` when a feature was
+delivered below its requested size. Unless `--no-fix-drc-settings`, the output's
+`.kicad_pro` DRC floors are lowered to what the fanout used (#160), so the next
+step and `check_drc` grade at it.
 
 ## Algorithm
 

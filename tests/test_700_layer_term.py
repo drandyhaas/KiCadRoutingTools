@@ -6,12 +6,10 @@ a 6-layer one got the same answer. It now also reports what the other signal
 layers could take -- bounded by the via slots in the escape band, which is the
 issue's own suggestion -- under NEW keys, with `supply` and `deficit` untouched.
 
-The first test is the one that matters most. Five independent places depend on
-`deficit == demand - supply` (`FaceLedger.deficit`, `options.deficit_totals`,
-`options.move_blocker`'s lanes-to-millimetres conversion, `routability`'s
-`escape_worst_deficit`, `board_brief`'s POSITION_DEPENDENT allowlist), and
-`test_capacity_options` pins `span_needed_mm == deficit_lanes * lane_pitch_mm`
-to 1e-6. Additive keys are the only safe shape, and "additive" has to be
+The first test is the one that matters most. Several independent places depend
+on `deficit == demand - supply` (`FaceLedger.deficit`, `options.deficit_totals`,
+`routability`'s `escape_worst_deficit`, `board_brief`'s POSITION_DEPENDENT
+allowlist). Additive keys are the only safe shape, and "additive" has to be
 measured rather than intended.
 """
 import os
@@ -402,10 +400,7 @@ def t_a_declared_plane_list_reaches_the_ledger_through_health():
     from placement.quench import QuenchState
     pcb, path = _board('rp2350_fpga_eensy_prePlane')
     state = QuenchState(pcb, path, clearance=defaults.CLEARANCE,
-                        board_edge_clearance=0.55, crossing_penalty=10.0,
-                        halo_base=0.5, halo_coef=0.15, halo_weight=2.0,
-                        edge_halo=2.0, edge_weight=2.0,
-                        grid_step=defaults.GRID_STEP, length_weight=1.0)
+                        board_edge_clearance=0.55)
     bare = routability.health(state, pcb, {}, {})
     declared = routability.health(state, pcb, {}, {
         'plane_layers': ['In1.Cu', 'In2.Cu', 'In3.Cu', 'In4.Cu']})
@@ -511,10 +506,7 @@ def t_the_health_block_reports_both_and_gates_on_neither():
     # the ledger off `pcb_data.source_path`, which `parse_kicad_pcb` sets --
     # there is no pcb_file parameter.
     state = QuenchState(pcb, path, clearance=defaults.CLEARANCE,
-                        board_edge_clearance=0.55, crossing_penalty=10.0,
-                        halo_base=0.5, halo_coef=0.15, halo_weight=2.0,
-                        edge_halo=2.0, edge_weight=2.0,
-                        grid_step=defaults.GRID_STEP, length_weight=1.0)
+                        board_edge_clearance=0.55)
     out = routability.health(state, pcb, {}, {})
     for key in ('escape_worst_deficit', 'escape_worst_deficit_floor',
                 'escape_deficit_parts', 'escape_deficit_parts_all_layers',

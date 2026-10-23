@@ -112,8 +112,7 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
     Args:
         indices: which steps to run (default: all, in order).
         snapshot_dir: save the board after each completed step as
-            ``<prefix>NN_<action>.kicad_pcb`` here -- the chain a routing movie
-            animates (``make_movie.py``).
+            ``<prefix>NN_<action>.kicad_pcb`` here -- a per-step debug chain.
         snapshot_format: override that naming ('{prefix}', '{n}' = 1-based step,
             '{action}'); the parity harness pins its own names.
         timeout: seconds before the run is abandoned (the plan cannot block on a

@@ -20,7 +20,7 @@ import (importing board_score pulls in the routing engine).
 
 `assembly` is the one deliberate exemption, and it is declared here with its
 reason rather than silently skipped: assembly is graded at the PLACEMENT
-boundaries by the pcb-free-agent verifier (references/verifier.md runs
+boundaries by the plan-pcb-placement verifier (references/verifier.md runs
 check_assembly), which answers a bare `VERDICT=PASS|FAIL` with no `lens=` --
 a grammar `_LENS_RE` refuses on purpose. The routed-board lenses are 7-9 and none of them
 was ever asked to run check_assembly.
@@ -47,7 +47,7 @@ BOARD_SCORE = os.path.join(ROOT, 'py_tools', 'board_score.py')
 #: skip-list: an exemption with no reason is how a real gap gets filed under
 #: "known".
 EXEMPT = {
-    'assembly': ('the pcb-free-agent verifier (references/verifier.md runs '
+    'assembly': ('the plan-pcb-placement verifier (references/verifier.md runs '
                  'check_assembly), whose VERDICT= line carries no '
                  'lens=<name>'),
 }

@@ -1,5 +1,5 @@
-"""The #1123 / #1124 mutation battery: the placement graders and the film read
-copper and the grader's census, not boxes.
+"""The #1123 mutation battery: the placement graders read copper, not
+boxes.
 
 One row per load-bearing line, each reverting it; every row names the test
 case that must fail. **THE ROWS TO LOOK AT FIRST if this file ever goes red**
@@ -9,13 +9,7 @@ restore the defect each issue measured, or the reason it went unseen:
     size box is symmetric about its anchor, so its empty side enlarged the
     part's occupancy and its empty corner could read as copper off the board;
   * `posed-box-stale` (#1123) -- `pads_at_pose` turned the copper and kept
-    the box, which then missed the copper at any turn but a half one;
-  * `film-plots-the-box-pairs` / `floor-from-the-box` (#1124) -- the film
-    plotted the quench's bounding-box pairs against a box floor: 10 pairs on
-    glasgow_revC where render's checklist names 1, and -- wherever six
-    FID/MK box contacts were every pair left (run 32's placed boards and
-    every board routed from them) -- "floor 6 = locked parts" for phantoms
-    the grader confirms none of.
+    the box, which then missed the copper at any turn but a half one.
 
 NOT named `test_*.py`, so `tests/run_all.py` does not collect it: it REWRITES
 the sources in place. One writer per tree. It refuses to start on a dirty
@@ -50,7 +44,6 @@ _PL = os.path.join(_ROOT, 'py_placer', 'placement')
 TARGETS = {
     'leg': os.path.join(_PL, 'legality.py'),
     'pads': os.path.join(_ROOT, 'py_router', 'check_pads.py'),
-    'mp': os.path.join(_ROOT, 'py_router', 'movie_placement.py'),
 }
 
 
@@ -67,15 +60,6 @@ OBLIQUE = _t(T1123, 'oblique_turn')
 CASTELLATED = _t(T1123, 'castellation_reads')
 DISJOINT = _t(T1123, 'disjoint_copper')
 T1094 = _t('test_1094_rotated_courtyards.py')
-T1124 = 'test_1124_film_grader_census.py'
-CHECKLIST = _t(T1124, 'reads_renders_checklist')
-GLASGOW_FLOOR = _t(T1124, 'phantom_floor_on_glasgow')
-BOX_PHANTOM = _t(T1124, 'box_phantom')
-EITHER_SIDE = _t(T1124, 'locked_member')
-NO_CTX = _t(T1124, 'not_measured')
-CENSUS_ERR = _t(T1124, 'census_error')
-NO_OUTLINE = _t(T1124, 'no_outline')
-EVERY_PAIR = _t(T1124, 'every_pair_locked')
 
 # (name, target, old, new, tests, expect)
 ROWS = [
@@ -129,43 +113,6 @@ ROWS = [
      "    if abs(math.remainder(delta, 90.0)) <= 1e-9:",
      "    if abs(math.remainder(delta, 90.0)) <= 1.0:",
      (OBLIQUE,), 'KILLED'),
-    # -- #1124: the film's LEGALITY panel reads render's checklist ----------
-    ('film-plots-the-box-pairs', 'mp',
-     "        'conflict_pairs': len(pairs) if ran else None,",
-     "        'conflict_pairs': model.metrics.get('pad_conflict_pairs'),",
-     (CHECKLIST, BOX_PHANTOM), 'KILLED'),
-    ('floor-from-the-box', 'mp',
-     "        'locked_pairs': (sum(1 for a, b, *_rest in pairs",
-     "        'locked_pairs': (model.metrics.get('locked_contact_pairs') + sum(0 for a, b, *_rest in pairs",
-     (GLASGOW_FLOOR,), 'KILLED'),
-    ('overlap-is-the-quench-rects', 'mp',
-     "                        else fnd.get('courtyard_overlap_mm2')),",
-     "                        else model.metrics.get('overlap_area')),",
-     (CHECKLIST,), 'KILLED'),
-    ('off-outline-is-the-ranking-list', 'mp',
-     "        'off_outline': (len(fnd.get('oob_refs_pad_copper_gating') or [])",
-     "        'off_outline': (len(fnd.get('oob_refs_pad_copper') or [])",
-     (CHECKLIST,), 'KILLED'),
-    ('no-ctx-reads-as-zero', 'mp',
-     "    ran = getattr(getattr(model, 'state', None), 'legality_ctx', None) \\",
-     "    ran = True or getattr(getattr(model, 'state', None), 'legality_ctx', None) \\",
-     (NO_CTX,), 'KILLED'),
-    ('census-error-reads-as-zero', 'mp',
-     "        'overlap_mm2': (None if fnd.get('courtyard_census_error')",
-     "        'overlap_mm2': (None if False",
-     (CENSUS_ERR,), 'KILLED'),
-    ('locked-member-one-sided', 'mp',
-     "                             if a in locked or b in locked)",
-     "                             if a in locked)",
-     (EITHER_SIDE,), 'KILLED'),
-    ('no-outline-reads-zero', 'mp',
-     "                        if ran and not getattr(model, 'no_outline', False)",
-     "                        if ran",
-     (NO_OUTLINE,), 'KILLED'),
-    ('floor-any-locked', 'mp',
-     "            and lb.conflict_pairs <= lb.locked_pairs):",
-     "            and lb.locked_pairs >= 1):",
-     (EVERY_PAIR,), 'KILLED'),
 ]
 
 sys.path.insert(0, _TESTS)

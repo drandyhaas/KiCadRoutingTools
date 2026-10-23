@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-"""#901: a ledger row that cannot replay, or cannot be read back, is refused.
+"""#901: a ledger row that cannot be read back is refused.
 
 `converge.py record` had two holes that turned rows into prose.
 
-1. ONLY `argv[0]` was validated ("exists or on PATH"). Every invocation the
-   doctrine teaches starts `python3 -X utf8 <script>`, so token 0 is always
-   real and a corruption three tokens later sailed through. Run 25's row 31
-   holds `--impedance-nets C:/Program Files/Git/D_P C:/Program Files/Git/D_N`:
-   the record call ran in Git Bash without MSYS2_ARG_CONV_EXCL, which rewrites
-   any `/`-prefixed argument into a Windows path -- and every KiCad net name is
-   `/`-prefixed. `replay` re-executes the stored list verbatim, so that row
-   grades impedance on two nets that do not exist and returns null: a vacuous
-   pass. 32 of 33 rows replayed; this one did not, and nothing said so.
+1. Run 25's row 31 holds `--impedance-nets C:/Program Files/Git/D_P
+   C:/Program Files/Git/D_N`: the record call ran in Git Bash without
+   MSYS2_ARG_CONV_EXCL, which rewrites any `/`-prefixed argument into a
+   Windows path -- and every KiCad net name is `/`-prefixed. The same shape in
+   --lever names nets that do not exist, so it WARNS.
 
 2. The stop token was validated ONLY when a lens FAILED. With every lens
    passing, any string was stored -- so the routing half's
@@ -28,7 +24,6 @@ integration and drop them from `--fast`.
 """
 import json
 import os
-import subprocess
 import sys
 import tempfile
 
@@ -96,7 +91,7 @@ def _classified(td, shape='parameter'):
     Stop condition 4 is convergence.md's "measured-unfixable", and since #963
     `record` refuses that claim when nothing in the ledger says what was
     measured. These tests use 4 as a convenient FAIL-compatible TOKEN -- their
-    subject is argv and stop-token parsing -- so they supply the decision the
+    subject is stop-token parsing -- so they supply the decision the
     claim rests on and carry on testing what they were testing.
     """
     run_utils.check(_argv(td, '--kind', 'classification', '--shape', shape,
@@ -104,41 +99,10 @@ def _classified(td, shape='parameter'):
                     accept=True)
 
 
-def test_a_mangled_argv_token_is_refused():
-    print('\n-- 1. an MSYS2-rewritten net name in --argv --')
-    run_utils.evidence(BOARD, 'the fixture board')
-    with tempfile.TemporaryDirectory() as td:
-        led = os.path.join(td, 'l.jsonl')
-        run_utils.check(
-            _argv(td, '--lever', 'route the pair',
-                  '--argv', sys.executable, '-c', 'pass',
-                  '--impedance-nets', MANGLED),
-            refuse='MSYS2', code=2)
-        check('nothing was written', not os.path.exists(led))
-        # ... and the refusal must carry the remedy, not just the diagnosis.
-        r = subprocess.run(
-            _argv(td, '--argv', sys.executable, '-c', 'pass', MANGLED),
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-            cwd=ROOT)
-        check('it names the environment variable that prevents it',
-              'MSYS2_ARG_CONV_EXCL' in r.stderr, r.stderr[-200:])
-
-
-def test_a_clean_argv_still_records():
-    """The control. Without it, arm 1 could be passing because `record` refuses
-    every --argv it is given."""
-    print('\n-- 2. control: the same command with real net names --')
-    with tempfile.TemporaryDirectory() as td:
-        e = _accept(td, '--lever', 'route the pair',
-                    '--argv', sys.executable, '-c', 'pass', '/D_P', '/D_N')
-        check('recorded', e.get('lever_argv', [])[-2:] == ['/D_P', '/D_N'],
-              e.get('lever_argv'))
-
-
 def test_a_mangled_lever_warns_but_records():
     """The lever is prose for a human: a mangled name there misleads a reader
-    without making the row unreplayable, so it warns rather than refusing."""
-    print('\n-- 3. the same shape in --lever --')
+    without making the row wrong, so it warns rather than refusing."""
+    print('\n-- 1. an MSYS2-rewritten net name in --lever --')
     with tempfile.TemporaryDirectory() as td:
         r = run_utils.check(
             _argv(td, '--lever', f'routed {MANGLED} at 90 ohm'), accept=True)
@@ -212,9 +176,9 @@ def test_the_reason_survives_every_shape_verbatim():
 
 
 def test_a_stop_reason_is_kept_on_a_non_final_row():
-    """A new flag that silently does nothing on most rows is worse than no
-    flag. The first cut stored both keys only inside `if a.final:`."""
-    print('\n-- 5c. --stop-condition / --stop-reason without --final --')
+    """A flag that silently does nothing on most rows is worse than no flag.
+    The first cut stored both keys only inside `if a.final:`."""
+    print('\n-- 5c. --stop-condition without --final --')
     with tempfile.TemporaryDirectory() as td:
         e = _accept(td, '--lever', 'a lap', '--stop-condition',
                     '3: five laps, no new copper')
@@ -266,36 +230,7 @@ def test_the_fail_lens_refusals_still_hold():
             refuse='lens FAILED', code=2)
 
 
-def test_a_reason_given_twice_and_differently_is_refused():
-    print('\n-- 7. --stop-reason vs the inline reason --')
-    with tempfile.TemporaryDirectory() as td:
-        run_utils.check(
-            _argv(td, '--final', '--stop-condition', '4: one story',
-                  '--stop-reason', 'a different story', *lenses(td)),
-            refuse='given twice', code=2)
-    with tempfile.TemporaryDirectory() as td:
-        _classified(td)
-        e = _accept(td, '--final', '--stop-condition', '4',
-                    '--stop-reason', 'the only story', *lenses(td))
-        check('--stop-reason alone works',
-              e.get('stop_reason') == 'the only story', e.get('stop_reason'))
-
-
-def test_scope_refs_takes_a_list():
-    print('\n-- 8. --scope-refs as a list, as its help promised --')
-    with tempfile.TemporaryDirectory() as td:
-        e = _accept(td, '--scope-refs', 'R1', 'R2', 'R3')
-        check('three refs recorded from one flag',
-              e.get('scope_refs') == ['R1', 'R2', 'R3'], e.get('scope_refs'))
-    with tempfile.TemporaryDirectory() as td:
-        e = _accept(td, '--scope-refs', 'R1', '--scope-refs', 'R2, R3')
-        check('repeating the flag and splitting a string both still work',
-              e.get('scope_refs') == ['R1', 'R2', 'R3'], e.get('scope_refs'))
-
-
 def main():
-    test_a_mangled_argv_token_is_refused()
-    test_a_clean_argv_still_records()
     test_a_mangled_lever_warns_but_records()
     test_the_stop_token_is_checked_with_every_lens_passing()
     test_a_token_with_a_reason_is_accepted_both_ways()
@@ -303,13 +238,11 @@ def main():
     test_a_stop_reason_is_kept_on_a_non_final_row()
     test_the_kind_flag_does_not_bypass_the_contradiction()
     test_the_fail_lens_refusals_still_hold()
-    test_a_reason_given_twice_and_differently_is_refused()
-    test_scope_refs_takes_a_list()
     print()
     if fails:
         print(f"FAIL: {len(fails)} check(s) failed: {fails}")
         return 1
-    print('PASS: a mangled argv is refused, and the stop token is checked on '
+    print('PASS: a mangled lever warns, and the stop token is checked on '
           'every record with its reason kept apart (#901)')
     return 0
 

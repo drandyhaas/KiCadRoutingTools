@@ -55,7 +55,7 @@ import strip_copper_only                                   # noqa: E402
 
 ESP = run_utils.evidence(os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb'))
 STRIP = os.path.join(ROOT, 'tests', 'stress', 'strip_copper_only.py')
-UNPLACED = os.path.join(ROOT, '.claude', 'skills', 'pcb-free-agent', 'scripts',
+UNPLACED = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement', 'scripts',
                         'make_unplaced.py')
 PY = [sys.executable, '-X', 'utf8']
 ANCHOR = '\t(embedded_fonts no)\n)'

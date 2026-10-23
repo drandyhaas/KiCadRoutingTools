@@ -4,9 +4,9 @@ not run says so.
 
 The issue reads this site backwards, and the correction is the point of the
 change. It says one slow DRC "disables the KiCad oracle for the rest of the
-run" via a module-global memo. The memo's only READ sat behind
-`env_knobs.LEGACY_ORACLE` -- `KICAD_LEGACY_ORACLE`, default off, set by
-nothing in this repo -- so it was written and never consulted. The live defect
+run" via a module-global memo. The memo's only READ sat behind an escape
+hatch that was off by default and set by nothing in this repo, so it was
+written and never consulted. The live defect
 was the inverse: ORACLE_DRC_TIMEOUT was re-paid on every round of every leg.
 
 A module-global fixes the re-pay by making the answer depend on RUN HISTORY,

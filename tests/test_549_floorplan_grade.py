@@ -343,10 +343,7 @@ def test_a_group_name_resolves_in_both_its_raw_and_short_form():
 def test_a_side_violation_names_the_part():
     pcb = parse_kicad_pcb(ULX)
     state = QuenchState(pcb, ULX, clearance=defaults.CLEARANCE,
-                        board_edge_clearance=0.55, crossing_penalty=10.0,
-                        halo_base=0.5, halo_coef=0.25, halo_weight=2.0,
-                        edge_halo=2.0, edge_weight=2.0,
-                        grid_step=defaults.GRID_STEP, length_weight=1.0)
+                        board_edge_clearance=0.55)
     back = sorted(p.ref for p in state.graded_parts() if p.side == 'B')
     assert len(back) > 20, len(back)
     raw = _emit()
@@ -364,10 +361,7 @@ def test_a_keepout_catches_a_through_hole_part_from_the_other_side():
     mounting-hole keep-out be walked through from the back."""
     pcb = parse_kicad_pcb(ULX)
     state = QuenchState(pcb, ULX, clearance=defaults.CLEARANCE,
-                        board_edge_clearance=0.55, crossing_penalty=10.0,
-                        halo_base=0.5, halo_coef=0.25, halo_weight=2.0,
-                        edge_halo=2.0, edge_weight=2.0,
-                        grid_step=defaults.GRID_STEP, length_weight=1.0)
+                        board_edge_clearance=0.55)
     tht = [p for p in state.graded_parts() if p.has_tht]
     assert tht, "no through-hole part on ulx3s"
     part = sorted(tht, key=lambda p: p.ref)[0]
@@ -391,10 +385,7 @@ def test_a_keepout_allow_list_clears_its_own_part():
     r0 = _graded(raw)
     pcb = parse_kicad_pcb(ULX)
     state = QuenchState(pcb, ULX, clearance=defaults.CLEARANCE,
-                        board_edge_clearance=0.55, crossing_penalty=10.0,
-                        halo_base=0.5, halo_coef=0.25, halo_weight=2.0,
-                        edge_halo=2.0, edge_weight=2.0,
-                        grid_step=defaults.GRID_STEP, length_weight=1.0)
+                        board_edge_clearance=0.55)
     part = sorted(state.graded_parts(), key=lambda p: p.ref)[0]
     raw['keepouts'] = [{'name': 'k', 'rect': list(part.rect)}]
     hit = [v for v in _graded(raw).violations if v.ref == part.ref]
@@ -459,11 +450,11 @@ def test_must_lock_reports_a_part_the_file_does_not_pin():
 
 def test_legality_numbers_are_the_optimizers_own():
     pcb = parse_kicad_pcb(ULX)
-    state = QuenchState(pcb, ULX, clearance=defaults.CLEARANCE,
-                        board_edge_clearance=0.55, crossing_penalty=10.0,
-                        halo_base=0.5, halo_coef=0.25, halo_weight=2.0,
-                        edge_halo=2.0, edge_weight=2.0,
-                        grid_step=defaults.GRID_STEP, length_weight=1.0)
+    # at the floors the grade reads when handed none: the board's own
+    # (`resolved_floors`, #1301), not the fixed 0.55 it used to fill in
+    from placement.floorplan import resolved_floors
+    clr, edge = resolved_floors(ULX)
+    state = QuenchState(pcb, ULX, clearance=clr, board_edge_clearance=edge)
     want = state.legality_metrics()
     got = _graded(_emit()).legality
     for k, v in want.items():
@@ -504,26 +495,31 @@ def test_a_legality_budget_bites_when_exceeded():
     assert n_conn, "ulx3s has overhanging parts and none were recorded"
     # (a) declared: the overlap arm bites, the outline arm is exempt by name,
     #     and the raw count stays the optimizer's own beside the exemption.
+    #     The emitter declares every part AT an edge (within the seat
+    #     tolerance); the grade counts the ones off the board at its own
+    #     floors, a subset (#1301), and every one of them is declared.
     r = _graded(raw)
+    n_oob = r.legality['oob_count']
+    assert 0 < n_oob <= n_conn, (n_oob, n_conn)
     hits = {v.expected and next(iter(v.expected)): v
             for v in r.violations if v.rule == 'legality'}
     assert 'overlap_area' in hits, "a zero overlap budget caught nothing on ulx3s"
     assert 'oob_count' not in hits, \
         f"declared edge connectors still counted: {hits['oob_count'].message}"
-    assert r.legality['oob_count_exempt'] == n_conn, r.legality
-    assert r.legality['oob_count'] == n_conn, \
-        "the raw oob_count must stay the optimizer's own number"
+    assert r.legality['oob_count_exempt'] == n_oob, r.legality
     # (b) undeclared: the same parts are off the board and nothing vouches for
     #     them, so a zero budget must catch every one.
     raw['edge_connectors'] = []
     r2 = _graded(raw)
     oob = [v for v in r2.violations if v.rule == 'legality'
            and 'oob_count' in v.expected]
-    assert len(oob) == 1 and oob[0].measured['oob_count'] == n_conn, \
+    assert len(oob) == 1 and oob[0].measured['oob_count'] == n_oob, \
         [v.message for v in oob]
+    assert r2.legality['oob_count'] == n_oob, \
+        "the raw oob_count must stay the optimizer's own number"
     assert r2.legality['oob_count_exempt'] == 0
-    print(f"  PASS: overlap bites either way; oob_count {n_conn} exempt when "
-          f"declared, {n_conn} counted when not")
+    print(f"  PASS: overlap bites either way; oob_count {n_oob} exempt when "
+          f"declared ({n_conn} declared), {n_oob} counted when not")
 
 
 def test_declared_edge_connectors_within_band_are_not_oob():
@@ -534,11 +530,17 @@ def test_declared_edge_connectors_within_band_are_not_oob():
     raw = _emit()
     raw['legality_budget'] = {'oob_count': 0}
     conns = raw['edge_connectors']
-    assert not [v for v in _graded(raw).violations if v.rule == 'legality'], \
+    r0 = _graded(raw)
+    assert not [v for v in r0.violations if v.rule == 'legality'], \
         "a zero oob budget fired on parts the intent declares off the board"
-    # Tighten one band to nothing: that part is outside it now.
-    ref = conns[0]['ref']
-    conns[0]['overhang_mm'] = {'min': 0.0, 'max': 0.0}
+    # the parts off the board at the grade's floors: every one declared
+    n_oob = r0.legality['oob_count']
+    assert 0 < n_oob == r0.legality['oob_count_exempt'], r0.legality
+    # Tighten one band to nothing -- the widest, a part well off the board:
+    # that part is outside it now.
+    i = max(range(len(conns)), key=lambda k: conns[k]['overhang_mm'].get('max') or 0)
+    ref = conns[i]['ref']
+    conns[i]['overhang_mm'] = {'min': 0.0, 'max': 0.0}
     r = _graded(raw)
     leg = [v for v in r.violations if v.rule == 'legality']
     edge = [v for v in r.violations if v.rule == 'edge_connector' and v.ref == ref]
@@ -546,15 +548,61 @@ def test_declared_edge_connectors_within_band_are_not_oob():
         [v.message for v in leg]
     assert ref not in leg[0].measured['exempt'], leg[0].measured
     assert edge, f"{ref} outside its band was not named by edge_connector"
-    assert r.legality['oob_count_exempt'] == len(conns) - 1
+    assert r.legality['oob_count_exempt'] == n_oob - 1
     # No max at all: an unbounded band vouches for nothing.
-    conns[0]['overhang_mm'] = {'min': 0.0}
+    conns[i]['overhang_mm'] = {'min': 0.0}
     r = _graded(raw)
     leg = [v for v in r.violations if v.rule == 'legality']
     assert len(leg) == 1 and leg[0].measured['oob_count'] == 1, \
         [v.message for v in leg]
-    print(f"  PASS: {len(conns)} declared parts exempt; one pushed outside its "
-          f"band (and one with no max) is counted and named")
+    print(f"  PASS: {n_oob} declared parts off the board exempt; one pushed "
+          f"outside its band (and one with no max) is counted and named")
+
+
+#: A 30 x 20 board. U2 sits at (6, 3) with a three-pin row 2 mm ABOVE its
+#: origin, i.e. 1.0 mm from the north edge, every partner south of it (the
+#: run-26 regulator; rotating it 180 puts the row at y 5, 5 mm from the
+#: edge); U9 has the same row at y 9 with its partners on J1 beyond its
+#: north face (a part wired to the edge strip); J1 is a declared edge
+#: connector on that edge; C1/C2 are two-pad parts no term counts. The
+#: middle pin of each row is staggered 0.1 mm, the SOT-89 shape that once
+#: read as the lattice pitch.
+_EDGE_BOARD = '''(kicad_pcb
+ (version 20241229)
+ (net 0 "")
+ (net 1 "/A") (net 2 "/B") (net 3 "/C") (net 4 "/D") (net 5 "/E") (net 6 "/F")
+ (net 7 "/G") (net 8 "/H") (net 9 "/I")
+ (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts") (uuid "e1"))
+ (footprint "test:SOT" (layer "F.Cu") (uuid "fp-u2") (at 6 3%s)
+   (property "Reference" "U2" (at 0 0 0))
+   (pad "1" smd rect (at -1.5 -2) (size 0.8 1.3) (layers "F.Cu") (net 1 "/A") (uuid "u2p1"))
+   (pad "2" smd rect (at 0 -1.9) (size 0.9 1.5) (layers "F.Cu") (net 2 "/B") (uuid "u2p2"))
+   (pad "3" smd rect (at 1.5 -2) (size 0.8 1.3) (layers "F.Cu") (net 3 "/C") (uuid "u2p3"))
+ )
+ (footprint "test:SOT" (layer "F.Cu") (uuid "fp-u9") (at 20 11)
+   (property "Reference" "U9" (at 0 0 0))
+   (pad "1" smd rect (at -1.5 -2) (size 0.8 1.3) (layers "F.Cu") (net 4 "/D") (uuid "u9p1"))
+   (pad "2" smd rect (at 0 -1.9) (size 0.9 1.5) (layers "F.Cu") (net 5 "/E") (uuid "u9p2"))
+   (pad "3" smd rect (at 1.5 -2) (size 0.8 1.3) (layers "F.Cu") (net 6 "/F") (uuid "u9p3"))
+ )
+ (footprint "test:HDR" (layer "F.Cu") (uuid "fp-j1") (at 20 1)
+   (property "Reference" "J1" (at 0 0 0))
+   (pad "1" smd rect (at -2.54 0) (size 1 1) (layers "F.Cu") (net 4 "/D") (uuid "j1p1"))
+   (pad "2" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 5 "/E") (uuid "j1p2"))
+   (pad "3" smd rect (at 2.54 0) (size 1 1) (layers "F.Cu") (net 6 "/F") (uuid "j1p3"))
+ )
+ (footprint "test:C" (layer "F.Cu") (uuid "fp-c1") (at 6 10)
+   (property "Reference" "C1" (at 0 0 0))
+   (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "/A") (uuid "c1p1"))
+   (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "/B") (uuid "c1p2"))
+ )
+ (footprint "test:C" (layer "F.Cu") (uuid "fp-c2") (at 10 10)
+   (property "Reference" "C2" (at 0 0 0))
+   (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 3 "/C") (uuid "c2p1"))
+   (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 9 "/I") (uuid "c2p2"))
+ )
+)
+'''
 
 
 def test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_connectors():
@@ -563,8 +611,6 @@ def test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_con
     disposes), a declared edge connector on the same edge is not named, and
     with no `edge_connectors` declared the rule abstains as 'not asked'."""
     import tempfile as _tf
-    sys.path.insert(0, os.path.join(ROOT, 'tests'))
-    from test_894_placement_terms import _EDGE_BOARD
     with _tf.TemporaryDirectory(prefix='t549e_') as tmp:
         board = os.path.join(tmp, 'edge.kicad_pcb')
         with open(board, 'w', encoding='utf-8') as fh:
@@ -630,11 +676,16 @@ def test_emit_records_the_overhanging_parts_as_edge_connectors():
     conns = raw['edge_connectors']
     assert conns, "ulx3s has overhanging parts and none were recorded"
     for c in conns:
-        assert c['edge'] in ('north', 'south', 'east', 'west')
+        # only an edge part claims an edge; any other overhanging part keeps
+        # its observed band and claims none (d5aede5d)
+        assert c.get('edge', 'north') in ('north', 'south', 'east', 'west'), c
         assert c['overhang_mm']['max'] > 0
+    edged = [c for c in conns if 'edge' in c]
+    assert edged, "no overhanging part on ulx3s claimed its edge"
     r = _graded(raw)
     assert not [v for v in r.violations if v.rule == 'edge_connector']
-    print(f"  PASS: {len(conns)} overhanging parts recorded, none flagged")
+    print(f"  PASS: {len(conns)} overhanging parts recorded ({len(edged)} claiming "
+          f"an edge), none flagged")
 
 
 def test_an_edge_connector_outside_its_declared_overhang_is_caught():

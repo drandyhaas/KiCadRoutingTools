@@ -48,6 +48,33 @@ TOOL_ACTIONS = {
 # only bumps a `skipped` counter -- a number, not a name -- so the converted
 # plan looks complete when it is not.
 REFUSED_TOOLS = {
+    'place_simple.py': (
+        'places the board by its groups and one annealed objective; the plan '
+        'format has no placement step. Run it BEFORE the plan and start the '
+        'plan from the placed board'),
+    'judge_seeds.py': (
+        "fast-routes and scores place_simple's judged seeds (the placement "
+        "skill's judging step); the plan format has no placement step. Run "
+        'it BEFORE the plan and start the plan from the kept seed\'s board'),
+    'place_movie.py': (
+        'films place_simple placing the board (and, with --route, the '
+        "placement skill's flow, routing included); the plan format has no "
+        'placement step. Run it BEFORE the plan and start the plan from the '
+        'placed board'),
+    # movie3d/: the 3D placement movie, place_simple placing the board on camera.
+    'make_movie.py': (
+        'films place_simple placing the board in 3D (and, with --route, the '
+        "placement skill's flow, routing included); the plan format has no "
+        'placement step. Run it BEFORE the plan and start the plan from the '
+        'placed board'),
+    'record.py': (
+        "records place_simple's run for the 3D placement movie and writes its "
+        'placed board; the plan format has no placement step. Run it BEFORE '
+        'the plan and start the plan from the placed board'),
+    # place_optimize, place_route_loop, place_seed, place_groups,
+    # place_candidates, place_reconstruct, place_portfolio, rank_rotations and
+    # place_intent_sides are retired, but recorded manifests still name them,
+    # and a step this table does not know is dropped silently, not refused.
     'place_optimize.py': (
         'moves footprints; the plan format has no placement step. Run it BEFORE '
         'the plan and start the plan from the placed board'),
@@ -58,6 +85,15 @@ REFUSED_TOOLS = {
         'seeds/repairs a placement from an intent; the plan format has no '
         'placement step. Run it BEFORE the plan and start the plan from the '
         'seeded board'),
+    'place_groups.py': (
+        'seeds a placement one functional group at a time into the regions '
+        'of an intent (place_seed per group); the plan format has no placement '
+        'step. Run it BEFORE the plan and start the plan from its output'),
+    'place_candidates.py': (
+        'places a grouped board several ways at once (place_seed and '
+        'place_groups over seeds) and keeps the best; the plan format has no '
+        'placement step, and keeping a candidate is a decision. Run it BEFORE '
+        'the plan and start the plan from its output'),
     'place_reconstruct.py': (
         'reconstructs a damaged placement; the plan format has no placement '
         'step. Run it BEFORE the plan and start the plan from its output'),
@@ -76,6 +112,10 @@ REFUSED_TOOLS = {
         '(`replicate`, #1211); the plan format has no placement step, and a '
         'pose is a decision rather than a replayable parameter set. Run it on '
         'the CLI and start the plan from its output'),
+    'place_intent_sides.py': (
+        'mirrors parts onto the faces a floorplan intent declares (#1280); '
+        'the plan format has no placement step. Run it BEFORE the plan and '
+        'start the plan from its output'),
     'render_placement.py': (
         'renders a PNG; it changes no board and has nothing to replay'),
     'beautify_labels.py': (
@@ -111,8 +151,9 @@ REFUSED_TOOLS = {
         'and at the end), so the explicit ones would be lost. Run it on the '
         'CLI over the board the plan leaves'),
     'pack_river.py': (
-        'compacts routed bus lanes off-grid after routing (#658); the plan '
-        'format has no step for it. Run it on the CLI over the plan\'s output'),
+        'its standalone CLI (off-grid bus-lane compaction after routing, #658) '
+        'was removed; there is nothing to run. In-run packing is '
+        'KICAD_PACK_INLINE=1 on the route step'),
     'run_plan.py': (
         'runs a whole GUI plan on the CLI (#507); a plan step cannot hold a '
         'plan. Load that plan in the AI tab instead'),
@@ -129,6 +170,15 @@ REFUSED_TOOLS = {
         'plans and lays one awx escape for every signal ball of an array; the '
         'plan\'s fanout step is bga_fanout / qfn_fanout, not this. Run it on '
         'the CLI and start the plan from its output'),
+    'dogbone_arrays.py': (
+        'dog-bones every netted ball of an awx bus\'s two arrays, the base of '
+        'route_bus --escape; the plan\'s fanout step is bga_fanout / '
+        'qfn_fanout, not this. Run it on the CLI and start the plan from its '
+        'output'),
+    'escape_plan.py': (
+        'plans and lays an awx escape fanout on a dog-boned array pair, a '
+        'stage of route_bus --escape; the plan format has no bus step. Run it '
+        'on the CLI and start the plan from its output'),
     'braid.py': (
         'emits the awx braid for a fanned-out bus; the plan format has no bus '
         'step. Run it on the CLI and start the plan from its output'),
@@ -491,6 +541,12 @@ TOOL_FLAG_PARAMS = {
     'route_diff.py': {'--track-width': 'diff_pair_width'},
     # qfn_fanout's --layer: the QFN panel's escape-layer choice (its item 0,
     # the mounted layer, is the omitted flag), selected by layer name.
+    # --clearance -> qfn_clearance, which the executor applies by TICKING the
+    # panel's Clearance override (#1328). An omitted --clearance emits no
+    # param, the executor's reset leaves the box unticked, and the panel then
+    # resolves the board's Default class exactly as the CLI does; a
+    # --clearance-ceiling maps to the global clearance_ceiling row, which the
+    # panel's resolver caps at.
     'qfn_fanout.py': {'--width': 'qfn_track_width', '--clearance': 'qfn_clearance',
                       '--layer': 'qfn_layer'},
     # bga_fanout's coupled-pair gap is the BGA panel's OWN control, never the
@@ -919,23 +975,41 @@ def plan_steps_from_manifest(manifest, keep_files=False):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_router'))  # #522/py_placer layout
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_placer'))  # #522/py_placer layout
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_tools'))  # #522/py_placer layout
-    from redo_stress_test import parse_manifest, is_check_cmd
+    from redo_stress_test import parse_manifest, is_check_cmd, split_env_prefix
 
     cmds = parse_manifest(manifest)
     keep, rejected = prune_manifest(cmds, manifest)
+    # #1337: a rejected command writes no board, so the chain breaks at it
+    # and everything that fed ONLY it falls out of the prune too. Those are
+    # named and counted with it: daplink's one rejected cap pass took the
+    # plane, fanout and copy steps with it while the summary said "1
+    # command(s) skipped".
+    lost = []
+    if rejected:
+        from redo_stress_test import compute_prune_keep
+        plain, _ = compute_prune_keep(cmds)
+        lost = sorted(i for i in plain - keep - set(rejected)
+                      if not is_check_cmd(cmds[i][1]))
 
     steps = []
-    skipped = len(rejected)
+    skipped = len(rejected) + len(lost)
     refused = []
     noops = []
+    env_dropped = []
     for i, (_cwd, argv) in enumerate(cmds):
         if i not in keep or is_check_cmd(argv):
             continue  # pruned out, or a check/grade command (no GUI step)
+        # #1302: a recorded `NAME=value` prefix is the step's environment. A
+        # plan step has nowhere to carry it (#670), so the GUI runs the step
+        # at the defaults; converted without it, and named below.
+        _env, argv = split_env_prefix(argv)
         if any(os.path.basename(a) == CAP_TOOL for a in argv):
             # standalone optimize_caps step, matching the live GUI plan (see above)
             step = cap_optimization_step(argv, cwd=_cwd)
             step['_files'] = [a for a in argv if a.endswith('.kicad_pcb')]
             steps.append(step)
+            if _env:
+                env_dropped.append((i, _env))
             continue
         # A relative file the command named was opened from its recorded cwd
         # (else the manifest's own folder, where the harness ran it).
@@ -968,6 +1042,8 @@ def plan_steps_from_manifest(manifest, keep_files=False):
                     step['assignments'] = [dict(a) for a in prev['assignments']]
                     break
         steps.append(step)
+        if _env:
+            env_dropped.append((i, _env))
 
     if not keep_files:
         for s in steps:
@@ -980,6 +1056,14 @@ def plan_steps_from_manifest(manifest, keep_files=False):
               f"them -- and are not plan steps:", file=sys.stderr)
         for i, why in sorted(rejected.items()):
             print(f"  - command {i + 1}: {why}", file=sys.stderr)
+        if lost:
+            print(f"  ...and {len(lost)} command(s) upstream of them are not "
+                  f"plan steps either: the boards they wrote reach the final "
+                  f"board only through a rejected command:", file=sys.stderr)
+            for i in lost:
+                tool = next((os.path.basename(a) for a in cmds[i][1]
+                             if a.endswith('.py')), cmds[i][1][0])
+                print(f"  - command {i + 1}: {tool}", file=sys.stderr)
     if refused:
         # Loud, on stderr, every time -- never a silent drop.
         print(f"WARNING: {len(refused)} command(s) have NO faithful plan "
@@ -988,6 +1072,23 @@ def plan_steps_from_manifest(manifest, keep_files=False):
             print(f"  - {r}", file=sys.stderr)
         print("  The replayed plan will DIVERGE from the recorded chain at "
               "these steps. Run them on the CLI.", file=sys.stderr)
+    if env_dropped:
+        # #1302: loud, like the refusals -- the plan step runs, but not as
+        # the recorded one did.
+        # One line per distinct knob set: a plan.sh `export` puts the same
+        # set on every step after it (#1337).
+        print(f"WARNING: {len(env_dropped)} plan step(s) ran with env knobs "
+              f"a plan step cannot carry (#670); the GUI runs them at the "
+              f"defaults, so the replayed plan may route a different board:",
+              file=sys.stderr)
+        groups = {}
+        for i, env in env_dropped:
+            groups.setdefault(tuple(env.items()), []).append(i + 1)
+        for env, nums in groups.items():
+            print(f"  - {' '.join(f'{k}={v}' for k, v in env)}: command(s) "
+                  f"{', '.join(map(str, nums))}", file=sys.stderr)
+        print("  Export them in the KiCad session's environment, or replay "
+              "the manifest on the CLI.", file=sys.stderr)
     if noops:
         counts = {n: noops.count(n) for n in sorted(set(noops))}
         print("NOTE: no plan step for " + ", ".join(
@@ -1033,8 +1134,8 @@ def main():
     with open(out, 'w', encoding='utf-8') as f:
         json.dump({'steps': steps}, f, indent=2)
     print(f"{len(steps)} step(s) written to {out} "
-          f"({skipped} command(s) skipped: kept but not GUI steps, or "
-          f"rejected by their tool's parser)")
+          f"({skipped} command(s) skipped: kept but not GUI steps, "
+          f"rejected by their tool's parser, or upstream of a rejected one)")
     print("Load it in the AI tab (Load... next to 'Parsed result') and "
           "press 'Run Selected Steps'.")
     return 0

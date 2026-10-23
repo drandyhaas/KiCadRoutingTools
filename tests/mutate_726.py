@@ -19,7 +19,7 @@ Two traps this battery is built against, both measured in this repo before:
     source SIZE), and several rows below are single-token edits, so the mutated
     and restored files are the SAME SIZE. Mutate, run and restore inside one
     second and the `.pyc` compiled from the MUTATED source stays valid for
-    every later import. `_uncache` (lifted from `mutate_703.py`) is called
+    every later import. `_uncache` is called
     after BOTH writes, and children run with `PYTHONDONTWRITEBYTECODE=1`.
 
   * **Prose anchors.** `placement/perturb.py` and `placement/placement_state.py`
@@ -58,7 +58,6 @@ TARGETS = {'p': PARSER, 'w': WRITER, 'g': PPARSER, 's': SEEDER,
 
 T_KEYS = os.path.join(TESTS, 'test_726_duplicate_reference_keys.py')
 T_WRITER = os.path.join(TESTS, 'test_726_writer_resolves_one_block.py')
-T_CONS = os.path.join(TESTS, 'test_726_consumers_see_both_blocks.py')
 T_PARITY = os.path.join(TESTS, 'test_parser_pcbnew_parity.py')
 T_GUI = os.path.join(TESTS, 'gui_parity', 'test_726_parse_path_parity.py')
 T_SYNC = os.path.join(TESTS, 'gui_parity', 'test_726_gui_sync.py')
@@ -75,18 +74,20 @@ ROWS = [
      "        _block_key = _raw_reference",
      (T_KEYS, T_PARITY), 'KILLED'),
 
+    # The pcbnew path's keys come from pcbnew_live_footprints, which the GUI's
+    # live re-sync shares with build_pcb_data_from_board.
     ('pcbnew-path-reverts-to-last-wins', 'p',
-     "    _live_keys = disambiguate_references(_raw_refs)",
-     "    _live_keys = list(_raw_refs)",
+     "    return live_fps, _raw_refs, disambiguate_references(_raw_refs)",
+     "    return live_fps, _raw_refs, list(_raw_refs)",
      (T_GUI,), 'KILLED'),
 
     # Mutates ONLY the pcbnew path while the text path stays fixed. If nothing
     # goes red here, the parity gate is not doing its job -- a one-sided fix is
     # exactly what it exists to catch.
     ('only-the-text-path-disambiguates', 'p',
-     "    _dups_live = duplicate_reference_counts(_raw_refs)",
-     "    _dups_live = duplicate_reference_counts(_raw_refs)\n"
-     "    _raw_refs = ['%s#%d' % (r, i) for i, r in enumerate(_raw_refs)]",
+     "    return live_fps, _raw_refs, disambiguate_references(_raw_refs)",
+     "    return live_fps, _raw_refs, disambiguate_references(\n"
+     "        ['%s#%d' % (r, i) for i, r in enumerate(_raw_refs)])",
      (T_GUI,), 'KILLED'),
 
     ('the-ordinal-starts-at-the-wrong-block', 'p',
@@ -97,7 +98,7 @@ ROWS = [
     ('duplicate-references-counts-extras-not-occurrences', 'p',
      "    return {r: c for r, c in counts.items() if c > 1}",
      "    return {r: c - 1 for r, c in counts.items() if c > 1}",
-     (T_KEYS, T_CONS), 'KILLED'),
+     (T_KEYS,), 'KILLED'),
 
     ('the-key-is-uuid-sorted-not-file-ordered', 'p',
      "    for (start, end, text), r, key in zip(spans, raw,\n"
@@ -180,11 +181,6 @@ ROWS = [
      (T_WRITER,), 'KILLED'),
 
     # ---- the consumers -----------------------------------------------------
-    ('side-maps-keep-the-last-block', 'g',
-     "        yield key, fp_text",
-     "        yield _raw_ref, fp_text",
-     (T_CONS,), 'KILLED'),
-
     # RE-ANCHORED (#892). `stamp_unlocked` landed beside `stamp_locked` with
     # the same loop head, so `        if key not in want:` began matching
     # TWICE and `replace(..., 1)` pointed this row at whichever copy comes
@@ -200,12 +196,6 @@ ROWS = [
      "        if key not in want:\n            continue\n        head_end",
      "        if _raw_ref not in want:\n            continue\n        head_end",
      (T_WRITER,), 'KILLED'),
-
-    ('footprint-blocks-uses-the-old-formula', 'a',
-     "            'footprint_blocks': len(pcb.footprints),",
-     "            'footprint_blocks': len(pcb.footprints) + sum(dup_refs.values())\n"
-     "                                - len(dup_refs),",
-     (T_CONS,), 'KILLED'),
 
     # SURVIVED on the first run, because nothing covered this function on a
     # board with duplicates: `test_footprint_position_sync.py` does cover it
@@ -255,8 +245,8 @@ ROWS = [
     # The pad-angle rotation when a footprint turns: an exponent pad angle
     # was skipped, so the pads kept their old angle.
     ('the-pad-angle-rotation-reads-no-exponent-again', 'w',
-     "        r'\\(at\\s+(' + AT_NUM + r')\\s+(' + AT_NUM + r')(?:\\s+(' + AT_NUM + r'))?\\)',",
-     "        r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)(?:\\s+([\\d.-]+))?\\)',",
+     "    r'\\(at\\s+(' + AT_NUM + r')\\s+(' + AT_NUM + r')(?:\\s+(' + AT_NUM + r'))?\\)')",
+     "    r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)(?:\\s+([\\d.-]+))?\\)')",
      (T_AT,), 'KILLED'),
 
     ('the-label-editor-reads-no-exponent-again', 'w',

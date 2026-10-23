@@ -485,6 +485,46 @@ def local_manifests(sets: list, stress: Path) -> dict:
     return out
 
 
+def strip_flag_subs(specs) -> list:
+    """``--strip-flag SCRIPT:FLAG`` -> the arm spec's ``manifest_sed`` entries.
+
+    Each drops FLAG and its value (``--flag V`` or ``--flag=V``; a bare flag
+    alone) from every recorded command line that runs SCRIPT. A value is the
+    next token unless that token is itself a flag; a negative number is a
+    value. modal_app applies ``manifest_sed`` to the CONTAINER's copy of each
+    manifest, so the shared kicad-corpus volume is never rewritten -- which is
+    why this rides the arm spec instead of an upload. It is the whole-chain
+    form of pernet_via_ab.py's strip: a default is live on a replay only where
+    the recorded step omitted the flag (#1328: 605 of 626 qfn_fanout steps
+    pass --clearance). Strip the SAME flags on both arms of an A/B."""
+    out = []
+    for spec in specs or ():
+        script, sep, flag = spec.partition(":")
+        if not sep or not script or not flag.startswith("-"):
+            raise SystemExit(f"--strip-flag {spec!r}: want SCRIPT:FLAG, "
+                             f"e.g. qfn_fanout.py:--clearance")
+        out.append({"pattern": (rf"(?m)^([^#\n]*?{re.escape(script)}\b[^\n]*?)"
+                                rf"[ \t]+{re.escape(flag)}"
+                                rf"(?:=\S+|[ \t]+(?!-[A-Za-z-])\S+)?(?=[ \t]|$)"),
+                    "replacement": r"\1"})
+    return out
+
+
+def strip_flag_census(subs, sets, stress) -> tuple:
+    """(lines rewritten, boards touched) if ``subs`` ran over the local
+    manifests this launch replays -- printed before a strip arm spends anything,
+    so a pattern that matches nothing (or everything) is seen up front."""
+    import sweep_lib as sl
+    lines = boards = 0
+    for _key, man in local_manifests(sets, stress).items():
+        text = man.read_text(encoding="utf-8", errors="replace")
+        new = sl.patch_manifest(text, subs)
+        n = sum(1 for a, b in zip(text.splitlines(), new.splitlines()) if a != b)
+        lines += n
+        boards += bool(n)
+    return lines, boards
+
+
 def manifest_preflight(sets: list, stress: Path) -> list:
     """[(set, board, path)] for every LOCAL manifest the cloud placer could not
     use. `modal_app` stages a board's corpus at the stress dir its manifest
@@ -693,8 +733,14 @@ def stage_run(args, sets, stress, plan):
         # instead of measuring the knob.
         spec["defaults"] = {k: _num(v)
                             for k, v in (kv.split("=", 1) for kv in args.defaults)}
-    if spec.get("env") or spec.get("defaults"):
-        spec["note"] = f"cloud replay; env={spec.get('env')} defaults={spec.get('defaults')}"
+    if getattr(args, "strip_flag", None):
+        spec["manifest_sed"] = strip_flag_subs(args.strip_flag)
+        n_lines, n_boards = strip_flag_census(spec["manifest_sed"], sets, stress)
+        print(f"  --strip-flag {' '.join(args.strip_flag)}: {n_lines} recorded "
+              f"step(s) on {n_boards} board(s) rewritten in the containers' copies")
+    if spec.get("env") or spec.get("defaults") or spec.get("manifest_sed"):
+        spec["note"] = (f"cloud replay; env={spec.get('env')} defaults={spec.get('defaults')}"
+                        + (f" strip={args.strip_flag}" if spec.get("manifest_sed") else ""))
     arms_file.write_text(json.dumps([spec], indent=1))
     print(f"  arm spec: {json.dumps(spec)}")
 
@@ -1116,6 +1162,12 @@ def main():
                          "(containers do not inherit this shell's environment).")
     ap.add_argument("--defaults", action="append", default=[], metavar="NAME=VALUE",
                     help="routing_defaults.py constant to patch for this arm, repeatable.")
+    ap.add_argument("--strip-flag", action="append", default=[], metavar="SCRIPT:FLAG",
+                    help="drop FLAG and its value from every recorded SCRIPT step of this "
+                         "arm (e.g. qfn_fanout.py:--clearance), repeatable -- the replay "
+                         "then runs that tool's default. Applied to each container's copy "
+                         "of the manifest, never to the shared corpus volume; the label "
+                         "gains a -strip<hash> suffix. Strip the SAME flags on both arms.")
     ap.add_argument("--jobs", type=int, default=6,
                     help="sets re-graded in parallel during the baseline stage (default 6)")
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")
@@ -1172,6 +1224,13 @@ def main():
         args.label = kicad_label(args.label, image)
         os.environ["KICAD_SWEEP_WITH_KICAD"] = "1"
         os.environ["KICAD_SWEEP_KICAD_IMAGE"] = image
+    if args.strip_flag:
+        # A stripped arm replays a different chain text: give it its own arm
+        # name, or it would resume an unstripped arm's rows at the same commit.
+        strip_flag_subs(args.strip_flag)               # refuse a bad spec early
+        import hashlib
+        args.label += "-strip" + hashlib.sha1(
+            "\n".join(sorted(args.strip_flag)).encode()).hexdigest()[:6]
     if not args.out:
         args.out = str(stress / f"cloud_{args.label}_{git_sha()}")
     if not args.workdir:

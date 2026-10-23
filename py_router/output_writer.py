@@ -59,7 +59,15 @@ def write_routed_output(
         exclusion_zone_lines: Debug lines for exclusion zones
         boundary_debug_labels: Debug labels for boundary positions
         skip_routing: Whether routing was skipped (debug only mode)
-        add_teardrops: Whether to add teardrop settings to all pads
+        add_teardrops: Whether to add teardrop settings to every pad and every
+            via (the via pass runs last, so this run's own vias get them too)
+        all_swap_segments: Stub segments synthesized by bare-pad target swaps,
+            written with the new copper
+        segments_to_remove: Input-file segments to strip from the output (the
+            dead-end sweep, #84, and later passes' removals of pre-existing copper)
+        vias_to_remove: Input-file vias to strip (e.g. the old vias of
+            ripped/re-routed nets, #103), so an old via and its replacement do
+            not both ship
 
     Returns:
         True if output was written successfully
@@ -423,8 +431,10 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                 via.layers, via.net_id, getattr(via, 'free', False),
                 net_name=_net_name(via.net_id),
                 # Keep a re-placed via's own protection spec; a genuinely new
-                # via follows the board's convention (#489 §8).
-                tenting_attrs=_via_attrs(via)
+                # via has none, emits no token and inherits the board's setup.
+                tenting_attrs=_via_attrs(via),
+                # ...and its blind/micro type word (a new via is through).
+                via_type=getattr(via, 'via_type', None)
             ) + "\n"
 
     # Add vias from stub layer swapping
@@ -436,8 +446,10 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                 via.layers, via.net_id, getattr(via, 'free', False),
                 net_name=_net_name(via.net_id),
                 # Keep a re-placed via's own protection spec; a genuinely new
-                # via follows the board's convention (#489 §8).
-                tenting_attrs=_via_attrs(via)
+                # via has none, emits no token and inherits the board's setup.
+                tenting_attrs=_via_attrs(via),
+                # ...and its blind/micro type word (a new via is through).
+                via_type=getattr(via, 'via_type', None)
             ) + "\n"
 
     # Add stub segments synthesized by bare-pad target swaps

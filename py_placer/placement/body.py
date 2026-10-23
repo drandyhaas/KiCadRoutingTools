@@ -428,6 +428,114 @@ def board_bodies(pcb_data, pcb_file: Optional[str] = None
     return out
 
 
+# ---------------------------------------------------------------------------
+# #1300: the courtyard a part that draws none would have had
+# ---------------------------------------------------------------------------
+class CourtyardEstimate(NamedTuple):
+    """The courtyard a pad-bearing part that draws NONE is seated on (#1300):
+    its occupancy -- what check_assembly's courtyard channel grades for it
+    (the .Fab body, else silk with the pads, else the pads, each united with
+    the pads) -- and no more. A library courtyard stands a margin off that
+    (KLC F5.3), a spacing the board itself never declared; the estimate only
+    keeps the bodies apart, which is what the grader gates.
+
+    A placement INPUT, never a grade: check_assembly and KiCad keep grading
+    what the library drew. Because it contains that occupancy, a placement
+    that keeps estimates clear keeps the graded bodies clear. `local` is in
+    the footprint's own unrotated frame, like every bbox here; `basis` is the
+    occupancy rung it was taken from."""
+    ref: str
+    side: str
+    local: Bbox
+    basis: str
+
+
+def estimate_courtyard(fp, geom: Optional[BodyGeometry], side: str
+                       ) -> Optional[CourtyardEstimate]:
+    """`geom`'s estimated courtyard, or None when the part draws a courtyard
+    (nothing to estimate), has no pads (a logo or a pad-less drawing is not
+    a part to seat) or has no occupancy at all."""
+    if geom is None or geom.source in (SOURCE_COURTYARD, SOURCE_NONE):
+        return None
+    occ = geom.occupancy_local
+    if occ is None or geom.pads_local is None:
+        return None
+    # The OCCUPANCY rung, not the drawn-body one, on purpose: it is what the
+    # grader grades, so the estimate always holds it. The two differ only on
+    # a `fab_marking` part (#1201), whose occupancy is its marking united with
+    # its pads and whose drawn body falls through to silk -- and that silk is
+    # where EasyEDA draws its "PCB edge" line: CM5_MINIMA_3's USB-C J101 reads
+    # 15.0 mm wide on silk against an 8.0 mm part.
+    return CourtyardEstimate(geom.ref, side, tuple(occ), geom.source)
+
+
+def estimated_courtyards(pcb_data, pcb_file: Optional[str] = None,
+                         bodies: Optional[Dict[str, BodyGeometry]] = None
+                         ) -> Dict[str, CourtyardEstimate]:
+    """`{ref: CourtyardEstimate}` for every pad-bearing part on the board
+    that draws no courtyard, except a container (`legality._container_kind`:
+    a board-sized outline or pin frame other parts sit inside by design,
+    which no consumer spaces as a body). `bodies` is `board_bodies`' answer
+    when the caller already holds it."""
+    from placement.legality import _container_kind, footprint_side
+    if bodies is None:
+        bodies = board_bodies(pcb_data, pcb_file)
+    fps = pcb_data.footprints or {}
+    out: Dict[str, CourtyardEstimate] = {}
+    for ref, geom in sorted(bodies.items()):
+        fp = fps.get(ref)
+        if fp is None or geom.source in (SOURCE_COURTYARD, SOURCE_NONE):
+            continue
+        if _container_kind(pcb_data, ref, geom.occupancy_local, geom.source,
+                           False):
+            continue
+        est = estimate_courtyard(fp, geom, footprint_side(fp))
+        if est is not None:
+            out[ref] = est
+    return out
+
+
+def courtyard_sides_with_estimates(pcb_data, pcb_file: str,
+                                   drawn: Optional[Dict[str, Dict[str, Bbox]]]
+                                   = None, skip=()):
+    """`(sides, estimates)`: `parser.extract_courtyard_sides`' map -- the
+    courtyards the board DRAWS, per side -- with every `estimated_courtyards`
+    entry added as its part's own-side courtyard, and the estimates
+    themselves for disclosure. A consumer that reads courtyards from this
+    map sees a courtyard-less part where it would see a courtyard; one that
+    must judge what is drawn (a declared pose, a grade) reads the parser.
+    `drawn` is the parser's map when the caller already read it; a ref in
+    `skip` keeps the basis the board draws (its pad box), estimate unused."""
+    from placement.parser import extract_courtyard_sides
+    sides = dict(extract_courtyard_sides(pcb_file) if drawn is None
+                 else drawn)
+    estimates = {r: e for r, e in estimated_courtyards(pcb_data, pcb_file).items()
+                 if r not in skip}
+    for ref, est in estimates.items():
+        if ref not in sides:
+            sides[ref] = {est.side: est.local}
+    return sides, estimates
+
+
+def format_estimates(estimates: Dict[str, CourtyardEstimate],
+                     label: str = 'placement') -> Optional[str]:
+    """The one NOTE line a consumer prints for its estimated courtyards
+    (None when there are none): how many, and per occupancy rung, which
+    parts -- so a reader sees what each was seated on."""
+    if not estimates:
+        return None
+    by: Dict[str, list] = {}
+    for e in estimates.values():
+        by.setdefault(e.basis, []).append(e.ref)
+    groups = '; '.join(
+        f"{basis}: " + ', '.join(sorted(refs)[:10])
+        + (', ...' if len(refs) > 10 else '')
+        for basis, refs in sorted(by.items()))
+    return (f"  NOTE [{label}]: {len(estimates)} footprint(s) draw no "
+            f"courtyard and are seated on an ESTIMATED one, what they occupy "
+            f"(body and pads, #1300) -- {groups}")
+
+
 class BodySeam(NamedTuple):
     """The tightest gap between two parts' DRAWN bodies, signed.
 
@@ -473,23 +581,3 @@ def tightest_body_seam(parts) -> Optional[BodySeam]:
     return best
 
 
-def source_mix(bodies) -> Dict[str, int]:
-    """`{source: count}` over `BodyGeometry` records, in ladder order.
-
-    The number `check_assembly`'s BODY COVERAGE line reports, so the coverage
-    claim and the geometry cannot drift apart.
-    """
-    counts = {s: 0 for s in SOURCES}
-    for g in (bodies.values() if isinstance(bodies, dict) else bodies):
-        counts[g.source] = counts.get(g.source, 0) + 1
-    return counts
-
-
-def format_source_mix(bodies) -> str:
-    """One line naming every rung that answered, zeros included.
-
-    Zeros are kept deliberately: "0 courtyard" on a board is the finding, and a
-    mix that only lists what it found cannot say that.
-    """
-    counts = source_mix(bodies)
-    return ', '.join(f'{counts[s]} {s}' for s in SOURCES)

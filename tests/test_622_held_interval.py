@@ -16,7 +16,9 @@ The columns below are A8's own, as whole_geo built them (offsets in the trunk's 
    below tests nothing (BROKEN TEST);
 2. every split column holds A8 on its terminal's side, north of the box, which its berth (offset -5.879) is on;
 3. a lane already held on one side stays there whatever its terminal (K41: lanes leaving the source's south face are
-   not to be moved across the box), and a reference inside an interval takes that interval.
+   not to be moved across the box) and wherever its reference lies -- a reference across the box does not carry the
+   lane over it (zynq LVDS K47: CTRL_IN0's bound jumped 3.3 mm across U1's corner so) -- and among the intervals the
+   one before overlaps, a reference inside one takes it.
 """
 import os
 import sys
@@ -73,11 +75,13 @@ split = [(k, q) for (k, q), (_k, iv, _r) in zip(held, COLS) if len(iv) > 1]
 check(all(q[1] < -5.0 for _k, q in split),
       f'every split column holds A8 north of the box, its berth\'s side: {[(k, q[1]) for k, q in split]}')
 
-# 3. held on one side, it stays; a reference inside an interval takes it
+# 3. held on one side, it stays; a reference inside one of the intervals the one before overlaps takes it
 s = corridor.held_interval(COLS[2][1], COLS[2][2], COLS[1][1][1], TERM)
 check(s == COLS[2][1][1], f'held south a column before, the lane stays south whatever its terminal: {s}')
 r = corridor.held_interval(COLS[2][1], -10.0, COLS[1][1][1], TERM)
-check(r == COLS[2][1][0], f'a reference inside an interval takes that interval: {r}')
+check(r == COLS[2][1][1], f'held south, a reference north across the box does not carry the lane over it: {r}')
+w = corridor.held_interval(COLS[1][1], -10.0, COLS[0][1][0], None)
+check(w == COLS[1][1][0], f'held on the whole column, the reference\'s interval is taken: {w}')
 n = corridor.held_interval(COLS[1][1], COLS[1][2], COLS[0][1][0], None)
 check(n == old, f'with no fixed terminal at that end the choice is the old one: {n}')
 

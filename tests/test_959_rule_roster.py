@@ -81,6 +81,7 @@ ARM_WITH = {
                                     'order': 'declared'}]},
     # #1211: a declared channel copy arms its grade.
     'replicate': {'replicate': [{'from': 'CH1', 'to': ['CH2']}]},
+    'template': {'templates': [{'anchor': 'U1', 'members': [{'ref': 'C1', 'at': [1.0, 0.0], 'rot': 0}]}]},
 }
 
 
@@ -191,8 +192,9 @@ def test_the_default_severity_table_is_what_the_rules_emit():
 
 def test_esp_prog_with_its_brief_owes_exactly_two():
     """The emitted esp_prog intent with fixture 711 merged: zone_containment
-    (no zones) and decap_distance (4 caps share a rail with an IC) are owed.
-    proximity and zone_exclusive are dark but POLICY; decap_pin_distance is
+    (no zones) and decap_distance (2 caps share a rail with an IC) are owed.
+    proximity is armed by the crystal claims the emitter derives for Y1;
+    zone_exclusive is dark but POLICY; decap_pin_distance is
     dark but ADVISORY here, because every esp_prog supply pin is found only
     through the rail-net channel, which files at WARN."""
     from placement import design_brief as db
@@ -204,9 +206,11 @@ def test_esp_prog_with_its_brief_owes_exactly_two():
     rows = _esp_roster(doc, pcb, brief_fragment=frag)
     owed = sorted(n for n, r in rows.items() if r['needs_disposition'])
     assert owed == ['decap_distance', 'zone_containment'], owed
-    for n in ('proximity', 'zone_exclusive'):
-        assert rows[n]['state'] == 'dark' and rows[n]['policy'], rows[n]
-        assert not rows[n]['needs_disposition'], n
+    assert rows['proximity']['state'] == 'armed', rows['proximity']
+    assert not rows['proximity']['needs_disposition']
+    assert rows['zone_exclusive']['state'] == 'dark' and \
+        rows['zone_exclusive']['policy'], rows['zone_exclusive']
+    assert not rows['zone_exclusive']['needs_disposition']
     pin = rows['decap_pin_distance']
     assert pin['state'] == 'dark' and pin['applicable'] and not pin['gating']
     assert rows['zone_side']['applicable'] is False, rows['zone_side']
@@ -336,7 +340,7 @@ def test_a_stale_ref_disposition_says_why():
     want = sorted([
         'dispositions.refs.NOPE: no such block on this board (keys are '
         'exact)',
-        'dispositions.refs.U1: the block carries pads -- the seeder places '
+        'dispositions.refs.U1: the block carries pads -- the placer places '
         'it, and `refs` answers pad-less blocks only',
         f'dispositions.refs.{logo}: the block is already locked; the lock '
         'is the answer'])
@@ -363,7 +367,7 @@ def test_a_stale_ref_disposition_says_why():
                            capture_output=True, text=True, encoding='utf-8',
                            errors='replace', cwd=REPO, timeout=900)
         assert 'Traceback' not in r.stdout + r.stderr, r.stderr[-1500:]
-        why = ('dispositions.refs.U1: the block carries pads -- the seeder '
+        why = ('dispositions.refs.U1: the block carries pads -- the placer '
                'places it, and `refs` answers pad-less blocks only')
         assert 'STALE: ' + why in r.stdout, r.stdout[-2000:]
         line = [x for x in r.stdout.splitlines()
@@ -376,7 +380,8 @@ def test_a_stale_ref_disposition_says_why():
 
 def test_the_run29_pile_owes_decaps_and_the_withheld_overlap():
     """Run 29's own zone plan on its own staged pile: the headline case. The
-    decap census has 4 caps with an IC on their rail and the plan declares no
+    decap census has 2 caps with an IC on their rail (the crystal's load caps
+    are not decaps) and the plan declares no
     limit; legality is armed with `overlap_area` withheld. Exactly those two
     are owed -- and the census reads the same on the pile as on the placed
     board, because tethered + beyond-radius does not depend on the poses."""
@@ -386,7 +391,7 @@ def test_the_run29_pile_owes_decaps_and_the_withheld_overlap():
     owed = sorted(n for n, r in rows.items() if r['needs_disposition'])
     assert owed == ['decap_distance', 'legality'], owed
     assert 'overlap_area' in rows['legality']['withheld'], rows['legality']
-    assert '4 decoupling cap(s)' in rows['decap_distance'][
+    assert '2 decoupling cap(s)' in rows['decap_distance'][
         'applicability_reason'], rows['decap_distance']
     print(f"  PASS: run 29's plan owes {owed}")
 

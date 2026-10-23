@@ -42,7 +42,8 @@ LOCAL = CORPUS / "pernet_ab"            # results live beside the corpus, not in
 APP = os.environ.get("PERNET_AB_APP", "pernet-via-ab")
 app = modal.App(APP)
 vol = modal.Volume.from_name("kicad-pernet-ab", create_if_missing=True)
-SIBLINGS = (".kicad_pro", ".kicad_prl", ".kicad_dru")
+# copy_board.SIBLING_EXTS: the brief carries keep_away rules route.py reads (#1253)
+SIBLINGS = (".kicad_pro", ".kicad_prl", ".kicad_dru", ".design-brief.json")
 
 # The image (a clean `git archive HEAD` + KiCad) is only needed to DEPLOY and
 # inside the container -- not for select/collect, whose worker processes
@@ -87,7 +88,8 @@ def _replay(task: dict) -> dict:
            f"{code}/py_router/route.py"] + args + ["--json-out", str(wd / "route.json")]
     t0 = time.time()
     with open(wd / "route.log", "w") as lf:
-        p = subprocess.Popen(cmd, cwd=wd, stdout=lf, stderr=subprocess.STDOUT)
+        p = subprocess.Popen(cmd, cwd=wd, stdout=lf, stderr=subprocess.STDOUT,
+                             env=dict(os.environ, **(task.get("env") or {})))
         _, status, ru = os.wait4(p.pid, 0)    # this child's own peak RSS (KB on Linux)
         p.returncode = os.waitstatus_to_exitcode(status)
     rc = p.returncode
@@ -136,12 +138,15 @@ def _route_steps(rd: Path):
             continue
         k = [i for i, t in enumerate(toks) if t.endswith("py_router/route.py")][0]
         args = toks[k + 1:]
+        # #1302: the step's recorded `NAME=value` env knobs, replayed with it.
+        env = dict(t.split("=", 1) for t in toks[:k]
+                   if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t))
         outs = [args[i + 1] for i, t in enumerate(args[:-1]) if t == "--output"] or \
                [a for a in args[1:2] if a.endswith(".kicad_pcb")]
         if not outs or os.path.basename(outs[0]) in seen:
             continue
         seen.add(os.path.basename(outs[0]))
-        steps.append((args[0], args, os.path.basename(outs[0])))
+        steps.append((args[0], args, os.path.basename(outs[0]), env))
     return steps
 
 
@@ -190,7 +195,7 @@ def _candidate(rd: str, max_s: float):
     if not steps:
         return None
     main = next((s for s in steps if "'*'" in shlex.join(s[1]) or "*" in s[1]), steps[0])
-    inp, args, out_name = main
+    inp, args, out_name, env = main
     src = Path(inp) if os.path.isabs(inp) else rd / inp
     secs = _recorded_secs(rd, out_name)
     if not src.exists() or (secs and secs > max_s):
@@ -202,7 +207,7 @@ def _candidate(rd: str, max_s: float):
     if not per:
         return None
     return dict(board=rd.name, set=rd.parent.name, src=str(src), args=args, out_name=out_name,
-                recorded_s=secs, per_net=len(per))
+                recorded_s=secs, per_net=len(per), env=env)
 
 
 def cmd_select(a):
@@ -241,7 +246,8 @@ def _task(row, arm, label, patch):
     else:
         args[1] = "out.kicad_pcb"
     return dict(label=label, arm=arm, board=row["board"], files=files, args=args,
-                input_name=src.name, patch=patch if arm == "fix" else "")
+                input_name=src.name, patch=patch if arm == "fix" else "",
+                env=dict(row.get("env") or {}))
 
 
 def cmd_launch(a):

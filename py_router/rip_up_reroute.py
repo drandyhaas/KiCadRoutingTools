@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 # a full via now fits). Nested sub-runs share the outer run's ledgers.
 RUN_LEDGERS = ('_preexisting_rips', '_rip_saved', '_refused_saved_134',
                '_pending_cap_moves', '_rip_override_names',
-               '_via_unblock_blame', '_unblock_via_sizes',
+               '_via_unblock_blame', '_unblock_via_sizes', '_unblock_via_sites',
                '_rip_authority_ids')
 
 
@@ -556,6 +556,38 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     return hits
 
 
+def restore_write_entry(pruned: dict, input_ids) -> Optional[dict]:
+    """The write-list entry for a piece-level restore (#134's last resort),
+    given the ids of the copper this run was handed (`input_ids`).
+
+    A restored piece that is one of those INPUT objects is copper the run's
+    board already carries -- the input file on the CLI, the live board on the
+    GUI, the parent's write model in a nested sub-run -- so it rides no
+    write-list: on the board and not re-emitted, the stale strip leaves it
+    alone. Put on the write-list, each such piece was its own re-emitted twin,
+    which the #284 clause strips: in a nested in-memory sub-run that strip
+    reaches the parent as a removal (plane_write_reconcile.
+    consume_inner_strips), which deleted the restored copper from the board,
+    the write-list and the file at once (#1311: glasgow /IO_Banks/Z9_N, its
+    escape restored "10 segment(s) + 2 via(s)", shipped with none).
+
+    Returns `pruned` when every piece is this run's own copper, None when
+    every piece is input copper, else an entry carrying the run's pieces that
+    `extends` `pruned` (route.py's #87 filter keeps it while `pruned` is the
+    net's result)."""
+    segs = list(pruned.get('new_segments') or [])
+    vias = list(pruned.get('new_vias') or [])
+    own_s = [s for s in segs if id(s) not in input_ids]
+    own_v = [v for v in vias if id(v) not in input_ids]
+    if len(own_s) == len(segs) and len(own_v) == len(vias):
+        return pruned
+    if not (own_s or own_v):
+        return None
+    return {'net_name': pruned.get('net_name'), 'net_id': pruned.get('net_id'),
+            'new_segments': own_s, 'new_vias': own_v,
+            'iterations': pruned.get('iterations', 0), 'extends': pruned}
+
+
 def partition_force_restores(force_ripped, pcb_data: PCBData,
                              clearance: float, skip_net_ids=None,
                              config: Optional[GridRouteConfig] = None):
@@ -703,7 +735,7 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
             stash[rid] = saved_result
         return
 
-    # Add back to pcb_data (tag as 'restore' for the route trace, #482)
+    # Add back to pcb_data (tagged 'restore': #658 packing leaves it as saved)
     add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines,
                           trace_event='restore')
     # #466: a restore puts copper BACK, so the fragility field must go back

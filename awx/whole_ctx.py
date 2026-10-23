@@ -205,6 +205,20 @@ def _guard(out, nets, dest):
     ctx, _cs = out
     import flow_frame
     k, _cx, _cy = flow_frame.quarter_of(ctx.pcb, dest, set(nets))
+    if k != 0 and ctx.src_ref:
+        # (a run of SOME of the bus's lanes -- whole_route's last resort leaves lanes out -- can have its balls'
+        # centroids a quarter off where the whole bus's are not, on a bench turned for the whole bus: the frame's own
+        # trunk decides then, the source's pad box to the destination's, as whole_frame.build draws it. Without it a
+        # generated 16-lane bus on a 2.5 mm channel, five lanes left out, was refused as turned a quarter, and every
+        # last-resort partial of rev8g1, rev8g2 and c4r12 was refused so, its round laying nothing)
+        import whole_frame
+        src = collections.Counter(ctx.src_ref.values()).most_common(1)[0][0]
+        prim = flow_frame.dest_refs(dest)[0]                # (the trunk's destination: whole_frame.build's)
+        if src in ctx.pcb.footprints and prim in ctx.pcb.footprints:
+            sb, db = whole_frame.box_of(ctx.pcb, src), whole_frame.box_of(ctx.pcb, prim)
+            dx, dy = (db[0] + db[2] - sb[0] - sb[2]) / 2, (db[1] + db[3] - sb[1] - sb[3]) / 2
+            if max(range(4), key=lambda k_: (round(flow_frame._q(dx, dy, k_)[0], 6), -k_)) == 0:
+                k = 0
     if k != 0:
         raise SystemExit(f'whole route: the bench is not in the canonical frame (its source-to-destination direction '
                          f'is a quarter turn {k} from +x) -- turn it with flow_frame.py first')
@@ -225,6 +239,78 @@ def board_in_frame():
 def bench_with(board, nets, dest):
     """plan() for a board, its nets and destination given (route_lanes --plan); never saved"""
     return _guard(_plan(board, nets, dest, True), nets, dest)
+
+
+def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
+    """the bench a CANDIDATE's ends make, read as braid.setup reads a board with its plan sidecar beside it -- with
+    nothing written: the board `pcb` (parsed once) with the candidate's escape runs `tracks` ({start, end, width, layer,
+    net_id}, as escape_plan.lay lays them) added in memory, and `plan` the sidecar's keys (ends, tooth_layer,
+    dest_layer, tooth_dir, stub_dir, dest_cut, chi). The fields the whole frame and the solve read -- the ends (a
+    pair's at its legs' midpoints), the layers (a pair's its P leg's, its N leg's beside them), the escape directions,
+    the source part, the destination's cut, the copper, each lane's taut path -- as setup gives them
+    (tests/test_622_candidate_ctx.py holds them to it). So the ends model asks the whole solve of its own ends before
+    any of them is laid (whole_ends.solve_check). None for a plan made in the turned-over pair frame (setup turns such
+    a board over first)"""
+    import copy
+    import braid as bd
+    import pairs as _pairs
+    from kicad_parser import Segment
+    if int(plan.get('chi') or 1) != 1:
+        return None
+    names = list(names)
+    prs = {}
+    if bd.PAIRS:
+        names, prs = _pairs.members(names)
+    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+    for b_, (pn_, _nn) in prs.items():
+        byname[b_] = byname[pn_]
+    pcb2 = copy.copy(pcb)
+    pcb2.segments = list(pcb.segments) + [
+        Segment(start_x=float(t_['start'][0]), start_y=float(t_['start'][1]), end_x=float(t_['end'][0]),
+                end_y=float(t_['end'][1]), width=float(t_['width']), layer=t_['layer'], net_id=int(t_['net_id']))
+        for t_ in tracks]
+    ctx = bd.Ctx()
+    ctx.chi, ctx.M = 1, None
+    ctx.pairs = prs
+    ctx.pages_first = bool(plan.get('pages_first'))
+    dc_ = plan.get('dest_cut')
+    ctx.dest_cut = None if dc_ is None else ((dc_[0], float(dc_[1])) if isinstance(dc_, (list, tuple)) else float(dc_))
+    ctx.src_cut = None if plan.get('src_cut') is None else float(plan['src_cut'])
+    pe = plan['ends']
+    # (each net's end at the destination part it reaches: DEST may name several, braid.net_dest)
+    ends = {nm: (tuple(pe[nm][0]), tuple(pe[nm][1]), bd.net_dest(byname[nm][1], dest)) for nm in names if nm in pe}
+    for pr_ in prs.values():
+        for leg in pr_:
+            ends[leg] = (tuple(pe[leg][0]), tuple(pe[leg][1]), bd.net_dest(byname[leg][1], dest))
+    ctx.pair_ends = {}
+    for b_, (pn_, nn_) in prs.items():
+        (sp_, tp_, _), (sn_, tn_, _) = ends[pn_], ends[nn_]
+        ends[b_] = (_pairs.mid(sp_, sn_), _pairs.mid(tp_, tn_), ends[pn_][2])
+        ctx.pair_ends[b_] = ((sp_, sn_), (tp_, tn_))
+    ctx.pcb, ctx.byname, ctx.ends, ctx.plan = pcb2, byname, ends, plan
+    ctx.kids = {byname[nm][0] for nm in names} | {byname[n][0] for pr_ in prs.values() for n in pr_}
+    # (in the run's order, as setup keys them: the frame takes its lanes in it. A pair's are its P leg's)
+    leg = lambda nm: prs[nm][0] if nm in prs else nm
+    ctx.tooth_layer = {nm: plan['tooth_layer'][leg(nm)] for nm in names}
+    ctx.dest_layer = {nm: plan['dest_layer'][leg(nm)] for nm in names}
+    ctx.tooth_dir = {nm: tuple(plan['tooth_dir'][leg(nm)]) for nm in names}
+    ctx.stub_dir = {nm: tuple(plan['stub_dir'][leg(nm)]) for nm in names}
+    ctx.pair_layers = {b_: (plan['tooth_layer'][nn_], plan['dest_layer'][nn_]) for b_, (_pn, nn_) in prs.items()}
+    ctx.src_ref = {}
+    for nm in names:
+        pads_ = [p for p in byname[nm][1].pads if p.component_ref != ends[nm][2]] or list(byname[nm][1].pads)
+        ctx.src_ref[nm] = min(pads_, key=lambda p: (p.global_x - ends[nm][0][0]) ** 2
+                              + (p.global_y - ends[nm][0][1]) ** 2).component_ref
+    ctx.cfg = cfg if cfg is not None else bd.run_config(pcb2, board)
+    ctx.base_segments, ctx.base_vias = list(pcb2.segments), list(pcb2.vias)
+    # each lane's TAUT path as setup draws it: round the copper on the bundle's layer, the run's own nets free. The
+    # frame's reference reads it, and the solve's built-in via cuts at other parts' pads read the reference: drawn
+    # straight from tooth to berth, a lane's reference stood 0.2 mm off where the round's did, and the check said a
+    # plan the round's solve had none for (zynq LVDS K40: RX_D0 1.36 mm off C152.1 here, 1.15 there -- cut there alone)
+    bl_ = bd.bundle_layer_of(ctx.tooth_layer)
+    with contextlib.redirect_stdout(io.StringIO()):         # (taut_paths prints its TAUT VIOLATING lines)
+        ctx.paths = bd.db.taut_paths(names, ends, lambda nm: bd.build_obstacles(pcb2, byname[nm][0], ctx.kids, bl_))
+    return ctx
 
 
 def _plan(board, nets, dest, quiet):
@@ -278,7 +364,7 @@ CTX_CACHE = os.path.join(HERE, 'tmp', 'ctx_cache')
 # what the loop hands one stage and not the next, read only by whole_solve, whole_geo and whole_snap once the bench is
 # planned: not in the plan's key, or each stage would plan the same bench again
 STAGE_VARS = ('HINT', 'CUTS', 'HIST', 'GEO_FLIPS_FROM', 'SEED_FLIPS', 'SEED_CUTS', 'SEED_HIST', 'WHOLE_SOLVE_BATCHES',
-              'SNAP_KEEP')
+              'WHOLE_SOLVE_PROBE', 'SNAP_KEEP')
 
 
 class _NoCell:

@@ -25,9 +25,10 @@
 #   3. The image's router download must be PINNED to the release whose asset
 #      matches the commit's crate. #615 made build_router skip the prebuilt
 #      whenever rust_router/ differs from main -- which a bisect worktree always
-#      does -- sending it to a source build the image cannot do (no Rust
-#      toolchain). An explicit --tag is honored as-given. Crate 0.20.1 maps to
-#      release v0.20.2, because v0.20.1's asset is a stale 0.20.0 build.
+#      does -- sending it to a source build (once impossible in the image, now
+#      ~10 min of cargo on its rustup layer). An explicit --tag is honored
+#      as-given. Crate 0.20.1 maps to release v0.20.2, because v0.20.1's asset
+#      is a stale 0.20.0 build.
 #   4. core64_logic is excluded: it replays in 4 min historically and now never
 #      terminates (issue #625), and one such board holds every arm at N-1.
 #
@@ -64,10 +65,10 @@ if [ -n "$CRATE" ]; then
   # Pin the image's prebuilt to this commit's crate release. This used to REWRITE
   # modal_app.py's build command from here; it now rides an env var that
   # modal_app._build_step() reads client-side, because a rewrite that silently
-  # no-ops launches an arm that builds unpinned and dies 30 minutes later (#615
-  # skips the prebuilt in a bisect worktree, and the image has no Rust). Keep the
-  # loud guard: if the knob is gone, refuse to launch rather than spend on an arm
-  # that cannot build.
+  # no-ops launches an arm that builds unpinned (#615 skips the prebuilt in a
+  # bisect worktree), which died 30 minutes later before the image had Rust and
+  # now pays a source build. Keep the loud guard: if the knob is gone, refuse to
+  # launch rather than quietly build every arm from source.
   if ! grep -q "KICAD_SWEEP_BUILD_TAG" "$WT/tests/stress/modal_sweep/modal_app.py"; then
     echo "  $TAG: modal_app.py has no KICAD_SWEEP_BUILD_TAG support -- refusing to launch unpinned"
     exit 1
@@ -77,6 +78,15 @@ if [ -n "$CRATE" ]; then
 fi
 echo "  $TAG: engine=$SHA harness=HEAD  (py_router matches $SHA)"
 cd "$WT"
+# The arm and its wave dir carry the KiCad image, by cloud_replay_sets' own
+# kicad_label: bis<tag>-kc on the default image, bis<tag>-kc-<image> when
+# KICAD_SWEEP_KICAD_IMAGE picks another. --arm is taken as given (arm_name()
+# adds nothing to it), so a bare bis<tag> let two images' runs of one tag share
+# result rows -- the volume resumes by arm name -- and one wave dir.
+ARM=$(python3 -c 'import os, sys; sys.path.insert(0, "tests/stress")
+import cloud_replay_sets as c
+print(c.kicad_label(sys.argv[1], os.environ.get("KICAD_SWEEP_KICAD_IMAGE") or c.DEFAULT_KICAD_IMAGE))' "bis${TAG}")
+[ -n "$ARM" ] || { echo "  $TAG: could not derive the arm name -- aborting before spending"; exit 1; }
 # Retry the LAUNCH, not just the build. Modal rate-limits app CREATION, and a
 # bisect ladder starts several points back to back -- launching six ~2s apart
 # had three rejected outright with "App create rate limit exceeded". The script
@@ -87,9 +97,9 @@ cd "$WT"
 _launch() {
   KICAD_SWEEP_BUILD_TAG="$BUILD_TAG" \
   KICAD_SWEEP_DIRTY=1 caffeinate -dimsu nohup python3 tests/stress/cloud_replay_sets.py \
-     --sets "$SETS" --arm "bis${TAG}" --label "bis${TAG}" --limit "$LIMIT" \
+     --sets "$SETS" --arm "$ARM" --label "$ARM" --limit "$LIMIT" \
      ${BOARDS:+--boards "$BOARDS"} \
-     --exclude core64_logic --out "$ST/cloud_bis${TAG}" --only plan,run \
+     --exclude core64_logic --out "$ST/cloud_$ARM" --only plan,run \
      > "$S/bis_$TAG.log" 2>&1
 }
 (
@@ -104,4 +114,4 @@ _launch() {
   done
 ) &
 disown
-echo "  $TAG: launched -> $S/bis_$TAG.log  (auto-retries an app-create rate limit)"
+echo "  $TAG: launched arm $ARM -> $ST/cloud_$ARM, log $S/bis_$TAG.log  (auto-retries an app-create rate limit)"

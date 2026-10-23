@@ -211,8 +211,10 @@ def process_board(set_board, manifest, work_root, out_dir, drc_size_checks):
     # rather than by an allow-list of the flags we happen to record today: the
     # list missed `-u` the moment recordings gained it (#599), leaving `-u -X
     # utf8 ...` in front of the argv.
+    # A recorded `NAME=value` env prefix (#1302) leads the line too.
     while rd_argv and (rd_argv[0].endswith(("python", "python3"))
-                       or rd_argv[0].startswith("-") or rd_argv[0] == "utf8"):
+                       or rd_argv[0].startswith("-") or rd_argv[0] == "utf8"
+                       or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", rd_argv[0])):
         rd_argv.pop(0)
     out_board, _rd_clearance = resolve_diff_output(rd_argv)
     # grade DRC at the floor the board must meet (min --clearance over the whole
@@ -237,6 +239,8 @@ def process_board(set_board, manifest, work_root, out_dir, drc_size_checks):
     failed = summary.get("failed_diff_pairs", []) if summary else None
     deferred = summary.get("single_ended_diff_pairs", []) if summary else None
     routed = summary.get("routed_diff_pairs", []) if summary else []
+    # #1303: routed, but the shipped copper is not coupled.
+    uncoupled = summary.get("uncoupled_diff_pairs", []) if summary else []
 
     out_path = os.path.join(wdir, os.path.basename(out_board))
     drc_log = os.path.join(wdir, "drc.log")
@@ -250,12 +254,13 @@ def process_board(set_board, manifest, work_root, out_dir, drc_size_checks):
     else:
         drc = "NO_OUTPUT"
 
-    flagged = (bool(failed) or bool(deferred) or summary is None
+    flagged = (bool(failed) or bool(deferred) or bool(uncoupled) or summary is None
                or drc == "NO_OUTPUT" or (isinstance(drc, int) and drc > 0))
     rec = dict(board=set_board, routed=len(routed), failed=failed, deferred=deferred,
+               uncoupled=uncoupled,
                drc=drc, flagged=flagged, replay_rc=rc, out=os.path.basename(out_board))
     print(f"  routed={len(routed)} failed={failed} deferred={deferred} "
-          f"drc={drc} flagged={flagged}")
+          f"uncoupled={uncoupled} drc={drc} flagged={flagged}")
 
     if flagged and os.path.isfile(out_path):
         dest = os.path.join(out_dir, set_board)

@@ -62,41 +62,10 @@ _WK_DEPENDENT = {
     # synthetic origin/control arms run on a clean clone, so absent the asset
     # the repro is skipped and the file still exits 0.
     'test_1038_hole_clearance_origin.py': ['wk/run32/routed_c3.kicad_pcb'],
-    # #1031's run-32 repro only (exit 77 without it). The synthetic
-    # test_1031_keepout_legality.py covers every invariant on a clean clone.
-    'test_1031_keepout_run32_repro.py': ['wk/run32/placed_v2.kicad_pcb'],
-    # #788 Arm B only: it re-grades 14 declared study boards to prove the
-    # committed literals still match the instrument. Arm A -- the claim
-    # those literals support -- runs on a clean clone and is what keeps
-    # this file from being green-while-covering-nothing when wk/ is absent.
-    'test_788_marginal_literals.py': ['wk/703/study'],
-    # #1042 CORROBORATION only: the run-32 table check runs when a machine
-    # has run 32; every claim in the file is also pinned on tracked
-    # kicad_files/ boards, and the absent case is SAID in the summary line,
-    # not passed silently.
-    'test_1042_placement_panels.py': ['wk/run32'],
-    # #1124 CORROBORATION only: the run-32 no-floor arm. Every other arm runs
-    # on tracked boards or a synthetic one, and the absent case is SAID.
-    'test_1124_film_grader_census.py': ['wk/run32'],
-    # #887 CORROBORATION only. The regression lives in
-    # test_887_cmd_timing_reader.py, against two small tracked fixtures, and
-    # passes in full on a clean clone. This arm re-derives run 24's published
-    # audit from the one real 153-row ledger when a machine happens to have
-    # one, and self-skips at exit 77 when it does not.
-    'test_887_run24_regression.py': ['wk/run24/esp_prog/cmd_timing.jsonl'],
     'test_outline_prefilter.py': ['wk/run19/urchin/base.kicad_pcb'],
-    'test_part_class.py': ['wk/b2/tigard__swap/d0/perturbed.control.kicad_pcb',
-                           'wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
-    'test_place_reconstruct.py':
-        ['wk/b2/tigard__swap/d0/perturbed.control.kicad_pcb',
-         'wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
     'test_placement_pad_legality.py':
         ['../wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
-    'test_run20_run_watch.py': ['wk/run20'],
     'test_run4_custom_pad_circle.py': ['wk/run3/final2.kicad_pcb'],
-    'test_run4_reconstruct.py': ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
-    'test_run5_emit_guard.py': ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
-    'test_run5_exchange.py': ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
     'test_run6_backlog.py': ['wk/run5/s1_pour.kicad_pcb'],
     'test_run6_body_overlap.py': ['wk/run2/original/tigard_v10.kicad_pcb',
                                   'wk/run5/final5.kicad_pcb'],
@@ -104,15 +73,6 @@ _WK_DEPENDENT = {
         ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb',
          'wk/run2/original/tigard_v10.kicad_pcb',
          'wk/run5/final5.kicad_pcb'],
-    'test_run7_vectors.py': ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
-    'test_run8_airwire_refuted.py':
-        ['wk/run7/glasgow_revC/perturbed.kicad_pcb'],
-    'test_run8_oob_outline.py': ['wk/run7/glasgow_revC/perturbed.kicad_pcb'],
-    'test_run8_rigid_consistency.py':
-        ['wk/run7/glasgow_revC/perturbed.control.kicad_pcb',
-         'wk/run7/glasgow_revC/perturbed.kicad_pcb',
-         'wk/run7/glasgow_revC/rL_repair.kicad_pcb'],
-    'test_run8_starved_face_gate.py': ['wk/run7/glasgow_revC'],
 }
 
 #: `os.path.join(<repo root>, 'a', 'b')` with every component after the base a
@@ -150,37 +110,13 @@ _ROOT_JOIN_ARGV_OK = {
         'ALREADY qualified by directory ("py_router/route.py") straight out '
         'of the skill text and filters them through os.path.isfile -- so the '
         'join is over a relative path, not a bare basename.',
-    'mutate_902.py':
-        'its `tests` values are the module-level T902/T895/T891/TSCH '
-        'constants, every one a directory-qualified literal '
-        '("tests/test_902_proximity.py"), so the join is over a relative path '
-        'and not a bare basename. `run_utils.tool()` is the wrong resolver '
-        'here: these are TEST files rather than shipped CLIs, and it looks '
-        'only in the four tool directories #522 created.',
-    'mutate_923.py':
-        'same shape and same reason as mutate_902: its `tests` values are the '
-        'module-level T431/T923 constants, both directory-qualified literals, '
-        'so the join is over a relative path rather than a bare basename.',
-    'mutate_936.py':
-        'same shape and same reason again: its `tests` values are the '
-        'module-level T_WORKLIST/T_CONVERGE/T_DFL/T_431/T_PRUN/T_RW/T_CC constants, every one a directory-qualified literal, so the '
-        'join is over a relative path rather than a bare basename.',
     'mutate_941_942.py':
-        'same shape and same reason once more: its `tests` values are the '
-        'module-level T_937/T_941/T_918 constants, '
+        'its `tests` values are the module-level T_937/T_941/T_918 constants, '
         'every one a directory-qualified literal '
         '("tests/test_941_final_board_is_one_name.py"), so the join is over a '
         'relative path rather than a bare basename. `run_utils.tool()` is the '
-        'wrong resolver here for the reason the rows above give: these are '
-        'TEST files rather than shipped CLIs.',
-    'mutate_937.py':
-        'same shape and same reason: its `tests` values are the module-level '
-        'T_REG/T_CHK/T_OOB/T_LEV constants, every one a '
-        'directory-qualified literal ("tests/test_937_tool_registry.py"), so '
-        'the join is over a relative path rather than a bare basename. '
-        '`run_utils.tool()` is the wrong resolver here for the reason the '
-        'three rows above give: these are TEST files rather than shipped '
-        'CLIs, and it looks only in the four tool directories #522 created.',
+        'wrong resolver here: these are TEST files rather than shipped CLIs, '
+        'and it looks only in the four tool directories #522 created.',
 }
 
 
@@ -699,15 +635,11 @@ def test_no_test_file_needs_pytest():
 #: the way 713 was.
 #:
 #: "Reads it and fails when it is wrong" is deliberately weaker than
-#: "re-derives every cell": four of these honestly do less, and say so.
-#:
-#: `test_553_recall_regen` re-derives 2 of 36 cells;
-#: `test_554_relocation_regen` re-derives the summary only;
-#: `test_803_calibration_claims` consumes its two files as the INPUT it holds
-#: `docs/placement-calibration.md` to; and
-#: `test_789_rule1_withdrawal` re-evaluates a rule over stored metrics. A map
+#: "re-derives every cell", and a gate that does less must say so here: a map
 #: that claimed full re-derivation for all of them would be the kind of
-#: overstatement this file exists to catch.
+#: overstatement this file exists to catch. (The four that did less --
+#: 553, 554, 803, 789 -- went with the placement flows they measured, in
+#: ecd673eb and 5dccf2fa.)
 #:
 #: A baseline nothing re-derives is free to drift arbitrarily far from the tree
 #: while still reading as authoritative, and whoever eventually re-records it
@@ -722,37 +654,12 @@ def test_no_test_file_needs_pytest():
 #: it claims to guard -- fails too. A registration nobody checks is how the
 #: #696 containment guard passed 28/28 while the thing it named had moved.
 _BASELINE_GATES = {
-    'tests/553_diagnosis_recall_baseline.json':
-        'tests/test_553_recall_regen.py',
-    'tests/554_block_relocation_baseline.json':
-        'tests/test_554_relocation_regen.py',
-    'tests/554_relocation_reach_baseline.json':
-        'tests/test_554_reach_regen.py',
     'tests/713_abstention_census.json':
         'tests/test_713_abstention_drift.py',
-    'tests/792_seeding_rows.jsonl':
-        'tests/test_792_seeding_claims.py',
-    'tests/799_feasibility_rows.jsonl':
-        'tests/test_799_feasibility_claims.py',
-    'tests/799_feasibility_summary.json':
-        'tests/test_799_feasibility_claims.py',
     'tests/831_fill_timing_census.json':
         'tests/test_831_fill_preflight_census.py',
     'tests/878_far_face_currency.json':
         'tests/test_878_far_face_currency.py',
-    'tests/placement_ab_baseline.json': 'tests/test_placement_ab.py',
-    # #1105: fixed before any pile number existed; the gate pins its sha256.
-    'tests/1105_pile_ab_prereg.json': 'tests/test_1105_pile_prereg.py',
-    # #1105 again, for #1142's per-cap signal; the same gate pins it.
-    'tests/1105_pile_ab_prereg_v2.json': 'tests/test_1105_pile_prereg.py',
-    # #1127: fixed before the licence census and the stack-mode A/B.
-    'tests/1127_stack_ab_prereg.json': 'tests/test_1127_prereg.py',
-    'tests/placement_calibration_recovered.json':
-        'tests/test_803_calibration_claims.py',
-    'tests/placement_calibration_rows.json':
-        'tests/test_803_calibration_claims.py',
-    'tests/placement_rule1_withdrawal.json':
-        'tests/test_789_rule1_withdrawal.py',
     'tests/data/714_identity_sha256.json':
         'tests/test_714_identity_write_unchanged.py',
     # #946. Re-derived per key AND per arm on every run, with DRIFT /
@@ -772,25 +679,6 @@ _BASELINE_UNGATED = {
         'run_all.py\'s measured per-test wall seconds (written by '
         '--write-durations / run_all_modal.py), read by `shard` to balance '
         'shards; a timing table, not a verdict, so no test re-derives it',
-    'tests/797_seed_exclusive_baseline.json':
-        'no test names it; its own `reproduce` key carries a two-command '
-        'recipe, which is a recipe rather than a gate',
-    'tests/836_flip_vs_reseat_baseline.json':
-        'test_836_flip_census.py is a real gate on the two MECHANISMS the '
-        'answer rests on, but it re-derives them from the engine and never '
-        'opens this file, so the recorded verdict itself is unguarded',
-    'tests/measure_847_calibration.json':
-        'nothing references it; only measure_847_calibration.py is cited, in '
-        'docs/utilities.md and check_channels.py',
-    'tests/553_diagnosis_recall_rows.jsonl':
-        'ZERO references repo-wide -- 52 KB and 36 recorded rows that nothing '
-        'in the tree reads. test_553_recall_regen.py writes its OWN rows into '
-        'a temp workdir and never opens this one. The most exposed file in '
-        'the tree by this issue\'s own definition, and named here rather than '
-        'left to be discovered the way 713 was',
-    'tests/stress/corpus_noop_baseline.json':
-        'read by tests/stress/corpus_noop_sweep.py, which is not a test_*.py '
-        'and lives outside run_all.py the non-recursive glob',
     'tests/stress/modal_sweep/board_value.json':
         'a recorded measurement (`boards_scored: 148`) that is ALSO consumed '
         'as sweep config, written by modal_sweep/curate_boards.py after a big '
@@ -804,7 +692,9 @@ _BASELINE_UNGATED = {
 #: it guards would make this agree with whatever the map currently says, and
 #: the point is that another ungated baseline be a decision somebody takes
 #: rather than a line somebody adds.
-_UNGATED_BASELINE_COUNT = 8     # 7 before run_all_durations.json
+_UNGATED_BASELINE_COUNT = 3     # 7 before run_all_durations.json; 8 until
+#                                 ecd673eb deleted five with the placement
+#                                 flows they recorded
 
 #: And the total the walk must CONSIDER. Without it the check goes vacuous in
 #: silence: widen an exclusion to `tests/` and every baseline disappears, while
@@ -817,8 +707,9 @@ _UNGATED_BASELINE_COUNT = 8     # 7 before run_all_durations.json
 #: have moved -- a "measured" line spliced from two versions is exactly what
 #: #879 is about.)
 #: 23 before #1127's pre-registration, 24 before run_all_durations.json, 25
-#: before #1105's second pre-registration.
-_DECLARED_BASELINE_COUNT = 26
+#: before #1105's second pre-registration; 26 until the placement retirement
+#: (ecd673eb, 5dccf2fa, e1e4777e) deleted 18 with the flows they measured.
+_DECLARED_BASELINE_COUNT = 8
 
 #: Committed JSON/JSONL under `tests/` that is an INPUT, not a recorded
 #: measurement. Full-path regexes, each with its reason.
@@ -1078,7 +969,7 @@ def test_every_committed_baseline_is_declared():
 #: Declared with the reason and held in BOTH directions, like `_WK_DEPENDENT`
 #: above: an entry that no longer applies is as much a defect as a missing one,
 #: because a stale exemption is indistinguishable from a gate that still covers
-#: the file. Empty today -- all 41 resolve -- and it exists so that a battery
+#: the file. Empty today -- all 26 resolve -- and it exists so that a battery
 #: written in a shape the resolver has never seen fails LOUDLY here instead of
 #: being counted as "no anchors, nothing to check".
 _UNRESOLVABLE = {}
@@ -1113,12 +1004,16 @@ _UNRESOLVABLE = {}
 #: added `mutate_1174.py`; 85 before #1176 added `mutate_1176.py`;
 #: 86 before #1201 added `mutate_1201.py`; 87 before #1155 added
 #: `mutate_1155.py`; 88 before #1172 added `mutate_1172.py`; 89 before #1211
-#: added `mutate_1211.py`.
-_BATTERY_COUNT = 90
+#: added `mutate_1211.py`; 90 until `mutate_1042.py` and `mutate_1081.py`
+#: went with the film tools they mutated; 88 until the placement retirement
+#: deleted 62 batteries of the code it removed (56 in ecd673eb, 3 in
+#: 5dccf2fa, 3 in e1e4777e); 26 before #1295 added `mutate_1295.py`.
+_BATTERY_COUNT = 27
 
-#: A floor well under today's 831, not a target. Same purpose as
+#: A floor well under today's 484, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.
-_MIN_ANCHORS = 600
+#: (600 under 831 until the placement retirement deleted 62 of 88 batteries.)
+_MIN_ANCHORS = 350
 
 
 def test_every_mutation_anchor_matches_exactly_once():

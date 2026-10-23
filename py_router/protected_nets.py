@@ -381,11 +381,45 @@ def cached_protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[st
     return m
 
 
+def held_net_reasons(pcb_data) -> Dict[str, str]:
+    """{net name: `sense:<REF>.<PAD>`} for nets carrying copper a `sense:`
+    group holds (#1279, Segment.held_by). Read straight from the board."""
+    out: Dict[str, str] = {}
+    for it in list(pcb_data.segments) + list(pcb_data.vias):
+        held = getattr(it, 'held_by', '')
+        net = pcb_data.nets.get(it.net_id) if held and it.net_id else None
+        if net is not None and net.name:
+            out.setdefault(net.name, held)
+    return out
+
+
+def is_sense_reason(reason: Optional[str]) -> bool:
+    """A protection reason naming the `sense:` group that holds the net's
+    copper (#1279)."""
+    return bool(reason) and reason.startswith('sense:')
+
+
+def never_lifts(reason: Optional[str]) -> bool:
+    """A reason no exact-name override lifts: KiCad-locked copper (#1261) and
+    copper a `sense:` group holds (#1279) -- naming the net would strip it."""
+    return reason == 'locked' or is_sense_reason(reason)
+
+
+#: The hint for a net whose pre-existing copper a `sense:` group holds.
+SENSE_HINT = ("copper held by a `sense:` group (#1279) is never stripped and "
+              "has no override; ungroup or rename the group to release it")
+
+
 def protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[str, str]:
-    """Full protection map for a board: the .kicad_pro list plus nets with
-    KiCad-locked copper. 'locked' wins where both apply -- unlike the .pro
-    reasons it has NO exact-name override (locked means never)."""
+    """Full protection map for a board: the .kicad_pro list, nets whose
+    copper a `sense:` group holds (reason: the group's name), and nets with
+    KiCad-locked copper. 'locked' wins where several apply. Neither 'locked'
+    nor a `sense:` reason has an exact-name override (`never_lifts`). A
+    `sense:` reason bars whole-net strips of the net's PRE-EXISTING copper
+    only: the in-run ladders rip a routed result, never held copper
+    (rip_refusal)."""
     m = read_for_pcb_data(pcb_data, input_file)
+    m.update(held_net_reasons(pcb_data))
     m.update({n: 'locked' for n in locked_net_names(pcb_data)})
     return m
 
@@ -434,6 +468,11 @@ def rip_refusal(pcb_data, net_id: int, context: str = "in-run rip ladder",
     and fallback rips, the victim-priority squatter rip. Same rule as the
     pre-run filters: 'locked' (KiCad-locked copper) never lifts; any other
     reason lifts for a net the operator named exactly (stash_rip_overrides).
+    A `sense:` reason (#1279) does not refuse here: these ladders rip a
+    routed RESULT, whose removal skips held copper
+    (remove_route_from_pcb_data), so the net's routes of this run stay
+    rippable -- unless the .kicad_pro also protects the net, whose rule then
+    applies as usual.
     A diff pair rips as a unit, so its partner's protection refuses it too.
     A refusal is recorded in PROTECTED_SKIPPED under `context` (JSON_SUMMARY).
     """
@@ -450,15 +489,39 @@ def rip_refusal(pcb_data, net_id: int, context: str = "in-run rip ladder",
                if i is not None] or ids
     for nid in ids:
         net = pcb_data.nets.get(nid)
-        name = net.name if net else None
-        if not name or name not in protected:
-            continue
-        reason = protected[name]
-        if reason != 'locked' and name in rip_override_names(pcb_data):
-            continue
-        PROTECTED_SKIPPED.setdefault(context, {})[name] = reason
-        return reason
+        reason = in_run_rip_reason(pcb_data, net.name if net else None)
+        if reason:
+            PROTECTED_SKIPPED.setdefault(context, {})[net.name] = reason
+            return reason
     return None
+
+
+def in_run_rip_reason(pcb_data, name: Optional[str]) -> Optional[str]:
+    """rip_refusal's rule for one net name, without recording it: the reason
+    an in-run ladder must not rip the net's routed result, or None."""
+    if not name:
+        return None
+    reason = cached_protection_map(pcb_data).get(name)
+    if is_sense_reason(reason):
+        reason = _cached_project_reasons(pcb_data).get(name)
+    if not reason:
+        return None
+    if reason != 'locked' and name in rip_override_names(pcb_data):
+        return None
+    return reason
+
+
+def _cached_project_reasons(pcb_data) -> Dict[str, str]:
+    """The .kicad_pro protection list alone, memoised like
+    cached_protection_map (a held net's own project reason, #1279)."""
+    m = getattr(pcb_data, '_project_protection_memo', None)
+    if m is None:
+        m = read_for_pcb_data(pcb_data)
+        try:
+            pcb_data._project_protection_memo = m
+        except Exception:
+            pass
+    return m
 
 
 
@@ -483,13 +546,14 @@ def filter_rippable_names(names: List[str], protected: Dict[str, str],
                           context: str = "rip-up") -> List[str]:
     """Drop protected names (minus exact-name overrides), printing what was
     excluded and why. Returns the surviving names in input order. A net whose
-    reason is 'locked' (KiCad-locked copper) has NO override -- ever."""
+    reason is 'locked' (KiCad-locked copper) or a `sense:` group (#1279) has
+    NO override -- ever (`never_lifts`)."""
     if not protected:
         return list(names)
     overrides = exact_names(override_patterns)
     kept, blocked = [], []
     for n in names:
-        if n in protected and (protected[n] == 'locked' or n not in overrides):
+        if n in protected and (never_lifts(protected[n]) or n not in overrides):
             blocked.append(n)
         else:
             kept.append(n)
@@ -504,12 +568,16 @@ def filter_rippable_names(names: List[str], protected: Dict[str, str],
         # The override hint only for the reasons that HAVE one (#1192): a
         # 'locked' net was refused even if the caller named it exactly.
         hints = []
-        if any(r != 'locked' for r in by_reason):
+        if any(not never_lifts(r) for r in by_reason):
             hints.append("name a net exactly (no glob) to override"
-                         + (" all but 'locked'" if 'locked' in by_reason else ""))
+                         + (" all but 'locked'" if 'locked' in by_reason else "")
+                         + (" and `sense:`" if any(map(is_sense_reason, by_reason))
+                            else ""))
         if 'locked' in by_reason:
             hints.append("KiCad-locked copper has no override; unlock it in "
                          "the board")
+        if any(map(is_sense_reason, by_reason)):
+            hints.append(SENSE_HINT)
         print(f"  {len(blocked)} PROTECTED net(s) excluded from {context} ({det})"
               f" -- {'; '.join(hints)}")
     return kept

@@ -933,6 +933,15 @@ def apply_step_params(step, dialog):
                         getattr(opts, _ctl).SetValue(float(params[_pname]))
                     except (TypeError, ValueError):
                         notes.append(f"ignored non-numeric {_pname}={params[_pname]!r}")
+                        continue
+                    if _pname == "qfn_clearance":
+                        # #1328: a step naming the clearance is the CLI's
+                        # --clearance -- tick the override, or the panel
+                        # resolves the board's Default class instead (the
+                        # omitted flag, which reset_params_to_defaults
+                        # restores between steps).
+                        opts.qfn_clearance_check.SetValue(True)
+                        opts.qfn_clearance.Enable(True)
     elif action == "optimize_caps":
         # Every cap_* param resolves through the generic loop now that
         # bga_options is one of this action's owners (#772). Only the

@@ -8,8 +8,10 @@ pad/hole/oob legality echo -- both conjuncts in one JSON.
 
 Needs NO intent to be meaningful (unlike check_floorplan's legality rule,
 which skips without a budget): a bare board grades honestly. --intent adds
-authored overlap waivers, and a declared `mating:<ref>` keep-out, which
-replaces the plug region derived from the board (#1098).
+authored overlap waivers, the courtyard pairs a declared pose accepts
+(`fixed_poses[].accept_courtyard_overlap`, courtyard only, #1298), and a
+declared `mating:<ref>` keep-out, which replaces the plug region derived from
+the board (#1098).
 
 --baseline <board> computes the loop currency: advisory pairs NEW relative
 to the baseline board (dense real boards ship hundreds of by-design
@@ -29,7 +31,12 @@ a moved member left under another part's body (see TEST POINT COVERED,
 #1250; armed by --baseline like the courtyard gate) OR a body inside the
 body-to-edge band the --intent DECLARES (`assembly.body_edge_mm`; see
 BODY-TO-EDGE BAND, #1255 -- undeclared, it reports against JLCPCB's 2.5 mm
-and never gates).
+and never gates) OR a pad touching another part's footprint graphic copper
+with a member moved vs --baseline (see PAD ON ANOTHER PART'S COPPER, #1266;
+armed by --baseline like the courtyard gate) OR two of one part's own pads
+touching on two different real nets, KiCad's shorting_items (see OWN PADS
+TOUCHING, #1306; with --baseline a pair the baseline's footprint already had
+does not gate).
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -59,6 +66,8 @@ def main():
     p.add_argument("board")
     p.add_argument("--intent", default=None, metavar="JSON",
                    help="Floorplan intent; its overlap_waivers are read, "
+                        "its fixed_poses[].accept_courtyard_overlap waive "
+                        "those COURTYARD pairs only (#1298), "
                         "a keep-out it names `mating:<ref>` replaces the "
                         "plug mating region derived from the board (#1098), "
                         "and a declared assembly.body_edge_mm makes the "
@@ -118,20 +127,26 @@ def main():
     # report pad_conflicts 0 -> 0 and buildable True -> True; only the graded
     # clearance and its recorded source moved. Grading at the board's own
     # clearance is right HERE because this tool grades existing geometry --
-    # check_channels PREDICTS routability and therefore needs a fab floor
-    # instead (see list_nets.board_floor, grade-vs-predict).
+    # a tool that PREDICTS routability needs a fab floor instead (see
+    # list_nets.board_floor, grade-vs-predict).
+    #
+    # #1338: "the board's own clearance" is what KiCad grades -- the Default
+    # class floored at Board Setup min_clearance, as check_drc has read it
+    # since #1210 -- not the class alone. multichannel_mixer declares class
+    # 0.2 and min_clearance 0.3; at 0.2 this tool called a board buildable
+    # with no pad pair while kicad-cli and check_drc reported two at 0.24 and
+    # 0.25 mm, and `--clearance 0.3` was told it was STRICTER than the board.
     _board_clr = None
     _decl = None
+    from list_nets import board_grading_clearance
     try:
-        from list_nets import (board_default_netclass_clearance,
-                               board_floor_declaration)
-        _board_clr = board_default_netclass_clearance(args.board)
+        from list_nets import board_floor_declaration
+        _board_clr, _board_src = board_grading_clearance(args.board)
         _decl = board_floor_declaration(args.board)
     except Exception:                                          # noqa: BLE001
         pass
-    from list_nets import board_floor
-    clearance, _src = board_floor(args.board, 'clearance', args.clearance,
-                                  defaults.CLEARANCE)
+    clearance, _src = board_grading_clearance(args.board, args.clearance,
+                                              defaults.CLEARANCE)
     print(f"  grading at clearance {clearance}mm  [{_src}]")
     # A board that declares NOTHING is a DIFFERENT case from one whose Default
     # class happens to match (run-12 Tier 1.3). The comparison below can only
@@ -152,15 +167,20 @@ def main():
     # can, and they should be told they did.
     if args.clearance is not None and _board_clr is not None \
             and abs(_board_clr - clearance) > 1e-9:
-        print(f"  NOTE: --clearance {clearance}mm overrides this board's own "
-              f"Default net-class clearance of {_board_clr}mm, so this grade "
-              f"is {'STRICTER' if clearance > _board_clr else 'LOOSER'} than "
-              f"the board asks for. Drop --clearance to grade at the board's "
+        print(f"  NOTE: --clearance {clearance}mm overrides the clearance KiCad "
+              f"grades this board at, {_board_clr}mm [{_board_src}], so this "
+              f"grade is {'STRICTER' if clearance > _board_clr else 'LOOSER'} "
+              f"than the board asks for. Drop --clearance to grade at the board's "
               f"floor. Expect the pad/hole ECHO counts to move; `blocking` "
               f"usually will not, because blocking pairs are pad "
               f"intersections rather than clearance grazes.")
 
     waivers = ()
+    # #1298: the pairs a declared pose accepts a COURTYARD overlap with
+    # (`fixed_poses[].accept_courtyard_overlap`). Courtyard-only: they reach
+    # the courtyard channel through `grade_body_overlap(courtyard_waivers=)`
+    # and never the containment gate, which `waivers` above also reach.
+    courtyard_waivers = ()
     declared_keepouts = ()
     # #1255: the body-to-edge band the intent declares (None = nothing
     # declared, and the census reports against the derived default without
@@ -172,10 +192,12 @@ def main():
             from placement.floorplan import load_intent
             _intent = load_intent(args.intent)
             waivers = _intent.waiver_pairs()
+            courtyard_waivers = _intent.fixed_pose_courtyard_waivers()
             body_edge_mm = _intent.body_edge_mm()
             edge_claim_refs = _intent.edge_claim_refs()
             # #1098: the intent's keep-outs, so a declared `mating:<ref>`
-            # replaces the derived plug region here as it does in the seeder.
+            # replaces the derived plug region here as it does in the seat
+            # predicate.
             declared_keepouts = tuple(_intent.keepouts or ())
         except Exception as exc:
             print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
@@ -190,7 +212,8 @@ def main():
     _cy_sev_arg = None if args.ignore_project_severity else 'auto'
     g = grade_body_overlap(pcb, clearance, intent_waivers=waivers,
                            pcb_file=args.board,
-                           courtyard_severity=_cy_sev_arg)
+                           courtyard_severity=_cy_sev_arg,
+                           courtyard_waivers=courtyard_waivers)
     leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board,
                              declared_keepouts=declared_keepouts)
     # #697: name any pair graded ABOVE `clearance` and what raised it, or the
@@ -212,8 +235,8 @@ def main():
     # graphics markers are co-located by design and must NOT flag). A bucket is
     # a finding here only when it holds >= 2 suspect NON-marker parts: one real
     # part sitting on a fiducial is not a stack of parts.
-    # `coincident_stack_groups` is that rule (fa10 P1: the seeder's #1151
-    # disposition calls it too, so the two cannot disagree about a stack).
+    # `coincident_stack_groups` is that rule (fa10 P1: one function, so no
+    # two readers can disagree about a stack).
     # #1204: an origin is a library's datum, not a body, so a pair at one
     # origin is a stack only when it shares something PHYSICAL on a face they
     # both occupy -- copper pad boxes (run 19's interleaved pads still
@@ -238,7 +261,7 @@ def main():
         exempt_out=stack_exempt)
     # #897: a waiver that resolves to nothing excuses nothing, and said nothing.
     # Formatted by the engine (`format_waiver_warnings`) rather than here, so
-    # place_reconstruct says the same words. A waiver that accepted a shared
+    # every caller says the same words. A waiver that accepted a shared
     # origin did excuse something (#1204), so it is not "unused".
     _stack_used = {tuple(p) for e in stack_exempt
                    for p in e.get('waived_pairs') or ()}
@@ -253,6 +276,8 @@ def main():
 
     new_advisory = None
     moved_refs = None
+    base_pile = False
+    own_pad_inherited = None
     if args.baseline:
         try:
             base_pcb = parse_kicad_pcb(args.baseline)
@@ -267,16 +292,32 @@ def main():
             print(f"baseline {args.baseline} has no footprints: pass the "
                   f"board this one was derived from", file=sys.stderr)
             return 2
-        gb = grade_body_overlap(base_pcb, clearance, intent_waivers=waivers,
-                                pcb_file=args.baseline,
-                                courtyard_severity=_cy_sev_arg)
-        base_keys = {(q.a, q.b, q.kind) for q in gb['pairs']}
+        # A PILE's overlaps are staging, not decisions (#1103, as emit_intent
+        # reads no overlap budget off one): no pair on the placed board is
+        # excused by having overlapped there, so every advisory pair is new,
+        # and the pile's own body grade -- 96% of this check on a 272-part
+        # pile (glasgow_revC: 8.9 s of 9.3) -- is not paid for. The courtyard
+        # gate's currency (`moved_refs`) is read off the pile as before.
+        from placement.placement_state import assess_placement
+        base_pile = assess_placement(base_pcb, args.baseline).pile
+        if base_pile:
+            base_keys = set()
+        else:
+            gb = grade_body_overlap(base_pcb, clearance, intent_waivers=waivers,
+                                    pcb_file=args.baseline,
+                                    courtyard_severity=_cy_sev_arg)
+            base_keys = {(q.a, q.b, q.kind) for q in gb['pairs']}
         new_advisory = [q for q in g['advisory_pairs']
                         if (q.a, q.b, q.kind) not in base_keys]
         # Refs whose POSE differs from the baseline: the courtyard gate's
         # currency (`legality.moved_refs` says why membership is not enough).
         # A function in legality, so a mover can ask the same question.
         moved_refs = legality.moved_refs(pcb, base_pcb)
+        # #1306: the own-pad shorts the baseline's footprints already had.
+        own_pad_inherited = {
+            (r['ref'], r['index_a'], r['index_b'])
+            for r in legality.own_pad_channel(base_pcb)['own_pad_contact_rows']
+            if r['short']}
 
     print(f"Assembly audit of {args.board} (clearance {clearance}):")
     if dup_refs:
@@ -299,6 +340,9 @@ def main():
           f"  courtyard_blocking {g['courtyard_blocking']}"
           + (f"  new-vs-baseline {len(new_advisory)}"
              if new_advisory is not None else ""))
+    if base_pile:
+        print(f"  baseline {args.baseline} is a pile: its overlaps are staging, "
+              f"not a baseline (#1103), so every advisory pair counts as new")
     _cb_keys = {(q.a, q.b) for q in g['courtyard_blocking_pairs']}
     _body_src = g.get('body_sources') or {}
     for q in g['pairs']:
@@ -624,6 +668,23 @@ def main():
               f"KiCad's own DRC reports none of them. Fab containment, pad "
               f"and locked-contact channels are graded as usual. "
               f"--ignore-project-severity grades them at error.")
+    # #1298: the courtyard pairs a DECLARED pose accepted by name -- waived,
+    # and said so, never silently. A pair can only get here from the intent
+    # (`accept_courtyard_overlap`), which check_floorplan --emit-intent
+    # writes, with a warning, for declared poses that overlap each other.
+    fixed_waived = [q for q in g['pairs']
+                    if q.waiver == legality.FIXED_POSE_WAIVER]
+    if fixed_waived:
+        print(f"  COURTYARD ACCEPTED BY A DECLARED POSE ({len(fixed_waived)}): "
+              f"waived, named in the intent's "
+              f"fixed_poses[].accept_courtyard_overlap -- courtyard only; a "
+              f"drawn-body containment, pads and holes keep their gates")
+        for q in fixed_waived:
+            _what = (f"pin(s) {', '.join(q.pins)} under its courtyard"
+                     if q.kind == 'pin_in_courtyard'
+                     else f"depth {q.depth_mm}mm")
+            print(f"    {q.a} <-> {q.b}  {q.kind}  {q.area_mm2}mm2  {_what}  "
+                  f"side {q.side}")
     courtyard_gating = []
     if g['courtyard_blocking'] and moved_refs is not None:
         courtyard_gating = legality.courtyard_gating(
@@ -648,10 +709,8 @@ def main():
                        else '  baseline\'s own (no member moved)')
             print(f"    {q.a} <-> {q.b}  {q.area_mm2}mm2  depth "
                   f"{q.depth_mm}mm  side {q.side}{_mv}")
-        print(f"    Run-23 shipped J4 0.90mm inside U6 as `buildable` "
-              f"because courtyard overlap was advisory everywhere. A "
-              f"deliberate overlap is accepted by naming the pair in the "
-              f"intent's `overlap_waivers`, where the acceptance is visible.")
+        print("    A deliberate overlap is accepted by naming the pair in the "
+              "intent's `overlap_waivers`, where the acceptance is visible.")
 
     # #1250: a TEST POINT whose pad copper lies under another part's drawn
     # body -- no probe or bed-of-nails pin can reach it. The marker waiver
@@ -740,11 +799,8 @@ def main():
                   + ', '.join(band['unmeasured'][:8]))
 
     # A FOURTH conjunct, and `g['blocking']` is deliberately NOT touched.
-    # `blocking` means "pad intersections" to board_score, to the seeder's
-    # repair census, and -- with INVERTED polarity -- to the retired
-    # placement_driver's _guard_damage, which refused to run the repair stages
-    # when `not blocking`. Folding containment into that count would have
-    # changed all three.
+    # `blocking` means "pad intersections" to board_score; folding
+    # containment into that count would change it.
     # This is the same shape the coincident-origin channel used.
     # `courtyard_gating` is the FIFTH conjunct (run-23): the moved-vs-baseline
     # subset of the courtyard census -- see the currency comment above for
@@ -804,13 +860,102 @@ def main():
             print(f"    {other} over {frame} {_kind} pin(s) "
                   f"{', '.join(x or f'(unnumbered {_kind})' for x in q.pins)}"
                   f"  {q.area_mm2}mm2  side {q.side}")
+    # #1266, the ELEVENTH: a part's pad copper touching ANOTHER part's
+    # footprint graphic copper (esp_prog C3 placed on U2's SOT-89 tab, one pad
+    # across its edge and one wholly inside it, graded `buildable`). Two
+    # parts' copper in one place, any net but a net tie's own (`stack`);
+    # measured by check_drc's `footprint_graphic_pad_census`, which place_pose
+    # and the seat gate also read. The courtyard gate's currency: a pair
+    # GATES when a member MOVED vs --baseline, and without one it is
+    # REPORT-ONLY, because healthy human boards ship such contacts by design
+    # -- measured over the stress manifests, 3 boards: ZYNQ_Ruler som's JP2
+    # on antenna AE2's feed copper, DIN_41612_Backplane's Kelvin ties on
+    # R3/R21 (a net tie's own net, never a stack), OpenWeatherStation's
+    # abutting ties NT1-NT4.
+    graphic_contacts = [r for r in (leg.get('graphic_pad_rows') or [])
+                        if r['contact']]
+    graphic_stack_pairs = sorted({(r['ref'], r['owner_ref'])
+                                  for r in graphic_contacts if r['stack']})
+    graphic_gating = ([p for p in graphic_stack_pairs
+                       if p[0] in moved_refs or p[1] in moved_refs]
+                      if moved_refs is not None else [])
+    if graphic_contacts:
+        _gate = set(graphic_gating)
+        print(f"  PAD ON ANOTHER PART'S COPPER ({len(graphic_stack_pairs)} "
+              f"part pair(s), "
+              + (f"{len(graphic_gating)} GATE (a member moved vs the "
+                 f"baseline)" if moved_refs is not None
+                 else "REPORT-ONLY: pass --baseline <the board the run "
+                      "started from> to gate")
+              + "): a pad touches another part's footprint graphic copper "
+                "(a drawn tab, an antenna)"
+              + (" -- NOT BUILDABLE" if graphic_gating else ''))
+        for r in graphic_contacts:
+            p = (r['ref'], r['owner_ref'])
+            _why = ("  [a net tie's own net: what the tie is for, never "
+                    "gates]" if not r['stack']
+                    else "  baseline's own (no member moved)"
+                    if moved_refs is not None and p not in _gate else '')
+            print(f"    {r['pad_ref']} ({r['net'] or 'no net'}) on "
+                  f"{r['owner_ref']}'s copper, {r['layer']}"
+                  + (", wholly inside the filled shape"
+                     if r['inside_filled'] else '') + _why)
+    _gp_un = leg.get('graphic_pad_unmeasured') or []
+    if _gp_un:
+        print("    footprint copper NOT measured against other parts' pads: "
+              + ', '.join(f"{u['owner_ref']} ({u['kind']})"
+                          for u in _gp_un[:6]))
+    # #1306, the TWELFTH: two of ONE part's pads touching on two different
+    # real nets -- KiCad's shorting_items. Every channel above is between two
+    # parts, so steppenprobe U1, whose pads the placement writer left at
+    # their old angle (#1305), read `buildable` with 164 such pairs. Measured
+    # by check_drc's `footprint_own_pad_census`, which place_pose reads too.
+    # Absolute without --baseline: over the stress corpus's 478 human boards
+    # one ships any (bldc_tester's two Kelvin shunts, which declare no
+    # net-tie group), and with --baseline a pair its footprint already had
+    # there is that board's own and does not gate. A contact with a no-net
+    # pad (a shield tab, a thermal-via pad: 21 pairs on 3 of those boards)
+    # or between two pins' `unconnected-(...)` nets (cm4_edge_ai's USB-C
+    # VBUS, one pin drawn as four pads) is listed and never gates: it
+    # shorts no signal.
+    own_contacts = leg.get('own_pad_contact_rows') or []
+    own_shorts = [r for r in own_contacts if r['short']]
+    own_gating = [r for r in own_shorts
+                  if own_pad_inherited is None
+                  or (r['ref'], r['index_a'], r['index_b'])
+                  not in own_pad_inherited]
+    if own_contacts:
+        print(f"  OWN PADS TOUCHING ({len(own_contacts)} pair(s) of one part's "
+              f"pads on two nets; {len(own_shorts)} short two real nets "
+              f"(KiCad: shorting_items), {len(own_gating)} GATE"
+              + (" -- a pair the --baseline footprint did not have"
+                 if own_pad_inherited is not None
+                 else "; pass --baseline to exempt a pair the board started "
+                      "with")
+              + ")" + (" -- NOT BUILDABLE" if own_gating else ''))
+        _gate_ids = {id(r) for r in own_gating}
+        for r in (own_gating + [r for r in own_contacts
+                                if id(r) not in _gate_ids])[:20]:
+            _why = ('' if id(r) in _gate_ids
+                    else '  [a no-net pad: shorts no net, never gates]'
+                    if r['no_net']
+                    else '  [two unconnected pins: shorts no signal, never '
+                         'gates]' if r['floating'] else "  baseline's own")
+            print(f"    {r['ref']}.{r['pad_a']} ({r['net_a'] or 'no net'}) <-> "
+                  f"{r['ref']}.{r['pad_b']} ({r['net_b'] or 'no net'}), "
+                  f"{r['layer']}{_why}")
+        if len(own_contacts) > 20:
+            print(f"    ... and {len(own_contacts) - 20} more (--json lists "
+                  f"every one)")
     # #1250, the NINTH: a test point a move left under another part's body
     # (`tp_gating`, above). #1255, the TENTH: a body inside the body-to-edge
     # band the intent DECLARES (`edge_band_gating`, empty when undeclared).
     not_buildable = bool(g['blocking'] or locked_contact or stack_groups
                          or g['containment_blocking']
                          or courtyard_gating or off_outline_pads or mating
-                         or pin_hits or tp_gating or edge_band_gating)
+                         or graphic_gating
+                         or pin_hits or tp_gating or edge_band_gating
+                         or own_gating)
     verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
 
@@ -893,6 +1038,13 @@ def main():
                 1 for q in g['advisory_pairs'] if q.kind == 'courtyard'
                 and q not in g['courtyard_blocking_pairs']),
             'courtyard_synthetic_refs': g['courtyard_synthetic_refs'],
+            # #1298: courtyard / pin pairs waived because a declared pose
+            # accepts them by name (`fixed_poses[].accept_courtyard_overlap`),
+            # and the accepted pairs that named nothing or matched nothing.
+            'courtyard_fixed_pose_waived': [q._asdict() for q in fixed_waived],
+            'courtyard_waivers_unresolved':
+                g.get('courtyard_waivers_unresolved') or [],
+            'courtyard_waivers_unused': g.get('courtyard_waivers_unused') or [],
             # #1250: test points whose pad copper lies under another part's
             # drawn body, every one (`testpoint_covered_pairs`), and the
             # subset that GATES -- a member moved vs --baseline. Like
@@ -966,6 +1118,31 @@ def main():
             'oob_graphic_copper_unmeasured': leg.get('oob_graphic_copper_unmeasured') or [],
             'oob_graphic_copper_basis': leg.get('oob_graphic_copper_basis'),
             'graphic_edge_shortfall_refs': leg.get('graphic_edge_shortfall_refs') or [],
+            # #1266: pads touching another part's graphic copper -- a
+            # conjunct. `_stack_pairs` are the `[pad part, copper owner]`
+            # contacts that count, `_gating_pairs` the subset with a member
+            # MOVED vs --baseline: None (not []) without one, as
+            # `courtyard_blocking_gating` is.
+            'graphic_pad_gating': (len(graphic_gating)
+                                   if moved_refs is not None else None),
+            'graphic_pad_contacts': graphic_contacts,
+            'graphic_pad_stack_pairs': [list(p) for p in graphic_stack_pairs],
+            'graphic_pad_gating_pairs': ([list(p) for p in graphic_gating]
+                                         if moved_refs is not None else None),
+            'graphic_pad_unmeasured': _gp_un,
+            'graphic_pad_basis': leg.get('graphic_pad_basis'),
+            # #1306: one part's own pads touching on two real nets -- a
+            # conjunct, measured (an int) with or without --baseline, which
+            # only exempts the pairs its footprint already had.
+            'own_pad_shorts': len(own_gating),
+            'own_pad_short_pairs': [[f"{r['ref']}.{r['pad_a']}",
+                                     f"{r['ref']}.{r['pad_b']}"]
+                                    for r in own_shorts],
+            'own_pad_gating_pairs': [[f"{r['ref']}.{r['pad_a']}",
+                                      f"{r['ref']}.{r['pad_b']}"]
+                                     for r in own_gating],
+            'own_pad_contacts': own_contacts,
+            'own_pad_basis': leg.get('own_pad_basis'),
             # #1031: pads in a board rule-area keep-out band -- the same
             # non-gating contract as the two off-outline channels.
             'oob_keepout_copper_count': leg.get('oob_keepout_copper_count', 0),
@@ -1024,6 +1201,7 @@ def main():
         }
         if new_advisory is not None:
             doc['baseline'] = args.baseline
+            doc['baseline_pile'] = base_pile
             doc['new_advisory_pairs'] = [q._asdict() for q in new_advisory]
         with open(args.json, 'w', encoding='utf-8') as f:
             json.dump(doc, f, indent=1, sort_keys=True)

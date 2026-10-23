@@ -2,7 +2,7 @@
 
 This document describes what happens when a route fails: how the router figures out which previously-routed nets are in the way, rips them up, retries, and then re-routes the ripped nets.
 
-Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who is blocking), `reroute_loop.py` (the escalation and reroute queue), `obstacle_costs.py` (corridor avoidance).
+Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who is blocking, and the ranking), `single_ended_loop.py` (the main pass's N+1 ladder), `reroute_loop.py` (the reroute queue and its own ladder), `phase3_routing.py` (multipoint tap rip-ups), `obstacle_costs.py` (corridor avoidance).
 
 ## Command-Line Options
 
@@ -10,25 +10,27 @@ Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who i
 |--------|---------|-------------|
 | `--max-ripup` | 3 | Maximum number of blockers ripped up at once for one failing net |
 | `--ripup-abandon-metric` | `stranded` | How a multipoint tap rip-up decides keep-retry vs abandon (see [Abandon metrics](#abandon-metrics)) |
-| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)). Also on `route_diff.py`, `route_planes.py`, `repair_planes.py`. Env override (route.py): `KICAD_RIPUP_BLOCKER_SELECT` |
+| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first: `count`, `near-target`, `bidir`, `mincut` or `cost` (see [Blocker selection algorithms](#blocker-selection-algorithms)). Also on `route_diff.py`, `route_planes.py`, `repair_planes.py`. Env override (route.py): `KICAD_RIPUP_BLOCKER_SELECT` |
 | `--ripped-route-avoidance-radius` | 1.0 | Soft-penalty radius around a ripped net's former corridor (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Soft-penalty cost in the former corridor (0 disables) |
+
+The GUI has `Max Rip-up`, `Rip-up Abandon Metric` and `Rip-up Blocker Select` in the Route tab's Parameters.
 
 ## When Rip-Up Triggers
 
 Two mechanisms start a rip-up:
 
-1. **Full A\* failure** — the search exhausts `--max-iterations` without reaching the target. The router returns the *frontier*: the set of cells the search tried to expand into but found blocked, for both the forward and reverse direction.
+1. **Full A\* failure** — the search exhausts its iteration budget without reaching the target. The budget is `--max-iterations`, extended in further tranches while the search's closest approach keeps improving (#529, `KICAD_DYNAMIC_ITERATIONS=0` keeps the static cap). The router returns the *frontier*: the set of cells the search tried to expand into but found blocked, for both the forward and reverse direction.
 2. **Early probe detection** — before attempting a full route, quick probes (default 5000 iterations, `MAX_PROBE_ITERATIONS`) run in both directions. If a probe gets stuck against obstacles rather than merely running out of budget, rip-up starts immediately — without burning a full A* budget first.
 
 ## Blocking Analysis
 
 `analyze_frontier_blocking()` attributes the blocked frontier cells to previously-routed nets. For each routed net it computes the obstacle cells its tracks and vias occupy (path expanded by track width + clearance) and intersects them with the frontier. Blockers are then prioritized:
 
-- Nets that are the **sole blocker** of every cell they block come first — ripping them is guaranteed to open the frontier.
+- Nets that are the **sole blocker** of every cell they block come first — ripping one is certain to free those cells.
 - Otherwise nets are scored by `unique_cells + near_endpoint_unique + 0.5 × shared_cells`, where `near_endpoint_unique` counts uniquely-blocked cells within 3mm of the failing net's source or target (blockages near endpoints are usually the decisive ones).
 
-`filter_rippable_blockers()` removes candidates that can't be ripped: nets not actually routed in this run (by default, pre-existing tracks are left untouched — see [Ripping Pre-Existing Routes](#ripping-pre-existing-routes) for the `--rip-existing-nets` exception), and diff pair members whose partner isn't routed. Differential pairs are treated as one unit — P and N are always ripped and restored together.
+`filter_rippable_blockers()` removes candidates that can't be ripped: nets this run holds no custody of (it keeps this run's routes plus the pre-existing nets registered as rip candidates, see [Ripping Pre-Existing Routes](#ripping-pre-existing-routes)), and protected or KiCad-locked nets (#521; every other victim pick asks the same `rip_refusal`). Differential pairs are treated as one unit — P and N are always ripped and restored together.
 
 The failure report printed to the console comes from this analysis ("Route stuck at (x, y) on F.Cu, blocked by: …"). A coverage line reports how many frontier cells were attributed to routed nets; the remainder is static, unrippable copper (pads, planes, pre-existing tracks, the board edge) — when that share dominates, ripping cannot open the frontier at all.
 
@@ -46,7 +48,9 @@ Two refinements sharpen the signal before ranking:
 - **`bidir`** — both-directions boost. The search runs from both ends; a net attributed in BOTH directions' frontiers lies on a genuine separating wall, while a bystander boxed in behind one endpoint appears in only one. Both-direction nets get their weighted score doubled.
 - **`mincut`** — soft-cost probe. The failing net is re-routed once on a clone of the obstacle map with every rippable candidate's copper converted from hard-blocked to a high soft cost; the copper the resulting path crosses is the true joint cut, and those nets are ripped first. If even the all-soft probe finds no path, the separating wall is static (unrippable) copper; the ladder still runs in legacy order, since ripping can free space for the via-placement and swap rescues even when no simple path exists. Costs roughly one extra A* search, on the failure path only.
 
-Validator-named blockers — identities proved by geometry validators such as via placement (the exact copper that vetoes a pad via) — sort ahead of every frontier-inferred tier under all four algorithms.
+- **`cost`** — the `count` score divided by the victim's re-route cost, `sqrt(pads) × sqrt(span)` (`net_cost.py`), so at equal blocking a small net is ripped before a large one. The `count` ranking correlates with victim size, because a large net has more copper in the way.
+
+Validator-named blockers — identities proved by geometry validators such as via placement (the exact copper that vetoes a pad via) — sort ahead of every frontier-inferred tier under every algorithm.
 
 ## Ripping Pre-Existing Routes
 
@@ -56,7 +60,7 @@ Copper already committed on the input board can be ripped in two ways.
 
 **`route.py --rip-existing-nets PATTERN [PATTERN …]`** extends the authority past those limits to the matching pre-existing routed nets, whatever their size: when one of them blocks a net the router is trying to route, it may be ripped up and re-routed like an in-run net. Use it on a board that a previous run (or another tool) already routed and that now needs a new net threaded through congested copper. Pass `'*'` to allow any non-plane net. Protected nets need their exact name, and KiCad-locked copper is never ripped. The failure hint names which blocking nets this run could already rip, so the flag is only prescribed for the ones it would add.
 
-One exception: the end-of-run oracle-reconnect pass may auto-grant `--rip-existing-nets` authority over pre-existing blockers that earlier failure hints named (capped at 12). That escalation always respects the run's own net filter — a net the caller excluded by pattern (`'!GND'` while planes pour in a later step) is excluded *by plan* and is never auto-ripped; only an explicit operator `--rip-existing-nets` can override that.
+One exception: the end-of-run reconciliation (see [After the Ladder](#after-the-ladder-the-recovery-tail)) auto-grants itself `--rip-existing-nets` authority over the pre-existing blockers that earlier failure hints named (#103, capped at 12; `KICAD_RECONCILE_RIP_ESCALATION=0` disables it). That escalation never takes a protected net, a plane-backed net, a net of more than 30 segments or 6 vias, or a net the caller excluded by pattern (`'!GND'` while planes pour in a later step is excluded *by plan*); only an explicit operator `--rip-existing-nets` can override the last.
 
 ### When to grant rip authority — and when not to
 
@@ -137,6 +141,22 @@ IMPROVEMENT GATE: this run broke 3 previously-connected net(s) [/BMS.Can_L, /BMS
   disconnected pads: 3 -> 3 over 43 multi-pad net(s)
 ```
 
+**The one draw that does not ship is a pour trade**: it broke a net that owns
+a pour (a zone net) to connect nets that do not. The run's in-run plane
+finalize already tried to mend the cut before the gate grades it, so shipping
+the draw takes power pins off their plane to buy a signal that is any later
+step's ordinary retry; the board whose pours are whole wins the tie, and the
+report says so on a line of its own. A pour's state has to be KiCad's for
+this to mean anything: the gate's union-find reads pours through the raster
+fill model, which can join fill islands KiCad's refill splits, so before it
+acts on a rejection that rests on a pour net it re-grades those nets on
+KiCad's exact fill of both boards (the CLI's input and output files; the GUI's
+live board and a staged save of the change-set). One retry read as
+trading GND for /P0.17 on the raster; KiCad had GND split on the step's input
+already, so it was a plain gain and ships. Without a KiCad python the raster
+grade stands. The JSON report names the pour nets among `lost` / `gained` as
+`lost_zone` / `gained_zone`.
+
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
 (`lost`, `gained`, `worsened`,
 `disconnected_pads_before/after`, `nets_compared`, `verdict`, and, when a
@@ -186,7 +206,8 @@ to try something different.
 
 The gate is skipped when it cannot mean anything: a run whose input board has
 no copper at all (nothing to regress), an in-place run (`output == input`,
-where no pre-run board survives to revert to), and every nested `batch_route` —
+where no pre-run board survives to revert to), a `--quick 2` judging run (its
+board is a diagnosis, not one to ship), and every nested `batch_route` —
 the reconciliation sub-run and the plane finalize's reconnects all carry
 `final_reconcile=False`, and only the run that owns the artifact gates.
 
@@ -205,7 +226,7 @@ On success, the ripped nets are appended to the **reroute queue**.
 
 ## Ripped-Corridor Avoidance
 
-When a net is ripped, its former corridor gets a *soft* cost penalty (`compute_ripped_route_costs()`): cells within `--ripped-route-avoidance-radius` of its old segments and vias cost slightly more (`--ripped-route-avoidance-cost`) for subsequent routing. The net that triggered the rip-up therefore tends to route *near* but not *through* the freed corridor, leaving room for the ripped net to re-route along something close to its original path. This is a penalty, not a block — if the corridor is the only way through, it is still used.
+When a net is ripped, its former corridor gets a *soft* cost penalty (`compute_ripped_route_costs()`): cells within `--ripped-route-avoidance-radius` of its old segments and vias cost slightly more (`--ripped-route-avoidance-cost`) for every other net's subsequent routing; the ripped net itself never pays it. The net that triggered the rip-up therefore tends to route *near* but not *through* the freed corridor, leaving room for the ripped net to re-route along something close to its original path. This is a penalty, not a block — if the corridor is the only way through, it is still used.
 
 ## The Reroute Loop
 
@@ -214,6 +235,16 @@ After the main routing pass, `run_reroute_loop()` processes the queue of ripped 
 - Each ripped net (or diff pair, as a unit) is re-routed with the current obstacle state.
 - If a reroute fails, the same blocking analysis and N+1 escalation applies — a reroute can itself rip further nets, which join the back of the queue (cascading).
 - Termination is guaranteed by the same combination-history and `--max-ripup` cap; the queue is processed linearly and only grows by successful rip-ups.
+
+## After the Ladder: the Recovery Tail
+
+A net still failed or open once the main pass, the reroute loop and Phase 3 are done gets three more attempts, all inside the shared engine (CLI and GUI alike), and all skipped by `--quick`:
+
+1. **Net rescue** (`net_rescue.py`, #331/#371): a scoped retry in a small window around the net's remaining gap, first at the run's own sizes on a finer grid, then at the fab-floor track width with the clearance stepped down toward the fab floor and smaller vias, never below the net's own class or rule floors and only as far as `--escalation` allows (under `off`, the finer grid is the only retry). Each below-nominal clearance is recorded in the clearance ledger, so `check_drc` grades at it. It never rips: a committed edge must reduce the net's component count or it is removed again. `KICAD_NET_RESCUE=0` disables it.
+2. **Terminal escalation**: a whole-net retry with track width and via size stepping down together toward the fab-tier floor, clearance never reduced. A rung is kept only when the net then grades fully connected; no rip authority. Nothing narrows under `--escalation off`; `KICAD_TERMINAL_ESCALATION=0` disables it.
+3. **End-of-run reconciliation**: a nested `batch_route` (`final_reconcile=False`) retries every incomplete net, and every rip victim still in custody, against the finished board, with the #103 rip authority above. Inside it, once the reroute queue has drained, a victim that would ship as only its escape stub because copper routed since its rip took its corridor gets that corridor back: the squatting nets are ripped and requeued, and the victim restored whole and protected from re-ripping (#622 victim-priority restore; `KICAD_VICTIM_RESTORE=0` disables it).
+
+A rip victim that ends the run without a successful reroute is restored at terminal failure; `terminal_restores` in `JSON_SUMMARY` names each with its outcome (`full` is the only success, `full_open` and `stub` ship broken). The [improvement gate](#improvement-gate-600) then judges the whole run.
 
 ## Abandon Metrics
 
@@ -224,7 +255,7 @@ end up worse off. The *abandon decision* arbitrates: keep the retry, or
 abandon it, restore the net's original tap, and re-route the whole rip tree
 around it (issues #85, #354).
 
-`--ripup-abandon-metric` (GUI: Advanced options tab → "Rip-up Abandon Metric"; env
+`--ripup-abandon-metric` (GUI: Route tab → "Rip-up Abandon Metric"; env
 override `KICAD_RIPUP_ABANDON_METRIC` for replay A/Bs) selects how the two
 worlds are compared. All metrics except `stranded` compare the **retry
 world** (retry kept, rip-tree victims re-routed around it) against the

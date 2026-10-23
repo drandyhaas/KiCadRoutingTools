@@ -18,10 +18,11 @@ For multi-point nets this happens between Phase 1 and Phase 3 of the MST-based a
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--length-match-group <patterns...>` | none | Define a match group by net name patterns (repeatable, one group per flag). The special value `auto` enables DDR4 auto-grouping |
+| `--length-match-group <patterns...>` | none | Define a match group by net name patterns (repeatable, one group per flag). The special value `auto` groups DRAM nets (DDR2 to DDR5, LPDDR4/5) by byte lane and command/address (see [DDR Auto-Grouping](#ddr-auto-grouping)) |
 | `--length-match-tolerance` | 0.1 | Acceptable length variance within a group (mm) |
 | `--meander-amplitude` | 1.0 | Maximum meander bump height perpendicular to the trace (mm) |
-| `--meander-spacing` | 2.0 | Centre-to-centre spacing of adjacent meander arms, in multiples of the net's routed track width (2.0 = 2W pitch = 1W edge gap) |
+| `--meander-spacing` | 2.0 | Centre-to-centre spacing of adjacent meander arms, in multiples of the net's routed track width (2.0 = 2W pitch = 1W edge gap). On `route_diff.py` it sets the intra-pair and AC-coupled arms; pair-centreline meanders scale with the pair pitch instead (`--diff-chamfer-extra`) |
+| `--diff-chamfer-extra` | 1.5 | (`route_diff.py`) Chamfer of a pair-centreline meander, as a multiple of the P/N half-pitch (>1 keeps P and N from crossing at the bends) |
 | `--time-matching` | false | Match propagation delay instead of physical length |
 | `--time-match-tolerance` | 1.0 | Acceptable delay variance within a group (ps) |
 | `--diff-pair-intra-match` | false | (`route_diff.py`) Match P and N lengths *within* each differential pair |
@@ -31,18 +32,18 @@ Examples:
 
 ```bash
 # Manual group: all DQ0-7 and DQS0 nets matched together
-python py_router/route.py board.kicad_pcb --length-match-group "*DQ[0-7]" "*DQS0*"
+python3 py_router/route.py board.kicad_pcb --length-match-group "*DQ[0-7]" "*DQS0*"
 
 # Two separate groups
-python py_router/route.py board.kicad_pcb \
+python3 py_router/route.py board.kicad_pcb \
     --length-match-group "*DQ[0-7]" "*DQS0*" \
     --length-match-group "*DQ1[0-5]" "*DQ[8-9]" "*DQS1*"
 
-# Auto-detect DDR4 byte lanes
-python py_router/route.py board.kicad_pcb --length-match-group auto
+# Auto-detect DRAM byte lanes and command/address
+python3 py_router/route.py board.kicad_pcb --length-match-group auto
 
 # Match propagation time instead of length
-python py_router/route.py board.kicad_pcb --length-match-group auto \
+python3 py_router/route.py board.kicad_pcb --length-match-group auto \
     --time-matching --time-match-tolerance 1.0
 ```
 
@@ -101,9 +102,10 @@ Meander:   ──╮╭──╮╭──╮╭──>
 
 ### Per-Bump Clearance Checking
 
-Before placing each bump, `get_safe_amplitude_at_point()` checks the bump area against nearby segments, vias, and pads using a spatial index (`ClearanceIndex`, 2mm cells):
+Before placing each bump, `get_safe_amplitude_at_point()` checks the bump area against nearby segments, vias, and pads using a spatial index (`ClearanceIndex`, 2mm cells), and against the board outline and cutouts:
 
-- Clearance margin: `track_width + clearance` plus a corner allowance for the 45° chamfers and half a grid step for output merging.
+- Clearance margin: half of each track's width (the foreign copper at its real width) plus the clearance, plus a corner allowance for the 45° chamfers and half a grid step for output merging. The clearance is the one `check_drc` grades that pair of nets at on that layer (net classes and `.kicad_dru` rules, #1136); a board with neither uses the flat `--clearance`.
+- The board edge is kept at `--board-edge-clearance` (else the clearance) plus half the track width.
 - If the full amplitude doesn't fit, the amplitude is reduced in 0.7× steps (binary-search style) down to a 0.2mm minimum.
 - If neither the up nor the down direction fits at all, the bump position is skipped forward 0.2mm and tried again.
 
@@ -115,8 +117,9 @@ Route lengths include the vertical distance through vias so that results match K
 
 - `PCBData.get_via_barrel_length(layer1, layer2)` sums the board stackup's layer thicknesses between the two copper layers.
 - **Stub via barrels**: when a BGA fanout stub switches layers, the barrel length from the *stub layer to the pad layer* is included (`calculate_stub_via_barrel_length()` in `connectivity.py`), not the via's full span.
+- **The graders** (`net_copper_length` / `net_match_length` in `board_score --length-groups` and check_drc's `.kicad_dru` length windows) charge each via over the layers it actually joins, as KiCad's length DRC does (`net_queries.kicad_via_length`, #1313). The router's own route lengths still charge a through via's full span, so on a board with partial-span vias the router's matched length and the graded one can differ by those barrels.
 
-Without stackup information in the board file, default thicknesses are assumed.
+Without stackup information in the board file, via barrels count as zero length.
 
 ## Pad-to-Die Length
 
@@ -165,11 +168,13 @@ Routes containing vias are supported, with restrictions:
 Two forms of matching exist for differential pairs (`route_diff.py`):
 
 - **Group matching** — multiple pairs in a `--length-match-group` are matched pair-to-pair by meandering each pair's *centerline*; both P and N are regenerated from the modified centerline so the pair stays symmetric. A **multipoint pair** (3+ terminals routed as a chain of coupled legs) is measured and meandered on its **longest MST leg** (#520): that leg's single-leg length is the pair's matching span, the centerline meanders are applied to that leg, and the result is spliced back into the chain.
-- **Intra-pair matching** (`--diff-pair-intra-match`) — within one pair, meanders are added to the shorter of P/N to equalize them (`apply_intra_pair_length_matching()`). Bumps here are smaller (minimum amplitude 0.1mm) since they must fit between the pair and its surroundings; stub barrel lengths and polarity swaps are accounted for.
+- **Intra-pair matching** (`--diff-pair-intra-match`) — within one pair, meanders are added to the shorter of P/N to equalize them (`apply_intra_pair_length_matching()`). Bumps here are smaller (minimum amplitude 0.1mm) since they must fit between the pair and its surroundings. The two legs are measured **on the board's copper** (#1303, `net_queries.net_signal_length`: a 2-pad member's pad-to-pad path, a larger one's copper with dead-end branches trimmed, plus pad-to-die), so the meander lands on the leg that is shorter on the board -- the routing result after a hybrid escape or seam re-ask carries no stub lengths, and on imx6ulz DQS0 it put the meander on the longer leg (skew 4.51 → 5.20 mm; measured on the board, 0.024 mm). A member whose pads are not joined yet is matched on the result's own sums (stub barrel lengths and polarity swaps accounted for). A multipoint pair's meander is spliced into the leg dict that held the replaced copper, as group matching's is (the writer emits the legs).
 
   **Every pair in the run is visited, and every pair produces a record (#766).** The pass is driven by the run's pair list (`run_intra_pair_matching()`), *not* by the shape of the routing results — it used to walk `routed_results` and require each result to carry an `is_diff_pair` / `p_net_id` stamp, which the **direct-hybrid escape** (coupled middle + point-to-point terminal legs) does not apply. A pair routed that way was skipped *without printing anything*, while the run still counted it routed and its P/N skew shipped unmeasured. Measured: a 10-pair LVDS board routed 4 pairs, all four via the hybrid escape, and matched **none** of them (1.19–7.25mm skew); the same run now matches all four (two inside a 0.05mm tolerance, the other two reported with their residual skew).
 
-  The outcome per pair reaches `JSON_SUMMARY` as `intra_pair_matching`: `{pair, p_net, n_net, status, reason, delta_mm, delta_before_mm}`, with `status` one of `matched`, `improved` (skew reduced but short of tolerance), `within-tolerance`, `unmatched` (has pair copper, could not meander — see `reason`), `not-matchable` (no single in-run pair result to meander; `delta_mm` is then measured **off the board** so the skew is still reported), or `skipped` (handled end-to-end by the AC-coupled pass). Gate on this rather than on `successful`, which says nothing about skew.
+  The outcome per pair reaches `JSON_SUMMARY` as `intra_pair_matching`: `{pair, p_net, n_net, status, reason, delta_mm, delta_before_mm, matcher_status, matcher_delta_mm}`, with `status` one of `matched`, `within-tolerance`, `unmatched` (over tolerance — see `reason`), `not-matchable` (no single in-run pair result to meander), or `skipped` (handled end-to-end by the AC-coupled pass). Gate on this rather than on `successful`, which says nothing about skew.
+
+  **Both `status` and `delta_mm` are read off the shipped copper** (#1303), once the board is final: `delta_mm` is the board's P/N skew as KiCad's skew DRC measures it (`net_queries.diff_pair_skew`: each member's `net_match_length`, mode `total`). The matcher measures its own result instead (segments plus stub lengths recorded at routing time), and after a seam re-ask that is not the copper that ships: on imx6ulz it read DQS0 as P 12.00 < N 13.08 and meandered P while the board had P 21.33 > N 16.82, so the skew went 4.51 → 5.20 mm under a printed "improved". `matcher_status` / `matcher_delta_mm` keep what the matcher reported; a matcher `matched` that the copper contradicts is `unmatched` with reason `copper-skew-over-tolerance`, and one whose pads are not joined is `unmatched` / `not-measured`. The GUI's completion dialog names the pairs not matched on the board. A hard skew budget belongs in the board's `.kicad_dru` as `(constraint skew (max ..) (within_diff_pairs))`: `check_drc.py` grades it as KiCad does (check 17 in [utilities](utilities.md#checks-performed)) and `board_score` counts it in `diff_pairs`.
 - **End-to-end AC-coupled matching** (`--ac-couple-match`) — a pair split into two base-named pairs by series DC-blocking caps (the common PCIe/USB3/SATA TX case) is auto-detected as one *extended net* / XNet: a 2-pad cap bridging `A_P↔B_P` plus another bridging `A_N↔B_N`. "2-pad" counts copper pads, not paste-only windows (#1251: a 0201 resistor drawn with two `F.Paste` windows beside its copper pads is still a series part). Its concatenated P path (`A_P+B_P`) is matched against the concatenated N path (`A_N+B_N`) — the skew the receiver actually sees — with the compensating meander placed on whichever segment has room (`apply_ac_coupled_length_matching()`, sharing the meander engine with intra-pair via `_lengthen_net_with_meanders()`). This **supersedes** per-side intra-pair matching for the member pairs, reports the end-to-end skew in the JSON summary (`ac_coupled_xnets`), and is off by default. No-pop (DNP) caps are open circuits and are not stitched; only symmetric cap pairs (both polarities bridged) are joined. Detection requires the pair halves to be found first (so it inherits the `_P`/`_N` naming rules above).
 
 ## Time Matching
@@ -180,23 +185,27 @@ For each segment, the delay is `length × ps_per_mm(layer)` where:
 
 - Microstrip (outer layers): `ε_eff = (ε_r + 1) / 2`
 - Stripline (inner layers): `ε_eff = ε_r`
-- `ps_per_mm = √ε_eff / c` with `c = 299.792458 mm/ns`
+- `ps_per_mm = √ε_eff / c` with `c = 0.299792458 mm/ps`
 
-The dielectric constant `ε_r` per layer comes from the board stackup. Via barrels use a thickness-weighted average `ε_eff` across the spanned dielectric layers (`get_via_barrel_epsilon_eff()`). Without stackup data, FR4 is assumed (`ε_r = 4.3`, microstrip `ε_eff ≈ 2.65`, ≈5.9 ps/mm).
+The dielectric constant `ε_r` per layer comes from the board stackup. Via barrels use a thickness-weighted average `ε_eff` across the spanned dielectric layers (`get_via_barrel_epsilon_eff()`). At FR4's `ε_r = 4.3` an outer layer runs ≈5.4 ps/mm (`ε_eff = 2.65`) and an inner layer ≈6.9 ps/mm. A layer the stackup does not describe (or a board with no stackup) takes `ε_eff = 4.0`, ≈6.7 ps/mm, on every layer alike, so on such a board time matching orders routes exactly as length matching does.
 
 To size the meanders, the required extra delay is converted to extra length using the `ps_per_mm` of the route's *primary layer* (the layer carrying the most length).
 
 ## Limitations
 
+- **A `.kicad_dru` length window is graded, not routed to** (#1313). `(constraint length (min ..) (max ..))` rules are read by `check_drc.py` (check 16 in [utilities](utilities.md#checks-performed)), which reports each net outside its window as `length-out-of-range`, as KiCad reports `length_out_of_range`; `board_score` counts them in its `drc` component. No routing step lengthens or shortens a net to meet one: `--length-match-group` with `--length-match-tolerance` matches nets to each other, not to an absolute window, so check_drc's grade is what confirms the window.
 - Meanders spill across multiple straight runs when one run cannot absorb the required extra length; if the runs together still cannot absorb it within clearance limits, the route may end outside tolerance (a warning is printed).
+- Very tight surroundings can force the amplitude to its 0.2mm minimum, limiting how much length a run can add.
+- Meanders are not placed across layer changes.
+- `--ac-couple-match` runs after `--length-match-group`; a pair that is both an XNet member and in a match group may be meandered again by the end-to-end pass, perturbing its group-matched length. Keep AC-coupled pairs out of match groups.
 
 ## Protected Nets (#521)
 
-Matching is a per-step feature but chains are multi-step: a later retry that runs `--rip-existing-nets` over matched nets would rip the meanders and reroute at natural length, silently voiding the group. To prevent that, **every matched group member and every routed diff-pair member is recorded as a *protected net*** in the sibling `.kicad_pro` (under `kicad_routing_tools.protected_nets`, next to the DRC-floor writeback — so the list flows down the chain automatically and `copy_board.py` carries it). The GUI also keeps the whole `kicad_routing_tools` namespace on the board itself (a top-level `(property "kicad_routing_tools" "...")` that KiCad's save writes into the `.kicad_pcb`), because KiCad's own project save rewrites the `.kicad_pro` from the copy it loaded and drops a record written after load; each copy carries `records_rev`, and every reader takes the newer (`py_router/tool_records.py`). "Routed diff-pair member" includes a pair taken by the 2-terminal DIRECT HYBRID escape (#906). That escape's result carries `hybrid_escape` and *not* `is_diff_pair` — the latter means a *coupled* constructor committed the copper, which custody reads for a different question — but a hybrid pair is a coupled middle with point-to-point terminal legs, and its geometry is exactly the invariant this record exists to protect. (A multipoint leg that took the hybrid produces a merged result carrying **both** keys; it was always recorded.) The one hybrid that is *not* protected is the self-graze fallback, kept when no layer couples cleanly and therefore shipping P/N below clearance — protecting that would make the step whose job is to fix it skip the pair. The record itself:
+Matching is a per-step feature but chains are multi-step: a later retry that runs `--rip-existing-nets` over matched nets would rip the meanders and reroute at natural length, silently voiding the group. To prevent that, **every matched group member and every routed diff-pair member whose shipped copper is coupled (#1303: a pair routed as two single-ended members is not) is recorded as a *protected net*** in the sibling `.kicad_pro` (under `kicad_routing_tools.protected_nets`, next to the DRC-floor writeback — so the list flows down the chain automatically and `copy_board.py` carries it). The GUI also keeps the whole `kicad_routing_tools` namespace on the board itself (a top-level `(property "kicad_routing_tools" "...")` that KiCad's save writes into the `.kicad_pcb`), because KiCad's own project save rewrites the `.kicad_pro` from the copy it loaded and drops a record written after load; each copy carries `records_rev`, and every reader takes the newer (`py_router/tool_records.py`). "Routed diff-pair member" includes a pair taken by the 2-terminal DIRECT HYBRID escape (#906). That escape's result carries `hybrid_escape` and *not* `is_diff_pair` — the latter means a *coupled* constructor committed the copper, which custody reads for a different question — but a hybrid pair is a coupled middle with point-to-point terminal legs, and its geometry is exactly the invariant this record exists to protect. (A multipoint leg that took the hybrid produces a merged result carrying **both** keys; it was always recorded.) The one hybrid that is *not* protected is the self-graze fallback, kept when no layer couples cleanly and therefore shipping P/N below clearance — protecting that would make the step whose job is to fix it skip the pair. The record itself:
 
 - `route.py --rip-existing-nets` **excludes protected nets from collateral rips** (a printed line lists the exclusions);
 - `repair_planes.py --rip-blocker-nets` never selects a protected net as a blocker to rip;
-- **override**: naming a net *exactly* (no glob) in `--nets` or `--rip-existing-nets` is the deliberate signal and lifts its protection for that step. There is no flag; edit the `.kicad_pro` to remove entries permanently.
+- **override**: naming a net *exactly* (no glob) in `--nets` or `--rip-existing-nets` is the deliberate signal and lifts its protection for that step. There is no flag; to remove entries permanently, edit the copy readers take: the `.kicad_pro`, or the board's `kicad_routing_tools` property when that carries the higher `records_rev` (after a GUI session and a KiCad save).
 - **KiCad-locked copper**: a net with any `(locked yes)` segment or via is never rip-eligible, **with no override** — locked means never. This is read straight from the board (both parse paths), not from the `.kicad_pro`.
 
 The GUI inherits the same behavior (engine-side reads via the board's sibling project file; the AI-plan executor and per-step floor updates persist new entries).
@@ -204,6 +213,3 @@ The GUI inherits the same behavior (engine-side reads via the board's sibling pr
 ### Impedance declarations survive redos
 
 Impedance-routed nets stay *rippable* — but a step run with `--impedance` records each targeted net's declaration (`ohms`, `differential`, `pair_gap`, `coplanar_gap`) in the `.kicad_pro` (`kicad_routing_tools.net_impedance`), plus **`applied`** (#906). `applied: false` means no layer width was actually solved, so the nets routed at the plain track width and the copper is *not* impedance-controlled: `check_impedance` skips such a declaration rather than grading nets against an impedance the router never attempted, and the step says so on the console. The declaration is still recorded, because it is the declaration — not the widths — that makes a later recompute possible. Note `applied` is decided by whether a width **solved**, not by whether the board has a stackup: a stackup listing copper with no adjacent dielectric, or with names that do not match the routed layers, solves nothing and falls back silently. Both `route.py` and `route_diff.py` record it. A later step that touches those nets **without** `--impedance` recomputes the same widths from the stackup and applies them per-net (`route.py`; the declaration — not the widths — is stored, so a stackup change recomputes correctly). `route_diff.py` reapplies call-level when every targeted pair shares one stored differential spec (the diff engine's obstacle stamps carry one width map), and warns when specs are mixed. `check_impedance.py` auto-reads the same records and audits every net against **its own** declared coplanar gap — no `--coplanar-gap` flag needed on boards routed by this tool.
-- Very tight surroundings can force the amplitude to its 0.2mm minimum, limiting how much length a run can add.
-- Meanders are not placed across layer changes.
-- `--ac-couple-match` runs after `--length-match-group`; a pair that is both an XNet member and in a match group may be meandered again by the end-to-end pass, perturbing its group-matched length. Keep AC-coupled pairs out of match groups.

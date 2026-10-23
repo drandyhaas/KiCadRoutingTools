@@ -20,13 +20,18 @@ first one is how that gap survived its own fix for an hour:
 Class 1 is checked STATICALLY (ast, no wx) so it runs anywhere. Class 2 needs to
 know whether a CONTROL exists for the key -- a key with no control legitimately
 falls back to the same default the CLI's argparse uses -- so it is checked LIVE
-against a real headless dialog,
-and skips cleanly when wx/pcbnew are unavailable.
+against a real headless dialog, under a python with wx + pcbnew. Launched from
+any other python, the gate re-execs into KiCad's bundled one, as its siblings
+do (headless_plan.reexec_into_kicad; KICAD_PYTHON names one explicitly).
 
     python3 tests/gui_parity/test_engine_kwarg_parity.py
 
-Exit 0 = parity. Exit 1 = a real divergence (printed with the file:line of both
-sides). See CLAUDE.md "Keep CLI and GUI routing in sync".
+Exit 0 = parity, BOTH classes checked. Exit 1 = a real divergence (printed with
+the file:line of both sides). Exit 77 = no python with wx + pcbnew exists, so
+Class 2 did not run: a skip (`SKIP: ...` on stdout), never a pass. It used to
+print SKIP under an OK verdict and exit 0 whenever it was launched with plain
+python3 -- on Windows every time, KiCad installed or not (found reviewing
+#1272). See CLAUDE.md "Keep CLI and GUI routing in sync".
 """
 
 # ---------------------------------------------------------------------------
@@ -80,14 +85,16 @@ PAIRS = [
 # Keep this list SHORT and justified -- every entry is a place the two fronts
 # genuinely differ, not a place we gave up.
 CLI_ONLY_OK = {
-    # The CLI streams a route trace to build the stress movie (#482). The GUI has
-    # its own recorder (movie_recorder.py) driven from the dialog, so it does not
-    # hand the engine a callback.
-    "vis_callback": "GUI uses movie_recorder.py instead of an engine callback (#482/#506)",
     # --json-out writes the merged JSON_SUMMARY to a FILE for the stress
     # harness to scrape. The GUI consumes results in-memory (return_results=
     # True) and has no summary-file output, so there is nothing to point at.
     "json_out": "CLI writes a JSON summary file; the GUI consumes results in-memory",
+    # route.py / route_diff.py --quick LEVEL: the placement skill's review
+    # routes a first round without the recovery tail to see what a placement
+    # leaves open (1), and the seed judge also skips the shipping polish (2).
+    # Both run the CLIs (also from the GUI's Place + Route); the GUI's own
+    # routing always routes to ship.
+    "quick": "a placement review / seed judge via the CLI; the GUI routes to ship",
     # (net_name_patterns was exempted here as "the GUI has no raw globs".
     # REVERSED: ai_plan resolving a plan's globs to exact names BEFORE the
     # call is not the reason the exemption is safe, it is the reason it was
@@ -305,19 +312,46 @@ def check_class1():
     return failures
 
 
-def check_class2():
-    """Every config key a GUI call site READS must be SUPPLIED, when a control exists."""
-    print("\nCLASS 2 -- GUI reads a config key nothing supplies (dead control)")
+#: Exit status when Class 2 could not run at all: run_all's self-skip code.
+#: It is not a pass -- a gate that exits 0 without checking its live half
+#: reports every dead control as checked.
+SKIP_EXIT = 77
+
+
+def kicad_python_missing():
+    """None when THIS python can run Class 2 (wx + pcbnew import), else why not.
+
+    Before answering, re-exec into KiCad's bundled python when one exists --
+    headless_plan.reexec_into_kicad, the shared launcher, whose candidates come
+    from kicad_locate (the registry, every drive, versions in NUMERIC order,
+    KICAD_PYTHON first) -- which exits with the child's status and does not
+    return. So a non-None answer means no such python exists on this machine.
+    """
     try:
+        import pcbnew  # noqa: F401
         import wx  # noqa: F401
-        from kicad_parser import parse_kicad_pcb
-        from kicad_routing_plugin import swig_gui
+        return None
     except Exception as e:
-        print(f"  SKIP (needs KiCad python: {type(e).__name__}: {e})")
-        print("  Run under KiCad's python to cover this class:")
-        print("    /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/"
-              "Versions/Current/bin/python3 tests/gui_parity/test_engine_kwarg_parity.py")
+        why = f"{type(e).__name__}: {e}"
+    import headless_plan
+    headless_plan.reexec_into_kicad(os.path.abspath(__file__))
+    return why
+
+
+def check_class2(missing=None):
+    """Every config key a GUI call site READS must be SUPPLIED, when a control exists.
+
+    `missing` is kicad_python_missing()'s answer: when set, Class 2 cannot run
+    and main() exits SKIP_EXIT rather than 0."""
+    print("\nCLASS 2 -- GUI reads a config key nothing supplies (dead control)")
+    if missing:
+        print(f"  SKIP: Class 2 NOT RUN -- no python with wx + pcbnew was found "
+              f"(this one: {missing}). Install KiCad, or point KICAD_PYTHON at "
+              f"its bundled python.")
         return []
+    import wx
+    from kicad_parser import parse_kicad_pcb
+    from kicad_routing_plugin import swig_gui
 
     os.environ.setdefault("WXSUPPRESS_SIZER_FLAGS_CHECK", "1")
     board = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
@@ -477,13 +511,18 @@ def check_delegation_case(dlg):
 
 
 def main():
-    failures = check_class1() + check_class2()
+    missing = kicad_python_missing()
+    failures = check_class1() + check_class2(missing)
     print("\n" + "=" * 72)
     if failures:
         print(f"ENGINE KWARG PARITY: {len(failures)} FAILURE(S)")
         for f in failures:
             print(f"  - {f}")
         return 1
+    if missing:
+        print("ENGINE KWARG PARITY: INCOMPLETE -- Class 1 OK, Class 2 (dead "
+              f"controls) NOT RUN; exit {SKIP_EXIT}, a skip and not a pass")
+        return SKIP_EXIT
     print("ENGINE KWARG PARITY: OK (no CLI-only kwargs, no dead controls)")
     return 0
 

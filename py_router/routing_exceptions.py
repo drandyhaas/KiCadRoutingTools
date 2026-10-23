@@ -51,6 +51,14 @@ class LayerError(RoutingError):
     pass
 
 
+class LayerCostsCountError(ConfigurationError):
+    """--layer-costs does not give one value per routing layer. The message
+    says which layers and which values, so a CLI prints it as a clean ERROR
+    line rather than a traceback (``user_facing``, honoured by cli_banner's
+    excepthook); the GUI shows the message as it shows any engine error."""
+    user_facing = True
+
+
 class GridResolutionError(RoutingError):
     """Raised when grid resolution causes issues."""
     pass

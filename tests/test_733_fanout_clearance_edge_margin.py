@@ -558,7 +558,7 @@ class TestTheEdgeMarginResolver(unittest.TestCase):
 
     def test_the_engine_resolves_an_omitted_margin_and_says_so(self):
         """The default is None, and the ENGINE resolves it -- which is what
-        makes the CLI, the plugin and the animator agree without any of them
+        makes the CLI and the plugin agree without either of them
         carrying a copy."""
         import placement.fanout_clearance as mod
         sig = inspect.signature(mod.repair_fanout_clearance)
@@ -631,18 +631,17 @@ class TestTheFrontEndsDoNotCarryTheirOwnCopy(unittest.TestCase):
     """#733's other two facts: the CLI hardcoded 0.55 and the GUI passed
     nothing at all. Both must now defer to the engine."""
 
-    def test_the_two_clis_default_to_none_so_the_engine_resolves(self):
+    def test_the_cli_defaults_to_none_so_the_engine_resolves(self):
         # assertTrue on a computed boolean, never assertIn against a whole
         # file: a failing assertIn prints the ENTIRE haystack, and a 100KB
         # failure message buries the one line that matters (#732's lesson).
-        for script in ('py_placer/place_fanout_clearance.py',
-                       'py_tools/animate_fanout_clearance.py'):
+        for script in ('py_placer/place_fanout_clearance.py',):
             with open(os.path.join(_ROOT, script), encoding='utf-8') as f:
                 src = f.read()
             self.assertTrue(
                 '"--board-edge-clearance", type=float, default=None' in src,
                 '%s still carries its own numeric edge default' % script)
-    # MUTATION: put `default=0.55` back in either script.
+    # MUTATION: put `default=0.55` back in the script.
 
     def test_the_plugin_passes_the_margin_to_the_engine(self):
         with open(os.path.join(_ROOT, 'kicad_routing_plugin', 'fanout_gui.py'),

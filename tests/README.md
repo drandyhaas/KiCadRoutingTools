@@ -1,10 +1,16 @@
-# Integration Tests
+# Tests
 
-This directory contains integration test scripts that exercise the full routing pipeline on various test boards.
+This directory holds the repo's tests: about 770 standalone `test_*.py`
+scripts (unit tests and CLI/board integration chains), the runner that drives
+them (`run_all.py`), the GUI/CLI parity gates (`gui_parity/`, see
+[its README](gui_parity/README.md)), checked-in fixtures (`fixtures/`), the
+mutation batteries (`mutate_*.py`) and the real-world stress harness
+(`stress/`).
 
 ## Running Tests
 
-All test scripts can be run from the project root or from the tests directory:
+Every test is a plain script. Run one from the project root or from the tests
+directory:
 
 ```bash
 # From project root
@@ -22,19 +28,41 @@ python3 tests/run_all.py                     # everything, 4 at a time, locally
 python3 tests/run_all.py --fast              # unit only (skip CLI/board tests)
 python3 tests/run_all.py 908                 # only files whose name contains "908"
 python3 tests/run_all.py --list              # what would run, and its classification
+python3 tests/run_all.py --shard 3/50        # one of 50 duration-balanced slices (0-based)
 ```
+
+`--timeout S` is the per-test budget (default 600 s; a test may declare more,
+see "Writing a test" below), `-j N` the parallelism (default 4, `1` = serial),
+`--shard-by stride` splits by name instead of by measured time, and
+`--durations-out FILE` writes each test's wall seconds. A test is
+*integration* (skipped by `--fast`) when its source imports `run_utils` or uses
+`subprocess`. Each test runs with `TMPDIR`/`TEMP`/`TMP` pointed at a scratch
+dir of its own, removed when it ends; run a test directly to keep its temp
+output.
+
+The summary keeps four buckets apart: passed, failed, **timed out** (a
+machine-speed fact, re-run it alone before calling it a failure, though it
+still makes the exit non-zero) and **self-skipped** (exit 77 with a `SKIP:`
+line: the test asserted nothing, and it is never counted as a pass).
 
 ### ...on Modal, fanned out
 
-The suite is ~594 files and roughly 40 minutes of one laptop. `--shard I/N`
-splits it into N disjoint slices, and the Modal driver runs them in parallel
-containers, so a full run takes about as long as its slowest shard:
+The suite is about 770 files and, last measured, roughly 40 minutes of one
+laptop. `--shard I/N` splits it into N disjoint slices, and the Modal driver
+runs them in parallel containers, so a full run takes about as long as its
+slowest shard:
 
 ```bash
 modal run tests/stress/modal_suite/run_all_modal.py               # 50 shards
 modal run tests/stress/modal_suite/run_all_modal.py --shards 25
-modal run tests/stress/modal_suite/run_all_modal.py --filters 908 # one family
+modal run tests/stress/modal_suite/run_all_modal.py --fast        # unit lane only
+modal run tests/stress/modal_suite/run_all_modal.py --filters "908 910"  # those families
 ```
+
+Its other options: `--timeout` (per test, default 600), `--jobs` (per
+container, default 2), `--out-dir DIR` (every shard's log; default a temp dir,
+printed), and `--write-durations` (below), which `--force-durations` lets
+write from a red run.
 
 Three things to know before you trust its output:
 
@@ -49,7 +77,7 @@ Three things to know before you trust its output:
   was balanced, and on how many measured tests. No balancing beats the
   slowest single test, so a test of independent rows may declare
   `RUN_ALL_PARTS = N` and take `--part I/N`: it then runs as N units
-  (`test_placement_ab.py[3/8]`), each sharded on its own.
+  (`test_x.py[3/8]`), each sharded on its own.
 - **The verdict is each shard's own exit code**, never the parsed counts. A
   container that OOMs prints no summary line at all, and a driver that decided
   on parsed counts would read that silence as zero failures. A shard that
@@ -70,16 +98,20 @@ Three things to know before you trust its output:
   the BUILD rather than quietly deadening the oracle legs. Note the two
   defaults differ: `modal_app.py` read on its own defaults the env var OFF,
   while the CLI you actually launch defaults it ON, and a KiCad wave labels
-  itself `-kc`.
+  itself `-kc` (`-kc-<tag>` when `KICAD_SWEEP_KICAD_IMAGE` picks another
+  image).
 
-  Only **two** of `run_all`'s self-skips would be recovered by giving the
-  suite image KiCad -- `test_887_iso_render` (wants the `kicad-cli` binary;
-  Pillow, its other precondition, IS in `requirements.txt`) and
-  `test_910_fill_for_delivery` (wants KiCad's bundled python). The other two,
-  `test_887_run24_regression` and `test_run8_starved_face_gate`, want recorded
-  artifacts under `wk/` -- gitignored, 0 files tracked -- so they self-skip on
-  ANY clean clone, with or without KiCad. Verified 2026-09-20 by running all
-  four locally WITH KiCad present.
+  The suite image's self-skips have three different reasons, so read each
+  `SKIP:` line rather than assuming:
+  - **No KiCad.** Six would be recovered by giving the suite image KiCad:
+    `test_910_fill_for_delivery` and the two `test_1279_*_pcbnew` tests (each
+    wants KiCad's bundled python), and three that run a pcbnew/wx half under
+    KiCad's python and self-skip without one (found reviewing #1272: such a
+    half used to print a skip and pass, so it ran nowhere):
+    `test_505_min_connection_clamp`, `test_505_gui_half_runs` and
+    `test_engine_kwarg_parity_launch`.
+  - **No `ortools`.** The `test_622_*` tests that plan with CP-SAT skip
+    without it, and `requirements.txt` does not list it.
 
 The image is a clean checkout of HEAD (reproducible, and you can keep editing
 while it runs); `KICAD_SWEEP_DIRTY=1` ships the working tree instead and stamps
@@ -94,7 +126,7 @@ are listed here because each is a trap that will come back:
 |---|---|
 | a git **index** | `run_utils.corpus_boards()` asks `git ls-files`, and `git archive` ships no `.git`, so it returned `[]` and 9 corpus-walking tests graded an EMPTY corpus instead of skipping |
 | `Pillow` | `startup_checks.check_render_dependencies` raised; 3 render tests died |
-| `pytest` | 2 tests imported it for fixtures (a test-only dep, correctly absent from `requirements.txt`). No test needs it now, so the image no longer installs it, and `test_718_static_test_hygiene.py` refuses a test file that imports pytest or that only pytest can run |
+| `pytest` | 2 tests imported it for fixtures (a test-only dep, correctly absent from `requirements.txt`). No test needs it now, so the image no longer installs it |
 | the right **Python version** | 2 tests behave differently on 3.12 vs 3.13+ |
 
 Three of those deserve spelling out:
@@ -110,21 +142,63 @@ Three of those deserve spelling out:
   corpus fails the build instead of quietly shrinking what the tests grade.
 - **The container's Python matches the interpreter you launched with.** This
   repo has already had a Python upgrade change *routing results* (`math.fsum`),
-  so grading on a different one is not grading your code. It also moves tests:
-  `test_run8_write_order` passes on 3.13+ and fails on 3.12 -- and the pass is
-  VACUOUS either way, because its assertion (`'early line' in the log`) is
-  satisfied by 3.13's traceback echoing the `python -c` source rather than by
-  the program running. Override with `KICAD_SUITE_PYTHON=3.12` if Modal has no
-  image for yours.
+  so grading on a different one is not grading your code. Override with
+  `KICAD_SUITE_PYTHON=3.12` if Modal has no image for yours.
 
 The moral, which cost a full red run to learn: **when a cloud suite fails tests
 that pass locally, suspect the image before the code.**
 
+## Writing a test
+
+A test is a standalone script ending `if __name__ == "__main__":
+sys.exit(main())`: exit 0 passes, anything else fails. `run_all.py` runs it as
+`python3 -X utf8 tests/test_x.py` from the repo root; there is no pytest.
+
+- **A test that cannot run self-skips**: it prints a line starting `SKIP:`
+  (with the colon) on stdout and exits 77. An exit 77 without that line is
+  reported as a FAIL, because 77 is also an ordinary crash code.
+- **Declarations `run_all` reads from the source** (never by importing):
+  `RUN_ALL_TIMEOUT = <seconds>` gives the test its own budget above
+  `--timeout`; `RUN_ALL_FAST_OK = True` keeps a test whose shelling-out is
+  cheap (a `git ls-files`) in `--fast`; `RUN_ALL_PARTS = N` runs a test of
+  independent rows as N units, each invoked with `--part I/N` (0-based) and
+  sharded on its own.
+- **`run_utils` helpers** (`from run_utils import ...`):
+  - `run_step(argv, outputs=[...], findings_ok=False)` runs one CLI chain step
+    and ASSERTS it worked: exit 0 (or 1 for a checker with `findings_ok`), no
+    traceback in its output, and every path in `outputs` written by this step.
+    The older `run(cmd)` asserts nothing.
+  - `check(argv, refuse='<the reason>', code=N)` asserts a command refused
+    FOR THE STATED REASON (`accept=True` asserts success instead). A command
+    that died of something else -- a traceback, an `ImportError`, an argparse
+    error, a missing file -- raises as a BROKEN TEST, never as a guard that
+    held.
+  - `evidence(path)` refuses an input that is not a real, non-empty file
+    before a check reads it (a `<(echo ...)` process substitution is not a
+    file on Windows).
+  - `corpus_boards()` is the boards git tracks under `kicad_files/`; it is
+    `[]` when git cannot answer, and the caller must then SKIP.
+- **Mutation batteries** (`mutate_*.py`) call `preflight(__file__)` from
+  `mutation_anchors` right after their row table, so a stale anchor refuses
+  (exit 2) in one second instead of reporting BROKEN after the witnesses ran;
+  `--verify-anchors` checks the anchors and stops. `python3
+  tests/mutation_anchors.py` censuses every battery (`--battery NAME`,
+  `--verbose`, `--repo-wide`). Prefer a single-line anchor for a `.md` target:
+  a multi-line one can match differently on a CRLF checkout.
+
 ## Test Scripts
 
-### test_fanout_and_route.py - Full 5-Layer BGA Board Test
+A selection: the end-to-end chain scripts and a few focused tests worth knowing
+by name. Every other `test_*.py` says what it pins in its own docstring.
 
-The most comprehensive test, exercising BGA/QFN fanout, single-ended routing, differential pair routing, DDR routing with length matching, and power plane creation on a complex 5-layer board.
+The chain scripts built on `run_utils.run` -- `test_fanout_and_route.py`,
+`test_flat_hierarchy.py`, `test_sonde_u.py` -- print each step and the
+checkers' verdicts but do not fail on a bad step, so read their output.
+`test_kit_route.py` and `test_interf_u.py` assert every step (`run_step`).
+
+### test_fanout_and_route.py - Full BGA Board Test
+
+The most comprehensive chain, exercising BGA/QFN fanout, single-ended routing, differential pair routing, DDR routing with length matching, and power plane creation on `kicad_files/haasoscope_pro_max_test.kicad_pcb` (10 copper layers; signals route on up to 5, the planes go on In4.Cu/In5.Cu). Its outputs are written into `kicad_files/`.
 
 ```bash
 # Run all stages (fanout, routing, checks)
@@ -154,7 +228,7 @@ python3 tests/test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
 | `--lvds` | Run LVDS differential pair routing tests |
 | `--ram` | Run DDR RAM routing tests |
 | `--planes` | Run power/ground plane routing tests |
-| `--checks` | Run DRC and connectivity checks after routing (skipped in --quick mode) |
+| `--checks` | Run DRC and connectivity checks after routing (the connectivity checks are skipped in --quick mode) |
 | `--onlychecks` | Run only checks, skip all routing stages (requires stage flags like --ftdi to specify which checks) |
 | `-u, --unbuffered` | Run python commands with unbuffered output |
 
@@ -162,32 +236,35 @@ python3 tests/test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
 1. QFN fanout for U2 (ADC interface)
 2. BGA fanout for FTDI (U3), ADC (IC1), FPGA (U3), and DDR (U1)
 3. Single-ended routing (FTDI data lanes with swappable targets)
-4. Differential pair routing (LVDS with length matching)
+4. Differential pair routing (the 56 LVDS pairs at 100 Ω in two batches, with swappable targets)
 5. DDR routing (DQS/CK diff pairs + DQ data lanes with auto byte-lane grouping)
-6. DRC and connectivity verification after each stage
+6. GND and power planes on In4.Cu/In5.Cu
+7. DRC and connectivity verification per stage
 
 ### test_kit_route.py - 4-Layer Pad-to-Pad Routing Test
 
-Routes directly between pads without fanout on the kit-dev-coldfire-xilinx board. Demonstrates routing without BGA fanout, power plane creation, and disconnected plane repair.
+Routes directly between pads without fanout on the kit-dev-coldfire-xilinx board. Demonstrates routing without BGA fanout, power plane creation, and disconnected plane repair. Outputs go to a fresh temp dir, never into `kicad_files/` (#426).
 
 ```bash
+# Default: route only the /AN* nets (~30 s), and the three checkers must be clean
 python3 tests/test_kit_route.py
 
-# Quick mode (only Net* patterns)
-python3 tests/test_kit_route.py --quick
+# The full signal set (~10 min); the board does not route completely (#426),
+# so the checkers' verdicts are printed, not asserted
+python3 tests/test_kit_route.py --full
 
-# Skip routing, only redo planes
-python3 tests/test_kit_route.py --planes-only
+# Keep the generated boards for inspection
+python3 tests/test_kit_route.py --workdir /path/to/dir
 
-# Unbuffered output
-python3 tests/test_kit_route.py -u
+# Skip routing, only redo the planes on that earlier run's kit-out.kicad_pcb
+python3 tests/test_kit_route.py --planes-only --workdir /path/to/dir
 ```
 
 **Pipeline stages:**
-1. Route all signals with power net width overrides
+1. Route the signals with power net width overrides
 2. Create +3.3V and GND planes on all 4 layers
-3. Connect disconnected plane regions
-4. DRC and connectivity verification
+3. Connect disconnected plane regions (`repair_planes.py`)
+4. DRC, connectivity and orphan-stub verification
 
 ### test_flat_hierarchy.py - 2-Layer Board with GND Plane
 
@@ -209,13 +286,13 @@ The test uses power net configurations generated by `/analyze-power-nets`.
 
 ### test_interf_u.py - 2-Layer Non-Rectangular Board
 
-Tests routing on a 2-layer board with a non-rectangular board outline (has a bottom protrusion).
+Tests routing on a 2-layer board with a non-rectangular board outline (has a bottom protrusion). Every step is asserted; outputs go to a fresh temp dir.
 
 ```bash
 python3 tests/test_interf_u.py
 
-# With unbuffered output
-python3 tests/test_interf_u.py -u
+# Keep the generated boards for inspection
+python3 tests/test_interf_u.py --workdir /path/to/dir
 ```
 
 **Pipeline stages:**
@@ -225,9 +302,9 @@ python3 tests/test_interf_u.py -u
 4. Connect disconnected plane regions
 5. DRC and connectivity verification
 
-### test_sonde_u.py - Wide Track Routing Test
+### test_sonde_u.py - Route + GND Plane with Return Vias
 
-Tests routing with wider than default track widths to verify track-to-track clearance handling.
+Routes `kicad_files/sonde_u.kicad_pcb`, which has no `.kicad_pro`, so the router's own defaults apply (0.3 mm track, 0.25 mm clearance), then pours a GND plane with GND return vias. Its outputs are written into `kicad_files/`.
 
 ```bash
 python3 tests/test_sonde_u.py
@@ -240,8 +317,9 @@ python3 tests/test_sonde_u.py -u
 ```
 
 **Pipeline stages:**
-1. Route with 1.2mm track width, 0.3mm clearance
-2. DRC and connectivity verification
+1. Route all nets at the defaults (`sonde_u_routed.kicad_pcb`)
+2. GND plane on B.Cu with `route_planes.py --add-gnd-vias` (its default output, `sonde_u_routed_routed.kicad_pcb`)
+3. DRC (at 0.2 mm) and connectivity on `sonde_u_routed.kicad_pcb`, the board from step 1
 
 ### test_guide_corridor.py - Guide-Corridor (Waypoint) Routing Test
 
@@ -253,7 +331,7 @@ asserts each scenario. It prints a `PASS`/`FAIL` line per scenario plus log deta
 and exits non-zero if any scenario fails.
 
 ```bash
-python3 tests/test_guide_corridor.py        # run with KiCad's python (needs the Rust router)
+python3 tests/test_guide_corridor.py        # needs the built Rust router (build_router.py)
 python3 tests/test_guide_corridor.py -v      # verbose routing output
 ```
 
@@ -286,7 +364,7 @@ with/without `--keepout`, and asserts each scenario. It prints a `PASS`/`FAIL` l
 per scenario plus log detail, and exits non-zero if any scenario fails.
 
 ```bash
-python3 tests/test_keepout.py        # run with KiCad's python (needs the Rust router)
+python3 tests/test_keepout.py        # needs the built Rust router (build_router.py)
 python3 tests/test_keepout.py -v      # verbose routing output
 ```
 
@@ -313,7 +391,7 @@ zone into `kicad_files/flat_hierarchy.kicad_pcb` and reuses the `test_keepout.py
 harness.
 
 ```bash
-python3 tests/test_rule_area_keepout.py        # run with KiCad's python
+python3 tests/test_rule_area_keepout.py
 python3 tests/test_rule_area_keepout.py -v       # verbose routing output
 ```
 
@@ -333,7 +411,7 @@ separate from the big `test_fanout_and_route.py` pipeline. It routes individual
 asserts each is **fully connected** and **DRC-clean**.
 
 ```bash
-python3 tests/test_diff_pair_route.py        # run with KiCad's python
+python3 tests/test_diff_pair_route.py
 python3 tests/test_diff_pair_route.py -v
 ```
 
@@ -490,9 +568,15 @@ Once the corpus exists, drive the whole run with the queue manager and watch
 it with the status script:
 
 ```bash
-bash run_queue.sh [concurrency=4] [model=sonnet]   # keeps N headless workers in flight
-bash stress_status.sh                              # DONE/RUNNING/TODO + free slots
+bash run_queue.sh [max_concurrency=8] [model]   # keeps headless workers in flight
+bash stress_status.sh                           # DONE/RUNNING/TODO + admit/hold
 ```
+
+Above a floor of `QUEUE_CONC_MIN` workers (default 2), the queue admits a new
+board only while the 1-minute load average is under `QUEUE_LOAD_MAX` (default:
+the core count minus 2), and at most one a minute; `max_concurrency` is a
+ceiling, not a target. The model defaults to the backend's own (`claude`: the
+latest Sonnet).
 
 See `tests/stress/README.md` for the full pipeline, the per-board run
 procedure (`RUNBOOK.md`), the ~12 GB-per-step memory watchdog (`run_limited.sh`),
@@ -513,7 +597,10 @@ Extracts every ` ```python ` block from `docs/python-api.md` and the
 `docs/api-*.md` reference pages and runs each complete example against the
 boards in `kicad_files/`, so the API documentation can't silently drift from
 the code. Signature listings and intentionally incomplete fragments are
-skipped automatically; ~30s total.
+skipped automatically; ~30s total. It also fails when a public
+`GridRouteConfig` field is missing from `docs/api-routing-config.md`'s tables,
+when `docs/configuration.md` quotes a stale `GridRouteConfig` default, or when
+an executed example opens a `kicad_files/` board git does not track.
 
 ```bash
 python3 tests/run_doc_examples.py
@@ -571,7 +658,9 @@ Gotchas:
 
 ## Performance Benchmarks
 
-Results from `test_fanout_and_route.py` (full mode):
+Results from `test_fanout_and_route.py` (full mode), recorded in January 2026
+when this README was first written. The router has changed a great deal since;
+read them as an order of magnitude, not a current benchmark.
 
 | Stage | Nets | Time | Iterations |
 |-------|------|------|------------|

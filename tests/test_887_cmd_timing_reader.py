@@ -11,8 +11,6 @@ THIS ARM CARRIES THE WHOLE REGRESSION. `wk/` is gitignored (`.gitignore:66`;
 committable and is not committed. Every bucketing rule, every total and every
 formatting rule is pinned here against two small TRACKED fixtures, so this file
 passes in full on a fresh clone with no `wk/` tree at all.
-`tests/test_887_run24_regression.py` corroborates it against the real ledger
-when one happens to be present, and self-skips when it is not.
 
 RUN_ALL_FAST_OK because it shells out only for the CLI and the no-Pillow probe;
 there is no board and no routing here.
@@ -175,11 +173,8 @@ def test_a_malformed_line_names_its_line_number(tmp=None):
         want(':7:' in msg, 'the parse error names the LINE NUMBER', msg)
         want('broken.jsonl' in msg, 'and the file', msg)
     # A ValueError, NOT a SystemExit, and the type is the whole point: this is a
-    # library function whose other consumer is the movie, where the clock is
-    # decoration that may never take the movie down. SystemExit derives from
-    # BaseException and walked through every `except Exception` guard meant to
-    # contain it -- including place_route_loop's end-of-run movie block, which
-    # would have killed a whole placement run after the routing was done.
+    # library function. SystemExit derives from BaseException and walks through
+    # every `except Exception` guard a library caller puts around it.
     want(issubclass(ct.LedgerError, ValueError),
          'LedgerError is a ValueError, so an `except Exception` guard holds it')
     want(not issubclass(ct.LedgerError, SystemExit),
@@ -287,14 +282,9 @@ def test_the_reader_imports_without_pillow():
 #: contains the other -- which this list caught the moment it was written.
 #: The rest are specific enough to match as substrings.
 #:
-#: `remaining` is deliberately NOT here, and the reason is the whole point of
-#: the feature. A remaining figure computed as `t1 - instant`, from a ledger
-#: that demonstrably spans the film, is the SUBTRACTION OF TWO RECORDED FACTS --
-#: the movie is built after the run, so the total is not a guess. Banning the
-#: word would have forced a worse name onto an honest number. What actually
-#: needs guarding is the BEHAVIOUR, and
-#: `test_a_remaining_figure_is_exact_or_absent` does that: it must equal
-#: t1 - instant exactly, and must be absent whenever coverage is not proven.
+#: `remaining` is deliberately NOT here: a remaining figure computed as the
+#: SUBTRACTION OF TWO RECORDED FACTS is not a guess, and banning the word would
+#: force a worse name onto an honest number.
 _BANNED_TOKENS = ('eta', 'rate')
 _BANNED_SUBSTRINGS = ('estimate', 'forecast', 'predict', 'extrapolat',
                       'projection')
@@ -569,8 +559,8 @@ def test_a_utf8_bom_does_not_reject_the_ledger():
 
 
 def test_find_ledger_walks_up_from_a_board():
-    """The parent walk is the stated contract with make_movie's board-sequence
-    form, and no test called find_ledger at all -- max_up=0 survived."""
+    """The parent walk is the stated contract for a board inside a work dir,
+    and no test called find_ledger at all -- max_up=0 survived."""
     p = _tmp_ledger([_row('P1', 1.0, 1.0)])
     wd = os.path.dirname(p)
     boards = os.path.join(wd, 'boards')
@@ -668,7 +658,7 @@ def test_the_totals_block_reports_tool_time_against_run_time():
 
 
 def test_report_data_carries_the_fields_a_consumer_reads():
-    """report_data is the API the movie overlay consumes; only two of its keys
+    """report_data is the API a --json consumer reads; only two of its keys
     were pinned, so wrong `steps` and `longest` payloads survived."""
     d = ct.report_data(ct.load_rows(FIX), 'x.jsonl')
     want(len(d['steps']) == 20, 'one step entry per row', len(d['steps']))

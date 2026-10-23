@@ -149,14 +149,10 @@ def _via_span(via, copper_layers) -> set:
     (a buried F.Cu-In2.Cu via touches In1.Cu) -- treating the span as the
     two endpoints alone manufactured phantom unsupported-via findings for
     mid-span connections."""
-    if via.layers and not ('F.Cu' in via.layers and 'B.Cu' in via.layers):
-        order = list(copper_layers)
-        idx = [order.index(l) for l in via.layers if l in order]
-        if len(idx) >= 2:
-            lo, hi = min(idx), max(idx)
-            return set(order[lo:hi + 1])
-        return set(via.layers)
-    return set(copper_layers)
+    # The TYPE decides, not the pair: an untyped via is a through via to
+    # KiCad whatever its layers say (found reviewing #1268).
+    from geometry_utils import via_copper_layers
+    return set(via_copper_layers(via, list(copper_layers)))
 
 
 def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
@@ -524,10 +520,10 @@ def _check_removable(net_id, name, net_segs, removable, findings):
             size=math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)))
 
 
-def _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
-                          net_zones, copper_layers, findings):
-    """A joint segment KiCad's DRC calls ``track_dangling`` although both its
-    ends lie on same-net copper (#1217).
+def kicad_dangling_end(s, others, net_vias, net_pads, net_zones,
+                       copper_layers):
+    """The end of track ``s`` KiCad's DRC reports as ``track_dangling``
+    although both its ends lie on same-net copper (#1217), or None.
 
     KiCad's rule (CONNECTIVITY_DATA::TestTrackEndpointDangling): each item
     touching the segment -- its shape within half the segment's width of an
@@ -542,48 +538,60 @@ def _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
     touches it. Where a via, pad or zone is involved KiCad's verdict turns on
     zone-fill and anchor details this model does not reproduce, so it says
     nothing rather than guess. Never size-filtered: KiCad warns at any length.
+
+    ``others`` is the same-net track copper to judge against (``s`` itself is
+    skipped by identity): every segment of the net, or any subset that still
+    holds each segment within reach of an end of ``s`` -- the verdict reads
+    only those, so a caller may hand a spatially filtered list. The ONE
+    predicate shared by this checker and the repair that splits the track
+    such a joint lands on (pcb_modification.split_kicad_dangling_hosts), so
+    the pass fixes exactly what the checker reports.
     """
-    for i, s in enumerate(net_segs):
-        if getattr(s, 'graphic', False):
+    if getattr(s, 'graphic', False):
+        return None
+    acc = s.width / 2.0
+    ends = ((s.start_x, s.start_y), (s.end_x, s.end_y))
+    touchers = []
+    for o in others:
+        if o is s or o.layer != s.layer or getattr(o, 'graphic', False):
             continue
-        acc = s.width / 2.0
-        ends = ((s.start_x, s.start_y), (s.end_x, s.end_y))
-        touchers = []
-        for j, o in enumerate(net_segs):
-            if j == i or o.layer != s.layer or getattr(o, 'graphic', False):
-                continue
-            hits = [_pt_seg_dist(x, y, o.start_x, o.start_y, o.end_x, o.end_y)
-                    <= o.width / 2.0 + acc + 1e-9 for x, y in ends]
-            if any(hits):
-                touchers.append(hits)
-        if not touchers or not all(h[0] and h[1] for h in touchers):
+        hits = [_pt_seg_dist(x, y, o.start_x, o.start_y, o.end_x, o.end_y)
+                <= o.width / 2.0 + acc + 1e-9 for x, y in ends]
+        if any(hits):
+            touchers.append((o, hits))
+    if not touchers or not all(h[0] and h[1] for _o, h in touchers):
+        return None
+    if any(s.layer in via_copper_layers(v, copper_layers)
+           and min(math.hypot(v.x - x, v.y - y) for x, y in ends)
+           <= v.size / 2.0 + acc + 1e-9 for v in net_vias):
+        return None
+    if any(endpoint_reaches_pad(x, y, acc, (s.layer,), p)
+           for p in net_pads for x, y in ends):
+        return None
+    if any(z.layer == s.layer and z.polygon
+           and any(point_in_polygon(x, y, z.polygon) for x, y in ends)
+           for z in net_zones):
+        return None
+    # Every toucher holds both ends, so each is counted once, at the end
+    # nearer one of its own endpoints; the other end is never counted.
+    counts = [0, 0]
+    for o, _h in touchers:
+        d0, d1 = (min(math.hypot(o.start_x - x, o.start_y - y),
+                      math.hypot(o.end_x - x, o.end_y - y)) for x, y in ends)
+        counts[0 if d0 < d1 else 1] += 1
+    if all(counts):
+        return None
+    return ends[0] if counts[0] == 0 else ends[1]
+
+
+def _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
+                          net_zones, copper_layers, findings):
+    """Report every track ``kicad_dangling_end`` names (#1217)."""
+    for s in net_segs:
+        free = kicad_dangling_end(s, net_segs, net_vias, net_pads, net_zones,
+                                  copper_layers)
+        if free is None:
             continue
-        if any(s.layer in via_copper_layers(v, copper_layers)
-               and min(math.hypot(v.x - x, v.y - y) for x, y in ends)
-               <= v.size / 2.0 + acc + 1e-9 for v in net_vias):
-            continue
-        if any(endpoint_reaches_pad(x, y, acc, (s.layer,), p)
-               for p in net_pads for x, y in ends):
-            continue
-        if any(z.layer == s.layer and z.polygon
-               and any(point_in_polygon(x, y, z.polygon) for x, y in ends)
-               for z in net_zones):
-            continue
-        # Every toucher holds both ends, so each is counted once, at the end
-        # nearer one of its own endpoints; the other end is never counted.
-        counts = [0, 0]
-        for j, o in enumerate(net_segs):
-            if j == i or o.layer != s.layer or getattr(o, 'graphic', False):
-                continue
-            if _pt_seg_dist(ends[0][0], ends[0][1], o.start_x, o.start_y,
-                            o.end_x, o.end_y) > o.width / 2.0 + acc + 1e-9:
-                continue
-            d0, d1 = (min(math.hypot(o.start_x - x, o.start_y - y),
-                          math.hypot(o.end_x - x, o.end_y - y)) for x, y in ends)
-            counts[0 if d0 < d1 else 1] += 1
-        if all(counts):
-            continue
-        free = ends[0] if counts[0] == 0 else ends[1]
         findings.append(_finding(
             'kicad-dangling', name, s.layer, free[0], free[1],
             f"segment ({s.start_x:.3f}, {s.start_y:.3f})-({s.end_x:.3f}, "

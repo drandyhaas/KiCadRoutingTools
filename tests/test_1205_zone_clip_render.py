@@ -6,8 +6,7 @@ larger than the board is the usual habit. `BoardRenderer` painted each zone's
 stored outline polygon over the board outline unclipped, so a non-rectangular
 board rendered as its bounding box: CM5_MINIMA_3's notch, ears and edge stroke
 were covered, and an agent placed edge parts against the bbox. The same
-renderer backs render_placement and the routing movie (`dynamic_zones`,
-where pours are drawn per frame). board_brief's text line printed the bbox as
+renderer backs render_placement. board_brief's text line printed the bbox as
 "outline ... (bbox area)" and showed the real area only when cutouts existed.
 
 The fixture is esp_prog with an EAR added on its right edge (so the two
@@ -18,12 +17,10 @@ Checks, by pixel probe (supersample 1, so no antialiasing):
   1. static base (render_placement's path): the corners beside the ear and a
      point past the bbox corner render as background, a point on the board and
      one in the ear as zone tint, and the edge stroke shows over the pour;
-  2. the same through `dynamic_zones` (the routing movie's per-frame pours);
-  3. render_placement's own panel agrees at the same probes, and the film's
-     3D stage scene cuts the pour to the outline as well;
-  4. control: without the pour the background probes are background and the
-     board probes are board body -- so 1-3 test the clip, not the fixture;
-  5. board_brief's text line prints the real outline area (bbox differs).
+  2. render_placement's own panel agrees at the same probes;
+  3. control: without the pour the background probes are background and the
+     board probes are board body -- so 1-2 test the clip, not the fixture;
+  4. board_brief's text line prints the real outline area (bbox differs).
 
     python3 tests/test_1205_zone_clip_render.py
 """
@@ -138,16 +135,7 @@ def main():
         grade('static base: pour clipped to the outline, edge drawn over it',
               r.render(), r)
 
-        # 2. dynamic pours: the routing movie draws them per frame
-        rd = BoardRenderer(pcb, size=SIZE, supersample=1, show_pads=False,
-                           dynamic_zones=True)
-        grade('dynamic_zones frame: the same', rd.frame(zone_net_ids=rd.zone_net_ids()), rd)
-        # ...and the frame with no pour revealed yet keeps its edge
-        want0 = {k: expected(rd, 'board_body' if w == 'zone' else w)
-                 for k, (_x, _y, w) in PROBES.items()}
-        grade('dynamic_zones frame before the pour is revealed', rd.frame(), rd, want0)
-
-        # 3. render_placement's panel at the same probes
+        # 2. render_placement's panel at the same probes
         import render_placement as RP
         m = RP.PlacementModel(pcb, board)
         img = RP.render_panel(RP.PanelSpec(m), size=SIZE, supersample=1)
@@ -157,25 +145,14 @@ def main():
         check('render_placement panel: the corners beside the ear and past the bbox '
               'are background', not rp_bad, rp_bad or '')
 
-        # 3b. the film's 3D stage: its scene clips each pour the same way
-        from stage3d.scene import build_scene
-        from shapely.geometry import Polygon
-        pours = build_scene(pcb)['pours']
-        board_ring = Polygon(OUTLINE)
-        areas = [Polygon(p['poly']).area for p in pours]
-        check('3D scene: the pour is cut to the eared outline, not the bbox',
-              len(pours) == 1 and abs(areas[0] - board_ring.area) < 1e-6
-              and Polygon(pours[0]['poly']).buffer(-1e-6).within(board_ring)
-              and pours[0]['holes'] == [], (len(pours), areas))
-
-        # 4. control: without the pour
+        # 3. control: without the pour
         bare = parse_kicad_pcb(build(td, pour=False))
         rb = BoardRenderer(bare, size=SIZE, supersample=1, show_pads=False)
         grade('control: no pour -> background outside, board body inside',
               rb.render(), rb, {k: expected(rb, 'board_body' if w == 'zone' else w)
                                 for k, (_x, _y, w) in PROBES.items()})
 
-        # 5. board_brief's text line
+        # 4. board_brief's text line
         r5 = run_utils.check([sys.executable, '-X', 'utf8',
                               os.path.join(ROOT, 'py_tools', 'board_brief.py'), board],
                              accept=True)

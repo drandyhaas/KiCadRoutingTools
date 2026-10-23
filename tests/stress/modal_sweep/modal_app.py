@@ -20,10 +20,8 @@ used), so reservations only add cost while burst covers real peaks (p90
 8 GB tier is opt-in OOM insurance via KICAD_SWEEP_BIG_BOARDS; see
 sweep_lib's tier note for the 414-task measurement behind this.
 
-Prerequisites and known-unverified bits are in README.md. Notably this file has
-NOT been executed against Modal's API from this repo -- pin `modal` per the
-README and expect to adjust image-builder method names if you are on an older
-client.
+Setup (and the 2-board smoke test to start with), the image, the options and
+the results volume are described in README.md.
 """
 from __future__ import annotations
 
@@ -127,15 +125,18 @@ def _image_source() -> tuple:
 def _build_step() -> str:
     """The image's Rust-router build command: pinnable, and retried.
 
-    A bare `build_router.py` has exactly two ways to fail here and both cost the
-    entire image (there is no Rust toolchain, so its source-build fallback can
-    only die): a flaky GitHub asset fetch, and #615 refusing the prebuilt when
-    the shipped `rust_router/` differs from origin/main -- which is every image
-    built at an old commit, i.e. every bisect arm.
+    A bare `build_router.py` misses the prebuilt here in two ways: a flaky
+    GitHub asset fetch, and #615 refusing the prebuilt when the shipped
+    `rust_router/` differs from origin/main -- which is every image built at
+    an old commit, i.e. every bisect arm. Before the image had a Rust
+    toolchain either one cost the entire image, because the source-build
+    fallback could only die; now either one costs the ~10 min source build
+    this command ends with.
 
     Both are handled here rather than by rewriting this file from the caller
     (corpus_bisect.sh used to sed the command in): a rewrite that silently
-    no-ops launches an arm that dies half an hour later.
+    no-ops launches an arm built unpinned -- which, before the rustup layer,
+    died half an hour later.
 
     LAST resort is a source build, which needs the rustup layer below. It is
     the ONLY path when the branch's crate is ahead of every published release
@@ -266,26 +267,24 @@ image = (
         # matching Cargo.toml). That took a rustup + build-essential layer and a ~10 min
         # cargo build off the cold image.
         #
-        # This FAILS LOUDLY at image-build time if a future crate bump ships without
-        # publishing binaries -- which is the behaviour you want. To unblock, either
-        # publish the assets (a python-only release republishes current crate binaries;
-        # see CLAUDE.md) or re-add:
-        #   .apt_install("build-essential")
-        #   .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
-        # and append `|| (. $HOME/.cargo/env && python3 build_router.py --from-source)`.
+        # With the toolchain, a crate bump that ships without publishing binaries
+        # no longer fails the image build: it pays the ~10 min source build. To get
+        # the cheap path back, publish the assets (a python-only release
+        # republishes current crate binaries; see CLAUDE.md).
         # Retried 3x with backoff: GitHub intermittently drops the release-asset
-        # fetch ("Remote end closed connection without response"), and with no
-        # Rust here build_router's fallback is a source build that cannot
-        # succeed -- so ONE flaky download kills the whole image, and with it
+        # fetch ("Remote end closed connection without response"). Before the
+        # rustup layer, build_router's fallback was a source build that could
+        # not succeed, so ONE flaky download killed the whole image, and with it
         # every arm riding it (that is how the set20 upload died on 2026-08-12,
         # and how three bisect arms died together when six concurrent image
-        # builds pulled the same asset).
+        # builds pulled the same asset). Now a miss costs the source build.
         #
         # KICAD_SWEEP_BUILD_TAG pins the release the prebuilt comes from, for
         # callers building an image at an OLD engine commit: #615 makes
         # build_router skip the prebuilt whenever rust_router/ differs from
-        # origin/main, and unpinned that means a source build -- i.e. death,
-        # half an hour in. Read client-side, where the image is defined.
+        # origin/main, and unpinned that means a source build -- once death
+        # half an hour in, now ~10 min of cargo. Read client-side, where the
+        # image is defined.
         _build_step(),
         # Pristine copy for per-task restore: containers are REUSED, so without
         # this a previous arm's routing_defaults patch leaks into the next task.
@@ -592,10 +591,10 @@ def replay_standard(task: dict) -> dict:
               timeout=6 * 3600, retries=modal.Retries(max_retries=3),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_big(task: dict) -> dict:
-    """Same work, bigger tier (4 GB while measuring -- was 12 GB sized
-    from macOS footprint; real Linux RSS now recorded per task, resize from
-    that). For boards whose recorded peak footprint exceeds
-    ~3.5 GB -- four boards in the reference wave, one at 10 GB."""
+    """Same work, the 8 GB tier: opt-in OOM insurance for the boards named in
+    KICAD_SWEEP_BIG_BOARDS (ones that proved flaky under burst). Everything
+    else rides replay_standard's 1 GB; sweep_lib's tier note has the
+    measurement behind both sizes."""
     return _replay_one(task)
 
 
@@ -614,8 +613,9 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
             50-minute monster first.
     stage:  'full' = every arm x every board (minus board_value.json excludes).
             'screened' = successive halving: every arm first runs the ~12-board
-            SCREEN set from board_value.json (~$0.15/arm); arms whose screen
-            pad-verdict is worse than baseline's by more than gate_margin
+            SCREEN set from board_value.json (~$0.15/arm); arms whose summed
+            screen nets_incomplete is worse than the control arm's (the first
+            arm declaring no overrides) by more than gate_margin
             (fractional, min +3 absolute) are KILLED before the full set --
             a clearly-bad arm costs cents instead of dollars.
     gate_margin: screened-stage kill threshold; generous by default so
@@ -723,8 +723,8 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
 
     # .map() BLOCKS until its tier drains, so calling the two tiers in sequence
     # would hold every big-tier board back until the small ones finished (or
-    # vice versa) -- and the big tier holds the longest boards, i.e. exactly
-    # the ones that must start first. Drain both concurrently instead.
+    # vice versa) -- and either way some of the longest boards, the ones that
+    # must start first, would wait. Drain both concurrently instead.
     import threading
 
     def run_tasks(items):

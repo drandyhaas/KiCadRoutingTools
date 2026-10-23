@@ -21,9 +21,11 @@ from pcb_modification import merge_close_same_net_vias
 
 
 class _Via:
-    def __init__(self, x, y, drill=0.2, size=0.45, layers=('F.Cu', 'B.Cu'), net_id=1):
+    def __init__(self, x, y, drill=0.2, size=0.45, layers=('F.Cu', 'B.Cu'), net_id=1,
+                 via_type='through'):
         self.x, self.y, self.drill, self.size = x, y, drill, size
         self.layers, self.net_id = list(layers), net_id
+        self.via_type = via_type
 
 
 class _PCB:
@@ -43,9 +45,9 @@ class _Pad:
         self.layers = ['*.Cu', '*.Mask']
 
 
-def _v(x, y, net_id=1, drill=0.2, layers=('F.Cu', 'B.Cu')):
+def _v(x, y, net_id=1, drill=0.2, layers=('F.Cu', 'B.Cu'), via_type='through'):
     return {'x': x, 'y': y, 'drill': drill, 'size': 0.45,
-            'layers': list(layers), 'net_id': net_id}
+            'layers': list(layers), 'net_id': net_id, 'via_type': via_type}
 
 
 def run():
@@ -101,12 +103,19 @@ def run():
     check("keeps well-separated same-net vias", n == 0 and len(vias) == 2)
 
     # (5) Survivor span must COVER the dropped via's layers; a blind via whose layers
-    #     the nearby via doesn't span is left in place (can't reuse safely).
-    vias = [_v(80.00, 80.03, layers=('In1.Cu', 'In2.Cu'))]
+    #     the nearby via doesn't span is left in place (can't reuse safely). The
+    #     vias are TYPED: an untyped pair is a through via to KiCad (#1268).
+    vias = [_v(80.00, 80.03, layers=('In1.Cu', 'In2.Cu'), via_type='buried')]
     n = merge_close_same_net_vias(vias, [], _PCB([_Via(80.00, 80.00,
-                                  layers=('F.Cu', 'In1.Cu'))]),
+                                  layers=('F.Cu', 'In1.Cu'), via_type='micro')]),
                                   hole_to_hole_clearance=0.25)
     check("does not merge when survivor span misses a layer", n == 0 and len(vias) == 1)
+    # ...and the same two pairs UNTYPED are two through vias: merge.
+    vias = [_v(90.00, 90.03, layers=('In1.Cu', 'In2.Cu'))]
+    n = merge_close_same_net_vias(vias, [], _PCB([_Via(90.00, 90.00,
+                                  layers=('F.Cu', 'In1.Cu'))]),
+                                  hole_to_hole_clearance=0.25)
+    check("merges when both pairs are untyped (through vias)", n == 1 and not vias)
 
     if fails:
         print("FAIL: " + ", ".join(fails))

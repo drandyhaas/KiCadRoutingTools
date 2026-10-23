@@ -153,7 +153,7 @@ class TestOffOutline(unittest.TestCase):
     def test_render_placement_gates_the_same_parts(self):
         """render_placement's `pad_copper_gating` is check_assembly's list:
         the castellated edge part is in neither, the part off the board in
-        both (verifier D9: --gate and the free-agent's grade.py read it)."""
+        both (verifier D9: --gate and the placement skill's grade.py read it)."""
         board = BOARD.replace(
             '(pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu")',
             '(pad "2" thru_hole rect (at 0.5 0.4) (size 0.6 0.6) (drill 0.3)'

@@ -2,22 +2,19 @@
 
 Two gates, both report-only here; the CLIs decide what to do with the verdict.
 
-**Unplaced.** The quench is *perturbative* -- `docs/placement-optimization.md`
-argues at length that a human seed is what lets it inherit every unmodeled
-constraint for free, and `place_optimize.py`'s own docstring promises output that
-is "your placement, nudged". Handed a pile of parts at the origin it has nothing
-to refine: every candidate pose is illegal, so the run prints "0 parts moved"
-plus a legality block that *looks like a result*. Worse, a large
-`--max-displacement` produces a tiny scatter around the origin that looks like
-progress and is not a placement. This module detects that and lets the caller
-refuse instead. Placing a board from scratch is deliberately out of scope.
+**Unplaced.** A tool that reads anything off the poses has nothing to work
+with on a pile of parts at the origin: a grade fires every rule at once,
+labels placed around a pile mean nothing, and an intent read off a pile's
+poses would record the pile as the spec. This module detects that and lets
+the caller refuse (check_floorplan, beautify_labels), warn
+(render_placement) or read nothing off the parts' poses (`emit_intent` on a
+`pile`, #1103) -- which is how `place_simple.py` treats every unlocked part
+anyway.
 
-**Already routed.** Verified in code, not assumed: the quench models no copper at
-all -- `place_optimize.py` contains zero references to segments or vias, legality
-is courtyard + outline, cost is pad-to-pad airwires, and
-`placement.writer.write_placed_output` rewrites footprint positions only. So
-placement on a routed board moves every part and leaves every track behind,
-detached from its pad. Nothing warned about this before.
+**Already routed.** Placement models no copper at all: legality is courtyard,
+pads and outline, cost is airwires, and `placement.writer.write_placed_output`
+rewrites footprint positions only. So placement on a routed board moves parts
+and leaves every track behind, detached from its pad.
 
 Deliberately NOT in `legality.py`. That module answers "is this placement legal",
 and by that measure `watchy.kicad_pcb` is illegal -- 81 of its 82 parts are in
@@ -54,11 +51,6 @@ DEFAULT_THRESHOLDS = {'dup_fraction': DUP_FRACTION,
                       'spread_ratio': SPREAD_RATIO,
                       'outside_fraction': OUTSIDE_FRACTION}
 
-#: `PlacementState.seed_scope` values (#1165).
-SEED_ALL = 'all'            # every unlocked part
-SEED_STACKED = 'stacked'    # only `stacked_suspect_refs`
-SEED_NONE = 'placed'        # the board looks placed: nothing without --force
-
 
 @dataclass
 class PlacementState:
@@ -86,7 +78,7 @@ class PlacementState:
     #: The subset of `stacked_refs` that is not explicable as deliberate
     #: co-location -- i.e. neither on a side the others cannot reach (a DRILLED
     #: part reaches both) nor a marker class. Being LOCKED is deliberately not
-    #: an excuse; see the NOTE in `_suspect_in`. `partially_unplaced` keys on
+    #: an excuse; see the NOTE in `stack_suspects`. `partially_unplaced` keys on
     #: THIS, not on `stacked_refs`.
     stacked_suspect_refs: List[str] = field(default_factory=list)
     segments: int = 0
@@ -111,7 +103,7 @@ class PlacementState:
         unlocked ones when some are locked. A staging ring is spread, not
         stacked, so it reads neither unplaced nor partially unplaced; and a
         pile whose fixed parts were placed and LOCKED first -- the order the
-        free-agent skill prescribes -- reads under the whole-board threshold
+        placement skill prescribes -- reads under the whole-board threshold
         once enough of them stand on the board."""
         sig = self.signals or {}
         return bool(sig.get('s3_outside') or sig.get('s3_movable_outside'))
@@ -128,7 +120,7 @@ class PlacementState:
         (`stacked_suspect_refs`, which excuses far-side and marker
         co-locations; the raw `duplicate_fraction` read a placed orangecrab
         as a pile). The ONE pile test: emit_intent, board_brief and
-        place_seed's gate read it, and the free-agent skill chooses its mode
+        check_assembly read it, and the placement skill chooses its mode
         from it. A locked part's pose stays a decision on a pile: emit_intent
         keeps its claims.
         """
@@ -137,30 +129,6 @@ class PlacementState:
                     or (self.partially_unplaced
                         and len(self.stacked_suspect_refs) / n
                         >= DUP_FRACTION))
-
-    @property
-    def seed_scope(self) -> str:
-        """What place_seed seeds without --force (#1165) -- ONE answer for
-        its gate, `rank_rotations`' eligibility and check_floorplan's seeder
-        forecast, so none of them can scope a seed the gate did not:
-
-        * `SEED_ALL` -- every unlocked part: the board is `unplaced`, or its
-          parts still to be placed sit off the outline (`off_outline`).
-          Checked BEFORE the stacked scope: a pile whose fixed parts were
-          placed first can carry a deliberate stack (CM5 module halves at
-          one origin), and scoping the seed to that stack seeded nothing but
-          two locked parts and left the pile where it was.
-        * `SEED_STACKED` -- a partially-unplaced board: only
-          `stacked_suspect_refs`; the rest is someone's work.
-        * `SEED_NONE` -- the board looks placed: place_seed refuses.
-
-        Locked parts are never seeded in any scope (seed_from_intent treats
-        a file-locked part as placed)."""
-        if self.unplaced or self.off_outline:
-            return SEED_ALL
-        if self.partially_unplaced:
-            return SEED_STACKED
-        return SEED_NONE
 
     @property
     def blocked(self) -> bool:
@@ -229,10 +197,8 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
     #   * a MARKER class (fiducial / mount_hole / testpoint) is co-located by
     #     design. legality._MARKER waives exactly this set for assembly.
     #
-    # A third filter, "every part in the group is LOCKED", was tried and
-    # REMOVED -- see the NOTE in _suspect_in. It is named here because the
-    # field docstring and the operator-facing reason string both used to
-    # advertise it, which is worse than not having it.
+    # "Every part in the group is LOCKED" is deliberately NOT a filter: see
+    # the NOTE in `stack_suspects`.
     #
     # The strong signal (s1) keeps every ref, because a genuine pile-up buries
     # markers and locks along with everything else; only the weak
@@ -285,7 +251,7 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
     s3 = (st.outside_fraction is not None
           and st.outside_fraction >= th['outside_fraction'])
     # #1165: the same test over the UNLOCKED parts. Only a REPORTED signal
-    # (`off_outline`, so `pile` and `seed_scope`): `unplaced` and
+    # (`off_outline`, so `pile`): `unplaced` and
     # `partially_unplaced` are unchanged, so every `gate_or_exit` caller
     # refuses and warns exactly as before.
     _locked = [fp for fp in fps if getattr(fp, 'locked', False)]
@@ -343,6 +309,19 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
     return st
 
 
+def footprints_outside(pcb_data, pcb_file, refs) -> Optional[Dict[str, bool]]:
+    """`{ref: its courtyard leaves the outline}` for `refs`, measured as
+    `assess_placement`'s S3 measures it; None when the board has no usable
+    outline. On a pile this is what tells a STAGED pose (off the board)
+    from one a stager kept (#1353)."""
+    fps = [pcb_data.footprints[r] for r in refs
+           if r in (pcb_data.footprints or {})]
+    flags: Dict[str, bool] = {}
+    if _outside_fraction(pcb_data, pcb_file, fps, flags) is None:
+        return None
+    return flags
+
+
 def _outside_fraction(pcb_data, pcb_file, fps,
                       flags_out: Optional[Dict[str, bool]] = None
                       ) -> Optional[float]:
@@ -390,7 +369,8 @@ def _outside_fraction(pcb_data, pcb_file, fps,
 
 def _global_rect(fp, side_boxes, rotate_local_bounds):
     """Absolute courtyard rect for a footprint, falling back to its pad bbox --
-    the same fallback the quench uses when a footprint draws no courtyard."""
+    the same fallback the placement state uses when a footprint draws no
+    courtyard."""
     local = None
     if side_boxes:
         from placement.legality import footprint_side
@@ -409,11 +389,19 @@ def _global_rect(fp, side_boxes, rotate_local_bounds):
 
 
 def format_report(state: PlacementState, tool: str = 'placement', *,
-                  allow_unplaced: bool = False, allow_routed: bool = False) -> str:
+                  allow_unplaced: bool = False, allow_routed: bool = False,
+                  warn_only: bool = False) -> str:
     """Human text for a refusal or a warning. A condition the caller already
     overrides gets no "Override with" advice (#1202: beautify_labels and
     check_floorplan always pass allow_routed=True, ran and exited 0, and still
-    printed the refusal and its override)."""
+    printed the refusal and its override).
+
+    `warn_only` is the renderer's mode, which refuses nothing: it gets no
+    override advice at all, and no advice to run the renderer (#1354:
+    render_placement told the user to "Override with --allow-unplaced", a
+    flag it does not have and exits 2 on, then rendered anyway)."""
+    allow_unplaced = allow_unplaced or warn_only
+    allow_routed = allow_routed or warn_only
     lines = []
     if state.unplaced:
         lines.append(
@@ -423,11 +411,13 @@ def format_report(state: PlacementState, tool: str = 'placement', *,
         for r in state.reasons:
             lines.append(f"  - {r}")
         lines.append(
-            "  This toolchain refines an existing placement; it does not place a "
-            "board from scratch. Place the parts in KiCad first.")
-        lines.append(
-            "  To see what the file currently contains:  "
-            "python3 render_placement.py <board> -o state.png")
+            "  Its poses are not a placement yet: py_placer/place_simple.py "
+            "places a board from a pile.")
+        if not warn_only:
+            lines.append(
+                "  To see what the file currently contains:  "
+                "python3 -X utf8 py_tools/render_placement.py <board> "
+                "-o state.png")
         if not allow_unplaced:
             lines.append("  Override with --allow-unplaced.")
     elif state.partially_unplaced:
@@ -457,7 +447,7 @@ def gate_or_exit(pcb_data, pcb_file, tool: str, *, allow_unplaced: bool = False,
     import sys
     st = assess_placement(pcb_data, pcb_file)
     msg = format_report(st, tool, allow_unplaced=allow_unplaced,
-                        allow_routed=allow_routed)
+                        allow_routed=allow_routed, warn_only=warn_only)
     blocking = (st.unplaced and not allow_unplaced) or (st.has_copper and not allow_routed)
     if msg:
         print(msg, file=sys.stderr if (blocking and not warn_only) else sys.stdout)
@@ -513,9 +503,8 @@ def stack_suspects(refs_at_one_spot, sides_of, is_marker,
                    touch=None) -> List[str]:
     """The refs at ONE coordinate that are not explicable, PER SIDE
     (`sides_of(ref)` -> its sides, `is_marker(ref)` -> a marker class).
-    THE stack rule: `assess_placement` calls it about the board, the
-    seeder's #1151 disposition about the parts PRESENT when it decides
-    (`coincident_stack_suspects`).
+    THE stack rule: `assess_placement` calls it about the board, and
+    `coincident_stack_suspects` about the parts at one origin.
 
     `touch(a, b, side)`, when given (#1204), keeps in a side's group only
     the parts that share something physical there with another member
@@ -549,12 +538,11 @@ def stack_suspects(refs_at_one_spot, sides_of, is_marker,
         # NOTE what is deliberately NOT here: "all locked". A lock records
         # a decision about WHERE a part goes; it does not make two parts
         # able to occupy one space. And this toolchain stamps its own locks
-        # -- seeder.stamp_locked, called on place_seed's output -- so a
+        # -- `place_pose lock`, through seeder.stamp_locked -- so a
         # pile-up the tools CREATED would have been invisible to the check
         # meant to catch pile-ups. Markers are the real discriminator: a
         # fiducial and a mounting hole are different physical things and
-        # share a coordinate by design. Costs nothing on the corpus: every
-        # board that changed was already suppressed by side or by class.
+        # share a coordinate by design.
         out.update(group)
     return sorted(out)      # a through part appears in both side-groups
 
@@ -698,8 +686,8 @@ def coincident_stack_groups(pcb_data, pcb_file: Optional[str] = None, *,
     `body_contact_pairs`); all-marker groups are exonerated. `refs` keeps
     every suspect part at the point, markers included. A pair the intent's
     `overlap_waivers` names (`waivers`) is accepted here as it is in the
-    courtyard channel. One function, so the seeder's #1151 disposition and
-    the grader cannot disagree about what a stack is.
+    courtyard channel. One function, so every reader and the grader cannot
+    disagree about what a stack is.
 
     `exempt_out`, when given, receives `{point, refs, why}` for each origin
     the origin-only rule would have gated and this one does not: `why` is

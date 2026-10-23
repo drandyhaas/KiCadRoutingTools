@@ -29,6 +29,7 @@ import awx_settings
 import shutil
 import subprocess
 import sys
+import time
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -123,6 +124,16 @@ def copy_pro(src_board, dst_board):
         print(f'  project floor NOT stamped: {e}', flush=True)
 
 
+def _drop_tie_siblings(tmp):
+    # the writer seeds a temp board's siblings beside it (#1286); the shipped board keeps its own
+    from copy_board import SIBLING_EXTS
+    for ext in SIBLING_EXTS:
+        try:
+            os.unlink(tmp[:-len('.kicad_pcb')] + ext)
+        except OSError:
+            pass
+
+
 ROUNDS = int(awx_settings.get('SRC_ROUNDS', '8'))   # realized source rounds (feasibility bans need re-plans); 0 = the teeth as they stand
 DST_ITERS = 8  # destination select -> fan out -> audit -> ban -> re-select
 
@@ -202,6 +213,20 @@ def via_escapes(moves, end):
     return [m for m in moves if m.kind != 'surface'] or moves
 
 
+def unbanned_or_all(nm, moves, banned, what):
+    """`nm`'s moves less those the fanout refused (`banned`: by signature, and by class) -- or, where that leaves none,
+    all of them, said: a net with no move stops the ends model's whole search (the zynq's USB bus on the six-rail board
+    with the LVDS step's field: OTG_NXT's one tooth class banned when the engine laid it as a via in pad, its laid tooth
+    on an inner layer no move is, and the fanout died, the bus laid nothing), where a refused move is only a move the
+    engine may lay otherwise"""
+    import source_realize as sr
+    ok = [m for m in moves if (nm, sr.move_sig(m)) not in banned and (nm, 'class', sr.move_class(m)) not in banned]
+    if moves and not ok:
+        print(f'  {nm}: every {what} move refused once -- offered again, the net has no other')
+        return list(moves)
+    return ok
+
+
 def plan_state(pcb, names, banned=frozenset()):
     """Everything the plan reads off ONE board: the menus of legal escapes
     at both ends, the launch points (the source teeth AS THEY ARE on this
@@ -253,20 +278,35 @@ def plan_state(pcb, names, banned=frozenset()):
             street=street, street_pitch=pe.sm._STACK_PITCH + 1e-4, street_dirs=street_dirs)
     dmenu, launch, src_pad, dst_pad = {}, {}, {}, {}
     dref = ends[names[0]][2]
+    # (DEST naming several parts, one source and several ends: the trunk's -- the first -- is the plan's destination
+    # array, and each other a BRANCH off the trunk, whole_frame)
+    _dl = te.dest_refs(awx_settings.get('DEST') or '')
+    if len(_dl) > 1:
+        dref = _dl[0]
     dgrid = em.grid_of(pcb.footprints[dref])
     dboxes = dgrid.bbox
+    _dests = [dref] + [r_ for r_ in _dl[1:] if r_ != dref] if len(_dl) > 1 else [dref]
+    _dgrid_of = {r_: (dgrid if r_ == dref else em.grid_of(pcb.footprints[r_])) for r_ in _dests}
     # the destination's FAR face, the one facing away from the source: under the whole route's ends a far-face move
     # is offered only to a ball in the array's half beside that face -- in ten fanouts over K15-K41 the ends model
     # chose 3 of 341 berths there, one net one column from the far face (K41 SA11), from 518 of 2269 menu moves
-    # (every dog-bone and via-in-pad among them unchosen)
+    # (every dog-bone and via-in-pad among them unchosen). Each destination's own, where DEST names several
     _sc = [sum(ends[n][0][k] for n in names) / len(names) for k in (0, 1)]
-    _dc = ((dboxes[0] + dboxes[2]) / 2, (dboxes[1] + dboxes[3]) / 2)
-    far = max(em.DIRS, key=lambda d: em.DIRS[d][0] * (_dc[0] - _sc[0]) + em.DIRS[d][1] * (_dc[1] - _sc[1]))
-    toward = max(em.DIRS, key=lambda d: em.DIRS[d][0] * (_sc[0] - _dc[0]) + em.DIRS[d][1] * (_sc[1] - _dc[1]))
-    _fax = 0 if em.DIRS[far][0] else 1
+    _fd = {}
+
+    def faces_of(ref):
+        """(far, toward, the far face's axis, the box) of destination `ref`"""
+        if ref not in _fd:
+            b_ = dboxes if ref == dref else em.grid_of(pcb.footprints[ref]).bbox
+            c_ = ((b_[0] + b_[2]) / 2, (b_[1] + b_[3]) / 2)
+            f_ = max(em.DIRS, key=lambda d: em.DIRS[d][0] * (c_[0] - _sc[0]) + em.DIRS[d][1] * (c_[1] - _sc[1]))
+            t_ = max(em.DIRS, key=lambda d: em.DIRS[d][0] * (_sc[0] - c_[0]) + em.DIRS[d][1] * (_sc[1] - c_[1]))
+            _fd[ref] = (f_, t_, 0 if em.DIRS[f_][0] else 1, b_, c_)
+        return _fd[ref]
 
     def far_half(pad):
-        mid = (dboxes[_fax] + dboxes[_fax + 2]) / 2
+        far, _t, _fax, b_, _c = faces_of(pad.component_ref)
+        mid = (b_[_fax] + b_[_fax + 2]) / 2
         return ((pad.global_x, pad.global_y)[_fax] - mid) * em.DIRS[far][_fax] >= -1e-6
     for nm in names:
         nid, net = byname[nm]
@@ -275,12 +315,18 @@ def plan_state(pcb, names, banned=frozenset()):
         pad = min(fp.pads, key=lambda p: (p.global_x - bx) * (p.global_x - bx)
                   + (p.global_y - by) * (p.global_y - by))
         dst_pad[nm] = pad
+        far, toward, _fax, _b, _c = faces_of(ends[nm][2])
         moves = dedupe_climbs(menu(pad, em.grid_of(fp), nid, climb=DST_CLIMB,
                                    street=DST_STREET, street_dirs=(toward,)))
         if PLAN_JUDGE == 'ends' and not far_half(pad):
             moves = [m for m in moves if m.direction != far]
-        dmenu[nm] = [m for m in moves if (nm, sr.move_sig(m)) not in banned
-                     and (nm, 'class', sr.move_class(m)) not in banned]
+        if ends[nm][2] != dref and len(_dl) > 1:
+            # a BRANCH's berths only on the faces turned toward the source: its lanes leave the trunk and land on
+            # them from the branch, which has no way round its part (whole_frame) -- a net whose ball has no such
+            # move has no berth, and the run names it
+            moves = [m for m in moves if em.DIRS[m.direction][0] * (_sc[0] - _c[0])
+                     + em.DIRS[m.direction][1] * (_sc[1] - _c[1]) > 1e-9]
+        dmenu[nm] = unbanned_or_all(nm, moves, banned, 'berth')
         # a pad of this net on the other layer UNDER the ball (a back-side
         # termination resistor under a DDR clock ball) is served by a TIE
         # VIA at the ball (tie_vias_under, after the berths are laid), so
@@ -337,11 +383,15 @@ def plan_state(pcb, names, banned=frozenset()):
     sref = max(refs, key=refs.get)
     sgrid = em.grid_of(pcb.footprints[sref])
     smenu = {}
-    # PLAN_JUDGE=ends: no tooth move to the source's FAR face (the one facing away from the destination) -- the whole
-    # route has no way round the source (whole_frame), so such a move is no candidate
+    # PLAN_JUDGE=ends: a tooth move to the source's FAR face (the one facing away from the destination) only from a ball
+    # in the array's half beside it, as a side face's (side_half, below) -- the whole route takes such a lane round the
+    # source on a lead-in (whole_frame), and the ends model prices it past any via count (whole_ends.FAR_TOOTH), so it
+    # is chosen only by a lane with no other way out
     far_dir = None
     if PLAN_JUDGE == 'ends':
-        _dp = [(p_.global_x, p_.global_y) for p_ in pcb.footprints[ends[names[0]][2]].pads]
+        # (every destination's pads, where DEST names several: the source's far face faces away from them all)
+        _dp = [(p_.global_x, p_.global_y) for r_ in sorted({ends[n][2] for n in names})
+               for p_ in pcb.footprints[r_].pads]
         _sp = [(p_.global_x, p_.global_y) for p_ in pcb.footprints[sref].pads]
         _fx = sum(x for x, _y in _dp) / len(_dp) - sum(x for x, _y in _sp) / len(_sp)
         _fy = sum(y for _x, y in _dp) / len(_dp) - sum(y for _x, y in _sp) / len(_sp)
@@ -363,11 +413,9 @@ def plan_state(pcb, names, banned=frozenset()):
         # net's laid tooth TRACKS is a conflict with that tooth (sblock, below), not a refusal -- so teeth can swap and
         # rotate (a run net's laid via still refuses it). The other judges keep them priced against the run's laid
         # stubs (own_only)
-        smenu[nm] = [m for m in dedupe_climbs(menu(p, sgrid, byname[nm][0], own_only=(PLAN_JUDGE != 'ends'),
-                                                   climb=SRC_CLIMB))
-                     if (nm, sr.move_sig(m)) not in banned and m.direction != far_dir
-                     and (nm, 'class', sr.move_class(m)) not in banned
-                     and (far_dir is None or m.direction == near_dir or side_half(p, m.direction))]
+        smenu[nm] = unbanned_or_all(
+            nm, [m for m in dedupe_climbs(menu(p, sgrid, byname[nm][0], own_only=(PLAN_JUDGE != 'ends'), climb=SRC_CLIMB))
+                 if far_dir is None or m.direction == near_dir or side_half(p, m.direction)], banned, 'tooth')
         _plegs = getattr(plan_state, '_pair_legs', None) or {}
         if nm in _plegs and _plegs[nm] in byname:
             keep = [m for m in smenu[nm] if pair_exit_clear(pcb, byname[nm][0], byname[_plegs[nm]][0], m, free=run_free)]
@@ -468,6 +516,8 @@ def plan_state(pcb, names, banned=frozenset()):
             'dst_pad': dst_pad, 'sref': sref, 'dref': dref, 'sgrid': sgrid,
             'bundle_layer': bundle_layer, 'chi': chi,
             'dgrid': dgrid, 'dboxes': dboxes,
+            # (DEST naming several parts: the trunk's first, each other a branch's -- whole_ends reads each lane's own)
+            'dests': _dests, 'dgrid_of': _dgrid_of, 'dbox_of': {r_: g_.bbox for r_, g_ in _dgrid_of.items()},
             'buses': buses, 'obs': obs, 'pcb': pcb,
             'pads_of': {ref: [(p.global_x, p.global_y) for p in fp.pads]
                         for ref, fp in pcb.footprints.items()}})
@@ -559,10 +609,31 @@ def joint_berths(st, board, choice, log=print):
     names = [st['byname'][nm][1].name for nm in choice if nm in st['byname']]
     pcb = parse_kicad_pcb(board)
     hands = teeth_hands(pcb, list(choice), st['byname'], st['sref'])
-    with contextlib.redirect_stdout(io.StringIO()):
-        _h, rep = je.plan_array(pcb, dref, names, a['others'], spec['layers'], prefer=prefer,
-                                drops=a['drops'], debug=True, log=lambda *a_: None, hands=hands,
-                                vias_only=route_layers.escape_vias('dest'))
+    # (two plans: the bus PREFERRING the ends model's berths, and every bus berth HELD there, the other balls planned
+    # round them -- the better by the plan's own objective kept, of those that serve every ball (no tier short, none
+    # let go or unplanned). The held plan is the preferring one's model with the berths fixed, so it can score no
+    # higher than that model's optimum -- where it does, the preferring search did not reach it: phase 2 starts from
+    # phase 1's answer (any plan serving every ball, no cost) and never reshuffles back. h616_lpddr4's U2: the
+    # preferring plan put SRST and SDQM3 on the far face, crossing the whole bus (119 -> 195 crossings, the solve
+    # INFEASIBLE); held, every ball served and the objective 18,544 higher)
+    hold = {k: {'tooth': g['tooth'], 'direction': g['direction'], 'layer': g['layer']} for k, g in prefer.items()}
+    whole = lambda r_: not r_.get('unplanned') and not r_.get('let_go') and \
+        all(s_ == 'OPTIMAL' for _t, _n, s_ in r_.get('phase1_tiers') or ())
+    objective = lambda r_: (r_.get('debug') or {}).get('objective')
+    plans = {}
+    for how, h_ in (('preferring', None), ('held', hold)):
+        t_ = time.time()
+        with contextlib.redirect_stdout(io.StringIO()):
+            _h, plans[how] = je.plan_array(pcb, dref, names, a['others'], spec['layers'], prefer=prefer,
+                                           drops=a['drops'], debug=True, log=lambda *a_: None, hands=hands,
+                                           vias_only=route_layers.escape_vias('dest'), exit_rays=True, hold=h_)
+        plans[how]['_secs'] = time.time() - t_
+    rank = lambda how: (whole(plans[how]), objective(plans[how]) if objective(plans[how]) is not None else -math.inf)
+    how = 'held' if rank('held') > rank('preferring') else 'preferring'
+    rep = plans[how]
+    log('  berths: the plan preferring the ends model\'s berths and the plan holding them -- ' +
+        ', '.join(f'{h_} {"serves every ball" if whole(plans[h_]) else "a ball short"}, objective {objective(plans[h_])} '
+                  f'({plans[h_]["_secs"]:.0f} s)' for h_ in ('preferring', 'held')) + f': the {how} plan kept')
     out = {k.split('#')[0]: o for k, (kind, o) in (rep.get('debug', {}).get('chosen') or {}).items()
            if kind == 'escape' and k.split('#')[0] in choice}
     same = sum(1 for nm, o in out.items() if sr.move_sig(o) == sr.move_sig(choice[nm]))
@@ -571,6 +642,12 @@ def joint_berths(st, board, choice, log=print):
         f'hand {len(rep.get("hands_held") or ())}/{len(rep.get("hands_held") or ()) + len(rep.get("hands_free") or ())}'
         + (f' (NO berth pair of it: {rep["hands_free"]})' if rep.get('hands_free') else '')
         + f', phase 1 {rep.get("phase1_tiers")}')
+    # (each berth the joint plan placed elsewhere than the ends model's, named: the ends are chosen again on these)
+    desc = lambda m_: f'{m_.kind}/{m_.direction}/{m_.layer}@({m_.exit_pt[0]:.2f},{m_.exit_pt[1]:.2f})'
+    moved = [nm for nm in choice if nm not in out or sr.move_sig(out[nm]) != sr.move_sig(choice[nm])]
+    if moved:
+        log(f'  berths the joint plan moved: ' + '; '.join(
+            f'{je.short_name(nm)} {desc(choice[nm])} -> {desc(out[nm]) if nm in out else "none"}' for nm in moved))
     return out
 
 
@@ -908,6 +985,7 @@ def pf_fmt(k0, k1):
 
 
 SRC_RESIDUE_ROUNDS = int(awx_settings.get('SRC_RESIDUE_ROUNDS', '8'))   # one tooth realized -> re-chosen, at most this often a round
+TEETH_AHEAD = 3             # (ends) a realized board worse as laid: the teeth its own choice asks realized too, this often
 
 
 def total(dst_c, st, cache, buses=None):
@@ -1154,6 +1232,8 @@ def plan(base, names, work):
                     if not ch2:
                         return None, line + '; no destination choice on the new board -- reverted'
                     import whole_ends
+                    # (and what the teeth the new board's own choice asks would make of it: _ahead)
+                    _trial.free = whole_ends.choose.last.get('free') if src2 else None
                     return (new_board, st2, ch2, un2, pf_key(ch2, {}, whole_ends.choose.last['laid']), src2,
                             split_pairs(st2)), line
                 ch2, un2 = dest_choice(st2, new_board, src_out=src2, fixed=keep_sig)
@@ -1216,8 +1296,54 @@ def plan(base, names, work):
                     board, st, dst_choice, un, best_key, src_out = res[0], res[1], res[2], res[3], res[4], res[5]
                     best_split = sp2
                 else:
+                    # THE TEETH AHEAD (ends): a board judged worse on its teeth as laid whose own choice asks teeth that
+                    # make it better than the board kept is a step, not the end -- those teeth realized too, once, from
+                    # it, and the board they make judged against the one kept. The zynq DDR3 bus with its reset's pull
+                    # laid: the moves realized met two berths in conflict as laid (one split pair before), the 13 teeth
+                    # its choice then asked 74 vias and none -- reverted, the round laid the split pair's ends, 326
+                    # crossings, 104 vias where the bus without the reset lays 64
+                    # The steps go on while each is better as laid than the one before (a conflict fewer: 200306 ->
+                    # 100299 -> ...), TEETH_AHEAD at most
+                    free_ = getattr(_trial, 'free', None)
+                    ahead = (PLAN_JUDGE == 'ends' and res[5] and free_ is not None and sp2[0] <= best_split[0]
+                             and free_ < best_key[0])
+                    steps_, won_ = [], None
+                    if ahead:
+                        kept_ = (board, st, dst_choice)
+                        cur_ = res
+                        for a_ in range(TEETH_AHEAD):
+                            board, st, dst_choice = cur_[0], cur_[1], cur_[2]
+                            nxt_, line_n = _trial(dict(cur_[5]), f'{work}_srcres{r}_{_k}a{a_}.kicad_pcb')
+                            if nxt_ is None:
+                                steps_.append('not laid')
+                                break
+                            steps_.append(pf_fmt(best_key, nxt_[4]).replace('judged ', ''))
+                            if nxt_[6][0] < best_split[0] or (nxt_[6][0] == best_split[0]
+                                                               and pf_better(nxt_[4], best_key)):
+                                won_ = (nxt_, line_n)
+                                break
+                            nfree_ = getattr(_trial, 'free', None)
+                            if not (nxt_[5] and nfree_ is not None and nfree_ < best_key[0]
+                                    and nxt_[6][0] <= cur_[6][0] and pf_better(nxt_[4], cur_[4])):
+                                break
+                            cur_ = nxt_
+                        if won_ is not None:
+                            res2, line2 = won_
+                            print(line + f'; {pf_fmt(best_key, res[4])}: worse as laid, its own teeth ahead '
+                                  f'{free_:.0f} -- realized too, {len(steps_)} step(s): {"; ".join(steps_)}')
+                            print(line2 + f'; {pf_fmt(best_key, res2[4])}'
+                                  + (f', pairs split {best_split[0]} -> {res2[6][0]}' if res2[6][0] != best_split[0]
+                                     else '') + ': KEPT')
+                            board, st, dst_choice, un, best_key, src_out = (res2[0], res2[1], res2[2], res2[3],
+                                                                            res2[4], res2[5])
+                            best_split = res2[6]
+                            if not src_out:
+                                break
+                            continue
+                        board, st, dst_choice = kept_
                     print(line + f'; {pf_fmt(best_key, res[4])}'
                           + (f', pairs split {best_split[0]} -> {sp2[0]}' if sp2[0] != best_split[0] else '')
+                          + (f', its own teeth ahead {free_:.0f} realized: {"; ".join(steps_)}' if ahead else '')
                           + ': not better -- reverted')
                     # (nothing banned: the engine laid them as asked -- a ban is the engine's refusal, not the judge's)
                     break
@@ -1333,6 +1459,10 @@ def explain_plan(choice, st, names, out_path=None, board=None, achieved=None):
         if PLAN_PAGES:
             plan['pages_first'] = True      # the braid stage pages this plan EXACTLY
         plan['nets'] = list(names)          # the run, in its order: an INCREMENTAL round routes the same nets
+        if isinstance(st, dict) and len(st.get('dests') or ()) > 1:
+            # (DEST naming several parts, one source and several ends: each net's own -- the feedback's berth boxes,
+            # whole_feedback)
+            plan['dest_of'] = {nm: st['dst_pad'][nm].component_ref for nm in plan['ends'] if nm in st['dst_pad']}
         if PLAN_JUDGE == 'ends':
             # the ends model's reading of each lane on these ends (whole_ends: its nets over two, its load on the
             # trunk, its crossings) -- the lanes a round the whole route lays nothing on frees next (whole_feedback
@@ -1345,6 +1475,8 @@ def explain_plan(choice, st, names, out_path=None, board=None, achieved=None):
                 c_ = pe_['cut']
                 # (a far-face cut its y, as it always was; one off the far face -- winding -- its face and coordinate)
                 plan['dest_cut'] = [c_[0], float(c_[1])] if isinstance(c_, (list, tuple)) else float(c_)
+            if pe_.get('scut') is not None:
+                plan['src_cut'] = float(pe_['scut'])       # (the source's far face's: a far-face tooth's side round it)
         with open(side, 'w', encoding='utf-8') as f:
             json.dump(plan, f, indent=1, sort_keys=True)
         print(f'  plan written to {os.path.basename(side)}')
@@ -1374,6 +1506,11 @@ def main():
     print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
           f'track {te.TRACK}, fanout {sr.FAN_TRACK}/{sr.FAN_CLEAR}, '
           f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.source}]')
+    if awx_settings.get('FANOUT_ESCAPE') == '1':
+        # THE ESCAPE FANOUT (route_bus --escape): the ends planned among the escapes of a dog-boned base and laid as
+        # they are (escape_plan.py)
+        import escape_plan
+        return escape_plan.run(out_path, K, base)
     if '--hold' in sys.argv[2:]:
         # (OUT_TAG is the round's fanned board, its passives just moved by the cap step: whole_route)
         joint_hold(out_path)
@@ -1407,12 +1544,7 @@ def main():
     # else its frame stops on. Such a board is set aside, named, and no board goes to the stage after
     sp, far, stops = fanout_audit(out_path, names, dref) if os.path.isfile(out_path) else ([], [], [])
     if sp or far or stops:
-        held = out_path[:-len('.kicad_pcb')] + '.refused.kicad_pcb'
-        os.replace(out_path, held)
-        # (the findings, for the chain's feedback: the next round frees the ends named -- whole_feedback --refused)
-        with open(out_path[:-len('.kicad_pcb')] + '.refused.json', 'w', encoding='utf-8') as f_:
-            json.dump({'splits': [[pr_, end_, list(ls_)] for pr_, end_, ls_ in sp], 'far': list(far),
-                       'stops': stops}, f_, indent=1)
+        held = set_aside_refused(out_path, sp, far, stops)
         print(f'REFUSED by the fanout audit: {_audit_line(sp, far, stops)} -- the board set aside as '
               f'{os.path.basename(held)}')
         return 3
@@ -1438,11 +1570,16 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
                                   'kind': m.kind} for nm, m in choice.items()}
     # each pair's berths arriving with the hand its teeth leave by (teeth_hands, on the source as laid)
     sref = next((x['ref'] for x in spec['arrays'] if x['ref'] != dref), None)
+    # the source board, named as fanout_destination names it: the whole route's next round starts from it
+    # (whole_route.advance). Unnamed, every round after the first started again from the bench's own source fanout,
+    # its pairs split as that pair-blind fanout left them (zynq LVDS on four layers: 11 pairs split at U1, every round 2)
+    log(f'\nplan (joint destination {dref}): {len(choice)} berth(s)  (source board: {os.path.basename(board)}, '
+        f'{len(banned)} banned move(s))')
     pcb = parse_kicad_pcb(board)
     hands = teeth_hands(pcb, list(names), byname, sref) if sref in pcb.footprints else {}
     rung, reps = je.fan_array(board, out_path, dref, list(names), a['others'], spec['layers'], prefer=prefer,
                               drops=a['drops'], log=log, debug=True, hands=hands,
-                              vias_only=route_layers.escape_vias('dest'))
+                              vias_only=route_layers.escape_vias('dest'), exit_rays=True)
     kept = next(r for r in reps if (r['track'], r['via'], r['drill']) == (rung.fan_track, rung.via_size,
                                                                           rung.via_drill))
     bus_s = {je.short_name(nm) for nm in names}
@@ -1498,6 +1635,7 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
             add_tracks_and_vias_to_pcb(out_path, tmp, [], ties, [],
                                        net_id_to_name={i: n.name for i, n in pcb_t.nets.items()})
             os.replace(tmp, out_path)
+            _drop_tie_siblings(tmp)
             ship_vias.stamp(out_path, 'fanout ties', log)
             log(f'  joint destination: {len(ties)} tie via(s) for pads under balls')
     except Exception as e:      # a tie must not lose the board
@@ -1782,6 +1920,31 @@ def _split_legs(names):
     return {b: tuple(pr) for b, pr in _pairs_s.pair_names(list(names)).items()}
 
 
+def set_aside_refused(out_path, splits, far, stops):
+    """A fanout board the audit refuses, set aside: OUT.kicad_pcb becomes OUT.refused.kicad_pcb, with what a board
+    carries beside it -- the whole route's last resort lays this board:
+    - its project and rules (#441: a board with no project beside it is laid under a stock one, which the step's OUT
+      then carries -- the board's DRC exclusions, rule severities and edge clearance lost);
+    - its plan sidecar (OUT.plan.json, and the taut cache): the solve reads the ends model's fronts from it, the braid
+      its corridors, and on more than two layers the via ends are moved onto the solve's layers by it -- without it
+      they stay as laid, on layers the plan does not route them on, and the band meets no tooth (TOOTH-OUT). Copied,
+      not moved: the last resort reads the round's own OUT.plan.json too;
+    and the findings beside it in OUT.refused.json, for the chain's feedback (whole_feedback --refused frees the ends
+    named). Returns the set-aside board's path"""
+    from copy_board import copy_siblings
+    base = out_path[:-len('.kicad_pcb')]
+    held = base + '.refused.kicad_pcb'
+    os.replace(out_path, held)
+    copy_siblings(out_path, held)
+    for ext in ('.plan.json', '.taut.json'):
+        if os.path.isfile(base + ext):
+            shutil.copy2(base + ext, base + '.refused' + ext)
+    with open(base + '.refused.json', 'w', encoding='utf-8') as f_:
+        json.dump({'splits': [[pr_, end_, list(ls_)] for pr_, end_, ls_ in splits], 'far': list(far),
+                   'stops': stops}, f_, indent=1)
+    return held
+
+
 def fanout_audit(board, names, dest):
     """THE FANOUT AUDIT, run on every board a fanout hands back (and on each destination pass's): what the whole
     route would refuse on it, by its own tests on the bench the board becomes -- whole_ctx's reading of it (its
@@ -1792,6 +1955,9 @@ def fanout_audit(board, names, dest):
     empty: the board may be handed on."""
     import whole_ctx
     import whole_frame
+    _d = awx_settings.get('DEST') or ''
+    if len(te.dest_refs(_d)) > 1 and te.dest_refs(_d)[0] == dest:
+        dest = _d                       # (DEST naming several parts, `dest` the trunk's: the frame of them all)
     with awx_settings.given({**awx_settings.environ(), 'BENCH': board, 'NETS': ','.join(names), 'DEST': dest}):
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -1980,10 +2146,36 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
             add_tracks_and_vias_to_pcb(out_path, tmp, [], ties, [],
                                        net_id_to_name={i: n.name for i, n in pcb_f.nets.items()})
             os.replace(tmp, out_path)
+            _drop_tie_siblings(tmp)
             ship_vias.stamp(out_path, 'fanout ties', print)
     except Exception as e:      # a tie must not lose the board
         print(f'  tie vias NOT added: {e}')
     return 0 if ok_l else 1
+
+
+def row_berths(pcb, dref, targets, choice, dst_pad, byname):
+    """(tracks, vias, removed vias, failed nets) for the berths at a ROW PART (escape_moves.row_part): each target's
+    planned move laid on its own legs at the fanout's track; a target the plan left unplaced takes its pad's one
+    escape, straight out of its row (escape_moves), where its row's face is clear of everything but the run's nets"""
+    grid = em.grid_of(pcb.footprints[dref])
+    kids = {byname[nm][0] for nm in targets}
+    tracks, vias, failed = [], [], []
+    for nm in targets:
+        nid = byname[nm][0]
+        m = choice.get(nm)
+        if m is None and nm in dst_pad:
+            own = em.enumerate_moves(dst_pad[nm], grid, route_layers.escape_layers(pcb.board_info.copper_layers),
+                                     lambda p, q, L, _n=nid: te.build_obstacles(pcb, _n, kids, L).seg_clear(p, q))
+            m = own[0] if own else None
+        if m is None:
+            failed.append(nm)
+            continue
+        tracks += [{'start': tuple(a), 'end': tuple(b), 'width': sr.FAN_TRACK, 'layer': L, 'net_id': nid}
+                   for a, b, L in m.legs]
+        if m.site is not None:
+            vias.append({'x': m.site[0], 'y': m.site[1], 'size': te.VIA_SIZE, 'drill': te.VIA_DRILL,
+                         'layers': ['F.Cu', 'B.Cu'], 'net_id': nid})
+    return tracks, vias, [], failed
 
 
 def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
@@ -2004,7 +2196,11 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     hint -- its own search picks the gap, layer and kind on that face), for a
     net whose menu of straight escapes is empty on an occupied board
     (reberth.py); measured like an unplanned net, not audited.
-    Returns (laid nets, audit dict, clean-and-complete)."""
+    Returns (laid nets, audit dict, clean-and-complete).
+    (DEST naming several parts, one source and several ends: each net's
+    berth laid at its own -- dst_pad's part -- by that part's engine.)"""
+    multi = len(te.dest_refs(awx_settings.get('DEST') or '')) > 1
+    dof = (lambda nm: dst_pad[nm].component_ref if nm in dst_pad else dref) if multi else (lambda nm: dref)
     if relay is None:
         targets = list(names)
         pcb = parse_kicad_pcb(board)
@@ -2015,14 +2211,16 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
         shutil.copy(out_path, prev)
         pcb = parse_kicad_pcb(prev)
         n2n = {i: n.name for i, n in pcb.nets.items()}
-        x0, y0, x1, y1 = em.grid_of(pcb.footprints[dref]).bbox
-        x0, y0, x1, y1 = x0 - 2.0, y0 - 2.0, x1 + 2.0, y1 + 2.0
-        nids = {byname[nm][0] for nm in targets}
-        segs = [s for s in pcb.segments if s.net_id in nids
-                and x0 <= min(s.start_x, s.end_x) and max(s.start_x, s.end_x) <= x1
-                and y0 <= min(s.start_y, s.end_y) and max(s.start_y, s.end_y) <= y1]
-        vias = [v for v in pcb.vias if v.net_id in nids
-                and x0 <= v.x <= x1 and y0 <= v.y <= y1]
+        segs, vias = [], []
+        for r_ in sorted({dof(nm) for nm in targets}):
+            x0, y0, x1, y1 = em.grid_of(pcb.footprints[r_]).bbox
+            x0, y0, x1, y1 = x0 - 2.0, y0 - 2.0, x1 + 2.0, y1 + 2.0
+            nids = {byname[nm][0] for nm in targets if dof(nm) == r_}
+            segs += [s for s in pcb.segments if s.net_id in nids
+                     and x0 <= min(s.start_x, s.end_x) and max(s.start_x, s.end_x) <= x1
+                     and y0 <= min(s.start_y, s.end_y) and max(s.start_y, s.end_y) <= y1]
+            vias += [v for v in pcb.vias if v.net_id in nids
+                     and x0 <= v.x <= x1 and y0 <= v.y <= y1]
         content = open(prev, encoding='utf-8').read()
         content, n_s = sr.remove_segments_from_content(content, segs, n2n)
         content, n_v = sr.remove_vias_from_content(content, vias, n2n)
@@ -2065,11 +2263,23 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     pcb._fanout_all_foreign_immovable = True
     import joint_escape as _je
     _je.reserve_ball_vias(pcb)          # the joint fanout: the other balls' own via sites stay free
-    tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-        pcb.footprints[dref], pcb, net_filter=targets, layers=route_layers.stacked(pcb.board_info.copper_layers),
-        track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
-        exit_margin=0.5, escape_method='underpad', plane_drop='off',
-        escape_dir_hints=hints)
+    tracks, vias_add, vias_rm, failed = [], [], [], []
+    for r_ in [dref] + sorted({dof(nm) for nm in targets} - {dref}):
+        tg_ = [nm for nm in targets if dof(nm) == r_]
+        if not tg_ and r_ != dref:
+            continue
+        if em.row_part(pcb.footprints[r_]):
+            # a ROW PART (a QFN): each berth laid as planned, on its own legs -- a pad's one escape, straight out of
+            # its row (escape_moves); the array engine follows a plan over a ball grid, and on zynq U4 laid 1 of 8
+            got_ = row_berths(pcb, r_, tg_, choice, dst_pad, byname)
+        else:
+            got_ = generate_bga_fanout(
+                pcb.footprints[r_], pcb, net_filter=tg_, layers=route_layers.stacked(pcb.board_info.copper_layers),
+                track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
+                exit_margin=0.5, escape_method='underpad', plane_drop='off',
+                escape_dir_hints=hints)
+        for acc_, add_ in zip((tracks, vias_add, vias_rm, failed), got_):
+            acc_ += list(add_)
     if tracks:
         add_tracks_and_vias_to_pcb(
             src_file, out_path, tracks, vias_add, vias_rm,
@@ -2130,7 +2340,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     got = {t['net_id'] for t in tracks}
     have = (set(already) - set(targets)) | {nm for nm in names if byname[nm][0] in got}
     laid = [nm for nm in choice if nm in have]
-    achieved = {nm: sr.measure_tooth(pcb_out, nm, dst_pad[nm], byname, dest_ref=dref)
+    achieved = {nm: sr.measure_tooth(pcb_out, nm, dst_pad[nm], byname, dest_ref=dof(nm))
                 for nm in laid}
     audit_d, _counts = sr.audit(choice, achieved, None, laid, print, 'berth')
     # the berth of a net the plan left UNPLACED, laid by the engine's own
@@ -2138,7 +2348,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     # over the asked berths only)
     for nm in names:
         if nm not in choice and nm in have and nm in dst_pad:
-            achieved[nm] = sr.measure_tooth(pcb_out, nm, dst_pad[nm], byname, dest_ref=dref)
+            achieved[nm] = sr.measure_tooth(pcb_out, nm, dst_pad[nm], byname, dest_ref=dof(nm))
     fanout_once.achieved = achieved
     print(f'\nwrote {out_path}: {len(tracks)} tracks, {len(vias_add)} '
           f'vias, {len(set(failed))} failed nets, '

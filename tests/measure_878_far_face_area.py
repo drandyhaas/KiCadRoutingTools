@@ -76,9 +76,10 @@ from placement.utility import compute_footprint_bbox_local   # noqa: E402
 SKIP_EXIT = 77
 
 #: ONE BASIS, stated rather than defaulted. 0.2 / 0.5 are what
-#: `tests/test_capacity_options.py` grades `grow_board` at, so every number
-#: here is comparable with the assertions that pin the engine.
-#: `check_capacity.py`'s own default edge clearance is 0.55, which is why the
+#: `tests/test_capacity_options.py` graded `grow_board` at, so every number
+#: here was comparable with the assertions that pinned the engine (that test
+#: and `check_capacity.py` were deleted in ecd673eb).
+#: `check_capacity.py`'s own default edge clearance was 0.55, which is why the
 #: robustness arm re-runs the verdict there (H5).
 CLEARANCE = 0.2
 BOARD_EDGE_CLEARANCE = 0.5

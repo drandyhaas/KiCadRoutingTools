@@ -1,23 +1,14 @@
 #!/usr/bin/env python3
-"""#887, the three defects found while mapping the movie path.
+"""#887, small defects of one shape: something DECLARED that nothing reads.
 
-Each is small; each was invisible in the way that matters. They are graded
-together because they share one shape: something DECLARED that nothing reads.
+  * Pillow was a hard module-scope import declared in neither
+    `requirements.txt` nor `startup_checks` -- and then, briefly, declared in
+    the WRONG one: the routing gate, which does not need it.
+  * The RUNBOOK's timing audit was a subagent's job, not a runnable command.
 
-  1. `place_route_loop --movie-tween` was parsed and never used.
-  2. Two of the three skills never mentioned the movie at all, so a
-     placement-only or routing-only run had no instruction to produce the
-     artifact the combined skill calls mandatory.
-  3. Pillow was a hard module-scope import declared in neither
-     `requirements.txt` nor `startup_checks` -- and then, briefly, declared in
-     the WRONG one: the routing gate, which does not need it.
-
-Note the shape of these gates. A substring check would pass on all three
-TODAY-AND-BEFORE-THE-FIX, because in every case the string was already present
-somewhere: `movie_tween` in an `add_argument`, the word "movie" in a comment,
-`PIL` in an import line. So each gate asserts the SHAPE -- an AST keyword, a
-fenced block inside a named section, a resolved distribution -- not the presence
-of a word.
+A substring check would pass TODAY-AND-BEFORE-THE-FIX, because the string was
+already present somewhere (`PIL` in an import line). So each gate asserts the
+SHAPE -- a fenced block, a resolved distribution -- not the presence of a word.
 """
 import ast
 import os
@@ -30,12 +21,6 @@ RUN_ALL_FAST_OK = True
 TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS)
 
-SKILLS = os.path.join(ROOT, '.claude', 'skills')
-# pcb-free-agent replaced the placement and the combined skill (#1009); it
-# drives placement runs, so it carries their movie mandate.
-FREE_SKILL = os.path.join(SKILLS, 'pcb-free-agent', 'SKILL.md')
-ROUTE_SKILL = os.path.join(SKILLS, 'plan-pcb-routing', 'SKILL.md')
-LOOP = os.path.join(ROOT, 'py_placer', 'place_route_loop.py')
 REQS = os.path.join(ROOT, 'requirements.txt')
 RUNBOOK = os.path.join(ROOT, 'tests', 'stress', 'RUNBOOK.md')
 
@@ -50,35 +35,7 @@ def want(cond, label, extra=''):
         print('  FAIL: %s %s' % (label, extra))
 
 
-# ------------------------------------------------------------ 1. movie-tween
-
-def test_place_route_loop_passes_its_movie_tween_through():
-    """AST, not substring. `'movie_tween' in src` was ALREADY TRUE before the
-    fix -- from the add_argument line -- which is precisely the defect: argparse
-    accepted the flag and nothing read it."""
-    src = open(LOOP, encoding='utf-8').read()
-    tree = ast.parse(src)
-    calls = [n for n in ast.walk(tree)
-             if isinstance(n, ast.Call)
-             and isinstance(n.func, ast.Name) and n.func.id == 'make_movie']
-    want(len(calls) == 1, 'there is exactly one make_movie call', len(calls))
-    kw = {k.arg: k.value for k in calls[0].keywords if k.arg}
-    want('tween' in kw, 'and it passes tween=', sorted(kw))
-    v = kw.get('tween')
-    want(isinstance(v, ast.Attribute) and v.attr == 'movie_tween',
-         'sourced from args.movie_tween, not a literal that would ignore the '
-         'flag just as thoroughly', ast.dump(v) if v is not None else None)
-
-
-def test_the_movie_tween_flag_still_exists_to_be_passed():
-    """The two halves must not drift: a passed-through flag nobody declares is
-    an AttributeError, and a declared flag nobody passes is the original bug."""
-    src = open(LOOP, encoding='utf-8').read()
-    want('"--movie-tween"' in src or "'--movie-tween'" in src,
-         'the flag is still declared')
-
-
-# ---------------------------------------------------------------- 2. skills
+# ---------------------------------------------------------------- the RUNBOOK
 
 _FENCE = re.compile(r'```(?:bash|sh)\n(.*?)```', re.S)
 
@@ -90,47 +47,6 @@ def _fenced_tools(text):
         for m in re.finditer(r'(\S+\.py)', block):
             out.append(os.path.basename(m.group(1)))
     return out
-
-
-def _section(text, heading):
-    """The text under `## heading`, up to the next `## `."""
-    parts = re.split(r'(?m)^## ', text)
-    for p in parts:
-        if p.startswith(heading):
-            return p
-    return ''
-
-
-def test_the_free_agent_skill_mandates_the_movie_with_a_runnable_command():
-    text = open(FREE_SKILL, encoding='utf-8').read()
-    tools = _fenced_tools(text)
-    want('make_film.py' in tools or 'make_movie.py' in tools,
-         'the free-agent skill carries a FENCED command that builds the movie -- '
-         'a fence, because prose quoting a command in backticks satisfies a '
-         'naive grep and has done so in this repo before',
-         [t for t in tools if 'm' in t][:8])
-
-
-def test_the_routing_skill_mandates_the_movie_after_routing_completes():
-    text = open(ROUTE_SKILL, encoding='utf-8').read()
-    sec = _section(text, 'After Routing Completes')
-    want(sec, 'the routing skill has an After Routing Completes section')
-    want('make_movie.py' in _fenced_tools(sec),
-         'and the movie command is fenced INSIDE it -- section-scoped, so a '
-         'mention elsewhere in a 2000-line file cannot satisfy this',
-         _fenced_tools(sec)[:8])
-
-
-def test_the_movie_mandate_is_in_every_run_skill():
-    """Asserted PER FILE: a concatenated scan passes with only one skill
-    carrying it -- and the combined skill once carried it alone."""
-    missing = []
-    for path in (FREE_SKILL, ROUTE_SKILL):
-        tools = _fenced_tools(open(path, encoding='utf-8').read())
-        if not ({'make_movie.py', 'make_film.py'} & set(tools)):
-            missing.append(os.path.basename(os.path.dirname(path)))
-    want(not missing,
-         'every skill that drives a run says how to produce the movie', missing)
 
 
 def test_the_runbook_names_the_audit_tool_not_a_subagent():
@@ -257,9 +173,6 @@ def test_the_requirements_file_declares_pillow():
          'and says where it is declared OPTIONAL (#943), because "declared in '
          'requirements.txt" now means two different things -- installed by the '
          'install path, and NOT a gate')
-    want('imageio' in txt,
-         'while imageio stays UNdeclared, with the reason written down -- it is '
-         'function-scope, optional, and its absence is audible')
 
 
 #: Blocks PIL for the child only, by refusing it at the import hook rather than
@@ -374,8 +287,8 @@ def test_the_gui_dep_check_mirrors_the_routing_gate_and_no_more():
     src = open(os.path.join(ROOT, 'kicad_routing_plugin', 'swig_gui.py'),
                encoding='utf-8').read()
     want("missing.append('Pillow')" not in src,
-         'the GUI routing dialog does not block on Pillow either (its only '
-         'raster consumer, the movie recorder, is off by default)')
+         'the GUI routing dialog does not block on Pillow either (routing '
+         'draws nothing)')
 
     # ...and the file that ACTUALLY decides, which this test did not read
     # until #943. `deps_check` derives its list from requirements.txt, so
@@ -399,11 +312,6 @@ def test_the_gui_dep_check_mirrors_the_routing_gate_and_no_more():
 
 
 TESTS_TO_RUN = [
-    test_place_route_loop_passes_its_movie_tween_through,
-    test_the_movie_tween_flag_still_exists_to_be_passed,
-    test_the_free_agent_skill_mandates_the_movie_with_a_runnable_command,
-    test_the_routing_skill_mandates_the_movie_after_routing_completes,
-    test_the_movie_mandate_is_in_every_run_skill,
     test_the_runbook_names_the_audit_tool_not_a_subagent,
     test_every_module_scope_third_party_import_is_declared,
     test_the_requirements_file_declares_pillow,

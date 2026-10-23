@@ -29,16 +29,10 @@ These are lower bounds on what ANY router must pay, which is what makes them
 safe to rank poses by -- unlike a correlational proxy, improving them cannot be
 gamed by the optimizer.
 
-They join ``quench.total_cost`` ONLY under an explicit non-zero
-``facing_weight``, whose default is 0.0 (#893). Before that they joined it
-never, and the reason is still the operative one for the default:
-docs/placement-optimization.md is a file-length negative result about adding
-proxies to this objective. Being a lower bound rather than a correlational
-proxy is an argument for trying it, not a measurement that it helps -- so the
-weight exists to MEASURE the question and
-``tests/test_placement_ab.py`` exists to decide it. The consumers are pose
-ranking (pose_score components), the operator reading a report, and
-``QuenchState._facing_cost`` when it is armed.
+They are REPORTED, not optimised: being a lower bound rather than a
+correlational proxy is an argument for trying them in an objective, not a
+measurement that it helps. The consumer is the operator reading a report
+(`board_context`'s pair rows).
 """
 from __future__ import annotations
 
@@ -77,48 +71,13 @@ def _lis_length(seq: List[int]) -> int:
     return len(tails)
 
 
-def part_pad_globals(part, pose=None):
-    """`part.pad_globals` at `pose` (or the live pose), as a LIST.
-
-    Hoisted out of `_escape_pads` because the transform does not depend on the
-    partner while the SELECTION does: `ref_inversions` asks about one part
-    against every partner it shares a net with, and the unhoisted version
-    re-transformed that part's whole pad list once per partner. Measured on
-    ulx3s (226 parts, ~150 partners for the FPGA after ignored nets), the two
-    hoists in this module together take `ref_inversions` from ~1430 us to the
-    low hundreds. The list is materialised because callers iterate it many
-    times; `pad_globals` may be a generator.
-
-    ON THE SPEED-UP FIGURES, because they are machine-dependent and were nearly
-    reported as if they were not: measured here as 1.35x / 1.11x / 1.34x on
-    esp_prog / tigard / ulx3s, and independently on another box as 1.25x /
-    1.75x / 2.53x -- same direction, different magnitudes, and a different
-    per-board ORDER. What is NOT machine-dependent, and is what
-    `tests/test_893_pair_order_equivalence.py` actually pins, is that the
-    inversion counts are unchanged: 16 / 384 / 1138 on those three boards
-    before and after. Trust the equivalence; treat any single speed-up number
-    as an anecdote from one machine.
-    """
-    x, y, rot = pose if pose is not None else (part.x, part.y, part.rot)
-    return list(part.pad_globals(x, y, rot))
-
-
-def _escape_pads(part, nets, toward_xy, pose=None,
-                 pads=None) -> Dict[int, Tuple[float, float]]:
+def _escape_pads(part, nets, toward_xy) -> Dict[int, Tuple[float, float]]:
     """One representative pad per shared net: the pad nearest the partner
     (the one that would actually escape into the channel). Deterministic
-    tie-break by (x, y). `pose` overrides the part's live (x, y, rot).
-
-    `pads` is `part_pad_globals(part, pose)` computed by the caller. It is an
-    optimisation ONLY: passing it must not change any number, which
-    `tests/test_893_pair_order_equivalence.py` asserts per ref rather than in
-    aggregate.
-    """
-    if pads is None:
-        pads = part_pad_globals(part, pose)
+    tie-break by (x, y)."""
     tx, ty = toward_xy
     best: Dict[int, Tuple[float, float, float]] = {}
-    for gx, gy, nid in pads:
+    for gx, gy, nid in part.pad_globals(part.x, part.y, part.rot):
         if nid not in nets:
             continue
         d = (gx - tx) ** 2 + (gy - ty) ** 2
@@ -136,10 +95,7 @@ def _scoring_net_ids(state):
     pose. It is pose-invariant: `net_refs` is assigned once in
     `QuenchState.__init__` and never mutated afterwards, and `part.nets` is
     filtered earlier in that same constructor, so both are frozen by the time
-    anything here runs. (Deliberately no line numbers: the first draft of this
-    docstring cited two, and this commit's own edits to `quench.py` moved both
-    before it was pushed.) Measured on ulx3s, that one expression was 735 of
-    1782 us per `ref_inversions` call.
+    anything here runs.
     """
     ids = getattr(state, '_pair_order_net_ids', None)
     if ids is None:
@@ -168,14 +124,10 @@ def _part_net_set(state, ref, part):
 
 
 def pair_metrics(state, ref_a: str, ref_b: str,
-                 pose_a: Optional[Tuple[float, float, float]] = None,
-                 pose_b: Optional[Tuple[float, float, float]] = None,
-                 only_nets=None, pads_a=None, pads_b=None) -> Optional[Dict]:
-    """{'inversions', 'lis', 'nets'} for one part pair, or None when they share
-    fewer than 2 scoring nets (one net cannot be out of order).
-
-    ``pose_a`` / ``pose_b`` override the live poses -- this is what makes the
-    delta cheap: nothing on the state is mutated or rebuilt.
+                 only_nets=None) -> Optional[Dict]:
+    """{'inversions', 'lis', 'nets'} for one part pair at their live poses,
+    or None when they share fewer than 2 scoring nets (one net cannot be out
+    of order).
 
     ``only_nets`` (net ids) narrows the question to a SUBSET of the shared
     nets; None, the default, keeps the whole-interface question every existing
@@ -198,16 +150,15 @@ def pair_metrics(state, ref_a: str, ref_b: str,
         shared = [n for n in shared if n in keep]
     if len(shared) < 2:
         return None
-    ax, ay = (pose_a[0], pose_a[1]) if pose_a is not None else (pa.x, pa.y)
-    bx, by = (pose_b[0], pose_b[1]) if pose_b is not None else (pb.x, pb.y)
+    ax, ay, bx, by = pa.x, pa.y, pb.x, pb.y
     ux, uy = bx - ax, by - ay
     n = math.hypot(ux, uy)
     if n < 1e-9:
         return None                      # coincident parts: no channel axis
     # Cross-section axis of the channel between the parts.
     vx, vy = -uy / n, ux / n
-    ea = _escape_pads(pa, set(shared), (bx, by), pose_a, pads=pads_a)
-    eb = _escape_pads(pb, set(shared), (ax, ay), pose_b, pads=pads_b)
+    ea = _escape_pads(pa, set(shared), (bx, by))
+    eb = _escape_pads(pb, set(shared), (ax, ay))
     common = [nid for nid in shared if nid in ea and nid in eb]
     if len(common) < 2:
         return None
@@ -308,80 +259,3 @@ def pair_inversions(state) -> Dict[Tuple[str, str], Dict]:
         if m is not None:
             out[(a, b)] = m
     return out
-
-
-def ref_inversions(state, ref: str,
-                   x: Optional[float] = None, y: Optional[float] = None,
-                   rot: Optional[float] = None) -> int:
-    """Total inversions over every pair involving `ref`, at an optional
-    hypothetical pose. This is the pose-ranking number: cheap (only `ref`'s
-    pairs are recomputed) and side-effect free."""
-    part = state.parts.get(ref)
-    if part is None:
-        return 0
-    pose = None
-    if x is not None or y is not None or rot is not None:
-        pose = (part.x if x is None else x,
-                part.y if y is None else y,
-                part.rot if rot is None else rot)
-    partners = set()
-    for nid in part.nets:
-        partners.update(state.net_refs.get(nid, ()))
-    partners.discard(ref)
-    total = 0
-    # Transformed ONCE, then handed to whichever slot this ref occupies. The
-    # slot matters and is not cosmetic: `pair_metrics` builds `order_a` from
-    # the FIRST ref's escape pads and ranks the second against it, and the
-    # channel axis is `b - a`, so passing the pads to the wrong side changes
-    # the tie-break and the axis sign. A draft that always treated `ref` as A
-    # was 6.7x faster and reported ulx3s U2 as 358 inversions instead of 26.
-    pads = part_pad_globals(part, pose)
-    own_nets = _part_net_set(state, ref, part)
-    for other in sorted(partners):
-        # Early-out BEFORE the call. `pair_metrics` returns None for a pair
-        # sharing fewer than two scoring nets, and `ref_inversions` then skips
-        # it -- but only after paying the call plus two set intersections. On
-        # a board where one part has hundreds of partners and a handful of
-        # scoring pairs (ulx3s: 226 parts, 209 scoring pairs on tigard), that
-        # rejected majority IS the hot path. This cannot change a result: it
-        # reproduces `pair_metrics`' own `len(shared) < 2` test against the
-        # same cached sets it would build.
-        other_part = state.parts.get(other)
-        if other_part is None:
-            # `pair_metrics` returns None for a ref outside `state.parts`, and
-            # the early-out must not turn that skip into a KeyError. Unreachable
-            # for a real QuenchState (`net_refs` is built FROM `parts`), but
-            # this function accepts any duck-typed state.
-            continue
-        if len(own_nets & _part_net_set(state, other, other_part)) < 2:
-            continue
-        m = (pair_metrics(state, ref, other, pose_a=pose, pads_a=pads)
-             if ref < other
-             else pair_metrics(state, other, ref, pose_b=pose, pads_b=pads))
-        if m is not None:
-            total += m['inversions']
-    return total
-
-
-def inversions_delta(state, ref: str, x: float, y: float, rot: float) -> Dict:
-    """Before/after inversion totals for moving `ref` to (x, y, rot), with the
-    per-pair breakdown at the CANDIDATE pose. Recomputes only pairs involving
-    `ref`; the state is never mutated."""
-    part = state.parts.get(ref)
-    if part is None:
-        return {'before': 0, 'after': 0, 'delta': 0, 'pairs': {}}
-    before = ref_inversions(state, ref)
-    after = ref_inversions(state, ref, x, y, rot)
-    pose = (x, y, rot)
-    partners = set()
-    for nid in part.nets:
-        partners.update(state.net_refs.get(nid, ()))
-    partners.discard(ref)
-    pairs = {}
-    for other in sorted(partners):
-        m = (pair_metrics(state, ref, other, pose_a=pose) if ref < other
-             else pair_metrics(state, other, ref, pose_b=pose))
-        if m is not None:
-            pairs[tuple(sorted((ref, other)))] = m
-    return {'before': before, 'after': after, 'delta': after - before,
-            'pairs': pairs}

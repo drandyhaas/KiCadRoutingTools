@@ -77,6 +77,7 @@ from schedule import Schedule  # noqa: E402
 import escape_moves as em  # noqa: E402
 from select_moves import pair_chirality  # noqa: E402
 from bga_fanout.flip_frame import to_front_frame, other_layer, mirror_axis  # noqa: E402
+from flow_frame import dest_refs  # noqa: E402  DEST naming one part or several ('U4+U3')
 
 import rules as _rules  # noqa: E402  ONE source for every design rule
 
@@ -939,7 +940,7 @@ def build_obstacles(pcb, nid, kids, layer, margin=None, skip_refs=frozenset()):
             root = _build_obstacles(pcb, frozenset(), layer, margin=margin, skip_refs=skip_refs)
             _obs_remember(rkey)
             _OBS_MEMO[rkey] = root
-        base = root.exclude(base_kids, where=lambda it: str(it[3]).startswith('seg:'))
+        base = root.exclude(base_kids, where=lambda it: str(it[3]).startswith(('seg:', GFX)))
         _OBS_MEMO[bkey] = base
     if base is None:
         base = _build_obstacles(pcb, base_kids, layer, margin=margin, skip_refs=skip_refs)
@@ -956,6 +957,7 @@ def build_obstacles(pcb, nid, kids, layer, margin=None, skip_refs=frozenset()):
 # rectangle: never smaller than its copper) -- while half its short side is within this many margins: past it, the
 # long axis's capsule and the edges' leave the pad's deep corners uncovered (exact to (sqrt 2 + 1) / (sqrt 2 - 1))
 RECT_EXACT = 5.5
+GFX = 'gfx:'          # a filled copper graphic's outline capsules are named GFX + net ('seg:' + net a track's)
 
 
 def _build_obstacles(pcb, kids, layer, margin=None, skip_refs=frozenset()):
@@ -1002,8 +1004,18 @@ def _build_obstacles(pcb, kids, layer, margin=None, skip_refs=frozenset()):
     for s in pcb.segments:
         if s.net_id in kids or s.layer != layer:
             continue
+        # (a FILLED copper graphic -- a footprint's land drawn as a polygon -- is copper AREA, as a pad is, not a track:
+        # its outline named apart, GFX, one name per shape, the taut strings see it as they see a pad drawn as
+        # capsules, the one disc round them (taut_fast.pad_discs) -- where a track ('seg:') crossed is a dive they
+        # pass. Crossed as tracks, X2.1's chamfered land on the zynq board took four strings in through its edges,
+        # which pushed them only where they ran along them, and folded each, 30% longer every block, to 846 mm for
+        # a 32 mm lane)
+        name = f'seg:{s.net_id}'
+        if getattr(s, 'graphic', False) and getattr(s, 'graphic_filled', False):
+            ring = getattr(s, 'graphic_ring', None) or ((s.start_x, s.start_y),)
+            name = f'{GFX}{s.net_id}:{ring[0][0]:.4f},{ring[0][1]:.4f}'
         obs.add_cap((s.start_x, s.start_y), (s.end_x, s.end_y),
-                    s.width / 2 + m, f'seg:{s.net_id}', net=s.net_id)
+                    s.width / 2 + m, name, net=s.net_id)
     for v in pcb.vias:
         obs.add_disc(v.x, v.y, v.size / 2 + m, f'via:{v.net_id}',
                      net=v.net_id)
@@ -1160,6 +1172,16 @@ def _offset_side(run, h):
         i = back[0]
         del pts[i + 1 if i + 1 < len(pts) - 1 else i]
 
+def bare_lane(pcb, nm, byname):
+    """a net with no track at all (a via in its pad at most) and pads on two parts: on the ESCAPE fanout's field
+    (dogbone_arrays) a net whose balls are both outer balls left to leave on their own layer, or one whose ball found
+    no gap for its dog-bone -- no stub end to read, and the escape fanout lays both of its ends from the pads
+    (escape_plan.plan_state reads a lane by its pads; sdi_mipi_conv's SDI bus lost five of its 21 nets to the ladder,
+    D0, D2 and D7 outer balls at both arrays)"""
+    nid, net = byname[nm]
+    return not any(s.net_id == nid for s in pcb.segments) and len({p.component_ref for p in net.pads}) >= 2
+
+
 def endpoints(pcb, names, byname, dest_ref=None):
     """Where each net's corridor must start and finish.
 
@@ -1169,8 +1191,11 @@ def endpoints(pcb, names, byname, dest_ref=None):
     free end at both; the pair is attributed by walking the net's own
     copper (nearest-pad is wrong for a stub dragged across a field).
     A free end is a segment endpoint used once that lies inside no pad
-    and no via barrel of the net."""
+    and no via barrel of the net. dest_ref may name several parts
+    ('U4+U3', one source and several ends): each net's end is at the
+    one it reaches, its third member that part."""
     ends = {}
+    dset = set(dest_refs(dest_ref)) if dest_ref is not None else None
     for nm in names:
         nid, net = byname[nm]
         segs = [s for s in pcb.segments if s.net_id == nid]
@@ -1225,7 +1250,7 @@ def endpoints(pcb, names, byname, dest_ref=None):
         assert free, (nm, 'no free stub end')
         if dest_ref is not None:
             at_dest = [pt for pt in free
-                       if _owner(pt, segs, net.pads) == dest_ref]
+                       if _owner(pt, segs, net.pads) in dset]
             at_src = [pt for pt in free if pt not in at_dest]
             if not at_dest or not at_src:
                 # ONE end's stub ends in a via (the rule above, per end): the
@@ -1239,15 +1264,15 @@ def endpoints(pcb, names, byname, dest_ref=None):
                           all(math.hypot(pt[0] - ax, pt[1] - ay) > max(0.02, ar)
                               for (ax, ay, ar) in pads_only)]
                 if not at_dest:
-                    at_dest = [pt for pt in free_v if _owner(pt, segs, net.pads) == dest_ref]
+                    at_dest = [pt for pt in free_v if _owner(pt, segs, net.pads) in dset]
                 if not at_src:
                     at_src = [pt for pt in free_v if pt not in at_dest
-                              and _owner(pt, segs, net.pads) != dest_ref]
+                              and _owner(pt, segs, net.pads) not in dset]
             if at_dest and at_src:
                 src = max(at_src, key=lambda p: max(ts.d2(p, q)
                                                     for q in at_dest))
                 tgt = max(at_dest, key=lambda q: ts.d2(src, q))
-                ends[nm] = (src, tgt, dest_ref)
+                ends[nm] = (src, tgt, _owner(tgt, segs, net.pads))
                 continue
             free = at_src or free
         if len(free) > 1:
@@ -6088,8 +6113,10 @@ def _clip_stub(p, q, boxes):
     return p, (p[0] + (q[0] - p[0]) * t_in, p[1] + (q[1] - p[1]) * t_in)
 
 
-def _route_pairs_planned_in_order(ctx, corridors, log, order):
-    """route_pairs_planned's worker over one order of the pairs; returns {pair: (segments, vias)}, the copper left on ctx.pcb."""
+def _route_pairs_planned_in_order(ctx, corridors, log, order, free=True, slacks=None):
+    """route_pairs_planned's worker over one order of the pairs; returns {pair: (segments, vias)}, the copper left on ctx.pcb.
+    free=False: each pair in its planned band only, never the free rungs (route_lanes --plan tries those after every
+    lane has had its band). slacks: the band's widenings tried, in mm (default pair_slacks())."""
     done = {}
     for nm in order:
         c = next(c for c in corridors if nm in c.members)
@@ -6196,18 +6223,18 @@ def _route_pairs_planned_in_order(ctx, corridors, log, order):
                         how = f'through {", ".join(w[0].component_ref for w in ways)}'
             else:
                 for ri, (virt_r, vv_r) in enumerate(rules):
-                    for sl in pair_slacks():
+                    for sl in (pair_slacks() if slacks is None else slacks):
                         res = c.route_pair_lane(nm, virt_r, vv_r, slack=sl, free=False)
                         if res is not None:
                             how = f'in its planned band +{sl:.1f} mm' + (' (the fan-in rule)' if ri else '')
                             break
                     if res is not None:
                         break
-                if res is None:
+                if res is None and free:
                     res = c.route_pair_lane(nm, virt, vv, free=True)
                     if res is not None:
                         how = 'free (its band refused)'
-                if res is None:
+                if res is None and free:
                     # the last resort: free of the plan's lanes altogether, only
                     # the others' exit stubs reserved, a 6 mm window, no
                     # connectors -- exactly the free-first flow's call, which
@@ -6585,22 +6612,33 @@ def pair_chirality_of(pcb, names, byname, dest):
     """The pair's chirality as the fanout's plan computes it
     (select_moves.pair_chirality on the same balls and the same array
     boxes): the run's nets' pad on `dest` against their pad on the source
-    array, the boxes those arrays' pads span."""
+    array, the boxes those arrays' pads span. (`dest` naming several
+    parts: each net's pad on the one it reaches, and the first's box --
+    the plan's own dgrid, fanout_from_plan.plan_state.)"""
     src, dst, refs = {}, {}, Counter()
+    dests = dest_refs(dest)
     for nm in names:
         _nid, net = byname[nm]
-        d = [p for p in net.pads if p.component_ref == dest]
-        o = [p for p in net.pads if p.component_ref != dest]
+        d = [p for p in net.pads if p.component_ref in dests]
+        o = [p for p in net.pads if p.component_ref not in dests]
         if d:
             dst[nm] = (d[0].global_x, d[0].global_y)
         if o:
             src[nm] = (o[0].global_x, o[0].global_y)
             refs[o[0].component_ref] += 1
-    if not src or not dst or dest not in pcb.footprints:
+    if not src or not dst or dests[0] not in pcb.footprints:
         return 1
     sref = max(refs, key=refs.get)
     return pair_chirality(src, dst, em.grid_of(pcb.footprints[sref]).bbox,
-                          em.grid_of(pcb.footprints[dest]).bbox)
+                          em.grid_of(pcb.footprints[dests[0]]).bbox)
+
+
+def net_dest(net, dest):
+    """the destination part a net reaches, of the parts `dest` names: the first carrying a pad of it (the first named
+    when none does)"""
+    dests = dest_refs(dest)
+    on = {p.component_ref for p in net.pads}
+    return next((d for d in dests if d in on), dests[0])
 
 
 def mirror_plan(plan, M):
@@ -6622,6 +6660,34 @@ def mirror_plan(plan, M):
                           for a in al]
                      for nm, al in plan['alts'].items()}
     return q
+
+
+def run_config(pcb, board):
+    """the run's routing config (connect.make_config at the run's sizes), with the board's own hole-to-hole and
+    copper-to-edge floors where they are tighter -- setup's, and a candidate's context's (whole_ctx.candidate)"""
+    # the board's own hole-to-hole floor when it is tighter than the
+    # config's default (the second bench, zynq_ad9364, declares 0.25 mm
+    # and its K28 shipped one drill-to-drill graze at the default 0.2);
+    # tighten-only, so a board declaring less than the default routes
+    # as before
+    from list_nets import board_constraint
+    # (a run's supplied rules carry the floors the driver resolved -- route_bus: given, else the board's own)
+    _sup = _rules.active()
+    h2h = _sup.hole_to_hole if _sup.hole_to_hole is not None else board_constraint(board, 'min_hole_to_hole')
+    kw = {}
+    if h2h and h2h > cn.GridRouteConfig().hole_to_hole_clearance:
+        kw['hole_to_hole_clearance'] = float(h2h)
+    # and the board's own copper-to-edge floor, likewise tighten-only: the
+    # config's 0 falls back to the track clearance (0.1), the project
+    # grades the edge at its min_copper_edge_clearance (0.2 on the
+    # bench's family), and a lane along an edge -- never on the bench,
+    # SCAS on the pose gate's BF article at K28 -- shipped three edge
+    # violations at 0.079 mm over (2026-09-08)
+    edge = (_sup.edge_clearance if _sup.edge_clearance is not None
+            else board_constraint(board, 'min_copper_edge_clearance'))
+    if edge and edge > CLEAR:
+        kw['board_edge_clearance'] = float(edge)
+    return cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL, grid_step=GRID, **kw)
 
 
 def setup(board, names, dest, log, plan=None, pairs=False):
@@ -6666,7 +6732,17 @@ def setup(board, names, dest, log, plan=None, pairs=False):
             try:
                 with open(_pj, encoding='utf-8') as _f:
                     plan = _json_pl.load(_f)
-                named = [nm for nm in names if nm in plan.get('ends', {})]
+                # (a pair member by its legs: the sidecar keys a pair's
+                # ends, layers and directions by its legs, as every read
+                # below takes them. Asked by its member's name alone, an
+                # all-pair bus's plan named none of its nets and was
+                # dropped: sdi_mipi_conv's MIPI bus to J4 read its escape
+                # directions off copper, MIPI0_D3's south tooth read west,
+                # a far-face tooth inside U11, and the solve refused every
+                # round -- the fanout's audit, its legs as singles, clean)
+                _pe = plan.get('ends', {})
+                named = [nm for nm in names if nm in _pe
+                         or any(l_ in _pe for l_ in _pairs_here.get(nm, ()))]
                 if not named:
                     log(f'plan sidecar {os.path.basename(_pj)} names none of '
                         f'this run\'s nets -- ignored')
@@ -6681,7 +6757,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
                     # than the one the plan was judged in (measured at
                     # K41: every net read off copper, the spine 0.07 mm
                     # off the judged one, three legs moved to one s)
-                    miss = [nm for nm in names if nm not in plan.get('ends', {})]
+                    miss = [nm for nm in names if nm not in named]
                     log(f'plan from {os.path.basename(_pj)}: {len(named)} of '
                         f'{len(names)} nets; {", ".join(miss)} read off the board')
                 else:
@@ -6715,7 +6791,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     ctx.pairs = _pairs_here
     if chi < 0:
         CY = mirror_axis(pcb)     # the engine's own rule: a lattice line
-        pcb, M = to_front_frame(pcb, dest)
+        pcb, M = to_front_frame(pcb, dest_refs(dest)[0])
         ctx.M = M
         byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
         _standin(byname)
@@ -6738,6 +6814,10 @@ def setup(board, names, dest, log, plan=None, pairs=False):
             ctx.dest_cut = (f_, v_)
         else:
             ctx.dest_cut = (2.0 * CY - float(dc_)) if chi < 0 else float(dc_)
+    # ...and the source's far-face cut (whole_frame.src_cut: which side a far-face tooth goes round), mirrored the same
+    ctx.src_cut = None
+    if plan and plan.get('src_cut') is not None:
+        ctx.src_cut = (2.0 * CY - float(plan['src_cut'])) if chi < 0 else float(plan['src_cut'])
     if ctx.pages_first and EXACT_PAGES_ENV != '0':
         # a PAGES-FIRST plan (fanout_from_plan PLAN_PAGES): its two chains
         # were chosen to cover every lane, so the schedule pages it exactly
@@ -6765,20 +6845,21 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     _want = ([nm for nm in names if nm not in planned and nm not in _pairs_here]
              + [n for n in _legs if n not in _pl_ends])
     ends = endpoints(pcb, _want, byname, dest_ref=dest) if _want else {}
+    # (each planned net's end at the destination part it reaches: DEST may name several, one source and several ends)
     for nm in [n for n in names if n in planned]:    # the run's order: a set's would follow the hash seed
         e = plan['ends'][nm]
-        ends[nm] = (tuple(e[0]), tuple(e[1]), dest)
+        ends[nm] = (tuple(e[0]), tuple(e[1]), net_dest(byname[nm][1], dest))
     for n in _legs:
         if n in _pl_ends:
             e = _pl_ends[n]
-            ends[n] = (tuple(e[0]), tuple(e[1]), dest)
+            ends[n] = (tuple(e[0]), tuple(e[1]), net_dest(byname[n][1], dest))
     ctx.pair_ends = {}
     for _b, (_pn, _nn) in list(_pairs_here.items()):
         (sp_, tp_, _), (sn_, tn_, _) = ends[_pn], ends[_nn]
         _ds, _dt = math.sqrt(ts.d2(sp_, sn_)), math.sqrt(ts.d2(tp_, tn_))
         # the limit: two lane pitches, or 1.3 of the destination's ball
         # pitch -- a harmonised pair's tips stand one ball apart
-        _dg = em.grid_of(pcb.footprints[dest])
+        _dg = em.grid_of(pcb.footprints[ends[_pn][2]])
         _lim = max(_pairs.MAX_SEP, 1.3 * max(_dg.pitch_x, _dg.pitch_y))
         if max(_ds, _dt) > _lim:
             # the plan put this pair's ends APART: it stays a PAIR all the
@@ -6789,7 +6870,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
             # 2026-09-20: never).
             log(f'pair {_b}: ends apart -- teeth {_ds:.2f} mm, berths {_dt:.2f} mm (limit {_lim:.2f}); '
                 f'still a pair: coupled or refused, never singles')
-        ends[_b] = (_pairs.mid(sp_, sn_), _pairs.mid(tp_, tn_), dest)
+        ends[_b] = (_pairs.mid(sp_, sn_), _pairs.mid(tp_, tn_), ends[_pn][2])
         ctx.pair_ends[_b] = ((sp_, sn_), (tp_, tn_))
     ctx.pairs = _pairs_here
     ctx.pcb, ctx.byname, ctx.ends, ctx.kids = pcb, byname, ends, kids
@@ -6893,7 +6974,12 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     ctx.src_ref = {}
     for nm in names:
         nid, net = byname[nm]
-        ctx.src_ref[nm] = min(net.pads, key=lambda p: ts.d2(
+        # (the destination's own pads are no source: a tooth whose stub ends nearer a ball of the destination than
+        # any of its own -- a dog-bone run down the channel -- was read as starting AT the destination, and the whole
+        # route, which plans the lanes of the run's one source, left it out of every frame: the generated c4s14g25's
+        # SYN07, open every round)
+        pads_ = [p for p in net.pads if p.component_ref != ends[nm][2]] or list(net.pads)
+        ctx.src_ref[nm] = min(pads_, key=lambda p: ts.d2(
             (p.global_x, p.global_y), ends[nm][0])).component_ref
 
     _cache = {}
@@ -6952,7 +7038,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     # relax algorithm changes; per-net entries so a different K
     # fills in only what is missing. json round-trips floats exactly
     # (repr), so the cached run stays bit-identical.
-    TAUT_CACHE_VERSION = 3   # 2: taut_clean reseeds (0902); 3: rect and oval pads as capsules, a string's disc round them
+    TAUT_CACHE_VERSION = 4   # 2: taut_clean reseeds (0902); 3: rect and oval pads as capsules, a string's disc round them; 4: a filled copper graphic a wall
     log('taut paths...')
     import json as _json
     _tc_path = os.path.splitext(board)[0] + '.taut.json'
@@ -7030,30 +7116,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     # vias) because the braid's vias are structural (page dive and
     # surface, reserved weaves, legs), so a costlier via only buys
     # worse detours that force more of them.
-    # the board's own hole-to-hole floor when it is tighter than the
-    # config's default (the second bench, zynq_ad9364, declares 0.25 mm
-    # and its K28 shipped one drill-to-drill graze at the default 0.2);
-    # tighten-only, so a board declaring less than the default routes
-    # as before
-    from list_nets import board_constraint
-    # (a run's supplied rules carry the floors the driver resolved -- route_bus: given, else the board's own)
-    _sup = _rules.active()
-    h2h = _sup.hole_to_hole if _sup.hole_to_hole is not None else board_constraint(board, 'min_hole_to_hole')
-    kw = {}
-    if h2h and h2h > cn.GridRouteConfig().hole_to_hole_clearance:
-        kw['hole_to_hole_clearance'] = float(h2h)
-    # and the board's own copper-to-edge floor, likewise tighten-only: the
-    # config's 0 falls back to the track clearance (0.1), the project
-    # grades the edge at its min_copper_edge_clearance (0.2 on the
-    # bench's family), and a lane along an edge -- never on the bench,
-    # SCAS on the pose gate's BF article at K28 -- shipped three edge
-    # violations at 0.079 mm over (2026-09-08)
-    edge = (_sup.edge_clearance if _sup.edge_clearance is not None
-            else board_constraint(board, 'min_copper_edge_clearance'))
-    if edge and edge > CLEAR:
-        kw['board_edge_clearance'] = float(edge)
-    ctx.cfg = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL,
-                             grid_step=GRID, **kw)
+    ctx.cfg = run_config(pcb, board)
     ctx.base_segments = list(pcb.segments)
     ctx.base_vias = list(pcb.vias)
     # each net's FANOUT copper, as it came: what a rip resets to

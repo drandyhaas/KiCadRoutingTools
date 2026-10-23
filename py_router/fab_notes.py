@@ -90,10 +90,12 @@ def via_paste_sites(vias, pcb_data, tol: float = 1e-6):
         if nid is None or vx is None or vy is None:
             continue
         vsz = _get(via, 'size', 0.6) or 0.6
-        span = _get(via, 'layers', None) or ['F.Cu', 'B.Cu']
         best = None
+        from geometry_utils import via_on_layer
         for ap in _pa.apertures_for_net(pcb_data, nid):
-            if ('F.Cu' if ap.layer.startswith('F.') else 'B.Cu') not in span:
+            # The barrel reaches a side by the via's TYPE, not its stored pair
+            # (found reviewing #1268): an untyped via is through to KiCad.
+            if not via_on_layer(via, 'F.Cu' if ap.layer.startswith('F.') else 'B.Cu'):
                 continue
             b = ap.bounds
             r = vsz / 2.0

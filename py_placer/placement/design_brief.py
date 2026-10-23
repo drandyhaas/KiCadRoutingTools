@@ -135,7 +135,7 @@ _PRODUCT_KEYS = {'form_factor', 'primary_axis', 'held_by', 'user_top_side'}
 _INTERFACE_KEYS = {'ref', 'role', 'user_facing', 'edge', 'along_edge',
                    'along_edge_tolerance_mm', 'overhang_mm', 'mount_mode',
                    'cable_entry', 'cable_envelope_mm', 'requirement', 'why',
-                   'note', 'context'}
+                   'note', 'context', 'mating_face'}
 #: #959 (#1000): the space a cable needs, declared. `depth` is how far an
 #: in-plane plug reaches in from the edge; `clear` is the margin around a
 #: perpendicular one. There are NO defaults: measured on five as-built boards
@@ -247,12 +247,6 @@ class Brief:
     #: Defaulted, like `proximity`.
     keep_away: Tuple[Dict[str, object], ...] = ()
     keep_away_unknown: bool = False
-
-
-def empty_brief(board: str = '') -> Brief:
-    return Brief(schema=SCHEMA_VERSION, kind=KIND, board=board, units='mm',
-                 product={}, interfaces=(), keepouts=(), fixed=(),
-                 unknown=(), proximity=(), context={}, arrays=())
 
 
 # --------------------------------------------------------------------------
@@ -668,9 +662,8 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
             raise BriefError(f"{where}: expected an object with a `ref`")
         where = f"{where} ({ref})"
         # A duplicate row is two claims about one part with no rule for which
-        # wins -- and the three consumers downstream disagree about that: the
-        # grade charges BOTH, the repair dispatch keeps the LAST, and the
-        # seeder's even distribution shifts every other connector on the edge.
+        # wins -- and consumers downstream would disagree about that (the
+        # grade charges BOTH, a reader keyed by ref keeps the LAST).
         # `blocks` already refuses a duplicate name for the same reason.
         if ref in seen_refs:
             raise BriefError(f"{where}: duplicate interface for {ref!r} "
@@ -679,6 +672,8 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
                              f"part, with no rule for which wins")
         seen_refs[ref] = i
         _enum(c.get('edge'), fp._EDGES + (UNKNOWN,), f"{where}.edge")
+        _enum(c.get('mating_face'), fp.MATING_FACES + (UNKNOWN,),
+              f"{where}.mating_face")
         _enum(c.get('mount_mode'), _MOUNT_MODES, f"{where}.mount_mode")
         _enum(c.get('cable_entry'), _CABLE_ENTRY, f"{where}.cable_entry")
         env = c.get('cable_envelope_mm')
@@ -822,8 +817,8 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
 def _fixed_pose(f: Dict, where: str, interface_refs) -> None:
     """Validate one `fixed[].pose` (#1054). Refused BY NAME when the same ref
     is a declared interface: an interface compiles to an `edge_connectors`
-    entry, which the seeder seats at its edge band, and a pose seats it
-    exactly -- two placements for one part, which the intent loader refuses
+    entry, which claims its edge band, and a pose claims one exact pose --
+    two placements for one part, which the intent loader refuses
     too. Refusing here sends the author to the brief they wrote."""
     pose = f['pose']
     if not isinstance(pose, dict):
@@ -846,8 +841,8 @@ def _fixed_pose(f: Dict, where: str, interface_refs) -> None:
     if str(f['ref']) in interface_refs:
         raise BriefError(
             f"{where}.pose: {f['ref']} is also declared in interfaces[], "
-            f"which compiles to an edge_connectors entry the seeder seats at "
-            f"its edge band. A fixed pose seats it exactly -- keep one")
+            f"which compiles to an edge_connectors entry claiming its edge "
+            f"band. A fixed pose claims one exact pose -- keep one")
 
 
 def _array_rows(raw: Dict, interfaces, fixed_refs) -> List[Dict]:
@@ -929,9 +924,9 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
             declared.append(f"interfaces[{ref}].edge")
         elif edge == UNKNOWN:
             # NO `edge` key. The schema supports edge-less entries and every
-            # consumer already declines to guess: the seeder's stage 1 skips
-            # them, the repair path refuses honestly, and `emit_intent`
-            # refuses to name one for an implausible pose. "I do not know"
+            # consumer already declines to guess: an edge-less entry claims no
+            # edge, and `emit_intent` refuses to name one for an implausible
+            # pose. "I do not know"
             # reaches machinery that knows what to do with it.
             unknown.append(f"interfaces[{ref}].edge")
             # DROP an inferred edge rather than leaving it. "I do not know"
@@ -943,6 +938,13 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
             entry['note'] = ('the brief declares this connector with edge '
                              '"unknown" -- no edge is claimed, and any edge '
                              'the emitter inferred is dropped')
+
+        face = c.get('mating_face')
+        if _known(face):
+            entry['mating_face'] = face
+            declared.append(f"interfaces[{ref}].mating_face")
+        elif face == UNKNOWN:
+            unknown.append(f"interfaces[{ref}].mating_face")
 
         if _known(c.get('user_facing')) and c.get('user_facing') is True:
             # An edge class is what the placement ENGINES read (via
@@ -1121,7 +1123,7 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         arrs.append(entry)
 
     # #1054. A `fixed[]` row with a `pose` compiles to `fixed_poses[]`, basis
-    # `declared`, for the seeder to SEAT and the grade to anchor. A row with
+    # `declared`, for place_simple to SEAT and the grade to anchor. A row with
     # no pose is carried in `report['fixed']` as before -- never turned into
     # `must_lock` (see the note on `fixed` below).
     fposes: List[Dict[str, object]] = []
@@ -1144,8 +1146,8 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
             row['why'] = str(f['why'])
         if f.get('accept_courtyard_overlap') is not None:
             # #1060: passed through as written; the intent loader validates
-            # it (literal refs, not the entry's own, a `why`) and the seeder
-            # refuses a ref the board does not have.
+            # it (literal refs, not the entry's own, a `why`) and the plan
+            # check refuses a ref the board does not have.
             row['accept_courtyard_overlap'] = f['accept_courtyard_overlap']
         ctx = dict(f.get('context') or {})
         if f.get('requirement'):
@@ -1284,14 +1286,11 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         'contradictions': [],
         'counts': counts,
         # #711 asks for `place_fixed` ops. There is no plan-op implementation
-        # in this tree -- `place_fixed` is named only in comments. Since #1054
+        # in this tree, and no tool names one (#1353). Since #1054
         # a row carrying a `pose` compiles to `fixed_poses[]` (above); every
         # row is still CARRIED here, and none is ever turned into
-        # `must_lock`: filling must_lock made `place_seed --repair` treat
-        # those refs as seeder-owned and LIFT the user's locks (measured on
-        # two run-7 boards, see emit_intent's own comment). It buys nothing
-        # either, since `resolve_intent_gate` already freezes every edge claim
-        # inside the quench.
+        # `must_lock`: must_lock is a requirement, and a brief row is an
+        # observation (see emit_intent's own comment).
         'fixed': [dict(f) for f in brief.fixed],
         'product': dict(brief.product),
     }
@@ -1596,7 +1595,7 @@ def compile_with_consequences(brief: 'Brief', pcb=None,
                               board_path: str = ''):
     """`compile_brief` and then `connector_consequences`: what every CLI
     that reads a brief against a board calls, so the emit path, the grade
-    path, `--plan-only`, `board_brief` and P1 derive the SAME clauses -- a
+    path, `--plan-only` and `board_brief` derive the SAME clauses -- a
     consequence only the emit path derived would never reach drift."""
     frag, rep = compile_brief(
         brief, board_refs=sorted((pcb.footprints or {}) if pcb else ()),
@@ -1658,8 +1657,8 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
         # very declaration the author wrote.
         # `c.get('edge')` -- the BRIEF's edge, not `base`'s. Reading the
         # merged entry would let an emitter-INFERRED edge promote a row into
-        # `Intent.edge_claims()`, which locks it in the quench and grants it
-        # the 2.0mm off-outline allowance. Unreachable today (the emitter
+        # `Intent.edge_claims()`, which claims an edge for it. Unreachable
+        # today (the emitter
         # never writes `edge` on a `connector_affinity` entry) and one
         # emitter change away from being a silent placement change.
         if c.get('edge') and base.get('class') == 'connector_affinity':
@@ -1702,15 +1701,26 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
     if fragment.get('keepouts'):
         out['keepouts'] = list(emitted.get('keepouts') or []) \
             + list(fragment['keepouts'])
-    # #902. APPENDED, like keepouts, and deliberately not the per-ref merge
-    # `edge_connectors` gets: there is no "declared outranks inferred" question
-    # to answer, because there is no inference. `emit_intent` writes no
-    # `proximity` -- a relation between two parts is not readable off a board,
-    # only the distance is -- so the emitted side is always empty and a
-    # reconciliation policy would be a rule for a case that cannot arise.
+    # #902. APPENDED, like keepouts. The one inference on the emitted side is
+    # a crystal claim `emit_intent` derives (`floorplan.derived_claim`); a
+    # declared row about the same two parts, in either order, outranks it, so
+    # the derived row is dropped and REPORTED -- kept, the intent loader would
+    # refuse the pair as a duplicate claim.
     if fragment.get('proximity'):
-        out['proximity'] = list(emitted.get('proximity') or []) \
-            + list(fragment['proximity'])
+        from placement.floorplan import derived_claim
+        declared = {frozenset((str(c.get('ref')), str(c.get('near'))))
+                    for c in fragment['proximity']}
+        kept = []
+        for c in emitted.get('proximity') or []:
+            if derived_claim(c) and frozenset((str(c.get('ref')),
+                                               str(c.get('near')))) in declared:
+                report['contradictions'].append(
+                    f"{c.get('ref')} near {c.get('near')}: the brief declares "
+                    f"this relation -- the brief wins, and the derived crystal "
+                    f"claim is dropped")
+                continue
+            kept.append(c)
+        out['proximity'] = kept + list(fragment['proximity'])
     # #1051/#1054. APPENDED, for proximity's reason: `emit_intent` writes no
     # `arrays` and no `fixed_poses` by default, so there is no inference to
     # outrank.
@@ -1761,7 +1771,8 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
             # The merge dropped the observed edge; its label goes with it.
             bmap.pop(f"edge_connectors[{c['ref']}].edge", None)
         for key in ('edge', 'overhang_mm', 'center_on_edge',
-                    'along_edge_band', 'max_setback_mm', 'side'):
+                    'along_edge_band', 'max_setback_mm', 'side',
+                    'mating_face'):
             if key in c:
                 own = cb.get(key) or (cb.get('overhang_mm.min')
                                       if key == 'overhang_mm' else None)
@@ -1855,7 +1866,7 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
                             f"the intent has no entry for it"))
             continue
         for key in ('edge', 'center_on_edge', 'along_edge_band',
-                    'overhang_mm', 'max_setback_mm', 'side'):
+                    'overhang_mm', 'max_setback_mm', 'side', 'mating_face'):
             if key in c and cur.get(key) != c[key]:
                 out.append((
                     _drift_clause_id('interfaces', ref, key,
@@ -1902,8 +1913,8 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
                                  f"{cur.get(field_name)!r}"))
     # A keep-out the intent carries because an envelope DERIVED it, which the
     # brief no longer derives (envelope removed, set "unknown", or its cable
-    # changed): the seat search and the quench still enforce it, so it is a
-    # stale consequence and drifts (Phase-5 verifier S5).
+    # changed): the placer still enforces it, so it is a stale consequence
+    # and drifts (Phase-5 verifier S5).
     frag_k = {k.get('name') for k in (fragment.get('keepouts') or [])}
     for name, cur in sorted(have_k.items(), key=lambda kv: str(kv[0])):
         src = (cur.get('context') or {}).get('derived_from')
@@ -2057,8 +2068,6 @@ def drifted_clause_ids(intent_doc: Dict, fragment: Dict) -> List[str]:
     """The clause ids `drift_pairs` could attribute. Deduped, sorted."""
     return sorted({cid for cid, _line in drift_pairs(intent_doc, fragment)
                    if cid})
-
-
 
 
 # --------------------------------------------------------------------------
@@ -2426,9 +2435,7 @@ def clause_coverage(report: Dict, intent_doc: Dict, *,
     # A drift id no row above names: the intent carries a consequence of a
     # clause the brief no longer states at all -- a derived keep-out whose
     # envelope was removed, a setback whose mount_mode was. Without a row it
-    # reached neither P1's refusal nor P-close's, which both read these rows,
-    # while the seat search and the quench kept enforcing it (round-2
-    # verifier, S5).
+    # would reach no report that reads these rows.
     have = {c['id'] for c in clauses}
     for cid in sorted(drift_set - have):
         rec = parse_clause_id(cid) or {}

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """#1031 repro on the run-32 board (glasgow_revC placed_v2).
 
-Needs `wk/run32/placed_v2.kicad_pcb` (+ .kicad_pro) from
-edgehero/KiCadRoutingTools@run32-assets `repro/run32/`. `wk/` is gitignored,
-so this SELF-SKIPS (exit 77) on a clean clone; the synthetic-board test
-`tests/test_1031_keepout_legality.py` always runs.
+The board is the tracked fixture `tests/fixtures/run32/placed_v2.kicad_pcb`
+(+ .kicad_pro), copied from edgehero/KiCadRoutingTools@run32-assets
+`repro/run32/` (see that folder's README). It used to be read from the
+gitignored `wk/run32/`, so this self-skipped on every clone; now it runs
+everywhere. It is #1031's only real-board pin: its synthetic-board sibling,
+`tests/test_1031_keepout_legality.py`, was deleted with the old placement
+flows (ecd673eb).
 
 What it pins, all measured on that board at --clearance 0.2 (track 0.2 from
 the board netclass, band 0.3 mm):
@@ -32,7 +35,7 @@ ROOT = os.path.dirname(TESTS_DIR)
 for _p in ('py_router', 'py_placer', 'py_tools', 'tests'):
     sys.path.insert(0, os.path.join(ROOT, _p))
 
-BOARD = os.path.join(ROOT, 'wk', 'run32', 'placed_v2.kicad_pcb')
+BOARD = os.path.join(TESTS_DIR, 'fixtures', 'run32', 'placed_v2.kicad_pcb')
 
 FAILS = []
 
@@ -45,15 +48,11 @@ def check(name, cond, detail=''):
 
 
 def main():
-    if not (os.path.isfile(BOARD)
-            and os.path.isfile(BOARD[:-len('.kicad_pcb')] + '.kicad_pro')):
-        print(f"SKIP: {BOARD} (+ .kicad_pro) absent -- wk/ is gitignored; "
-              f"fetch repro/run32 from edgehero/KiCadRoutingTools@run32-assets")
-        return 77
     from kicad_parser import parse_kicad_pcb
     from placement.legality import grade_pad_legality
     from run_utils import check as run_check, evidence
     evidence(BOARD, 'run-32 board')
+    evidence(BOARD[:-len('.kicad_pcb')] + '.kicad_pro', 'its project sibling')
 
     g = grade_pad_legality(parse_kicad_pcb(BOARD), 0.2, pcb_file=BOARD)
     refs = [r[0] for r in g['oob_keepout_copper_refs']]

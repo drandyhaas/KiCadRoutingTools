@@ -86,7 +86,9 @@ OLD_SENTENCE = 'analysis only, do not modify any files'
 #: for why this is an equality and not a bag of substrings.
 EXPECTED_CONSTRAINT = (
     "analysis and planning only: do not execute any routing commands and do "
-    "not modify any files. If you dispatch a subagent, copy this sentence into "
+    "not modify any files (a downloaded datasheet may be saved under "
+    "$KRT_DATASHEET_DIR, which is deleted when this run ends). If you "
+    "dispatch a subagent, copy this sentence into "
     "its prompt verbatim and give it no tool this run does not have; have it "
     "answer with a line beginning VERDICT= (never RESULT=, which this GUI "
     "reads as the run's own result line)."

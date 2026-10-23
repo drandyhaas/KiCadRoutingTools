@@ -242,6 +242,79 @@ def _overlaps_in(pads, tolerance, exact=True, ties=None):
     return hits
 
 
+def _tie_groups(pcb):
+    """The footprints' deliberate shorts, keyed the way a pad names its part."""
+    ties = {}
+    for fp in pcb.footprints.values():
+        groups = getattr(fp, 'net_tie_groups', None) or ()
+        if groups and fp.pads:
+            ties.setdefault(fp.pads[0].component_ref, []).extend(
+                set(g) for g in groups)
+    return ties
+
+
+def pads_shorted_as_drawn(pcb, net_ids, tolerance: float = 1e-3):
+    """The pads of `net_ids` already shorted to ANOTHER net on the board as
+    drawn, before any routing: another net's pad overlapping it (the
+    measurement `find_pad_overlaps` makes, a footprint's own net-tie groups
+    exempt as KiCad's DRC exempts them), or another footprint's copper it
+    touches whose pads carry other nets (#1266's census, a net tie's own tied
+    net exempt). No copper can land on such a pad without joining that net
+    too, so a net left open by one is unroutable AS DESIGNED: the board needs
+    the fix, not the router. A board that stacks two net ties at one pose
+    and overlaps two more with swapped nets has all seven contacts graded
+    `shorting_items` by KiCad on the unrouted board.
+
+    One row per (pad, foreign copper), sorted::
+
+        {'net': '/Connectors/ETH_PORT4', 'pad': 'NT1.1', 'by': 'pad',
+         'foreign': 'NT2.1', 'foreign_nets': ['/Connectors/ETH_PORT5']}
+        {..., 'by': 'footprint copper', 'foreign': 'NT2', 'foreign_nets': [...]}
+    """
+    targets = {n for n in net_ids if n}
+    mine = [p for n in targets for p in pcb.pads_by_net.get(n, ())]
+    if not mine:
+        return []
+    rows = set()
+    # Pads against pads: the pads near any of `mine`, then the one measure.
+    reach = max(math.hypot(p.size_x, p.size_y) / 2.0
+                for fp in pcb.footprints.values() for p in fp.pads)
+    cell = max(2.0 * reach, 1.0)
+    grid = {}
+    for fp in pcb.footprints.values():
+        for p in fp.pads:
+            grid.setdefault((int(p.global_x // cell), int(p.global_y // cell)),
+                            []).append(p)
+    near = {}
+    for p in mine:
+        cx, cy = int(p.global_x // cell), int(p.global_y // cell)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for q in grid.get((cx + dx, cy + dy), ()):
+                    near[id(q)] = q
+    for a, b, _d in _overlaps_in(list(near.values()), tolerance,
+                                 ties=_tie_groups(pcb)):
+        for p, q in ((a, b), (b, a)):
+            if p.net_id in targets:
+                rows.add((p.net_name, f'{p.component_ref}.{p.pad_number}',
+                          'pad', f'{q.component_ref}.{q.pad_number}',
+                          (q.net_name,)))
+    # Pads against other parts' copper (#908 footprint copper).
+    from check_drc import footprint_graphic_pad_census
+    names = {pcb.nets[n].name for n in targets if n in pcb.nets}
+    for r in footprint_graphic_pad_census(pcb, 0.0)['rows']:
+        if not r['contact'] or r['same_net'] or r['net'] not in names:
+            continue
+        fp = pcb.footprints.get(r['owner_ref'])
+        theirs = sorted({q.net_name for q in (fp.pads if fp else ())
+                         if q.net_id and q.net_name != r['net']})
+        if theirs:
+            rows.add((r['net'], r['pad_ref'], 'footprint copper',
+                      r['owner_ref'], tuple(theirs)))
+    return [{'net': n, 'pad': p, 'by': by, 'foreign': f,
+             'foreign_nets': list(fn)} for n, p, by, f, fn in sorted(rows)]
+
+
 def find_pad_overlaps(pcb, tolerance: float = 0.05, component: str = None,
                       cross_footprint: bool = False):
     """Return [(padA, padB, depth_mm), ...] for different-net pad-copper overlaps.
@@ -254,13 +327,7 @@ def find_pad_overlaps(pcb, tolerance: float = 0.05, component: str = None,
     noisier on tightly-placed passives). Custom pads are measured on their real
     copper (`_overlaps_in`, #1111).
     """
-    # The footprints' deliberate shorts, keyed the way a pad names its part.
-    ties = {}
-    for fp in pcb.footprints.values():
-        groups = getattr(fp, 'net_tie_groups', None) or ()
-        if groups and fp.pads:
-            ties.setdefault(fp.pads[0].component_ref, []).extend(
-                set(g) for g in groups)
+    ties = _tie_groups(pcb)
     if cross_footprint:
         pads = [pd for fp in pcb.footprints.values() for pd in fp.pads]
         return _overlaps_in(pads, tolerance, ties=ties)

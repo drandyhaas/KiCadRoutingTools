@@ -43,6 +43,7 @@ every run. An unchecked rule that says so is honest; one that is silently
 absent is the failure this whole issue is about.
 """
 import argparse
+import fnmatch
 import os
 import re
 import sys
@@ -77,7 +78,8 @@ DELEGATED = (
     ('fanout escaped every ball it was asked to (failed == 0)',
      "the fanout step's own JSON_SUMMARY.failed"),
     ('diff pairs did not silently peel to single-ended',
-     'JSON_SUMMARY.failed_diff_pairs / single_ended_diff_pairs'),
+     'JSON_SUMMARY.failed_diff_pairs / single_ended_diff_pairs / '
+     'partial_diff_pairs'),
     ('emitted width meets each width-specced net minimum',
      'board_score.py --net-min-widths'),
     ('pours kept their promises to carved-off balls',
@@ -147,7 +149,11 @@ class Plan:
 
     @property
     def argvs(self):
-        return [argv for _cwd, argv in self.cmds]
+        """Each command's argv WITHOUT its leading `NAME=value` env prefix,
+        which parse_manifest puts there for an `export`ed or recorded knob
+        (#1302, #1337), so `argv[0]` is the command run."""
+        from redo_stress_test import split_env_prefix
+        return [split_env_prefix(argv)[1] for _cwd, argv in self.cmds]
 
     def by_tool(self, *names):
         return [a for a in self.argvs if tool_of(a) in names]
@@ -370,13 +376,31 @@ def _globs(argv, flag):
     return set(values(argv, flag))
 
 
+def _claims(argv, net):
+    """Does this route step's `--nets` take `net`? The router's own order:
+    the include patterns add, a `!` pattern removes (fnmatch either way)."""
+    pats = values(argv, '--nets')
+    if any(n.startswith('!') and fnmatch.fnmatchcase(net, n[1:])
+           for n in pats):
+        return False
+    return any(not n.startswith('!') and fnmatch.fnmatchcase(net, n)
+               for n in pats)
+
+
 def r_net_coverage_reconciles(p):
-    """SKILL.md Step 5b, the two `assert`s at :952 and :954 -- which ship in a
+    """SKILL.md Step 5b, the `assert`s of its step 2 -- which ship in a
     fenced block NO TEST RUNS, and whose violation is how `GNDA` ended a run
     at 0/23 pads connected while the run reported success.
 
-      * the route step's exclusions MUST equal the Step-2b impedance set;
-      * every poured net MUST appear in the route step's `--power-nets`.
+      * a net a route step excludes (`!X`) is claimed by another stage:
+        Step 2b's impedance pass, or a LATER route.py step whose `--nets`
+        takes it (#1346). Step 8's pour-last flow is the case: the signal
+        step runs `'*' '!GND'`, the pour comes after it, and the closing
+        `'*'` step claims GND, whose in-run finalize welds the late pour.
+        An EARLIER claim does not count: the last route step to see a net
+        is the one whose finalize answers for it;
+      * every Step-2b impedance net is excluded by a route step;
+      * every poured net MUST appear in a route step's `--power-nets`.
 
     Compared as the LITERAL PATTERNS the plan passes, which is exact only for
     literal net names: `!+3V3*` against `+3V3` is a glob question and needs
@@ -402,11 +426,21 @@ def r_net_coverage_reconciles(p):
         plane_nets |= _globs(argv, '--nets')
 
     bad = []
-    orphans = exclusions ^ impedance_se
+    orphans = set()
+    for i, argv in enumerate(routes):
+        for net in {n[1:] for n in _globs(argv, '--nets')
+                    if n.startswith('!')} - impedance_se:
+            if not any(_claims(later, net) for later in routes[i + 1:]):
+                orphans.add(net)
     if orphans:
         bad.append(f'Net-coverage gap: {sorted(orphans)} handled by no stage '
-                   f'-- the route step excludes {sorted(exclusions)} and '
-                   f'Step 2b routes {sorted(impedance_se)}')
+                   f'-- a route step excludes it, no LATER route.py step '
+                   f'claims it, and Step 2b routes {sorted(impedance_se)}')
+    unexcluded = impedance_se - exclusions
+    if unexcluded:
+        bad.append(f'Step 2b routes {sorted(unexcluded)} but no route step '
+                   f'excludes it -- the route steps exclude '
+                   f'{sorted(exclusions)}')
     unsized = plane_nets - power
     if unsized:
         bad.append(f'Poured but no route-step width: {sorted(unsized)} -- '

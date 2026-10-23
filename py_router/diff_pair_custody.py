@@ -84,6 +84,21 @@ def classify_diff_pair_failure(result: Optional[dict]) -> str:
     return 'no-route'
 
 
+def deferred_reasons_text(pair_reports, pair_names) -> str:
+    """Why the pairs in ``pair_names`` were left whole for the single-ended
+    pass, counted by their pair_reports ``failure_reason``:
+    "2 electrically short, 1 coupled route failed". One wording for the
+    CLI's end-of-run summary and the GUI's completion dialog."""
+    names = set(pair_names or ())
+    counts: Dict[str, int] = {}
+    for rep in pair_reports or ():
+        if rep.get('pair') in names:
+            why = rep.get('failure_reason') or 'unknown'
+            counts[why] = counts.get(why, 0) + 1
+    return ', '.join(f"{n} {why.replace('-', ' ')}"
+                     for why, n in sorted(counts.items()))
+
+
 def blocker_names(rippable_blockers, diff_pair_by_net_id, limit: int = 3) -> List[str]:
     """Human names (pair name when applicable) for the top blocking nets."""
     names = []
@@ -137,14 +152,128 @@ def audit_pair_members(pcb_data, diff_pairs_list, tolerance: float = 0.02) -> Di
     return audit
 
 
+#: #1303: a span of P and N counts as coupled up to this multiple of the gap
+#: the pair was routed at. The router lays its coupled run AT the gap (a 45
+#: degree run lands ~12 um wider after grid snapping); via approach tracks and
+#: the single-ended legs of a hybrid sit 3-6x the gap apart, and KiCad would
+#: count those too under a rule that sets no maximum gap.
+COUPLED_GAP_FACTOR = 1.5
+
+#: #1361: a pair whose copper is not coupled at the routed gap still runs
+#: ALONGSIDE its partner where KiCad's coupling geometry finds P and N facing
+#: each other up to this gap (mm). It is the router's own radius for a member
+#: that has not split from its partner: the #444 seam re-ask counts copper
+#: farther than 1 mm from the partner as split (`_split_len`). A re-ask is one
+#: single-ended A* per net pulled toward its partner, so it runs a few times
+#: the routed gap apart -- ulx3s GPDI at 0.8 mm, set by the HDMI connector's
+#: pins (P and N 1 mm apart with a ground pin between). A pair split onto two
+#: layers (imx6ulz DQS0) runs alongside nowhere; two members routed to
+#: separate connectors (sata_sniffer GTX_RX3_AC, P and N 20 mm apart) face
+#: each other at no maximum gap, but not within this one.
+ALONGSIDE_GAP_MM = 1.0
+
+
+def coupled_floor_mm(track_width: float, gap: float) -> float:
+    """#1303: the least coupled run that makes a pair's copper COUPLED: one
+    pair pitch (track width + gap). Below it the "coupling" is where two legs
+    happen to pass each other -- a corner sliver of 2 um to 0.15 mm on
+    recorded runs -- not a run the router laid coupled; at or above it the
+    pair keeps its credit however short the run, because a hybrid's coupled
+    middle can be 1.4 mm of a 3 mm pair and is still the coupled route."""
+    return (track_width or 0.0) + (gap or 0.0)
+
+
+def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
+                        geometry_of) -> Dict[str, Dict]:
+    """#1303: what each pair the run CLAIMS to have routed coupled delivers on
+    the board it ships, read off `pcb_data` (the copper the writer emits; the
+    KICAD_BOARD_LEDGER audit holds the two equal).
+
+    The outcome used to come from result existence: both members had a
+    non-single-ended result, so the pair was 'coupled'. imx6ulz DQS0 shipped
+    that way with P on In2.Cu only and N on B.Cu only -- 0 mm coupled, 4.5 mm
+    of skew -- because the #444 seam re-ask had replaced the coupled middle
+    with two single-ended routes.
+
+    `geometry_of(pair)` -> (track_width, gap) the pair was routed at. Returns
+    {pair_name: record} for every pair with a coupled-route result on both
+    members: `net_queries.diff_pair_copper` measured with the gap window
+    (none, COUPLED_GAP_FACTOR x gap), plus 'gap_mm', 'gap_window_mm',
+    'coupled_floor_mm' and 'coupled' (coupled_mm >= the floor).
+
+    #1361: a record that is not coupled also carries 'alongside_mm' (the same
+    KiCad measure with the window (none, ALONGSIDE_GAP_MM)),
+    'alongside_window_mm' and 'alongside' (alongside_mm >= the same floor).
+    It reports nothing -- the outcome stays 'uncoupled' -- it is what #521
+    protection reads (`route_diff.coupled_protection_pairs`)."""
+    from net_queries import diff_pair_copper, diff_pair_coupling, CopperIndex
+    out: Dict[str, Dict] = {}
+    index = None
+    for pair_name, pair in diff_pairs_list:
+        rr_p = routed_results.get(pair.p_net_id)
+        rr_n = routed_results.get(pair.n_net_id)
+        if rr_p is None or rr_n is None or rr_p.get('se_member_fallback') \
+                or rr_n.get('se_member_fallback'):
+            continue
+        width, gap = geometry_of(pair)
+        hi = COUPLED_GAP_FACTOR * gap if gap else None
+        try:
+            if index is None:
+                index = CopperIndex(pcb_data)
+            rec = diff_pair_copper(pcb_data, pair.p_net_id, pair.n_net_id, None, hi,
+                                   index=index)
+        except Exception as exc:                             # noqa: BLE001
+            # A grader must never cost the run its routed board. Unmeasured is
+            # said, and the pair keeps the outcome its result gives it.
+            print(f"{RED}#1303: could not measure {pair_name}'s copper "
+                  f"({type(exc).__name__}: {exc}){RESET}")
+            out[pair_name] = {'error': f'{type(exc).__name__}: {exc}',
+                              'coupled': True, 'skew_mm': None, 'gap_mm': gap}
+            continue
+        floor = coupled_floor_mm(width, gap)
+        rec.update(gap_mm=gap, gap_window_mm=[None, None if hi is None else round(hi, 4)],
+                   coupled_floor_mm=round(floor, 4),
+                   coupled=rec['coupled_mm'] >= floor - 1e-9)
+        if not rec['coupled']:
+            try:
+                along = diff_pair_coupling(pcb_data, pair.p_net_id, pair.n_net_id,
+                                           None, ALONGSIDE_GAP_MM,
+                                           index=index)['coupled_mm']
+            except Exception as exc:                         # noqa: BLE001
+                # Unmeasured is not alongside: the pair stays unprotected,
+                # as it was before #1361.
+                print(f"{RED}#1361: could not measure how far {pair_name} runs "
+                      f"alongside ({type(exc).__name__}: {exc}){RESET}")
+                along = 0.0
+            rec.update(alongside_mm=round(along, 4),
+                       alongside_window_mm=[None, ALONGSIDE_GAP_MM],
+                       alongside=along >= floor - 1e-9)
+        out[pair_name] = rec
+    return out
+
+
 def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
-                       skipped_fanout=()) -> List[Dict]:
+                       skipped_fanout=(), pair_copper=None) -> List[Dict]:
     """Assemble the per-pair JSON records (additive JSON_SUMMARY key).
 
     outcome: 'coupled' (both members routed coupled), 'partial' (coupled trunk
     with terminals peeled to the single-ended follow-up), 'deferred' (whole
     pair left for the single-ended follow-up), 'failed', 'skipped' (fanout
-    pre-check, #242).
+    pre-check, #242), 'uncoupled' (#1303: the run routed both members, but
+    the copper it ships is not coupled -- see `pair_copper`).
+
+    pair_copper: `measure_pair_copper`'s records (#1303). A pair carrying
+    one gets it as `copper`, and the outcome is decided by it: a 'coupled'
+    pair whose copper is not coupled is 'uncoupled', a 'partial' one is
+    flagged `no_coupled_trunk`.
+
+    failure_reason (set for 'failed' and 'deferred'): a classify_diff_pair_
+    failure code, 'congestion' or 'multipoint-leg-failure' for a pair whose
+    coupled route failed -- a 2-terminal pair deferred as the fallback keeps
+    its code. A deferred pair otherwise carries 'electrically-short' (every
+    leg below the coupled floor: coupling buys nothing) or
+    'coupled-route-failed' (a multipoint pair no coupled chain could route,
+    deferred as the fallback, #165). 'unknown' when nothing was recorded.
     """
     reports = []
     routed_results = state.routed_results
@@ -204,6 +333,16 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             outcome == 'partial'
             and not any(rr.get('is_diff_pair') and rr.get('new_segments')
                         for rr in (_rr_p, _rr_n) if rr))
+        # #1303: the copper decides, not the result. A pair whose results
+        # exist but whose WRITTEN copper is not coupled is not a coupled
+        # route: 'coupled' becomes 'uncoupled', and a 'partial' pair has no
+        # coupled trunk to keep its credit with.
+        cop = (pair_copper or {}).get(pair_name)
+        copper_uncoupled = bool(cop is not None and not cop.get('coupled'))
+        if copper_uncoupled and outcome == 'coupled':
+            outcome = 'uncoupled'
+        if copper_uncoupled and outcome == 'partial':
+            no_coupled_trunk = True
         if no_coupled_trunk:
             print(f"{RED}DEMOTED {pair_name}: no coupled trunk copper kept "
                   f"-- 'partial' pair dropped from routed_diff_pairs{RESET}")
@@ -239,6 +378,8 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             'member_audit_mismatch': bool(mismatch or no_coupled_trunk),
             'no_coupled_trunk': no_coupled_trunk,
         }
+        if cop is not None:
+            rep['copper'] = cop
         # #766: a HYBRID ESCAPE is a coupled middle plus point-to-point
         # (single-ended) terminal legs. Its members connect and its copper is
         # DRC-clean, so it is genuinely routed and keeps its credit -- but

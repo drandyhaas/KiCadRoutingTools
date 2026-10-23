@@ -36,7 +36,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPTS = os.path.join(ROOT, '.claude', 'skills', 'pcb-free-agent', 'scripts')
+SCRIPTS = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement', 'scripts')
 for _d in (os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_placer'),
            os.path.join(ROOT, 'tests'), SCRIPTS):
     sys.path.insert(0, _d)

@@ -9,21 +9,15 @@ usage example still used it. The run followed the documentation, `route.py`
 answered `error: unrecognized arguments`, and a lap was spent finding out why.
 
 Nothing caught it, and the near-miss is instructive: `test_krt_capabilities.py`
-asserts `--track-width-floor` is absent on `route_planes.py` and
-`route_diff.py` -- but never on `route.py`, the one CLI it had actually been
-removed from. The removal passed CI because the only assertions about the flag
-were about the two tools that never had it.
+(since deleted) asserted `--track-width-floor` was absent on `route_planes.py`
+and `route_diff.py` -- but never on `route.py`, the one CLI it had actually
+been removed from. The removal passed CI because the only assertions about the
+flag were about the two tools that never had it.
 
-How this differs from `tests/test_431_skill_commands.py`, which is ALSO a
-"every flag the skill tells you to pass must exist" gate over the same skill
-files -- keep both, and do not delete either as a duplicate:
-
-  * #431 reads COMMAND LINES and resolves each flag against the NAMED tool's
-    real parser (`--help`, or the built argparse object). Stronger, per-tool,
-    and it is the right check for an emitted invocation.
-  * this gate reads PROSE -- a `--flag` in backticks in a sentence -- and
-    resolves it as a UNION over every tool, because prose names a flag without
-    naming a tool.
+This gate reads PROSE -- a `--flag` in backticks in a sentence -- and resolves
+it as a UNION over every tool, because prose names a flag without naming a
+tool. Its per-tool sibling, `tests/test_431_skill_commands.py`, reads COMMAND
+LINES and resolves each flag against the NAMED tool's real parser.
 
 That is exactly the gap 53a5a16e fell through: the stale `--track-width-floor`
 instruction was a sentence ("plus `--track-width-floor` for a width clause"),
@@ -49,7 +43,7 @@ import krt_capabilities as K                                   # noqa: E402
 
 #: The docs this gate holds to the engine's actual surface.
 #:
-#: (History: the staged placement skill, since retired for pcb-free-agent.)
+#: (History: the staged placement skill, since retired for plan-pcb-placement.)
 #: `plan-pcb-placement/SKILL.md` was excluded (#923) over two rows that came
 #: back, on the reasoning that neither was a defect and a gate shipping two
 #: standing false positives stops being read. #936 resolved both instead, so
@@ -75,19 +69,13 @@ import krt_capabilities as K                                   # noqa: E402
 #: what makes the coverage real rather than asserted.
 DOCS = (
     os.path.join('.claude', 'skills', 'plan-pcb-routing', 'SKILL.md'),
-    # The free-agent skill replaced the staged placement and combined skills
+    # The placement skill (plan-pcb-placement) replaced the staged placement and combined skills
     # (#923 had enrolled those after a number they quoted was pinned nowhere);
     # it inherits their place in the list, verifier brief included.
-    os.path.join('.claude', 'skills', 'pcb-free-agent', 'SKILL.md'),
-    os.path.join('.claude', 'skills', 'pcb-free-agent', 'references',
+    os.path.join('.claude', 'skills', 'plan-pcb-placement', 'SKILL.md'),
+    os.path.join('.claude', 'skills', 'plan-pcb-placement', 'references',
                  'verifier.md'),
     os.path.join('docs', 'api-routing-config.md'),
-    # #946: this file was in NO gate at all -- not this one, not
-    # test_doc_constants, not run_doc_examples -- while quoting flags and
-    # constants throughout. Added here rather than to run_doc_examples,
-    # which EXECUTES its ```python blocks: a render block there would need
-    # Pillow and a board and would write PNGs into the repo root.
-    os.path.join('docs', 'route-animation.md'),
 )
 
 #: What counts as LIVE: any non-test source file that registers the flag with
@@ -95,7 +83,7 @@ DOCS = (
 #: per-CLI parser walk -- `krt_capabilities.script_flags` follows a registrar
 #: only when it sits BESIDE the script (the rule that stops it handing
 #: route_planes the whole of route.py's vocabulary), so flags registered from
-#: a sub-package (`py_placer/placement/cli_gates.py` supplies --suggest-locks
+#: a sub-package (`py_placer/placement/cli_gates.py` supplies --allow-unplaced
 #: and --allow-routed) read as dead and the gate cries wolf. A gate that cries
 #: wolf gets deleted, which would be worse than no gate.
 SKIP_DIRS = ('.git', 'wk', 'kicad_files', 'docs', 'node_modules',
@@ -121,7 +109,7 @@ SKIP_DIRS = ('.git', 'wk', 'kicad_files', 'docs', 'node_modules',
 #: never cries at all is worse: it is deleted AND it was never doing anything.
 #:
 #: The two objections the broad scan was reaching for both survive here:
-#:   * flags registered from a sibling sub-package (`--suggest-locks` via
+#:   * flags registered from a sibling sub-package (`--allow-routed` via
 #:     `py_placer/placement/cli_gates.py`) stay live, because the scan is a
 #:     UNION over every non-test source file, not a per-CLI parser walk;
 #:   * generated boolean pairs stay live via the `--no-` derivation below --
@@ -291,11 +279,12 @@ EXTERNAL = {
     '--oneline', '--json', '--format', '--output', '--help', '--version',
     '--no-verify', '--hard', '--force', '--from-source', '--stat',
     '--exclude-all', '--define-var', '--drc', '--severity-all', '--units',
+    '--refill-zones',
     '--schematic-parity', '--all', '--quiet', '--verbose', '--dry-run',
     '--name-only', '--porcelain', '--short', '--set-upstream', '--amend',
     '--no-pager', '--follow', '--patch', '--word-diff', '--color',
     '--recurse-submodules', '--depth', '--branch', '--tags',
-    # `gh issue list --search` (pcb-free-agent's hand-back: check the open
+    # `gh issue list --search` (plan-pcb-placement's hand-back: check the open
     # issues before filing a tool gap).
     '--search',
     # Prose placeholders, not flags: "`--flag`" in a worked example, and

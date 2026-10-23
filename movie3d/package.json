@@ -1,0 +1,12 @@
+{
+  "name": "krt-movie3d",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prototype 3D placement movie: drives a three.js page in headless Chromium.",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "1.52.0",
+    "three": "0.186.1"
+  }
+}

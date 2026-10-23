@@ -22,9 +22,9 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS = os.path.join(ROOT, '.claude', 'skills')
-#: The staged placement and combined skills were retired for pcb-free-agent.
+#: The staged placement and combined skills were retired for plan-pcb-placement.
 #: The banlist applies to it unchanged: it is meant to work on ANY board.
-OWNED = ('plan-pcb-routing', 'pcb-free-agent')
+OWNED = ('plan-pcb-routing', 'plan-pcb-placement')
 
 FAILURES = []
 
@@ -89,7 +89,7 @@ def main():
 
     print('the skills stay separable')
     route = os.path.join(SKILLS, 'plan-pcb-routing', 'SKILL.md')
-    free = os.path.join(SKILLS, 'pcb-free-agent', 'SKILL.md')
+    free = os.path.join(SKILLS, 'plan-pcb-placement', 'SKILL.md')
     for p in (route, free):
         check(f'{os.path.basename(os.path.dirname(p))} has front matter',
               open(p, encoding='utf-8').read().startswith('---\n'))

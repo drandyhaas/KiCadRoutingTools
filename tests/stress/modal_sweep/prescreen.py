@@ -13,8 +13,8 @@ use: the prescreen catches BLOWUPS (quality collapse, wall explosion);
 mild degradation is the cloud screen's job (hw3.0 tied 0-0 locally, died
 across 12 cloud boards). The funnel:
 
-  prescreen (2 boards, local, $0)  ->  screen (12 boards, ~$0.02/arm)
-  ->  full corpus (~$0.7/arm)      ->  holdout (untouched sets)
+  prescreen (2 boards, local, $0)  ->  screen (12 boards, ~$0.15/arm)
+  ->  full corpus (~$1/arm)        ->  holdout (untouched sets)
 
 PARALLEL up to --jobs (default 4): defaults-mode values each get their own
 temporary git WORKTREE (routing_defaults is per-tree state; the compiled

@@ -100,17 +100,22 @@ def t_assign():
                    for s in out if pred(s.width))
 
     # A 9 mm short edge whose route only fit at 0.15 overall, in FREE space
-    # away from its pads: the pad necks (neckdown_length each end) stay at
-    # the edge's width, the middle goes back to the requested 0.3 (#1033
-    # honour), and no ledger row is written for this attempt.
+    # (no board, so no pad caps either end): the middle goes back to the
+    # requested 0.3 (#1033 honour), and no ledger row is written for this
+    # attempt. #1318: the neckdown_length zone at each end is no longer
+    # narrowed whole; it is fit-checked at the pad-entry width like the rest,
+    # so where 0.3 fits -- everywhere, here -- the ends ship at 0.3 too. (They
+    # used to ship at 0.15 unconditionally; the blocked case below is the one
+    # that keeps the edge width, and test_1318_neck_zone_fit covers the pad
+    # cap and a pinch inside the zone.)
     n0 = len(ledger())
     segs = [make_seg(0, 0, 4.5, 0, width=0.3, net_id=1),
             make_seg(4.5, 0, 9, 0, width=0.3, net_id=1)]
     out = _assign_wide_route_widths(segs, cfg, 1, GridObstacleMap(1), coord,
                                     ['F.Cu'], 0, False, 0.15, neck_start=True)
     new = ledger()[n0:]
-    check('short edge: the pad ends keep the edge width',
-          abs(out[0].width - 0.15) < 1e-9 and abs(out[-1].width - 0.15) < 1e-9,
+    check('short edge: where the net width fits, the ends ship at it too (#1318)',
+          abs(out[0].width - 0.3) < 1e-9 and abs(out[-1].width - 0.3) < 1e-9,
           [round(s.width, 4) for s in out])
     check('short edge: the middle is widened back to the requested 0.3',
           length_at(out, lambda w: abs(w - 0.3) < 1e-9) > 2.0,

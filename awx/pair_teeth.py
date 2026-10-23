@@ -76,6 +76,70 @@ def pockets(pairs, tooth, half_pitch, reach=REACH):
     return out
 
 
+CLOSE_REACH = 4.0   # mm past their teeth two neighbouring lanes are followed to where they close (lane_pockets)
+
+
+def lane_pockets(segments, name_of, tooth, bbox, half_pitch, close, pairs=None, reach=CLOSE_REACH, step=0.1):
+    """[(layer, face, quad)]: the POCKET between two NEIGHBOURING laid lanes -- teeth on one face and one layer (`tooth`,
+    teeth()), no other of them on that layer between the two along the face -- whose copper on that layer past their
+    face comes within `close` of each other (centre to centre: no room for a via between them, joint_escape) within
+    `reach` mm out of it: the quad from `half_pitch` inside the ball box
+    `bbox`'s face between the two teeth to where they close (a laid lane's tooth, its copper's end furthest out within
+    teeth()'s band, may stand well out of the face). A track of another net there on that layer, or a via, is walled in once they close, as in a pair's
+    pocket (pockets): the zynq's U1, where the DDR3 bus's A14 and A10 leave the east face 1.6 mm apart on F.Cu and run
+    on north-east 0.78 mm apart, round OTG_DATA5's and SD_D1's escapes -- the USB bus's OTG_DATA5 open on every board. A pair's own two legs are pockets()'s (`pairs`
+    {base: (P leg, N leg)}); two neighbours that part, or are not laid past their teeth, close nothing.
+    `segments` [(a, b, layer, net)], `name_of` {net: short name}"""
+    import collections
+    import math
+    own = {frozenset(pr) for pr in (pairs or {}).values()}
+    by = collections.defaultdict(list)
+    for a, b, layer, net in segments:
+        nm = name_of.get(net)
+        if nm in tooth and tooth[nm][2] == layer:
+            by[nm].append((a, b))
+
+    x0, y0, x1, y1 = bbox
+    face = lambda u: {(1, 0): (x1, 0.0), (-1, 0): (x0, 0.0), (0, 1): (0.0, y1), (0, -1): (0.0, y0)}[tuple(u)]
+
+    def depth(p, u):
+        f = face(u)
+        return (p[0] - f[0]) * u[0] + (p[1] - f[1]) * u[1]
+
+    def past(nm):
+        """[(depth, point)]: points along the lane's copper on its tooth's layer, from the face out to `reach`"""
+        _q, u, _L = tooth[nm]
+        out = []
+        for a, b in by.get(nm, ()):
+            k = max(1, int(math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / step)))
+            for i in range(k + 1):
+                p = (a[0] + (b[0] - a[0]) * i / k, a[1] + (b[1] - a[1]) * i / k)
+                d = depth(p, u)
+                if -1e-9 <= d <= reach:
+                    out.append((d, p))
+        return out
+    group = collections.defaultdict(list)
+    for nm, (q, u, L) in tooth.items():
+        group[(u, L)].append((q, nm))
+    res = []
+    for (u, L), ts in sorted(group.items()):
+        ax = 1 if u[0] != 0 else 0                      # (the coordinate along the face)
+        ts.sort(key=lambda t: (t[0][ax], t[1]))
+        for (qa, na), (qb, nb) in zip(ts, ts[1:]):
+            if frozenset((na, nb)) in own:
+                continue
+            pa, pb = past(na), past(nb)
+            shut = [max(da, db) for da, a_ in pa for db, b_ in pb
+                    if math.hypot(a_[0] - b_[0], a_[1] - b_[1]) < close]
+            if not shut:
+                continue
+            d = min(shut)
+            # (the quad on the face's line: from half a pitch inside it to `d` out, between the two teeth along it)
+            pt_ = lambda q, k: (q[0] - u[0] * depth(q, u) + u[0] * k, q[1] - u[1] * depth(q, u) + u[1] * k)
+            res.append((L, u, [pt_(qa, -half_pitch), pt_(qb, -half_pitch), pt_(qb, d), pt_(qa, d)]))
+    return res
+
+
 def in_pocket(quad, a, b=None):
     """a point `a`, or the segment a-b, inside the quad `quad` or crossing its edge"""
     if b is None:

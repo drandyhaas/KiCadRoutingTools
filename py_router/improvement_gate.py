@@ -59,7 +59,9 @@ An exact draw on both axes ships, and is reported loudly with both net lists.
 `bms_sensor`'s retry reproduced today closes the three nets it was asked to
 close, breaks three others, and leaves the pad count unchanged at 3 -- a
 genuine lateral trade. The operator who passed `--rip-existing-nets` authorised
-that; what they could not do before is see it.
+that; what they could not do before is see it. The one draw that does NOT ship
+is a POUR TRADE: it broke a net that owns a pour to connect one that does not
+-- see gate_verdict.
 
 The prior art is unanimous on why the gate has to exist at all: five separate
 measurements (2026-08-05/06) found that the SAME rip authority WITHOUT an
@@ -89,7 +91,7 @@ def net_connectivity_map(pcb_data, tolerance: float = 0.02,
     for net_id, pads in (pcb_data.pads_by_net or {}).items():
         if not net_id or len(pads or []) < 2:
             continue          # net 0 pseudo-net / trivially connected
-        broken, dis_pads = _grade_net(
+        broken, dis_pads, _pairs = _grade_net(
             pcb_data, net_id, pads, segs_by_net.get(net_id, []),
             vias_by_net.get(net_id, []), zones_by_net.get(net_id, []),
             tolerance)
@@ -148,14 +150,18 @@ def _copper_by_net(pcb_data, segs_by_net, vias_by_net, zones_by_net):
 
 
 def _grade_net(pcb_data, net_id, pads, segs, vias, zones, tolerance):
-    """(broken, disconnected_pad_locations) for one net: the zone/fill-aware
-    union-find route.py's own sweeps grade with, multi-board aware."""
-    from check_connected import check_net_connectivity, net_break_within_outlines
+    """(broken, disconnected_pad_locations, (pairs_total, pairs_connected))
+    for one net: the zone/fill-aware union-find route.py's own sweeps grade
+    with, multi-board aware, and its #409 pad-pair tally."""
+    from check_connected import (check_net_connectivity,
+                                 net_break_within_outlines,
+                                 net_pad_pairs_within_outlines)
     r = check_net_connectivity(net_id, segs, vias, pads, zones,
                                tolerance=tolerance, pcb_data=pcb_data)
     # #479 multi-board: only a break WITHIN one outline is a real break.
     broken, dis_pads = net_break_within_outlines(pcb_data, r)
-    return bool(broken), (list(dis_pads or []) if broken else [])
+    return (bool(broken), (list(dis_pads or []) if broken else []),
+            net_pad_pairs_within_outlines(pcb_data, r, pads))
 
 
 def grade_nets(pcb_data, net_ids, tolerance: float = 0.02,
@@ -164,7 +170,8 @@ def grade_nets(pcb_data, net_ids, tolerance: float = 0.02,
                zones_by_net: Optional[Dict[int, list]] = None
                ) -> Dict[int, Dict]:
     """Per-net detail for `net_ids` ONLY, on `net_connectivity_map`'s grade:
-    {net_id: {'pads', 'broken', 'copper', 'failed_pads'}}, `failed_pads`
+    {net_id: {'pads', 'broken', 'copper', 'pad_pairs', 'failed_pads'}},
+    `pad_pairs` the (pairs_total, pairs_connected) tally, `failed_pads`
     shaped like route.py's failed_multipoint entries. Nets with fewer than two
     pads are skipped (trivially connected). route.py's final re-grade (#1069)
     uses it because it must grade the nets the run OWNS, never the whole
@@ -178,12 +185,13 @@ def grade_nets(pcb_data, net_ids, tolerance: float = 0.02,
             continue
         segs = segs_by_net.get(net_id, [])
         vias = vias_by_net.get(net_id, [])
-        broken, dis = _grade_net(pcb_data, net_id, pads, segs, vias,
-                                 zones_by_net.get(net_id, []), tolerance)
+        broken, dis, pairs = _grade_net(pcb_data, net_id, pads, segs, vias,
+                                        zones_by_net.get(net_id, []), tolerance)
         out[net_id] = {
             'pads': len(pads),
             'broken': broken,
             'copper': bool(segs or vias),
+            'pad_pairs': list(pairs),
             'failed_pads': [
                 {'x': round(float(p[0]), 4), 'y': round(float(p[1]), 4),
                  'component_ref': p[3] if len(p) > 3 else '?',
@@ -194,7 +202,8 @@ def grade_nets(pcb_data, net_ids, tolerance: float = 0.02,
 
 def compare_connectivity(before: Dict[int, Tuple[bool, int]],
                          after: Dict[int, Tuple[bool, int]],
-                         net_name: callable) -> Dict:
+                         net_name: callable,
+                         zone_net_ids=None) -> Dict:
     """Per-net connectivity delta between two states of the same board.
 
     Only nets present in BOTH maps are compared: a net that exists in one
@@ -206,9 +215,16 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
     (name, before, after) -- disjoint from `lost`, so a net is named once. A
     pad-count rejection used to name no net at all in that case, because the
     net is then not `lost`.
+
+    `zone_net_ids` (the nets that own a pour) adds `lost_zone` /
+    `gained_zone`, the pour nets among `lost` / `gained`, which
+    gate_verdict's tie rule reads.
     """
+    zone_ids = set(zone_net_ids or ())
     lost: List[str] = []
     gained: List[str] = []
+    lost_zone: List[str] = []
+    gained_zone: List[str] = []
     worsened: List[Tuple[str, int, int]] = []
     pads_before = pads_after = 0
     compared = 0
@@ -221,18 +237,35 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
         pads_after += dis_a
         if conn_b and not conn_a:
             lost.append(net_name(net_id))
+            if net_id in zone_ids:
+                lost_zone.append(net_name(net_id))
         elif conn_a and not conn_b:
             gained.append(net_name(net_id))
+            if net_id in zone_ids:
+                gained_zone.append(net_name(net_id))
         elif dis_a > dis_b:
             worsened.append((net_name(net_id), dis_b, dis_a))
     return {
         'lost': sorted(lost),
         'gained': sorted(gained),
+        'lost_zone': sorted(lost_zone),
+        'gained_zone': sorted(gained_zone),
         'worsened': sorted(worsened),
         'disconnected_pads_before': pads_before,
         'disconnected_pads_after': pads_after,
         'nets_compared': compared,
     }
+
+
+def pour_trade(cmp: Dict) -> bool:
+    """True when `cmp` is an exact draw (as many nets connected as broken,
+    the disconnected-pad count unchanged) that BROKE more pour nets than it
+    connected: a plane net's connection traded for a signal's."""
+    return (len(cmp['lost']) == len(cmp['gained'])
+            and cmp['disconnected_pads_after']
+            == cmp['disconnected_pads_before']
+            and len(cmp.get('lost_zone') or ())
+            > len(cmp.get('gained_zone') or ()))
 
 
 def gate_verdict(cmp: Dict) -> str:
@@ -243,10 +276,54 @@ def gate_verdict(cmp: Dict) -> str:
     on the net count while DOUBLING its open pads (83 -> 154), because the nets
     it broke were much larger than the ones it closed. See the module
     docstring.
+
+    An exact draw on both axes ships -- unless it is a POUR TRADE
+    (pour_trade): it broke a net that owns a pour to connect one that does
+    not. The input had that pour whole and the run's in-run plane finalize
+    already tried to mend the cut before this grade, so shipping the draw
+    takes power pins off their plane to buy a signal, which is any later
+    step's ordinary retry. The draw goes to the board whose pours are whole.
+    A pour's state must be KiCad's for this: route.py re-grades the pour
+    nets a rejection rests on with KiCad's exact fill of both boards before
+    acting on it (one retry read as GND for /P0.17 on the raster, but
+    KiCad had GND split on the input already, so it was a plain gain).
     """
     net_delta = len(cmp['lost']) - len(cmp['gained'])
     pad_delta = cmp['disconnected_pads_after'] - cmp['disconnected_pads_before']
-    return 'reject' if (net_delta > 0 or pad_delta > 0) else 'accept'
+    if net_delta > 0 or pad_delta > 0 or pour_trade(cmp):
+        return 'reject'
+    return 'accept'
+
+
+def verified_pour_compare(before: Dict[int, Tuple[bool, int]],
+                          after: Dict[int, Tuple[bool, int]],
+                          net_name: callable,
+                          kicad_before: Dict[int, Tuple[bool, int]],
+                          kicad_after: Dict[int, Tuple[bool, int]],
+                          zone_net_ids) -> Tuple[Dict, str]:
+    """(cmp, verdict) for route.py's verified-pour re-audit: the board the
+    in-run finalize's oracle VERIFIED (`before`, its connectivity map)
+    against the board after the final reconciliation and the re-audit's own
+    weld (`after`).
+
+    The pours KiCad graded (`kicad_before` / `kicad_after`, {net id:
+    (connected, disconnected pads)}) take KiCad's word over the raster's: a
+    raster map can join fill islands KiCad's refill splits (measured on GND
+    and +3V3 pours of three boards), so its "connected" is not evidence for a
+    pour. A pour KiCad graded on one side only is left out of both -- its
+    change is unknown. Everything else is the improvement gate's own grade,
+    and the verdict is gate_verdict's, pour-trade tie rule included: a
+    reconciliation that connected one signal by cutting a pour the weld
+    could not mend is refused."""
+    b = dict(before)
+    a = dict(after)
+    b.update(kicad_before)
+    a.update(kicad_after)
+    for nid in set(kicad_before) ^ set(kicad_after):
+        b.pop(nid, None)
+        a.pop(nid, None)
+    cmp = compare_connectivity(b, a, net_name, zone_net_ids=zone_net_ids)
+    return cmp, gate_verdict(cmp)
 
 
 def excluded_plane_attribution(before: Dict[int, Tuple[bool, int]],
@@ -319,6 +396,10 @@ def format_report(cmp: Dict, verdict: str, action: str) -> str:
     lines.append(f"  disconnected pads: {cmp['disconnected_pads_before']} "
                  f"-> {cmp['disconnected_pads_after']} "
                  f"over {cmp['nets_compared']} multi-pad net(s)")
+    if pour_trade(cmp):
+        lines.append(f"  a draw that breaks pour net(s) "
+                     f"{', '.join(cmp['lost_zone'])} to connect signal(s): "
+                     f"the board whose pours are whole wins the tie")
     excl = cmp.get('excluded_plane_nets') or []
     if excl:
         # #1114: the plane net is outside --nets, so the finalize that would

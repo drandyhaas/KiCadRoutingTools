@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """The colour language every render in this repo speaks (#946, #1011).
 
-``frame_layout`` plans WHERE things go; this plans WHAT COLOUR THEY ARE. Same
-posture as its neighbour: pure data over stdlib, so a palette can be measured --
+This plans WHAT COLOUR things are, as pure data over stdlib, so a palette can be measured --
 contrast, colour-vision separation, compositing collisions -- before anything is
 drawn. ``palette_audit`` does that measuring; ``tests/test_946_palette_measures``
 re-derives its floors from what is declared here.
@@ -501,7 +500,7 @@ def layer_palette(copper_layers: Sequence[str],
 def audit_lines(th: Theme = None) -> list:
     """The theme as a table, for a console or a commit message. Deliberately
     not a `__main__`: this is a leaf library, and a runnable module would owe a
-    `KRT_TOOL` declaration. `palette_card.py` draws it instead."""
+    `KRT_TOOL` declaration."""
     th = DARK if th is None else th
     out = ['theme %s -- %d roles, %d layers at alpha %d'
            % (th.name, len(ROLES), len(th.layers), th.layer_alpha)]

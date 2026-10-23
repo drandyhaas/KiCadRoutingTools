@@ -6,7 +6,6 @@ pair routing to avoid code duplication.
 """
 from __future__ import annotations
 
-import os
 import time
 from typing import List, Optional, Tuple, Dict, Set
 
@@ -115,8 +114,7 @@ def setup_bga_exclusion_zones(
             # net whose fanout dropped it. Auto-disable that component's zone.
             # Engine-level (batch_route/batch_route_diff_pairs), so the GUI
             # inherits; board-state-driven, so no sidecar file is load-bearing.
-            import env_knobs
-            if selected_net_ids and env_knobs.BARE_BALL_ZONE_EXEMPT:
+            if selected_net_ids:
                 _sel = set(selected_net_ids)
                 # Only nets that can actually be ROUTED (>=2 pads): a
                 # single-pad net's ball is trivially bare and disabled
@@ -235,6 +233,57 @@ def power_width_report(segments, requested: Dict[int, float],
             'by_width_mm': {f'{w:g}': round(L, 2)
                             for w, L in sorted(prof.items())},
         }
+    return out
+
+
+def segment_identity(s, net_name):
+    """A segment's geometry as a hashable key, orientation-free: net (by NAME,
+    so a re-parsed board's renumbered nets still match), layer, width and the
+    two endpoints to 0.1 um. Two boards' segments with equal keys are the same
+    copper; a key the input board lacks is copper the run laid (or re-laid)."""
+    a = (round(s.start_x, 4), round(s.start_y, 4))
+    b = (round(s.end_x, 4), round(s.end_y, 4))
+    return (net_name, s.layer, round(s.width, 4)) + ((a, b) if a <= b else (b, a))
+
+
+def new_copper_width_shortfall(segments, name_of, input_keys, requested_of):
+    """Per net, the copper THIS run laid that ships narrower than the width it
+    requested on that copper's layer (found reviewing #1282).
+
+    `segments` is the shipped copper (the written board, or the GUI's write
+    model); a segment whose :func:`segment_identity` is in `input_keys` was on
+    the input board and is not this run's. `requested_of(net_name, layer)` is
+    the width asked for there, or None for a net this report does not cover.
+    Graphic and net-0 copper is ignored.
+
+    Returns {net_name: {requested_mm, length_mm, under_mm, min_mm}} for every
+    covered net with new copper -- `requested_mm` the widest layer request,
+    `min_mm` the narrowest new segment, `under_mm` the new copper more than
+    1 um narrower than its own layer's request (the same tolerance as
+    power_width_report)."""
+    import math as _math
+    out: Dict[str, Dict] = {}
+    for s in segments:
+        if getattr(s, 'graphic', False) or not s.net_id:
+            continue
+        name = name_of(s.net_id)
+        req = requested_of(name, s.layer)
+        if req is None or segment_identity(s, name) in input_keys:
+            continue
+        L = _math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        if L <= 0:
+            continue
+        r = out.setdefault(name, {'requested_mm': 0.0, 'length_mm': 0.0,
+                                  'under_mm': 0.0, 'min_mm': None})
+        r['requested_mm'] = max(r['requested_mm'], round(float(req), 4))
+        r['length_mm'] += L
+        if s.width < req - 1e-3:
+            r['under_mm'] += L
+        w = round(s.width, 4)
+        r['min_mm'] = w if r['min_mm'] is None else min(r['min_mm'], w)
+    for r in out.values():
+        r['length_mm'] = round(r['length_mm'], 2)
+        r['under_mm'] = round(r['under_mm'], 2)
     return out
 
 
@@ -637,7 +686,7 @@ def filter_already_routed(
                       f"and via is KiCad-locked -- its {n} strict fragment(s) "
                       f"are pinned copper, not a route to finish (#1261)")
                 n = 1
-            if n > 1 and os.environ.get('KICAD_659_DIVERT', '1') != '0':
+            if n > 1:
                 from check_connected import net_dead_copper
                 _dead_s, _dead_v = net_dead_copper(
                     pcb_data, net_id, net_segments, net_vias, net_pads,

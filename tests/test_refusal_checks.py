@@ -113,10 +113,10 @@ def case_right_failure_wrong_reason_is_caught():
 def case_it_works_on_the_real_guards():
     """Against a real refusal in a shipped tool, not a synthetic script.
 
-    pcb-free-agent's make_unplaced refuses a routed input with exit 3 and
+    plan-pcb-placement's make_unplaced refuses a routed input with exit 3 and
     names the strip tool, before writing anything.
     """
-    D = os.path.join(ROOT, '.claude', 'skills', 'pcb-free-agent', 'scripts',
+    D = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement', 'scripts',
                      'make_unplaced.py')
     src = os.path.join(ROOT, 'kicad_files', 'qfn_interior_pads.kicad_pcb')
     with tempfile.TemporaryDirectory() as tmp:

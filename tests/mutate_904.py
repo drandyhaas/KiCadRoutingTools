@@ -99,15 +99,6 @@ CONVERGE_ROWS = [
      "        _lens_src.append({'path': _p, 'abspath': os.path.abspath(_p),\n"
      "                          'sha256': _h.sha256(_line.encode()).hexdigest(),\n"
      "                          'line': _no})"),
-    # the whole point: a close-out verdict with no artifact behind it
-    ('unsourced-lens-gate-deleted',
-     "    if a.final:\n        _unsourced = [v for v, s in zip(a.lens or [], _lens_src)",
-     "    if False:\n        _unsourced = [v for v, s in zip(a.lens or [], _lens_src)"),
-    # scoping it to completion is the `--kind systemic --final` bypass, which
-    # _cross_check then reads as the live claim
-    ('unsourced-gate-scoped-to-completion',
-     "    if a.final:\n        _unsourced =",
-     "    if a.final and a.kind == 'completion':\n        _unsourced ="),
     # the count contradicting its own detail
     ('unjudged_iterations-drops-unnumbered-rows',
      "            out['unjudged_iterations'] = list(unjudged_its)",
@@ -125,13 +116,6 @@ CONVERGE_ROWS = [
      "                   unanswerable=_unanswerable,",
      "        doc.update(verdict='CONTINUE', improving=still,\n"
      "                   unanswerable=_unanswerable,"),
-    # the itemisation nested back under the systemic warning, where an
-    # ordinary ledger never reaches it
-    ('status-itemisation-renested',
-     "    for e in _unlevered:\n"
-     "        print(f\"  i{e.get('iteration')}  {row_label(e)[:80]}\", file=sys.stderr)",
-     "    for e in []:\n"
-     "        print(f\"  i{e.get('iteration')}  {row_label(e)[:80]}\", file=sys.stderr)"),
     # the ladder that stops at the first rung
     ('row_label-stops-at-the-lever',
      """    dec = row.get('exhausted')
@@ -143,7 +127,7 @@ CONVERGE_ROWS = [
 # --- loop_driver: RETIRED -------------------------------------------------
 # Its nine rows (the close-out order, the lens-file slots, the verdict paths)
 # left with loop_driver.py and its killer test_904_closeout_order.py when the
-# combined skill was retired for pcb-free-agent.
+# combined skill was retired for plan-pcb-placement.
 
 # --- the GUI copy of the label ladder -------------------------------------
 GUI_ROWS = [

@@ -121,7 +121,7 @@ def test_foreign_pad_blocks_move_into_short():
     # per-net baseline since #441 (4b955ce)
     st.base_pad[CAP] = st._pad_shortfalls(CAP, cap, cap.x, cap.y, cap.rot)
     assert st.pad_penalty(CAP, cap, tx, ty, tr) > 1e-6
-    assert st.hard_blocked(CAP, cap, tx, ty, tr)
+    assert st.cost(CAP, cap, tx, ty, tr) == float('inf')
     # Same-net foreign pad at the same spot is NOT a violation.
     st.cap_foreign_pads[CAP] = [(foreign[0], foreign[1], foreign[2],
                                  foreign[3], GND, cap.side)]
@@ -150,7 +150,7 @@ def test_via_clear_fallback_rescues_stuck_caps():
 def test_via_clear_fallback_respects_hard_clearances():
     """The fallback must not create a new foreign-pad short to clear a via: no
     cap it moves ends up grazing a foreign pad worse than at its seed (the
-    hard_blocked guard is enforced inside the fallback's cost() gate)."""
+    hard guard is enforced inside the fallback's cost() gate)."""
     seed = _new_repair(parse_kicad_pcb(BOARD))  # base_pad at seed placement
     pcb = parse_kicad_pcb(BOARD)
     res = repair_fanout_clearance(pcb, BOARD, clearance=CLEAR,
@@ -272,12 +272,12 @@ def test_mover_pad_short_is_hard_blocked():
                         st.base_static[(ref, i)] = float('inf')
                     st.base_seg[ref] = _AllInf()
                     st.base_pad[ref] = _AllInf()
-                    assert st.hard_blocked(ref, cap, x, y, cap.rot), \
+                    assert st.cost(ref, cap, x, y, cap.rot) == float('inf'), \
                         f"{ref} pad allowed onto {oref} pad (different nets)"
                     # sanity: the guard is baseline-relative, not absolute --
                     # tolerating the same encroachment when present at seed
                     st.base_cap_pad[frozenset((ref, oref))] = float('inf')
-                    assert not st.hard_blocked(ref, cap, x, y, cap.rot), \
+                    assert st.cost(ref, cap, x, y, cap.rot) < float('inf'), \
                         f"{ref}/{oref}: guard not baseline-relative"
                     return
     raise AssertionError("fixture has no same-side mover pair with "

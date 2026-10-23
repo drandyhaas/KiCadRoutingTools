@@ -68,7 +68,7 @@ def test_rects_come_from_the_optimizers_own_model():
 
 def test_metrics_are_the_quenchs_own_numbers():
     m = _model()
-    cost = m.state.total_cost()
+    cost = m.state.wire_metrics()      # was total_cost() before e1e4777e
     leg = m.state.legality_metrics()
     for k in ('crossings', 'hpwl', 'length'):
         assert m.metrics[k] == cost[k], k
@@ -344,47 +344,6 @@ def test_single_panel_accepts_a_directory_target():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_ignore_nets_reproduces_place_optimize_exactly():
-    """The skill calls this the re-measurement channel: render the WRITTEN board
-    and the metrics must reproduce place_optimize's JSON_SUMMARY. They cannot
-    unless both exclude the same nets -- place_optimize is always given
-    --ignore-nets for the plane rails, and this tool had no such flag, so the
-    check compared two different net sets and always "failed"."""
-    import json
-    d = tempfile.mkdtemp()
-    try:
-        placed = os.path.join(d, 'p.kicad_pcb')
-        opt = subprocess.run(
-            [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_placer', 'place_optimize.py'),
-             SEED, placed, '--max-displacement', '1', '--ignore-nets', 'GND'],
-            capture_output=True, text=True, cwd=ROOT, timeout=1800)
-        assert opt.returncode == 0, opt.stderr[-600:]
-        # Line-based parse (the documented convention): the B1 banner appends
-        # an EXIT= line after JSON_SUMMARY, so a whole-stdout split no longer
-        # yields bare JSON.
-        q = json.loads([l for l in opt.stdout.splitlines()
-                        if l.startswith('JSON_SUMMARY:')][0]
-                       .split('JSON_SUMMARY:', 1)[1])
-
-        def rendered(*extra):
-            r = _run(placed, '--json', '-o', os.path.join(d, 'r.png'),
-                     '--size', '320', '--supersample', '1', *extra)
-            assert r.returncode == 0, r.stderr[-600:]
-            line = [l for l in r.stdout.splitlines()
-                    if l.startswith('JSON_SUMMARY:')][0]
-            return json.loads(line.split('JSON_SUMMARY:', 1)[1])['metrics']
-
-        same = rendered('--ignore-nets', 'GND')
-        assert same['crossings'] == q['crossings_after'], (same, q)
-        assert abs(same['hpwl'] - q['hpwl_after']) < 1e-9, (same, q)
-        # and without the flag it legitimately differs, or the test proves nothing
-        assert rendered()['crossings'] != q['crossings_after']
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-
-
 # --- run-4 G additions: file JSON, instrument echo, checklist, -o siblings --
 
 def test_per_side_png_target_writes_sibling_files():
@@ -460,8 +419,10 @@ def test_json_out_writes_a_file_with_instrument_and_checklist():
         # #962 added the footprint GRAPHIC copper channel (and what it could
         # not measure) beside the two #937 channels. #1031 added the
         # rule-area keep-out band channel, always emitted.
-        # #1096 added the GATING subset of the pad channel.
+        # #1096 added the GATING subset of the pad channel. #1300 added the
+        # parts whose courtyard is an estimate (they draw none).
         assert set(cl['a_off_outline']) == {'pad_copper', 'courtyard',
+                                            'courtyard_estimated',
                                             'pad_copper_gating',
                                             'graphic_copper',
                                             'graphic_copper_unmeasured',
@@ -609,7 +570,6 @@ TESTS = [
     test_ratsnest_nets_uses_the_shared_net_filter,
     test_ratsnest_nets_cli_reports_an_empty_match,
     test_single_panel_accepts_a_directory_target,
-    test_ignore_nets_reproduces_place_optimize_exactly,
     # Defined AFTER the runner and never registered until now (#876):
     test_per_side_png_target_writes_sibling_files,
     test_json_out_writes_a_file_with_instrument_and_checklist,

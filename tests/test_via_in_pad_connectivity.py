@@ -34,14 +34,16 @@ def scenarios():
     # 1. Cross-layer via-in-pad: F.Cu plane pad, via to In1 plane, offset within pad.
     pad_f = _pad('C89', 10.0, 10.0, 0.6, 1.95, ['F.Cu'])         # tall plane pad
     on_plane = _pad('U1', 20.0, 10.0, 0.6, 0.6, ['In1.Cu'])      # already on plane
-    via = Via(x=10.0, y=10.8, size=0.5, drill=0.3, layers=['F.Cu', 'In1.Cu'], net_id=5)
+    via = Via(x=10.0, y=10.8, size=0.5, drill=0.3, layers=['F.Cu', 'In1.Cu'], net_id=5,
+              via_type='micro')
     zone = Zone(net_id=5, net_name='GND', layer='In1.Cu',
                 polygon=[(5, 5), (25, 5), (25, 15), (5, 15)])
     r = check_net_connectivity(5, [], [via], [pad_f, on_plane], [zone])
     results.append(("offset via-in-pad connects cross-layer plane", r['connected']))
 
     # 2. A via genuinely OUTSIDE the pad must NOT be credited (no false positive).
-    far_via = Via(x=10.0, y=12.5, size=0.5, drill=0.3, layers=['F.Cu', 'In1.Cu'], net_id=5)
+    far_via = Via(x=10.0, y=12.5, size=0.5, drill=0.3, layers=['F.Cu', 'In1.Cu'], net_id=5,
+                  via_type='micro')
     r = check_net_connectivity(5, [], [far_via], [pad_f, on_plane], [zone])
     results.append(("via outside pad stays disconnected", not r['connected']))
 
@@ -51,7 +53,8 @@ def scenarios():
     # orthogonal angle. _point_in_pad reads that resolved geometry, not the
     # total rotation, so the fixture must supply the swapped sizes.
     rpad = _pad('C90', 30.0, 30.0, 1.95, 0.6, ['F.Cu'])  # board-resolved: wide in x
-    rvia = Via(x=30.8, y=30.0, size=0.5, drill=0.3, layers=['F.Cu', 'In1.Cu'], net_id=5)
+    rvia = Via(x=30.8, y=30.0, size=0.5, drill=0.3, layers=['F.Cu', 'In1.Cu'], net_id=5,
+               via_type='micro')
     zone3 = Zone(net_id=5, net_name='GND', layer='In1.Cu',
                  polygon=[(25, 25), (35, 25), (35, 35), (25, 35)])
     on_plane3 = _pad('U2', 33.0, 30.0, 0.6, 0.6, ['In1.Cu'])

@@ -29,12 +29,18 @@ directory (the source board, referenced by its own absolute path, still resolves
 import argparse
 import os
 import json
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+try:
+    import resource as _resource   # POSIX only: per-command CPU via getrusage
+except ImportError:                # Windows: no CPU figure is recorded
+    _resource = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for _gitver when run as a script
 # #522/py_placer layout. The engine dirs hang off the REPO ROOT, which is
@@ -148,7 +154,32 @@ def _tree_footprint_mb(pid):
     return total
 
 
-def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None, footprint_interval=5.0):
+def _kill_tree(p):
+    """Kill a replayed command and its children (the heavy router workers).
+
+    POSIX kills the children `pgrep` names, then the wrapper. Windows has no
+    pgrep (calling it raised FileNotFoundError out of the timeout path), and
+    killing only the wrapper leaves its pool workers running, so `taskkill /T`
+    takes the whole tree."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)],
+                       capture_output=True)
+    else:
+        for k in subprocess.run(["pgrep", "-P", str(p.pid)],
+                                capture_output=True, text=True).stdout.split():
+            try:
+                os.kill(int(k), 9)
+            except (ValueError, ProcessLookupError):
+                pass
+    try:
+        p.kill()
+    except ProcessLookupError:
+        pass
+    p.wait()
+
+
+def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None, footprint_interval=5.0,
+                      env=None):
     """Run a command (inheriting stdout/stderr) while sampling its process-tree
     RSS; return (returncode, peak_rss_kb, timed_out, peak_footprint_mb). Lets the
     replay record per-step peak memory so an engine change's memory effect is
@@ -164,8 +195,10 @@ def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None, footprint_interval=
     (run_board.sh's 3-hour/command budget); the replay had none, so a board that
     wedges in rip-up (issue #211: ulx3s' 40-min+ non-terminating final route)
     could hang a whole sweep forever. A generous cap (default 3h) lets slow-but-
-    finishing boards complete while still bailing a true non-termination."""
-    p = subprocess.Popen(argv, cwd=cwd)
+    finishing boards complete while still bailing a true non-termination.
+
+    `env`: the child's whole environment (None inherits this process's)."""
+    p = subprocess.Popen(argv, cwd=cwd, env=env)
     peak = 0
     peak_fp = 0.0
     start = time.time()
@@ -183,18 +216,7 @@ def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None, footprint_interval=
             last_fp = now
         if timeout is not None and now - start > timeout:
             timed_out = True
-            # Kill the children first (the heavy router workers), then the wrapper.
-            for k in subprocess.run(["pgrep", "-P", str(p.pid)],
-                                    capture_output=True, text=True).stdout.split():
-                try:
-                    os.kill(int(k), 9)
-                except (ValueError, ProcessLookupError):
-                    pass
-            try:
-                p.kill()
-            except ProcessLookupError:
-                pass
-            p.wait()
+            _kill_tree(p)
             break
         time.sleep(interval)
     return p.returncode, peak, timed_out, peak_fp
@@ -222,9 +244,35 @@ def parse_manifest(path):
     So lines are ACCUMULATED until shlex can split them, which is exactly the
     shell's own continuation rule. Newlines inside the quotes survive into the
     token, reproducing the recorded argument byte-for-byte.
+
+    Two SHELL lines are directives here, not commands (#1337). A hand-written
+    plan.sh starts with `cd <repo>` -- the routing skill requires it and
+    route_plan_check enforces it -- and this read it as a command, so every
+    command's cwd stayed None and its relative paths resolved against the
+    manifest's folder: manifest_to_plan "rejected" a valid repo-relative
+    `--intent`, and the pruner dropped every step upstream of it (gp14
+    daplink: 4 plan steps where the chain has 7).
+      * `cd DIR` sets the cwd exactly as `# cwd=` does, sticky. `~` expands;
+        a relative DIR resolves against the cwd so far, else the manifest's
+        folder. `cd` alone is $HOME. A `cd` sharing a line with more
+        (`cd x && ...`) stays a command.
+      * `export NAME=value ...` exports a knob to every LATER command, as
+        the shell does: each export that `env_knobs.is_replay_knob` accepts
+        joins the leading `NAME=value` prefix of every command after it
+        (#1302; a command's own prefix still wins, as in the shell).
+        Anything else exported -- REDO_MANIFEST, REDO_RUNDIR, PATH -- is the
+        recording harness's, and is dropped: a replay that inherited
+        REDO_MANIFEST would append to the ORIGINAL run's manifest.
     """
     cmds = []
     current_cwd = None
+    exported = {}
+    base = os.path.dirname(os.path.abspath(path))
+    try:
+        from env_knobs import is_replay_knob
+    except Exception:                  # the engine dir missing: export none
+        def is_replay_knob(_name):
+            return False
     buf = ""
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -248,13 +296,55 @@ def parse_manifest(path):
             except ValueError:
                 continue  # unbalanced quote so far -> this command continues
             buf = ""
-            if argv:
-                cmds.append((current_cwd, argv))
+            if not argv:
+                continue
+            if argv[0] == "cd" and len(argv) <= 2:
+                target = os.path.expanduser(argv[1] if len(argv) == 2 else "~")
+                if not os.path.isabs(target):
+                    target = os.path.join(current_cwd or base, target)
+                current_cwd = os.path.normpath(target)
+                continue
+            if argv[0] == "export":
+                for tok in argv[1:]:
+                    if "=" in tok:
+                        k, v = tok.split("=", 1)
+                        if is_replay_knob(k):
+                            exported[k] = v
+                continue
+            if exported:
+                argv = [f"{k}={v}" for k, v in exported.items()] + argv
+            cmds.append((current_cwd, argv))
     if buf.strip():
         # Genuinely unterminated at EOF: raise rather than silently drop the tail,
         # which would replay a TRUNCATED chain and look like a routing failure.
         raise ValueError(f"{path}: unterminated quote at end of manifest: {buf[:120]!r}")
     return cmds
+
+
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def split_env_prefix(argv):
+    """(env, argv): the command's leading `NAME=value` assignments, and the
+    command that follows them (#1302).
+
+    The recorder writes the env knobs a step ran with as that prefix -- the
+    shell's own spelling, so `bash redo_commands.sh` applies them -- and an
+    agent may type one by hand. A replayer must apply them as the child's
+    ENVIRONMENT: handed to Popen as argv, `KICAD_PLANE_FRAGILITY_COST=0` was
+    run as a program (PermissionError / FileNotFoundError), and a replayer
+    that dropped them routed the step at the defaults instead. The parsed
+    manifest keeps the prefix in argv, so every reader sees what was run;
+    the analysis helpers (board_io, is_check_cmd, the pruner) are blind to
+    it by construction, and anything that EXECUTES or converts a command
+    splits it here."""
+    env = {}
+    i = 0
+    while i < len(argv) and _ENV_ASSIGN.match(argv[i]):
+        k, v = argv[i].split("=", 1)
+        env[k] = v
+        i += 1
+    return env, list(argv[i:])
 
 
 def relocate_moved_scripts(argv):
@@ -618,7 +708,7 @@ def seed_input_boards(manifest, cmds, dest_dir):
 # Flags whose VALUE is a file the command WRITES. A produced file may already
 # exist in the original run dir, so copying it would pre-seed a stale output.
 _OUTPUT_FLAGS = frozenset({
-    "-o", "--out", "--output", "--json-out", "--timings-out", "--routetrace",
+    "-o", "--out", "--output", "--json-out", "--timings-out",
     "--report", "--log", "--save", "--dump",
 })
 
@@ -710,9 +800,9 @@ def main():
                          "the whole replay forever. Pass 0 to disable the cap.")
     args = ap.parse_args()
 
-    # Record a per-copper route trace for each replayed route.py / route_diff.py
-    # step (#482) so render_run can splice fine rip/restore animation into the
-    # whole-run movie. Default-on; set KICAD_ROUTE_TRACE=0 to skip.
+    # Record a route trace for each replayed route.py / route_diff.py step
+    # (#482), for the run's routing movie below. Default-on; set
+    # KICAD_ROUTE_TRACE=0 to skip.
     os.environ.setdefault("KICAD_ROUTE_TRACE", "1")
 
     remaps = []
@@ -847,22 +937,37 @@ def main():
         # commands run serially and each child's whole reaped tree folds into
         # the counter at wait(), so the delta is that command's tree CPU.
         # Wall time is load-confounded (parallel pools, shared cloud hosts);
-        # CPU-seconds are the honest cross-run cost metric.
-        import resource as _res
-        _ru0 = _res.getrusage(_res.RUSAGE_CHILDREN)
+        # CPU-seconds are the honest cross-run cost metric. Windows has no
+        # getrusage, so there the record carries no cpu_seconds at all (its
+        # readers default a missing figure, as they do for older timings).
+        _ru0 = _resource.getrusage(_resource.RUSAGE_CHILDREN) if _resource else None
         timeout = args.timeout if args.timeout and args.timeout > 0 else None
-        rc, peak_kb, timed_out, peak_fp_mb = run_with_peak_rss(argv, cwd, timeout=timeout)
-        _ru1 = _res.getrusage(_res.RUSAGE_CHILDREN)
-        cpu_s = (_ru1.ru_utime - _ru0.ru_utime) + (_ru1.ru_stime - _ru0.ru_stime)
+        # #1302: the recorded env knobs are the child's ENVIRONMENT, not argv.
+        env_knobs, run_argv = split_env_prefix(argv)
+        child_env = dict(os.environ, **env_knobs) if env_knobs else None
+        # The prefix wins, as in the shell -- so an A/B arm exporting a knob
+        # this step pinned does not reach it. Say so rather than let the arm
+        # measure nothing.
+        for _k, _v in env_knobs.items():
+            if _k in os.environ and os.environ[_k] != _v:
+                print(f"    NOTE: the recorded {_k}={_v} overrides this "
+                      f"replay's {_k}={os.environ[_k]} for this step")
+        rc, peak_kb, timed_out, peak_fp_mb = run_with_peak_rss(
+            run_argv, cwd, timeout=timeout, env=child_env)
+        cpu_s = None
+        if _resource:
+            _ru1 = _resource.getrusage(_resource.RUSAGE_CHILDREN)
+            cpu_s = (_ru1.ru_utime - _ru0.ru_utime) + (_ru1.ru_stime - _ru0.ru_stime)
         if rc == 0 and not timed_out:
             # A `cp`/`mv` of a board must carry its .kicad_pro (the recorded DRC
             # floor) or the renamed board grades at the looser design default.
-            mirror_project_sibling(argv, cwd)
+            mirror_project_sibling(run_argv, cwd)
         dt = time.time() - cmd_t0
-        rec = {"index": i, "seconds": round(dt, 3),
-               "cpu_seconds": round(cpu_s, 3), "returncode": rc,
+        rec = {"index": i, "seconds": round(dt, 3), "returncode": rc,
                "peak_rss_mb": round(peak_kb / 1024, 1),
                "timed_out": timed_out, "argv": argv}
+        if cpu_s is not None:
+            rec["cpu_seconds"] = round(cpu_s, 3)
         # peak_footprint_mb (darwin only): the authoritative memory number that
         # captures mimalloc-retained + IOAccelerator-tagged pages RSS misses
         # (issue #419). Omitted on platforms where it's unavailable (0.0).
@@ -919,11 +1024,11 @@ def main():
         if not os.path.isfile(fb_path):
             fb_path = None
 
-    # Final-board snapshot (combined + per-layer PNGs, #296/#424) AND the
-    # whole-run routing movie (#482), via the fast geometry renderer
-    # (render_run -> route_render + animate_route), replacing the old kicad-cli
-    # + headless-Chrome board_layer_images path. Drops <board>.png,
-    # <board>_<layer>.png, and <rundir>/routing.gif. Non-fatal.
+    # Final-board snapshot (combined + per-layer PNGs, #296/#424) and the
+    # run's routing movie (#482), via the fast geometry renderer (render_run ->
+    # route_render, route_movie), replacing the old kicad-cli + headless-Chrome
+    # board_layer_images path. Drops <board>.png, <board>_<layer>.png and
+    # <rundir>/routing.mp4. Non-fatal.
     if fb_path:
         try:
             from render_run import render_final_snapshot, render_run_movie

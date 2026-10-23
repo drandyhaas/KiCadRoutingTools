@@ -165,7 +165,7 @@ def main():
     ap.add_argument('--log', help='also append the report to this file')
     # --json-out, not --json: every other tool in this repo that writes a JSON
     # document to a path spells it --json-out (route.py, converge.py,
-    # place_route_loop.py, pose_score.py), and in check_reachability --json
+    # pose_score.py), and in check_reachability --json
     # means "print the document on stdout". Nothing in the tree called the
     # flag by its old name, so there is no alias to keep.
     ap.add_argument('--json-out', metavar='PATH', default=None,

@@ -328,7 +328,7 @@ def _stub(classes=None):
 def _run(pcb, path, **kw):
     """Drive the WHOLE pass, capturing stdout and the internal `_Repair`.
 
-    `on_move` is the supported hook the animator uses: it is handed the state
+    `on_move` is the supported inspection hook: it is handed the state
     at the seed frame, and every frame is the SAME object, so it is the only
     way to see cap_segs / segments / _seg_floor_by_id from outside without
     monkeypatching.

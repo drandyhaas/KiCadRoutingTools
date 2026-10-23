@@ -166,9 +166,10 @@ def layers_at(n, u):
     return {layer_of(n, u)}
 
 
-DST_REF = awx_settings.req('DEST')
+DST_REF = Fr.dst                # (the trunk's destination; DEST may name several, each other a branch's: Fr.dests)
 SRC_REF = collections.Counter(ctx.src_ref[n] for n in M).most_common(1)[0][0]
 BOX = [Fr.SB, Fr.DB]       # the arrays' pad boxes, grown by how far outside them the terminals sit (whole_frame)
+BOX += [Fr.DBs[b_] for b_ in Fr.dests[1:]]               # ...and each branch's part's, kept as the trunk's is
 log(f'pad boxes grown by the terminals: {[round(b[2] - b[0], 3) for b in BOX]}')
 
 
@@ -183,6 +184,7 @@ def _pads_box(ref, b):
 # ...and by their pads alone: what bounds a lane whose own tooth or berth stands inside its array's grown box (shorter
 # than the median the box is grown by) -- its first or last columns are its stub's room beside the longer stubs
 PADS_BOX = [_pads_box(SRC_REF, BOX[0]), _pads_box(DST_REF, BOX[1])]
+PADS_BOX += [_pads_box(b_, Fr.DBs[b_]) for b_ in Fr.dests[1:]]
 BX0, BY0, BX1, BY1 = ctx.pcb.board_info.board_bounds
 EDGE = (float(getattr(ctx.cfg, 'board_edge_clearance', 0.0) or 0.0) or ctx.cfg.clearance) + TW / 2
 _SPAN = max(BX1 - BX0, BY1 - BY0)
@@ -206,7 +208,7 @@ def intervals(ftag, sp, s, margin, own=(False, False)):
         return _ivc[key]
     X, Y = spine_xy_vec(sp, s, OS)
     ok = (X >= BX0 + EDGE) & (X <= BX1 - EDGE) & (Y >= BY0 + EDGE) & (Y <= BY1 - EDGE)
-    for b in [PADS_BOX[i] if own[i] else BOX[i] for i in (0, 1)]:
+    for b in [PADS_BOX[i] if own[i] else BOX[i] for i in (0, 1)] + BOX[2:]:
         ok &= ~((X > b[0] - margin) & (X < b[2] + margin) & (Y > b[1] - margin) & (Y < b[3] + margin))
     out, i = [], 0
     while i < len(OS):
@@ -228,11 +230,11 @@ ISL = {}             # an island's pads on one layer set (a lane goes round an i
 # (a two-pad part split where a lane fits between its pads only where they stand across the lanes: corridor.pads_across)
 _SPINES = {'T': Fr.spine, **{k_: r_ for k_, r_ in Fr.rings.items()}}
 _CU = lambda p_: bool(p_.drill and p_.drill > 0) or any(L in p_.layers for L in ('F.Cu', 'B.Cu', '*.Cu'))
-ISLAND = whole_ctx.part_islands(ctx, skip=(SRC_REF, DST_REF), split=lambda ref: len(
+ISLAND = whole_ctx.part_islands(ctx, skip=(SRC_REF, *Fr.dests), split=lambda ref: len(
     [p_ for p_ in ctx.pcb.footprints[ref].pads if _CU(p_)]) == 2 and _cor.pads_across(
     _SPINES, [(p_.global_x, p_.global_y) for p_ in ctx.pcb.footprints[ref].pads if _CU(p_)]))
 for ref, fp in ctx.pcb.footprints.items():
-    if ref in (SRC_REF, DST_REF):
+    if ref in (SRC_REF, *Fr.dests):
         continue
     for i_, p in enumerate(fp.pads):
         drilled = bool(p.drill and p.drill > 0)
@@ -319,6 +321,7 @@ def stub_pieces(reach, lanes=False):
 # a VIA beside the box line meets stub copper within its reach; a LANE (never inside the box) only the copper
 # within a clearance block of the line
 REACH = VIA_ST + bd.VIA_NEED
+FIELD_MARGIN = 5.0          # the FIELD the lanes cross: the arrays' boxes and this far round them, mm (other nets' vias)
 VSTUB = stub_pieces(REACH) + VIA_ONLY        # (x0, y0, x1, y1, {layer}, label, owner)
 LSTUB = stub_pieces(TW + CL, lanes=True)
 # base VIAS near the box lines (a stub ending in a via: SDQM1's berth) -- discs on both layers
@@ -326,7 +329,21 @@ for v_ in ctx.base_vias:
     own_ = NET_LANE.get(v_.net_id)
     if any(b[0] - REACH <= v_.x <= b[2] + REACH and b[1] - REACH <= v_.y <= b[3] + REACH for b in BOX):
         r = v_.size / 2
+        if (awx_settings.get('SVIA_RING') or '1') == '1':
+            # (its reach for a lane: the router's ring about the grid point it rounds to -- pairs.svia_reach)
+            r = max(r, _pairs.svia_reach(ctx.cfg, v_.x, v_.y, v_.size))
         VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), 'svia ' + (own_ or ctx.pcb.nets[v_.net_id].name.split('/')[-1]), own_))
+    elif v_.net_id not in NET_LANE and (min(b[0] for b in BOX) - FIELD_MARGIN <= v_.x <= max(b[2] for b in BOX)
+                                        + FIELD_MARGIN and min(b[1] for b in BOX) - FIELD_MARGIN <= v_.y
+                                        <= max(b[3] for b in BOX) + FIELD_MARGIN):
+        # ...and every OTHER net's via in the FIELD the lanes cross, away from the boxes: a bus an earlier step routed
+        # drops its lanes there (sdi_mipi_conv's DDR3 bus, south of U11, where the SDI lanes pass on the plane layers:
+        # the audit found one lane 0.007 short of such a via round after round, a static no cut answers, and the
+        # geometry had never seen it) -- a disc on every layer, the router's ring about it, as a stub's via
+        r = max(v_.size / 2, _pairs.svia_reach(ctx.cfg, v_.x, v_.y, v_.size)) \
+            if (awx_settings.get('SVIA_RING') or '1') == '1' else v_.size / 2
+        VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), 'svia ' + ctx.pcb.nets[v_.net_id].name.split('/')[-1]
+                      if v_.net_id in ctx.pcb.nets else 'svia', None))
 # ... and the LANES keep off the stub copper within a clearance block of the line, and off the stub vias
 for st_ in LSTUB + [v for v in VSTUB if v[5].startswith('svia ')]:
     STATIC.append(st_)
@@ -396,7 +413,7 @@ def _out_of(sp, o_at):
 
 _depths = []
 for n in M:
-    if n in cls and n in prs:
+    if n in cls and n in prs and cls[n] not in Fr.branch:
         sp_ = ring_sp[cls[n]]
         m_ = _pairs.mid(*ctx.pair_ends[n][1])
         _depths.append(abs(sp_.project_pt(Fr.land[n])[1] - sp_.project_pt(m_)[1]))
@@ -448,6 +465,11 @@ for n in M:
         s_out = sb0 + abs(o_run - ob0)                          # out to the standoff at 45 degrees past the handoff
         rpts = ([(sb0, ob0), (s_out, o_run), (s_run, o_run), (sb1, ob1)] if s_out < s_run else
                 [(sb0, ob0), (s_run, o_run), (sb1, ob1)] if s_run > sb0 + 1e-9 else [(sb0, ob0), (sb1, ob1)])
+        if cls[n] in Fr.branch:
+            # a BRANCH's lane lands off it as the trunk's near face's lanes land off the trunk: straight onto its berth,
+            # held a track's width into it (no ring, no standoff: its berth faces the branch, whole_frame)
+            rpts = [(sb0, ob0), (sb1, ob1)]
+            hold1 = max(hold1, HOLD)
         PIECE[(cls[n], n)] = dict(k0=int(round(sb0 / G)), k1=int(round(sb1 / G)), o0=None, o1=ob1, hold0=0, hold1=hold1,
                                   ex0=0, ex1=max(hold1 + 1, EXC),
                                   ref=(lambda s, P=rpts: float(np.interp(s, [q[0] for q in P], [q[1] for q in P]))),
@@ -507,6 +529,18 @@ def build_and_solve(sides, prev=None):
         for k in range(v['k0'], v['k1'] + 1):
             var[(f, n, k)] = len(var)
     inv = {j: key for key, j in var.items()}
+    # a PAIR's staircase off its line, per column, as the pass before laid the line (pairs.stair_dev): a single with a
+    # pair either side stands that much further off each -- the two are laid nearer it than their lines by that, and
+    # the lane between them had no path (h616's SDQM2 between SDQS2 and SDQS3). Not a single with another single on
+    # one side: the snap moves it toward that one, as it does every such lane (room held for those too, h616's joint
+    # bus on two layers lost two lanes more); nor a pair beside a pair, laid against the other one's steps
+    STD = {}
+    if prev is not None:
+        for (f, n), v in PIECE.items():
+            if n in prs:
+                ks = [k for k in range(v['k0'], v['k1'] + 1) if (f, n, k) in prev]
+                for k, d_ in zip(ks, _pairs.stair_dev(ctx.cfg, [FR[f]['sp'].xy(k * G, prev[(f, n, k)]) for k in ks])):
+                    STD[(f, n, k)] = d_
 
     def tangents(sl):
         """The slopes to cut sqrt(1 + k^2) at for the mean slope of segments sl [(j1, j0)]: with a previous
@@ -526,15 +560,29 @@ def build_and_solve(sides, prev=None):
         extra.append(cost)
         return nv + len(extra) - 1
 
-    def le(terms, b, elastic=None):
+    # (probe GEO_SHARED_SLACK: one slack per RULE -- a pitch rule is written once per tangent and slope combination, a
+    # via's room once per tangent, each copy a cut of the same rule; each its own slack, a pitch shortfall paid up to
+    # thirteen times what a lane drawn into a box paid once, and the LP put the shortfall in the arrays' fields. Shared,
+    # the rule pays its largest copy's shortfall, once. Only those two kinds: a pair's dive tags its whole straight run,
+    # a rule per column, and a lane's slope and turn their two directions, one row each)
+    SHARED_ = ('pitch', 'via') if (awx_settings.get('GEO_SHARED_SLACK') or '0') == '1' else ()
+    slack_of = {}
+    lazy = []
+
+    def le(terms, b, elastic=None, tangent=False):
         r = len(rhs)
         for j, a_ in terms:
             rows.append(r); cols.append(j); vals.append(a_)
         if elastic is not None:
-            e = newvar(W_HARD)
+            if elastic[0] in SHARED_ and elastic in slack_of:
+                e = slack_of[elastic]
+            else:
+                e = newvar(W_HARD)
+                slack_of[elastic] = e
+                tags.append((e, elastic))
             rows.append(r); cols.append(e); vals.append(-1.0)
-            tags.append((e, elastic))
         rhs.append(b)
+        lazy.append(tangent)
 
     bounds = {}
     orders = {}
@@ -549,7 +597,12 @@ def build_and_solve(sides, prev=None):
             pres = [n for n, v in pcs.items() if v['k0'] <= k <= v['k1']]
             if not pres:
                 continue
-            od = sorted(pres, key=functools.cmp_to_key(lambda a, b: -1 if below(a, b, u) else 1))
+            # (a ring's order read where its layers are (lay_u): no earlier than its lanes leave the trunk -- a ring
+            # piece starts short of the ring's origin, its first columns' u below HK, and a crossing the solve placed on
+            # the trunk's last stretch was undone there and made again on the ring: zynq LVDS K47, CTRL_IN3 x CTRL_OUT1
+            # placed 0.66 short of the S ring's start, the two drawn on top of each other on In2)
+            ub = max(u, HK[f]) if f != 'T' and f in HK else u
+            od = sorted(pres, key=functools.cmp_to_key(lambda a, b: -1 if below(a, b, ub) else 1))
             orders[(f, k)] = od
             lay = {n: layers_at(n, lay_u(f, n, u)) for n in od}
 
@@ -580,8 +633,13 @@ def build_and_solve(sides, prev=None):
                     or (v['o1'] is not None and v['k1'] - k <= v['hold1'] + NTURN))
             for Ly in range(NL):
                 seq = [n for n in od if Ly in lay[n]]
+                # (a single with a pair either side on the layer: its room from their staircases)
+                sand = {seq[i_] for i_ in range(1, len(seq) - 1)
+                        if seq[i_] not in prs and seq[i_ - 1] in prs and seq[i_ + 1] in prs}
                 for a, b in zip(seq, seq[1:]):
-                    sep = P_MIN + hw[a] + hw[b] + (PAIR_TURN_ROOM if turning(a) or turning(b) else 0.0)
+                    st_ = (STD.get((f, a, k), 0.0) if b in sand else 0.0) + \
+                          (STD.get((f, b, k), 0.0) if a in sand else 0.0)
+                    sep = P_MIN + hw[a] + hw[b] + st_ + (PAIR_TURN_ROOM if turning(a) or turning(b) else 0.0)
                     ta, tb = term_o(a), term_o(b)
                     if ta and tb and ta[0] == tb[0]:
                         sep = min(sep, max(0.0, abs(tb[1] - ta[1]) - G / 20))
@@ -613,12 +671,12 @@ def build_and_solve(sides, prev=None):
                             terms = [(ja, 1.0), (jb, -1.0)]
                             for (p1, p0) in sl:
                                 terms += [(p1, sep * be / (len(sl) * G)), (p0, -sep * be / (len(sl) * G))]
-                            le(terms, -sep * al, ('pitch', f, k, a, b, Ly))
+                            le(terms, -sep * al, ('pitch', f, k, a, b, Ly), tangent=True)
                     e = newvar(W_COMF * G)
-                    le([(ja, 1.0), (jb, -1.0), (e, -1.0)], -(P_COMF + hw[a] + hw[b]))
+                    le([(ja, 1.0), (jb, -1.0), (e, -1.0)], -(P_COMF + hw[a] + hw[b] + st_))
                     # ...and steeper below the midpoint to the minimum: the tightest pairs are spread first
                     e = newvar(W_COMF_TIGHT * G)
-                    le([(ja, 1.0), (jb, -1.0), (e, -1.0)], -(P_MID + hw[a] + hw[b]))
+                    le([(ja, 1.0), (jb, -1.0), (e, -1.0)], -(P_MID + hw[a] + hw[b] + st_))
     # vias
     vias = []
     for (f, n), v in PIECE.items():
@@ -692,7 +750,7 @@ def build_and_solve(sides, prev=None):
                         for t0_, sc_ in tangents([(j1, j0)]):
                             al, be = sc_ / math.sqrt(1 + t0_ * t0_), sc_ * t0_ / math.sqrt(1 + t0_ * t0_)
                             terms = [(jb_, sg), (jm, -sg), (j1, sg * need * be / G), (j0, -sg * need * be / G)]
-                            le(terms, -need * al, ('via', f, k, n, nb))
+                            le(terms, -need * al, ('via', f, k, n, nb), tangent=True)
     for i, (f, n, cu, kc) in enumerate(vias):
         for (f2, m_, cu2, kc2) in vias[i + 1:]:
             ds = abs(FR[f]['s'](cu) - FR[f2]['s'](cu2)) if f2 == f else math.inf
@@ -707,9 +765,9 @@ def build_and_solve(sides, prev=None):
             ka, kb = (kc, kc2) if a == n else (kc2, kc)
             le([(var[(f, a, ka)], 1.0), (var[(f, b, kb)], -1.0)], -h, ('viavia', f, km, a, b))
     via_at = {(f, n, kc) for (f, n, cu, kc) in vias}
-    # bounds: board, pad boxes (a via further off), the interval the reference lies in -- and where it lies in none
-    # (it cuts a box's corner), the interval the lane was in a column before, which it cannot leave across the box,
-    # and where that stood on both sides of the box, the side of its nearer terminal (corridor.held_interval)
+    # bounds: board, pad boxes (a via further off), the interval the reference lies in among those overlapping the one
+    # the lane was held to a column before, which it cannot leave across the box -- and where that one stands on both
+    # sides of the box, the side of the terminal ahead of it (corridor.held_interval)
     held_iv = {}
     # (a lane whose tooth -- or a trunk lane whose berth -- stands inside its array's grown box: bounded by the
     # array's pads on the trunk, where it leaves its tooth or reaches its berth)
@@ -729,8 +787,12 @@ def build_and_solve(sides, prev=None):
         iv = intervals(f, FR[f]['sp'], s_, round(mg, 4), OWN[n] if f == 'T' else (False, False))
         if not iv:
             continue
-        lo_, hi_ = held_iv[(f, n)] = _cor.held_interval(
-            iv, v['ref'](s_), held_iv.get((f, n)), v['o1'] if v['k1'] - k <= k - v['k0'] else v['o0'])
+        # (the terminal a SPLIT reads is the one AHEAD -- a box beginning at a column stands between the lane and its
+        # end, never its start: the piece's end, a ring lane's trunk its place on the ring's stack at the handoff; read
+        # as the nearer one, a trunk piece run on past the destination's corner took the tooth's side of it: zynq LVDS
+        # K47, CTRL_IN0 / IN2 / IN3 held north of U5's box with their stack south of it, 12-15 mm of bound)
+        end_ = v['o1'] if v['o1'] is not None else (Fr.o_h[n] if f == 'T' and n in cls else v['o0'])
+        lo_, hi_ = held_iv[(f, n)] = _cor.held_interval(iv, v['ref'](s_), held_iv.get((f, n)), end_)
         le([(j, -1.0)], -lo_, ('bound', f, k, n, 'lo'))
         le([(j, 1.0)], hi_, ('bound', f, k, n, 'hi'))
     # terminals, holds, slope cap, travel, bends
@@ -754,7 +816,7 @@ def build_and_solve(sides, prev=None):
             d = newvar(W_LEN)
             for t_ in LEN_T:
                 r_ = math.sqrt(1 + t_ * t_)
-                le([(b, t_ / r_), (a, -t_ / r_), (d, -1.0)], -G * (1 / r_ - 1))
+                le([(b, t_ / r_), (a, -t_ / r_), (d, -1.0)], -G * (1 / r_ - 1), tangent=True)
             if k > v['k0']:
                 p = var[(f, n, k - 1)]
                 d2 = newvar(W_BEND)
@@ -881,7 +943,19 @@ def build_and_solve(sides, prev=None):
     for j, b in bounds.items():
         bnd[j] = b
     tb = time.time()
-    res = lp_by_dual(cost, Aub, np.array(rhs), bnd)
+    lz = np.array(lazy, bool)
+    how = ''
+    if prev is not None and GEO_LAZY and lz.any():
+        # (the tangents' rows LAZY, from the pass before: its answer says which can bind -- lp_lazy)
+        xo = np.array([prev[inv[j]] if inv[j] in prev else PIECE[inv[j][:2]]['ref'](inv[j][2] * G) for j in range(nv)])
+        res, n_, na_ = lp_lazy(cost, Aub, np.array(rhs), bnd, lz, nv, xo)
+        how = f' ({n_} solve(s) on {na_} of them: the tangents lazy)'
+        if res.status != 0:
+            # (a lazy solve the solver could not finish: the whole LP, as it was asked)
+            log(f'  LP status {res.status} with the tangents lazy: {res.message} -- the whole LP')
+            res, how = lp_by_dual(cost, Aub, np.array(rhs), bnd), ''
+    else:
+        res = lp_by_dual(cost, Aub, np.array(rhs), bnd)
     if res.status != 0:
         log(f'  LP status {res.status}: {res.message}')
         return None
@@ -891,12 +965,43 @@ def build_and_solve(sides, prev=None):
     for e, tg in tags:
         if x[e] > 1e-4:
             paid[tg[0]].append((float(x[e]),) + tuple(tg[1:]))
-    log(f'  joint LP: {len(PIECE)} pieces, {nv} o-vars, {len(rhs)} rows, build {tb - t0:.0f}s solve {time.time() - tb:.0f}s, '
+    log(f'  joint LP: {len(PIECE)} pieces, {nv} o-vars, {len(rhs)} rows{how}, build {tb - t0:.0f}s solve {time.time() - tb:.0f}s, '
         f'obj {res.fun:.1f}; elastic paid: ' + (', '.join(f'{k} {len(v)} (max {max(q[0] for q in v):.3f})' for k, v in paid.items()) or 'none'))
     return dict(o=o, paid=paid, vias=vias, orders=orders)
 
 
 IPM_ITERS = 500      # the interior point's iterations before the dual simplex takes over (it ends in 58-103 here)
+GEO_LAZY = (awx_settings.get('GEO_LAZY') or '1') == '1'     # the second pass's tangents lazy (lp_lazy); 0: all at once
+LAZY_NEAR = 0.1      # mm: a tangent's row taken from the start when the pass before's answer stands this near its bar
+LAZY_TOL = 1e-7      # a row broken by more than this (relative to its bar) is added
+
+
+def lp_lazy(c, A, b, bnd, lz, nv, xo):
+    """lp_by_dual's LP with the rows `lz` (the tangent cuts: most of the second pass's rows, few of them binding) LAZY:
+    solved on the others and those of `lz` within LAZY_NEAR of binding at the start -- the pass before's offsets `xo`
+    (the first nv columns), each extra column at the least its tangents there ask -- then again with every row its
+    answer breaks (and those near binding beside them), until it breaks none: then it is the whole LP's optimum, its
+    tie-break making that one point. The two-end USB and Ethernet bus's second pass, 228 000 rows: two solves on
+    130 000 of them, 40 s to 16 s, the same geometry. (res, solves, rows taken)"""
+    A = A.tocsr()
+    tol = LAZY_TOL * (1.0 + np.abs(b))
+    s_ = A[:, :nv] @ xo - b
+    Ae = A[:, nv:].tocoo()
+    m = lz[Ae.row] & (Ae.data < 0)
+    ex = np.zeros(A.shape[1] - nv)
+    np.maximum.at(ex, Ae.col[m], s_[Ae.row[m]] / -Ae.data[m])
+    near = lambda x_: (A @ x_ - b) > -LAZY_NEAR - tol
+    active = ~lz | near(np.concatenate([xo, ex]))
+    n_ = 0
+    while True:
+        n_ += 1
+        res = lp_by_dual(c, A[active], b[active], bnd)
+        if res.status != 0:
+            return res, n_, int(active.sum())
+        new = ((A @ res.x - b) > tol) & ~active
+        if not new.any():
+            return res, n_, int(active.sum())
+        active |= near(res.x) & ~active
 
 
 def lp_by_dual(c, A, b, bnd):
@@ -1059,7 +1164,7 @@ def static_sides(sol):
                 room[-1] = min(room[-1], oa - lo_i)
                 room[1] = min(room[1], hi_i - ob)
                 span = [max(span[0], lo_i), min(span[1], hi_i)]
-            if f != 'T':
+            if f != 'T' and f not in Fr.branch:
                 # on a RING the lanes run the ring's standoff out from the destination's face (its pairs' landings
                 # lie that deep): the room between the island and the face is that much less (K35 C12 at DU1's south
                 # face: four F lanes and a pair kept inside it, the pair pressed onto the face and folded to its landing)
@@ -1281,14 +1386,27 @@ def static_sides(sol):
                     side = forced             # never against the lane's own fixed end, nor against its home side
                 out.append((f, n, k, ext[0], ext[1], side, lab))
             # (a pair's via is two barrels VX either side of its centreline -- its half width hw is less: 74 um short)
+            # ...its row REFINED by the part's exact extent on the via's column, as a lane's is: a part past a ring's
+            # end projects clamped onto it -- its box the ring's whole length and tens of millimetres across -- and
+            # every via of the ring was held outside it (zynq LVDS K47: R33, 30 mm from U5's south ring, its box s
+            # 0..24.1 and o -32.8..4.4; 'via R33' the largest static payment of every round, and the vias pushed out
+            # onto Ct1's pad)
             g2 = VIA_ST + max(hw[n], VX[n])
             if k in vcol[(f, n)] and sa - g2 <= s_ <= sb + g2:
-                out.append((f, n, k, oa - g2, ob + g2, -1 if o_ < (oa + ob) / 2 else 1, 'via ' + lab))
+                ev_ = extent(f, s_, ii, g2)
+                if ev_ is not None:
+                    ev_ = (max(ev_[0], oa - g2), min(ev_[1], ob + g2))
+                if ev_ is not None and ev_[0] <= ev_[1] and max(ev_[0] - o_, o_ - ev_[1], 0.0) <= WIN:
+                    out.append((f, n, k, ev_[0], ev_[1], -1 if o_ < (ev_[0] + ev_[1]) / 2 else 1, 'via ' + lab))
         if k in vcol[(f, n)]:
-            for (sa, sb, oa, ob, Ls, lab, own) in vboxes[f]:
+            for (sa, sb, oa, ob, Ls, lab, own), vr_ in zip(vboxes[f], VSTUB):
                 g2 = VIA_ST + max(hw[n], VX[n])
                 if own != n and sa - g2 <= s_ <= sb + g2 and oa - WIN <= o_ <= ob + WIN:
-                    out.append((f, n, k, oa - g2, ob + g2, -1 if o_ < (oa + ob) / 2 else 1, 'via ' + lab))
+                    ev_ = _cor.line_extent(FR[f]['sp'], s_, [tuple(vr_[:4])], g2)
+                    if ev_ is not None:
+                        ev_ = (max(ev_[0], oa - g2), min(ev_[1], ob + g2))
+                    if ev_ is not None and ev_[0] <= ev_[1]:
+                        out.append((f, n, k, ev_[0], ev_[1], -1 if o_ < (ev_[0] + ev_[1]) / 2 else 1, 'via ' + lab))
     return out
 
 
@@ -1383,14 +1501,37 @@ for n in M:
                 # then cut (K28 SDQS1 folded 113 degrees)
                 _chamfer(pieces, xy_all, TURN_RUN)
         # ...and at its tooth: a pair started past its end run (whole_frame) runs straight out of its tooth to its
-        # start and turns there onto its lane, the same two bends
+        # start and turns there onto its lane, the same two bends -- and a far-face lane runs its LEAD-IN round the
+        # source's corner to its start (whole_frame.lead_ins), drawn as the frame gives it, on its first run's layer
         sx, sy = Fr.start[n]
-        if math.hypot(tx - sx, ty - sy) > 1e-9:
+        lead = (getattr(Fr, 'lead', None) or {}).get(n)
+        if lead:
+            a = pieces[0]; pieces[0] = (sx, sy, a[2], a[3], a[4]); xy_all[0] = (sx, sy)
+            pieces[:0] = [(p[0], p[1], q[0], q[1], a[4]) for p, q in zip(lead, lead[1:])]
+            xy_all[:0] = [tuple(p) for p in lead[:-1]]
+        elif math.hypot(tx - sx, ty - sy) > 1e-9:
             a = pieces[0]; pieces[0] = (sx, sy, a[2], a[3], a[4]); xy_all[0] = (sx, sy)
             pieces.insert(0, (tx, ty, sx, sy, a[4])); xy_all.insert(0, (tx, ty))
             rp, rx = [(q[2], q[3], q[0], q[1], q[4]) for q in reversed(pieces)], xy_all[::-1]
             _chamfer(rp, rx, TURN_RUN)
             pieces[:] = [(q[2], q[3], q[0], q[1], q[4]) for q in reversed(rp)]; xy_all[:] = rx[::-1]
+    # a change AT a terminal -- a surface tooth's via at its stub's end (whole_solve's TVIA), a surface berth's (BVIA):
+    # its column has no length, so the line drawn never took the layer the lane leaves its tooth on, or reaches its
+    # berth on, and the plan ended on the other layer with no via (sdi_mipi_conv's PCLK, its berth on F.Cu: drawn on
+    # In2.Cu into it, the band BERTH-OUT and the route refused it). The terminal's own layer is drawn a grid step long
+    if pieces:
+        for at_end, L_ in ((False, LNAME[layer_of(n, -math.inf)]), (True, LNAME[layer_of(n, math.inf)])):
+            ax, ay, bx, by, L0 = pieces[-1] if at_end else pieces[0]
+            ln_ = math.hypot(bx - ax, by - ay)
+            if L0 == L_ or ln_ < 1e-9:
+                continue
+            t_ = min(G, ln_ / 2) / ln_
+            if at_end:
+                cx, cy = bx - (bx - ax) * t_, by - (by - ay) * t_
+                pieces[-1:] = [(ax, ay, cx, cy, L0), (cx, cy, bx, by, L_)]
+            else:
+                cx, cy = ax + (bx - ax) * t_, ay + (by - ay) * t_
+                pieces[:1] = [(ax, ay, cx, cy, L_), (cx, cy, bx, by, L0)]
     # reversing vertices next to a short side (mapping artifacts inside spine corners, at a replaced terminal):
     # dropped over the finished line, while the two sides share a layer
     changed = True
@@ -1503,6 +1644,87 @@ if NL > 2:
     for n in res['uxy']:
         res['uxy'][n].sort()
 res['flips'] = sorted(FLIP)
+
+
+def room_cuts(sol_):
+    """(probe GEO_ROOM_CUTS) the geometry's ROOM back to the solve. A pitch, bound or static row the LP paid is a layer
+    with no room for what the plan put on it there -- every elastic row costs alike, so the LP spreads the shortfall
+    and the snap meets it later as a lane with no path (the zynq LVDS at K47: two lanes 6-7 mm inside U1's field, a
+    third squeezed onto its box line by the polish that pushed them out). Per frame, layer and column, the paid rows
+    of the lanes on that layer summed: where that passes GEO_ROOM_TOL, a run of such columns is a CAPACITY CUT --
+    'layer L between u_lo and u_hi holds at most `cap` of these lanes', `cap` the lanes there less the shortfall in
+    lane pitches and a margin (GEO_ROOM_MARGIN), so the solve plans room to spare, not a fit to the hundredth"""
+    # (a shortfall the geometry and the polish spread is no cut: half a lane pitch at the least -- every paid row a cut,
+    # the zynq LVDS K47's 19 cuts for shortfalls of 0.04 to 0.2 mm each took a lane off its layer, and the next round
+    # had 141 via rows short where the first had 25)
+    tol_ = float(awx_settings.get('GEO_ROOM_TOL') or str(P_MIN / 2))
+    marg_ = float(awx_settings.get('GEO_ROOM_MARGIN') or str(ctx.cfg.grid_step))
+    # (one row's shortfall once: a pitch row is written for each tangent and slope combination tried, the same pair at
+    # the same column several times -- the largest of them is that pair's shortfall there)
+    row_ = {}
+    for kind_ in ('pitch', 'bound'):
+        for q_ in sol_['paid'].get(kind_, []):
+            key_ = (kind_,) + tuple(q_[1:])
+            row_[key_] = max(row_.get(key_, 0.0), q_[0])
+    # (a PITCH shortfall is lanes too many on the layer there, counted in pitches; a lane that paid a BOUND row was
+    # drawn into a box -- it has no place on that layer there whatever the others do, and leaves it: summed in
+    # millimetres, a lane 7 mm inside an array's field asked 26 lanes off a layer that held 8. A STATIC row is the
+    # layer and via cuts' (lcuts, vcuts), and near a lane's fixed end a layer change cannot meet it at all -- K47's
+    # pairs at U5's west face each paid 0.49 against its dog-bone vias, and capped off their berths' layer the solve
+    # dived them there)
+    short_ = collections.defaultdict(float)                 # (frame, layer, column) -> the shortfall paid there
+    pitch_ = collections.defaultdict(float)                 # ...of it, the pitch rows'
+    stuck_ = collections.defaultdict(set)                   # ...the lanes that paid a bound or static row there
+    for key_, v_ in row_.items():
+        kind_, f_, k_ = key_[0], key_[1], key_[2]
+        if kind_ == 'pitch':
+            Ls_ = [key_[5]]
+        else:
+            n_ = key_[3]
+            Ls_ = sorted(layers_at(n_, lay_u(f_, n_, FR[f_]['u'](k_ * G))))
+        for L_ in Ls_:
+            short_[(f_, L_, k_)] += v_ / len(Ls_)
+            if kind_ == 'pitch':
+                pitch_[(f_, L_, k_)] += v_
+            elif v_ > tol_:
+                stuck_[(f_, L_, k_)].add(key_[3])
+    out_ = []
+    for (f_, L_) in sorted({(f_, L_) for (f_, L_, _k) in short_}):
+        ks_ = sorted(k_ for (f2_, L2_, k_) in short_ if f2_ == f_ and L2_ == L_ and short_[(f_, L_, k_)] > tol_)
+        runs_, cur_ = [], []
+        for k_ in ks_:
+            if cur_ and k_ - cur_[-1] > 2:
+                runs_.append(cur_)
+                cur_ = []
+            cur_.append(k_)
+        if cur_:
+            runs_.append(cur_)
+        for run_ in runs_:
+            kmax_ = max(run_, key=lambda k_: short_[(f_, L_, k_)])
+            on_ = [n_ for n_ in sol_['orders'].get((f_, kmax_), [])
+                   if L_ in layers_at(n_, lay_u(f_, n_, FR[f_]['u'](kmax_ * G)))]
+            if len(on_) < 2:
+                continue
+            pk_ = pitch_[(f_, L_, kmax_)]
+            drop_ = len(stuck_[(f_, L_, kmax_)]) + (int(math.ceil((pk_ + marg_) / P_MIN - 1e-9)) if pk_ >= tol_ else 0)
+            if drop_ == 0:
+                continue
+            drop_ = min(len(on_) - 1, max(1, drop_))
+            lanes_ = sorted({n_ for k_ in run_ for n_ in sol_['orders'].get((f_, k_), [])
+                             if L_ in layers_at(n_, lay_u(f_, n_, FR[f_]['u'](k_ * G)))})
+            out_.append({'frame': f_, 'layer': LNAME[L_], 'u_lo': round(FR[f_]['u'](min(run_) * G), 4),
+                         'u_hi': round(FR[f_]['u'](max(run_) * G), 4), 'lanes': lanes_, 'on': len(on_),
+                         'cap': len(on_) - drop_, 'short': round(short_[(f_, L_, kmax_)], 3),
+                         'stuck': sorted(stuck_[(f_, L_, kmax_)]), 'pitch': round(pk_, 3)})
+    return out_
+
+
+if (awx_settings.get('GEO_ROOM_CUTS') or '0') == '1':
+    res['ccuts'] = room_cuts(sol)
+    if res['ccuts']:
+        log('room cuts for the solve: ' + '; '.join(f"{c_['layer']} {c_['frame']} u {c_['u_lo']:.2f}..{c_['u_hi']:.2f} "
+                                                   f"at most {c_['cap']} of {c_['on']} (short {c_['short']:.2f})"
+                                                   for c_ in res['ccuts']))
 res['changes'] = {n: list(chg.get(n, [])) for n in res['lanes']}    # each lane's changes in route u, in order
 res['rules'] = {'grid': ctx.cfg.grid_step, 'track': TW, 'clear': CL, 'lane_min': bd.LANE_MIN}
 json.dump(res, open(OUT, 'w'))

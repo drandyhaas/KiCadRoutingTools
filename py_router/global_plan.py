@@ -958,15 +958,6 @@ def _build_river_groups(plan: GlobalPlan, config, pcb_data) -> None:
         print(f"Global plan river groups (#658): {len(plan.river)} net(s) "
               f"in {len(plan.river_order)} bus(es) (sizes {sizes[:6]}) -- "
               f"follow-the-leader lanes, consecutive order")
-        # Rip-resistance transport: river members ARE bus members for the
-        # blocker ladder (KICAD_BUS_RIP_RESISTANCE). The classic attach point
-        # (single_ended_loop's --ordering bus branch) never runs under the
-        # plan, so without this the resistance knob is silently inert in
-        # river runs -- mez_rx full-169: the endgame rip-storm shattered 11
-        # early-routed river members into shipped-open restores.
-        config.bus_member_net_ids = (
-            set(getattr(config, 'bus_member_net_ids', None) or ())
-            | set(plan.river))
 
 
 def river_attraction_path(config, net_id, pcb_data):

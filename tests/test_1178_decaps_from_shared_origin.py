@@ -17,7 +17,7 @@ is read off EVERY part: it is the reference's own fixed point
 (`_decap_derivation`), so the reference must still grade clean against it.
 
 What still refuses: a reference that IS a pile (the same board run through the
-free-agent skill's `make_unplaced.py`), and the auto arm on run 29's heap,
+placement skill's `make_unplaced.py`), and the auto arm on run 29's heap,
 whose 83% stacked parts read `pile` through its heap arm.
 
 Run: python3 -X utf8 tests/test_1178_decaps_from_shared_origin.py
@@ -43,7 +43,7 @@ from run_utils import check, evidence                          # noqa: E402
 PY = sys.executable
 RP = os.path.join(ROOT, 'kicad_files', 'rp2350_fpga_eensy_prePlane.kicad_pcb')
 RUN29 = os.path.join(ROOT, 'tests', 'fixtures', '959', 'run29_pile.kicad_pcb')
-MAKE_UNPLACED = os.path.join(ROOT, '.claude', 'skills', 'pcb-free-agent',
+MAKE_UNPLACED = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement',
                              'scripts', 'make_unplaced.py')
 STRIP = os.path.join(ROOT, 'tests', 'stress', 'strip_copper_only.py')
 
@@ -78,8 +78,12 @@ class APlacedReferenceWithASharedOrigin(unittest.TestCase):
 
     def test_both_limits_are_derived(self):
         decaps = self.doc.get('decaps') or {}
-        self.assertEqual(decaps.get('max_distance_mm'), 1.0925, decaps)
-        self.assertEqual(decaps.get('max_pin_distance_mm'), 6.7132, decaps)
+        # 1.3073 since #1351: a passive part owns no decap, so the cap that
+        # was 1.09 mm from it is measured to its chip (owners 7 -> 6)
+        self.assertEqual(decaps.get('max_distance_mm'), 1.3073, decaps)
+        # U5 pin 6; connector J3's +3V3 pin (6.713) owns no decap, so it is
+        # not one of the reference's supply pins
+        self.assertEqual(decaps.get('max_pin_distance_mm'), 5.904, decaps)
         withheld = self.doc['context']['budget_withheld']
         self.assertNotIn('decaps.max_distance_mm', withheld)
         cen = self.doc['context']['decap_census']
@@ -106,7 +110,7 @@ class APlacedReferenceWithASharedOrigin(unittest.TestCase):
                        os.path.join(ROOT, 'py_tools', 'check_floorplan.py'),
                        RP, '--emit-intent', out, '--decaps-from', RP],
                       accept=True)
-            self.assertIn('decaps: max_distance_mm 1.0925', r.stdout)
+            self.assertIn('decaps: max_distance_mm 1.3073', r.stdout)
             self.assertIn('J2, U3 share an origin', r.stdout)
             self.assertNotIn('WITHHELD', r.stdout)
         finally:
@@ -144,7 +148,7 @@ class TheAutoArm(unittest.TestCase):
     def test_auto_derives_off_the_placed_board(self):
         doc = _emit(RP, derive_decaps='auto')
         self.assertEqual((doc.get('decaps') or {}).get('max_distance_mm'),
-                         1.0925, doc.get('decaps'))
+                         1.3073, doc.get('decaps'))
         self.assertNotIn('auto_withheld', doc['context']['decap_census'])
 
     def test_auto_still_withholds_on_run29s_heap(self):

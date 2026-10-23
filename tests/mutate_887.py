@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""#887 mutation battery: are the reader, the run clock and the iso renderer covered,
-or do their tests merely run?
+"""#887 mutation battery: is the cmd_timing reader covered, or do its tests
+merely run?
 
     python3 tests/mutate_887.py
     python3 tests/mutate_887.py --verify-anchors  # PRE-FLIGHT only, ~1 second
@@ -41,26 +41,9 @@ TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS)
 
 TIMING = os.path.join(ROOT, 'py_router', 'cmd_timing.py')
-ISO = os.path.join(ROOT, 'py_router', 'kicad_iso_render.py')
-#: make_movie is the INTEGRATION, and it is a target because that is where the
-#: two worst defects of this branch lived -- the clock that never ran, and the
-#: named ledger that silently became a different one. Both were invisible to
-#: every row aimed at the modules above.
-MOVIE = os.path.join(ROOT, 'py_router', 'make_movie.py')
-TARGETS = {'t': TIMING, 'i': ISO, 'm': MOVIE}
+TARGETS = {'t': TIMING}
 
 T_READER = os.path.join(TESTS, 'test_887_cmd_timing_reader.py')
-T_CLOCK = os.path.join(TESTS, 'test_887_frame_clock.py')
-T_SMALL = os.path.join(TESTS, 'test_887_small_items.py')
-#: The machine-independent killer of the 'i' rows (kicad-cli monkeypatched).
-#: It was `test_887_two_panel_frame.py` until the iso panel was retired with
-#: every film layout but stage3d; its kicad_iso_render tests moved here.
-T_MODELS = os.path.join(TESTS, 'test_887_iso_models.py')
-#: The kicad-cli arm. Rows naming it are killed by EITHER file, and this one
-#: self-skips (exit 77, which `run` reads as "not killed") on a machine without
-#: kicad-cli -- so a row that only this file can kill must also name T_MODELS, or
-#: it would report SURVIVED there for an environmental reason.
-T_ISO = os.path.join(TESTS, 'test_887_iso_render.py')
 
 #: (name, target, old, new, tests, expectation)
 ROWS = [
@@ -173,170 +156,6 @@ ROWS = [
      "        'steps': [] and [{'label': r.get('label'), 'iso_start': r.get('iso_start'),",
      (T_READER,), 'KILLED'),
 
-    # ---- the run clock ---------------------------------------------------
-    ('the-mtime-witness-is-removed', 't',
-     "            inside = [r for r in rows if r['t_start'] <= mt <= r['t_end']]",
-     "            inside = []",
-     (T_CLOCK,), 'KILLED'),
-    ('argv-matching-ignores-the-exit-code', 't',
-     "            clean = [r for r in hits if r.get('exit') in (0, '0')]",
-     "            clean = list(hits)",
-     (T_CLOCK,), 'KILLED'),
-    ('argv-matching-becomes-a-substring-test', 't',
-     "            hits = [r for r in rows if base in _basenames(r)]",
-     "            hits = [r for r in rows if any(base in b for b in _basenames(r))]",
-     (T_CLOCK,), 'KILLED'),
-    ('the-monotone-clamp-is-removed', 't',
-     "        if a.t is not None and prev is not None and a.t < prev:\n"
-     "            a = a._replace(t=prev, basis=a.basis + '+clamped')",
-     "        pass",
-     (T_CLOCK,), 'KILLED'),
-    ('a-clamped-instant-stops-saying-so', 't',
-     "            a = a._replace(t=prev, basis=a.basis + '+clamped')",
-     "            a = a._replace(t=prev)",
-     (T_CLOCK,), 'KILLED'),
-    ('the-pre-run-branch-is-removed', 't',
-     "            t, basis = min(r['t_start'] for r in rows), 'pre-run'",
-     "            pass",
-     (T_CLOCK,), 'KILLED'),
-    # The countdown's four rows are gone with the countdown itself (a `covered`
-    # predicate, its shortfall message and an exact-or-absent branch in both the
-    # overlay and the metadata). These replace them, over the UTC stamp and the
-    # per-step cost that took its place.
-    ('utc_iso-follows-the-local-zone', 't',
-     "    return (datetime.datetime.fromtimestamp(float(epoch),\n"
-     "                                            datetime.timezone.utc)\n"
-     "            .strftime('%Y-%m-%dT%H:%M:%SZ'))",
-     "    return (datetime.datetime.fromtimestamp(float(epoch))\n"
-     "            .strftime('%Y-%m-%dT%H:%M:%SZ'))",
-     (T_CLOCK,), 'KILLED'),
-    ('the-frame-stops-carrying-a-utc-instant', 't',
-     "        if r.instant is not None:\n"
-     "            m['krt:utc'] = utc_iso(r.instant)",
-     "        if False:\n"
-     "            m['krt:utc'] = utc_iso(r.instant)",
-     (T_CLOCK,), 'KILLED'),
-    ('the-overlay-stops-drawing-the-instant', 't',
-     "        if r.instant is not None:\n"
-     "            out.append('at  %s' % utc_iso(r.instant))",
-     "        if False:\n"
-     "            out.append('at  %s' % utc_iso(r.instant))",
-     (T_CLOCK,), 'KILLED'),
-    ('a-step-stops-reporting-what-it-cost', 't',
-     "                if a.wall_s is not None:\n"
-     "                    m['krt:step_wall_s'] = round(a.wall_s, 3)",
-     "                if False:\n"
-     "                    m['krt:step_wall_s'] = round(a.wall_s, 3)",
-     (T_CLOCK,), 'KILLED'),
-    ('the-run-start-utc-is-dropped', 't',
-     "            m['krt:run_started_utc'] = utc_iso(t.t0)",
-     "            pass",
-     (T_CLOCK,), 'KILLED'),
-    ('an-interpolated-reading-stops-admitting-it', 't',
-     "        interp = frac not in (0.0,)",
-     "        interp = False",
-     (T_CLOCK,), 'KILLED'),
-    ('the-frame-stops-naming-its-basis', 't',
-     "        out.append('basis  cmd_timing.jsonl - %d wrapped commands, %s'\n"
-     "                   % (t.n if t else 0, how))",
-     "        pass",
-     (T_CLOCK,), 'KILLED'),
-    # Re-anchored when the overlay became a band: the wrapping moved out of
-    # stamp_run_clock into the shared _wrap_clock. The --list preflight named
-    # it in one second, which is the whole reason that flag exists.
-    ('the-clock-text-stops-wrapping', 't',
-     "            if cur and measure(cand) > avail:\n                out.append(cur)\n"
-     "                cur = word",
-     "            if False:\n                out.append(cur)\n                cur = word",
-     (T_CLOCK,), 'KILLED'),
-    ('the-png-block-gains-a-progress-key', 't',
-     "            'krt:ledger_rows': t.n if t else 0,",
-     "            'krt:ledger_rows': t.n if t else 0,\n            'krt:progress': 0.5,",
-     (T_CLOCK,), 'KILLED'),
-    # ---- the iso renderer (kicad_iso_render) ------------------------------
-    ('render-results-come-back-in-completion-order', 'i',
-     "    with ThreadPoolExecutor(max_workers=n) as ex:\n"
-     "        for k, v in ex.map(one, jobs):\n            out[k] = v",
-     "    with ThreadPoolExecutor(max_workers=n) as ex:\n"
-     "        for i2, (k, v) in enumerate(ex.map(one, jobs)):\n"
-     "            out[jobs[-1 - i2][0]] = v",
-     (T_MODELS, T_ISO), 'KILLED'),
-    ('a-relative-model-path-is-resolved-against-the-cwd', 'i',
-     "        if not os.path.isabs(path):\n"
-     "            path = os.path.join(proj, path).replace('\\\\', '/')",
-     "        pass",
-     (T_MODELS,), 'KILLED'),
-    ('models-note-prints-total-over-found', 'i',
-     "    note = '3D models %d/%d' % (f, t)",
-     "    note = '3D models %d/%d' % (t, f)",
-     (T_MODELS,), 'KILLED'),
-    ('a-mostly-bare-board-gets-no-warning', 'i',
-     "    elif f < t * MOSTLY_BARE_FRACTION:",
-     "    elif False:",
-     (T_MODELS,), 'KILLED'),
-    ('model_dirs-stops-defining-KIPRJMOD', 'i',
-     "    if board_path:\n        dirs['KIPRJMOD'] = os.path.dirname(os.path.abspath(board_path))",
-     "    if False:\n        dirs['KIPRJMOD'] = os.path.dirname(os.path.abspath(board_path))",
-     (T_MODELS,), 'KILLED'),
-    ('an-unreadable-png-is-accepted-as-a-render', 'i',
-     "        with Image.open(out_png) as probe:\n            probe.verify()",
-     "        pass",
-     (T_MODELS, T_ISO), 'KILLED'),
-    ('the-error-tail-is-sliced-from-the-end-again', 'i',
-     "        head = blob.splitlines()[0].strip() if blob else ''",
-     "        head = blob.replace('\\n', ' ')[-160:] if blob else ''",
-     (T_MODELS, T_ISO), 'SURVIVED'),   # a one-line stderr reads the same
-
-    ('a-countdown-comes-back-into-the-png-block', 't',
-     "        if r.instant is not None:\n"
-     "            m['krt:utc'] = utc_iso(r.instant)\n"
-     "            m['krt:t_epoch'] = round(r.instant, 3)",
-     "        if r.instant is not None:\n"
-     "            m['krt:utc'] = utc_iso(r.instant)\n"
-     "            m['krt:t_epoch'] = round(r.instant, 3)\n"
-     "            m['krt:remaining_s'] = 1.0",
-     (T_CLOCK,), 'KILLED'),
-    # ---- the pre-push review's two behaviour fixes ------------------------
-    ('the-opening-frame-borrows-the-first-anchors-basis-again', 't',
-     "            if i < self.anchors[0].first:\n"
-     "                return Reading(0.0, None, 'run-start', t.t0, False)",
-     "            if i < self.anchors[0].first:\n"
-     "                a0 = self.anchors[0]\n"
-     "                return Reading(0.0, a0.stage, a0.basis, t.t0, False)",
-     (T_CLOCK,), 'KILLED'),
-    # Restores the ORIGINAL silent fallback verbatim, rather than breaking the
-    # branch: a mutant that raises NameError would be killed for a reason that
-    # has nothing to do with the behaviour under test.
-    ('a-missing-named-ledger-silently-falls-back-again', 'm',
-     "            if not os.path.isfile(timing):\n"
-     "                raise FileNotFoundError(\n"
-     "                    'timing ledger: no such file: %s' % timing)\n"
-     "            ledger = timing",
-     "            if not os.path.isfile(timing):\n"
-     "                try:\n"
-     "                    import cmd_timing\n"
-     "                    timing = cmd_timing.find_ledger(inputs[0])\n"
-     "                except Exception:\n"
-     "                    timing = None\n"
-     "            ledger = timing",
-     (T_CLOCK,), 'KILLED'),
-    # ---- the two defects a reviewer saw in the first published image -------
-    ('the-clock-is-drawn-over-the-board-again', 't',
-     # Re-anchored by #1011, which made the band's black a theme role
-     # (`chrome_band`, value-for-value). The MUTATION is unchanged: paste the
-     # frame below the band instead of above it, so the clock covers the board.
-     "    out = Image.new('RGB', (W, H + int(band_h)), "
-     "_TH.rgb('chrome_band'))\n"
-     "    out.paste(frame, (0, 0))",
-     "    out = Image.new('RGB', (W, H + int(band_h)), "
-     "_TH.rgb('chrome_band'))\n"
-     "    out.paste(frame, (0, int(band_h)))",
-     (T_CLOCK,), 'KILLED'),
-    ('the-band-is-sized-per-frame-again', 't',
-     "    worst = max((len(_wrap_clock(ln, avail, measure)) for ln in all_lines\n"
-     "                 if ln), default=0)",
-     "    worst = len(_wrap_clock(all_lines[0], avail, measure))",
-     (T_CLOCK,), 'KILLED'),
 ]
 
 

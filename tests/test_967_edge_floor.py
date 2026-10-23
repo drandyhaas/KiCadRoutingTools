@@ -1,8 +1,7 @@
 """Resolved placement edge floor on the published esp_prog poses (#967).
 
 Reconstruct geometry from the existing repository board, never edit it.
-Frozen public board/brief identities and independent native evidence are in
-docs/issue-967-verification.md. These tests need no KiCad installation.
+These tests need no KiCad installation.
 """
 import copy
 import hashlib
@@ -145,7 +144,8 @@ class EdgeFloor(unittest.TestCase):
         board = self.fixture()
         s, _ = self.cli(board, 'set', 'Y1', '124.7', '103.2', '--rot', '270', floor=None)
         self.assertEqual(s['knobs']['board_edge_clearance']['requested'], None)
-        self.assertEqual(s['pad_edge_after']['source'], 'fixed default')
+        self.assertEqual(s['pad_edge_after']['source'],
+                         'fab edge floor (what routing writes)')   # #1301
         pro = board.with_suffix('.kicad_pro')
         pro.write_text(json.dumps({'board': {'design_settings': {'rules': {
             'min_copper_edge_clearance': .60}}},

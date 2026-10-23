@@ -69,7 +69,11 @@ VIA_SIZE, VIA_DRILL = 0.45, 0.20
 # so no escape can be lost. An earlier draft asserted `len(vias) + len(dropped)
 # > 0` under the label "escapes are unchanged", which would have passed on
 # (0 vias, 36 dropped). These numbers are the pre-change measurement on
-# upstream/main e239e067.
+# upstream/main e239e067 -- except routed_output U2, which escapes two more
+# pads since: DATA_23 (U2.67) by a stub to its own existing via, 0.188 mm off
+# U2.68, once the under-pad escape measured pads exactly instead of off the
+# stub map; and DATA_6 (U2.46) at 0.095 mm, the under-pad escalation down the
+# QFN clearance ladder (#1328). Both are new escapes, none is lost.
 CASES = [
     ('qfn_underpad_coupling', 'U1', ['SIG*'], 'F.Cu', 0.1, 0.12, (8, 0)),
     ('qfn_diffpair_escape', 'U1', ['DP1*'], 'F.Cu', 0.1, 0.15, (2, 0)),
@@ -79,7 +83,7 @@ CASES = [
     # EVERYTHING (`if True:`) is invisible, because every via on the three
     # boards above does overlap: measured, that row SURVIVED until this
     # board was added.
-    ('routed_output', 'U2', ['Net-(U2A-*)'], 'B.Cu', 0.1, 0.10, (14, 22)),
+    ('routed_output', 'U2', ['Net-(U2A-*)'], 'B.Cu', 0.1, 0.10, (15, 20)),
 ]
 
 CHECKS = []
@@ -100,10 +104,25 @@ def escaping_pad(fp, via):
                                                p.global_y - via['y']))
 
 
+# #1342: these fixtures' nets exist only on U1, and the fanouts skip a
+# single-pad (NC) net; run() fans a copy where each has a partner pad.
+SYNTHETIC = {'qfn_underpad_coupling', 'qfn_diffpair_escape'}
+_TMP = None
+
+
 def run(board, ref, nets, layer, tw, clr):
+    global _TMP
     path = os.path.join(ROOT, 'kicad_files', board + '.kicad_pcb')
     if not os.path.exists(path):
         return None
+    if board in SYNTHETIC:
+        import tempfile
+        from synth import with_partner_pads
+        if _TMP is None:
+            _TMP = tempfile.TemporaryDirectory()
+        copy = os.path.join(_TMP.name, board + '.kicad_pcb')
+        with_partner_pads(path, copy, (2.0, 2.0))
+        path = copy
     pcb = parse_kicad_pcb(path)
     fp = pcb.footprints.get(ref)
     if fp is None:
@@ -193,7 +212,7 @@ def main():
         check(f'{board} {ref}: escapes match the PRE-change measurement '
               f'({len(vias)} vias, {len(dropped)} dropped)',
               (len(vias), len(dropped)) == expect,
-              f'expected {expect} on upstream/main e239e067 -- the clamp only '
+              f'expected {expect} (see CASES) -- the clamp only '
               f'shrinks vias, which relaxes every clearance term, so no '
               f'escape may be lost'),
 

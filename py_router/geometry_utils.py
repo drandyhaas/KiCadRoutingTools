@@ -12,6 +12,7 @@ This module consolidates geometry calculations used across multiple modules:
 from __future__ import annotations
 
 import math
+import re
 from typing import Tuple, Optional, Dict, List, Any, TYPE_CHECKING
 
 
@@ -465,3 +466,87 @@ def overlap_thickness(geom) -> float:
         else:
             best = max(best, min(short, 2.0 * _inscribed_radius(p)))
     return best
+
+
+# KiCad via types whose copper covers only part of the stack (Via.via_type).
+PARTIAL_VIA_TYPES = frozenset(('blind', 'buried', 'micro'))
+
+
+def _copper_order(name: str) -> int:
+    """Stack position of a copper layer: F.Cu 0, InN.Cu N, B.Cu last."""
+    if name == "F.Cu":
+        return 0
+    if name == "B.Cu":
+        return 10_000
+    m = re.fullmatch(r"In(\d+)\.Cu", name)
+    return int(m.group(1)) if m else -1
+
+
+def _via_field(via, name: str, default=None):
+    """A Via attribute, or the same key of a via dict (the writers' shape)."""
+    if isinstance(via, dict):
+        return via.get(name, default)
+    return getattr(via, name, default)
+
+
+def via_on_layer(via, layer_name: str) -> bool:
+    """True when the via has copper on `layer_name`.
+
+    Only a via KiCad types blind, buried or micro (`Via.via_type`) covers part
+    of the stack: the layers between its two end layers in stack order. Any
+    other via is a through via, on every copper layer whatever its layer pair
+    says -- KiCad loads an untyped `(via ... (layers "F.Cu" "In1.Cu"))` as a
+    through via, and this repo's writer emits exactly that. A layer name that
+    is not F.Cu / InN.Cu / B.Cu counts as on (the conservative answer)."""
+    if _via_field(via, "via_type", "through") not in PARTIAL_VIA_TYPES:
+        return True
+    layers = _via_field(via, "layers")
+    if not layers or len(layers) < 2:
+        return True
+    a, b = sorted((_copper_order(layers[0]), _copper_order(layers[-1])))
+    o = _copper_order(layer_name)
+    if a < 0 or o < 0:
+        return True
+    return a <= o <= b
+
+
+def via_span_layer_indices(via, routing_layers, num_layers: int):
+    """Routing-layer indices a via's copper occupies.
+
+    A through via occupies every routing layer. A blind/buried/micro via
+    occupies only the layers between its two end layers in stack order: an
+    F.Cu->In1.Cu microvia leaves In2..B.Cu free for tracks (via-in-pad GND
+    microvias freed nothing while every via was rasterized on all layers).
+    Layers are matched by NAME through `via_on_layer`, never by index: a
+    full-stack run's config.layers is not in stack order (`--layers F.Cu
+    In2.Cu B.Cu` appends In1/In3/In4 after B.Cu). Without a name for every map
+    layer the answer is every layer, so a board whose vias are all through
+    vias rasterizes exactly as before.
+    """
+    if (_via_field(via, "via_type", "through") not in PARTIAL_VIA_TYPES
+            or not routing_layers or len(routing_layers) < num_layers):
+        return range(num_layers)
+    return [i for i, name in enumerate(list(routing_layers)[:num_layers])
+            if via_on_layer(via, name)]
+
+
+def via_copper_layers(via, copper_layers):
+    """The layers of `copper_layers` (in that order) a via has copper on: all
+    of them for a through via, whatever pair it carries, and the run between
+    its end layers for one KiCad types blind/buried/micro. Accepts a Via or a
+    via dict. This is what every consumer that asks "which layers does this
+    via join" should read -- a via's stored pair is NOT its span (found
+    reviewing #1268: an untyped via is through to KiCad, and a typed one also
+    joins the layers BETWEEN its ends)."""
+    return [layer for layer in copper_layers if via_on_layer(via, layer)]
+
+
+def via_end_layers(via):
+    """(top, bottom) of a via's copper: ('F.Cu', 'B.Cu') for a through via,
+    whatever pair it carries, and its own two end layers for one KiCad types
+    blind/buried/micro. What a barrel-length measurement spans."""
+    layers = _via_field(via, "layers") or []
+    if (_via_field(via, "via_type", "through") in PARTIAL_VIA_TYPES
+            and len(layers) >= 2):
+        return layers[0], layers[-1]
+    return "F.Cu", "B.Cu"

@@ -32,12 +32,12 @@ TARGETS = {'bs': os.path.join(_ROOT, 'py_tools', 'board_score.py'),
            'ca': os.path.join(_ROOT, 'py_tools', 'check_assembly.py'),
            'cv': os.path.join(_ROOT, 'py_placer', 'converge.py'),
            'cc': os.path.join(_ROOT, 'check_complete.py'),
-           'gr': os.path.join(_ROOT, '.claude', 'skills', 'pcb-free-agent',
+           'gr': os.path.join(_ROOT, '.claude', 'skills', 'plan-pcb-placement',
                               'scripts', 'grade.py')}
 
 T1183 = os.path.join(_TESTS, 'test_1183_board_score_baseline.py')
 T918 = os.path.join(_TESTS, 'test_918_assembly_verdict.py')
-TFA = os.path.join(_TESTS, 'test_pcb_free_agent_scripts.py')
+TFA = os.path.join(_TESTS, 'test_plan_pcb_placement_scripts.py')
 
 #: (name, target, old, new, tests, expect)
 ROWS = [

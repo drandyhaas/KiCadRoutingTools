@@ -521,9 +521,9 @@ def main():
 
     # 15. Copper-layer GRAPHICS (#337) are immutable input art. They were
     #     soft-joint CANDIDATES here and nowhere else -- _check_dangles refuses
-    #     them and check_connected refuses them outright ("graphics never
-    #     conduct") -- so a graphic pair produced an unactionable finding in a
-    #     size=None category that --tolerance can never drop.
+    #     them, and no pass may weld or move art -- so a graphic pair produced
+    #     an unactionable finding in a size=None category that --tolerance can
+    #     never drop.
     _gpads = [_pad(-5, 0, num='1'), _pad(-6, 0, num='2', ref='U2')]
     _real = [_seg(-6, 0, -5, 0), _seg(3, 0, 5, 0), _seg(3.12, 0, 6, 0.5)]
     _art = [_real[0]] + [Segment(start_x=s.start_x, start_y=s.start_y,
@@ -532,8 +532,8 @@ def main():
                          for s in _real[1:]]
     _w_art = check_net_connectivity(NET, _art, [], _gpads, [])
     _wo_art = check_net_connectivity(NET, [_real[0]], [], _gpads, [])
-    results.append(("graphics are invisible to check_connected (identical "
-                    "verdict with and without them)",
+    results.append(("art touching no pad leaves check_connected's verdict "
+                    "unchanged (identical with and without it)",
                     (_w_art['num_components'], _w_art['disconnected_pads'])
                     == (_wo_art['num_components'],
                         _wo_art['disconnected_pads'])))
@@ -602,7 +602,7 @@ def main():
         segs = [_seg(-3, 0, -0.35, -0.06, layer=seg_layer, width=0.25),
                 _seg(-0.35, 0.06, -3, 0, layer=seg_layer, width=0.25)]
         v = Via(x=0, y=0, size=0.6, drill=0.3, layers=['F.Cu', 'In1.Cu'],
-                net_id=NET)
+                net_id=NET, via_type='blind')   # untyped would be through
         pcb = _pcb(segs, vias=[v], pads=pads)
         pcb.board_info.copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
         return pcb, segs, [v], pads
@@ -623,18 +623,19 @@ def main():
 
     #     (b) A soft joint is a PAIR. Excluding a copper-layer GRAPHIC as a
     #         CANDIDATE drops the TRACK end paired with it, and nothing else
-    #         picks that end up -- so a genuinely open net went from exit 1 to
-    #         exit 0, which is what check_complete gates DONE on. The art half
-    #         is unactionable (#337); the track half is not.
+    #         picks that end up, so the soft joint went unreported. The art
+    #         half is unactionable (#337); the track half is not. The joint
+    #         itself conducts: KiCad 10 joins a track whose end lies in a
+    #         net-tagged board graphic's stroke, and so does check_connected.
     _gp = [_pad(-6, 0, num='1'), _pad(6, 0, num='2', ref='U2')]
     _track = _seg(-6, 0, -0.05, 0, width=0.25)
     _artseg = Segment(start_x=0.05, start_y=0, end_x=6, end_y=0, width=0.25,
                       layer='F.Cu', net_id=NET, graphic=True)
     _mixed = _pcb([_track, _artseg], pads=_gp)
     _cm = check_net_connectivity(NET, [_track, _artseg], [], _gp, [])
-    results.append(("a track ending short of ART is a real open "
-                    "(check_connected)",
-                    _cm['num_components'] > 1 or bool(_cm['disconnected_pads'])))
+    results.append(("a track whose end lies in ART's stroke joins it "
+                    "(check_connected, as KiCad 10)",
+                    _cm['connected'] and not _cm['disconnected_pads']))
     results.append(("...and the track-vs-art pair is still reported",
                     _sj(_mixed) == 1))
     _rep = [x for x in check_weird(_mixed, tolerance=0)[0]

@@ -164,7 +164,6 @@ FLAT_DEFAULT = 0.2      # its Default net class
 FLAT_WIDE = 0.4         # its second class, the one clamp_nondefault_netclasses
                         # silently took to 0.25 with no flag given at all
 CLI = os.path.join(_ROOT, 'py_placer', 'place_fanout_clearance.py')
-ANIM = os.path.join(_ROOT, 'py_tools', 'animate_fanout_clearance.py')
 
 
 def _classes(clearance, wide=None):
@@ -705,18 +704,14 @@ class TestTheEngineResolvesAndDiscloses(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestTheCLI(unittest.TestCase):
 
-    def test_neither_front_declares_a_numeric_default(self):
-        """The source guard, over the SAME two scripts test_733:638-644 covers
-        for --board-edge-clearance. The animator is the third front, and the
-        placement README promises it "gets the same answer" -- left with a
-        numeric default it would price with max(base, netclass) while the CLI
-        priced with the ceiling, so the GIF would show a repair the tool does
-        not perform.
+    def test_the_cli_declares_no_numeric_default(self):
+        """The source guard, over the SAME script test_733 covers for
+        --board-edge-clearance.
 
         Comment-stripped, because a docstring quoting the old line would
         otherwise satisfy a plain `in` test -- the exact false pass #756's
         fact-check found in its own source arm."""
-        for script in (CLI, ANIM):
+        for script in (CLI,):
             with open(script, encoding='utf-8') as fh:
                 src = '\n'.join(l.split('#')[0]
                                 for l in fh.read().splitlines())
@@ -724,13 +719,6 @@ class TestTheCLI(unittest.TestCase):
                           os.path.basename(script))
             self.assertNotIn('"--clearance", type=float, default=defaults',
                              src, os.path.basename(script))
-
-    def test_the_animator_passes_the_same_ceiling(self):
-        """It writes no project, so it clamps nothing; it takes the ceiling
-        anyway because its job is to SHOW what the CLI does."""
-        with open(ANIM, encoding='utf-8') as fh:
-            src = '\n'.join(l.split('#')[0] for l in fh.read().splitlines())
-        self.assertIn('netclass_ceiling=args.clearance', src)
 
     def test_the_ceiling_reaches_the_engine(self):
         with open(CLI, encoding='utf-8') as fh:

@@ -358,6 +358,29 @@ ACTIVE = None
 they were initialized with). `active()` reads it."""
 
 
+def fan_via_reach(rules):
+    """How far a via keeps another net's ESCAPE run (a fanout track) off it, as the router keeps a track's grid cells
+    off a via: its RING (pairs.via_ring) -- the via-to-track clearance rounded up to whole grid cells, plus a quarter
+    cell for a track passing between grid points diagonally -- for a fanout track. 0.28125 at the defaults, 0.38125 at
+    the zynq LVDS's 0.45 mm via, 0.09 clearance and 0.12 escapes. (select_moves._VIA_REACH, the ends model's and the
+    fanout's site-against-run conflicts: a fixed 0.30 let the LVDS's vias stand 0.30 to 0.38 off another net's run;
+    rounded up to two grid steps it was 0.40, exactly where a 0.8 mm array's dog-bone stands off the next ball line --
+    every dog-bone met every neighbouring row's run, and the ends had no plan)"""
+    return (math.ceil((rules.via_size / 2 + rules.fan_track / 2 + rules.clearance) / rules.grid - 1e-9) + 0.25) \
+        * rules.grid
+
+
+def fan_via_clear(rules):
+    """How far a via keeps another net's escape run off it where the run is laid EXACTLY as planned, not routed on a
+    grid: the escape fanout (escape_plan) lays its moves as they are, and joint_escape plans the shared array's runs at
+    exactly this -- the via's radius, the run's half width and the clearance. fan_via_reach's grid ring is 0.40625 at
+    0.45 mm vias, 0.12 escapes and 0.1 clearance: past the 0.4 a 0.8 mm array's dog-bone stands off the next ball line,
+    so every dog-bone met every neighbouring line's run on every layer, and the ends model found no plan with no
+    conflict for sdi_mipi_conv's SDI bus on four routing layers or on eight (11 of 15 teeth at most), where the joint
+    escape laid them"""
+    return rules.via_size / 2 + rules.fan_track / 2 + rules.clearance
+
+
 def active():
     """The rules in force in this process: the last installed, else the
     supplied (SETTING), else DEFAULT. A module initializes its constants
@@ -455,6 +478,17 @@ def install(rules, verbose=False):
         put('braid', 'PAIR_APPROACH', float(awx_settings.get('BRAID_PAIR_APPROACH', '4.5') or 0) * pp)
     stack = rules.track + rules.clearance + HUG_OVER
     put('select_moves', '_STACK_PITCH', stack)
+    put('select_moves', '_VIA_REACH', fan_via_reach(rules))
+    # whole_solve, which the ends model's solve check imports into the driver: its sizes as it derives them
+    put('whole_solve', 'TRK', rules.track)
+    put('whole_solve', 'CLR', rules.hug)
+    put('whole_solve', 'VIA', rules.via_size)
+    put('whole_solve', 'VNEED', rules.via_need)
+    put('whole_solve', 'PITCH', rules.lane_min)
+    put('whole_solve', 'LEGROOM', rules.lane_min)
+    put('whole_solve', 'G', rules.lane_min / 5)
+    put('whole_solve', 'MARG', rules.hug)
+    put('whole_solve', 'FACE_ROOM', 2 * rules.via_need)
     put('whole_ends', 'DUP_TOL', stack / 2)
     put('whole_ends', '_LANE_PITCH', rules.lane_min)
     put('whole_ends', '_CHG_ROOM', 2 * 1.1 * rules.via_need)

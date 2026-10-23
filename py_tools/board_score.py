@@ -3,13 +3,10 @@
 
 Why this exists
 ---------------
-`place_route_loop.better()` compares `failures` and `iterations`, and BOTH come
-out of route.py's own ``JSON_SUMMARY``. It never runs a checker. CLAUDE.md warns
-about exactly this -- *"Routers can report false success. A router's own 'routed'
-tally may come from a local/heuristic proxy while pads stay disconnected"* -- so a
-round can be reported ACCEPTED while pads sit disconnected and DRC is dirty. That
-is how a board went out at 39/44 nets with 762 DRC errors and 141/141 vias below
-its own spec.
+A router's own ``JSON_SUMMARY`` is not a verdict. CLAUDE.md: *"Routers can report
+false success. A router's own 'routed' tally may come from a local/heuristic
+proxy while pads stay disconnected"* -- so a board can read as routed while pads
+sit disconnected and DRC is dirty.
 
 This script is the second opinion. It answers one question -- *is this board
 better than that board?* -- with a number that cannot be produced by the thing
@@ -31,11 +28,15 @@ disconnected net with a lower via count::
 
     score = (blocking, quality)
     blocking = (unrouted + broken + drc + undersized + floorplan
-               + assembly + impedance + length + net_widths)
+               + assembly + impedance + length + net_widths + diff_pairs)
     quality  = (vias, copper_mm, segments)      # only compared once blocking == 0
 
 `blocking` must reach 0 before a board is deliverable. `quality` orders the
-boards that already got there.
+boards that already got there. Below that, two boards of equal `blocking`
+are ordered by `joins_needed` -- the joins their open nets still need (an
+unrouted net of N pads needs N - 1, a broken one components - 1) -- never by
+`quality`: a board missing a 17-pad rail has fewer vias BECAUSE the rail is
+missing, and one net counts 1 in `blocking` whatever its size (#1340).
 
 Vacuity
 -------
@@ -91,6 +92,12 @@ RULE_PAIR_TYPES = frozenset({'segment-segment-track-rule'})
 # `inherited-via-in-paste`; what is left is then a site the run created, and
 # counts in `blocking` (#1171).
 VIA_PASTE_TYPES = frozenset({'via-in-paste'})
+
+# #1303: a .kicad_dru skew or diff_pair_uncoupled rule a pair's copper breaks
+# (check_drc's pair-rule pass, KiCad's skew_out_of_range and
+# diff_pair_uncoupled_length_too_long). Split out of `drc` into the
+# `diff_pairs` component, which carries each pair's measurement beside them.
+PAIR_RULE_TYPES = frozenset({'skew-out-of-range', 'diff-pair-uncoupled'})
 
 _DRC_TOTAL = re.compile(r'^FOUND (\d+) DRC VIOLATIONS', re.M)
 # The per-type header carries an OPTIONAL suffix between the count and the
@@ -269,6 +276,7 @@ def score_connectivity(root: str, board: str) -> dict:
     rc, out = run_tool(root, 'check_connected.py', board)
     if 'ALL NETS FULLY CONNECTED' in out:
         return {'ran': True, 'count': 0, 'unrouted': 0, 'broken': 0, 'nets': [],
+                'unrouted_pads': {}, 'joins_needed': 0,
                 'poured_nets': sorted(poured_net_names(board)),
                 'poured_nets_meaning': POURED_NETS_MEANING}
     m = _CONN_TOTAL.search(out)
@@ -288,7 +296,9 @@ def score_connectivity(root: str, board: str) -> dict:
     # Net names, so the ledger can say WHICH nets failed and a later round can
     # tell "the same nets every time" (parameters) from "different nets"
     # (congestion) -- the Step 9 classification needs this distinction.
-    unrouted_names = re.findall(r'^\s{4}(\S+) \(\d+ pads\)', out, re.M)
+    unrouted_pads = {n: int(c) for n, c in
+                     re.findall(r'^\s{4}(\S+) \((\d+) pads\)', out, re.M)}
+    unrouted_names = list(unrouted_pads)
     broken_names = re.findall(r'^\s{2}(\S+) \(net \d+\):', out, re.M)
     nets = unrouted_names + broken_names
 
@@ -338,10 +348,22 @@ def score_connectivity(root: str, board: str) -> dict:
     for name, v in detail.items():
         v['handler'] = 'route'
 
+    # THE JOINS THE BOARD STILL NEEDS (#1340). `unrouted` counts NETS, so a
+    # 17-pad rail with no copper weighs 1 -- the same as one stranded pad --
+    # and a tie on `blocking` fell to vias and copper, where the missing rail
+    # reads as quality: StickHub's rail-less board (117 vias) outranked the
+    # one with a single open pad (132). An unrouted net of N pads needs N - 1
+    # joins, a broken one (components - 1), the unit `broken` already counts;
+    # their sum breaks a `blocking` tie before vias or copper do. check_
+    # connected prints each unrouted net's pad count, which was parsed and
+    # dropped.
+    joins = sum(max(0, n - 1) for n in unrouted_pads.values()) + broken
     return {'ran': True, 'count': int(m.group(1)), 'unrouted': unrouted,
             'broken': broken, 'broken_nets': broken_nets,
             'components_per_broken_net': comps, 'nets': sorted(set(nets)),
             'unrouted_net_names': sorted(set(unrouted_names)),
+            'unrouted_pads': dict(sorted(unrouted_pads.items())),
+            'joins_needed': joins,
             'poured_nets': sorted(poured),
             'poured_nets_meaning': POURED_NETS_MEANING,
             'broken_detail': detail}
@@ -392,7 +414,7 @@ def unrouted_shape(board: str, unrouted_names, pcb=None) -> dict:
             'open': sorted(open_nets)}
 
 
-#: check_assembly's ten `not_buildable` conjuncts, by the JSON key each one
+#: check_assembly's twelve `not_buildable` conjuncts, by the JSON key each one
 #: publishes (check_assembly's `not_buildable = ...` line). `blocking` -- pad INTERSECTIONS -- is
 #: the first of them and is the only one this component used to read (#918).
 #:
@@ -402,8 +424,8 @@ def unrouted_shape(board: str, unrouted_names, pcb=None) -> dict:
 #:   * `locked_contacts` is a strict SUBSET of `blocking`. `locked_ref` is set
 #:     at exactly one site, inside the pad-intersection channel, so every
 #:     locked-contact pair is already a blocking pair --
-#:     `tests/test_run8_locked_contact.py` asserts in so many words that it is
-#:     "a second channel, not a re-count".
+#:     `tests/test_run8_locked_contact.py` (since retired) asserted in so many
+#:     words that it is "a second channel, not a re-count".
 #:   * `coincident_origins` counts GROUPS, not pairs: an N-part stack is one
 #:     group and N(N-1)/2 potential pairs.
 #:   * `containment_blocking` counts `fab`-kind pairs, a different geometry
@@ -428,11 +450,20 @@ def unrouted_shape(board: str, unrouted_names, pcb=None) -> dict:
 #: intent's `assembly.body_edge_mm` -- and is 0, not null, when nothing is
 #: declared: the census still ran, and an undeclared band gates nothing by
 #: policy, which is a measured answer rather than a missing one.
+#:
+#: `graphic_pad_gating` (#1266) is the courtyard currency again -- a pad a
+#: moved member put on another part's footprint graphic copper -- and is
+#: null when unarmed.
+#:
+#: `own_pad_shorts` (#1306) is two of ONE part's pads touching on two real
+#: nets. Always measured; `--baseline` only exempts the pairs its footprint
+#: already had.
 ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
                       'containment_blocking', 'courtyard_blocking_gating',
                       'oob_pad_copper_gating_count', 'mating_keepout_count',
                       'pin_in_courtyard', 'testpoint_covered_gating',
-                      'body_edge_band_gating')
+                      'body_edge_band_gating', 'graphic_pad_gating',
+                      'own_pad_shorts')
 
 #: The conjuncts that can ACTUALLY flip the verdict while `blocking` is 0, in
 #: this scorer's invocation. Not every conjunct can:
@@ -455,10 +486,15 @@ ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
 #: #1255 added `body_edge_band_gating`: a body inside the body-to-edge band
 #: the intent declares, a fact about one part, so it too fires at
 #: `blocking` 0.
+#: #1266 added `graphic_pad_gating`: a pad on another part's footprint
+#: GRAPHIC copper is no pad intersection, so it fires at `blocking` 0.
+#: #1306 added `own_pad_shorts`: two pads of ONE part are no pair of parts,
+#: so it fires at `blocking` 0 too.
 ASSEMBLY_LIVE_CONJUNCTS = ('coincident_origins', 'containment_blocking',
                            'oob_pad_copper_gating_count', 'mating_keepout_count',
                            'pin_in_courtyard', 'courtyard_blocking_gating',
-                           'testpoint_covered_gating', 'body_edge_band_gating')
+                           'testpoint_covered_gating', 'body_edge_band_gating',
+                           'graphic_pad_gating', 'own_pad_shorts')
 
 
 def assembly_component(doc: dict, rc: int) -> dict:
@@ -758,12 +794,14 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     size = {t: n for t, n in by_type.items() if t in SIZE_TYPES}
     rule = {t: n for t, n in by_type.items() if t in RULE_PAIR_TYPES}
     vip = {t: n for t, n in by_type.items() if t in VIA_PASTE_TYPES}
+    pairs = {t: n for t, n in by_type.items() if t in PAIR_RULE_TYPES}
     clear = {t: n for t, n in by_type.items()
              if t not in SIZE_TYPES and t not in RULE_PAIR_TYPES
-             and t not in VIA_PASTE_TYPES}
+             and t not in VIA_PASTE_TYPES and t not in PAIR_RULE_TYPES}
     return ({'ran': True, 'count': sum(clear.values()), 'by_type': clear,
              'graded_at': _graded_at(out),
              'graphic_grazes_unverified': _unverified_grazes(out),
+             'pair_rules': pairs,
              'via_in_paste': {'ran': True, 'count': sum(vip.values()), 'by_type': vip,
                               'undeclarable': _undeclarable_vias(out)}},
             {'ran': True, 'count': sum(size.values()), 'by_type': size},
@@ -848,6 +886,75 @@ def score_floorplan(root: str, board: str, intent: str, tmp: str) -> dict:
             # so "no warnings" and "warnings not looked at" cannot look alike.
             'warnings': len(warns),
             'warning_rules': sorted({str(v.get('rule')) for v in warns})}
+
+
+def score_diff_pairs(board: str, drc: dict, pcb=None) -> dict:
+    """Every differential pair on the board, graded on its copper (#1303).
+
+    The pairs are KiCad's (`kicad_dru.coupled_net_pairs`: a MatchDpSuffix
+    complement that exists). Each one whose members' pads are all joined by
+    track copper is MEASURED as KiCad's DRC measures it
+    (`net_queries.diff_pair_copper`): coupled and uncoupled length under the
+    pair's binding diff_pair_gap window (`design_rules.DesignRules`), track
+    lengths, the layers each member uses, and the P/N skew of
+    `net_match_length(mode 'total')`. On the board that motivated this
+    (imx6ulz, gp14 H10) route_diff reported DQS0 'coupled' while P ran on
+    In2.Cu, N on B.Cu -- 0 mm coupled, 4.5 mm skew -- and no grader said so.
+
+    GRADED only against what the board DECLARES: its `.kicad_dru` skew and
+    diff_pair_uncoupled rules, which check_drc's pair-rule pass grades and
+    this component counts (`count`; the rows leave `drc`, so nothing is
+    counted twice). A board that declares neither is measured, not graded:
+    `ran` False with the measurements attached, listed in UNGRADED -- KiCad
+    itself grades no pair without a rule, and an invented threshold would
+    fail every pair a design never asked to couple (a `+`/`-` named analog
+    input is a pair to MatchDpSuffix). `no_coupled_copper` names the
+    measured pairs with no coupled run at all, report-only."""
+    rows = (drc or {}).get('pair_rules') or {}
+    try:
+        from kicad_parser import parse_kicad_pcb
+        from kicad_dru import coupled_net_pairs, read_board_length_rules
+        from net_queries import diff_pair_copper, net_pads_joined, CopperIndex
+        from design_rules import DesignRules
+        if pcb is None:
+            pcb = parse_kicad_pcb(board)
+        rules, _notes = read_board_length_rules(
+            board, kinds=('skew', 'diff_pair_uncoupled'))
+        names = {nid: n.name for nid, n in pcb.nets.items() if nid and n.name}
+        pairs = coupled_net_pairs(names)
+        measured, unjoined = {}, []
+        index = dr = None
+        for p, n in sorted(pairs, key=lambda pn: names[pn[0]]):
+            if len(pcb.pads_by_net.get(p) or ()) < 2 or len(pcb.pads_by_net.get(n) or ()) < 2:
+                continue
+            if not (net_pads_joined(pcb, p) and net_pads_joined(pcb, n)):
+                unjoined.append({'p_net': names[p], 'n_net': names[n]})
+                continue
+            if index is None:
+                index, dr = CopperIndex(pcb), DesignRules.from_project(pcb, board)
+            gap = dr.resolve('diff_pair_gap', dr.item_for_net(p, 'track'))
+            gmin = gap.kicad_min if gap.kicad_min is not None else gap.min
+            rec = diff_pair_copper(pcb, p, n, gmin, gap.max, index=index)
+            rec.update(n_net=names[n], gap_window_mm=[gmin, gap.max])
+            measured[names[p]] = rec
+    except Exception as exc:                                 # noqa: BLE001
+        return {'ran': True, 'count': None,
+                'reason': f'diff-pair measurement failed: {type(exc).__name__}: {exc}'}
+    # `pairs` is keyed by the P net, each record naming its `n_net`.
+    detail = {'pairs': measured, 'unjoined_pairs': unjoined,
+              'no_coupled_copper': sorted(k for k, r in measured.items()
+                                          if r['coupled_mm'] <= 0),
+              'by_type': rows}
+    if not rules:
+        return dict(skipped('no .kicad_dru skew / diff_pair_uncoupled rule '
+                            'declares what the pairs must meet; measured, '
+                            'not graded'), **detail)
+    if (drc or {}).get('count') is None:
+        # check_drc grades the rules; without its run the rows are unknown,
+        # not zero.
+        return {'ran': True, 'count': None, 'rules': len(rules), **detail,
+                'reason': 'check_drc did not grade the board'}
+    return {'ran': True, 'count': sum(rows.values()), 'rules': len(rules), **detail}
 
 
 def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
@@ -1126,6 +1233,13 @@ def declared_net_names(score: dict) -> dict:
         'components.length.groups[].pad_to_die_mm':
             [n for g in (length.get('groups') or {}).values()
              if isinstance(g, dict) for n in (g.get('pad_to_die_mm') or {})],
+        # #1303: diff pairs, keyed by the P net with the N net inside.
+        'components.diff_pairs.pairs':
+            [n for p, r in ((c.get('diff_pairs') or {}).get('pairs') or {}).items()
+             for n in (p, r.get('n_net')) if n],
+        'components.diff_pairs.unjoined_pairs':
+            [n for r in ((c.get('diff_pairs') or {}).get('unjoined_pairs') or ())
+             for n in (r.get('p_net'), r.get('n_net')) if n],
     }
     return {k: v for k, v in fields.items() if v}
 
@@ -1208,52 +1322,6 @@ def quality(board: str, pcb=None) -> dict:
         return {'error': str(e)}
 
 
-def score_placement(root: str, board: str, tmp: str, intent: str = '',
-                    parent: dict = None) -> dict:
-    """Placement quality for a copper-free lap (#894). REPORT-ONLY.
-
-    NOT in `parts`, so not in `blocking`, not in `blocking_by`, not in
-    `ungraded`, not in `unknown`, and it cannot move the exit code. Three
-    reasons, and the first is the one to read: its terms are millimetres and
-    counts in four different currencies, and `blocking` is a sum. Adding
-    metres of pair length to a violation count produces a number with no unit.
-    The second is that `parts` is AST-scraped by
-    `tests/test_904_lens_components_cover_blocking.py`, which would then
-    demand a verifier lens for a component no lens grades. The third is that
-    keeping it out leaves every existing ledger's `blocking` untouched.
-
-    Run as a SUBPROCESS, like every other component here (see this module's
-    header): `placement_score` builds a quench state that PRINTS to stdout,
-    and this script's stdout carries `SCORE_JSON=` which every consumer parses
-    whole. The tool takes `--json`, so nothing of its own reaches this stream.
-    """
-    out = os.path.join(tmp, 'placement.json')
-    args = [board, '--json', out]
-    if intent:
-        args += ['--intent', intent]
-    rc, text = run_tool(root, 'placement_score.py', *args)
-    if rc != 0 or not os.path.exists(out):
-        return skipped(f'placement_score rc {rc}: {text.strip()[-200:]}')
-    try:
-        with open(out, encoding='utf-8') as f:
-            doc = json.load(f)
-    except Exception as exc:                                 # noqa: BLE001
-        return skipped(f'placement_score json unreadable: {exc}')
-    if parent is not None:
-        try:
-            sys.path.insert(0, os.path.join(root, 'py_placer'))
-            import placement_score as _ps
-            verdict, detail = _ps.compare_terms(
-                (parent.get('placement') or {}).get('terms'), doc['terms'])
-            doc['vs_parent'] = {
-                'verdict': verdict, 'terms': detail,
-                'board_sha': parent.get('board_sha'),
-                'label': parent.get('label')}
-        except Exception as exc:                             # noqa: BLE001
-            doc['vs_parent'] = {'error': f'{type(exc).__name__}: {exc}'}
-    return doc
-
-
 def build_parser():
     p = argparse.ArgumentParser(
         description='One authoritative (blocking, quality) score for a board',
@@ -1304,18 +1372,6 @@ def build_parser():
                         'anything that is not an existing file leaves length '
                         'matching UNGRADED (ran: false) and the board scoring '
                         'exit 0, which reads as a pass')
-    p.add_argument('--placement-terms', action='store_true',
-                   help='grade the PLACEMENT terms (#894): worst diff-pair '
-                        'span, crossed pin orders, cluster distance, plane-cut '
-                        'proxy, pad-area balance. REPORT-ONLY -- never in '
-                        '`blocking`, never in the exit code. On a copper-free '
-                        'board `quality` is (0, 0.0, 0) for every placement, '
-                        'so this is the only thing that can rank two of them. '
-                        'Opt-in because it builds a quench state')
-    p.add_argument('--parent-score', metavar='PATH',
-                   help="the parent lap's board_score JSON. Each placement "
-                        "term is then reported raw AND as a delta against it. "
-                        "Ignored without --placement-terms")
     p.add_argument('--json', metavar='PATH',
                    help='write the full score here. The stdout SCORE_JSON= '
                         'line caps each components.assembly list (pairs, '
@@ -1380,18 +1436,6 @@ def main():
         imped = score_impedance(root, args.board, _imp_nets, tmp)
         length = score_length(args.board, args.length_groups)
         net_widths = score_net_widths(args.board, args.net_min_widths)
-        placement = None
-        if args.placement_terms:
-            _parent = None
-            if args.parent_score:
-                try:
-                    with open(args.parent_score, encoding='utf-8') as _f:
-                        _parent = json.load(_f)
-                except Exception as _exc:                    # noqa: BLE001
-                    print(f'--parent-score unreadable, so no delta is '
-                          f'reported: {_exc}', file=sys.stderr)
-            placement = score_placement(root, args.board, tmp, args.intent,
-                                        _parent)
 
     # Both connectivity components carry their work list, not just their count --
     # see score_connectivity. `unrouted` needs names; `broken` needs names, piece
@@ -1409,8 +1453,10 @@ def main():
         _pcb = None
     shape = unrouted_shape(args.board, conn.get('unrouted_net_names', []),
                            pcb=_pcb)
+    diff_pairs = score_diff_pairs(args.board, drc, pcb=_pcb)
     parts = {'unrouted': {'ran': conn['ran'], 'count': conn.get('unrouted'),
                           'nets': conn.get('unrouted_net_names', []),
+                          'pads': conn.get('unrouted_pads', {}),
                           **shape},
              'broken': {'ran': conn['ran'], 'count': conn.get('broken'),
                         'poured_nets': conn.get('poured_nets', []),
@@ -1418,7 +1464,8 @@ def main():
                         'nets': conn.get('broken_detail', {})},
              'drc': drc, 'undersized': undersized, 'floorplan': floorplan,
              'assembly': assembly,
-             'impedance': imped, 'length': length, 'net_widths': net_widths}
+             'impedance': imped, 'length': length, 'net_widths': net_widths,
+             'diff_pairs': diff_pairs}
 
     # Track-rule-governed pairs are ADVISORY: their gate is the repo's own
     # registered-floor checker (check_dru), not this scalar. They live beside
@@ -1455,15 +1502,14 @@ def main():
     score = {'schema': 1, 'kind': 'board-score', 'board': os.path.abspath(args.board),
              'board_sha': _h.hexdigest(),
              'label': args.label, 'blocking': blocking,
+             # the joins the open nets still need: a `blocking` tie's
+             # breaker, ahead of `quality` (#1340); None when unmeasured
+             'joins_needed': conn.get('joins_needed') if conn.get('ran') else None,
              'blocking_by': {k: v.get('count') for k, v in parts.items()},
              'advisory': {k: v.get('count') for k, v in advisory.items()},
              'ungraded': ungraded_entries(parts),
              'unknown': sorted(unknown),
              'quality': quality(args.board, pcb=_pcb),
-             # BESIDE `quality`, never inside `parts` -- see score_placement.
-             # Absent entirely without the flag, so a payload that carries the
-             # key is one that asked for it.
-             **({'placement': placement} if placement is not None else {}),
              'components': {**parts, **advisory},
              'floors': _floors(args.board, sizes),
              'connectivity_nets': conn.get('nets', []),
@@ -1485,42 +1531,27 @@ def main():
                     if v is not None)
     q = score['quality']
     print(f"BLOCKING={blocking}  ({bits})  "
-          f"vias={q.get('vias')} copper_mm={q.get('copper_mm')}")
+          f"vias={q.get('vias')} copper_mm={q.get('copper_mm')}  "
+          f"joins_needed={score['joins_needed']}")
     _adv_bits = ' '.join(f'{k}={v}' for k, v in score['advisory'].items() if v)
     if _adv_bits:
         print(f"ADVISORY (floor-governed, not blocking): {_adv_bits}")
-    # PLACEMENT terms, and the note when they are missing on a board where
-    # nothing else can rank a lap.
-    if placement is not None:
-        _pt = placement.get('terms') or {}
-        _bits = ' '.join(
-            f"{k}={_pt[k]['value']}" for k in (placement.get('term_order') or [])
-            if _pt.get(k, {}).get('value') is not None)
-        _ungraded = [k for k in (placement.get('term_order') or [])
-                     if _pt.get(k, {}).get('ran') is False]
-        # A plain variable, not a multi-line expression inside the f-string:
-        # that spelling is PEP 701 and a SyntaxError before Python 3.12, and
-        # README.md says 3.9+. It would have broken the whole scorer at import
-        # on a supported interpreter.
-        _summary = _bits or 'nothing measured'
-        print(f"PLACEMENT (report-only, not blocking): {_summary}")
-        if _ungraded:
-            print(f"  placement terms UNGRADED (not scored, not passed): "
-                  f"{', '.join(_ungraded)}")
-        _vs = placement.get('vs_parent') or {}
-        if _vs.get('terms'):
-            sys.path.insert(0, os.path.join(root, 'py_placer'))
-            try:
-                import placement_score as _ps
-                print(f"  vs parent: {_vs.get('verdict')} -- "
-                      f"{_ps.format_delta(_vs['terms'])}")
-            except Exception:                                # noqa: BLE001
-                pass
-    elif (score['quality'] or {}).get('segments') == 0:
-        print("DEGENERATE QUALITY KEY: this board carries 0 copper segments, "
-              "so `quality` is (0, 0.0, 0) on EVERY such board and cannot "
-              "rank two placements. Re-score with --placement-terms to get a "
-              "key the placement half can compare.")
+    # #1303: what each pair's copper delivers, whether or not a rule grades it.
+    _dp = score['components'].get('diff_pairs') or {}
+    if _dp.get('pairs'):
+        _worst = sorted(_dp['pairs'].items(),
+                        key=lambda kv: -(kv[1].get('skew_mm') or 0))[:3]
+        print(f"DIFF PAIRS: {len(_dp['pairs'])} measured"
+              + ('' if _dp.get('ran') else ' (not graded: no .kicad_dru skew / '
+                 'diff_pair_uncoupled rule)')
+              + "; largest skew: " + ', '.join(
+                  f"{k} {v['skew_mm']:.3f}mm "
+                  f"(coupled {v['coupled_mm']:.2f} of "
+                  f"{max(v['length_p_mm'], v['length_n_mm']):.2f}mm)"
+                  for k, v in _worst))
+        if _dp.get('no_coupled_copper'):
+            print(f"  NO COUPLED COPPER (P and N never run side by side): "
+                  f"{', '.join(_dp['no_coupled_copper'])}")
     # WHICH LEVER. `unrouted` looks the same whether the router had a path and
     # missed it (parameter-shaped) or the net has fewer than 2 pads ON the
     # board (placement-shaped, and no router setting will ever fix it). The

@@ -1835,8 +1835,8 @@ def parse_part(spec):
         u_, v_ = float(u_), float(v_)
     except ValueError:
         raise SystemExit(f'--part {spec!r}: want KIND@ANCHOR:U:V[:F|B][:h|v][:nN][:pP][:dD][:rR]')
-    if kind not in PART_KINDS or anchor not in ('sw', 'nw', 'dw', 'ds', 'dn', 'sf', 'ch'):
-        raise SystemExit(f'--part {spec!r}: KIND one of {sorted(PART_KINDS)}, ANCHOR sw|nw|dw|ds|dn|sf|ch')
+    if kind not in PART_KINDS or anchor not in ('sw', 'nw', 'dw', 'ds', 'dn', 'sf', 'ch', 'de'):
+        raise SystemExit(f'--part {spec!r}: KIND one of {sorted(PART_KINDS)}, ANCHOR sw|nw|dw|ds|dn|sf|ch|de')
     n_, p_ = PART_DEFAULTS.get(kind, (1, 0.0))
     out = {'kind': kind, 'anchor': anchor, 'u': u_, 'v': v_, 'layer': 'F', 'orient': 'h', 'n': n_, 'pitch': p_,
            'd': 3.2, 'rot': 0.0}
@@ -1959,8 +1959,12 @@ def build(a):
         # FAR-FACE lanes (--ring-e): the destination's far column, bottom to top -- round the perimeter after the
         # south face, so the planted order stays one cycle round the destination; reached round its north side
         # or its south, which the truth leaves to each lane (truth_wind)
-        e0 = 1 + (rows - 2 - nE) // 2
-        dst_slots += [(r, dcols - 1) for r in range(e0 + nE - 1, e0 - 1, -1)]
+        # (--e-depth D: a BLOCK of the D far columns, row by row from the bottom and the far column first in each --
+        # the balls beside the far face whose only way out is that face, as sdi_mipi_conv's SDI bus on U11)
+        eD = max(1, getattr(a, 'e_depth', 1) or 1)
+        nr = -(-nE // eD)
+        e0 = 1 + (rows - 2 - nr) // 2
+        dst_slots += [(r, dcols - 1 - d) for r in range(e0 + nr - 1, e0 - 1, -1) for d in range(eD)][:nE]
     else:
         dst_slots = face_slots(K, dcols, east=False)
     names = [f'SYN{i:02d}' for i in range(K)]
@@ -2036,7 +2040,8 @@ def build(a):
     # south); `ds` / `dn` the south / north face's west end (U east along the
     # face, V out from it); `sf` the source's facing column's middle (U east,
     # into the channel, V south); `ch` the channel (U east of the source's
-    # facing column, V south of the bus's middle)
+    # facing column, V south of the bus's middle); `de` the destination's far
+    # face's middle (U east of its far column, V south)
     hcaps = []
     xw, yn, ys = sx + dx - wdst / 2, sy + dy - h / 2, sy + dy + h / 2
     xs = sx + wsrc / 2
@@ -2046,7 +2051,7 @@ def build(a):
         u_, v_ = q['u'], q['v']
         cx_, cy_ = {'sw': (xw - u_, ys + v_), 'nw': (xw - u_, yn - v_), 'dw': (xw - u_, sy + dy + v_),
                     'ds': (xw + u_, ys + v_), 'dn': (xw + u_, yn - v_), 'sf': (xs + u_, sy + v_),
-                    'ch': (xs + u_, sy + v_)}[q['anchor']]
+                    'ch': (xs + u_, sy + v_), 'de': (xw + wdst + u_, sy + dy + v_)}[q['anchor']]
         ref_ = {'npth': 'H', 'pth': 'J', 'vias': 'TP'}.get(q['kind'], 'CH') + str(j + 1)
         txt.append(PART_KINDS[q['kind']](ref_, cx_, cy_, q['layer'], q['orient'], q['n'], q['pitch'], q['d'],
                                          f'part{j}', q['rot']))
@@ -2117,6 +2122,7 @@ def build(a):
         'dst_rot': a.dst_rot, 'caps': a.caps,
         'ring_n': nN, 'ring_s': nS, 'dst_cols': dcols, 'dst_dy': dy, 'parts': hcaps,
         **({'ring_e': nE, 'shift': getattr(a, 'shift', 1), 'wind': wind} if wind else {}),
+        **({'e_depth': a.e_depth} if (getattr(a, 'e_depth', 1) or 1) > 1 else {}),
         **({'closed': True} if getattr(a, 'closed', False) else {}),
         'w_align': getattr(a, 'w_align', 'centre'),
         'crossings': len(edges),
@@ -2200,6 +2206,10 @@ def main(argv=None):
                     help='that many lanes end on the destination\'s FAR face (its side away from the source), '
                          'after the south face round it -- each reached round its north side or its south, which '
                          'the truth leaves to the lane (truth_wind; the sidecar\'s "wind")')
+    ap.add_argument('--e-depth', type=int, default=1,
+                    help='with --ring-e: the far-face lanes a block of this many far columns deep (row by row, the '
+                         'far column first) -- balls beside the far face that leave by it, under the truth\'s '
+                         'model (which reads each at its row on the far face) no longer exact')
     ap.add_argument('--dst-cols', type=int, default=None,
                     help='the destination\'s columns (default --cols): its north and south faces hold this minus 2')
     ap.add_argument('--w-align', default='centre', choices=('centre', 'north', 'south'),
@@ -2214,8 +2224,8 @@ def main(argv=None):
                     help='KIND@ANCHOR:U:V[:F|B][:h|v][:nN][:pP][:dD][:rR] -- a foreign part: KIND c0402, c0603, row '
                          '(N 0402s, pitch P), sot23, pth (an N-pin header, 2.54), vias (N via-sized barrels, 1.0), '
                          'npth (a hole of diameter D, 3.2); ANCHOR sw / nw (the destination\'s corner), dw (its '
-                         'facing column), ds / dn (its south / north face), sf (the source\'s facing column), ch (the '
-                         'channel) -- see build(); turned R degrees as KiCad turns a footprint. Repeatable')
+                         'facing column), ds / dn (its south / north face), de (its far face), sf (the source\'s facing '
+                         'column), ch (the channel) -- see build(); turned R degrees as KiCad turns a footprint. Repeatable')
     ap.add_argument('--copper', type=int, default=2, choices=(2, 4, 6),
                     help='copper layers: 2 (F.Cu, B.Cu), 4 (In1.Cu and In2.Cu between them) or 6 (In1.Cu .. In4.Cu)')
     ap.add_argument('--pairs', type=int, default=0,

@@ -46,7 +46,10 @@ DIAGONAL_MARGIN = 0.25  # mm
 # shrunk/rejected until the unblock failed. Tolerate up to this much sub-clearance
 # at PLACEMENT and let the post-route via-nudge (nudge_grazing_vias) move the
 # residual graze to full clearance instead -- a nudged via stays connected; a
-# stranded pad does not. Matches check_drc's default grading margin.
+# stranded pad does not. It is LOOSER than check_drc's grading margin (5% of
+# the clearance: 5 um at 0.1 mm), so a residual the nudge cannot move ships as
+# a counted item; the refit picks a SIZE and is no legality gate for the SITE,
+# which must come from the via map.
 UNBLOCK_REFIT_MARGIN_MM = 0.05  # mm (absolute; NOT a fraction like check_drc's clearance_margin)
 
 # Cost parameters
@@ -58,8 +61,16 @@ TRACK_PROXIMITY_COST = 0.0
 
 # Distance parameters
 STUB_PROXIMITY_RADIUS = 2.0  # mm
-NECKDOWN_LENGTH = 2.5  # mm of narrow track from the pad on neck-down routes (issue #72)
+NECKDOWN_LENGTH = 2.5  # mm pad-entry zone of a neck-down route (issue #72): pad-capped width where it fits (#1318)
 NECKDOWN_TAPER_LENGTH = 0.5  # mm narrow->wide width taper (0 = abrupt)
+# Under --escalation off, the most routed path a wide (power / impedance) net
+# may run below its requested width on one edge or one via-to-pad tap: the
+# pad-entry stretch a 2 mm rail cannot keep into a 0.2 mm pin. A longer neck
+# is refused and the edge or pad is reported instead. Measured as path
+# LENGTH, not span. Shared by the neck-down ladder (single_ended_routing) and
+# the tap router (route_planes); not a CLI/GUI parameter. The fab / board
+# policies do not read it (their necks are shaped by NECKDOWN_LENGTH).
+PAD_ENTRY_NECK_MM = 2.0
 TRACK_PROXIMITY_DISTANCE = 2.0  # mm
 # #1146 pairwise keep-away: band cost per cell (mm equivalent; 0 = measure
 # and report only) and the radius around the routed net's own pads where the
@@ -193,8 +204,8 @@ DIRECTION_PREFERENCE_COST = 250  # Cost penalty per off-axis move (0 = disabled)
 # Bus routing - auto-detection and parallel routing of grouped nets
 BUS_DETECTION_RADIUS = 5.0  # mm - max endpoint distance to form bus
 BUS_MIN_NETS = 2  # Minimum nets to form a bus
-BUS_ATTRACTION_RADIUS = 5.0  # mm - attraction radius from neighbor track
-BUS_ATTRACTION_BONUS = 5000  # Cost bonus for staying near neighbor
+BUS_ATTRACTION_RADIUS = 5.0  # mm - attraction reach around the planned corridor (else the routed neighbour)
+BUS_ATTRACTION_BONUS = 5000  # up to bonus/50 percent off a step along the corridor, capped at 90% (4500+ = full)
 
 # Guide corridor - route selected nets through a user-drawn polyline (issue #7)
 GUIDE_CORRIDOR_ENABLED = False
@@ -238,7 +249,16 @@ BGA_DIFF_PAIR_GAP = 0.1  # mm
 
 # QFN Fanout defaults
 QFN_TRACK_WIDTH = 0.1  # mm
+# The QFN clearance when NEITHER --clearance NOR the board names one (#1328): a
+# board with no project, or a Default class left unset. An omitted --clearance
+# otherwise takes the board's Default net class (qfn_fanout.resolve_qfn_clearance),
+# and the GUI QFN panel's Clearance spin shows this until its override is ticked.
 QFN_CLEARANCE = 0.1  # mm
+# #1328: the step a QFN stub escalates its clearance down by when it cannot
+# escape at the run clearance (qfn_fanout.qfn_clearance_ladder). Small, so the
+# clearance recorded for an escalated stub is within one step of what its copper
+# actually needs.
+QFN_ESCALATION_STEP = 0.005  # mm
 QFN_EXTENSION = 0.05  # mm - extension past pad edge before bend (0.1 -> 0.05: s2 rescan, -25 verdict on 65 QFN boards -- shorter stubs leave routing room)
 
 # Differential Pair defaults
@@ -320,6 +340,10 @@ RESCUE_CLEARANCE_STEPS = 4        # clearance rungs from nominal down to the fab
 RESCUE_WINDOW_MARGIN = 4.0        # mm of window past the gap bbox on every side
 RESCUE_MIN_WINDOW_HALF = 6.0      # mm - minimum window half-size (detour room)
 RESCUE_MAX_WINDOW_CELLS = 4_000_000  # per-layer cell budget; grid coarsens to fit
+RESCUE_MAX_MARGIN_CELLS = 30      # a rung whose wide-net A* track margin exceeds
+                                  # this many cells runs on a coarser grid (never
+                                  # past the run's own): the swept-capsule test
+                                  # costs (2r+1)^2 cells per neighbour
 RESCUE_MAX_EDGES_PER_NET = 8      # max gap-closing attempts per rescued net
 RESCUE_MAX_ITERATIONS = 1_000_000  # per-rung A* backstop. Deliberately generous:
                                    # hopeless rungs exhaust the small fenced window

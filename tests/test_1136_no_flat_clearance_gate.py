@@ -62,7 +62,8 @@ SITES = {
                                           '_merge_terminal_to_exact'],
     'py_router/diff_pair_routing.py': ['_collapse_leg_attach_join',
                                        '_gnd_via_offsets', '_create_gnd_vias',
-                                       '_settle_gnd_via',
+                                       '_settle_gnd_via', '_gnd_via_pair_shortfall',
+                                       '_gnd_via_ring_site',
                                        '_min_via_center_distance',
                                        '_pair_via_offset', '_try_route_direction',
                                        '_route_direct_coupled_middle',
@@ -156,7 +157,8 @@ _CFG_ATTRS = ('config', 'cfg', '_config', '_cfg')
 _FOLDS = ('max', 'min')
 _PRICERS = ('pair_clearance', 'pad_pair_clearance',
             'pad_pair_clearance_before_override')
-_PRICER_FUNCS = ('_pair_floor', '_meander_pair_pricing', '_gnd_via_offsets')
+_PRICER_FUNCS = ('_pair_floor', '_meander_pair_pricing', '_gnd_via_offsets',
+                 '_gnd_via_pair_shortfall')
 
 
 def _cfgish(v, aliases=()):

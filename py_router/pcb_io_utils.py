@@ -37,5 +37,17 @@ def passthrough_copy(input_file: str, output_file: str) -> bool:
         same = os.path.abspath(input_file) == os.path.abspath(output_file)
     if same:
         return False
+    # The board's siblings go with it (#441: never a board without its
+    # .kicad_pro), seeded BEFORE the board exists exactly as every routing
+    # writer seeds them (seed_project_for_output, #513 item 12). A bare copy
+    # left the output project-less until main()'s writeback, so everything that
+    # read the output's rules mid-run read NOTHING: on neo6502's GND step
+    # ("nothing to route", the board passed through to the plane finalize)
+    # every copper-to-hole lookup of the KiCad oracle and of the final
+    # reconciliation returned 0.0 against a board declaring 0.25, and their
+    # copper was held only at the 0.20 NPTH fab floor. Lazy import: this
+    # module stays light for every entrypoint.
+    from fix_kicad_drc_settings import seed_project_for_output
+    seed_project_for_output(output_file, input_file)
     shutil.copyfile(input_file, output_file)
     return True

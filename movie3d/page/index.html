@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>movie3d</title>
+<style>
+html, body { margin: 0; padding: 0; overflow: hidden; background: #0e1012;
+             font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; }
+#wrap { position: relative; }
+canvas { display: block; }
+#cap { position: absolute; left: 0; top: 0; padding: 4px 9px; background: rgba(0, 0, 0, 0.72);
+       color: #f0f0f0; font-size: 16px; white-space: nowrap; }
+#key { display: flex; flex-wrap: wrap; gap: 3px 22px; padding: 6px 10px; background: #000;
+       color: #f0f0f0; font-size: 13px; box-sizing: border-box; }
+.sw { display: inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; }
+.ring { box-sizing: border-box; border: 2px solid; border-radius: 50%; background: none !important; }
+</style>
+<!-- Served by render.mjs through page.route (http://movie3d.local/), never
+     file:// -- Chromium refuses ES-module imports from a null origin. three
+     is the pinned npm package in movie3d/node_modules. -->
+<script type="importmap">
+{ "imports": { "three": "http://movie3d.local/three/three.module.js",
+               "three/addons/": "http://movie3d.local/three-addons/" } }
+</script>
+<script type="module" src="http://movie3d.local/page/movie3d.mjs"></script>
+</head>
+<body><div id="wrap"><div id="cap"></div></div><div id="key"></div></body>
+</html>

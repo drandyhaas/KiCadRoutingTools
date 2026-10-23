@@ -13,7 +13,7 @@ runs, and succeeds, in the GUI -- where the CLI ran nothing at all.
 `rejection(argv)` answers with the tool's real parser, not a copy of its flag
 list: the parser is captured in a CHILD process (it is built inside each
 tool's `main()` or `__main__` block, whose side effects -- the redo-manifest
-recorder, cli_banner's exit echo, the provenance registry -- must not run in
+recorder, cli_banner's exit echo -- must not run in
 the caller), at its first `ArgumentParser.parse_args` call, which is then
 handed each command line in turn. One child per tool, kept for the life of
 the calling process, so converting the whole corpus costs one parser build
@@ -24,6 +24,9 @@ route.py's --force-reroute with no scope, a missing --fab-overrides file).
 The child judges those too, from the parsed arguments: see POST_PARSE and
 REFUSAL_SITES below, and why that is a hand-kept inventory rather than a run
 of the main.
+
+`parsed_args(argv)` hands back the parsed namespace itself, through the
+same child: lineage_scope.py reads what each step SCOPES that way.
 
 The parser is TODAY'S. A command recorded under an older commit that used a
 flag removed since then reads as rejected here; that is what a replay of it
@@ -116,6 +119,16 @@ for line in sys.stdin:
             why = cli_argv_check.post_parse_rejection(tool_name, ns, cwd)
         reply = {'ok': True} if not why else {'ok': False, 'code': 2,
                                               'why': why, 'post': True}
+        if reply['ok'] and req.get('ns'):
+            # parsed_args(): the namespace itself, every JSON-able value.
+            ns_out = {}
+            for k, v in vars(ns).items():
+                try:
+                    json.dumps(v)
+                except (TypeError, ValueError):
+                    continue
+                ns_out[k] = v
+            reply['ns'] = ns_out
     except SystemExit as e:
         msg = [l for l in err.getvalue().splitlines() if l.strip()]
         reply = {'ok': False, 'code': e.code,
@@ -218,6 +231,14 @@ def _planes_count_mismatch(ns, cwd):
                 f"of plane layers ({len(ns.plane_layers)})")
 
 
+def _power_nets_count_mismatch(ns, cwd):
+    pn = list(getattr(ns, 'power_nets', None) or [])
+    pw = list(getattr(ns, 'power_nets_widths', None) or [])
+    if len(pn) != len(pw):
+        return (f"--power-nets ({len(pn)}) and --power-nets-widths ({len(pw)}) "
+                f"must have the same length")
+
+
 def _repair_count_mismatch(ns, cwd):
     if ns.nets and ns.plane_layers and len(ns.nets) != len(ns.plane_layers):
         return "when both --nets and --plane-layers are given, counts must match"
@@ -230,8 +251,7 @@ def _cap_clearance_not_finite(ns, cwd):
 
 
 def _cap_intent_unreadable(ns, cwd):
-    if not getattr(ns, 'intent', None) or getattr(ns, 'suggest_locks', False) \
-            or not _can_see(cwd):
+    if not getattr(ns, 'intent', None) or not _can_see(cwd):
         return None
     from placement import floorplan
     here = os.getcwd()
@@ -258,13 +278,13 @@ POST_PARSE = {
     'route_diff.py': (_keep_away, _fab_overrides_missing, _output_twice,
                       _net_clearances_unreadable),
     'route_planes.py': (_fab_overrides_missing, _output_twice,
-                        _planes_count_mismatch),
+                        _planes_count_mismatch, _net_clearances_unreadable),
     'repair_planes.py': (_fab_overrides_missing, _output_twice,
                          _repair_count_mismatch),
     'route_disconnected_planes.py': (_fab_overrides_missing, _output_twice,
                                      _repair_count_mismatch),
     'bga_fanout.py': (_fab_overrides_missing,),
-    'qfn_fanout.py': (_fab_overrides_missing,),
+    'qfn_fanout.py': (_power_nets_count_mismatch, _fab_overrides_missing),
     'place_fanout_clearance.py': (_cap_clearance_not_finite,
                                   _cap_intent_unreadable),
 }
@@ -304,8 +324,9 @@ REFUSAL_SITES = {
         'if not resolve_net_ids(pcb_data, net_names)':
             ('board', "the board's net names"),
         'if _scope_defaulted': ('never a step', 'under --undo, which is refused'),
-        "if _es['count'] or _es['fab_tier_escalations']":
+        'call:finish_design_rules':
             ('after the run', '--strict-sizes: exit 3 after routing'),
+        'if _rc857': ('after the run', '--strict-sizes: exit 3 after routing'),
         'call:load_net_clearances': ('file', '_net_clearances_unreadable'),
     },
     'route_diff.py': {
@@ -320,11 +341,15 @@ REFUSAL_SITES = {
         'if not net_names': ('board', "which nets the patterns match"),
         'call:load_net_clearances': ('file', '_net_clearances_unreadable'),
         'if _NO_PAIRS_MATCHED': ('board', "set by the engine: no pair matched"),
+        'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
+        'if _rc857': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'route_planes.py': {
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'both a positional output and --output we': ('argv', '_output_twice'),
         'number of net arguments (': ('argv', '_planes_count_mismatch'),
+        'call:load_net_clearances': ('file', '_net_clearances_unreadable'),
+        'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'repair_planes.py': {
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
@@ -334,6 +359,7 @@ REFUSAL_SITES = {
         'if not zone_pairs': ('board', "zones auto-detected from the board"),
         'if LAST_RIPPED_STILL_OPEN':
             ('after the run', 'rip casualties ship open: exit 4'),
+        'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'bga_fanout.py': {
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
@@ -342,13 +368,16 @@ REFUSAL_SITES = {
             ('board', "the board's footprint references"),
         'if _stagger_why and (not env_knobs.ALLOW_STAGGERED_BGA)':
             ('board', "the part's pad lattice (#500)"),
+        'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'qfn_fanout.py': {
+        '--power-nets (': ('argv', '_power_nets_count_mismatch'),
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'if qfn_components': ('board', "auto-detects the QFN on the board"),
         'if args.component not in pcb_data.footprints':
             ('board', "the board's footprint references"),
         'if _single': ('board', "the part's pads (#1195: not a QFN/QFP)"),
+        'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'place_fanout_clearance.py': {
         '--clearance must be a finite number, got':
@@ -435,7 +464,8 @@ def _flag_list_rejection(tool, args):
     """The fallback when the tool's parser cannot be built here (a missing
     dependency in this interpreter): its long flags as krt_capabilities reads
     them from the source -- held exact against the real parsers by
-    tests/test_798_registrar_flags.py -- with argparse's own rule that an
+    tests/test_798_registrar_flags.py -- with
+    argparse's own rule that an
     unambiguous prefix of a long option is that option. It sees an unknown
     flag (the --dry-run class), not a bad value or a missing argument."""
     try:
@@ -469,22 +499,58 @@ def rejection(argv, cwd=None):
     if found is None:
         return None
     tool, args = found
+    reply = _ask(tool, args, cwd)
+    if reply is _NO_PARSER:
+        return _flag_list_rejection(tool, args)
+    if reply is None or reply['ok']:
+        return None
+    if reply.get('code') == 0:
+        return f"{tool} prints and exits at parse time ({reply['why']})"
+    if reply.get('post'):
+        return f"{tool} refuses its arguments after parsing: {reply['why']}"
+    return f"{tool} rejects its arguments: {reply['why']}"
+
+
+_NO_PARSER = object()
+
+
+def _ask(tool, args, cwd, want_ns=False):
+    """The child's reply to one command line, `_NO_PARSER` when the tool's
+    parser could not be built here, or None when the child said nothing."""
     proc = _child(tool)
     if proc is None:
-        return _flag_list_rejection(tool, args)
-    proc.stdin.write(json.dumps({'args': args, 'cwd': cwd}) + '\n')
+        return _NO_PARSER
+    proc.stdin.write(json.dumps({'args': args, 'cwd': cwd, 'ns': want_ns}) + '\n')
     proc.stdin.flush()
     for line in proc.stdout:
         if line.startswith('##R '):
-            reply = json.loads(line[4:])
-            if reply['ok']:
-                return None
-            if reply.get('code') == 0:
-                return f"{tool} prints and exits at parse time ({reply['why']})"
-            if reply.get('post'):
-                return f"{tool} refuses its arguments after parsing: {reply['why']}"
-            return f"{tool} rejects its arguments: {reply['why']}"
+            return json.loads(line[4:])
     return None
+
+
+def parsed_args(argv, cwd=None):
+    """What the recorded command's tool PARSED it into, by its real parser.
+
+    Returns None when the tool is not one this module checks or its parser
+    cannot be built here; otherwise a dict with `tool`, `ok` and, when the
+    tool would go ahead, `ns` = {dest: value} (every JSON-able value of the
+    argparse namespace), else `why` it refuses. This is how a reader learns
+    what a step SCOPES (its positional net patterns, --nets, --component ...)
+    without copying a parser: a hand-rolled split cannot tell a positional
+    net from the value of a flag it does not know takes one."""
+    found = tool_args(argv)
+    if found is None:
+        return None
+    tool, args = found
+    reply = _ask(tool, args, cwd, want_ns=True)
+    if reply is _NO_PARSER or reply is None:
+        return None
+    out = {'tool': tool, 'ok': bool(reply.get('ok'))}
+    if out['ok']:
+        out['ns'] = reply.get('ns') or {}
+    else:
+        out['why'] = reply.get('why')
+    return out
 
 
 if __name__ == '__main__':

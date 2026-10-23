@@ -4,9 +4,9 @@
 Two runner behaviours are pinned here, both of which already have producers
 in this repo:
 
-  * SELF-SKIP. `tests/test_run22_containment_repair.py` and
-    `tests/test_run22_seat_containment_gate.py` both `return SKIP_EXIT` (77)
-    when the fixture they need is absent. The runner had no bucket for that
+  * SELF-SKIP. `tests/test_run22_seat_containment_gate.py` (and, until it was
+    deleted in ecd673eb, `tests/test_run22_containment_repair.py`) does
+    `return SKIP_EXIT` (77) when the fixture it needs is absent. The runner had no bucket for that
     code, so a genuine "cannot run" landed in the summary as
     `FAIL ... (exit 77)` -- which reads as a product failure and sends the
     next reader to debug a test that never started. It now gets its own

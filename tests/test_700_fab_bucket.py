@@ -4,9 +4,9 @@ claiming a result it could not have measured.
 
 `_FAB_FLOORS` has two rungs, keyed 2 and 4, so `fab_floor_min(4)`, `(6)` and
 `(8)` return byte-identical dicts. That is a modelling limit -- JLC publishes
-one multilayer capability column -- and `placement.options.add_layers` reported
-it as a routing fact: on rp2350_fpga_eensy_prePlane, 6 copper layers and 121
-escape lanes short, it said "more layers buy NO extra lanes on a face".
+one multilayer capability column -- and a comparison of two layer counts
+reported it as a routing fact: on rp2350_fpga_eensy_prePlane, 6 copper layers
+and 121 escape lanes short, it said "more layers buy NO extra lanes on a face".
 
 The issue offers two fixes. Extending `_FAB_FLOORS` with 6- and 8-layer rungs
 is declined, on one ground rather than two: `fab_tiers.py` sources its table
@@ -166,94 +166,12 @@ def t_fine_via_rung_is_asked_not_restated():
           "and follows it when the ladder moves")
 
 
-def t_add_layers_stops_claiming_a_result_it_could_not_measure():
-    """The behaviour #700 filed, on the board it is worst on.
-
-    rp2350_fpga_eensy_prePlane: 6 copper layers, 121 deficit lanes at its own
-    clearance, and the tool answered "more layers buy NO extra lanes on a
-    face" -- a routing claim, from a comparison of two identical dicts.
-    """
-    from kicad_parser import parse_kicad_pcb
-    from placement.options import add_layers
-
-    import fixture_boards
-    board = fixture_boards.ensure('rp2350_fpga_eensy_prePlane.kicad_pcb')
-    out = add_layers(parse_kicad_pcb(board), board, clearance=0.2)
-    assert out.get('ran'), out.get('reason')
-    m = out['measured']
-    assert m['copper_layers'] == 6, m['copper_layers']
-    assert m['fab_bucket_now'] == m['fab_bucket_at_more'] == 4, m
-    assert m['fab_floor_layer_blind'] is True, m
-    assert m['fab_bucket_saturated'] is True, m
-    assert 'STRUCTURALLY BLIND' in out['action'], out['action']
-    assert 'buy NO extra lanes' not in out['action'], out['action']
-    # The board really is short, so this is not a vacuous pass on a clean board
-    assert m['deficit_lanes_now'] > 0, m
-    # ...and the admission is machine-readable, not only prose.
-    assert 'fab_tiers models buckets' in out['not_modelled'], out['not_modelled']
-    print(f"  PASS: 6 layers, {m['deficit_lanes_now']} deficit lanes, "
-          f"answered 'structurally blind' instead of 'buy nothing'")
-
-
-def t_a_two_layer_board_still_gets_the_real_comparison():
-    """The 2 -> 4 step crosses a bucket, so it is a genuine measurement and
-    must NOT be reported as blind. Without this, "always say blind" passes the
-    case above."""
-    from kicad_parser import parse_kicad_pcb
-    from placement.options import add_layers
-
-    import fixture_boards
-    board = fixture_boards.ensure('esp_prog.kicad_pcb')
-    out = add_layers(parse_kicad_pcb(board), board, clearance=0.2)
-    assert out.get('ran'), out.get('reason')
-    m = out['measured']
-    assert m['copper_layers'] == 2, m['copper_layers']
-    assert m['fab_bucket_now'] == 2 and m['fab_bucket_at_more'] == 4, m
-    assert m['fab_floor_layer_blind'] is False, m
-    assert m['floors_differ'] is True, m
-    assert 'STRUCTURALLY BLIND' not in out['action'], out['action']
-    assert 'fab_tiers models buckets' not in out['not_modelled'], \
-        'a board whose comparison CAN differ must not carry the blindness note'
-    print("  PASS: a 2->4 step is measured, not declared blind")
-
-
-def t_the_headline_key_survives_the_text_digest():
-    """`_digest` truncates at five, and this file has already lost a headline
-    that way -- the comment above `_DIGEST_ALWAYS` records it. A disclosure
-    nobody can see is not a disclosure."""
-    from placement import options
-    assert 'fab_floor_layer_blind' in options._DIGEST_ALWAYS
-    # ...and the non-empty LIST is deliberately not forced: it would spend a
-    # slot rendering `fab_buckets_modelled[2]` and evict a real number.
-    assert 'fab_buckets_modelled' not in options._DIGEST_ALWAYS
-    text = options._digest({'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5, 'f': 6,
-                            'fab_floor_layer_blind': True})
-    assert 'fab_floor_layer_blind=yes' in text, text
-    print("  PASS: the blindness flag is forced past the digest limit")
-
-
-def t_the_disclosure_is_not_a_string_only_channel():
-    """`_digest` skips `str` values outright, so a string-valued `measured`
-    key is invisible in the text channel. Every key this phase adds is a bool,
-    an int or a list -- pinned, because the next one will be tempting to add
-    as a string."""
-    from placement import options
-    text = options._digest({'a_string': 'invisible', 'a_bool': True})
-    assert 'a_string' not in text, text
-    assert 'a_bool=yes' in text, text
-    print("  PASS: _digest drops strings -- new keys must not be strings")
-
-
 TESTS = (t_the_reported_bucket_is_the_one_the_floor_came_from,
          t_bucketed_and_saturated_say_which_answers_are_proxies,
          t_an_unreadable_layer_count_takes_the_conservative_bucket,
          t_the_floor_dict_did_not_grow_a_provenance_key,
          t_an_override_file_cannot_forge_provenance,
-         t_fine_via_rung_is_asked_not_restated,
-         t_add_layers_stops_claiming_a_result_it_could_not_measure,
-         t_a_two_layer_board_still_gets_the_real_comparison,
-         t_the_headline_key_survives_the_text_digest,
-         t_the_disclosure_is_not_a_string_only_channel)
+         t_fine_via_rung_is_asked_not_restated)
 
 
 def _every_case_is_registered():

@@ -453,9 +453,10 @@ def _joint_spec():
         return json.load(f)
 
 
-def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=print, hands=None):
+def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=print, hands=None, kept=None):
     """realize()'s engine call under the joint fanout: the source array planned jointly (joint_escape.plan_array) --
-    `names` (the stripped nets: those asked to move, and the blockers freed with them) preferring their asks, the
+    `names` (the stripped nets: those asked to move, the blockers freed with them, and the run's other nets `kept`
+    {net: its tooth as measured before the strip}, each preferring that tooth) preferring their asks, the
     array's other nets and plane balls with them, the bus never by the face away from the other array -- and the
     stripped nets laid as planned by the joint escape engine (a planned pair's gate kept), each pair leaving with the
     hand `hands` asks (its berths', fanout_from_plan.berth_hands). Returns the engine's (tracks, vias to add, vias to
@@ -466,6 +467,8 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
     full = [byname[nm][1].name for nm in names]
     prefer = {_je.short_name(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer,
                                    'kind': m.kind} for nm, m in src_choice.items()}
+    for nm, g in (kept or {}).items():
+        prefer.setdefault(_je.short_name(nm), {k: g[k] for k in ('tooth', 'direction', 'layer', 'kind')})
     far = _je.far_face(pcb, sref, dref) if dref and dref in pcb.footprints else None
     import route_layers
     hints, rep = _je.plan_array(pcb, sref, full, a['others'], jspec['layers'], far=far, prefer=prefer,
@@ -518,10 +521,20 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     pcb = parse_kicad_pcb(board)
     n2n = {i: n.name for i, n in pcb.nets.items()}
     free = [nm for nm in dict.fromkeys(free) if nm not in src_choice]
-    names = list(src_choice) + free
+    jspec = _joint_spec()
+    joint_ = jspec is not None and len(route_layers.layers()) > 2
+    # THE BUS RE-PLANNED WHOLE (the joint fanout on more routing layers than two): every run net with a tooth at this
+    # array is stripped and planned again with the asked ones, each preferring the tooth it has (`kept`). The joint
+    # plan holds a pair's two legs together with no other exit between them -- but only among the balls it plans: a
+    # leg asked alone, re-planned beside its partner left on the board, and the pairs left there as obstacles, are
+    # held by nothing (zynq LVDS U1 on four layers: RX_D4_N asked alone, laid between RX_D0's legs while RX_D0_P stood
+    # between RX_D4's -- the fanout audit refused the board, round after round on Linux)
+    kept = ([nm for nm in dict.fromkeys(guard_names) if nm not in src_choice and nm not in free and nm in src_pad]
+            if joint_ else [])
+    names = list(src_choice) + free + kept
     # the drift guard's BEFORE, read now, before any copper comes off (it
     # used to parse the board a second time for an untouched copy)
-    others = [nm for nm in guard_names if nm not in src_choice and nm not in free]
+    others = [nm for nm in guard_names if nm not in names]
     before = te.endpoints(pcb, others, byname) if others else {}
     original = {nm: measure_tooth(pcb, nm, src_pad[nm], byname) for nm in names}
 
@@ -529,7 +542,6 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     for nm in names:
         removed[nm] = remove_net_from_pcb_data(pcb, byname[nm][0])
     import joint_escape as _je
-    jspec = _joint_spec()
     # no placement step follows this chain, so every foreign pad -- a
     # decoupling cap under the array included -- is one a via must clear.
     # The JOINT fanout's bus step is followed by the cap placement step, which
@@ -545,7 +557,6 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     # of the whole array, run for every re-fan, moved the asked teeth for every
     # ball's sake -- the zynq DDR's ends crossed 260 times to the chain's 202,
     # and its four realizes of round 1 took 400 s
-    joint_ = jspec is not None and len(route_layers.layers()) > 2
     if not joint_ or _je.passives_fixed():
         pcb._fanout_all_foreign_immovable = True
     if joint_:
@@ -556,7 +567,8 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
         # some at all (zynq U1 on three layers: TXNRX's tooth, asked on B, In2 and F in turn, laid a gap off each
         # time, banned each time, until it had no option left)
         tracks, vias_add, vias_rm, failed = _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec,
-                                                           log, hands=hands)
+                                                           log, hands=hands,
+                                                           kept={nm: original[nm] for nm in kept if original.get(nm)})
     else:
         _je.reserve_ball_vias(pcb)      # the joint fanout's promise to the others, kept by a bus-only re-fan
         hints = {}
@@ -621,6 +633,16 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
                  and achieved[nm]['tooth'] != original[nm]['tooth']]
         log(f'  source realize: blockers -- {len(moved)} of {len(free)} took a '
             f'different tooth' + (f': {", ".join(moved)}' if moved else ''))
+    if kept:
+        def _off(nm):
+            a, o = achieved.get(nm), original.get(nm)
+            if not a or not o:
+                return a is not o
+            return (math.hypot(a['tooth'][0] - o['tooth'][0], a['tooth'][1] - o['tooth'][1]) > 0.1
+                    or any(a[k] != o[k] for k in ('direction', 'layer', 'kind')))
+        moved = [nm for nm in kept if _off(nm)]
+        log(f'  source realize: the bus re-planned whole -- {len(kept) - len(moved)}/{len(kept)} unasked teeth kept '
+            f'where they stood' + (f'; moved by the joint plan: {", ".join(moved)}' if moved else ''))
     audit_d, counts = audit(src_choice, {n: achieved[n] for n in src_choice},
                             {n: original[n] for n in src_choice},
                             [n for n in ok if n in src_choice], log, 'source')
@@ -649,4 +671,4 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
             log('      ' + ln)
     return {'board': out_path, 'audit': audit_d, 'ok': ok, 'restored': restored,
             'achieved': achieved, 'original': original, 'rejected': rejected,
-            'counts': counts, 'free': list(free), 'pairs': pairs, 'joint': jspec is not None}
+            'counts': counts, 'free': list(free), 'kept': list(kept), 'pairs': pairs, 'joint': jspec is not None}

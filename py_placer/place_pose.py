@@ -11,11 +11,8 @@
     place_pose.py BOARD OUT replicate --from CH1 --to CH2 --to CH3   # #1211
 
 Every verb writes through `placement.writer.write_placed_output` -- the same
-writer `place_seed` uses -- carries the sibling `.kicad_pro` / `.kicad_dru`
-(#441), and runs inside `declare_lever('place_pose.py')`, so an armed unaided
-regime accepts this tool and still refuses the hand script it replaces. The
-provenance row is recorded when the finished candidate is promoted onto OUT,
-not when it is staged (#960).
+writer `place_simple` uses -- and carries the sibling `.kicad_pro` /
+`.kicad_dru` (#441).
 
 SEVERAL VERBS IN ONE CALL describe ONE arrangement: every op is resolved
 against the INPUT board and written in a single pass, so no op sees another's
@@ -30,18 +27,20 @@ typo you fix by rewriting the command; 3 the board carries copper (moving a
 footprint would strand its tracks -- `--allow-routed` to override); 4 the
 request is WELL FORMED and the board said no (it grades worse, or the part is
 locked) and nothing was written -- a measurement you act on. Note that 4
-departs from `place_seed`, where it means "written, but the grade found
-errors": here a refusal writes nothing at all, which is what #892 asks for.
+departs from `place_simple`, where it means "written, with parts left
+illegal": here a refusal writes nothing at all, which is what #892 asks for.
 
 Every exit THIS TOOL decides prints exactly one `JSON_SUMMARY:` line, refusals
 included -- the board gate and the unreadable-input path as well as the pose
 refusals. The exception is argparse's own usage errors, which exit 2 from
 inside argparse before there is a board, a grade or a summary to print; if you
-are parsing output, treat "exit 2 with no summary line" as a usage error.
+are parsing output, treat "exit 2 with no summary line" as a usage error. The
+line caps each per-pad and per-pair list at 20 entries, `<list>_count` and
+`<list>_truncated` beside a capped one (#1352); `--json PATH` writes it whole.
 
 WHAT IS GRADED, and what "illegal" means. The verdict is
-`placement.legality.grade_pad_legality` -- the same numbers `place_seed` and
-the review sheet print, netclass- and `.kicad_dru`-aware (#697) -- taken on the
+`placement.legality.grade_pad_legality` -- the same numbers `check_assembly`
+and the review sheet print, netclass- and `.kicad_dru`-aware (#697) -- taken on the
 candidate board and compared with the SAME grade on the input. A request is
 refused when it makes a category worse -- the counts (pad conflicts, hole
 conflicts, pads off-board) and their MAGNITUDES (`pad_shortfall`,
@@ -88,9 +87,7 @@ VERBS = ('set', 'rotate', 'face', 'lock', 'unlock', 'replicate')
 
 #: The verbs and THEIR flags. `main()` parses with the verb-less parser, so
 #: what `--help` renders is THIS TEXT -- the subparsers exist for a reader who
-#: goes looking through the parser object (and for
-#: `tests/test_431_skill_commands.py`, which does exactly that), not for the
-#: help screen. (`place_pose.py` is deliberately absent from
+#: goes looking through the parser object, not for the help screen. (`place_pose.py` is deliberately absent from
 #: `krt_capabilities.FLAG_SCRIPTS` for the same reason -- that contract is
 #: "every flag this script accepts is visible in --help as an option and
 #: accepted at the top level", and a per-verb flag is neither.)
@@ -159,9 +156,9 @@ exact points given -- so --near / --snap need a call with ONE pose op):
 def build_parser(with_verbs=True):
     """The CLI's parser.
 
-    `with_verbs` registers the verb parsers as subparsers -- which is how
-    `tests/test_431_skill_commands.py` finds `--rot` / `--near` / `--relative`
-    when it checks that a documented flag exists. `main()` asks for the parser
+    `with_verbs` registers the verb parsers as subparsers -- which is how a
+    reader of the parser object finds `--rot` / `--near` / `--relative` when
+    it checks that a documented flag exists. `main()` asks for the parser
     WITHOUT them, because a subparsers action consumes the rest of the line at
     the first verb and this tool takes several in one call; so what `--help`
     actually renders is the epilog, not a subparser section.
@@ -174,14 +171,15 @@ def build_parser(with_verbs=True):
     p.add_argument('output_file',
                    help='board to write (still required with --dry-run, '
                         'which writes nothing and reports the path under '
-                        '`would_write` -- the same shape place_seed uses, and '
+                        '`would_write`, and '
                         'it keeps a verb token from being read as the output '
                         'path)')
     p.add_argument('--clearance', type=float, default=None, metavar='MM',
                    help="Pad clearance the grade runs at. Omitted, it comes "
-                        "from the BOARD (its Default netclass / constraints) "
-                        "-- a fixed 0.25 on a board routed to 0.15 vetoes "
-                        "poses the router would happily route")
+                        "from the BOARD as KiCad grades it: its Default "
+                        "netclass, floored at Board Setup min_clearance "
+                        "(#1338) -- a fixed 0.25 on a board routed to 0.15 "
+                        "vetoes poses the router would happily route")
     p.add_argument('--board-edge-clearance', type=float, default=None,
                    metavar='MM',
                    help="Edge clearance for the pose ranking. Omitted, from "
@@ -190,7 +188,7 @@ def build_parser(with_verbs=True):
                    help="Track width the FACE rule prices a lane at. "
                         "Omitted, the board's Default netclass width")
     p.add_argument('--snap', action='store_true',
-                   help="If the requested pose is refused, take the best "
+                   help="If the requested pose is refused, take the nearest "
                         "legal pose within --radius instead (ranked by "
                         "pose_score, then RE-GRADED here -- the ranker's "
                         "legality is an AABB gate and this verb's verdict is "
@@ -232,6 +230,12 @@ def build_parser(with_verbs=True):
     p.add_argument('--dry-run', action='store_true',
                    help='Grade the request and print the summary; write '
                         'nothing')
+    p.add_argument('--json', default=None, metavar='PATH',
+                   help='also write the FULL summary here. The stdout '
+                        'JSON_SUMMARY line caps each per-pad and per-pair '
+                        'list at 20 entries and says so in <list>_count / '
+                        '<list>_truncated (#1352); this file carries every '
+                        'entry')
     if with_verbs:
         _verb_parsers(p.add_subparsers(dest='verb', metavar='VERB'))
     return p
@@ -244,10 +248,8 @@ def _verb_parsers(sub=None):
     even though `main()` parses each segment by hand (several verbs in one
     call, which a subparsers action cannot express -- it consumes the rest of
     the line at the first one). The registration is not decoration: it is how
-    `--rot` / `--near` / `--relative` are discoverable, and both
-    `tests/test_431_skill_commands.py` (documented flags must exist) goes
-    looking for them through the subparsers action -- `--help` itself renders
-    the epilog, since `main()` builds the verb-less parser. The
+    `--rot` / `--near` / `--relative` are discoverable through the
+    subparsers action -- `--help` itself renders the epilog, since `main()` builds the verb-less parser. The
     parsers registered there are the SAME objects the split-segment path
     parses with, so a flag cannot be documented in one and honoured by the
     other.
@@ -274,8 +276,8 @@ def _verb_parsers(sub=None):
     q.add_argument('y', nargs='?', type=float)
     q.add_argument('--near', nargs=2, type=float, metavar=('X', 'Y'),
                    help='the same coordinates read as APPROXIMATE: implies '
-                        '--snap, so the engine seats the part at the best '
-                        'legal pose near the point you aimed at. One pose op '
+                        '--snap, so the engine seats the part at the nearest '
+                        'legal pose to the point you aimed at. One pose op '
                         'per call: with a second one it is refused (exit 2)')
     q.add_argument('--rot', type=float, default=None,
                    help='absolute rotation in degrees; omitted, the part '
@@ -353,7 +355,7 @@ def split_segments(rest):
     lowercase match, so a footprint actually REFERENCED `set` or `lock` would
     start a segment instead of being a name. KiCad references are conventionally
     uppercase and no board in this repo has one, but if you meet one, place it
-    with `place_seed`/`place_optimize` rather than here -- a quoting escape
+    with `place_simple` rather than here -- a quoting escape
     would be a second syntax to learn for a case nobody has.
     """
     segments = []
@@ -556,7 +558,7 @@ def main(argv=None):
     if any(o.get('declared') for o in ops):
         # #1211: `replicate` with no --from/--to is the intent's
         # `replicate[]`, one op per declaration, in file order -- the ops
-        # place_seed's replicate stage applies, through the same engine.
+        # the copies the verb would make one by one, through the same engine.
         decls = tuple(getattr(intent, 'replicate', ()) or ()) if intent else ()
         if not decls:
             return _refuse(
@@ -624,8 +626,7 @@ def main(argv=None):
             # refused run carried the "did nothing" note in the JSON alone.
             print("note: --snap/--near did not apply -- %s" % _sc['skipped'],
                   file=sys.stderr)
-        print('JSON_SUMMARY: ' + json.dumps(refused, sort_keys=True,
-                                            default=str), flush=True)
+        _emit_summary(args, refused)
         # 2 = the request names something that is not there (a typo the caller
         # rewrites); 4 = the request is well formed and the BOARD said no (a
         # measurement the caller acts on). One code for both would make them
@@ -633,9 +634,19 @@ def main(argv=None):
         return exc.code
 
     _report(summary)
-    print('JSON_SUMMARY: ' + json.dumps(summary, sort_keys=True, default=str),
-          flush=True)
+    _emit_summary(args, summary)
     return 0
+
+
+def _emit_summary(args, doc):
+    """The one JSON_SUMMARY line, its per-pad and per-pair lists capped
+    (`pose_ops.stdout_summary`, #1352), and the whole document in `--json`."""
+    from placement.pose_ops import stdout_summary
+    if getattr(args, 'json', None):
+        with open(args.json, 'w', encoding='utf-8') as fh:
+            json.dump(doc, fh, indent=1, sort_keys=True, default=str)
+    print('JSON_SUMMARY: ' + json.dumps(stdout_summary(doc), sort_keys=True,
+                                        default=str), flush=True)
 
 
 def _refuse(args, reason, code, **extra):
@@ -651,8 +662,7 @@ def _refuse(args, reason, code, **extra):
            'dry_run': bool(args.dry_run), 'refused': reason,
            'exit_code': code, 'moved': [], 'ops': [], 'legal': None}
     doc.update(extra)
-    print('JSON_SUMMARY: ' + json.dumps(doc, sort_keys=True, default=str),
-          flush=True)
+    _emit_summary(args, doc)
     return code
 
 
@@ -663,7 +673,9 @@ def _report(summary):
         summary['board_edge_clearance'],
         summary['knobs']['board_edge_clearance']['source']))
     for n in summary['ops']:
-        arrow = ('%s -> %s' % (n['from'], n['to'])) if n['moved'] else 'unmoved'
+        arrow = (('%s -> %s' % (n['from'], n['to'])) if n['moved']
+                 else 'unmoved' + (' -- %s' % n['unmoved_why']
+                                   if n.get('unmoved_why') else ''))
         extra = ''
         if n['kind'] == 'face':
             extra = (" [%s row aimed %s, landed %d/%d]"
@@ -722,9 +734,13 @@ def _report(summary):
                             summary['pad_edge_conflicts_after'],
                             summary['pad_edge_shortfall_after'],
                             'complete' if edge['complete'] else 'partial/unmeasured'))
-    for finding in edge['findings']:
+    # The first 5, as the stacks below (#1352): a pile prints hundreds.
+    for finding in edge['findings'][:5]:
         print("  %s: edge shortfall %.6g mm (required %g mm)" % (
             finding['pad_ref'], finding['shortfall_mm'], finding['required_mm']))
+    if len(edge['findings']) > 5:
+        print("  ... and %d more (--json PATH lists every one)"
+              % (len(edge['findings']) - 5))
     # #1064: same-net pads are not a pad CONFLICT above, and a stack of them
     # is still unbuildable -- check_assembly's pad_intersection, measured by
     # its own function.
@@ -734,6 +750,25 @@ def _report(summary):
              summary.get('pad_stack_count_after')))
     for a, b, area, side in (summary.get('pad_stack_pairs_after') or [])[:5]:
         print("  %s/%s %.4fmm2 side %s" % (a, b, area, side or '-'))
+    # #1306: one footprint's own pads shorted together (KiCad shorting_items).
+    print("one part's own pads touching on two nets: %s -> %s"
+          % (summary.get('own_pad_short_count_before'),
+             summary.get('own_pad_short_count_after')))
+    for a, b in (summary.get('own_pad_short_pairs_after') or [])[:5]:
+        print("  %s/%s" % (a, b))
+    # #1266: a pad on another part's footprint graphic copper (a SOT-89 tab).
+    print("pads on another part's graphic copper (touching, any net): "
+          "%s -> %s; short of clearance: %s -> %s"
+          % (summary.get('graphic_pad_stack_count_before'),
+             summary.get('graphic_pad_stack_count_after'),
+             summary.get('graphic_pad_conflicts_before'),
+             summary.get('graphic_pad_conflicts_after')))
+    for r in (summary.get('graphic_pad_rows_after') or [])[:5]:
+        print("  %s on %s's copper: %s%s" % (
+            r['pad_ref'], r['owner_ref'],
+            'touching' if r['contact']
+            else 'clearance %.4fmm short' % r['shortfall_mm'],
+            ', wholly inside the filled shape' if r['inside_filled'] else ''))
     if summary['knobs']['clearance']['source'] == 'cli':
         # A refusing tool whose threshold is a flag has to say when the
         # threshold came from the caller: measured on esp_prog (no netclass),
@@ -774,11 +809,5 @@ def _report(summary):
 
 
 if __name__ == "__main__":
-    # Declare the lever for the WHOLE run, so every pose this CLI writes
-    # carries its name (#903). place_pose.py is in
-    # placement.provenance.LEVER_REGISTRY: an armed unaided regime accepts
-    # this tool and still refuses the hand script it replaces.
-    from placement.provenance import declare_lever
-    with declare_lever('place_pose.py', sys.argv):
-        import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
-        sys.exit(main())
+    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo
+    sys.exit(main())

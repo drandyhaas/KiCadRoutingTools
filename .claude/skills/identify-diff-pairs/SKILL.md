@@ -15,6 +15,14 @@ python3 py_router/list_nets.py path/to/file.kicad_pcb --diff-pairs
 
 This catches pairs following P/N naming conventions. Record the result as the baseline.
 
+`route_diff.py` finds pairs with the same name matcher
+(`net_queries.extract_diff_pair_base`: `_P`/`_N`, `P`/`N`, `_P0`/`_N0`, `+`/`-`,
+`DP`/`DM`/`DN`, `DPLUS`/`DMINUS`, DDR `_t`/`_c`) and selects pairs only through
+it, so this baseline is the set it can route (`list_nets` also drops a P/N-named
+pair on a two-terminal crystal, #145). Naming the two nets of a pair whose
+names fit none of these conventions routes nothing as a pair ("No differential
+pairs found matching the patterns").
+
 ## Step 2: Datasheet-Based Detection by Pin Function
 
 For each IC likely to have differential interfaces (footprint/value keywords: FPGA, PHY, SERDES, USB, ETH, HDMI, LVDS, MIPI, SATA, PCIE, DDR, transceiver, redriver):
@@ -48,15 +56,16 @@ A pair is **confirmed** when both nets trace back to a documented differential p
 | Ethernet (MDI) | 100 Ω | |
 | HDMI / TMDS | 100 Ω | |
 | PCIe | 85 Ω | AC coupling caps in-line on TX |
-| SATA | 90 Ω | |
+| SATA | 100 Ω | AC coupling caps in-line |
 | MIPI D-PHY | 100 Ω | |
 | DDR (DQS, CK) | 100 Ω typical | Check the memory datasheet |
 | CAN | 120 Ω | Low speed; tolerances relaxed |
 
 From the impedance, derive the routing flags:
 
-- `--impedance <Z>` computes per-layer widths and gap from the stackup (preferred when the stackup is realistic — see `/recommend-stackup`), or set `--track-width`/`--diff-pair-gap` explicitly.
+- `--impedance <Z>` computes the per-layer trace width from the stackup at the `--diff-pair-gap` spacing (preferred when the stackup is realistic — see `/recommend-stackup`); the gap is yours to set (it defaults to the board's Default net-class `diff_pair_gap`, else 0.101). Without a stackup, set `--track-width`/`--diff-pair-gap` explicitly. One `--impedance` per call, so group pairs by target.
 - `--diff-pair-intra-match` for interfaces fast enough that P/N skew matters (USB HS+, PCIe, SATA, HDMI, LVDS at high rates).
+- `--ac-couple-match` (#196) for a pair split by series DC-blocking caps (PCIe/SATA/USB 3.x TX): it matches the whole P path against the whole N path across the caps instead of each segment alone.
 - Classify every pair's polarity-swappability from the datasheet pin functions and report a machine-readable verdict per pair: `polarity_swappable: yes|no|unknown`. `yes` = an endpoint can compensate a P/N swap (FPGA/CPLD generic I/O pin pairs, PCIe lanes, SerDes with RX/TX polarity-invert, 1000BASE-T MDI); `no` = polarity-critical (USB D+/D-, MIPI, TMDS/HDMI/DP, CAN, RS-485/422, DDR CK/DQS, fixed-function receivers, connectors to unknown hardware, or an asymmetric attachment like a single-sided pull-up on one net); `unknown` = treat as `no`. Feed the `yes` pairs into `route_diff.py --polarity-swap-nets <patterns>` (swaps are denied by default, #279).
 
 ## Step 4: Output
@@ -78,5 +87,7 @@ python3 -X utf8 py_router/route_diff.py board.kicad_pcb board_lvds.kicad_pcb \
 ```
 
 2. **Suspected pairs** with the evidence (matching pin functions but unverified part, name-only pairing), asking the user to confirm before routing them as pairs.
+
+   A confirmed pair whose net names fit no P/N convention (Step 1) gets no `route_diff.py` command: the router cannot see it as a pair. List it separately and recommend renaming its nets in the schematic to a P/N convention (e.g. `TX_P`/`TX_N`), then re-running from the updated board.
 
 3. A note of any pairs found by Step 1 but *not* corroborated by pin function — possible false positives of name matching (e.g. unrelated nets that happen to end in P/N).

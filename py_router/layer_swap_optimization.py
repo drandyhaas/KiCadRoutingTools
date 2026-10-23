@@ -290,6 +290,9 @@ def _validate_single_ended_swap(
 
     if getattr(stub, 'locked', False):
         return False    # #1261: KiCad-locked copper never moves
+    from stub_layer_switching import forbidden_destination
+    if forbidden_destination(config, dest_layer):
+        return False
 
     if exclude_net_ids is None:
         exclude_net_ids = set()
@@ -851,6 +854,13 @@ def apply_diff_pair_layer_swaps(
                         if fan_layer != src_layer:
                             print(f"    Bare-pad target launch layer: {fan_layer} "
                                   f"(most open; src is {src_layer})")
+                # src_layer is the source stub's CURRENT layer, which may be a
+                # forbidden one (a --layers subset run); with no routable
+                # layer ranked, the fan would lay its stubs there.
+                if fan_layer not in config.routable_layers():
+                    print(f"    Bare-pad target swap skipped for {pair_name}: "
+                          f"{fan_layer} is a forbidden layer")
+                    continue
                 # The fan-out drops a through-via on each pad; don't let either
                 # barrel punch through another net's under-pad copper (issue #123).
                 # Check EACH via against the PARTNER pair-net too: a through-via
@@ -1460,7 +1470,7 @@ def apply_diff_pair_layer_swaps(
                     continue
 
                 # Try each available layer except source and target
-                for alt_layer in config.layers:
+                for alt_layer in config.routable_layers():
                     if alt_layer == tgt_layer or alt_layer == src_layer:
                         continue
                     # Don't swap to F.Cu unless it's an edge stub
@@ -1560,7 +1570,7 @@ def apply_diff_pair_layer_swaps(
                     if not se_stub:
                         continue
 
-                    for alt_layer in config.layers:
+                    for alt_layer in config.routable_layers():
                         if alt_layer == src_layer or alt_layer == tgt_layer:
                             continue
                         if not can_swap_to_top_layer and alt_layer == 'F.Cu':
@@ -1804,7 +1814,7 @@ def _collapse_multipoint_net_to_common_layer(
     # moved stubs, then stack order. A zero-move candidate means some layer
     # already satisfies every endpoint — nothing to do.
     candidates = []
-    for L in config.layers:
+    for L in config.routable_layers():
         to_move = []
         feasible = True
         for e in entries:
@@ -1921,14 +1931,14 @@ def _assign_multipoint_net_per_cluster(
     chosen: List[str] = []
     while uncovered:
         best_L, best_count = None, 0
-        for L in config.layers:
+        for L in config.routable_layers():
             cnt = sum(1 for i in uncovered if _placement(entries[i], L) is not None)
             if cnt > best_count:
                 best_count, best_L = cnt, L
         if best_L is None or best_count == 0:
-            # Some endpoint is feasible on no layer at all -- cannot happen
-            # (every endpoint is at least 'free' on its own current layer),
-            # but guard defensively rather than loop forever.
+            # Some endpoint is feasible on no ROUTABLE layer: a bare pad
+            # pinned to a forbidden layer (a --layers subset run). It needs
+            # a via whatever is chosen, so leave the net as it is.
             return -1
         chosen.append(best_L)
         uncovered = {i for i in uncovered if _placement(entries[i], best_L) is None}

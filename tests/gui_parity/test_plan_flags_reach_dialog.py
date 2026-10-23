@@ -130,6 +130,12 @@ CASES = [
          param=('net_clearances_path', '{tmp}/' + _NCL_FILE),
          probe='net_clearances_path_diff',
          want=('{tmp}/' + _NCL_FILE,) * 2, default=('', '')),
+    dict(label='route_planes --net-clearances',
+         cmd=_PLANES,
+         flag='--net-clearances ' + _NCL_FILE,
+         param=('net_clearances_path', '{tmp}/' + _NCL_FILE),
+         probe='net_clearances_path_planes',
+         want=('{tmp}/' + _NCL_FILE,) * 2, default=('', '')),
     dict(label='route --fab-overrides (relative file)',
          cmd='python3 py_router/route.py {src} {dst} --nets "*"',
          flag='--fab-overrides ' + _FAB_FILE,
@@ -172,6 +178,8 @@ def _probes(dlg):
                                route_cfg.get('fab_overrides_path')),
         'net_clearances_path_diff': (dlg.net_clearances_path.GetValue(),
                                      diff_cfg.get('net_clearances_path')),
+        'net_clearances_path_planes': (dlg.net_clearances_path.GetValue(),
+                                       plane_cfg.get('net_clearances_path')),
         'centerline_setback': (
             d.centerline_setback_check.GetValue(),
             round(d.centerline_setback.GetValue(), 6),
@@ -195,14 +203,16 @@ def _sub(value, tmp):
 
 
 def _worker_net_clearances(dlg, path):
-    """{'route' | 'diff': the per-net clearance map, BY NET NAME, that the
-    Route tab's and the Differential tab's REAL workers hand batch_route /
-    batch_route_diff_pairs} with the Net Clearances File set to `path`. Each
+    """{'route' | 'diff' | 'planes': the per-net clearance map, BY NET NAME,
+    that the Route, Differential and Planes tabs' REAL workers hand
+    batch_route / batch_route_diff_pairs / create_plane} with the Net
+    Clearances File set to `path`. Each
     engine is a spy that records its kwargs and stops the run, so nothing
     routes; wx.CallAfter is held so no completion handler fires later."""
     import wx
     import route
     import route_diff
+    import route_planes
 
     class _Stop(Exception):
         pass
@@ -216,11 +226,14 @@ def _worker_net_clearances(dlg, path):
         return _engine
 
     names = {nid: n.name for nid, n in dlg.pcb_data.nets.items()}
-    real = (route.batch_route, route_diff.batch_route_diff_pairs, wx.CallAfter)
+    real = (route.batch_route, route_diff.batch_route_diff_pairs, wx.CallAfter,
+            route_planes.create_plane)
     d = dlg.differential_tab
+    p = dlg.planes_tab
     try:
         route.batch_route = _spy('route')
         route_diff.batch_route_diff_pairs = _spy('diff')
+        route_planes.create_plane = _spy('planes')
         wx.CallAfter = lambda *a, **k: None
         dlg.net_clearances_path.SetValue(path)
         dlg._run_routing(dlg._build_routing_config(['/CLOCK_IN'],
@@ -229,8 +242,13 @@ def _worker_net_clearances(dlg, path):
         with contextlib.redirect_stderr(io.StringIO()):
             d._run_diff_routing({**d.get_routing_config(), **d.get_config()},
                                 ['/CLOCK_IN'])
+            # (the planes worker reports the stop as its plane error)
+            with contextlib.redirect_stdout(io.StringIO()):
+                p._run_create_planes(dict(p._build_mode_config(),
+                                          assignments=[(['GND'], ['B.Cu'])]))
     finally:
-        route.batch_route, route_diff.batch_route_diff_pairs, wx.CallAfter = real
+        (route.batch_route, route_diff.batch_route_diff_pairs, wx.CallAfter,
+         route_planes.create_plane) = real
         dlg.net_clearances_path.SetValue('')
     return {tag: ({names.get(i, i): v for i, v in m.items()}
                   if isinstance(m, dict) else m)
@@ -440,9 +458,9 @@ def main():
               _min_coupled(gui_auto) == cli_auto,
               f"setback {gui_auto!r} -> {_min_coupled(gui_auto)} mm")
 
-        print("\n[5] the Net Clearances File reaches the engines: the Route and "
-              "Differential workers hand them the file's map, as route.py / "
-              "route_diff.py --net-clearances do")
+        print("\n[5] the Net Clearances File reaches the engines: the Route, "
+              "Differential and Planes workers hand them the file's map, as "
+              "route.py / route_diff.py / route_planes.py --net-clearances do")
         from kicad_parser import parse_kicad_pcb as _parse
         from list_nets import load_net_clearances, net_clearance_map_by_name
         _cli = _parse(board_path)
@@ -450,7 +468,7 @@ def main():
             _cli.nets, load_net_clearances(ncl_path)).items()}
         check("the CLI's map from the file names both nets",
               cli_map == _NCL, f"{cli_map}")
-        for tag in ('route', 'diff'):
+        for tag in ('route', 'diff', 'planes'):
             got = ncl_runs['file'].get(tag, '<engine not reached>')
             check(f"{tag} worker with the file: the engine gets the CLI's map",
                   got == cli_map, f"{got}")

@@ -43,12 +43,8 @@ BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 
 def _state():
     pcb = parse_kicad_pcb(BOARD)
-    st = pose_score.make_state(pcb, BOARD, clearance=0.2,
-                               board_edge_clearance=0.3)
-    # The neighbour lists, when built, replace the sweep for the parts they
-    # cover; this test is about the sweep.
-    st._neighbors = None
-    return st
+    return pose_score.make_state(pcb, BOARD, clearance=0.2,
+                                 board_edge_clearance=0.3)
 
 
 def _answers(st, ref, x, y, rot):

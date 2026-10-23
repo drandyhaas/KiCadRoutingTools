@@ -53,14 +53,14 @@ import fnmatch
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 __all__ = [
     'Constraint', 'RuleItem', 'Rule', 'DesignRules', 'Unsupported',
     'parse_dru', 'parse_condition', 'CLEARANCE_KINDS', 'SIZE_KINDS',
     'BOARD_MIN_KEYS', 'NETCLASS_OPT_KEYS', 'FAB_FLOOR_KEYS',
-    'install_design_rules', 'KIND_ALIASES',
+    'install_design_rules', 'KIND_ALIASES', 'project_class_membership',
 ]
 
 # --------------------------------------------------------------------------
@@ -98,9 +98,18 @@ SIZE_KINDS = frozenset({
     'track_width', 'via_diameter', 'hole_size', 'annular_width',
     'diff_pair_width', 'connection_width',
 })
-# The kinds a consumer in this tool actually honours. Anything else in a
-# rule is reported as "parsed, not consumed".
+# The kinds a rule may carry without being reported as "parsed, not
+# consumed". WIDER than what is read today: the resolver's callers ask only
+# for track_width / via_diameter / hole_size (draw_size, floor), copper
+# clearance reaches the router only through kicad_dru's layer- and
+# track-scoped subsets, and `disallow` through net_keepouts. A rule built only on the other kinds listed here is
+# reported neither "NOT honoured" nor "not consumed".
 CONSUMED_KINDS = CLEARANCE_KINDS | SIZE_KINDS | {'disallow', 'via_count'}
+# Kinds no routing step honours but a grader does: check_drc grades every
+# `length` window (kicad_dru.read_board_length_rules, #1313) and every
+# diff-pair `skew` / `diff_pair_uncoupled` rule through the same channel
+# (#1303).
+GRADED_ONLY_KINDS = frozenset({'length', 'skew', 'diff_pair_uncoupled'})
 
 # Spellings a caller may use for a kind.
 KIND_ALIASES = {
@@ -171,6 +180,10 @@ class Constraint:
     fab_bound: bool = False
     # ``min`` before the fab floor, so a caller can say what KiCad would accept.
     kicad_min: Optional[float] = None
+    # the custom rule that set ``min`` (None: a class, an override, the board
+    # minimum), and whether that rule is a coupled-pair rule (#1293)
+    min_rule: Optional[str] = None
+    min_rule_coupled: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +206,8 @@ class RuleItem:
     # zone (connect_pads (clearance ...)) -> KiCad's post-loop max path
     local_clearance: Optional[float] = None
     plated: bool = True
+    # the rule areas the item lies in, for an areas=True condition only
+    areas: FrozenSet[str] = frozenset()
 
 
 @dataclass
@@ -206,6 +221,19 @@ class Rule:
     severity: Optional[str] = None
     unsupported: Optional[str] = None         # reason this rule is NOT evaluated
     unconsumed_kinds: List[str] = field(default_factory=list)
+    # A `disallow` rule's condition parsed WITH its rule-area predicates
+    # (parse_condition(areas=True)); `condition` stays None and `unsupported`
+    # stays set, so the resolver never evaluates it. net_keepouts reads it.
+    area_condition: object = None
+    # set by net_keepouts.derive_area_keepouts when the router honours the
+    # rule as a net-filtered keep-out: what it honours, for the report
+    honoured: Optional[str] = None
+    # the condition ANDs in AB.isCoupledDiffPair() (#1293): the rule binds a
+    # diff pair's P against its own N
+    coupled: bool = False
+    # the condition ANDs in !AB.isCoupledDiffPair() (#1295): KiCad's "keep
+    # pairs apart" rule, which binds everything EXCEPT a pair's own partner
+    keep_apart: bool = False
 
     def layers_for(self, copper_layers: Sequence[str]) -> Optional[List[str]]:
         """Concrete copper layers this rule's (layer ...) clause names, or None
@@ -347,8 +375,22 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
         if rule.condition_src is not None and rule.unsupported is None:
             try:
                 rule.condition = parse_condition(rule.condition_src)
+                rule.coupled, rule.keep_apart = _coupled_terms(rule.condition)
             except Unsupported as e:
                 rule.unsupported = f"condition: {e}"
+                # A rule that only disallows, on a rule area: the routing
+                # steps read it as a net-filtered keep-out (net_keepouts);
+                # the resolver and every other step still do not.
+                if set(rule.constraints) == {'disallow'}:
+                    try:
+                        rule.area_condition = parse_condition(rule.condition_src,
+                                                              areas=True)
+                    except Unsupported:
+                        pass
+                    else:
+                        rule.unsupported = (f"condition: {e} here; route.py and "
+                                            f"route_diff.py read it as a "
+                                            f"net-filtered keep-out")
         if rule.layer_clause is not None and rule.unsupported is None:
             lc = rule.layer_clause
             if not (lc in ('outer', 'inner', '*.Cu', '*') or lc.endswith('.Cu')):
@@ -372,11 +414,17 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
 #   term   := ITEM '.' NAME '(' args ')' | ITEM '.' NAME | STRING | NUMBER | 'L'
 # Supported properties: NetClass, NetName, Net, Type, Layer, Pad_Type, Via_Type
 # Supported functions: hasNetclass, hasExactNetclass, onLayer, existsOnLayer,
-#   isMicroVia, isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup
+#   isMicroVia, isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup,
+#   inDiffPair('pattern') (#1295), and AB.isCoupledDiffPair() as a term of an
+#   AND only, positive (#1293: the pair's own P<->N rule) or negated (#1295:
+#   KiCad's "keep pairs apart" rule); OR'ed or compared it stays Unsupported
 # Recognised but NOT modelled (-> Unsupported): intersectsArea, enclosedByArea,
+#   insideArea (each modelled ONLY for a `disallow` rule's net-filtered keep-out:
+#   parse_condition(areas=True), net_keepouts.derive_area_keepouts),
 #   intersectsCourtyard, intersectsFrontCourtyard, intersectsBackCourtyard,
-#   inDiffPair, isCoupledDiffPair, fromTo, memberOfSheet, memberOfSheetOrChildren,
-#   hasComponentClass, getField, and any numeric comparison (<, >, arithmetic).
+#   isCoupledDiffPair in any other position, fromTo, memberOfSheet,
+#   memberOfSheetOrChildren, hasComponentClass, getField, and any numeric
+#   comparison (<, >, arithmetic).
 
 _TOKEN = re.compile(r"""
     \s*(?:
@@ -391,10 +439,13 @@ _SUPPORTED_PROPS = {'netclass', 'netname', 'net', 'type', 'layer', 'pad_type',
                     'via_type'}
 _SUPPORTED_FUNCS = {'hasnetclass', 'hasexactnetclass', 'onlayer', 'existsonlayer',
                     'ismicrovia', 'isblindburiedvia', 'isplated',
-                    'memberoffootprint', 'memberofgroup'}
+                    'memberoffootprint', 'memberofgroup', 'indiffpair'}
+#: Rule-area predicates. KiCad's insideArea() is the older spelling of
+#: intersectsArea() and KiCad 10 still grades it.
+_AREA_FUNCS = {'insidearea', 'intersectsarea', 'enclosedbyarea'}
 _KNOWN_UNSUPPORTED_FUNCS = {
-    'intersectsarea', 'enclosedbyarea', 'intersectscourtyard',
-    'intersectsfrontcourtyard', 'intersectsbackcourtyard', 'indiffpair',
+    'insidearea', 'intersectsarea', 'enclosedbyarea', 'intersectscourtyard',
+    'intersectsfrontcourtyard', 'intersectsbackcourtyard',
     'iscoupleddiffpair', 'fromto', 'memberofsheet', 'memberofsheetorchildren',
     'hascomponentclass', 'getfield', 'isbetween',
 }
@@ -418,9 +469,10 @@ def _tokens(src: str):
 
 
 class _Parser:
-    def __init__(self, src: str):
+    def __init__(self, src: str, areas: bool = False):
         self.toks = _tokens(src)
         self.i = 0
+        self.areas = areas
 
     def peek(self):
         return self.toks[self.i] if self.i < len(self.toks) else (None, None)
@@ -509,8 +561,20 @@ class _Parser:
                     else:
                         raise Unsupported(f"argument {av!r} to {name}()")
                 self.take('op', ')')
+                if item_u == 'AB' and lname == 'iscoupleddiffpair' and not args:
+                    return ('coupled',)
+                if self.areas and lname in _AREA_FUNCS:
+                    if len(args) != 1:
+                        raise Unsupported(f"{name}() with {len(args)} arguments")
+                    return ('area', item_u, lname, args[0])
                 if lname in _KNOWN_UNSUPPORTED_FUNCS or lname not in _SUPPORTED_FUNCS:
                     raise Unsupported(f"predicate {name}() not modelled")
+                if lname == 'indiffpair' and (item_u == 'AB' or len(args) != 1
+                                              or not args[0]):
+                    # KiCad reports "Missing diff-pair name argument" and the
+                    # term is false; AB has no single net to test.
+                    raise Unsupported(f"{item}.{name}() needs one diff-pair "
+                                      f"name pattern on A or B")
                 return ('call', item_u, lname, tuple(args))
             if lname not in _SUPPORTED_PROPS:
                 raise Unsupported(f"property {name} not modelled")
@@ -518,9 +582,129 @@ class _Parser:
         raise Unsupported(f"unexpected token {v!r}")
 
 
-def parse_condition(src: str):
-    """AST for a rule condition, or raise Unsupported."""
-    return _Parser(src).parse()
+def parse_condition(src: str, areas: bool = False):
+    """AST for a rule condition, or raise Unsupported. With ``areas`` the
+    rule-area predicates parse too, as ('area', item, fn, name) nodes that
+    `_eval` answers from RuleItem.areas. Only net_keepouts asks for that, on
+    a `disallow` rule: everywhere else an area predicate stays Unsupported,
+    so a `!A.intersectsArea()` clearance rule is not read as matching
+    every item on the board.
+
+    AB.isCoupledDiffPair() parses only as a term of an AND, positive (#1293,
+    the form that gives a pair its own P<->N clearance) or negated (#1295,
+    KiCad's "keep pairs apart" rule, which binds everything but the pair's
+    own partner). OR'ed or compared it raises Unsupported, so such a rule
+    stays unread rather than half-read."""
+    node = _Parser(src, areas=areas).parse()
+    if _contains_coupled(node) and _coupled_terms(node) is None:
+        raise Unsupported("AB.isCoupledDiffPair() is modelled only as a "
+                          "term ANDed into the condition, or its negation")
+    return node
+
+
+def _contains_coupled(node) -> bool:
+    if not isinstance(node, tuple) or not node:
+        return False
+    if node[0] == 'coupled':
+        return True
+    return any(_contains_coupled(c) for c in node[1:] if isinstance(c, tuple))
+
+
+def _coupled_terms(node):
+    """(positive, negated): whether the condition ANDs in AB.isCoupledDiffPair()
+    and whether it ANDs in its negation, or None when a coupled node sits
+    anywhere else (under an OR, a comparison, a double negation)."""
+    if node is None or not _contains_coupled(node):
+        return False, False
+    if node == ('coupled',):
+        return True, False
+    if node == ('not', ('coupled',)):
+        return False, True
+    if node[0] == 'and':
+        pos = neg = False
+        for c in node[1:]:
+            t = _coupled_terms(c)
+            if t is None:
+                return None
+            pos, neg = pos or t[0], neg or t[1]
+        return pos, neg
+    return None
+
+
+def match_dp_suffix(name: str) -> Tuple[int, str, str]:
+    """KiCad's DRC_ENGINE::MatchDpSuffix, ported exactly (#1293; identical in
+    9.0 and master): (polarity, complement net name, base name), or
+    (0, '', '') for a name with no pair suffix.
+
+    Scanning from the end, digits and '_' are skipped and the first other
+    character decides: '+'/'P' is the positive side, '-'/'N' the negative
+    one, case-sensitive. The base drops the polarity character and every
+    digit or '_' after it; the complement puts them back around the opposite
+    character. 'DATA_P_1' -> (1, 'DATA_N_1', 'DATA_'); 'D+1' -> (1, 'D-1',
+    'D'). No separator is required, so 'SPIN' is the N side of 'SPI'."""
+    rv, count, comp = 0, 0, ''
+    for ch in reversed(name):
+        if '0' <= ch <= '9' or ch == '_':
+            count += 1
+            continue
+        if ch == '+':
+            comp, rv = '-', 1
+        elif ch == '-':
+            comp, rv = '+', -1
+        elif ch == 'N':
+            comp, rv = 'P', -1
+        elif ch == 'P':
+            comp, rv = 'N', 1
+        break
+    if rv == 0:
+        return 0, '', ''
+    count += 1
+    base = name[:len(name) - count]
+    return rv, base + comp + name[len(name) - count + 1:], base
+
+
+#: Constraint kinds KiCad evaluates "only in the context of a diffpair" and so
+#: for which AB.isCoupledDiffPair() holds with no B when the complement net
+#: exists (isCoupledDiffPairFunc; master adds net_chain_length).
+_DP_CONTEXT_KINDS = frozenset({'diff_pair_gap', 'length', 'skew',
+                               'net_chain_length'})
+
+
+def _is_coupled(a: Optional['RuleItem'], b: Optional['RuleItem'], ctx) -> bool:
+    """KiCad's isCoupledDiffPairFunc: B's net is the complement of A's."""
+    if a is None or not a.net_name:
+        return False
+    rv, comp, _base = match_dp_suffix(a.net_name)
+    if not rv:
+        return False
+    kind, nets = ctx if ctx is not None else (None, frozenset())
+    if kind in _DP_CONTEXT_KINDS and comp in nets:
+        return True
+    return b is not None and b.net_name == comp
+
+
+def _wx_matches(pattern: str, text: str) -> bool:
+    """wxString::Matches: '*' and '?' are the only wildcards, case-sensitive
+    (fnmatch would also read '[...]' as a character class)."""
+    rx = ''.join('.*' if ch == '*' else '.' if ch == '?' else re.escape(ch)
+                 for ch in pattern)
+    return re.fullmatch(rx, text, re.DOTALL) is not None
+
+
+def _in_diff_pair(it: 'RuleItem', pattern: str, ctx) -> bool:
+    """KiCad's inDiffPairFunc (#1295; identical in 9.0 and master): the
+    item's net has a pair suffix (MatchDpSuffix), its complement net exists on
+    the board, and the pair's base name matches ``pattern`` -- or, when the
+    base ends in '_', the base before that last '_' does."""
+    if not it.net_name:
+        return False
+    rv, comp, base = match_dp_suffix(it.net_name)
+    nets = ctx[1] if ctx is not None else frozenset()
+    if not rv or comp not in nets:
+        return False
+    if _wx_matches(pattern, base):
+        return True
+    return base.endswith('_') and _wx_matches(pattern, base[:base.rfind('_')])
 
 
 def _norm_type(t: Optional[str]) -> str:
@@ -535,18 +719,23 @@ _VIA_TYPE_NAMES = {'through': 'through', 'micro': 'micro', 'blind/buried': 'blin
                    'blind_buried': 'blind_buried'}
 
 
-def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str]):
+def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
+          ctx=None):
+    """``ctx`` is (constraint kind, the board's net names) -- what
+    AB.isCoupledDiffPair() reads beyond A and B."""
     op = node[0]
     if op == 'or':
-        return _eval(node[1], a, b, layer) or _eval(node[2], a, b, layer)
+        return _eval(node[1], a, b, layer, ctx) or _eval(node[2], a, b, layer, ctx)
     if op == 'and':
-        return _eval(node[1], a, b, layer) and _eval(node[2], a, b, layer)
+        return _eval(node[1], a, b, layer, ctx) and _eval(node[2], a, b, layer, ctx)
     if op == 'not':
-        return not _eval(node[1], a, b, layer)
+        return not _eval(node[1], a, b, layer, ctx)
+    if op == 'coupled':
+        return _is_coupled(a, b, ctx)
     if op == 'cmp':
         _, cop, lhs, rhs = node
-        lv = _value(lhs, a, b, layer)
-        rv = _value(rhs, a, b, layer)
+        lv = _value(lhs, a, b, layer, ctx)
+        rv = _value(rhs, a, b, layer, ctx)
         if lhs[0] == 'prop' and rhs[0] == 'prop' and lhs[2] == 'net' and rhs[2] == 'net':
             eq = (lv == rv)
         elif isinstance(lv, str) and isinstance(rv, str):
@@ -555,7 +744,10 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str]):
             eq = (lv == rv)
         return eq if cop == '==' else not eq
     if op == 'call':
-        return bool(_call(node, a, b, layer))
+        return bool(_call(node, a, b, layer, ctx))
+    if op == 'area':
+        it = _item(node[1], a, b)
+        return it is not None and node[3] in it.areas
     if op == 'prop':
         v = _value(node, a, b, layer)
         return bool(v)
@@ -589,7 +781,7 @@ def _item(which: str, a: RuleItem, b: Optional[RuleItem]) -> Optional[RuleItem]:
     return None
 
 
-def _value(node, a, b, layer):
+def _value(node, a, b, layer, ctx=None):
     op = node[0]
     if op == 'lit':
         return node[1]
@@ -620,11 +812,13 @@ def _value(node, a, b, layer):
         if name == 'via_type':
             return it.via_type or ''
     if op == 'call':
-        return _call(node, a, b, layer)
+        return _call(node, a, b, layer, ctx)
     raise Unsupported(f"value of {op}")
 
 
-def _call(node, a, b, layer):
+def _call(node, a, b, layer, ctx=None):
+    """``ctx`` is _eval's (constraint kind, the board's net names), which
+    inDiffPair() reads to find the complement net."""
     _, which, fn, args = node
     if which == 'AB':
         raise Unsupported(f"AB.{fn}")
@@ -649,11 +843,14 @@ def _call(node, a, b, layer):
             fnmatch.fnmatchcase(it.footprint_ref, args[0])
     if fn == 'memberofgroup':
         return bool(args) and args[0] in it.groups
+    if fn == 'indiffpair':
+        return bool(args) and _in_diff_pair(it, args[0], ctx)
     raise Unsupported(f"predicate {fn}()")
 
 
 def _rule_matches(rule: Rule, a: RuleItem, b: Optional[RuleItem],
-                  layer: Optional[str], copper_layers: Sequence[str]) -> bool:
+                  layer: Optional[str], copper_layers: Sequence[str],
+                  ctx=None) -> bool:
     lay = rule.layers_for(copper_layers)
     if lay is not None:
         if layer is None:
@@ -662,10 +859,84 @@ def _rule_matches(rule: Rule, a: RuleItem, b: Optional[RuleItem],
             return False
     if rule.condition is None:
         return True
-    try:
-        return bool(_eval(rule.condition, a, b, layer))
-    except Unsupported:
-        return False
+    # KiCad's DRC_RULE_CONDITION::EvaluateFor: "Conditions are commutative" --
+    # a two-item condition that fails as (A, B) is tried again as (B, A).
+    for x, y in ((a, b), (b, a)) if b is not None else ((a, b),):
+        try:
+            if _eval(rule.condition, x, y, layer, ctx):
+                return True
+        except Unsupported:
+            pass
+    return False
+
+
+# --------------------------------------------------------------------------
+# Net-class membership as the .kicad_pro declares it
+# --------------------------------------------------------------------------
+
+# The newest net_settings schema whose ``classes[].nets`` lists are
+# membership. KiCad 6 kept a class's members inside the class; KiCad 7's
+# schema 2 -> 3 migration turns each name into a ``netclass_patterns`` entry,
+# and it runs on every load of a file still at schema 0-2. Probed on pcbnew
+# 10.0.0 with steppenprobe's KiCad-6 project (#1304): meta.version 0, 1 or 2
+# resolves the listed nets to their class, 3 and 4 leave them Default (the key
+# is no longer read), and a file with no ``meta`` loads no net_settings at all.
+KICAD6_MEMBERS_MAX_SCHEMA = 2
+
+
+def project_class_membership(net_settings) -> Tuple[Dict[str, List[str]],
+                                                      List[Tuple[str, str]]]:
+    """Net-class MEMBERSHIP from a .kicad_pro ``net_settings`` dict, in every
+    form KiCad reads -- the one parser both project readers
+    (``list_nets.read_design_rules`` and ``DesignRules.from_project``, so the
+    router, the graders, the placer and the GUI's design-rule table) go
+    through, so none of them can miss a form the others honour.
+
+    Returns ``(assignments, patterns)``:
+
+    * ``assignments`` -- {net name: [class, ...]} in file order: the explicit
+      ``netclass_assignments`` (KiCad 7+; a value is one name or, KiCad 9+, a
+      list), then the KiCad-6 ``classes[].nets`` lists when the schema is at
+      most ``KICAD6_MEMBERS_MAX_SCHEMA`` (#1304). Those are exact net names:
+      KiCad's migration makes each a pattern, and a pattern spelled as a whole
+      net name matches that net.
+    * ``patterns`` -- [(glob, class)] from ``netclass_patterns``, file order.
+    """
+    ns = net_settings if isinstance(net_settings, dict) else {}
+    assignments: Dict[str, List[str]] = {}
+
+    def _add(net, cls):
+        if not net or not cls:
+            return
+        lst = assignments.setdefault(str(net), [])
+        if cls not in lst:
+            lst.append(str(cls))
+
+    na = ns.get('netclass_assignments') or {}
+    if isinstance(na, dict):
+        for net, cl in na.items():
+            for c in (cl if isinstance(cl, list) else [cl]):
+                _add(net, c)
+    meta = ns.get('meta')
+    version = meta.get('version') if isinstance(meta, dict) else None
+    if (isinstance(version, int) and not isinstance(version, bool)
+            and version <= KICAD6_MEMBERS_MAX_SCHEMA):
+        for c in ns.get('classes') or []:
+            if not isinstance(c, dict):
+                continue
+            members = c.get('nets')
+            if isinstance(members, list):
+                for net in members:
+                    if isinstance(net, str):
+                        _add(net, c.get('name') or 'Default')
+    patterns: List[Tuple[str, str]] = []
+    for pe in ns.get('netclass_patterns') or []:
+        try:
+            if pe.get('netclass'):
+                patterns.append((pe.get('pattern', ''), pe['netclass']))
+        except (AttributeError, TypeError):
+            continue
+    return assignments, patterns
 
 
 # --------------------------------------------------------------------------
@@ -686,6 +957,8 @@ class DesignRules:
     source: str = ''
     dru_path: str = ''
     notes: List[str] = field(default_factory=list)
+    # net_keepouts.derive_area_keepouts' regions (install_design_rules)
+    net_keepouts: List[dict] = field(default_factory=list)
     _cache: dict = field(default_factory=dict, repr=False)
     _effective: Dict[int, str] = field(default_factory=dict, repr=False)
 
@@ -809,20 +1082,9 @@ class DesignRules:
                 d['priority'] = int(c.get('priority', _DEFAULT_PRIORITY
                                           if name == 'Default' else 0))
                 self.classes[name] = d
-            na = ns.get('netclass_assignments') or {}
-            if isinstance(na, dict):
-                for net, cl in na.items():
-                    if isinstance(cl, list):
-                        assignments[net] = [c for c in cl if c]
-                    elif cl:
-                        assignments[net] = [cl]
-            for pe in ns.get('netclass_patterns') or []:
-                try:
-                    if pe.get('netclass'):
-                        patterns.append((pe.get('pattern', ''), pe['netclass']))
-                except (AttributeError, TypeError):
-                    continue
-            rules = ((proj.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
+            # every membership form, KiCad 6's classes[].nets included (#1304)
+            assignments, patterns = project_class_membership(ns)
+            rules =((proj.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
             for k, v in rules.items():
                 if k.startswith('min_') and isinstance(v, (int, float)) and v > 0:
                     self.board_min[k] = float(v)
@@ -961,6 +1223,13 @@ class DesignRules:
                 source = 'netclass ' + '/'.join(names)
         elif kind in NETCLASS_OPT_KEYS:
             v = self.class_value(a.net_id, NETCLASS_OPT_KEYS[kind])
+            # KiCad's "netclass (diff pair)" implicit rule, conditioned on
+            # A.inDiffPair('*'): a coupled-pair member's track is drawn at the
+            # class diff_pair_width, and custom rules below still override it.
+            if kind == 'track_width' and a.diff_pair:
+                dv = self.class_value(a.net_id, 'diff_pair_width')
+                if dv is not None:
+                    v = dv
             if v is not None:
                 cur['opt'] = v
                 source = f'netclass {self.effective_class(a.net_id)}'
@@ -968,10 +1237,12 @@ class DesignRules:
         # 2c. custom rules, file order, per field, last wins.
         disallow: set = set()
         min_from_rule = False
+        min_rule = None
+        ctx = (kind, self._net_name_set())
         for rule in self.rules:
             if rule.unsupported or kind not in rule.constraints:
                 continue
-            if not _rule_matches(rule, a, b, layer, self.copper_layers):
+            if not _rule_matches(rule, a, b, layer, self.copper_layers, ctx):
                 continue
             spec = rule.constraints[kind]
             if kind == 'disallow':
@@ -983,6 +1254,7 @@ class DesignRules:
                     cur[f] = spec[f]
                     if f == 'min':
                         min_from_rule = True
+                        min_rule = rule
             source = f'rule "{rule.name}"'
 
         if kind == 'disallow':
@@ -996,6 +1268,7 @@ class DesignRules:
                         cur['min'] = x.local_clearance
                         source = 'zone clearance'
                         min_from_rule = False
+                        min_rule = None
 
         # 4. the ONLY post-loop board floors KiCad applies -- and MEASURED on
         # KiCad 10.0.0 (tests/oracle/constraint_agreement.py rows
@@ -1009,7 +1282,9 @@ class DesignRules:
                 source = 'board minimum'
 
         c = Constraint(kind, min=cur['min'], opt=cur['opt'], max=cur['max'],
-                       source=source, kicad_min=cur['min'])
+                       source=source, kicad_min=cur['min'],
+                       min_rule=min_rule.name if min_rule is not None else None,
+                       min_rule_coupled=bool(min_rule is not None and min_rule.coupled))
         return self._fab(kind, c)
 
     def _fab(self, kind: str, c: Constraint) -> Constraint:
@@ -1021,10 +1296,37 @@ class DesignRules:
         if fv is None:
             return c
         if c.min is None or c.min < fv - 1e-9:
-            return Constraint(kind, min=fv, opt=c.opt, max=c.max,
-                              source=f'fab floor (over {c.source})',
-                              fab_bound=True, kicad_min=c.min)
+            return replace(c, min=fv, source=f'fab floor (over {c.source})',
+                           fab_bound=True, kicad_min=c.min)
         return c
+
+    def _net_name_set(self) -> FrozenSet[str]:
+        s = self._cache.get('_net_name_set')
+        if s is None:
+            s = self._cache['_net_name_set'] = frozenset(self.net_names.values())
+        return s
+
+    def has_coupled_rules(self) -> bool:
+        """A supported rule ANDs in AB.isCoupledDiffPair() (#1293)."""
+        return any(r.coupled and not r.unsupported for r in self.rules)
+
+    def coupled_pair_clearance(self, p_net_id: int, n_net_id: int,
+                               layer: Optional[str],
+                               types: Tuple[str, str] = ('track', 'track')
+                               ) -> Optional[Constraint]:
+        """The clearance KiCad grades a diff pair's P against its own N at on
+        ``layer``, when the rule that sets it is a coupled-pair rule
+        (``AB.isCoupledDiffPair()``, #1293); None when a class, an override,
+        the board minimum or any other rule sets it -- the caller then keeps
+        its own value. ``types`` are the two items' KiCad types (a rule may
+        scope itself with ``A.Type == 'track'``). ``min`` carries the fab
+        floor, ``kicad_min`` what KiCad accepts."""
+        if not self.has_coupled_rules():
+            return None
+        a = self.item_for_net(p_net_id, types[0], layer)
+        b = self.item_for_net(n_net_id, types[1], layer)
+        c = self.resolve('clearance', a, b, layer)
+        return c if c.min_rule_coupled and c.min is not None else None
 
     def resolve_stack(self, kind: str, a: RuleItem, b: Optional[RuleItem],
                       layers: Iterable[str]) -> Constraint:
@@ -1046,14 +1348,17 @@ class DesignRules:
         return self.resolve(kind, a, b, layer).min
 
     def draw_size(self, kind: str, net_id: int, layer: Optional[str] = None,
-                  default: Optional[float] = None, type: Optional[str] = None) -> Optional[float]:
+                  default: Optional[float] = None, type: Optional[str] = None,
+                  diff_pair: Optional[str] = None) -> Optional[float]:
         """The size to DRAW: explicit CLI value (PNS 'custom size'), else the
         resolved ``opt`` (rule opt over the aggregate class value, PNS 'use
-        netclass values'), else ``default``; then clamped into [min, max]."""
+        netclass values'), else ``default``; then clamped into [min, max].
+        ``diff_pair`` (the pair's name) marks the net a coupled-pair member,
+        whose class track width is the class ``diff_pair_width``."""
         kind = canonical_kind(kind)
         if type is None:
             type = 'via' if kind in ('via_diameter', 'hole_size') else 'track'
-        a = self.item_for_net(net_id, type, layer)
+        a = self.item_for_net(net_id, type, layer, diff_pair=diff_pair)
         c = self.resolve(kind, a, None, layer)
         v = self.cli.get(kind)
         if v is None:
@@ -1071,7 +1376,13 @@ class DesignRules:
     # ---------------- disclosure ----------------
 
     def unsupported(self) -> List[Tuple[str, str]]:
-        return [(r.name, r.unsupported) for r in self.rules if r.unsupported]
+        return [(r.name, r.unsupported) for r in self.rules
+                if r.unsupported and not r.honoured]
+
+    def honoured_rules(self) -> List[Tuple[str, str]]:
+        """Rules the resolver does not evaluate but another consumer honours
+        (net_keepouts: a `disallow` rule on a named rule area)."""
+        return [(r.name, r.honoured) for r in self.rules if r.honoured]
 
     def unconsumed(self) -> List[Tuple[str, List[str]]]:
         return [(r.name, r.unconsumed_kinds) for r in self.rules
@@ -1079,12 +1390,21 @@ class DesignRules:
 
     def report_lines(self) -> List[str]:
         out = []
+        for name, what in self.honoured_rules():
+            out.append(f".kicad_dru rule '{name}': {what}")
         for name, why in self.unsupported():
             out.append(f".kicad_dru rule '{name}': NOT honoured ({why}); "
                        f"KiCad will still enforce it")
         for name, kinds in self.unconsumed():
-            out.append(f".kicad_dru rule '{name}': parsed, but {', '.join(kinds)} "
-                       f"has no consumer in this tool yet")
+            # #1313: a length window is graded (check_drc) but not routed to.
+            graded = [k for k in kinds if k in GRADED_ONLY_KINDS]
+            rest = [k for k in kinds if k not in GRADED_ONLY_KINDS]
+            if rest:
+                out.append(f".kicad_dru rule '{name}': parsed, but {', '.join(rest)} "
+                           f"has no consumer in this tool yet")
+            if graded:
+                out.append(f".kicad_dru rule '{name}': {', '.join(graded)} is not "
+                           f"routed to; check_drc grades it")
         out.extend(self.notes)
         return out
 
@@ -1101,6 +1421,7 @@ class DesignRules:
                                 for k, v in sorted(r.constraints.items())},
                 'layer': r.layer_clause, 'condition': r.condition_src,
                 'severity': r.severity, 'unsupported': r.unsupported,
+                'honoured': r.honoured,
                 'unconsumed': list(r.unconsumed_kinds),
             } for r in self.rules],
             'fab_floor': dict(sorted(self.fab_floor.items())),
@@ -1207,7 +1528,7 @@ _ANNOUNCED = set()
 
 
 def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
-                         cli=None, board=None):
+                         cli=None, board=None, net_keepouts=False):
     """Build the board's DesignRules and attach it as ``config.rules``. The
     .kicad_dru / .kicad_pro are discovered beside ``input_file`` (else
     ``pcb_data.source_path``), the same way install_layer_clearances does.
@@ -1227,12 +1548,23 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         except Exception:                                      # noqa: BLE001
             pass
         return None
+    # Net-filtered keep-outs (``net_keepouts``: the routing engines, which
+    # stamp them): the `disallow` rules on a named rule area, derived against
+    # this board before the report, which says which are honoured. Never
+    # raises into the engine either.
+    if net_keepouts and pcb_data is not None:
+        try:
+            from net_keepouts import derive_area_keepouts
+            rules.net_keepouts = derive_area_keepouts(rules, pcb_data)
+        except Exception as e:                                 # noqa: BLE001
+            rules.net_keepouts = []
+            rules.notes.append(f"net-filtered keep-outs not derived ({e})")
     try:
         config.rules = rules
     except Exception:                                          # noqa: BLE001
         pass
     key = (os.path.abspath(rules.source) if rules.source else '',
-           tuple((r.name, r.unsupported) for r in rules.rules))
+           tuple((r.name, r.unsupported, r.honoured) for r in rules.rules))
     if key not in _ANNOUNCED:
         _ANNOUNCED.add(key)
         for line in rules.report_lines():

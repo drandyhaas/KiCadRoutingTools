@@ -678,14 +678,8 @@ class TestOneViaRule(unittest.TestCase):
     def test_no_OTHER_module_builds_a_graded_via_tuple(self):
         """A DIRECTORY sweep, not inspect: the arms above are scoped to this
         one module, so a second construction site in a NEW file would fire
-        none of them.
-
-        `py_tools/animate_fanout_clearance.py` unpacks the 4-tuple to draw it
-        and is the known, allowed reader -- it never re-enters `_Repair` and
-        never writes the radius map. It is named here so the sweep stays a
-        change detector rather than a permanent red."""
-        allowed = {'py_placer/placement/fanout_clearance.py',
-                   'py_tools/animate_fanout_clearance.py'}
+        none of them."""
+        allowed = {'py_placer/placement/fanout_clearance.py'}
         hits = set()
         for sub in ('py_placer', 'py_router', 'py_tools',
                     'kicad_routing_plugin'):

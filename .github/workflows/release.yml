@@ -27,6 +27,10 @@ jobs:
     # after every binary is built.
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The parity gate diffs .gui-parity-checked's SHA..HEAD; a shallow
+          # clone has no such SHA, and the gate then skipped with a warning.
+          fetch-depth: 0
       - name: VERSION <-> metadata.json (and tag) agree
         shell: bash
         run: |
@@ -121,8 +125,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     # We always package (even on manual workflow_dispatch) so PRs/branches
-    # can produce a downloadable zip for inspection. metadata.json is only
-    # committed/PR'd on tag pushes (see the release job below).
+    # can produce a downloadable zip for inspection; the release job below
+    # attaches the zips and metadata.json to the GitHub Release on tag pushes
+    # (nothing is committed back).
     steps:
       - uses: actions/checkout@v6
 

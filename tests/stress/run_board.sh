@@ -1,21 +1,17 @@
 #!/bin/bash
 # Headless per-board stress worker.
 #
-# Runs a non-interactive agent (`claude -p` by default, or `opencode run`
-# with STRESS_AI_BACKEND=opencode, #503) that follows tests/stress/RUNBOOK.md
+# Runs a non-interactive agent (`claude -p`) that follows tests/stress/RUNBOOK.md
 # to route ONE board, then writes the results JSON (RUNBOOK schema) and a
 # concise FINDINGS.md into the board's run dir. Decouples board execution from
 # the harness notification stream — the queue manager just watches files.
 #
 # Also captures the agent transcript (transcript.jsonl) and derives a compact
-# routing decision trail (agent_narrative.md) via extract_narrative.py —
-# both backends' JSON event schemas are supported there.
+# routing decision trail (agent_narrative.md) via extract_narrative.py.
 #
 # Usage: run_board.sh <board> <set:1|2|3...> [model]
-#   model: claude backend takes tier aliases (default: sonnet, i.e. the latest
-#          Sonnet); opencode takes provider/model (e.g. anthropic/claude-sonnet-4-5;
-#          default: the user's configured opencode default model).
-#   effort: STRESS_AI_EFFORT=low|medium|high|xhigh|max (claude backend; default high).
+#   model: a tier alias (default: sonnet, i.e. the latest Sonnet).
+#   effort: STRESS_AI_EFFORT=low|medium|high|xhigh|max (default high).
 set -u
 BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-}"
 BACKEND="${STRESS_AI_BACKEND:-claude}"
@@ -84,7 +80,7 @@ FIRST read $REPO/tests/stress/RUNBOOK.md and obey EVERY rule exactly. Do NOT ask
 anything (you are non-interactive) — use the skill's inline heuristics and your judgment.
 
 You ARE the one and only worker for THIS board. Any run_board.sh or headless
-agent process ('claude -p' / 'opencode run') you notice for '$BOARD' (or
+agent process ('claude -p') you notice for '$BOARD' (or
 touching $RUNDIR) is YOUR OWN launcher and yourself — NOT a competing/duplicate worker. Do NOT check whether the board is
 'already being routed', do NOT wait for or defer to 'another worker', and do NOT
 skip routing to avoid 'collisions'. Start routing immediately and produce the
@@ -112,7 +108,9 @@ Rules that matter most:
   manufacturing-floor clearance, DRC floor). Grade DRC at that floor.
 - On a 4+ layer board, pass ALL inner copper layers to bga_fanout AND route_diff
   (e.g. --layers F.Cu In1.Cu In2.Cu B.Cu) so deep balls escape.
-- GND (+ main power rail on 4+ layers) as planes; exclude plane nets from routing.
+- GND (+ main power rail on 4+ layers) as planes, poured FIRST. Exclude plane nets from
+  FANOUT only; the route step takes them in its --nets (and --power-nets with a width),
+  and its in-run finalize welds and taps them (#562, RUNBOOK rule 4).
 - Keep fine (sub-Default) clearance LOCAL to fine-pitch escapes, never board-wide.
 - Run EVERY command in the FOREGROUND and BLOCK until it returns — even if a
   single route step takes an hour (hard 3-hour/command cap, ~3.5-hour board
@@ -154,8 +152,8 @@ When fully done:
   echo "[run_board] result=$RESULT"
 } >> "$RUNDIR/worker.log"
 
-# Record a per-copper route trace for each route.py / route_diff.py step the
-# agent runs (#482), so render_run.py can build a whole-run movie afterward.
+# Record a route trace for each route.py / route_diff.py step the agent runs
+# (#482), so render_run.py can make the run's routing movie afterwards.
 # Default-on; set KICAD_ROUTE_TRACE=0 in the outer env to skip.
 export KICAD_ROUTE_TRACE="${KICAD_ROUTE_TRACE:-1}"
 
@@ -184,11 +182,11 @@ if [ -f "$RESULT" ]; then
   python3 "$REPO/tests/stress/grade_final.py" "$RUNDIR" "$RESULT" >> "$RUNDIR/worker.log" 2>&1 || true
   MIS=$(python3 -c "import json; print('MISGRADE' if json.load(open('$RUNDIR/authoritative_grade.json')).get('misgrade') else '')" 2>/dev/null)
 
-  # Final-board snapshot (combined + per-layer PNGs, #424 layer-role study) AND
-  # the whole-run routing movie (#482), via the fast geometry renderer
-  # (render_run.py -> route_render + animate_route), replacing the old kicad-cli
+  # Final-board snapshot (combined + per-layer PNGs, #424 layer-role study)
+  # and the run's routing movie (#482), via the fast geometry renderer
+  # (render_run.py -> route_render, route_movie), replacing the old kicad-cli
   # + headless-Chrome board_layer_images path. Drops <board>.png,
-  # <board>_<layer>.png, and <rundir>/routing.gif. This MIRRORS the no-LLM
+  # <board>_<layer>.png and <rundir>/routing.mp4. This MIRRORS the no-LLM
   # replay path (redo_stress_test.py). Non-fatal; needs no KiCad/browser.
   FB=$(python3 -c "import json,os,sys
 d=json.load(open('$RUNDIR/authoritative_grade.json'))

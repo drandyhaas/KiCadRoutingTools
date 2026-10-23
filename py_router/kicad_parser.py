@@ -8,6 +8,7 @@ from __future__ import annotations
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}
 
 import functools
+from array import array
 import os
 import re
 import math
@@ -456,6 +457,28 @@ class Pad:
     # BOTH parse paths. Consumers: net_queries.pad_to_die_length/_delay.
     die_length: float = 0.0
     die_delay: float = 0.0
+    # #1279: the name of the protected Kelvin sense branch (a KiCad group
+    # named `sense:<REF>.<PAD>`) this pad is a SENSE pad of, '' otherwise.
+    # Set by sense_branch.resolve_sense_branches on both parse paths; the
+    # router may never attach new copper to it.
+    sense: str = ""
+    # A CUSTOM pad's copper box `(x0, y0, x1, y1)` about (global_x, global_y),
+    # board frame, when the copper's centre is off the pad's
+    # (`copper_box_if_offset`): `size_x`/`size_y` box the copper
+    # symmetrically about the pad, so copper drawn to one side of its anchor
+    # reads twice its size (bitaxe's CSD17311Q5 drain pad, 10.0 x 9.1 mm for
+    # 5.0 x 4.6 mm of copper). None for every other pad. Set by BOTH parse
+    # paths; placement reads it (`legality.pad_copper_box`), routing reads
+    # `polygons`.
+    copper_box: Optional[Tuple[float, float, float, float]] = None
+    # The pad's zone-connection OVERRIDE, spelled like Zone.pad_connection
+    # ('none', 'thermal', 'solid', 'thru_hole_only'): the pad's own
+    # `(zone_connect N)`, else its footprint's, resolved at parse time the way
+    # local_clearance is. None = no override, so each zone's own connect_pads
+    # decides. Never read it directly to ask "does the pour reach this pad":
+    # pad_zone_connection(pad, zone) applies the zone and THT rules. Set by
+    # BOTH parse paths.
+    zone_connection: Optional[str] = None
 
 
 _VIA_BIRTH_WATCH = None
@@ -477,24 +500,6 @@ def _via_birth_watch():
                     pass
         _VIA_BIRTH_WATCH = out
     return _VIA_BIRTH_WATCH
-
-
-    def __post_init__(self):
-        # #803 VIA BIRTH WATCH (debug only). KICAD_VIA_BIRTH_WATCH="x,y;x,y"
-        # prints a stack trace for every Via CONSTRUCTED near a watched point,
-        # naming the producer. The obstacle-map probes can only say a cell was
-        # free; this says who put copper there. Off unless the env var is set.
-        _w = _via_birth_watch()
-        if _w:
-            for wx, wy in _w:
-                if abs(self.x - wx) <= 0.05 and abs(self.y - wy) <= 0.05:
-                    import traceback
-                    print(f"[VIABIRTH] via net={self.net_id} "
-                          f"({self.x:.3f},{self.y:.3f}) size={self.size} "
-                          f"drill={self.drill}")
-                    for ln in traceback.format_stack()[-7:-1]:
-                        print("    " + ln.rstrip().replace("\n", " | "))
-                    break
 
 
 @dataclass
@@ -524,6 +529,23 @@ class Via:
     # matters most for via-in-pad, where IPC-4761 Type VII filled+capped+plated
     # is what keeps solder out of the barrel.
     tenting_attrs: Dict[str, str] = field(default_factory=dict)
+    # #1279: the protected sense branch (KiCad group `sense:<REF>.<PAD>`) this
+    # via is a member of, '' otherwise (see Pad.sense).
+    sense: str = ""
+    # #1279: the `sense:` group that holds this via immutable, '' otherwise
+    # (see Segment.held_by).
+    held_by: str = ""
+    # KiCad's via type: 'through', 'blind', 'buried' or 'micro', from the
+    # block's type word (text) or GetViaType() (pcbnew). It, not `layers`,
+    # says whether the via has copper on only part of the stack: KiCad loads
+    # a via block with NO type word as a THROUGH via whatever its `(layers ...)`
+    # says, and both parse paths then report its pair as F.Cu/B.Cu (the text
+    # parser snaps it, pcbnew already has). A Via the tool builds in-run is
+    # through unless given a type, whatever pair it carries -- the back-side
+    # BGA fanout's through vias used to carry `["B.Cu", "In6.Cu"]`. Read a
+    # via's copper through geometry_utils.via_on_layer / via_copper_layers,
+    # never off this pair.
+    via_type: str = "through"
 
 
     def __post_init__(self):
@@ -601,6 +623,22 @@ class Segment:
     # check_drc graded the short clean. The obstacle map stamps this interior
     # and check_drc grades containment in it.
     graphic_ring: Optional[Tuple[Tuple[float, float], ...]] = None
+    # #1279: the protected sense branch (KiCad group `sense:<REF>.<PAD>`) this
+    # track is a member of, '' otherwise (see Pad.sense).
+    sense: str = ""
+    # #1279: the `sense:` group that holds this track immutable, '' otherwise.
+    # Set on a group's member copper whenever it resolves on the join pad's
+    # net, protected or refused, so no pass moves, rewrites or removes the
+    # declared sense copper. It is not `locked`: nothing writes it to the file,
+    # and it does not make the net never-rippable (only the net's pre-existing
+    # copper is spared from whole-net strips, protected_nets.protection_map).
+    held_by: str = ""
+
+
+def is_immutable_copper(item) -> bool:
+    """True for a track or via no pass may move, rewrite or remove: KiCad-
+    locked copper (#1261) or copper a `sense:` group holds (#1279)."""
+    return bool(getattr(item, 'locked', False) or getattr(item, 'held_by', ''))
 
 
 @dataclass
@@ -617,12 +655,25 @@ class Zone:
     island_area_min: float = 0.0  # mm^2 floor for mode 2 (KiCad file units are mm^2)
     clearance: float = None  # zone fill clearance (connect_pads (clearance X)); None = unknown
     min_thickness: float = None  # minimum fill width; None = unknown
+    # #1329: how the pour joins its net's pads, and its spoke geometry -- read
+    # so that a pass REPLACING the zone (route_planes) can say what it changed.
+    # 'thermal' (KiCad's default, `(connect_pads (clearance X))`), 'solid'
+    # (`connect_pads yes`), 'none' (`no`) or 'thru_hole_only'; None = unknown.
+    pad_connection: str = None
+    thermal_gap: float = None  # (fill (thermal_gap X)); None = unknown
+    thermal_bridge_width: float = None  # (fill (thermal_bridge_width X)); spoke width
     in_footprint: bool = False  # #478: zone is owned by a footprint (nested in its
     # (footprint ...) block). Points are still BOARD coordinates. Consumers treat it
     # as normal copper/keep-out; plane creation must not replace or abort on it.
     teardrop: bool = False  # #1164: KiCad's (attr (teardrop ...)) -- a GENERATED
     # teardrop area where a track meets a pad or via. Routing output, like a
     # track: KiCad regenerates it on refill, and it sits on its pad's old pose.
+    # #1279: the zone's CUT-OUTS. KiCad's file holds one outline per zone and
+    # every later (polygon ...) block in it is a hole in that outline (pcbnew
+    # loads it so: OutlineCount 1, HoleCount(0) = the rest; writing a second
+    # outline drops it). The fill never enters a hole. Both parse paths fill
+    # it; `polygon` stays the outline alone.
+    holes: List[List[Tuple[float, float]]] = field(default_factory=list)
 
 
 def pour_zones(zones):
@@ -763,6 +814,10 @@ class Footprint:
     # paths agree string for string. '' = the file names no sheet. Appended.
     sheet_name: str = ""
     sheet_file: str = ""
+    # The footprint-level `(zone_connect N)` override, raw (see
+    # Pad.zone_connection, which already carries it for every pad without one
+    # of its own). None = not set. Appended.
+    zone_connection: Optional[str] = None
 
 
 #: The (attr ...) flags `Footprint.attrs` keeps -- the ones the text form and
@@ -817,7 +872,7 @@ class BoardInfo:
     # inside the panel frame -- dropping it outright let the router lay copper
     # straight across the milled gap between the two keyboard halves (85 items).
     board_edge_contours: List[List[Tuple[float, float]]] = field(default_factory=list)
-    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed}
+    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed, name}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
     # None until a step records one. Routers fold this into the .kicad_pro DRC
@@ -929,9 +984,16 @@ class PCBData:
     #: #962: footprint copper the parser does NOT model, named so a grade that
     #: cannot see it says so instead of passing it:
     #: `{'owner_ref', 'kind', 'reason'}`, kind 'logo' (a pad-less footprint's
-    #: copper, which the writer relocates to silk, #146) or 'curve' (bezier).
+    #: copper, which the writer relocates to silk, #146), 'curve' (bezier) or
+    #: 'text' (copper text on a part with pads).
     #: Filled by both parse paths.
     graphic_copper_unmeasured: List[dict] = field(default_factory=list)
+    #: #1279: protected Kelvin sense branches, one per KiCad group named
+    #: `sense:<REF>.<PAD>` (sense_branch.SenseBranch). Separate from `groups`,
+    #: which holds footprint members only (#459). Resolved against the parsed
+    #: tracks and vias by uuid on BOTH parse paths; a branch that cannot be
+    #: protected carries its `reason`.
+    sense_branches: list = field(default_factory=list)
 
     def net_tie_exempt_pad_ids(self, net_id: int):
         """id()s of pads whose keep-out copper of `net_id` may IGNORE.
@@ -1336,12 +1398,26 @@ def _custom_pad_board_extent(pad_text: str, abs_rotation_deg: float,
     corners, 23 um past the copper on awkb_36_split SW16 at 345 deg. Returns
     (0, 0) with no primitives.
     """
+    ext_x = ext_y = 0.0
+    for bx, by, hw in _custom_pad_board_points(pad_text, abs_rotation_deg,
+                                               anchor_x, anchor_y):
+        ext_x = max(ext_x, abs(bx) + hw)
+        ext_y = max(ext_y, abs(by) + hw)
+    return ext_x, ext_y
+
+
+def _custom_pad_board_points(pad_text: str, abs_rotation_deg: float,
+                             anchor_x: float, anchor_y: float):
+    """[(bx, by, hw)]: a custom pad's copper as board-frame points about its
+    anchor, each with the half-width its copper reaches round it -- the
+    primitives' points and strokes plus the anchor shape (a rect's corners, a
+    circle's centre and radius), turned by the pad's ABSOLUTE angle (KiCad
+    negate convention). [] with no primitives."""
     prims = _custom_pad_primitive_points(pad_text)
     if not prims:
-        return 0.0, 0.0
+        return []
     rad = math.radians(-abs_rotation_deg)
     cos_r, sin_r = math.cos(rad), math.sin(rad)
-    ext_x = ext_y = 0.0
     hx, hy = anchor_x / 2.0, anchor_y / 2.0
     if _custom_anchor_kind(pad_text) == 'rect':
         prims = prims + [([(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)], 0.0)]
@@ -1349,13 +1425,37 @@ def _custom_pad_board_extent(pad_text: str, abs_rotation_deg: float,
         # A centre point plus its radius: rotation-invariant, as the circle
         # primitives above. Same radius as the anchor polygon.
         prims = prims + [([(0.0, 0.0)], min(hx, hy))]
-    for pts, hw in prims:
-        for vx, vy in pts:
-            bx = vx * cos_r - vy * sin_r
-            by = vx * sin_r + vy * cos_r
-            ext_x = max(ext_x, abs(bx) + hw)
-            ext_y = max(ext_y, abs(by) + hw)
-    return ext_x, ext_y
+    return [(vx * cos_r - vy * sin_r, vx * sin_r + vy * cos_r, hw)
+            for pts, hw in prims for vx, vy in pts]
+
+
+#: mm the centre of a custom pad's copper must lie off its own centre before
+#: the pad carries `Pad.copper_box`: far above the two parse paths' few-um
+#: disagreement, so both decide alike, and a pad drawn about its anchor keeps
+#: the box it always had.
+COPPER_BOX_OFFSET_MM = 0.01
+
+
+def copper_box_if_offset(x0: float, y0: float, x1: float, y1: float):
+    """`(x0, y0, x1, y1)` -- a custom pad's copper box about its centre --
+    when its centre is more than COPPER_BOX_OFFSET_MM off the pad's, else
+    None (the pad's symmetric `size_x`/`size_y` box is then its copper's)."""
+    if max(abs(x0 + x1), abs(y0 + y1)) / 2.0 > COPPER_BOX_OFFSET_MM:
+        return (x0, y0, x1, y1)
+    return None
+
+
+def _custom_pad_board_box(pad_text: str, abs_rotation_deg: float,
+                          anchor_x: float, anchor_y: float):
+    """The board-frame box `(x0, y0, x1, y1)` of a custom pad's copper about
+    its anchor, side by side -- `_custom_pad_board_extent` takes the farther
+    side on each axis and centres a box twice that on the anchor -- or None
+    with no primitives."""
+    pts = _custom_pad_board_points(pad_text, abs_rotation_deg, anchor_x, anchor_y)
+    if not pts:
+        return None
+    return (min(bx - hw for bx, _by, hw in pts), min(by - hw for _bx, by, hw in pts),
+            max(bx + hw for bx, _by, hw in pts), max(by + hw for _bx, by, hw in pts))
 
 
 def _adaptive_circle_n(r: float, eps: float = 0.001, lo: int = 16,
@@ -2503,6 +2603,42 @@ _GR_CIRCLE_PATTERN = (r'\(gr_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+'
                       + r'\(layer\s+"Edge\.Cuts"\)')
 
 
+#: Work one `parse_kicad_pcb` shares between its extractors, set only while a
+#: parse runs (so a long-lived caller -- the GUI, the writer -- never
+#: accumulates it) and emptied as the parse returns:
+#:   * `live`: {id: text} of the parse's own texts (the board text and its
+#:     `_mask_pad_primitives` copy), the only texts the entries below are kept
+#:     for -- an id is reused only after its object is freed, and these stay
+#:     alive for the whole parse;
+#:   * `masked_from`: {id(masked copy): board text};
+#:   * `ends`: {(id(text), open index): `find_matching_paren`'s answer};
+#:   * `shapes`: {(id(text), block start, tags): each fp shape's (tag, start,
+#:     end) inside that footprint block}.
+#: On a 54 MB board (ddr4_rdimm_tester) the footprint blocks were scanned
+#: three times and every footprint's shapes twice: 4.8 s of an 8.5 s parse.
+_PARSE_MEMO: Optional[dict] = None
+
+
+def _memo_for(content: str) -> Optional[dict]:
+    memo = _PARSE_MEMO
+    if memo is not None and memo['live'].get(id(content)) is content:
+        return memo
+    return None
+
+
+def _block_end(content: str, start: int) -> int:
+    """`find_matching_paren(content, start)`, answered once per parse for the
+    parse's own texts: every footprint-block scan opens the same blocks."""
+    memo = _memo_for(content)
+    if memo is None:
+        return find_matching_paren(content, start)
+    key = (id(content), start)
+    end = memo['ends'].get(key)
+    if end is None:
+        end = memo['ends'][key] = find_matching_paren(content, start)
+    return end
+
+
 @functools.lru_cache(maxsize=2)
 def _mask_pad_primitives(content: str) -> str:
     """Blank out pad ``(primitives ...)`` blocks before board-level graphic scans.
@@ -2541,7 +2677,12 @@ def _mask_pad_primitives(content: str) -> str:
     if not out:
         return content
     out.append(content[pos:])
-    return ''.join(out)
+    masked = ''.join(out)
+    memo = _memo_for(content)
+    if memo is not None:
+        memo['live'][id(masked)] = masked
+        memo['masked_from'][id(masked)] = content
+    return masked
 
 
 @functools.lru_cache(maxsize=2)
@@ -2570,6 +2711,12 @@ def _footprint_blocks_by_key(content: str):
         hash(content)
     except TypeError:              # not a str: cannot be memoised
         return _footprint_blocks_by_key_uncached(content)
+    # A masked copy has the original's blocks: masking replaces each pad's
+    # `(primitives ...)` with a balanced token of the same length, inside the
+    # pad, so no footprint's start, end or reference moves.
+    memo = _memo_for(content)
+    if memo is not None:
+        content = memo['masked_from'].get(id(content), content)
     # Deliberately NOT a try/except around the cached call: that would also
     # catch a TypeError raised INSIDE the scan, re-run the whole whole-file
     # walk, and hide the real bug behind a slow success.
@@ -2589,7 +2736,7 @@ def _footprint_blocks_by_key_uncached(content: str):
     """
     spans, raws = [], []
     for m in re.finditer(r'\(footprint\s+"', content):
-        end = find_matching_paren(content, m.start())
+        end = _block_end(content, m.start())
         spans.append((m.start(), end))
         raws.append(footprint_raw_reference(content[m.start():end]))
     return [(a, b, k) for (a, b), k in
@@ -2623,6 +2770,12 @@ def iter_footprint_shapes(fp_text: str, tags=_FP_SHAPE_TAGS):
     a synthetic 45-degree part) -- a false obstacle AND missing copper at
     once. Do not widen this to "any shape inside a footprint block".
     """
+    for tag, i, j in _footprint_shape_spans(fp_text, tags):
+        yield tag, fp_text[i:j]
+
+
+def _footprint_shape_spans(fp_text: str, tags=_FP_SHAPE_TAGS):
+    """`iter_footprint_shapes`' shapes as `(tag, start, end)` in `fp_text`."""
     for tag in tags:
         needle = '(' + tag
         pos = 0
@@ -2635,8 +2788,30 @@ def iter_footprint_shapes(fp_text: str, tags=_FP_SHAPE_TAGS):
                 pos = i + len(needle)      # token boundary: '(fp_linex'
                 continue
             j = find_matching_paren(fp_text, i)
-            yield tag, fp_text[i:j]
+            yield tag, i, j
             pos = j
+
+
+def _footprint_shapes(content: str, start: int, fp_text: str,
+                      tags=_FP_SHAPE_TAGS):
+    """`iter_footprint_shapes(fp_text, tags)` for the footprint block that
+    starts at `start` in `content` (`fp_text` is its text). During a parse,
+    for the parse's own texts, the shapes are found once and kept as offsets
+    (`_PARSE_MEMO`): the segment and paste-graphic extractors walk the same
+    blocks."""
+    memo = _memo_for(content)
+    if memo is None:
+        yield from iter_footprint_shapes(fp_text, tags)
+        return
+    key = (id(content), start, tags)
+    spans = memo['shapes'].get(key)
+    if spans is None:
+        flat = array('l')
+        for tag, i, j in _footprint_shape_spans(fp_text, tags):
+            flat.extend((tags.index(tag), i, j))
+        spans = memo['shapes'][key] = flat
+    for k in range(0, len(spans), 3):
+        yield tags[spans[k]], fp_text[spans[k + 1]:spans[k + 2]]
 
 
 def footprint_pose(fp_text: str):
@@ -2674,6 +2849,46 @@ def footprint_pose(fp_text: str):
 
 
 _FP_PAD_RE = re.compile(r'\(pad\s+("(?:[^"\\]|\\.)*"|\S+)\s+(\w+)')
+
+#: A pad's number, type and shape, in both spellings KiCad reads (#1290): the
+#: quoted `(pad "1" smd rect` and the older unquoted `(pad 1 smd rect`, which
+#: pcbnew still loads. Group 1 is a quoted number, group 2 a bare one; a bare
+#: token reads as the same token quoted.
+PAD_HEAD_RE = re.compile(r'\(pad\s+(?:"([^"]*)"|([^\s()"]+))\s+(\w+)\s+(\w+)')
+#: A string node's value, quoted or bare (`(pinfunction "GND")`, `(pinfunction
+#: GND)`): group 1 quoted, group 2 bare.
+_STR_OR_BARE = r'(?:"([^"]*)"|([^\s()"]+))'
+#: A net reference whose NAME is bare -- `(net GND)` or `(net 3 GND)` -- as a
+#: footprint written in the older unquoted spelling has it (#1290). Group 1 is
+#: the name; a lone number, `(net 5)`, is an id and never matches.
+_BARE_NET_REF_RE = re.compile(r'\(net\s+(?:\d+\s+)?(?!\d+\))([^\s()"]+)\)')
+
+
+def pad_net_from_text(pad_text: str, name_to_id) -> Tuple[int, str]:
+    """(net_id, net_name) of one pad block's `(net ...)` node, in each spelling
+    pcbnew reads: `(net 3 "GND")`, `(net "GND")` (KiCad 10), and the unquoted
+    `(net 3 GND)` / `(net GND)` of footprints written in the older spelling
+    (#1290). A bare name resolves by NAME through the board's net table, as
+    pcbnew resolves it on a board with no numeric table; the id is the
+    fallback when the table does not know the name. (0, "") when the pad has
+    no net."""
+    m = re.search(r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR, pad_text)
+    if m:
+        return int(m.group(1)), _unescape_kicad_string(m.group(2))
+    m = re.search(r'\(net\s+"%s"\)' % _ESC_STR, pad_text)
+    if m:
+        if name_to_id:
+            return (name_to_id.get(m.group(1), 0),
+                    _unescape_kicad_string(m.group(1)))
+        return 0, ""
+    m = _BARE_NET_REF_RE.search(pad_text)
+    if m:
+        name = m.group(1)
+        if name in (name_to_id or {}):
+            return name_to_id[name], name
+        num = re.match(r'\(net\s+(\d+)\s', m.group(0))
+        return (int(num.group(1)), name) if num else (0, "")
+    return 0, ""
 
 
 def footprint_pad_count(fp_text: str) -> int:
@@ -3953,6 +4168,17 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
                                      name=_unescape_kicad_string(net_name))
             name_to_id[net_name] = synthetic_id
             synthetic_id += 1
+        # #1290: a footprint written in the older unquoted spelling names its
+        # pad's net bare -- `(net GND)` or `(net 3 GND)` -- and pcbnew reads
+        # it as that name. A second pass, so a file with no bare names keeps
+        # exactly the ids above.
+        for m in re.finditer(_BARE_NET_REF_RE, content):
+            net_name = m.group(1)
+            if net_name in name_to_id:
+                continue
+            nets[synthetic_id] = Net(net_id=synthetic_id, name=net_name)
+            name_to_id[net_name] = synthetic_id
+            synthetic_id += 1
     else:
         # Numeric table (KiCad 9, whatever the stamp says): (net <id> "name")
         net_pattern = r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR
@@ -3963,6 +4189,14 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
             # in-file references.
             nets[net_id] = Net(net_id=net_id, name=_unescape_kicad_string(net_name))
             name_to_id[net_name] = net_id
+        # #1290: `(net N NAME)` with the name bare, as the older spelling
+        # writes it. Never overrides an id the quoted pass above declared.
+        for m in re.finditer(r'\(net\s+(\d+)\s+([^\s()"]+)\)', content):
+            net_id = int(m.group(1))
+            if net_id in nets or m.group(2) in name_to_id:
+                continue
+            nets[net_id] = Net(net_id=net_id, name=m.group(2))
+            name_to_id[m.group(2)] = net_id
 
     return nets, name_to_id
 
@@ -4194,7 +4428,7 @@ def iter_footprint_blocks(content: str):
         start = m.start()
         if start < reach:
             continue
-        end = find_matching_paren(content, start)
+        end = _block_end(content, start)
         reach = end
         text = content[start:end]
         spans.append((start, end, text))
@@ -4339,6 +4573,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
         # clearance above, so a PAD's own token cannot be mistaken for one.
         fp_paste_margin, fp_paste_ratio = _paste_overrides(fp_text[:_clr_end],
                                                            _file_version)
+        # Footprint-level zone connection override. KiCad writes it right
+        # after the header (clearance ...); its own bound, because the one
+        # above stops at '(zone', which is a prefix of '(zone_connect'.
+        _zc_child = re.search(r'\((?:pad\s|fp_|zone\s|model\s)', fp_text)
+        fp_zone_connection = zone_connect_from_text(
+            fp_text[:_zc_child.start()] if _zc_child else fp_text)
 
         # Net-tie pad groups: (net_tie_pad_groups "1, 2" "3, 4") -- each quoted
         # string is one comma-separated group of pad numbers this footprint
@@ -4359,7 +4599,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             _tags = re.search(r'\(tags\s+"((?:[^"\\]|\\.)*)"\)', fp_text[:_tag_end])
             if _tags and _unescape_kicad_string(_tags.group(1)).startswith('net tie'):
                 group_strings = [', '.join(
-                    re.findall(r'\(pad\s+"((?:[^"\\]|\\.)*)"', fp_text))]
+                    q or b for q, b in re.findall(
+                        r'\(pad\s+(?:"((?:[^"\\]|\\.)*)"|([^\s()"]+))', fp_text))]
         for grp in group_strings:
             pads_in_group = [p.strip() for p in grp.split(',') if p.strip()]
             if len(pads_in_group) >= 2:
@@ -4404,6 +4645,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             ref_label=ref_label,
             paste_margin=fp_paste_margin,
             paste_margin_ratio=fp_paste_ratio,
+            zone_connection=fp_zone_connection,
             parsed_pose=(fp_x, fp_y, fp_rotation, fp_layer),
             attrs=fp_attrs,
             has_model=fp_has_model,
@@ -4417,16 +4659,17 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
 
         # Simpler approach: find pad starts and extract info
         # Note: pad number can be empty string (pad "") so use [^"]* not [^"]+
-        for pad_match in re.finditer(r'\(pad\s+"([^"]*)"\s+(\w+)\s+(\w+)', fp_text):
+        for pad_match in PAD_HEAD_RE.finditer(fp_text):
             pad_start = pad_match.start()
             # Find end of this pad block (string-aware paren matching).
             pad_end = find_matching_paren(fp_text, pad_start)
 
             pad_text = fp_text[pad_start:pad_end]
 
-            pad_num = pad_match.group(1)
-            pad_type = pad_match.group(2)  # smd, thru_hole, etc.
-            pad_shape = pad_match.group(3)  # circle, rect, roundrect, etc.
+            pad_num = (pad_match.group(1) if pad_match.group(1) is not None
+                       else pad_match.group(2))
+            pad_type = pad_match.group(3)  # smd, thru_hole, etc.
+            pad_shape = pad_match.group(4)  # circle, rect, roundrect, etc.
 
             # Extract pad local position and rotation
             pad_at_match = AT_NODE_RE.search(pad_text)
@@ -4491,6 +4734,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             # A custom pad whose copper IS its anchor (`_custom_copper_is_anchor`)
             # is sized as the anchor rect, with its residual tilt, below.
             custom_resolved = False
+            copper_box = None
             if pad_shape == 'custom' and not _custom_copper_is_anchor(
                     pad_text, size_x, size_y):
                 # pad_rotation: the file's (at ...) angle is the pad's ABSOLUTE
@@ -4498,6 +4742,9 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 # _resolve_pad_rect).
                 ext_bx, ext_by = _custom_pad_board_extent(
                     pad_text, pad_rotation, size_x, size_y)
+                _box = _custom_pad_board_box(pad_text, pad_rotation, size_x, size_y)
+                if _box is not None:
+                    copper_box = copper_box_if_offset(*_box)
                 if ext_bx > 0 or ext_by > 0:
                     # Board-frame symmetric box about the anchor, matching the
                     # pcbnew builder's convention exactly (rect_rotation 0) --
@@ -4517,28 +4764,19 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             if not custom_resolved:
                 size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
-            # Extract net - try KiCad 9 format first, then KiCad 10
-            net_match = re.search(r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR, pad_text)
-            if net_match:
-                net_id = int(net_match.group(1))
-                net_name = _unescape_kicad_string(net_match.group(2))
-            else:
-                # KiCad 10: (net "name") with no numeric ID
-                net_match_v10 = re.search(r'\(net\s+"%s"\)' % _ESC_STR, pad_text)
-                if net_match_v10 and name_to_id:
-                    net_id = name_to_id.get(net_match_v10.group(1), 0)
-                    net_name = _unescape_kicad_string(net_match_v10.group(1))
-                else:
-                    net_id = 0
-                    net_name = ""
+            # Extract net: KiCad 9 `(net N "name")`, KiCad 10 `(net "name")`,
+            # or either one unquoted (#1290).
+            net_id, net_name = pad_net_from_text(pad_text, name_to_id)
 
             # Extract pinfunction
-            pinfunc_match = re.search(r'\(pinfunction\s+"([^"]*)"\)', pad_text)
-            pinfunction = pinfunc_match.group(1) if pinfunc_match else ""
+            pinfunc_match = re.search(r'\(pinfunction\s+%s\)' % _STR_OR_BARE, pad_text)
+            pinfunction = ((pinfunc_match.group(1) if pinfunc_match.group(1) is not None
+                            else pinfunc_match.group(2)) if pinfunc_match else "")
 
             # Extract pintype
-            pintype_match = re.search(r'\(pintype\s+"([^"]*)"\)', pad_text)
-            pintype = pintype_match.group(1) if pintype_match else ""
+            pintype_match = re.search(r'\(pintype\s+%s\)' % _STR_OR_BARE, pad_text)
+            pintype = ((pintype_match.group(1) if pintype_match.group(1) is not None
+                        else pintype_match.group(2)) if pintype_match else "")
 
             # Extract drill size for through-hole pads. Oval/slot drills are
             # (drill oval w h); take max(w, h) so the pad keeps drill>0 (TH)
@@ -4658,6 +4896,9 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 unconnected_layer_mode=unconnected_layer_mode_from_text(pad_text),
                 die_length=_pad_die[0],
                 die_delay=_pad_die[1],
+                copper_box=copper_box,
+                zone_connection=(zone_connect_from_text(pad_text)
+                                 or fp_zone_connection),
             )
 
             footprint.pads.append(pad)
@@ -4944,6 +5185,20 @@ _VIA_PREFIX_RE = re.compile(
 _VIA_NET_RE = re.compile(r'\(net\s+(?:"((?:[^"\\]|\\.)*)"|(\d+))\)')
 _VIA_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"\)')
 _VIA_FREE_RE = re.compile(r'\(free\s+yes\)')
+# KiCad's via type is a bare word of the via block (`(via micro (at ...`,
+# `(via buried ...`); a block with none is a THROUGH via. KiCad 9 writes
+# `blind` for its BLIND_BURIED type; KiCad 10 also writes `buried`.
+_VIA_TYPE_WORDS = ('blind', 'buried', 'micro')
+
+
+def _via_type_from_block(block: str) -> str:
+    """'blind' / 'buried' / 'micro' from a via block's bare words, else
+    'through'. KiCad reads the type from that word alone, never from
+    `(layers ...)`."""
+    if not any(w in block for w in _VIA_TYPE_WORDS):
+        return 'through'
+    return next((w for w in _sexpr_children(block)[1] if w in _VIA_TYPE_WORDS),
+                'through')
 
 
 def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
@@ -4961,7 +5216,7 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
     model. Not an invisible spec -- an invisible barrel, which the router then
     plans tracks through (the hazard PR #534 was written against). Our own
     writer produces that exact shape whenever a net name fails to resolve, and
-    ``net_id_to_name`` has no key 0 on any board.
+    ``net_id_to_name`` has no key 0 on a name-net board.
 
     A token sitting between ``(net ...)`` and ``(uuid ...)`` used to cost the
     SPEC in both dialects for the same positional reason -- the uuid capture
@@ -5015,12 +5270,32 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             # against the net's own copper.
             net_id = name_to_id.get(net_name, 0)
         u = _VIA_UUID_RE.search(block)
+        via_type = _via_type_from_block(block)
+        layers = [geom[4], geom[5]]
+        if via_type == 'through':
+            # KiCad loads a via with no type word as THROUGH and snaps its pair
+            # to F.Cu/B.Cu (probed on pcbnew 10.0.3 and 9.0.6), which is what
+            # build_pcb_data_from_board then reads back. Keeping the file's
+            # pair -- this repo's writer emitted `(layers "B.Cu" "In6.Cu")` for
+            # back-side BGA fanout vias -- made every consumer that reads the
+            # pair model a through via as a blind one, and the two parse paths
+            # disagree (found reviewing #1268). A through via written
+            # `(layers "B.Cu" "F.Cu")` reads F.Cu first too: pcbnew's
+            # TopLayer()/BottomLayer() order is what the GUI path holds.
+            layers = ['F.Cu', 'B.Cu']
+        else:
+            # A typed pair top layer first, as pcbnew reads it back: the two
+            # paths then hold one tuple, which placement Apply's via key
+            # compares (a pair written bottom first was re-created there,
+            # with a new uuid, on every apply).
+            from geometry_utils import _copper_order
+            layers.sort(key=_copper_order)
         via = Via(
             x=float(geom[0]),
             y=float(geom[1]),
             size=float(geom[2]),
             drill=float(geom[3]),
-            layers=[geom[4], geom[5]],
+            layers=layers,
             net_id=net_id,
             uuid=(u.group(1) if u else uuid_or_tstamp(block)),  # KiCad 6: (tstamp ...)
             # Read from the block, not from a capture group and not from a
@@ -5029,6 +5304,7 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             # linear pre-scan) and it could only reach vias that HAD a uuid.
             free=bool(_VIA_FREE_RE.search(block)),
             locked=_track_locked(block),
+            via_type=via_type,
         )
         # Protection spec per via (#489 §8): tenting/covering/plugging/capping/
         # filling were parsed by NOBODY, so a re-placed via lost whatever the
@@ -5603,7 +5879,7 @@ def extract_paste_graphics(content: str) -> List[dict]:
 
         def tf(x, y, _ox=fx, _oy=fy, _or=frot):
             return local_to_global(_ox, _oy, _or, x, y)
-        for tag, blk in iter_footprint_shapes(fp_text):
+        for tag, blk in _footprint_shapes(masked, _fstart, fp_text):
             if 'Paste' in blk:      # most shapes are silk/fab: skip the regexes
                 out.extend(_paste_shape_record(tag, blk, _fkey, tf))
     # Board-level gr_* on a paste layer (rare; owner '').
@@ -5637,9 +5913,8 @@ def _extract_via_protection_attrs(content: str) -> Dict[str, Dict[str, str]]:
 
     ``extract_vias`` no longer needs this -- it reads each via's spec from the
     block it already has, so a UUID-LESS via can carry one now. This stays for
-    the callers that hold board TEXT and no parsed vias
-    (``prevailing_via_protection_in_text``, the GUI's #751 fallback), and those
-    genuinely need the uuid key.
+    the callers that hold board TEXT and no parsed vias (the GUI's #751
+    fallback), and those genuinely need the uuid key.
     """
     if not any(('(' + t) in content for t in VIA_PROTECTION_TOKENS):
         return {}
@@ -5656,17 +5931,21 @@ def _extract_via_protection_attrs(content: str) -> Dict[str, Dict[str, str]]:
 
 
 def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
-    """Warn loudly when a board carries NET-TAGGED copper graphics (#513 item 6).
+    """Say when a board carries NET-TAGGED copper graphics.
 
     KiCad allows a ``gr_line``/``gr_rect``/... on a copper layer to carry a
-    ``(net ...)`` field (card-edge/pogo connector fingers drawn as graphics),
-    but its connectivity engine does NOT treat graphics as electrical
-    connections. These parse as ``Segment(graphic=True)`` and are modelled as
-    obstacles/DRC-real copper ONLY -- the router cannot route TO them and the
-    connectivity model must not credit joins THROUGH them, or a physically
-    open net reads "already fully connected" (opengammakit: 5 nets shipped
-    split with 0 DRC violations). Returns the number of net-tagged graphic
-    segments found. Called by BOTH parse paths (file text and pcbnew build)."""
+    ``(net ...)`` field (card-edge/pogo connector fingers drawn as graphics,
+    a filled copper area). KiCad 10's connectivity conducts through them --
+    measured with pcbnew and kicad-cli 10.0.0: a stroke joins the same-net
+    copper it touches, a filled shape its whole interior -- and so does
+    `check_connected.check_net_connectivity` (`conducting_stroke`). #513
+    item 6 had concluded the opposite and graded such joins open: an
+    inductor pad inside its net's own filled B.Cu gr_poly read
+    open to the grader and to the route step while KiCad called it
+    connected. They parse as ``Segment(graphic=True)``, immovable art (#337)
+    the router routes around and never targets. Returns the number of
+    net-tagged graphic segments found. Called by BOTH parse paths (file text
+    and pcbnew build)."""
     tagged = [s for s in segments
               if getattr(s, 'graphic', False) and getattr(s, 'net_id', 0)]
     if not tagged:
@@ -5675,23 +5954,20 @@ def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
     nets = sorted({id_to_name.get(s.net_id, f'net {s.net_id}') for s in tagged})
     preview = ', '.join(nets[:6]) + (', ...' if len(nets) > 6 else '')
     print(f"WARNING: {len(tagged)} NET-TAGGED copper graphic segment(s) on "
-          f"{len(nets)} net(s) ({preview}). KiCad does NOT treat graphics as "
-          f"electrical connections: they are obstacles only, the router cannot "
-          f"target them, and copper joined only through them is electrically "
-          f"OPEN. Convert them to footprint pads or tracks if they must "
-          f"conduct (#513).")
+          f"{len(nets)} net(s) ({preview}). KiCad conducts through them (a "
+          f"stroke joins the copper it touches, a filled shape its whole "
+          f"interior) and so does our connectivity grading, but they are "
+          f"immovable art the router routes around and never targets (#337).")
     # ...and say what it will look like AFTERWARDS, which is the part people
-    # actually hit (#659). KiCad's own DRC lists such a net as unconnected on
-    # every run, forever: the art is copper to KiCad, so it demands a link to
-    # it, while #337 makes the art immutable so no routing pass may weld to it
-    # or delete it. Measured over 31 recorded boards, this is the DOMINANT
-    # class of "KiCad says open, our grading says connected" -- 36 of 51 such
-    # links on zone-less signal nets. Nobody should spend a retry on it.
-    print(f"         Expect KiCad DRC to keep reporting these {len(nets)} "
-          f"net(s) as UNCONNECTED on every run: no routing pass can fix it "
-          f"(the art is immutable, #337), so this is a board-authoring fix, "
-          f"not a routing failure. It is the single largest source of "
-          f"'KiCad says open, our grading says connected' (#659).")
+    # actually hit (#659): art that touches none of its net's other copper is
+    # an island KiCad's DRC demands a link to, and #337 makes it immutable, so
+    # no routing pass welds to it or deletes it. Measured over 31 recorded
+    # boards it was 36 of 51 KiCad-only open links on zone-less signal nets.
+    # Nobody should spend a retry on it.
+    print(f"         A net whose art touches none of its other copper stays "
+          f"UNCONNECTED in KiCad's DRC on every run: no routing pass welds "
+          f"to art, so joining it is a board-authoring fix, not a routing "
+          f"failure (#659).")
     return len(tagged)
 
 
@@ -6177,7 +6453,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 return local_to_global(_ox, _oy, _or, _x, _y)
 
             _mark_from = len(segments)
-            for tag, blk in iter_footprint_shapes(fp_text):
+            for tag, blk in _footprint_shapes(_gcontent, _fstart, fp_text):
                 layers, w, nid, uuid = _blk_fields(blk)
                 if not layers:
                     continue
@@ -6857,6 +7133,12 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         zone_clearance_val = float(zcl_match.group(1)) if zcl_match else None
         mth_match = re.search(r'\(min_thickness\s+([\d.]+)\)', zone_header)
         zone_min_th = float(mth_match.group(1)) if mth_match else None
+        # #1329: the pad connection is the bare word after connect_pads (none
+        # = KiCad's default, thermal relief); the spoke settings sit inside
+        # (fill ...). The build_pcb_data_from_board twin reads the same three
+        # off pcbnew.
+        zone_pad_conn, zone_th_gap, zone_th_bridge = zone_connection_settings(
+            zone_header)
         # #1164: a teardrop area is (attr (teardrop (type padvia|track_end)))
         # in the header. A pad's own `(teardrops ...)` settings never reach a
         # zone block.
@@ -6895,6 +7177,18 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         if not polygon:
             continue
 
+        # #1279: every later (polygon ...) block of the zone is a hole in its
+        # outline; the (filled_polygon ...) blocks after them are the fill.
+        holes = []
+        _fill_at = zone_content.find('(filled_polygon')
+        for _hm in re.finditer(r'\(polygon\b', zone_content):
+            if _hm.start() <= pts_start or (_fill_at != -1 and _hm.start() > _fill_at):
+                continue
+            _he = find_matching_paren(zone_content, _hm.start())
+            _hole = zone_outline_points(zone_content[_hm.start():_he])
+            if len(_hole) >= 3:
+                holes.append(_hole)
+
         for zl in zone_layers:
             zones.append(Zone(
                 net_id=net_id,
@@ -6907,11 +7201,76 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
                 island_area_min=island_area_min,
                 clearance=zone_clearance_val,
                 min_thickness=zone_min_th,
+                pad_connection=zone_pad_conn,
+                thermal_gap=zone_th_gap,
+                thermal_bridge_width=zone_th_bridge,
                 in_footprint=in_footprint,
-                teardrop=is_teardrop
+                teardrop=is_teardrop,
+                holes=holes,
             ))
 
     return zones
+
+
+def zone_connection_settings(zone_header: str):
+    """(pad_connection, thermal_gap, thermal_bridge_width) of one zone block's
+    header text (#1329) -- see `Zone.pad_connection`. A zone with no
+    `(connect_pads ...)` clause connects by thermal relief, KiCad's default;
+    an absent spoke token reads None (unknown), never a guessed default."""
+    m = re.search(r'\(connect_pads(?:\s+([a-z_]+))?', zone_header)
+    word = (m.group(1) if m else None) or ''
+    pad_connection = {'': 'thermal', 'yes': 'solid', 'no': 'none',
+                      'thru_hole_only': 'thru_hole_only'}.get(word, word)
+    g = re.search(r'\(thermal_gap\s+([\d.]+)\)', zone_header)
+    b = re.search(r'\(thermal_bridge_width\s+([\d.]+)\)', zone_header)
+    return (pad_connection, float(g.group(1)) if g else None,
+            float(b.group(1)) if b else None)
+
+
+#: KiCad's ZONE_CONNECTION enum as a pad or footprint `(zone_connect N)` writes
+#: it, spelled like Zone.pad_connection. INHERITED (-1) is never written.
+ZONE_CONNECT_NAMES = {0: 'none', 1: 'thermal', 2: 'solid', 3: 'thru_hole_only'}
+
+_ZONE_CONNECT_RE = re.compile(r'\(zone_connect\s+(-?\d+)\)')
+
+
+def zone_connect_from_text(text: str) -> Optional[str]:
+    """The `(zone_connect N)` override in a pad block or a footprint header,
+    spelled like Zone.pad_connection; None = not set (inherit)."""
+    m = _ZONE_CONNECT_RE.search(text)
+    return ZONE_CONNECT_NAMES.get(int(m.group(1))) if m else None
+
+
+def zone_connect_from_pcbnew(item) -> Optional[str]:
+    """The pcbnew twin of zone_connect_from_text, for a PAD or a FOOTPRINT:
+    its OWN override (GetLocalZoneConnection), never an inherited one."""
+    try:
+        return ZONE_CONNECT_NAMES.get(int(item.GetLocalZoneConnection()))
+    except Exception:
+        return None
+
+
+def pad_zone_connection(pad, zone) -> str:
+    """How `zone` connects to `pad`: 'none', 'thermal' or 'solid' -- KiCad's
+    resolution (DRC_ENGINE::EvalZoneConnection): the pad's own override, else
+    its footprint's (both already folded into Pad.zone_connection), else the
+    zone's connect_pads (thermal when the zone does not say). Thermal-for-PTH
+    ('thru_hole_only') gives a plated through-hole pad a thermal relief and
+    every other pad a solid joint. A `zone_connection` custom rule in the
+    .kicad_dru (which KiCad ranks between the pad's and the footprint's
+    override) is not read."""
+    mode = (getattr(pad, 'zone_connection', None)
+            or getattr(zone, 'pad_connection', None) or 'thermal')
+    if mode == 'thru_hole_only':
+        return 'thermal' if getattr(pad, 'pad_type', '') == 'thru_hole' else 'solid'
+    return mode
+
+
+def pad_joins_zone(pad, zone) -> bool:
+    """False when KiCad keeps `zone`'s fill off this pad of its own net
+    (connection 'none'): the pour then pulls back by its clearance, and the
+    pad reaches the net only through a track, a via or another pad."""
+    return pad_zone_connection(pad, zone) != 'none'
 
 
 def extract_keepouts(content: str) -> List[dict]:
@@ -6921,7 +7280,10 @@ def extract_keepouts(content: str) -> List[dict]:
     — e.g. an antenna-flange RF clearance. Returns a list of dicts:
         {polygon: [(x,y),...], layers: set(layer_names),
          tracks_allowed: bool, vias_allowed: bool, copper_pour_allowed: bool,
-         in_footprint: bool}
+         in_footprint: bool, name: str}
+    `name` is the area's `(name ...)` ('' when it has none): a .kicad_dru
+    condition names the area it restricts (`A.intersectsArea('corridor')`),
+    and an area that allows everything can still be one (net_keepouts).
     """
     keepouts = []
     for zc, in_footprint in _iter_zone_blocks(content):
@@ -6985,11 +7347,30 @@ def extract_keepouts(content: str) -> List[dict]:
             search = p_end + 1
         if not polys:
             continue
+        # The zone's own (name "..."): the first one in the block -- no
+        # sub-clause of a zone carries a (name ...) of its own.
+        nm = re.search(r'\(name\s+"((?:[^"\\]|\\.)*)"\s*\)', zc)
         keepouts.append({'polygon': polys[0], 'holes': polys[1:], 'layers': layers,
                          'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed,
                          'copper_pour_allowed': copper_pour_allowed,
-                         'in_footprint': in_footprint})
+                         'in_footprint': in_footprint,
+                         'name': nm.group(1).replace('\\"', '"') if nm else ''})
     return keepouts
+
+
+def release_text_caches() -> None:
+    """Drop the text-keyed memos (`_mask_pad_primitives`,
+    `_footprint_blocks_by_key`, `_footprint_edge_points_by_ref`).
+
+    They exist so ONE parse asks each whole-file question once, and they are
+    keyed on the board's whole text: kept past the parse they hold that text
+    and a masked copy of it, 216 MB for a 54 MB board (ddr4_rdimm_tester,
+    whose one non-ASCII character makes the text two bytes a character), and
+    with `maxsize=2` twice that. `parse_kicad_pcb` calls this as it returns;
+    a writer that scans a board's text calls it when done."""
+    _mask_pad_primitives.cache_clear()
+    _footprint_blocks_by_key_cached.cache_clear()
+    _footprint_edge_points_by_ref_cached.cache_clear()
 
 
 def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
@@ -7005,6 +7386,20 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     Returns:
         PCBData object containing all parsed data
     """
+    global _PARSE_MEMO
+    outer = _PARSE_MEMO is None
+    if outer:
+        _PARSE_MEMO = {'live': {}, 'masked_from': {}, 'ends': {}, 'shapes': {}}
+    try:
+        return _parse_kicad_pcb(filepath, guide_layer, keepout_layer)
+    finally:
+        if outer:
+            _PARSE_MEMO = None
+        release_text_caches()
+
+
+def _parse_kicad_pcb(filepath: str, guide_layer: str,
+                     keepout_layer: str) -> PCBData:
     content = read_board_text(filepath)
 
     kicad_version = detect_kicad_version(content)
@@ -7018,6 +7413,8 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     # A file from before 6.0's arc format: rewrite its center/angle arcs as
     # start/mid/end on this ANALYSIS copy, the form every reader below matches.
     content = strip_bare_shape_locks(upgrade_legacy_arcs(content, kicad_version))
+    if _PARSE_MEMO is not None:
+        _PARSE_MEMO['live'][id(content)] = content
 
     # Extract components in order
     board_info = extract_layers(content)
@@ -7084,7 +7481,7 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         footprints, board_info, extract_paste_graphics(content))
     graphic_copper_unmeasured = extract_unmodelled_footprint_copper(content)
 
-    return PCBData(
+    pcb = PCBData(
         board_info=board_info,
         nets=nets,
         footprints=footprints,
@@ -7103,6 +7500,11 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         paste_apertures=paste_apertures,
         graphic_copper_unmeasured=graphic_copper_unmeasured,
     )
+    # #1279: KiCad groups named `sense:<REF>.<PAD>` declare protected Kelvin
+    # sense branches; resolved against the copper parsed above.
+    from sense_branch import sense_groups_from_text, resolve_sense_branches
+    pcb.sense_branches = resolve_sense_branches(pcb, sense_groups_from_text(content))
+    return pcb
 
 
 def propagate_via_cluster_nets(content: str, vias, segments, footprints, zones,
@@ -7570,42 +7972,56 @@ def pcbnew_copper_layer_names() -> Dict[int, str]:
     return names
 
 
-def build_pcb_data_from_board(board, guide_layer: str = "User.1",
-                              keepout_layer: str = "User.2") -> PCBData:
-    """Build PCBData directly from a pcbnew board object (no file I/O).
-
-    This is much faster than parse_kicad_pcb() since it reads from pcbnew's
-    in-memory data structures rather than parsing the file from disk.
-
-    Args:
-        board: A pcbnew.BOARD object (from pcbnew.GetBoard())
-
-    Returns:
-        PCBData object containing all routing-relevant data
-    """
+def pcbnew_via_type(via) -> str:
+    """A pcbnew PCB_VIA's type in Via.via_type's spelling, for parity with
+    the text parser's `_via_type_from_block`. KiCad 9 has one BLIND_BURIED
+    type (written `blind`); KiCad 10 splits it into BLIND and BURIED. A wrapper
+    that cannot answer falls back to the layer pair, which pcbnew normalises to
+    F.Cu/B.Cu for every through via."""
     import pcbnew
+    try:
+        vt = via.GetViaType()
+        for attr, name in (('VIATYPE_THROUGH', 'through'),
+                           ('VIATYPE_MICROVIA', 'micro'),
+                           ('VIATYPE_BURIED', 'buried'),
+                           ('VIATYPE_BLIND', 'blind'),
+                           ('VIATYPE_BLIND_BURIED', 'blind')):
+            const = getattr(pcbnew, attr, None)
+            if const is not None and vt == const:
+                return name
+    except Exception:                                            # noqa: BLE001
+        pass
+    try:
+        if {via.TopLayer(), via.BottomLayer()} == {pcbnew.F_Cu, pcbnew.B_Cu}:
+            return 'through'
+        return 'blind'
+    except Exception:                                            # noqa: BLE001
+        return 'through'
 
-    def to_mm(val):
-        return pcbnew.ToMM(val)
 
-    # #751: whether the live objects can be asked for their protection spec is
-    # a property of the WRAPPER, so it is decided once, on the first via (a
-    # real PCB_VIA is needed to catch the opaque-getter half of the failure).
-    # [] = not resolved yet; {} = the accessors work and no fallback is needed.
-    _text_specs_memo = []
+def pcbnew_viatype_value(via_type):
+    """The pcbnew VIATYPE constant for a Via.via_type, or None for a through
+    via (a new PCB_VIA is already THROUGH). The reverse of pcbnew_via_type:
+    KiCad 10 has BLIND and BURIED, KiCad 9 one BLIND_BURIED for both."""
+    import pcbnew
+    if via_type == 'micro':
+        return getattr(pcbnew, 'VIATYPE_MICROVIA', None)
+    if via_type in ('blind', 'buried'):
+        own = getattr(pcbnew, 'VIATYPE_BURIED' if via_type == 'buried'
+                      else 'VIATYPE_BLIND', None)
+        return own if own is not None else getattr(pcbnew, 'VIATYPE_BLIND_BURIED', None)
+    return None
 
-    def _via_text_specs(via):
-        if not _text_specs_memo:
-            _text_specs_memo.append(
-                {} if pcbnew_protection_accessors_usable(via)
-                else via_protection_attrs_from_board_file(board))
-        return _text_specs_memo[0]
 
-    # --- Build layer mappings ---
-    # copper_id_to_name: COPPER ONLY -- the copper-layer enumeration and the
-    # pad '*.Cu' wildcard collapse iterate this; mixing non-copper tokens in
-    # broke both. id_to_name (below) adds the non-copper tokens for
-    # get_layer_name.
+def pcbnew_layer_maps(board):
+    """(copper_id_to_name, id_to_name, get_layer_name) for a live pcbnew board.
+
+    copper_id_to_name: COPPER ONLY -- the copper-layer enumeration and the pad
+    '*.Cu' wildcard collapse iterate this; mixing non-copper tokens in broke
+    both. id_to_name adds the non-copper tokens for get_layer_name. Shared by
+    build_pcb_data_from_board and pcbnew_track_copper (#1279), so a track's
+    layer is named the same way wherever the live board is read."""
+    import pcbnew
     copper_id_to_name = pcbnew_copper_layer_names()
     id_to_name = dict(copper_id_to_name)
 
@@ -7641,6 +8057,368 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             token = None
         return token if isinstance(token, str) and token \
             else board.GetLayerName(layer_id)
+
+    return copper_id_to_name, id_to_name, get_layer_name
+
+
+def pcbnew_track_copper(board, to_mm=None, get_layer_name=None, owners=None):
+    """([Segment], [Via]) for a live pcbnew board's tracks, arcs and vias --
+    the ONE reader of live track copper (#1279).
+
+    build_pcb_data_from_board builds its copper with it, and the GUI's
+    pre-route re-sync (resync_live_copper) replaces a dialog's copper with it,
+    so every field the parse paths agree on -- uuid (what a `sense:` group's
+    members resolve against), the KiCad lock (#521), arc pieces chorded like
+    the text parser's, via type (#1268) and protection spec (#489) -- reaches
+    the router whichever way the board was read. The re-sync used to build its
+    own Segment/Via with a subset of the fields and no arcs at all, so a GUI
+    route after the first sync saw no lock, no uuid and no arc copper.
+
+    `owners`, when a dict, is filled with {id(Segment or Via): the pcbnew item
+    it was read from} -- every piece of an arc maps to its one PCB_ARC -- for
+    a caller that compares live items with parsed copper (the placement
+    Apply keeps an unchanged live item, #1279).
+    """
+    import pcbnew
+    if to_mm is None:
+        to_mm = pcbnew.ToMM
+    if get_layer_name is None:
+        get_layer_name = pcbnew_layer_maps(board)[2]
+
+    # #751: whether the live objects can be asked for their protection spec is
+    # a property of the WRAPPER, so it is decided once, on the first via (a
+    # real PCB_VIA is needed to catch the opaque-getter half of the failure).
+    # [] = not resolved yet; {} = the accessors work and no fallback is needed.
+    _text_specs_memo = []
+
+    def _via_text_specs(via):
+        if not _text_specs_memo:
+            _text_specs_memo.append(
+                {} if pcbnew_protection_accessors_usable(via)
+                else via_protection_attrs_from_board_file(board))
+        return _text_specs_memo[0]
+
+    segments = []
+    vias = []
+    for track in board.GetTracks():
+        track_class = track.GetClass()
+        if track_class == "PCB_TRACK":
+            seg = Segment(
+                start_x=to_mm(track.GetStart().x),
+                start_y=to_mm(track.GetStart().y),
+                end_x=to_mm(track.GetEnd().x),
+                end_y=to_mm(track.GetEnd().y),
+                width=to_mm(track.GetWidth()),
+                layer=get_layer_name(track.GetLayer()),
+                net_id=track.GetNetCode(),
+                uuid=_item_uuid(track),
+                locked=bool(track.IsLocked()),
+            )
+            segments.append(seg)
+            if owners is not None:
+                owners[id(seg)] = track
+        elif track_class == "PCB_ARC":
+            # Arc tracks: linearize with the same helper (and the same three
+            # defining points) the text parser uses, so GUI and CLI see the
+            # identical copper graph. Skipping them left the GUI's obstacle /
+            # connectivity model blind to arc-routed copper (thunderscope:
+            # 19,520 file-only segments in validate-board).
+            try:
+                s = (to_mm(track.GetStart().x), to_mm(track.GetStart().y))
+                a_mid = (to_mm(track.GetMid().x), to_mm(track.GetMid().y))
+                e = (to_mm(track.GetEnd().x), to_mm(track.GetEnd().y))
+            except Exception:
+                continue
+            for p0, p1 in _arc_to_segments(s, a_mid, e):
+                segments.append(Segment(
+                    start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                    width=to_mm(track.GetWidth()),
+                    layer=get_layer_name(track.GetLayer()),
+                    net_id=track.GetNetCode(),
+                    uuid=_item_uuid(track),
+                    locked=bool(track.IsLocked()),
+                ))
+                if owners is not None:
+                    owners[id(segments[-1])] = track
+        elif track_class == "PCB_VIA":
+            # GetFrontWidth() FIRST (#605). KiCad 9/10 padstack vias can
+            # refuse layerless GetWidth() with 'result with an error set'
+            # (seen on vias ADDED in-session by the plugin, then re-synced),
+            # and on KiCad 10 a bare PCB_VIA::GetWidth() trips a wxASSERT
+            # ("GetWidth called without a layer argument") for EVERY via. The
+            # assert does NOT raise, so asking GetWidth() first printed one
+            # stderr line per via and then fell through to the same answer:
+            # 34 of the 99 sets-21-27 boards logged 70-90 lines of it, in the
+            # same stream as warnings that matter. GetFrontWidth() is the
+            # stable outer-annulus accessor; GetWidth stays as the fallback
+            # for builds that lack it.
+            try:
+                _vw = track.GetFrontWidth()
+            except Exception:
+                _vw = track.GetWidth()
+            v = Via(
+                x=to_mm(track.GetPosition().x),
+                y=to_mm(track.GetPosition().y),
+                size=to_mm(_vw),
+                drill=to_mm(track.GetDrill()),
+                layers=[get_layer_name(track.TopLayer()), get_layer_name(track.BottomLayer())],
+                net_id=track.GetNetCode(),
+                # Parity with the text parser's protection spec (#489 s8) --
+                # via the #751 resolver, so a pcbnew whose SWIG wrapper omits
+                # the protection enums reads the spec from the board's FILE
+                # instead of reporting {} for every via and silently dropping
+                # the GUI half of the round trip.
+                tenting_attrs=pcbnew_via_protection_attrs(
+                    track, _via_text_specs(track)),
+                uuid=_item_uuid(track),
+                locked=bool(track.IsLocked()),
+                via_type=pcbnew_via_type(track),
+            )
+            vias.append(v)
+            if owners is not None:
+                owners[id(v)] = track
+    return segments, vias
+
+
+def pcbnew_live_footprints(board):
+    """(live footprints, raw references, PCBData keys) for a live board.
+
+    Names are resolved for the WHOLE board first, exactly as the text parser
+    does, and then zipped back on. Two blocks can claim one reference (#726),
+    and the ordinal that separates them is a property of the ordered list,
+    not of any one footprint.
+
+    `board.GetFootprints()` returns KiCad's own footprint list. Measured on
+    KiCad 10.0.0 it iterates in FILE ORDER on all 22 tracked corpus boards --
+    the uuid sequence and the reference sequence both match a text scan
+    exactly -- which is what lets the two parse paths compute the same
+    ordinal independently. That is an empirical fact about one release, not a
+    documented contract, so `tests/gui_parity/test_726_parse_path_parity.py`
+    pins it and says what to do if a newer KiCad breaks it. Shared by
+    build_pcb_data_from_board and resync_live_copper, so a graphic's
+    `owner_ref` is the same key on both."""
+    live_fps = list(board.GetFootprints())
+    _raw_refs = []
+    for _fp in live_fps:
+        _r = _fp.GetReference()
+        if not _r:
+            # Reference-less footprint: key by uuid, mirroring the text parser
+            # (see footprint_raw_reference) so both models keep every such
+            # footprint (NPTH drill dots) instead of collapsing them onto ''.
+            try:
+                _r = "#" + _fp.m_Uuid.AsString()
+            except Exception:
+                _r = "?"
+        _raw_refs.append(_r)
+    return live_fps, _raw_refs, disambiguate_references(_raw_refs)
+
+
+def pcbnew_graphic_copper(board, live_fps, live_keys, get_layer_name, to_mm):
+    """[Segment(graphic=True)] for a live board's copper GRAPHICS: board
+    drawings (#337) and the copper a footprint's land pattern draws (#908).
+
+    Parity with the text parser's gr_line/gr_arc pass: PCB_SHAPE lines/arcs
+    on copper layers render as real copper (obstacles + DRC), tagged
+    graphic=True (immutable input art -- never ripped/pruned/stripped).
+    #908: and the same for copper drawn INSIDE a footprint. `GetDrawings()`
+    excludes footprint children, so this path was blind to an SOT89 tab or a
+    PCB antenna exactly as the text path was. One emitter, two feeders --
+    board drawings and `fp.GraphicalItems()` -- because the alternative is a
+    second hand-written copy that drifts (the tree already carries four
+    disagreeing answers to the same question for Edge.Cuts).
+
+    THE one emitter of live graphic copper: build_pcb_data_from_board builds
+    with it, and the GUI's pre-step re-sync (resync_live_copper) re-reads it,
+    so copper art follows a footprint moved in the session (the re-sync used
+    to keep the graphics built when the dialog opened -- a phantom obstacle
+    where the part had been and nothing where its copper is).
+    """
+    segments = []
+    try:
+        import pcbnew as _pcbnew_g
+        # The CAPABILITY probe is scoped to itself, so a real bug in the walk
+        # is not mistaken for "older pcbnew". Note the honest limit: the
+        # board-level #337 pass this shares still has its own
+        # `except Exception: pass` at the end (best-effort on old APIs), so a
+        # raise inside the walk is caught THERE and the board comes back with
+        # no graphic copper. Narrowing that outer guard is a #337 change, not
+        # a #908 one; what is fixed here is the guard that was three lines
+        # wide and swallowed the footprint walk on its own.
+        _fp_graphics_ok = True
+        try:
+            if live_fps:
+                live_fps[0].GraphicalItems()
+                live_fps[0].Pads()
+        except Exception:
+            _fp_graphics_ok = False     # older pcbnew: no GraphicalItems()
+        # A generator, not a list: on a big board this walk visits every
+        # graphical item of every pad-bearing footprint, and materialising the
+        # pairs first only adds allocation on top of the SWIG enumeration that
+        # is the real cost. That cost is inherent -- copper graphics cannot be
+        # found without looking at them -- and it is MEASURED, not waved away:
+        # +14.5..57% median across esp_prog / splitflap_driver / tigard /
+        # watchy, two independent paired passes with a fresh process per
+        # parse and the arms alternated (KiCad 10.0.0 python). The direction
+        # is robust; the magnitude is not tight, and the biggest number is on
+        # the smallest board, where the fixed cost dominates. The text path
+        # had a duplicate whole-file walk to reclaim with a memo; this path
+        # has none, so the cost stands.
+        def _fp_shapes():
+            if not _fp_graphics_ok:
+                return
+            for _ofp, _okey in zip(live_fps, live_keys):
+                # NPTH pads are not copper (see footprint_pad_count), so the
+                # two parse paths must count pads the same way or a mounting
+                # hole would make a logo "functional" on one side only.
+                _npads = 0
+                for _pd in _ofp.Pads():
+                    try:
+                        if _pd.GetAttribute() == _pcbnew_g.PAD_ATTRIB_NPTH:
+                            continue
+                    except Exception:
+                        pass
+                    _npads += 1
+                if not footprint_copper_is_functional(_npads):
+                    continue        # pad-less logo footprint: see the text path
+                for _g in _ofp.GraphicalItems():
+                    yield _g, _okey
+        import itertools as _it
+        for _d, _owner in _it.chain(((_x, "") for _x in board.GetDrawings()),
+                                    _fp_shapes()):
+            # FP_SHAPE is KiCad 6/7's class for a footprint-embedded shape;
+            # KiCad 8+ unified them onto PCB_SHAPE. `GraphicalItems()` also
+            # yields text, which this pass must not touch.
+            if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT", "FP_SHAPE"):
+                continue
+            # EVERY copper layer of the shape, not just GetLayer() (#659
+            # follow-up): KiCad writes a multi-layer graphic as the plural
+            # (layers "F.Cu" "F.Mask") / ("F.Cu" "B.Cu"), and the text parser
+            # now models one copy per copper layer -- the same rule the
+            # multi-layer ZONE fix already follows. GetLayer() returns only
+            # the primary layer, so a two-sided graphic would be copper on
+            # one side in the GUI and both in the CLI.
+            _lns = []
+            try:
+                for _lid in _d.GetLayerSet().Seq():
+                    _n2 = get_layer_name(_lid)
+                    if (_n2 or '').endswith('.Cu') and _n2 not in _lns:
+                        _lns.append(_n2)
+            except Exception:
+                pass        # older pcbnew: no LayerSet on a shape
+            if not _lns:
+                _n2 = get_layer_name(_d.GetLayer())
+                if (_n2 or '').endswith('.Cu'):
+                    _lns = [_n2]
+            if not _lns:
+                continue
+            try:
+                _shape = _d.GetShape()
+                _w = to_mm(_d.GetWidth())
+            except Exception:
+                continue
+            # #962 Segment.graphic_filled: pcbnew already applied the loader's
+            # no-token rule, so its answer is the text path's `_shape_filled`.
+            try:
+                _filled_b = bool(_d.IsAnyFill())
+            except AttributeError:
+                try:
+                    _filled_b = bool(_d.IsFilled())
+                except Exception:
+                    _filled_b = False
+            _nid = _d.GetNetCode() if hasattr(_d, 'GetNetCode') else 0
+            _POLY = getattr(_pcbnew_g, 'SHAPE_T_POLY', -10)
+            _RECT = getattr(_pcbnew_g, 'SHAPE_T_RECT', -11)
+            _CIRC = getattr(_pcbnew_g, 'SHAPE_T_CIRCLE', -12)
+
+            for _ln in _lns:
+                def _emit_outline_b(pts, ew, kind='poly', circle=None):
+                    seq = list(pts) + [pts[0]]
+                    _ring = (tuple((float(x), float(y)) for x, y in pts)
+                             if _filled_b else None)          # #1181
+                    for _a, _b in zip(seq, seq[1:]):
+                        if _a == _b:
+                            continue        # see _emit_outline (text path)
+                        segments.append(Segment(
+                            start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
+                            width=ew, layer=_ln, net_id=_nid, graphic=True,
+                            owner_ref=_owner, drawn_width=max(0.0, _w),
+                            graphic_kind=kind, graphic_circle=circle,
+                            graphic_filled=_filled_b, graphic_ring=_ring))
+
+                if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
+                    if _w <= 0:
+                        continue
+                    segments.append(Segment(
+                        start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
+                        end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
+                        width=_w, layer=_ln, net_id=_nid, graphic=True,
+                        owner_ref=_owner, drawn_width=_w, graphic_kind='line'))
+                elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
+                    if _w <= 0:
+                        continue
+                    try:
+                        _s0 = (to_mm(_d.GetStart().x), to_mm(_d.GetStart().y))
+                        _m0 = (to_mm(_d.GetArcMid().x), to_mm(_d.GetArcMid().y))
+                        _e0 = (to_mm(_d.GetEnd().x), to_mm(_d.GetEnd().y))
+                    except Exception:
+                        continue
+                    for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
+                        segments.append(Segment(
+                            start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
+                            width=_w, layer=_ln, net_id=_nid, graphic=True,
+                            owner_ref=_owner, drawn_width=_w, graphic_kind='arc'))
+                elif _shape in (_POLY, _RECT, _CIRC):
+                    # FILLED copper areas (#337): outline as graphic segments (parity
+                    # with the text parser). Filled shapes may have 0 stroke width.
+                    _ow = _w if _w > 0 else defaults.TRACK_WIDTH
+                    try:
+                        if _shape == _POLY:
+                            _pts = _pcbnew_chain_points(
+                                _d.GetPolyShape().Outline(0), to_mm)
+                            if len(_pts) >= 2:
+                                _emit_outline_b(_pts, _ow)
+                        elif _shape == _RECT:
+                            _s0 = _d.GetStart(); _e0 = _d.GetEnd()
+                            _x1, _y1 = to_mm(_s0.x), to_mm(_s0.y)
+                            _x2, _y2 = to_mm(_e0.x), to_mm(_e0.y)
+                            _emit_outline_b([(_x1, _y1), (_x2, _y1),
+                                             (_x2, _y2), (_x1, _y2)], _ow,
+                                            kind='rect')
+                        elif _shape == _CIRC:
+                            _c = _d.GetCenter(); _cx, _cy = to_mm(_c.x), to_mm(_c.y)
+                            _r = to_mm(_d.GetRadius())
+                            _emit_outline_b(
+                                [(_cx + _r * math.cos(k * math.pi / 8),
+                                  _cy + _r * math.sin(k * math.pi / 8))
+                                 for k in range(16)], _ow,
+                                kind='circle', circle=(_cx, _cy, _r))
+                    except Exception:
+                        pass
+    except Exception:
+        pass  # older pcbnew APIs: best-effort
+    return segments
+
+
+def build_pcb_data_from_board(board, guide_layer: str = "User.1",
+                              keepout_layer: str = "User.2") -> PCBData:
+    """Build PCBData directly from a pcbnew board object (no file I/O).
+
+    This is much faster than parse_kicad_pcb() since it reads from pcbnew's
+    in-memory data structures rather than parsing the file from disk.
+
+    Args:
+        board: A pcbnew.BOARD object (from pcbnew.GetBoard())
+
+    Returns:
+        PCBData object containing all routing-relevant data
+    """
+    import pcbnew
+
+    def to_mm(val):
+        return pcbnew.ToMM(val)
+
+    # --- Build layer mappings ---
+    copper_id_to_name, id_to_name, get_layer_name = pcbnew_layer_maps(board)
 
     # --- Pad shape mapping ---
     pad_shape_map = {}
@@ -7892,43 +8670,26 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     pads_by_net: Dict[int, List[Pad]] = {}
 
     # Names are resolved for the WHOLE board first, exactly as the text parser
-    # does, and then zipped back on. Two blocks can claim one reference (#726),
-    # and the ordinal that separates them is a property of the ordered list,
-    # not of any one footprint.
-    #
-    # `board.GetFootprints()` returns KiCad's own footprint list. Measured on
-    # KiCad 10.0.0 it iterates in FILE ORDER on all 22 tracked corpus boards --
-    # the uuid sequence and the reference sequence both match a text scan
-    # exactly -- which is what lets the two parse paths compute the same
-    # ordinal independently. That is an empirical fact about one release, not a
-    # documented contract, so `tests/gui_parity/test_726_parse_path_parity.py`
-    # pins it and says what to do if a newer KiCad breaks it.
-    _live_fps = list(board.GetFootprints())
-    _raw_refs = []
-    for _fp in _live_fps:
-        _r = _fp.GetReference()
-        if not _r:
-            # Reference-less footprint: key by uuid, mirroring the text parser
-            # (see footprint_raw_reference) so both models keep every such
-            # footprint (NPTH drill dots) instead of collapsing them onto ''.
-            try:
-                _r = "#" + _fp.m_Uuid.AsString()
-            except Exception:
-                _r = "?"
-        _raw_refs.append(_r)
+    # does, and then zipped back on (#726; see pcbnew_live_footprints).
+    _live_fps, _raw_refs, _live_keys = pcbnew_live_footprints(board)
     _dups_live = duplicate_reference_counts(_raw_refs)
-    _live_keys = disambiguate_references(_raw_refs)
 
     for fp, reference in zip(_live_fps, _live_keys):
 
-        # Get footprint name (library:footprint)
+        # Get footprint name (library:footprint), as the file parser reads it
+        # from `(footprint "lib:item" ...)`: the item alone made a classifier
+        # table that matches the library name (`Connector_DIN:`, a `switches`
+        # library) class a part one way on the CLI and another in the GUI.
         try:
-            fp_name = fp.GetFPID().GetUniStringLibItemName()
-        except AttributeError:
+            fp_name = str(fp.GetFPIDAsString())
+        except Exception:
             try:
-                fp_name = str(fp.GetFPID().GetLibItemName())
-            except Exception:
-                fp_name = ""
+                fp_name = fp.GetFPID().GetUniStringLibItemName()
+            except AttributeError:
+                try:
+                    fp_name = str(fp.GetFPID().GetLibItemName())
+                except Exception:
+                    fp_name = ""
 
         # Position
         pos = fp.GetPosition()
@@ -8017,6 +8778,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         # header read. pcbnew 10 returns None when unset (probed), else IU / a
         # ratio.
         fp_paste_margin, fp_paste_ratio = _pcbnew_paste_overrides(fp, to_mm)
+        # Footprint-level zone connection override, parity with the text read.
+        fp_zone_connection = zone_connect_from_pcbnew(fp)
 
         # Net-tie pad groups — parity with the text parser (Kelvin shunts /
         # net-tie parts; KiCad exempts the grouped pads' mutual clearance).
@@ -8148,6 +8911,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             ref_label=fp_ref_label,
             paste_margin=fp_paste_margin,
             paste_margin_ratio=fp_paste_ratio,
+            zone_connection=fp_zone_connection,
             parsed_pose=(fp_x, fp_y, fp_rotation, fp_layer),
             attrs=fp_attrs,
             has_model=fp_has_model,
@@ -8250,6 +9014,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             # frame - for a rotated pad the anchor's long side leaks into the wrong
             # board axis and over-widens the pad (e.g. U9 QFN: narrow 0.28 -> 0.71).
             pad_polygons = None
+            copper_box = None
             if shape == 'custom':
                 # A pad whose copper IS its anchor is the anchor rect with its
                 # residual tilt, as on the text path (`_custom_copper_is_anchor`);
@@ -8301,11 +9066,19 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                         size_y = 2 * max(abs(to_mm(_eb.GetTop()) - global_y),
                                          abs(to_mm(_eb.GetBottom()) - global_y))
                         rect_rotation = 0.0
+                        copper_box = copper_box_if_offset(
+                            to_mm(_eb.GetLeft()) - global_x, to_mm(_eb.GetTop()) - global_y,
+                            to_mm(_eb.GetRight()) - global_x, to_mm(_eb.GetBottom()) - global_y)
                     except Exception:
                         if pad_polygons:
                             size_x = 2 * max(abs(x - global_x) for _r in pad_polygons for x, _ in _r)
                             size_y = 2 * max(abs(y - global_y) for _r in pad_polygons for _, y in _r)
                             rect_rotation = 0.0
+                            copper_box = copper_box_if_offset(
+                                min(x for _r in pad_polygons for x, _ in _r) - global_x,
+                                min(y for _r in pad_polygons for _, y in _r) - global_y,
+                                max(x for _r in pad_polygons for x, _ in _r) - global_x,
+                                max(y for _r in pad_polygons for _, y in _r) - global_y)
             else:
                 # Resolve the pad rectangle into board space (keyed on the absolute
                 # total rotation, not pad_rotation alone — see the text-parser path).
@@ -8429,6 +9202,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 unconnected_layer_mode=unconnected_layer_mode_from_pcbnew(pad),
                 die_length=_pad_die[0],
                 die_delay=_pad_die[1],
+                copper_box=copper_box,
+                zone_connection=(zone_connect_from_pcbnew(pad)
+                                 or fp_zone_connection),
             )
 
             footprint.pads.append(pad_obj)
@@ -8465,254 +9241,21 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
               f"moved (#829)")
 
     # --- Extract segments and vias (single pass over tracks) ---
-    segments = []
-    vias = []
-    for track in board.GetTracks():
-        track_class = track.GetClass()
-        if track_class == "PCB_TRACK":
-            seg = Segment(
-                start_x=to_mm(track.GetStart().x),
-                start_y=to_mm(track.GetStart().y),
-                end_x=to_mm(track.GetEnd().x),
-                end_y=to_mm(track.GetEnd().y),
-                width=to_mm(track.GetWidth()),
-                layer=get_layer_name(track.GetLayer()),
-                net_id=track.GetNetCode(),
-                locked=bool(track.IsLocked()),
-            )
-            segments.append(seg)
-        elif track_class == "PCB_ARC":
-            # Arc tracks: linearize with the same helper (and the same three
-            # defining points) the text parser uses, so GUI and CLI see the
-            # identical copper graph. Skipping them left the GUI's obstacle /
-            # connectivity model blind to arc-routed copper (thunderscope:
-            # 19,520 file-only segments in validate-board).
-            try:
-                s = (to_mm(track.GetStart().x), to_mm(track.GetStart().y))
-                a_mid = (to_mm(track.GetMid().x), to_mm(track.GetMid().y))
-                e = (to_mm(track.GetEnd().x), to_mm(track.GetEnd().y))
-            except Exception:
-                continue
-            for p0, p1 in _arc_to_segments(s, a_mid, e):
-                segments.append(Segment(
-                    start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
-                    width=to_mm(track.GetWidth()),
-                    layer=get_layer_name(track.GetLayer()),
-                    net_id=track.GetNetCode(),
-                    locked=bool(track.IsLocked()),
-                ))
-        elif track_class == "PCB_VIA":
-            # GetFrontWidth() FIRST (#605). KiCad 9/10 padstack vias can
-            # refuse layerless GetWidth() with 'result with an error set'
-            # (seen on vias ADDED in-session by the plugin, then re-synced),
-            # and on KiCad 10 a bare PCB_VIA::GetWidth() trips a wxASSERT
-            # ("GetWidth called without a layer argument") for EVERY via. The
-            # assert does NOT raise, so asking GetWidth() first printed one
-            # stderr line per via and then fell through to the same answer:
-            # 34 of the 99 sets-21-27 boards logged 70-90 lines of it, in the
-            # same stream as warnings that matter. GetFrontWidth() is the
-            # stable outer-annulus accessor; GetWidth stays as the fallback
-            # for builds that lack it.
-            try:
-                _vw = track.GetFrontWidth()
-            except Exception:
-                _vw = track.GetWidth()
-            v = Via(
-                x=to_mm(track.GetPosition().x),
-                y=to_mm(track.GetPosition().y),
-                size=to_mm(_vw),
-                drill=to_mm(track.GetDrill()),
-                layers=[get_layer_name(track.TopLayer()), get_layer_name(track.BottomLayer())],
-                net_id=track.GetNetCode(),
-                # Parity with the text parser's protection spec (#489 s8) --
-                # via the #751 resolver, so a pcbnew whose SWIG wrapper omits
-                # the protection enums reads the spec from the board's FILE
-                # instead of reporting {} for every via and silently dropping
-                # the GUI half of the round trip.
-                tenting_attrs=pcbnew_via_protection_attrs(
-                    track, _via_text_specs(track)),
-                locked=bool(track.IsLocked()),
-            )
-            vias.append(v)
+    # The one extractor (#1279): the GUI's pre-route re-sync reads the live
+    # board's tracks through the same function, so the two never disagree.
+    segments, vias = pcbnew_track_copper(board, to_mm, get_layer_name)
 
     # --- Extract zones ---
     zones = _extract_zones_from_pcbnew(board, to_mm, get_layer_name)
 
     # --- Extract user-layer guide corridors (issue #7) ---
-    # --- Net-tied copper GRAPHICS (#337), builder side ---
-    # Parity with the text parser's gr_line/gr_arc pass: PCB_SHAPE lines/arcs
-    # on copper layers render as real copper (obstacles + DRC), tagged
-    # graphic=True (immutable input art -- never ripped/pruned/stripped).
-    # #908: and the same for copper drawn INSIDE a footprint. `GetDrawings()`
-    # excludes footprint children, so this path was blind to an SOT89 tab or a
-    # PCB antenna exactly as the text path was. One emitter, two feeders --
-    # board drawings and `fp.GraphicalItems()` -- because the alternative is a
-    # second hand-written copy that drifts (the tree already carries four
-    # disagreeing answers to the same question for Edge.Cuts).
-    try:
-        import pcbnew as _pcbnew_g
-        # The CAPABILITY probe is scoped to itself, so a real bug in the walk
-        # is not mistaken for "older pcbnew". Note the honest limit: the
-        # board-level #337 pass this shares still has its own
-        # `except Exception: pass` at the end (best-effort on old APIs), so a
-        # raise inside the walk is caught THERE and the board comes back with
-        # no graphic copper. Narrowing that outer guard is a #337 change, not
-        # a #908 one; what is fixed here is the guard that was three lines
-        # wide and swallowed the footprint walk on its own.
-        _fp_graphics_ok = True
-        try:
-            if _live_fps:
-                _live_fps[0].GraphicalItems()
-                _live_fps[0].Pads()
-        except Exception:
-            _fp_graphics_ok = False     # older pcbnew: no GraphicalItems()
-        # A generator, not a list: on a big board this walk visits every
-        # graphical item of every pad-bearing footprint, and materialising the
-        # pairs first only adds allocation on top of the SWIG enumeration that
-        # is the real cost. That cost is inherent -- copper graphics cannot be
-        # found without looking at them -- and it is MEASURED, not waved away:
-        # +14.5..57% median across esp_prog / splitflap_driver / tigard /
-        # watchy, two independent paired passes with a fresh process per
-        # parse and the arms alternated (KiCad 10.0.0 python). The direction
-        # is robust; the magnitude is not tight, and the biggest number is on
-        # the smallest board, where the fixed cost dominates. The text path
-        # had a duplicate whole-file walk to reclaim with a memo; this path
-        # has none, so the cost stands.
-        def _fp_shapes():
-            if not _fp_graphics_ok:
-                return
-            for _ofp, _okey in zip(_live_fps, _live_keys):
-                # NPTH pads are not copper (see footprint_pad_count), so the
-                # two parse paths must count pads the same way or a mounting
-                # hole would make a logo "functional" on one side only.
-                _npads = 0
-                for _pd in _ofp.Pads():
-                    try:
-                        if _pd.GetAttribute() == _pcbnew_g.PAD_ATTRIB_NPTH:
-                            continue
-                    except Exception:
-                        pass
-                    _npads += 1
-                if not footprint_copper_is_functional(_npads):
-                    continue        # pad-less logo footprint: see the text path
-                for _g in _ofp.GraphicalItems():
-                    yield _g, _okey
-        import itertools as _it
-        for _d, _owner in _it.chain(((_x, "") for _x in board.GetDrawings()),
-                                    _fp_shapes()):
-            # FP_SHAPE is KiCad 6/7's class for a footprint-embedded shape;
-            # KiCad 8+ unified them onto PCB_SHAPE. `GraphicalItems()` also
-            # yields text, which this pass must not touch.
-            if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT", "FP_SHAPE"):
-                continue
-            # EVERY copper layer of the shape, not just GetLayer() (#659
-            # follow-up): KiCad writes a multi-layer graphic as the plural
-            # (layers "F.Cu" "F.Mask") / ("F.Cu" "B.Cu"), and the text parser
-            # now models one copy per copper layer -- the same rule the
-            # multi-layer ZONE fix already follows. GetLayer() returns only
-            # the primary layer, so a two-sided graphic would be copper on
-            # one side in the GUI and both in the CLI.
-            _lns = []
-            try:
-                for _lid in _d.GetLayerSet().Seq():
-                    _n2 = get_layer_name(_lid)
-                    if (_n2 or '').endswith('.Cu') and _n2 not in _lns:
-                        _lns.append(_n2)
-            except Exception:
-                pass        # older pcbnew: no LayerSet on a shape
-            if not _lns:
-                _n2 = get_layer_name(_d.GetLayer())
-                if (_n2 or '').endswith('.Cu'):
-                    _lns = [_n2]
-            if not _lns:
-                continue
-            try:
-                _shape = _d.GetShape()
-                _w = to_mm(_d.GetWidth())
-            except Exception:
-                continue
-            # #962 Segment.graphic_filled: pcbnew already applied the loader's
-            # no-token rule, so its answer is the text path's `_shape_filled`.
-            try:
-                _filled_b = bool(_d.IsAnyFill())
-            except AttributeError:
-                try:
-                    _filled_b = bool(_d.IsFilled())
-                except Exception:
-                    _filled_b = False
-            _nid = _d.GetNetCode() if hasattr(_d, 'GetNetCode') else 0
-            _POLY = getattr(_pcbnew_g, 'SHAPE_T_POLY', -10)
-            _RECT = getattr(_pcbnew_g, 'SHAPE_T_RECT', -11)
-            _CIRC = getattr(_pcbnew_g, 'SHAPE_T_CIRCLE', -12)
+    # --- Net-tied copper GRAPHICS (#337), footprint copper (#908) ---
+    # One emitter, shared with the GUI's live re-sync (resync_live_copper),
+    # so a footprint moved in the session carries its copper art with it.
+    segments.extend(pcbnew_graphic_copper(board, _live_fps, _live_keys,
+                                          get_layer_name, to_mm))
 
-            for _ln in _lns:
-                def _emit_outline_b(pts, ew, kind='poly', circle=None):
-                    seq = list(pts) + [pts[0]]
-                    _ring = (tuple((float(x), float(y)) for x, y in pts)
-                             if _filled_b else None)          # #1181
-                    for _a, _b in zip(seq, seq[1:]):
-                        if _a == _b:
-                            continue        # see _emit_outline (text path)
-                        segments.append(Segment(
-                            start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
-                            width=ew, layer=_ln, net_id=_nid, graphic=True,
-                            owner_ref=_owner, drawn_width=max(0.0, _w),
-                            graphic_kind=kind, graphic_circle=circle,
-                            graphic_filled=_filled_b, graphic_ring=_ring))
-
-                if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
-                    if _w <= 0:
-                        continue
-                    segments.append(Segment(
-                        start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
-                        end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
-                        width=_w, layer=_ln, net_id=_nid, graphic=True,
-                        owner_ref=_owner, drawn_width=_w, graphic_kind='line'))
-                elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
-                    if _w <= 0:
-                        continue
-                    try:
-                        _s0 = (to_mm(_d.GetStart().x), to_mm(_d.GetStart().y))
-                        _m0 = (to_mm(_d.GetArcMid().x), to_mm(_d.GetArcMid().y))
-                        _e0 = (to_mm(_d.GetEnd().x), to_mm(_d.GetEnd().y))
-                    except Exception:
-                        continue
-                    for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
-                        segments.append(Segment(
-                            start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
-                            width=_w, layer=_ln, net_id=_nid, graphic=True,
-                            owner_ref=_owner, drawn_width=_w, graphic_kind='arc'))
-                elif _shape in (_POLY, _RECT, _CIRC):
-                    # FILLED copper areas (#337): outline as graphic segments (parity
-                    # with the text parser). Filled shapes may have 0 stroke width.
-                    _ow = _w if _w > 0 else defaults.TRACK_WIDTH
-                    try:
-                        if _shape == _POLY:
-                            _pts = _pcbnew_chain_points(
-                                _d.GetPolyShape().Outline(0), to_mm)
-                            if len(_pts) >= 2:
-                                _emit_outline_b(_pts, _ow)
-                        elif _shape == _RECT:
-                            _s0 = _d.GetStart(); _e0 = _d.GetEnd()
-                            _x1, _y1 = to_mm(_s0.x), to_mm(_s0.y)
-                            _x2, _y2 = to_mm(_e0.x), to_mm(_e0.y)
-                            _emit_outline_b([(_x1, _y1), (_x2, _y1),
-                                             (_x2, _y2), (_x1, _y2)], _ow,
-                                            kind='rect')
-                        elif _shape == _CIRC:
-                            _c = _d.GetCenter(); _cx, _cy = to_mm(_c.x), to_mm(_c.y)
-                            _r = to_mm(_d.GetRadius())
-                            _emit_outline_b(
-                                [(_cx + _r * math.cos(k * math.pi / 8),
-                                  _cy + _r * math.sin(k * math.pi / 8))
-                                 for k in range(16)], _ow,
-                                kind='circle', circle=(_cx, _cy, _r))
-                    except Exception:
-                        pass
-    except Exception:
-        pass  # older pcbnew APIs: best-effort
-
-    # Parity with parse_kicad_pcb: net-tagged graphics never conduct (#513).
+    # Parity with parse_kicad_pcb: the same net-tagged graphics notice.
     warn_net_tagged_graphics(segments,
                              {n.name: nid for nid, n in nets.items()})
 
@@ -8925,22 +9468,13 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # #962: the paste stencil, parity with parse_kicad_pcb. The board setup is
     # read from the LIVE design settings (the file can be stale mid-plan), and
     # the apertures come from the same shared builder, fed this path's graphics.
-    try:
-        _ds962 = board.GetDesignSettings()
-        board_info.pad_to_paste_clearance = to_mm(_ds962.m_SolderPasteMargin)
-        board_info.pad_to_paste_clearance_ratio = float(_ds962.m_SolderPasteMarginRatio)
-        board_info.via_protection_setup = via_protection_setup_from_design_settings(_ds962)
-    except Exception as _e962:
-        print(f"  WARNING: could not read the board's paste/via-protection setup "
-              f"from pcbnew ({type(_e962).__name__}: {_e962}); using KiCad's "
-              f"defaults (#962)")
-        board_info.via_protection_setup = dict(VIA_PROTECTION_SETUP_DEFAULTS)
+    _pcbnew_paste_setup(board, board_info, to_mm)
     _paste_apertures = build_paste_apertures(
         footprints, board_info,
         _pcbnew_paste_graphics(board, _live_fps, _live_keys, get_layer_name, to_mm))
     _unmeasured_cu = _pcbnew_unmodelled_copper(_live_fps, _live_keys, get_layer_name)
 
-    return PCBData(
+    pcb = PCBData(
         board_info=board_info,
         nets=nets,
         footprints=footprints,
@@ -8976,6 +9510,12 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         # The board's records, as the session holds them (tool_records)
         live_records_provider=lambda _board=board: _live_records(_board),
     )
+    # #1279 parity with parse_kicad_pcb: the LIVE board's `sense:<REF>.<PAD>`
+    # groups (a group drawn in this session counts before it is saved),
+    # resolved by the same function against the same uuids.
+    from sense_branch import sense_groups_from_board, resolve_sense_branches
+    pcb.sense_branches = resolve_sense_branches(pcb, sense_groups_from_board(board))
+    return pcb
 
 
 def _live_records(board):
@@ -9003,6 +9543,123 @@ def _live_design_rules(board):
     except Exception:
         return None
     return out or None
+
+
+def _item_uuid(item) -> str:
+    """A pcbnew item's uuid as the file spells it, '' when it cannot be read --
+    the text parser's `(uuid ...)` for the same track or via (#1279 resolves
+    `sense:` group members by it on both paths)."""
+    try:
+        return str(item.m_Uuid.AsString())
+    except Exception:
+        return ""
+
+
+#: Per-PCBData memos derived from the copper that a re-sync must drop (#1279).
+#: Most self-invalidate on the copper lists' identity, but not all:
+#: `_protection_map_memo` is not keyed at all (KiCad locks and `sense:` holds
+#: decide it), and `_foreign_via_arr_cache` is keyed on the via count and the
+#: TAIL via only, so a via moved in the editor kept its old position. Dropped
+#: like plane_pad_tap's rescue window drops its parent's (#665); each is
+#: rebuilt on first use.
+LIVE_COPPER_MEMOS = (
+    '_protection_map_memo', '_locked_net_ids_memo',
+    '_foreign_seg_arr_cache', '_foreign_seg_arr_trust',
+    '_foreign_via_arr_cache', '_gopn_cache', '_net_graph_cache',
+    '_pourable_anchor_cache', '_tap_spatial_index_cache', '_attach_pts_memo',
+    '_blockid_geom_memo', '_via_place_fail_memo')
+
+
+def _pcbnew_paste_setup(board, board_info, to_mm) -> None:
+    """The live board's paste margin and via-protection setup onto
+    `board_info` (#962), KiCad's defaults when pcbnew cannot say."""
+    try:
+        _ds962 = board.GetDesignSettings()
+        board_info.pad_to_paste_clearance = to_mm(_ds962.m_SolderPasteMargin)
+        board_info.pad_to_paste_clearance_ratio = float(_ds962.m_SolderPasteMarginRatio)
+        board_info.via_protection_setup = via_protection_setup_from_design_settings(_ds962)
+    except Exception as _e962:
+        print(f"  WARNING: could not read the board's paste/via-protection setup "
+              f"from pcbnew ({type(_e962).__name__}: {_e962}); using KiCad's "
+              f"defaults (#962)")
+        board_info.via_protection_setup = dict(VIA_PROTECTION_SETUP_DEFAULTS)
+
+
+def resync_live_paste_apertures(pcb_data, board) -> None:
+    """Rebuild `pcb_data.paste_apertures` from the live board (#962), as
+    build_pcb_data_from_board builds them: the board's paste setup, then the
+    shared builder over the footprints and the paste graphics.
+
+    Call it once the footprints and pads are current
+    (gui_utils.sync_footprint_positions_from_board). An opening is a pad's
+    paste grown by its margin, or a paste graphic, so a part moved in the
+    session (optimize_caps, the placement Apply, the user) moves its
+    openings. Kept as built, they stayed where the part had been, and the
+    via-in-paste keep-out (obstacle_map) and Type VII stamping (fab_notes)
+    read them there."""
+    import pcbnew
+    get_layer_name = pcbnew_layer_maps(board)[2]
+    live_fps, _raw, live_keys = pcbnew_live_footprints(board)
+    _pcbnew_paste_setup(board, pcb_data.board_info, pcbnew.ToMM)
+    pcb_data.paste_apertures = build_paste_apertures(
+        pcb_data.footprints, pcb_data.board_info,
+        _pcbnew_paste_graphics(board, live_fps, live_keys, get_layer_name, pcbnew.ToMM))
+
+
+def resync_live_copper(pcb_data, board) -> None:
+    """Replace `pcb_data`'s tracks and vias with the live board's (#1279).
+
+    The GUI keeps ONE PCBData across steps and re-reads the copper before each
+    (RoutingDialog._sync_pcb_data_from_board), because tracks a step adds live
+    only in pcbnew until the user saves. The copper comes from
+    pcbnew_track_copper -- the extractor build_pcb_data_from_board uses -- so
+    it carries what a fresh build carries: uuids, KiCad locks, arc pieces, via
+    types and protection specs. Copper GRAPHICS (#337/#908, `graphic=True`)
+    are re-read too, through pcbnew_graphic_copper -- the build's own emitter
+    -- after the tracks as a fresh build orders them: a footprint moved in the
+    session (optimize_caps, the placement Apply, the user) carries its tab or
+    antenna with it. Kept as built, they stayed where the part had been: a
+    phantom obstacle there and nothing where the copper is.
+    Every memo derived from the old copper is dropped. Call
+    resolve_live_sense_branches afterwards, once pads and zones are current.
+    """
+    import pcbnew
+    get_layer_name = pcbnew_layer_maps(board)[2]
+    segments, vias = pcbnew_track_copper(board, pcbnew.ToMM, get_layer_name)
+    live_fps, _raw, live_keys = pcbnew_live_footprints(board)
+    pcb_data.segments = segments + pcbnew_graphic_copper(
+        board, live_fps, live_keys, get_layer_name, pcbnew.ToMM)
+    pcb_data.vias = vias
+    # The same PCBData object lives across routing runs; work cached against
+    # its old copper (rescue maps, escape memos) must not answer for the board
+    # the user has edited since.
+    from pcb_modification import bump_copper_epoch
+    bump_copper_epoch(pcb_data)
+    # #980: the input-copper mark names the objects just replaced; the next
+    # engine run marks the board it is handed.
+    from rip_up_reroute import forget_input_copper
+    forget_input_copper(pcb_data)
+    for attr in LIVE_COPPER_MEMOS:
+        vars(pcb_data).pop(attr, None)
+
+
+def resolve_live_sense_branches(pcb_data, board) -> None:
+    """Re-resolve `pcb_data.sense_branches` from the live board's `sense:`
+    groups (#1279), the way build_pcb_data_from_board resolves them.
+
+    A group drawn, edited or removed in the session counts at the next step,
+    and the branches hold the CURRENT track objects (resync_live_copper
+    replaced the ones they were resolved against). Pads persist across a
+    re-sync, so their `sense` tags from the last resolution are cleared first;
+    the protection memo is dropped because holds decide it."""
+    from sense_branch import sense_groups_from_board, resolve_sense_branches
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if getattr(pad, 'sense', ''):
+                pad.sense = ''
+    pcb_data.sense_branches = resolve_sense_branches(
+        pcb_data, sense_groups_from_board(board))
+    vars(pcb_data).pop('_protection_map_memo', None)
 
 
 def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
@@ -9397,6 +10054,7 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
 
             # Extract polygon outline
             polygon = []
+            holes = []
             try:
                 outline = zone.Outline()
                 if outline and outline.OutlineCount() > 0:
@@ -9404,6 +10062,13 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
                     for j in range(contour.PointCount()):
                         pt = contour.CPoint(j)
                         polygon.append((to_mm(pt.x), to_mm(pt.y)))
+                    # #1279 parity with extract_zones: the outline's cut-outs.
+                    for h in range(outline.HoleCount(0)):
+                        chain = outline.Hole(0, h)
+                        hole = [(to_mm(chain.CPoint(j).x), to_mm(chain.CPoint(j).y))
+                                for j in range(chain.PointCount())]
+                        if len(hole) >= 3:
+                            holes.append(hole)
             except Exception:
                 continue
 
@@ -9418,6 +10083,16 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
                 _mth = to_mm(zone.GetMinThickness())
             except Exception:
                 _mth = None
+            # #1329: the text parser's zone_connection_settings, off pcbnew.
+            _pconn = _pcbnew_zone_pad_connection(zone)
+            try:
+                _tgap = to_mm(zone.GetThermalReliefGap())
+            except Exception:
+                _tgap = None
+            try:
+                _tbridge = to_mm(zone.GetThermalReliefSpokeWidth())
+            except Exception:
+                _tbridge = None
             # #1164: the text parser's (attr (teardrop ...)); pcbnew 8+.
             try:
                 _td = bool(zone.IsTeardropArea())
@@ -9443,13 +10118,35 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
                     island_area_min=island_area_min,
                     clearance=_zcl,
                     min_thickness=_mth,
+                    pad_connection=_pconn,
+                    thermal_gap=_tgap,
+                    thermal_bridge_width=_tbridge,
                     in_footprint=_in_fp,
-                    teardrop=_td
+                    teardrop=_td,
+                    holes=holes,
                 ))
     except Exception:
         pass
 
     return zones
+
+
+def _pcbnew_zone_pad_connection(zone):
+    """`Zone.pad_connection` of a live pcbnew ZONE (#1329), spelled as
+    `zone_connection_settings` spells the file token; None when the binding
+    cannot say."""
+    try:
+        import pcbnew as _pcbnew
+        mode = zone.GetPadConnection()
+    except Exception:
+        return None
+    for const, name in (('ZONE_CONNECTION_THERMAL', 'thermal'),
+                        ('ZONE_CONNECTION_FULL', 'solid'),
+                        ('ZONE_CONNECTION_NONE', 'none'),
+                        ('ZONE_CONNECTION_THT_THERMAL', 'thru_hole_only')):
+        if getattr(_pcbnew, const, object()) == mode:
+            return name
+    return None
 
 
 def _polygon_union_excess(polys_a, polys_b):
@@ -9650,6 +10347,10 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
         bfc = getattr(bf, 'clearance', 0.0); ffc = getattr(ff, 'clearance', 0.0)
         if not close(bfc, ffc):
             diffs.append(f"Footprint {ref} clearance: board={bfc:.3f} file={ffc:.3f}")
+        # Footprint-level zone connection: inherited by every pad without its own.
+        bzc = getattr(bf, 'zone_connection', None); fzc = getattr(ff, 'zone_connection', None)
+        if bzc != fzc:
+            diffs.append(f"Footprint {ref} zone_connection: board={bzc} file={fzc}")
         # #1211: the schematic sheet, which `place_pose replicate` resolves a
         # channel by (name) and maps its parts by (path). A pcbnew accessor
         # that moved would hand the GUI a board with no sheets.
@@ -9751,6 +10452,12 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 bc = getattr(bp, 'local_clearance', 0.0); fc = getattr(fp, 'local_clearance', 0.0)
                 if not close(bc, fc):
                     diffs.append(f"Pad {ref}:{bp.pad_number} local_clearance: board={bc:.3f} file={fc:.3f}")
+                # Zone connection override: 'none' keeps the pour off the pad,
+                # so a path that dropped it would credit pour contact KiCad
+                # never makes.
+                bzc = getattr(bp, 'zone_connection', None); fzc = getattr(fp, 'zone_connection', None)
+                if bzc != fzc:
+                    diffs.append(f"Pad {ref}:{bp.pad_number} zone_connection: board={bzc} file={fzc}")
                 # Roundrect corner ratio - only consumed (and only meaningful) for
                 # roundrect pads; pcbnew returns a default ratio on every pad shape,
                 # so comparing it on circle/rect pads is pure noise.
@@ -9856,11 +10563,16 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                         lambda s: f"ends={s[0]} w={s[1]} layer={s[2]} net={s[3]}")
 
     # --- Compare vias (geometry, not just count) ---
+    # The pair IN ORDER and the type: a consumer keys on both (placement
+    # Apply's via key is the ordered pair), so a sorted pair hid the paths
+    # disagreeing on a via written bottom first.
     def _via_sig(v):
-        return (_q(v.x), _q(v.y), _q(v.size), _q(v.drill), v.net_id, tuple(sorted(v.layers)))
+        return (_q(v.x), _q(v.y), _q(v.size), _q(v.drill), v.net_id, tuple(v.layers),
+                getattr(v, 'via_type', 'through'))
 
     _multiset_diff(from_board.vias, from_file.vias, _via_sig, "Via",
-                   lambda v: f"({v[0]},{v[1]}) size={v[2]} drill={v[3]} net={v[4]} layers={list(v[5])}")
+                   lambda v: f"({v[0]},{v[1]}) size={v[2]} drill={v[3]} net={v[4]} "
+                             f"layers={list(v[5])} type={v[6]}")
 
     # --- Compare zones, as a multiset per (net, layer) ---
     # Pairing the two lists by sort order on (net_id, layer) was ambiguous
@@ -9887,13 +10599,18 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
         return (bool(getattr(z, 'teardrop', False)), len(z.polygon),
                 getattr(z, 'priority', 0), mode,
                 round(getattr(z, 'island_area_min', 0.0), 3) if mode == 2 else None,
-                tuple((_kiround(x * 1e6), _kiround(y * 1e6)) for x, y in z.polygon))
+                tuple((_kiround(x * 1e6), _kiround(y * 1e6)) for x, y in z.polygon),
+                # #1279: the cut-outs, the same way.
+                tuple(tuple((_kiround(x * 1e6), _kiround(y * 1e6)) for x, y in h)
+                      for h in (getattr(z, 'holes', None) or ())))
 
     def _zone_fmt(s):
         import zlib
         return (f"[{'teardrop' if s[0] else 'pour'} vertices={s[1]} priority={s[2]} "
                 f"island_mode={s[3]}" + (f" island_area_min={s[4]}" if s[3] == 2 else '')
-                + f" outline=#{zlib.crc32(repr(s[5]).encode()):08x}]")
+                + f" outline=#{zlib.crc32(repr(s[5]).encode()):08x}"
+                + (f" holes={len(s[6])}#{zlib.crc32(repr(s[6]).encode()):08x}" if s[6] else '')
+                + "]")
 
     from collections import Counter as _Counter
     _zb, _zf = {}, {}
@@ -10041,6 +10758,14 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     if _ub != _uf:
         diffs.append(f"Unmeasured graphic copper: only board={sorted((_ub - _uf).elements())[:6]} "
                      f"only file={sorted((_uf - _ub).elements())[:6]}")
+
+    # #1279: the protected sense branches -- what each front would keep new
+    # copper off, and why a branch it declines is declined.
+    from sense_branch import branch_signature
+    _sb = sorted(branch_signature(b) for b in (from_board.sense_branches or []))
+    _sf = sorted(branch_signature(b) for b in (from_file.sense_branches or []))
+    if _sb != _sf:
+        diffs.append(f"Sense branches: board={_sb} file={_sf}")
 
     return diffs
 

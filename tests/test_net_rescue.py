@@ -175,10 +175,10 @@ def test_rescue_skips_connected_and_reports_unchanged():
 def _pinch_board():
     """#1033: VICTIM is a POWER net (0.4 requested) whose only way across is
     a 0.5 mm long pinch at x 3.0..3.5 -- solid net-2 copper above and below it
-    on both layers -- with free space either side. Its pads are 10 mm apart,
-    so beyond the 2.5 mm neck zone at each pad there is ~3 mm of free middle
-    where the full width fits; only a width below the power width fits the
-    pinch."""
+    on both layers -- with free space either side. Its pads are 10 mm apart
+    and 0.6 mm wide, so the full width fits everywhere but the pinch, the
+    2.5 mm pad-entry zones included (#1318); only a width below the power
+    width fits the pinch."""
     bi = BoardInfo(layers={0: 'F.Cu', 31: 'B.Cu'},
                    copper_layers=['F.Cu', 'B.Cu'],
                    board_bounds=(-5.0, -2.0, 7.0, 2.0))
@@ -231,14 +231,34 @@ def test_rescued_power_net_keeps_its_width_where_it_fits():
     """#1033: a rescued POWER net is laid at its requested width where that
     fits and narrower only where it must -- the main router's own neck-down,
     not the whole gap at the floor width."""
+    import contextlib
+    import io
     import math
-    pcb, segs = _rescue_pinch()
+    import re
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pcb, segs = _rescue_pinch()
+    log = buf.getvalue()
+    sys.stdout.write(log)
+    # #1283: the `rescued a gap:` line names the widths the gap's copper was
+    # emitted at -- this gap's 0.4 rail AND its pinch neck -- not the rung's
+    # signal width, which it used to print (`track 0.127`) for this very gap.
+    m = re.search(r'rescued a gap.*?track (\S+) \(', log)
+    assert m, "no `rescued a gap:` line in the rescue log"
+    logged = {float(w) for w in m.group(1).split('/')}
+    assert max(logged) == 0.4 and min(logged) < 0.2, m.group(0)
     wide = [s for s in segs if abs(s.width - 0.4) < 1e-9]
     wide_len = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
                    for s in wide)
     assert wide_len >= 2.0, f"the free middle must carry the full 0.4: {wide_len:.2f} mm"
-    assert all(-1.6 < min(s.start_x, s.end_x) and max(s.start_x, s.end_x) < 2.6
-               for s in wide), "full width only in the free middle"
+    # #1318: the pad-entry zone carries the full width too where it fits
+    # (these 0.6 mm pads take 0.4), so the 0.4 runs pad to pinch on each side
+    # and only the pinch neighbourhood narrows
+    assert all(max(s.start_x, s.end_x) < 2.6 or min(s.start_x, s.end_x) > 3.9
+               for s in wide), "full width kept out of the pinch"
+    assert (min(min(s.start_x, s.end_x) for s in wide) <= -3.5
+            and max(max(s.start_x, s.end_x) for s in wide) >= 5.5), \
+        "full width at both pads, where it fits (#1318)"
     pinch = [s.width for s in segs
              if min(s.start_x, s.end_x) < 3.4 and max(s.start_x, s.end_x) > 3.1]
     assert pinch and max(pinch) < 0.2, f"the pinch must stay narrow: {pinch}"
@@ -258,6 +278,30 @@ def test_rescued_power_net_without_neckdown_routes_at_the_floor():
     fallback, so the rescue routes the net at the floor width, as before."""
     _pcb, segs = _rescue_pinch(power_tap_neckdown=False)
     assert segs and max(s.width for s in segs) < 0.2, [s.width for s in segs]
+
+
+def test_fold_into_restored_registration_reaches_the_write_list():
+    """Copper folded into a restored pre-existing net's custody registration
+    (not on the write-list: its copper is the input file's) also rides an
+    entry of its own naming the registration, carrying ONLY the new copper,
+    so the writer emits it once and the original is not written twice. A
+    result already on the write-list gets no second entry."""
+    old, new = make_seg(0, 0, 1, 0, net_id=5), make_seg(1, 0, 2, 0, net_id=5)
+    reg = {'net_id': 5, 'new_segments': [old], 'new_vias': [],
+           'is_existing_route': True}
+    merged = {'net_name': 'N5', 'net_id': 5, 'new_segments': [new],
+              'new_vias': [], 'iterations': 3}
+    state = SimpleNamespace(results=[])
+    net_rescue._fold_into_result(state, reg, merged)
+    assert reg['new_segments'] == [old, new]
+    assert len(state.results) == 1, state.results
+    ride = state.results[0]
+    assert ride['extends'] is reg and ride['new_segments'] == [new], ride
+
+    routed = {'net_id': 6, 'new_segments': [], 'new_vias': []}
+    state = SimpleNamespace(results=[routed])
+    net_rescue._fold_into_result(state, routed, dict(merged, net_id=6))
+    assert state.results == [routed] and routed['new_segments'] == [new]
 
 
 def main():

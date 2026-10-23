@@ -59,20 +59,17 @@ import hashlib, json, sys
 from kicad_parser import parse_kicad_pcb
 from placement.quench import QuenchState
 
-KN = dict(clearance=0.25, board_edge_clearance=0.55, crossing_penalty=10.0,
-          halo_base=0.3, halo_coef=0.15, halo_weight=1.0,
-          edge_halo=1.0, edge_weight=1.0, grid_step=0.05)
+KN = dict(clearance=0.25, board_edge_clearance=0.55)
 f = sys.argv[1]
 st = QuenchState(parse_kicad_pcb(f), f, **KN)
 aw = [tuple(round(v, 9) for v in a)
       for lst in st.net_airwires.values() for a in lst]
-cost = st.total_cost()
+cost = st.wire_metrics()
 sys.stdout.write("RESULT" + json.dumps({
     'airwires': hashlib.sha1(repr(aw).encode()).hexdigest(),
     'n': len(aw),
     'length': round(cost['length'], 9),
     'crossings': cost['crossings'],
-    'total': round(cost['total'], 9),
     'hpwl': round(cost['hpwl'], 9),
     'net_refs': hashlib.sha1(repr(sorted(
         (k, list(v)) for k, v in st.net_refs.items())).encode()).hexdigest(),
@@ -103,8 +100,8 @@ def test_quench_state_is_identical_across_hash_seeds():
         base = results[SEEDS[0]]
         for s in SEEDS[1:]:
             got = results[s]
-            for key in ('airwires', 'n', 'length', 'crossings', 'total',
-                        'hpwl', 'net_refs_order'):
+            for key in ('airwires', 'n', 'length', 'crossings', 'hpwl',
+                        'net_refs_order'):
                 assert got[key] == base[key], (
                     f"{board}: {key} differs between PYTHONHASHSEED="
                     f"{SEEDS[0]} and {s}: {base[key]!r} vs {got[key]!r}. "
@@ -131,9 +128,7 @@ def test_net_refs_is_not_a_set():
     from placement.quench import QuenchState
     f = os.path.join(ROOT, 'kicad_files', 'interf_u_unrouted.kicad_pcb')
     st = QuenchState(parse_kicad_pcb(f), f, clearance=0.25,
-                     board_edge_clearance=0.55, crossing_penalty=10.0,
-                     halo_base=0.3, halo_coef=0.15, halo_weight=1.0,
-                     edge_halo=1.0, edge_weight=1.0, grid_step=0.05)
+                     board_edge_clearance=0.55)
     for net_id, refs in st.net_refs.items():
         assert isinstance(refs, list), \
             f"net {net_id}: net_refs holds {type(refs).__name__}, not list"

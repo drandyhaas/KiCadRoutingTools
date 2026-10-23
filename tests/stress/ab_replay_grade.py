@@ -205,6 +205,10 @@ def _diff_pair_stats(log_text):
         # kept its stale "coupled" -- the member-audit demotion route_diff had
         # already made was invisible to the very metric this computes.
         for p in d.get("partial_diff_pairs", []):      status[p] = "partial"
+        # #1303: routed, but the shipped copper is not coupled. Its own
+        # status: absent from routed_diff_pairs, it would otherwise drop out
+        # of the total altogether.
+        for p in d.get("uncoupled_diff_pairs", []):    status[p] = "uncoupled"
         # Pairs the audit found with disconnected member pads, in ANY bucket.
         for p in d.get("member_incomplete_pairs", []): incomplete.add(p)
         for p in d.get("routed_diff_pairs", []):
@@ -217,6 +221,7 @@ def _diff_pair_stats(log_text):
             "diff_pairs_single_ended": sum(1 for v in status.values() if v == "single_ended"),
             "diff_pairs_failed": sum(1 for v in status.values() if v == "failed"),
             "diff_pairs_partial": sum(1 for v in status.values() if v == "partial"),
+            "diff_pairs_uncoupled": sum(1 for v in status.values() if v == "uncoupled"),
             # Gate on this for "member pads actually connected" -- it is the
             # audit's verdict, not an inference from the coupled count.
             "diff_pairs_member_incomplete": len(incomplete),
@@ -252,6 +257,50 @@ def manifest_baseline(txt, *search_dirs):
         if os.path.exists(cand):
             return cand
     return tok
+
+
+def lineage_scope_row(manifest, board=None):
+    """The routable nets no step of the manifest's final lineage scopes
+    (lineage_scope.compact: `unscoped`, `unscoped_input_copper`, `pour_only`,
+    `unmodelled`). A net in `unscoped` is open on the final board because the
+    CHAIN never asks for it -- one board shipped 34 such nets after #734 -- so
+    it is reported beside the grade, never folded into a verdict. A failure
+    to read it is recorded under `error`, not raised.
+
+    It runs in a CHILD process: the board parser and the net expansion print,
+    and silencing them here would swap the process-global sys.stdout under
+    the wave's worker threads, swallowing their result lines (#383)."""
+    import tempfile
+    fd, out = tempfile.mkstemp(suffix=".json", prefix="lineage_scope_")
+    os.close(fd)
+    try:
+        import lineage_scope as _ls
+        cmd = [sys.executable, "-X", "utf8", str(Path(_ls.__file__)), str(manifest),
+               "--json", out]
+        if board and os.path.isfile(str(board)):
+            cmd += ["--board", str(board)]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        reps = json.loads(Path(out).read_text() or "[]")
+        if not reps:
+            return {"error": f"lineage_scope exited {p.returncode}: "
+                             f"{(p.stdout + p.stderr).strip()[-300:]}"}
+        return _ls.compact(reps[0])
+    except Exception as e:  # noqa: BLE001 -- a report must never fail a board
+        return {"error": f"{type(e).__name__}: {e}"}
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+
+
+def lineage_scope_note(row):
+    """One log line naming a row's unscoped nets, or ''."""
+    try:
+        import lineage_scope as _ls
+        return _ls.describe(row or {})
+    except Exception:
+        return ""
 
 
 def _kicad_grade(pcb, clearance, baseline=None):
@@ -509,6 +558,9 @@ def do_board(set_dir, out_dir, label, board):
         # dest/src dirs (board0.kicad_pcb lives there after the remap).
         baseline = manifest_baseline(txt, dst, src)
         res.update(grade(final, clr, baseline=baseline))
+    # Nets the chain never asks for: read off the manifest and its input board,
+    # so it is reported for a broken chain too.
+    res["lineage_scope"] = lineage_scope_row(manifest, manifest_baseline(txt, dst, src))
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
     fp_note = f" fp={res['peak_footprint_mb']}MB" if res.get("peak_footprint_mb") else ""
     # Say the floor the kicad numbers were graded at whenever it is NOT the one
@@ -523,6 +575,9 @@ def do_board(set_dir, out_dir, label, board):
           f"drc={res['drc']} kdrc={res.get('kicad_drc')}{gc_note} cw={res.get('kicad_connection_width')} "
           f"conn={res['conn']} compl={res['completion_pct']}% "
           f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB{fp_note} final={res['final']}", flush=True)
+    _ls = lineage_scope_note(res["lineage_scope"])
+    if _ls:
+        print(f"[{label}] {board}: LINEAGE SCOPE: {_ls}", flush=True)
     return res
 
 
@@ -599,8 +654,12 @@ def regrade(out_dir, set_dir):
             # both) so #405 symmetric subtraction fires (see manifest_baseline).
             baseline = manifest_baseline(txt, bdir, set_dir / b)
             res.update(grade(str(final), clr, baseline=baseline))
+        res["lineage_scope"] = lineage_scope_row(man, manifest_baseline(txt, bdir, set_dir / b))
         print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} "
               f"conn={res['conn']} compl={res['completion_pct']}%")
+        _ls = lineage_scope_note(res["lineage_scope"])
+        if _ls:
+            print(f"[regrade] {b}: LINEAGE SCOPE: {_ls}")
         results.append(res)
     (out_dir / "summary.json").write_text(json.dumps(results, indent=2))
     print(f"[regrade] rewrote {out_dir/'summary.json'}")
@@ -713,6 +772,21 @@ def compare(old_json, new_json):
           f"incomplete nets {incompl_delta:+d} "
           f"(unrouted + connectivity-issue), coupled diff-pairs {dpair_delta:+d}"
           f"  ==>  {verdict}")
+    # Boards whose final lineage never asks for some routable nets. A replay of
+    # today's engine leaves those open whatever the change under test, so a
+    # delta there can be the CHAIN's, not the engine's: one board's
+    # recorded run got its 34 from a pre-#734 reconciliation that no longer
+    # enrolls them.
+    _unscoped = []
+    for b in boards:
+        _o = len(((old.get(b) or {}).get("lineage_scope") or {}).get("unscoped") or [])
+        _n = len(((new.get(b) or {}).get("lineage_scope") or {}).get("unscoped") or [])
+        if _o or _n:
+            _unscoped.append(f"{b} {_o}->{_n}")
+    if _unscoped:
+        print(f"lineage scope: {len(_unscoped)} board(s) carry routable nets that "
+              f"no step of the final lineage routes (unscoped, old->new): "
+              f"{', '.join(_unscoped)}")
     if t_old and t_new:
         print(f"total replay wall-clock: {t_old:.1f}s -> {t_new:.1f}s  ({t_old/t_new:.2f}x)")
         print("\nper-tool: wall-clock (summed) and peak RSS (max) over boards complete in both:")

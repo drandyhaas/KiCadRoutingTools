@@ -11,6 +11,10 @@ Tiny 2-layer board: a SIG via at (10,10), an HV SMD pad 1.8mm to its right
 (gap 0.4mm from the natural first GND-via spot), a GND through-hole pad far
 away to anchor the plane. HV is in a 0.8mm net class; Default is 0.2.
 
+A --net-clearances FILE (route.py's, which route_planes.py takes since #1272)
+REPLACES that class map in the GND-via pass too, used as given: the
+--clearance-ceiling does not cap it, and the HV class no longer governs.
+
     python3 tests/test_gnd_vias_net_class_clearance.py
 """
 import json
@@ -28,6 +32,8 @@ sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 from kicad_parser import parse_kicad_pcb
 
 HV_CLEARANCE = 0.8
+FILE_WIDE = 0.5      # a --net-clearances value ABOVE the ceiling
+FILE_TIGHT = 0.3     # a --net-clearances value BELOW the HV class
 BASE_CLEARANCE = 0.2
 VIA_SIZE = 0.6
 HV_PAD = (11.8, 10.0, 0.6)   # x, y, square size
@@ -104,12 +110,28 @@ def run():
         with open(os.path.join(d, 'b.kicad_pro'), 'w') as f:
             json.dump(PROJECT, f, indent=2)
 
+        file_wide = os.path.join(d, 'ncl_wide.json')
+        file_tight = os.path.join(d, 'ncl_tight.json')
+        for path, mm in ((file_wide, FILE_WIDE), (file_tight, FILE_TIGHT)):
+            with open(path, 'w') as f:
+                json.dump({'HV': mm}, f)
+
         # 1. Classes honoured (no ceiling): every GND via clears HV at 0.8.
         # 2. --clearance-ceiling 0.2 caps every class (#439): 0.2 governs, so
         #    the via may take the natural spot -- but never below the ceiling.
-        for tag, extra, need in (('honor', [], HV_CLEARANCE),
-                                 ('ceiling', ['--clearance-ceiling',
-                                              str(BASE_CLEARANCE)], BASE_CLEARANCE)):
+        # 3. The same ceiling plus a --net-clearances file naming HV at 0.5:
+        #    the file's map is used AS GIVEN, so the ceiling does not cap it.
+        # 4. A --net-clearances file naming HV at 0.3, no ceiling: the file
+        #    REPLACES the class map, so the 0.8 class must not govern -- some
+        #    via sits nearer HV than 0.8 (the natural spot), but not below 0.3.
+        for tag, extra, need, below in (
+                ('honor', [], HV_CLEARANCE, None),
+                ('ceiling', ['--clearance-ceiling', str(BASE_CLEARANCE)],
+                 BASE_CLEARANCE, None),
+                ('file_ceiling', ['--clearance-ceiling', str(BASE_CLEARANCE),
+                                  '--net-clearances', file_wide], FILE_WIDE, None),
+                ('file', ['--net-clearances', file_tight], FILE_TIGHT,
+                 HV_CLEARANCE)):
             gaps, log = _route(d, tag, extra)
             if gaps is None:
                 print(log)
@@ -124,13 +146,19 @@ def run():
                 if gap < need - 1e-6:
                     fails.append(f"[{tag}] GND via at ({x:.2f},{y:.2f}) is {gap:.3f}mm "
                                  f"from the HV pad < required {need}mm")
+            if below is not None and gaps and \
+                    min(gap for _xy, gap in gaps) >= below - 1e-6:
+                fails.append(f"[{tag}] every GND via keeps >= {below}mm from the HV "
+                             f"pad: the HV class governed, not the file's "
+                             f"{need}mm")
 
     print("=" * 60)
     if fails:
         for f in fails:
             print(f"FAIL: {f}")
         return 1
-    print("PASS: GND return vias keep the HV net-class clearance (ceiling honoured)")
+    print("PASS: GND return vias keep the HV net-class clearance (ceiling "
+          "honoured), and a --net-clearances file replaces it as given")
     return 0
 
 

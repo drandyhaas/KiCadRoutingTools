@@ -15,10 +15,6 @@ Covers:
     inherits the board's `(setup ...)` policy -- what pcbnew does for a via the
     GUI adds and KiCad for one the user places. (Inverted from what #489 s8
     first shipped; see the comment at that check.)
-  * prevailing_via_protection is a deterministic majority. It is no longer the
-    default for vias the tool adds -- over 886 corpus boards a prevailing spec
-    never once disagreed with the board's own setup -- but it stays correct and
-    is still the honest answer to "what do this board's vias say".
   * the via-in-pad fab note fires on a same-net pad hit and not otherwise
 
 Run with:  python3 tests/test_489_via_tenting.py
@@ -35,9 +31,8 @@ sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(ROOT_DIR, "rust_router"))
 
 import kicad_parser as kp  # noqa: E402
-from kicad_parser import Via, Pad  # noqa: E402
-from kicad_writer import (generate_via_sexpr, prevailing_via_protection,  # noqa: E402
-                          prevailing_via_protection_in_text)
+from kicad_parser import Pad  # noqa: E402
+from kicad_writer import generate_via_sexpr  # noqa: E402
 from fab_notes import via_in_pad_sites, via_in_pad_summary  # noqa: E402
 
 # A real hackrf_one via block: full IPC-4761 declaration, multi-line.
@@ -143,39 +138,6 @@ def run():
             check(f'({token}' not in out,
                   f"{label}: a via with no spec must emit NO {token} token and "
                   f"inherit the board's (setup ...); got:\n{out}")
-
-    # ------------------------------------------- prevailing convention, majority
-    def _v(spec):
-        return Via(x=0, y=0, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'],
-                   net_id=1, tenting_attrs=spec)
-
-    a = {'capping': 'no'}
-    b = {'tenting': '(front yes) (back yes)'}
-    check(prevailing_via_protection([_v(a), _v(a), _v(b)]) == a,
-          "the majority spec must win")
-    check(prevailing_via_protection([_v(b), _v(a), _v(a)]) == a,
-          "the majority must not depend on input order")
-    check(prevailing_via_protection([]) is None,
-          "no vias -> no prevailing spec")
-    check(prevailing_via_protection([_v({}), _v({})]) is None,
-          "vias with no spec -> no prevailing spec")
-    # Deterministic tie-break: same answer whichever order a tie arrives in.
-    t1 = prevailing_via_protection([_v(a), _v(b)])
-    t2 = prevailing_via_protection([_v(b), _v(a)])
-    check(t1 == t2, f"a tie must break deterministically, got {t1} vs {t2}")
-
-    # Passed EXPLICITLY, a prevailing spec still round-trips: the function is
-    # unchanged, only its use as the added-via default is retired.
-    board_text = REAL_VIA + REAL_VIA.replace(uuid, "0000ffff-1111-2222-3333-444444444444")
-    prevailing = prevailing_via_protection_in_text(board_text)
-    check(prevailing is not None and prevailing.get('capping') == 'no',
-          f"text-based prevailing spec should match the board, got {prevailing}")
-    new_out = generate_via_sexpr(5, 5, 0.6, 0.3, ['F.Cu', 'B.Cu'], 1,
-                                 net_name='GND', tenting_attrs=prevailing)
-    check('(tenting (front yes) (back yes))' not in new_out,
-          f"a new via must not be stamped tented on a board that declines it; got:\n{new_out}")
-    check(prevailing_via_protection_in_text(PLAIN_VIA) is None,
-          "a board with no protection tokens has no prevailing spec")
 
     # --------------------- a board that says DO NOT TENT must be obeyed (e2e)
     # The regression this whole inversion exists for, through the real writer

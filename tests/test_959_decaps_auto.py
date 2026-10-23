@@ -126,11 +126,14 @@ def _labelled(doc):
             assert basis[f"edge_connectors[{c['ref']}].edge"] == \
                 'observed_baseline', c
         if 'overhang_mm' in c:
-            # A band this module chose -- the sanity cap, a class default,
-            # the affinity floor -- is a default, not an observation.
+            # A band this module chose -- the sanity cap, a class default
+            # (an edge-class part declared without an edge), the affinity
+            # floor -- is a default, not an observation. A part of no edge
+            # class keeps its OBSERVED band and claims no edge (d5aede5d).
             want = ('derived_default' if c.get('overhang_capped')
                     or c.get('class') == 'connector_affinity'
-                    or 'edge' not in c else None)
+                    or ('edge' not in c and c.get('class')) else
+                    'observed_baseline' if 'edge' not in c else None)
             got = basis[f"edge_connectors[{c['ref']}].overhang_mm"]
             assert got in ('observed_baseline', 'derived_default'), (got, c)
             if want:
@@ -225,8 +228,11 @@ def _intent_with(pcb, board, frag, **extra):
 def test_a_declared_relation_supersedes_the_inferred_tether():
     """Fixture 902 declares `C1` and `C3` near `U2` with their pad 1 -- on
     the rail U2 carries -- so those two caps are graded by the relation and
-    not by the decap rules. `C2` and `C4`, tethered to Y1 by inference, are
-    still graded. Nothing is written into `decaps.exempt`."""
+    not by the decap rules. They are esp_prog's only decaps (`C2` and `C4`
+    are Y1's load caps, which the decap rule leaves out), so with the brief
+    no decap rule fires at all; without it `C3` is graded. A brief declaring
+    only `C3` leaves `C1` to the decap rules, still owed. Nothing is written
+    into `decaps.exempt`."""
     pcb = parse_kicad_pcb(ESP)
     frag, _rep = db.compile_brief(db.load_brief(BRIEF_902),
                                   board_refs=sorted(pcb.footprints))
@@ -235,20 +241,29 @@ def test_a_declared_relation_supersedes_the_inferred_tether():
     it = _intent_with(pcb, ESP, frag, decaps={'max_distance_mm': 0.5})
     assert not (it.decaps or {}).get('exempt'), it.decaps
     res = fp.grade(it, pcb, ESP, brief_fragment=frag)
-    hit = {v.ref for v in res.violations if v.rule == 'decap_distance'}
-    assert 'C3' not in hit and {'C2', 'C4'} <= hit, hit
-    ung = {v.ref for v in res.violations if v.rule == 'decap_ungraded'}
-    assert 'C1' not in ung, ung
-    # Without the brief nothing is superseded: the same intent grades C3.
+    hit = {(v.rule, v.ref) for v in res.violations if v.rule.startswith('decap_')}
+    assert not hit, hit
+    # Without the brief nothing is superseded: the same intent grades C3,
+    # and reports C1 (beyond the search radius) as ungraded.
     res = fp.grade(it, pcb, ESP)
-    assert 'C3' in {v.ref for v in res.violations
-                    if v.rule == 'decap_distance'}
-    # PARTIAL supersession leaves the dark rule OWED: C2 and C4 still have
-    # only an inferred tether, so P1 must still ask.
-    dark = _intent_with(pcb, ESP, frag)
+    assert {(v.rule, v.ref) for v in res.violations
+            if v.rule.startswith('decap_')} == {('decap_distance', 'C3'),
+                                                ('decap_ungraded', 'C1')}
+    full = _intent_with(pcb, ESP, frag)
     row = {r['rule']: r for r in fp.rule_roster(
-        dark, pcb, ESP, brief_fragment=frag)}['decap_distance']
+        full, pcb, ESP, brief_fragment=frag)}['decap_distance']
+    assert not row['needs_disposition'] and not row['applicable'], row
+    # PARTIAL supersession leaves the dark rule OWED: with only C3 declared,
+    # C1 has only its inferred tether, so P1 must still ask.
+    part = json.loads(json.dumps(frag))
+    part['proximity'] = [p for p in part['proximity'] if p['ref'] != 'C1']
+    dark = _intent_with(pcb, ESP, part)
+    row = {r['rule']: r for r in fp.rule_roster(
+        dark, pcb, ESP, brief_fragment=part)}['decap_distance']
     assert row['needs_disposition'], row
+    res = fp.grade(_intent_with(pcb, ESP, part, decaps={'max_distance_mm': 0.5}),
+                   pcb, ESP, brief_fragment=part)
+    assert 'C1' in {v.ref for v in res.violations if v.rule == 'decap_ungraded'}
     # A row only the PLAN carries (a hypothesis) supersedes nothing, and
     # neither does a brief row naming no pads on the cap's rail.
     plan_only = fp.superseded_caps(pcb, frag['proximity'], {'proximity': []})
@@ -257,9 +272,10 @@ def test_a_declared_relation_supersedes_the_inferred_tether():
     for p in nopads['proximity']:
         p.pop('pads', None)
     assert fp.superseded_caps(pcb, nopads['proximity'], nopads) == {}
-    print("  PASS: C1 and C3 are graded by their declared relation; C2 and "
-          "C4 by the decap rule; a plan-only row or a pad-less row "
-          "supersedes nothing")
+    print("  PASS: C1 and C3 are graded by their declared relation and no "
+          "decap rule fires; without the brief C3 is graded; a partial "
+          "supersession still owes the rule; a plan-only row or a pad-less "
+          "row supersedes nothing")
 
 
 def test_supersession_cannot_be_laundered():

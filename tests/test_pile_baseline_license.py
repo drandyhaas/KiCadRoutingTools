@@ -7,7 +7,7 @@ Run 19, cycle 1: every conjunct of `LegalityContext.pads_ok` is relative to
 producing the SW23/SW28<->U2 blocker pairs on the shipped board.
 
 The fix sits at the single choke point every consumer routes through
-(`seed_baseline`, feeding `pads_ok` and `swap_pads_ok`): a seed bucket of
+(`seed_baseline`, feeding `pads_ok`): a seed bucket of
 >= 3 parts at one round(coord, 3) point is the pile signature, and every part
 in one gets the ZERO baseline -- its pose must be absolutely clean toward
 every neighbor. Deliberately >= 3, not >= 2: a legitimate two-part by-design

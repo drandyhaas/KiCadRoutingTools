@@ -55,6 +55,14 @@ from bga_fanout.geometry import clamp_via_to_pad
 from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
 from routing_defaults import HOLE_TO_HOLE_CLEARANCE
 
+#: Every via this engine drills is a THROUGH via: the writer gives it no type
+#: word, so KiCad loads it as one whatever its `(layers ...)` pair says. The
+#: pair used to be `[layers[0], layers[-1]]`, the escape list's two ends, which
+#: the back-side flip frame and a full-stack run's layer order leave on an
+#: inner layer -- `(layers "B.Cu" "In6.Cu")` on zynq7020_som -- a pair anything
+#: reading it as the span took for a blind via (found reviewing #1268).
+THROUGH_VIA_LAYERS = ('F.Cu', 'B.Cu')
+
 
 def _custom_polys(pad):
     """The pad's REAL polygon copper (board mm) if it is a custom-shape pad,
@@ -597,6 +605,30 @@ def _segments_from_cells(occ, cells):
     return out
 
 
+def segment_reaches_window(seg, bounds, reach):
+    """True when existing segment `seg` can matter to an escape laid inside
+    the occupancy window `bounds` (x0, y0, x1, y1): its extent, grown by
+    `reach` (its own half-width plus the largest new copper's half-size plus
+    clearance), overlaps the window. (#1315)
+
+    The test used to be "the segment's START point lies inside the window",
+    so a foreign track running INTO the ball field from outside was stamped
+    or ignored depending on which end KiCad wrote first: on imx6ulz U2 a
+    DRAM_DQ5 F.Cu track entering from x=79.9 (window max ~75.0) was never an
+    obstacle, VMEM escapes and a DQS0_N via were laid on it, and the fanout
+    reported failed 0 -- while the same track written end-first was an
+    obstacle and the fanout honestly failed VMEM. A bbox overlap admits a
+    segment that may still miss the window diagonally; that is harmless, as
+    the capsule stamp clips to the grid and the exact checks measure true
+    distance."""
+    lo_x = min(seg.start_x, seg.end_x) - reach
+    hi_x = max(seg.start_x, seg.end_x) + reach
+    lo_y = min(seg.start_y, seg.end_y) - reach
+    hi_y = max(seg.start_y, seg.end_y) + reach
+    return not (hi_x < bounds[0] or lo_x > bounds[2]
+                or hi_y < bounds[1] or lo_y > bounds[3])
+
+
 def _pt_seg_dist(px, py, x1, y1, x2, y2):
     """the distance from (px, py) to the segment (x1, y1)-(x2, y2)"""
     dx, dy = x2 - x1, y2 - y1
@@ -991,9 +1023,22 @@ def generate_underpad_escape(footprint: Footprint,
     # rule (in astar) already removes the diagonal clipping that used to need it,
     # so it defaults to 0; raise it only to trade routability for extra slack.
     margin = keepout_margin or 0.0
+
+    # #1317: a pad / footprint clearance OVERRIDE above the run clearance is
+    # the pair clearance KiCad grades a track or via against that pad
+    # (design_rules.override_clearance), and every keep-out below priced the
+    # pads at the scalar --clearance: imx6ulz's U1 (footprint clearance 0.12,
+    # run 0.1) shipped escape stubs 5-7 um inside its balls' 0.12, which
+    # KiCad flags. Raise-only, as qfn_fanout prices it: an override BELOW the
+    # run clearance leaves the run clearance in force.
+    def _ovr_extra(p):
+        lc = getattr(p, 'local_clearance', 0.0) or 0.0
+        return lc - clearance if lc > clearance else 0.0
+
+    own_extra = max((_ovr_extra(p) for p in footprint.pads), default=0.0)
     pad_r = max((max(p.size_x, p.size_y) for p in fp_pads), default=0.4) / 2
     via_r = via_size / 2
-    pad_keep = pad_r + track_width / 2 + clearance + margin
+    pad_keep = pad_r + track_width / 2 + clearance + margin + own_extra
     via_keep = via_r + track_width / 2 + clearance + margin
     trk_keep = track_width + clearance + margin  # other centerlines stay this far
 
@@ -1081,7 +1126,10 @@ def generate_underpad_escape(footprint: Footprint,
     exact_segs: List[Tuple] = []      # (x1, y1, x2, y2, half_w, net_id, layer) - real tracks
     reserved_sites: List[Tuple] = []  # (x, y, ring_r, drill_r, net_id) - pending via-in-pads
     carve_disks: List[Tuple] = []     # (x, y, keep_r, layer_idx_or_None, net_id) - stamps
-    exact_pads = [(p2.global_x, p2.global_y, max(p2.size_x, p2.size_y) / 2.0,
+    # A pad's clearance override (#1317) rides in its half-extent here, so
+    # every `half + clearance` test below prices the pad at its override.
+    exact_pads = [(p2.global_x, p2.global_y,
+                   max(p2.size_x, p2.size_y) / 2.0 + _ovr_extra(p2),
                    (p2.drill or 0.0) / 2.0, p2.net_id,
                    p2.pad_type != 'np_thru_hole')
                   for p2 in footprint.pads]
@@ -1118,7 +1166,9 @@ def generate_underpad_escape(footprint: Footprint,
         routed = s.layer in layer_set
         if not routed and not (s.layer or '').endswith('.Cu'):
             continue
-        if not (bounds[0] <= s.start_x <= bounds[2] and bounds[1] <= s.start_y <= bounds[3]):
+        if not segment_reaches_window(
+                s, bounds, (s.width or 0.0) / 2.0 + max(track_width / 2.0, via_r)
+                + clearance + margin):
             continue
         if s.net_id in route_net_ids and only_pad_keys is None:
             # our own future nets - don't preblock (fanned nets are NOT in this
@@ -1174,14 +1224,16 @@ def generate_underpad_escape(footprint: Footprint,
         if not (bounds[0] - _reach <= p.global_x <= bounds[2] + _reach and
                 bounds[1] - _reach <= p.global_y <= bounds[3] + _reach):
             continue
-        p_keep = p_half + track_width / 2 + clearance + margin
+        p_extra = _ovr_extra(p)                     # #1317
+        p_keep = p_half + track_width / 2 + clearance + margin + p_extra
         if p.drill and p.drill > 0:
             occ.block_all(p.global_x, p.global_y, p_keep)
             carve_disks.append((p.global_x, p.global_y, p_keep, None, p.net_id))
             # TH/NPTH copper + drill for the exact via-site check (#393); the
             # locked-SMD copper stays with via_site_ok's exact rect test.
-            exact_pads.append((p.global_x, p.global_y, p_half, p.drill / 2.0,
-                               p.net_id, p.pad_type != 'np_thru_hole'))
+            exact_pads.append((p.global_x, p.global_y, p_half + p_extra,
+                               p.drill / 2.0, p.net_id,
+                               p.pad_type != 'np_thru_hole'))
             continue
         # Non-custom pads stamp their REAL RECT outline (rect_rotation-aware),
         # not a disk of radius max(size)/2: that disk under-covers a rect's
@@ -1191,7 +1243,7 @@ def generate_underpad_escape(footprint: Footprint,
         # is exact for rect/roundrect and a conservative superset for
         # circle/oval. Stamp radius shrinks to the track/clearance term since
         # the copper extent is now in the polygon itself.
-        _rect_keep = track_width / 2 + clearance + margin
+        _rect_keep = track_width / 2 + clearance + margin + p_extra
         _rect_poly = None
         if not cpolys:
             hx, hy = p.size_x / 2.0, p.size_y / 2.0
@@ -1229,6 +1281,7 @@ def generate_underpad_escape(footprint: Footprint,
     # two escape legs cannot be moved anywhere (ulx3s C19: 1.4mm pad vs a
     # 1.6mm comb gap), so routes should graze them only when boxed in.
     from bga_fanout.geometry import MOVABLE_PASSIVE_PREFIXES
+    soft_pads = []   # the movable passives' copper pads, for a via's exact test
     for fp in pcb_data.footprints.values():
         if fp.reference == footprint.reference:
             continue
@@ -1244,6 +1297,7 @@ def generate_underpad_escape(footprint: Footprint,
             if not (bounds[0] - _pad_margin <= p.global_x <= bounds[2] + _pad_margin
                     and bounds[1] - _pad_margin <= p.global_y <= bounds[3] + _pad_margin):
                 continue
+            soft_pads.append(p)
             p_keep = max(p.size_x, p.size_y) / 2.0 + track_width / 2 + clearance
             if p.drill and p.drill > 0:
                 for li in range(len(layers)):
@@ -1934,7 +1988,7 @@ def generate_underpad_escape(footprint: Footprint,
             occ.block_all(vx, vy, vkeep)
             vias_to_add.append({'x': vx, 'y': vy, 'size': v_size,
                                 'drill': v_drill,
-                                'layers': [layers[0], layers[-1]], 'net_id': net_id})
+                                'layers': list(THROUGH_VIA_LAYERS), 'net_id': net_id})
             nvia += 1
 
     # Differential pairs (issue #182): collect the pairs we can try to escape
@@ -2091,7 +2145,7 @@ def generate_underpad_escape(footprint: Footprint,
                                'net_id': pad.net_id})
         occ.block_all(vx, vy, vkeep)
         vias_to_add.append({'x': vx, 'y': vy, 'size': v_size, 'drill': v_drill,
-                            'layers': [layers[0], layers[-1]],
+                            'layers': list(THROUGH_VIA_LAYERS),
                             'net_id': pad.net_id})
         nvia += 1
 
@@ -2424,6 +2478,18 @@ def generate_underpad_escape(footprint: Footprint,
                 if any(occ.soft_foreign(L, six, siy, p.net_id)
                        for L in range(occ.nl)):
                     return False
+                # The soft stamps are a TRACK's keep (pad + track/2 +
+                # clearance), read above at the via's centre cell alone, so
+                # a via centred just past that disk still put its ring on the
+                # pad and passed as soft-free (butterstick U4: a lane-walked
+                # P_1V2_FPGA drop 0.502 mm from C39.2's centre, its 0.2 mm
+                # ring 0.06 mm into the GND pad; cap-opt found no pose for
+                # C39 and the short shipped). A through via meets the pad on
+                # whatever layer it is, so the whole ring must clear.
+                if not via_clears_pad_rects(
+                        vx, vy, via_size / 2.0, clearance,
+                        [q for q in soft_pads if q.net_id != p.net_id]):
+                    return False
             if locked_smd_pads and not via_site_ok(vx, vy, via_size / 2.0):
                 return False
             return _via_site_conflict(vx, vy, p.net_id, ctx) is None
@@ -2651,7 +2717,7 @@ def generate_underpad_escape(footprint: Footprint,
                                        'layer': layers[top_idx], 'net_id': p.net_id})
                     _vs, _vd = _dv or (via_size, via_drill)
                     vias_to_add.append({'x': _site[0], 'y': _site[1], 'size': _vs, 'drill': _vd,
-                                        'layers': [layers[0], layers[-1]], 'net_id': p.net_id})
+                                        'layers': list(THROUGH_VIA_LAYERS), 'net_id': p.net_id})
                     if _dv:
                         from fab_tiers import note_narrowing
                         note_narrowing(p.net_id, 'via_diameter', via_size, _vs, 'planned plane drop')
@@ -2670,7 +2736,7 @@ def generate_underpad_escape(footprint: Footprint,
                     occ.block_all(gx, gy, ckeep)
                     exact_vias.append((gx, gy, cs / 2.0, cd / 2.0, p.net_id))
                     vias_to_add.append({'x': gx, 'y': gy, 'size': cs, 'drill': cd,
-                                        'layers': [layers[0], layers[-1]], 'net_id': p.net_id})
+                                        'layers': list(THROUGH_VIA_LAYERS), 'net_id': p.net_id})
                     _nd['in_pad'] += 1
                     _drop_laid.add(id(p))
                     continue
@@ -2869,7 +2935,7 @@ def generate_underpad_escape(footprint: Footprint,
         occ.block_all(vx, vy, via_keep)
         vias_to_add.append({'x': vx, 'y': vy, 'size': via_size,
                             'drill': via_drill,
-                            'layers': [layers[0], layers[-1]],
+                            'layers': list(THROUGH_VIA_LAYERS),
                             'net_id': p.net_id})
         nvia += 1
         n_db_esc += 1
@@ -3878,7 +3944,7 @@ def generate_underpad_escape(footprint: Footprint,
                                    'net_id': p.net_id})
                 vias_to_add.append({'x': vx, 'y': vy, 'size': via_size,
                                     'drill': via_drill,
-                                    'layers': [layers[0], layers[-1]],
+                                    'layers': list(THROUGH_VIA_LAYERS),
                                     'net_id': p.net_id})
                 _net_vias.setdefault(p.net_id, []).append((vx, vy, via_size / 2.0))
                 n_gap += 1
@@ -3906,7 +3972,7 @@ def generate_underpad_escape(footprint: Footprint,
             occ.block_all(gx, gy, ckeep)
             exact_vias.append((gx, gy, cs / 2.0, cd / 2.0, p.net_id))
             vias_to_add.append({'x': gx, 'y': gy, 'size': cs, 'drill': cd,
-                                'layers': [layers[0], layers[-1]],
+                                'layers': list(THROUGH_VIA_LAYERS),
                                 'net_id': p.net_id})
             _net_vias.setdefault(p.net_id, []).append((gx, gy, cs / 2.0))
             n_ctr += 1

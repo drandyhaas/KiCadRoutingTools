@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The #946 mutation battery, shipped so its numbers can be re-derived.
 
-One row per phase of the render design system, each reverting that phase's
+One row per kept phase of the render design system, each reverting that phase's
 single load-bearing line. A count is only checkable if the exact source edit is
 written down: two reviewers of an earlier branch reconstructed a battery's rows
 from their names and both got the wrong answer, because a plausible-looking
@@ -24,9 +24,7 @@ restore the defect #946 opened on:
   * `defect-back-in-the-red-family` -- a pad/hole conflict 2.8 from the rip,
     indistinguishable and opposite in kind;
   * `crossings-blend-again` -- the 19 two-layer crossings that land within 34
-    of some third layer's solo appearance;
-  * `frame-height-only-even` -- the silent pixel-column crop `_write_mp4` has
-    been doing to every tall board's mp4.
+    of some third layer's solo appearance.
 
 NOT named `test_*.py`, so `tests/run_all.py` does not collect it: it REWRITES
 the engine in place. One writer per tree -- do not run it while a suite, an A/B
@@ -70,13 +68,7 @@ _ROOT = os.path.dirname(_TESTS)
 TARGETS = {
     'theme': os.path.join(_ROOT, 'py_router', 'render_theme.py'),
     'render': os.path.join(_ROOT, 'py_router', 'route_render.py'),
-    'anim': os.path.join(_ROOT, 'py_router', 'animate_route.py'),
-    'chrome': os.path.join(_ROOT, 'py_router', 'render_chrome.py'),
     'plan': os.path.join(_ROOT, 'py_router', 'render_plan.py'),
-    'layout': os.path.join(_ROOT, 'py_router', 'frame_layout.py'),
-    'panels': os.path.join(_ROOT, 'py_router', 'render_panels.py'),
-    'attempts': os.path.join(_ROOT, 'py_router', 'movie_attempts.py'),
-    'motion': os.path.join(_ROOT, 'py_router', 'copper_motion.py'),
 }
 
 
@@ -86,19 +78,12 @@ def _t(name):
 
 T_PAL = _t('test_946_palette_measures.py')
 T_THEME = _t('test_946_theme_completeness.py')
-T_KEY = _t('test_946_event_key.py')
 T_XING = _t('test_946_opaque_crossings.py')
 T_PLAN = _t('test_946_plan_overlay.py')
-T_LAY = _t('test_946_frame_layout.py')
-T_CAP = _t('test_946_caption_split.py')
-T_BOX = _t('test_946_lower_box.py')
-T_ATT = _t('test_946_movie_attempts.py')
-T_MOT = _t('test_946_retract_and_grow.py')
-T_FMT = _t('test_946_format_defaults.py')
 
 # (name, target, old, new, tests, expect)
 ROWS = [
-    # --- P2: the palettes ---------------------------------------------------
+    # --- the palettes -----------------------------------------------------
     # The defect #946 opened on: a defect colour 2.8 from the rip, so red means
     # "copper was removed" and "this board is wrong" at the same time.
     ('defect-back-in-the-red-family', 'theme',
@@ -111,7 +96,7 @@ ROWS = [
      "LIGHT = Theme('light', _LIGHT, _DARK_MARKS, _LAYERS, 150)",
      (T_PAL,), 'KILLED'),
 
-    # --- P3: cyan, and the dash --------------------------------------------
+    # --- cyan, and the dash ------------------------------------------------
     ('restore-back-to-the-red-green-axis', 'theme',
      "    'event_restored':     (80, 215, 230),",
      "    'event_restored':     (86, 224, 96),",
@@ -120,35 +105,21 @@ ROWS = [
     ('rip-loses-its-second-channel', 'theme',
      "    'event_ripped': 'dashed',",
      "    'event_ripped': 'solid',",
-     (T_PAL, T_KEY), 'KILLED'),
+     (T_PAL,), 'KILLED'),
 
-    # --- P1/P2: the theme is COMPLETE and ordered ---------------------------
+    # --- the theme is COMPLETE and ordered ---------------------------------
     ('a-role-vanishes-from-the-light-theme', 'theme',
      "    'event_restored':        (0, 60, 150),\n",
      "",
      (T_THEME, T_PAL), 'KILLED'),
 
-    # --- P4: the key reports the RUN, not the palette -----------------------
-    ('key-advertises-every-colour-whatever-happened', 'chrome',
-     "    wanted = [(r, lbl) for r, lbl in EVENT_KEY if seen is None or r in seen]",
-     "    wanted = list(EVENT_KEY)",
-     (T_KEY,), 'KILLED'),
-
-    ('key-reads-its-mark-from-somewhere-other-than-the-theme', 'chrome',
-     "    return [(theme.rgb(role), theme.mark(role), label) for role, label in roles]",
-     "    return [(theme.rgb(role), 'solid', label) for role, label in roles]",
-     (T_KEY,), 'KILLED'),
-
-    # --- P5: crossings are opaque ------------------------------------------
+    # --- crossings are opaque ----------------------------------------------
     ('crossings-blend-again', 'render',
      "        self.opaque_crossings = True",
      "        self.opaque_crossings = False",
      (T_XING,), 'KILLED'),
 
-    # --- P6: the iso gate -- retired with the iso panel (stage3d is the
-    # only film layout); its row went with movie_panels.py.
-
-    # --- P7: the declared plan ---------------------------------------------
+    # --- the declared plan -------------------------------------------------
     # The FULL diagonals, which is what the first version of this drew. The
     # clip is implemented in three cooperating places -- the loop bound, the
     # 45-degree adjust-and-skip, and the clamp on the line itself -- and
@@ -173,161 +144,7 @@ ROWS = [
      "                d.line([x0, i + (x1 - x0), x1, i], fill=keep_c, "
      "width=1)",
      (T_PLAN,), 'KILLED'),
-
-    # --- P8: the frame is decided ONCE -------------------------------------
-    # The bug this phase found shipped: `_write_mp4` crops BOTH axes and only
-    # the height was ever forced even, so every tall board's mp4 silently lost
-    # a pixel column.
-    ('frame-height-only-even', 'layout',
-     "    W, H = even(W), even(H)",
-     "    H = even(H)",
-     (T_LAY,), 'KILLED'),
-
-    # 'auto-infers-a-stance-it-must-never-infer' went with 'auto': stage3d
-    # is the only film layout.
-
-    ('mixed-frame-sizes-are-squashed-silently', 'anim',
-     "        frame_layout.assert_frames_uniform(sorted(sizes))",
-     "        return frames",
-     (T_LAY,), 'KILLED'),
-
-    # --- P9: the caption splits --------------------------------------------
-    ('totals-drop-a-field-when-the-foot-is-short', 'chrome',
-     "        t = _fit(d, '  -  '.join(parts), font, box.w - 2 * pad)",
-     "        t = _fit(d, parts[0], font, box.w - 2 * pad)",
-     (T_CAP,), 'KILLED'),
-
-    ('the-rail-counts-steps-again', 'chrome',
-     "    out = 'lap %d' % lap",
-     "    return label or ''\n    out = 'lap %d' % lap",
-     (T_CAP,), 'KILLED'),
-
-    # --- P10: one box, four contents ---------------------------------------
-    ('the-strip-counts-copper-that-is-not-its-own', 'panels',
-     "            for s in by_layer.get(ln, ()):",
-     "            for s in segments:",
-     (T_BOX,), 'KILLED'),
-
-    ('the-strip-reports-a-tally-it-did-not-draw', 'panels',
-     "                drew += 1",
-     "                pass",
-     (T_BOX,), 'KILLED'),
-
-    ('the-count-is-stamped-on-the-layer-name-again', 'panels',
-     "            if d.textlength(num, font=font) > room:\n                num = ''",
-     "            if False:\n                num = ''",
-     (T_BOX,), 'KILLED'),
-
-    ('cells-shrink-below-legibility', 'panels',
-     "    if cw < CELL_MIN_W:",
-     "    if False:",
-     (T_BOX,), 'KILLED'),
-
-    # 'an-unplaced-board-pretends-it-was-repaired' went with phase_for and the
-    # seeding inventory (the retired layouts' lower box).
-
-    # --- P11: the attempts band --------------------------------------------
-    ('the-axis-becomes-vias-instead-of-the-accept-rule', 'attempts',
-     "    key = 'accept_score' if use_accept else 'failures'",
-     "    key = 'vias'",
-     (T_ATT,), 'KILLED'),
-
-    ('a-screened-round-is-scored-zero', 'attempts',
-     "            score=None if sc is None else float(sc),",
-     "            score=float(sc or 0),",
-     (T_ATT,), 'KILLED'),
-
-    ('a-null-blocking-row-is-dropped', 'attempts',
-     "        b = sc.get('blocking') if sc else None",
-     "        b = (sc.get('blocking') if sc else None)\n        if b is None:\n            continue",
-     (T_ATT,), 'KILLED'),
-
-    # #1077: a blocking that is not a count is drawn ungraded, never raised.
-    ('a-non-count-blocking-is-plotted', 'attempts',
-     "        b = _blocking_value(b)\n",
-     "",
-     (T_ATT,), 'KILLED'),
-
-    ('graded-trusts-any-blocking', 'attempts',
-     "    return bool(sc) and _blocking_value(sc.get('blocking')) is not None",
-     "    return bool(sc) and sc.get('blocking') is not None",
-     (T_ATT,), 'KILLED'),
-
-    # #1088 RETIRED four rows here -- film-counts-false-as-a-count,
-    # film-counts-nan-or-negative, film-isfinite-on-an-int-again and
-    # film-past-float-is-a-count. They mutated the film's hand MIRROR of
-    # converge's rule, and there is no mirror any more: the film imports
-    # `ledger_score.blocking_value`, whose clauses mutate_936's `ls` rows
-    # cover. `a-non-count-blocking-is-plotted` and `graded-trusts-any-
-    # blocking` stay: they are the film's own CALL sites.
-
-    ('a-list-result-sha-raises', 'attempts',
-     "        if e.get('result_sha') and isinstance(e['result_sha'], str):\n",
-     "        if e.get('result_sha'):\n",
-     (T_ATT,), 'KILLED'),
-
-    ('a-bool-iteration-reads-as-one', 'attempts',
-     "        return it if isinstance(it, int) and not isinstance(it, bool) else i",
-     "        return it if isinstance(it, int) else i",
-     (T_ATT,), 'KILLED'),
-
-    ('a-null-iteration-raises-again', 'attempts',
-     "        return it if isinstance(it, int) and not isinstance(it, bool) else i",
-     "        return int(it)",
-     (T_ATT,), 'KILLED'),
-
-    ('a-rejected-attempt-can-set-the-record', 'attempts',
-     "                and (a.accepted or not require_accepted)",
-     "                and True",
-     (T_ATT,), 'KILLED'),
-
-    # 'the-off-arm-rebuilds-the-frame-list' went with movie_attempts.attach:
-    # the attempts band is not drawn by any film layout left.
-
-    ('attempts-are-synthesised-from-the-boards', 'attempts',
-     "    loop = attempts_from_loop_dir(d)\n",
-     "    loop = attempts_from_loop_dir(d)\n    import glob as _g\n    _b = sorted(_g.glob(os.path.join(d, '*.kicad_pcb')))\n    if not loop and len(_b) > 1:\n        loop = Track(tuple(Attempt(i, b, 'round', i - 1 or None, True, False,\n                                   float(len(_b) - i), False, b)\n                           for i, b in enumerate(_b)),\n                     'boards', 'loop', 'synthesised')\n",
-     (T_ATT,), 'KILLED'),
-
-    # --- P12: retract and grow ---------------------------------------------
-    ('copper-dissolves-instead-of-retracting', 'motion',
-     "    ordered = order_from(rows, a)",
-     "    ordered = [list(r) for r in rows]",
-     (T_MOT,), 'KILLED'),
-
-    ('the-last-retract-stage-still-holds-copper', 'motion',
-     "        f = ((i + 1) / float(n)) if grow else (1.0 - (i + 1) / float(n))",
-     "        f = ((i + 1) / float(n)) if grow else (1.0 - i / float(n))",
-     (T_MOT,), 'KILLED'),
-
-    ('rip-hold-zero-animates-anyway', 'anim',
-     "        self.motion = rip_hold > 0",
-     "        self.motion = True",
-     (T_MOT,), 'KILLED'),
-
-    ('every-add-grows-not-just-a-restore', 'anim',
-     "            if self.motion and role == 'event_restored' and new_s:",
-     "            if self.motion and new_s:",
-     (T_MOT,), 'KILLED'),
-
-    ('a-growth-stage-has-its-finished-self-underneath-it', 'anim',
-     "                                    col, label, base_s=base)",
-     "                                    col, label)",
-     (T_MOT,), 'KILLED'),
-
 ]
-
-# `a-growth-stage-has-its-finished-self-underneath-it` shipped for one commit
-# as an EXPECTED SURVIVOR, with the note that closing it needed a pixel probe
-# of a growth stage rather than another count. It has one now
-# (`test_a_growth_stage_is_not_drawn_over_its_finished_self`, asserting the
-# restore ink grows stage by stage), so the row is an ordinary KILLED.
-#
-# #946 SECTION 4 has NO row here on purpose. Its refusal lives in
-# `make_movie.DEFAULT_SIZE` / `DEFAULT_FPS`, which this battery does not own,
-# and `tests/test_946_format_defaults.py` gates it by RE-MEASURING rather than
-# by a source edit -- a mutation of a default is just a different default, and
-# the gate's whole point is that the number has to come past a measurement.
 
 # Every anchor must match its target exactly once BEFORE anything is rewritten.
 from mutation_anchors import preflight   # noqa: E402

@@ -6,17 +6,14 @@ A floorplan intent is a fully geometric document -- `docs/floorplan-intent.md`:
 `keepouts[]` a `rect` or a `circle`, `edge_connectors[]` an edge plus an
 `along_edge_band` given as two fractions. All drawable.
 
-**And nothing drew it.** `render_placement --intent` reads that file for exactly
-one thing -- `overlap_waivers` -- so the plan existed only as JSON and as
-pass/fail counts out of `check_floorplan`. The film opened on parts arriving
-with no indication of where they were supposed to go, and on an UNPLACED board
-the declared zones are the only statement of intent there is: no prior
-arrangement to compare against, so without them the opening frames are an empty
-outline and nothing else.
+**This draws it.** `render_placement --intent` reads that file for its
+`overlap_waivers` and, through this module, draws the plan; otherwise it
+exists only as JSON and as pass/fail counts out of `check_floorplan`. On an UNPLACED board the declared
+zones are the only statement of intent there is: no prior arrangement to
+compare against, so without them a render is an empty outline and nothing else.
 
 **Drawn through `frame(overlays=...)`**, which draws at supersampled resolution
-above copper and below the label -- so this costs NO FRAME GEOMETRY and is
-available to the still renderer and the movie on the same terms.
+above copper and below the label -- so this costs NO FRAME GEOMETRY.
 
 **This module reads no intent file.** It takes an already-parsed `Intent` (or
 anything with the same three attributes), because `placement.floorplan` owns
@@ -69,11 +66,11 @@ def draw_plan(d, r, intent, *, verdict=None, alpha=1.0, theme=None,
 
     `verdict` maps a block name to True (held) / False (drifted). When given,
     blocks are recoloured by it -- which is what `violations_by_rule` already
-    computes, so the close of a film can grade against the plan it opened on
-    without a second measurement.
+    computes, so a render can grade against the plan without a second
+    measurement.
 
-    `alpha` scales the stroke weight and is how the same call serves the
-    opening (full) and the context pass while parts move (faint).
+    `alpha` scales the stroke weight: full for the plan itself, faint when it
+    is context under other drawing.
 
     Never raises: a plan overlay is not worth failing a render over, the rule
     `render_placement.draw_legend` established.

@@ -60,12 +60,15 @@ WHAT IS PINNED HERE, and what each check is FOR:
    `test_qfn_underpad.py`'s own 18/22/20 pin): any future change to the escape
    ladder fails them and forces a re-measurement rather than silent drift.
 
-7. LAYER SCOPE, as a decision pin. The via half is layer-BLIND because
-   `check_drc.check_via_segment_overlap` grades a via against segments on every
-   copper layer regardless of `via.layers`; the segment half is layer-FILTERED
-   because segments really are single-layer. It filters on `footprint.layer`
-   (where the stub lands, #195) and NOT on `layer`, and the two are not
-   interchangeable: on U2 they find 25 and 17 pairs and the sets are disjoint.
+7. LAYER SCOPE, as a decision pin. The via half is layer-BLIND, a superset of
+   `check_drc.check_via_segment_overlap`, which grades a via KiCad types
+   blind/buried/micro on its span only (#1268) and every other via -- an
+   untyped one whatever its layer pair -- on every copper layer. A blind half
+   can refuse a stub the grader would pass, never the reverse. The segment
+   half is layer-FILTERED because segments really are single-layer. It
+   filters on `footprint.layer` (where the stub lands, #195) and NOT on
+   `layer`, and the two are not interchangeable: on U2 they find 25 and 17
+   pairs and the sets are disjoint.
 
 8. THE PAD HALF'S FOUR EXCLUSIONS. NPTH (no copper), the `*.Cu` / `F&B.Cu`
    wildcards, per-pad `local_clearance`, and net ties. Each is check_drc's own
@@ -458,16 +461,20 @@ def test_measured_boards():
 def test_layer_scope_decision():
     print("\n7. layer scope: blind for vias, filtered for segments")
     from check_drc import check_via_segment_overlap
+    untyped = Via(x=10.0, y=10.0, size=VS, drill=VD,
+                  layers=["In1.Cu", "In2.Cu"], net_id=1)
     buried = Via(x=10.0, y=10.0, size=VS, drill=VD,
-                 layers=["In1.Cu", "In2.Cu"], net_id=1)
+                 layers=["In1.Cu", "In2.Cu"], net_id=1, via_type="buried")
     seg = Segment(start_x=9.0, start_y=10.0, end_x=11.0, end_y=10.0,
                   width=TW, layer="F.Cu", net_id=2)
-    hit, _ = check_via_segment_overlap(buried, seg, CL)
-    check("check_drc grades a via against segments on EVERY copper layer "
-          "regardless of via.layers, so a layer-FILTERED via backstop would "
-          "ship copper this repo's own grader flags -- the via half is "
-          "deliberately layer-blind, and this fails the day that changes",
-          hit is True)
+    check("check_drc grades an UNTYPED via against segments on EVERY copper "
+          "layer whatever its layer pair (KiCad loads it as a through via)",
+          check_via_segment_overlap(untyped, seg, CL)[0] is True)
+    check("check_drc grades a TYPED buried via only on its span (#1268), so "
+          "the layer-blind via half is a superset of the grader -- it can "
+          "refuse a stub, never pass one check_drc flags; this fails the day "
+          "that changes",
+          check_via_segment_overlap(buried, seg, CL)[0] is False)
     # And the segment half's filter is on the STUB's layer, not the escape
     # layer. Every board in the sweep runs escape layer == footprint.layer, so
     # the distinction is INVISIBLE there -- mutate_619 found that swapping
@@ -480,7 +487,25 @@ def test_layer_scope_decision():
     check("the fixture is genuinely cross-layer: U2 mounts on F.Cu and is "
           "escaped to B.Cu, so the stub's layer and the escape layer differ",
           fp.layer == "F.Cu")
-    t_x, v_x, d_x = _fanout(pcb, "U2", layer="B.Cu")
+    # The stub's primary clearance test (#845) is PadFreeMap.line_clear, which
+    # reads ONE layer name for its grid plane and its exact pads. On this
+    # fixture no escape depends on which plane it reads (via_clears and this
+    # gate already refuse what the B.Cu plane would let through), so no tally
+    # can see the escape layer passed there: the call is spied on instead.
+    from bga_fanout.reroute import PadFreeMap
+    _seen_layers = set()
+    _orig_lc = PadFreeMap.line_clear
+
+    def _spy_lc(self, x1, y1, x2, y2, layer, cfg):
+        _seen_layers.add(layer)
+        return _orig_lc(self, x1, y1, x2, y2, layer, cfg)
+    PadFreeMap.line_clear = _spy_lc
+    try:
+        t_x, v_x, d_x = _fanout(pcb, "U2", layer="B.Cu")
+    finally:
+        PadFreeMap.line_clear = _orig_lc
+    check("the stub's clearance test reads the stub's own layer (F.Cu), never "
+          "the escape layer (#845)", _seen_layers == {"F.Cu"}, str(_seen_layers))
     e = _erased(pcb, "U2")
     check("the stub's copper layer is footprint.layer, not the escape layer "
           "(#195: putting it on the escape layer would float it above the pad)",
@@ -490,12 +515,13 @@ def test_layer_scope_decision():
     # read the mount layer, and this configuration is one of only two places in
     # the repo that can tell the difference -- every board in the corpus sweep
     # runs escape layer == footprint.layer, where the distinction is invisible.
-    check("cross-layer tally pinned at 14 tracks / 13 vias / 28 dropped "
-          "(15 / 13 / 27 before the #845 layer fix). Filtering erased segments "
-          "by the ESCAPE layer instead of the stub's layer selects a DIFFERENT "
-          "set (25 vs 17 pairs on this board) and moves this number -- which "
-          "is what makes this a real check",
-          (len(t_x), len(v_x), len(d_x)) == (14, 13, 28),
+    check("cross-layer tally pinned at 16 tracks / 14 vias / 26 dropped "
+          "(15 / 13 / 27 at 0.1 alone: #1328 re-runs the part at 0.095, where "
+          "Net-(U2A-DATA_6) escapes; 14 / 13 / 28 before PadFreeMap). "
+          "Filtering erased segments by the ESCAPE layer instead of the stub's "
+          "layer selects a DIFFERENT set (25 vs 17 pairs on this board) and "
+          "moves this number -- which is what makes this a real check",
+          (len(t_x), len(v_x), len(d_x)) == (16, 14, 26),
           f"got {(len(t_x), len(v_x), len(d_x))}")
 
 
@@ -603,11 +629,18 @@ NOOP_ROWS = [
 
 # Each half alone on routed_output U2, and the pairs it leaves behind.
 # (arm, tally t/v/d, residual pairs via/seg/pad)
+# Every arm escapes one more pad since the stub measures pads exactly
+# (bga_fanout.reroute.PadFreeMap): Net-(U2A-DATA_23)'s 0.67 mm F.Cu stub to an
+# existing via clears U2.68 by 0.188 mm at a 0.1 rule, and the pad-stamped
+# map refused it. The residual pairs, which are this file's point, are unchanged.
+# 'seg' and 'all' escape one more again (#1328): a part whose under-pad escape
+# drops pads is re-run down the clearance ladder, and at 0.095 Net-(U2A-DATA_6)
+# (U2.46) escapes; the 0.1 tallies were (17, 15, 25) and (15, 13, 27).
 ARM_ROWS = [
-    ('off',     (27, 26, 15), (7, 32, 0)),
-    ('via',     (20, 19, 22), (0, 13, 0)),   # via contacts gone, 13 seg remain
-    ('seg',     (16, 15, 26), (2, 0, 0)),    # seg contacts gone,  2 via remain
-    ('all',     (14, 13, 28), (0, 0, 0)),
+    ('off',     (28, 26, 14), (7, 32, 0)),
+    ('via',     (21, 19, 21), (0, 13, 0)),   # via contacts gone, 13 seg remain
+    ('seg',     (18, 16, 24), (2, 0, 0)),    # seg contacts gone,  2 via remain
+    ('all',     (16, 14, 26), (0, 0, 0)),
 ]
 
 # (board, ref, post-fix tally t/v/d, pre-fix pairs via/seg/pad)
@@ -616,11 +649,17 @@ ARM_ROWS = [
 # place. It was pre-registered as a withdrawal candidate on a 5-board sample
 # that showed zero yield; the full 408-footprint sweep found 49 pairs on 9
 # footprints across 6 boards, so it ships.
+# The #1328 under-pad escalation (the part re-run down the clearance ladder
+# when it drops pads) adds one escape on three of these: U2 Net-(U2A-DATA_6)
+# (U2.46) at 0.095, orangecrab U3 FPGA_RESET (U3.V17) at 0.09, rp2350 U6
+# /RP2354A/1V1 (U6.50) at 0.09. Their 0.1 tallies follow each row.
 BOARD_ROWS = [
-    (U2BOARD, "U2", (14, 13, 28), (7, 32, 0)),
+    (U2BOARD, "U2", (16, 14, 26), (7, 32, 0)),   # (15, 13, 27); (14, 13, 28) before PadFreeMap
     (ORANGE, "U7", (2, 0, 4), (3, 0, 4)),
-    (ORANGE, "U3", (33, 33, 62), (1, 14, 11)),
-    (RP2350, "U6", (6, 3, 41), (2, 11, 1)),
+    # (33, 33, 62) before #1342: its 6 escapes and 4 drops on single-pad
+    # (NC) nets are no longer fanned at all.
+    (ORANGE, "U3", (28, 28, 57), (1, 14, 11)),   # (27, 27, 58)
+    (RP2350, "U6", (7, 4, 40), (2, 11, 1)),      # (6, 3, 41)
     (TIGARD, "U3", (43, 43, 5), (0, 0, 4)),     # pad half only
     (WATCHY, "J3", (12, 12, 7), (0, 0, 9)),     # pad half only
 ]

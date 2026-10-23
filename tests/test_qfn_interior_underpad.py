@@ -47,7 +47,10 @@ from qfn_fanout import generate_qfn_fanout
 from qfn_fanout.layout import analyze_qfn_layout, analyze_pad
 from bga_fanout.constants import POSITION_TOLERANCE
 
-BOARD = os.path.join(ROOT, 'kicad_files', 'qfn_interior_pads.kicad_pcb')
+SRC_BOARD = os.path.join(ROOT, 'kicad_files', 'qfn_interior_pads.kicad_pcb')
+# #1342: the fixture's nets exist only on U1, and the fanouts skip a
+# single-pad (NC) net; main() fans a copy where each has a partner pad.
+BOARD = SRC_BOARD
 VIA_SIZE, VIA_DRILL, CLEARANCE, GRID = 0.45, 0.2, 0.15, 0.05
 
 CHECKS = []
@@ -84,6 +87,10 @@ def main():
     print("=" * 60)
     print("Issue #410: interior-pad underpad escapes")
     print("=" * 60)
+    global BOARD
+    from synth import with_partner_pads
+    BOARD = os.path.join(tempfile.mkdtemp(), 'qfn_interior_pads.kicad_pcb')
+    with_partner_pads(SRC_BOARD, BOARD, (2.0, 2.0))
     pcb = parse_kicad_pcb(BOARD)
     fp = pcb.footprints['U1']
     layout = analyze_qfn_layout(fp)

@@ -7,9 +7,7 @@ real thing. They exist because **`wk/` is gitignored** — `git ls-files | grep 
 regression cannot depend on it.
 
 `tests/test_887_cmd_timing_reader.py` reads only these files and **carries the
-whole regression on a fresh clone**. `tests/test_887_run24_regression.py`
-corroborates the same reader against the real ledger when a machine happens to
-have one, and self-skips (exit 77) when it does not.
+whole regression on a fresh clone**.
 
 Every row's `t_start` is `1787200000.0 + <offset>`; `iso_start` is that instant
 in UTC. Nothing reads the absolute epoch — only the differences matter.
@@ -24,14 +22,14 @@ serves stops testing anything**, so this table is the map.
 | 1 | `fence-audit-start` | 0.5 | 0 | close-out | Ran **first** and buckets **last**. Deliberately row 1 so a bucketer keyed on position ("everything after the last route step", which is how the original mandate worded it) fails too, not only a prefix bug. |
 | 2 | `staging-assembly0` | 1.0 | **4** | staging | A non-zero exit that is still counted — run 24's own start anchor exited 4 and is row 1 of the published table. |
 | 3 | `P0-driver` | 0.5 | 0 | P* | An ordinary placement step. |
-| 4 | `P3-reconstruct` | 4.0 | 0 | P* | Names `r1.kicad_pcb` in `argv`, for the board→command mapping. |
+| 4 | `P3-reconstruct` | 4.0 | 0 | P* | The longest placement step: most of `P*`'s 8.0 s. |
 | 5 | `Pclose-q-render` | 1.5 | 0 | **P\*** | `Pclose-*` counts under `P*`, because `close` is not a prefix **of** `Pclose-*`. |
 | 6 | `Pclose-film` | 2.0 | 0 | **P\*** | A second one, so the count is not 1-vs-0. |
 | 7 | `L2-driver` | 0.5 | **4** | L* | Second non-zero exit. |
 | 8 | `L5-final-record` | 0.25 | **2** | L* | Repeated label, 1st entry. |
 | 9 | `L5-final-record` | 0.25 | 0 | L* | Repeated label, 2nd — "counted once per entry" means two steps, not one. |
-| 10 | `R1-pour` | 1.5 | 0 | R* | Names `r1_pour.kicad_pcb`. |
-| 11 | `R3-route` | **60.0** | 0 | R* | Longest step. Names `r3_route.kicad_pcb`. |
+| 10 | `R1-pour` | 1.5 | 0 | R* | An ordinary routing step. |
+| 11 | `R3-route` | **60.0** | 0 | R* | Longest step. |
 | 12-14 | `R5-prune` ×3 | 0.5 each | 2, 0, 0 | R* | A label repeated **three** times, one of them failing. |
 | 15 | `R7-layercosts` | **24.0** | 0 | R* | 2nd longest. |
 | 16 | `V-complete` | **8.2** | 0 | V* | 3rd longest. |
@@ -68,12 +66,11 @@ the defensive code is still pinned.
 | `A-first` | +0 | +1 | Written **third**, but is first in time — so `load_rows` must sort. |
 | `E-last` | +600 | +602 | Last by `t_start`, **not** last by `t_end`. |
 
-Span is therefore **700 s**, not 602. These rows also overlap, which is why the
-disjointness assertion lives in the run-24 arm and not here.
+Span is therefore **700 s**, not 602. These rows also overlap, so nothing here
+asserts that rows are disjoint.
 
 ## Extending them
 
 Append a line and add its expectation to `WANT_SUBTOTALS` (and a row above).
-Note that `argv`/`cmdline` are only meaningful on the four rows that name a
-board; the rest carry a plausible command so the shape is right, and no
-assertion reads them.
+No assertion reads `argv`/`cmdline`: every row carries a plausible command so
+the shape is right, and some name scripts that no longer exist.

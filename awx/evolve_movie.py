@@ -107,14 +107,13 @@ from route_render import BoardRenderer, load_font               # noqa: E402
 
 # --------------------------------------------------------------------------
 # palette -- one colour language for the whole film, and since #1011 it is the
-# SAME one language the routing movie and render_placement speak. These were
+# SAME one language render_placement speaks. These were
 # eleven constants of this file's own; they are now aliases onto
 # `py_router/render_theme`, value-for-value.
 #
 # Two of them are worth naming, because they are the finding rather than the
-# tidy-up: ADDED and REMOVED mean exactly what animate_route's _NEW and _RIP
-# mean -- "copper present now and not before", "present before and not now" --
-# and they are DIFFERENT VALUES. A rip is a rip in both films. #1013 collapses
+# tidy-up: ADDED and REMOVED mean "copper present now and not before" and
+# "present before and not now", and they are DIFFERENT VALUES. #1013 collapses
 # them; #1011 only records that they were apart.
 # --------------------------------------------------------------------------
 from render_theme import DARK as _TH                            # noqa: E402
@@ -1211,23 +1210,26 @@ class Ribbon:
         # The record is a function of TIME, sampled at every instant a world was
         # born -- not once per chapter.  A descent that walks 98 -> 96 -> 95 set
         # two records inside one chapter, and a per-chapter sample keeps only
-        # the last of them.
-        #
-        # #1021: that sampling rule is now ONE function, shared with the
-        # routing movie's attempts band, because it is one algorithm and was
-        # about to be written twice.  The POLICY stays each film's own and is
-        # passed in: here a world need not have been KEPT to set a record, and
-        # it must be admissible (open nets are not bought off by a via count).
-        # On the routing side both are the other way round, and both are right
-        # -- see `movie_attempts.best_so_far`.
-        from movie_attempts import Attempt, best_so_far
+        # the last of them.  ONE entry per distinct instant (a whole generation
+        # shares one `born`), holding the best via count among every world born
+        # at or before it.  A world need not have been KEPT to set a record,
+        # but it must be admissible: open nets are not bought off by a via
+        # count.  A non-finite count never wins.
         rows = sorted((w for w in reg.worlds.values() if w.grade),
                       key=lambda w: (w.born, w.gid))
-        self.record = best_so_far(
-            [Attempt(index=w.born, label=w.gid, kind=w.kind, parent=None,
-                     accepted=True, screened=False, score=w.grade[2],
-                     admissible=not w.grade[0], board=None) for w in rows],
-            require_accepted=False, require_admissible=True)
+        self.record = []
+        best, k = None, 0
+        for born in sorted({w.born for w in rows}):
+            while k < len(rows) and rows[k].born <= born:
+                w = rows[k]
+                k += 1
+                v = w.grade[2]
+                if (not w.grade[0] and v is not None and v == v
+                        and v not in (float('inf'), float('-inf'))
+                        and (best is None or v < best)):
+                    best = v
+            if best is not None:
+                self.record.append((born, best))
 
     def _x(self, chapter):
         px0, _, px1, _ = self.plot
@@ -1337,9 +1339,8 @@ class Film:
 
     Frames are written as they are made rather than accumulated: this canvas is
     ~5 MB per frame as RGB, so a few hundred frames would be a gigabyte of RAM
-    on a machine that is also routing.  `animate_route.save_movie` is the
-    repo's shared encoder but it materialises every frame, so it is the
-    FALLBACK here and ffmpeg over the PNG sequence is the primary path.
+    on a machine that is also routing.  ffmpeg over the PNG sequence is the
+    encoder; `--gif` writes a GIF with Pillow alone.
     """
 
     def __init__(self, tagline, K, cam, stage, ribbon, canvas, frames_dir, out=sys.stdout):
@@ -1672,9 +1673,8 @@ def run(args, out=sys.stdout):
 # encoding
 # --------------------------------------------------------------------------
 def encode(frames_dir, out_path, fps, n_frames, gif=False, log=sys.stdout):
-    """PNG sequence -> mp4.  ffmpeg over the files is the primary path because
-    it streams; the repo's shared `animate_route.save_movie` is the fallback
-    (it materialises every frame, which is why it is not first here)."""
+    """PNG sequence -> mp4 through ffmpeg, which streams the files.  Without
+    ffmpeg no mp4 is written and the run says so; `gif` still works."""
     pat = os.path.join(frames_dir, 'f%06d.png')
     ff = None
     for cand in ('/opt/homebrew/bin/ffmpeg', 'ffmpeg'):
@@ -1693,15 +1693,9 @@ def encode(frames_dir, out_path, fps, n_frames, gif=False, log=sys.stdout):
         ok = r.returncode == 0 and os.path.exists(out_path)
         if not ok:
             print(f'evolve_movie: ffmpeg failed: {r.stderr.strip()[:300]}', file=log)
-    if not ok:
-        try:
-            import animate_route
-            frames = [Image.open(os.path.join(frames_dir, f'f{i:06d}.png')).convert('RGB')
-                      for i in range(n_frames)]
-            animate_route.save_movie(frames, out_path, fps, end_hold=1.0)
-            ok = True
-        except Exception as e:                                  # noqa: BLE001
-            print(f'evolve_movie: no encoder ({e})', file=log)
+    if not ok and not ff:
+        print(f'evolve_movie: no mp4 written (ffmpeg not found); the frames are '
+              f'in {frames_dir}, and --gif writes a GIF without it', file=log)
     if ok:
         sz = os.path.getsize(out_path) / 1e6 if os.path.exists(out_path) else 0
         print(f'evolve_movie: wrote {out_path} ({n_frames} frames @ {fps}fps, '

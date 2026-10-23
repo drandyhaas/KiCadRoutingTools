@@ -22,9 +22,11 @@ Each backend knows how to:
 This module is intentionally wx-free so tests can import it headless.
 """
 
+import contextlib
 import json
 import os
 import shutil
+import tempfile
 
 # Read-only analysis tools: the DEFAULT allowlist for the "Ask AI" analysis
 # skills, which never need write access to the board. Callers that drive a
@@ -49,7 +51,34 @@ import shutil
 # what is written here. So this is a statement of INTENT, not a sandbox.
 # Anyone reasoning about what a run can do to the board should note that
 # `Bash` is on this list, and `Bash` writes files.
-CLAUDE_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,Agent,Task,WebSearch"
+#
+# WebFetch is here so a skill can READ a datasheet, not only the snippet
+# WebSearch returns (Andy, 2026-10-15: full WebFetch for the CLI and the GUI).
+# It writes no file; a run that downloads one (curl for a PDF) puts it in the
+# per-run folder `datasheet_scratch()` makes, which is deleted when the run ends.
+CLAUDE_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,Agent,Task,WebSearch,WebFetch"
+
+#: The environment variable that names a run's datasheet folder, and the one
+#: sentence every run is told about it (stated once, as ANALYSIS_CONSTRAINT is).
+DATASHEET_DIR_ENV = "KRT_DATASHEET_DIR"
+DATASHEET_SENTENCE = (
+    "Read datasheets with WebSearch and WebFetch; a PDF datasheet reads "
+    "better downloaded (curl) and opened with the Read tool, a few `pages` at "
+    "a time, figures included. If you must save a downloaded file, save it "
+    "only under $KRT_DATASHEET_DIR, which is deleted when this run ends."
+)
+
+
+@contextlib.contextmanager
+def datasheet_scratch():
+    """A fresh folder for one run's downloaded datasheets, removed on exit --
+    after a clean finish, a failure, a cancel or an exception alike. Yields the
+    folder's path; the runner hands it to the child as DATASHEET_DIR_ENV."""
+    path = tempfile.mkdtemp(prefix="krt_datasheets_")
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 # The behavioural half of the contract. Stated once here because it was
 # hand-copied into eight prompts across four GUI modules, which is exactly how
@@ -69,7 +98,7 @@ CLAUDE_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,Agent,Task,WebSearch"
 # agents themselves, and it applies to Claude Code only, while this sentence
 # has to reach opencode too. What ships here is the repo's EXISTING convention
 # for bounding a child -- a subagent brief quoted verbatim (see
-# .claude/skills/pcb-free-agent/references/verifier.md) -- stated once instead of eight
+# .claude/skills/plan-pcb-placement/references/verifier.md) -- stated once instead of eight
 # times. Treat the enforced version as owed, not done.
 #
 # VERDICT= rather than RESULT= for the child's answer, because
@@ -83,7 +112,9 @@ CLAUDE_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,Agent,Task,WebSearch"
 # eight said before.
 ANALYSIS_CONSTRAINT = (
     "analysis and planning only: do not execute any routing commands and do "
-    "not modify any files. If you dispatch a subagent, copy this sentence into "
+    "not modify any files (a downloaded datasheet may be saved under "
+    "$KRT_DATASHEET_DIR, which is deleted when this run ends). If you "
+    "dispatch a subagent, copy this sentence into "
     "its prompt verbatim and give it no tool this run does not have; have it "
     "answer with a line beginning VERDICT= (never RESULT=, which this GUI "
     "reads as the run's own result line)."

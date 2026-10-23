@@ -6,7 +6,7 @@ The basis keys always held only the reference's basename
 `context.decap_census.reference_board` held the path exactly as given --
 absolute when it was passed absolute -- and a refused reference repeated it in
 `context.budget_withheld['decaps.max_distance_mm']` and
-`decap_census.pin_limit_withheld`. In the flow the pcb-free-agent skill
+`decap_census.pin_limit_withheld`. In the flow the plan-pcb-placement skill
 prescribes, the reference is a human layout, so the run then graded against a
 document naming the file it must not read (fa10 post-processed every intent
 for it).

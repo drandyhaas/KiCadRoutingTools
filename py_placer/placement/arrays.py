@@ -2,18 +2,16 @@
 
 A declared `arrays[]` entry says "these parts are one row": resistor banks along
 a bus in the served IC's pin order, a decap row under a chip, one rotation for
-the lot. The seeder has no term that builds such a row and the quench pulls
-each member toward its own nets, so identical parts scatter (run 32:
-3750 crossings against the human layout's 1352).
+the lot. A search that pulls each member toward its own nets scatters
+identical parts (run 32: 3750 crossings against the human layout's 1352).
 
 This module holds the two PURE pieces every consumer shares:
 
 * `formation` -- ONE predicate for "is this set of poses a formed row": a
   common axis, the expected order along it, one shared rotation, an even
-  pitch. The grade rule `array_formation` calls it, and the seeder's row seat
-  and the quench's block move are to call it too (#1051 phases 3-4) rather
-  than each carrying a copy, which is how a grader and an engine come to
-  disagree about what "formed" means.
+  pitch. The grade rule `array_formation` calls it, and any engine that
+  forms rows is to call it too rather than carry a copy, which is how a
+  grader and an engine come to disagree about what "formed" means.
 * `pin_order` -- the order a row must follow for `order: "pin"`: the served
   IC's pad numbering, read off pads and nets only. POSE-BLIND on purpose: an
   order read off where the parts sit would bless whatever arrangement the
@@ -322,30 +320,6 @@ def formation(members_poses: Sequence[Dict[str, object]], *,
             'axis': axis, 'order': observed, 'checks': checks}
 
 
-def formation_at_state(state, pcb, spec: Dict[str, object],
-                       members: Sequence[str]) -> Dict[str, object]:
-    """`formation` over `members` at their CURRENT poses in a placement
-    state (`pose_score.make_state` / `QuenchState`), in the grade's own
-    measurement: each member's courtyard centre on the grade ladder
-    (`part.grade_rect()`, the rect `rule_array_formation` reads -- under
-    `body_model` `rect()` is the occupancy, whose centre moved by up to
-    3.5 mm on One-Air-Max), its board rotation, its copper pad count.
-    `spec` is a resolved array (`floorplan.resolved_arrays`: `order_refs`,
-    `rotation`, `pitch_mm`, `axis`). The seeder's row self-check and the
-    quench's "is this row formed, so hold it rigid" both call this."""
-    poses = []
-    for m in members:
-        p = state.parts[m]
-        r = p.grade_rect() if hasattr(p, 'grade_rect') else p.rect()
-        poses.append({'ref': m, 'x': (r[0] + r[2]) / 2.0,
-                      'y': (r[1] + r[3]) / 2.0, 'rot': p.rot % 360.0,
-                      'pads': _copper_pad_count(pcb.footprints[m])})
-    return formation(poses, order_key=spec.get('order_refs'),
-                     rotation_spec=spec.get('rotation'),
-                     pitch_spec=spec.get('pitch_mm', 'auto'),
-                     axis_spec=spec.get('axis', 'auto'))
-
-
 def spec_of(entry: Dict[str, object]) -> Dict[str, object]:
     """One intent `arrays[]` entry with its absent keys RESOLVED.
 
@@ -537,6 +511,10 @@ def pose_free_chip_refs(pcb) -> set:
             SimpleNamespace(global_x=float(p.local_x or 0.0),
                             global_y=float(p.local_y or 0.0)) for p in pads])
         if groups_mod._pads_are_collinear(local):
+            continue
+        # #1351: the role gate `_ic_list` applies (pose-free: roles, pin
+        # types and names)
+        if groups_mod.passive_by_role(pcb, ref) is not None:
             continue
         out.add(ref)
     # #1249: the supply owners `chip_refs` adds read no pose at all
@@ -767,10 +745,8 @@ def _pin_runs(pcb, refs: List[str], rails=frozenset(),
         # bank between two big parts (glasgow's 17 SN74LVC1T45 between U30
         # and the IO side), which humans lay as multi-row blocks near the
         # far part -- a shape `arrays[]` cannot express (one row per
-        # entry; multi-row blocks are not supported). Seeding it as one
-        # row at the host measured WORSE on glasgow (phase-3 verifier:
-        # crossings and hpwl both rose), so it is declined with the
-        # reason, and a reader may still declare it by hand.
+        # entry; multi-row blocks are not supported), so it is declined
+        # with the reason, and a reader may still declare it by hand.
         other = _bridge_partner(fps, links, host, ordered, floor)
         if other is not None:
             if declined is not None:

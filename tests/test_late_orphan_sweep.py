@@ -302,10 +302,11 @@ def test_sweep_runs_on_the_nothing_to_route_early_exit():
 def test_via_on_same_net_graphic_is_kept():
     """The regression the sets1-5 corpus caught, in miniature.
 
-    Net-tagged copper GRAPHICS do not conduct in our connectivity graph
-    (#513), so a via whose only same-net neighbour is art looks pad-less --
-    but KiCad DOES credit the graphic, so that barrel is the bridge between
-    the net's copper and its art. remove_orphan_islands has guarded segment
+    A via whose only same-net neighbour is art reaches no pad, but KiCad
+    credits the graphic, so that barrel is the bridge between the net's
+    copper and its art and must not be swept as debris (the connectivity
+    graph now conducts through board art too, so it sits in the art's
+    component). remove_orphan_islands has guarded segment
     islands against this since #337 via `_touches_graphic`, but that test
     iterates the cluster's SEGMENTS, which is vacuous for a via-only cluster
     -- exactly the cluster kind #659 taught it to see.

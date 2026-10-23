@@ -264,7 +264,7 @@ def _drive(bi, vias, segs, fps, zones, **kw):
     collaborators degrade cleanly (courtyards -> {}, locked refs -> set(),
     PadClearanceModel -> INERT), run the WHOLE pass, capture stdout.
 
-    `on_move` is the supported hook the animator uses and the only way to see
+    `on_move` is the supported inspection hook and the only way to see
     the internal `_Repair` -- in particular `st.caps`, whose iteration order
     both returned lists must preserve.
     """

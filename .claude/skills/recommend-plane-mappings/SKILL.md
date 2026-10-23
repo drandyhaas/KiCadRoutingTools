@@ -22,7 +22,7 @@ for layer in pcb.board_info.stackup:               # List[StackupLayer], ordered
 
 # Existing zones - don't silently duplicate them
 for zone in pcb.zones:
-    print(zone.net_name if hasattr(zone, 'net_name') else zone, getattr(zone, 'layer', '?'))
+    print(zone.net_name, zone.layer, 'priority', zone.priority)
 ```
 
 Report the layer count up front. On a **2-layer board** there are no inner layers to
@@ -63,6 +63,12 @@ python3 -X utf8 py_router/list_nets.py path/to/file.kicad_pcb --power
   vias and escape congestion. TH-heavy nets gain nothing from layer choice
   (barrels connect everywhere), so don't let TH counts sway it.
 - Mention existing zones that already cover a recommendation instead of repeating them.
+  Pouring the same net on that layer REPLACES the existing zone with the run's
+  own settings (solid pad connection unless `--thermal-relief`, the run's
+  clearance and width, a board-sized outline). Say whether to keep it
+  (`--skip-existing-zones`, Planes tab: Skip existing zones) or replace it.
+  A multi-layer existing zone is replaced only when every one of its layers is
+  in the assignment.
 
 ## Step 3b: Routability Budget (do this BEFORE finalizing layers)
 
@@ -159,4 +165,6 @@ RESULT=GND:In1.Cu;VCC|+3V3:In2.Cu
 - Use exact net names as they appear on the board (including any `/` prefix)
 
 This line maps 1:1 onto the Planes tab's assignment list and `route_planes.py
---nets ... --plane-layers ...` arguments.
+--nets ... --plane-layers ...` arguments: one `--nets` entry per group (a split
+layer keeps its `|`, quoted) and one bare layer name per entry, positionally —
+`--nets GND 'VCC|+3V3' --plane-layers In1.Cu In2.Cu` for the line above.

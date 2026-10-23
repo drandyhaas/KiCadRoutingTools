@@ -36,7 +36,7 @@ import plane_fragility as pf                        # noqa: E402
 from kicad_exact_fill import RefillStatus           # noqa: E402
 from kicad_parser import parse_kicad_pcb            # noqa: E402
 
-#: A board WITH zones (splitflap_driver has none; see test_713_refill_status).
+#: A board WITH zones (splitflap_driver has none).
 ZONED = os.path.join(ROOT, 'kicad_files', 'sonde_u.kicad_pcb')
 
 passed = failed = 0

@@ -72,12 +72,17 @@ ALLOWED_COMPARE_SITES = {
 #: "do two ledgers describe the same work" are different questions from "does
 #: this score grade this board", and folding them together would be the
 #: opposite of what #963 is about.
-NOT_THE_PREDICATE = {
-    ('py_placer/converge.py', '_resolve_parent'):
-        'which STORED board was this lap made from (#1034) -- compares an '
-        "--argv board's sha to the OUTPUT board's, so the output is never "
-        'its own parent; no score is involved',
-}
+NOT_THE_PREDICATE = {}
+
+#: A copy of the predicate in the assign-then-compare spelling, scanned as a
+#: POSITIVE CONTROL: with no such site left in converge, a scan that matched
+#: nothing would otherwise read exactly like a pass.
+_CONTROL_COPY = """
+def copy(board, payload):
+    sha = sha256_file(board)
+    if sha != payload.get('board_sha'):
+        return 'other'
+"""
 
 
 def _tree(path):
@@ -179,9 +184,9 @@ def test_no_other_function_compares_a_stored_digest():
     comparing the two. Neither is a copy of the predicate. Requiring the
     COMPARISON is what separates deciding from mentioning.
     """
-    hits = set()
-    for rel, path in (('py_placer/converge.py', CONVERGE),):
-        for fn in ast.walk(_tree(path)):
+    def _scan(rel, tree):
+        out = set()
+        for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             held = _names_from_sha(fn)
@@ -191,10 +196,14 @@ def test_no_other_function_compares_a_stored_digest():
                 if isinstance(n, ast.Compare) and any(
                         isinstance(p, ast.Name) and p.id in held
                         for p in [n.left] + list(n.comparators)):
-                    hits.add((rel, fn.name))
-    assert hits, ("the dataflow scan matched nothing at all -- it is supposed "
-                  "to reach the ledger comparisons below, and a silently "
-                  "empty walk reads exactly like a pass")
+                    out.add((rel, fn.name))
+        return out
+
+    assert _scan('<control>', ast.parse(_CONTROL_COPY)) == {
+        ('<control>', 'copy')}, (
+        "the dataflow scan does not see a copy of the predicate at all, so "
+        "its silence about converge.py is not evidence")
+    hits = _scan('py_placer/converge.py', _tree(CONVERGE))
     exempt = sorted(hits & set(NOT_THE_PREDICATE))
     for site in exempt:
         print(f"    not the predicate -- {site[1]}: {NOT_THE_PREDICATE[site]}")
@@ -234,8 +243,6 @@ def test_the_binding_is_four_valued():
         missing = os.path.join(tmp, 'gone.kicad_pcb')
         assert converge.score_board_binding(missing, {'board_sha': 'a' * 64}) \
             == ('unknown', 'a' * 64)
-        assert set(converge.SCORE_BINDINGS) == {'this', 'other', 'unbound',
-                                                'unknown'}
     print("  PASS: this / other / unbound / unknown are four distinct answers")
 
 

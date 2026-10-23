@@ -241,6 +241,12 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     out = CleanupOutcome()
     counts = out.counts
     strip = out.input_strip_segments
+    # --quick 2, the seed judge: keep the passes that keep board and
+    # write-list one ledger (snap, phantom, the sweeps); skip the ones that
+    # only polish copper for shipping, which judging a placement never reads.
+    _judge = getattr(config, 'quick', 0) >= 2
+    if _judge:
+        graze = octolinear = via_nudge = cycles = neck = smooth = False
 
     # KICAD_LEDGER_TRACE="x,y;x,y;..." -- ledger-leak forensics: after every
     # pass, print how many pcb_data / write-list segments have an endpoint
@@ -354,7 +360,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   f"on {_nz_nets} net(s)")
 
     _prog("graze micro-shift")
-    _ms_segs, _ms_nets, _ms_strip, _ = nudge_grazing_microshift(
+    _ms_segs, _ms_nets, _ms_strip, _ = (0, 0, [], None) if _judge else nudge_grazing_microshift(
         results, pcb_data, scope_net_ids, clearance=config.clearance,
         max_shift=(microshift_max_shift if microshift_max_shift is not None
                    else config.grid_step / 2),
@@ -469,17 +475,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     _de_segs, _de_vias, _de_strip = sweep_dead_ends(
         results, pcb_data, scope_net_ids,
         protect_net_ids=protect_net_ids,
-        keep_input_copper=keep_input_copper,
-        # #672: protected (unfinished) nets still shed sub-CELL dead-end
-        # slivers -- rip/restore/prune debris no landing needs. One routing
-        # cell is the epsilon: no A* span is shorter. Plane-flow namespace
-        # configs carry no grid_step, which disables the pass there.
-        # #672: OPT-IN (env_knobs.SLIVER_TRIM). One routing cell is the
-        # epsilon -- no A* span is shorter -- but trimming sub-cell debris
-        # off a net the ladder is still retrying measured as a LOST NET on
-        # orangecrab, so it is off by default. See the knob's note.
-        sliver_eps=(float(getattr(config, 'grid_step', 0.0) or 0.0)
-                    if env_knobs.SLIVER_TRIM else 0.0))
+        keep_input_copper=keep_input_copper)
     counts['dead_ends_swept'] = _de_segs
     counts['dead_end_vias'] = _de_vias
     _trace('sweep')
@@ -531,7 +527,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if _sm_env == '':
         _sm_on = smooth and not getattr(config, 'guide_corridor_enabled', False)
     else:
-        _sm_on = _sm_env in ('1', 'true', 'on')
+        _sm_on = _sm_env in ('1', 'true', 'on') and not _judge
     if _sm_on:
         _prog("octolinear smoothing")
         _sm_n, _sm_nets, _sm_strip, _sm_added, _sm_stats = smooth_octolinear_chains(
@@ -760,6 +756,7 @@ def unreported_input_strips(orig_seg_by_net, orig_via_by_net, scope_net_ids,
     re-emit clause lets a result reproduce an original's span, so that span is
     still on the board even when the original object is not in `board_*`.
     """
+    from kicad_parser import is_immutable_copper  # #1279
     present_s = {_seg_ledger_sig(x) for x in board_segments
                  if not getattr(x, 'graphic', False)}
     present_v = {_via_ledger_sig(x) for x in board_vias}
@@ -771,12 +768,12 @@ def unreported_input_strips(orig_seg_by_net, orig_via_by_net, scope_net_ids,
             for x in orig_seg_by_net.get(nid, ())
             if id(x) not in known_seg_ids
             and not getattr(x, 'graphic', False)
-            and not getattr(x, 'locked', False)
+            and not is_immutable_copper(x)
             and _seg_ledger_sig(x) not in present_s]
     vias = [x for nid in (scope_net_ids or ())
             for x in orig_via_by_net.get(nid, ())
             if id(x) not in known_via_ids
-            and not getattr(x, 'locked', False)
+            and not is_immutable_copper(x)
             and _via_ledger_sig(x) not in present_v]
     return segs, vias
 

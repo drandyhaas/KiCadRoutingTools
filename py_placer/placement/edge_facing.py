@@ -5,11 +5,7 @@ SOT-89 regulator seated with its three pins 0.4 mm from the north edge, every
 one of its nets forced to leave under its own body or on the back, and the
 review wrote "the only free side in that corner -- PASS" because criterion 4
 of the boundary review (facing) had no number. This module is that number,
-shared by three consumers so they cannot disagree about it:
-
-  * `placement_score.edge_facing`   -- the report-only placement term;
-  * `floorplan.rule_pins_to_edge`   -- the WARN a close-out grade prints;
-  * `seeder` (opt-in, #C5)          -- the tie-break among rotations that fit.
+read by `floorplan.rule_pins_to_edge`, the WARN a close-out grade prints.
 
 DEFINITION. For one part: its connected pads (`net_id > 0`), the rectangle
 those pad centres span, and the board outline's bounds. A pad is ON a face
@@ -54,11 +50,8 @@ EDGE_MM = 2.0
 MIN_PITCH_STEP = 0.2
 
 #: A part counts when it has at least this many CONNECTED pads: a two-pad
-#: passive has no row to face anything with. ONE constant for the term
-#: (`placement_score.EDGE_FACING_MIN_PADS`), the rule
-#: (`floorplan.PINS_TO_EDGE_MIN_PADS`) and the seeder's opt-in tie-break
-#: (`seeder._facing_rank`), so what the search prefers is what the term
-#: then reports -- three spellings of `3` drifted apart in review.
+#: passive has no row to face anything with. Read by the rule as
+#: `floorplan.PINS_TO_EDGE_MIN_PADS`, so it is spelled once.
 MIN_PADS = 3
 
 Point = Tuple[float, float]
@@ -68,8 +61,8 @@ def pitch_of(points: Iterable[Point]) -> float:
     """The minimum spacing of a point lattice along either axis, in mm,
     ignoring steps under `MIN_PITCH_STEP`; inf when no axis has two distinct
     coordinates that far apart. The same reading `escape.pad_pitch` takes off
-    a footprint's local pads, here on any coordinates so the seeder and the
-    term measure one pitch."""
+    a footprint's local pads, here on any coordinates so both measure one
+    pitch."""
     pts = list(points)
     xs = sorted({round(x, 3) for x, _ in pts})
     ys = sorted({round(y, 3) for _, y in pts})

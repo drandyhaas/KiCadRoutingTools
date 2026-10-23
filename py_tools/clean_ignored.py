@@ -52,8 +52,10 @@ def main():
                         help="Skip confirmation prompt when deleting")
     args = parser.parse_args()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    os.chdir(script_dir)
+    # The repo root, one level up since #522 moved this into py_tools/: git
+    # lists ignored files relative to the working directory.
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(repo_root)
 
     print("Finding git-ignored files and directories...\n")
 
@@ -117,7 +119,7 @@ def main():
     print(f"Total: {len(all_items)} items, {total_str}")
 
     if not args.delete:
-        print("\nTo delete these files, run: python clean_ignored.py --delete")
+        print("\nTo delete these files, run: python3 py_tools/clean_ignored.py --delete")
         return
 
     # Confirm deletion

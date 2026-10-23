@@ -27,8 +27,8 @@ simulated by withholding the fab rung below the threshold.
 
 The fa10 human boards are read in place when present (`FA10_HUMAN`); they are
 not tracked, so nothing here is asserted against them -- `test_1201_fab_guard`
-pins the tracked numbers. A measurement tool; `run_all` does not collect
-`measure_*`.
+pinned the tracked numbers until it was deleted with the old placement flows
+(ecd673eb). A measurement tool; `run_all` does not collect `measure_*`.
 """
 import contextlib
 import json

@@ -4,18 +4,14 @@ from their geometry -- no KiCad, no SVG, no headless-browser rasterization.
 
 The existing renderer (``tests/stress/board_image.py``) shells out to
 ``kicad-cli`` to export an SVG and then to headless Chrome to rasterize it:
-two heavyweight subprocesses per image, far too slow to animate a route
-frame-by-frame. This module instead rasterizes the parsed geometry with
-Pillow, so a single frame is milliseconds and a whole routing movie is
-feasible (issue #482).
+two heavyweight subprocesses per image. This module instead rasterizes the
+parsed geometry with Pillow, so a single frame is milliseconds (issue #482).
 
 It is built around :class:`BoardRenderer`, which computes the world->pixel
 transform once and renders the *static substrate* (board outline, zones,
 pads) a single time. Each :meth:`BoardRenderer.frame` call then composites a
-chosen set of segments and vias on top of a copy of that substrate -- which
-is exactly what an animator needs to draw the cumulative copper state at
-each step, with optional highlight colors for the tracks/vias added, ripped,
-or restored on that frame.
+chosen set of segments and vias on top of a copy of that substrate, with
+optional highlight colors for chosen tracks/vias.
 
 Copper layers are composited with per-layer transparency (``layer_alpha``),
 so overlapping layers blend at crossings instead of the top one hiding the
@@ -31,7 +27,7 @@ Library:
     from route_render import BoardRenderer
     r = BoardRenderer(parse_kicad_pcb(path))
     r.render().save('board.png')                 # full board
-    r.frame(segments=my_subset, vias=[]).save(..) # partial state (animation)
+    r.frame(segments=my_subset, vias=[]).save(..) # a chosen subset
 """
 from __future__ import annotations
 
@@ -53,7 +49,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from startup_checks import check_render_dependencies
 check_render_dependencies()
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -188,7 +184,7 @@ class BoardRenderer:
 
     Build once (computes transform + the static substrate), then call
     :meth:`render` for the whole board or :meth:`frame` for an arbitrary
-    subset of segments/vias (the animation hook).
+    subset of segments/vias.
 
     ``supersample`` renders at N x resolution and downsamples with LANCZOS for
     anti-aliasing; use 1 for maximum speed (many frames), 2 for crisp stills.
@@ -199,9 +195,8 @@ class BoardRenderer:
                  show_zones: bool = True, layers: Optional[Sequence[str]] = None,
                  bg: Optional[Tuple[int, int, int]] = None,
                  layer_alpha: Optional[int] = None,
-                 dynamic_zones: bool = False,
                  view: Optional[Tuple[float, float, float, float]] = None,
-                 theme=None):
+                 theme=None, zone_tint: float = 0.45):
         # #1011. `theme=None` resolves to the CONFIGURED default
         # (`render_theme.default_theme()`: light since #1081, or
         # $KICAD_RENDER_THEME) -- it used to be hard-wired DARK, which kept
@@ -212,9 +207,6 @@ class BoardRenderer:
         self.theme = render_theme.theme(theme) if theme is not None \
             else _default_theme()
         self.pcb = pcb
-        # dynamic_zones: keep plane pours OUT of the static base so the animator
-        # can reveal each plane's fill per frame (via frame(zone_net_ids=...)).
-        self.dynamic_zones = dynamic_zones
         self.ss = max(1, int(supersample))
         self.copper_layers = list(layers) if layers else list(pcb.board_info.copper_layers)
         self.palette = layer_palette(self.copper_layers, self.theme)
@@ -251,6 +243,10 @@ class BoardRenderer:
         self.context_alpha_frac = 0.28
         self._show_pads = show_pads
         self._show_zones = show_zones
+        #: How much of its layer's colour a pour takes over the board body (0:
+        #: none, 1: all). The movies pass less, so a track over a plane on its
+        #: own layer still reads.
+        self.zone_tint = zone_tint
         self.set_view(view)
 
     def set_canvas(self, width: int, height: int) -> None:
@@ -258,8 +254,8 @@ class BoardRenderer:
 
         `__init__` derives W/H from the board's bounding box, which is why the
         frame aspect has always BEEN the board's aspect and there was no output
-        ratio control anywhere. `frame_layout` decides a frame shape once per
-        film; this is how that decision reaches the renderer.
+        ratio control anywhere. A caller that lays several boards out in one
+        frame chooses each canvas; this is how that choice reaches the renderer.
 
         `awx/evolve_movie.py:549-554` already did exactly this, informally --
         assign `r.W, r.H` then call `set_view` -- to get cell-sized boards out
@@ -279,21 +275,6 @@ class BoardRenderer:
         self.W, self.H = max(2, int(width)), max(2, int(height))
         self._margin_px = (CANVAS_MARGIN_FRAC * min(self.W, self.H)
                            * self.ss)
-        self.set_view(getattr(self, '_view', None))
-
-    def set_layers(self, layers: Optional[Sequence[str]] = None) -> None:
-        """Re-point the renderer at a different set of copper layers.
-
-        A per-layer strip needs one small board per layer, and
-        `tests/test_431_placement_movie.py:92-121` asserts exactly ONE
-        `BoardRenderer` is constructed on the no-stage path -- so the strip
-        cannot build ten renderers. It rebuilds the palette and the static
-        base on THIS one.
-        """
-        self.copper_layers = (list(layers) if layers
-                              else list(self.pcb.board_info.copper_layers))
-        self.palette = layer_palette(self.copper_layers, self.theme)
-        self._layer_set = set(self.copper_layers)
         self.set_view(getattr(self, '_view', None))
 
     def set_view(self, view: Optional[Tuple[float, float, float, float]] = None) -> None:
@@ -322,11 +303,10 @@ class BoardRenderer:
         self._board_mask = m if self._paint_body(ImageDraw.Draw(m), 255, 0) \
             else None
         self._draw_outline(d)
-        if self._show_zones and not self.dynamic_zones:
+        if self._show_zones:
             self._draw_zones(self._base)
-        # With dynamic_zones the pours are drawn per-frame, so pads must be too
-        # (drawn AFTER the pour so they read on top of it, as in the static base).
-        if self._show_pads and not self.dynamic_zones:
+        # Pads AFTER the pour, so they read on top of it.
+        if self._show_pads:
             self.draw_pads(d)
         # #1015: pad copper is part of the stack. It is drawn into the STATIC
         # base, so the crossing mask never saw it -- and a trace entering a pad
@@ -403,7 +383,7 @@ class BoardRenderer:
         # Plane pours drawn dim, under the tracks, tinted by layer. The stored
         # polygon is the zone OUTLINE (not the computed fill) -- a good-enough
         # substrate hint for a debug view. ``net_ids`` (a set) restricts to those
-        # nets' zones, for animating a plane "filling in" per frame.
+        # nets' zones.
         #
         # #1205: CLIPPED to the board. KiCad clips a pour's fill to the
         # outline, so a GND zone drawn as a rectangle past the board is the
@@ -421,17 +401,12 @@ class BoardRenderer:
         body = self.theme.rgb('board_body')
         for z in zones:
             base = self.palette.get(z.layer, self.theme.rgb('zone_tint'))
-            dim = tuple(int(body[i] * 0.55 + base[i] * 0.45) for i in range(3))
+            k = self.zone_tint
+            dim = tuple(int(body[i] * (1 - k) + base[i] * k) for i in range(3))
             d.polygon([self.tf.pt(x, y) for x, y in z.polygon], fill=dim)
         if mask is not None:
             img.paste(layer, (0, 0), mask)
         self._draw_edge(ImageDraw.Draw(img))
-
-    def zone_net_ids(self):
-        """Net ids that have at least one drawable plane zone (for the animator
-        to reveal each plane's fill when its taps first appear)."""
-        return {z.net_id for z in (getattr(self.pcb, 'zones', []) or [])
-                if z.layer in self._layer_set and len(z.polygon) >= 3}
 
     def draw_pads(self, d: ImageDraw.ImageDraw, pads: Optional[Iterable] = None,
                   fill_for=None) -> None:
@@ -447,9 +422,6 @@ class BoardRenderer:
             pads = (p for fp in self.pcb.footprints.values() for p in fp.pads)
         for p in pads:
             self._draw_pad(d, p, fill=fill_for(p) if fill_for else None)
-
-    def _draw_pads(self, d: ImageDraw.ImageDraw) -> None:
-        self.draw_pads(d)
 
     def _draw_pad(self, d: ImageDraw.ImageDraw, p, fill=None) -> None:
         fill = fill or self.theme.rgb('pad')
@@ -600,35 +572,23 @@ class BoardRenderer:
               highlight_mark: str = 'solid',
               focus_layer: Optional[str] = None,
               opaque_crossings: Optional[bool] = None,
-              label: Optional[str] = None, zone_net_ids=None,
-              overlays: Optional[Sequence] = None, mirror: bool = False
+              label: Optional[str] = None,
+              overlays: Optional[Sequence] = None
               ) -> Image.Image:
         """Composite the given copper onto the static substrate and return an
         RGB image at output resolution.
 
         ``segments``/``vias`` default to the whole board. ``highlight_*`` draw
         on top in ``highlight_color`` (e.g. tracks/vias added, ripped, or
-        restored on this animation frame). ``label`` is stamped top-left.
-        ``zone_net_ids`` (used with dynamic_zones) draws just those nets' plane
-        pours under the copper, so a plane "fills in" on the frame its taps land.
+        restored). ``label`` is stamped top-left.
         ``overlays`` is a sequence of ``fn(draw, renderer)`` callables drawn at
         SUPERSAMPLED resolution, above the copper and below the label.
-
-        ``mirror`` (#1082-#1085) flips the board left-right -- the view from
-        the BACK -- after ``overlays`` and BEFORE the downsample, and stamps
-        ``label`` last, upright.
         """
         segs = self.pcb.segments if segments is None else segments
         vs = self.pcb.vias if vias is None else vias
         if opaque_crossings is None:
             opaque_crossings = self.opaque_crossings
         img = self._base.copy()
-        if self.dynamic_zones:
-            if zone_net_ids:
-                self._draw_zones(img, net_ids=zone_net_ids)
-            if self._show_pads:
-                # pads on top of the (dynamic) pour
-                self._draw_pads(ImageDraw.Draw(img))
         by_layer = self._group_by_layer(segs)
         # Draw layers in reverse stack order (B.Cu first ... F.Cu last, so the
         # top copper reads as "nearest the viewer"). With layer_alpha < 255 each
@@ -662,10 +622,8 @@ class BoardRenderer:
             # board -- copper does not blend, it stacks.
             #
             # FOCUS. When the caller names the layer the current event is on,
-            # every other layer drops to a context alpha. The movie already
-            # knows which layer each event touches, so the focus is free, and a
-            # crossing stops being ambiguous because only one side of it is
-            # lit.
+            # every other layer drops to a context alpha, and a crossing stops
+            # being ambiguous because only one side of it is lit.
             covered = (self._pad_mask.copy()
                        if getattr(self, '_pad_mask', None) is not None
                        else Image.new('L', acc.size, 0))
@@ -710,8 +668,6 @@ class BoardRenderer:
         # ghosts, arrows, airwires) out of this copper renderer entirely.
         for fn in (overlays or ()):
             fn(ImageDraw.Draw(img), self)
-        if mirror:
-            img = ImageOps.mirror(img)
         if self.ss > 1:
             img = img.resize((self.W, self.H), Image.LANCZOS)
         if label:

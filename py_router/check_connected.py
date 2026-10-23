@@ -100,7 +100,7 @@ def matches_any_pattern(name: str, patterns: List[str]) -> bool:
     return False
 
 
-from geometry_utils import UnionFind, segment_to_segment_distance
+from geometry_utils import UnionFind, segment_to_segment_distance, segments_intersect
 
 
 def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:
@@ -223,34 +223,27 @@ def _pad_bounding_radius(pad) -> float:
     return math.hypot(pad.size_x, pad.size_y) / 2
 
 
-def _pad_credit_disc(pad):
-    """(cx, cy, reach): the disc inside which a track counts as landing on this
-    pad's copper.
+def track_reaches_pad(seg, pad, tolerance: float = 0.02) -> bool:
+    """Whether track `seg`'s copper overlaps `pad`'s real copper anywhere
+    along it (layers are the caller's business) -- KiCad's answer, measured
+    on pcbnew 9.0.6 and 10.0.3: a track crossing a 2 x 2 mm pad 0.7 mm off
+    its centre, or overlapping its edge by 5 um, is connected; one exactly
+    tangent to the edge, or passing a roundrect's rounded corner, is not.
 
-    Run-7 finding, and the reason this is not just `min(size)/4` about the
-    anchor: a CUSTOM pad is stored as a symmetric box around its anchor big
-    enough to enclose the real primitives, and the anchor is frequently a
-    corner of them rather than their centre. One MOSFET tab measured 4.57 x
-    5.01mm of real copper modelled as a 9.13 x 10.01mm box whose centre sat
-    3.4mm away from it -- so a 2.28mm credit disc sat in empty space, and any
-    track passing near it was unioned onto the pad. Two islands of that net
-    each "reached" the phantom disc, and the net graded CONNECTED while its
-    copper was in two pieces. The router then skipped it as already routed.
-
-    When the real primitive polygons are available, use their bbox. They are
-    the actual copper.
-    """
-    polys = getattr(pad, 'polygons', None)
-    if polys:
-        xs = [pt[0] for poly in polys for pt in poly]
-        ys = [pt[1] for poly in polys for pt in poly]
-        if xs and ys:
-            w, h = max(xs) - min(xs), max(ys) - min(ys)
-            return ((max(xs) + min(xs)) / 2.0, (max(ys) + min(ys)) / 2.0,
-                    (min(w, h) / 4.0) if (w > 0 and h > 0) else 0.05)
-    if pad.size_x and pad.size_y:
-        return pad.global_x, pad.global_y, min(pad.size_x, pad.size_y) / 4.0
-    return pad.global_x, pad.global_y, 0.05
+    The overlap is exact (check_drc.segment_pad_gap on the pad's core
+    polygon and corner radius), so a CUSTOM pad is its primitives, never the
+    box the parser stores around its anchor (run 7: a 2.28 mm credit disc
+    about that box's anchor sat in empty space and joined two islands of one
+    net). Tangency is not contact: the reach is the track's half-width less
+    1 nm, KiCad's grid -- the endpoint-in-pad rule's own margin, floored at
+    `tolerance` the same way."""
+    reach = max(seg.width / 2 - 1e-6, tolerance)
+    from geometry_utils import point_to_segment_distance
+    if point_to_segment_distance(pad.global_x, pad.global_y, seg.start_x, seg.start_y,
+                                 seg.end_x, seg.end_y) > _pad_bounding_radius(pad) + reach:
+        return False                        # cheap reject: nowhere near the pad
+    from check_drc import segment_pad_gap
+    return segment_pad_gap(seg.start_x, seg.start_y, seg.end_x, seg.end_y, pad) <= reach
 
 
 #: #1157: two real pads are ONE terminal only where their copper meets, as
@@ -261,6 +254,43 @@ def _pad_credit_disc(pad):
 #: reports open. Point-like terminals (stubs) keep the caller's tolerance:
 #: theirs IS a coincidence question.
 PAD_JOIN_EPS = 1e-6
+
+
+class _GraphicStroke:
+    """A board-level copper graphic's stroke at its DRAWN width (#962), the
+    width KiCad's connectivity collides it at. `Segment.width` gives a
+    stroke-0 filled shape the fab track width, which would credit a track
+    ending up to 0.15 mm outside the shape."""
+    __slots__ = ('start_x', 'start_y', 'end_x', 'end_y', 'layer', 'width')
+
+    def __init__(self, seg, width):
+        self.start_x, self.start_y = seg.start_x, seg.start_y
+        self.end_x, self.end_y = seg.end_x, seg.end_y
+        self.layer, self.width = seg.layer, width
+
+
+def conducting_stroke(seg):
+    """The copper the connectivity graph joins through for segment `seg`, or
+    None when it conducts nothing.
+
+    A track conducts. So does a BOARD-level copper graphic (#337 `gr_*`, its
+    `owner_ref` empty): measured on pcbnew 10.0.0 / kicad-cli 10.0.0, a
+    net-tagged gr_line, gr_arc and the stroke of a gr_rect / gr_poly /
+    gr_circle join every same-net pad, via and track they touch -- a track
+    crossing the stroke mid-span included -- and a FILLED one joins across its
+    whole interior (`check_net_connectivity` reads `graphic_ring` for that).
+    An unfilled outline does not conduct through its empty middle. A
+    footprint's own copper (#908, `owner_ref` set) is never a connectivity
+    item: KiCad grades two pads joined only by their footprint's fp_line
+    unconnected (and the line a short against them)."""
+    if not getattr(seg, 'graphic', False):
+        return seg
+    if getattr(seg, 'owner_ref', ''):
+        return None
+    w = getattr(seg, 'drawn_width', None)
+    if w is None or w == seg.width:
+        return seg
+    return _GraphicStroke(seg, w)
 
 
 def _pad_is_point(p) -> bool:
@@ -480,7 +510,8 @@ def net_copper_fragments(net_id, segments, vias, pads, zones=None,
     frag_anchor: Dict[int, Tuple[float, float]] = {}
     for i, seg in enumerate(seg_list):
         if getattr(seg, 'graphic', False):
-            continue    # graphics never conduct (#513 item 6)
+            continue    # art is not routed copper (#337): it joins the
+            # fragments it touches, but is not one of its own
         root = uf.find(2 * i)
         if root not in frag_anchor:
             frag_anchor[root] = (seg.start_x, seg.start_y)
@@ -644,11 +675,14 @@ def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
     for i, s in enumerate(segments):
         if getattr(s, 'graphic', False):
             graphic_roots.add(uf.find(2 * i))
-    # A cluster ABUTTING the art is joined to it in copper even though the
-    # graph does not conduct through it (#513). Measured on openstint: the
-    # via bridging /A-'s copper to its graphic looks pad-less to us and is
-    # load-bearing to KiCad -- deleting it took that board from 0 unconnected
-    # items to 2. Same rule remove_orphan_islands' _touches_graphic applies.
+    # A cluster ABUTTING the art is joined to it in copper. The graph
+    # conducts through board art (`conducting_stroke`), so such a cluster is
+    # normally in the art's own component already; the geometric test below
+    # stays as the conservative anchor (it reads the modelled stroke width,
+    # never narrower than the drawn one). Measured: deleting the via bridging
+    # a net's copper to its graphic took a board from 0 unconnected items
+    # to 2. Same rule remove_orphan_islands'
+    # _touches_graphic applies.
     import math as _m
 
     def _abuts_art_seg(s):
@@ -708,9 +742,12 @@ def classify_unconnected_link(pcb_data, net_id, pt_a, pt_b,
       'padless' -- the cluster reaches no pad and no zone. It is rip/reroute
                    DEBRIS: it conducts nothing, so welding it adds dead metal
                    and deletion is the fix (remove_orphan_islands).
-      'graphic' -- the cluster is net-tagged copper ART (#337), which is
-                   immutable: neither weld nor delete applies, and the board's
-                   author has to convert it to pads/tracks (#513).
+      'graphic' -- the cluster holds net-tagged copper ART (#337) and
+                   reaches no pad or pour. KiCad conducts through art, so the
+                   open is real, but the art is immutable and the router never
+                   targets it: neither weld nor delete applies, and joining it
+                   is a board-authoring fix. A cluster that reaches a pad
+                   THROUGH art is 'live'.
       'unknown' -- no copper of this net located at the point (a shape the
                    parser models differently, e.g. a filled gr_circle whose
                    reported position is its centre).
@@ -775,9 +812,9 @@ def classify_unconnected_link(pcb_data, net_id, pt_a, pt_b,
             if vb is None:
                 return 'unknown'
             root = uf.find(via_repr[vb])
-        if root in graphic_roots:
-            return 'graphic'
-        return 'live' if root in live else 'padless'
+        if root in live:
+            return 'live'
+        return 'graphic' if root in graphic_roots else 'padless'
 
     return _one(pt_a, kind_a), _one(pt_b, kind_b)
 
@@ -1155,17 +1192,15 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     point_id = 0
     point_info = {}  # Maps point_id to descriptive info
 
-    # Add segment endpoints
+    # Add segment endpoints. A board-level copper GRAPHIC conducts as KiCad
+    # 10 has it (`conducting_stroke`): its stroke joins like a track, at its
+    # drawn width, and a filled one's interior is credited below. Footprint
+    # copper conducts nothing; it keeps its two point ids (callers rely on
+    # "segment i -> ids 2i / 2i+1") and stays out of the join graph.
+    strokes = [conducting_stroke(s) for s in segments]
     for seg_idx, seg in enumerate(segments):
-        if getattr(seg, 'graphic', False):
-            # Net-tagged copper GRAPHICS (gr_line/gr_rect fingers etc.) are
-            # DRC-real obstacles but NOT electrical connections: KiCad's
-            # connectivity engine never credits them, so copper that only
-            # joins "through" a graphic is electrically split (#513 item 6 --
-            # opengammakit shipped 5 nets open while this model read them
-            # connected through the card-edge finger graphics). Allocate the
-            # two point ids (callers rely on "segment i -> ids 2i / 2i+1")
-            # but keep the points out of the join graph entirely.
+        seg = strokes[seg_idx]
+        if seg is None:
             point_id += 2
             continue
         start_id = point_id
@@ -1184,13 +1219,11 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     via_point_ids = {}      # via_idx -> every point id of the via (one per layer)
     via_copper_layers = {}  # via_idx -> set of copper layers the via spans
     for via_idx, via in enumerate(vias):
-        if via.layers:
-            if 'F.Cu' in via.layers and 'B.Cu' in via.layers:
-                via_layers = all_copper_layers
-            else:
-                via_layers = via.layers
-        else:
-            via_layers = all_copper_layers
+        # A through via joins every layer whatever pair it carries; a typed
+        # blind/micro via the run between its ends -- not just its two ends
+        # (found reviewing #1268).
+        from geometry_utils import via_copper_layers as _via_cu
+        via_layers = _via_cu(via, all_copper_layers) or all_copper_layers
 
         via_size = getattr(via, 'size', 0.6)  # Default via size if not available
         via_ids = []
@@ -1256,6 +1289,17 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             if _h:
                 pad_hole_only[pad_idx] = _h
 
+    # A pad whose zone connection resolves to NONE for a zone (a pad or
+    # footprint `(zone_connect 0)`, or the zone's `connect_pads no`) never
+    # touches that zone's fill in KiCad: the filler knocks it out like foreign
+    # copper, so it joins the net only through tracks, vias or pads.
+    from kicad_parser import pad_joins_zone as _pad_joins_zone
+
+    def _pad_refused_by_zone(pid, zone):
+        info = point_info.get(pid)
+        return bool(info and info[0] == 'pad'
+                    and not _pad_joins_zone(pads[info[1]], zone))
+
     # Connect points through zones (power planes)
     # All points on the same layer that are inside the same zone are connected
     zone_repr_id = {}  # zone_idx -> a representative point id credited to the zone
@@ -1290,10 +1334,17 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         # validator logic only on the inside ones -- mask byte-identical).
         points_in_zone = []   # legacy blob (no model verdict)
         points_by_comp = {}   # fill component id -> [pid]
-        _mask = points_in_polygon_mask([p[0] for p in points_on_layer],
-                                       [p[1] for p in points_on_layer],
-                                       zone.polygon)
+        _pxs = [p[0] for p in points_on_layer]
+        _pys = [p[1] for p in points_on_layer]
+        _mask = points_in_polygon_mask(_pxs, _pys, zone.polygon)
+        # A zone's cut-outs (Zone.holes) are not pour: copper in one is not
+        # on the zone, whatever its outline says (KiCad never fills a hole).
+        for _hole in (getattr(zone, 'holes', None) or ()):
+            if _mask.any():
+                _mask &= ~points_in_polygon_mask(_pxs, _pys, _hole)
         for _in_poly, (x, y, layer, pid, size) in zip(_mask, points_on_layer):
+            if _in_poly and _pad_refused_by_zone(pid, zone):
+                continue   # zone connection NONE: KiCad keeps the fill off it
             if _in_poly:
                 # Removal gates pass a fill validator (#outline-over-credit,
                 # bitaxe Q2): outline membership only counts where real fill
@@ -1453,9 +1504,9 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # pad outline on a copper layer the pad occupies.
     if pad_repr_id and segments:
         endpoint_index = SpatialIndex(cell_size=1.0)
-        for seg_idx, seg in enumerate(segments):
-            if getattr(seg, 'graphic', False):
-                continue  # graphics never conduct (#513 item 6, see above)
+        for seg_idx, seg in enumerate(strokes):
+            if seg is None:
+                continue  # footprint copper conducts nothing (see above)
             if seg.layer.endswith('.Cu'):
                 endpoint_index.add(seg.start_x, seg.start_y, seg.layer, seg_idx * 2, seg.width)
                 endpoint_index.add(seg.end_x, seg.end_y, seg.layer, seg_idx * 2 + 1, seg.width)
@@ -1481,13 +1532,13 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # any point below can need, so every query below is a single 3x3-cell
     # ring — on 0.05mm-pitch plane fill the old fixed 1mm cells held hundreds
     # of segments each and this loop dominated plane-step runtime (#363).
-    max_seg_width = max((seg.width for seg in segments), default=0.0)
+    max_seg_width = max((seg.width for seg in strokes if seg is not None),
+                        default=0.0)
     _max_reach = max((max_point_size + max_seg_width) / 2, tolerance)
     seg_index = SegmentIndex(cell_size=max(_max_reach * 1.01, 0.05))
-    for seg_idx, seg in enumerate(segments):
-        if getattr(seg, 'graphic', False):
-            continue  # graphics never conduct (#513 item 6): a point lying on
-            # a graphic must not union through it (T-junction/through-pad rules)
+    for seg_idx, seg in enumerate(strokes):
+        if seg is None:
+            continue  # footprint copper: no T-junction/through-pad credit
         seg_start_id = seg_idx * 2
         seg_index.add(seg, seg_start_id)
 
@@ -1497,15 +1548,18 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # endpoints sat >1mm outside, the endpoint rule above missed it, and the
     # pad graded as a phantom disconnect while the router's terminal selector
     # (correctly) dropped it as already connected -- so every retry did
-    # nothing and the board could never grade complete. Mirror
-    # connectivity._pad_on_group's conservative gate exactly: credit only when
-    # the centreline reaches well inside the pad (segment half-width plus a
-    # quarter of the smaller pad dimension from the pad CENTRE), so a track
-    # merely grazing the pad outline still grades as disconnected.
+    # nothing and the board could never grade complete. The credit is
+    # KiCad's: the track's copper overlaps the pad's real copper anywhere
+    # (track_reaches_pad), and connectivity._pad_on_group asks the same
+    # question, so the two cannot disagree the way #479 did. It used to be a
+    # disc of a quarter of the pad's short side about its centre, which left
+    # a track crossing a 2 x 2 mm pad 0.7 mm off centre open while KiCad
+    # connects it (a Kelvin sense trace across a same-net pad, #1279).
     if pad_repr_id and segments:
         for pad_idx in pad_repr_id:
             pad = pads[pad_idx]
-            px, py, reach_pad = _pad_credit_disc(pad)
+            px, py = pad.global_x, pad.global_y
+            reach_pad = _pad_bounding_radius(pad)
             for layer in pad_copper_layers[pad_idx]:
                 if layer in pad_hole_only.get(pad_idx, ()):
                     # Unflashed layer: the track must cross the hole itself.
@@ -1521,19 +1575,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                     continue
                 for seg, seg_start_id in seg_index.query_near(
                         px, py, layer, radius=max_seg_width / 2 + reach_pad):
-                    dx = seg.end_x - seg.start_x
-                    dy = seg.end_y - seg.start_y
-                    seg_len_sq = dx * dx + dy * dy
-                    if seg_len_sq < 1e-8:
-                        cx, cy = seg.start_x, seg.start_y
-                    else:
-                        t = ((px - seg.start_x) * dx
-                             + (py - seg.start_y) * dy) / seg_len_sq
-                        t = max(0.0, min(1.0, t))
-                        cx = seg.start_x + t * dx
-                        cy = seg.start_y + t * dy
-                    if math.sqrt((px - cx) ** 2 + (py - cy) ** 2) \
-                            <= seg.width / 2 + reach_pad:
+                    if track_reaches_pad(seg, pad, tolerance):
                         _union(pad_repr_id[pad_idx], seg_start_id)
 
     # Check for T-junctions: points that lie on the middle of a segment (same layer)
@@ -1593,6 +1635,63 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             if point_on_segment(px, py, seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg_tolerance):
                 # Connect this point to the segment (via one of its endpoints)
                 _union(pid, seg_start_id)
+
+    # Two same-layer tracks whose centrelines CROSS mid-span overlap in
+    # copper, and KiCad connects them, but neither endpoint lies on the other
+    # track, so the T-junction rule above misses an X crossing (a load track
+    # crossing a Kelvin sense trace graded as two islands, #1279 review).
+    # Two straight tracks that do not cross are closest at an endpoint of one
+    # of them, which that rule already credits, so a proper crossing is the
+    # one case left. A crossing point lies in a cell both tracks index, so
+    # pairs sharing a cell suffice; a cell whose tracks already share one
+    # component costs one find() per track.
+    for _cell_items in seg_index.grid.values():
+        if len(_cell_items) < 2:
+            continue
+        _roots = [uf.find(_sid) for _s, _sid in _cell_items]
+        if len(set(_roots)) < 2:
+            continue
+        for _i in range(len(_cell_items) - 1):
+            _sa, _ida = _cell_items[_i]
+            for _sb, _idb in _cell_items[_i + 1:]:
+                if uf.find(_ida) == uf.find(_idb):
+                    continue
+                if segments_intersect(_sa.start_x, _sa.start_y, _sa.end_x, _sa.end_y,
+                                      _sb.start_x, _sb.start_y, _sb.end_x, _sb.end_y):
+                    _union(_ida, _idb)
+
+    # A FILLED board-level graphic conducts across its whole interior (KiCad
+    # 10, `conducting_stroke`): a pad, via or track end inside it joins it
+    # though it touches no stroke (an inductor pad can lie wholly inside
+    # its net's own filled B.Cu gr_poly). Anything reaching the interior
+    # from outside crosses the outline, which the stroke rules above already credit, so
+    # point containment is the one case left. A circle is tested on its true
+    # radius, not the parser's inscribed 16-gon.
+    # Keyed by the ring OBJECT, which every segment of one shape shares (both
+    # parse paths build it once per shape): hashing the vertex tuple per
+    # segment would cost a many-vertex shape quadratic time on every call.
+    _fills = {}
+    for seg_idx, seg in enumerate(segments):
+        ring = getattr(seg, 'graphic_ring', None)
+        if ring and strokes[seg_idx] is not None:
+            _rep = _fills.setdefault((id(ring), seg.layer),
+                                     (seg_idx * 2,
+                                      getattr(seg, 'graphic_circle', None),
+                                      ring))[0]
+            _union(_rep, seg_idx * 2)
+    for (_rid, layer), (_rep, circle, ring) in _fills.items():
+        _on = [p for p in all_points if p[2] == layer]
+        if not _on:
+            continue
+        if circle:
+            _cx, _cy, _r = circle
+            _inside = [math.hypot(p[0] - _cx, p[1] - _cy) <= _r for p in _on]
+        else:
+            _inside = points_in_polygon_mask([p[0] for p in _on],
+                                             [p[1] for p in _on], list(ring))
+        for _in, p in zip(_inside, _on):
+            if _in:
+                _union(_rep, p[3])
 
     # Optional reusable graph for exclusion re-evaluation (see _union note).
     # pad_index_repr maps each input pad's INDEX to a representative point id,

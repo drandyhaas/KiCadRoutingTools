@@ -47,7 +47,6 @@ import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse
 import json
-import math
 import os
 import sys
 
@@ -92,7 +91,6 @@ def _shoelace(ring):
 
 
 def board_section(pcb, pcb_file, skipped):
-    from kicad_parser import parse_kicad_pcb  # noqa: F401  (documents origin)
     bi = pcb.board_info
     out = {
         'path': os.path.abspath(pcb_file),
@@ -193,8 +191,7 @@ def _floors(pcb_file):
 # STALE ON THE PLACED SIDE, and dated rather than quietly re-typed. #841
 # changed what a neighbour contributes from the bbox of its pad CENTRES to its
 # pad COPPER, so every PLACED number above moved: ulx3s 0 -> 5,
-# kit-dev-coldfire 0 -> 8, watchy 25 -> 55 (regenerate with
-# `tests/measure_834_835_side_awareness.py --table B`). The PILED halves are
+# kit-dev-coldfire 0 -> 8, watchy 25 -> 55. The PILED halves are
 # from a recorded run against a staged pile that no committed script rebuilds,
 # so they are not re-derived here. The direction is unaffected -- a pile still
 # collapses every supply to 0 -- and it is the direction the block is about.
@@ -256,16 +253,11 @@ PILE_FRACTION = 0.5
 # they are correct for the board AS IT IS and not for the board as it will
 # be. Named rather than nulled because each is the best answer available and
 # an author needs it: `extent_mm` is what sizes a part, per-face `demand` is
-# what an escape budget is read from. What makes them treacherous on a
-# staged board is that `stage_unaided` writes ROTATION 0 for every part it
-# moves, and all of these follow rotation.
-#
-# Measured on boards staged by this repo's own stager: 130 of 234 ulx3s parts
-# have `extent_mm` with width and height SWAPPED against the placed board
-# (BAT1 [20.3, 14.1] at rot 90 -> [14.1, 20.3] at rot 0); watchy 43 of 84,
-# tigard 30 of 92, every one an exact swap. And U2's escape demand moves
-# north 21 -> 2 / east 1 -> 21 as the part turns, so the per-face table is
-# right about a rotation the author has not chosen yet.
+# what an escape budget is read from. What makes them treacherous on a pile
+# is that a piled part's rotation is not a decision yet, and all of these
+# follow rotation: a part at 90 degrees reports its width and height swapped
+# against the same part at 0, and an IC's escape demand moves from face to
+# face as it turns.
 POSE_DERIVED_KEPT = (
     ('parts[].rotation',
      'on a staged board this is a generator default, not a decision'),
@@ -450,8 +442,8 @@ def parts_section(pcb, pcb_file, skipped):
     the drawn .Fab body, else silk unioned with the pad bbox, else the pad
     bbox -- and `extent_source` says WHICH, because a pad bbox carries no
     courtyard margin and treating the two alike is how a part gets seated
-    tighter than its own footprint allows (the quench warns about this on
-    every board that needs it).
+    tighter than its own footprint allows (the placement state warns about
+    this on every board that needs it).
 
     It reads the model rather than its own ladder because this table and the
     body-overlap channel used to answer the same question differently: this
@@ -463,7 +455,6 @@ def parts_section(pcb, pcb_file, skipped):
     from placement.legality import rotate_local_bounds
     from placement.utility import compute_footprint_bbox_local  # noqa: F401
     from placement.part_class import classify_part
-    from placement.escape import lane_pitch  # noqa: F401 (documents origin)
 
     bodies = _safe('parts.bodies', board_bodies, skipped, pcb, pcb_file) or {}
     out = {}
@@ -511,16 +502,13 @@ def parts_section(pcb, pcb_file, skipped):
                'extent_source': src,
                'pads': len(pads),
                'side': getattr(fp, 'layer', None),
-               # WHERE THE PART IS, which this table has never carried. Six
-               # of the thirteen plan ops take a literal board coordinate
-               # (place_keepout.rect, place_fixed.at, place_at.at,
-               # place_array.origin, place_slots.slots, place_pack.zone), and
-               # `place_fixed` -- the op whose whole job is asserting a pose
-               # the mechanical drawing already fixed -- REQUIRES an `at` no
-               # section of this brief could supply. Reported as a fact: on
-               # an unplaced board it is the pile coordinate, which `state`
-               # already says is meaningless, and the two must be read
-               # together.
+               # WHERE THE PART IS, which this table has never carried.
+               # A declared pose -- an intent `fixed_poses[]` row, a design
+               # brief `fixed[].pose`, `place_pose set` -- takes a literal
+               # board coordinate, and no section of this brief could supply
+               # one. Reported as a fact: on an unplaced board it is the pile
+               # coordinate, which `state` already says is meaningless, and
+               # the two must be read together.
                'at': [round(fp.x, 6), round(fp.y, 6)],
                'rect': rect,
                'rotation': getattr(fp, 'rotation', None),
@@ -538,7 +526,7 @@ def parts_section(pcb, pcb_file, skipped):
     return out
 
 
-def mechanical_section(pcb, pcb_file, skipped):
+def mechanical_section(pcb, pcb_file, skipped, pile=False):
     """Which parts' positions are a mechanical fact, on what evidence.
 
     INFERENCE, NEVER AUTHORITY -- `--requirements` is the channel for fact,
@@ -549,21 +537,35 @@ def mechanical_section(pcb, pcb_file, skipped):
     whether the board's own author already pinned the part.
 
     It exists because the brief's only other channel for the same question --
-    `measurements.locks.high` -- is GEOMETRIC and collapses on exactly the
-    input an unaided author has. Measured placed -> piled: watchy 7 -> 1,
-    ulx3s 10 -> 0, splitflap_driver 16 -> 2. `part_class.classify_part` reads
+    `measurements.locks.high` -- is GEOMETRIC and collapses on a pile. `part_class.classify_part` reads
     footprint name, reference prefix and pin function and never a coordinate,
     so it answers the same on both.
 
     `pose_shared_with` is the per-part honesty check, and it is per PART
     rather than a whole-board verdict for the reason `plan_resolve` gives:
     a part alone at its coordinate is where someone put it, whatever state
-    the rest of the board is in. A staged unaided board carries the real
-    poses of exactly these parts, so an empty list here is the difference
-    between `place_fixed` having a coordinate to assert and not.
+    the rest of the board is in. On a pile only the parts left in place keep
+    a coordinate of their own, so an empty list says this part's pose is a
+    real one.
+
+    `staged` is the other half, and on a pile it decides (#1353). Being
+    alone proves nothing there: `make_unplaced.py` spreads EVERY part on a
+    grid south of the outline, so each one is alone, and gp14 CM5's brief
+    called all 12 mechanical parts' staging coordinates assertable. On a
+    pile (`pile`, the state section's #1109 test) an unlocked part whose
+    courtyard leaves the outline is at a staging pose. A KiCad-locked part
+    is a decision wherever it is (#1103), and a part a stager left ON the
+    board (`stage_unaided` keeps the mechanical parts' real poses) is not
+    staged by this test.
     """
     from placement.part_class import mechanical_parts
     found = mechanical_parts(pcb)
+    staged = set()
+    if pile:
+        from placement.placement_state import footprints_outside
+        off = footprints_outside(pcb, pcb_file, sorted(found)) or {}
+        staged = {r for r in found if off.get(r) and not getattr(
+            pcb.footprints.get(r), 'locked', False)}
     at_coord = {}
     for ref, fp in (pcb.footprints or {}).items():
         at_coord.setdefault((round(fp.x, 4), round(fp.y, 4)), []).append(ref)
@@ -576,14 +578,18 @@ def mechanical_section(pcb, pcb_file, skipped):
                 (round(fp.x, 4), round(fp.y, 4)), ()) if r != ref)
         row = dict(rec)
         row['pose_shared_with'] = shared
+        row['staged'] = ref in staged
         out[ref] = row
     return {'refs': out,
             'note': 'INFERENCE from part class, not a mechanical drawing. '
                     'These are the parts whose position a real new board '
                     'would already know; `at` is [x, y, rotation] AS THE FILE '
-                    'HAS IT, so read `pose_shared_with` before treating one '
-                    'as a fact to assert with place_fixed. State real '
-                    'mechanical constraints with --requirements.'}
+                    'HAS IT, so read `pose_shared_with` and `staged` before '
+                    'treating one as a fact: a pose that is neither can be '
+                    'declared in the intent\'s `fixed_poses[]` (or the design '
+                    'brief\'s `fixed[].pose`), or set with `place_pose set` '
+                    'and `lock`. State real mechanical constraints with '
+                    '--requirements.'}
 
 
 def structure_section(pcb, pcb_file, skipped):
@@ -792,7 +798,11 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
             board_edge_clearance=board_edge_clearance)
     except Exception as e:                       # noqa: BLE001 - disclosed
         clr = 0.25 if clearance is None else clearance
-        edge = 0.55 if board_edge_clearance is None else board_edge_clearance
+        edge = board_edge_clearance
+        if edge is None:
+            # The floor routing writes back for an unset rule (#1301).
+            from list_nets import unset_board_edge_clearance
+            edge = unset_board_edge_clearance(pcb_file)[0]
         skipped['floors'] = f"{type(e).__name__}: {e}"
 
     brief = {'schema': SCHEMA, 'kind': 'board-brief',
@@ -805,7 +815,8 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
     brief['parts'] = _safe('parts', parts_section, skipped, pcb, pcb_file,
                            skipped)
     brief['mechanical'] = _safe('mechanical', mechanical_section, skipped, pcb,
-                                pcb_file, skipped)
+                                pcb_file, skipped,
+                                pile=bool((brief['state'] or {}).get('pile')))
     brief['structure'] = _safe('structure', structure_section, skipped, pcb,
                                pcb_file, skipped)
     brief['measurements'] = _safe('measurements', measurements_section,
@@ -875,14 +886,12 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
     st = brief.get('state') or {}
     # NOT `st['unplaced']` alone. `assess_placement`'s verdict needs BOTH a
     # high duplicate fraction AND `distinct_positions <= max(3, 0.1n)`, and
-    # this repo's own stager breaks the second conjunct with the very
-    # exemptions that make an unaided board usable: `stage_unaided` on
-    # splitflap_driver leaves 58 of 65 parts on one coordinate but 8 distinct
-    # positions (7 mechanical + the pile), so `unplaced` is False,
-    # `partially_unplaced` is True -- and this whole disclosure did not fire
-    # on the tool's own output. The brief's question is narrower than the
-    # stager's: "are these coordinates meaningful", and half the parts
-    # sharing one is enough to answer no. A netlist re-import dropping three
+    # a pile that leaves its mechanical parts in place (`make_unplaced` keeps
+    # every locked part) breaks the second conjunct: most parts share one
+    # coordinate but there are several distinct positions, so `unplaced` is
+    # False and `partially_unplaced` True. The brief's question is narrower:
+    # "are these coordinates meaningful", and half the parts sharing one is
+    # enough to answer no. A netlist re-import dropping three
     # new parts on a placed board is 3/65 = 0.046 and stays unmarked, which
     # is the case `partially_unplaced` exists for.
     dup = st.get('duplicate_fraction') or 0.0
@@ -983,22 +992,34 @@ def format_text(b):
         L.append(f"  !! {len(pd['invalid'])} measurement(s) below are NULL: "
                  f"they are measured from part positions and this board has "
                  f"none yet")
-        L.append("     every part's input coordinate is meaningless, so an "
-                 "op that does not state a target has nothing to work from. "
-                 "State mechanical")
-        L.append("     poses with place_fixed and the rest with "
-                 "place_at/place_pack. `--fit WxH` still answers where a "
-                 "part can go at all.")
+        L.append("     every part's input coordinate is meaningless, so a "
+                 "step that does not state a target has nothing to work "
+                 "from. Declare")
+        L.append("     mechanical poses in the intent's `fixed_poses[]` (or "
+                 "the design brief's `fixed[].pose`), or set them with "
+                 "`place_pose set` + `lock`;")
+        L.append("     place_simple places the rest. `--fit WxH` still "
+                 "answers where a part can go at all.")
     mech = ((b.get('mechanical') or {}).get('refs')) or {}
     if mech:
         _fixed = sorted(r for r, v in mech.items()
-                        if not v.get('pose_shared_with'))
+                        if not v.get('pose_shared_with')
+                        and not v.get('staged'))
+        _staged = sorted(r for r, v in mech.items() if v.get('staged'))
         L.append(f"  mechanical: {len(mech)} part(s) whose position is a "
                  f"mechanical fact {sorted(mech)[:6]}"
                  f"{'...' if len(mech) > 6 else ''}")
-        L.append(f"    {len(_fixed)} of them sit alone at their coordinate, "
-                 f"so `at` is assertable with place_fixed: {_fixed[:6]}"
-                 f"{'...' if len(_fixed) > 6 else ''}")
+        if _staged:
+            # #1353: on a pile `alone` proves nothing -- a grid stager puts
+            # every part alone, off the board.
+            L.append(f"    {len(_staged)} of them sit at a STAGING pose off "
+                     f"the outline (the board is a pile): not a claim, "
+                     f"declare their real pose: {_staged[:6]}"
+                     f"{'...' if len(_staged) > 6 else ''}")
+        L.append(f"    {len(_fixed)} of them sit alone at their coordinate"
+                 + (" on the board" if _staged else "")
+                 + f", so `at` can be declared (intent `fixed_poses[]`): "
+                 f"{_fixed[:6]}{'...' if len(_fixed) > 6 else ''}")
     stx = b.get('structure') or {}
     for src, groups in (stx.get('groups') or {}).items():
         # A nulled source is named by position_dependent, not counted here --
@@ -1030,7 +1051,7 @@ def format_text(b):
     if lk:
         t = lk.get('tally') or {}
         _uh = t.get('unlocked_high')
-        L.append(f"  locks: "
+        L.append("  locks: "
                  + (f"{_uh} high-confidence part(s) NOT locked" if _uh
                     is not None else
                     "confidence NOT MEASURED (needs a placement) -- see the "
@@ -1038,7 +1059,9 @@ def format_text(b):
                  + f"; {t.get('locked_in_file', 0)} already locked in the "
                    f"file")
         if lk.get('lock_argv'):
-            L.append(f"    {' '.join(lk['lock_argv'])}")
+            L.append(f"    python3 -X utf8 py_placer/place_pose.py "
+                     f"{bd.get('path', '<board>')} <out> "
+                     f"{' '.join(lk['lock_argv'])}")
     for row in (b.get('fit') or []):
         w, h = row['extent_mm']
         if row['fits']:
@@ -1172,12 +1195,8 @@ def main(argv=None):
                         fit_step=a.fit_step, render_doc=render_doc,
                         design_brief=dbrief, design_brief_path=dbrief_path)
     if mech is not None:
-        from placement import reconcile as _rc_mod
-        _prov = _rc_mod.mechanical_provenance(mech, a.board)
         brief['mechanical_declared'] = {
-            'path': mech_path, 'shape': mech['shape'],
-            'sha256': mech['sha256'], 'provenance': _prov[0],
-            'provenance_why': _prov[1],
+            'path': mech_path, 'sha256': mech['sha256'],
             'poses': mech['poses'], 'edges': mech['edges'],
             'floors': mech['floors']}
     if not a.quiet:
@@ -1185,9 +1204,9 @@ def main(argv=None):
         if mech is not None:
             print(f"mechanical declaration {mech_path}: "
                   f"{len(mech['poses'])} pose(s), {len(mech['edges'])} "
-                  f"edge(s) -- recorded facts ({_prov[0]}: {_prov[1]})")
+                  f"edge(s) -- recorded facts")
     if a.json:
-        # #1115: the free-agent skill's FIRST command writes to wk/<run>/,
+        # #1115: the placement skill's FIRST command writes to wk/<run>/,
         # which does not exist yet on a fresh checkout (wk/ is gitignored).
         # It died there with a traceback before printing JSON_SUMMARY.
         _jdir = os.path.dirname(os.path.abspath(a.json))
@@ -1200,8 +1219,8 @@ def main(argv=None):
          'nets': brief['board'].get('nets'),
          'unplaced': (brief.get('state') or {}).get('unplaced'),
          'pile': (brief.get('state') or {}).get('pile'),
-         # #1115: the free-agent skill picks its mode from `pile` and
-         # `has_copper`; this line carried only the first, so the second was
+         # #1115: the placement skill reads `pile` and `has_copper`
+         # here; this line carried only the first, so the second was
          # readable only from a --json file the skill's command never wrote.
          'has_copper': (brief.get('state') or {}).get('has_copper'),
          # #1197: `has_copper` is False on a board whose only copper is a

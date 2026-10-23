@@ -415,7 +415,7 @@ def reset_hint_condenser() -> None:
 
 def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
                               routed_net_ids=(), rip_existing_names=None,
-                              return_names=False):
+                              return_names=False, anchors=None):
     """Name the PRE-EXISTING nets whose copper blocks a failed route (#301).
 
     Copper committed by an earlier run/step lives in the BASE obstacle map, so
@@ -425,6 +425,13 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     step). Geometric frontier attribution (the plane-repair machinery) names
     them, and --rip-existing-nets (#103) is the existing, connectivity-safe way
     to let this run rip + re-route them. Returns '' when nothing attributable.
+
+    `anchors` are the (x, y) points the failed search ran between. Omitted,
+    they are the net's derived endpoints (`get_net_endpoints`). A forced
+    oracle link (#572) searches between its OWN endpoints, which on a pour
+    net can lie anywhere: anchored on GND's derived pads, the hint named a net
+    0.2 mm from one of them and 29.9 mm from the failed strap (#1324,
+    multichannel_mixer), so the caller passes the link's endpoints.
     """
     def _ret(text, names):
         return (text, names) if return_names else text
@@ -447,10 +454,13 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     # lockout was GPIO5/GPIO3 flanking the pad).
     near_cells = []
     try:
-        from connectivity import get_net_endpoints
-        srcs, tgts, _err = get_net_endpoints(pcb_data, net_id, config)
-        anchors = [(s[3], s[4]) for s in (srcs or [])[:2]] + \
-                  [(t[3], t[4]) for t in (tgts or [])[:2]]
+        if anchors:
+            anchors = [(float(a[0]), float(a[1])) for a in anchors]
+        else:
+            from connectivity import get_net_endpoints
+            srcs, tgts, _err = get_net_endpoints(pcb_data, net_id, config)
+            anchors = [(s[3], s[4]) for s in (srcs or [])[:2]] + \
+                      [(t[3], t[4]) for t in (tgts or [])[:2]]
         if anchors:
             r_cells = max(4, int(2.0 / config.grid_step))
             for (gx, gy, l) in blocked_cells:
@@ -540,16 +550,21 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
                 # #1261: only a non-'locked' reason has the exact-name
                 # override; KiCad-locked copper has none, so offering it
                 # sends the reader to a flag that will be refused.
+                from protected_nets import never_lifts, is_sense_reason, SENSE_HINT
                 _plock = [n for n in _pnames if _pmap[n] == 'locked']
-                _ovr = [n for n in _pnames if _pmap[n] != 'locked']
+                _psense = [n for n in _pnames if is_sense_reason(_pmap[n])]
+                _ovr = [n for n in _pnames if not never_lifts(_pmap[n])]
                 _fix = "reorder so this net routes BEFORE them"
                 if _ovr:
                     _fix += (", or override deliberately by naming "
-                             + ("a non-locked one" if _plock else "the net")
+                             + ("a non-locked one" if (_plock or _psense)
+                                else "the net")
                              + " EXACTLY (no glob) in --rip-existing-nets")
                 if _plock:
                     _fix += ("; KiCad-locked copper has no override -- "
                              "unlock it in the board")
+                if _psense:
+                    _fix += "; " + SENSE_HINT
                 prot_txt = (f"\nHint: the box also includes PROTECTED "
                             f"net(s) {_pq} within 3mm of the failing "
                             f"endpoint(s). The router will NEVER rip these "
@@ -591,14 +606,20 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
                                getattr(pcb_data, 'source_path', None)) or {}
     except Exception:
         _prot = {}
+    from protected_nets import is_sense_reason, SENSE_HINT
     locked_out = [n for n in outside if _prot.get(n) == 'locked']
-    outside = [n for n in outside if n not in set(locked_out)]
+    sense_out = [n for n in outside if is_sense_reason(_prot.get(n))]
+    outside = [n for n in outside if n not in set(locked_out) | set(sense_out)]
     lock_txt = ""
     if locked_out:
         lock_txt = (f" {len(locked_out)} blocking net(s) "
                     f"({' '.join(repr(n) for n in locked_out)}) carry "
                     f"KiCad-locked copper, which no flag can rip (#521): "
                     f"unlock it in the board, or plan around it.")
+    if sense_out:
+        lock_txt += (f" {len(sense_out)} blocking net(s) ("
+                     + ' '.join(f"{n!r} ({_prot[n]})" for n in sense_out)
+                     + f") carry {SENSE_HINT}, or plan around it.")
     prot_out = [n for n in outside if n in _prot]
     prot_out_txt = ""
     if prot_out:
@@ -623,6 +644,24 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
             f"ripped net is re-routed and the run reports honestly if one "
             f"cannot be), then bisect if you want a minimal rip.{prot_out_txt}"
             f"{had_txt}{lock_txt}" + prot_txt, names)
+
+
+def _escaped_on_input(pcb_data, net_id, bare, reach=0.05):
+    """The `(pad, ref)` entries of `bare` whose escape copper the step's INPUT
+    carried: a segment end or via of `net_id` within `reach` of the pad, the
+    attachment rule `entombed_bare_pads` applies to the live board. Read off
+    `pcb_data._input_copper` (rip_up_reroute.mark_input_copper); [] when the
+    run never marked its input."""
+    mark = getattr(pcb_data, '_input_copper', None)
+    if not mark:
+        return []
+    _ids, segs, vias = mark
+    pts = [(s.start_x, s.start_y) for s in segs if s.net_id == net_id]
+    pts += [(s.end_x, s.end_y) for s in segs if s.net_id == net_id]
+    pts += [(v.x, v.y) for v in vias if v.net_id == net_id]
+    return [(p, r) for p, r in bare
+            if any(abs(x - p.global_x) < reach and abs(y - p.global_y) < reach
+                   for x, y in pts)]
 
 
 def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
@@ -662,9 +701,27 @@ def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
         return _ret('')
     if not bare:
         return _ret('')
+    # The geometry reads the LIVE board, which mid-run lacks whatever this run
+    # has ripped. A ball whose escape the INPUT carried was escaped by the
+    # fanout and is bare only because this run took the copper, so the fanout
+    # is not the remedy (#1311: glasgow U30.C9, ripped as a blocker, then
+    # "Re-run the fanout").
+    ripped = _escaped_on_input(pcb_data, net_id, bare)
+    _rids = {id(p) for p, _r in ripped}
+    dropped = [b for b in bare if id(b[0]) not in _rids]
+    name = net_name or bare[0][0].net_name or f"net{net_id}"
+    if not dropped:
+        rw = f"{ripped[0][1]}.{ripped[0][0].pad_number}"
+        hint = (f"Hint: pad {rw} has no copper of {name} on the board now, "
+                f"but the input carried its escape: this run ripped it, so "
+                f"the fanout is not the cause.")
+        return _ret(hint, {'verdict': 'ripped_by_run', 'pad': rw,
+                           'component': ripped[0][1],
+                           'pads': [f"{r}.{p.pad_number}"
+                                    for p, r in ripped[:6]]})
+    bare = dropped
     pad, ref = bare[0]
     where = f"{ref}.{pad.pad_number}"
-    name = net_name or pad.net_name or f"net{net_id}"
     # A net with many pads is usually plane-destined, and telling its owner to
     # re-run the FANOUT is the wrong remedy: on a pre-plane board `zones` is
     # empty, so `entombed_bare_pads` cannot tell a dropped signal ball from a

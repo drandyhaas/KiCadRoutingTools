@@ -556,26 +556,12 @@ def rank_blockers(results, algo: str = 'count',
     candidates by actual path crossings; after that reorder the list is
     already in rip order and this function is not called.
     """
-    # Bus rip resistance: members of a settled bus group score 1/res so
-    # the ladder prefers ripping bystanders over tearing up the river.
-    # Validator-named entries are exempt (micron-proof identity outranks
-    # protection).
-    _members = getattr(config, 'bus_member_net_ids', None) or set()
-    _res = float(getattr(config, 'bus_rip_resistance', 1.0) or 1.0)
-    if _res <= 1.0:
-        _members = set()
-
-    def _r(x):
-        return _res if (x.net_id in _members
-                        and not getattr(x, 'validator_named', False)) else 1.0
-
     if algo == 'near-target':
         def key(x):
             near = x.near_target_cells + x.near_source_cells
             named = 1 if getattr(x, 'validator_named', False) else 0
-            r = _r(x)
-            return (named, min(near, x.unique_cells) / r, near / r,
-                    x.unique_cells / r, x.blocked_count / r)
+            return (named, min(near, x.unique_cells), near,
+                    x.unique_cells, x.blocked_count)
         results.sort(key=key, reverse=True)
     elif algo == 'bidir':
         both = bidir_both_sets or set()
@@ -583,7 +569,7 @@ def rank_blockers(results, algo: str = 'count',
             base = _count_sort_key(x)
             boost = 2.0 if x.net_id in both else 1.0
             # scale the score component of the count key
-            return (base[0], base[1], base[2] * boost / _r(x), base[3] / _r(x))
+            return (base[0], base[1], base[2] * boost, base[3])
         results.sort(key=key, reverse=True)
     elif algo == 'cost' and pcb_data is not None:
         from net_cost import net_cost
@@ -593,13 +579,10 @@ def rank_blockers(results, algo: str = 'count',
             # at equal blocking. Floor at 1.0: a 1-pad/degenerate net must not
             # get a divide-by-~0 boost to the top of the rip order.
             c = max(net_cost(pcb_data, x.net_id), 1.0)
-            return (base[0], base[1], base[2] / (_r(x) * c), base[3] / (_r(x) * c))
+            return (base[0], base[1], base[2] / c, base[3] / c)
         results.sort(key=key, reverse=True)
     else:
-        def key(x):
-            base = _count_sort_key(x)
-            return (base[0], base[1], base[2] / _r(x), base[3] / _r(x))
-        results.sort(key=key, reverse=True)
+        results.sort(key=_count_sort_key, reverse=True)
 
 
 def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
@@ -642,10 +625,7 @@ def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
     cell_sets = {}
     soft_rows = []
     cost = config.cell_cost(5.0)   # ~5mm-equiv per cell: cross only if needed
-    _members = getattr(config, 'bus_member_net_ids', None) or set()
-    _res = float(getattr(config, 'bus_rip_resistance', 1.0) or 1.0)
     for nid in cand_ids:
-        n_cost = int(cost * _res) if (nid in _members and _res > 1.0) else cost
         data = net_obstacles_cache[nid]
         cells = getattr(data, 'blocked_cells', None)
         if cells is None or not len(cells):
@@ -655,16 +635,20 @@ def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
         for i in range(len(cells)):
             gx, gy, li = cells[i]
             cs.add((int(gx), int(gy), int(li)))
-            soft_rows.append((int(li), int(gx), int(gy), n_cost))
+            soft_rows.append((int(li), int(gx), int(gy), cost))
         cell_sets[nid] = cs
     if not soft_rows:
         return [], True
     clone.set_layer_proximity_batch(np.array(soft_rows, dtype=np.int32))
 
-    from single_ended_routing import route_net_with_obstacles
+    from single_ended_routing import (route_net_with_obstacles,
+                                      uncommit_dropped_result)
     probe_cfg = _replace(config, max_rip_up_count=0) \
         if hasattr(config, 'max_rip_up_count') else config
     result = route_net_with_obstacles(pcb_data, net_id, probe_cfg, clone)
+    # Only the path is read; the probe commits nothing, so neither may the
+    # #189 unblock copper it committed to the LIVE pcb_data (#803).
+    uncommit_dropped_result(pcb_data, result)
     if not result or result.get('failed') or not result.get('path'):
         return [], False
 

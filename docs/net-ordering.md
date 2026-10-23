@@ -6,14 +6,18 @@ This document describes the net ordering strategies available in the KiCad Grid 
 
 The order in which nets are routed significantly affects success rate. Nets routed early have more freedom, while later nets must work around existing routes.
 
-Three ordering strategies are available:
+Four ordering strategies are available on `route.py` (`--ordering`, `-o`; the GUI's "Ordering Strategy" on the Advanced options tab):
 
 | Strategy | Flag | Best For |
 |----------|------|----------|
-| MPS | `--ordering mps` | General routing, crossing conflicts |
+| MPS | `--ordering mps` (default) | General routing, crossing conflicts |
 | Inside-Out | `--ordering inside_out` | BGA escape routing |
 | Original | `--ordering original` | Manual control |
-| Bus | `--ordering bus` | Detected bus groups first (members middle-out), rest by MPS. Ordering only -- corridor attraction still needs `--bus` (which implies this ordering) |
+| Bus | `--ordering bus` | Detected bus groups first (members middle-out), rest by MPS. Ordering only: `--bus` makes the same bus-first reorder over whichever strategy is chosen and adds the corridors and attraction ([Bus Routing](bus-routing.md)) |
+
+`route_diff.py` takes `mps`, `inside_out` and `original`, and orders each pair as one unit (P and N together).
+
+The strategy's order is then adjusted twice before routing; see [After the Strategy](#after-the-strategy).
 
 ## MPS (Maximum Planar Subset) Algorithm
 
@@ -92,22 +96,30 @@ def compute_mps_net_ordering(pcb_data, net_ids):
                 conflicts[net_a].add(net_b)
                 conflicts[net_b].add(net_a)
 
-    # Step 5: Greedy ordering
-    ordered = []
+    # Step 5: Greedy ordering in rounds
+    rounds = []
     remaining = set(net_list)
-
     while remaining:
-        # Find net with minimum active conflicts
-        best_net = min(remaining, key=lambda n: len(conflicts[n] & remaining))
-        ordered.append(best_net)
-        remaining.remove(best_net)
+        winners, losers = [], set()
+        round_remaining = set(remaining)
+        while round_remaining:
+            # Fewest active conflicts first, shorter route on a tie
+            best_net = min(round_remaining,
+                           key=lambda n: (len(conflicts[n] & round_remaining), distance[n]))
+            winners.append(best_net)
+            round_remaining.discard(best_net)
+            # Nets crossing it wait for the next round
+            for loser in conflicts[best_net] & round_remaining:
+                losers.add(loser)
+                round_remaining.discard(loser)
+        rounds.append(winners)
+        remaining = losers
 
-        # Remove conflicting nets from this round
-        for loser in conflicts[best_net] & remaining:
-            remaining.remove(loser)
-
-    return ordered
+    # Each round is routed shortest-first, round 1 first
+    return [n for winners in rounds for n in sorted(winners, key=distance.get)]
 ```
+
+(Simplified from `compute_mps_net_ordering()` in `net_queries.py`. With no chip pair to unroll, nets are compared by angle around the routing region's centre instead, and the segment intersection method below replaces both when no net ends on a BGA.)
 
 ### Example
 
@@ -129,7 +141,7 @@ Order: [C, D, A, B]
 ### Usage
 
 ```bash
-python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
+python3 py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 ```
 
 ### Segment Intersection Method
@@ -144,10 +156,10 @@ This method is more accurate for non-BGA boards where nets route directly betwee
 
 ```bash
 # Force segment intersection method
-python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-segment-intersection
+python3 py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-segment-intersection
 
 # Auto-detection (default): uses segment intersection when no nets on BGAs
-python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
+python3 py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 ```
 
 ### Reverse Round Order
@@ -155,7 +167,7 @@ python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mp
 By default, MPS routes the least-conflicting groups first (fewest active conflicts). The `--mps-reverse-rounds` flag reverses this, routing the most-conflicting groups first:
 
 ```bash
-python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-reverse-rounds
+python3 py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-reverse-rounds
 ```
 
 This can sometimes improve results when:
@@ -168,7 +180,7 @@ This can sometimes improve results when:
 When MPS detects crossing conflicts (nets placed in Round 2+), the `--mps-layer-swap` flag enables automatic layer swaps to eliminate same-layer crossings:
 
 ```bash
-python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-layer-swap
+python3 py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-layer-swap
 ```
 
 #### How It Works
@@ -247,6 +259,8 @@ Routes BGA nets from center outward, improving escape routing success.
 3. Sort by distance (closest to center first)
 4. Non-BGA nets keep original order and are routed last
 
+With no BGA exclusion zone (no BGA on the board, or `--no-bga-zones`), `inside_out` leaves the order as it was given.
+
 ### Algorithm
 
 ```python
@@ -290,12 +304,12 @@ BGA Pad Array:
 ### Usage
 
 ```bash
-python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering inside_out
+python3 py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering inside_out
 ```
 
 ## Original Ordering
 
-Keeps nets in the order they were specified on the command line.
+Keeps nets in the order they were specified: literal names in the order given, each wildcard pattern's matches in name order.
 
 ### When to Use
 
@@ -306,7 +320,7 @@ Keeps nets in the order they were specified on the command line.
 ### Usage
 
 ```bash
-python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-A" "Net-B" "Net-C" --ordering original
+python3 py_router/route.py input.kicad_pcb output.kicad_pcb "Net-A" "Net-B" "Net-C" --ordering original
 ```
 
 ## Strategy Comparison
@@ -317,6 +331,7 @@ python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-A" "Net-B" "Net-
 | BGA escape | Inside-Out |
 | Long parallel routes | MPS |
 | Manual control | Original |
+| Data/address buses routed as rivers | `--bus` (any strategy) |
 | Dense routing with many crossings | MPS |
 | Simple 2-point routes | Any |
 
@@ -326,14 +341,23 @@ Net ordering (which net routes first) combines with direction order (which endpo
 
 ```bash
 # MPS ordering + backward direction
-python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" \
+python3 py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" \
     --ordering mps \
     --direction backward
 ```
 
-Direction options:
-- `forward`: Always route from stub group 1 to stub group 2
-- `backward`: Always route from stub group 2 to stub group 1
+Direction options (`--direction`, `-d`):
+- `forward` (default): start the search from the source end (stub group 1)
+- `backward`: start it from the target end (stub group 2)
+
+Either way the router tries the other direction when the first fails; the option only chooses which goes first. (A bus member whose group clustered at its targets routes from that end only.)
+
+## After the Strategy
+
+On `route.py`, two reorders are applied on top of every strategy, in this order:
+
+1. **Direct-first (#472).** Nets with a bare BGA ball (a ball of the net with no stub or via on it, the fanout-deferred direct-route class) move to the front, keeping their relative order, so their short surface lanes are claimed before long nets and bus corridors contend for the space. Inert on a board whose balls all carry escape copper. `KICAD_DIRECT_FIRST=0` disables it.
+2. **Bus-first.** Under `--bus` or `--ordering bus`, detected bus groups move to the very front, each middle-out ([Bus Routing](bus-routing.md#routing-order-bus-groups-first-middle-out)).
 
 ## Performance Notes
 

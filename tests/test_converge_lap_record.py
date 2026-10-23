@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """What a lap has to record so a later reader can act on it.
 
-`converge record` is the loop's ledger. Three things a lap needs and did not
+`converge record` is the loop's ledger. Two things a lap needs and did not
 have:
 
-  * the MEASUREMENT it was aimed at. Run 20 recorded "throat 0.409mm vs 0.450
-    needed, blocked by U4.53/R7.2" as English inside `lever`. A person could
-    read it; nothing else could.
   * the re-entry SHAPE it acted on, the same word the loop's own gate demands,
     so "which shape did we re-enter at, and did it work" becomes a question
     the record can answer.
@@ -56,65 +53,6 @@ def _rows(ledger):
         return [json.loads(ln) for ln in f if ln.strip()]
 
 
-class TestDefectRecord(unittest.TestCase):
-    def test_the_contents_are_inlined_not_the_path(self):
-        """A path into a work dir is not a measurement.
-
-        Work dirs are deleted; the ledger outlives them.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            ledger = os.path.join(td, 'ledger.jsonl')
-            dj = os.path.join(td, 'defect.json')
-            with open(dj, 'w', encoding='utf-8') as f:
-                json.dump({'ref': 'U4', 'throat_mm': 0.409,
-                           'needed_mm': 0.450}, f)
-            r = _record(ledger, score={'blocking': 4, 'quality': {}},
-                        kind='placement', lever='reseat U4', defect_json=dj)
-            self.assertEqual(r.returncode, 0, r.stderr[-400:])
-            row = _rows(ledger)[0]
-            self.assertEqual(row['defects'][0]['throat_mm'], 0.409)
-            self.assertEqual(row['defects'][0]['needed_mm'], 0.450)
-
-    def test_it_is_repeatable(self):
-        with tempfile.TemporaryDirectory() as td:
-            ledger = os.path.join(td, 'ledger.jsonl')
-            argv = [CONVERGE, 'record', '--ledger', ledger, '--board', BOARD,
-                    '--kind', 'placement', '--lever', 'two defects']
-            for i, ref in enumerate(('U4', 'R7')):
-                p = os.path.join(td, 'd%d.json' % i)
-                with open(p, 'w', encoding='utf-8') as f:
-                    json.dump({'ref': ref}, f)
-                argv += ['--defect-json', p]
-            self.assertEqual(_run(*argv).returncode, 0)
-            self.assertEqual([d['ref'] for d in _rows(ledger)[0]['defects']],
-                             ['U4', 'R7'])
-
-    def test_an_unreadable_record_is_kept_as_an_error_not_dropped(self):
-        """Naming a record we cannot read is not the same as naming none.
-
-        Collapsing the two silently is how a ledger stops being evidence.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            ledger = os.path.join(td, 'ledger.jsonl')
-            bad = os.path.join(td, 'bad.json')
-            with open(bad, 'w', encoding='utf-8') as f:
-                f.write('{not json')
-            self.assertEqual(
-                _record(ledger, kind='placement', lever='x',
-                        defect_json=bad).returncode, 0)
-            d = _rows(ledger)[0]['defects'][0]
-            self.assertEqual(d['path'], bad)
-            self.assertIn('error', d)
-
-    def test_no_flag_leaves_the_key_null(self):
-        """The absence has to be readable too, not an absent key."""
-        with tempfile.TemporaryDirectory() as td:
-            ledger = os.path.join(td, 'ledger.jsonl')
-            self.assertEqual(
-                _record(ledger, kind='placement', lever='x').returncode, 0)
-            self.assertIsNone(_rows(ledger)[0]['defects'])
-
-
 class TestShape(unittest.TestCase):
     def test_the_shape_lands_in_the_row(self):
         with tempfile.TemporaryDirectory() as td:
@@ -161,18 +99,16 @@ class TestClassificationKind(unittest.TestCase):
                          {'placement': 'placement', 'completion': 'routing'})
 
 
-class TestStatusIsStillOneDocument(unittest.TestCase):
-    """`status` stdout is a JSON API; callers json.loads the whole stream."""
+class TestRecordIsStillOneDocument(unittest.TestCase):
+    """`record` stdout is a JSON API; callers json.loads the whole stream."""
 
-    def test_status_parses_as_one_json_doc(self):
+    def test_record_parses_as_one_json_doc(self):
         with tempfile.TemporaryDirectory() as td:
             ledger = os.path.join(td, 'ledger.jsonl')
-            _record(ledger, score={'blocking': 2, 'quality': {}},
-                    kind='classification', shape='parameter', lever='lap')
-            r = _run(CONVERGE, 'status', '--ledger', ledger)
+            r = _record(ledger, score={'blocking': 2, 'quality': {}},
+                        kind='classification', shape='parameter', lever='lap')
             self.assertEqual(r.returncode, 0, r.stderr[-300:])
-            doc = json.loads(r.stdout.split('\nNOTE:')[0])
-            self.assertEqual(doc['total'], 1)
+            self.assertEqual(json.loads(r.stdout)['kind'], 'classification')
 
 
 if __name__ == '__main__':

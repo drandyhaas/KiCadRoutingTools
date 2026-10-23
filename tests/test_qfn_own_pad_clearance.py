@@ -15,6 +15,11 @@ Two checks on kicad_files/tigard.kicad_pcb (QFN-64, 0.5mm):
      pad's escape path must not be grazed by any emitted track -- pre-fix the
      scan couldn't see it and the escape shipped straight through it.
 
+Grazes are graded by check_drc's segment_pad_gap on the pad's true copper.
+The square-cornered `_seg_hits_pad` box this used to grade with flagged a fan
+that clears the injected ROUND pad by 0.1062 mm at a 0.1 mm rule, once the
+fanout measured pads exactly (found in #1328's replays).
+
 Skips cleanly if the corpus board is absent.
 """
 import copy
@@ -27,11 +32,10 @@ sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 from kicad_parser import parse_kicad_pcb
 from qfn_fanout import generate_qfn_fanout
-from bga_fanout.reroute import _seg_hits_pad
+from check_drc import segment_pad_gap
 
 BOARD = os.path.join(ROOT, "kicad_files", "tigard.kicad_pcb")
 TRACK_W, CLEARANCE = 0.1, 0.1
-MARGIN = CLEARANCE + TRACK_W / 2
 
 
 def _own_pad_grazes(tracks, pads, layer):
@@ -42,8 +46,8 @@ def _own_pad_grazes(tracks, pads, layer):
                 continue
             if p.drill <= 0 and layer not in (p.layers or []):
                 continue
-            if _seg_hits_pad(t["start"][0], t["start"][1],
-                             t["end"][0], t["end"][1], p, margin=MARGIN):
+            if segment_pad_gap(t["start"][0], t["start"][1], t["end"][0],
+                               t["end"][1], p) - t["width"] / 2 < CLEARANCE - 1e-9:
                 hits.append((t, p.pad_number, p.net_name))
     return hits
 
@@ -70,10 +74,29 @@ def main():
 
     # --- 2. injected own pad in the escape path is respected ---
     # U3 pad 2 (Net-(C23-Pad1)) sits at (44.55, 57.15) on the left side, so its
-    # stub escapes in -x. Park a same-footprint GND pad 0.95mm out on that path.
-    pcb2 = parse_kicad_pcb(BOARD)
-    u3b = pcb2.footprints["U3"]
+    # stub escapes in -x and fans out. Park a same-footprint GND pad on the
+    # middle of that fan, so a scan blind to own pads runs straight through it.
     victim_net = "Net-(C23-Pad1)"
+
+    def victim_fanout(blocker=None):
+        pcb_v = parse_kicad_pcb(BOARD)
+        u3v = pcb_v.footprints["U3"]
+        if blocker is not None:
+            # Register only in pads_by_net (the graze scan's source); keeping
+            # it out of footprint.pads leaves the QFN layout analysis untouched.
+            pcb_v.pads_by_net.setdefault(blocker.net_id, []).append(blocker)
+        return generate_qfn_fanout(
+            u3v, pcb_v, net_filter=[victim_net], layer="F.Cu",
+            track_width=TRACK_W, clearance=CLEARANCE, grid_step=0.05,
+            escape_method="stub")[0], u3v
+
+    free, u3b = victim_fanout()
+    ends = {tuple(t["end"]) for t in free}
+    fan = [t for t in free if tuple(t["start"]) in ends]
+    if len(fan) != 1:
+        print(f"FAIL: expected one fan leg for {victim_net}, got {free}")
+        return 1
+    fan = fan[0]
     donor = next(p for p in u3b.pads if p.net_name == victim_net)
     gnd_id = next(p.net_id for p in u3b.pads if p.net_name == "GND")
     blocker = copy.copy(donor)
@@ -82,16 +105,14 @@ def main():
     blocker.net_name = "GND"
     blocker.shape = "circle"
     blocker.size_x = blocker.size_y = 0.3
-    blocker.global_x = donor.global_x - 0.95
-    blocker.global_y = donor.global_y
-    # Register only in pads_by_net (the graze scan's source); keeping it out of
-    # footprint.pads leaves the QFN layout analysis untouched.
-    pcb2.pads_by_net.setdefault(gnd_id, []).append(blocker)
+    blocker.global_x = (fan["start"][0] + fan["end"][0]) / 2
+    blocker.global_y = (fan["start"][1] + fan["end"][1]) / 2
+    # The grader's own control: the fan laid blind to the pad runs through it.
+    if not _own_pad_grazes(free, [blocker], "F.Cu"):
+        fails.append("control: a fan laid blind to the injected pad is not "
+                     "graded as grazing it")
 
-    tracks2, _v2, _d2 = generate_qfn_fanout(
-        u3b, pcb2, net_filter=[victim_net], layer="F.Cu",
-        track_width=TRACK_W, clearance=CLEARANCE, grid_step=0.05,
-        escape_method="stub")
+    tracks2, _u3 = victim_fanout(blocker)
     grazes2 = _own_pad_grazes(tracks2, [blocker], "F.Cu")
     if grazes2:
         fails.append(f"escape shipped through injected own pad: {grazes2}")

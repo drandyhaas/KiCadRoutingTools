@@ -81,7 +81,7 @@ def order_nets_mps(
 
             swap_result = try_mps_aware_layer_swaps(
                 pcb_data, config, mps_result, diff_pairs,
-                available_layers=config.layers,
+                available_layers=config.routable_layers(),
                 can_swap_to_top_layer=can_swap_to_top_layer,
                 all_segment_modifications=all_segment_modifications,
                 all_swap_vias=all_swap_vias,

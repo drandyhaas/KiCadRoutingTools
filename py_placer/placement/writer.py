@@ -49,7 +49,7 @@ def _outline_owner_map(input_file: str) -> Dict[str, bool]:
         key = (os.path.abspath(input_file), st.st_mtime_ns, st.st_size)
     except OSError:
         return {}
-    # Keyed by (path, mtime, size), NOT by path alone. `place_seed` writes a
+    # Keyed by (path, mtime, size), NOT by path alone. A tool that writes a
     # temp board and `os.replace`s it over the output, and `route.py` writes in
     # place, so a path-keyed memo answers for a file that no longer exists --
     # measured: after the file changed on disk the writer still reported the
@@ -164,9 +164,7 @@ def _report_unapplied(requested, matched, unaddressed, what):
 
     ON STDERR, for the same reason the parser's duplicate-reference warning is
     (`kicad_parser.py`): shipped tools emit bare JSON on stdout, where a
-    WARNING line in front is a JSONDecodeError at char 0. `converge.py` happens
-    to wrap its write in `_StdoutToStderr()`, which is luck rather than a
-    contract.
+    WARNING line in front is a JSONDecodeError at char 0.
     """
     missing = sorted(set(requested) - set(matched))
     if missing:
@@ -248,6 +246,15 @@ def write_label_output(input_file: str, output_file: str,
     return True
 
 
+#: A pad's own `(at x y [angle])`: the pad number quoted or bare, then any run
+#: of bare tokens before it -- type and shape, and the `locked` KiCad 6 writes
+#: on every pad, which a fixed two-token pattern missed, leaving every pad of a
+#: rotated KiCad 6 footprint turned against its body (#1305, steppenprobe).
+_PAD_AT = re.compile(
+    r'(\(pad\s+(?:"[^"]*"|[^\s()"]+)(?:\s+[^\s()"]+)*\s*)'
+    r'\(at\s+(' + AT_NUM + r')\s+(' + AT_NUM + r')(?:\s+(' + AT_NUM + r'))?\)')
+
+
 def _rotate_pad_angles(fp_text: str, delta_rot: float) -> str:
     """Add delta_rot to the (at x y [angle]) of every pad in a footprint block."""
 
@@ -260,10 +267,7 @@ def _rotate_pad_angles(fp_text: str, delta_rot: float) -> str:
             return f'{head}(at {x} {y} {new_angle:.6g})'
         return f'{head}(at {x} {y})'
 
-    return re.sub(
-        r'(\(pad\s+"[^"]*"\s+\S+\s+\S+\s*\n?\s*)'
-        r'\(at\s+(' + AT_NUM + r')\s+(' + AT_NUM + r')(?:\s+(' + AT_NUM + r'))?\)',
-        fix_pad, fp_text)
+    return _PAD_AT.sub(fix_pad, fp_text)
 
 
 #: A text node's own `(at x y [angle])`.
@@ -559,7 +563,6 @@ _PAD_HANDLED = frozenset({
     'die_delay',
 })
 
-_SIDED_LAYER = re.compile(r'^[FB]\.')
 _INNER_LAYER = re.compile(r'^In\d+\.Cu$', re.IGNORECASE)
 
 
@@ -1017,6 +1020,11 @@ def write_placed_output(input_file: str, output_file: str,
 
     placement_by_ref = {p['reference']: p for p in placements}
     modified_count = 0
+    # #1322: a placement at the block's own pose rewrites the block and moves
+    # nothing; counted apart, so `rotate R2 180` on a part already at 180 no
+    # longer reports "Modified 1 footprint positions" beside place_pose's
+    # "unmoved".
+    unchanged_count = 0
     matched = set()
     unapplied_blocks = []
 
@@ -1025,11 +1033,11 @@ def write_placed_output(input_file: str, output_file: str,
     # STRING up, so one placement rewrote EVERY block carrying it: measured, a
     # single placement for esp_prog's `Ref*` moved both fiducials and left them
     # stacked 23.44 mm from where the second one belonged, and `perturb.
-    # _all_at_current` -- the identity write that builds the stress harness's
-    # ground-truth CONTROL board -- relocated 3 blocks on 2 corpus boards, up
-    # to 23.44 mm. (12 blocks across 5 boards, to 70.66 mm, is the ceiling for
-    # a caller that places every PARSED footprint; `state.parts` excludes the
-    # zero-pad blocks that make up the difference.)
+    # _all_at_current` (since retired) -- the identity write that built the
+    # stress harness's ground-truth CONTROL board -- relocated 3 blocks on 2
+    # corpus boards, up to 23.44 mm. (12 blocks across 5 boards, to 70.66 mm,
+    # is the ceiling for a caller that places every PARSED footprint;
+    # `state.parts` excludes the zero-pad blocks that make up the difference.)
     #
     # Resolving here means the writer and the parser can no longer disagree
     # about what a name means -- which is the property that matters, not merely
@@ -1042,6 +1050,13 @@ def write_placed_output(input_file: str, output_file: str,
     # property value (an MPN like "TCR2EF115,LM(CT") cannot run past a block and
     # swallow the next footprint -- issue #113. A naive depth counter here would
     # place the WRONG footprint, or silently place none.
+    #
+    # The rewritten board is assembled ONCE, from pieces collected back to
+    # front: splicing each block into the whole string copied the board once
+    # per moved part, which on a 54 MB board (ddr4_rdimm_tester) was 3 s of a
+    # 300-part write and grows as parts x file size.
+    pieces: List[str] = []
+    tail = len(content)
     for start, end, fp_text, _raw_ref, key in reversed(
             list(iter_footprint_blocks(content))):
         placement = placement_by_ref.get(key)
@@ -1067,9 +1082,9 @@ def write_placed_output(input_file: str, output_file: str,
 
         # #714. An OPTIONAL key: absent or None means the layer is left alone
         # and this write is byte-identical to one built before the flip
-        # existed, which is what keeps the ~20 producers of these dicts
-        # (quench, seeder, portfolio, relocate, perturb, fanout_clearance,
-        # place_reconstruct, place_seed, converge, net_rescue) unchanged.
+        # existed, which is what keeps every producer of these dicts
+        # (place_simple, pose_ops, fanout_clearance, converge, net_rescue,
+        # ...) unchanged.
         #
         # Spelled 'F'/'B', matching `legality.footprint_side` exactly, and
         # anything else RAISES at the boundary rather than 200 lines
@@ -1093,14 +1108,14 @@ def write_placed_output(input_file: str, output_file: str,
         # pad coordinates that exist nowhere on the board.
         #
         # ON AN ACTUAL POSE CHANGE ONLY, and that qualifier is not a nicety.
-        # `perturb._all_at_current` deliberately hands this writer EVERY part,
-        # at its current pose, so the moved set cannot be read off the
-        # six-decimal `(at)` formatting -- and its dose-0 CONTROL board is
-        # exactly that call with no moves at all. Gating on presence in
-        # `placements` therefore refused to write the control board of every
-        # perturbation run on a board with an outline owner, with a message
-        # blaming a mover that had not moved anything. Measured before this
-        # qualifier existed.
+        # An identity write hands this writer EVERY part at its current
+        # pose, so the moved set cannot be read off the six-decimal `(at)`
+        # formatting -- `perturb._all_at_current` (since retired) did, and
+        # its dose-0 CONTROL board was exactly that call with no moves at all.
+        # Gating on presence in `placements` therefore refused to write the
+        # control board of every perturbation run on a board with an outline
+        # owner, with a message blaming a mover that had not moved anything.
+        # Measured before this qualifier existed.
         if (_OWNS_OUTLINE_RE.search(fp_text)
                 and (abs(new_x - float(at_match.group(1))) > _POSE_EPS
                      or abs(new_y - float(at_match.group(2))) > _POSE_EPS
@@ -1109,10 +1124,9 @@ def write_placed_output(input_file: str, output_file: str,
                      # and on an outline owner it MIRRORS the owned Edge.Cuts
                      # geometry -- the board resize this guard exists to
                      # refuse. Without this term the flip walks straight past
-                     # it. `perturb._all_at_current` never sets `new_side`, so
-                     # the dose-0 control board is unaffected, which is the
-                     # reason the rest of this predicate is written the way it
-                     # is.
+                     # it. An identity write never sets `new_side`, so it is
+                     # unaffected, which is the reason the rest of this
+                     # predicate is written the way it is.
                      or side_change)
                 # `key`, not the raw reference: #726 keys a duplicated
                 # reference's second block `TP4~2`, and the owner map is keyed
@@ -1183,8 +1197,19 @@ def write_placed_output(input_file: str, output_file: str,
             new_fp_text = _set_text_angles(new_fp_text, float(new_text_angle),
                                            key)
 
-        content = content[:start] + new_fp_text + content[end:]
-        modified_count += 1
+        pieces.append(content[end:tail])
+        pieces.append(new_fp_text)
+        tail = start
+        if (abs(new_x - float(at_match.group(1))) > _POSE_EPS
+                or abs(new_y - float(at_match.group(2))) > _POSE_EPS
+                or abs((new_rot - old_rot + 180) % 360 - 180) > _POSE_EPS
+                or side_change):
+            modified_count += 1
+        else:
+            unchanged_count += 1
+    if pieces:
+        pieces.append(content[:tail])
+        content = ''.join(reversed(pieces))
 
     # Via-nudge rewrites (#313): remove each moved via from the input text and
     # append it at its new position, plus the new connector segments back to
@@ -1192,7 +1217,24 @@ def write_placed_output(input_file: str, output_file: str,
     if via_moves or new_segments:
         from plane_io import _remove_vias_at_positions
         from kicad_writer import generate_via_sexpr, generate_segment_sexpr
+        from kicad_parser import is_immutable_copper
         n2n = getattr(pcb_data, 'net_id_to_name', None) if pcb_data is not None else None
+        # A KiCad-locked via (#521) or one a `sense:` group holds (#1279) is
+        # never re-emitted: deleting it and appending it again gives it a new
+        # uuid, which takes it out of its group, and moves pinned copper. The
+        # nudge never proposes one, so a move naming one is a caller's bug --
+        # refused rather than written. The nudge moves its Via in place, so
+        # the via is looked for at the move's old AND new position.
+        for m in (via_moves or ()) if pcb_data is not None else ():
+            nid = m[2]['net_id']
+            for v in getattr(pcb_data, 'vias', ()) or ():
+                if v.net_id == nid and is_immutable_copper(v) and any(
+                        abs(v.x - x) < 1e-6 and abs(v.y - y) < 1e-6
+                        for x, y in ((m[0], m[1]), (m[2]['x'], m[2]['y']))):
+                    raise ValueError(
+                        f"via move ({m[0]}, {m[1]}) -> ({m[2]['x']}, "
+                        f"{m[2]['y']}) names a KiCad-locked or sense-held via; "
+                        f"such a via is never re-emitted (#1279)")
 
         def _net_name(net_id):
             """This board's name for a net id, or None if it has none.
@@ -1233,12 +1275,9 @@ def write_placed_output(input_file: str, output_file: str,
                 # Every via in via_moves came OFF this board a few lines up,
                 # so its OWN spec is the whole answer. That much is
                 # plane_io.py:862-866's form -- the rip-up restore, which is
-                # structurally the same act -- and deliberately NOT
-                # plane_io.py:557-563's `or
-                # prevailing_via_protection_in_text(...)`, the right default
-                # for vias this tool ADDS but a THIRD answer for one that
-                # already existed: it would stamp the majority spec of OTHER
-                # vias onto this one.
+                # structurally the same act. Falling back to the majority
+                # spec of OTHER vias would be a THIRD answer for one that
+                # already existed: it would stamp their spec onto this one.
                 #
                 # `inherit_when_unspecified=True` is where this call goes
                 # BEYOND plane_io's form, and it is the second half of #741. An
@@ -1287,7 +1326,9 @@ def write_placed_output(input_file: str, output_file: str,
                     # cannot do this job -- the repo's own idiom for carrying a
                     # spec is `dict(...)`, which would turn any dict-shaped
                     # sentinel back into a plain {}.
-                    inherit_when_unspecified=True))
+                    inherit_when_unspecified=True,
+                    # A nudged blind/micro via keeps its type word.
+                    via_type=v.get('via_type')))
         for nsd in (new_segments or []):
             nm = n2n.get(nsd['net_id']) if n2n else None
             elements.append(generate_segment_sexpr(
@@ -1297,56 +1338,14 @@ def write_placed_output(input_file: str, output_file: str,
             close = content.rindex(')')
             content = content[:close] + '\n'.join(elements) + '\n)' + content[close+1:]
 
-    # THE SINGLE POSE FUNNEL, and it must run BEFORE the write. Every
-    # footprint `(at ...)` rewrite in py_placer comes through here, so this is
-    # the one place that can answer "was every pose in this board produced by
-    # a registered engine lever?". Outside an unaided regime it is a no-op and
-    # the behaviour is byte-identical; inside one, an undeclared write raises,
-    # and the row records the input's and the output's pose digests -- the
-    # links `provenance_audit` walks from the staged board (#972).
-    # `place_seed` and `place_route_loop`, which copy or rename a board built
-    # elsewhere into place, record that delivery too, via
-    # `provenance.recorded_delivery` (#973).
-    #
-    # It used to raise AFTER `f.write(content)`, which made the refusal
-    # decorative: the poses were already on disk, so the "gate" reported a
-    # violation about a file it had just helped produce. Refusing means not
-    # writing.
-    #
-    # NOTE the qualifier -- "in py_placer". The GUI writes poses through
-    # pcbnew (`ai_plan._run_place_plan`, `fanout_gui`, `placement_gui`) and
-    # does NOT come through here, so a GUI-driven placement leaves no row.
-    # See provenance.record_write for what that means for a verdict.
-    # #829 tripwire: would this write change the board OUTLINE? The per-ref
-    # gate above answers "may this footprint move"; this answers the question
-    # the placement stack's contract actually makes -- "is the outline the same
-    # board it was" -- and it catches a route no gate anticipated.
-    #
-    # BEFORE THE WRITE, comparing the ORIGINAL text against the in-memory
-    # `content`. Both halves of that matter and the first draft got both wrong:
-    #
-    #  * Raising after `f.write` left the resized board sitting at
-    #    `output_file` with `commit_write` skipped -- a board with a changed
-    #    outline on disk, no ledger row for it, and an orphaned _PENDING entry.
-    #    `provenance.py` documents that exact shape as the defect its
-    #    pending/commit split was introduced to fix; doing it here reinstated
-    #    it.
-    #  * Re-reading `output_file` made the check STRUCTURALLY INERT when
-    #    `input_file is output_file` -- which is `route.py:4074`, the #666
-    #    scoped cap move, the very call site this backstop cites as its reason
-    #    to exist. Both paths read the same bytes, so it could never fire.
-    #
-    # It compares a FINGERPRINT, not `board_bounds`. Bounds are blind to an
-    # interior cutout moving and to a rotated circular window (fp_circle bounds
-    # are rotation-invariant about the moved centre), and rings are blind to an
-    # open stub that never chains -- the #829 repro moved bounds while
-    # board_outlines stayed identical, so either alone would have missed it.
-    #
-    # Armed off the BOARD, not off which refs the per-ref gate happened to
-    # check: using the gate's cache made the tripwire depend on a side effect,
-    # so it disarmed whenever the moved footprints were not the ones carrying
-    # Edge.Cuts. Only a board with footprint-embedded Edge.Cuts arms it, which
-    # is 0 of the 27 tracked boards.
+    # Outline tripwire (#829): would this write change the board OUTLINE? It
+    # runs BEFORE the write and compares the ORIGINAL text against the
+    # in-memory `content`, so nothing is written when it fires, and it still
+    # works when `input_file is output_file` (route.py's scoped cap move).
+    # It compares a structural FINGERPRINT, not `board_bounds`: bounds are
+    # blind to an interior cutout moving and to a rotated circular window,
+    # and rings are blind to an open stub that never chains. Only a board
+    # with footprint-embedded Edge.Cuts arms it.
     if _outline_owner_map(input_file):
         from kicad_parser import structural_outline_fingerprint, read_board_text
         # The same read as `content` (#1149), or a repaired footprint block
@@ -1361,16 +1360,12 @@ def write_placed_output(input_file: str, output_file: str,
                 f"owns. Nothing was written. This is a bug in whatever "
                 f"produced the placement list (#829).")
 
-    from placement import provenance
-    provenance.record_write(input_file, output_file, placements,
-                            pending=True)
-
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    provenance.commit_write(output_file)
-
-    print(f"Modified {modified_count} footprint positions")
+    print(f"Modified {modified_count} footprint positions"
+          + (f" ({unchanged_count} placement(s) already at that pose, "
+             f"unchanged)" if unchanged_count else ""))
     _report_unapplied(placement_by_ref, matched, unapplied_blocks,
                       'placement')
     print(f"Successfully wrote {output_file}")

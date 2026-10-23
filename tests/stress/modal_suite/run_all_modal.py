@@ -17,8 +17,9 @@ KICAD_SWEEP_DIRTY=1 to ship the WORKING TREE instead -- for a suite run over an
 uncommitted change. It warns, and the provenance printed in the report is
 suffixed `+dirty`.
 
-Why this exists: the suite is ~594 files and ~40 min of laptop (and of
-battery). Fifty containers turn it into the length of its slowest shard.
+Why this exists: the suite is ~770 files and (when last measured) ~40 min of
+laptop (and of battery). Fifty containers turn it into the length of its
+slowest shard.
 
 WHAT THE EXIT CODE MEANS. Each shard's OWN exit code decides that shard, and
 the driver is red if ANY shard is red or MISSING. The parsed counts are for the
@@ -36,9 +37,10 @@ KiCad-python session.
 That is true of THIS app and not of "the cloud": the stress app has carried
 KiCad since 2026-08-23 (cloud_replay_sets.py passes --with-kicad by default,
 building modal_sweep/modal_app.py on kicad/kicad:10.0.6). Giving this image
-KiCad would mean copying that recipe; it would recover the two self-skips that
-are really about KiCad, and NOT the ones wanting artifacts under the gitignored
-wk/, which self-skip on any clean checkout.
+KiCad would mean copying that recipe; it would recover the six self-skips that
+are really about KiCad (tests/README.md names them), and NOT the test_622_*
+ones wanting ortools (not in requirements.txt) or the ones wanting artifacts
+under the gitignored wk/, which self-skip on any clean checkout.
 """
 from __future__ import annotations
 
@@ -58,8 +60,9 @@ _here = Path(__file__).resolve().parent
 _repo_root = _here.parent.parent.parent
 sys.path.insert(0, str(_repo_root / "tests" / "stress" / "modal_sweep"))
 
-# _image_source() shells out to `git`, which the container has neither of (no
-# git, no repo). Compute locally; hand the containers the sha as an env var.
+# _image_source() shells out to `git` against the host repo, which the
+# container does not have (its git sees only the index rebuilt below, with no
+# commits). Compute locally; hand the containers the sha as an env var.
 # Running it container-side is what once made every container crash at import.
 def _tracked_manifest():
     """(path of a NUL-separated `git ls-files` dump, tracked board count).
@@ -112,10 +115,10 @@ else:
 #: Not pinned to a constant, because the version is not cosmetic here: this
 #: repo has already had a Python upgrade change ROUTING RESULTS (math.fsum),
 #: so a suite that grades on 3.12 is not grading the code the developer runs
-#: on 3.14. It also changes what TESTS see -- `test_run8_write_order` passes
-#: on 3.13+ and fails on 3.12 purely because 3.13 echoes the offending source
+#: on 3.14. It also changes what TESTS see -- a since-deleted test passed on
+#: 3.13+ and failed on 3.12 purely because 3.13 echoes the offending source
 #: line in a `python -c` traceback, and that test's assertion (`'early line'
-#: in the log`) is satisfied by the echo rather than by the program running.
+#: in the log`) was satisfied by the echo rather than by the program running.
 #: A runner that silently picks its own interpreter turns differences like
 #: that into phantom failures, and hides the real ones.
 #:
@@ -128,8 +131,8 @@ PY_VERSION = os.environ.get(
 image = (
     modal.Image.debian_slim(python_version=PY_VERSION)
     .pip_install_from_requirements(str(_repo_root / "requirements.txt"))
-    # No pytest: run_all.py runs every test as a plain script, and
-    # test_718_static_test_hygiene refuses a test file that needs pytest.
+    # No pytest: run_all.py runs every test as a plain script, so no test
+    # may need it.
     .apt_install("git", "procps", "curl", "build-essential")
     # a toolchain for the case with no prebuilt to download: a branch whose rust_router/Cargo.toml is
     # ahead of the latest release (build_router.py then builds from source, and without cargo it fails)
@@ -168,14 +171,14 @@ image = (
         f"cd {REPO} && (python3 build_router.py"
         f" || (. $HOME/.cargo/env && python3 build_router.py --from-source))",
         # Prove the extension imports IN A FRESH PROCESS before any shard runs.
-        # A broken .so would otherwise surface as 594 identical import errors
+        # A broken .so would otherwise surface as ~770 identical import errors
         # spread over 50 containers.
         f"cd {REPO} && python3 -c \"import sys; sys.path.insert(0,'rust_router'); "
         f"import grid_router; print('grid_router', grid_router.__version__)\"",
     )
 )
 
-#: One shard of ~12 files at --jobs 2. The per-TEST budget is run_all's own
+#: One shard of ~15 files at --jobs 2. The per-TEST budget is run_all's own
 #: --timeout; this is the whole-shard ceiling and must exceed
 #: ceil(files/jobs) * per_test, or a slow shard dies as an unaccounted
 #: container rather than as a named timed-out test.
@@ -386,8 +389,9 @@ def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
     if tot["self_skipped"]:
         print(f"\n{tot['self_skipped']} self-skipped -- these asserted NOTHING "
               f"and are not passes. The reasons DIFFER: this image has no "
-              f"KiCad, and some tests want recorded artifacts absent from a "
-              f"clean checkout. Read each SKIP: line rather than assuming.")
+              f"KiCad and no ortools, and some tests want recorded artifacts "
+              f"absent from a clean checkout. Read each SKIP: line rather "
+              f"than assuming.")
     # A shard that never reported is the failure mode this block exists for:
     # its tests did not run, and without this the run would print green.
     if missing:

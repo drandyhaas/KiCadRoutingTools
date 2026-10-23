@@ -37,7 +37,8 @@ improve later.
 Run:
     python3 tests/test_guide_corridor.py            # uses kicad_files/flat_hierarchy
     python3 tests/test_guide_corridor.py -v          # verbose routing output
-Use the same interpreter that has the Rust router available (e.g. KiCad's python).
+Needs the Rust router built for this interpreter (`python3 build_router.py`);
+KiCad's python is not required.
 """
 
 import argparse

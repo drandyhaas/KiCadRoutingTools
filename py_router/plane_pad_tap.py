@@ -519,7 +519,8 @@ def inflight_copper_dicts(pcb_data: PCBData):
         for v in vias:
             extra_vias.append({'x': v.x, 'y': v.y, 'size': v.size,
                                'drill': v.drill, 'layers': list(v.layers),
-                               'net_id': v.net_id})
+                               'net_id': v.net_id,
+                               'via_type': getattr(v, 'via_type', 'through')})
         for s in segments:
             extra_segments.append({'start': (s.start_x, s.start_y),
                                    'end': (s.end_x, s.end_y),
@@ -1507,6 +1508,8 @@ def find_unconnected_plane_pads(
         if off_board is not None and off_board(pad.global_x, pad.global_y):
             skipped_off_board += 1
             continue
+        if pad.sense:
+            continue    # #1279: a sense pad joins its net at the join pad only
         if pad_is_plated_through(pad):
             continue
         if '*.Cu' in pad.layers or any(zl in pad.layers for zl in zone_layers):

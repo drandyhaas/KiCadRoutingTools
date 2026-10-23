@@ -1,11 +1,10 @@
 """What a part IS, read off the board -- role knowledge both sides share.
 
-`py_tools/board_context.py` prints a role per part (#891), and the decap
-owner predicate (`groups.supply_owner_evidence`, #1249) asks the same
-question of a part with fewer than four copper pads: is this a regulator?
-The answer used to live in `board_context` alone, which the placement engine
-must not import (py_placer never reads py_tools). It lives here so the sheet
-and the election read ONE table.
+`py_tools/board_context.py` prints a role per part, and the decap owner
+predicate (`groups.supply_owner_evidence`) asks the same question of a part
+with fewer than four copper pads: is this a regulator? The table lives here,
+in py_placer (which never imports py_tools), so the sheet and the predicate
+read ONE table.
 
 Deliberately NOT part of `part_class.classify_part`: `grade_body_overlap.
 _waiver_for` branches on that classifier's `.name` against its marker and
@@ -25,10 +24,8 @@ from typing import Dict, List, Optional
 
 #: (role, keys) by footprint-name substring, matched on `_norm`ed text (lower
 #: case, separators dropped) -- so `TO-92_HandSolder`, `TO92` and `to_92`
-#: are one name. Before #1249 the match was a raw substring and KiCad's own
-#: spelling `TO-92` never matched the key `to92`, nor `SOT-223-3_TabPin2` the
-#: key `sot223`, so both rows were dead on every board that uses the stock
-#: library.
+#: are one name, and KiCad's own spellings (`TO-92`, `SOT-223-3_TabPin2`)
+#: match the keys `to92` and `sot223`.
 _ROLE_FP = (
     ('crystal', ('xtal', 'crystal', 'resonator', 'oscillator')),
     ('usb receptacle', ('usbmicro', 'usbc', 'usbb', 'usba', 'uicro')),
@@ -36,6 +33,15 @@ _ROLE_FP = (
     ('npn/pnp transistor', ('sot23', 'sot323', 'to92')),
     ('regulator', ('sot89', 'sot223', 'to252', 'dpak')),
 )
+
+#: Connector rows above. A hit for one of these found only in a footprint's
+#: LIBRARY nickname does not outrank an IC's reference prefix: a board's own
+#: library groups parts by where they are used, and fusb302_pd_dev files its
+#: buck converter U2 as `usb-c:TI-RNX0012A-VQFN-HR`. Over the 478 corpus
+#: boards that rule changes that one part; reading the library nickname not
+#: at all would change 19 others for the worse (a crystal's `Crystal-FP:`
+#: library, `Mlab_Pin_Headers:Straight_2x03`).
+_CONNECTOR_FP_ROLES = ('usb receptacle', 'pin header')
 
 #: The two package rows above hold parts of BOTH kinds -- a 78L05 and a
 #: BC237 are both TO-92, a BCX56 and an ME6210 are both SOT-89 -- so a hit
@@ -162,9 +168,13 @@ def infer_role(fp, ref: str, cls_name: Optional[str]) -> Dict[str, object]:
         return {'role': cls_name.replace('_', ' '), 'source': 'part_class',
                 'evidence': [f'placement.part_class says {cls_name}']}
     flat = _norm(name)
+    own = _norm(name.split(':', 1)[1]) if ':' in name else flat
     for role, keys in _ROLE_FP:
         hit = next((k for k in keys if k in flat), None)
         if not hit:
+            continue
+        if (role in _CONNECTOR_FP_ROLES and hit not in own
+                and _ROLE_PREFIX.get(pref) == 'integrated circuit'):
             continue
         if role in _SHARED_PACKAGE_ROLES:
             got = _package_role(fp, role, hit, pref)

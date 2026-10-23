@@ -32,10 +32,13 @@ WHAT COUNTS AS A BOUNDARY. A rectangular Edge.Cuts outline with no other cuts.
 Anything else is unmeasured rather than approximated by the bounding box.
 
 UNMEASURED IS A BASIS, NOT A VERDICT. `band_amount` hands every caller its
-own legacy reading back, named `legacy_occupancy@margin=<m>`, when the body
+own courtyard reading back, named `legacy_occupancy@margin=<m>`, when the body
 cannot be measured. Nothing here refuses a pose, withholds a board or records
-an abstention; a board this module cannot read grades exactly as it did before
-#961, and says which currency it was graded in.
+an abstention; a board this module cannot read is graded on its courtyard,
+and says which currency it was graded in. Since #1301 the grade (and the
+grouped edge seat) take that reading at ZERO margin (`courtyard_overhang`):
+at the gate's margin (`max(clearance, edge clearance)`), which a routing
+step's DRC writeback moves, one pose graded differently placed and routed.
 """
 from __future__ import annotations
 
@@ -242,6 +245,15 @@ class ConnectorGeometry:
         self._encloses = {}
         self._pad_boxes = {}
         self._bodies = None
+        self._zero_gate = None
+
+    def zero_gate(self):
+        """The board outline at ZERO margin, built once: the gate the band's
+        courtyard reading is taken on (`courtyard_overhang`, #1301)."""
+        if self._zero_gate is None:
+            from .legality import BoardOutlineGate
+            self._zero_gate = BoardOutlineGate(self.pcb.board_info, 0.0)
+        return self._zero_gate
 
     def _fab_is_marking(self, ref):
         """Is the part's Fab drawing a marking, not a body (#1243)?
@@ -428,15 +440,35 @@ def geometry_for(holder, pcb_data, pcb_file):
     return geometry
 
 
+def courtyard_overhang(geometry, rect, skip_rings=None):
+    """How far the courtyard `rect` lies past the outline, read at ZERO
+    margin: the occupancy reading (`rect_outside_amount`, summed over the
+    sides it crosses) with the edge margin taken out. A mechanical
+    quantity -- an overhang of x reads x at any margin. `skip_rings` is the
+    caller's own (the part's milled rings, as the oob census skips them)."""
+    return float(geometry.zero_gate().rect_outside_amount(
+        rect, skip_rings=skip_rings))
+
+
 def band_amount(geometry, ref, edge, legacy_amount, margin, pose=None):
     """`(amount, basis, row)`: the number a declared `overhang_mm` band is
     graded on, and the currency it is in.
 
     Drawn body measurable -> the body's overhang past the outline at zero
     margin, summed over the sides it crosses (`body_outside_mm`, the same
-    form as the occupancy reading). Otherwise -> `legacy_amount`, exactly as
-    the caller computed it, so every call site keeps its own pre-#961 reading
-    (and its own rings and tolerance) wherever the body cannot be read."""
+    form as the occupancy reading). Otherwise -> `legacy_amount`, the
+    caller's courtyard reading, taken at `margin`, so every call site keeps
+    its own rings and tolerance wherever the body cannot be read.
+
+    #1301: the grade (`rule_edge_connector`, `oob_exempt`) and the grouped
+    edge seat pass the courtyard at ZERO margin (`courtyard_overhang`,
+    margin 0), so both currencies are mechanical and one pose reads the same
+    before and after a routing step rewrites the board's floors. At the
+    gate's margin, `overhang + margin` outside the board, daplink's J2/J3
+    read 7.0062 placed (margin 0.55) and 6.6562 routed (margin 0.2) with
+    nothing moved, and failed a band of 7.0 after routing; at zero margin
+    both boards read 6.4562. Main's place_seed still passes its gate-margin
+    reading, as before."""
     row = geometry.measure(ref, edge, pose)
     if row['body_measured']:
         return row['body_outside_mm'], 'body:' + row['body_layer'], row

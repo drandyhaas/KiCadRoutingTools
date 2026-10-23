@@ -195,7 +195,8 @@ def current_tooth(st, nm) -> Optional[Move]:
     read off the copper (source_realize.measure_tooth). None for a net
     without a source pad on the source array or without copper there."""
     p = st['src_pad'].get(nm)
-    if p is None or p.component_ref != st['sref']:
+    if p is None or p.component_ref != st['sref'] or st.get('escape'):
+        # (an ESCAPE state, escape_plan: no tooth is laid on its dog-boned base -- the ball's dog-bone is no tooth)
         return None
     g = sr.measure_tooth(st['pcb'], nm, p, st['byname'])
     # (any routing layer: on three, a tooth laid on In2.Cu read as no tooth at all -- 17 of the zynq LVDS bus's
@@ -208,7 +209,7 @@ def current_tooth(st, nm) -> Optional[Move]:
 
 
 def _conflicts(cands: Dict[str, List[Move]], strict: bool, stack: bool = False,
-               xing: Optional[int] = None) -> List[Tuple[str, int, str, int]]:
+               xing: Optional[int] = None, via_reach: Optional[float] = None) -> List[Tuple[str, int, str, int]]:
     """Every (net a, index, net b, index) whose two moves cannot both be
     laid, tested only between moves sharing a lane, a site or an exit
     (bucketed: the all-pairs test is 10^6-10^7 calls at K41). `stack`:
@@ -216,7 +217,8 @@ def _conflicts(cands: Dict[str, List[Move]], strict: bool, stack: bool = False,
     one layer closer than select_moves._STACK_PITCH do (select_moves.
     _conflict) -- so the exits are bucketed at that pitch. `xing`: the
     crossing rule (select_moves.SEL_XING when not given -- the whole
-    route's ends model, whose greedy seed reads the same)."""
+    route's ends model, whose greedy seed reads the same). `via_reach`: a
+    via's reach for another move's run (select_moves._conflict's `reach`)."""
     buckets: Dict[tuple, List[Tuple[str, int]]] = {}
     reach = any(getattr(m, 'street', 0) for ms in cands.values() for m in ms)
     for nm, ms in cands.items():
@@ -283,7 +285,7 @@ def _conflicts(cands: Dict[str, List[Move]], strict: bool, stack: bool = False,
                 if a == b or (a, i, b, j) in seen or (b, j, a, i) in seen:
                     continue
                 seen.add((a, i, b, j))
-                if sm._conflict(cands[a][i], cands[b][j], strict=strict, stack=stack, xing=xing):
+                if sm._conflict(cands[a][i], cands[b][j], strict=strict, stack=stack, xing=xing, reach=via_reach):
                     out.append((a, i, b, j))
     return out
 

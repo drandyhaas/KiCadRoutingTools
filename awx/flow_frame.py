@@ -60,17 +60,25 @@ def _fmt(v):
     return '0' if t in ('', '-0') else t
 
 
+def dest_refs(dest):
+    """the destination parts a run's DEST names, the trunk's first: 'U2', or 'U4+U3' -- one source, two ends (the
+    whole route's trunk runs to the first, a BRANCH off it to each other, whole_frame)"""
+    return [r for r in str(dest).split('+') if r]
+
+
 def quarter_of(pcb, dest, names):
     """(k, cx, cy): the quarter turn that points the run's source-to-
     destination centroid vector along +x, and the lattice point nearest
-    the destination array's centre to turn about."""
+    the destination array's centre to turn about (DEST naming several
+    parts: their pads together, about the first's centre)."""
     src, dst = [], []
+    dests = set(dest_refs(dest))
     for nid, net in pcb.nets.items():
         nm = net.name.split('/')[-1]
         if nm not in names:
             continue
         for p in net.pads:
-            (dst if p.component_ref == dest else src).append((p.global_x, p.global_y))
+            (dst if p.component_ref in dests else src).append((p.global_x, p.global_y))
     if not src or not dst:
         return 0, 0.0, 0.0
     sx = sum(p[0] for p in src) / len(src)
@@ -80,7 +88,7 @@ def quarter_of(pcb, dest, names):
     # the turn k for which the turned vector has the largest x (ties: the
     # smaller k), keys to a nanometre so a diagonal is a deterministic tie
     best = max(range(4), key=lambda k: (round(_q(dx, dy, k)[0], 6), -k))
-    fp = pcb.footprints[dest]
+    fp = pcb.footprints[dest_refs(dest)[0]]
     cx = round(fp.x / LATTICE) * LATTICE
     cy = round(fp.y / LATTICE) * LATTICE
     return best, cx, cy

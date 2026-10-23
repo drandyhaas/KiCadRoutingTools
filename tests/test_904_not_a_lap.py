@@ -246,7 +246,7 @@ def test_a_lap_after_a_close_out_is_not_measured_against_it():
             [sys.executable, '-X', 'utf8', CV, 'record', '--ledger', led,
              '--board', BOARD, '--kind', 'completion',
              '--lever', 'an ordinary lap after a close-out',
-             '--score-file', sf, '--argv', sys.executable, '-c', 'pass'],
+             '--score-file', sf],
             capture_output=True, text=True, cwd=ROOT)
         # Measured against iteration 0 this lap is IDENTICAL -- same component
         # set, same total. Measured against the close-out it grades one

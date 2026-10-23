@@ -13,8 +13,13 @@ Re-running is idempotent: a pre-existing manifest entry survives unless the new
 curation re-adds the same `short_name`. (This used to be "keep entries WITHOUT a
 short_name", which was really a stand-in for set4's one hand-written board and
 would have silently dropped every entry in an already-populated set.)"""
-import json, os, shutil, subprocess
+import argparse, json, os, shutil, subprocess
 from pathlib import Path
+
+# It takes no arguments and writes the corpus as soon as it runs; parsing
+# them makes `--help` print this docstring instead of doing the work.
+argparse.ArgumentParser(description=__doc__,
+                        formatter_class=argparse.RawDescriptionHelpFormatter).parse_args()
 
 STRESS = Path(os.environ.get("STRESS_DIR", str(Path.home() / "Documents/kicad_stress_test")))
 CAND = STRESS / "sources/candidates"

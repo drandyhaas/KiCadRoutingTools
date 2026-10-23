@@ -10,12 +10,11 @@ reported a 0.5mm "mismatch" that was the oracle being wrong.
 `BoardOutlineGate.rect_blocked` and `rect_outside_amount` measured every ring
 edge of the board against all four sides of the rect. `edges_near` is supposed
 to shorten that list, but it prunes per PART, sized by a displacement budget --
-and the seeding path has no budget: `pose_score.make_state` builds its
-QuenchState without `build_neighbor_lists`, so `_travel_budget` is infinite,
-`reach` is infinite, and `edges_near` hands back every edge there is.
+and a movable part has no budget: its travel is infinite, `reach` is
+infinite, and `edges_near` hands back every edge there is.
 
 Measured on run 19's urchin (638 edges, one milled ring): 9-24 ms per
-`rect_outside_amount` depending on machine load. `_try_place` calls it once
+`rect_outside_amount` depending on machine load. A seat search calls it once
 per candidate offset, and `_offsets(16, 0.25)` alone is 16,641 offsets --
 which is why a single failed seat on that board cost minutes.
 

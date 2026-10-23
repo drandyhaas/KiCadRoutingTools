@@ -9,9 +9,8 @@ directly, and required to be equal -- not merely plausible.
 
 The other half is honesty about absence. A section that cannot run has to
 appear in `skipped` WITH A REASON and be absent from the body; a brief that
-silently omitted a measurement would read as "nothing to report", which is the
-failure `check_channels` names when it exits 3 rather than answering "clean"
-for a gate that examined nothing.
+silently omitted a measurement would read as "nothing to report" -- a gate
+that examined nothing answering "clean".
 """
 import json
 import os
@@ -427,10 +426,11 @@ from board_brief import POSITION_DEPENDENT, _null_path
 
 
 def piled(path):
-    """The board as `stage_unaided.stage()` leaves it, in memory.
+    """The board as a from-scratch pile leaves it (see `_stage` below), in
+    memory.
 
-    ROTATION 0 is not a detail -- `stage_unaided.py:118` writes it for every
-    part it moves, and `extent_mm`, `rect` and the whole per-face escape
+    ROTATION 0 is not a detail -- a pile writes it for every part it moves
+    (`_stage` does), and `extent_mm`, `rect` and the whole per-face escape
     table follow rotation. An earlier version of this helper translated the
     parts and KEPT their angles, so nothing rotation-derived could move and
     the arm below could not see any of it: an injection that rotated every
@@ -589,79 +589,93 @@ check("at least one board actually exercised the demand invariant",
       f"check vacuous, so it is skipped there and must bite somewhere")
 
 # --------------------------------------------------------------------------
-# THE PRODUCT PATH. The in-memory pile above is a model; this is the thing
-# the toolchain actually produces, and the two disagree in the way that
-# matters. `stage_unaided` exempts the mechanical parts, which keeps their
-# real coordinates -- so `distinct_positions` is 8, not 1, on
-# splitflap_driver, `assess_placement` returns partially_unplaced rather than
-# unplaced, and a disclosure gated on `state.unplaced` alone DID NOT FIRE on
-# 58-of-65 parts stacked at one point. Gate on the pile fraction here.
+# THE WRITTEN PILE. The in-memory pile above is a model; this one is WRITTEN
+# by the placement writer and parsed back, and the two disagree in the way
+# that matters. The pile keeps the mechanical parts at their real coordinates
+# (what a from-scratch board genuinely knows) -- so `distinct_positions` is 8,
+# not 1, on splitflap_driver, `assess_placement` returns partially_unplaced
+# rather than unplaced, and a disclosure gated on `state.unplaced` alone DID
+# NOT FIRE on 58-of-65 parts stacked at one point. Gate on the pile fraction
+# here. (The stager this arm first ran, tests/stress/stage_unaided.py, went
+# with the old placement flows in ecd673eb; `_stage` below is its pose rule:
+# `mechanical_parts` keep their pose, everything else lands on the board
+# centre at rotation 0, written through `write_placed_output`.)
 # --------------------------------------------------------------------------
 import shutil
 import tempfile
 
-sys.path.insert(0, os.path.join(REPO, 'tests', 'stress'))
-try:
-    from stage_unaided import stage as _stage
-except Exception as _e:                                      # noqa: BLE001
-    _stage = None
-    check("stage_unaided is importable (the product path arm needs it)",
-          False, str(_e))
+from placement.portfolio import copy_siblings
+from placement.writer import write_placed_output
 
-if _stage is not None:
-    for _bd in (BOARD, _w):
-        if not os.path.isfile(_bd):
-            continue
-        name = os.path.basename(_bd)
-        _tmp = tempfile.mkdtemp(prefix='brief_staged_')
-        try:
-            _out = os.path.join(_tmp, 'board.kicad_pcb')
-            _stage(_bd, _out, os.path.join(_tmp, 'truth'))
-            _spcb = parse_kicad_pcb(_out)
-            _sb = build_brief(_spcb, _out)
-            _st = _sb['state']
-            _spd = _sb.get('position_dependent') or {}
-            check(f"{name} STAGED: the disclosure fires on the real stager's "
-                  f"output", bool(_spd.get('invalid')),
-                  f"unplaced={_st['unplaced']} "
-                  f"partially={_st['partially_unplaced']} "
-                  f"dup={_st['duplicate_fraction']} "
-                  f"distinct={_st['signals'].get('distinct_positions')} -- "
-                  f"gating on state.unplaced alone misses this board")
-            check(f"{name} STAGED: and says which gate fired",
-                  bool(_spd.get('gate')), str(_spd.get('gate')))
-            check(f"{name} STAGED: the pile really is a pile "
-                  f"(else the check above is free)",
-                  (_st['duplicate_fraction'] or 0) >= 0.5,
-                  str(_st['duplicate_fraction']))
-            # The mechanical refs KEEP their real pose through staging --
-            # that is what makes `place_fixed` writable from the brief.
-            _sm = (_sb.get('mechanical') or {}).get('refs') or {}
-            _om = (build_brief(parse_kicad_pcb(_bd), _bd)
-                   .get('mechanical') or {}).get('refs') or {}
-            check(f"{name} STAGED: every mechanical pose survives staging",
-                  _sm and all(_sm[r]['at'] == _om[r]['at'] for r in _sm),
-                  str({r: (_sm[r]['at'], _om[r]['at']) for r in _sm
-                       if _sm[r]['at'] != _om[r]['at']}))
-            check(f"{name} STAGED: and each is alone, so `at` is assertable",
-                  all(not v['pose_shared_with'] for v in _sm.values()),
-                  str({r: v['pose_shared_with'] for r, v in _sm.items()
-                       if v['pose_shared_with']}))
-            # The rotation-derived keys the note now names: prove they really
-            # do move, so `also_pose_derived` is a live disclosure.
-            _ob = build_brief(parse_kicad_pcb(_bd), _bd)
-            swapped = [r for r, row in _sb['parts'].items()
-                       if r in _ob['parts'] and r not in _sm
-                       and row['extent_mm'] == list(
-                           reversed(_ob['parts'][r]['extent_mm']))
-                       and row['extent_mm'] != _ob['parts'][r]['extent_mm']]
-            check(f"{name} STAGED: extent_mm really does swap on staged parts",
-                  len(swapped) > 0,
-                  f"{len(swapped)} part(s) transposed -- if this is 0 the "
-                  f"`also_pose_derived` entry for extent_mm is not earning "
-                  f"its place")
-        finally:
-            shutil.rmtree(_tmp, ignore_errors=True)
+
+def _stage(src, out_board):
+    """Write `src` as a pile: mechanical parts kept, the rest at the centre."""
+    _p = parse_kicad_pcb(src)
+    _b = _p.board_info.board_bounds
+    _cx = round((_b[0] + _b[2]) / 2.0, 6)
+    _cy = round((_b[1] + _b[3]) / 2.0, 6)
+    _keep = {r: tuple(v['at']) for r, v in mechanical_parts(_p).items()}
+    _rows = []
+    for _ref in sorted(_p.footprints):
+        _x, _y, _rot = _keep.get(_ref, (_cx, _cy, 0.0))
+        _rows.append({'reference': _ref, 'new_x': _x, 'new_y': _y,
+                      'new_rotation': _rot})
+    write_placed_output(src, out_board, _rows)
+    copy_siblings(src, out_board)
+
+for _bd in (BOARD, _w):
+    if not os.path.isfile(_bd):
+        continue
+    name = os.path.basename(_bd)
+    _tmp = tempfile.mkdtemp(prefix='brief_staged_')
+    try:
+        _out = os.path.join(_tmp, 'board.kicad_pcb')
+        _stage(_bd, _out)
+        _spcb = parse_kicad_pcb(_out)
+        _sb = build_brief(_spcb, _out)
+        _st = _sb['state']
+        _spd = _sb.get('position_dependent') or {}
+        check(f"{name} STAGED: the disclosure fires on the written "
+              f"pile", bool(_spd.get('invalid')),
+              f"unplaced={_st['unplaced']} "
+              f"partially={_st['partially_unplaced']} "
+              f"dup={_st['duplicate_fraction']} "
+              f"distinct={_st['signals'].get('distinct_positions')} -- "
+              f"gating on state.unplaced alone misses this board")
+        check(f"{name} STAGED: and says which gate fired",
+              bool(_spd.get('gate')), str(_spd.get('gate')))
+        check(f"{name} STAGED: the pile really is a pile "
+              f"(else the check above is free)",
+              (_st['duplicate_fraction'] or 0) >= 0.5,
+              str(_st['duplicate_fraction']))
+        # The mechanical refs KEEP their real pose through staging --
+        # that is what makes `place_fixed` writable from the brief.
+        _sm = (_sb.get('mechanical') or {}).get('refs') or {}
+        _om = (build_brief(parse_kicad_pcb(_bd), _bd)
+               .get('mechanical') or {}).get('refs') or {}
+        check(f"{name} STAGED: every mechanical pose survives staging",
+              _sm and all(_sm[r]['at'] == _om[r]['at'] for r in _sm),
+              str({r: (_sm[r]['at'], _om[r]['at']) for r in _sm
+                   if _sm[r]['at'] != _om[r]['at']}))
+        check(f"{name} STAGED: and each is alone, so `at` is assertable",
+              all(not v['pose_shared_with'] for v in _sm.values()),
+              str({r: v['pose_shared_with'] for r, v in _sm.items()
+                   if v['pose_shared_with']}))
+        # The rotation-derived keys the note now names: prove they really
+        # do move, so `also_pose_derived` is a live disclosure.
+        _ob = build_brief(parse_kicad_pcb(_bd), _bd)
+        swapped = [r for r, row in _sb['parts'].items()
+                   if r in _ob['parts'] and r not in _sm
+                   and row['extent_mm'] == list(
+                       reversed(_ob['parts'][r]['extent_mm']))
+                   and row['extent_mm'] != _ob['parts'][r]['extent_mm']]
+        check(f"{name} STAGED: extent_mm really does swap on staged parts",
+              len(swapped) > 0,
+              f"{len(swapped)} part(s) transposed -- if this is 0 the "
+              f"`also_pose_derived` entry for extent_mm is not earning "
+              f"its place")
+    finally:
+        shutil.rmtree(_tmp, ignore_errors=True)
 
 # A PLACED board must be untouched by all of this.
 _pl = build_brief(parse_kicad_pcb(BOARD), BOARD)

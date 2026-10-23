@@ -4,7 +4,7 @@ Configuration classes and coordinate utilities for PCB routing.
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, FrozenSet
 from dataclasses import dataclass, field
 
 from routing_constants import FORBIDDEN_LAYER_COST
@@ -69,6 +69,28 @@ def _snap_to_lattice_reach(margin: float, e: float) -> float:
     # computed from exact integer offsets, and a margin computed as a quotient
     # can land one ULP BELOW the very distance it must reject.
     return need * (1.0 + 1e-12)
+
+
+def layer_costs_count_error(layers, layer_costs) -> Optional[str]:
+    """The refusal for a layer-cost list that is not one value per routing
+    layer, or None when it is (or when no costs were given at all).
+
+    The costs are positional: entry i prices layers[i]. Every engine that
+    takes them then APPENDS the board's unrequested copper layers at
+    FORBIDDEN cost after them, so a list one short shifted each appended -1
+    onto the wrong layer: `--layers F.Cu B.Cu --layer-costs 1.0` on a
+    4-layer board forbade the requested B.Cu and left In2.Cu routable at
+    1.0x (found reviewing #1269). A longer list priced unrequested layers
+    instead of forbidding them. Which layer a short list leaves out, or what
+    a long list's extra values were meant for, cannot be known, so the
+    count is refused rather than guessed -- as bga_fanout refuses it."""
+    if not layer_costs or len(layer_costs) == len(layers or ()):
+        return None
+    shown = ' '.join(f"{float(c):g}" for c in layer_costs)
+    return (f"--layer-costs needs one value per routing layer, in --layers "
+            f"order: {len(layers or ())} layer(s) "
+            f"({' '.join(layers or ()) or 'none'}), got {len(layer_costs)} "
+            f"value(s) ({shown})")
 
 
 @dataclass
@@ -147,7 +169,7 @@ class GridRouteConfig:
     # routed single-ended (P->P, N->N) instead (issue #121).
     diff_pair_uncouple_factor: float = 6.0  # multiples of pair spacing (track+gap)
     min_turning_radius: float = 0.2  # mm - minimum turning radius for pose-based routing
-    debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
+    debug_lines: bool = False  # Output debug geometry on User.3/4/5/6/8/9 layers
     verbose: bool = False  # Print detailed diagnostic output
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
     # How the #85 arbitration decides keep-retry vs abandon after a Phase 3
@@ -159,11 +181,6 @@ class GridRouteConfig:
     # blocking_analysis.rank_blockers / mincut_probe_order):
     # count | near-target | bidir | mincut
     ripup_blocker_select: str = 'count'
-    # Bus rip resistance: >1.0 divides bus-group members' blocker scores so
-    # the rip ladder prefers bystanders over tearing up a settled bus river;
-    # the mincut probe prices member cells higher by the same factor.
-    # 1.0 = off (legacy). bus_member_net_ids is attached by the SE loop.
-    bus_rip_resistance: float = 1.0
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
@@ -205,9 +222,10 @@ class GridRouteConfig:
     hole_clearance: float = 0.0
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
-    # retry it at the layer's default track width. The narrow neck extends
-    # neckdown_length mm from the target pad; beyond that the track returns
-    # to the power width wherever the wide clearance fits.
+    # retry it at the layer's default track width. Within neckdown_length mm
+    # of a pad the track is laid at the power width capped at the pad's short
+    # side where that fits (#1318), narrow only where it does not; beyond it
+    # the track returns to the power width wherever the wide clearance fits.
     power_tap_neckdown: bool = True
     # #568 per-rung via legality: 0 = the configured via (baseline); 1 = the
     # small fab-rung via where the obstacle map's blocked_vias_small proves it
@@ -221,7 +239,7 @@ class GridRouteConfig:
     # against the run's via, so a rung-1 retry from that clone must ship the
     # pair the map was stamped at, not one derived from the net's own via.
     run_via: Optional[Tuple[float, float]] = None
-    neckdown_length: float = 2.5  # mm of narrow track from the target pad
+    neckdown_length: float = 2.5  # mm pad-entry zone (pad-capped width where it fits, #1318)
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
@@ -369,6 +387,13 @@ class GridRouteConfig:
     # consults it (KiCad's Type=='track' binds tracks only). An empty map is
     # a strict no-op. Like the layer map: no CLI flag, no GUI control.
     track_clearances: Dict[int, float] = field(default_factory=dict)
+    # #1295: a .kicad_dru "keep pairs apart" track rule (!AB.isCoupledDiffPair())
+    # exempts a diff pair's P against its own N, which the per-net map above
+    # cannot say -- it raises the partner's stamp too. This holds the
+    # pair-exact track-rule value of every pair KiCad couples by name,
+    # frozenset({P, N}) -> mm, which pair_clearance reads instead of that map.
+    # Engine-computed (kicad_dru.install_track_clearances); empty = inert.
+    track_partner_clearances: Dict[FrozenSet[int], float] = field(default_factory=dict)
     # #530: the board's design rules resolved in KiCad's order
     # (design_rules.DesignRules), installed engine-side by
     # kicad_dru.install_layer_clearances for both fronts. None until then.
@@ -390,6 +415,19 @@ class GridRouteConfig:
     # keep-outs. Engine-computed and handed down to nested sub-runs; no CLI
     # flag and no GUI control (KICAD_POUR_GUARD=0 reverts). Empty = inert.
     pour_barriers: List[dict] = field(default_factory=list)
+    # route.py / route_diff.py --quick LEVEL: 0 routes to ship; 1 is a
+    # placement review's first round (route.py skips the recovery tail); 2 is
+    # the seed judge, which also skips every pass that only polishes copper
+    # for shipping (cleanup_pipeline, the seam re-asks, the plane-fragility
+    # field). Read by the engines from here so both fronts see one value.
+    quick: int = 0
+    # #1293: the P<->N clearance of each diff pair a .kicad_dru coupled-pair
+    # rule (AB.isCoupledDiffPair()) sets, keyed frozenset({P, N}) ->
+    # {'track': {layer: mm}, 'layer': {layer: mm}, 'stack': mm or None}, the
+    # pair_clearance kinds. A layer is listed only where that rule is what
+    # KiCad grades the pair at. Engine-computed (route_diff); no CLI flag and
+    # no GUI control -- the rules file is the source. Empty = inert.
+    coupled_pair_clearances: Dict[FrozenSet[int], dict] = field(default_factory=dict)
 
     def net_via(self, net_id: int) -> Tuple[float, float]:
         """(diameter, drill) this net's vias are drawn at."""
@@ -541,13 +579,26 @@ class GridRouteConfig:
           it (check_drc's `_track_pair_cl`). The router side reads the
           per-obstacle-net map, an over-approximation of check_drc's
           pair-exact rule. Net-0 copper is in no class and missing from that
-          map, so it is priced at the widest track rule;
+          map, so it is priced at the widest track rule. A diff pair's P
+          against its own N on a board with a "keep pairs apart" rule reads
+          its pair-exact value (`track_partner_clearances`, #1295) instead;
         * 'stack' -- via vs via, which meet on every layer: the max over the
           stack (check_drc's `_stack_cl`). `layer` is ignored.
+
+        A diff pair's P against its own N, where a coupled-pair rule sets it
+        (`coupled_pair_clearances`, #1293), is that rule's value: KiCad's
+        last matching rule replaces the classes and the base.
 
         With no class map, no layer rule and no track rule it returns `base`
         unchanged, so a site that swaps its flat term for this call is
         byte-identical on such a board."""
+        if self.coupled_pair_clearances and net_a != net_b:
+            cp = self.coupled_pair_clearances.get(frozenset((net_a, net_b)))
+            if cp is not None:
+                v = (cp.get('stack') if kind == 'stack'
+                     else (cp.get(kind) or {}).get(layer))
+                if v is not None:
+                    return v
         clr = self.clearance if base is None else base
         nc = self.net_clearances
         if nc:
@@ -565,6 +616,10 @@ class GridRouteConfig:
         if layer is not None:
             clr = self.layer_clearance(layer, clr)
         if kind == 'track' and self.track_clearances:
+            tp = (self.track_partner_clearances.get(frozenset((net_a, net_b)))
+                  if self.track_partner_clearances else None)
+            if tp is not None:
+                return tp if tp > clr else clr
             if not net_a or not net_b:
                 widest = max(self.track_clearances.values())
                 if widest > clr:
@@ -595,14 +650,20 @@ class GridRouteConfig:
                 mv = max(m.values())
                 if mv > v:
                     v = mv
+        for cp in (self.coupled_pair_clearances or {}).values():
+            for mv in ([cp.get('stack')] + list((cp.get('track') or {}).values())
+                       + list((cp.get('layer') or {}).values())):
+                if mv is not None and mv > v:
+                    v = mv
         return v
 
     def pair_clearance_inert(self) -> bool:
         """True when no channel can move a pair off the floor it is given: no
-        class map, no .kicad_dru layer rule, no track rule. A hot loop may
-        then keep its flat term instead of pricing every item."""
+        class map, no .kicad_dru layer rule, no track rule, no coupled-pair
+        rule. A hot loop may then keep its flat term instead of pricing every
+        item."""
         return not (self.net_clearances or self.layer_clearances
-                    or self.track_clearances)
+                    or self.track_clearances or self.coupled_pair_clearances)
 
     def pad_pair_clearance_before_override(self, pad, other_net: int,
                                            layer: Optional[str] = None, *,
@@ -762,14 +823,17 @@ class GridRouteConfig:
 
         Priority order:
         1. Per-net power width override (power_net_widths) -- floored UP to track_width
-        2. Per-net netclass width (net_track_widths) -- the net's OWN class width,
+        2. Per-net per-layer width (net_layer_widths, #521) -- reapplied from a
+           stored impedance declaration (.kicad_pro net_impedance); a layer it
+           does not list falls through to the next rung.
+        3. Per-net netclass width (net_track_widths) -- the net's OWN class width,
            EXACTLY (may be narrower than the global track_width); floored at the fab
            minimum by the caller. Only populated when --track-width was omitted.
-        3. Per-net COPLANAR impedance width (coplanar_layer_widths, #486) -- the
+        4. Per-net COPLANAR impedance width (coplanar_layer_widths, #486) -- the
            net was declared to run through a ground pour, so its width comes
            from the CPW-over-ground model rather than microstrip.
-        4. Layer-specific width (layer_widths, for impedance control)
-        5. Default track_width
+        5. Layer-specific width (layer_widths, for impedance control)
+        6. Default track_width
 
         Args:
             net_id: The net ID to get width for
@@ -804,6 +868,14 @@ class GridRouteConfig:
         clearance. Never smaller than `clearance` (netclasses only widen)."""
         nc = self.net_clearances.get(net_id, 0.0) if self.net_clearances else 0.0
         return nc if nc > self.clearance else self.clearance
+
+    def routable_layers(self) -> List[str]:
+        """Layers a track may be placed on: config.layers minus the FORBIDDEN ones
+        (negative cost, e.g. the unrequested copper layers appended as obstacles).
+        Candidate lists for relocation, stub switching and layer swaps must come
+        from here -- a GND reference plane is in config.layers but takes no track."""
+        costs = self.layer_costs or []
+        return [l for i, l in enumerate(self.layers) if not (i < len(costs) and costs[i] < 0)]
 
     def get_layer_costs(self) -> List[int]:
         """Get layer cost multipliers for the Rust router.

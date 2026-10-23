@@ -220,6 +220,37 @@ def test_repair_planes_publishes_the_clamped_map():
           f"the 0.3 ceiling)")
 
 
+def test_repair_planes_uses_a_passed_map_as_given():
+    """A map the CALLER passes is used as given, ceiling or not, as
+    batch_route and create_plane use theirs: only the map repair_planes()
+    reads off the board itself is capped. Before, the passed map was capped
+    too, so a caller handing over its own per-net values under a ceiling
+    lost every value above it."""
+    import contextlib
+    import io
+    from constraint_agreement import write_board
+    import repair_planes
+    with tempfile.TemporaryDirectory() as td:
+        b = os.path.join(td, 'b.kicad_pcb')
+        write_board(b, segments=[(5, 10, 15, 10, 0.2, 'F.Cu', 1),
+                                 (5, 12, 15, 12, 0.2, 'F.Cu', 2)],
+                    classes=[{'name': 'WIDE', 'clearance': 0.5,
+                              'priority': 0}],
+                    patterns=[('B', 'WIDE')])
+        repair_planes.LAST_NET_CLEARANCES_BY_NAME = {'stale': 9.9}
+        with contextlib.redirect_stdout(io.StringIO()):
+            repair_planes.repair_planes(
+                b, os.path.join(td, 'o.kicad_pcb'), ['A'], ['B.Cu'],
+                clearance=0.2, dry_run=True, repair_pads=False,
+                net_clearances={2: 0.45, 1: 0.25},
+                clamp_netclasses=True, clearance_ceiling=0.3)
+        got = dict(repair_planes.LAST_NET_CLEARANCES_BY_NAME)
+    assert got.get('B') == 0.45 and got.get('A') == 0.25 \
+        and 'stale' not in got, got
+    print(f"  PASS: repair_planes kept the passed map {got} under a 0.3 "
+          f"ceiling")
+
+
 # --------------------------------------------------------------- admission
 def _v10_board(path, segments=(), vias=(), pads=()):
     """A KiCad-10 style board (nets by NAME, no numbered table): the parser
@@ -493,6 +524,7 @@ TESTS = [test_every_oracle_call_hands_over_the_map,
          test_escalation_and_cap_config_carry_the_rules,
          test_rekey_by_name,
          test_repair_planes_publishes_the_clamped_map,
+         test_repair_planes_uses_a_passed_map_as_given,
          test_stitch_via_admission_prices_the_pair,
          test_sliver_weld_admission_prices_the_pair,
          test_pad_override_handling_is_unchanged,

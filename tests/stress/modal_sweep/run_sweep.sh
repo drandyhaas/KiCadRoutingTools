@@ -99,7 +99,8 @@ if [ -n "$OUT" ]; then
   RESULT="$OUT"
 else
   modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" ${EXARG[@]+"${EXARG[@]}"} | tee /tmp/sweep_run.log
-  RESULT="$(grep -oE '/[^ ]*sweep_[0-9]+\.json' /tmp/sweep_run.log | tail -1)"
+  # modal_app names it sweep_<ts>_<arm names>[_<n>].json (fcf1ffa6)
+  RESULT="$(grep -oE '/[^ ]*sweep_[0-9]+[^ ]*\.json' /tmp/sweep_run.log | tail -1)"
 fi
 
 echo

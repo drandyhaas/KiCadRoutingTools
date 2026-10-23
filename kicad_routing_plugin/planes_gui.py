@@ -809,6 +809,14 @@ class PlanesTab(wx.Panel):
 
         config = self._build_mode_config()
         config['assignments'] = assignments
+        # A Net Clearances File route_planes.py would fail to read is refused
+        # before the run, as on the Route and Differential tabs.
+        from .swig_gui import net_clearances_file_error
+        _ncl_err = net_clearances_file_error(config.get('net_clearances_path'))
+        if _ncl_err:
+            wx.MessageBox(_ncl_err, "Invalid Net Clearances File",
+                          wx.OK | wx.ICON_WARNING)
+            return
 
         # Disable UI
         self.action_btn.Disable()
@@ -856,6 +864,10 @@ class PlanesTab(wx.Panel):
 
         try:
             self._run_create_planes(config)
+            # #857: the Design rules line route_planes.py's main prints (the
+            # exit code is the CLI's alone).
+            from fab_tiers import finish_design_rules
+            finish_design_rules(None, 0)
 
         except Exception as e:
             import traceback
@@ -943,6 +955,16 @@ class PlanesTab(wx.Panel):
         _seen = set()
         all_layers = [l for l in (['F.Cu'] + _plane_layers_in_order + ['B.Cu'])
                       if not (l in _seen or _seen.add(l))]
+        # The Basic-tab layer costs, one per entry of all_layers BY NAME. They
+        # were handed over aligned to the SELECTED layers, which create_plane
+        # read positionally against all_layers -- on a 4-layer board the
+        # default costs priced the wrong layers and the full-stack append's
+        # FORBIDDEN entry for the unrequested inner layer fell off the end.
+        from .gui_utils import layer_costs_for_layers
+        plane_layer_costs = layer_costs_for_layers(
+            config.get('layer_costs_typed'), all_layers,
+            config.get('layer_costs_selected_layers') or [],
+            list(self.pcb_data.board_info.copper_layers or []))
 
         total_vias = 0
         total_traces = 0
@@ -1020,6 +1042,14 @@ class PlanesTab(wx.Panel):
         except Exception as e:
             print(f"Warning: Could not get net class clearances: {e}")
             _plane_net_clearances = None
+        # route_planes.py --net-clearances FILE (the Advanced tab's Net
+        # Clearances File): it replaces the class-derived map, as given, for
+        # the plane taps and the GND vias alike.
+        from .swig_gui import explicit_net_clearances
+        _explicit = explicit_net_clearances(config.get('net_clearances_path'),
+                                            self.pcb_data)
+        if _explicit is not None:
+            _plane_net_clearances = _explicit
 
         failed_pads = 0
         try:
@@ -1053,7 +1083,7 @@ class PlanesTab(wx.Panel):
                                                 defaults.RIPUP_BLOCKER_SELECT),
                 # #381 D6: per-layer cost bias from the shared Basic-tab control
                 # (route_planes.py passes --layer-costs); None -> engine default.
-                layer_costs=config.get('layer_costs') or None,
+                layer_costs=plane_layer_costs or None,
                 # #381 D6: plane knobs the CLI threads, supplied by the
                 # create panel's controls of the same names (each starting at
                 # route_planes.py's argparse default).
@@ -1388,11 +1418,6 @@ class PlanesTab(wx.Panel):
                 print(f"Warning: failed to build plane suggestions: {e}")
 
         msg += "\nUse Edit -> Undo to revert changes."
-        # Routing movie (#506): snapshot the board this step just produced,
-        # BEFORE the completion popup blocks on the user. No-op unless the
-        # Advanced tab's "Make routing movie" box is ticked.
-        from .movie_recorder import record_movie_step
-        record_movie_step(self, 'planes')
 
         if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
             print(msg)  # unattended plan run: no per-step OK dialog
@@ -1542,7 +1567,10 @@ class PlanesTab(wx.Panel):
                 # Set via layers
                 layers = via_data.get('layers', ['F.Cu', 'B.Cu'])
                 if len(layers) >= 2:
-                    via.SetLayerPair(get_layer_id(layers[0]), get_layer_id(layers[-1]))
+                    from .gui_utils import set_via_layers
+                    set_via_layers(via, get_layer_id(layers[0]),
+                                   get_layer_id(layers[-1]),
+                                   via_data.get('via_type'))
                 # #962: the engine stamped Type VII onto a via it put in a pad
                 # or paste opening, and a re-placed via carries its own spec.
                 # This tab applied NEITHER before (every other tab did).
@@ -1582,13 +1610,21 @@ class PlanesTab(wx.Panel):
         if hasattr(self, '_new_zones') and self._new_zones:
             # Snapshot which (net_name, layer) pairs already have a POUR on
             # the live board so we never add a duplicate -- and, per pair, the
-            # single-layer pours a `replace_existing` zone supersedes, which
-            # are exactly the zones the CLI writer drops from the file
+            # pours a `replace_existing` zone supersedes, which are exactly the
+            # zones the CLI writer drops from the file
             # (plane_io.filter_zones_from_content; footprint zones are not in
-            # board.Zones()). Teardrop and rule areas are no pour (#1164), so
+            # board.Zones()): a pour goes only when EVERY copper layer it
+            # covers is replaced by this run (#1299 -- a multi-layer pour the
+            # run poured on all of its layers used to stay under its
+            # replacements). Teardrop and rule areas are no pour (#1164), so
             # they neither block a pour as a "duplicate" nor get replaced.
+            replaced_keys = {(zd.get('net_name', ''), zd.get('layer', ''))
+                             for zd in self._new_zones
+                             if zd.get('replace_existing')
+                             and not zd.get('keepout')}
             existing_zone_keys = set()
             replaceable = {}
+            removed_zone_ids = set()
             try:
                 for existing_zone in board.Zones():
                     try:
@@ -1611,13 +1647,18 @@ class PlanesTab(wx.Panel):
                         existing_layer = ''
                     existing_zone_keys.add((existing_net, existing_layer))
                     try:
-                        _span = [id_to_name.get(l, '')
-                                 for l in existing_zone.GetLayerSet().Seq()]
+                        # Copper layers only (id_to_name holds no other), as
+                        # the parsers read a zone's span.
+                        _span = [n for n in (id_to_name.get(l, '') for l in
+                                             existing_zone.GetLayerSet().Seq())
+                                 if n]
                     except Exception:
-                        _span = [existing_layer]
-                    if len(_span) == 1 and _span[0]:
-                        replaceable.setdefault((existing_net, _span[0]),
-                                               []).append(existing_zone)
+                        _span = [existing_layer] if existing_layer else []
+                    if _span and all((existing_net, l) in replaced_keys
+                                     for l in _span):
+                        for l in _span:
+                            replaceable.setdefault((existing_net, l),
+                                                   []).append(existing_zone)
             except Exception:
                 pass
 
@@ -1682,8 +1723,12 @@ class PlanesTab(wx.Panel):
                     # pour on the layer, so delete the old one, as the CLI
                     # writer does. Once per pair -- a shared layer's split
                     # returns several polygons for one net, and the later
-                    # ones must not delete the earlier.
+                    # ones must not delete the earlier -- and once per pour:
+                    # a multi-layer pour is listed under each of its layers.
                     for _old in replaceable.pop(key):
+                        if id(_old) in removed_zone_ids:
+                            continue
+                        removed_zone_ids.add(id(_old))
                         board.RemoveNative(_old)
                         zones_replaced += 1
                     existing_zone_keys.discard(key)
@@ -1834,6 +1879,15 @@ class PlanesTab(wx.Panel):
         # Make the live board's DRC constraints consistent with the plane routing
         # floors (issue #160), mirroring route_planes.py's auto-fix. Best-effort.
         cfg = getattr(self, "_plane_drc_config", None)
+        # #1319: only the floors of copper this step drew -- route_planes'
+        # main makes the same decision (plane_fix_kwargs) from its files.
+        from fix_kicad_drc_settings import plane_fix_kwargs
+        _pkw = plane_fix_kwargs(
+            tracks_added, vias_added, clearance=(cfg or {}).get('clearance'),
+            hole_to_hole=(cfg or {}).get('hole_to_hole_clearance'),
+            track_width=(cfg or {}).get('track_width'),
+            via_size=(cfg or {}).get('via_size'),
+            via_drill=(cfg or {}).get('via_drill'))
         if cfg and cfg.get('fix_drc_settings', True):
             try:
                 from fix_kicad_drc_settings import (compute_targets, severity_plan,
@@ -1845,12 +1899,13 @@ class PlanesTab(wx.Panel):
                     if cfg.get('clearance') else cfg.get('clearance')
                 targets = compute_targets(
                     clearance=eff_clearance,
-                    hole_to_hole=cfg.get('hole_to_hole_clearance'),
+                    hole_to_hole=_pkw['hole_to_hole'],
                     edge_clearance=cfg.get('board_edge_clearance'),
-                    track_width=cfg.get('track_width'),
-                    via_diameter=cfg.get('via_size'),
-                    via_drill=cfg.get('via_drill'),
+                    track_width=_pkw['track_width'],
+                    via_diameter=_pkw['via_diameter'],
+                    via_drill=_pkw['via_drill'],
                     fab_edge=fab_edge_floor(),
+                    copper_holes=_pkw['copper_holes'],
                     # #530: caps min_clearance at the smallest pad override
                     minima=board_minima_from_live(board))
                 # #856: severities only on explicit request; {} = untouched.
@@ -1882,10 +1937,10 @@ class PlanesTab(wx.Panel):
             update_live_drc_floors(
                 board,
                 clearance=_cfg.get('clearance'),
-                track_width=_cfg.get('track_width'),
-                via_size=_cfg.get('via_size'),
-                via_drill=_cfg.get('via_drill'),
-                hole_to_hole=_cfg.get('hole_to_hole_clearance'),
+                track_width=_pkw['track_width'],
+                via_size=_pkw['via_diameter'],
+                via_drill=_pkw['via_drill'],
+                hole_to_hole=_pkw['hole_to_hole'],
                 # #581: recorded as route_planes.py records it
                 same_net_pad_clearance=_cfg.get('same_net_pad_clearance'))
 

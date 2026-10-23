@@ -4,19 +4,19 @@ List and analyze nets in a KiCad PCB file.
 
 Examples:
     # List nets on a component
-    python list_nets.py board.kicad_pcb --component U1
+    python3 list_nets.py board.kicad_pcb --component U1
 
     # Show pad-to-net assignments
-    python list_nets.py board.kicad_pcb --component U1 --pads
+    python3 list_nets.py board.kicad_pcb --component U1 --pads
 
     # Detect differential pairs in the board
-    python list_nets.py board.kicad_pcb --diff-pairs
+    python3 list_nets.py board.kicad_pcb --diff-pairs
 
     # Show power/ground nets with pad counts
-    python list_nets.py board.kicad_pcb --power
+    python3 list_nets.py board.kicad_pcb --power
 
     # Full board analysis
-    python list_nets.py board.kicad_pcb --diff-pairs --power
+    python3 list_nets.py board.kicad_pcb --diff-pairs --power
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -99,9 +99,29 @@ def effective_floors(constraints, copper_layers):
     def floor(constraint_val, fab_val):
         return max(constraint_val or 0.0, fab_val)
 
+    # #1349: the diameter and the drill are floored separately, so a board
+    # whose hole minimum is large and whose via minimum is small got a via
+    # whose drill is wider than the via (One-Air-Max: min_via_diameter 0.3,
+    # min_through_hole_diameter 0.508 -> "0.45/0.508"). The diameter must hold
+    # the drill plus a ring each side: the board's min_via_annular_width (KiCad
+    # grades it), and never less than the ring of the smallest via the active
+    # tier can make (the fab table's 'annular' is the PTH-pad ring, which no
+    # tier's via meets). That changes nothing on a board whose working via
+    # already met both: over the corpus, the 58 of 437 projects it moves are
+    # exactly those whose old suggestion failed their own annular rule.
+    via_drill = floor(constraints.get('min_through_hole_diameter'), fab['via_drill'])
+    via_ring = max(constraints.get('min_via_annular_width') or 0.0,
+                   (fmin['via_diameter'] - fmin['via_drill']) / 2.0)
+    via_dia = floor(constraints.get('min_via_diameter'), fab['via_diameter'])
+    via_held = round(via_drill + 2.0 * via_ring, 4)
+
     return {
-        'working_via_diameter': floor(constraints.get('min_via_diameter'), fab['via_diameter']),
-        'working_via_drill':    floor(constraints.get('min_through_hole_diameter'), fab['via_drill']),
+        'working_via_diameter': max(via_dia, via_held),
+        'working_via_drill':    via_drill,
+        # The ring the working via was sized with, and whether the drill (not
+        # a diameter minimum) set its diameter -- print_design_rules says so.
+        'working_via_ring':     round(via_ring, 4),
+        'working_via_from_drill': via_held > via_dia + 1e-9,
         # Advanced small via for fine-pitch escape only. The fab's smallest reachable
         # via (the rung 'standard' escalates to), not floored by the board's nominal.
         'fine_via_diameter':    fmin['via_diameter'],
@@ -139,9 +159,11 @@ def effective_floors(constraints, copper_layers):
 def read_design_rules(pcb_path):
     """Read net-class design rules so a skill can pass them to the routing CLIs.
 
-    Net classes live in the sibling .kicad_pro (KiCad 8+, JSON under
-    net_settings.classes) or, for KiCad 6/7, in (net_class ...) blocks inside
-    the .kicad_pcb. The router itself does not read these - it defaults to
+    Net classes live in the sibling .kicad_pro (KiCad 6+, JSON under
+    net_settings.classes; membership through
+    design_rules.project_class_membership, KiCad 6's classes[].nets included)
+    or, failing that, in (net_class ...) blocks inside the .kicad_pcb. The
+    router itself does not read these - it defaults to
     routing_defaults.CLEARANCE etc. - so the analysis step should read them
     here and pass --clearance/--track-width/--via-size/--via-drill (and the
     diff-pair gap) explicitly, instead of over-/under-clearancing the board.
@@ -171,32 +193,19 @@ def read_design_rules(pcb_path):
                                  ('clearance', 'track_width', 'via_diameter',
                                   'via_drill', 'diff_pair_gap', 'diff_pair_width')
                                  if k in c}
-            # net -> class assignment (dict in newer files; list of pairs in some).
-            # KiCad 9 values can be a LIST of class names (a net may belong to
-            # several classes); normalize to a single class name (prefer the first
-            # non-Default) so downstream consumers see {net: classname}.
-            na = ns.get('netclass_assignments') or {}
-            if isinstance(na, dict):
-                # KiCad 9 values can be a LIST of class names (a net may belong to
-                # several classes); normalize to a single class name (prefer the
-                # first non-Default) so downstream consumers see {net: classname}.
-                for _net, _cls in na.items():
-                    if isinstance(_cls, list):
-                        _nd = [c for c in _cls if c and c != 'Default']
-                        assignments[_net] = _nd[0] if _nd else (_cls[0] if _cls else 'Default')
-                    elif _cls:
-                        assignments[_net] = _cls
-            # Wildcard assignments / net-name -> class glob patterns (KiCad 8+
-            # net_settings.netclass_patterns): the primary membership mechanism on
-            # many boards (explicit assignments are often empty). Consumers fnmatch
-            # net names against it; explicit assignment wins. Kept as (pattern,
-            # class) pairs, in file order.
-            for pe in ns.get('netclass_patterns') or []:
-                try:
-                    if pe.get('netclass'):
-                        patterns.append((pe.get('pattern', ''), pe['netclass']))
-                except (KeyError, TypeError, AttributeError):
-                    continue
+            # Membership, every form KiCad reads, through the ONE parser
+            # DesignRules.from_project uses too: explicit netclass_assignments,
+            # KiCad 6's classes[].nets (#1304), and the netclass_patterns globs
+            # (the primary mechanism on many boards; consumers fnmatch net
+            # names against them, explicit assignment wins). A net may belong
+            # to several classes (KiCad 9 lists); normalize to a single class
+            # name (prefer the first non-Default) so downstream consumers see
+            # {net: classname}.
+            from design_rules import project_class_membership
+            _members, patterns = project_class_membership(ns)
+            for _net, _cls in _members.items():
+                _nd = [c for c in _cls if c and c != 'Default']
+                assignments[_net] = _nd[0] if _nd else (_cls[0] if _cls else 'Default')
             # DRC-enforced Board Constraints (what humans actually route against).
             rules = ((pro.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
             constraints = {k: rules[k] for k in _CONSTRAINT_FIELDS if k in rules}
@@ -265,6 +274,47 @@ def board_default_netclass_param(pcb_path, key, design_rules=None):
         return None
 
 
+def positive_mm(v):
+    """``v`` as mm when it is a positive number, else None (unset)."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def class_diff_pair_geometry(cls, default=None):
+    """``(width, gap)`` a coupled pair of net class ``cls`` is drawn at, from
+    its class fields (mm), each None when nothing declares one. ``default`` is
+    the board's Default class, whose value a class that leaves a field unset
+    inherits (KiCad's aggregate net class).
+
+    A ``diff_pair_width`` / ``diff_pair_gap`` of 0 is UNSET, the same as an
+    absent one. Projects do store 0 (routed_output, usb_fm_radio). KiCad 7
+    then makes no diff-pair rule (``if( nc->GetDiffPairWidth() )`` in
+    drc_engine.cpp); KiCad 10 reads it as set to 0 and its router draws
+    ``max(board minimum, 0)``. Nobody means a 0 mm pair, and read as a width
+    it routed every pair at the fab floor (found reviewing #1276).
+
+    An unset width falls back to the class ``track_width``: with no diff-pair
+    rule, KiCad's netclass track-width rule sizes the pair. An unset gap falls
+    back to the class ``clearance``, which KiCad grades P against N at when no
+    pair gap is declared. The routing CLI, the GUI's Differential tab and
+    route_diff's per-pair class geometry (#435) all resolve through this."""
+    chain = [c for c in (cls, default) if c]
+
+    def first(key):
+        for c in chain:
+            v = positive_mm(c.get(key))
+            if v is not None:
+                return v
+        return None
+    width = first('diff_pair_width')
+    gap = first('diff_pair_gap')
+    return (width if width is not None else first('track_width'),
+            gap if gap is not None else first('clearance'))
+
+
 def board_default_netclass_clearance(pcb_path, design_rules=None):
     """The board's Default net-class **clearance** (mm), or ``None``. Thin wrapper
     over :func:`board_default_netclass_param` kept for existing callers."""
@@ -331,21 +381,60 @@ def board_floor_declaration(pcb_path, design_rules=None):
             'declares_nothing': not classes and not constraints}
 
 
+#: The source an UNSET edge clearance names (#1301). It is not a "fixed
+#: default": it is the floor every routing step's DRC writeback records.
+UNSET_EDGE_SOURCE = 'fab edge floor (what routing writes)'
+
+
+def unset_board_edge_clearance(pcb_path=None):
+    """``(mm, source)`` for a board whose ``min_copper_edge_clearance`` is
+    unset (0 or absent): the fab copper-to-edge floor
+    (`fix_kicad_drc_settings.fab_edge_floor`, 0.20 on every fab tier), which
+    is exactly the value every routing step's DRC writeback records there
+    (`compute_targets`' ``edge_target = max(routed edge, fab_edge)``, the
+    "fab-edge pin").
+
+    #1301: placement used to read an unset rule as a fixed 0.55, and routing
+    then wrote 0.20 into the same field, so one placed pose was graded at an
+    edge margin of 0.55 before routing and 0.20 after it -- daplink passed
+    placed and failed routed with nothing moved. Reading the floor routing
+    writes makes the placed board and the routed board the same board to
+    every placement grade. ``pcb_path`` may be None (no board file): the
+    floor of a 2-layer board, which is the same 0.20 on every tier."""
+    from fix_kicad_drc_settings import fab_edge_floor
+    return float(fab_edge_floor(pcb_path or None)), UNSET_EDGE_SOURCE
+
+
 def board_floor_knobs(pcb_path, clearance=None, board_edge_clearance=None,
-                      clearance_default=0.25, edge_default=0.55,
+                      clearance_default=0.25, edge_default=None,
                       design_rules=None):
     """Resolve grading/legality knobs BOARD-first (run-7 S1/S4).
 
     An explicit value wins; an unset one resolves from the board's own
-    Default netclass clearance / min_copper_edge_clearance constraint; only
-    a project-less board falls back to the fixed default. Grading a board at
+    Default netclass clearance / min_copper_edge_clearance constraint. An
+    unset clearance falls back to ``clearance_default``. An unset edge
+    clearance resolves to the fab edge floor routing writes back
+    (`unset_board_edge_clearance`, #1301), unless the caller passes its own
+    ``edge_default`` (then labelled ``'fixed default'``). A declared or
+    explicit edge clearance under that floor is raised to it, as routing
+    raises it (`fix_kicad_drc_settings.effective_board_edge_clearance`); its
+    knob keeps the source and adds ``declared`` (the value raised) and
+    ``raised_to``. Grading a board at
     a fixed constant tighter than its own floor manufactures phantom
     violations (S1: check_floorplan oob), and one LOOSER lets real ones
     pass; the same mistake vetoed legal poses in converge (S4).
 
+    An unset clearance resolves the way KiCad GRADES the board: the Default
+    class floored at Board Setup ``min_clearance`` (`board_grading_clearance`,
+    #1338). Every caller is a placement grade or a placer, and a part seated
+    at the class alone on multichannel_mixer (class 0.2, min_clearance 0.3)
+    is one KiCad reports pad clearance errors on, so the placers obey the
+    floor too. A tool that PREDICTS routability reads `board_floor` instead.
+
     Returns ``(clearance, board_edge_clearance, knobs)`` where ``knobs``
     records each value's source (``'cli'`` | ``'board netclass'`` |
-    ``'board constraint'`` | ``'fixed default'``) for JSON disclosure.
+    ``'board minimum clearance'`` | ``'board constraint'`` |
+    ``UNSET_EDGE_SOURCE`` | ``'fixed default'``) for JSON disclosure.
     """
     # A non-positive declared value is UNSET, not a floor of zero -- KiCad
     # writes 0 into these fields for "not configured", and reading it as a real
@@ -353,25 +442,42 @@ def board_floor_knobs(pcb_path, clearance=None, board_edge_clearance=None,
     # below encodes the same rule; this helper predates it and did NOT, so a
     # project declaring `min_copper_edge_clearance: 0.0` silently gave
     # render_placement a 0.0 edge floor (every edge-halo and oob term
-    # vanishing) where it had previously used 0.55.
+    # vanishing). Unset now reads the floor routing writes (#1301).
     knobs = {}
     if clearance is None:
-        v = board_default_netclass_clearance(pcb_path, design_rules)
-        clearance, src = ((v, 'board netclass') if v is not None and v > 0
-                          else (clearance_default, 'fixed default'))
+        clearance, src = board_grading_clearance(
+            pcb_path, None, clearance_default, design_rules)
     else:
         src = 'cli'
     knobs['clearance'] = {'value': clearance, 'source': src}
     if board_edge_clearance is None:
         v = board_constraint(pcb_path, 'min_copper_edge_clearance',
                              design_rules)
-        board_edge_clearance, src = ((v, 'board constraint')
-                                     if v is not None and v > 0
-                                     else (edge_default, 'fixed default'))
+        if v is not None and v > 0:
+            board_edge_clearance, src = v, 'board constraint'
+        elif edge_default is not None:
+            board_edge_clearance, src = float(edge_default), 'fixed default'
+        else:
+            board_edge_clearance, src = unset_board_edge_clearance(pcb_path)
     else:
         src = 'cli'
     knobs['board_edge_clearance'] = {'value': board_edge_clearance,
                                      'source': src}
+    if src in ('board constraint', 'cli'):
+        # Routing pins a declared or requested edge clearance UP to the fab
+        # floor (`effective_board_edge_clearance`) and writes that floor
+        # back, so a value under it is read as the floor here too: sonde
+        # declares 0.01 and its J2 was seated with pads 0.01 mm from the
+        # edge, which every routed copy then graded at 0.20.
+        # Only a real distance: a non-finite or negative request is left for
+        # the caller's own refusal (place_pose exits 2 on `-inf`).
+        floor, _ = unset_board_edge_clearance(pcb_path)
+        if (isinstance(board_edge_clearance, (int, float))
+                and 0.0 <= board_edge_clearance < floor):
+            knobs['board_edge_clearance'].update(
+                value=floor, declared=board_edge_clearance,
+                raised_to=UNSET_EDGE_SOURCE)
+            board_edge_clearance = floor
     return clearance, board_edge_clearance, knobs
 
 
@@ -480,6 +586,40 @@ def board_floor(pcb_path, name, explicit=None, fallback=None,
     return _num(fallback), 'fixed default'
 
 
+def board_grading_clearance(pcb_path, explicit=None, fallback=None,
+                            design_rules=None):
+    """The clearance KiCad GRADES this board's pads at, ``(value, source)``
+    (#1338): the Default net class floored at Board Setup ``min_clearance``
+    -- `fix_kicad_drc_settings.grading_clearance`, the rule check_drc has
+    graded by since #1210.
+
+    `board_floor('clearance')` is the class alone, and stays so: it is what a
+    placement or routing step WORKS at, and the route writeback lowers
+    ``min_clearance`` to what it routed. A tool that grades existing copper
+    against what KiCad will report must read this instead. Measured on
+    multichannel_mixer (class 0.2, min_clearance 0.3): kicad-cli and check_drc
+    report 2 pad pairs at 0.24 / 0.25 mm while check_assembly and place_pose,
+    reading the class, called the board buildable and legal.
+
+    Sources: ``'cli'`` | ``'board netclass'`` | ``'board minimum clearance'``
+    | ``'fixed default'`` | ``'unreadable project'`` -- `board_floor`'s
+    vocabulary plus the one this adds."""
+    if explicit is not None:
+        return float(explicit), 'cli'
+    try:
+        dr = (design_rules if design_rules is not None
+              else read_design_rules(pcb_path))
+        from fix_kicad_drc_settings import grading_clearance
+        value, src = grading_clearance(
+            board_default_netclass_param(pcb_path, 'clearance', dr),
+            board_constraint(pcb_path, 'min_clearance', dr))
+    except Exception:                                          # noqa: BLE001
+        return _num(fallback), 'unreadable project'
+    if value is None:
+        return _num(fallback), 'fixed default'
+    return value, ('board netclass' if src == 'Default net class' else src)
+
+
 def _num(v):
     """Fallbacks are returned in the same type the board paths return."""
     return None if v is None else float(v)
@@ -496,13 +636,14 @@ def resolve_cli_floor(pcb_path, name, explicit, fallback, flag):
     The four routing mains did not: each carried its own copy of
     ``board_constraint(...) if ... is not None else <default>``, an
     ``is not None`` test with no positivity guard, eight sites in all
-    (route.py 3725/3731, route_diff.py 1947/1953, route_planes.py 4940/4946,
-    route_disconnected_planes.py 3410/3416).
+    (two each in route.py, route_diff.py, route_planes.py and repair_planes.py,
+    then named route_disconnected_planes.py).
 
     So on a board declaring ``min_copper_edge_clearance: 0.0`` the two halves
     of the place/route loop read one declared floor two ways: the placement
     half (render_placement, check_floorplan, converge -- all via
-    board_floor_knobs) resolved 0.55 ``[fixed default]``, while the routing
+    board_floor_knobs) resolved 0.55 ``[fixed default]`` (since #1301 the
+    fab edge floor routing writes back, 0.20), while the routing
     half took a REAL floor of 0.0 and printed *"using the board
     min_copper_edge_clearance 0.0mm"* -- claiming the board had declared what
     it had in fact left unset. The plane engines were worse than misleading:
@@ -512,9 +653,9 @@ def resolve_cli_floor(pcb_path, name, explicit, fallback, flag):
     The FALLBACKS legitimately differ between callers and are NOT unified
     here: the signal mains fall back to BOARD_EDGE_CLEARANCE 0.0, which is a
     deliberate sentinel meaning "no edge rule declared, use the copper-copper
-    clearance instead" (route.py:896, obstacle_map.py:797), while the plane
+    clearance instead" (obstacle_map's ``board_edge_clearance > 0`` tests), while the plane
     mains fall back to PLANE_EDGE_CLEARANCE 0.5 and the placement model to
-    0.55. What must agree -- and now does -- is whether the board declared
+    the fab edge floor (`unset_board_edge_clearance`). What must agree -- and now does -- is whether the board declared
     anything at all, and what the tool SAYS about where its number came from.
 
     The source tag is printed in the same ``[board constraint]`` /
@@ -583,9 +724,10 @@ def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
 def load_net_clearances(path):
     """{net name: clearance mm} from a ``--net-clearances`` JSON file.
 
-    route.py / route_diff.py take the file as an explicit override of the
-    class-derived map above, and the Route and Differential tabs read the same
-    file through this function (their "Net Clearances File" field), so both
+    route.py / route_diff.py / route_planes.py take the file as an explicit
+    override of the class-derived map above, and the Route, Differential and
+    Planes tabs read the same file through this function (their "Net
+    Clearances File" field), so both
     fronts accept and refuse exactly the same files. Raises OSError when the
     file cannot be read and ValueError when it is not a JSON object of numbers.
     """
@@ -732,7 +874,8 @@ def print_design_rules(pcb_path):
     non_default = {n: c for n, c in dr['assignments'].items() if c != 'Default'}
     if non_default:
         print(f"  ({len(non_default)} net(s) assigned to non-default classes — "
-              f"route those separately with that class's flags)")
+              f"the routers honour their class clearance in the same call; omit "
+              f"--track-width / --via-size and they keep their class width and via too)")
 
     # The DRC-enforced Board Constraints. Net-class track_width/via_diameter are
     # only drawing DEFAULTS; ONLY these min_* are DRC floors (#111/#115).
@@ -752,6 +895,13 @@ def print_design_rules(pcb_path):
     # a board minimum ABOVE the JLC figure is exactly the case where the two
     # disagreed: the printed 0.2 went into every command and check_drc graded at
     # the board's 0.25 anyway.
+    if eff.get('working_via_from_drill'):
+        print(f"  - working via {eff['working_via_diameter']}/{eff['working_via_drill']}: "
+              f"the drill {eff['working_via_drill']} is the board's "
+              f"min_through_hole_diameter (or the fab drill), so the diameter is that "
+              f"drill plus a {eff['working_via_ring']} ring each side (the board's "
+              f"min_via_annular_width, at least the ring of the fab tier's smallest "
+              f"via), not the smaller via minimum (#1349).")
     _h2h_con = float((dr['constraints'] or {}).get('min_hole_to_hole') or 0.0)
     if _h2h_con > eff['fab']['hole_to_hole']:
         print(f"  - hole-to-hole {eff['drc_hole_to_hole']} comes from the BOARD's "
@@ -808,16 +958,19 @@ def print_design_rules(pcb_path):
     print("\nSUGGESTED route.py/qfn_fanout/bga_fanout/route_planes flags "
           "(Default class; small working via):\n  " + " ".join(flags))
     print("  Fine-pitch escape may drop --clearance toward the manufacturing floor "
-          f"{eff['drc_clearance']} (never below); route non-Default-class nets separately.")
+          f"{eff['drc_clearance']} (never below); non-Default-class nets keep their own "
+          f"class clearance in the same call.")
     if eff['fab_track_width'] < eff['min_track_width']:
         print(f"  On dense/congested boards, drop --track-width to the fab floor "
               f"{eff['fab_track_width']} for ordinary signals (keep --power-nets and "
               "impedance nets wide); thinner completes more nets and routes faster.")
 
     if 'diff_pair_gap' in d or 'diff_pair_width' in d:
+        # resolved the way route_diff.py resolves them: a 0 is unset
+        dp_w, dp_g = class_diff_pair_geometry(d)
         dp = []
-        if 'diff_pair_width' in d: dp.append(f"--track-width {d['diff_pair_width']}")
-        if 'diff_pair_gap' in d:   dp.append(f"--diff-pair-gap {d['diff_pair_gap']}")
+        if 'diff_pair_width' in d and dp_w is not None: dp.append(f"--track-width {dp_w}")
+        if 'diff_pair_gap' in d and dp_g is not None:   dp.append(f"--diff-pair-gap {dp_g}")
         print("SUGGESTED route_diff.py flags (Default class):\n  " + " ".join(dp))
 
     # Verification: DRC/connectivity at the manufacturability floor -- the rule

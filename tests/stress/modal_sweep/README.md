@@ -6,6 +6,11 @@ Fan a routing-parameter sweep across the stress corpus on rented cores, so
 No LLM is involved. Every recorded board leaves a `redo_commands.sh` manifest
 that replays its whole chain deterministically, so a sweep is pure CPU.
 
+This directory is also the cloud engine behind `tests/stress/cloud_replay_sets.py`
+(a no-knob replay of whole sets that keeps the routed boards) and
+`tests/stress/corpus_bisect.sh`; both drive `modal_app.py`. Their recipes are in
+`tests/stress/RUNBOOK.md` → "Corpus-scale A/B and bisect on the cloud".
+
 ## Why one task per (arm, board)
 
 The wall-clock floor of the whole sweep is **the single longest board**. An arm
@@ -16,7 +21,7 @@ sets 1-10, `daisho`) instead of an arm.
 Tasks are dispatched **longest-first** from recorded timings. Round-robin order
 lets a 50-minute board start near the end and add 50 minutes to the tail.
 
-## Measured sizing (sets 1-10, 150 boards)
+## Measured sizing (sets 1-10, 150 boards, August 2026)
 
 | | |
 |---|---|
@@ -58,7 +63,8 @@ still the right number for sizing a *local* macOS run — where RSS under-report
 by up to 5x (mimalloc-retained + IOAccelerator-tagged pages, issue #419) — but it
 does not transfer to a cloud reservation. Measure on the target OS.
 
-Raise a board to the 8 GB tier only if it actually OOMs.
+Raise a board to the 8 GB tier only if it actually OOMs, by naming it in
+`KICAD_SWEEP_BIG_BOARDS=board1,board2` for a top-up run.
 
 ## Three ways to express an arm
 
@@ -82,19 +88,35 @@ tests nothing would look like "the parameter has no effect".
 Anchor `manifest_sed` patterns tightly — a loose one rewrites more of the chain
 than you intended.
 
+The control arm is the first one declaring none of the three, whatever its
+name. Give it a name unique to the campaign (`baseline590`, `base2127`): the
+results volume banks rows **by arm name** (see "Results volume and resume"), so
+a plain `baseline` would resume a previous campaign's rows from another commit.
+
+An arm may also carry `"keep_artifacts": true` to keep each final board — with
+its `.kicad_pro`/`.kicad_dru`/`.kicad_prl` siblings and the replayed manifest —
+under `<arm>/artifacts/<set>__<board>/` on the results volume.
+`cloud_replay_sets.py` sets it; a sweep that only needs the numbers should not.
+
 ## The files
 
 | file | what it is |
 |---|---|
-| `modal_app.py` | the app: fan-out, staging, parameter application, aggregation |
-| `sweep_lib.py` | pure-python helpers (no `modal` import) — cost table, discovery, patching |
-| `upload_corpus.py` | populate the corpus volume (`--boards` for a small slice) |
+| `modal_app.py` | the app: fan-out, staging, parameter application, resume, aggregation |
+| `sweep_lib.py` | pure-python helpers (no `modal` import) — recorded-cost table, discovery, patching |
+| `upload_corpus.py` | populate the corpus volume (`--boards` for a small slice, `--dry-run` for the size) |
 | `arms.example.json` | template showing all three arm mechanisms |
 | `arms.smoke.json` | the 2-arm config the smoke test uses |
 | `smoke_test.sh` | **run this first** — end-to-end, self-verifying |
 | `run_sweep.sh` | a full sweep: plan → run → verify, with guard rails |
 | `arms.track_proximity.json` | worked example of a real parameter sweep |
 | `check_sweep.py` | validates a sweep result; exits non-zero if untrustworthy |
+| `rank_arms.py` | scores a sweep's arms by PAIRED connectivity verdict |
+| `prescreen.py` | local dose-range prescreen of one knob on two boards, before any cloud spend |
+| `curate_boards.py` | writes `board_value.json` from a results-volume snapshot |
+| `board_value.json` | the 12-board `screen` set and the zero-information `exclude` list |
+| `regrade_arm.py` | re-grades an existing arm's kept boards on Modal with one checkout's grader |
+| `arms.history590*.json`, `retry_shape_2127.json`, `PREREG_590_sets21_27.md` | the #590 corpus A/B: its arm files, board list and pre-registration |
 
 ## Start here: the 2-board smoke test
 
@@ -121,8 +143,10 @@ parameter has no effect", and nothing in the output contradicts it.
 
 `check_sweep.py` tests four things:
 
-1. **chain_complete** — a broken chain is not a result. On failure it prints the
-   captured `_replay.log` tail, since the container is gone by then.
+1. **chain_complete** — a broken chain is not a result. A real sweep
+   legitimately has some, so broken rows are a warning until their RATE passes
+   `--max-broken-frac` (default 0.25), which reads as systemic and fails. It
+   prints the captured `_replay.log` tail, since the container is gone by then.
 2. **arm spec applied** — an arm declaring `defaults` must report non-empty
    `patched_defaults`; inconsistency across boards means container reuse is
    leaking arms.
@@ -170,14 +194,17 @@ Its plan over sets 1-10:
 
 `run_sweep.sh` **always prints that plan before spending anything**, then runs,
 then pipes the result through `check_sweep.py`. It refuses an arms file with no
-baseline arm, with duplicate names, or that isn't a non-empty list.
+baseline arm, with duplicate names, or that isn't a non-empty list. It names the
+Modal app after the arms file (`arms.586.json` → `kicad-sweep-586`) so runs are
+distinguishable on the dashboard.
 
 | env | effect |
 |---|---|
-| `SWEEP_SETS=set1,set2` | override the sets (or pass as `$2`) |
+| `SWEEP_SETS=set1,set2` | override the sets (or pass as `$2`); default sets 1-10 |
 | `SWEEP_UPLOAD=1` | populate the corpus volume first (one-off) |
 | `SWEEP_DRY=1` | stop after the plan, spend nothing |
 | `SWEEP_OUT=/path.json` | where to write the result |
+| `SWEEP_EXCLUDE=a,b` | skip these boards this run — the wall-clock lever for multi-hour monsters |
 | `KICAD_SWEEP_DIRTY=1` | ship the working tree instead of a clean `HEAD` |
 
 Note the verification here does **not** use `--require-all-complete`: a real
@@ -190,53 +217,129 @@ default order is longest-first, which is right for throughput but would hand you
 the 50-minute board first.
 
 Output: a per-arm table (boards, chain-complete, mean completion %, total real
-DRC, CPU-hours) plus every raw row, written to `sweep_<ts>.json`. Each
-`(arm, board)` row uses the **same schema `ab_replay_grade.py` emits**, because
-each task literally calls it on a one-board set dir — so no grading logic is
-duplicated, and `ab_replay_grade.py --compare` still works on the results.
+DRC, CPU-hours) plus every raw row, written to `--out` or to
+`<stress dir>/sweep_<ts>_<arm names>.json`. Each `(arm, board)` row uses the
+**same schema `ab_replay_grade.py` emits**, because each task literally calls it
+on a one-board set dir — so no grading logic is duplicated — plus the sweep's own
+fields (`arm`, `git`, `deps`, `patched_defaults`, `env_overrides`,
+`sweep_wall_s`, and `replay_log_tail` on a broken chain).
 
-## Verified vs not
+## Scoring the arms: `rank_arms.py`
 
-Tested here, against real repo files and the real corpus:
+The run's own table (mean completion %) is not the verdict. `rank_arms.py`
+scores every arm against the control on `nets_incomplete`, paired on boards
+where every arm replayed the same chain, and reports W/L per arm with DRC beside
+it rather than folded in:
 
-- cost table, board discovery (150/150 across sets 1-10), longest-first order
-- `routing_defaults.py` patching: values land, the patched module imports, inline
-  comments survive, no line drift, unknown names rejected
-- recorded-repo-prefix detection from a real manifest
-- all three files byte-compile
+```bash
+python3 tests/stress/modal_sweep/rank_arms.py <sweep.json>
+#   --drop-rescue-clean   drop boards whose recorded rescue step biases them
+#   --hard N              score only boards where the control leaves >=N nets incomplete
+#   --exclude B1,B2       sensitivity check (the headline stays unfiltered)
+#   --perf                also report wall / CPU / iterations / peak RSS
+```
 
-**Not verified — no Modal account or Linux box was available:**
+The rules behind it (pair on identical chains, score `nets_incomplete` alone,
+disclose the rescue cell, never trust a two-board result) are
+`tests/stress/RUNBOOK.md` → "Rules that make these trustworthy".
 
-- **The Modal API calls.** Image-builder method names have moved across client
-  versions (`add_local_dir(..., copy=True)` vs the older `copy_local_dir`). Pin
-  `modal` and expect to adjust if you are on an older client.
-- **The Linux `grid_router` build.** Resolved as of v0.20.2 (2026-08-09): that
-  release publishes `grid_router-linux-x86_64.so` built from crate 0.20.1, so the
-  image just runs `build_router.py` and keeps the prebuilt — no Rust toolchain,
-  ~10 min off the cold build. Verified on the macos-arm64 asset (`__version__`
-  reports 0.20.1, matching `Cargo.toml`); the *linux* asset has not been imported
-  on a linux box yet, which the smoke test covers. The image deliberately fails
-  at build time if a future crate bump ships without binaries — see the comment
-  in `modal_app.py` for the two-line fallback.
-- **An end-to-end replay in a container.** Manifests bake absolute tool paths;
-  `recorded_repo_prefix` detects each manifest's own prefix and remaps it, and
-  that logic is tested — but the remap has not been exercised inside a container.
-  Run one board, one arm before launching 15,000 tasks.
+## `modal_app.py` options
 
-## Deliberately out of scope
+`run_sweep.sh` and `cloud_replay_sets.py` call it for you; run it directly with
+`modal run tests/stress/modal_sweep/modal_app.py --arms <arms.json> ...`.
 
-- **No KiCad in the image.** Replay and grading are pure python
-  (`check_drc.py` imports numpy/scipy/shapely only), so KiCad buys nothing here
-  and costs a large image. The price is `ab_replay_grade`'s optional
-  `kicad-cli` cross-check degrading to `None`. Cross-check the *winning* arm
-  locally, where KiCad already lives — that check caught #487, where
-  `clearance: warning` blinded the grader.
-- **Building new corpus sets.** Still needs `pcbnew` for prep; a local one-time
-  step, unrelated to sweeping.
+| option | effect |
+|---|---|
+| `--sets` | comma-separated set names (default `set1`..`set10`) |
+| `--boards a,b` | only these boards |
+| `--limit N` | only the N cheapest boards |
+| `--exclude a,b` | skip these boards this run |
+| `--ignore-excludes` | do not drop `board_value.json`'s `exclude` list (a new knob family's first sweep should not inherit it) |
+| `--stage screened` | successive halving: the `screen` boards first, then the full set for surviving arms (see "Screen before you sweep") |
+| `--gate-margin F` | screened-stage kill threshold (default 0.25) |
+| `--dry-run` | print the plan, spend nothing |
+| `--out PATH`, `--stress-dir DIR` | result path; local corpus root (default `~/Documents/kicad_stress_test`) |
+
+| env (read on the launching machine) | effect |
+|---|---|
+| `KICAD_SWEEP_NAME` | the Modal app name |
+| `KICAD_SWEEP_DIRTY=1` | ship the working tree; rows are stamped `<sha>+dirty` |
+| `KICAD_SWEEP_BIG_BOARDS=a,b` | put these boards on the 8 GB tier |
+| `KICAD_SWEEP_WITH_KICAD=1` | build the KiCad image (see "The image") |
+| `KICAD_SWEEP_KICAD_IMAGE` | which KiCad image (default `kicad/kicad:10.0.6`) |
+| `KICAD_SWEEP_BUILD_TAG` | pin the release the prebuilt router comes from (for an image at an old engine commit) |
+
+## Results volume and resume
+
+Every task writes its row to the `kicad-sweep-results` volume as
+`<arm>/<set>__<board>.json` (a broken chain also leaves the whole replay log as
+`<set>__<board>.log`). A relaunch **skips every (arm, board) that already has a
+row** and merges the banked rows into its result, so a stopped sweep resumes for
+free — and an arm name reused at a different commit resumes the OLD rows, which is
+why `cloud_replay_sets.py` puts the commit in its arm names. Pull an arm down with
+`modal volume get kicad-sweep-results /<arm> <dir>`.
+
+The corpus lives on the `kicad-corpus` volume, staged by `upload_corpus.py`:
+manifests, the boards they read, and `boards_<set>/` + `boards_unrouted_<set>/`
+— not prior outputs or transcripts. A board edited locally after its set went up
+is only refreshed by re-uploading it (`upload_corpus.py --sets S --boards b`);
+`cloud_replay_sets.py`'s upload stage does that check for you.
+
+## The image
+
+- **Source**: a clean `git archive HEAD` by default, so a sweep is reproducible
+  and you can keep editing while it runs; `KICAD_SWEEP_DIRTY=1` ships the working
+  tree instead.
+- **Numeric stack pinned exactly** (`numpy`/`scipy`/`shapely`, `_PY_PINS`): an
+  unpinned rebuild once routed 28 of 96 boards differently at identical config.
+  Every row records the versions it ran (`deps`). Bump only deliberately,
+  expecting a new baseline era.
+- **Router**: `build_router.py` keeps the release's prebuilt Linux binary when it
+  matches `rust_router/Cargo.toml`, retried three times against flaky downloads;
+  when the crate is ahead of every release it builds from source (rustup is in
+  the image — a ~10 min cold build, then cached). `KICAD_SWEEP_BUILD_TAG` pins
+  the release for an image built at an old engine commit (`corpus_bisect.sh`
+  sets it). The build is proved by importing `grid_router` in a fresh
+  interpreter before any task runs.
+- **KiCad is opt-in here** (`KICAD_SWEEP_WITH_KICAD=1`, which
+  `cloud_replay_sets.py` sets by default). The image is then
+  `KICAD_SWEEP_KICAD_IMAGE` (default `kicad/kicad:10.0.6`) on its own system
+  python, with the same pins, and the build fails unless both `import pcbnew` and
+  `kicad-cli version` work. Without KiCad every oracle leg of the route step is
+  **dead, not degraded** (`oracle_reconnect` reports `available=False`), so a
+  change acting only through the finalize audit or the oracle recheck A/Bs as a
+  perfect null, and `ab_replay_grade`'s `kicad-cli` cross-check is skipped, so
+  `drc_real` falls back to raw check_drc minus accepted edge items. Plain
+  `modal_app.py` stays without KiCad because a different base image is a new
+  baseline era for every comparison made on the old one.
+- **Building new corpus sets** is out of scope: it needs `pcbnew` for prep, a
+  local one-time step unrelated to sweeping.
 
 ## Screen before you sweep
 
-100 arms x 150 boards is ~864 CPU-hours. Running all 100 arms against a ~30-board
-subset costs ~10 minutes and tells you which ~20 arms deserve the full corpus.
-Same answer about the winners, roughly a fifth of the compute, first results in
-minutes.
+100 arms x 150 boards is ~864 CPU-hours. Most arms can be judged far cheaper:
+
+```
+prescreen (2 boards, local, $0)  ->  screen (12 boards)  ->  full corpus  ->  holdout (untouched sets)
+```
+
+- **`prescreen.py`** runs ONE knob at several values on two challenging-but-fast
+  boards on this machine and prints verdict / wall per value. It catches
+  blow-ups (quality collapse, wall explosion), not mild damage:
+
+  ```bash
+  python3 tests/stress/modal_sweep/prescreen.py HEURISTIC_WEIGHT 1.0 1.5 2.5 3.0
+  python3 tests/stress/modal_sweep/prescreen.py --env KICAD_PROXIMITY_SUM 0 1 softcap
+  ```
+
+- **`--stage screened`** runs every arm on `board_value.json`'s 12-board
+  `screen` set first, then KILLS each arm whose summed `nets_incomplete` on it
+  exceeds the control arm's by more than `--gate-margin` (fractional, at least
+  +3) before the full set. The gate only saves money; final rankings still come
+  from the full set.
+- **`curate_boards.py <results snapshot>`** regenerates `board_value.json` from a
+  downloaded results-volume snapshot: boards scored by how much they
+  discriminate between arms per CPU-hour, the cheapest discriminating ones as
+  the `screen`, and boards where every arm ties as `exclude`. Regenerate it after
+  a big sweep. The exclude list is fitted to the arm family it was measured on,
+  so a new family's first sweep passes `--ignore-excludes`.

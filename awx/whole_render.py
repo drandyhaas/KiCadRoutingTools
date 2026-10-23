@@ -1,5 +1,5 @@
 """whole_render.py PLAN.json OUT.png [view x0,y0,x1,y1] [LANES] -- a whole-route plan drawn over its board: F red, B blue,
-vias white, LANES thick and labelled; the plan's conflicts (a failed snap's lanes) yellow and numbered, and with
+In1 green, In2 purple, vias white, LANES thick and labelled; the plan's conflicts (a failed snap's lanes) yellow and numbered, and with
 AUDIT=FILE the audit's failures as magenta crosses. The board is BENCH (NETS, DEST: whole_ctx), drawn in the plan's frame -- turned over at pair chirality -1, as the
 plan is; the pad boxes drawn are DEST's (and SRC's)."""
 import sys, os, json, contextlib, io
@@ -19,9 +19,9 @@ try:
     font = ImageFont.truetype('/System/Library/Fonts/Supplemental/Arial.ttf', 18)
 except Exception:
     font = None
-COL = {'F.Cu': (255, 90, 70), 'B.Cu': (70, 160, 255)}
+COL = {'F.Cu': (255, 90, 70), 'B.Cu': (70, 160, 255), 'In1.Cu': (40, 170, 60), 'In2.Cu': (160, 70, 220)}
 def ov(dr, rr):
-    for L in ('B.Cu', 'F.Cu'):
+    for L in ('In2.Cu', 'In1.Cu', 'B.Cu', 'F.Cu'):
         if ONLY and L != ONLY: continue
         for n, v in g['lanes'].items():
             w = 0.09 if n in hl else 0.05
@@ -54,5 +54,5 @@ def ov(dr, rr):
         x0, y0 = rr.tf.pt(min(xs) - 1, min(ys) - 1); x1, y1 = rr.tf.pt(max(xs) + 1, max(ys) + 1)
         dr.rectangle([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)], outline=(255, 255, 0), width=1)
 r = BoardRenderer(pcb, size=1800, supersample=2, show_zones=False, view=view, layer_alpha=70)
-r.frame(segments=[], vias=[], overlays=[ov], label=f'{os.path.basename(sys.argv[1])}: F red, B blue, vias white').save(out)
+r.frame(segments=[], vias=[], overlays=[ov], label=f'{os.path.basename(sys.argv[1])}: F red, B blue, In1 green, In2 purple, vias white').save(out)
 print('wrote', out)

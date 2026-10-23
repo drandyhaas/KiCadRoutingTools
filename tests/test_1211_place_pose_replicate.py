@@ -25,6 +25,8 @@ The arms:
 * a locked part that the copy does NOT move is not refused;
 * `--allow-net-mismatch REF.PAD` waives one pad wired differently by
   design, from either instance, and the refusal spells the flags it needs;
+* the net map is the one under which the most pad pairs agree (#1277):
+  a strap met first names itself, not the pads wired alike;
 * both sheet-name spellings are read (KiCad 8+ token, KiCad 6/7 property)
   into `Footprint.sheet_name` / `sheet_file`;
 * on the tracked glasgow_revC, the two IO_Buffer instances map 68 for 68 by
@@ -290,7 +292,7 @@ def test_nets_not_wired_alike_are_refused():
                                       ('R2', '2'): '/S2/IN'})
         r = pose(inp, out, 'replicate', '--from', 'S1', '--to', 'S2',
                  refuse='not wired alike', code=4)
-        assert 'already maps to' in r.stderr, r.stderr[-800:]
+        assert '/S1/IN maps to /S2/OUT (R1.1)' in r.stderr, r.stderr[-800:]
         assert not os.path.exists(out)
         # Two source nets onto ONE target net (R2's OUT pad and U2's OUT pad
         # both on /S2/IN): each source net still reaches one net, so only
@@ -299,7 +301,7 @@ def test_nets_not_wired_alike_are_refused():
                                        ('U2', '3'): '/S2/IN'})
         r = pose(inp, out, 'replicate', '--from', 'S1', '--to', 'S2',
                  refuse='not wired alike', code=4)
-        assert '/S2/IN is already reached from /S1/IN' in r.stderr, (
+        assert '/S2/IN is reached from /S1/IN' in r.stderr, (
             r.stderr[-800:])
         # A pad on a SOURCE channel net that maps nowhere else: copying U1
         # alone, U2's OUT pad on S1's own input.
@@ -376,6 +378,75 @@ def test_a_pad_wired_differently_by_design_is_waived_per_pad():
         print('  the refusal spells --allow-net-mismatch C1.1; a source ref '
               'waives every target, a target ref one; unneeded waivers '
               'reported; a waived pad shares no net; bad waivers -> 2')
+
+
+def test_the_net_map_is_chosen_over_every_pair():
+    """#1277: the map THE NET RULE judges pads against is the one under
+    which the most pad pairs agree, chosen over all of them at once. It was
+    grown first-come, so a strap met first claimed its net: with R2.1
+    strapped to /S2/OUT, /S1/IN mapped to /S2/OUT and the refusal named
+    R1.2, U1.2 and U1.3 -- the three pads wired ALIKE -- and following its
+    advice was accepted with /S1/IN renamed to /S2/OUT."""
+    from kicad_parser import parse_kicad_pcb
+    from placement import replicate
+    from placement.pose_ops import PoseRefusal
+    with tempfile.TemporaryDirectory() as td:
+        inp = board(td, 'first', nets={('R2', '1'): '/S2/OUT'})
+        out = os.path.join(td, 'x.kicad_pcb')
+        r = pose(inp, out, 'replicate', '--from', 'S1', '--to', 'S2',
+                 refuse='not wired alike', code=4)
+        s = summary(r)
+        assert [b['pads'] for b in s['net_breaks']] == [
+            'R1.1 /S1/IN -> R2.1 /S2/OUT'], s['net_breaks']
+        assert s['suggest_waivers'] == ['R1.1'], s['suggest_waivers']
+        assert '/S1/IN maps to /S2/IN (U1.2)' in r.stderr, r.stderr[-800:]
+        # Following the advice maps /S1/IN where the channel wires it.
+        r = pose(inp, out, 'replicate', '--from', 'S1', '--to', 'S2',
+                 '--allow-net-mismatch', 'R1.1', accept=True)
+        t2 = summary(r)['replicate'][0]['to'][0]
+        assert t2['nets_renamed'] == {'/S1/IN': '/S2/IN',
+                                      '/S1/OUT': '/S2/OUT'}, t2
+        assert [(w['as_given'], w['needed']) for w in t2['nets_waived']] == [
+            ('R1.1', True)], t2['nets_waived']
+
+        def _breaks(nets):
+            pcb = parse_kicad_pcb(board(td, 'm', nets=nets))
+            inst = replicate.sheet_instances(pcb)
+            a = replicate.resolve_sheet(pcb, 'S1', '--from', inst)
+            b = replicate.resolve_sheet(pcb, 'S2', '--to', inst)
+            try:
+                replicate.correspond(pcb, a, b)
+            except PoseRefusal as exc:
+                return [x['source_pad'] for x in exc.extra['net_breaks']]
+            return []
+        # A tie on one side, settled by the other: /S1/IN's two pairs split
+        # 1 to 1 between /S2/OUT and /S2/IN, and /S1/OUT's one voting pair
+        # (U2.3 has no net, which breaks under any map and does not vote)
+        # wants /S2/OUT. A per-net majority cannot see that; the map does.
+        assert _breaks({('R2', '1'): '/S2/OUT', ('U2', '3'): ''}) == [
+            'R1.1', 'U1.3']
+        # Controls: a map with no competing pairing never reaches the solver
+        # (no strap here; glasgow's straps are on its rails, which do not
+        # vote), and the swap -- a true tie -- still goes to the pairings
+        # met first, as before.
+        real = replicate._first_best
+        replicate._first_best = None
+        try:
+            assert _breaks({}) == []
+            assert _breaks({('C2', '1'): '/S2/IN'}) == ['C1.1']
+            pcb = parse_kicad_pcb(run_utils.evidence(GLASGOW, 'glasgow'))
+            inst = replicate.sheet_instances(pcb)
+            a = replicate.resolve_sheet(pcb, 'IO_Buffer_A', '--from', inst)
+            b = replicate.resolve_sheet(pcb, 'IO_Buffer_B', '--to', inst)
+            replicate.correspond(pcb, a, b, waive=replicate.resolve_waivers(
+                pcb, ['U19.2', 'U20.6', 'U21.2'], a, [b])[b])
+        finally:
+            replicate._first_best = real
+        assert _breaks({('R2', '1'): '/S2/OUT', ('R2', '2'): '/S2/IN'}) == [
+            'U1.2', 'U1.3']
+    print('  R2.1 strapped: only R1.1 named, its waiver maps /S1/IN to /S2/IN; '
+          'a one-sided tie settled by the other side; no solver without a '
+          'competing pairing; a true tie goes to the first met')
 
 
 def test_a_missing_part_is_refused():
@@ -758,6 +829,7 @@ TESTS = [
     test_offset_and_anchor_move_the_copy,
     test_nets_not_wired_alike_are_refused,
     test_a_pad_wired_differently_by_design_is_waived_per_pad,
+    test_the_net_map_is_chosen_over_every_pair,
     test_a_missing_part_is_refused,
     test_a_different_footprint_is_refused,
     test_a_partial_copy_moves_only_the_parts_it_names,

@@ -10,17 +10,19 @@ does, with no buttons and no LLM, exactly what a user does with it:
 
 and then grades the result against the CLI chain the corpus run recorded.
 
-WHAT MAKES THIS DIFFERENT FROM test_gui_engine_parity.py: that harness
-hand-mirrors the plan->params mapping onto shimmed dialog objects, so it proves
-the ENGINE half only (same batch_route kwargs -> same board) and is blind to
-bugs in `manifest_to_plan` (converter) or `ai_plan.apply_step_params`
-(apply) -- the two layers that silently diverged in the set11 rp2350 replay
-(#361). Here the REAL `swig_gui.RoutingDialog` is constructed headless (parent
-None, no Show()) with its REAL tabs and controls, and the REAL
-`ai_plan.PlanExecutor` drives it inside a wx MainLoop -- the same
-parse_plan_result -> reset_params_to_defaults -> apply_step_params ->
-apply_step_selection -> tab._on_*() path the buttons run. Nothing is mirrored,
-so a converter/apply bug shows up as a board difference.
+WHAT MAKES THIS DIFFERENT FROM test_gui_engine_parity.py: that gate was
+migrated off its shim harness (2026-07-26) and now drives the same real dialog
+through this module's `replay`, but on a hand-written GUI_PLAN that mirrors its
+CLI leg -- so it is blind to bugs in `manifest_to_plan` (converter). Here the
+plan is the one the stress run recorded, so both layers that silently diverged
+in the set11 rp2350 replay (#361) -- the converter and
+`ai_plan.apply_step_params` (apply) -- are exercised. The REAL
+`swig_gui.RoutingDialog` is constructed headless (parent None, no Show()) with
+its REAL tabs and controls, and the REAL `ai_plan.PlanExecutor` drives it
+inside a wx MainLoop -- the same parse_plan_result -> reset_params_to_defaults
+-> apply_step_params -> apply_step_selection -> tab._on_*() path the buttons
+run. Nothing is mirrored, so a converter/apply bug shows up as a board
+difference.
 
 THE TWO LEGS RUN ON DIFFERENT PYTHONS, ON PURPOSE. The GUI leg needs pcbnew so
 it runs under KiCad's bundled python (3.9 here); the CLI leg runs the manifest's
@@ -455,10 +457,10 @@ def replay(info, steps, workdir, timeout=7200, verbose=False, snapshots=True):
     """Run the plan through the REAL plugin dialog + PlanExecutor, headless.
 
     The driving itself (headless dialog, PlanExecutor in a wx MainLoop, popup
-    stubs, per-step snapshots, deterministic wx teardown) lives in the
-    repo-root `headless_plan` module, which is also what the user-facing
-    `run_plan.py` runs -- so this harness exercises the shipped driver rather
-    than a private copy of it.
+    stubs, per-step snapshots, deterministic wx teardown) lives in
+    `py_router/headless_plan.py`, which is also what the user-facing
+    `py_router/run_plan.py` runs -- so this harness exercises the shipped
+    driver rather than a private copy of it.
 
     Returns a dict with the produced board, per-step status and timings.
     """

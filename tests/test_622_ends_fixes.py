@@ -15,7 +15,8 @@ route is only as good as those ends. This pins the rules it prices and bans by, 
 5. feedback by place (whole_ends.fb_weights): a pair is priced in full where EITHER leg's exit stands on the item's
    layer, so it cannot leave the price by moving one leg; FB_OTHER_LAYER of that on the other layer there; off the place
    less than the other layer there, the nearest other exit included, falling to nothing FB_RADIUS beyond; FB_ESCALATE
-   times more for an end named again;
+   times more for an end named again; and the feedback's tables (whole_ends.fb_tables) key no lane the state has no
+   options for (SDI_D13's item, round 1's, on round 2's ends chosen where it had no tooth: a KeyError in the score);
 6. the exact ranking (Ends.best_exact): a state whose exact route found no plan ranks after every state whose route
    did, even with the lower objective.
 """
@@ -131,13 +132,30 @@ def main():
     if not 0.0 < near < other:
         fails.append(f'fb_weights: one exit over (0.4 mm) pays {near:.3f}, the other layer at the place {other:.3f} -- '
                      f'want less, and more than nothing')
+    # 5b. the feedback's tables (fb_tables): an item for a lane the state has no options for keys nothing
+    T = {'P': pair, 'A': [opt(mv(0, 0, 'F.Cu'))]}
+    B = {'P': pair, 'A': [opt(mv(30, 0, 'F.Cu'))]}
+    here = {'layer': 'F.Cu', 'points': [(10.5, 0)]}
+    fb = {'avoid': [dict(here, lane='P', end=0), dict(here, lane='GONE', end=0), dict(here, lane='GONE', end=1)],
+          'pairs': [[dict(here, lane='P', end=1), dict(here, lane='GONE', end=1)]]}
+    avoid, prs = we.fb_tables(fb, T, B)
+    if set(avoid) != {('P', 0)} or abs(avoid[('P', 0)].get(0, 0.0) - 1.0) > 1e-9:
+        fails.append(f'fb_tables: {avoid} -- want P\'s tooth priced, no key for a lane with no options (GONE)')
+    if prs:
+        fails.append(f'fb_tables: a pair of items one of whose lanes has no options priced: {prs}')
+    fb2 = {'pairs': [[dict(here, lane='P', end=0), dict(here, lane='P', end=0)]]}
+    if len(we.fb_tables(fb2, T, B)[1]) != 1:
+        fails.append('fb_tables: a pair of items naming options of one end not priced')
 
     # 6. the exact ranking
     s_fail, s_ok = {'A': (0, 0)}, {'A': (1, 0)}
     parts = {tuple(sorted(s_fail.items())): (1.0, {'exact_failed': True}),
              tuple(sorted(s_ok.items())): (3.0, {'exact_failed': False})}
+    # (best_exact routes the candidates at once, each on a copy: the memo it keys by the lanes, the cut and the prices)
     fake = NS(pool={k: v[0] for k, v in parts.items()},
-              score=lambda s, exact=False: parts[tuple(sorted(s.items()))])
+              score=lambda s, exact=False: parts[tuple(sorted(s.items()))],
+              lanes=[('A', ('A',))], wcut=None, unpriced=None, _memo={}, _parts={},
+              _keep_parts=lambda key, p: None)
     we._fmt = lambda p: str(p)         # (its log line formats a whole parts record; these carry one key)
     got = we.Ends.best_exact(fake, dict(s_fail), log=lambda *a: None)[0]
     if got != s_ok:

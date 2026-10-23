@@ -1369,13 +1369,34 @@ class QFNOptionsPanel(wx.ScrolledWindow):
         self.qfn_track_width.SetToolTip("QFN fanout track width (CLI qfn_fanout --width, default 0.1)")
         grid.Add(self.qfn_track_width, 0, wx.EXPAND)
 
+        # #1328: a "checkbox + spinctrl" override row like the Basic tab's
+        # floors. Unchecked (the default) = the board's Default net-class
+        # clearance, qfn_fanout.py's omitted --clearance, resolved by the same
+        # qfn_fanout.resolve_qfn_clearance and capped by the Basic tab's
+        # Clearance ceiling; checked = the typed value (--clearance).
         rc = defaults.PARAM_RANGES['clearance']
         grid.Add(wx.StaticText(self, label="Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        clr_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.qfn_clearance_check = wx.CheckBox(self, label="")
+        self.qfn_clearance_check.SetValue(False)
+        self.qfn_clearance_check.SetToolTip(
+            "Override the escape clearance (unchecked = use the board's Default "
+            "net-class clearance, as qfn_fanout.py does without --clearance).")
+        self.qfn_clearance_check.Bind(
+            wx.EVT_CHECKBOX,
+            lambda evt: self.qfn_clearance.Enable(self.qfn_clearance_check.GetValue()))
         self.qfn_clearance = wx.SpinCtrlDouble(self, min=rc['min'], max=rc['max'],
                                                initial=defaults.QFN_CLEARANCE, inc=rc['inc'])
         self.qfn_clearance.SetDigits(rc['digits'])
-        self.qfn_clearance.SetToolTip("QFN fanout clearance (CLI qfn_fanout --clearance, default 0.1)")
-        grid.Add(self.qfn_clearance, 0, wx.EXPAND)
+        self.qfn_clearance.SetToolTip(
+            "QFN fanout clearance (CLI qfn_fanout --clearance). Used only when "
+            "the box is checked; otherwise the board's Default net-class "
+            "clearance. A pad that cannot escape at it escalates lower when "
+            "the Basic tab's Escalation allows (#1328).")
+        self.qfn_clearance.Enable(False)
+        clr_sizer.Add(self.qfn_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        clr_sizer.Add(self.qfn_clearance, 1, wx.EXPAND)
+        grid.Add(clr_sizer, 0, wx.EXPAND)
 
         # Extension parameter
         r = defaults.PARAM_RANGES['qfn_extension']
@@ -1416,10 +1437,12 @@ class QFNOptionsPanel(wx.ScrolledWindow):
     def get_config(self):
         """Get the configuration values (QFN-specific only, shared params come from Basic tab)."""
         return {
-            # #381 D7: QFN-tuned width/clearance (own controls, default 0.1/0.1)
-            # override the Basic-tab shared values in _run_qfn_fanout.
+            # #381 D7: QFN-tuned width/clearance (own controls) override the
+            # Basic-tab shared values in _run_qfn_fanout. #1328: clearance None
+            # = the box unchecked = the board's Default class (resolved there).
             'track_width': self.qfn_track_width.GetValue(),
-            'clearance': self.qfn_clearance.GetValue(),
+            'clearance': (self.qfn_clearance.GetValue()
+                          if self.qfn_clearance_check.GetValue() else None),
             'extension': self.extension.GetValue(),
             'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'stub',
             'allow_via_in_pad': self.allow_via_in_pad.GetValue(),
@@ -1593,6 +1616,12 @@ class FanoutTab(wx.Panel):
         self._cancel_requested = False
         self._operation_result = None
         self._operation_error = None
+        # One fanout is one independent operation, as on the CLI (a fresh
+        # process): the floor its writeback records is the clearance it ran at
+        # lowered only by what IT escalated to (#1328), never by an earlier
+        # tab's run. The routing, diff and planes tabs reset the same way.
+        import clearance_ledger
+        clearance_ledger.reset()
         self.fanout_btn.Disable()
         self.close_btn.SetLabel("Cancel")
         self.status_text.SetLabel(label)
@@ -1636,6 +1665,10 @@ class FanoutTab(wx.Panel):
                         footprint, self.pcb_data, **kwargs)
                     vias_to_remove = None
                     skipped = list(qfn_fanout.LAST_CANCEL_SKIPPED)
+                # #857: the Design rules line bga_fanout.py / qfn_fanout.py
+                # print (the exit code is the CLI's alone).
+                from fab_tiers import finish_design_rules
+                finish_design_rules(None, 0)
                 self._operation_result = {
                     'tracks': tracks, 'vias': vias, 'failed': failed,
                     'vias_to_remove': vias_to_remove, 'skipped': skipped}
@@ -1977,11 +2010,21 @@ class FanoutTab(wx.Panel):
         # Get shared parameters from Basic tab
         shared = self.get_shared_params() if self.get_shared_params else {}
         from fab_tiers import set_fab_tier_from_config
-        # #381 D7: QFN width/clearance come from the QFN panel's own controls
-        # (default 0.1/0.1 = qfn_fanout.py's CLI defaults), NOT the Basic-tab
-        # 0.3/0.25 that BGA/route use. `config` is the QFN options config.
+        # #381 D7: QFN width/clearance come from the QFN panel's own controls,
+        # NOT the Basic-tab 0.3/0.25 that BGA/route use. `config` is the QFN
+        # options config.
         track_width = config.get('track_width', defaults.QFN_TRACK_WIDTH)
-        clearance = config.get('clearance', defaults.QFN_CLEARANCE)
+        # #1328: the panel's clearance override, else the board's Default
+        # class, capped by the Basic tab's Clearance ceiling -- the resolver
+        # qfn_fanout.py's main uses for --clearance / --clearance-ceiling.
+        from qfn_fanout import resolve_qfn_clearance
+        clearance, _clr_lines = resolve_qfn_clearance(
+            config.get('clearance'), shared.get('default_class_clearance'),
+            shared.get('clearance_ceiling'))
+        for _l in _clr_lines:
+            print(f"QFN fanout: {_l}")
+            if self.append_log:
+                self.append_log(f"QFN fanout: {_l}")
         # #530: the escalation policy's stale-minimum rule must see THIS run's
         # width and clearance -- the QFN panel's, not the Basic tab's -- or a
         # stock 0.2 mm board minimum pins 0.1 mm escape stubs up to 0.2
@@ -2025,6 +2068,9 @@ class FanoutTab(wx.Panel):
             board_edge_clearance=shared.get('board_edge_clearance', 0.0),
             # #581: the Basic tab's via-in-pad policy, as the BGA path.
             same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
+            # #1318: the route tab's power nets (qfn_fanout.py --power-nets).
+            power_nets=shared.get('power_nets'),
+            power_nets_widths=shared.get('power_nets_widths'),
             # See the BGA path: safe from the worker via ui_thread_status.
             # Only the counted x/N lines reach the status feed -- the
             # uncounted phase chatter (gridding, staging, ...) is log-only.
@@ -2050,6 +2096,8 @@ class FanoutTab(wx.Panel):
                 'fix_drc_settings': shared.get('fix_drc_settings', True),
                 # #581: recorded at the step boundary, as qfn_fanout records it.
                 'same_net_pad_clearance': shared.get('same_net_pad_clearance', -1.0),
+                # the part, for the completion message's failure split
+                'footprint_ref': footprint.reference,
             },
             fanout_kind='qfn',
         )
@@ -2147,10 +2195,10 @@ class FanoutTab(wx.Panel):
             via.SetDrill(mm_to_iu(via_dict['drill']))
             via.SetNetCode(via_dict['net_id'])
             if 'layers' in via_dict and len(via_dict['layers']) >= 2:
-                via.SetLayerPair(
-                    get_layer_id(via_dict['layers'][0]),
-                    get_layer_id(via_dict['layers'][1])
-                )
+                from .gui_utils import set_via_layers
+                set_via_layers(via, get_layer_id(via_dict['layers'][0]),
+                               get_layer_id(via_dict['layers'][1]),
+                               via_dict.get('via_type'))
             # Keep a re-placed via's own tenting/plugging/filling (#489 §8).
             from .gui_utils import apply_via_protection
             apply_via_protection(via, via_dict.get('tenting_attrs'))
@@ -2280,13 +2328,13 @@ class FanoutTab(wx.Panel):
             msg += "\n" + cap_summary + "\n"
         if failed_nets:
             if fanout_kind == 'qfn':
-                msg += f"\nNets whose stubs are too close to neighbours ({len(failed_nets)}):\n"
+                unescaped, flagged = self._qfn_failure_split(failed_nets, tracks,
+                                                             vias, fanout_config or {})
+                msg += self._net_list("Failed nets, a pad left with no copper", unescaped)
+                msg += self._net_list("Nets whose stubs are too close to neighbours",
+                                      flagged)
             else:
-                msg += f"\nFailed nets ({len(failed_nets)}):\n"
-            for name in failed_nets[:8]:
-                msg += f"  - {name}\n"
-            if len(failed_nets) > 8:
-                msg += f"  ... and {len(failed_nets) - 8} more (see Log tab)\n"
+                msg += self._net_list("Failed nets", failed_nets)
             try:
                 from routing_diagnostics import (
                     suggest_bga_fanout_adjustments,
@@ -2308,12 +2356,6 @@ class FanoutTab(wx.Panel):
                 print(f"Warning: failed to build fanout suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
-        # Routing movie (#506): snapshot the board this step just produced,
-        # BEFORE the completion popup blocks on the user. No-op unless the
-        # Advanced tab's "Make routing movie" box is ticked.
-        from .movie_recorder import record_movie_step
-        record_movie_step(self, 'fanout')
-
         if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
             print(msg)  # unattended plan run: no per-step OK dialog
         else:
@@ -2322,6 +2364,33 @@ class FanoutTab(wx.Panel):
         # Callback
         if self.on_fanout_complete:
             self.on_fanout_complete()
+
+    @staticmethod
+    def _net_list(title, names):
+        """A completion message's list of nets: its title and count, eight
+        names, and how many more; '' for none."""
+        if not names:
+            return ""
+        out = f"\n{title} ({len(names)}):\n" + "".join(f"  - {n}\n" for n in names[:8])
+        if len(names) > 8:
+            out += f"  ... and {len(names) - 8} more (see Log tab)\n"
+        return out
+
+    def _qfn_failure_split(self, failed_nets, tracks, vias, fanout_config):
+        """(unescaped, flagged): the QFN engine's failed list split as
+        qfn_fanout's main splits it (`bga_fanout.unserved_nets`). A net is a
+        failure only while one of its pads has no copper; the rest escaped,
+        with stubs ending too close to a neighbour's. Without the part, every
+        name stays a failure."""
+        ref = fanout_config.get('footprint_ref')
+        fp = (self.pcb_data.footprints.get(ref)
+              if ref and getattr(self, 'pcb_data', None) is not None else None)
+        if fp is None:
+            return list(failed_nets), []
+        from bga_fanout import unserved_nets
+        unescaped = unserved_nets(fp, self.pcb_data, sorted(set(failed_nets)), tracks,
+                                  vias, fanout_config.get('track_width') or 0.0)
+        return unescaped, sorted(set(failed_nets) - set(unescaped))
 
     def _optimize_decoupling_caps(self, board, pcbnew, fanout_config):
         """Run the fanout-clearance cap repair on the live board (#130).
@@ -2533,6 +2602,8 @@ class FanoutTab(wx.Panel):
                 # of the round trip does not currently carry a spec at all.
                 # #751.
                 moved_attrs = vd.get('tenting_attrs')
+                # The moved via's type: the dict's, else the live via's own.
+                moved_type = vd.get('via_type')
                 for track in list(board.GetTracks()):
                     if track.GetClass() != 'PCB_VIA':
                         continue
@@ -2557,6 +2628,9 @@ class FanoutTab(wx.Panel):
                                     via_protection_attrs_from_board_file(board))
                             except Exception:
                                 moved_attrs = None
+                        if moved_type is None:
+                            from kicad_parser import pcbnew_via_type
+                            moved_type = pcbnew_via_type(track)
                         board.RemoveNative(track)
                         break
                 nv = pcbnew.PCB_VIA(board)
@@ -2566,8 +2640,9 @@ class FanoutTab(wx.Panel):
                 nv.SetDrill(mm_to_iu(vd['drill']))
                 nv.SetNetCode(vd['net_id'])
                 if len(vd.get('layers', [])) >= 2:
-                    nv.SetLayerPair(_layer_id(vd['layers'][0]),
-                                    _layer_id(vd['layers'][1]))
+                    from .gui_utils import set_via_layers
+                    set_via_layers(nv, _layer_id(vd['layers'][0]),
+                                   _layer_id(vd['layers'][1]), moved_type)
                 from .gui_utils import apply_via_protection
                 apply_via_protection(nv, moved_attrs)
                 board.Add(nv)

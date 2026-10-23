@@ -16,6 +16,7 @@ pitch is the rules' track plus the pair gap.
 
     BRAID_PAIRS=1     the pair member (default off: the braid byte-identical)
 """
+import bisect
 import math
 import awx_settings
 import re
@@ -76,6 +77,21 @@ def via_ring(cfg, extra: float = 0.0, size: float = None) -> float:
     size = cfg.via_size if size is None else size
     return (math.ceil((size / 2 + cfg.track_width / 2 + cfg.clearance + extra) / cfg.grid_step)
             + 0.25) * cfg.grid_step
+
+
+def svia_reach(cfg, x: float, y: float, size: float) -> float:
+    """(SVIA_RING) how far a via ON THE BOARD (another net's: a dog-bone, a stitch) reaches for a planned lane,
+    as a disc's radius that the stages' lane bars (half a track and the clearance, and their grid allowance) are
+    added to: the router keeps a track's grid cells off it by its RING about the grid point it rounds to (via_ring,
+    the via's own size), and as far again as it stands off that point. Planned at the copper's bar alone, a lane met
+    the ring in the snap (zynq LVDS K40: EN_AGC 0.408 off VCC_1V8's dog-bone at U1's corner, the geometry, the polish
+    and the audit asking 0.4025, the ring 0.417 -- one free column, closed where its neighbour's share began). Off
+    (SVIA_RING=0), the via's own radius"""
+    if (awx_settings.get('SVIA_RING') or '1') != '1':
+        return size / 2
+    g = cfg.grid_step
+    off = math.hypot(x - round(x / g) * g, y - round(y / g) * g)
+    return max(size / 2, via_ring(cfg, size=size) + off - cfg.track_width / 2 - cfg.clearance)
 
 
 def pad_corner_radius(pad) -> float:
@@ -149,6 +165,43 @@ def stair_spread(cfg, dx: float, dy: float) -> float:
     else:
         H = R; D = H * t / (1 - t)
     return H * D / (H + D) * math.cos(a)
+
+
+STAIR_WINDOW = 8     # the chord a pair's heading is read on, either side of a point, in turns' runs (stair_dev)
+
+
+def stair_dev(cfg, xy) -> List[float]:
+    """How far the pair router's STAIRCASE can stand off a pair's planned line, at each point of the line `xy` (a
+    polyline, board mm): half the smallest staircase along the heading there (stair_spread), read on the chord
+    STAIR_WINDOW turns' runs of the line either side -- and no more than half how far that chord runs across the
+    router heading nearest it, since a line straying less than a staircase's step is laid straight along that heading.
+    0 on a router heading. A single beside the pair is laid against the staircase, not the line: two pairs planned
+    0.40 either side of h616's SDQM2 at a 12-degree slant were laid 0.30 from it at the same place, and the lane between
+    them, the bar 0.34, had no path"""
+    if len(xy) < 2:
+        return [0.0] * len(xy)
+    w = STAIR_WINDOW * (turn_straight_steps(cfg) + 1) * cfg.grid_step
+    s = [0.0]
+    for (x0, y0), (x1, y1) in zip(xy, xy[1:]):
+        s.append(s[-1] + math.hypot(x1 - x0, y1 - y0))
+
+    def at(t):
+        t = min(max(t, 0.0), s[-1])
+        i = min(max(bisect.bisect_right(s, t) - 1, 0), len(xy) - 2)
+        L = s[i + 1] - s[i]
+        f = 0.0 if L < 1e-12 else (t - s[i]) / L
+        return xy[i][0] + (xy[i + 1][0] - xy[i][0]) * f, xy[i][1] + (xy[i + 1][1] - xy[i][1]) * f
+    out = []
+    for si in s:
+        (ax, ay), (bx, by) = at(si - w), at(si + w)
+        dx, dy = bx - ax, by - ay
+        c = math.hypot(dx, dy)
+        if c < 1e-9:
+            out.append(0.0)
+            continue
+        a = math.atan2(abs(dy), abs(dx)) % (math.pi / 4)
+        out.append(min(stair_spread(cfg, dx, dy), c * math.sin(min(a, math.pi / 4 - a))) / 2)
+    return out
 
 
 def via_straight(cfg, u) -> float:

@@ -3,8 +3,8 @@
 All four seams exist so a PLACEMENT renderer can reuse this copper renderer
 instead of copying it -- the issue's binding instruction is "reuse as much of
 the existing image/movie creation code as possible". This file's job is the
-other half of that bargain: proving the seams changed nothing for the four
-existing callers (`route.py --preview-png`, `animate_route`, `render_run`,
+other half of that bargain: proving the seams changed nothing for the
+existing callers (`route.py --preview-png`, `render_run`,
 `render_board_file`).
 
 Deliberately NOT a committed golden-image hash. Pillow's LANCZOS resampling and

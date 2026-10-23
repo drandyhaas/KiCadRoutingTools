@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """#1251: a differential pair that runs through per-leg series parts.
 
-`placement_score`'s `pair_length` read `board_context`'s pair rows, and a row
-existed only for two parts that each carry BOTH nets of a pair. A pair through
-AC caps or USB series resistors has no such two parts, so ulx3s (14 pairs),
-rp2350_fpga_eensy_prePlane and cap_chain scored nothing -- and said
-"list_nets.find_differential_pairs found no differential pair", which was
-false. orangecrab_ext_pll scored its DDR pairs and missed the longer USB pair.
-A raised pair branch read the same, because its row's scope `pair` failed the
-`startswith('pair ')` filter.
+`board_context`'s pair rows existed only for two parts that each carry BOTH
+nets of a pair. A pair through AC caps or USB series resistors has no such two
+parts, so ulx3s (14 pairs), rp2350_fpga_eensy_prePlane and cap_chain had no
+pair row at all, and orangecrab_ext_pll had its DDR pairs and missed the
+longer USB pair.
 
 Underneath, `diff_xnet.find_ac_coupled_xnets` (#196) -- the router's junction
 rule, reused here -- counted `fp.pads`, so a 0201 resistor drawn with two
@@ -25,19 +22,15 @@ Pinned here:
     carry whole is said rather than chosen;
   * `pair_order.composed_pair_metrics` IS `pair_metrics` when the two ends
     name the same nets, and reverses its verdict when one end's legs swap;
-  * `pair_length`'s four reasons are distinct and counted, the bare-`pair`
-    error row is read, and the basis names the rule;
-  * the tracked boards reproduce the issue's leg table (P / N / |P-N|).
+  * the tracked boards reproduce the issue's leg table (P / N / |P-N|), and
+    the pair census names the pairs left out and why.
 
 Run: python3 -X utf8 tests/test_1251_series_part_pairs.py
 """
 import contextlib
 import io
-import json
 import os
-import subprocess
 import sys
-import tempfile
 import unittest
 from types import SimpleNamespace
 
@@ -50,9 +43,8 @@ from kicad_parser import parse_kicad_pcb                       # noqa: E402
 from diff_xnet import find_ac_coupled_xnets                    # noqa: E402
 from net_queries import find_differential_pairs                # noqa: E402
 from routing_config import DiffPairNet                         # noqa: E402
-from run_utils import evidence, tool_env                       # noqa: E402
+from run_utils import evidence                                 # noqa: E402
 import board_context                                           # noqa: E402
-import placement_score as ps                                   # noqa: E402
 
 BOARDS = os.path.join(ROOT, 'kicad_files')
 RP = os.path.join(BOARDS, 'rp2350_fpga_eensy_prePlane.kicad_pcb')
@@ -63,7 +55,7 @@ ESP = os.path.join(BOARDS, 'esp_prog.kicad_pcb')
 QFN = os.path.join(BOARDS, 'qfn_diffpair_escape.kicad_pcb')
 
 _PCB = {}
-_TERMS = {}
+_ROWS = {}
 
 
 def _pcb(path):
@@ -81,25 +73,22 @@ def _xnet_refs(path):
     return sorted(x.bridge_refs for x in xnets)
 
 
-def _pair_length(path):
-    """`pair_length` as the CLI publishes it."""
-    if path not in _TERMS:
-        evidence(path, 'tracked board')
-        with tempfile.TemporaryDirectory(prefix='t1251_') as tmp:
-            out = os.path.join(tmp, 'ps.json')
-            r = subprocess.run(
-                [sys.executable, '-X', 'utf8',
-                 os.path.join(ROOT, 'py_placer', 'placement_score.py'), path,
-                 '--json', out], capture_output=True, text=True,
-                encoding='utf-8', errors='replace', cwd=ROOT, env=tool_env(),
-                timeout=900)
-            if r.returncode != 0:
-                raise AssertionError(f'placement_score exit {r.returncode} on '
-                                     f'{path}: {r.stderr[-800:]}')
-            with open(evidence(out, 'placement_score output'),
-                      encoding='utf-8') as fh:
-                _TERMS[path] = json.load(fh)['terms']['pair_length']
-    return _TERMS[path]
+def _pair_rows(path):
+    """`board_context.pin_order_rows`' document on a tracked board."""
+    if path not in _ROWS:
+        from list_nets import board_floor_knobs
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            _ROWS[path] = board_context.pin_order_rows(
+                _pcb(path), path, board_floor_knobs(path, clearance=None)[0])
+    return _ROWS[path]
+
+
+def _spanned(path):
+    """The pair-scoped rows that carry a span, as `scope` `pair A/B...`."""
+    return [r for r in _pair_rows(path)['rows']
+            if str(r.get('scope') or '').startswith('pair ')
+            and isinstance(r.get('span_mm'), (int, float))]
 
 
 def _state(path):
@@ -268,70 +257,6 @@ class TheComposedVerdict(unittest.TestCase):
                                  crossed['inversions'])), [0, 1])
 
 
-# --------------------------------------------------------------- the term
-
-def _row(scope, span=None, **kw):
-    r = {'a': 'A', 'b': 'B', 'nets': 2, 'scope': scope, 'span_mm': span,
-         'verdict': 'AGREES', 'inversions': 0}
-    r.update(kw)
-    return r
-
-
-class ThePairLengthReasons(unittest.TestCase):
-
-    def test_a_raised_branch_is_named_not_read_as_no_pair(self):
-        # The issue's own document, verbatim.
-        r = ps.pair_length({'error': None, 'rows': [
-            {'a': '-', 'b': '-', 'nets': 0, 'scope': 'pair',
-             'span_mm': None, 'verdict': 'NOT MEASURED (KeyError)'}]})
-        self.assertIs(r['ran'], False)
-        self.assertIsNone(r['value'])
-        self.assertIn('raised (KeyError)', r['reason'])
-        self.assertNotIn('found no differential pair', r['reason'])
-        # With rows measured before it, the population is still incomplete.
-        r = ps.pair_length({'error': None, 'rows': [
-            _row('pair X+/X-', 3.0),
-            {'a': '-', 'b': '-', 'nets': 0, 'scope': 'pair', 'span_mm': None,
-             'verdict': 'NOT MEASURED (TypeError)',
-             'error': 'the composed pairs: TypeError: boom'}]})
-        self.assertIs(r['ran'], False)
-        self.assertIn('TypeError: boom', r['reason'])
-        self.assertIn('1 pair row(s) were measured before it', r['reason'])
-
-    def test_found_but_not_carried_names_the_pairs(self):
-        r = ps.pair_length({'error': None, 'rows': [], 'pairs': {
-            'found': [['X+', 'X-'], ['Y+', 'Y-']],
-            'not_measured': [
-                {'pair': 'X+/X-', 'why': 'carried whole by U1 only'},
-                {'pair': 'Y+/Y-', 'why': 'no part carries both nets'}]}})
-        self.assertIs(r['ran'], False)
-        self.assertIn('found 2 pair(s)', r['reason'])
-        self.assertIn('X+/X- (carried whole by U1 only)', r['reason'])
-        self.assertEqual(r['pairs_found'], 2)
-
-    def test_no_pair_found_is_said_only_when_the_census_says_so(self):
-        r = ps.pair_length({'error': None, 'rows': [],
-                            'pairs': {'found': [], 'not_measured': []}})
-        self.assertIn('found no differential pair', r['reason'])
-        r = ps.pair_length({'error': None, 'rows': []})
-        self.assertNotIn('found no differential pair', r['reason'])
-        self.assertIn('no pair census', r['reason'])
-
-    def test_rows_without_a_span_keep_their_own_reason(self):
-        r = ps.pair_length({'error': None, 'rows': [_row('pair X+/X-')]})
-        self.assertIn('none carries a span_mm', r['reason'])
-
-    def test_the_basis_names_the_rule_so_an_old_lap_is_not_judged(self):
-        r = ps.pair_length({'error': None, 'rows': [_row('pair X+/X-', 3.0)]})
-        self.assertEqual(r['basis'],
-                         [ps.PAIR_LENGTH_BASIS, 'A~B pair X+/X-'])
-        old = dict(r, basis=None)
-        verdict, detail = ps.compare_terms({'pair_length': old},
-                                           {'pair_length': r})
-        self.assertEqual(verdict, 'no-common-terms')
-        self.assertEqual(detail[0]['why'], 'the basis moved')
-
-
 # ------------------------------------------------------- the tracked boards
 
 #: The issue's table: composed pair -> (ends, series P, series N, P, N, |P-N|).
@@ -350,66 +275,47 @@ class TheTrackedBoards(unittest.TestCase):
 
     def test_the_issues_leg_table_is_reproduced(self):
         for path, want in TABLE.items():
-            t = _pair_length(path)
-            got = {(p['a'], p['b'], tuple(p['series']['P']),
-                    tuple(p['series']['N'])):
-                   (p['legs_mm']['P'], p['legs_mm']['N'], p['leg_skew_mm'])
-                   for p in t['pairs'] if p.get('composed')}
+            got = {(r['a'], r['b'], tuple(r['series']['P']),
+                    tuple(r['series']['N'])):
+                   (r['legs_mm']['P'], r['legs_mm']['N'], r['leg_skew_mm'])
+                   for r in _spanned(path) if r.get('composed')}
             for a, b, sp, sn, lp, ln, skew in want:
                 with self.subTest(board=os.path.basename(path), series=sp):
                     self.assertEqual(got.get((a, b, tuple(sp), tuple(sn))),
                                      (lp, ln, skew), sorted(got))
 
-    def test_every_composed_board_now_measures(self):
-        want = {ULX: (48.122, 6), RP: (7.017, 1), CAP: (16.523, 1),
-                OC: (23.152, 1)}
-        for path, (value, composed) in want.items():
-            t = _pair_length(path)
+    def test_every_composed_board_now_has_its_rows(self):
+        want = {ULX: 6, RP: 1, CAP: 1, OC: 1}
+        for path, composed in want.items():
             with self.subTest(board=os.path.basename(path)):
-                self.assertIs(t['ran'], True, t['reason'])
-                self.assertEqual((t['value'], t['composed']),
-                                 (value, composed))
-        # orangecrab's DDR rows are still there, and the USB pair outranks
-        # the old worst (18.289, RN6~U3 RAM_CK) it used to be missing from.
-        oc = _pair_length(OC)
+                self.assertEqual(
+                    sum(1 for r in _spanned(path) if r.get('composed')),
+                    composed)
+        # orangecrab's DDR rows are still there beside the composed USB pair.
         self.assertIn(('RN6', 'U3', 18.289),
-                      [(p['a'], p['b'], p['span_mm']) for p in oc['pairs']])
-        self.assertTrue(oc['worst_pair'].startswith('J3~U3 pair '))
+                      [(r['a'], r['b'], r['span_mm']) for r in _spanned(OC)])
 
     def test_the_pairs_left_out_are_named_with_why(self):
-        ulx = _pair_length(ULX)
-        self.assertEqual(ulx['pairs_found'], 14)
+        census = _pair_rows(ULX)['pairs']
+        self.assertEqual(len(census['found']), 14)
         self.assertEqual(
-            [(p['pair'], p['carried_whole_by']) for p in ulx['not_measured']],
+            [(p['pair'], p['carried_whole_by'])
+             for p in census['not_measured']],
             [('/serdes/SRCLKP//serdes/SRCLKN', ['U1']),
              ('USB_FPGA_PULL_D+/USB_FPGA_PULL_D-', ['U1'])])
-        qfn = _pair_length(QFN)
-        self.assertIs(qfn['ran'], False)
-        self.assertIn('found 2 pair(s), but none is carried whole',
-                      qfn['reason'])
+        qfn = _pair_rows(QFN)
+        self.assertEqual(len(qfn['pairs']['found']), 2)
+        self.assertEqual(_spanned(QFN), [])
 
     def test_rp2350s_row_says_where_it_stops(self):
-        (row,) = [p for p in _pair_length(RP)['pairs'] if p.get('composed')]
+        (row,) = [r for r in _spanned(RP) if r.get('composed')]
         self.assertEqual([(s['ref'], s['copper_pads'])
                           for s in row['stops_at']], [('U3', 6), ('U6', 71)])
         self.assertIn('stops at U3', row['note'])
         self.assertIn('not followed', row['note'])
 
-    def test_the_term_publishes_board_contexts_rows(self):
-        """Called, not mirrored: the composed rows are board_context's own."""
-        from list_nets import board_floor_knobs
-        with contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
-            theirs = board_context.pin_order_rows(
-                _pcb(RP), RP, board_floor_knobs(RP, clearance=None)[0])
-        want = sorted((r['a'], r['b'], r['scope'], r['span_mm'])
-                      for r in theirs['rows']
-                      if str(r.get('scope')).startswith('pair ')
-                      and isinstance(r.get('span_mm'), (int, float)))
-        got = sorted((p['a'], p['b'], p['scope'], p['span_mm'])
-                     for p in _pair_length(RP)['pairs'])
-        self.assertEqual(got, want)
-        self.assertEqual(theirs['pairs']['composed'], [
+    def test_the_census_names_the_composed_pairs(self):
+        self.assertEqual(_pair_rows(RP)['pairs']['composed'], [
             '/Power Supply and USB/D+//Power Supply and USB/D-',
             '/RP2354A/USB_D+//RP2354A/USB_D-'])
 

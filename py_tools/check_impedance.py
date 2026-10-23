@@ -212,6 +212,44 @@ def reference_layers_for(pcb) -> Dict[str, List[str]]:
 # Copper occupancy on one layer, from the zone fill models
 # =============================================================================
 
+def _overlapping_components(ma, mb) -> List[Tuple[int, int]]:
+    """(component of `ma`, component of `mb`) for every pair of fill
+    components of two pour models that share copper. Sampled at the cell
+    centres of the finer of the two grids, over their common extent -- the
+    same cell-centre reading `ZoneFillModel.query_component` gives a probe."""
+    import numpy as np
+    la_all = getattr(ma, 'labels', None)
+    lb_all = getattr(mb, 'labels', None)
+    if la_all is None or lb_all is None:
+        return []
+    swap = mb.cell < ma.cell
+    f, c = (mb, ma) if swap else (ma, mb)          # f: the finer grid
+    lo_x, hi_x = max(f.x0, c.x0), min(f.x0 + f.nx * f.cell, c.x0 + c.nx * c.cell)
+    lo_y, hi_y = max(f.y0, c.y0), min(f.y0 + f.ny * f.cell, c.y0 + c.ny * c.cell)
+    if hi_x <= lo_x or hi_y <= lo_y:
+        return []
+    fi = np.arange(max(0, int((lo_x - f.x0) / f.cell)),
+                   min(f.nx, int(math.ceil((hi_x - f.x0) / f.cell))))
+    fj = np.arange(max(0, int((lo_y - f.y0) / f.cell)),
+                   min(f.ny, int(math.ceil((hi_y - f.y0) / f.cell))))
+    ci = np.floor((f.x0 + (fi + 0.5) * f.cell - c.x0) / c.cell).astype(np.int64)
+    cj = np.floor((f.y0 + (fj + 0.5) * f.cell - c.y0) / c.cell).astype(np.int64)
+    okx = (ci >= 0) & (ci < c.nx)
+    oky = (cj >= 0) & (cj < c.ny)
+    fi, ci, fj, cj = fi[okx], ci[okx], fj[oky], cj[oky]
+    if not len(fi) or not len(fj):
+        return []
+    lf = f.labels[np.ix_(fi, fj)].astype(np.int64)
+    lc = c.labels[np.ix_(ci, cj)].astype(np.int64)
+    both = (lf > 0) & (lc > 0)
+    if not both.any():
+        return []
+    base = int(lc.max()) + 1
+    pairs = np.unique(lf[both] * base + lc[both])
+    out = [(int(p // base), int(p % base)) for p in pairs]
+    return [(b, a) for a, b in out] if swap else out
+
+
 class LayerCopper:
     """Filled-pour occupancy for one copper layer.
 
@@ -220,6 +258,13 @@ class LayerCopper:
     per-net-class clearances). Component ids matter as much as presence: a
     trace that stays over copper but moves from one fill COMPONENT to another
     has still crossed a slot, and its return current still has to detour.
+
+    A fill component is the copper, not the zone that drew it (#1299): where
+    two pours of the SAME net overlap on the layer their fills are one sheet
+    of copper, so the components that overlap are one reference. Keyed by
+    zone, a trace passing from one such pour's fill to the other's read as a
+    split -- 64 phantom splits on a CM5 board whose GND plane was stacked on a
+    same-net pour, and none once the stale pour was deleted.
     """
 
     def __init__(self, pcb, layer: str):
@@ -229,6 +274,9 @@ class LayerCopper:
         # tested at CELL CENTRES, so a distance probe first reports copper half
         # a cell late on average; callers de-bias with this.
         self.cell: float = 0.0
+        # (zone index, component) -> the key of the copper it belongs to; only
+        # components merged with another pour's are listed.
+        self._same_copper: Dict[Tuple[int, int], Tuple[int, int]] = {}
         zones = getattr(pcb, 'zones', None) or []
         try:
             from plane_fill_model import get_zone_model
@@ -246,12 +294,41 @@ class LayerCopper:
             if model is not None:
                 self.entries.append((idx, zone.net_id, model))
                 self.cell = max(self.cell, getattr(model, 'cell', 0.0) or 0.0)
+        self._merge_same_net_overlaps()
+
+    def _merge_same_net_overlaps(self) -> None:
+        """Union every pair of same-net fill components that overlap, keyed to
+        the smallest (zone index, component) of each union so the key does not
+        depend on which pour a probe hits first."""
+        by_net: Dict[int, List[Tuple[int, object]]] = {}
+        for idx, net_id, model in self.entries:
+            by_net.setdefault(net_id, []).append((idx, model))
+        parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
+
+        def find(k):
+            while parent.get(k, k) != k:
+                parent[k] = parent.get(parent[k], parent[k])
+                k = parent[k]
+            return k
+
+        for pours in by_net.values():
+            for a in range(len(pours)):
+                for b in range(a + 1, len(pours)):
+                    ia, ma = pours[a]
+                    ib, mb = pours[b]
+                    for la, lb in _overlapping_components(ma, mb):
+                        ra, rb = find((ia, la)), find((ib, lb))
+                        if ra != rb:
+                            lo, hi = min(ra, rb), max(ra, rb)
+                            parent[hi] = lo
+        self._same_copper = {k: find(k) for k in parent}
 
     def __bool__(self) -> bool:
         return bool(self.entries)
 
     def key_at(self, x: float, y: float) -> Optional[Tuple[int, int]]:
-        """(zone index, fill component) of the pour covering (x, y), else None.
+        """(zone index, fill component) of the copper covering (x, y), else
+        None. Overlapping same-net fills share one key (see the class note).
 
         Deterministic: zones are probed in file order and the first hit wins,
         so two runs over the same board classify a point identically.
@@ -259,7 +336,8 @@ class LayerCopper:
         for idx, _net_id, model in self.entries:
             comp = model.query_component(x, y)
             if comp:
-                return (idx, comp)
+                key = (idx, comp)
+                return self._same_copper.get(key, key)
         return None
 
     def foreign_key_at(self, x: float, y: float,

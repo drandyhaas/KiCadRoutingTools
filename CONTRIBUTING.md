@@ -30,6 +30,10 @@ cd KiCadRoutingTools
 python3 build_router.py        # fetches the prebuilt Rust router for your platform
 ```
 
+When the checkout's Rust crate is newer than the latest release, no prebuilt
+matches and `build_router.py` builds it from source, which needs a
+[Rust toolchain](https://rustup.rs/) (see [rust_router/README.md](rust_router/README.md)).
+
 ### Route it with Claude
 
 Open Claude Code in the repository and point the planning skill at your board:
@@ -40,9 +44,15 @@ Open Claude Code in the repository and point the planning skill at your board:
 
 The skill analyzes the board (fanout needs, differential pairs, power nets,
 plane candidates), proposes a step-by-step plan, runs the commands, and
-verifies the result. The same flow is available inside KiCad via the plugin's
-**AI tab** (*Plan Routing* → *Run Selected Steps*) — see
+verifies the result. The same flow is available inside KiCad on the plugin's
+**AI Drive** tab (*Routing*: *Plan Routing* → *Run Selected Steps*) — see
 [docs/claude-skills.md](docs/claude-skills.md).
+
+Parts not placed yet, or piled off the board? `/plan-pcb-placement full
+path/to/your_board.kicad_pcb` places them by function and then routes the
+board (*AI Drive* → *Placement* → **Place + Route (AI)** in the plugin).
+Placement findings are welcome too: a part left off the outline, overlapping
+courtyards, or a placement that cannot be routed.
 
 Prefer driving it by hand? The full CLI workflow is in the
 [README](README.md) (`bga_fanout.py`, `route.py`, `route_diff.py`,
@@ -95,7 +105,7 @@ A reproducible issue gets fixed ten times faster. Include:
    repro, is the next best thing. Issues without a board are still welcome,
    just slower to act on.
 2. **The exact commands you ran**, in order, with all flags (copy-paste from
-   your shell history), or the plan the AI tab executed. Routing output
+   your shell history), or the plan the AI Drive tab executed. Routing output
    depends heavily on the parameter chain, and re-running the same board at
    different clearances is a different experiment.
 3. **The full output** — the router's summary plus `check_drc.py` /
@@ -132,6 +142,10 @@ approachable. Before you start:
   python3 tests/gui_parity/test_cli_postpass_coverage.py
   ```
 
+  If you add, rename or remove a plugin dialog control, also run
+  `python3 tests/gui_parity/test_settings_roundtrip.py`, which needs KiCad's
+  bundled Python (pcbnew and wx).
+
 ### Verifying a fix
 
 - Reproduce the reported failure **before** the fix, then show it gone
@@ -143,7 +157,10 @@ approachable. Before you start:
   checker counts, never file hashes.
 - Run the test scripts near your change (they're standalone:
   `python3 tests/test_<name>.py`), and `python3 tests/run_doc_examples.py`
-  if you touched documented APIs.
+  if you touched documented APIs. `python3 tests/run_all.py` runs the whole
+  suite (long: about 40 minutes on one laptop; `--fast` skips the board-level
+  tests, and `python3 tests/run_all.py <term>` runs only the files whose name
+  contains the term).
 
 ### The pull request
 
@@ -152,9 +169,11 @@ approachable. Before you start:
 - In the description: the issue number, the board + command chain used to
   reproduce, and before/after checker output.
 - If your change adds an engine parameter or flag, follow the
-  "Claude-settable end to end" checklist in CLAUDE.md (GUI control, plan
-  executor, manifest converter, parity test) — a flag only the CLI knows
-  about silently does nothing in the plugin.
+  "Claude-settable end to end" checklist in CLAUDE.md (every GUI call site, a
+  dialog control named after the parameter and kept in
+  `settings_persistence.py`, the plan executor's `reset_params_to_defaults`,
+  and the `FLAG_PARAMS` map in `tests/stress/manifest_to_plan.py`) — a flag
+  only the CLI knows about silently does nothing in the plugin.
 
 Claude Code is genuinely good at this loop: point it at the issue
 (`gh issue view <n>`), let it reproduce, fix, and verify — CLAUDE.md keeps it

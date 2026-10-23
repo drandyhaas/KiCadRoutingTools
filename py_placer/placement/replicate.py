@@ -6,9 +6,8 @@ mixer's channel strips, one I/O buffer per bank) already carries the
 correspondence between the copies: every footprint's `(path "/<sheet>/
 <symbol>")` ends in the SAME symbol uuid in every instance, and KiCad's own
 "Repeat Layout" maps by it. Nothing in the placement stack used it --
-`place_seed` seeds each sheet on its own, `arrays` (#1051) rows identical
-parts on ONE sheet, `reconstruct` repairs a damaged placement -- so an agent
-that wanted four channels laid out alike wrote its own helper.
+`arrays` (#1051) rows identical parts on ONE sheet -- so an agent that wanted
+four channels laid out alike wrote its own helper.
 
 This module
 
@@ -37,6 +36,11 @@ cannot be asked for. What is asked for, over every mapped pad pair, is
 * a net carried by pads of BOTH instances (a rail, a bus both channels sit
   on) maps to itself;
 * no net maps to no net.
+
+The first two are judged against ONE net map, chosen over all the pad pairs
+at once so that the most of them agree (`net_map`, #1277): which pads break
+it is then the fewest that can, and a strap names itself however early its
+pad comes in pair order.
 
 A pad pair that breaks one is named -- refs, pads and nets -- and the copy is
 refused: the two instances are not interchangeable there, so a geometric
@@ -213,6 +217,84 @@ def members(pcb, prefix: str) -> Dict[str, str]:
     return out
 
 
+def net_map(votes: Dict[Tuple[int, int], int],
+            rank: Dict[Tuple[int, int], int]) -> List[Tuple[int, int]]:
+    """The source -> target net map THE NET RULE judges pads against (#1277):
+    `[(source net, target net), ...]`, one to one.
+
+    `votes[(a, b)]` is how many mapped pad pairs wire source net `a` where
+    the target wires `b`, and `rank[(a, b)]` the position of the first of
+    them in pair order. The map is the one under which the MOST pad pairs
+    agree -- a maximum-weight matching of the votes, so the fewest pads are
+    named -- and among maps that tie, the one whose pairings are met first
+    (taken in rank order, each kept when an optimal map still includes it).
+
+    A map grown first-come instead let one strap claim its net: R2.1
+    strapped to /S2/OUT, met before the two pairs wiring /S1/IN to /S2/IN
+    alike, mapped /S1/IN to /S2/OUT and named the pads that ARE alike. A
+    per-net majority would need tie-breaks across the sides, because a
+    net's pairs can split evenly (there, /S1/IN's split 1 to 1 and only
+    /S1/OUT's two pairs on /S2/OUT settle it); the matching weighs both
+    sides at once, and its one tie-break is the order the pairs are met.
+
+    Only a connected group of COMPETING pairings is solved, so a map with
+    no strap -- every net wired to one net -- is the votes as they stand,
+    and no solver runs."""
+    parent: Dict[Tuple[str, int], Tuple[str, int]] = {}
+
+    def _root(n):
+        while parent.setdefault(n, n) != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    edges = sorted(votes, key=lambda e: rank[e])
+    for a, b in edges:
+        parent[_root(('s', a))] = _root(('t', b))
+    groups: Dict[Tuple[str, int], List[Tuple[int, int]]] = {}
+    for e in edges:
+        groups.setdefault(_root(('s', e[0])), []).append(e)
+    out: List[Tuple[int, int]] = []
+    for group in groups.values():
+        out += group if len(group) == 1 else _first_best(group, votes)
+    return out
+
+
+def _first_best(edges: List[Tuple[int, int]],
+                votes: Dict[Tuple[int, int], int]) -> List[Tuple[int, int]]:
+    """`net_map` on one group of competing pairings, `edges` in rank order:
+    of the maximum-weight matchings, the one that takes the earliest edges."""
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    def _best(es):
+        if not es:
+            return 0
+        src = {a: i for i, a in enumerate(sorted({a for a, _b in es}))}
+        dst = {b: i for i, b in enumerate(sorted({b for _a, b in es}))}
+        w = np.zeros((len(src), len(dst)))
+        for a, b in es:
+            w[src[a], dst[b]] = votes[(a, b)]
+        r, c = linear_sum_assignment(w, maximize=True)
+        return int(round(float(w[r, c].sum())))
+
+    target = _best(edges)
+    live = list(edges)
+    kept: List[Tuple[int, int]] = []
+    got = 0
+    for e in edges:
+        if e not in live:
+            continue
+        rest = [f for f in live if f[0] != e[0] and f[1] != e[1]]
+        if got + votes[e] + _best(rest) == target:
+            kept.append(e)
+            got += votes[e]
+            live = rest
+        else:
+            live.remove(e)
+    return kept
+
+
 def correspond(pcb, src: str, dst: str, *,
                waive: Optional[Dict[Tuple[str, str], str]] = None,
                keys: Optional[Set[str]] = None
@@ -228,8 +310,9 @@ def correspond(pcb, src: str, dst: str, *,
 
     `waive` (`--allow-net-mismatch`): `{(symbol key, pad number): as given}`
     -- pads wired differently BY DESIGN (glasgow's I2C address straps), left
-    out of the net rule entirely: they neither break it nor make a net look
-    shared. Each is reported back with whether the rule needed it
+    out of the net rule entirely: they neither break it, nor make a net look
+    shared, nor vote on the net map. Each is reported back with whether the
+    rule needed it
     (`nets['waived']`). A refusal names the pads it would take, as flags.
 
     `keys` (`--only` / `--skip`): the symbol keys this copy MOVES; None is
@@ -294,6 +377,9 @@ def correspond(pcb, src: str, dst: str, *,
                 for p in fps[ref].pads or ()
                 if (k, p.pad_number) not in waive}
     s_nets, t_nets = _instance_nets(sm), _instance_nets(tm)
+
+    # The map, filled below. EMPTY while the votes are counted, so `_why`
+    # there gives only the reasons a pad pair breaks under ANY map.
     fwd: Dict[int, Tuple[int, str]] = {}
     bwd: Dict[int, Tuple[int, str]] = {}
 
@@ -302,33 +388,47 @@ def correspond(pcb, src: str, dst: str, *,
                                          t, tp.pad_number, _name(tp.net_id))
 
     def _why(a, b):
+        # The pair's own reasons first: they hold under any map (#1277).
         if (a == 0) != (b == 0):
             return 'one pad has no net and the other has one'
-        if a in fwd and fwd[a][0] != b:
-            return '%s already maps to %s (%s)' % (_name(a), _name(fwd[a][0]),
-                                                   fwd[a][1])
-        if b in bwd and bwd[b][0] != a:
-            return '%s is already reached from %s (%s)' % (
-                _name(b), _name(bwd[b][0]), bwd[b][1])
         if a != b and a in t_nets:
             return ('%s is on pads of BOTH instances (a shared net), so it '
                     'must map to itself' % _name(a))
         if a != b and b in s_nets:
             return ('%s is on pads of BOTH instances (a shared net), so only '
                     'itself may map to it' % _name(b))
+        if a in fwd and fwd[a][0] != b:
+            return '%s maps to %s (%s)' % (_name(a), _name(fwd[a][0]),
+                                           fwd[a][1])
+        if b in bwd and bwd[b][0] != a:
+            return '%s is reached from %s (%s)' % (
+                _name(b), _name(bwd[b][0]), bwd[b][1])
         return None
+
+    # THE NET MAP (#1277) is chosen over ALL the pad pairs at once
+    # (`net_map`), not grown first-come: a strap met first claimed its net
+    # (R2.1 strapped to /S2/OUT mapped /S1/IN there), and the refusal named
+    # the pads wired alike. A pair that breaks the rule under any map does
+    # not vote. Each map entry cites the first pad pair that wires it.
+    votes: Dict[Tuple[int, int], int] = {}
+    first: Dict[Tuple[int, int], Tuple[int, str, str]] = {}
+    for i, (s, sp, t, tp, _g) in enumerate(rows):
+        a, b = sp.net_id, tp.net_id
+        if _why(a, b) is None:
+            votes[(a, b)] = votes.get((a, b), 0) + 1
+            first.setdefault((a, b), (i, '%s.%s' % (s, sp.pad_number),
+                                      '%s.%s' % (t, tp.pad_number)))
+    for a, b in net_map(votes, {e: r[0] for e, r in first.items()}):
+        fwd[a] = (b, first[(a, b)][1])
+        bwd[b] = (a, first[(a, b)][2])
 
     breaks = []
     for s, sp, t, tp, _g in rows:
-        a, b = sp.net_id, tp.net_id
-        why = _why(a, b)
+        why = _why(sp.net_id, tp.net_id)
         if why:
             breaks.append({'pads': _at(s, sp, t, tp), 'why': why,
                            'source_pad': '%s.%s' % (s, sp.pad_number),
                            'target_pad': '%s.%s' % (t, tp.pad_number)})
-            continue
-        fwd.setdefault(a, (b, '%s.%s' % (s, sp.pad_number)))
-        bwd.setdefault(b, (a, '%s.%s' % (t, tp.pad_number)))
     if breaks:
         flags = []
         for b in breaks:
@@ -694,41 +794,3 @@ def measure_declared(pcb, decl: Dict) -> List[Dict]:
     return out
 
 
-def apply_declared(board_path: str, intent, *, clearance=None,
-                   board_edge_clearance=None,
-                   group_sources: Sequence[str] = ()) -> List[Dict]:
-    """`place_seed`'s replicate stage (#1211): each `replicate[]`
-    declaration, in order, applied IN PLACE to `board_path` through
-    `pose_ops.apply_poses` -- the engine, the writer, the lock and plug
-    guards, the intent's zone check and the verdict `place_pose replicate
-    --intent` uses. A copy that verdict refuses (it grades worse than the
-    board it would replace, or would move a locked part) is NOT written: the
-    seed stays as it was and the record says why, naming the members that
-    collide. One record per declaration, `applied` True or False."""
-    from placement import pose_ops
-    out = []
-    for i, decl in enumerate(getattr(intent, 'replicate', ()) or ()):
-        rec = {'index': i, 'from': decl['from'], 'to': list(decl['to'])}
-        try:
-            s = pose_ops.apply_poses(
-                board_path, board_path, [declared_op(decl)],
-                clearance=clearance,
-                board_edge_clearance=board_edge_clearance,
-                intent=intent, group_sources=group_sources)
-        except PoseRefusal as exc:
-            summ = exc.extra.get('summary') or {}
-            rec.update(applied=False, code=exc.code, reason=exc.reason,
-                       new_conflicts={n['ref']: n['new_conflicts']
-                                      for n in summ.get('ops') or ()
-                                      if n.get('new_conflicts')})
-            out.append(rec)
-            continue
-        rep = (s.get('replicate') or [{}])[0]
-        rec.update(applied=True, moved=sorted(
-            (n['ref'] for n in s['moved']), key=natural_key),
-            targets=[{'sheet': t['sheet']['name'] or t['sheet']['path'],
-                      'offset': t['offset'], 'pairs': t['pairs'],
-                      'moved': t['moved'], 'search': t.get('search')}
-                     for t in rep.get('to') or ()])
-        out.append(rec)
-    return out

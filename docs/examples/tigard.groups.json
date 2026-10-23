@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "board": "kicad_files/tigard.kicad_pcb",
+  "groups": [
+    {
+      "name": "io",
+      "role": "io",
+      "refs": ["J3", "J4", "J5", "J6", "J7", "SW1", "SW2"],
+      "why": "the target headers (JTAG, UART, SPI, CORTEX, LA, I2C) and the voltage and mode switches; all locked at the board edge"
+    },
+    {
+      "name": "usb_in",
+      "role": "interface",
+      "anchor": "J1",
+      "near": ["power", "core"],
+      "refs": ["J1", "R1", "R2", "R3", "C25"],
+      "why": "the USB-C receptacle with its CC pull-downs (R1, R2) and the shield RC (R3, C25)"
+    },
+    {
+      "name": "power",
+      "role": "power",
+      "near": ["usb_in", "core"],
+      "refs": ["U1", "U2", "C1", "C3", "C26", "C2", "C4", "TP1", "FB3"],
+      "why": "the two AP7365 LDOs (1V8 and 3V3) fed from +5V through the VBUS ferrite FB3, their input caps (C1, C3, C26) and output caps (C2, C4), and the GND test point"
+    },
+    {
+      "name": "core",
+      "role": "core",
+      "anchor": "U3",
+      "near": ["usb_in", "shift_a", "shift_b"],
+      "refs": ["U3", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C5", "C6", "FB1", "C7", "C8", "FB2", "R6", "R7", "U4", "R12", "R13", "R14", "R15"],
+      "why": "the FT2232HQ with its VREG and +3V3 decaps, the VPHY and VPLL ferrite filters, the REF resistor and pull-ups, and the 93LC46 EEPROM with its pull-ups"
+    },
+    {
+      "name": "clock",
+      "role": "clock",
+      "near": ["core"],
+      "refs": ["Y1", "C23", "C24"],
+      "why": "the 12 MHz crystal and its load caps"
+    },
+    {
+      "name": "shift_a",
+      "role": "interface",
+      "anchor": "J2",
+      "near": ["core", "shift_b"],
+      "refs": ["J2", "U5", "RN1", "RN2", "RN3", "RN4", "R18", "R22", "R10", "C21"],
+      "why": "level shifter U5 (SN74LVC8T245) with its pull and series networks; anchored on J2, the header it drives most"
+    },
+    {
+      "name": "shift_b",
+      "role": "interface",
+      "near": ["core", "shift_a"],
+      "refs": ["U6", "RN5", "RN6", "RN7", "RN8", "R19", "R16", "JP2", "C22"],
+      "why": "level shifter U6 (SN74LVC8T245) with its pull and series networks"
+    },
+    {
+      "name": "vref",
+      "role": "power",
+      "near": ["shift_a", "shift_b"],
+      "refs": ["Q1", "D2", "R5", "R17", "R24", "JP1", "R20", "R21"],
+      "why": "the target reference voltage: its sense FET and LED (Q1, D2, R5), its divider and pull-down, its decaps, the ISO jumper and the SPI pull-ups"
+    },
+    {
+      "name": "ui",
+      "role": "ui",
+      "refs": ["D1", "R4", "D3", "R8", "D4", "R9", "D5", "R11"],
+      "why": "the power, RX, TX and enable LEDs with their resistors"
+    }
+  ]
+}

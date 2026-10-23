@@ -4,7 +4,7 @@ Data types for QFN/QFP fanout routing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 from kicad_parser import Pad
 
@@ -57,6 +57,12 @@ class FanoutStub:
     stub_end: Tuple[float, float]    # Final fanned-out endpoint
     side: str
     layer: str = "F.Cu"
+    # #1332: the stub reached a SAME-NET pad and ends on it. `joined_pad`
+    # names it ("REF.PAD"); `join_end`, when set, is a short closing segment
+    # from stub_end into that pad, laid when the deepest contact point is
+    # still outside the copper (a corner graze) so the joint is not a sliver.
+    joined_pad: Optional[str] = None
+    join_end: Optional[Tuple[float, float]] = None
 
     @property
     def net_id(self) -> int:

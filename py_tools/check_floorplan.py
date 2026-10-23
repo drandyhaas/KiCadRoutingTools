@@ -64,12 +64,7 @@ from placement.placement_state import UNPLACED_EXIT, gate_or_exit
 from placement.groups import GroupError, parse_sources
 
 #: What `--emit-intent` does about a decap limit when no flag says (#959,
-#: #1002): 'off' | 'strict' | 'auto'. 'auto' was put to the A/B gate in
-#: tests/test_placement_ab.py (rows `decaps-auto-*`, improve on N-1 boards,
-#: regress on none) and REJECTED: it improved no board and regressed all
-#: three with zones. The three flat boards are structurally neutral (with no
-#: zoned block the seeder's pin stage seats nothing), so a re-trial is
-#: judged on zoned boards; flip this only when those rows say otherwise.
+#: #1002): 'off' | 'strict' | 'auto'. Flip it only on a routed A/B.
 #: Set through `set_defaults` in `build_parser` -- a `default=` on one of
 #: the three shared-dest flags would be dead.
 DECLARE_DECAPS_DEFAULT = 'off'
@@ -140,12 +135,8 @@ def build_parser():
                         'dishonest: no tethers, fewer than 3, or more than '
                         'a quarter of the rail-sharing caps already beyond '
                         'the search radius. SEPARATE from --declare-classes '
-                        'on purpose -- this key is not a part CLASS, and '
-                        'declaring it CHANGES PLACEMENT: place_seed reads it '
-                        'and moves the caps that elect a tether out of zone '
-                        'packing into its per-supply-pin stage (ulx3s: 60 of '
-                        '70, the other 10 having no rail-carrying chip to be '
-                        'seated at). It also arms decap_ungraded, which reports at WARN '
+                        'on purpose -- this key is not a part CLASS. It also '
+                        'arms decap_ungraded, which reports at WARN '
                         'the caps beyond the search radius that the limit '
                         'was never derived from. The tether census is '
                         'written to context.decap_census either way')
@@ -200,13 +191,15 @@ def build_parser():
                         "ON unlike on the placement CLIs")
     p.add_argument('--clearance', type=float, metavar='MM',
                    help="clearance the legality model grades at (default: "
-                        "the board's own Default netclass, else 0.25). "
+                        "the board's own Default netclass floored at its "
+                        "Board Setup min_clearance, as KiCad grades it, "
+                        "else 0.25). "
                         "Grading a fixed constant tighter than the board's "
                         "floor manufactures phantom violations")
     p.add_argument('--board-edge-clearance', type=float, metavar='MM',
                    help="board-edge clearance for the outline gate (default: "
                         "the board's own min_copper_edge_clearance, else "
-                        "0.55)")
+                        "the fab edge floor routing writes, 0.2)")
     p.add_argument('--health', action='store_true',
                    help="also report the routability signals from the intent's "
                         "`health` block: how far each block sits from the parts "
@@ -234,146 +227,6 @@ def build_parser():
     # on the parser instead.
     p.set_defaults(declare_decaps=DECLARE_DECAPS_DEFAULT)
     return p
-
-
-def _seeder_forecast(doc, pcb, board, sources):
-    """#1105: `seeder.decap_pin_forecast` on the emitted document, with the
-    parts place_seed leaves standing when it is run without `--force`:
-    file-locked parts, and on a partially-unplaced board everything outside
-    the pile it seeds (place_seed's own rule, `stacked_suspect_refs`)."""
-    from placement import seeder
-    from placement.floorplan import resolve_blocks
-    from placement.placement_state import SEED_STACKED, assess_placement
-    try:
-        intent = intent_from_dict(doc, board)
-        blocks, _probs = resolve_blocks(intent, pcb, sources or ())
-    except IntentError as exc:
-        return {'unavailable': str(exc)}
-    standing = set((doc.get('context') or {}).get('file_locked') or ())
-    st = assess_placement(pcb, board)
-    # place_seed's scope, by its own predicate (#1165: `seed_scope`).
-    partial = st.seed_scope == SEED_STACKED
-    if partial:
-        standing |= set(pcb.footprints) - set(st.stacked_suspect_refs)
-    # #1105: stage 3.5 is on by default for a pile input, so the forecast
-    # reads the same verdict place_seed will hold.
-    out = seeder.decap_pin_forecast(pcb, intent, blocks,
-                                    standing=sorted(standing),
-                                    assessment=st)
-    out['standing'] = sorted(standing)
-    # `--force` re-seeds every unlocked part, so the parts a partial pile
-    # leaves standing are only standing without it (file locks survive it).
-    out['standing_needs_no_force'] = partial
-    return out
-
-
-#: #1105: how an author seats an owner IC before the per-supply-pin stage --
-#: the routes `seeder.decap_pin_forecast` counts as "early".
-DECLARE_OWNERS_HOW = ('a fixed_poses[] entry, a must_lock pattern or a '
-                      'zoned block')
-
-#: #1105: the line's note when the pile default arms stage 3.5.
-LATE_ON_A_PILE = ('stage 3.5 is on by default because this board is a pile, '
-                  'undoing a seat that lands past the decap limit; place_seed '
-                  '--no-decap-claim-after-ics turns it off')
-
-#: #1105: what the flag runs, and where stage 3.5 is on without being asked
-#: -- said wherever the emitter tells a reader of a board that is NOT a pile
-#: to pass the flag.
-LATE_DEFAULT_SCOPE = ('keeping every seat it finds; the stage is on by '
-                      'default, undoing a seat past the decap limit, only '
-                      'when the input board is a pile -- the corpus A/B '
-                      'rejected it on placed boards')
-
-
-def _forecast_clause(cen):
-    """#1105: the tail of the emitter's decap line -- what place_seed's pin
-    stages can claim from this intent, by stage, and what they never can.
-
-    It promises only what the stage can do on the board it was emitted
-    from. The pin stage serves the supply pins of owner ICs seated BEFORE
-    it, so where no owner is placed, locked or declared it claims nothing
-    (run 38's StickHub pile: "will seat 38", then claimed 0 on every seed).
-    On a pile stage 3.5 is on by default and claims them once the centroid
-    stage has seated their owners, and the line says so and how to turn it
-    off; elsewhere it says the stage claims no cap and how to declare the
-    owners. With no forecast it states the scope as a scope, never as a
-    count of seats."""
-    f = cen.get('seeder_forecast') or {}
-    if not f or 'unavailable' in f:
-        return (f"; its per-supply-pin stage has {cen.get('seeder_pin_scope')}"
-                f" cap(s) in scope and claims only those whose owner IC is "
-                f"seated before it ({DECLARE_OWNERS_HOW}, or a part already "
-                f"placed or file-locked) -- how many could not be forecast"
-                + (f" ({f['unavailable']})" if f else ''))
-
-    def _refs(xs, n=8):
-        xs = list(xs)
-        return ', '.join(xs[:n]) + (f", +{len(xs) - n} more" if len(xs) > n
-                                    else '')
-
-    early, late = f.get('early') or [], f.get('late') or []
-    armed = bool(f.get('late_armed'))
-    if not early and not (late and armed):
-        # Nothing to claim on THIS board. Said as a statement, not as "up
-        # to 0", which read as a promise with a zero in it.
-        owners = sorted(set(f.get('late_owners') or ()))
-        out = (f", but its per-supply-pin stage will claim NO cap on this "
-               f"board: of the {f.get('scope')} cap(s) in scope, none has an "
-               f"owner IC placed, locked or declared before the stage runs"
-               + (f" (their owners {_refs(owners)} are seated only by the "
-                  f"centroid stage, after it)" if owners else '')
-               + f", so they are zone-packed or seated by the centroid stage "
-                 f"instead. To claim them, declare the owners -- "
-                 f"{DECLARE_OWNERS_HOW} -- so they are seated first; "
-                 f"place_seed --decap-claim-after-ics claims after the "
-                 f"centroid stage instead ({LATE_DEFAULT_SCOPE})")
-        if f.get('ownerless'):
-            out += (f"; {len(f['ownerless'])} can never be claimed -- no "
-                    f"{f.get('owner_rule', 'U-prefixed cap owner')} carries "
-                    f"their rail ({_refs(f['ownerless'])})")
-        if f.get('exempt'):
-            out += f"; {len(f['exempt'])} exempt"
-        if f.get('array_members'):
-            out += (f"; {len(f['array_members'])} are declared array members "
-                    f"(the array wins)")
-        return out
-    head = (f" and can claim up to {len(early) + (len(late) if armed else 0)} "
-            f"of {f.get('scope')} cap(s) in scope at a supply pin instead of "
-            f"zone-packing them")
-    parts = []
-    if early:
-        parts.append(f"{len(early)} at stage 2.5, at owner IC(s) seated "
-                     f"before it ({_refs(f.get('early_owners') or ())}) if "
-                     f"those seats succeed"
-                     + (" and place_seed runs without --force"
-                        if f.get('standing_needs_no_force') else ''))
-    if late and armed:
-        parts.append(f"{len(late)} at stage 3.5, once the centroid stage has "
-                     f"seated their owner IC(s) "
-                     f"({_refs(f.get('late_owners') or ())})"
-                     + ('' if early else ' -- no owner IC is seated before '
-                        'stage 2.5 on this board')
-                     + (f" ({LATE_ON_A_PILE})"
-                        if f.get('late_armed_by') == 'pile' else ''))
-    out = head + (': ' + ', '.join(parts) if parts else '')
-    if late and not armed:
-        out += (f"; {len(late)} are NOT claimed: their owner IC(s) "
-                f"({_refs(f.get('late_owners') or ())}) are seated only by "
-                f"the centroid stage, after the pin stage (declare them -- "
-                f"{DECLARE_OWNERS_HOW} -- to seat them first; "
-                f"place_seed --decap-claim-after-ics claims after them, "
-                f"{LATE_DEFAULT_SCOPE})")
-    if f.get('ownerless'):
-        out += (f"; {len(f['ownerless'])} can never be claimed -- no "
-                f"{f.get('owner_rule', 'U-prefixed cap owner')} carries "
-                f"their rail ({_refs(f['ownerless'])})")
-    if f.get('exempt'):
-        out += f"; {len(f['exempt'])} exempt"
-    if f.get('array_members'):
-        out += (f"; {len(f['array_members'])} are declared array members "
-                f"(the array wins)")
-    return out
 
 
 def _brief_absence_reason(args, brief):
@@ -493,7 +346,7 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
         return UNPLACED_EXIT
     errors = [v for v in found if v.severity == 'error']
     # The channels reconciled here too, so the before-placement ledger names
-    # every contradiction P1 will refuse on.
+    # every contradiction the plan owes a disposition.
     recon = _rc.reconcile(pcb, args.board, brief_fragment=brief_fragment,
                           brief_source=brief_path or None, mechanical=mech,
                           intent_doc=intent_doc_for_drift(args.intent),
@@ -707,10 +560,8 @@ def main(argv=None):
     if _mrc:
         return _mrc
     if mech is not None and not args.quiet:
-        _prov = _rc.mechanical_provenance(mech, args.board)
         print(f"mechanical declaration {mech_path}: {len(mech['poses'])} "
-              f"pose(s), {len(mech['edges'])} edge(s) ({mech['shape']}; "
-              f"{_prov[0]}: {_prov[1]})")
+              f"pose(s), {len(mech['edges'])} edge(s)")
     from list_nets import board_floor_knobs as _bfk
     _floors_used = _bfk(args.board, args.clearance,
                         args.board_edge_clearance)[2]
@@ -726,11 +577,15 @@ def main(argv=None):
         return 2
     if args.emit_intent:
         try:
+            from list_nets import board_floor_knobs
+            _ec, _ee, _ek = board_floor_knobs(args.board, args.clearance,
+                                              args.board_edge_clearance)
             doc = emit_intent(pcb, args.board, group_sources=sources or (),
                               declare_classes=args.declare_classes,
                               derive_decaps=args.declare_decaps,
                               brief_fragment=brief_fragment or None,
-                              decaps_from=args.decaps_from)
+                              decaps_from=args.decaps_from,
+                              clearance=_ec, board_edge_clearance=_ee)
         except UntrustworthyOutline as exc:
             print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
             return UNPLACED_EXIT
@@ -759,16 +614,13 @@ def main(argv=None):
             _anchors, _skipped = _rc.anchor_blocks(
                 pcb, args.board, mech,
                 lost=_rc.lost_mechanical_refs(_rows))
-            _prov = _rc.mechanical_provenance(mech, args.board)
             _ctx['mechanical'] = {
                 'path': mech['path'], 'sha256': mech['sha256'],
-                'shape': mech['shape'], 'provenance': _prov[0],
-                'provenance_why': _prov[1],
                 'anchored': sorted(b['name'][len('mech:'):]
                                    for b in _anchors),
                 'skipped': _skipped}
             # #1054: the anchored poses also compile into `fixed_poses[]`,
-            # so the seeder can SEAT what the grade anchors. The grade
+            # so place_simple can SEAT what the grade anchors. The grade
             # still anchors from the FILE, so a plan that drops a row
             # drops the seat, never the grade. A ref another claim of
             # this intent already places is skipped by name -- the
@@ -802,6 +654,50 @@ def main(argv=None):
                 doc['fixed_poses'] = (list(doc.get('fixed_poses') or ())
                                       + _fixed)
                 doc['min_reader'] = max(int(doc.get('min_reader') or 0), 7)
+        # #1298: declared poses that overlap EACH OTHER at those poses (a
+        # human layout's FID inside a connector's courtyard). Compiled
+        # silently, they made every placement honouring the intent grade NOT
+        # BUILDABLE on a pair no move can clear. A courtyard overlap is
+        # written as an explicit waiver the author can delete; a pad or hole
+        # conflict, which no waiver covers, is said and left alone.
+        _decl_cy, _decl_hard = [], []
+        if len(doc.get('fixed_poses') or ()) >= 2:
+            try:
+                from list_nets import board_floor_knobs
+                from placement.floorplan import (accept_declared_overlaps,
+                                                 declared_pose_overlaps)
+                _dc, _de, _ = board_floor_knobs(args.board, args.clearance,
+                                                args.board_edge_clearance)
+                _already = ([tuple(w.get('pair') or ()) for w in
+                             doc.get('overlap_waivers') or ()]
+                            + [(str(f['ref']), str(o))
+                               for f in doc['fixed_poses']
+                               for o in f.get('accept_courtyard_overlap')
+                               or ()])
+                _decl_cy, _decl_hard = declared_pose_overlaps(
+                    doc['fixed_poses'], pcb, args.board, clearance=_dc,
+                    board_edge_clearance=_de, waived=_already)
+                _wrote = accept_declared_overlaps(doc, _decl_cy)
+                _ctx['declared_pose_overlaps'] = {
+                    'accepted': [list(p) for p in _wrote],
+                    'hard': [c['pair'] for c in _decl_hard]}
+            except Exception as exc:                         # noqa: BLE001
+                print(f"  WARNING: declared poses not checked against each "
+                      f"other: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if _decl_cy:
+            print(f"  WARNING: {len(_decl_cy)} pair(s) of declared poses "
+                  f"overlap each other by courtyard at those poses: "
+                  + '; '.join(f"{c['pair'][0]}<->{c['pair'][1]} "
+                              f"({c['reason']})" for c in _decl_cy)
+                  + " -- written as fixed_poses[].accept_courtyard_overlap "
+                    "(courtyard only: check_assembly and the plan check waive "
+                    "exactly these pairs). Delete a ref from that list to "
+                    "refuse its overlap instead.", file=sys.stderr)
+        for c in _decl_hard:
+            print(f"  WARNING: declared poses {c['pair'][0]} and "
+                  f"{c['pair'][1]} also conflict past their courtyards: "
+                  f"{c['reason']} -- no waiver covers pads or holes, and "
+                  f"stage 0 refuses the pair; move one pose", file=sys.stderr)
         if not args.quiet:
             for line in _rc.format_rows(_rows):
                 print(line)
@@ -811,13 +707,13 @@ def main(argv=None):
                                 for k, v in sorted(_m['skipped'].items()))
                 print(f"  {len(_m['anchored'])} mechanical ref(s) the "
                       f"grade anchors at their declared pose (compiled from "
-                      f"the file at grade time; P1 requires each locked "
+                      f"the file at grade time; each must be locked "
                       f"there, or seated by a fixed_poses entry)"
                       + (f"; skipped: {_sk}" if _sk else ''))
                 _fs = ', '.join(f"{k} ({v})" for k, v in
                                 sorted(_m['fixed_skipped'].items()))
                 print(f"  {len(_m['fixed_poses'])} of them compiled into "
-                      f"fixed_poses[] for the seeder to seat"
+                      f"fixed_poses[] for place_simple to seat"
                       + (f"; not compiled: {_fs}" if _fs else ''))
         if args.require_brief and not brief_fragment:
             print(f"  FAIL: --require-brief, but " + _brief_absence_reason(
@@ -825,15 +721,6 @@ def main(argv=None):
                   + ". The emitted intent describes the board as it is, "
                     "including its damage.", file=sys.stderr)
             _require_brief_failed = True
-        # #1105: what the seeder's pin stages CAN claim from THIS document
-        # (merged brief and compiled fixed_poses included), so the printed
-        # promise is the seed's and not the census's.
-        _dcen = (doc.get('context') or {}).get('decap_census')
-        if (isinstance(_dcen, dict)
-                and (doc.get('decaps') or {}).get('max_distance_mm')
-                is not None):
-            _dcen['seeder_forecast'] = _seeder_forecast(doc, pcb, args.board,
-                                                        sources)
         # The file is written BEFORE the --require-brief verdict: the flag
         # says "exit 4 when nothing was declared", not "produce nothing".
         # Returning early left `--emit-intent X --require-brief` with no X at
@@ -870,9 +757,7 @@ def main(argv=None):
                         f"reference {os.path.basename(cen['reference_board'])}"
                         if cen.get('reference_board')
                         else f"{cen.get('tethers')} tether(s)")
-                print(f"  decaps: max_distance_mm {lim} from "
-                      f"{_src} -- NOTE: place_seed READS this key"
-                      + _forecast_clause(cen))
+                print(f"  decaps: max_distance_mm {lim} from {_src}")
             elif held:
                 print(f"  decaps: max_distance_mm WITHHELD -- {held}")
             # #1102: the pin limit --decaps-from derives beside it.
@@ -923,8 +808,7 @@ def main(argv=None):
                       f"-- bulk or filter caps with no IC to be near; "
                       f"graded by nothing, and correctly so")
             # #959 (#997): what the emitted intent leaves dark, and what a
-            # plan built from it will owe at P1 -- said at the moment of
-            # emission, not discovered laps later.
+            # plan built from it will owe -- said at the moment of emission.
             try:
                 from list_nets import board_floor_knobs
                 _c, _e, _k = board_floor_knobs(args.board, args.clearance,
@@ -990,7 +874,7 @@ def main(argv=None):
                        brief_fragment=brief_fragment or None,
                        mechanical=mech, mechanical_skip=_lost,
                        reconciliation=_rows,
-                       with_pad_stacks=True)
+                       with_pad_stacks=True, edge_seats=True)
     except UntrustworthyOutline as exc:
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
         print("  Refused rather than graded: with no usable outline every "
@@ -1177,11 +1061,8 @@ def main(argv=None):
     if not result.complete:
         # #713 item 5: an ungraded DECLARED channel is not a pass, and the exit
         # code is what most callers actually branch on -- board_score (and
-        # check_complete through it) reads `errors` or the exit status, as the
-        # retired staged drivers did, and none reads GradeResult.passed.
-        # Measured on the tracked corpus: 5 of 22 boards reported pass:true
-        # and exit 0 in the default emit-then-grade round trip while
-        # `overlap_area` was never graded.
+        # check_complete through it) reads `errors` or the exit status, and
+        # none reads GradeResult.passed.
         # `--exit-zero` still suppresses the code without lying about `pass`,
         # exactly as it does for violations.
         print(f"  NOT FULLY GRADED: "

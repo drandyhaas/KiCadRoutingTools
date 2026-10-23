@@ -168,7 +168,9 @@ def test_ground_pins_are_not_graded():
     # And the pins DO exist and ARE far, so the exclusion is doing work.
     from net_queries import is_supply_pinfunction
     far = []
-    by = fp._decap_caps_by_net(pcb)
+    # every cap ON the ground net: the decap map files a decap under its rail
+    # only, never ground, so it would find nothing here
+    by = fp._caps_carrying_net(pcb)
     for ref in ('IC2', 'IC3', 'IC4'):
         for pad in pcb.footprints[ref].pads:
             fn = getattr(pad, 'pinfunction', '') or ''

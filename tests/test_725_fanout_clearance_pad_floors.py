@@ -958,8 +958,8 @@ class TestShapeContract(unittest.TestCase):
             rects = cap.pad_rects()
             self.assertTrue(rects)
             self.assertTrue(all(len(r) == 5 for r in rects))
-    # MUTATION: widen any of them -> animate_fanout_clearance.py and three
-    # existing test files stop unpacking.
+    # MUTATION: widen any of them -> three existing test files stop
+    # unpacking.
 
     def test_pad_floors_stay_index_aligned_through_every_rotation(self):
         cap = self.st.caps[ANCHOR_CAP]
@@ -1315,21 +1315,6 @@ class TestReport(unittest.TestCase):
             list_nets.net_clearance_map = orig
     # MUTATION: read `model.notes` after `if not model.active: model = None`
     # -> AttributeError, or the notes are lost.
-
-
-class TestAnimatorRecorderStillUnpacks(unittest.TestCase):
-    """tests/test_431_animator_port.py drives render_gif with a SYNTHETIC
-    recorder and never touches the real `_Recorder`, so it passes even if a
-    shape change breaks the shipped animator. This is the only coverage."""
-
-    def test_the_real_on_move_recorder_survives(self):
-        import animate_fanout_clearance as AFC
-        rec = AFC._Recorder()
-        repair_fanout_clearance(parse_kicad_pcb(INERT), INERT, clearance=CLEAR,
-                                max_displacement=0.0, max_passes=1, on_move=rec)
-        self.assertTrue(rec.static['vias'], 'no vias were recorded')
-        self.assertTrue(all(len(v) == 4 for v in rec.static['vias']))
-    # MUTATION: widen st.vias to 5-tuples -> ValueError inside _Recorder.
 
 
 class TestParityGateRegistration(unittest.TestCase):

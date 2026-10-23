@@ -45,6 +45,7 @@ class Grid:
     pitch_x: float
     pitch_y: float
     bbox: Tuple[float, float, float, float]
+    row: bool = False               # a ROW PART (row_part): its pads in rows round its edge
 
 
 @dataclass
@@ -72,9 +73,53 @@ class Move:
         return s
 
 
+def _row_pads(footprint):
+    """(the pads of its rows, its pitch along them) for a ROW PART, else None: a part whose pads stand in rows round
+    the edge of its box -- a QFN, a QFP, an SO -- each longer than it is wide, and no pad inside the rows but one (an
+    exposed pad). A ball array's balls are round, and its box is full of them"""
+    pads = [p for p in footprint.pads if getattr(p, 'pad_type', '') != 'np_thru_hole']
+    if len(pads) < 4:
+        return None
+    x0, x1 = min(p.global_x for p in pads), max(p.global_x for p in pads)
+    y0, y1 = min(p.global_y for p in pads), max(p.global_y for p in pads)
+    reach = sorted(max(p.size_x, p.size_y) for p in pads)[len(pads) // 2]     # (a row pad's length: the median's)
+
+    def depth(p):
+        return min(p.global_x - x0, x1 - p.global_x, p.global_y - y0, y1 - p.global_y) - reach
+    inner = [p for p in pads if depth(p) > 0]
+    rows = [p for p in pads if depth(p) <= 0]
+    if len(inner) > 1 or len(rows) < 4 or \
+            any(max(p.size_x, p.size_y) < 1.5 * min(p.size_x, p.size_y) for p in rows):
+        return None
+    pitch = min(min(((p.global_x - q.global_x) ** 2 + (p.global_y - q.global_y) ** 2) ** 0.5
+                    for q in rows if q is not p) for p in rows)
+    return rows, pitch
+
+
+def row_part(footprint) -> bool:
+    """A part whose pads stand in rows round its edge (_row_pads): a QFN, a QFP, an SO -- not a ball array"""
+    return _row_pads(footprint) is not None
+
+
 def grid_of(footprint) -> Grid:
     """Measure the array from its pads. A single row or column is fine;
-    a non-grid part gives a degenerate Grid the caller can reject."""
+    a non-grid part gives a degenerate Grid the caller can reject.
+
+    A ROW PART (row_part: a QFN, whose long pads stand in rows round its
+    edge) is measured from its rows alone, the exposed pad left out: its
+    pitch the pads' own along a row, its box the rows' COPPER, so its faces
+    -- half a pitch beyond the box, as an array's -- lie half a pitch past
+    the pads' outer ends. Measured from the pads' centres, zynq U4's
+    (0.9 mm pads at 0.5 mm) lay inside the pads, and its exposed pad's
+    offset read as a 0.25 mm pitch."""
+    rp = _row_pads(footprint)
+    if rp is not None:
+        rows, pitch = rp
+        return Grid(sorted({round(p.global_x, 3) for p in rows}), sorted({round(p.global_y, 3) for p in rows}),
+                    pitch, pitch, (min(p.global_x - p.size_x / 2 for p in rows),
+                                   min(p.global_y - p.size_y / 2 for p in rows),
+                                   max(p.global_x + p.size_x / 2 for p in rows),
+                                   max(p.global_y + p.size_y / 2 for p in rows)), row=True)
     xs = sorted({round(p.global_x, 3) for p in footprint.pads})
     ys = sorted({round(p.global_y, 3) for p in footprint.pads})
 
@@ -131,6 +176,28 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
         if dx:
             return (x0 - hx - margin if dx < 0 else x1 + hx + margin, py)
         return (px, y0 - hy - margin if dy < 0 else y1 + hy + margin)
+
+    if grid.row:
+        # a ROW PART's pad has one way out: straight along its own length,
+        # on its own layer, out of the face its row stands on -- between two
+        # of its neighbours there is no room for a track (zynq U4: 0.22 mm
+        # between 0.28 mm pads at 0.5 mm), and a via beside it stands in
+        # its neighbours'. The lane changes layer beyond the face, where
+        # the whole route places its vias
+        if pad.size_x >= pad.size_y:
+            d = 'left' if px - x0 <= x1 - px else 'right'
+        else:
+            d = 'up' if py - y0 <= y1 - py else 'down'
+        e = edge(d)
+        # (checked from the pad's OUTER end: over its own copper the stub
+        # meets nothing, and a model's circumscribed disc of the exposed
+        # pad reaches the inner ends of the pads beside its corners -- zynq
+        # U4's, 2.64 mm round a 3.3 mm square, refused four of its twelve)
+        half = max(pad.size_x, pad.size_y) / 2
+        tip = (px + DIRS[d][0] * half, py + DIRS[d][1] * half)
+        if clear(tip, e, home):
+            out.append(Move(net, 'surface', d, home, e, 0, [((px, py), e, home)]))
+        return out
 
     # --- surface: leave on the pad's own layer along an ADJACENT GAP.
     # Not along the pad's own row/column -- that is where the other

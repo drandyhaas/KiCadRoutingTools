@@ -36,9 +36,9 @@ def tool(name):
 
     So a missing tool must fail HERE, naming what it looked for and where,
     rather than three frames away inside a subprocess. A static lint cannot do
-    this job: test_431_board_gates builds `os.path.join(ROOT, script)` with
-    `script` a variable, so the bad path is only knowable at runtime. This
-    function is the gate.
+    this job: a test that builds `os.path.join(ROOT, script)` with `script` a
+    variable (test_431_board_gates did) knows the bad path
+    only at runtime. This function is the gate.
     """
     try:
         sys.path.insert(0, ROOT_DIR)
@@ -121,7 +121,7 @@ def run(cmd: str, unbuffered: bool = False) -> None:
 #   * an assertion that `--deadline 0` must always produce a partial, which is
 #     false on a board with no work to abandon.
 #
-# `must_refuse` separates the two outcomes. An ACCIDENT (import error,
+# `check` separates the two outcomes. An ACCIDENT (import error,
 # traceback, argparse usage, missing file) is reported as a BROKEN TEST, never
 # as a satisfied guard.
 
@@ -282,7 +282,8 @@ def corpus_boards(pattern: str = 'kicad_files/*.kicad_pcb'):
 #: rather than in the one gate that needs it because the next gate that
 #: resolves a documented key against real output should not re-derive the
 #: grammar slightly differently -- `tests/test_895_boundary_criteria.py`
-#: already carries eight of these as hand-written lambdas.
+#: carried eight of these as hand-written lambdas (it was deleted in
+#: ecd673eb).
 _PATH_SEGMENT = re.compile(r'^[a-z][a-z0-9_]*$')
 _PATH_BRACKET = re.compile(r'\[[^\]]*\]')
 #: Rejected outright: these are FILE NAMES, and `conn.txt` / `route.py` /

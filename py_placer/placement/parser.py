@@ -555,10 +555,9 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
             # a T that stops 15 um short, crossing ends, a stray parallel
             # line read closed here while KiCad flags malformed_courtyard
             # (it still tests a pin against the contours that do close).
-            # tests/fixtures/1212_courtyard_chaining.json holds kicad-cli's
-            # verdict on 178 drawings; the test asserts no drawing KiCad
-            # closes reads open here. NOT modelled: a drawing that closes
-            # plus debris no join absorbs (a stray piece outside it, a
+            # Measured against kicad-cli's verdict on 178 drawings (#1212):
+            # no drawing KiCad closes reads open here. NOT modelled: a
+            # drawing that closes plus debris no join absorbs (a stray piece outside it, a
             # there-and-back spike, a flat fp_rect or 2-point fp_poly)
             # reads as the hull here, its pins `courtyard_malformed`
             # (listed, not gating), where KiCad flags it malformed AND
@@ -749,8 +748,7 @@ def courtyard_for_side(sides: Optional[Dict[str, Bbox]],
     return sides.get(side) or next(iter(sides.values()))
 
 
-def warn_missing_courtyards(refs, label: str = 'placement',
-                            sources: Optional[Dict[str, str]] = None) -> None:
+def warn_missing_courtyards(refs, label: str = 'placement') -> None:
     """Print a one-line warning naming refs that have no courtyard at all.
 
     Those parts fall back to `compute_footprint_bbox_local`, which is the union
@@ -758,34 +756,10 @@ def warn_missing_courtyards(refs, label: str = 'placement',
     ~2.9x1.5mm against a ~1.9x0.9mm pad box — so the part is modelled smaller
     than it is and can be packed to a courtyard violation. Silence was the
     complaint in #456 item 3; the geometry itself is unchanged.
-
-    `sources` ({ref: occupancy source}, `placement.body`) is the ARMED case
-    (`body_model`, #1182): a courtyard-less part with a drawn body does not
-    fall back to its pads, so only `pad_bbox` parts are named, and the line
-    says what the others are spaced on instead.
     """
     refs = sorted(refs)
     if not refs:
         return
-    if sources is not None:
-        drawn = sorted(r for r in refs
-                       if sources.get(r) not in (None, 'pad_bbox'))
-        if drawn:
-            mix: Dict[str, int] = {}
-            for r in drawn:
-                mix[sources[r]] = mix.get(sources[r], 0) + 1
-            print(f"  NOTE [{label}]: {len(drawn)} footprint(s) without a "
-                  f"courtyard are spaced on their drawn body united with "
-                  f"their pads (body model: "
-                  + ', '.join(f"{n} {s}" for s, n in sorted(mix.items()))
-                  + ")"
-                  + ("; a fab_marking is a .Fab pin-1 dot or line, not a "
-                     "body (#1201): those are spaced on the marking united "
-                     "with their pads, as before"
-                     if 'fab_marking' in mix else ''))
-        refs = [r for r in refs if r not in drawn]
-        if not refs:
-            return
     shown = ', '.join(refs[:12]) + (', ...' if len(refs) > 12 else '')
     print(f"  WARNING [{label}]: {len(refs)} footprint(s) have no courtyard "
           f"(F/B.CrtYd) and fall back to their pad bounding box, which carries "

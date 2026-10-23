@@ -45,17 +45,6 @@ except ImportError:  # pragma: no cover - stale checkout
     _STARTUP_FAILURES = (SystemExit,)
 
 
-def _via_width(via):
-    """KiCad 9/10 padstack vias can refuse layerless GetWidth() ('result
-    with an error set', seen on vias ADDED in-session then re-synced);
-    GetFrontWidth() is the stable outer-annulus accessor and is asked FIRST
-    (#605) -- a bare PCB_VIA::GetWidth() also trips a non-raising wxASSERT
-    on KiCad 10, one stderr line per via, before returning the same answer."""
-    try:
-        return via.GetFrontWidth()
-    except Exception:
-        return via.GetWidth()
-
 from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector, board_minima_from_live
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
@@ -117,9 +106,10 @@ def _nm_to_mm(nm):
 
 
 def net_clearances_file_error(path):
-    """Why the Net Clearances File (route.py / route_diff.py --net-clearances)
-    cannot be used, or None when it is empty or loads -- through the loader
-    the CLI mains call, so a file the CLI would fail on is refused here too."""
+    """Why the Net Clearances File (route.py / route_diff.py / route_planes.py
+    --net-clearances) cannot be used, or None when it is empty or loads --
+    through the loader the CLI mains call, so a file the CLI would fail on is
+    refused here too."""
     path = (path or '').strip()
     if not path:
         return None
@@ -283,44 +273,34 @@ class RoutingDialog(wx.Dialog):
         self._plane_prompt_dismissed = set()
 
         self._create_ui()
-        # Routing movie recorder (#506). Created after the UI because it reads
-        # the Advanced tab's "Make routing movie" checkbox; inert while that is
-        # unchecked (the default).
-        from .movie_recorder import MovieRecorder
-        self.movie_recorder = MovieRecorder(self)
-        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_dialog_destroy)
         self._load_nets_immediate()  # Load net names only (fast)
         self.Centre()
 
         # Defer sync and connectivity check until after dialog is shown
         wx.CallAfter(self._deferred_init)
 
-    def _on_make_movie_toggle(self, event):
-        """Ticking "Make routing movie" starts recording from the board as it
-        stands now, so the next step's movie shows only what THAT step adds."""
-        self.movie_recorder.on_toggle(event)
-
-    def _on_dialog_destroy(self, event):
-        if event.GetEventObject() is self:
-            try:
-                self.movie_recorder.cleanup()
-            except Exception:
-                pass
-        event.Skip()
-
     def _sync_pcb_data_from_board(self):
-        """Sync pcb_data.segments and pcb_data.vias from pcbnew's in-memory board.
+        """Sync pcb_data's copper, zones, footprints, paste openings and
+        `sense:` branches from pcbnew's in-memory board.
 
         This is necessary because pcb_data is parsed from the file on disk,
         but tracks added during previous routing sessions only exist in pcbnew's
         memory until the file is saved.
+
+        The tracks and vias are read by the extractor build_pcb_data_from_board
+        uses (kicad_parser.resync_live_copper, #1279), so a step after the
+        first sees what a fresh build sees -- KiCad locks (#521), uuids, arc
+        pieces, via types -- and the `sense:` groups are re-resolved against
+        that copper once pads and zones are current.
         """
         # Clear connectivity cache since board state is changing
         self._connectivity_cache = {}
 
         try:
             import pcbnew
-            from kicad_parser import Segment, Via
+            from kicad_parser import (pcbnew_layer_maps, resync_live_copper,
+                                      resync_live_paste_apertures,
+                                      resolve_live_sense_branches)
 
             board = pcbnew.GetBoard()
             if board is None:
@@ -330,65 +310,18 @@ class RoutingDialog(wx.Dialog):
             return
 
         try:
-            # Get layer mappings
-            _, id_to_name = _build_layer_mappings()
-
-            def get_layer_name(layer_id):
-                return id_to_name.get(layer_id, 'F.Cu')
-
-            # Collect all segments from board
-            new_segments = []
-            for track in board.GetTracks():
-                if track.GetClass() == "PCB_TRACK":
-                    seg = Segment(
-                        start_x=pcbnew.ToMM(track.GetStart().x),
-                        start_y=pcbnew.ToMM(track.GetStart().y),
-                        end_x=pcbnew.ToMM(track.GetEnd().x),
-                        end_y=pcbnew.ToMM(track.GetEnd().y),
-                        width=pcbnew.ToMM(track.GetWidth()),
-                        layer=get_layer_name(track.GetLayer()),
-                        net_id=track.GetNetCode(),
-                    )
-                    new_segments.append(seg)
-
-            # Collect all vias from board
-            new_vias = []
-            for track in board.GetTracks():
-                if track.GetClass() == "PCB_VIA":
-                    via = track
-                    top_layer = via.TopLayer()
-                    bot_layer = via.BottomLayer()
-                    v = Via(
-                        x=pcbnew.ToMM(via.GetPosition().x),
-                        y=pcbnew.ToMM(via.GetPosition().y),
-                        size=pcbnew.ToMM(_via_width(via)),
-                        drill=pcbnew.ToMM(via.GetDrill()),
-                        layers=[get_layer_name(top_layer), get_layer_name(bot_layer)],
-                        net_id=via.GetNetCode(),
-                    )
-                    new_vias.append(v)
-
             # Replace pcb_data segments and vias with what's in pcbnew
-            self.pcb_data.segments = new_segments
-            self.pcb_data.vias = new_vias
-            # The same PCBData object lives across routing runs; work cached
-            # against its old copper (rescue maps, escape memos) must not
-            # answer for the board the user has edited since.
-            from pcb_modification import bump_copper_epoch
-            bump_copper_epoch(self.pcb_data)
-            # #980: the input-copper mark names the objects just replaced;
-            # the next engine run marks the board it is handed.
-            from rip_up_reroute import forget_input_copper
-            forget_input_copper(self.pcb_data)
+            resync_live_copper(self.pcb_data, board)
 
             # Also sync zones - the connectivity check uses pcb_data.zones to
             # determine which nets are connected via copper pours. Without
             # this, a freshly-created plane is invisible to "hide connected"
-            # until the GUI reopens.
+            # until the GUI reopens. Layers are named as a fresh build names
+            # them (#1279).
             try:
                 from kicad_parser import _extract_zones_from_pcbnew
                 self.pcb_data.zones = _extract_zones_from_pcbnew(
-                    board, pcbnew.ToMM, get_layer_name)
+                    board, pcbnew.ToMM, pcbnew_layer_maps(board)[2])
             except Exception as e:
                 print(f"Warning: Error syncing zones from board: {e}")
 
@@ -400,6 +333,27 @@ class RoutingDialog(wx.Dialog):
                 sync_footprint_positions_from_board(board, self.pcb_data)
             except Exception as e:
                 print(f"Warning: Error syncing footprint positions from board: {e}")
+
+            # #962: the paste openings follow the parts just synced, or the
+            # via-in-paste keep-out and Type VII stamping read them where a
+            # moved part used to be.
+            try:
+                resync_live_paste_apertures(self.pcb_data, board)
+            except Exception as e:
+                print(f"Warning: Error syncing paste openings from board "
+                      f"({type(e).__name__}: {e}); via-in-paste checks (#962) "
+                      f"read the openings as they were")
+
+            # #1279: the board's `sense:` groups, against the copper, pads and
+            # zones just read -- a group drawn or edited in this session
+            # counts at the next step.
+            try:
+                resolve_live_sense_branches(self.pcb_data, board)
+            except Exception as e:
+                print(f"Warning: Error resolving sense: groups from board "
+                      f"({type(e).__name__}: {e}); sense branches (#1279) are "
+                      f"not protected this step")
+                self.pcb_data.sense_branches = []
         except Exception as e:
             print(f"Warning: Error syncing tracks from board: {e}")
 
@@ -673,7 +627,9 @@ class RoutingDialog(wx.Dialog):
         self.escalation.SetToolTip(
             "How far below a requested size a failing net may be retried. off: never "
             "-- sizes and clearances are exact, a net that cannot complete at them "
-            "fails and is reported. board: down to the board's own declared floors "
+            "fails and is reported (a wide power/impedance net may still neck for at "
+            f"most {defaults.PAD_ENTRY_NECK_MM:g} mm of path at a pad entry). board: "
+            "down to the board's own declared floors "
             "(Board Setup > Constraints; an unset key falls back to the fab tier "
             "floor, an unset minimum clearance to the Default class). That is what "
             "KiCad's DRC accepts once 'Fix DRC settings after routing' lowers the "
@@ -834,9 +790,9 @@ class RoutingDialog(wx.Dialog):
             event.Skip()
 
     def _fab_floored(self, ctrl_name, val):
-        """Pin ``val`` UP to the fab floor for ``ctrl_name`` (the fab can't make
-        sub-floor geometry) -- parity with the CLI's enforce_fab_floors, and it
-        respects the same --fab-tier / fab-overrides file. Idempotent for a control
+        """Pin ``val`` UP to the physical fab floor for ``ctrl_name`` (the fab
+        can't make sub-floor geometry) -- parity with the CLI's enforce_fab_floors:
+        the advanced rung, or the fab-overrides file. Idempotent for a control
         value that was already fab-floored interactively."""
         floor = self._fab_floor_for_ctrl(ctrl_name)
         if floor is not None and val is not None and val < floor:
@@ -1124,7 +1080,7 @@ class RoutingDialog(wx.Dialog):
             ('bga_proximity_cost', 'BGA Prox. Cost:', defaults.BGA_PROXIMITY_COST, "Cost multiplier for routing near BGA pads"),
             ('stub_proximity_radius', 'Stub Proximity (mm):', defaults.STUB_PROXIMITY_RADIUS, "Radius around stubs to apply extra cost"),
             ('stub_proximity_cost', 'Stub Prox. Cost:', defaults.STUB_PROXIMITY_COST, "Cost for routing near stubs of other nets"),
-            ('neckdown_length', 'Neck-down (mm):', defaults.NECKDOWN_LENGTH, "Length of narrow track from the pad when a wide power route is necked down (issue #72)"),
+            ('neckdown_length', 'Neck-down (mm):', defaults.NECKDOWN_LENGTH, "Length of the pad-entry zone when a wide power route is necked down (issue #72): there the track takes the power width capped at the pad's short side where it fits, the default width only where it does not (#1318)"),
             ('neckdown_taper_length', 'Neck Taper (mm):', defaults.NECKDOWN_TAPER_LENGTH, "Length of the stepped narrow-to-wide width taper on necked routes (0 = abrupt)"),
             ('coplanar_gap', 'Coplanar Gap (mm):', defaults.COPLANAR_GAP, "#486: declare that impedance-controlled traces run through a same-layer ground pour this far away (edge to edge). >0 uses the coplanar-waveguide-over-ground model instead of microstrip -- a NARROWER trace for the same ohms. Pour the plane layers with a MATCHING zone clearance, then verify with check_impedance.py. 0 = plain microstrip."),
             ('via_proximity_cost', 'Via Prox. Multiplier:', defaults.VIA_PROXIMITY_COST, "Via cost multiplier in stub/BGA proximity zones (0 = no extra cost)"),
@@ -1156,10 +1112,10 @@ class RoutingDialog(wx.Dialog):
                     "one side route against each other at the normal clearance. The "
                     "log reports per net the length left inside a band. Empty = off.")
                 grid.Add(self.keep_away, 0, wx.EXPAND)
-                # route.py / route_diff.py --net-clearances FILE, named after
-                # the plan param: an explicit per-net clearance map that
-                # replaces the one the Route and Differential tabs build from
-                # the board's net classes.
+                # route.py / route_diff.py / route_planes.py --net-clearances
+                # FILE, named after the plan param: an explicit per-net
+                # clearance map that replaces the one the Route, Differential
+                # and Planes tabs build from the board's net classes.
                 grid.Add(wx.StaticText(parent, label="Net Clearances File:"), 0,
                          wx.ALIGN_CENTER_VERTICAL)
                 ncl_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -1168,9 +1124,10 @@ class RoutingDialog(wx.Dialog):
                 self.net_clearances_path.SetToolTip(
                     "Optional JSON file mapping net name -> clearance in mm, "
                     "e.g. {\"/USB_D+\": 0.12, \"/USB_D-\": 0.12} (route.py / "
-                    "route_diff.py --net-clearances). When set it REPLACES the "
-                    "per-net clearances the Route and Differential tabs read "
-                    "from the board's net classes, used as given (no class, no "
+                    "route_diff.py / route_planes.py --net-clearances). When "
+                    "set it REPLACES the per-net clearances the Route, "
+                    "Differential and Planes tabs read from the board's net "
+                    "classes, used as given (no class, no "
                     "ceiling); a net it does not name routes at the run's "
                     "clearance. Empty = from the net classes.")
                 ncl_sizer.Add(self.net_clearances_path, 1, wx.EXPAND | wx.RIGHT, 4)
@@ -1296,8 +1253,9 @@ class RoutingDialog(wx.Dialog):
         self._revalidate_fab_floors()
 
     def _fab_floor_for_ctrl(self, ctrl_name):
-        """Fab floor (mm) for a Basic-tab spin control under the active fab tier +
-        override file, or None if the control has no fab floor / no board loaded."""
+        """Physical fab floor (mm) for a Basic-tab spin control (fab_floor_for_param:
+        the advanced rung, or the override file -- the selected tier does not move
+        it), or None if the control has no fab floor / no board loaded."""
         try:
             from fab_tiers import fab_floor_for_param, parse_fab_overrides
             ncu = len(self.pcb_data.board_info.copper_layers) or 2
@@ -1387,7 +1345,7 @@ class RoutingDialog(wx.Dialog):
         # Add teardrops
         self.add_teardrops_check = wx.CheckBox(options_scroll, label="Add teardrops")
         self.add_teardrops_check.SetValue(False)
-        self.add_teardrops_check.SetToolTip("Add teardrop settings to all pads in output file")
+        self.add_teardrops_check.SetToolTip("Add teardrop settings to every pad and via (this run's new vias included)")
         options_inner.Add(self.add_teardrops_check, 0, wx.ALL, 3)
 
         self.fix_drc_check = wx.CheckBox(options_scroll, label="Fix DRC settings after routing")
@@ -1398,8 +1356,11 @@ class RoutingDialog(wx.Dialog):
             "so a manual DRC flags only genuine problems instead of stock-default "
             "noise. Never lowers net-class track/via draw sizes and never touches "
             "severities (#842/#856; see 'Relax DRC severities'). The board's next "
-            "save persists it. Unticked, Escalation 'board' stops clearance "
-            "descents at the Default class, since nothing will lower it (#1262). "
+            "save persists it. Unticked, Escalation 'board' stops every descent "
+            "at what KiCad grades the unchanged board at, since nothing will "
+            "lower it: clearance at the Default class (#1262), every other size "
+            "at its Board Setup minimum, or at the size asked for when that is "
+            "already below it (#1287). "
             "Mirrors the CLI's auto-fix (route.py, off via --no-fix-drc-settings)")
         options_inner.Add(self.fix_drc_check, 0, wx.ALL, 3)
 
@@ -1718,7 +1679,7 @@ class RoutingDialog(wx.Dialog):
         self.bus_attraction_radius = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
                                                         initial=defaults.BUS_ATTRACTION_RADIUS, inc=r['inc'])
         self.bus_attraction_radius.SetDigits(r['digits'])
-        self.bus_attraction_radius.SetToolTip("Attraction radius from neighbor track (mm)")
+        self.bus_attraction_radius.SetToolTip("Reach of the bus attraction around the group's planned corridor (else an already-routed neighbour's track), mm; the pull falls off to 0 here")
         bus_attract_sizer.Add(self.bus_attraction_radius, 1, wx.EXPAND)
         options_inner.Add(bus_attract_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
@@ -1727,7 +1688,7 @@ class RoutingDialog(wx.Dialog):
         r = defaults.PARAM_RANGES['bus_attraction_bonus']
         self.bus_attraction_bonus = wx.SpinCtrl(options_scroll, min=r['min'], max=r['max'],
                                                  initial=defaults.BUS_ATTRACTION_BONUS)
-        self.bus_attraction_bonus.SetToolTip("Cost bonus for staying parallel to neighbor track")
+        self.bus_attraction_bonus.SetToolTip("Strength of the bus attraction: a step near the planned corridor (else the routed neighbour) and moving along it costs up to bonus/50 percent less, capped at 90% (4500 and above is full strength)")
         bus_bonus_sizer.Add(self.bus_attraction_bonus, 1, wx.EXPAND)
         options_inner.Add(bus_bonus_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
@@ -1846,21 +1807,6 @@ class RoutingDialog(wx.Dialog):
         self.stats_check = wx.CheckBox(options_scroll, label="Show A* statistics")
         self.stats_check.SetToolTip("Show A* search statistics (iterations, expansions, etc.)")
         options_inner.Add(self.stats_check, 0, wx.ALL, 3)
-
-        # Routing movie (#506). Off by default: it snapshots the board after
-        # every routing step and renders a movie, which costs a few seconds.
-        self.make_movie_check = wx.CheckBox(options_scroll, label="Make routing movie")
-        self.make_movie_check.SetValue(False)
-        self.make_movie_check.SetToolTip(
-            "Record the routing and write a movie next to the board "
-            "(<board>_routing.mp4, or .gif without imageio-ffmpeg). Each routing "
-            "step gets its own movie; a plan run from the AI tab (Run "
-            "Selected Steps / Run All Selected Steps) gets ONE movie covering "
-            "all of its steps. New copper flashes white, rips flash red. The "
-            "path is printed in green in the Log tab. Same movie as the command "
-            "line's make_movie.py.")
-        self.make_movie_check.Bind(wx.EVT_CHECKBOX, self._on_make_movie_toggle)
-        options_inner.Add(self.make_movie_check, 0, wx.ALL, 3)
 
         options_scroll.SetSizer(options_inner)
         options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
@@ -1983,6 +1929,11 @@ class RoutingDialog(wx.Dialog):
                 # reaches fanout too -- it is the step where a track-to-via
                 # teardrop matters most.
                 'add_teardrops': self.add_teardrops_check.GetValue(),
+                # #1318: the route tab's power nets/widths, as the planes tab
+                # takes them -- qfn_fanout lays a power net's stub at its
+                # width where it fits (qfn_fanout.py --power-nets). None when
+                # the fields are empty or the counts disagree.
+                **self._fanout_power_nets(),
                 # #693: the fanout tab's shared params were the ONE set that
                 # did not carry this, so its live-floor writeback had nothing
                 # to gate on. Unchecked must mean "change no DRC setting" on
@@ -2064,7 +2015,12 @@ class RoutingDialog(wx.Dialog):
                 # control, so the Planes tab honors --layer-costs like the CLI
                 # (route_planes.py) does; empty/invalid -> [] -> engine uses 1.0
                 # (or its F.Cu/inner default). Previously dropped entirely.
-                'layer_costs': self._selected_layer_costs(),
+                # The values AS TYPED plus the layers they may be written for:
+                # the tab places them by name on ITS routing layers (F.Cu +
+                # pour layers + B.Cu), which are not the selected layers
+                # (gui_utils.layer_costs_for_layers).
+                'layer_costs_typed': self._typed_layer_costs(),
+                'layer_costs_selected_layers': self._get_selected_layers(),
                 # Share the route tab's No-BGA-Zones intent so plane rip-up
                 # reroutes match signal routing on BGA boards (issue #88).
                 'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
@@ -2079,6 +2035,9 @@ class RoutingDialog(wx.Dialog):
                 'clamp_netclasses': self._ceiling_on(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
+                # route_planes.py --net-clearances: the Advanced tab's Net
+                # Clearances File reaches the plane taps and GND vias too.
+                'net_clearances_path': self.net_clearances_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
                 # #1262: what KiCad grades a Default net at when the DRC
@@ -2654,12 +2613,6 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab.net_panel._checked_nets = set()
         self.differential_tab.pair_panel._checked_pairs = set()
 
-        # An explicit "reset settings" DOES turn movie recording off (unlike
-        # the per-step parameter reset, which must leave it alone -- see
-        # reset_params_to_defaults).
-        self.make_movie_check.SetValue(False)
-        self.movie_recorder.cleanup()
-
         self.reset_params_to_defaults()
 
     def reset_cap_params_to_defaults(self):
@@ -2823,13 +2776,18 @@ class RoutingDialog(wx.Dialog):
             _qo = getattr(_ft, 'qfn_options', None)
             if _qo is not None:
                 for _n, _v in (('qfn_track_width', defaults.QFN_TRACK_WIDTH),
-                               ('qfn_clearance', defaults.QFN_CLEARANCE)):
+                               ('qfn_clearance', defaults.QFN_CLEARANCE),
+                               # #1328: unchecked = the board's Default class,
+                               # qfn_fanout.py's omitted --clearance.
+                               ('qfn_clearance_check', False)):
                     _ctl = getattr(_qo, _n, None)
                     if _ctl is not None:
                         try:
                             _ctl.SetValue(_v)
                         except Exception:
                             pass
+                if getattr(_qo, 'qfn_clearance', None) is not None:
+                    _qo.qfn_clearance.Enable(False)
         except Exception:
             pass
         try:
@@ -2972,11 +2930,6 @@ class RoutingDialog(wx.Dialog):
         self.skip_routing_check.SetValue(False)
         self.debug_memory_check.SetValue(False)
         self.stats_check.SetValue(False)
-        # NOT reset: make_movie_check (#506). The plan executor resets params
-        # before EVERY step, so resetting the movie box here would untick the
-        # user's choice mid-plan and abandon the run's movie halfway. It is a
-        # session output preference, not a routing parameter -- nothing about
-        # the routed copper depends on it.
 
         # Reset hide checkboxes
         if self.net_panel.hide_check:
@@ -3142,6 +3095,21 @@ class RoutingDialog(wx.Dialog):
         """Get list of selected layers."""
         return [layer for layer, cb in self.layer_checks.items() if cb.GetValue()]
 
+    def _fanout_power_nets(self):
+        """#1318: ``{'power_nets', 'power_nets_widths'}`` from the route tab's
+        fields for the fanout tab (qfn_fanout.py --power-nets /
+        --power-nets-widths), both None when the fields are empty, unparsable
+        or of different lengths -- the CLI refuses a mismatch, and a fanout
+        that cannot read the widths lays every stub at its own width."""
+        nets = _split_net_list(self.power_nets_ctrl.GetValue()) or None
+        try:
+            widths = [float(w) for w in self.power_widths_ctrl.GetValue().split()] or None
+        except ValueError:
+            widths = None
+        if not nets or not widths or len(nets) != len(widths):
+            return {'power_nets': None, 'power_nets_widths': None}
+        return {'power_nets': nets, 'power_nets_widths': widths}
+
     def _selected_layer_costs(self):
         """Layer costs from the shared Basic-tab control, aligned to the
         SELECTED layers (what batch_route/generate_bga_fanout expect).
@@ -3156,21 +3124,20 @@ class RoutingDialog(wx.Dialog):
         Anything else is returned raw so the engine's clear error stands.
         Empty/invalid -> [].
         """
+        from .gui_utils import layer_costs_for_layers
+        selected = self._get_selected_layers()
+        return layer_costs_for_layers(self._typed_layer_costs(), selected,
+                                      selected,
+                                      self.pcb_data.board_info.copper_layers)
+
+    def _typed_layer_costs(self):
+        """The Basic-tab Layer Costs control's values as typed (floats, in the
+        control's own order); [] when empty or not numbers."""
         lc_text = self.layer_costs_ctrl.GetValue().strip()
         try:
-            costs = [float(c) for c in lc_text.split()] if lc_text else []
+            return [float(c) for c in lc_text.split()] if lc_text else []
         except ValueError:
             return []
-        if not costs:
-            return []
-        selected = self._get_selected_layers()
-        if len(costs) == len(selected):
-            return costs
-        copper = self.pcb_data.board_info.copper_layers
-        if len(costs) == len(copper):
-            by_layer = dict(zip(copper, costs))
-            return [by_layer[l] for l in selected if l in by_layer]
-        return costs
 
     def _validate_routing_inputs(self):
         """Validate routing inputs before starting.
@@ -3595,10 +3562,9 @@ class RoutingDialog(wx.Dialog):
                 # It CALLS the shared probe rather than restating it. The list
                 # was hand-mirrored from startup_checks for exactly as long as
                 # it took to drift. Pillow stays out of it because
-                # ROUTING_PACKAGES leaves it out (#887): the GUI's only raster
-                # consumer is the movie recorder, inert until the Advanced tab's
-                # checkbox is ticked, so blocking the routing dialog on it would
-                # refuse a board this GUI can route. The raster gate lives in
+                # ROUTING_PACKAGES leaves it out (#887): routing draws nothing,
+                # so blocking the routing dialog on it would refuse a board
+                # this GUI can route. The raster gate lives in
                 # startup_checks.check_render_dependencies, at the render sites.
                 from startup_checks import (ROUTING_PACKAGES,
                                             dependency_problems,
@@ -3621,7 +3587,7 @@ class RoutingDialog(wx.Dialog):
                 except ImportError:
                     msg = "Rust router module not found.\n\n"
                     msg += "Build it by running:\n"
-                    msg += "  python build_router.py\n\n"
+                    msg += "  python3 build_router.py\n\n"
                     msg += "from the KiCadRoutingTools directory."
                     raise RuntimeError(msg)
 
@@ -3900,6 +3866,12 @@ class RoutingDialog(wx.Dialog):
                     return_results=True,
                     pcb_data=self.pcb_data,
                     net_clearances=net_clearances,
+                    # #1285: the Fix DRC settings box, as the CLI passes
+                    # --no-fix-drc-settings. Inert here today (the in-run
+                    # floor sync it gates writes FILES, and this run writes
+                    # none), passed so the engine never assumes a writeback
+                    # the user turned off.
+                    fix_drc_settings=config.get('fix_drc_settings', True),
                     # #562 parity: let the plane finalize run its ORACLE leg
                     # IN-RUN, at the CLI's own sequence point, by handing it a
                     # save of the LIVE board to stage onto. Saving the live
@@ -4241,6 +4213,8 @@ class RoutingDialog(wx.Dialog):
                     layer_costs=_cmv.get('layer_costs'),
                     net_widths_by_name=_cmv.get('net_widths_by_name'),
                     net_clearances_by_name=_cmv.get('net_clearances_by_name'),
+                    board_edge_clearance=_cmv.get('board_edge_clearance'),
+                    same_net_pad_clearance=_cmv.get('same_net_pad_clearance'),
                     progress_callback=(
                         lambda c, t, m: self._apply_status(
                             f"{m} ({c}/{t})" if t else m)))
@@ -4303,6 +4277,8 @@ class RoutingDialog(wx.Dialog):
                     net_widths_by_name=_pfo.get('net_widths_by_name'),
                     net_clearances_by_name=_pfo.get(
                         'net_clearances_by_name'),
+                    board_edge_clearance=_pfo.get('board_edge_clearance'),
+                    same_net_pad_clearance=_pfo.get('same_net_pad_clearance'),
                     progress_callback=(
                         lambda c, t, m: self._apply_status(
                             f"{m} ({c}/{t})" if t else m)))
@@ -4424,12 +4400,6 @@ class RoutingDialog(wx.Dialog):
                 print(f"Warning: failed to build routing suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
-        # Routing movie (#506): snapshot the board this step just produced,
-        # BEFORE the completion popup blocks on the user. No-op unless the
-        # Advanced tab's "Make routing movie" box is ticked.
-        from .movie_recorder import record_movie_step
-        record_movie_step(self, 'route')
-
         if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
             print(msg)  # unattended plan run: no per-step OK dialog
         else:
@@ -4504,7 +4474,9 @@ class RoutingDialog(wx.Dialog):
         if hasattr(via, 'layers') and len(via.layers) >= 2:
             top_layer = get_layer_id(via.layers[0])
             bot_layer = get_layer_id(via.layers[1])
-            pcb_via.SetLayerPair(top_layer, bot_layer)
+            from .gui_utils import set_via_layers
+            set_via_layers(pcb_via, top_layer, bot_layer,
+                           getattr(via, 'via_type', None))
         # Keep a re-placed via's own tenting/plugging/filling (#489 §8). A via
         # with no spec is left to inherit the board setting, as before.
         from .gui_utils import apply_via_protection

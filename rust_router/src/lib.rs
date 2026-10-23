@@ -17,6 +17,8 @@ mod router;
 mod dubins;
 mod pose_router;
 mod lane_search;
+mod placement_kernels;
+mod pair_search;
 
 pub use obstacle_map::GridObstacleMap;
 pub use router::GridRouter;
@@ -146,5 +148,22 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PoseRouter>()?;
     m.add_function(wrap_pyfunction!(identify_blocking_obstacles, m)?)?;
     m.add_function(wrap_pyfunction!(lane_search::lane_search, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::crossing_pairs, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::mst_prim, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::mst_l1, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::seg_rect_hits, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::seg_crossings, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::seg_cross_pairs, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::gap_tree, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::mst_l1_tree, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::seg_cross_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::pad_hit_sums, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::net_box, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::pad_use, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::cong_delta, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::cong_delta_blocks, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::cong_block_slack, m)?)?;
+    m.add_function(wrap_pyfunction!(placement_kernels::overlap_sum, m)?)?;
+    m.add_function(wrap_pyfunction!(pair_search::pair_search, m)?)?;
     Ok(())
 }

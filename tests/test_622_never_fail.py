@@ -16,7 +16,8 @@ those decisions rest on, without a bench to route:
 3. add_over: the lanes an unproved plan leaves over two vias merged into the
    fanout's feedback ('over'), the lanes it newly names returned, a lane raised
    only by more, and the audits' own feedback (pairs, avoid) left as it was;
-4. held_plan: a loop's snapped plan when it has one; nothing when it held none;
+4. held_plan: a loop's snapped plan when it has one; nothing when it held none; and its best round's plan snapped,
+   and laid (plan_bench), on THAT round's bench -- not the first round's, whose via ends another solve relayed;
 5. whole_feedback --refused: the fanout audit's split pair (SDQS0 at its berth, SDQ3 between its tips) fed back
    as the two lanes' berths not to be chosen together -- the next round, incremental, frees both -- and a tooth on
    the source's far face (SDQ7) as an end to avoid;
@@ -132,6 +133,32 @@ def main():
         hp = wr.held_plan(loopd, dict(os.environ))
         if hp != os.path.join(loopd, 'plan.json'):
             fails.append(f'held_plan: {hp}, want the loop\'s snapped plan.json')
+        # ...and a loop with no snapped plan whose best round is not its first: that round's plan snapped and laid on
+        # THAT round's bench (the snaps stubbed: each records the bench it was run on and leaves its output)
+        loopd2 = os.path.join(td, 'loop2')
+        os.makedirs(loopd2)
+        for nm_ in ('p1.json', 'p2.json'):
+            open(os.path.join(loopd2, nm_), 'w').write('{}')
+        json.dump({'i': 2, 'score': 1}, open(os.path.join(loopd2, 'best.json'), 'w'))
+        json.dump({'1': '/b/fo_layers.kicad_pcb', '2': '/b/bench2.kicad_pcb'},
+                  open(os.path.join(loopd2, 'benches.json'), 'w'))
+        seen, run0 = [], wr.run
+
+        def run_(argv, env, log_path=None, **kw):
+            seen.append((os.path.basename(argv[0]), os.path.basename(argv[1]), env.get('BENCH')))
+            open(argv[2], 'w').write('{}')
+            return 0, ''
+        wr.run = run_
+        try:
+            hp2 = wr.held_plan(loopd2, dict(os.environ, BENCH='/b/fo_layers.kicad_pcb'))
+        finally:
+            wr.run = run0
+        on = sorted({b_ for _s, _p, b_ in seen})
+        if not seen or seen[0][1] != 'p2.json' or on != ['/b/bench2.kicad_pcb']:
+            fails.append(f'held_plan: round 2 held, its snaps {seen} -- want p2.json, every one on bench2')
+        pb = wr.plan_bench(loopd2, hp2, '/b/fo_layers.kicad_pcb')
+        if pb != '/b/bench2.kicad_pcb':
+            fails.append(f'plan_bench: the held plan laid on {pb}, want its round\'s bench2')
         side = os.path.join(td, 'fo.plan.json')
         json.dump({'chi': 1, 'ends': {'SDQS0P': [[127.0, 66.0], [139.0, 68.2]], 'SDQS0N': [[127.0, 66.3],
                                                                                          [139.8, 68.2]],

@@ -182,8 +182,15 @@ def test_methods(verbose):
             ("qfn_fanout/underpad", dict(escape_method="underpad", via_size=0.45,
                                          via_drill=0.2, allow_via_in_pad=True)),
         ]
+        # #1342: the fixture's nets exist only on U1, and the fanouts skip a
+        # single-pad (NC) net; fan a copy where each has a partner pad.
+        import tempfile
+        from synth import with_partner_pads
+        tmp = tempfile.TemporaryDirectory()
+        qfn_board = os.path.join(tmp.name, os.path.basename(QFN_BOARD))
+        with_partner_pads(QFN_BOARD, qfn_board, (2.0, 2.0))
         for label, kw in cases:
-            pcb = parse_kicad_pcb(QFN_BOARD)
+            pcb = parse_kicad_pcb(qfn_board)
             fp = pcb.footprints["U1"]
             t, vias, _d = _run(lambda: generate_qfn_fanout(
                 fp, pcb, net_filter=["DP1*"], layer="F.Cu", track_width=0.1,

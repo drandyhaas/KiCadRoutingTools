@@ -9,6 +9,7 @@ from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import Pad, is_kicad_10, _unescape_kicad_string
 from routing_utils import pos_key, POSITION_DECIMALS
+from geometry_utils import PARTIAL_VIA_TYPES
 
 
 def _escape_net_name(name: Optional[str]) -> Optional[str]:
@@ -194,11 +195,13 @@ def _functional_footprint_spans(content: str):
         return []
     from kicad_parser import (_footprint_blocks_by_key, footprint_pad_count,
                               footprint_copper_is_functional)
+    from kicad_parser import release_text_caches
     spans = []
     for start, end, _key in _footprint_blocks_by_key(content):
         if footprint_copper_is_functional(
                 footprint_pad_count(content[start:end])):
             spans.append((start, end))
+    release_text_caches()
     return spans
 
 
@@ -318,6 +321,15 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
               f"(a part's own land pattern, not decoration)")
 
     return content
+
+
+#: Coordinates are written on KiCad's 1 nm grid (``:.6f`` mm). Rounding moves a
+#: written line by at most half a nanometre along each axis, so two facing
+#: edges laid exactly at a rule can read up to sqrt(2) nm inside it in the file
+#: -- a diagonal diff pair coupled at its clearance does. KiCad grades
+#: clearance with a 0.5 um epsilon and never sees it; a margin-0 check_drc
+#: grade does.
+EDGE_ROUNDING_MM = 2 ** 0.5 * 1e-6
 
 
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
@@ -478,10 +490,11 @@ def via_net_name(net_id: int, net_id_to_name: dict) -> Optional[str]:
     """This board's name for a net id, or None to mean "use the numeric dialect".
 
     THE one resolver for every via emit site (#749 D). `net_id_to_name` has no
-    key `0` on any board -- `extract_nets` records `name_to_id[""] = 0` but never
-    builds a Net for id 0 -- so a legitimate no-net via missed the lookup at
-    every site and fell back to numeric. Measured: orangecrab_ext_pll resolves
-    169 nets and has no key 0.
+    key `0` on a NAME-net board -- `extract_nets` records `name_to_id[""] = 0`
+    there but never builds a Net for id 0 (a numeric board's table declares
+    `(net 0 "")`, so its map carries `{0: ''}`) -- so a legitimate no-net via
+    missed the lookup at every site and fell back to numeric. Measured:
+    orangecrab_ext_pll resolves 169 nets and has no key 0.
 
     That mattered more than a cosmetic dialect slip. `generate_via_sexpr` picks
     the net dialect from `net_name` and the protection tokens from
@@ -502,55 +515,11 @@ def via_net_name(net_id: int, net_id_to_name: dict) -> Optional[str]:
     return '' if name is None and net_id == 0 else name
 
 
-def prevailing_via_protection(vias) -> Optional[dict]:
-    """The protection spec most of a board's existing vias carry, or None.
-
-    Used as the default for vias this tool ADDS, so a new via follows the
-    board's own convention instead of a hardcoded front+back tenting (#489 §8).
-    hackrf_one is the motivating case: all 498 of its vias explicitly declare
-    covering/plugging/capping/filling = no, and the tool would have stamped
-    tenting yes on every via it added to that board.
-
-    Deterministic: ties break on the canonical spec text, not dict order.
-    """
-    from collections import Counter
-
-    counts = Counter()
-    canonical = {}
-    for via in vias or ():
-        spec = getattr(via, 'tenting_attrs', None)
-        if not spec:
-            continue
-        key = tuple(sorted((t, " ".join((v or '').split())) for t, v in spec.items()))
-        counts[key] += 1
-        canonical[key] = dict(spec)
-    if not counts:
-        return None
-    best = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
-    return canonical[best]
-
-
-def prevailing_via_protection_in_text(content: str) -> Optional[dict]:
-    """`prevailing_via_protection` for a writer that holds the board TEXT rather
-    than parsed Via objects (the plane / repair writers work on file text)."""
-    from kicad_parser import _extract_via_protection_attrs
-
-    class _V:
-        __slots__ = ('tenting_attrs',)
-
-        def __init__(self, spec):
-            self.tenting_attrs = spec
-
-    specs = _extract_via_protection_attrs(content)
-    if not specs:
-        return None
-    return prevailing_via_protection([_V(s) for s in specs.values()])
-
-
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
                        net_name: str = None, tenting_attrs: dict = None,
-                       inherit_when_unspecified: bool = False) -> str:
+                       inherit_when_unspecified: bool = False,
+                       via_type: str = None) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
@@ -559,20 +528,30 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
         tenting_attrs: The via's own protection spec as parsed from the board
             (Via.tenting_attrs). Pass it for any via that already existed so a
             ripped-and-re-placed via keeps its real tenting/plugging/filling
-            instead of being re-stamped with front+back tenting (#489 §8).
+            (#489 §8). None or {} emits no token: the via inherits the
+            board's `(setup ...)`.
         inherit_when_unspecified: Pass True alongside it for a RE-PLACED via.
             An empty spec then emits nothing, so a via that was inheriting the
             board's `(setup (tenting ...))` keeps inheriting it rather than
             gaining an explicit token it never had (#741). See
             via_protection_sexpr.
+        via_type: The via's own Via.via_type. 'blind' / 'buried' / 'micro'
+            writes KiCad's type word; anything else writes none, which KiCad
+            loads as a THROUGH via whatever `layers` says. Pass it for any via
+            that already existed: without the word a re-emitted microvia ships
+            as a through via (found reviewing #1268). A via the tool adds is a
+            through via and passes None. The word is written verbatim, so a
+            `buried` (KiCad 10's word, which KiCad 9 refuses to load) only ever
+            goes back into the KiCad 10 file it was read from.
     """
     layers_str = '" "'.join(layers)
+    type_word = f' {via_type}' if via_type in PARTIAL_VIA_TYPES else ''
     free_str = "\n\t\t(free yes)" if free else ""
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
     tenting_str = via_protection_sexpr(tenting_attrs, net_name,
                                       inherit_when_unspecified)
-    return f'''	(via
+    return f'''	(via{type_word}
 		(at {x:.6f} {y:.6f})
 		(size {size})
 		(drill {drill})
@@ -754,6 +733,17 @@ def zone_overlap_priorities(zones) -> List[int]:
     Ties break on (net_id, index) so the result never depends on dict order.
     Zones that overlap nothing keep priority 0, so boards that never had the
     ambiguity are byte-for-byte unaffected.
+
+    Zones of ONE net that overlap at equal priority are split too, and only
+    them. Their copper merges either way, but KiCad's DRC reports two
+    overlapping zones at equal priority as `zones_intersect`, an ERROR, same
+    net or not: argus_mainboard's split In2.Cu plane wrote a GND region piece
+    and the whole-layer GND background both at priority 0. The smaller gets a
+    level just above the larger and the layer is renumbered in (priority,
+    level) order, so every other pair of zones keeps its order AND its ties. It
+    has to: ranking the piece by area with the rest put it above the +3V3
+    zones it only borders, and they pulled back from it (11 mm2 of In2.Cu
+    changed hands on argus).
     """
     n = len(zones)
     prio = [0] * n
@@ -776,7 +766,7 @@ def zone_overlap_priorities(zones) -> List[int]:
         for pos, i in enumerate(idxs):
             for j in idxs[pos + 1:]:
                 if zones[i][1] == zones[j][1]:
-                    continue  # same net: overlap is harmless, they merge
+                    continue  # same net: split below, without reordering anything
                 if _polygons_overlap(zones[i][2], zones[j][2]):
                     ri, rj = find(i), find(j)
                     if ri != rj:
@@ -794,7 +784,44 @@ def zone_overlap_priorities(zones) -> List[int]:
                                             zones[i][1], i))
             for rank, i in enumerate(ordered):
                 prio[i] = rank
+
+        # same-net zones overlapping at EQUAL priority: a level each, the
+        # smaller higher, then the layer renumbered densely by (priority,
+        # level) -- identical numbers when no such tie exists
+        same = {i: i for i in idxs}
+
+        def top(a):
+            while same[a] != a:
+                same[a] = same[same[a]]
+                a = same[a]
+            return a
+
+        for pos, i in enumerate(idxs):
+            for j in idxs[pos + 1:]:
+                if (zones[i][1] == zones[j][1] and prio[i] == prio[j]
+                        and _polygons_overlap(zones[i][2], zones[j][2])):
+                    ri, rj = top(i), top(j)
+                    if ri != rj:
+                        same[ri] = rj
+        level = {i: 0 for i in idxs}
+        ties: Dict[int, List[int]] = {}
+        for i in idxs:
+            ties.setdefault(top(i), []).append(i)
+        for members in ties.values():
+            if len(members) > 1:
+                for lv, i in enumerate(sorted(members, key=lambda i: (-_polygon_area(zones[i][2]), i))):
+                    level[i] = lv
+        dense = {k: r for r, k in enumerate(sorted({(prio[i], level[i]) for i in idxs}))}
+        for i in idxs:
+            prio[i] = dense[(prio[i], level[i])]
     return prio
+
+
+#: The thermal-relief spoke geometry every pour route_planes writes (the
+#: Planes tab sets the same two numbers on its pcbnew ZONE), named so that
+#: replacing a designer's pour can say what its spokes become (#1329).
+ZONE_THERMAL_GAP = 0.2
+ZONE_THERMAL_BRIDGE_WIDTH = 0.2
 
 
 def generate_zone_sexpr(
@@ -804,8 +831,8 @@ def generate_zone_sexpr(
     polygon_points: List[Tuple[float, float]],
     clearance: float = 0.2,
     min_thickness: float = 0.1,
-    thermal_gap: float = 0.2,
-    thermal_bridge_width: float = 0.2,
+    thermal_gap: float = ZONE_THERMAL_GAP,
+    thermal_bridge_width: float = ZONE_THERMAL_BRIDGE_WIDTH,
     direct_connect: bool = True,
     use_net_name: bool = False,
     priority: int = 0
@@ -1197,15 +1224,16 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
             # through here and comes back re-stamped. Which behaviour is right
             # depends on the caller, so the via dict carries the answer:
             #
-            #   fanout / route_planes  -> new copper, no keys: prevailing spec
+            #   fanout / route_planes  -> new copper, no keys: no token, the
+            #                              via inherits the board's setup
             #   route.py's #666 re-emit -> PRE-EXISTING copper the written file
             #                              lost, so its own spec, and inherit
             #                              when it had none
             #
-            # `inherit_when_unspecified` is the second half and not redundant:
-            # {} is what Via.tenting_attrs holds for a via that inherits the
-            # board's `(setup ...)`, so without it such a via would silently
-            # GAIN the prevailing spec on the way back in.
+            # `inherit_when_unspecified` no longer changes the output (#741: an
+            # empty spec emits nothing either way); it records that the via
+            # ALREADY EXISTED. {} is what Via.tenting_attrs holds for a via that
+            # inherits the board's `(setup ...)`.
             # A via this call ADDS carries no spec and so emits no token: it
             # INHERITS the board's `(setup ...)` policy, which is what pcbnew
             # does for a via the GUI adds and what KiCad does for one the user
@@ -1227,10 +1255,12 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                 via.get('free', False),
                 # #749 D: the ONE resolver, so a no-net via does not fall to the
                 # numeric dialect on a name-net board (net 0 is missing from
-                # every map).
+                # that board's map).
                 net_name=via_net_name(via['net_id'], net_id_to_name),
                 tenting_attrs=attrs,
                 inherit_when_unspecified=existing,
+                # A re-emitted blind/micro via keeps its type word.
+                via_type=via.get('via_type'),
             )
             elements.append(v)
 
@@ -1549,7 +1579,8 @@ def assert_balanced_sexpr(text: str, label: str = 'board'):
 
 def remove_segments_from_content(content: str, segments: List,
                                  net_id_to_name: Dict = None,
-                                 unmatched_out: List = None) -> Tuple[str, int]:
+                                 unmatched_out: List = None,
+                                 match_width: bool = False) -> Tuple[str, int]:
     """Delete whole ``(segment ...)`` blocks matching the given segments.
 
     Used by the dead-end sweep (issue #84) to strip original input-file copper
@@ -1558,6 +1589,16 @@ def remove_segments_from_content(content: str, segments: List,
     unordered endpoint pair plus layer and net, which uniquely identifies it
     (a duplicate with the same endpoints/layer/net is interchangeable). The whole
     block (including its trailing uuid) is removed, not just the net token.
+
+    Pass ``net_id_to_name`` whenever the file references nets by name
+    (``kicad_parser.board_uses_name_nets``), whatever its version stamp: a
+    ``(net "name")`` block matches a target only through the map, so a
+    pre-KiCad-10 file with name refs matched nothing without it (#1312).
+
+    ``match_width`` adds the track width to the key, for a caller removing
+    some members of a same-span stack whose widths differ (#162): without it
+    the counted match takes the FIRST block of the span, which may be the
+    wider one meant to stay.
 
     Returns ``(modified_content, count_removed)``.
     """
@@ -1577,8 +1618,9 @@ def remove_segments_from_content(content: str, segments: List,
     def _canon(nid):
         return net_id_to_name.get(nid, nid) if net_id_to_name else nid
 
-    def seg_key(p1, p2, layer, net_token):
-        return (frozenset((p1, p2)), layer, net_token)
+    def seg_key(p1, p2, layer, net_token, width=None):
+        return (frozenset((p1, p2)), layer, net_token,
+                round(width, 4) if match_width and width is not None else None)
 
     # COUNTED multiset, not a set (#318 follow-up): a board can legitimately
     # carry N identical-span segments with only K < N of them strip-listed
@@ -1588,8 +1630,11 @@ def remove_segments_from_content(content: str, segments: List,
     targets = Counter()
     by_key = {}
     for s in segments:
+        # The width is read only when it is part of the key: the default
+        # match is span + layer + net, which a caller may hand without one.
         k = seg_key(pos_key(s.start_x, s.start_y),
-                    pos_key(s.end_x, s.end_y), s.layer, _canon(s.net_id))
+                    pos_key(s.end_x, s.end_y), s.layer, _canon(s.net_id),
+                    s.width if match_width else None)
         targets[k] += 1
         by_key.setdefault(k, []).append(s)
 
@@ -1600,6 +1645,7 @@ def remove_segments_from_content(content: str, segments: List,
     layer_re = re.compile(r'\(layer\s+"?([^")]+)"?\)|\(layers\s+"([^"]+\.Cu)"')
     net_name_re = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
     net_id_re = re.compile(r'\(net\s+(\d+)\)')
+    width_re = re.compile(r'\(width\s+([\d.]+)\)')
 
     # Scan top-level (segment ...) blocks with a quote-aware paren matcher. A
     # plain nested-paren regex breaks on KiCad v10 auto-net names that contain
@@ -1648,9 +1694,11 @@ def remove_segments_from_content(content: str, segments: List,
             else:
                 mi = net_id_re.search(block)
                 net_token = _canon(int(mi.group(1))) if mi else None
+            mw = width_re.search(block) if match_width else None
             key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
                           pos_key(float(me.group(1)), float(me.group(2))),
-                          ml.group(1) or ml.group(2), net_token)
+                          ml.group(1) or ml.group(2), net_token,
+                          float(mw.group(1)) if mw else None)
             if targets.get(key, 0) > 0:
                 targets[key] -= 1
                 keep = False
@@ -1679,7 +1727,9 @@ def remove_vias_from_content(content: str, vias: List,
     of a ripped/re-routed net that are no longer on the final board (#103 rip-
     existing; without this the old via AND its reroute's replacement both ship,
     stacking same-net drill pairs). Matched by position + net token; duplicates
-    are interchangeable. Returns ``(modified_content, count_removed)``.
+    are interchangeable. ``net_id_to_name`` as for the segment twin: required
+    whenever the file has name refs. Returns ``(modified_content,
+    count_removed)``.
     """
     if not vias:
         return content, 0
@@ -1938,9 +1988,10 @@ def add_teardrops_to_vias(content: str,
     KiCad accepts the same 9-field `(teardrops ...)` block on a via as on a pad
     (verified by round-tripping SetTeardropsEnabled through pcbnew). The block is
     inserted AFTER `(uuid ...)`, as the via's last child: KiCad's parser does not
-    care about child order, while this repo's own via regexes require
-    layers -> (free)? -> net -> uuid to be contiguous, so inserting earlier would
-    make the boards we write unparseable BY US.
+    care about child order, and since #748 neither does ours past the geometry
+    prefix (`extract_vias` reads net, uuid, free and the protection family by
+    token, in any order), but that prefix up to `(layers ...)` is still
+    positional, so the block goes last rather than anywhere near it.
 
     Returns (modified_content, count_of_vias_given_teardrops).
     """
@@ -2040,8 +2091,12 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
             if key != component_ref:
                 continue
 
-            # Find every pad with this number in this footprint
-            pad_pattern = rf'\(pad\s+"{re.escape(pad_number)}"\s+\w+\s+\w+'
+            # Find every pad with this number in this footprint, quoted or in
+            # the older unquoted spelling KiCad still reads (#1290)
+            _num = re.escape(pad_number)
+            _bare = (f'|{_num}(?=\\s)'
+                     if pad_number and re.fullmatch(r'[^\s()"]+', pad_number) else '')
+            pad_pattern = rf'\(pad\s+(?:"{_num}"{_bare})\s+\w+\s+\w+'
             for pad_match in re.finditer(pad_pattern, fp_text):
                 pad_start_rel = pad_match.start()
                 # Find end of this pad block
@@ -2063,6 +2118,10 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
                 if not net_match:
                     # KiCad 10: (net "name") with no numeric ID
                     net_match = re.search(r'\(net\s+"(?:[^"\\]|\\.)*"\)', pad_text)
+                if not net_match:
+                    # the older spelling's bare name, (net 3 GND) / (net GND)
+                    net_match = re.search(r'\(net\s+(?:\d+\s+)?(?!\d+\))[^\s()"]+\)',
+                                          pad_text)
                 if net_match:
                     # Convert to absolute positions in content
                     abs_start = fp_start + pad_start_rel + net_match.start()

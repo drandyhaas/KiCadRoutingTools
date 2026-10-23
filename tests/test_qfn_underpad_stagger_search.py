@@ -29,8 +29,11 @@ from kicad_writer import add_tracks_and_vias_to_pcb
 from qfn_fanout import generate_qfn_fanout
 from check_drc import run_drc
 
-BOARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                     "kicad_files", "qfn_underpad_coupling.kicad_pcb")
+SRC_BOARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "kicad_files", "qfn_underpad_coupling.kicad_pcb")
+# #1342: the fixture's nets exist only on U1, and the fanouts skip a
+# single-pad (NC) net; main() fans a copy where each has a partner pad.
+BOARD = SRC_BOARD
 VIA_SIZE, VIA_DRILL, CLEARANCE, GRID = 0.45, 0.2, 0.12, 0.05
 N_LEGS = 8
 
@@ -49,13 +52,17 @@ def _fanout(out_path):
 
 
 def main():
+    global BOARD
     if not os.path.exists(BOARD):
         print(f"FAIL: coupling board missing ({BOARD})")
         return 1
 
     import tempfile
+    from synth import with_partner_pads
     fails = []
     with tempfile.TemporaryDirectory() as tmp:
+        BOARD = os.path.join(tmp, "qfn_underpad_coupling.kicad_pcb")
+        with_partner_pads(SRC_BOARD, BOARD, (2.0, 2.0))
         # check_sizes=False: this fanout intentionally routes 0.1mm escapes, below
         # the 2-layer fab floor -- the test asserts clearance/connectivity, not the
         # fab-width floor that issue #176 added.

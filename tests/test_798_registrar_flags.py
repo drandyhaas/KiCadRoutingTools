@@ -41,11 +41,13 @@ import krt_capabilities as k                                # noqa: E402
 RUN_ALL_TIMEOUT = 300
 
 #: A long option as argparse RENDERS it: at the start of an option line, on its
-#: own or after a short alias. Scraping every `--token` out of the help TEXT
+#: own or after a short alias -- `-o, --output OUTPUT` on Python 3.13+, but
+#: `-o OUTPUT, --output OUTPUT` before it, which repeats the metavar after the
+#: alias. Scraping every `--token` out of the help TEXT
 #: instead picks up prose ("Use --group-by to choose...") and words broken
 #: across a wrap, which manufactures phantom flags like `--net-` and makes the
 #: comparison meaningless in the direction that matters.
-_OPT = re.compile(r'^\s{0,10}(?:-\w,\s*)?(--[A-Za-z0-9][A-Za-z0-9-]*)', re.M)
+_OPT = re.compile(r'^\s{0,10}(?:-\w(?: [A-Z][A-Z0-9_]*)?,\s*)?(--[A-Za-z0-9][A-Za-z0-9-]*)', re.M)
 
 
 def _real_flags(script):
@@ -90,25 +92,39 @@ def t_a_registrar_is_resolved_per_FUNCTION_not_per_module():
     """The false-positive trap the module-level union walked into.
 
     `py_placer/placement/cli_gates.py` holds four registrars.
-    `place_optimize.py` calls all four; `place_portfolio.py` calls three and
-    NOT `add_lock_advisor_args`. Unioning the module credits portfolio with
-    `--suggest-locks`, which its parser rejects with exit 2 -- so a fix that
-    only teaches the resolver about dotted paths passes the first assertion
-    here and fails the second.
+    `check_floorplan.py` calls three of them (`add_brief_arg`,
+    `add_mechanical_arg`, `add_board_state_args`); `board_brief.py` calls two
+    and NOT `add_board_state_args`; `place_fanout_clearance.py` calls only
+    `add_intent_arg`. Unioning the module credits board_brief with
+    `--allow-unplaced`, which its parser rejects with exit 2 -- so a fix that
+    only teaches the resolver about dotted paths passes the first assertions
+    here and fails the later ones.
     """
     caps = k.capabilities()
-    assert k.missing(caps, ['place_optimize.py:--intent']) == [], \
+    assert k.missing(caps, ['check_floorplan.py:--brief']) == [], \
         'a flag from a sub-package registrar must be found'
-    assert k.missing(caps, ['place_optimize.py:--suggest-locks']) == [], \
-        'place_optimize.py calls add_lock_advisor_args'
+    assert k.missing(caps, ['check_floorplan.py:--allow-unplaced']) == [], \
+        'check_floorplan.py calls add_board_state_args'
     # ...and the same registrar module must NOT leak into a script that
     # imports it but never calls that particular registrar.
-    port = set(k.script_flags(k._tool_path(k.ROOT, 'place_portfolio.py')))
-    assert '--intent' in port, 'place_portfolio.py does call add_intent_arg'
-    assert '--align-weight' in port, 'and add_tidiness_args'
-    assert '--suggest-locks' not in port, (
-        'place_portfolio.py imports cli_gates but never calls '
-        'add_lock_advisor_args; argparse rejects --suggest-locks')
+    brief = set(k.script_flags(k._tool_path(k.ROOT, 'board_brief.py')))
+    assert '--brief' in brief, 'board_brief.py does call add_brief_arg'
+    assert '--mechanical' in brief, 'and add_mechanical_arg'
+    real = _real_flags('board_brief.py')
+    for flag, registrar in (('--allow-unplaced', 'add_board_state_args'),
+                            ('--intent', 'add_intent_arg')):
+        assert flag not in real, (
+            f'board_brief.py started accepting {flag}; pick another pair')
+        assert flag not in brief, (
+            f'board_brief.py imports cli_gates but never calls {registrar}; '
+            f'argparse rejects {flag}')
+    pfc = set(k.script_flags(os.path.join(k.ROOT, 'py_placer',
+                                          'place_fanout_clearance.py')))
+    assert '--intent' in pfc, 'place_fanout_clearance.py calls add_intent_arg'
+    for flag in ('--brief', '--mechanical', '--allow-unplaced'):
+        assert flag not in pfc, (
+            f'place_fanout_clearance.py calls only add_intent_arg; {flag} '
+            f'leaked from the module')
     print("  PASS: per-function resolution, both directions")
 
 
@@ -149,7 +165,9 @@ def t_a_script_still_does_NOT_inherit_another_CLIs_flags():
     cannot inherit its vocabulary however the resolution changes.
     """
     caps = k.capabilities()
-    for token in ('route_planes.py:--net-clearances',
+    # route_planes.py has taken --net-clearances since #1272, so the
+    # route.py-only example is --keep-away.
+    for token in ('route_planes.py:--keep-away',
                   'route_planes.py:--track-width-floor',
                   'repair_planes.py:--net-clearances',
                   'route_diff.py:--track-width-floor'):
@@ -160,7 +178,8 @@ def t_a_script_still_does_NOT_inherit_another_CLIs_flags():
 
 def t_a_computed_flag_name_is_a_known_limit_not_a_silent_gap():
     """`render_placement.py` builds 18 toggles as `f'--{name}'`
-    (py_tools/render_placement.py:1576-1578), so no source scan can see them.
+    (`_bool_pair` in py_tools/render_placement.py), so no source scan can see
+    them.
 
     That is why it is NOT in FLAG_SCRIPTS, and this pins the reason: if
     someone adds it, the exact-match test above would fail with a list of 18

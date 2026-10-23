@@ -26,7 +26,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - [Support](#support) — donate via Ko-fi, GitHub Sponsors or PayPal
 - [Features](#features)
 - [Quick Start](#quick-start)
-- [KiCad Plugin](#kicad-plugin) — GUI, the AI **AI tab**, installation
+- [KiCad Plugin](#kicad-plugin) — GUI, the **AI Drive** tab (routing and placement), installation
 - [Command-Line Interface](#command-line-interface) — routing, planes, verification
 - [Documentation](#documentation) — full guide for every feature
 - [Project Structure](#project-structure) & [Module Overview](#module-overview)
@@ -45,7 +45,7 @@ cloud computing and AI-assisted development.
 
 The compute is not incidental. Every change to the router is A/B-tested by
 replaying a corpus of real open-source boards on rented cores and grading each
-one for DRC violations and unconnected nets, and the ~600-file test suite fans
+one for DRC violations and unconnected nets, and the ~770-file test suite fans
 out the same way. It is what stops a change that helps one board from quietly
 breaking ten others.
 
@@ -64,7 +64,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 **Core routing**
 - Rust-accelerated A\* pathfinding, multi-layer with automatic via insertion
 - [Rip-up and reroute](docs/rip-up-reroute.md) — progressive N+1 blocker analysis, ripped-corridor avoidance
-- [Net ordering strategies](docs/net-ordering.md) — MPS (crossing-aware), inside-out, or original, with MPS layer swaps
+- [Net ordering strategies](docs/net-ordering.md) — MPS (crossing-aware), inside-out, original, or bus-first, with MPS layer swaps
 - Stub layer switching, vertical track alignment, turn-cost straightening
 - Board-edge (Edge.Cuts arcs/cutouts), keep-out rule areas, and auto BGA exclusion zones — see [Configuration](docs/configuration.md)
 - Direction-aware stub / BGA / track [proximity penalties](docs/configuration.md)
@@ -86,7 +86,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 - [Bus routing](docs/bus-routing.md), plus [guide corridors and keep-out zones](docs/configuration.md) drawn on a User layer
 
 **Placement, fanout & optimization**
-- [Placement optimization](docs/placement-optimization.md) for routability, before routing
+- [Placement by function](py_placer/placement/README.md): parts sorted into functional groups, one objective annealed (`place_simple.py`) over 12 seeds (6 started scattered, 6 with each group gathered), and a fast route (`route.py --quick 2`) of the 6 the objective rates best to keep the best (`/plan-pcb-placement`)
 - [The design brief](docs/design-brief.md) — state what the board is FOR, in a sibling the toolchain reads: which connectors are user-facing, which edge each belongs on and where along it
 - [Floorplan intent, graded](docs/floorplan-intent.md) — declare where parts belong and check the board against it, so "the render looks fine" stops being a verdict
 - BGA / QFN fanout with decoupling-cap placement cleanup, Hungarian target-swap, and schematic sync
@@ -98,8 +98,8 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 
 **Interfaces**
 - Full [KiCad plugin GUI](#kicad-plugin) (KiCad 9 & 10) and a scriptable [CLI](#command-line-interface)
-- [AI assistance](docs/claude-skills.md) — a **AI tab** that plans an entire routing workflow, per-field "Ask AI" helpers, and datasheet-driven power / high-speed / diff-pair analysis
-- [Board rendering & routing animation](docs/route-animation.md) — fast geometry PNG renderer, plus a movie of the router laying/ripping/restoring copper (`make_movie.py`, or the Advanced options tab's **Make routing movie** debug checkbox → `.mp4`/`.gif`)
+- [AI assistance](docs/claude-skills.md) — an **AI Drive** tab that plans an entire routing workflow or places a board by function, per-field "Ask AI" helpers, and datasheet-driven power / high-speed / diff-pair analysis
+- [Board rendering](docs/utilities.md#board-renderer-route_renderpy) — fast geometry PNG renderer (`route_render.py`), placement stills (`render_placement.py`), a board's power components (`render_power.py`), and movies of a routing run (`route_movie.py`, made for every stress run) and of a placement, or the placement skill's whole flow through to the full route (`place_movie.py`)
 - [Routing plans as files](docs/claude-skills.md#plans-from-the-command-line) — save/load a whole routing chain as JSON: build one from a recorded command chain (`make_plan.py`), run it headless through the real plugin (`run_plan.py`), or load it in the GUI
 
 ## Quick Start
@@ -114,10 +114,12 @@ cd KiCadRoutingTools
 
 Or [download the ZIP](https://github.com/drandyhaas/KiCadRoutingTools/archive/refs/heads/main.zip) and extract it.
 
+Commands here use `python3`. On Windows, use `py -3` (or `python`) if `python3` is not found.
+
 ### 2. Install the Rust Router
 
 ```bash
-python build_router.py
+python3 build_router.py
 ```
 
 By default this downloads a prebuilt binary for your OS from the project's
@@ -147,9 +149,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 After installation, restart your terminal or run `source ~/.cargo/env`, then:
 
 ```bash
-python build_router.py --from-source     # build locally instead of downloading
-python build_router.py --tag v0.15.0     # download a specific release
-python build_router.py --clean           # remove all build artifacts
+python3 build_router.py --from-source     # build locally instead of downloading
+python3 build_router.py --tag v0.15.0     # download a specific release
+python3 build_router.py --clean           # remove all build artifacts
 ```
 
 ### 3. Choose Your Interface
@@ -158,7 +160,7 @@ python build_router.py --clean           # remove all build artifacts
 
 ```bash
 # Install the plugin
-python install_plugin.py
+python3 install_plugin.py
 
 # Then in KiCad: Tools → External Plugins → KiCadRoutingTools
 ```
@@ -185,35 +187,36 @@ Other useful skills:
 > /analyze-power-nets kicad_files/my_board.kicad_pcb         # Identify power nets and track widths
 > /identify-diff-pairs kicad_files/my_board.kicad_pcb        # Find diff pairs by pin function, recommend gap/impedance
 > /recommend-stackup kicad_files/my_board.kicad_pcb          # Stackup advice for impedance/time-matching accuracy
+> /recommend-plane-mappings kicad_files/my_board.kicad_pcb   # Which nets get planes, on which layers
 > /diagnose-routing-failures my_board.kicad_pcb /tmp/route_output.txt  # Root-cause failed routes, get a retry command
 > /review-routed-board my_board_routed.kicad_pcb             # Post-route QA: DRC, connectivity, length match, GND vias
-> /pcb-free-agent full kicad_files/my_board.kicad_pcb        # Place and route end to end; the agent picks its steps
+> /plan-pcb-placement full kicad_files/my_board.kicad_pcb    # Group, place seeds, fast-route, review until clean, then route end to end
 ```
 
 See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
 
-All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-ai-tab) below. The plugin can run the same skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the AI tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
+All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-ai-drive-tab) below. The plugin can run the analysis and routing skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the AI Drive tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The placement runs need Claude Code, because they write files and opencode's analysis agent may not. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
 
 **Option C: Manual Command Line (For scripting and automation)**
 
 ```bash
-# Optionally optimize an existing placement for routability (before routing)
-python py_placer/place_optimize.py my_board.kicad_pcb --max-displacement 3
+# Optionally place the board first, by its functional groups (see py_placer/placement/README.md)
+python3 py_placer/place_simple.py my_board.kicad_pcb placed.kicad_pcb --groups groups.json --intent intent.json
 
 # Pour the planes FIRST (#562): the fanout's plane-drop vias then land on
 # real fill, and the route step welds plane pads into it.
-python py_router/route_planes.py my_board.kicad_pcb poured.kicad_pcb --nets GND --plane-layers B.Cu
+python3 py_router/route_planes.py my_board.kicad_pcb poured.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Fan out a BGA, then tidy decoupling caps off the new vias (issue #130)
-python py_router/bga_fanout.py poured.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
-python py_placer/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
+python3 py_router/bga_fanout.py poured.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
+python3 py_placer/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
 
-# Route differential pairs
-python py_router/route_diff.py capclean.kicad_pcb -o diffed.kicad_pcb --nets "*lvds*"
+# Route differential pairs (the output is positional: route_diff's -o is --ordering)
+python3 py_router/route_diff.py capclean.kicad_pcb diffed.kicad_pcb --nets "*lvds*"
 
 # Route ALL remaining nets, plane nets included (their widths via --power-nets).
 # This step ends with the in-run plane finalize that completes the planes.
-python py_router/route.py diffed.kicad_pcb routed.kicad_pcb --nets "*" \
+python3 py_router/route.py diffed.kicad_pcb routed.kicad_pcb --nets "*" \
     --power-nets GND --power-nets-widths 0.3
 ```
 
@@ -227,16 +230,19 @@ The plugin provides a full graphical interface for all routing features, running
   <img src="kicad_routing_plugin/gui.png" alt="KiCad Plugin GUI" width="600">
 </p>
 
-### AI assistance (AI tab)
+### AI assistance (AI Drive tab)
 
 <p align="center">
   <img src="docs/claude_tab.png" alt="AI tab: planned steps, controls, and live transcript" width="700">
 </p>
 
-With [Claude Code](https://claude.ai/claude-code) or [opencode](https://opencode.ai) installed, the routing dialog gains AI assistance throughout (the plugin spawns the selected agent CLI headless, streams a live transcript, and fills GUI controls from the results). The **Backend** dropdown on the AI tab picks the CLI: Claude Code runs Anthropic models; opencode takes `provider/model` strings for many providers (including its built-in free tier), with `opencode auth login` adding provider accounts. Both discover the same `.claude/skills/`; opencode runs them under a read-only `pcb-analysis` agent defined in `opencode.json` (the equivalent of the Claude run's read-only tool allowlist). Neither grants a dedicated write tool, though both grant `Bash`, so neither is a sandbox — the allowlist states intent, and `--allowedTools` auto-approves rather than restricts. They are also not identical: the Claude list grants the subagent-dispatch tool, so an analysis skill there can dispatch an independent verifier (#552), which opencode's pinned agent has no per-run equivalent for. A caller asking opencode for a tool set naming `Write`/`Edit` is refused rather than silently downgraded.
+With [Claude Code](https://claude.ai/claude-code) or [opencode](https://opencode.ai) installed, the routing dialog gains AI assistance throughout (the plugin spawns the selected agent CLI headless, streams a live transcript, and fills GUI controls from the results). The **Backend** dropdown on the AI Drive tab picks the CLI: Claude Code runs Anthropic models; opencode takes `provider/model` strings for many providers (including its built-in free tier), with `opencode auth login` adding provider accounts. Both discover the same `.claude/skills/`; opencode runs them under a read-only `pcb-analysis` agent defined in `opencode.json` (the equivalent of the Claude run's read-only tool allowlist). Neither grants a dedicated write tool, though both grant `Bash`, so neither is a sandbox — the allowlist states intent, and `--allowedTools` auto-approves rather than restricts. Both can dispatch a subagent, so an analysis skill can hand its close-out to an independent verifier (#552): the Claude allowlist grants the dispatch tool per run, and the `pcb-analysis` agent grants opencode's `task` tool in `opencode.json`. A caller asking opencode for a tool set naming `Write`/`Edit` is refused rather than silently downgraded.
 
-- **AI tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Backend, model, and effort selectors control every AI run and persist with the dialog settings (model/effort remembered per backend).
-- **Save / Load a plan** - *Save…* writes the generated step list to a JSON file; *Load…* reads one back and runs it with **no Claude call** — handy for replaying a workflow that worked on another board. A recorded stress-test chain converts to a loadable plan too (`tests/stress/manifest_to_plan.py <board>/redo_commands.sh plan.json`).
+The tab has two sub-tabs:
+
+- **Routing** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Backend, model, and effort selectors control every AI run and persist with the dialog settings (model/effort remembered per backend).
+- **Placement** - *Place (AI)* and *Place + Route (AI)* run `/plan-pcb-placement place` / `full` headless into a `krt_placement/` folder beside the board. The tab shows the seed candidates with a preview, a status line read from the run's milestone ledger, and at the end REPORT.md; *Apply Result to Board* moves the open board's parts to the result's poses and locks (and, after *Place + Route*, its routed copper). These two need Claude Code. *Beautify Labels* (no AI) tidies the reference-designator silkscreen (`py_placer/beautify_labels.py`).
+- **Save / Load a plan** - *Save…* writes the generated step list to a JSON file; *Load…* reads one back and runs it with **no Claude call** — handy for replaying a workflow that worked on another board. A recorded command chain converts to a loadable plan too (`python3 py_router/make_plan.py <run dir>`; see [Plans from the command line](docs/claude-skills.md#plans-from-the-command-line)).
 - **Per-field "Ask AI" buttons** - power nets/widths (Route tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
 
 The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs/claude-skills.md#plugin-gui-integration). Datasheet-based skills use web lookups and take a few minutes; every run shows a live transcript with cancel.
@@ -245,7 +251,7 @@ The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs
 
 Three ways to install:
 
-**A. KiCad Plugin and Content Manager (PCM)** — the recommended path for end users, and it needs no extra repository URL: the package has been in the **official KiCad repository** (the one KiCad ships with, `gitlab.com/kicad/addons`) since v0.15.6. Open the PCM from the KiCad main window, leave the repository dropdown on *KiCad official repository*, go to the **Plugins** tab, search for `routing`, select *KiCad Routing Tools* and click **Install**, then **Apply Changes** at the bottom. If it is not listed, the PCM is serving a cached catalogue — press **Refresh** and look again. Versions are published with status `testing` rather than `stable`, which the PCM shows in the Status column but does not hide or block; `kicad_version` is a *minimum*, so the 9.0 entry installs on KiCad 10 as well. On first launch, the plugin checks the Python packages listed in `requirements.txt` (`numpy`, `scipy`, `shapely`) and offers a one-click pip install for any that are missing **or too old** into KiCad's Python. Do not assume KiCad supplies them: what it bundles varies by version and platform, and KiCad 10 on macOS ships no `numpy` at all. The check reports the version and the file path the *running* interpreter imports — KiCad's Python is often not the one `pip show numpy` answers for in a terminal.
+**A. KiCad Plugin and Content Manager (PCM)** — the recommended path for end users, and it needs no extra repository URL: the package has been in the **official KiCad repository** (the one KiCad ships with, `gitlab.com/kicad/addons`) since v0.15.6. Open the PCM from the KiCad main window, leave the repository dropdown on *KiCad official repository*, go to the **Plugins** tab, search for `routing`, select *KiCad Routing Tools* and click **Install**, then **Apply Changes** at the bottom. If it is not listed, the PCM is serving a cached catalogue — press **Refresh** and look again. Versions are published with status `testing` rather than `stable`, which the PCM shows in the Status column but does not hide or block; `kicad_version` is a *minimum*, so the 9.0 entry installs on KiCad 10 as well. On first launch, the plugin checks the Python packages listed in `requirements.txt` (`numpy`, `scipy`, `shapely`, and the optional `Pillow`, without which only board renders and the placement preview are off) and offers a one-click pip install for any that are missing **or too old** into KiCad's Python. Do not assume KiCad supplies them: what it bundles varies by version and platform, and KiCad 10 on macOS ships no `numpy` at all. The check reports the version and the file path the *running* interpreter imports — KiCad's Python is often not the one `pip show numpy` answers for in a terminal.
 
 **B. PCM "Install from File…" using the release zip** — for a release newer than the one the official catalogue currently carries, for a pinned older version, or for an offline machine. Each [GitHub Release](https://github.com/drandyhaas/KiCadRoutingTools/releases) ships a ready-to-install PCM package zip named `KiCadRoutingTools-<version>.zip` (a single cross-platform archive bundling the prebuilt Rust binaries for all platforms — **not** the auto-generated "Source code (zip)"). To install it:
 
@@ -260,16 +266,19 @@ The plugin appears under *Tools → External Plugins* in the PCB Editor. The sam
 
 ```bash
 # Install the plugin (copies to KiCad plugins directory)
-python install_plugin.py
+python3 install_plugin.py
 
 # For development: create symlink instead of copying
-python install_plugin.py --symlink
+python3 install_plugin.py --symlink
 
 # Remove the plugin
-python install_plugin.py --uninstall
+python3 install_plugin.py --uninstall
+
+# Skip installing the Python dependencies
+python3 install_plugin.py --no-deps
 ```
 
-The installer automatically detects your KiCad installation directory (supports KiCad 9.0 and 10.0):
+The installer installs into every KiCad version it finds (version directories and install roots are discovered, not taken from a fixed list), under:
 - **macOS**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
 - **Linux**: `~/.local/share/kicad/<version>/3rdparty/plugins/`
 - **Windows**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
@@ -284,14 +293,14 @@ The full release flow — version bump, GitHub Release, and the merge request to
 
 Short version:
 
-1. Bump `VERSION` and the `versions[]` entry in `metadata.json`.
+1. Bump `VERSION` and the `versions[]` entry in `metadata.json` (and `rust_router/Cargo.toml` only when the Rust crate changed); `python3 check_release_version.py --tag vX.Y.Z` checks they agree.
 2. `git tag v0.15.6 && git push --tags` — CI builds all 4 platform binaries, packages a single `KiCadRoutingTools-<ver>.zip` (the PCM validator rejects duplicate version strings, so we ship one cross-platform zip), patches `metadata.json` with real sha256/size values, and attaches everything to the GitHub Release.
 3. Append the new version to the metadata file in your fork of `gitlab.com/kicad/addons/metadata` and open an MR. See the docs page for the exact commands.
 
 To build a zip locally for testing:
 
 ```bash
-python package_pcm.py --binary-dir ./path/to/release/artifacts
+python3 package_pcm.py --binary-dir ./path/to/release/artifacts
 ```
 
 ### Usage
@@ -312,9 +321,9 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 - Net selection with filtering and component filtering
 - Nets selected in the PCB editor before opening the plugin are pre-checked automatically (also applies to the Fanout, Planes, and Differential tabs)
 - Option to separate nets by net class (organizes into tabs per class)
-- Track width, clearance, via size/drill from net class or manual override
+- Track width, clearance, via size/drill from net class or manual override; impedance; the fab tier, escalation policy and clearance ceiling (the CLI's `--fab-tier`, `--escalation`, `--clearance-ceiling`)
 - Layer selection with per-layer cost multipliers
-- Options: stub layer swaps, copper text moving, teardrops, power net widths, no-BGA zones
+- Options: stub layer swaps, copper text moving, teardrops, DRC-settings fix, power net widths and neck-down, no-BGA zones, smoothing
 - **Guide corridor** - draw a polyline on a User layer (e.g. `User.1`) and tick "Follow User-layer guide path" to route the selected nets along it (waypoints, avoiding obstacles, packed non-overlapping)
 - **Keepout zones** - draw one or more closed polygons on a User layer (e.g. `User.2`) and tick "Keep out of User-layer polygon(s)" to keep routed tracks out of those areas (hard keepout, all routed nets)
 - **Clear guide/keepout layers** - optional "Clear guide layer after routing" / "Clear keepout layer after routing" checkboxes (unchecked by default) delete the drawn guide/keepout graphics from their User layer after a successful route, so you can draw fresh ones for the next run
@@ -328,22 +337,27 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 
 **Differential Tab:**
 - Differential pair selection with filtering
-- Pair gap, turning radius, setback angle configuration
-- Options: polarity fix, GND vias, intra-pair length matching
+- Pair width and gap, differential impedance, turning radius, setback angle configuration
+- Options: polarity fix, GND vias, intra-pair length matching, AC-coupled end-to-end matching
+- **Ask AI** confirms pairs by pin function
 
 **Fanout Tab:**
-- BGA fanout with exit margin, escape direction, differential pair support
-- Under-pad escape option for dense, fully-populated BGAs the channel router can't escape (issue #122) — see [BGA Fanout](py_router/bga_fanout/README.md#escape-methods)
-- "Optimize decoupling cap placement" option (off by default) — after fanout, nudges decoupling caps off foreign-net fanout vias and toward same-net balls (issue #130) — see [Placement](py_placer/placement/README.md#place_fanout_clearancepy--decoupling-cap-clearance-repair-issue-130)
-- QFN fanout with extension length configuration
+- BGA fanout with exit margin, escape direction, differential pair support, and plane-net ball drops
+- Escape method: auto (channel router, under-pad retry), channel, under-pad for dense fully-populated BGAs (issue #122), or dog-bone — see [BGA Fanout](py_router/bga_fanout/README.md#escape-methods)
+- "Optimize decoupling cap placement" option (off by default) — after fanout, nudges decoupling caps off foreign-net fanout vias and toward same-net balls — see [Decap Clearance Repair](docs/utilities.md#decap-clearance-repair-place_fanout_clearancepy)
+- QFN fanout with extension length, escape layer, and an under-pad (via-drop) escape
 - Net selection for fanout operations
 
 **Planes Tab** (pour creation only since #562 — plane repair runs inside
 every route, and the route step welds plane pads into the pour):
-- Net-to-layer assignment for power/ground planes
-- Create the pours (plus thermal via arrays under exposed pads)
-- Area via stitching and GND return via placement near signal vias
+- Net-to-layer assignment for power/ground planes (**Ask AI** recommends one)
+- Create the pours (plus thermal via arrays under exposed pads, optional thermal-relief connections)
+- Area via stitching, a board-edge via fence, and GND return via placement near signal vias
 - Via size/drill, zone clearance configuration
+
+**AI Drive Tab** — see [AI assistance](#ai-assistance-ai-drive-tab) above:
+- *Routing* sub-tab: plan a routing chain with `/plan-pcb-routing` and run its steps; review and diagnose; save/load plans
+- *Placement* sub-tab: place (and route) the board with `/plan-pcb-placement`; Beautify Labels
 
 **Log Tab:**
 - Real-time routing output display
@@ -351,6 +365,7 @@ every route, and the route step welds plane pads into the pour):
 
 **About Tab:**
 - Version information and credits
+- Window transparency, *Validate PCB Data* (the pcbnew-built board model against the file parser's, reported in the Log tab) and *Reset All Settings to Defaults*
 
 **General Features:**
 - Settings persistence (parameters and selections preserved between sessions)
@@ -385,91 +400,91 @@ All `--nets` options support fnmatch-style wildcards and exclusion patterns:
 
 ```bash
 # Route all nets (default) - outputs to input_routed.kicad_pcb
-python py_router/route.py kicad_files/input.kicad_pcb
+python3 py_router/route.py kicad_files/input.kicad_pcb
 
 # Route all nets, overwrite input file
-python py_router/route.py kicad_files/input.kicad_pcb --overwrite
+python3 py_router/route.py kicad_files/input.kicad_pcb --overwrite
 
 # Route all nets to a specific output file
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
 
 # Route specific nets (using --nets option)
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
 
 # Route with wildcard patterns
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_*)"
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_*)"
 
 # Route all nets on a component (auto-excludes GND/VCC/VDD/unconnected)
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --component U1
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --component U1
 
 # Route specific patterns on a component (no auto-exclusion)
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "/DDAT*" --component U1
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "/DDAT*" --component U1
 
 # Route ALL nets on a component including power (use "*" pattern)
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" --component U1
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" --component U1
 
 # Exclusion-pattern SYNTAX demo (! prefix). NOTE: in the #562 chain you do
 # NOT exclude plane nets from the route step -- see the chain example below.
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" "!GND" "!VCC"
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" "!GND" "!VCC"
 
-# Route one placement BLOCK -- a schematic sheet, a KiCad group, an IC and its decaps
-# (see "Placement blocks" below for what --group-by can infer, and --list-groups)
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+# Route one placement BLOCK -- a schematic sheet, a KiCad group, a net-name prefix, an IC and
+# its decaps (--group-by kicad,sheet,netprefix,decap; auto = kicad,sheet; --list-groups shows them)
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
   --group-by sheet --list-groups                      # what blocks exist?
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
   --group sheet:558c3023 --group-by sheet --group-scope internal
 
 # PREVIEW any routing run: route it, report what it WOULD add, write no board
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
   --group sheet:558c3023 --group-by sheet --preview --preview-png preview.png
 
 # UNDO: strip the scoped nets' copper back to unrouted (needs an explicit scope;
 # defaults to --group-scope internal, since a block's "touching" nets include
 # GND/VCC and undoing those would strip their copper across the whole board)
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/undone.kicad_pcb \
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/undone.kicad_pcb \
   --group sheet:558c3023 --group-by sheet --undo
 
 # Route differential pairs (use route_diff.py)
-python py_router/route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --no-bga-zones
+python3 py_router/route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --no-bga-zones
 
 # Route with wider tracks for power nets
-python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net*" \
+python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net*" \
   --power-nets "*GND*" "*VCC*" "+3.3V" --power-nets-widths 0.4 0.5 0.3 --track-width 0.2
 
 # Typical workflow: create GND plane first, then route all signals
-python py_router/route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu
-python py_router/route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite
+python3 py_router/route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu
+python3 py_router/route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite
 ```
 
-### 3. Create Power/Ground Planes
+### Create Power/Ground Planes
 
 ```bash
-# Create GND zone on B.Cu with via connections to all GND pads (outputs to input_routed.kicad_pcb)
-python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
+# Pour a GND zone on B.Cu (outputs to input_routed.kicad_pcb). The pour places no
+# per-pad taps: the route step that follows welds the plane pads into it (#562)
+python3 py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create GND zone, overwrite input file
-python py_router/route_planes.py kicad_files/input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
+python3 py_router/route_planes.py kicad_files/input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
 
 # Create GND zone to specific output file
-python py_router/route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND --plane-layers B.Cu
+python3 py_router/route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
+python3 py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
-# Create VCC plane with larger vias
-python py_router/route_planes.py kicad_files/input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
-
-# Pour planes (the pour places no taps: the route step welds plane pads)
-python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
+# VCC plane; --via-size/--via-drill size this step's own vias (thermal arrays, stitching)
+python3 py_router/route_planes.py kicad_files/input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Multiple nets sharing one layer, split round spines routed on it (use | separator)
-python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu
+python3 py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu
 
 # Dry run to see what would be placed
-python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
+python3 py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
 
-### 3b. Repair Disconnected Plane Regions
+GND return vias (`--add-gnd-vias`) and area stitching (`--stitch-vias`, `--stitch-edge-fence`) go in a re-run of the same pour after routing, so they place around the finished signals — see [Plane Routing](docs/route-plane.md).
+
+### Repair Disconnected Plane Regions
 
 > **Since #562 you normally do not run this step.** Every `route.py` run
 > finishes with an in-run *plane finalize* that applies this same engine
@@ -487,23 +502,23 @@ After creating power planes, regions may become split by vias and traces from ot
 
 ```bash
 # Auto-detect all zones in PCB and repair disconnected regions (outputs to input_routed.kicad_pcb)
-python py_router/repair_planes.py kicad_files/input.kicad_pcb
+python3 py_router/repair_planes.py kicad_files/input.kicad_pcb
 
 # Auto-detect all zones, overwrite input
-python py_router/repair_planes.py kicad_files/input.kicad_pcb --overwrite
+python3 py_router/repair_planes.py kicad_files/input.kicad_pcb --overwrite
 
 # Auto-detect all zones to specific output file
-python py_router/repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+python3 py_router/repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
 
 # Specific nets and layers
-python py_router/repair_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
+python3 py_router/repair_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Customize track width and clearance
-python py_router/repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+python3 py_router/repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
     --track-width 0.5 --clearance 0.2
 ```
 
-### 3c. Review a Placement (issue #431)
+### Review a Placement
 
 Placement deltas are invisible in a board file; render them instead.
 
@@ -515,21 +530,24 @@ python3 py_tools/render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o
 python3 py_tools/render_placement.py board.kicad_pcb --list-groups --group-by sheet
 python3 py_tools/render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
 
-# which parts should NOT be moved -- advice only, locks nothing, writes no board
-python3 py_placer/place_optimize.py board.kicad_pcb --suggest-locks
+# everything a placement author reads, in one artifact: escape lanes, groups, and
+# lock advice (which parts should NOT move) -- locks nothing, writes no board
+python3 py_tools/board_brief.py board.kicad_pcb
 ```
 
 Toggles for `--borders` / `--labels` / `--ratsnest` / `--arrows` / `--ghosts`;
 `--per-side` gives F and B panels rather than one flattened projection.
-The render is triage -- the verdict is the caption's `crossings` / `hpwl`.
+The render is triage, and so are the caption's `crossings` / `hpwl`: a
+placement is judged by routing it.
 
-### 4. Verify Results
+### Verify Results
 
 ```bash
-# Check for DRC violations. With no -c, grades at the clearance the routing
-# steps wrote into the sibling .kicad_pro (the smallest clearance any step
-# actually used); falls back to 0.2mm if there's no project. Pass -c to override.
-python py_router/check_drc.py kicad_files/output.kicad_pcb
+# Check for DRC violations. With no -c, grades at the Default net-class clearance
+# the routing steps wrote into the sibling .kicad_pro (the clearance the board was
+# routed to), plus the board's .kicad_dru layer rules; falls back to 0.2mm if
+# there's no project. Pass -c to override.
+python3 py_router/check_drc.py kicad_files/output.kicad_pcb
 
 # Cross-check with KiCad's own DRC engine (requires KiCad; --refill-zones avoids
 # bogus zone-clearance errors from stale pours - see tests/README.md for details)
@@ -538,49 +556,55 @@ kicad-cli pcb drc --refill-zones --format json -o drc.json kicad_files/output.ki
 # ...because a routed board ships zone OUTLINES with no filled_polygon, so an
 # unrefilled grade reports plane opens that are not real (#910). To ship a
 # board that already carries its fills, add --write-fill to the route step, or:
-python py_tools/fill_for_delivery.py kicad_files/output.kicad_pcb -o delivered.kicad_pcb
+python3 py_tools/fill_for_delivery.py kicad_files/output.kicad_pcb -o delivered.kicad_pcb
 
 # Check connectivity (detects unrouted nets, broken routes, and T-junctions)
-python py_router/check_connected.py kicad_files/output.kicad_pcb
+python3 py_router/check_connected.py kicad_files/output.kicad_pcb
 
 # Check connectivity for specific nets
-python py_router/check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
+python3 py_router/check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # Check connectivity for all nets on a component
-python py_router/check_connected.py kicad_files/output.kicad_pcb --component U1
+python3 py_router/check_connected.py kicad_files/output.kicad_pcb --component U1
 
 # Only check routed nets (skip unrouted net detection)
-python py_router/check_connected.py kicad_files/output.kicad_pcb --routed-only
+python3 py_router/check_connected.py kicad_files/output.kicad_pcb --routed-only
 
 # Check for orphan stubs (dead-end traces with no pad/via/trace at the loose end).
 # Connection is judged by actual copper extent (via radius, pad size, trace
 # half-width), so T-junction taps and copper-overlap joints are not miscounted.
-python py_tools/check_orphan_stubs.py kicad_files/output.kicad_pcb
+python3 py_tools/check_orphan_stubs.py kicad_files/output.kicad_pcb
 
 # Pad-geometry sanity check: flags same-footprint, different-net pads whose copper
 # overlaps (a short). A non-zero result almost always means a pad's rotation/size
 # is modelled wrong - the usual cause is a QFN/QFP/BGA placed at a non-orthogonal
 # angle. The fanout tools run this automatically on their component first; run it
 # yourself before fanout (or board-wide) as a standalone check:
-python py_router/check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
-python py_router/check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
-python py_router/check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
+python3 py_router/check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
+python3 py_router/check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
+python3 py_router/check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
 
 # Flag long non-orthonormal tracks. An on-grid router emits only 0/45/90-degree
 # segments; the only legitimate non-orthonormal segment is a short (<=1 grid cell)
 # terminal connector to an off-grid pad/ball. Anything longer is a routing defect
 # (it can cut diagonally across foreign copper). qfn_fanout escape stubs are
 # excluded automatically; bga_fanout's short stub-end jogs clear the 0.25mm default.
-python py_tools/check_orthonormal.py kicad_files/output.kicad_pcb
+python3 py_tools/check_orthonormal.py kicad_files/output.kicad_pcb
 
 # Copper hygiene (read-only): dangling stubs, same-net soft joints, redundant
 # cycles, and removable / stacked / floating copper the routing left behind.
-python py_router/check_weird.py kicad_files/output.kicad_pcb
+python3 py_router/check_weird.py kicad_files/output.kicad_pcb
+
+# Is the board DONE? One verdict over board_score and the checkers above, which
+# fails closed: exit 0 done, 4 incomplete, 5 graded clean only against floors
+# the routing lowered (--authored-from names the board the chain started from)
+python3 check_complete.py kicad_files/output.kicad_pcb --authored-from kicad_files/input.kicad_pcb
 ```
 
-See [Utilities](docs/utilities.md) for every checker and its options.
+See [Utilities](docs/utilities.md) for every checker and its options, and
+`python3 krt_registry.py` for every runnable tool in the clone with its purpose.
 
-### 5. Power Net Analysis
+### Power Net Analysis
 
 Use the `/analyze-power-nets` skill to identify power nets and get track width recommendations:
 
@@ -598,7 +622,7 @@ The skill:
 
 See [Power Net Analysis](docs/power-nets.md) for detailed documentation.
 
-### 6. High-Speed Net Analysis
+### High-Speed Net Analysis
 
 Use the `/find-high-speed-nets` skill to identify high-speed nets and get GND return via recommendations:
 
@@ -619,14 +643,17 @@ footprint pattern matching only, no datasheet lookup) and automatically includes
 via step when GND planes are present. Run `/find-high-speed-nets` first for more accurate
 recommendations based on actual component specifications.
 
-### 7. Integration Tests
+### Integration Tests
 
 ```bash
 # Run full integration test (fanout + routing + checks)
-python tests/test_fanout_and_route.py --all
+python3 tests/test_fanout_and_route.py --all
 
 # Quick mode for faster testing
-python tests/test_fanout_and_route.py --all --quick
+python3 tests/test_fanout_and_route.py --all --quick
+
+# The whole suite (~770 files, about 40 minutes on one machine when last measured)
+python3 tests/run_all.py
 ```
 
 See [tests/README.md](tests/README.md) for detailed documentation of all test scripts.
@@ -642,20 +669,18 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
 | [Rip-Up and Reroute](docs/rip-up-reroute.md) | Blocking analysis, progressive N+1 escalation, reroute loop |
 | [Length Matching](docs/length-matching.md) | Trombone meanders, via barrel lengths, DDR auto-grouping, time matching |
-| [Bus Routing](docs/bus-routing.md) | Bus detection, middle-out ordering, neighbor attraction |
+| [Bus Routing](docs/bus-routing.md) | Bus detection and filter, corridor planning, middle-out ordering, corridor attraction; the topo bus step |
 | [Guide Corridor](docs/configuration.md#guide-corridor-options-preferred-route) | User-layer guide paths, waypoints, best-effort following |
 | [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
-| [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher, DRC-settings fixer |
+| [Utilities](docs/utilities.md) | Every checker (DRC, connectivity, completion, hygiene, pads), the fanout generators, placement tools, renderers, the DRC-settings fixer |
 | [Design Brief](docs/design-brief.md) | Declare what the board IS -- the facts a board file cannot contain -- and compile them into the intent (`<board>.design-brief.json`) |
 | [Floorplan Intent](docs/floorplan-intent.md) | Declare the floorplan, grade the board against it (`check_floorplan.py`) |
-| [Placement Predictors](docs/placement-predictors.md) | What actually predicts routed `blocking`, measured (#703) |
-| [Placement Calibration](docs/placement-calibration.md) | Why P-close's routability threshold was withdrawn, and the rows it was withdrawn on (#803) |
 | [BGA Fanout](py_router/bga_fanout/README.md) | BGA escape routing generator |
 | [QFN Fanout](py_router/qfn_fanout/README.md) | QFN/QFP escape routing generator |
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 | [Claude Skills](docs/claude-skills.md) | All ten AI skills: placement and routing end to end, routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
-| [Placement](py_placer/placement/README.md) | Placement optimization for routability |
+| [Placement](py_placer/placement/README.md) | Placement by function: groups, one annealed objective, legality, the floorplan intent's grade |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 
@@ -663,13 +688,16 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 
 ```
 KiCadRoutingTools/
-├── py_router/                # Routing engine + CLI entry points (~100 modules)
-│   ├── place_optimize.py         # Main CLI - placement optimization (quench)
-│   ├── place_route_loop.py       # Main CLI - router-in-the-loop placement repair
+├── py_router/                # Routing engine + CLI entry points (~130 modules)
 │   ├── route.py                  # Main CLI - single-ended routing (ends with the in-run plane finalize, #562)
 │   ├── route_diff.py             # Main CLI - differential pair routing
 │   ├── route_planes.py           # Main CLI - power/ground plane pours
 │   ├── repair_planes.py          # Standalone utility - repair disconnected plane regions (the chain step is absorbed into route.py's finalize, #562)
+│   ├── route_render.py           # PNG still of a board from its geometry
+│   ├── route_movie.py            # Movie of a routing run, step by step (route_trace.py records the router's events)
+│   ├── make_plan.py              # Recorded command chain -> GUI routing plan (plan.json)
+│   ├── run_plan.py               # Run a GUI routing plan headless, through the real plugin dialog
+│   ├── add_rule_area.py          # Write a copper keep-out rule area onto a board
 │   ├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
 │   ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
 │   ├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
@@ -677,7 +705,7 @@ KiCadRoutingTools/
 │   ├── plane_split_raster.py     # Raster finishing of a shared plane layer's split
 │   ├── plane_resistance.py       # Plane resistance and current capacity calculations
 │   ├── plane_region_connector.py # Detect and route between disconnected plane regions
-│   ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
+│   ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPairNet classes
 │   ├── routing_defaults.py       # Default routing parameter values
 │   ├── routing_state.py          # RoutingState class - tracks routing progress
 │   ├── routing_common.py         # Shared utilities for route.py and route_diff.py
@@ -700,6 +728,7 @@ KiCadRoutingTools/
 │   ├── check_connected.py        # Connectivity checker (with T-junction detection)
 │   ├── check_pads.py             # Pad-geometry sanity checker
 │   ├── check_weird.py            # Copper hygiene checker
+│   ├── cleanup_pipeline.py       # The one ordered post-route cleanup pipeline (both routing fronts)
 │   ├── fix_kicad_drc_settings.py # Make .kicad_pro DRC constraints consistent with the routed floors
 │   ├── copy_board.py             # Copy a board WITH its sibling .kicad_pro/.kicad_dru
 │   ├── list_nets.py              # List nets on a component
@@ -708,16 +737,29 @@ KiCadRoutingTools/
 │   ├── bga_fanout/               # BGA fanout package (escape, reroute, layer balance, under-pad escape, ...)
 │   ├── qfn_fanout.py             # QFN/QFP fanout CLI wrapper
 │   ├── qfn_fanout/               # QFN/QFP fanout package (layout, geometry, types)
-│   ├── placement/                # Component placement package
-│   │   ├── quench.py             # Placement optimizer
+│   └── ...                       # plus the rest of the engine modules — see Module Overview below
+│
+├── py_placer/                # Placement CLIs and the placement package
+│   ├── place_simple.py           # The placer: functional groups, one objective, annealed
+│   ├── place_movie.py            # place_simple with a camera: a movie of the placement, step by step
+│   ├── judge_seeds.py            # The seed judge: judge.json's seeds routed by one quick chain, scored
+│   ├── place_pose.py             # Set, turn, face, lock or replicate parts by hand
+│   ├── place_fanout_clearance.py # Move decoupling caps off fanout vias
+│   ├── beautify_labels.py        # Tidy the reference-designator silkscreen
+│   ├── converge.py               # The milestone ledger: record, where, verdict
+│   ├── placement/                # Component placement package — see py_placer/placement/README.md
+│   │   ├── simple.py             # The placer's cost model
+│   │   ├── simple_anneal.py      # The placer's simulated annealing
+│   │   ├── quench.py             # QuenchState: the parts, their poses and the board
+│   │   ├── grouping.py           # The groups file
+│   │   ├── legality.py           # Placement legality checks
+│   │   ├── floorplan.py          # Floorplan intent and its grade
+│   │   ├── body.py               # THE footprint body model (#896)
 │   │   ├── fanout_clearance.py   # Fanout clearance evaluation
 │   │   ├── parser.py             # Courtyard boundary extraction
 │   │   ├── writer.py             # Footprint position modification
-│   │   ├── groups.py             # Group-move support
-│   │   ├── body.py               # THE footprint body model (#896)
-│   │   ├── legality.py           # Placement legality checks
-│   │   └── utility.py            # Shared placement utilities
-│   └── ...                       # plus the rest of the engine modules — see Module Overview below
+│   │   └── ...
+│   └── ...
 │
 ├── py_tools/                 # Leaf diagnostic / analysis tools
 │   ├── check_impedance.py        # Verify impedance-controlled widths/gaps
@@ -728,12 +770,26 @@ KiCadRoutingTools/
 │   ├── kicad_unconnected.py      # Unconnected-item listing
 │   ├── validate_pcb_data.py      # PCBData validation
 │   ├── extract_pcb_geometry.py   # Geometry extraction
-│   ├── clean_ignored.py          # Remove ignored copper
+│   ├── clean_ignored.py          # List / delete git-ignored files
 │   ├── analyze_power_paths.py    # Power-path analysis (backs /analyze-power-nets)
-│   ├── animate_fanout_clearance.py # Animate cap-placement repair
+│   ├── board_brief.py            # What a board looks like to whatever places it
+│   ├── board_context.py          # Every part's value, pins, nets and role
+│   ├── check_groups.py           # Check a groups file against its board
+│   ├── check_floorplan.py        # Grade a board against its floorplan intent
+│   ├── check_assembly.py         # Is a placement buildable?
+│   ├── render_placement.py       # PNG stills of a placement, with its legality
+│   ├── route_review.py           # What to move after a route
+│   ├── render_nets.py            # Chosen nets' copper on several boards side by side
+│   ├── render_power.py           # A board's power components over its rails
+│   ├── board_score.py            # One score for a board: blocking, then quality
+│   ├── quick_score.py            # Score a route.py --quick 2 board (the placement seed judge)
+│   ├── check_reachability.py     # Is this pad reachable, or is the geometry to blame?
+│   ├── check_join.py             # Verify a hand-drawn join against all board copper before committing it
+│   ├── fill_for_delivery.py      # Write a filled copy of a routed board (#910)
 │   └── _path.py                  # sys.path bootstrap so the tools import py_router
 │
-├── tests/                    # Integration tests
+├── tests/                    # Tests (~770 files) and the stress/A-B harness
+│   ├── run_all.py                # The whole suite (tests/stress/modal_suite/ fans it out onto Modal)
 │   ├── test_fanout_and_route.py  # Full integration test (fanout + route)
 │   ├── test_kit_route.py         # Pad-to-pad routing test (no fanout)
 │   ├── test_flat_hierarchy.py    # 2-layer board with GND plane test
@@ -750,10 +806,11 @@ KiCadRoutingTools/
 │   ├── differential_gui.py   # Differential pair routing tab
 │   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
 │   ├── planes_gui.py         # Power/ground planes tab
-│   ├── ai_gui.py             # AI tab (spawns the agent CLI headless, streams transcript)
-│   ├── ai_plan.py            # AI tab routing-plan orchestration
+│   ├── ai_gui.py             # AI Drive tab, Routing sub-tab (spawns the agent CLI headless, streams transcript)
+│   ├── ai_plan.py            # Routing plans: parse, fill the tabs, run the steps (PlanExecutor)
+│   ├── placement_gui.py      # AI Drive tab, Placement sub-tab (+ Beautify Labels)
+│   ├── placement_run.py      # Placement run folders, prompts and progress (krt_placement/)
 │   ├── ai_backend.py         # Agent CLI backend selection (Claude Code / opencode)
-│   ├── movie_recorder.py     # Routing-movie capture for the GUI
 │   ├── board_swaps.py        # Shared board pad/net swap helpers
 │   ├── deps_check.py         # Plugin dependency checks
 │   ├── about_tab.py          # About tab with version info
@@ -761,6 +818,11 @@ KiCadRoutingTools/
 │   └── settings_persistence.py  # Save/restore dialog settings between sessions
 ├── build_router.py           # Rust module build script (--clean to remove artifacts)
 ├── install_plugin.py         # Plugin installer script
+├── check_complete.py         # Is this board DONE? One fail-closed verdict
+├── krt_registry.py           # Every runnable tool in the clone, its purpose and kind
+├── krt_capabilities.py       # What this clone can do, as JSON (also route.py --capabilities)
+├── package_pcm.py            # Build the KiCad PCM zip (maintainers)
+├── requirements.txt          # Python dependencies
 ├── kicad_files/              # Example and test boards
 ├── docs/                     # Documentation
 └── .claude/skills/           # Claude Code skills
@@ -771,7 +833,7 @@ KiCadRoutingTools/
     ├── recommend-stackup/    # Stackup review/recommendation skill
     ├── recommend-plane-mappings/  # Net-to-plane-layer assignment skill
     ├── diagnose-routing-failures/  # Failure root-cause and retry skill
-    ├── pcb-free-agent/       # Agent-driven place and/or route, one verifier, film + report
+    ├── plan-pcb-placement/   # Place by function, fast-route seeds, review until clean, route; one verifier, report
     ├── review-routed-board/  # Post-route QA and sign-off skill
     └── stress-test-router/   # Batch stress-test on real-world boards + issue filing (dev/QA)
 ```
@@ -788,9 +850,13 @@ One-line summaries below (all of these modules live in `py_router/`); the
 |--------|---------|
 | `route.py` | CLI for single-ended routing |
 | `route_diff.py` | CLI for differential pair routing |
-| `route_planes.py` | CLI for power/ground plane via connections |
-| `repair_planes.py` | CLI for repairing disconnected plane regions |
-| `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
+| `route_planes.py` | CLI for power/ground plane pours (#562 bare pour), thermal via arrays, stitching and GND return vias |
+| `repair_planes.py` | CLI for repairing disconnected plane regions on a board routed outside the chain (route.py's in-run plane finalize runs the same engine) |
+| `routing_config.py` | Configuration classes (`GridRouteConfig`, `GridCoord`, `DiffPairNet`) |
+| `routing_defaults.py` | Every default routing parameter, in one place (`FAB_TIER`, `ESCALATION`, `CLEARANCE`, ...) |
+| `design_rules.py` | KiCad design rules resolved in KiCad's own order (#530): pad overrides, net classes, `.kicad_dru` rules, Board Setup minimums |
+| `kicad_dru.py` | Per-layer clearance rules from the board's `.kicad_dru` (#498) |
+| `fab_tiers.py` | Fab-capability floors (`--fab-tier`) and the escalation policy (`--escalation`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |
 | `routing_common.py` | Shared utilities for route.py and route_diff.py (BGA zones, net resolution, length matching) |
@@ -798,6 +864,8 @@ One-line summaries below (all of these modules live in `py_router/`); the
 | `obstacle_map.py` | Obstacle map building from PCB data |
 | `obstacle_cache.py` | Net obstacle caching for incremental obstacle map builds |
 | `obstacle_costs.py` | Stub and track proximity cost calculations |
+| `sense_branch.py` | Protected Kelvin sense branches (#1279), declared by a KiCad group named `sense:<REF>.<PAD>` (the join pad): the member copper and its sense pads are foreign to their own net except on the join pad, so new copper joins the branch only there |
+| `net_keepouts.py` | Net-filtered copper keep-outs from the board's `.kicad_dru` (`disallow` rules on a named rule area): the regions, stamped into the obstacle map only while a net a rule binds routes, and the audit of bound-net copper the shipped board has inside one |
 | `keep_away.py` | Pairwise keep-away between net groups (#1146): the per-net band cost and the in-band report; the design brief's `keep_away` rules, read for the router and the placement grade alike (#1253) |
 | `bresenham_utils.py` | Bresenham line-walking utilities for grid-based segment operations |
 | `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, UnionFind) |
@@ -813,7 +881,9 @@ One-line summaries below (all of these modules live in `py_router/`); the
 | `reroute_loop.py` | Processes reroute queue for failed routes |
 | `phase3_routing.py` | Phase 3 multi-point tap routing (connects remaining pads after length matching) |
 | `diff_pair_routing.py` | Differential pair A* with centerline + offset and GND vias |
+| `diff_pair_multipoint.py` | Multi-point and hybrid (coupled middle + single-ended legs) differential pairs |
 | `single_ended_routing.py` | Single-ended net A* routing |
+| `group_routing.py` | Route, preview and undo one placement block (`route.py --group/--preview/--undo`) |
 
 ### Net Analysis
 
@@ -821,7 +891,9 @@ One-line summaries below (all of these modules live in `py_router/`); the
 |--------|---------|
 | `net_ordering.py` | MPS, inside-out, and original net ordering strategies |
 | `net_queries.py` | Net queries (diff pair detection, MPS ordering, power net detection, chip pad positions) |
-| `connectivity.py` | Stub endpoints, connected groups, multi-point net detection |
+| `connectivity.py` | Stub endpoints, connected groups, multi-point net detection, MST edges |
+| `bus_detection.py` / `bus_corridor.py` | Bus groups of nets with clustered endpoints, and one planned centerline per bus (`--bus`) |
+| `diff_xnet.py` | AC-coupled differential pairs (XNets) through series caps (#196) |
 
 Key functions in `net_queries.py`:
 - `identify_power_nets(pcb, patterns, widths)` - Pattern-based power net detection for `--power-nets` CLI option
@@ -849,6 +921,18 @@ Key functions in `py_tools/analyze_power_paths.py` (used by `/analyze-power-nets
 | `blocking_analysis.py` | Analyze which nets are blocking |
 | `length_matching.py` | Length matching with trombone-style meanders |
 
+### Recovery, Planes and Post-Route
+
+| Module | Purpose |
+|--------|---------|
+| `net_rescue.py` | Last-chance scoped retry of failed nets at finer parameters, then the terminal geometry escalation |
+| `plane_pad_tap.py` / `plane_region_connector.py` | Plane pad taps and region joins: the engine of route.py's in-run plane finalize and of `repair_planes.py` |
+| `kicad_oracle.py` | KiCad-oracle reconnect: routes the exact links KiCad's own connectivity reports open |
+| `cleanup_pipeline.py` | The one ordered post-route cleanup pipeline both routing fronts run |
+| `improvement_gate.py` | Never ship a board a run made worse (#600): reverts the step when connectivity regressed |
+| `fix_kicad_drc_settings.py` | Write the routed floors into the output's `.kicad_pro` so KiCad's DRC grades what was routed |
+| `protected_nets.py` / `tool_records.py` | Records later steps must honour (matched groups, routed pairs, impedance, pour promises), kept on the board and in the `.kicad_pro` |
+
 ### I/O and Utilities
 
 | Module | Purpose |
@@ -860,10 +944,13 @@ Key functions in `py_tools/analyze_power_paths.py` (used by `/analyze-power-nets
 | `schematic_updater.py` | Update .kicad_sch files with pad swaps from routing |
 | `impedance.py` | Impedance calculations (microstrip/stripline, width from target Z) |
 | `memory_debug.py` | Memory usage statistics and debugging |
+| `route_render.py` | PNG still of a board from its geometry: the frame every picture and movie is drawn on |
+| `route_trace.py` | With `KICAD_ROUTE_TRACE=1`, records each track and via as the router lays, rips and restores it (`<output>_routetrace.json`), for `route_movie.py` |
+| `route_movie.py` | Movie of a routing run, step by step |
 
 ## Performance
 
-Integration test results (`tests/test_fanout_and_route.py`):
+Integration test results (`tests/test_fanout_and_route.py`), as measured when this table was written in January 2026; the router has changed a great deal since, so read them as orders of magnitude:
 
 | Stage | Nets | Time | Iterations |
 |-------|------|------|------------|
@@ -873,7 +960,7 @@ Integration test results (`tests/test_fanout_and_route.py`):
 | DDR diff pairs | 5/5 | 0.3s | 25K |
 | DDR single-ended | 51/51 | 6.2s | 565K |
 
-Rust acceleration provides ~10x speedup vs pure Python.
+Rust acceleration provided a ~10x speedup over the original pure-Python A*.
 
 ## Command Reference
 
@@ -883,28 +970,33 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 |------|---------|-------|
 | `route.py` | Single-ended routing | [Configuration](docs/configuration.md) |
 | `route_diff.py` | Differential-pair routing | [Differential Pairs](docs/differential-pairs.md) |
-| `route_planes.py` | Power/ground plane via connections | [Plane Routing](docs/route-plane.md) |
+| `route_planes.py` | Power/ground plane pours, stitching, GND return vias | [Plane Routing](docs/route-plane.md) |
 | `repair_planes.py` | Plane region repair + pad taps | [Plane Routing](docs/route-plane.md) |
 | `bga_fanout.py` / `qfn_fanout.py` | BGA / QFN escape fanout | [BGA](py_router/bga_fanout/README.md) · [QFN](py_router/qfn_fanout/README.md) · [Utilities](docs/utilities.md) |
-| `place_fanout_clearance.py` | Move decoupling caps off fanout vias | [Utilities](docs/utilities.md) |
-| `place_optimize.py` | Placement for routability | [Placement Optimization](docs/placement-optimization.md) |
-| `board_brief.py` | Assemble what a placement author needs to read, in one artifact | [Design Brief](docs/design-brief.md) |
+| `place_fanout_clearance.py` | Move decoupling caps off fanout vias | [Utilities](docs/utilities.md#decap-clearance-repair-place_fanout_clearancepy) |
+| `place_simple.py` | Place a board by its functional groups | [Placement](py_placer/placement/README.md) |
+| `judge_seeds.py` | The seed judge: the seeds judge.json names routed by one quick (level 2) chain and scored | [Utilities](docs/utilities.md#seed-judge-runner-judge_seedspy) |
+| `board_brief.py` | Assemble what a placement author needs to read, in one artifact | [Utilities](docs/utilities.md#board-brief-board_briefpy) · [Design Brief](docs/design-brief.md) |
 | `check_floorplan.py` | Grade a board against a declared floorplan intent | [Floorplan Intent](docs/floorplan-intent.md) |
 | `check_*.py` | DRC / connectivity / hygiene / pad checks | [Utilities](docs/utilities.md) |
-| `make_movie.py` | Movie of a routing run (`.mp4`/`.gif`) | [Rendering & animation](docs/route-animation.md) |
+| `check_complete.py` | Is the board DONE? One fail-closed verdict over the checks | [Utilities](docs/utilities.md#completion-check-check_completepy) |
+| `krt_registry.py` | Every runnable tool in the clone, what it is for, and which door (placement / routing) serves it | [Utilities](docs/utilities.md#tool-inventory-krt_registrypy-krt_capabilitiespy) |
+| `route_render.py` | PNG still of a board from its geometry | [Utilities](docs/utilities.md#board-renderer-route_renderpy) |
+| `route_movie.py` / `place_movie.py` | Movie of a routing run / of a placement, step by step | [Utilities](docs/utilities.md#routing-movie-route_moviepy) |
+| `render_power.py` | A board's power components over its rails | [Utilities](docs/utilities.md#power-view-render_powerpy) |
 | `make_plan.py` / `run_plan.py` | Build a GUI routing plan from a recorded chain / run one headless | [Plans from the CLI](docs/claude-skills.md#plans-from-the-command-line) |
 
 ```bash
 # Full option list for any tool
-python py_router/route.py --help
+python3 py_router/route.py --help
 
 # A typical chain (#562 pours-first): pour, then diff pairs, then ONE route
 # over ALL nets -- plane nets INCLUDED. The pour places no taps; the route
 # step welds plane pads into the fill and its in-run finalize completes them,
 # so do NOT exclude the plane nets here.
-python py_router/route_planes.py board.kicad_pcb board.kicad_pcb --nets GND --plane-layers B.Cu
-python py_router/route_diff.py board.kicad_pcb -O --nets "*_P" "*_N" --diff-pair-gap 0.15
-python py_router/route.py board.kicad_pcb -O --nets "*" --power-nets GND --power-nets-widths 0.3
+python3 py_router/route_planes.py board.kicad_pcb board.kicad_pcb --nets GND --plane-layers B.Cu
+python3 py_router/route_diff.py board.kicad_pcb -O --nets "*_P" "*_N" --diff-pair-gap 0.15
+python3 py_router/route.py board.kicad_pcb -O --nets "*" --power-nets GND --power-nets-widths 0.3
 ```
 
 The shared option groups — geometry, power-net widths, algorithm/strategy, proximity penalties, length/time matching, post-route DRC settings, and debug layers — apply across the routing CLIs and are documented in full in [Configuration](docs/configuration.md).
@@ -919,15 +1011,17 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
   >=1.22.4 ... is required" and `TypeError: 'numpy._DTypeMeta' object is not
   subscriptable`
 - scipy (`pip3 install scipy`) - used for optimal target assignment and Voronoi partitioning
-- shapely (`pip3 install shapely`) - used for polygon union in multi-net plane layers
-- Rust toolchain — only needed if you build the router from source (`python build_router.py --from-source`); not required when using the prebuilt binary
+- shapely **2.0 or newer** (`pip3 install "shapely>=2.0"`) - polygon operations: multi-net plane layers, the placement courtyard reader
+- Pillow (optional, `pip3 install Pillow`; 10.1+ for full-size caption fonts) - board renders and the placement preview; without it only rendering is off
+- `pip3 install -r requirements.txt` installs all of the above
+- Rust toolchain — only needed if you build the router from source (`python3 build_router.py --from-source`); not required when using the prebuilt binary
 
 ## Limitations
 
 - No push-and-shove (routes around obstacles, doesn't move them)
 - No blind or buried vias
 - No coarse grid assignment before detailed routing to plan overall topology
-- No design rules by region/area support
+- Area-scoped design rules only as keep-outs: a `.kicad_dru` rule conditioned on a rule area is honoured as a (net-filtered) `disallow` keep-out, and per-layer clearance rules are honoured, but an area-scoped clearance or width rule is reported as not honoured
 
 ## Contributing
 

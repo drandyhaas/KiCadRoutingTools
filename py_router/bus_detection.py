@@ -313,6 +313,29 @@ def get_attraction_neighbor(
     return None
 
 
+#: The axes a net's run is measured along: x, y and both diagonals. Every
+#: direction is within 22.5 deg of one of them. Measuring along x + y alone
+#: (#1284) lost every net running along the -45 deg diagonal, where x + y is
+#: constant: a zero-length run, or a direction picked by sub-mm jitter.
+_RUN_AXES = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
+
+
+def _run_endpoints(pads):
+    """The two pads spanning a net's run: the farthest-apart of the pairs
+    extreme along each of :data:`_RUN_AXES`. Exact for a two-pad net, within
+    cos(22.5 deg) of the true span otherwise, and O(n) -- a pad-heavy net
+    the caller did not declare as power still reaches the filter. The pair
+    has no meaningful order; a net has no direction."""
+    best, best_d2 = None, -1.0
+    for ax, ay in _RUN_AXES:
+        lo = min(pads, key=lambda p: ax * p.global_x + ay * p.global_y)
+        hi = max(pads, key=lambda p: ax * p.global_x + ay * p.global_y)
+        d2 = (hi.global_x - lo.global_x) ** 2 + (hi.global_y - lo.global_y) ** 2
+        if d2 > best_d2:
+            best, best_d2 = (lo, hi), d2
+    return best
+
+
 def filter_bus_groups_geometric(pcb_data, bus_groups, config,
                                 min_members: int = 3,
                                 min_run_mm: float = 5.0,
@@ -320,19 +343,22 @@ def filter_bus_groups_geometric(pcb_data, bus_groups, config,
                                 max_len_ratio: float = 1.5):
     """Strict geometric bus definition (default on; KICAD_BUS_STRICT=0
     reverts to raw clique detection): a group is a bus only if its members
-    genuinely TRAVEL TOGETHER. Five rules, no names, no component identity:
+    genuinely TRAVEL TOGETHER. Four rules, no names, no component identity:
 
       1. >=3 members (pairs belong to the diff router or aren't worth
          bundling),
-      2. parallel travel: member displacement vectors within a cos>0.9
-         cone at length ratio <=1.5 (largest coherent subset kept --
+      2. parallel travel: member runs (:func:`_run_endpoints`) within a
+         cos>0.9 cone either way round, since a net has no direction, at
+         length ratio <=1.5 (largest coherent subset kept --
          clustered sources + this cone geometrically imply clustered
          destinations, subsuming any shared-component test),
       3. run length >= 5mm (local hops gain nothing; also retires the
          decoupling-cap clusters without a passive-component carve-out),
-      4. no power nets (config.power_net_widths),
-      5. no diff-pair members (config-independent: *_P/*_N by pair map is
-         the caller's concern; here power/width classes only).
+      4. no power nets (config.power_net_widths).
+
+    A member with fewer than 2 pads has no run and is dropped too. Diff-pair
+    members are NOT filtered here: the *_P/*_N pair map is the caller's
+    concern.
 
     Raw clique detection on ottercast declared 31 groups/118 members and
     planned corridors for decoupling clusters and power rails; these rules
@@ -354,8 +380,7 @@ def filter_bus_groups_geometric(pcb_data, bus_groups, config,
             pads = pcb_data.pads_by_net.get(nid, [])
             if len(pads) < 2:
                 continue
-            a = min(pads, key=lambda p: p.global_x + p.global_y)
-            b = max(pads, key=lambda p: p.global_x + p.global_y)
+            a, b = _run_endpoints(pads)
             dx, dy = b.global_x - a.global_x, b.global_y - a.global_y
             L = _math.hypot(dx, dy)
             if L >= min_run_mm:
@@ -363,7 +388,7 @@ def filter_bus_groups_geometric(pcb_data, bus_groups, config,
         best = []
         for nid, (ux, uy, L) in vecs.items():
             cone = [m for m, (vx, vy, M) in vecs.items()
-                    if ux * vx + uy * vy > cos_cone
+                    if abs(ux * vx + uy * vy) > cos_cone
                     and max(L, M) / min(L, M) <= max_len_ratio]
             if len(cone) > len(best):
                 best = cone
@@ -374,29 +399,6 @@ def filter_bus_groups_geometric(pcb_data, bus_groups, config,
             bus.net_ids = kept
         out.append(bus)
     return out
-
-
-def bus_stick_config(config, attraction_path):
-    """Off-lane surcharge (the STICK, KICAD_BUS_OFFLANE_MULT, default 1.0
-    = off): a bus member with a planned corridor routes with every layer's
-    step cost scaled by the multiplier; the corridor attraction discount
-    then makes the LANE the only normal-priced place on the board. Without
-    this the attraction is carrot-only -- a member whose direct area is
-    congested hops outside the attraction radius, where the corridor
-    exerts zero pull, and defects to a lone detour for free (WL_SDIO_D1's
-    8mm northern flight while its lane ran direct at y~94). Forbidden
-    layers (cost -1) stay forbidden; the member's config is otherwise
-    untouched (via cost, clearances, caches all nominal)."""
-    import env_knobs
-    m = env_knobs.BUS_OFFLANE_MULT
-    if m == 1.0 or not attraction_path:
-        return config
-    from dataclasses import replace as _replace
-    base = list(config.layer_costs or []) or [1.0] * len(config.layers)
-    while len(base) < len(config.layers):
-        base.append(1.0)
-    scaled = [c if c < 0 else c * m for c in base]
-    return _replace(config, layer_costs=scaled)
 
 
 def bus_attraction_context(

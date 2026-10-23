@@ -3,8 +3,8 @@
 
 Makes the unrouted twin of a routed corpus board, which is what a
 perturbed-corpus run needs as a subject: the placement CLIs refuse a board
-carrying copper (`place_optimize`, `place_portfolio`, `place_route_loop` and
-`check_floorplan` without `--allow-routed`; the pcb-free-agent skill's
+carrying copper (`place_pose` and `check_floorplan` without
+`--allow-routed`; the plan-pcb-placement skill's
 `make_unplaced.py` outright), and on a ROUTED board that copper also
 encodes the original poses (run 14 measured 301 of 569 pads within 5 um of
 their own track endpoint, which `fence_audit` cannot see because it

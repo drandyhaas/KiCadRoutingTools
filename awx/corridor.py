@@ -647,7 +647,8 @@ def piece_u(u: float, trunk: bool, handoff: float) -> float:
 def held_interval(iv, ref: float, was, term):
     """(lo, hi): the free interval of a column a lane is bounded to (whole_geo's bound rows). `iv` the column's free
     offset intervals outside the arrays' boxes, `ref` the lane's reference there, `was` the interval it was held to a
-    column before (None at its first), `term` the offset of its NEARER fixed terminal (None: that end is not fixed).
+    column before (None at its first), `term` the offset of the terminal AHEAD of it -- the end it must reach (None: no
+    end fixed).
     The interval the reference lies in; where it lies in none -- it cuts a box's corner -- the one the lane was in a
     column before, which it cannot leave across the box (K41: at the column clipping the source's south-east corner,
     the interval nearest the south-face lanes' references was the one NORTH of the box, and six lanes were bounded 2.7
@@ -655,13 +656,20 @@ def held_interval(iv, ref: float, was, term):
     this column -- the side of its nearer terminal, which it cannot reach across the box: by the most overlap it was
     the larger side, and zynq U2's top-face berths, which stand on the destination's grown box, had A8 and CKE held
     SOUTH of the corner they reached them round, their last columns run across the west column's balls (A8 into A6's
-    via in the gap). The nearest one only with neither"""
-    inside = [q for q in iv if q[0] <= ref <= q[1]]
-    if inside:
-        return inside[0]
+    via in the gap). The nearest one only with neither.
+    A lane held a column before keeps to the intervals that overlap that one: a reference that runs INTO the box and
+    out of its far side does not carry the lane across it (zynq LVDS K47: CTRL_IN0's reference, tooth to handoff,
+    crossed U1's east corner, and at the column it came out north of the box the bound jumped 3.3 mm across it --
+    the lane paid 5 to 7 mm of bound, and the polish that pushed it out squeezed its neighbour off its layer). And at
+    such a split the side of the terminal ahead whether or not the reference lies in the other: a reference a hair
+    inside one side may run on into the box (K47's RX_D0, 0.15 mm north of the destination's corner where it started,
+    its berth 1.1 mm south of it: held north, it paid 1.3 mm of bound)"""
     over = [q for q in iv if was is not None and min(q[1], was[1]) > max(q[0], was[0])]
     if len(over) > 1 and term is not None:
         return min(over, key=lambda q: max(q[0] - term, term - q[1], 0.0))
+    inside = [q for q in (over or iv) if q[0] <= ref <= q[1]]
+    if inside:
+        return inside[0]
     if over:
         return max(over, key=lambda q: min(q[1], was[1]) - max(q[0], was[0]))
     return min(iv, key=lambda q: min(abs(ref - q[0]), abs(ref - q[1])))
@@ -1229,8 +1237,14 @@ def build_wrap_spine(dest_pts: Sequence[Pt], stubs: Sequence[Pt],
     def swept(p):
         d = ang(p) - a0
         return d % (2 * math.pi) if ccw else (-d) % (2 * math.pi)
+    # (a WOUND ring's stubs, `wrap_side`, lie anywhere ahead short of the face the bundle meets, whose far corner is
+    # its bound: a bundle arriving at a slant meets the hull's diagonal face, and its wound stubs on the side face
+    # beyond the far one lie 1.6 pi round -- past one and a half pi the start was backed up to just short of them
+    # and the ring ran straight from the trunk THROUGH the destination, zynq's Ethernet bus's MDC and MDIO to U3)
+    j_b = (k_front * per_edge) if ccw else (((k_front + 1) % 8) * per_edge)
     for _ in range(len(ring)):
-        if all(swept(s) < 1.5 * math.pi for s in stubs):
+        lim = swept(ring[j_b]) if wrap_side else 1.5 * math.pi
+        if all(swept(s) < lim for s in stubs):
             break
         i_f = (i_f - step) % len(ring)
         a0 = ang(ring[i_f])

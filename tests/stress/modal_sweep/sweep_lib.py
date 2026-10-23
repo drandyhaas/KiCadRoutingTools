@@ -4,7 +4,8 @@ this file is unit-testable and usable from the CLI without a Modal account.
 
 Three things live here:
   1. arm parameter application (env / routing_defaults constants / manifest sed)
-  2. the recorded-cost table used for longest-first dispatch + memory tiering
+  2. the recorded-cost table used for longest-first dispatch (the memory
+     tier is chosen by name, not from it -- see the tier note below)
   3. task-list construction
 
 Why longest-first matters: the sweep's wall-clock floor is the single longest
@@ -132,7 +133,7 @@ def recorded_corpus_prefix(manifest_text: str) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# 2. Recorded cost table (dispatch order + memory tier)
+# 2. Recorded cost table (dispatch order) + the memory tier
 # --------------------------------------------------------------------------
 
 def load_cost_table(stress_dir: Path) -> dict:
@@ -176,13 +177,6 @@ def load_cost_table(stress_dir: Path) -> dict:
             continue
         table[b] = {"seconds": float(sec), "peak_mb": 0.0, "src": "llm"}
     return table
-
-
-# A board with no recorded memory but a long recorded runtime gets the big tier
-# anyway: LLM-sourced rows carry no peak at all, so the 8-hour monsters would
-# otherwise land in the 4 GB tier and OOM -- losing the whole board, which is the
-# expensive failure. Over-provisioning a few boards costs almost nothing.
-LONG_BOARD_S = 30 * 60
 
 
 def memory_mb_for(board: str, costs: dict) -> int:

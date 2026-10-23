@@ -158,8 +158,8 @@ ROWS = [
      _DISCLOSE, '',
      (T768,), 'KILLED'),
     ('ceiling-not-recorded-on-the-model', 'leg',
-     '                    has_overrides=has_overrides, ceiling=ceiling)',
-     '                    has_overrides=has_overrides, ceiling=None)',
+     '                    has_overrides=has_overrides, ceiling=ceiling,',
+     '                    has_overrides=has_overrides, ceiling=None,',
      (T768,), 'KILLED'),
 
     # ---- resolve_pair_clearance: the two documented branches ------------

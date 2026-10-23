@@ -52,7 +52,7 @@ The canonical library flow. Parse a board, look around, add a track and a
 via, and write a new file KiCad can open:
 
 ```python
-from kicad_parser import parse_kicad_pcb, KICAD_10_MIN_VERSION
+from kicad_parser import parse_kicad_pcb, pcb_uses_name_nets
 from kicad_writer import add_tracks_and_vias_to_pcb
 
 pcb = parse_kicad_pcb('kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb')
@@ -82,8 +82,9 @@ vias = [{
     'net_id': gnd.net_id,
 }]
 
-# KiCad 10 files need the net-name mapping; KiCad 9 files must not get it
-names = pcb.net_id_to_name if pcb.kicad_version >= KICAD_10_MIN_VERSION else None
+# The file writers follow the input's own net dialect; pass the map for a
+# name-net board (KiCad 10 style), None for a numeric one
+names = pcb.net_id_to_name if pcb_uses_name_nets(pcb) else None
 
 add_tracks_and_vias_to_pcb(
     'kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb',
@@ -102,7 +103,7 @@ into `footprint.ref_label`, an `Optional[RefLabel]` — `None` only for a
 reference-less footprint (drill dots) or an unparseable node. Both parse
 paths (the text parser and `build_pcb_data_from_board`) fill it in the same
 normalized form, so label geometry decisions are front-end independent.
-`beautify_labels.py` (issue #481) consumes it.
+`py_placer/beautify_labels.py` (issue #481) consumes it.
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -146,6 +147,10 @@ print(f"{len(hidden)} hidden reference labels")
   [`impedance`](api-impedance.md).
 - **"Configure a programmatic routing run."** →
   [`routing_config.GridRouteConfig`](api-routing-config.md).
+- **"What clearance does KiCad require between these two items?"** →
+  `design_rules` (below).
+- **"Place parts programmatically."** → the placement package in
+  `py_placer/placement/` ([its README](../py_placer/placement/README.md)).
 
 For the internals of the router itself (obstacle maps, A*, rip-up), see
 [Routing Architecture](routing-architecture.md).
@@ -158,8 +163,8 @@ documented here for orientation. See [Routing Architecture](routing-architecture
 for how they fit together.
 
 - **`obstacle_map`** — builds the per-net obstacle/cost grid the Rust A* routes
-  on. `build_base_obstacle_map(pcb_data, config, exclude_net_ids)` is the entry
-  point; the many `add_*`/`block_*` helpers layer on keepouts, board-edge and
+  on. `build_base_obstacle_map(pcb_data, config, nets_to_route)` is the entry
+  point (the nets to route are left out of the base and added per net); the many `add_*`/`block_*` helpers layer on keepouts, board-edge and
   drill clearances, stub/pad/diff-pair blocking, and stub-proximity soft costs.
   Consumes `GridRouteConfig` clearances and emits a Rust `GridObstacleMap`.
 
@@ -176,10 +181,18 @@ for how they fit together.
   via `run_obstacle_audit` / `obstacle_ledger_report`; with `pcb_data` and
   `config` the audit also runs `run_obstacle_content_audit`, which recomputes
   every cached net from the board and counts the cells the map should block
-  but does not -- the invariant ref-count balance cannot see.
+  but does not -- the invariant ref-count balance cannot see. The ledger's
+  scaffold watch (`ledger_scaffold_begin` / `ledger_scaffold_end`) checks, on
+  ANY map, that a `route_multipoint_taps` call leaves none of its own search
+  state behind (free vias, allowed cells, source/target overrides), which the
+  working-map books cannot see either.
 
 - **`fab_tiers`** — JLCPCB fab-capability floors as selectable cost tiers
-  (issue #237). `fab_floor_ladder` / `fab_floors` / `fab_floor_for_param` give
+  (issue #237), and the escalation policy that bounds how far below a
+  requested size a step may go (`--escalation off|board|fab`, #857;
+  `set_escalation_policy` / `get_escalation_policy`). The defaults
+  `DEFAULT_TIER` / `DEFAULT_ESCALATION` are read from `routing_defaults`
+  (`FAB_TIER`, `ESCALATION`). `fab_floor_ladder` / `fab_floors` / `fab_floor_for_param` give
   the minimum manufacturable value per parameter for a tier; `fab_floor_bucket`
   reports WHICH layer bucket a floor came from, so a consumer comparing two
   layer counts can tell "the floor does not move" from "this table cannot see
@@ -191,6 +204,17 @@ for how they fit together.
   params; `add_fab_tier_args` + `fab_tier_from_args` /
   `set_fab_tier_from_config` thread the tier through the CLI and GUI;
   `parse_fab_overrides` reads a `--fab-overrides` file.
+
+- **`design_rules`** — KiCad's design rules resolved in KiCad's own order
+  (#530): pad/footprint clearance overrides, net-class implicit rules
+  (`max(class a, class b)` for clearance), `.kicad_dru` custom rules in file
+  order, Board Setup minimums, and the fab floor last. `DesignRules.from_project`
+  (the sibling `.kicad_pro` / `.kicad_dru`, the CLI path) and
+  `DesignRules.from_pcbnew` (the live board, the GUI path) build the same
+  table; `resolve(kind, a, b, layer)` answers one constraint, and
+  `install_design_rules(config, input_file, pcb_data)` attaches the board's
+  rules to a routing config as `config.rules`. A rule it cannot model is
+  reported, never silently dropped.
 
 - **`clearance_ledger`** — process-scoped bridge for the smallest copper
   clearance any step actually used, so a board routed with a deep sub-nominal

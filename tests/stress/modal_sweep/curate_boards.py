@@ -5,7 +5,7 @@
 
 Reads a downloaded results-volume snapshot (<dir>/<arm>/<set>__<board>.json),
 scores every board on DISCRIMINATION (population stdev of the pad-verdict
-proxy nets_incomplete+conn across arms -- a board where all arms tie carries
+proxy nets_incomplete across arms -- a board where all arms tie carries
 no decision information, whether it ties at 100% or in equal failure) per
 CPU-hour, and writes board_value.json next to this script:
 
@@ -47,7 +47,10 @@ def main():
         r = r[0] if isinstance(r, list) else r
         arm = os.path.basename(os.path.dirname(f))
         if r.get("chain_complete"):
-            v = (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
+            # nets_incomplete ALONE, rank_arms.verdict's definition: it already
+            # counts unrouted PLUS connectivity-issue nets, so adding `conn`
+            # counted each connectivity-issue net twice (RUNBOOK rule 4).
+            v = r.get("nets_incomplete") or 0
             by_board[r["board"]][arm] = (v, r.get("total_seconds") or 0)
 
     scored = []

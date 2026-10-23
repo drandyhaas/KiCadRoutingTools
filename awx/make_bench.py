@@ -178,6 +178,76 @@ def strip_pair_copper(txt, pcb, names):
     return txt, n0 - len(txt)
 
 
+_NUM = r'(-?[\d.]+)'
+
+
+def walk_blocks(txt, token, remove):
+    """Every top-level `(token ...)` block: `remove(block)` True drops it.
+    Paren-balanced, either net dialect (te.strip_net_items's walk)."""
+    out, i = [], 0
+    while True:
+        j = txt.find('(' + token, i)
+        while j >= 0 and txt[j + 1 + len(token)] not in ' \n\t':
+            j = txt.find('(' + token, j + 1)
+        if j < 0:
+            out.append(txt[i:])
+            break
+        k, depth = j, 0
+        while True:
+            c = txt[k]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        block = txt[j:k + 1]
+        if remove(block):
+            out.append(txt[i:j].rstrip(' \t'))
+            e = k + 1
+            if e < len(txt) and txt[e] == '\n':
+                e += 1
+            i = e
+        else:
+            out.append(txt[i:k + 1])
+            i = k + 1
+    return ''.join(out)
+
+
+def block_geom(block, token):
+    if token == 'segment':
+        s = re.search(r'\(start ' + _NUM + ' ' + _NUM + r'\)', block)
+        e = re.search(r'\(end ' + _NUM + ' ' + _NUM + r'\)', block)
+        L = re.search(r'\(layer "?([^")\s]+)"?\)', block)
+        return ((float(s.group(1)), float(s.group(2))), (float(e.group(1)), float(e.group(2))), L.group(1))
+    a = re.search(r'\(at ' + _NUM + ' ' + _NUM + r'\)', block)
+    return ((float(a.group(1)), float(a.group(2))), None, None)
+
+
+def in_box(p, box):
+    return box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3]
+
+
+def strip_window(txt, nets, byname, box):
+    """`txt` with those nets' copper inside `box` removed (a segment
+    wholly inside, a via inside): fanout_once's re-lay strip, as text."""
+    ids = {byname[nm][0]: byname[nm][1].name for nm in nets}
+
+    def rm(token):
+        def f(block):
+            m = re.search(r'\(net (\d+)\)', block)
+            m2 = re.search(r'\(net "([^"]+)"\)', block)
+            nid = int(m.group(1)) if m else next((i for i, n in ids.items() if m2 and n == m2.group(1)), None)
+            if nid not in ids:
+                return False
+            a, b, _ = block_geom(block, token)
+            return in_box(a, box) and (b is None or in_box(b, box))
+        return f
+    txt = walk_blocks(txt, 'segment', rm('segment'))
+    return walk_blocks(txt, 'via', rm('via'))
+
+
 def side_of(fp_):
     return 'B' if fp_.layer.startswith('B') else 'F'
 
@@ -240,23 +310,55 @@ def drc_verdict(board):
     return 0 if 'NO DRC VIOLATIONS' in out else (int(m.group(1)) if m else -1)
 
 
-def write_ladder(board, names, log=print):
-    """`<board stem>.ladder.txt`: the plan's rivers, largest first."""
+def pairs_whole(rivers):
+    """the rivers with each differential PAIR's two legs in ONE of them, the earlier leg's, side by side -- whether
+    the later leg stood in a later river or further along the same one: a prefix K that took one leg and not the other
+    ran that leg alone, as a single (the zynq LVDS bus: RX_D3_N in its second river, RX_D3_P in its fourth; TX_D3_P
+    and TX_D3_N three apart in one), and with the legs side by side a prefix cuts at most one pair (coherent_nets drops
+    that leg). A river left empty is dropped; the rivers keep their order"""
+    import pairs as _pairs
+    mate = {}
+    for p_, n_ in _pairs.pair_names([n for r in rivers for n in r], admit_all=True).values():
+        mate[p_], mate[n_] = n_, p_
+    out, taken = [], set()
+    for r in rivers:
+        row = []
+        for n in r:
+            if n in taken:
+                continue
+            row.append(n)
+            taken.add(n)
+            if n in mate and mate[n] not in taken:
+                row.append(mate[n])
+                taken.add(mate[n])
+        out.append(row)
+    return [r for r in out if r]
+
+
+def write_ladder(board, names, log=print, bare_ok=False):
+    """`<board stem>.ladder.txt`: the plan's rivers, largest first -- and, with `bare_ok` (the escape fanout's field),
+    each net bare at both arrays (braid.bare_lane) a singleton after them: no stub for the rivers' taut paths to read"""
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(board)
     bn = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
     short = [n.split('/')[-1] for n in names]
-    ok = []
+    ok, bare = [], []
     for n in short:
         try:
             te.endpoints(pcb, [n], bn)
             ok.append(n)
         except AssertionError as e:
+            if bare_ok and n in bn and te.bare_lane(pcb, n, bn):
+                bare.append(n)
+                continue
             log(f'  {n}: no free stub at the source -- not in the ladder ({e})')
-    st = fp.plan_state(pcb, ok, set())
+    st = fp.plan_state(pcb, ok, set()) if ok else {'buses': []}
     buses = sorted((list(b) for b in st['buses']), key=len, reverse=True)
     placed = {n for b in buses for n in b}
-    single = [n for n in ok if n not in placed]
+    single = [n for n in ok if n not in placed] + bare
+    ok += bare
+    rivers = pairs_whole(buses + [[n] for n in single])
+    buses, single = [r for r in rivers if len(r) > 1], [r[0] for r in rivers if len(r) == 1]
     out = os.path.splitext(board)[0] + '.ladder.txt'
     cps, tot = [], 0
     for b in buses:

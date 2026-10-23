@@ -43,11 +43,9 @@ housing, sets the offset -- CUI SJ1-3533NG (x2, -x at 0.90 mm; its twin
 SJ1-3535NG, same housing, reads -y) and Neutrik NMJ6HCD3 (-x at 1.36 mm; the
 opening is +x) -- while 60+ correct micro-USB / USB-C faces sit in the same
 0.6-1.6 mm range. Above 2 mm no wrong face is known (227 checked). A weak
-face that is itself wrong is NOT caught: when the seeder's stage 1 chooses
-an undeclared connector's angle (on a pile, whose input angle says nothing),
-it tries the angles that point even a weak face at the edge first, so such a
-jack can be seated with its opening into the board, and the facing conjunct
-then reads that pose as a pass.
+face that is itself wrong is NOT caught: a jack seated with its opening into
+the board by a search that points even a weak face at the edge reads as a
+pass to the facing conjunct.
 
 A THIRD source, since #1245: the "PCB Edge" marker many footprints draw, a
 text beside a line where the board edge goes (`marker_face_local`, carried
@@ -56,7 +54,7 @@ position (sonde_u's DSUBs put the text 21.55 mm along the line), and it
 never names a face alone: a marker that agrees makes the body's face STRONG
 (basis `+marker`), one that contradicts makes it abstain -- never fail --
 and no marker leaves today's reading. Calibrated on KiCad 10's 154 marked
-stock footprints (`tests/measure_1245_edge_marker.py`): it agrees with all
+stock footprints: it agrees with all
 73 strong body faces at every quarter turn, agrees with 75 weak ones and
 vetoes one (the Pico W module's RF-edge marker). The three wrong jacks above
 draw no marker, so for them the weak tier is still the only guard.
@@ -71,13 +69,11 @@ The board frame uses the sign `connector_geometry.rect` and
 the board file stores a B-side footprint's local coordinates already mirrored,
 measured on sonde_u J2, orangecrab J4 and rp2350 J3.
 
-Measured over the tracked corpus and the fa10 human boards
-(`tests/measure_1155_mating_census.py`, fixture
-`tests/fixtures/1155_mating_census.json`): every decisive receptacle faces
-the edge it is seated on.
+Measured over the tracked corpus and the fa10 human boards: every decisive
+receptacle faces the edge it is seated on.
 """
 import math
-from typing import Dict, NamedTuple, Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 #: A body must sit at least this far (mm) off its pad row's centre to name a
 #: face. The census's gap among receptacles is 0.085 (the most offset that
@@ -98,7 +94,6 @@ FACE_DOMINANCE = 1.5
 #: A pose more than this far off the nearest cardinal angle names no edge.
 CARDINAL_TOL_DEG = 30.0
 
-FACES = ('+x', '-x', '+y', '-y')
 _UNIT = {'+x': (1.0, 0.0), '-x': (-1.0, 0.0),
          '+y': (0.0, 1.0), '-y': (0.0, -1.0)}
 
@@ -107,7 +102,7 @@ _UNIT = {'+x': (1.0, 0.0), '-x': (-1.0, 0.0),
 #: (`marker_face_local`)...
 MARKER_NEARER_RATIO = 2.0
 #: ...and at least this much nearer (mm). Measured on KiCad 10's 154 marked
-#: stock footprints (`tests/measure_1245_edge_marker.py`): no rival there is
+#: stock footprints: no rival there is
 #: nearer than 2.57 times (Amphenol 12401948E412A) or 2.15 mm (Technik
 #: TWP-4002D-H3) farther than the line read, so neither floor binds on the
 #: library; they are there for a footprint whose text sits between two lines.
@@ -333,18 +328,3 @@ def facing_edge(face: Optional[str], rotation: float) -> Optional[str]:
     return 'south' if vy > 0 else 'north'
 
 
-def facing_rotations(face: Optional[str], edge: str) -> Tuple[float, ...]:
-    """The quarter turns at which `face` points at `edge`, ascending."""
-    return tuple(float(r) for r in (0, 90, 180, 270)
-                 if facing_edge(face, r) == edge)
-
-
-def board_faces(pcb_data, pcb_file: Optional[str] = None,
-                bodies: Optional[Dict] = None) -> Dict[str, LocalFace]:
-    """`{ref: LocalFace}` for every footprint `body.board_bodies` answers."""
-    if bodies is None:
-        from .body import board_bodies
-        bodies = board_bodies(pcb_data, pcb_file)
-    fps = getattr(pcb_data, 'footprints', None) or {}
-    return {ref: mating_face_local(fps[ref], geom)
-            for ref, geom in sorted(bodies.items()) if ref in fps}

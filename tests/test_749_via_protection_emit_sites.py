@@ -7,10 +7,11 @@ board's convention for a new one.
   A. `add_tracks_and_vias_to_pcb` had no `tenting_attrs` parameter AT ALL, and
      it also takes `remove_vias` -- so a via removed and re-added round-tripped
      through it and came back re-stamped. Its callers split cleanly: fanout and
-     route_planes emit NEW vias (which want the board's prevailing convention),
+     route_planes emit NEW vias (which took the board's prevailing convention
+     at #749, and now carry no token and inherit its `(setup ...)` -- see A1),
      while route.py's #666 re-emit of model copper the written file lost is a
-     genuinely PRE-EXISTING via (which wants its own spec back, and inheritance
-     when it had none).
+     genuinely PRE-EXISTING via (which wants its own spec back, and
+     inheritance when it had none).
   B. Three `kicad_oracle` sites passed no spec, so every via the oracle welded
      got the hardcoded front+back tenting whatever the board said.
   C. `plane_io.restore_failed_reroute_nets` carried the spec but not the
@@ -19,6 +20,12 @@ board's convention for a new one.
   D. All of them resolved `net_name` from a lookup that misses on net 0, which
      emitted a numeric ref next to a spec -- a via `extract_vias` could not read
      back at all (#748).
+  E. (Found reviewing #1268.) None of them carried the via's TYPE either, and
+     KiCad loads a via with no blind/buried/micro word as a THROUGH via, so a
+     re-emitted microvia shipped as a through via. The structural half lives
+     here (every generate_via_sexpr call passes via_type=, every copy of a
+     via's layers carries its type, every plugin PCB_VIA goes through
+     gui_utils.set_via_layers); the round trips are tests/test_via_type_reemit.py.
 
 Latent on the tracked corpus (only two boards carry per-via specs, and all 206
 are exactly DEFAULT_VIA_TENTING, so today's output and the correct output are
@@ -85,6 +92,31 @@ BOARD = '''(kicad_pcb
 N2N = {0: '', 1: '/SIG'}
 
 
+def _repo_trees(root, dirs=('py_router', 'py_placer', 'py_tools',
+                            'kicad_routing_plugin')):
+    """(repo-relative path, AST) of every .py file under `dirs`."""
+    for d in dirs:
+        for dp, _, fs in os.walk(os.path.join(root, d)):
+            for f in sorted(fs):
+                if f.endswith('.py'):
+                    p = os.path.join(dp, f)
+                    rel = os.path.relpath(p, root).replace(os.sep, '/')
+                    with open(p, encoding='utf-8') as fh:
+                        yield rel, ast.parse(fh.read(), rel)
+
+
+def _copies_layers(node):
+    """Is this expression an existing object's `.layers` (or list() of it)?"""
+    if isinstance(node, ast.Attribute) and node.attr == 'layers':
+        return True
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'list' and node.args):
+        return _copies_layers(node.args[0])
+    if isinstance(node, ast.BoolOp):
+        return any(_copies_layers(v) for v in node.values)
+    return False
+
+
 def _emit(tmp, vias):
     """Run add_tracks_and_vias_to_pcb and return the vias it wrote, minus the
     board's own."""
@@ -126,8 +158,8 @@ def run():
                   f"A1: a NEW via got {got[0].tenting_attrs}, expected NO "
                   f"protection token at all so it inherits the board policy")
             check(got[0].tenting_attrs != DEFAULT_VIA_TENTING,
-                  "A1: the new via was stamped with the hardcoded front+back "
-                  "tenting, which is what #489 s8 set out to stop")
+                  "A1: the new via was stamped with the RETIRED hardcoded "
+                  "front+back tenting, which is what #489 s8 set out to stop")
             check(got[0].tenting_attrs != HOUSE_SPEC,
                   f"A1: the new via was stamped with the board's PREVAILING "
                   f"per-via spec {HOUSE_SPEC}; that is still an override, and "
@@ -211,8 +243,8 @@ def run():
     # must decide the protection question rather than fall through to the
     # writer's default. A new emit site that forgets fails here.
     #
-    # py_placer/placement/writer.py is deliberately out of scope: that is #741,
-    # whose fix is not on main.
+    # py_placer/placement/writer.py is deliberately out of scope: that is #741's
+    # site, pinned by tests/test_741_via_nudge_tenting.py.
     for rel in ('py_router/kicad_oracle.py', 'py_router/plane_io.py',
                 'py_router/repair_planes.py', 'py_router/output_writer.py',
                 'py_router/kicad_writer.py',
@@ -231,8 +263,79 @@ def run():
             kw = {k.arg for k in c.keywords}
             check('tenting_attrs' in kw,
                   f"{rel}:{c.lineno}: generate_via_sexpr with no "
-                  f"tenting_attrs= -- it will be stamped with the hardcoded "
-                  f"front+back tenting (#489 s8 / #749)")
+                  f"tenting_attrs= -- an existing via it re-emits loses its own "
+                  f"protection spec and falls back to the board's `(setup ...)` "
+                  f"(#489 s8 / #749)")
+
+    # --- The via TYPE, the same way (found reviewing #1268) -----------------
+    # A via block with no blind/buried/micro word is a THROUGH via to KiCad,
+    # so an emit site that forgets via_type= ships a re-emitted microvia as a
+    # through via. Every call in the repo, not a fixed list: a new emit site in
+    # a new file is caught too.
+    type_calls = 0
+    for rel, tree in _repo_trees(ROOT_DIR):
+        for c in ast.walk(tree):
+            if (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                    and c.func.id == 'generate_via_sexpr'):
+                type_calls += 1
+                check('via_type' in {k.arg for k in c.keywords},
+                      f"{rel}:{c.lineno}: generate_via_sexpr with no via_type= "
+                      f"-- an existing blind/micro via it re-emits ships as a "
+                      f"THROUGH via (pass the via's own via_type; a via the "
+                      f"tool adds passes None)")
+    check(type_calls >= 10, f"only {type_calls} generate_via_sexpr call(s) "
+                            f"found -- the walk has gone stale")
+
+    # ...and every copy of an EXISTING via's layers -- a dict or a Via() built
+    # from `v.layers` -- carries its type next to them, or the copy that
+    # reaches a writer has lost it before the writer is called.
+    copies = 0
+    for rel, tree in _repo_trees(ROOT_DIR):
+        if rel.startswith('py_tools/'):
+            continue        # geometry dumps; no tool there re-emits from them
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Dict):
+                keys = {k.value: v for k, v in zip(n.keys, n.values)
+                        if isinstance(k, ast.Constant)}
+                if ('layers' in keys and 'drill' in keys
+                        and _copies_layers(keys['layers'])):
+                    copies += 1
+                    check('via_type' in keys,
+                          f"{rel}:{n.lineno}: a via dict copies an existing "
+                          f"via's layers but not its via_type")
+            elif (isinstance(n, ast.Call)
+                  and getattr(n.func, 'id', getattr(n.func, 'attr', None))
+                  in ('Via', '_Via')):
+                kw = {k.arg: k.value for k in n.keywords}
+                if 'layers' in kw and _copies_layers(kw['layers']):
+                    copies += 1
+                    check('via_type' in kw,
+                          f"{rel}:{n.lineno}: a Via() copies an existing via's "
+                          f"layers but not its via_type")
+    check(copies >= 10, f"only {copies} via copy site(s) found -- the walk has "
+                        f"gone stale")
+
+    # The plugin's pcbnew twins: a PCB_VIA is born THROUGH and pcbnew snaps a
+    # through via's pair to F.Cu/B.Cu as it is set, so the type has to go on
+    # FIRST. gui_utils.set_via_layers does it in that order; a function that
+    # builds a PCB_VIA must use it and never call SetLayerPair itself.
+    pcb_vias = 0
+    for rel, tree in _repo_trees(ROOT_DIR, ('kicad_routing_plugin',)):
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)]
+            names = {getattr(c.func, 'attr', getattr(c.func, 'id', None))
+                     for c in calls}
+            if 'PCB_VIA' not in names:
+                continue
+            pcb_vias += 1
+            check('set_via_layers' in names and 'SetLayerPair' not in names,
+                  f"{rel}:{fn.lineno} {fn.name}: builds a PCB_VIA without "
+                  f"gui_utils.set_via_layers -- a re-created blind/micro via "
+                  f"comes back THROUGH")
+    check(pcb_vias >= 6, f"only {pcb_vias} PCB_VIA-building function(s) found "
+                         f"-- the walk has gone stale")
 
     # route.py's #666 re-emit builds via dicts inline; both keys must be there
     # or the writer cannot tell pre-existing copper from new copper.

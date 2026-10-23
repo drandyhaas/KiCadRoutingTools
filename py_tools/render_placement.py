@@ -2,11 +2,9 @@
 """Headless PNG stills of placement status (#431).
 
 A routed board is self-evidently inspectable: open it in KiCad, the tracks are
-there. A placement repair is a set of position deltas whose merit is invisible
-without the context that motivated it -- which airwires were failing, which nets
-walled them off, what moved and how far. `docs/placement-optimization.md` names
-the acceptance criterion ("output that is visibly 'your placement, nudged' can
-be reviewed in minutes") but nothing produced an artifact to review.
+there. A placement is a set of poses whose merit is invisible without the
+context around it -- which airwires cross, which nets wall others off, what
+moved and how far. This renders that, to be looked at in minutes.
 
 This composes; it does not re-render. Every pixel goes through
 `route_render.BoardRenderer` (board outline, cutouts, zones, pads, drills, the
@@ -15,9 +13,9 @@ caption HUD) via its `overlays=` hook, and every world->pixel conversion through
 the rect handed to the drawing layer is `state.parts[ref].rect()` identically,
 which fails the day someone inlines a courtyard transform.
 
-    python3 render_placement.py BOARD.kicad_pcb [-o OUT.png|OUTDIR] [options]
-    python3 render_placement.py BOARD --before SEED --arrows -o delta.png
-    python3 render_placement.py BOARD --zoom-group sheet:1a2b --per-side -o dir/
+    python3 py_tools/render_placement.py BOARD.kicad_pcb [-o OUT.png|OUTDIR] [options]
+    python3 py_tools/render_placement.py BOARD --before SEED --arrows -o delta.png
+    python3 py_tools/render_placement.py BOARD --zoom-group sheet:1a2b --per-side -o dir/
 
 Known limits, stated because the artifact should not oversell (the issue's own
 list): a dense board does not fit one readable frame, which is why delta-first
@@ -39,7 +37,7 @@ import json
 import math
 import os
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import routing_defaults as defaults
 from kicad_parser import parse_kicad_pcb
@@ -64,8 +62,7 @@ from kicad_parser import parse_kicad_pcb
 # because `board_context.py` and the stress predictors import it for
 # `PlacementModel` / `legality_findings` and draw nothing.
 #
-# Every name survives, because callers read them by name --
-# `tests/test_431_render_placement.py:293-294` reads `C_AIR_PICK` that way.
+# Every name survives, because callers read them by name.
 # The second block that used to sit MID-FILE (C_CONFLICT / C_HOLE /
 # C_COURT_OVL, declared after `draw_courtyards`) is folded in here: there was
 # no reason for a palette to be in two places except that nobody owned it.
@@ -92,10 +89,47 @@ C_CONFLICT = _THEME_DARK.rgb('defect_conflict')    # pad/hole legality
 C_HOLE = _THEME_DARK.rgb('defect_hole')            # NPTH keepout circles
 C_COURT_OVL = _THEME_DARK.rgb('defect_courtyard')  # courtyard interpenetration
 
-#: The "required gap" amber. It had NO CONSTANT NAME AT ALL and was typed as a
-#: literal in five places, one of them its own legend row -- a semantic colour
-#: with no name is the clearest single symptom of a palette nobody owns.
-C_REQUIRED_GAP = _THEME_DARK.rgb('defect_required_gap')
+#: --groups: one colour per group, in file order. A qualitative palette whose
+#: colours stay apart on both themes; more groups than colours reuse them.
+GROUP_PALETTE = ((31, 119, 180), (255, 127, 14), (44, 160, 44),
+                 (214, 39, 40), (148, 103, 189), (140, 86, 75),
+                 (227, 119, 194), (23, 190, 207), (188, 189, 34),
+                 (127, 127, 127))
+
+
+def group_palette(n):
+    """`n` colours, no two alike: GROUP_PALETTE (its grey, which reads as no
+    group, left out), then hues a golden angle apart. For a picture whose
+    every group or rail must be told apart -- the placement movie's groups,
+    render_power's rails."""
+    import colorsys
+    base = [c for c in GROUP_PALETTE if len(set(c)) > 1]
+    out = list(base[:n])
+    h = 0.11
+    while len(out) < n:
+        h = (h + 0.618034) % 1.0
+        out.append(tuple(int(255 * v) for v in colorsys.hsv_to_rgb(h, 0.7 - 0.25 * (len(out) // 20 % 2),
+                                                                     0.95)))
+    return out
+
+
+def group_colours(path, refs) -> Tuple[Dict[str, tuple], List[tuple], List[str]]:
+    """The groups file at `path` as colours: ({ref: rgb}, legend rows,
+    refs the file names that `refs` does not hold). Raises
+    `grouping.GroupsError` on a file the placer would refuse too."""
+    from placement.grouping import load_groups
+    doc = load_groups(path)
+    colour_of, rows, missing = {}, [], []
+    for i, g in enumerate(doc['groups']):
+        rgb = GROUP_PALETTE[i % len(GROUP_PALETTE)]
+        role = g.get('role')
+        rows.append((rgb, 'solid', f"{g['name']} ({role})" if role else g['name']))
+        for ref in g['refs']:
+            if ref in refs:
+                colour_of[ref] = rgb
+            else:
+                missing.append(ref)
+    return colour_of, rows, missing
 
 
 # ---------------------------------------------------------------------------
@@ -130,23 +164,22 @@ class PlacementModel:
         from list_nets import board_floor_knobs
         # BOARD-FIRST floors, resolved HERE rather than in main() so the CLI and
         # every library caller get the same answer -- and so this instrument
-        # agrees with place_optimize, which has resolved them this way since
-        # run-7 S1 (place_optimize.py:144). Until now it did not: the renderer
-        # hardcoded 0.25/0.55 while the optimizer read the board, so on any
+        # agrees with the placement tools, which resolve them this way. It
+        # once did not: the renderer hardcoded 0.25/0.55 while the optimizer
+        # read the board, so on any
         # board declaring its own floor the two disagreed about the geometry
         # they were supposedly sharing. On the measured board that is 0.2 and
         # 0.5, not 0.25 and 0.55.
         #
         # An explicit --clearance still wins: board_floor_knobs takes a non-None
-        # value as 'cli' and returns it unchanged.
+        # value as 'cli' and returns it unchanged. An unset edge clearance
+        # reads the fab edge floor routing writes back (#1301), as every
+        # placement grade does.
         clr, edge, self.floor_knobs = board_floor_knobs(
             self.pcb_file, clearance=kw.get('clearance'),
             board_edge_clearance=kw.get('board_edge_clearance'),
-            clearance_default=defaults.CLEARANCE, edge_default=0.55)
-        args = dict(clearance=clr, board_edge_clearance=edge,
-                    crossing_penalty=10.0, halo_base=0.5, halo_coef=0.25,
-                    halo_weight=2.0, edge_halo=2.0, edge_weight=2.0,
-                    grid_step=defaults.GRID_STEP, length_weight=1.0)
+            clearance_default=defaults.CLEARANCE)
+        args = dict(clearance=clr, board_edge_clearance=edge)
         args.update({k: v for k, v in kw.items() if v is not None})
         try:
             return QuenchState(self.pcb, self.pcb_file, **args)
@@ -165,7 +198,7 @@ class PlacementModel:
             return QuenchState(self.pcb, self.pcb_file, **args)
 
     def _metrics(self) -> Dict[str, object]:
-        m = dict(self.state.total_cost())
+        m = dict(self.state.wire_metrics())
         leg = self.state.legality_metrics()
         m.update(leg)
         if self.no_outline:
@@ -333,6 +366,13 @@ def legality_findings(model) -> Dict[str, object]:
            # sheet/gate say NOT MEASURED rather than reporting "blocking: none"
            # on a board nothing looked at.
            'courtyard_census_error': None,
+           # #1300: [ref, basis] for each part the model seats on
+           # an ESTIMATED courtyard (it draws none); `oob_refs_courtyard`
+           # measures those estimates.
+           'estimated_courtyards': [
+               [e.ref, e.basis] for e in sorted(
+                   (getattr(getattr(model, 'state', None),
+                            'courtyard_estimates', None) or {}).values())],
            'locked_refs': sorted(r for r, p in model.parts().items()
                                  if getattr(p, 'locked', False))}
     state = getattr(model, 'state', None)
@@ -439,7 +479,7 @@ def legality_findings(model) -> Dict[str, object]:
             out['keepout_copper_unmeasured'] = [['*', 'error', '%s: %s'
                                                  % (type(e).__name__, e)]]
         # #1065: pad CLEARANCE is the grader's own measurement, not a mirror.
-        # `pair_shortfall` (the seeder and quench gate) charges bounding-box
+        # `pair_shortfall` (the seat gate) charges bounding-box
         # gaps, so an oval pad 0.277 mm from its neighbour read 0.0215 mm
         # short at 0.25 and render flagged a pose grade_pad_legality and
         # check_drc both call clean -- and a run gated its search on it. Its
@@ -531,8 +571,8 @@ def legality_findings(model) -> Dict[str, object]:
             from placement.legality import grade_body_overlap
             # The board's OWN resolved clearance floor -- what the instrument
             # block reports and what --clearance sets -- rather than a magic
-            # constant. `state.clearance` is the quench's copy; floor_knobs is
-            # the model's resolution of it; routing_defaults.CLEARANCE is the
+            # constant. `state.clearance` is the placement state's copy;
+            # floor_knobs is the model's resolution of it; routing_defaults.CLEARANCE is the
             # last resort for a model built without either.
             _clr = (getattr(state, 'clearance', None)
                     or (model.floor_knobs.get('clearance') or {}).get('value')
@@ -545,7 +585,12 @@ def legality_findings(model) -> Dict[str, object]:
             _g = grade_body_overlap(pcb, _clr,
                                     intent_waivers=getattr(
                                         model, 'intent_waivers', ()),
-                                    pcb_file=getattr(model, 'pcb_file', None))
+                                    pcb_file=getattr(model, 'pcb_file', None),
+                                    # #1298: the courtyard pairs a declared
+                                    # pose accepts, as check_assembly reads
+                                    # them
+                                    courtyard_waivers=getattr(
+                                        model, 'courtyard_waivers', ()))
             # UNWAIVED courtyard pairs only -- the advisory population. It is
             # NOT a superset of the blocking list below (a waiver-voided pair
             # blocks while staying labelled waived), which is why this key is
@@ -962,7 +1007,7 @@ def _dash(d, p0, p1, on_px, off_px, fill, width):
 
 
 def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
-                    locked=(), width_mm=0.12):
+                    locked=(), width_mm=0.12, colour_of=None):
     for ref in refs:
         rect = model.rect(ref)
         if rect is None:
@@ -984,6 +1029,8 @@ def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
                         (C_COURT_B if own == 'B' else C_COURT_F))
         if ref in locked:
             col = C_LOCKED
+        if colour_of and ref in colour_of:
+            col = colour_of[ref]     # --groups: the group's colour, locked or not
         if clusters:
             for cb in clusters[:-1]:
                 d.rectangle(_rect_pts(r, cb), outline=col,
@@ -996,9 +1043,15 @@ def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
         # what made esp_prog's SOT89 look 5.2mm wide when the part is 4.5mm,
         # and it is why a silk body never gates. A dash rather than a colour
         # because the four colours here already carry side and lock state.
+        # #1300: an ESTIMATED courtyard is dashed too -- the outline a part
+        # that draws none is seated on, which no library drew (a silk body's
+        # outline is always one of these now).
         _src = (getattr(model, 'body_sources', None) or {}).get(ref)
+        _est = (ref in (getattr(getattr(model, 'state', None),
+                                'courtyard_estimates', None) or {})
+                and (side is None or own == side))
         _wpx = _w(r, width_mm)
-        if _src == 'silk':
+        if _src == 'silk' or _est:
             _on, _off = max(3, _wpx * 4), max(3, _wpx * 3)
             corners = [(box[0], box[1]), (box[2], box[1]),
                        (box[2], box[3]), (box[0], box[3])]
@@ -1009,6 +1062,24 @@ def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
             d.rectangle(box, outline=col, width=_wpx)
         if ref in locked:      # hatch so "locked" reads without a legend
             d.line([box[0], box[1], box[2], box[3]], fill=col, width=_w(r, 0.06))
+
+
+def draw_group_fills(d, r, model, colour_of, *, side=None, locked=(), k=0.38):
+    """--groups: tint each grouped part's body with its group's colour,
+    blended into the board colour so pads and labels stay readable. A locked
+    member is not tinted (its hatch already marks it); its outline still
+    takes the group colour in `draw_courtyards`."""
+    import render_theme
+    th = getattr(r, 'theme', None) or render_theme.default_theme()
+    base = th.rgb('board_body')
+    for ref, rgb in colour_of.items():
+        if ref in locked:
+            continue
+        rect = model.rect(ref)
+        if rect is None or (side is not None and model.side(ref) != side):
+            continue
+        fill = tuple(int(k * c + (1 - k) * b) for c, b in zip(rgb, base))
+        d.rectangle(_rect_pts(r, rect), fill=fill)
 
 
 def draw_legality(d, r, model, *, side=None):
@@ -1256,11 +1327,18 @@ def overlay_for(spec: PanelSpec):
             p = m.parts().get(ref)
             if p is not None:
                 quiet_ids |= set(p.nets)
+    colour_of = (o.get('groups') or {}).get('colour_of')
+
     def _draw(d, r):
+        if colour_of:
+            draw_group_fills(d, r, m, colour_of, side=spec.side, locked=locked)
         if o.get('borders', True):
             if context:
-                draw_courtyards(d, r, m, context, side=spec.side, dim=True)
-            draw_courtyards(d, r, m, prom, side=spec.side, locked=locked)
+                draw_courtyards(d, r, m, context, side=spec.side, dim=True,
+                                colour_of=colour_of)
+            draw_courtyards(d, r, m, prom, side=spec.side, locked=locked,
+                            colour_of=colour_of,
+                            width_mm=0.2 if colour_of else 0.12)
         if o.get('pads', True):
             r.draw_pads(d, fill_for=pad_fill_for(m, spec.side))
         if o.get('ratsnest', True):
@@ -1462,7 +1540,6 @@ def draw_legend(d, r, spec) -> None:
     Only the keys this panel can actually show are drawn -- a legend listing
     arrows on a panel with no --before is itself misinformation.
     """
-    from route_render import load_font
     if getattr(spec, 'defects', None):
         # A defect panel's marks are its whole point, so they are the ONLY
         # legend on it. Listing the legality key beside them would invite the
@@ -1471,12 +1548,14 @@ def draw_legend(d, r, spec) -> None:
                 ((255, 200, 64), 'dashed', 'REQUIRED gap (what would fit)'),
                 (C_CONFLICT, 'ring', 'throat location')]
     else:
-        rows = [(C_CONFLICT, 'dashed', 'pad copper off-board'),
-                (C_CONFLICT, 'ring', 'pad/hole clearance short'),
-                (C_CONFLICT, 'solid', 'BODY STACK - parts overlap'),
-                (C_COURT_OVL, 'solid', 'courtyard interpenetration'),
-                (C_HOLE, 'ring', 'NPTH keepout'),
-                (C_LOCKED, 'hatch', 'KiCad-locked (never moved)')]
+        rows = []
+        if (spec.o or {}).get('legality', True):
+            rows += [(C_CONFLICT, 'dashed', 'pad copper off-board'),
+                     (C_CONFLICT, 'ring', 'pad/hole clearance short'),
+                     (C_CONFLICT, 'solid', 'BODY STACK - parts overlap'),
+                     (C_COURT_OVL, 'solid', 'courtyard interpenetration'),
+                     (C_HOLE, 'ring', 'NPTH keepout')]
+        rows.append((C_LOCKED, 'hatch', 'KiCad-locked (never moved)'))
         # #896. Only when the board actually has one -- a legend row for a
         # mark nothing on the panel carries teaches the reader to look for
         # something that is not there.
@@ -1487,16 +1566,19 @@ def draw_legend(d, r, spec) -> None:
         if spec.hot_nets:
             rows.append((C_AIR_FAIL, 'line', 'failed net'))
     # #1014: the ROWS are still chosen here -- which keys this panel can show
-    # is a placement question -- but the DRAWING moved to
-    # `py_router/render_chrome.draw_key`, so `animate_route` can draw the
-    # movie's key with the same marks rather than a second implementation of
-    # them. `pad_scale=r.ss` because an overlay draws on the SUPERSAMPLED
+    # is a placement question -- but the DRAWING lives in
+    # `py_router/render_chrome.draw_key`, which reads each mark off the same
+    # theme role as the draw site. `pad_scale=r.ss` because an overlay draws on the SUPERSAMPLED
     # canvas: using the output height here once put the legend a fraction of
     # the way up the image, on top of the board.
     from render_chrome import draw_key
     ss = max(1, int(getattr(r, 'ss', 1)))
     draw_key(d, rows, width=r.W * ss, height=r.H * ss,
              theme=getattr(r, 'theme', None), corner='bl', pad_scale=ss)
+    _groups = (spec.o or {}).get('groups') or {}
+    if _groups.get('rows') and not getattr(spec, 'defects', None):
+        draw_key(d, _groups['rows'], width=r.W * ss, height=r.H * ss,
+                 theme=getattr(r, 'theme', None), corner='br', pad_scale=ss)
 
 
 def crop_findings(model, view) -> Dict[str, int]:
@@ -1620,10 +1702,10 @@ def describe_pair(before_model, after_model, args):
         L.append(f"  VERDICT: {net_fixed} resolved, none introduced.")
     else:
         L.append("  VERDICT: no legality finding changed identity.")
-    # #1126: the courtyard census, as the caption and the checklist read it,
-    # beside the quench's rect metric -- labelled as the optimizer's, since
-    # the two differ (glasgow_revC 52.252 vs 70.05) and a reader comparing
-    # this diff with the checklist must be able to tell which one moved.
+    # The courtyard census, as the caption and the checklist read it, beside
+    # the placement state's rect metric -- labelled apart, since the two
+    # differ and a reader comparing this diff with the checklist must be able
+    # to tell which one moved.
     _cen = {}
     for side, fnd, mdl in (('before', b, before_model),
                            ('after', a, after_model)):
@@ -1647,6 +1729,25 @@ def describe_pair(before_model, after_model, args):
                      + ("   (worse)" if am > bm + 1e-9 else
                         "   (better)" if am < bm - 1e-9 else ""))
     return "\n".join(L), J
+
+
+def crop_path_for(args):
+    """`name -> path` for the follow-up renders a report suggests, beside
+    this run's own -o target (#1354). A directory target holds them
+    (`<dir>/worst1.png`); a file target gets stem-suffixed siblings
+    (`x.png` -> `x_worst1.png`, `x_focus/`), the way multi-panel output is
+    named; no -o means the default `<board>_placement.png` target."""
+    out = getattr(args, 'output', None)
+    as_dir = bool(out) and (out.endswith(('/', os.sep)) or os.path.isdir(out)
+                            or not os.path.splitext(out)[1])
+    if not out:
+        out = os.path.splitext(args.board)[0] + '_placement.png'
+
+    def path(name):
+        if as_dir:
+            return os.path.join(out, name)
+        return os.path.splitext(out)[0] + '_' + name
+    return path
 
 
 def describe(model, fnd, moves, args, panel_paths):
@@ -1735,6 +1836,10 @@ def describe(model, fnd, moves, args, panel_paths):
     if args.ignore_nets:
         same.append("--ignore-nets " + " ".join(args.ignore_nets))
     same_s = (" " + " ".join(same)) if same else ""
+    # The suggested crops land NEXT TO this run's own -o target (#1354): they
+    # were hard-coded under `wk/`, whatever -o said, so a run writing
+    # elsewhere was told to write its crops into a folder it never chose.
+    _cp = crop_path_for(args)
 
     shots = []
     for _sev, kind, refs, note in worst[:args.max_focus]:
@@ -1756,13 +1861,13 @@ def describe(model, fnd, moves, args, panel_paths):
             v = s['view']
             L.append(f"     python3 -X utf8 py_tools/render_placement.py {board}"
                      f" --view {v[0]},{v[1]},{v[2]},{v[3]}{same_s}"
-                     f" --no-ratsnest -o wk/worst{i}.png")
+                     f" --no-ratsnest -o {_cp(f'worst{i}.png')}")
     L.append("")
     L.append("SEE THE WHOLE PICTURE AGAIN, uncluttered")
     L.append(f"  python3 -X utf8 py_tools/render_placement.py {board}{same_s} "
-             f"--no-ratsnest --no-labels -o wk/clean.png")
+             f"--no-ratsnest --no-labels -o {_cp('clean.png')}")
     L.append(f"  python3 -X utf8 py_tools/render_placement.py {board}{same_s} "
-             f"--focus -o wk/focus/    # a panel per legality pocket")
+             f"--focus -o {_cp('focus/')}    # a panel per legality pocket")
     L.append("")
     L.append("DECLUTTER  (add these when the panel is too busy to read)")
     L.append("  --no-ratsnest    drop the airwires -- the biggest source of "
@@ -1814,10 +1919,9 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
         # #1126: the courtyard CENSUS -- every courtyard pair
         # `grade_body_overlap` measures on the drawn outlines, waived ones
         # included -- the number the checklist (`b_courtyard_overlap_mm2`)
-        # and the film (#1124) carry. `metrics.overlap_area` is the quench's
-        # rect courtyards, zeroed under a #1104 project waiver: glasgow_revC's
-        # caption read 70.05 against 52.252 on its panel and checklist. The
-        # metric stays in the JSON. No census (no pcb on the model, or one
+        # carries. `metrics.overlap_area` is the placement state's rect
+        # courtyards, zeroed under a project waiver, so the two can differ.
+        # The metric stays in the JSON. No census (no pcb on the model, or one
         # that raised) prints n/a, never the empty default's 0.00.
         _f = (legality_findings(spec.model)
               if getattr(spec.model, 'pcb', None) is not None else None)
@@ -1833,11 +1937,8 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
     if m.get('pad_conflict_pairs') is not None:
         # #1065: the GRADER's pair count -- the list the checklist, the
         # overlay and --gate carry. `metrics.pad_conflict_pairs` is the
-        # optimizer's bounding-box currency (place_optimize labels it so in
-        # `pad_conflict_pairs_currency`),
-        # so the caption printed "pad-conflicts 10" on a glasgow panel whose
-        # checklist named one pair. The metric itself stays in the JSON: the
-        # quench moves on it. The film plots the grader's list too (#1124).
+        # placement state's bounding-box currency, which can count more pairs
+        # than the grader names. The metric itself stays in the JSON.
         _ctx = getattr(getattr(spec.model, 'state', None), 'legality_ctx', None)
         _n = (len(legality_findings(spec.model)['pad_conflict_pairs_refs'])
               if _ctx is not None else m['pad_conflict_pairs'])
@@ -1896,17 +1997,17 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  render_placement.py board.kicad_pcb -o state.png
-  render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
-  render_placement.py board.kicad_pcb --list-groups --group-by sheet
-  render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
+  python3 py_tools/render_placement.py board.kicad_pcb -o state.png
+  python3 py_tools/render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+  python3 py_tools/render_placement.py board.kicad_pcb --list-groups --group-by sheet
+  python3 py_tools/render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
 """)
     p.add_argument('board', nargs='?', help='the board to render ("after")')
     p.add_argument('--before', metavar='BOARD',
                    help='seed board; enables ghost rects and displacement arrows')
     p.add_argument('-o', '--output', help='PNG path (one panel) or directory')
     p.add_argument('--summary-json', metavar='FILE',
-                   help='route.py JSON_SUMMARY or a loop round log, naming the '
+                   help='route.py JSON_SUMMARY or a route log, naming the '
                         'failed and blocker nets to highlight')
     p.add_argument('--zoom-group', metavar='BLOCK',
                    help='frame one placement block (same names as route.py --group)')
@@ -1918,6 +2019,11 @@ Examples:
                    help='how blocks are derived (default: auto = kicad,sheet)')
     p.add_argument('--list-groups', action='store_true',
                    help='list the blocks --group-by would derive, and exit')
+    p.add_argument('--groups', metavar='FILE', default=None,
+                   help='colour each part by its group in a groups file (the '
+                        'place_simple / check_groups format): a tint and an '
+                        'outline per group, keyed bottom-right. Locked '
+                        'members keep their hatch and take the group outline.')
     p.add_argument('--defect-json', action='append', default=None,
                    metavar='PATH',
                    help='a `defect-record` JSON document (schema: see '
@@ -1947,15 +2053,12 @@ Examples:
     p.add_argument('--max-focus', type=int, default=6)
     p.add_argument('--zoom-pad', type=float, default=2.0, metavar='MM')
     p.add_argument('--per-side', action='store_true',
-                   help='force an F and a B panel (run-6: boards with '
-                        'back-side parts get per-side panels by DEFAULT; '
-                        'this flag only matters with --flat semantics)')
+                   help='force an F and a B panel (a board with back-side '
+                        'parts gets per-side panels by default)')
     p.add_argument('--side', choices=('F', 'B'), default=None,
-                   help='render ONLY this side\'s panel (run-23: there was '
-                        'no way to ask for one face -- the choices were both '
-                        'panels or --flat, which mixes the faces into one '
-                        'image). Overrides --per-side/--flat; the review '
-                        'sheet then carries the one panel.')
+                   help='render ONLY this side\'s panel. Overrides '
+                        '--per-side/--flat; the review sheet then carries '
+                        'the one panel.')
     p.add_argument('--flat', action='store_true',
                    help='one flattened panel even when the board has '
                         'back-side parts (the pre-run-6 default; a B part '
@@ -1963,10 +2066,8 @@ Examples:
     _bool_pair(p, 'borders', True, 'draw component courtyards (default: on)')
     _bool_pair(p, 'labels', True, 'draw component references (default: on)')
     _bool_pair(p, 'legend', True,
-               'draw the colour key bottom-left (default: on). The encoding '
-               'used to live only in source comments, and the two colours most '
-               'easily confused are the two that matter: solid red is a body '
-               'stack no router can fix, a red ring is a clearance shortfall.')
+               'draw the colour keys (default: on): solid red is a body '
+               'stack no router can fix, a red ring a clearance shortfall')
     _bool_pair(p, 'ratsnest', True, 'draw airwires (default: on)')
     _bool_pair(p, 'pads', True, 'draw pads (default: on)')
     _bool_pair(p, 'ghosts', True, 'draw seed rects when --before is given')
@@ -1988,24 +2089,19 @@ Examples:
                         'hairball switch: on a dense board this reproduces exactly '
                         'the unreadable ratsnest KiCad already shows')
     p.add_argument('--clearance', type=float, default=None,
-                   help="pad clearance in mm for the legality/halo metrics. "
-                        "DEFAULT: the board's own Default net-class clearance, "
-                        "else its min_clearance constraint, else "
+                   help="pad clearance in mm for the legality metrics. "
+                        "DEFAULT: the board's own Default net-class clearance "
+                        "floored at its Board Setup min_clearance (as KiCad "
+                        "grades it), else "
                         f"{defaults.CLEARANCE}. The effective value and its "
                         "source are printed, and land in the JSON as "
-                        "instrument.floors -- this flag documented no default "
-                        "at all, and four renders in one run were graded at a "
-                        "clearance nothing recorded")
-    # Same spelling and semantics as place_optimize's. Without it this tool
-    # cannot reproduce a run's crossings/hpwl whenever the optimizer was given
-    # --ignore-nets -- which is the normal case, since the plane nets have to be
-    # excluded from airwire scoring. The gap turned the "re-measure the written
-    # board" check into a false-alarm generator: GND alone took placedA from
-    # 53 crossings to 116, which reads as a corrupted write and is not one.
+                        "instrument.floors")
+    # Without it this tool cannot reproduce a run's crossings/hpwl whenever
+    # the run excluded nets (plane nets usually are) from airwire scoring.
     p.add_argument('--ignore-nets', nargs='+', default=None, metavar='NET',
                    help='net-name globs to exclude from airwire scoring; pass '
-                        'the same set given to place_optimize --ignore-nets, '
-                        'or crossings/hpwl will not match its JSON_SUMMARY')
+                        'the set the placement or route ignored, or '
+                        'crossings/hpwl will not match its JSON_SUMMARY')
     p.add_argument('--size', type=int, default=1600)
     p.add_argument('--supersample', type=int, default=2)
     p.add_argument('--json', action='store_true',
@@ -2060,15 +2156,13 @@ Examples:
                         'checklist.a_body_edge_band\'s band and makes it fail '
                         '--gate (#1255).')
     p.add_argument('--review-sheet', metavar='PATH', default=None,
-                   help='run-23: ALSO write ONE composite image built for the '
+                   help='ALSO write ONE composite image built for the '
                         'boundary review -- F and B side by side (with the '
                         'courtyard-interpenetration overlay both panels '
                         'already carry) over a facts strip: the courtyard '
                         'census with mm2/depth, and every connector-family '
                         'part with its distance-to-nearest-edge (INTERIOR '
-                        'flagged). Exists because the facts a reviewer needs '
-                        'were spread over two panels and a JSON, and run 23 '
-                        'proved that spread is where the looking stops.')
+                        'flagged).')
     return p
 
 
@@ -2119,11 +2213,15 @@ def warn_unmatched(report: dict) -> None:
 
 
 def _load_summary(path):
-    """Failed + blocker net names from a JSON_SUMMARY file or a route log.
+    """Failed + blocker net names from a JSON_SUMMARY file or a route log,
+    and the route's counts.
 
-    Uses place_route_loop's OWN arithmetic (metrics_from_summary, split out for
-    exactly this) rather than re-deriving failure counts here.
+    A verdict counts `failed_single` + `open_single` + the multipoint pad
+    deficit (a non-multipoint open net is in neither of the other two).
+    Blockers come from the structured `blockers` key; only a log that has
+    none (pre-#409) falls back to its printed blocker lines.
     """
+    import re
     if not path or not os.path.isfile(path):
         return [], [], {}
     txt = open(path, encoding='utf-8', errors='replace').read()
@@ -2131,12 +2229,25 @@ def _load_summary(path):
     try:
         summary = json.loads(txt)
     except ValueError:
-        from place_route_loop import merge_route_summaries
+        from route_summary import merge_route_summaries
         summary = merge_route_summaries(txt)
     if not summary:
         return [], [], {}
-    from place_route_loop import metrics_from_summary
-    m = metrics_from_summary(summary, txt)
+    failed = list(summary.get('failed_single', []))
+    failed += [d['net_name'] if isinstance(d, dict) else d
+               for d in summary.get('failed_multipoint', [])]
+    deficit = (summary.get('multipoint_pads_total', 0)
+               - summary.get('multipoint_pads_connected', 0))
+    jb = summary.get('blockers')
+    if jb is not None:
+        blockers = {b['net'] for e in jb for b in e.get('blocked_by', [])}
+    else:
+        blockers = set(re.findall(r'^\s+\d+\.\s+(\S+?):\s+\d+\s+\(', txt, re.M))
+    m = {'failures': (len(summary.get('failed_single', []))
+                      + len(summary.get('open_single', [])) + deficit),
+         'failed_nets': failed, 'blockers': sorted(blockers),
+         'iterations': summary.get('total_iterations', 0),
+         'vias': summary.get('total_vias', 0)}
     return m['failed_nets'], m['blockers'], m
 
 
@@ -2202,9 +2313,13 @@ def main(argv=None):
     # lying -- a flag that accepts a value and changes nothing reads as a knob
     # somebody already thought about. Making `none` real means teaching the
     # render path to draw without a state, which is a different change.
+    # #1300: a part that draws no courtyard is drawn, and measured, on the
+    # ESTIMATED courtyard place_simple seats it on -- the model the placer
+    # acted on, as everything else here is (dashed: no library drew it).
     model = PlacementModel(pcb, args.board, exact=True,
                            quench_kwargs={'clearance': args.clearance,
-                                          'ignore_net_ids': ignore_ids})
+                                          'ignore_net_ids': ignore_ids,
+                                          'estimate_courtyards': True})
 
     # #897: authored overlap waivers, BEFORE the first legality_findings call
     # (which is memoised, and which draw_legality makes while rendering the
@@ -2217,13 +2332,14 @@ def main(argv=None):
             from placement.legality import format_waiver_warnings
             _it = load_intent(args.intent)
             model.intent_waivers = _it.waiver_pairs()
+            model.courtyard_waivers = _it.fixed_pose_courtyard_waivers()
             # #946 item 5 / #1017. The intent is a fully GEOMETRIC document --
             # blocks[].zone, keepouts[].rect/circle,
             # edge_connectors[].along_edge_band -- and this reader used it for
             # exactly ONE thing: overlap_waivers. The plan existed only as JSON
-            # and as pass/fail counts out of check_floorplan, so a still (and
-            # the film built from these panels) showed parts with no indication
-            # of where they were supposed to go. `render_plan` draws it,
+            # and as pass/fail counts out of check_floorplan, so a still
+            # showed parts with no indication of where they were supposed to
+            # go. `render_plan` draws it,
             # through the same `frame(overlays=...)` seam everything else here
             # uses, so it costs no frame geometry.
             model.intent_plan = _it
@@ -2277,7 +2393,8 @@ def main(argv=None):
         _pair_floors = {n: d['value'] for n, d in model.floor_knobs.items()}
         before_model = PlacementModel(
             _bpcb, args.before, exact=True,
-            quench_kwargs={'ignore_net_ids': _bignore, **_pair_floors})
+            quench_kwargs={'ignore_net_ids': _bignore, **_pair_floors,
+                           'estimate_courtyards': True})
     failed, blockers, route_metrics = _load_summary(args.summary_json)
     prominent = {m['reference'] for m in moves} | \
         model.refs_of_nets(model.net_ids_for(failed))
@@ -2294,8 +2411,20 @@ def main(argv=None):
     opts = {'borders': args.borders, 'labels': args.labels,
             'ratsnest': args.ratsnest, 'pads': args.pads,
             'ghosts': args.ghosts, 'arrows': args.arrows,
-            'legality': args.legality,
+            'legality': args.legality, 'legend': args.legend,
             'delta_first': args.delta_first, 'ratsnest_all': args.ratsnest_all}
+    if args.groups:
+        from placement.grouping import GroupsError
+        try:
+            _colour_of, _rows, _missing = group_colours(args.groups,
+                                                       set(model.parts()))
+        except GroupsError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        if _missing and not args.quiet:
+            print(f"  --groups: {len(_missing)} ref(s) not drawn on this board: "
+                  f"{' '.join(sorted(_missing))}")
+        opts['groups'] = {'colour_of': _colour_of, 'rows': _rows}
 
     view = None
     tag = os.path.splitext(os.path.basename(args.board))[0]
@@ -2641,6 +2770,9 @@ def main(argv=None):
                 # castellated module) or is a round pad's bbox corner.
                 'pad_copper_gating': fnd['oob_refs_pad_copper_gating'],
                 'courtyard': fnd['oob_refs_courtyard'],
+                # #1300: [ref, basis] of the parts whose
+                # courtyard above is an ESTIMATE (they draw none)
+                'courtyard_estimated': fnd.get('estimated_courtyards', []),
                 # #962: footprint graphic copper past the outline
                 'graphic_copper': fnd.get('oob_refs_graphic_copper', []),
                 'graphic_copper_unmeasured': fnd.get('graphic_copper_unmeasured', []),

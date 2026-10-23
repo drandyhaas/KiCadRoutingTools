@@ -14,8 +14,8 @@ Use this instead of ``cp`` whenever you rename/duplicate a board mid-chain:
     python3 copy_board.py src.kicad_pcb dst.kicad_pcb
 
 It copies ``.kicad_pcb`` and every sibling in ``SIBLING_EXTS``
-(``.kicad_pro``, ``.kicad_prl``, ``.kicad_dru``, ``.design-brief.json``)
-``.kicad_prl``), so the DRC floor travels with the board. It also self-records into
+(``.kicad_pro``, ``.kicad_prl``, ``.kicad_dru``, ``.design-brief.json``),
+so the DRC floor travels with the board. It also self-records into
 the stress redo manifest (``REDO_MANIFEST``) like the routing tools, so a replayed
 manifest reproduces the full copy (not just the board) -- no more floor drop.
 """

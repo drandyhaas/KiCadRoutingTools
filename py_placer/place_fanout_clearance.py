@@ -19,7 +19,7 @@ first, since copper this pass draws can also break a cap that arrived clean.
 They are in the unresolved list too; this line names the cause, which is us.
 
 Usage:
-  python place_fanout_clearance.py fanned.kicad_pcb [output.kicad_pcb] [options]
+  python3 py_placer/place_fanout_clearance.py fanned.kicad_pcb [output.kicad_pcb] [options]
 
 Run it ONCE after ALL fanouts, not after each: the pass is board-global (it
 reads every via and every BGA footprint), so one late run sees every constraint
@@ -40,8 +40,7 @@ import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 
 import math
 import os
-import sys  # declare_lever() below reads sys.argv -- without this the module
-             # raised NameError on EVERY invocation, --help included (run 20)
+import sys
 
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
@@ -58,10 +57,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python place_fanout_clearance.py fanned.kicad_pcb
-  python place_fanout_clearance.py fanned.kicad_pcb cleared.kicad_pcb \\
+  python3 py_placer/place_fanout_clearance.py fanned.kicad_pcb
+  python3 py_placer/place_fanout_clearance.py fanned.kicad_pcb cleared.kicad_pcb \\
       --clearance 0.1 --max-displacement 2
-  python place_fanout_clearance.py fanned.kicad_pcb cleared.kicad_pcb \\
+  python3 py_placer/place_fanout_clearance.py fanned.kicad_pcb cleared.kicad_pcb \\
       --clearance 0.1 --intent floorplan.json
 """
     )
@@ -77,7 +76,10 @@ Examples:
                              "class from the sibling .kicad_pro, else "
                              f"{defaults.CLEARANCE}) and the net CLASSES are "
                              "preserved. The PRESENCE of the flag is the clamp "
-                             "switch, exactly as in route.py. Note OMITTED "
+                             "switch: this CLI's own ceiling contract "
+                             "(#768/#769), the one route.py spells "
+                             "--clearance-ceiling (route.py's --clearance sets "
+                             "the Default class, #530). Note OMITTED "
                              "preserves the clearance family specifically, not "
                              "the whole project: the size minima, the "
                              "severities and the fab-floor provenance are "
@@ -88,8 +90,8 @@ Examples:
                         help="Hard clearance from board edge in mm (default: the "
                              "board's own min_copper_edge_clearance when it asks "
                              "for MORE than 0.55, else 0.55). #733: resolved by "
-                             "the shared engine, so the GUI plugin and "
-                             "animate_fanout_clearance.py get the same answer.")
+                             "the shared engine, so the GUI plugin gets the "
+                             "same answer.")
     parser.add_argument("--capture-radius", type=float, default=2.0,
                         help="Max distance over which a same-net ball attracts "
                              "a cap pad in mm (default: 2.0)")
@@ -386,11 +388,6 @@ Examples:
 
 
 if __name__ == "__main__":
-    # In LEVER_REGISTRY, so it must DECLARE -- an entry that writes
-    # poses without declaring makes an armed regime refuse the engine
-    # itself, which is the failure the registry exists to prevent.
-    from placement.provenance import declare_lever
-    with declare_lever('place_fanout_clearance.py', sys.argv):
-        from console_encoding import enable_utf8_console
-        enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
-        sys.exit(main())
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
+    sys.exit(main())

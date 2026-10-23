@@ -79,7 +79,8 @@ def main():
               local_x=0, local_y=0, size_x=0.5, size_y=0.5, shape='circle',
               layers=['F.Cu'], net_id=1, net_name='P')
     segs = [_seg(0, 0, 2, 0, layer='F.Cu')]
-    blind = Via(x=0, y=0, size=0.4, drill=0.2, layers=['F.Cu', 'In1.Cu'], net_id=1)
+    blind = Via(x=0, y=0, size=0.4, drill=0.2, layers=['F.Cu', 'In1.Cu'], net_id=1,
+                via_type='blind')   # untyped would be a through via to KiCad
     pcb = _pcb(segs, vias=[blind], pads={1: [pad]})
     stub = get_stub_info(pcb, 1, 2.0, 0.0, 'F.Cu')
     check("blind via not credited as pad via",

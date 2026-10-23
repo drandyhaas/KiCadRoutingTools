@@ -22,6 +22,11 @@ route_planes.py on the same files:
           would go. A through via must clear it, but the GUI checked only the
           plane step's outer + pour layers (the bitaxe fix, 5c4a9f8d, reached
           the CLI only).
+  file    the class arm's board plus a Net Clearances File naming HV at 0.3
+          mm (route_planes.py --net-clearances, #1272): the file REPLACES the
+          class map, used as given, so a return via may sit nearer HV than its
+          0.8 class -- but not inside 0.3. Negative control: the tab's
+          explicit_net_clearances made to return None, i.e. the file unread.
 
 In every arm the GUI and CLI must place the SAME vias, and the GUI's GND-via
 config is read back: all copper layers, an edge clearance at or above the fab
@@ -62,6 +67,7 @@ KICAD_PYTHONS = [
 ]
 
 BASE, HV, VIA, DRILL = 0.2, 0.8, 0.6, 0.3
+FILE_HV = 0.3                              # the file arm's HV clearance
 HV_PAD = (11.8, 10.0, 0.6)                 # x, y, square size
 IN1 = ((10.4, 10.2), (11.4, 10.2), 0.2)    # start, end, width
 LAYER_IDS = {'F.Cu': 0, 'In1.Cu': 1, 'In2.Cu': 2, 'B.Cu': 31}
@@ -157,10 +163,15 @@ ARMS = (
     dict(name='layers', copper=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
          items=[SIG_VIA, IN1_TRACK], hv_class=False, dru=False,
          gap=_gap_to_in1_track, need=BASE, what='the In1.Cu track'),
+    dict(name='file', copper=['F.Cu', 'B.Cu'], items=[SIG_VIA, HV_FP],
+         hv_class=True, dru=False, ncl={'HV': FILE_HV},
+         gap=_gap_to_hv_pad, need=FILE_HV, what='the HV pad'),
 )
 
 
 def _stage(d, arm):
+    """The arm's board (+ project, rules, Net Clearances File) in `d`:
+    (board path, the file's path or None)."""
     path = os.path.join(d, 'b.kicad_pcb')
     with open(path, 'w', encoding='utf-8') as f:
         f.write(_board(arm['copper'], arm['items']))
@@ -169,7 +180,12 @@ def _stage(d, arm):
     if arm['dru']:
         with open(os.path.join(d, 'b.kicad_dru'), 'w', encoding='utf-8') as f:
             f.write(DRU_RULE)
-    return path
+    ncl = None
+    if arm.get('ncl'):
+        ncl = os.path.join(d, 'ncl.json')
+        with open(ncl, 'w', encoding='utf-8') as f:
+            json.dump(arm['ncl'], f)
+    return path, ncl
 
 
 # ------------------------------------------------------------------ the fronts
@@ -190,8 +206,9 @@ class _Patched:
         return False
 
 
-def _gui(board_path, off=None):
-    """The Planes tab's GND vias ({(x, y): via}) and the config it used."""
+def _gui(board_path, off=None, ncl=None):
+    """The Planes tab's GND vias ({(x, y): via}) and the config it used, with
+    the Net Clearances File `ncl` (None = the field empty)."""
     import pcbnew
     import add_gnd_vias
     from kicad_parser import build_pcb_data_from_board
@@ -212,7 +229,8 @@ def _gui(board_path, off=None):
     config = {'assignments': [(['GND'], ['B.Cu'])],
               'via_size': VIA, 'via_drill': DRILL, 'clearance': BASE,
               'track_width': 0.2, 'grid_step': 0.1, 'add_gnd_vias': True,
-              'gnd_via_distance': 3.0, 'gnd_via_net': 'GND'}
+              'gnd_via_distance': 3.0, 'gnd_via_net': 'GND',
+              'net_clearances_path': ncl or ''}
     try:
         with _Patched(add_gnd_vias, 'add_gnd_vias_to_existing_board', spy):
             if off is None:
@@ -228,8 +246,9 @@ def _gui(board_path, off=None):
     return vias, seen.get('config')
 
 
-def _cli(d, board_path):
-    """route_planes.py's GND vias on the same files ({(x, y): via}), or None."""
+def _cli(d, board_path, ncl=None):
+    """route_planes.py's GND vias on the same files ({(x, y): via}), or None;
+    `ncl` is its --net-clearances file (None = omitted)."""
     from kicad_parser import parse_kicad_pcb
     out = os.path.join(d, 'out_cli.kicad_pcb')
     r = subprocess.run(
@@ -237,7 +256,8 @@ def _cli(d, board_path):
          board_path, out, '--nets', 'GND', '--plane-layers', 'B.Cu',
          '--clearance', str(BASE), '--via-size', str(VIA), '--via-drill', str(DRILL),
          '--track-width', '0.2', '--grid-step', '0.1',
-         '--add-gnd-vias', '--gnd-via-distance', '3.0'],
+         '--add-gnd-vias', '--gnd-via-distance', '3.0',
+         *(['--net-clearances', ncl] if ncl else [])],
         capture_output=True, text=True, encoding='utf-8', errors='replace', cwd=REPO)
     if r.returncode != 0 or not os.path.exists(out):
         print(r.stdout[-2000:] + r.stderr[-2000:])
@@ -261,6 +281,7 @@ def main():
     import kicad_dru
     import obstacle_map
     from fix_kicad_drc_settings import fab_edge_floor
+    from kicad_routing_plugin import swig_gui
 
     app = wx.App(False)          # noqa: F841 - must outlive the dialogs
     wx.MessageBox = lambda *a, **k: wx.OK
@@ -276,14 +297,18 @@ def main():
                                   map_without_classes),
         'dru': lambda: _Patched(kicad_dru, 'install_layer_clearances',
                                 lambda *a, **k: None),
+        # The tab reads `from .swig_gui import explicit_net_clearances` at
+        # run time, so the module attribute is the one to swap.
+        'file': lambda: _Patched(swig_gui, 'explicit_net_clearances',
+                                 lambda *a, **k: None),
     }
     for arm in ARMS:
         name, need, gap, what = arm['name'], arm['need'], arm['gap'], arm['what']
         print(f"--- {name}")
         d = tempfile.mkdtemp(prefix=f'gndgui_{name}_')
         try:
-            board = _stage(d, arm)
-            gui, cfg = _gui(board)
+            board, ncl = _stage(d, arm)
+            gui, cfg = _gui(board, ncl=ncl)
             for p, v in sorted(gui.items()):
                 print(f"    GUI GND via at ({p[0]:.2f},{p[1]:.2f}): "
                       f"{gap(v):.3f} mm to {what}")
@@ -291,6 +316,11 @@ def main():
             bad = {p: round(gap(v), 3) for p, v in gui.items() if gap(v) < need - 1e-6}
             check(f"[{name}] every GUI return via clears {what} by {need} mm",
                   not bad, f"{bad}")
+            if ncl:
+                check(f"[{name}] the file replaces the HV class: a GUI return via "
+                      f"sits nearer {what} than its {HV} mm class",
+                      any(gap(v) < HV - 1e-6 for v in gui.values()),
+                      f"{sorted((p, round(gap(v), 3)) for p, v in gui.items())}")
 
             check(f"[{name}] the GND-via config checks every copper layer",
                   cfg is not None and list(cfg.layers) == arm['copper'],
@@ -305,13 +335,21 @@ def main():
                       abs(lc.get('F.Cu', 0) - HV) < 1e-9, f"{lc}")
 
             if name in controls:
-                ctl, _ = _gui(board, controls[name])
-                check(f"[{name}] negative control: switched off, a via lands "
-                      f"inside {need} mm of {what}",
-                      any(gap(v) < need - 1e-6 for v in ctl.values()),
-                      f"{sorted((p, round(gap(v), 3)) for p, v in ctl.items())}")
+                ctl, _ = _gui(board, controls[name], ncl=ncl)
+                ctl_gaps = sorted((p, round(gap(v), 3)) for p, v in ctl.items())
+                if ncl:
+                    check(f"[{name}] negative control: the file unread, every "
+                          f"via keeps the HV class's {HV} mm",
+                          bool(ctl) and all(gap(v) >= HV - 1e-6
+                                            for v in ctl.values()),
+                          f"{ctl_gaps}")
+                else:
+                    check(f"[{name}] negative control: switched off, a via lands "
+                          f"inside {need} mm of {what}",
+                          any(gap(v) < need - 1e-6 for v in ctl.values()),
+                          f"{ctl_gaps}")
 
-            cli = _cli(d, board)
+            cli = _cli(d, board, ncl)
             check(f"[{name}] route_planes.py produced a board", cli is not None)
             if cli is not None:
                 bad_cli = {p: round(gap(v), 3) for p, v in cli.items()
@@ -331,7 +369,8 @@ def main():
             print(f"  - {f}")
         return 1
     print("PASS: the Planes tab's GND return vias keep class, .kicad_dru and "
-          "every-layer clearance, and match route_planes.py")
+          "every-layer clearance, take a Net Clearances File as given, and "
+          "match route_planes.py")
     return 0
 
 

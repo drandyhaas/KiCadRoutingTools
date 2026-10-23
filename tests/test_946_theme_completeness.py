@@ -22,17 +22,14 @@ allowed.
 
 The table is not decoration: writing it caught **four real colour changes** the
 byte-identity harness could not see, because that harness renders
-`route_render` and never renders the fanout animation, `make_film`'s cards or
-`evolve_movie`. Four of `animate_fanout_clearance`'s colours had been folded
-onto `render_placement`'s near-identical ones -- 4 to 13 apart -- and would have
-shipped silently, since `tests/test_431_animator_port.py` asserts two renders
-match EACH OTHER, not that they match what they used to be.
+`route_render` and never renders `evolve_movie` or the (since removed) fanout
+animation, whose colours had been folded onto `render_placement`'s
+near-identical ones -- 4 to 13 apart -- and would have shipped silently.
 
-**DETERMINISTIC.** `tests/test_431_render_placement.py:175-195` requires
-byte-identical PNGs across two `PYTHONHASHSEED` values. A palette built from set
-iteration order flaps that test intermittently -- the worst possible failure
-mode for a colour change -- so this guards it at the data level, ~200x faster,
-and names the cause when it fires.
+**DETERMINISTIC.** Renders must be byte-identical across `PYTHONHASHSEED`
+values (`tests/test_431_render_placement.py` asserts it on the PNGs). A palette built from set iteration order would break
+that intermittently -- the worst possible failure mode for a colour change --
+so this guards it at the data level and names the cause when it fires.
 
 **PIL-FREE.** `py_tools/render_placement.py` imports `render_theme` at module
 scope and must keep importing with `sys.modules['PIL'] = None`.
@@ -289,61 +286,17 @@ def test_layer_palette_matches_route_renders_assignment():
     print('  PASS: layer assignment identical on 3 stackups, F.Cu/B.Cu pinned')
 
 
-def test_the_film_chrome_reads_the_active_theme():
-    """#946/C4: the last DARK literals in the film path are gone.
-
-    `make_film._card_frame` and `_badge` and the run clock
-    (`cmd_timing.add_clock_band`) each drew in DARK whatever `--theme` said,
-    so a light film carried dark cards and a dark clock band. (The iso panel
-    this also checked was retired with every film layout but stage3d.) Asserted by PIXEL on each, under LIGHT --
-    and by source for `make_film`, whose module must not bind DARK at all."""
-    _mark = len(_FAIL)
-    try:
-        from PIL import Image
-    except ImportError:
-        print('  SKIP: needs Pillow for the pixel half')
-        return
-    import cmd_timing
-    import make_film
-    L, D = RT.theme('light'), RT.theme('dark')
-    card = make_film._card_frame((200, 120), None, 'x', theme='light')
-    if card.getpixel((5, 5)) != L.rgb('chrome_panel'):
-        fail('a light card is %r, not LIGHT chrome_panel %r'
-             % (card.getpixel((5, 5)), L.rgb('chrome_panel')))
-    fr = Image.new('RGB', (80, 60), (0, 0, 0))
-    make_film._badge(fr, 'TRIED', theme='light')
-    if fr.getpixel((0, 0)) != L.rgb('status_tried'):
-        fail('a light badge is %r, not LIGHT status_tried %r'
-             % (fr.getpixel((0, 0)), L.rgb('status_tried')))
-    band = cmd_timing.add_clock_band(Image.new('RGB', (120, 40)),
-                                     ['t 0:01'], 30, theme='light')
-    if band.getpixel((119, 69)) != L.rgb('chrome_band'):
-        fail('a light clock band is %r, not LIGHT chrome_band %r'
-             % (band.getpixel((119, 69)), L.rgb('chrome_band')))
-    # the dark default is unchanged
-    if make_film._card_frame((50, 40), None, '').getpixel((2, 2)) \
-            != D.rgb('chrome_panel') and RT.default_theme().name == 'dark':
-        fail('the default card is no longer DARK chrome_panel')
-    src = open(make_film.__file__, encoding='utf-8').read()
-    if 'DARK as _TH' in src or 'import DARK' in src:
-        fail('make_film still binds DARK')
-    if len(_FAIL) == _mark:
-        print('  PASS: cards, badges and clock band draw in the '
-              'active theme')
-
-
 def test_the_theme_flag_is_validated_but_not_case_sensitive():
     """`--theme` refuses a name that is no theme (the #1036 review's
     `choices`), but takes `Light` / `DARK` as the theme they name -- which
     it always did before choices, since `render_theme.theme` folds case.
-    Behaviour on route_render (the fastest of the four CLIs), and the same
+    Behaviour on route_render (the faster of the two CLIs), and the same
     `type=str.lower` asserted on every front end's `--theme` argument."""
     _mark = len(_FAIL)
     import re
     import tempfile
     from run_utils import check
-    for rel in ('py_router/make_movie.py', 'py_tools/make_film.py',
-                'py_router/route_render.py', 'py_tools/render_placement.py'):
+    for rel in ('py_router/route_render.py', 'py_tools/render_placement.py'):
         src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
         args = re.findall(r"add_argument\('--theme',[^\n]*", src)
         if len(args) != 1:
@@ -370,12 +323,11 @@ def test_the_theme_flag_is_validated_but_not_case_sensitive():
             fail(str(exc)[:400])
     if len(_FAIL) == _mark:
         print('  PASS: --theme LIGHT renders, --theme Chartreuse refuses; '
-              'all four CLIs fold case and validate')
+              'both CLIs fold case and validate')
 
 
 TESTS = (
     test_the_theme_flag_is_validated_but_not_case_sensitive,
-    test_the_film_chrome_reads_the_active_theme,
     test_dark_is_value_preserving,
     test_every_theme_is_complete_in_both_directions,
     test_the_refusals_are_armed,

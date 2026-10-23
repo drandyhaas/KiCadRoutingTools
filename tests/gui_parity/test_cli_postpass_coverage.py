@@ -57,7 +57,10 @@ CLI_MAINS = ["py_router/route.py", "py_router/route_diff.py",
              # none today by construction -- the sibling carry and the legality
              # grade live in `placement/pose_ops.py`, which both fronts call --
              # and scanning it is what keeps that true.
-             "py_placer/place_pose.py"]
+             "py_placer/place_pose.py",
+             # The placement CLI writes boards too; the GUI's Place button
+             # runs it through the placement skill.
+             "py_placer/place_simple.py"]
 
 # Known post-engine passes -> GUI counterpart symbol(s). A pass is "covered" if
 # ANY listed symbol appears anywhere under kicad_routing_plugin/. Keep the RHS
@@ -115,6 +118,18 @@ REGISTRY = {
     # they are written with. bga_fanout's and qfn_fanout's mains and the fanout
     # tab's apply all decide with it before their writeback.
     'fanout_fix_kwargs': ['_apply_fanout_results'],
+    # #1319: the same rule for a pour -- no size or copper-to-hole floor for
+    # copper the step did not draw. route_planes' main counts its copper off
+    # the files (drawn_copper); the Planes tab's apply decides with the same
+    # function from the copper it applied.
+    'plane_fix_kwargs': ['_apply_results_to_board_body'],
+    'drawn_copper': ['plane_fix_kwargs'],
+    # #857: the end-of-run `Design rules [...]` line (and, CLI-only, the
+    # --strict-sizes exit 3). route.py's line comes from inside batch_route on
+    # both fronts; route_diff / route_planes / the fanouts print it from their
+    # mains, and their GUI tabs call the same helper after the engine
+    # (differential_gui, planes_gui, fanout_gui), so the log says the same.
+    'finish_design_rules': ['finish_design_rules'],
 }
 # NOTE (deliberately NOT registered): move_copper_graphics_to_silkscreen runs
 # inside the shared plane WRITER (plane_io), not a main() -- so this gate, which
@@ -189,6 +204,11 @@ DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     # step's descent lowered (the writeback's class_clearance_relaxed
                     # record). No board mutation; the GUI writes no project record.
                     'warn_if_class_clearance_relaxed',
+                    # The fanout mains' pre-engine snapshot of the input board's
+                    # copper, which fanout_drc_grazes subtracts to scope its
+                    # audit to the step's own copper. A pure READER, no board
+                    # mutation.
+                    'copper_keys',
                     # #441: pure RESOLVER (max(cli, project edge rule, fab floor) ->
                     # float) feeding the engine's board_edge_clearance; same VALUE-level
                     # parity story as read_project_edge_clearance above -- the GUI
@@ -202,8 +222,9 @@ DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
 # spot) without demanding a GUI counterpart. A board-MUTATING pass must go in
 # REGISTRY (with a real GUI counterpart), never here.
 KNOWN_CLI_ONLY = {
-    'run_drc': 'bga/qfn fanout post-engine DRC graze audit -> JSON_SUMMARY '
-               'drc_grazes (report-only, no board mutation)',
+    'fanout_drc_grazes': 'bga/qfn fanout post-engine DRC graze audit -> '
+                         'JSON_SUMMARY drc_grazes, scoped to the copper the '
+                         'step laid (report-only, no board mutation)',
     # #910. OPT-IN (--write-fill) and CLI-only ON PURPOSE: it writes
     # `filled_polygon` blocks into the DELIVERED FILE, and the GUI has no
     # delivered file -- it applies copper to the user's open board, where
@@ -220,6 +241,31 @@ KNOWN_CLI_ONLY = {
     'grade_plane_completion': 'repair_planes.py: grades the plane nets on the '
                               'written board for JSON_SUMMARY (report-only, '
                               'no board mutation)',
+    # Found reviewing #1282: repair_planes' main replaces its per-attempt
+    # --power-nets `plane tap` ledger rows with the copper it ships. No GUI
+    # front runs repair_planes' main; the route tab's in-run finalize is
+    # graded by route.py's engine-side pass, on both fronts.
+    'replace_track_rows': 'repair_planes.py: --power-nets ledger rows from '
+                          'the copper it ships (report-only, no board '
+                          'mutation)',
+    # #1279, found by the 2026-10-16 parity audit (neither module is in
+    # POSTPASS_MODULES, so discovery cannot see them; listed by hand as
+    # replace_track_rows was). Both only fill JSON_SUMMARY.sense_branches.
+    # The WARNINGs a GUI user needs -- a pour over a branch, a run tapping
+    # one -- are printed by the engines on both fronts.
+    'consume_sense_branches': 'route_planes.py: takes create_plane\'s '
+                              'sense-branch entries (with poured_over) for '
+                              'JSON_SUMMARY (report-only, no board mutation)',
+    'sense_branches_shipped': 'repair_planes.py: judges the declared sense '
+                              'branches on the board it wrote, for '
+                              'JSON_SUMMARY (report-only, no board mutation; '
+                              'no GUI front runs repair_planes\' main)',
+    # #1329, listed by hand like consume_sense_branches. It only fills
+    # JSON_SUMMARY.zone_replacements; the lines a GUI user reads (what each
+    # replaced pour's settings become, and why) are printed by create_plane.
+    'consume_zone_replacements': 'route_planes.py: takes create_plane\'s '
+                                 'replaced-pour records for JSON_SUMMARY '
+                                 '(report-only, no board mutation)',
 }
 
 
@@ -307,6 +353,7 @@ SAME_SYMBOL_TWINS = {
     'persist_impedance_specs',
     'persist_pour_served_pads',
     'fanout_fix_kwargs',
+    'plane_fix_kwargs',
 }
 
 

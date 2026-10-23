@@ -12,7 +12,8 @@ top of main(). It is a no-op unless the REDO_MANIFEST env var points at a
 manifest file (run_board.sh sets it to <run-dir>/redo_commands.sh; set it to
 /dev/null or leave it unset to disable). The manifest format matches what
 redo_stress_test.py expects: a '# cwd=<dir>' line followed by the fully-quoted
-command on the next line.
+command on the next line, led by the env knobs it ran with as `NAME=value`
+assignments (#1302), which bash and redo_stress_test both apply.
 """
 from __future__ import annotations
 
@@ -56,7 +57,8 @@ def _resolve_manifest(manifest: str):
     return manifest
 
 
-def _register_timing(manifest: str, cmd: list, cwd: str) -> None:
+def _register_timing(manifest: str, cmd: list, cwd: str,
+                     env: dict = None) -> None:
     """Append this command's wall-clock to a sibling timings log when the
     process exits (issue #132). Kept in a SEPARATE file from the manifest so the
     manifest stays a clean replayable script; one JSON line per command, in
@@ -68,12 +70,31 @@ def _register_timing(manifest: str, cmd: list, cwd: str) -> None:
     def _on_exit():
         try:
             rec = {"seconds": round(time.time() - start, 3), "cwd": cwd, "argv": cmd}
+            if env:
+                rec["env"] = env    # #1302: the knobs the step ran with
             with open(timings, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec) + "\n")
         except Exception:
             pass
 
     atexit.register(_on_exit)
+
+
+def _replay_knobs() -> dict:
+    """The env knobs this process runs with that a replay must reproduce
+    (#1302); {} when none is set, or when env_knobs cannot be imported."""
+    try:
+        from env_knobs import replay_env_knobs
+    except Exception:
+        return {}
+    return replay_env_knobs()
+
+
+def env_prefix_tokens(knobs: dict) -> list:
+    """`NAME=value` tokens for `knobs`, each shell-quoted on the VALUE only:
+    bash reads `NAME='a b' cmd` as an assignment, but a quoted `'NAME=a b'`
+    as the name of the command to run."""
+    return [f"{k}={shlex.quote(v)}" for k, v in knobs.items()]
 
 
 def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
@@ -86,6 +107,12 @@ def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
     part-way -- by the caller's command timeout, the memory watchdog, or a
     Ctrl-C -- leaves an EMPTY log with buffered stdout, so the one artifact
     that would explain the kill dies with it (usmu_smu, sets-21-27 wave).
+
+    The env knobs the step ran with lead the line as a `NAME=value` prefix
+    (#1302), the shell's own spelling and the one the routing skill tells an
+    agent to type. Without them a replay ran the step at the defaults: gp14
+    ecc83 routed 0 vias / 131.72 mm under KICAD_PLANE_FRAGILITY_COST=0 and
+    its recorded line replayed to 2 vias / 146.10 mm.
     """
     manifest = os.environ.get(manifest_env)
     if not manifest or manifest == os.devnull or manifest == "/dev/null":
@@ -98,7 +125,9 @@ def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
         if not argv:
             return
         cmd = ["python3", "-u", "-X", "utf8"] + argv
-        quoted = " ".join(shlex.quote(a) for a in cmd)
+        knobs = _replay_knobs()
+        quoted = " ".join(env_prefix_tokens(knobs)
+                          + [shlex.quote(a) for a in cmd])
         header = ""
         if not os.path.exists(manifest) or os.path.getsize(manifest) == 0:
             header = ("#!/bin/bash\n"
@@ -108,6 +137,6 @@ def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
         cwd = os.getcwd()
         with open(manifest, "a", encoding="utf-8") as f:
             f.write(f"{header}# cwd={shlex.quote(cwd)}\n{quoted}\n")
-        _register_timing(manifest, cmd, cwd)
+        _register_timing(manifest, cmd, cwd, knobs)
     except Exception:
         pass

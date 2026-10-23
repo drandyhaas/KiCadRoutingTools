@@ -28,7 +28,13 @@ disabled at 0, and an absent key means 0):
      exactly as they are.
 """
 import os
+import subprocess
 import sys
+
+#: The only shell-out is KiCad's python for the GUI half below, when THIS
+#: python has no pcbnew: one interpreter start, seconds. Without the marker
+#: run_all's 'subprocess' proxy would move the #505 clamp out of --fast.
+RUN_ALL_FAST_OK = True
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -104,14 +110,35 @@ check("no non-rule key reached the project's rules",
 # vary by KiCad version, so it is guarded by hasattr -- which means a WRONG
 # attribute name fails SILENTLY and the GUI would never get the clamp. Pin the
 # real name (m_MinConn, confirmed present in BOARD_DESIGN_SETTINGS) and the same
-# three semantics. Skips cleanly under a python without pcbnew; run it with
-# KiCad's interpreter to exercise it.
+# three semantics.
+#
+# Under a python without pcbnew -- run_all's python3 -- this half used to print
+# "[skip]" and the file passed, KiCad installed or not, so it ran nowhere
+# (found reviewing #1272). It now runs this file again under KiCad's python
+# (kicad_exact_fill.find_kicad_python, the shared verified finder), and exits
+# 77 -- a skip, not a pass -- only when no python with pcbnew exists.
 # --------------------------------------------------------------------------
+GUI_SKIPPED = None
 try:
     import pcbnew  # noqa: F401
 except ImportError:
-    print("  [skip] pcbnew not importable -- GUI path not exercised "
-          "(run under KiCad's python to cover it)")
+    from kicad_exact_fill import find_kicad_python  # noqa: E402
+    _kp = find_kicad_python()
+    if _kp is None:
+        GUI_SKIPPED = ("no python with pcbnew was found (KICAD_PYTHON names "
+                       "one)")
+    else:
+        _r = subprocess.run([_kp, '-X', 'utf8', os.path.abspath(__file__)],
+                            capture_output=True, text=True, encoding='utf-8',
+                            errors='replace', timeout=600)
+        for _ln in _r.stdout.splitlines():
+            if 'm_MinConn' in _ln or 'GUI:' in _ln:
+                print('  [KiCad python]' + _ln)
+        _ran = 'pcbnew exposes m_MinConn' in _r.stdout
+        check(f"GUI path run under KiCad's python ({_kp}): exit "
+              f"{_r.returncode}", _r.returncode == 0 and _ran)
+        if _r.returncode != 0 or not _ran:
+            print(_r.stdout[-2000:] + _r.stderr[-2000:])
 else:
     from fix_kicad_drc_settings import apply_targets_to_board  # noqa: E402
     MM = 1e6
@@ -138,4 +165,7 @@ print("-" * 60)
 if fails:
     print(f"{len(fails)} FAILED: " + "; ".join(fails))
     sys.exit(1)
+if GUI_SKIPPED:
+    print(f"SKIP: the GUI (pcbnew) half did not run -- {GUI_SKIPPED}")
+    sys.exit(77)
 print("ALL PASS")

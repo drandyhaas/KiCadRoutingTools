@@ -138,6 +138,7 @@ def to_front_frame(pcb_data: PCBData, ref: str, axis: float = None
     for z in rp.zones or []:
         z.layer = other_layer(z.layer)
         z.polygon = [m(x, y) for (x, y) in z.polygon]
+        z.holes = [[m(x, y) for (x, y) in h] for h in (getattr(z, 'holes', None) or ())]
     for gp in list(rp.guide_paths or []) + list(rp.keepout_zones or []):
         if hasattr(gp, 'layer'):
             gp.layer = other_layer(gp.layer)

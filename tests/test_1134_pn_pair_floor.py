@@ -134,13 +134,16 @@ def test_cap_chain_routes_off_a_ruled_layer():
     """End to end: cap_chain's pairs with an F.Cu rule of 0.3 above their
     class gap, the #215 hybrid on, graded clean (the flat floor shipped 28
     F.Cu P/N violations here). Since #1145 the coupled run is built at the
-    rule; test_1145 grades it with the hybrid off."""
+    rule; test_1145 grades it with the hybrid off. Graded at margin 0 past
+    the writer's 1 nm coordinate rounding (kicad_writer.EDGE_ROUNDING_MM),
+    which a diagonal laid exactly at the rule reads inside it by."""
     import contextlib
     import io
     import shutil
     import route_diff
     from check_drc import run_drc
     from kicad_parser import parse_kicad_pcb
+    from kicad_writer import EDGE_ROUNDING_MM
     with tempfile.TemporaryDirectory() as td:
         dst = os.path.join(td, 'cc.kicad_pcb')
         shutil.copy(os.path.join(ROOT, 'kicad_files', 'cap_chain.kicad_pcb'),
@@ -161,6 +164,7 @@ def test_cap_chain_routes_off_a_ruled_layer():
         viols = run_drc(evidence(out), clearance=0.25, quiet=True,
                         print_summary=False, check_sizes=False,
                         clearance_margin=0.0)
+    viols = [v for v in viols if v.get('overlap_mm', 1.0) > EDGE_ROUNDING_MM]
     assert not viols, [(v['type'], v.get('layer')) for v in viols][:6]
 
 

@@ -27,11 +27,6 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 
-# Over-blocking audit F3 A/B kill-switch: 1 restores the pre-fix cache stamps
-# (obstacle net's CONFIGURED width for narrow existing copper + via->track
-# rings). Temporary -- remove once the actual-width fix is validated corpus-wide.
-_LEGACY_CACHE_WIDTH = os.environ.get('KICAD_OBSCACHE_LEGACY_WIDTH', '') in ('1', 'true', 'on')
-
 try:
     from grid_router import GridObstacleMap
 except ImportError:
@@ -52,6 +47,7 @@ _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed gr
 # whole-map KICAD_OBSTACLE_AUDIT diff can only total. Raw (non-cache) list ops
 # on the working map are accounted separately by get_stats() deltas per site.
 import itertools as _it
+from geometry_utils import via_span_layer_indices
 _UID = _it.count(1)
 _LEDGER_ENV = os.environ.get("KICAD_OBSTACLE_LEDGER") == "1"
 _LEDGER = None
@@ -195,6 +191,7 @@ def ledger_set_working_map(obstacles) -> None:
         _LEDGER["removes"] = {}
         _LEDGER["raw"] = {}
         _LEDGER["events"] = 0
+        _LEDGER["scaffold"] = [0, 0]   # SCAFFOLD WATCH: [calls checked, leaks]
 
 
 def _ledger_cache_op(op: str, obstacles, cache_data) -> None:
@@ -216,6 +213,100 @@ def ledger_raw_delta(obstacles, site_tag: str, d_cells: int, d_vias: int) -> Non
     ent[0] += d_cells
     ent[1] += d_vias
     _LEDGER["events"] += 1
+
+
+# ---------------------------------------------------------------------------
+# SCAFFOLD WATCH. The books above cannot see a route leaving its own search
+# state on a map: they follow the WORKING map alone (`wid`), while Phase 3
+# routes every multipoint net on a per-net clone, and they count only the
+# ref-counted cells. Free vias and allowed cells are plain sets that no cache
+# object carries, and the end-of-run audit samples the working map after
+# restore_obstacles_inplace has emptied both. Measured on a ch32v003_usb route
+# step before route_multipoint_taps took its stamps off: every one of its 20
+# calls left free vias, allowed rects or source/target overrides on the map it
+# was handed (and the stub-switch retry, while it was still handed the first
+# pass's map, started on them), and the audit, the ledger and the content check
+# all printed BALANCED / OK.
+#
+# So, with the ledger armed, route_multipoint_taps checks its own contract
+# (nothing it stamps survives the call) on whatever map it was handed: a copy
+# of the map on entry is compared with the map on return around every
+# terminal and via of the net, where the stamps go, and the ref-counted totals
+# and the override count with get_stats(). Allowed cells are only visible
+# inside a BGA zone, so both sides are probed under one zone laid over those
+# cells (on copies).
+
+
+def ledger_scaffold_begin(obstacles):
+    """Entry snapshot for ledger_scaffold_end, or None when the ledger is off."""
+    if _LEDGER is None:
+        return None
+    try:
+        return obstacles.clone(), obstacles.get_stats()
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def _scaffold_probe_cells(pcb_data, net_id, config, result, reach=5):
+    """Cells within `reach` of every terminal of the net (its pads and the
+    multipoint pad_info cells, which can be stub ends rather than pads) and
+    every via it has or routed: where a terminal escape rect (radius 5) or a
+    free via can land. A free via anywhere else still moves get_stats()[6]."""
+    step = config.grid_step
+    centres = {(int(round(p.global_x / step)), int(round(p.global_y / step)))
+               for p in pcb_data.pads_by_net.get(net_id, [])}
+    centres |= {(int(p[0]), int(p[1]))
+                for p in (result or {}).get('multipoint_pad_info') or ()}
+    vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    vias += list((result or {}).get('new_vias') or ())
+    centres |= {(int(round(v.x / step)), int(round(v.y / step))) for v in vias}
+    return sorted({(gx + dx, gy + dy) for gx, gy in centres
+                   for dx in range(-reach - 1, reach + 2)
+                   for dy in range(-reach - 1, reach + 2)})
+
+
+def ledger_scaffold_end(token, obstacles, pcb_data, net_id, config, result,
+                        what: str = "route_multipoint_taps") -> None:
+    """Compare `obstacles` on return with the entry snapshot; print one
+    SCAFFOLD LEAK line when the call left anything behind (see SCAFFOLD WATCH)."""
+    if token is None or _LEDGER is None:
+        return
+    try:
+        before, st0 = token
+        st1 = obstacles.get_stats()
+        cells = _scaffold_probe_cells(pcb_data, net_id, config, result)
+        nl = obstacles.num_layers
+        fv = sum(1 for gx, gy in cells
+                 if obstacles.is_free_via(gx, gy) != before.is_free_via(gx, gy))
+        za, zb = obstacles.clone(), before.clone()
+        if cells:
+            xs, ys = [c[0] for c in cells], [c[1] for c in cells]
+            for z in (za, zb):
+                z.clear_source_target_cells()
+                z.set_bga_zone(min(xs), min(ys), max(xs), max(ys))
+        opened = 0
+        for gx, gy in cells:
+            if zb.is_via_blocked(gx, gy) and not za.is_via_blocked(gx, gy):
+                opened += 1
+            elif any(zb.is_blocked(gx, gy, li) and not za.is_blocked(gx, gy, li)
+                     for li in range(nl)):
+                opened += 1
+        d = {"blocked_cells": st1[0] - st0[0], "blocked_vias": st1[1] - st0[1],
+             "blocked_vias_rungs": st1[7] - st0[7], "free_vias": st1[6] - st0[6]}
+        leak = fv or opened or st1[5] or any(d.values())
+        book = _LEDGER.setdefault("scaffold", [0, 0])
+        book[0] += 1
+        if leak:
+            book[1] += 1
+            name = getattr((getattr(pcb_data, 'nets', None) or {}).get(net_id),
+                           'name', None) or str(net_id)
+            print(f"[OBSTACLE LEDGER] SCAFFOLD LEAK {what} {name}: "
+                  f"{fv} free-via cell(s) changed, {opened} cell(s) opened "
+                  f"(allowed/unblocked), {st1[5]} source/target override(s) "
+                  f"left, totals " + " ".join(f"{k} {v:+d}" for k, v in d.items())
+                  + f"  @ {_ledger_site(depth=3, frames=2)}")
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[OBSTACLE LEDGER] scaffold check skipped ({e})")
 
 
 def run_obstacle_audit(base_obstacles, working_obstacles,
@@ -463,6 +554,9 @@ def obstacle_ledger_report(final_cache: Dict[int, "NetObstacleData"]) -> None:
             print(f"    -{n} remove {site}")
     if not bad:
         print("  cache-object ledger BALANCED (leak, if any, is in raw ops below)")
+    _sc = _LEDGER.get("scaffold") or [0, 0]
+    print(f"  scaffold watch (route_multipoint_taps, any map): {_sc[0]} call(s) "
+          f"checked, {_sc[1]} left per-route state behind")
     raw = {k: v for k, v in _LEDGER["raw"].items() if v[0] or v[1]}
     if raw:
         print("  raw-op cumulative stats deltas (should cancel per add/remove pair):")
@@ -734,9 +828,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # track_margin already covers. Matches _via_track_expansion_per_layer
         # (obstacle_map), whose docstring calls the wider variant out as
         # double-counting.
-        # KICAD_OBSCACHE_LEGACY_WIDTH=1 restores the pre-fix stamps (A/B only).
-        layer_widths.append(layer_width if _LEGACY_CACHE_WIDTH
-                            else config.route_reserve_width(layer_name))
+        layer_widths.append(config.route_reserve_width(layer_name))
         # #498: a .kicad_dru layer rule REPLACES the net/class value on its layer.
         clr_l = config.layer_clearance(layer_name, obs_clearance)
         # A track-scoped DRU rule RAISES the seg-vs-seg capsule only (#735);
@@ -784,8 +876,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             continue
         layer_w = config.get_net_track_width(net_id, seg.layer)
         seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) else layer_w
-        own_half = (max(layer_w, seg_w) if _LEGACY_CACHE_WIDTH else seg_w) / 2
-        if (seg_w <= layer_w) if _LEGACY_CACHE_WIDTH else (seg_w == layer_w):
+        own_half = seg_w / 2
+        if seg_w == layer_w:
             expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
@@ -840,7 +932,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                                    + config.stack_clearance(obs_clearance)) * coord.inv_step)
         _collect_via_obstacles(via, coord, num_layers, via_track_list,
                                 via_via_radius, diagonal_margin,
-                                blocked_cells_set, blocked_vias_set)
+                                blocked_cells_set, blocked_vias_set,
+                                routing_layers=config.layers)
         # #441: net-INDEPENDENT drill hole-to-hole keepout, stamped into the via
         # map IN ADDITION to the copper via-via disc above (which is copper-only:
         # vs/2 + via_size/2 + clearance). A future ROUTE via must also clear this
@@ -1000,7 +1093,8 @@ def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
                             via_track_expansion_grid, via_via_expansion_grid: int,
                             diagonal_margin: float,
                             blocked_cells: List["np.ndarray"],
-                            blocked_vias: List["np.ndarray"]):
+                            blocked_vias: List["np.ndarray"],
+                            routing_layers=None):
     """Collect via obstacle cells into sets (no obstacle map modification).
 
     Args:
@@ -1025,16 +1119,17 @@ def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
         rows[:, 2] = layer_idx
         blocked_cells.append(rows)
 
+    span = via_span_layer_indices(via, routing_layers, num_layers)
     # Support per-layer expansion for impedance-controlled routing
     if isinstance(via_track_expansion_grid, list):
-        for layer_idx in range(num_layers):
+        for layer_idx in span:
             layer_expansion = via_track_expansion_grid[layer_idx]
             radius = layer_expansion + diagonal_margin + off_cells
             add_layer_cells(circle_offsets(int(math.ceil(radius)), radius ** 2), layer_idx)
     else:
         radius = via_track_expansion_grid + diagonal_margin + off_cells
         offs = circle_offsets(int(math.ceil(radius)), radius ** 2)
-        for layer_idx in range(num_layers):
+        for layer_idx in span:
             add_layer_cells(offs, layer_idx)
 
     via_radius = via_via_expansion_grid + off_cells

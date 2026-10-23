@@ -112,8 +112,8 @@ def _load_recorder():
 # --- the comparator ---------------------------------------------------------
 #
 # DRIFT, MISSING, MALFORMED and the message shapes are
-# `tests/test_placement_ab.py`'s `compare_baseline` (its docstring explains
-# each), reused rather than reinvented. The rest of that vocabulary does not
+# `tests/test_placement_ab.py`'s `compare_baseline` (deleted in ecd673eb; its
+# docstring explained each), reused rather than reinvented. The rest of that vocabulary does not
 # transfer, and the reader is owed which is which rather than left to wonder:
 #
 #   INVERTED  NOT carried over. It compares the direction of an off/on pair,

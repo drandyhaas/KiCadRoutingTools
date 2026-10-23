@@ -15,8 +15,10 @@ Invariants (the follow-up comment's placement acceptance, run through the real C
    on the AMOUNT arm.
 5. `legal_scope` / `legal_unmeasured` are published, and `legal_basis` still
    names `no_worse` (test_892) and graphic copper.
-6. `--snap` from 115.34 never writes a pose whose graphic copper is off the
-   outline.
+6. `--snap` from 115.34 finds the clean pose about 1.3 mm away and writes it,
+   graphic copper on the board: the seat gate holds a footprint's drawn
+   copper to the outline, so the snap's ranked rung no longer spends its
+   tries on poses with U2's tab past the edge (it refused here for a while).
 
 Run:
     python3 tests/test_962_place_pose_graphic.py
@@ -26,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -134,18 +137,20 @@ def main():
               'no_worse' in (s.get('legal_basis') or '')
               and 'graphic' in (s.get('legal_basis') or ''))
 
-        # 6 -- --snap never writes an overrun
+        # 6 -- --snap finds the clean pose nearby and writes it, no overrun
         out = os.path.join(work, 'snap.kicad_pcb')
-        r = run_check([sys.executable, '-X', 'utf8', POSE, src, out, 'set', 'U2', '115.34',
-                       '93.6', '--rot', '90', '--snap'], accept=True, allow=())
+        r = subprocess.run([sys.executable, '-X', 'utf8', POSE, src, out, 'set', 'U2',
+                            '115.34', '93.6', '--rot', '90', '--snap'],
+                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+        assert 'Traceback' not in r.stdout + r.stderr, (r.stdout + r.stderr)[-1200:]
         s = summary(r)
-        if os.path.exists(out):
-            ov = u2_overrun(out)
-            check('6. --snap from 115.34 writes a pose with NO graphic overrun',
-                  ov is not None and ov <= 1e-6 and s.get('legal') is True, f'{ov} {s.get("snapped")}')
-        else:
-            check('6. --snap from 115.34 refused rather than writing an overrun',
-                  s.get('output') is None)
+        ov = u2_overrun(out) if os.path.exists(out) else None
+        snapped = s.get('snapped') or {}
+        check('6. --snap from 115.34 writes a pose with NO graphic overrun',
+              r.returncode == 0 and ov is not None and ov <= 1e-6
+              and s.get('legal') is True and (snapped.get('dist_mm') or 99) <= 2.0,
+              f'exit {r.returncode} overrun {ov} snapped {snapped} '
+              f'refused {s.get("refused")}')
 
         # 7 -- a swap cannot launder an overrun onto a clean part by keeping
         # the totals level

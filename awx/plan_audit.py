@@ -75,6 +75,42 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 import braid as bd  # noqa: E402
 import pairs as _pairs  # noqa: E402
 
+# a shortfall of a quarter of the router's grid step or less is NUDGEABLE: no finding, so no cut and no failure -- the
+# grid snap or a nudge afterwards moves a lane or a via that near its bar off it. Each check counts what it let pass so
+# on its own NUDGE line. (Measured on the zynq LVDS bus's recorded loops: 4% of 1704 findings, and 8 of 98 layer cuts,
+# came from such near-misses)
+NUDGE_FRAC = 0.25
+
+
+def _neck_ends(ctx, c, nm):
+    """the lane's own ends -- its tooth and its berth -- where the TERMINAL NECK holds it: the router narrows a
+    terminal's segments -- the exact stub to the grid and the first leg on it -- where they graze foreign copper
+    (single_ended_routing._neck_terminal_grazes), and the fanout's escape the lane continues is the fanout's track wide
+    (rules.fan_track): within a lane pitch of its own ends a single's copper is held to that track, not the lane's.
+    None for a pair (its end legs are laid by the pair step)"""
+    if nm in (getattr(ctx, 'pairs', {}) or {}) or nm not in getattr(c, 'teeth', {}) or nm not in getattr(c, 'stubs', {}):
+        return np.zeros((0, 2))
+    return np.array([c.teeth[nm], c.stubs[nm]], float)
+
+
+def _neck_cut(ctx):
+    """the half-width the terminal neck takes off a lane: (track - fanout track) / 2, none when the fanout's is not narrower"""
+    import rules as _rules
+    return max(0.0, (ctx.cfg.track_width - _rules.active().fan_track) / 2)
+
+
+def _near_ends(P, E, reach):
+    """per point of P: within `reach` of one of the points E"""
+    if not len(E) or not len(P):
+        return np.zeros(len(P), bool)
+    return np.hypot(P[:, None, 0] - E[None, :, 0], P[:, None, 1] - E[None, :, 1]).min(1) <= reach
+
+
+def _nudge_line(check, n, g):
+    if n:
+        print(f'NUDGE {check}: {n} near-miss(es) within a quarter grid step ({NUDGE_FRAC * g:.4f} mm) of their bar -- '
+              f'nudgeable, not findings')
+
 
 def read_nets(arg):
     """A comma list, or @FILE holding one."""
@@ -160,6 +196,53 @@ def _router_terminals(v, ends, g):
     return out
 
 
+def _with_stair(cfg, segs):
+    """a pair's pieces [(p, q, L, a0, a1)] with its staircase off its line (pairs.stair_dev) added to the allowances:
+    its bar to a single, which is laid against the staircase -- each leg's pieces chained, as _pair_legs lays them"""
+    runs = []
+    for s_ in segs:
+        if runs and np.hypot(*(np.asarray(runs[-1][-1][1], float) - np.asarray(s_[0], float))) < 1e-6:
+            runs[-1].append(s_)
+        else:
+            runs.append([s_])
+    out = []
+    for run in runs:
+        d_ = _pairs.stair_dev(cfg, [tuple(map(float, run[0][0]))] + [tuple(map(float, s_[1])) for s_ in run])
+        out.extend((p, q, L, a0 + d_[i], a1 + d_[i + 1]) for i, (p, q, L, a0, a1) in enumerate(run))
+    return out
+
+
+def _sandwiched(P, pairs, L, reach):
+    """per point of P (a single's samples on L, in order along it): a leg of a pair (pieces [(p, q, L, a0, a1)] per
+    pair, `pairs`) within `reach` of it on EACH side of the single's way there"""
+    left, right = np.zeros(len(P), bool), np.zeros(len(P), bool)
+    if len(P) < 2:
+        return left
+    D = np.gradient(P, axis=0)
+    for segs in pairs:
+        S = [(np.asarray(p, float), np.asarray(q, float)) for p, q, L_, _a0, _a1 in segs if L_ == L]
+        if not S:
+            continue
+        A_, B_ = np.array([s_[0] for s_ in S]), np.array([s_[1] for s_ in S])
+        d_ = B_ - A_
+        t = np.clip(((P[:, None, :] - A_[None]) * d_[None]).sum(2) / np.maximum((d_ * d_).sum(1), 1e-12)[None], 0, 1)
+        Q = A_[None] + t[..., None] * d_[None]
+        dist = np.hypot(*(P[:, None, :] - Q).transpose(2, 0, 1))
+        k = dist.argmin(1)
+        r_ = np.arange(len(P))
+        w = Q[r_, k] - P
+        cr = D[:, 0] * w[:, 1] - D[:, 1] * w[:, 0]
+        near = dist[r_, k] <= reach
+        left |= near & (cr > 1e-12)
+        right |= near & (cr < -1e-12)
+    return left & right
+
+
+def _nearest(P, Q):
+    """per point of P, the index of the nearest point of Q"""
+    return np.array([int(np.argmin(np.hypot(Q[:, 0] - x, Q[:, 1] - y))) for x, y in P], int)
+
+
 def _samples_allow(segs, L, step):
     """points every `step` along the pieces [(p, q, L, a0, a1)] on L, each with its allowance there"""
     P, A = [], []
@@ -223,8 +306,9 @@ def check_pitch(ctx, corridors, png=None):
     # pieces that is off the grid (it lands up to half a step off its plan; one ON the grid lands on itself)
     bar = lambda off_a, off_b: TW + CL + g / 2 * (off_a + off_b)
     block = bar(1, 1)
+    cut = _neck_cut(ctx)
     bx0, by0, bx1, by1 = ctx.pcb.board_info.board_bounds
-    hits, V_all = [], {}
+    hits, V_all, n_near = [], {}, 0
     for c in corridors:
         s_h = getattr(c, 'handoff_s', None)
         V = {nm: [(np.array(p, float), np.array(q, float), L) for (p, q, L) in c.virtual_of([nm])]
@@ -249,19 +333,49 @@ def check_pitch(ctx, corridors, png=None):
                   else [(p, q, L, *((0.0, 0.0) if (_on_grid(p, q, g) or (tuple(map(float, p)), tuple(map(float, q)), L)
                                                    in exact[nm]) else (g / 2, g / 2))) for (p, q, L) in v])
              for nm, v in V.items()}
+        # (a pair beside a SINGLE with a pair either side -- which the snap cannot move off either -- its staircase off
+        # its line as well: not beside a single it can move, nor beside another pair, laid against its steps)
+        RS = {nm: _with_stair(ctx.cfg, R[nm]) for nm in V if nm in prs_}
+        reach_sw = TW + CL + 2 * g + (_pairs.turn_straight_steps(ctx.cfg) + 1) * g
+        SW = {}
+
+        def sw_of(nm_, L_):
+            """a single's samples on L_ and whether each has a pair's leg within reach on either side"""
+            if (nm_, L_) not in SW:
+                P_ = _samples_allow(R[nm_], L_, g)[0]
+                SW[(nm_, L_)] = (P_, _sandwiched(P_, [R[p_] for p_ in mem if p_ in prs_], L_, reach_sw))
+            return SW[(nm_, L_)]
+        NE = {nm: _neck_ends(ctx, c, nm) for nm in mem}
         for i, nm in enumerate(mem):
             for L in ctx.cfg.layers:
                 Pa, Aa = _samples_allow(R[nm], L, g)
                 if not len(Pa):
                     continue
+                As = _samples_allow(RS[nm], L, g)[1] if nm in RS else Aa
+                neck_a = cut * _near_ends(Pa, NE[nm], bd.LANE_MIN)
                 for om in mem[i + 1:]:
                     _m, d, ab = _dist_allow(Pa, R[om], L)
-                    need = TW + CL + Aa + ab
+                    Ax = Aa
+                    if nm in prs_ and om not in prs_:
+                        Po, So = sw_of(om, L)
+                        if len(Po) and So.any():
+                            Ax = np.where(So[_nearest(Pa, Po)], As, Aa)
+                    elif om in RS and nm not in prs_:
+                        fl = sw_of(nm, L)[1]
+                        if fl.any():
+                            _m2, d2, ab2 = _dist_allow(Pa, RS[om], L)
+                            d, ab = np.where(fl, d2, d), np.where(fl, ab2, ab)
+                    # (each lane at its own terminal held to the fanout's track: the other's binding point within a
+                    # lane pitch of its ends when this point is within that and the distance of them)
+                    neck_b = cut * _near_ends(Pa, NE[om], bd.LANE_MIN + d) if len(NE[om]) else 0.0
+                    need = TW + CL + Ax + ab - neck_a - neck_b
                     # ...short by half a step at most without failing, where the pieces are off the grid: the bar
                     # already charges each such piece half a step as if it landed toward the other, the snap lays them
                     # on the grid and its audit holds the laid pieces to the bar exactly (K35's smooth plan: four pairs
                     # short by a few microns, a whole round spent on them)
-                    bad = d < need - np.minimum(g / 2, Aa + ab) - 1e-6
+                    bad = d < need - np.minimum(g / 2, Ax + ab) - NUDGE_FRAC * g
+                    if not bad.any() and (d < need - np.minimum(g / 2, Ax + ab) - 1e-6).any():
+                        n_near += 1
                     if bad.any():
                         k = int(np.argmin(d - need))
                         d_, need_, (x, y), ln_ = float(d[k]), float(need[k]), Pa[k], float(bad.sum()) * g
@@ -273,6 +387,7 @@ def check_pitch(ctx, corridors, png=None):
     for (d, a, b, L, xy, S, where, ln, ci, need) in hits:
         print(f'PITCH {a:7s} {b:7s} {lay_tag(L)} min {d:.3f}  over {ln:4.2f} mm  at ({xy[0]:.2f},{xy[1]:.2f})  '
               f'corridor {ci} s {S:6.2f} {where}  (bar {need:.4f})')
+    _nudge_line('pitch', n_near, g)
     print(f'PITCH {len(hits)} pair(s) short of their bar on one layer (track + clearance {TW + CL:.3f}, + half a '
           f'grid step per piece off the grid, less half a step where any is): '
           f'{dict(collections.Counter(h[6] for h in hits))}')
@@ -480,6 +595,15 @@ def check_dives(ctx, corridors, show_all=False):
     REACH_ = (max([math.hypot(pd.size_x, pd.size_y) / 2 for _r, pd in pads] + [pd.drill / 2 for _r, pd in holes] + [0.0])
               + max(VR + CL, c2c) + TW + 2 * g)
     fail = collections.Counter()
+    nudge, n_near = NUDGE_FRAC * g, [0]
+
+    def short(x, need_x):
+        """`x` short of its bar by more than a nudge: a finding -- by less, a near-miss, counted (NUDGE_FRAC)"""
+        if x < need_x - nudge:
+            return True
+        if x < need_x - 1e-6:
+            n_near[0] += 1
+        return False
     n_sites = 0
     for c in corridors:
         M = list(c.members)
@@ -561,7 +685,7 @@ def check_dives(ctx, corridors, show_all=False):
                                  cfg.via_drill / 2 + pd.drill / 2 + h2h + g2 * vo, f'hole {ref}.{pd.pad_number}')
                                 for ref, pd in holes if near(pd.global_x, pd.global_y)],
                              key=lambda r: r[0] - r[1], default=(9, 0, ''))
-                    if st[0] < st[1] - 1e-6:
+                    if short(st[0], st[1]):
                         hits.append(f'static {st[0]:+.3f}/{st[1]:.3f} ({st[2]})')
                         fail['static'] += 1
                     # a via keeps a track's grid cells out of its RING (pairs.via_ring: the clearance rounded up to
@@ -578,13 +702,13 @@ def check_dives(ctx, corridors, show_all=False):
                              + [(dseg(x, y, p, q), ring_one + voff + g2 * (0 if _on_grid(p, q, g) else 1), om, L)
                                 for om in leg_lines if om != nm for (p, q, L) in leg_lines[om]],
                              key=lambda r: r[0] - r[1], default=(9, 0, '', ''))
-                    if ln[0] < ln[1] - 1e-6:
+                    if short(ln[0], ln[1]):
                         hits.append(f'lane {ln[0]:.3f}/{ln[1]:.3f} ({ln[2]} {lay_tag(ln[3])})')
                         fail['lane'] += 1
                     vv = min(((math.hypot(px - x, py - y), c2c + g2 * (vo + boff(om, px, py)), om) for om in M if om != nm
                               for bs in barrels[om].values() for (px, py) in bs),
                              key=lambda r: r[0] - r[1], default=(9, 0, ''))
-                    if vv[0] < vv[1] - 1e-6:
+                    if short(vv[0], vv[1]):
                         hits.append(f'via {vv[0]:.3f}/{vv[1]:.3f} ({vv[2]})')
                         fail['via'] += 1
                 if nm in pairs and s not in exact_b[nm] and (nm, s) not in xsite:
@@ -605,7 +729,7 @@ def check_dives(ctx, corridors, show_all=False):
                                      for (cx_, cy_) in ((s[0], s[1]), (s[0] + o_[0], s[1] + o_[1]), (s[0] - o_[0], s[1] - o_[1]))
                                      for om in M if om != nm for sv in sites[om]],
                                   key=lambda r: r[0] - r[1], default=(9, 0, ''))
-                        if cl_[0] < cl_[1] - 1e-6:
+                        if short(cl_[0], cl_[1]):
                             hits.append(f'cell {cl_[0]:.3f}/{cl_[1]:.3f} ({cl_[2]})')
                             fail['cell'] += 1
                 if nm in pairs:
@@ -619,7 +743,8 @@ def check_dives(ctx, corridors, show_all=False):
                             need_b = _pairs.crossover_shape(cfg, ub, xsite[(nm, s)])[1]
                             need_a = _pairs.crossover_shape(cfg, ua, xsite[(nm, s)])[2]
                         turn_ = ub[0] * ua[0] + ub[1] * ua[1] < 1 - 1e-6
-                        if turn_ or lb < need_b - 1e-6 or la < need_a - 1e-6:
+                        sb_, sa_ = short(lb, need_b), short(la, need_a)
+                        if turn_ or sb_ or sa_:
                             hits.append(f'straight {lb:.3f}/{need_b:.3f} before, {la:.3f}/{need_a:.3f} after'
                                         + (f', turning {math.degrees(math.acos(max(-1.0, min(1.0, ub[0] * ua[0] + ub[1] * ua[1])))):.0f} deg' if turn_ else ''))
                             fail['straight'] += 1
@@ -638,7 +763,8 @@ def check_dives(ctx, corridors, show_all=False):
                         if (nm, s) in xsite:
                             need0 = _pairs.crossover_room(cfg, ctx.pair_ends[nm][0], ub, 0)
                             need1 = _pairs.crossover_room(cfg, ctx.pair_ends[nm][1], ua, 1)
-                        if a0 < need0 - 1e-6 or a1 < need1 - 1e-6:
+                        s0_, s1_ = short(a0, need0), short(a1, need1)
+                        if s0_ or s1_:
                             hits.append(f'end {a0:.3f}/{need0:.3f} from its tooth, {a1:.3f}/{need1:.3f} from its berth')
                             fail['end'] += 1
                 if hits or show_all:
@@ -659,7 +785,7 @@ def check_dives(ctx, corridors, show_all=False):
                 for k_, e_ in enumerate(ends_):
                     u_ = tuple(map(float, e_['heading']))
                     got, need_ = _straight_len(pcs_, tuple(e_['pose']), u_), PR * step_(u_)
-                    if got < need_ - 1e-6:
+                    if short(got, need_):
                         hits.append(f'pose {got:.3f}/{need_:.3f} straight from its {("tooth", "berth")[k_]} pose')
                         fail['pose'] += 1
                 xo = cross[nm]
@@ -669,15 +795,67 @@ def check_dives(ctx, corridors, show_all=False):
                     lb = _straight_len(pcs_, at_, (-u_[0], -u_[1]))
                     la = _straight_len(pcs_, at_, u_)
                     nb, na = -xo['span'][0] + PR * step_(u_), xo['span'][1] + PR * step_(u_)
-                    if lb < nb - 1e-6 or la < na - 1e-6:
+                    sb_, sa_ = short(lb, nb), short(la, na)
+                    if sb_ or sa_:
                         hits.append(f'crossover {lb:.3f}/{nb:.3f} straight before, {la:.3f}/{na:.3f} after')
                         fail['crossover'] += 1
                 if hits or show_all:
                     print(f'DIVE {nm:7s} poses  ' + ('; '.join(hits) if hits else 'ok'))
+    _nudge_line('dives', n_near[0], g)
     print(f'DIVE {n_sites} planned via sites'
           + (f' (a pair\'s dive = two barrels {off:.3f} either side of its centreline)' if pairs else '')
           + f'; failing: {dict(fail)}')
     return fail
+
+
+def keepout_areas(pcb, layers):
+    """the board's KEEP-OUT rule areas with tracks not allowed, on the routing layers `layers`: [(polygon, holes, the
+    layers it keeps tracks off, its bbox)] -- resolved as the router's obstacle map resolves them (obstacle_map.
+    add_rule_area_keepout_obstacles: '*.Cu' every layer, 'F&B.Cu' the outer two, none listed every layer)"""
+    out = []
+    for ko in getattr(pcb.board_info, 'keepouts', None) or []:
+        poly = ko.get('polygon') or []
+        if ko.get('tracks_allowed', True) or len(poly) < 3:
+            continue
+        kl = ko.get('layers') or set()
+        lays = set()
+        for ln in kl:
+            if ln in layers:
+                lays.add(ln)
+            elif ln == '*.Cu':
+                lays.update(layers)
+            elif ln in ('F&B.Cu', 'F&B'):
+                lays.update(L for L in ('F.Cu', 'B.Cu') if L in layers)
+        if not kl:
+            lays = set(layers)
+        if lays:
+            P_ = np.array(poly, float)
+            out.append((P_, [np.array(h, float) for h in ko.get('holes') or [] if len(h) >= 3], lays,
+                        (float(P_[:, 0].min()), float(P_[:, 1].min()), float(P_[:, 0].max()), float(P_[:, 1].max()))))
+    return out
+
+
+def _inside(P, poly):
+    """even-odd: the points P inside the closed polygon poly"""
+    ins = np.zeros(len(P), bool)
+    x, y = P[:, 0], P[:, 1]
+    for (ax, ay), (bx, by) in zip(poly, np.roll(poly, -1, axis=0)):
+        if ay == by:
+            continue
+        cross = ((ay > y) != (by > y)) & (x < (bx - ax) * (y - ay) / (by - ay) + ax)
+        ins ^= cross
+    return ins
+
+
+def keepout_dist(P, poly, holes=()):
+    """each point's signed distance to a keep-out area (its polygon less its holes): negative inside"""
+    rings = [poly] + list(holes)
+    segs = [(np.array(a), np.array(b), 0) for r in rings for a, b in zip(r, np.roll(r, -1, axis=0))]
+    d = _dist_to_segs(P, segs, 0)
+    ins = _inside(P, poly)
+    for h in holes:
+        ins &= ~_inside(P, h)
+    return np.where(ins, -d, d)
 
 
 def check_static(ctx, corridors, only=None):
@@ -692,6 +870,7 @@ def check_static(ctx, corridors, only=None):
     cfg = ctx.cfg
     TW, CL, g = cfg.track_width, cfg.clearance, cfg.grid_step
     need = TW / 2 + CL + g / 2                   # the bar for a lane piece off the grid (it lands up to half a step off)
+    cut = _neck_cut(ctx)
     pairs = getattr(ctx, 'pairs', {}) or {}
     pads = []
     for fp in ctx.pcb.footprints.values():
@@ -706,7 +885,8 @@ def check_static(ctx, corridors, only=None):
                 if Ls:
                     pads.append((fp.reference, pd, Ls, 'pad'))
     name = lambda i: (ctx.pcb.nets[i].name.split('/')[-1] if i in ctx.pcb.nets else str(i))
-    hits = {}
+    kos = keepout_areas(ctx.pcb, ctx.cfg.layers)
+    hits, near_ = {}, set()
     for c in corridors:
         for nm in c.members:
             if only and nm not in only:
@@ -726,6 +906,8 @@ def check_static(ctx, corridors, only=None):
                 NEED = np.concatenate([np.full(len(P_on), TW / 2 + CL), np.full(len(P_off), need)])[:len(P)]
                 if not len(P):
                     continue
+                # (within a lane pitch of its own tooth or berth, the fanout's track: the terminal neck, _neck_ends)
+                NEED = NEED - cut * _near_ends(P, _neck_ends(ctx, c, nm), bd.LANE_MIN)
                 x0, y0 = P.min(0) - 4 * bd.LANE_MIN       # the static copper near the lane: a few lane pitches round it
                 x1, y1 = P.max(0) + 4 * bd.LANE_MIN
                 inb = lambda x, y: x0 <= x <= x1 and y0 <= y <= y1
@@ -751,14 +933,23 @@ def check_static(ctx, corridors, only=None):
                 for v in ctx.base_vias:
                     if v.net_id in own or not inb(v.x, v.y):
                         continue
-                    cand.append((np.hypot(P[:, 0] - v.x, P[:, 1] - v.y) - v.size / 2, f'via {name(v.net_id)}'))
+                    cand.append((np.hypot(P[:, 0] - v.x, P[:, 1] - v.y) - _pairs.svia_reach(cfg, v.x, v.y, v.size),
+                                 f'via {name(v.net_id)}'))
+                # (a KEEP-OUT rule area whose tracks are not allowed on L: the samples' signed distance to it, inside
+                # negative -- the router stamps it as it stamps copper, and refuses a lane in it)
+                for k_, (poly_, holes_, lays_, bb_) in enumerate(kos):
+                    if L in lays_ and bb_[0] <= x1 and x0 <= bb_[2] and bb_[1] <= y1 and y0 <= bb_[3]:
+                        cand.append((keepout_dist(P, poly_, holes_), f'keepout K{k_} ' + '+'.join(sorted(lays_))))
                 for d, what in cand:
                     k = int(np.argmin(d - NEED))
-                    if d[k] < NEED[k] - 1e-6:
+                    if NEED[k] - NUDGE_FRAC * g <= d[k] < NEED[k] - 1e-6:
+                        near_.add((nm, L, what))
+                    if d[k] < NEED[k] - NUDGE_FRAC * g:
                         key = (nm, L, what)
                         if key not in hits or d[k] - NEED[k] < hits[key][0] - hits[key][2]:
                             hits[key] = (float(d[k]), tuple(P[k]), float(NEED[k]))
     rows = sorted((v[0], k[0], k[1], k[2], v[1], v[2]) for k, v in hits.items())
+    _nudge_line('static', len(near_ - set(hits)), g)
     for d, nm, L, what, xy, nd in rows:
         print(f'STATIC {nm:7s} {lay_tag(L)} {d:+.3f}/{nd:.3f} {what} at ({xy[0]:.2f},{xy[1]:.2f})')
     print(f'STATIC {len(rows)} lane/object pair(s) short of their bar (track/2 + clearance {TW / 2 + CL:.3f}, + half a '

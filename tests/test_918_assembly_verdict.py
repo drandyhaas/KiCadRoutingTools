@@ -220,17 +220,20 @@ def main():
              'containment_blocking': 5, 'courtyard_blocking_gating': None,
              'oob_pad_copper_gating_count': 0, 'mating_keepout_count': 0,
              'pin_in_courtyard': 0, 'testpoint_covered_gating': None,
-             'body_edge_band_gating': 0}, 4)
+             'body_edge_band_gating': 0, 'own_pad_shorts': 0}, 4)
         check('count is 1, not 8', r.get('count') == 1,
               f"count={r.get('count')!r} basis={r.get('count_basis')!r}")
         check('...and the basis says WHY it is not a sum',
               'not one currency' in (r.get('count_basis') or '')
               and 'coincident_origins' in (r.get('count_basis') or ''),
               repr(r.get('count_basis')))
-        # Both moved-vs-baseline conjuncts: the courtyard gate (fifth) and,
-        # since #1250, a test point a move left under a body (ninth).
+        # All three moved-vs-baseline conjuncts: the courtyard gate (fifth),
+        # since #1250 a test point a move left under a body (ninth), and
+        # since #1266 a moved member's pad on another part's graphic copper
+        # (eleventh) -- absent from this doc, which is unmeasured too.
         check('the unarmed baseline conjuncts are named, never counted as 0',
               r.get('conjuncts_unmeasured') == ['courtyard_blocking_gating',
+                                                'graphic_pad_gating',
                                                 'testpoint_covered_gating']
               and r.get('courtyard_gating_armed') is False
               and '--baseline' in (r.get('courtyard_gating_reason') or ''),
@@ -273,15 +276,18 @@ def main():
         # frame's drilled pin the fifth, and #1183 the courtyard gate the
         # sixth -- board_score now arms it when handed --baseline -- and
         # #1250 a test point a moved member left under a body the seventh,
-        # and #1255 a body inside a DECLARED body-to-edge band the eighth.
-        print('the eight conjuncts that can REALLY fire at blocking 0 are '
+        # #1255 a body inside a DECLARED body-to-edge band the eighth, and
+        # #1266 a moved member's pad on another part's graphic copper the
+        # ninth, and #1306 two of one part's own pads shorted the tenth.
+        print('the ten conjuncts that can REALLY fire at blocking 0 are '
               'named')
         check('locked_contacts is not among them',
               tuple(board_score.ASSEMBLY_LIVE_CONJUNCTS)
               == ('coincident_origins', 'containment_blocking',
                   'oob_pad_copper_gating_count', 'mating_keepout_count',
                   'pin_in_courtyard', 'courtyard_blocking_gating',
-                  'testpoint_covered_gating', 'body_edge_band_gating'),
+                  'testpoint_covered_gating', 'body_edge_band_gating',
+                  'graphic_pad_gating', 'own_pad_shorts'),
               repr(board_score.ASSEMBLY_LIVE_CONJUNCTS))
         r = board_score.assembly_component(
             {'blocking': 0, 'buildable': False, 'verdict': 'NOT BUILDABLE',
@@ -298,7 +304,8 @@ def main():
              'containment_blocking': 0, 'courtyard_blocking_gating': 0,
              'oob_pad_copper_gating_count': 0, 'mating_keepout_count': 0,
              'pin_in_courtyard': 0, 'testpoint_covered_gating': 0,
-             'body_edge_band_gating': 0,
+             'body_edge_band_gating': 0, 'graphic_pad_gating': 0,
+             'own_pad_shorts': 0,
              'courtyard_gating_basis': 'moved-vs-baseline'}, 0)
         check('a doc produced WITH --baseline reports the conjunct as armed',
               r.get('courtyard_gating_armed') is True

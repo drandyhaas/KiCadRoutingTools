@@ -37,6 +37,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -56,7 +57,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 3,
+   "rules_run": 4,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -68,8 +69,8 @@
     "keepout",
     "must_lock",
     "pins_to_edge",
-    "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -101,6 +102,7 @@
     "must_lock",
     "proximity",
     "replicate",
+    "template",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -120,7 +122,7 @@
    "human_not_derivable": true,
    "human_pass_line": false,
    "pass": false,
-   "rules_run": 6,
+   "rules_run": 7,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -130,8 +132,8 @@
     "keep_away",
     "keepout",
     "must_lock",
-    "proximity",
     "replicate",
+    "template",
     "zone_exclusive",
     "zone_side"
    ],
@@ -164,6 +166,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -179,9 +182,9 @@
    "errors": 0,
    "grade_rc": 0,
    "human_not_derivable": false,
-   "human_pass_line": true,
+   "human_pass_line": false,
    "pass": true,
-   "rules_run": 5,
+   "rules_run": 6,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -191,8 +194,8 @@
     "keep_away",
     "keepout",
     "must_lock",
-    "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -210,9 +213,9 @@
    "errors": 0,
    "grade_rc": 0,
    "human_not_derivable": false,
-   "human_pass_line": true,
+   "human_pass_line": false,
    "pass": true,
-   "rules_run": 5,
+   "rules_run": 6,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -222,8 +225,8 @@
     "keep_away",
     "keepout",
     "must_lock",
-    "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -241,9 +244,9 @@
    "errors": 0,
    "grade_rc": 0,
    "human_not_derivable": false,
-   "human_pass_line": true,
+   "human_pass_line": false,
    "pass": true,
-   "rules_run": 7,
+   "rules_run": 8,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -253,8 +256,8 @@
     "keep_away",
     "keepout",
     "must_lock",
-    "proximity",
     "replicate",
+    "template",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -286,6 +289,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -319,6 +323,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -352,6 +357,7 @@
     "must_lock",
     "proximity",
     "replicate",
+    "template",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -383,6 +389,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -416,6 +423,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -449,6 +457,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -482,6 +491,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -515,6 +525,7 @@
     "pins_to_edge",
     "proximity",
     "replicate",
+    "template",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -532,7 +543,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 7,
+   "rules_run": 8,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -542,8 +553,8 @@
     "keep_away",
     "keepout",
     "must_lock",
-    "proximity",
     "replicate",
+    "template",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -573,6 +584,7 @@
     "must_lock",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -604,6 +616,7 @@
     "must_lock",
     "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -625,7 +638,7 @@
    "human_not_derivable": true,
    "human_pass_line": false,
    "pass": false,
-   "rules_run": 5,
+   "rules_run": 6,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -635,8 +648,8 @@
     "keep_away",
     "keepout",
     "must_lock",
-    "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -658,7 +671,7 @@
    "human_not_derivable": true,
    "human_pass_line": false,
    "pass": false,
-   "rules_run": 7,
+   "rules_run": 8,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -668,8 +681,8 @@
     "keep_away",
     "keepout",
     "must_lock",
-    "proximity",
     "replicate",
+    "template",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -689,7 +702,7 @@
    "human_not_derivable": true,
    "human_pass_line": false,
    "pass": false,
-   "rules_run": 5,
+   "rules_run": 6,
    "skipped_arm": [],
    "skipped_not_asked": [
     "array_formation",
@@ -699,8 +712,8 @@
     "keep_away",
     "keepout",
     "must_lock",
-    "proximity",
     "replicate",
+    "template",
     "zone_containment",
     "zone_exclusive",
     "zone_side"

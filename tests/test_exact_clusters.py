@@ -29,7 +29,7 @@ FIX = os.path.join(os.path.dirname(__file__), 'fixtures', 'island_semantics')
 def main():
     if find_kicad_python() is None:
         print("SKIP: pcbnew python unavailable")
-        return
+        sys.exit(77)   # a skip, not a pass (run_all counts exit 77 apart)
     for name in ('two_islands_tht', 'two_islands_smd_stub_via',
                  'two_islands_via_only'):
         b = os.path.join(FIX, name + '.kicad_pcb')

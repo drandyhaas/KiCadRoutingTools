@@ -99,7 +99,6 @@ def _site_values(pcb, path, refs):
     from placement import (legality, escape, groups, part_class, pose_ops,
                            body, floorplan)
     from placement.utility import compute_footprint_bbox_local
-    import placement_score as PS
     import kicad_parser as KP
     out = {}
 
@@ -132,10 +131,6 @@ def _site_values(pcb, path, refs):
     site('assembly_census', lambda: {k: v for k, v in
                                      legality.assembly_census(pcb).items()
                                      if k != 'basis'})
-    site('pad_area_balance', lambda: {k: v for k, v in
-                                      PS.pad_area_balance(pcb).items()
-                                      if k in ('value', 'abstained',
-                                               'npth_pads_excluded')})
     site('pad_pitch', lambda: {r: escape.pad_pitch(fps[r]) for r in refs})
     site('fine_pitch_parts', lambda: sorted(escape.fine_pitch_parts(pcb)))
 
@@ -147,9 +142,6 @@ def _site_values(pcb, path, refs):
     site('part_copper_geometry', lambda: {
         r: g.rect for r, g in legality.part_copper_geometry(
             fps, CLEARANCE).items() if r in refs})
-    site('edge_facing', lambda: {k: v for k, v in
-                                 PS.edge_facing(pcb, path).items()
-                                 if k in ('value', 'pads', 'parts')})
 
     def _cls():
         res = {}

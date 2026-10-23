@@ -82,7 +82,6 @@ def test_consumers_do_not_silently_skip_a_missing_fixture():
     """
     consumers = {
         'test_493_interpreter_independence.py': 'fanout_starting_point.kicad_pcb',
-        'test_506_507_plan_movie_tools.py': 'fanout_output1.kicad_pcb',
         'test_dru_layer_clearance_e2e.py': 'fanout_starting_point.kicad_pcb',
         'test_pad_global_nm_grid.py': 'fanout_starting_point.kicad_pcb',
     }

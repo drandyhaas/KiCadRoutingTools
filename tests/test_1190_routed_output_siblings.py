@@ -9,10 +9,16 @@ next ``check_floorplan`` read "design brief: none beside this board" and
 inferred every edge from the current pose. It now carries every
 ``copy_board.SIBLING_EXTS`` member it does not rewrite.
 
+#1286: the carry lived only in ``fix_project_for_output``, which
+``--no-fix-drc-settings`` skips, so such an output reached kicad-cli without
+the board's ``.kicad_dru``. The routing writers now seed every sibling
+before the board is written (``seed_project_for_output``).
+
 Checks:
   1. route.py and route_planes.py outputs of esp_prog, staged with the
      tracked #711 brief plus a .kicad_dru and a .kicad_prl, carry the
-     input's whole sibling set, the brief byte-identical.
+     input's whole sibling set, the brief and the .kicad_dru byte-identical,
+     with the DRC-settings writeback and with --no-fix-drc-settings.
   2. check_floorplan finds the brief beside the routed output.
   3. fix_project_for_output never overwrites a sibling the output already
      has.
@@ -78,13 +84,22 @@ def main():
         check('precondition: the staged input has the whole sibling set',
               want == sorted(SIBLING_EXTS), str(want))
 
-        # 1. Both routing writers carry the set.
+        # 1. Both routing writers carry the set, with the DRC-settings
+        #    writeback and without it (#1286: --no-fix-drc-settings skipped
+        #    the one call that carried anything but the .kicad_pro).
         steps = [
             ('route.py', ['py_router/route.py', inp,
                           os.path.join(tmp, 'routed.kicad_pcb'), '--nets', '/EN']),
             ('route_planes.py', ['py_router/route_planes.py', inp,
                                  os.path.join(tmp, 'pour.kicad_pcb'),
                                  '--nets', 'GND', '--plane-layers', 'B.Cu']),
+            ('route.py --no-fix-drc-settings',
+             ['py_router/route.py', inp, os.path.join(tmp, 'nofix.kicad_pcb'),
+              '--nets', '/EN', '--no-fix-drc-settings']),
+            ('route_planes.py --no-fix-drc-settings',
+             ['py_router/route_planes.py', inp,
+              os.path.join(tmp, 'pournofix.kicad_pcb'),
+              '--nets', 'GND', '--plane-layers', 'B.Cu', '--no-fix-drc-settings']),
         ]
         for name, argv in steps:
             rc, out = run(argv)
@@ -93,11 +108,12 @@ def main():
             got = siblings(outb)
             check(f'{name} output carries the input sibling set', got == want,
                   f'{got} vs {want}')
-            if os.path.isfile(outb + '.design-brief.json'):
-                with open(BRIEF, 'rb') as a, \
-                        open(outb + '.design-brief.json', 'rb') as b:
-                    check(f'{name} output brief is the input brief',
-                          a.read() == b.read())
+            for ext, src in (('.design-brief.json', BRIEF),
+                             ('.kicad_dru', base + '.kicad_dru')):
+                if os.path.isfile(outb + ext):
+                    with open(src, 'rb') as a, open(outb + ext, 'rb') as b:
+                        check(f'{name} output {ext} is the input one',
+                              a.read() == b.read())
 
         # 2. The next grade finds the brief.
         rc, out = run(['py_tools/check_floorplan.py',

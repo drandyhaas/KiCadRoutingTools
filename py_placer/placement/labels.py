@@ -248,7 +248,7 @@ def beautify_labels(pcb_data, pcb_file: Optional[str],
 
     Pure computation: nothing is written (that is `write_label_output`'s
     job), so the GUI can apply the same results directly to a live board.
-    `cancel_check`/`progress_callback` follow the quench protocol (zero-arg
+    `cancel_check`/`progress_callback` follow the engines' protocol (zero-arg
     cancel probe; `(current, total, label)` progress).
 
     Returns ``{'results': [LabelResult...], 'summary': {...}}``.
@@ -292,7 +292,10 @@ def beautify_labels(pcb_data, pcb_file: Optional[str],
         from list_nets import board_floor_knobs
         _, edge_margin, _ = board_floor_knobs(pcb_file, None, None)
     if edge_margin is None:
-        edge_margin = 0.55
+        # No board file to read: the floor routing writes back for an unset
+        # rule (#1301), the value board_floor_knobs reads for one.
+        from list_nets import unset_board_edge_clearance
+        edge_margin = unset_board_edge_clearance(None)[0]
 
     # copper_holes=False (#730): these circles keep label INK off a drill,
     # and an NPTH pad's `(clearance ...)` is a COPPER rule -- KiCad has no

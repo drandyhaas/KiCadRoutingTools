@@ -425,8 +425,9 @@ def test_the_sibling_reaches_the_grade_and_no_brief_reproduces_the_old_doc():
         assert len(doc['keepouts']) == 1, doc['keepouts']
         # 6, not 2, since #959 (#1000): the fixture's brief declares
         # `user_top_side` with user-facing connectors, which compiles each
-        # one's `side` -- a reader-6 field.
-        assert doc['min_reader'] == 6, doc.get('min_reader')
+        # one's `side` -- a reader-6 field. 12 since af45a9e7: esp_prog's
+        # crystal Y1 gets the emitter's derived crystal claims.
+        assert doc['min_reader'] == 12, doc.get('min_reader')
 
         without = os.path.join(td, 'without.json')
         run_utils.check([sys.executable, '-X', 'utf8',
@@ -456,9 +457,10 @@ def test_the_sibling_reaches_the_grade_and_no_brief_reproduces_the_old_doc():
 def test_board_brief_reports_the_declaration_and_says_so_when_there_is_none():
     """#711's third ask: the channel reaches an instrument a placed board hits.
 
-    `test_board_brief.py`'s own fixture passes `requirements='x'`, so its
-    "every emitted section names its producer" check never sees this section.
-    Asserted here instead, in both branches.
+    `test_board_brief.py`'s own fixture passed `requirements='x'`, so its
+    "every emitted section names its producer" check never saw this section
+    (that test was deleted in ecd673eb). Asserted here instead, in both
+    branches.
     """
     import board_brief as bb
     pcb = parse_kicad_pcb(BOARD)
@@ -481,7 +483,7 @@ def test_board_brief_reports_the_declaration_and_says_so_when_there_is_none():
     assert 'design brief UNKNOWN' in txt, txt[-600:]
 
     # Every emitted section must name its producer, with a `[requires:`
-    # clause -- the rule test_board_brief enforces for the other sections.
+    # clause -- the rule test_board_brief enforced for the other sections.
     assert 'design_brief' in bb.SOURCES_NOTE
     assert '[requires:' in bb.SOURCES_NOTE['design_brief']
     print("  PASS: board_brief emits `design_brief` in both branches, sourced, "

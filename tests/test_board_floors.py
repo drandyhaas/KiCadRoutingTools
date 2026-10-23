@@ -124,9 +124,11 @@ def _d9_shared_resolver():
         b = _fixture(z, clearance=0.2,
                      extra_rules={'min_copper_edge_clearance': 0.0})
         _clr, _edge, knobs = board_floor_knobs(b)
+        # #1301: unset reads the fab edge floor routing writes back, not 0.55.
         check('board_floor_knobs does not return a 0.0 edge floor',
-              _edge == 0.55 and knobs['board_edge_clearance']['source']
-              == 'fixed default', str(knobs['board_edge_clearance']))
+              _edge == 0.2 and knobs['board_edge_clearance']['source']
+              == 'fab edge floor (what routing writes)',
+              str(knobs['board_edge_clearance']))
         check('board_floor agrees',
               board_floor(b, 'board_edge_clearance', None, 0.55)
               == (0.55, 'fixed default'))
@@ -200,10 +202,12 @@ def _q3_routing_half_uses_the_same_resolver():
         # nothing. The fallbacks then legitimately differ -- BOARD_EDGE_CLEARANCE
         # 0.0 is a deliberate "no edge rule, use the copper-copper clearance"
         # sentinel (route.py:896, obstacle_map.py:797), the plane engines want
-        # 0.5, the placement model 0.55 -- and are NOT unified here.
-        check('placement half: declared 0.0 reads as fixed default',
-              edge_place == 0.55
-              and knobs['board_edge_clearance']['source'] == 'fixed default',
+        # 0.5, the placement model the fab edge floor routing writes back
+        # (#1301) -- and are NOT unified here.
+        check('placement half: declared 0.0 reads as the fab edge floor',
+              edge_place == 0.2
+              and knobs['board_edge_clearance']['source']
+              == 'fab edge floor (what routing writes)',
               str(knobs['board_edge_clearance']))
         check('routing half agrees the board declared nothing',
               board_floor(z, 'board_edge_clearance', None, 0.0)[1]

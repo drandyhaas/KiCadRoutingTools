@@ -1,7 +1,10 @@
 # Proposal: one KiCad-standard design-rule model for sizes, clearances and escalation
 
-**Status:** proposal, not implemented. Audited at `e239e067` (main, 2026-09-03) on branch
-`worktree-constraints-dru`.
+**Status:** implemented, with exceptions. The proposal was audited at `e239e067` (main,
+2026-09-03), built on branch `worktree-constraints-dru` and merged as PR #866 (v0.22.0),
+with the defaults amended per §9 decision 1. §8 lists what shipped and what did not, and
+"As shipped" notes in §4 mark where the code differs from the text. §3 is the audit of the
+code *before* this work; it no longer describes the code.
 **Issues:** #530 (constraints must equal KiCad's DRC), #842 (tracks always 0.127),
 #857 (`--fab-tier standard` escalates silently), and the related #856 (severities
 rewritten to ignore), #770 (dru subset never fires on a real board), #502 (drill aspect
@@ -126,10 +129,11 @@ ours, and its correctness must be *measured* against `kicad-cli pcb drc` (§7.1)
 
 ---
 
-## 3. What the code does today (audit)
+## 3. What the code did before this work (audit)
 
-Full details with `file:line` citations are in the audit notes this proposal was
-written from; the load-bearing findings are summarised here.
+The audit of `e239e067`, kept as the record of what the design set out to fix; the
+`file:line` citations point into that commit. Full details are in the audit notes this
+proposal was written from; the load-bearing findings are summarised here.
 
 ### 3.1 Track width
 
@@ -320,6 +324,16 @@ tests already do for `PCBData`.
 makes a shim that is called *without* the layer argument raise, so the "caller forgot
 a tier" hole (#530) is caught in CI on a ruled fixture rather than shipped.
 
+**As shipped:** `py_router/design_rules.py` is the resolver (`from_project`,
+`from_pcbnew`, `resolve`, `resolve_stack`, `draw_size`, `floor`, `unsupported`,
+`table`), installed on every engine as `config.rules` by `install_design_rules`. It
+supplies the per-net draw sizes (route.py, route_diff.py), the per-net descent floors
+(`GridRouteConfig.rule_floors`), check_drc's size floors and the pad-override semantics
+(`design_rules.override_clearance`, §6.4). The pairwise copper clearance is still
+assembled from the net-class map and `kicad_dru.py`'s #498 layer and track-rule
+channels rather than through `resolve`, and the hole, edge and hole-to-hole floors still
+come from Board Setup. The strict mode and the named loader-parity gate were not built.
+
 ### 4.2 `.kicad_dru`: parse everything, evaluate a declared subset, disclose the rest
 
 The parser reads **every** rule and every `min` / `opt` / `max`. Evaluation supports
@@ -336,14 +350,15 @@ the subset our item model can answer without guessing:
 | `A.memberOfFootprint('glob')`, `A.intersectsCourtyard('ref')` | footprint ref / courtyard polygon | 2 |
 | `A.memberOfGroup('G')` | group membership (parseable from the file; GUI via `GetParentGroup`) | 2 |
 | `A.intersectsArea('zone')`, `enclosedByArea` | rule-area zone polygons (we parse zones) | 2 |
-| `A.inDiffPair('glob')`, `AB.isCoupledDiffPair()` | diff-pair detection (exists) | 2 |
+| `A.inDiffPair('glob')`, `AB.isCoupledDiffPair()` | diff-pair detection (exists); `AB.isCoupledDiffPair()` as a positive AND term is evaluated since #1293 (KiCad's `MatchDpSuffix`, ported), negated as an AND term ("keep pairs apart") and `inDiffPair()` since #1295; OR'ed or compared it stays unsupported | 2 |
 | `fromTo`, `memberOfSheet`, `hasComponentClass`, `getField`, `A.Length`, assertions | out of scope | never |
 
 A rule using an unsupported predicate or kind is kept in the table marked
 **UNSUPPORTED** and reported at run start (once per board), in `JSON_SUMMARY`
 (`design_rules.unsupported: [names]`) and in the GUI results panel, replacing today's
 silent drop. That is #770's "make the skip loud" and #530's "warn about what we cannot
-honour" in one channel.
+honour" in one channel. (As shipped: the key is `design_rules.unsupported_rules`, on
+route.py's summary, and the GUI shows the run-start lines in its log.)
 
 Kinds the router *consumes* and how:
 
@@ -357,6 +372,15 @@ Kinds the router *consumes* and how:
 | `length`, `skew`, `diff_pair_uncoupled` | length matching (`--length-match` groups), reported | phase 3 |
 | `track_angle (min 135)` | octolinear vs orthogonal smoothing selector | phase 3 |
 | everything else | table only, reported | — |
+
+As shipped, the evaluated predicates are the phase-1 rows plus `memberOfFootprint` and
+`memberOfGroup`. The area predicates are evaluated only for a `disallow` rule on a named
+rule area, which becomes a net-filtered keep-out (#1278, `net_keepouts.py`); the
+courtyard and diff-pair predicates stay unsupported. Of the kinds, the engines read
+`track_width`, `via_diameter` and `hole_size` through the resolver and copper
+`clearance` rules through `kicad_dru.py` (#498 layer rules, track rules); the hole, edge
+and hole-to-hole kinds are not read from rules (Board Setup supplies those floors), and
+`via_count`, `length`, `skew` and `track_angle` have no consumer.
 
 ### 4.3 Sizes: KiCad's `opt` / `min` split
 
@@ -404,11 +428,13 @@ back as the output's Default class -- so "no project writeback is needed" holds
 only when the run's `.kicad_pro` writeback is OFF (`--no-fix-drc-settings`, the
 GUI's "Fix DRC settings after routing" unticked). Then the clearance floor is the
 Default class floored at `min_clearance`, what KiCad grades the unchanged project
-at (#1262).
+at (#1262), and a rule the project leaves out of its `.kicad_pro` floors at KiCad's
+factory value, the value KiCad loads for it (#1287).
 
 Where a board leaves a minimum unset (KiCad writes 0; 96 of 445 corpus boards for
 `min_track_width`), `board` falls back to the fab profile's floor **for that key**, and
-says so in the disclosure. This keeps today's completion rate on undeclared boards while
+says so in the disclosure. (With the writeback off, a rule ABSENT from the project is
+not unset: KiCad grades it at its factory value, so it floors there, #1287.) This keeps today's completion rate on undeclared boards while
 never crossing a floor a user did declare.
 
 **A board minimum bounds descents only when the run's own request respects it**
@@ -452,6 +478,10 @@ the standard tier's 0.45 would have rerouted every recorded command that asks fo
 0.3 via and then had the grader flag the vias it asked for; the request is the operator
 declaring their fab can make it, the same reading the stale-board-minimum rule gives.
 
+**As shipped:** the defaults are `--fab-tier auto` and `--escalation fab` (§9 decision
+1), defined once in `routing_defaults.py`. `--fab-overrides` reads only the
+`key = value` file (`fab_overrides.example.txt`), not a `.kicad_dru`.
+
 **Disclosure**, one shape for every front:
 
 ```json
@@ -475,6 +505,17 @@ track 0.15 mm (board minimum); 0 fab-tier escalations") and a results-panel row 
 GUI. `--strict-sizes` (CLI) / the same checkbox (GUI) makes any escalation a non-zero
 exit so a CI harness needs no grep. `check_complete` folds the count into its existing
 `fab_floors` verdict.
+
+As shipped, the block (`fab_tiers.escalation_summary`) carries `escalation_policy`,
+`fab_tier`, `board_floors`, `count`, `nets`, `narrowed` (one row per narrowing: `net`,
+`net_name`, `kind`, `requested`, `delivered`, `site`, `count`), `min_delivered`,
+`fab_tier_escalations`, `fab_tier_contexts` and `fab_tier_target` (`advanced`, or
+`board_floors` under `--escalation board`), plus `unsupported_rules` on route.py. The
+end-of-run line reads `Design rules [--escalation P, --fab-tier T]: ...`. route.py,
+route_diff.py, route_planes.py, repair_planes.py and both fanouts print it and honour
+`--strict-sizes` (exit 3; a run that already failed keeps its own code). The GUI prints
+the line in its log; it has no `--strict-sizes` checkbox, and `check_complete` does not
+read the block.
 
 ### 4.5 Writeback: never lower a draw default, never touch severities
 
@@ -507,6 +548,14 @@ changes:
    so the GUI cannot drift from the CLI again (the planes-tab and QFN-tab omissions in
    §3.5 close for free).
 
+**As shipped:** items 1, 2, 4 and 5 hold. The routing CLIs ask for the severity
+changes with `--relax-drc-severities` (the standalone fixer's flag is
+`--relax-severities`). For item 3, `min_track_width` / `min_via_diameter` /
+`min_through_hole_diameter` / `min_via_annular_width` are still lowered to the routed
+values and the smallest object on the board under every policy, as before, and the
+`project_writes` list is kept inside `fix_kicad_drc_settings` (`LAST_PROJECT_WRITES`)
+rather than published in `JSON_SUMMARY`.
+
 ### 4.6 `--clearance`: two meanings, one of them explicit
 
 Today the *presence* of `--clearance` is a ceiling switch over every class (#439).
@@ -530,6 +579,15 @@ regression on boards with aspirational classes, the fallback is to keep the ceil
 semantics under `--clearance` and ship only the explicit flag; the resolver does not
 care which spelling wins.
 
+**As shipped:** the split, as proposed (§9 decision 2), on every routing CLI and the
+GUI ("Clearance ceiling" next to Min Clearance). A chain passes
+`--clearance-ceiling <floor>`: on the sets 1-5 corpus a bare `--clearance 0.2` after an
+earlier step had lowered the project to 0.1 routed wider than the chain's own floor
+(+28 real DRC / +83 open nets), so the recorded manifests' routing steps were rewritten
+to the ceiling (`tests/stress/ab_replay_grade.py` reads either spelling). The engine's own net-class
+auto-read caps only when a ceiling is given. `place_fanout_clearance.py` keeps
+`--clearance` as a ceiling (#768/#769).
+
 ### 4.7 Graders share the resolver
 
 `check_drc` replaces its private closures (`_pair_cl`, `_layer_cl`, `_stack_cl`,
@@ -552,7 +610,10 @@ verdicts can no longer be conflated. The placer's `PadClearanceModel` and
   Unchecked now resolves through `draw_size` (aggregate class per net, floored at the
   board minimum), so the reporter's Board Setup 0.25 finally binds.
 - `Fab Tier` gains `auto`; `--strict-sizes` gets a checkbox; results panel and log get
-  the disclosure block; hole-to-hole control relabelled.
+  the disclosure block; hole-to-hole control relabelled. (As shipped: the Escalation
+  choice replaced "Obey design rule constraints" and the Clearance ceiling checkbox was
+  added; there is no `--strict-sizes` checkbox, the disclosure line goes to the log,
+  and the hole-to-hole control is still labelled "Min Hole Clearance".)
 - New params (`escalation`, `strict_sizes`, `clearance_ceiling`) are named after the
   controls, added to `reset_params_to_defaults`, `settings_persistence`, and
   `manifest_to_plan.FLAG_PARAMS`, per the CLAUDE.md three-step rule.
@@ -569,6 +630,8 @@ The fab profile gains `max_aspect_ratio` (8 standard / 10 advanced) and the reso
 stackup thickness `kicad_parser` already sums. It is a floor like any other, so the
 via clamp, the escalation ladder and `check_drc` all honour it through the same path
 with no special case.
+
+(Not built: #502 has no aspect-ratio floor yet.)
 
 ---
 
@@ -672,7 +735,10 @@ unenforced", which KiCad contradicts), `docs/route-plane.md`, `docs/python-api.m
 forward, per-field), `tests/README.md`, `tests/stress/README.md` ("netclass
 `track_width` is a minimum": wrong) and `RUNBOOK.md` ("the router does NOT read any of
 this": stale since #439), `py_placer/placement/README.md`, and the two skills that
-describe fab sizing (`plan-pcb-routing`, `find-high-speed-nets`).
+describe fab sizing (`plan-pcb-routing`, `find-high-speed-nets`). PR #866 itself
+updated `CLAUDE.md`, `docs/configuration.md`, `docs/utilities.md`,
+`docs/api-routing-config.md`, `docs/route-plane.md` and the routing and placement
+skills.
 
 ---
 
@@ -746,14 +812,24 @@ A two-board result is not a default change.
 Phases 2 and 3 are the ones users are waiting on and do not depend on phase 4; they can
 ship on the resolver's shims.
 
-**Status (branch `worktree-constraints-dru`, 2026-09-03):** phases 0, 1, 2, 3, 4, 5
-and 7 are implemented and committed on the branch (phase 5 without the aspect-ratio
-check, #502, and without the `annular_width` resolver kind, which the fab ladder's
-`annular` floor still covers). Phase 6 is not started; it is tracked as #865, and the
-under-pad rescue cost the corpus A/B surfaced as #864. The GUI engine parity gate,
-the rp2350 live-chain gate, the settings round-trip and the 21-row agreement harness
-are green on the branch head. The crate is 0.22.0 with `/VERSION` 0.22.0; `metadata.json`
-and the per-platform binaries are the release step, not done on the branch.
+**Status:** phases 0-5 and 7 were built on branch `worktree-constraints-dru` and merged
+to main as PR #866 (v0.22.0, 2026-09-03; per-net via rungs in `grid_router` 0.22.0), with
+the GUI engine parity gate, the rp2350 live-chain gate, the settings round-trip and the
+agreement harness green at merge. On main now:
+
+| Phase | In the code | Not built |
+|---|---|---|
+| 0 | `tests/oracle/constraint_agreement.py`, wrapped for `run_all` by `tests/test_530_constraint_agreement.py` | |
+| 1 | `design_rules.py`, installed as `config.rules` on every engine (§4.1 "As shipped") | the clearance chain through `resolve`; strict mode; the named loader-parity gate |
+| 2 | net-class draw sizes never written; severities only on request (§4.5 "As shipped") | `rules.min_*` gated on `--escalation fab`; a published `project_writes` |
+| 3 | `--escalation`, `--fab-tier auto`, the ledger, the `design_rules` block, the end-of-run line, `--strict-sizes`; GUI Escalation choice | GUI `--strict-sizes` checkbox |
+| 4 | parser for every kind and `min`/`opt`/`max`; phase-1 predicates plus `memberOfFootprint` / `memberOfGroup`; unsupported rules named | hole / edge / hole-to-hole rule kinds in the engines |
+| 5 | per-net via sizes as N via rungs (live when route.py has no `--via-size`) | an `annular_width` consumer (the fab ladder's `annular` floor covers it); aspect ratio (#502) |
+| 6 | partly (#865): rule-area `disallow` rules as net-filtered keep-outs (#1278) | courtyard and diff-pair predicates; `via_count` |
+| 7 | `--clearance` / `--clearance-ceiling` split; chains and manifests on the ceiling | the `.kicad_dru` fab-profile export |
+
+The under-pad rescue cost the corpus A/B surfaced is #864. Later changes to the
+`board` policy are #1262 and #1287 (§4.4).
 
 ---
 

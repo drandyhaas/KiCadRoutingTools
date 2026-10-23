@@ -10,7 +10,6 @@ from collections import OrderedDict
 from typing import List, Set, Dict, Optional, Tuple, TYPE_CHECKING
 import math
 import numpy as np
-import env_knobs
 from routing_config import GridCoord, GridRouteConfig
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
@@ -38,24 +37,52 @@ def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
         pcb_data: PCB data with pads_by_net
         net_ids: List of net IDs to add through-hole positions for
         config: Routing config with grid_step
+
+    Returns the (N, 3) [gx, gy, layer] cells it BLOCKED on `obstacles` (see the
+    blind/micro via note below); a caller that keeps its map past this route
+    removes them again (prepare/restore_obstacles_inplace do).
     """
+    from geometry_utils import via_on_layer
+    from obstacle_map import via_stops_short
     coord = GridCoord(config.grid_step)
     free_via_positions = []
+    full_cells = set()
     for net_id in net_ids:
         for pad in pcb_data.pads_by_net.get(net_id, []):
             if pad.drill and pad.drill > 0:
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
                 free_via_positions.append((gx, gy))
+                full_cells.add((gx, gy))
     # Every EXISTING same-net via (fanout via-in-pad, a prior route's via, or a
     # board via) is a reusable zero-cost layer transition, so the router reuses it
     # instead of dropping its own beside it. The emitted layer-change via at such a
     # position must be REUSED, not added (see via dedup at route conversion).
     net_id_set = set(net_ids)
+    partial = []
     for v in pcb_data.vias:
         if v.net_id in net_id_set:
-            free_via_positions.append(coord.to_grid(v.x, v.y))
+            cell = coord.to_grid(v.x, v.y)
+            free_via_positions.append(cell)
+            if via_stops_short(v, pcb_data):
+                partial.append((cell, v))
+            else:
+                full_cells.add(cell)
     if free_via_positions:
         obstacles.add_free_vias_batch(free_via_positions)
+    # A blind/micro via is free only BETWEEN the layers it spans (found
+    # reviewing #1268). The Rust free via is one cell on every layer, so the
+    # cell is closed on the layers the via never reaches: a layer change there
+    # can then only land on its span, and the route rides an F.Cu->In1.Cu
+    # microvia to In1.Cu but drills its own via to reach B.Cu. Not where a
+    # plated hole or a full via of the net already joins every layer.
+    rows = [(cell[0], cell[1], li) for cell, v in partial if cell not in full_cells
+            for li, name in enumerate(config.layers)
+            if not via_on_layer(v, name)]
+    if not rows:
+        return np.empty((0, 3), dtype=np.int32)
+    cells = np.asarray(rows, dtype=np.int32)
+    obstacles.add_blocked_cells_batch(cells)
+    return cells
 
 
 def filter_ripped_ghosts(ghost_dict, config: GridRouteConfig, routed_net_ids=None,
@@ -692,33 +719,6 @@ def prepare_obstacles_inplace(
             for _arr in _lifted:
                 working_obstacles.remove_blocked_cells_batch(_arr)
             _lift_record(_TIE_LIFTED, working_obstacles, net_id, _lifted)
-            # #667: the lifted band is legal CELL-BY-CELL but its copper
-            # can be illegal as a SEGMENT (KiCad's IsNetTieExclusion
-            # waives a (track, partner-pad) pair only when the contact
-            # lies on the OWN pad -- cynthion shipped 3 router-introduced
-            # tie violations per pass through this exact band). Price the
-            # band (radius 1: the cells themselves, no halo) so the A*
-            # prefers the clean own-axis approach the human uses; the
-            # band stays available as a last resort, so connectivity is
-            # never lost (the reject-gate attempt stranded 3 sense nets).
-            # clear_stub_proximity() at prepare/finish brackets this like
-            # every other proximity cost -- no cross-net leak.
-            _tie_cost = env_knobs.TIE_BAND_COST
-            if _tie_cost > 0:
-                # Differential pricing: the OWN-PAD approach (KiCad-waived
-                # contact) stays free; only the off-pad corridor cells are
-                # priced. Uniform pricing over the whole lifted band was
-                # measured INERT on cynthion (no gradient = no steering).
-                _price667 = (getattr(pcb_data, '_net_tie_price', None)
-                             or {}).get(net_id)
-                if _price667 is None:
-                    _pos667 = np.unique(np.concatenate(
-                        [np.asarray(_a)[:, :2] for _a in _lifted]), axis=0)
-                    _price667 = [(int(gx), int(gy)) for gx, gy in _pos667]
-                if _price667:
-                    working_obstacles.add_stub_proximity_costs_batch(
-                        [(int(gx), int(gy)) for gx, gy in _price667], 1,
-                        config.cell_cost(_tie_cost))
 
     # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = _stub_proximity_source_ids(
@@ -884,7 +884,10 @@ def prepare_obstacles_inplace(
         same_net_via_arr = np.empty((0, 2), dtype=np.int32)
 
     # Add through-hole pads as free via positions (zero-cost layer change)
-    _add_free_via_positions(working_obstacles, pcb_data, [net_id], config)
+    _fv_cells = _add_free_via_positions(working_obstacles, pcb_data, [net_id],
+                                        config)
+    if len(_fv_cells):
+        _lift_record(_FREE_VIA_SPAN, working_obstacles, net_id, _fv_cells)
 
     return all_stubs, same_net_via_arr
 
@@ -912,6 +915,10 @@ _OWNPAD_VIA_LIFTED: Dict[tuple, tuple] = {}
 #: and the #530 per-net rungs: ((rung, cells), ...), removed by the matching
 #: restore. Same lifetime, keying and pin as _TIE_LIFTED.
 _SAME_NET_RUNG_MIRROR: Dict[tuple, tuple] = {}
+#: The cells _add_free_via_positions closed around a blind/micro via of the
+#: net (its non-span layers), removed by the matching restore. Same lifetime,
+#: keying and pin as _TIE_LIFTED.
+_FREE_VIA_SPAN: Dict[tuple, tuple] = {}
 
 
 def _lift_record(registry, obstacles, net_id, rows):
@@ -954,6 +961,10 @@ def restore_obstacles_inplace(
     # Remove same-net via clearance cells
     if len(same_net_via_cells) > 0:
         working_obstacles.remove_blocked_vias_batch(same_net_via_cells)
+    # ...and the cells closed around the net's own blind/micro vias.
+    _fvs = _lift_take(_FREE_VIA_SPAN, working_obstacles, net_id)
+    if _fvs is not None and len(_fvs):
+        working_obstacles.remove_blocked_cells_batch(_fvs)
     # The rung mirrors -- the #568 small one and the #530 per-net ones
     # (#1070) -- from exactly the rungs prepare stamped.
     _mir = _lift_take(_SAME_NET_RUNG_MIRROR, working_obstacles, net_id)

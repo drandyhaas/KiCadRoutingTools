@@ -237,7 +237,7 @@ class TestTheSeedHalfUsesThem(unittest.TestCase):
                       'the FINAL call takes a kwarg; it must be the bare pose')
 
     def test_seed_pos_defaults_OFF(self):
-        """Every other caller -- cost(), hard_blocked, the accept gate --
+        """Every other caller -- cost(), the accept gate --
         grades live copper and must keep seeing current positions."""
         sig = inspect.signature(FC._Repair._via_shortfalls)
         self.assertIs(sig.parameters['seed_pos'].default, False)

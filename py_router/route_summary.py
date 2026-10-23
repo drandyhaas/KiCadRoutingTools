@@ -290,13 +290,14 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False,
                 merged['pad_pairs_connected'] = first.get('pad_pairs_connected', 0)
                 if 'pad_pairs_open' in first:
                     merged['pad_pairs_open'] = first['pad_pairs_open']
-        # `blockers` and `boxed_in` are both first-pass attribution: the
-        # reconcile sub-run re-routes a SUBSET and its summary carries neither,
-        # so without this a merged summary loses the evidence for nets that are
-        # still failing. Filtered to the nets that ARE still failing, so a net
-        # the reconcile fixed does not carry a stale accusation.
+        # `blockers`, `boxed_in` and `unroutable_as_designed` are first-pass
+        # attribution: the reconcile sub-run re-routes a SUBSET and its
+        # summary may carry none of them, so without this a merged summary
+        # loses the evidence for nets that are still failing. Filtered to the
+        # nets that ARE still failing, so a net the reconcile fixed does not
+        # carry a stale accusation.
         _failed = None
-        for _k in ('blockers', 'boxed_in'):
+        for _k in ('blockers', 'boxed_in', 'unroutable_as_designed'):
             if _k in first and _k not in merged:
                 if _failed is None:
                     _failed = set(merged.get('failed_single') or [])
@@ -604,6 +605,15 @@ def regrade_record(summaries: List[Dict], grades: Dict[str, Dict],
         # that the shipped board has connected.
         'unowned_broken': sorted(broken & set(disturbed_only) - set(last)),
         'recovered': sorted(was_failing & set(grades) - broken),
+        # Each broken net's #409 pad-pair tally on the shipped board, which
+        # _apply_regrade puts in pad_pairs_open: the summaries' entries are
+        # snapshots taken before the final reconciliation, so a net broken
+        # after them had none (#1309).
+        'pad_pairs': {n: {'total': int(g['pad_pairs'][0]),
+                          'connected': int(g['pad_pairs'][1]),
+                          'copper': bool(g.get('copper'))}
+                      for n, g in grades.items()
+                      if g.get('broken') and g.get('pad_pairs')},
     }
 
 
@@ -627,16 +637,31 @@ def _apply_regrade(merged: Dict, regrade: Dict, summaries: List[Dict]) -> None:
             if v == 'full' or n in broken}
     # Per-net attribution, newest entry per net across every summary, kept for
     # the nets that are still failing (the old path kept pass 1's only).
+    # pad_pairs_open takes the re-grade's own tally of the shipped board where
+    # it has one (#1309: a net broken after the last summary had no entry).
+    _pairs = regrade.get('pad_pairs') or {}
     for k, key in (('blockers', 'net'), ('boxed_in', 'net'),
                    ('pad_pairs_open', 'net')):
-        if not any(k in s for s in summaries):
+        if not any(k in s for s in summaries) and not (
+                k == 'pad_pairs_open' and _pairs):
             continue
         by_net: Dict[str, Dict] = {}
         for s in summaries:
             for e in s.get(k) or []:
                 if isinstance(e, dict) and e.get(key):
                     by_net[e[key]] = e
+        if k == 'pad_pairs_open':
+            for n, pp in _pairs.items():
+                if pp['connected'] >= pp['total']:
+                    continue
+                old = by_net.get(n) or {}
+                by_net[n] = {'net': n, 'pairs_connected': pp['connected'],
+                             'pairs_total': pp['total'], 'outcome': 'open',
+                             'open_subtype': old.get('open_subtype') or (
+                                 'partial' if pp['copper'] else 'unrouted')}
         merged[k] = [e for n, e in by_net.items() if n in broken]
+        if k == 'pad_pairs_open':
+            merged[k].sort(key=lambda e: e['net'])
     if 'pad_pairs_total' in merged and 'pad_pairs_open' in merged:
         _deficit = sum(e.get('pairs_total', 0) - e.get('pairs_connected', 0)
                        for e in merged['pad_pairs_open'])
@@ -645,6 +670,14 @@ def _apply_regrade(merged: Dict, regrade: Dict, summaries: List[Dict]) -> None:
     merged['regrade'] = {k: regrade.get(k) for k in (
         'board', 'graded_nets', 'seconds', 'unowned_broken', 'recovered',
         'broken_by_run')}
+    # Whose fill the pours were graded on, when the re-grade had to ask
+    # KiCad itself (route._regrade_pour_fill).
+    if regrade.get('pour_fill') is not None:
+        merged['regrade']['pour_fill'] = regrade['pour_fill']
+    if regrade.get('exact_open'):
+        # #1339: the pour nets graded on KiCad's exact fill (or the oracle's
+        # verdict) because the fill model credited them.
+        merged['regrade']['exact_open'] = dict(regrade['exact_open'])
 
 
 def merge_route_summaries(log: str) -> Optional[Dict]:
@@ -741,6 +774,12 @@ def summary_min(merged: Dict, name_cap: int = 20) -> Dict:
     if merged.get('finalize_excluded_nets'):
         out['finalize_excluded_nets'] = _names(
             merged['finalize_excluded_nets'])
+    if merged.get('unroutable_as_designed'):
+        # Open nets whose pad is shorted to another net as drawn: no retry
+        # fixes them, so the agent reading only this line must see them.
+        out['unroutable_as_designed'] = _names(sorted(
+            {r.get('net') for r in merged['unroutable_as_designed']
+             if r.get('net')}))
     # #1069: how many nets the final-board re-grade read. Absent when the
     # tally rests on the summaries alone (no re-grade ran).
     if isinstance(merged.get('regrade'), dict):
@@ -793,18 +832,11 @@ def write_summary_file(path: str, merged: Optional[Dict]) -> None:
     stdout line refused -- non-deterministic, and silently divergent from
     ``merge_route_summaries(log)``, which a test compares against this file.
 
-    Deliberately NO fallback document either. `converge.route_verdict` scores a
-    truthy dict carrying none of the failure keys as `(0, 'clean')`, so an
-    ``{'complete': false}`` placeholder would rank a broken candidate FIRST.
-    Failing closed -- no file -- lands every caller in the `summary = {}` /
-    "no summary" case they all already handle. Stated precisely, because the
-    three handle it differently: compare_seeds ranks such a row last and never
-    picks it as `best`; cmd_poses only annotates; place_portfolio DROPS it from
-    the routed ranking and falls through to the static one, so with every probe
-    unreadable it still names a best on crossings/HPWL alone (`probe_kind:
-    null` is the only tell). That last one is pre-existing and is not made
-    worse here -- but it is not "ranks last", and saying so would be the
-    comfortable version.
+    Deliberately NO fallback document either. A ranker that scores a truthy
+    dict carrying none of the failure keys as clean would rank an
+    ``{'complete': false}`` placeholder FIRST. Failing closed -- no file --
+    lands every caller in the `summary = {}` / "no summary" case it already
+    handles.
 
     FAILING CLOSED MEANS DELETING THE DESTINATION, and that is not fussiness.
     An atomic publish that merely declines to overwrite leaves the PREVIOUS

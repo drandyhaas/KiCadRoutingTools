@@ -45,7 +45,7 @@ sys.path.insert(0, HERE)
 from run_utils import check, evidence                          # noqa: E402
 
 PY = [sys.executable, '-X', 'utf8']
-MEASURE = os.path.join(ROOT, '.claude', 'skills', 'pcb-free-agent',
+MEASURE = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement',
                        'scripts', 'measure.py')
 PRIMARY = '/home/u/krt'
 WORKTREE = '/home/u/krt-fa10'
@@ -96,7 +96,7 @@ def _sub(agent, steps, in_flight=True):
                       _bash(cmd), **kw),
                  _result('2026-10-07T10:%02d:30Z' % i, '%s%d' % (agent, i), **kw)]
     call = _use('2026-10-07T11:13:00Z', agent + 'm', 'Bash', _bash(
-        'python3 -X utf8 .claude/skills/pcb-free-agent/scripts/measure.py '
+        'python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/measure.py '
         '--self --evidence wk/runB'), **kw)
     rows.append(call)
     if not in_flight:
@@ -112,7 +112,7 @@ def _session(touch_run_b=False):
             'python3 py_placer/converge.py record --ledger wk/runA/ledger.jsonl')),
         _result('2026-10-05T09:00:10Z', 'a1'),
         _use('2026-10-05T09:01:00Z', 'a2', 'Agent', {
-            'prompt': 'Run /pcb-free-agent full on wk/runB/pile.kicad_pcb; '
+            'prompt': 'Run /plan-pcb-placement full on wk/runB/pile.kicad_pcb; '
                       'work in wk/runB.'}),
         _result('2026-10-05T09:01:01Z', 'a2'),
         _use('2026-10-07T12:00:00Z', 'a3', 'Bash', _bash(

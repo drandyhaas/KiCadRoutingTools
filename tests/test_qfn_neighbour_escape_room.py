@@ -74,6 +74,14 @@ def board(with_u2):
             + (qfn('U2', 100, U2_Y, 4 * N, 2) if with_u2 else '') + ')\n')
 
 
+def partner(path):
+    """#1342: every net here exists on one QFN pad only, and the fanouts skip
+    a single-pad (NC) net; give each a partner pad in the board's left strip,
+    10 mm clear of the packages."""
+    from synth import with_partner_pads
+    with_partner_pads(path, path, (86.5, 86.5), cols=4, pitch=0.8)
+
+
 def fan(src, ref, out):
     r = subprocess.run([sys.executable, tool('qfn_fanout.py'), src,
                         '--component', ref, '--output', out,
@@ -101,6 +109,7 @@ def main():
     with tempfile.TemporaryDirectory() as wd:
         alone = os.path.join(wd, 'alone.kicad_pcb')
         open(alone, 'w').write(board(False))
+        partner(alone)
         fan(alone, 'U1', os.path.join(wd, 'alone_U1.kicad_pcb'))
         reach, _, _ = deepest(os.path.join(wd, 'alone_U1.kicad_pcb'))
         assert reach > MID + TRACK, (
@@ -111,6 +120,7 @@ def main():
 
         both = os.path.join(wd, 'both.kicad_pcb')
         open(both, 'w').write(board(True))
+        partner(both)
         results = {}
         for first, second in (('U1', 'U2'), ('U2', 'U1')):
             a = os.path.join(wd, f'{first}.kicad_pcb')

@@ -45,8 +45,8 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -815,6 +815,35 @@ def nearest_foreign(pcb, x, y, net_id, layers=None, net_clearances=None,
                         'layer': s.layer, 'dist': round(d, 5)})
     out.sort(key=lambda e: e['dist'])
     return tuple(out[:NEAR_K])
+
+
+def without_routed_copper(pcb):
+    """`(placement, n_segments, n_vias)`: `pcb` with its ROUTED copper set
+    aside, and how much was set aside (#1347).
+
+    Routed copper is every track and via a router could rip: not footprint
+    or board GRAPHIC copper (a tab, an antenna -- part of the footprint), and
+    not immutable copper (KiCad-locked, or held by a `sense:` group), which
+    no pass may move and is therefore as fixed as a pad. What is left is the
+    placement: pads, parts, rule areas and fixed copper.
+
+    `slack_field` walls every segment and via it is given, which is right for the
+    question "is there room now" and wrong for the one this module's verdict
+    answers, "is this GEOMETRY": on gp14 StickHub U1.37 the routed board
+    measured CAGED for any track width and the same placement with its
+    copper stripped PASSABLE by +1030.5 um, so a congestion failure read as
+    a placement defect and went back to placement.
+
+    A shallow copy: the footprints, nets and board info are shared, only the
+    two copper lists are new."""
+    import copy
+    from kicad_parser import is_immutable_copper
+    segs = [s for s in pcb.segments
+            if getattr(s, 'graphic', False) or is_immutable_copper(s)]
+    vias = [v for v in pcb.vias if is_immutable_copper(v)]
+    out = copy.copy(pcb)
+    out.segments, out.vias = segs, vias
+    return out, len(pcb.segments) - len(segs), len(pcb.vias) - len(vias)
 
 
 def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,

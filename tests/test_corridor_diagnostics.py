@@ -40,25 +40,19 @@ SPLIT = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 _CACHE = {}
 
 
-def _state(path, corridor_weight=0.0, specs=None):
-    key = (path, corridor_weight, repr(specs))
-    if key not in _CACHE:
-        pcb = _CACHE.setdefault(('pcb', path), parse_kicad_pcb(path))
+def _state(path):
+    if path not in _CACHE:
+        pcb = parse_kicad_pcb(path)
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
             st = QuenchState(pcb, path, clearance=0.2,
-                             board_edge_clearance=0.55, crossing_penalty=30.0,
-                             halo_base=0.5, halo_coef=0.15, halo_weight=2.0,
-                             edge_halo=2.0, edge_weight=2.0, grid_step=0.1,
-                             length_weight=0.3,
-                             corridor_weight=corridor_weight,
-                             corridor_specs=specs)
-        _CACHE[key] = (pcb, st)
-    return _CACHE[key]
+                             board_edge_clearance=0.55)
+        _CACHE[path] = (pcb, st)
+    return _CACHE[path]
 
 
-def _corridor(path, spec, **kw):
-    pcb, st = _state(path, **kw)
+def _corridor(path, spec):
+    pcb, st = _state(path)
     cors = corridors_from_intent(st, pcb, [spec])
     return st, (cors[0] if cors else None)
 

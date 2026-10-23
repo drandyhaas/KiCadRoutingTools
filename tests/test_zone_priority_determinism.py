@@ -63,10 +63,13 @@ def main():
     check("the SMALLER (nested) pour wins the overlap",
           p[1] > p[0], f"{p}")
 
-    # Same net: KiCad merges them, no tie-break needed, and bumping one would
-    # only churn output for boards that were never ambiguous.
+    # Same net: the copper merges either way, but KiCad's DRC calls two
+    # overlapping zones at equal priority `zones_intersect` (argus_mainboard's
+    # split In2.Cu GND), so the tie is split, the smaller a level above --
+    # and only that tie: every other pair keeps its order and its ties.
     p = zone_overlap_priorities([("In1.Cu", 1, BIG), ("In1.Cu", 1, SMALL)])
-    check("same-net overlap stays at priority 0", p == [0, 0], f"{p}")
+    check("same-net overlap gets distinct priorities, the smaller winning",
+          p == [0, 1], f"{p}")
 
     p = zone_overlap_priorities([("In1.Cu", 1, BIG), ("In2.Cu", 2, SMALL)])
     check("zones on DIFFERENT layers never contend", p == [0, 0], f"{p}")

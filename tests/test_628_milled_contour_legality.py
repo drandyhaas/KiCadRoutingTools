@@ -46,12 +46,14 @@ def check(name, cond):
         fails.append(name)
 
 
-# The canonical QuenchState knobs (same set tests/test_456_side_and_outline.py
-# uses); board_edge_clearance is the gate margin.
-KNOBS = dict(clearance=0.25, board_edge_clearance=0.55, crossing_penalty=10.0,
-             halo_base=0.3, halo_coef=0.15, halo_weight=1.0,
-             edge_halo=1.0, edge_weight=1.0, grid_step=0.05)
+# The QuenchState floors; board_edge_clearance is the gate margin.
+KNOBS = dict(clearance=0.25, board_edge_clearance=0.55)
 MARGIN = KNOBS['board_edge_clearance']
+
+
+def _violation(st, ref, *pose):
+    """A pose's total illegality, board + overlap: 0.0 exactly when legal."""
+    return sum(st.violation_parts(ref, *pose))
 
 
 def _rect_edge(x1, y1, x2, y2, tag):
@@ -214,14 +216,14 @@ def test_quench_candidate_over_a_milled_slot_is_refused():
         pcb = parse_kicad_pcb(path)
         st = QuenchState(pcb, path, **KNOBS)
         check("fixture: SW17's seed pose is legal",
-              st.violation('SW17') == 0.0)
+              _violation(st, 'SW17') == 0.0)
         check("fixture: the candidate pose is inside the bbox inset",
               st.usable[0] <= SWALLOW[0] and st.usable[1] <= SWALLOW[1]
               and SWALLOW[2] <= st.usable[2] and SWALLOW[3] <= st.usable[3])
         check("candidate_valid refuses a pose swallowing the milled slot",
               not st.candidate_valid('SW17', 22.0, 20.0, 0.0))
         check("violation() scores that pose as illegal",
-              st.violation('SW17', 22.0, 20.0, 0.0) > 0.0)
+              _violation(st, 'SW17', 22.0, 20.0, 0.0) > 0.0)
         # ... and a genuinely clear pose is still accepted.
         check("a clear pose is still accepted",
               st.candidate_valid('SW17', 45.0, 20.0, 0.0))
@@ -339,8 +341,8 @@ def test_owner_is_legal_at_its_own_seed_pose():
         pcb = parse_kicad_pcb(path)
         st = QuenchState(pcb, path, **KNOBS)
         check("the ring owner is legal at its own hand-placed pose",
-              st.violation('J1') == 0.0)
-        check("...and the control part is too", st.violation('SW17') == 0.0)
+              _violation(st, 'J1') == 0.0)
+        check("...and the control part is too", _violation(st, 'SW17') == 0.0)
     finally:
         os.unlink(path)
 
@@ -355,7 +357,7 @@ def test_owner_is_not_walked_off_the_board_edge():
         st = QuenchState(pcb, path, **KNOBS)
         walk_x = 0.45 + 4.5          # courtyard half-width 4.5 -> x0 = 0.45
         check("a sub-clearance edge pose IS a violation",
-              st.violation('J1', walk_x, 20.0, 0.0) > 0.0)
+              _violation(st, 'J1', walk_x, 20.0, 0.0) > 0.0)
         check("candidate_valid refuses to walk the owner to the board edge",
               not st.candidate_valid('J1', walk_x, 20.0, 0.0))
     finally:

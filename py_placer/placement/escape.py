@@ -48,11 +48,6 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 FACES = ('north', 'east', 'south', 'west')
 
-#: This module's face names -> the letters `routability.face_lane_ledger`
-#: publishes (#850). ONE mapping, because the two ledgers name the same four
-#: faces differently and its rows are a published JSON schema
-#: (`check_channels --json`, key `ledgers`), so the letters stay.
-FACE_LETTER = {'north': 'N', 'east': 'E', 'south': 'S', 'west': 'W'}
 
 # A pad is "interior" when it is not on the part's own pad bounding box, i.e.
 # it has neighbours on every side and cannot leave sideways at any pitch.
@@ -103,9 +98,8 @@ class FaceLedger:
         """Lanes short. Positive means the face cannot pass its own nets.
 
         OWN-LAYER, and it stays that way. `deficit_floor` is the layer-aware
-        number; this one is what `health_escape_worst_deficit`, board_brief's
-        POSITION_DEPENDENT keys and `options.move_blocker`'s lanes-to-mm
-        conversion have always meant.
+        number; this one is what `health_escape_worst_deficit` and
+        board_brief's POSITION_DEPENDENT keys have always meant.
         """
         return max(0, self.demand - self.supply)
 
@@ -429,7 +423,7 @@ def fine_pitch_parts(pcb_data, min_pads: int = MIN_PADS,
     reporting tools pass the floors they resolved, so "fine" moves with the
     board's own track and clearance instead of only with two absolute
     pitches. Through-hole parts stay out either way (their pins are on every
-    layer; `pin_rows` reports what they do to other nets' crossings).
+    layer; `pin_rows.is_through_hole_part`).
 
     The same test the routing skill spells out inline for the fanout decision,
     lifted here so it has one definition rather than a copy in prose. Raw pad
@@ -553,7 +547,7 @@ def via_pitch(pcb_data, pcb_file: Optional[str] = None,
             import list_nets
             # The caller may already have read them -- `escape_ledger` does,
             # for the lane pitch. A second read per ledger is ~12ms against a
-            # ~46ms ledger, on a path `portfolio` grades once per candidate.
+            # ~46ms ledger.
             dr = (design_rules if design_rules is not None
                   else list_nets.read_design_rules(path))
             for key, val in want.items():
@@ -578,8 +572,7 @@ def signal_layer_count(pcb_data, *, signal_layers: Optional[int] = None,
 
     Precedence, most authoritative first:
 
-      ``declared_count``   an explicit ``signal_layers=``. The only channel
-                           `options.add_layers` can use, since it is asking
+      ``declared_count``   an explicit ``signal_layers=``, for a question
                            about a stackup this board does not have yet.
       ``declared_planes``  caller-named plane layers, spelled the way
                            ``health.ignore_net_ids`` is.
@@ -617,9 +610,7 @@ def signal_layer_count(pcb_data, *, signal_layers: Optional[int] = None,
 
     The part's OWN layer is always counted, plane or not, because `supply`
     already measures that layer directly; this only decides how many OTHERS
-    exist. Never returns None: `tests/test_board_brief.py` fails on any
-    undeclared None leaf, with a message about position dependence that reads
-    as unrelated.
+    exist. Never returns None.
     """
     cu = [l for l in (getattr(getattr(pcb_data, 'board_info', None),
                               'copper_layers', None) or [])
@@ -814,17 +805,17 @@ def face_of(pad, rect, pitch, pad_box=None,
     a new error, and `interior_pads` is provably NON-INCREASING against the
     rule before it.
 
-    Replacing the box test instead was measured and is worse. `tol` is not
-    noise: it is the depth below which the corridor's straight-shadow model
-    does not apply, because a track leaving a pad turns before it has
-    travelled that far. Drop it and orangecrab_ext_pll U10 and
-    rp2350_fpga_eensy_prePlane U4 each GAIN an interior pad -- both a 0.325mm
-    part with 5 copper pads, whose central GND pad (0.58 x 0.58 at 45 degrees,
-    so an 0.8202mm axis-aligned extent, which is what this test measures) sits
-    0.0699mm from the copper box on west and east, plainly on the boundary,
-    and whose axis-aligned corridor is nevertheless closed by its flanking
-    pads once they are inflated by clearance. (That divergence is basis-dependent and invisible at clearance
-    0.09, where the two rules agree exactly; it appears at 0.20.)
+    The box test stays because `tol` is not noise: it is the depth below
+    which the corridor's straight-shadow model does not apply, because a
+    track leaving a pad turns before it has travelled that far. Without it
+    orangecrab_ext_pll U10 and rp2350_fpga_eensy_prePlane U4 would each read
+    an escaping pad as interior -- both a 0.325mm part with 5 copper pads,
+    whose central GND pad (0.58 x 0.58 at 45 degrees, so an 0.8202mm
+    axis-aligned extent, which is what this test measures) sits 0.0699mm from
+    the copper box on west and east, plainly on the boundary, and whose
+    axis-aligned corridor is nevertheless closed by its flanking pads once
+    they are inflated by clearance. (The two rules agree exactly at clearance
+    0.09; they part at 0.20.)
 
     Because the union only ADDS escapes, the corridor is consulted only for
     the pads the box half rejects. That is a PROOF, not an optimisation: when
@@ -1025,18 +1016,12 @@ def assign_faces(fp, geom, *, lane_mm, fallback_rect=None,
                  through_row: bool = False) -> FaceAssignment:
     """THE face rule: which face each of `fp`'s pads escapes through.
 
-    One function because the disagreement #850 names is not in `face_of`'s
-    arithmetic -- it is in what the caller PAIRS with it. Three copies of this
-    loop existed, and each paired differently:
-
-    * `part_escape` measured each pad's own copper box against
-      `CopperGeometry.copper`, with `max(pad_pitch/2, INTERIOR_EPS)` tolerance.
-    * `routability.face_lane_ledger` measured pad CENTRES against the
-      hole-inclusive `PartPads.extent`, with no tolerance and no interior
-      bucket -- so every netted pad was demand on some face, a BGA's inner
-      balls included.
-    * `tests/stress/demand_halo_study.py` carried a third, whose own docstring
-      called that "the defect #841 exists to remove".
+    One function because what matters is not `face_of`'s arithmetic but what
+    the caller PAIRS with it: each pad's own copper box against
+    `CopperGeometry.copper`, with `max(pad_pitch/2, INTERIOR_EPS)` tolerance
+    and an interior bucket -- not pad CENTRES against the hole-inclusive
+    `PartPads.extent`, which makes every netted pad demand on some face, a
+    BGA's inner balls included.
 
     Getting the pairing wrong is not a small error: measure a pad's CENTRE
     against a copper box and every pad moves half its own width inside the
@@ -1246,13 +1231,9 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
     more than fully blocked, and an over-100% total silently becomes "supply 0"
     rather than an error. The witness is ulx3s H4 south: TWO neighbours
     covering 6.16mm of a 5.50mm face -- summed that is supply 0, unioned it is
-    3.71mm and supply 4. (It used to be glasgow_revC's J1 east, nine
-    neighbours covering 12.42mm of a 9.64mm face. Once both ledgers charge pad
-    COPPER rather than the courtyard or the bbox of pad centres (#841), that
-    face is supply 8 either way and glasgow has no discriminating face left;
-    `tests/test_835_escape_side_aware.py` records the re-scan. Note also that
-    `face_lane_ledger`'s `eaten_by` is truncated to the top 8 for display, so
-    counting THAT list undercounts the obstruction -- ask this function.)
+    3.71mm and supply 4. (Note that `face_lane_ledger`'s `eaten_by` is
+    truncated to the top 8 for display, so counting THAT list undercounts the
+    obstruction -- ask this function.)
 
     Corpus-wide over the git-tracked boards, at the pad-copper rect: 60 of the
     388 faces the ESCAPE ledger reports have neighbours covering the same
@@ -1267,9 +1248,8 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
     the union stands: every interval is already clipped to [lo, hi] as it is
     built, so their union is a subset of [lo, hi] and cannot measure more than
     `hi - lo`. It is kept because it is the guard that binds the moment the
-    union is removed, and a mutation that drops it is recorded as an expected
-    survivor rather than deleted (`tests/mutate_834_835.py`). Do not read it as
-    the thing that fixed the 12.42-on-9.64 number; the union is.
+    union is removed; the union is what measures overlapping neighbours
+    once.
     """
     intervals: List[Tuple[float, float, str]] = []
     for ref, (oxmin, oymin, oxmax, oymax) in obstacles:
@@ -1401,8 +1381,8 @@ def pad_band(rect, face, pad_box):
     wider than its pad is routine (it necks down at the joint); this model
     says no. Measured on ulx3s U1, whose balls are 0.4mm wide, at clearance
     0.2: the corridor frees 71 balls at every track width up to and including
-    0.400, and 0 at 0.401. `check_channels` floors the track UP to the fab
-    floor, which can only move toward that edge. Widening the strip to admit
+    0.400, and 0 at 0.401. `check_channels` (since retired) floored the track
+    UP to the fab floor, which can only move toward that edge. Widening the strip to admit
     a necked track is a real change and would need its own evidence -- the
     measured alternatives (a pitch-wide window, a zero threshold) both break
     `qfn_interior_pads`, so it is not a one-line relaxation.
@@ -1449,12 +1429,12 @@ class EscapeBand(NamedTuple):
     `source` is the term that decided: 'caller' (an explicit override),
     'lanes' (`lanes * lane_mm`), or 'floor'. An exact tie reports 'lanes',
     because a floor equal to the scaled term decides nothing -- which is not a
-    pedantic distinction: at the basis `tests/test_run8_starved_face_gate.py`
-    uses (track 0.127, clearance 0.09, grid 0.05) the quantized pitch is 0.25
+    pedantic distinction: at track 0.127, clearance 0.09 and grid 0.05 the
+    quantized pitch is 0.25
     and `4 * pitch` is exactly 1.0, so the floor TIES there and does not bind,
     while at the basis the shipped CLI resolves for the same board (track
     0.0889, grid 0.1) the pitch is 0.20, `4 * pitch` is 0.80, and it DOES.
-    Same band, two different reasons, and #847 is about only one of them.
+    Same band, two different reasons.
     """
     mm: float
     source: str          # 'caller' | 'lanes' | 'floor'
@@ -1734,20 +1714,6 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                       through_row_pads=through)
 
 
-def board_rule_fine_parts(pcb_data, pcb_file: Optional[str] = None,
-                          track_width: Optional[float] = None,
-                          clearance: Optional[float] = None) -> List[str]:
-    """`escape_ledger(..., fine_at_board_rules=True)`'s population, without
-    the ledger (#1196): fine by pitch or at the rules resolved from these
-    arguments. A caller that ledgers one board at SEVERAL clearances resolves
-    this once and passes it as `refs`, so every rung grades the same parts --
-    otherwise a tighter rung ledgers fewer parts and reads as a gain."""
-    tw, clr, dr = lane_pitch_parts(pcb_data, pcb_file, track_width, clearance,
-                                   return_rules=True)
-    vpitch = via_pitch(pcb_data, pcb_file, clearance=clr, design_rules=dr)
-    return fine_pitch_parts(pcb_data, rules=(tw, clr, vpitch))
-
-
 def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
                   pcb_file: Optional[str] = None,
                   track_width: Optional[float] = None,
@@ -1766,9 +1732,9 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
     `fine_at_board_rules` (#1196): with no `refs`, ALSO ledger every part
     that is fine at the track, clearance and via pitch resolved here
     (`fine_by_rules`), not only those fine by the two absolute pitches. The
-    reporting tools pass it (`check_capacity`'s options, `check_floorplan
-    --health`); the default keeps the population every other caller and
-    every recorded measurement of this ledger was taken on.
+    reporting tool passes it (`check_floorplan --health`, through
+    `routability.health`); the default keeps the population every other
+    caller and every recorded measurement of this ledger was taken on.
 
     Returns [] on a board with no fine-pitch parts, which is the common case
     and is not a failure -- there is simply no escape question to ask.
@@ -1816,39 +1782,3 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
     # `deficit_floor` is not necessarily first, and can be truncated away.
     out.sort(key=lambda p: (-(p.worst.deficit if p.worst else 0), p.ref))
     return out
-
-
-def format_text(ledgers: Sequence[PartEscape], limit: int = 5) -> str:
-    """The ledger as the table a human reads before blaming the router."""
-    if not ledgers:
-        return "escape lanes: no fine-pitch parts on this board"
-    lines = []
-    short = [p for p in ledgers if p.worst]
-    lines.append(f"escape lanes ({len(ledgers)} fine-pitch part(s), "
-                 f"{len(short)} with a face in deficit):")
-    for p in ledgers[:limit]:
-        flag = (f"  DEFICIT {p.worst.deficit} lane(s) on {p.worst.face}"
-                if p.worst else "  ok")
-        lines.append(f"  {p.ref} (pitch {p.pitch_mm:.2f}mm){flag}")
-        for f in p.faces:
-            if f.demand == 0 and f.supply == 0:
-                continue
-            mark = '!!' if f.deficit else '  '
-            who = (f"; blocked {f.blocked_mm:.1f}mm by "
-                   f"{', '.join(f.blockers[:3])}" if f.blockers else "")
-            lines.append(f"   {mark} {f.face:<6} supply {f.supply:>3} / "
-                         f"demand {f.demand:<3} "
-                         f"(span {f.span_mm:.1f}mm @ {f.lane_pitch_mm:.3f}mm"
-                         f"{who})")
-        if p.interior_pads:
-            lines.append(f"      {p.interior_pads} interior pad(s) escape "
-                         f"through NO face -- that is a fanout question, not a "
-                         f"lane one")
-        if p.through_row_pads:
-            lines.append(f"      {p.through_row_pads} through-hole pin(s) "
-                         f"inside the outer rows count on their nearest face: "
-                         f"on every layer already, they need a lane between "
-                         f"the outer pins, not a via")
-    if len(ledgers) > limit:
-        lines.append(f"  ... {len(ledgers) - limit} more")
-    return '\n'.join(lines)

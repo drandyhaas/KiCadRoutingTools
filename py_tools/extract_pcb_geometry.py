@@ -3,14 +3,14 @@
 Extract KiCad PCB geometry into a simple JSON format.
 
 Usage:
-    python extract_pcb_geometry.py input.kicad_pcb [output.json]
-    python extract_pcb_geometry.py input.kicad_pcb --summary
-    python extract_pcb_geometry.py input.kicad_pcb --nets "pattern"
+    python3 py_tools/extract_pcb_geometry.py input.kicad_pcb [output.json]
+    python3 py_tools/extract_pcb_geometry.py input.kicad_pcb --summary
+    python3 py_tools/extract_pcb_geometry.py input.kicad_pcb --nets "pattern"
 
 Examples:
-    python extract_pcb_geometry.py board.kicad_pcb geometry.json
-    python extract_pcb_geometry.py board.kicad_pcb --summary
-    python extract_pcb_geometry.py board.kicad_pcb --nets "*lvds*" --output lvds.json
+    python3 py_tools/extract_pcb_geometry.py board.kicad_pcb geometry.json
+    python3 py_tools/extract_pcb_geometry.py board.kicad_pcb --summary
+    python3 py_tools/extract_pcb_geometry.py board.kicad_pcb --nets "*lvds*" --output lvds.json
 """
 
 from __future__ import annotations

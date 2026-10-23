@@ -3476,15 +3476,16 @@ def apply_meanders_to_diff_pair(
         if bump_count == 0:
             continue
 
-        from diff_pair_routing import create_parallel_path_from_float, _float_path_to_geometry, _calculate_parallel_extension, _process_via_positions
+        from diff_pair_routing import create_parallel_path_from_float, _float_path_to_geometry, _calculate_parallel_extension, _process_via_positions, layer_pair_spacing
 
-        # Unified path: always regenerate full P/N paths from modified centerline
+        # Unified path: always regenerate full P/N paths from modified centerline,
+        # at each layer's own pitch (the router's builders do the same).
         p_float_path = create_parallel_path_from_float(
-            new_centerline_float, sign=p_sign, spacing_mm=spacing_mm,
+            new_centerline_float, sign=p_sign, spacing_mm=layer_pair_spacing(config),
             start_dir=start_stub_dir, end_dir=end_stub_dir
         )
         n_float_path = create_parallel_path_from_float(
-            new_centerline_float, sign=n_sign, spacing_mm=spacing_mm,
+            new_centerline_float, sign=n_sign, spacing_mm=layer_pair_spacing(config),
             start_dir=start_stub_dir, end_dir=end_stub_dir
         )
 
@@ -3537,6 +3538,7 @@ def apply_meanders_to_diff_pair(
                                for x, y, layer in new_centerline_float]
 
         # Recreate GND vias for multi-layer routes
+        gnd_not_placed = []
         if not is_single_layer and config.gnd_via_enabled:
             from diff_pair_routing import _create_gnd_vias
             gnd_net_id = result.get('gnd_net_id')
@@ -3544,7 +3546,11 @@ def apply_meanders_to_diff_pair(
             gnd_vias = _create_gnd_vias(
                 new_centerline_grid, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs,
                 pair_net_ids=(p_net_id, n_net_id), pair_segs=p_segs + n_segs,
-                pcb_data=pcb_data
+                pcb_data=pcb_data,
+                # the pair's current route is still on the board: these replace it
+                ignore_vias=result.get('new_vias') or (),
+                ignore_segments=result.get('new_segments') or (),
+                pair_vias=p_vias_new + n_vias_new, not_placed=gnd_not_placed
             )
             new_vias.extend(gnd_vias)
 
@@ -3564,6 +3570,8 @@ def apply_meanders_to_diff_pair(
         modified_result = dict(result)
         modified_result['new_segments'] = new_segments
         modified_result['new_vias'] = new_vias
+        # The GND vias were re-created above (or dropped with the old route).
+        modified_result['gnd_vias_not_placed'] = gnd_not_placed
         modified_result['p_routed_length'] = p_routed_length
         modified_result['n_routed_length'] = n_routed_length
         modified_result['centerline_length'] = avg_routed_length  # Use actual routed length
@@ -3791,6 +3799,34 @@ def apply_intra_pair_length_matching(
     p_length = p_routed_length + p_stub_length + p_die
     n_length = n_routed_length + n_stub_length + n_die
 
+    # #1303: measure the legs on the BOARD's copper. The routing result is
+    # not always the copper that ships: a hybrid escape or a seam re-ask
+    # returns a result with no stub lengths at all, so on imx6ulz DQS0 the
+    # sums above read P 12.00 < N 13.08 and the meander went on P, while the
+    # board had P 21.31 > N 16.82 -- skew 4.51 -> 5.20 mm. The pair's copper
+    # is on the board by now (each route is committed as it is found), so
+    # net_signal_length reads what the cleanup will leave of it. The result
+    # sums stay the fallback while a member's pads are not joined.
+    _board = None
+    if pcb_data is not None:
+        from net_queries import net_signal_length
+        _bp = net_signal_length(pcb_data, p_net_id)
+        _bn = net_signal_length(pcb_data, n_net_id)
+        if _bp is not None and _bn is not None:
+            _board = (_bp, _bn)
+    if _board is not None:
+        print(f"    P/N intra-pair: board copper P={_board[0]:.3f}mm, "
+              f"N={_board[1]:.3f}mm (the routing result read P={p_length:.3f}, "
+              f"N={n_length:.3f})")
+        # Each leg's offset is then everything the board has beyond the
+        # result's own copper: stubs, pad-to-die, the copper of other legs.
+        p_stub_length = _board[0] - p_routed_length - p_die
+        n_stub_length = _board[1] - n_routed_length - n_die
+        p_length, n_length = _board
+    else:
+        print("    P/N intra-pair: pads not joined by track copper yet -- "
+              "matching on the routing result's own lengths")
+
     # Debug: show length breakdown
     if config.verbose:
         from net_queries import calculate_via_barrel_length
@@ -3889,6 +3925,7 @@ def apply_intra_pair_length_matching(
 
     # Update result
     result['new_segments'] = new_segments
+    _splice_into_legs(result, shorter_segments, meandered_segments, all_segments)
     # Stored without the pad-to-die term, exactly as before #1248.
     if shorter_net_id == p_net_id:
         result['p_routed_length'] = new_shorter_length - shorter_die
@@ -3926,6 +3963,95 @@ def _board_pair_lengths(pcb_data, p_net_id, n_net_id):
             + net_pad_to_die_length(pcb_data, p_net_id),
             calculate_route_length(segs_n, vias_n, pcb_data)
             + net_pad_to_die_length(pcb_data, n_net_id))
+
+
+def _splice_into_legs(result, old_segments, new_segments, all_segments):
+    """#1303: fold an intra-pair meander back into a multipoint pair's LEG
+    dicts.
+
+    A multipoint pair's routed_results entry is a merged bookkeeping dict; the
+    write list carries its per-leg dicts (#369 A2, `leg_results`). Group
+    matching splices its meanders into the legs (#520); intra-pair matching
+    rewrote only the merged list, so pcb_data took the meander while the
+    writer emitted the leg's original straight run beside it. On imx6ulz
+    CLK0 the file then held both -- the straight 3.9 mm run shorting the bump
+    out -- and KICAD_BOARD_LEDGER reported the net diverged. The leg that held
+    the replaced copper takes the meander; the merged list is rebuilt from
+    the legs plus whatever it carries beyond them."""
+    legs = result.get('leg_results') if result.get('is_multipoint') else None
+    if not legs:
+        return
+    old_ids = {id(s) for s in old_segments}
+    new_ids = {id(s) for s in new_segments}
+    removed = old_ids - new_ids
+    added = [s for s in new_segments if id(s) not in old_ids]
+    if not removed and not added:
+        return
+    leg_ids = {id(s) for lr in legs for s in lr.get('new_segments') or []}
+    extra = [s for s in all_segments if id(s) not in leg_ids and id(s) not in removed]
+    host = max(legs, key=lambda lr: sum(1 for s in lr.get('new_segments') or []
+                                        if id(s) in removed))
+    for lr in legs:
+        segs = [s for s in lr.get('new_segments') or [] if id(s) not in removed]
+        if lr is host:
+            segs += added
+        lr['new_segments'] = segs
+    result['new_segments'] = [s for lr in legs for s in lr['new_segments']] + extra
+
+
+def regrade_intra_pair_reports(reports, pair_copper, pcb_data, diff_pair_ids,
+                               tolerance):
+    """Decide each intra-pair record's status from the SHIPPED copper (#1303).
+
+    `run_intra_pair_matching` reports what the matcher believed: its own
+    result dict's segments plus the stub lengths recorded at routing time.
+    After a seam re-ask that is not the copper that ships -- imx6ulz DQS0 read
+    P 12.00 < N 13.08 there, was meandered on P, and shipped P 21.33 > N 16.82
+    -- so a 'matched' printed off it can sit on a 4.5 mm skew. This rewrites
+    each record in place, once the board is final:
+
+      delta_mm         the shipped P/N skew, KiCad's measure
+                       (`net_queries.diff_pair_skew`), or None when a member's
+                       pads are not joined by track copper
+      matcher_status   / matcher_delta_mm: what the matcher reported
+      status           'matched' (inside `tolerance`, the matcher meandered),
+                       'within-tolerance' (inside, nothing meandered),
+                       'unmatched' (over it; `reason` keeps the matcher's own
+                       when it had one, else 'copper-skew-over-tolerance', or
+                       'not-measured' when the skew cannot be read).
+                       'not-matchable' and 'skipped' keep their status and
+                       take the shipped skew as delta_mm.
+
+    `delta_before_mm` stays the matcher's estimate before it meandered: the
+    shipped copper before the meander no longer exists to measure.
+    `pair_copper` is `diff_pair_custody.measure_pair_copper`'s records; a
+    pair without one (no coupled result) is measured here."""
+    from net_queries import diff_pair_skew
+    by_name = dict(diff_pair_ids)
+    for rec in reports:
+        cop = (pair_copper or {}).get(rec['pair'])
+        if cop is not None:
+            skew = cop.get('skew_mm')
+        else:
+            pair = by_name.get(rec['pair'])
+            skew = (diff_pair_skew(pcb_data, pair.p_net_id, pair.n_net_id)['skew_mm']
+                    if pair is not None else None)
+        rec['matcher_status'] = rec.get('status')
+        rec['matcher_delta_mm'] = rec.get('delta_mm')
+        rec['delta_mm'] = None if skew is None else round(skew, 4)
+        st = rec.get('status')
+        if st in ('not-matchable', 'skipped'):
+            continue
+        if skew is None:
+            rec['status'], rec['reason'] = 'unmatched', 'not-measured'
+        elif skew <= tolerance + 1e-9:
+            rec['status'] = 'matched' if st in ('matched', 'improved') else 'within-tolerance'
+            rec['reason'] = None
+        else:
+            rec['status'] = 'unmatched'
+            if st in ('matched', 'within-tolerance') or not rec.get('reason'):
+                rec['reason'] = 'copper-skew-over-tolerance'
+    return reports
 
 
 def run_intra_pair_matching(diff_pair_ids, routed_results, config, pcb_data,

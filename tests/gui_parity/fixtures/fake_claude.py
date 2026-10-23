@@ -3,12 +3,13 @@
 
 Receives the EXACT argv ClaudeBackend.build_cmd produced (the test prepends
 this script to it), asserts the placement-run contract (write-capable
-allowlist, --add-dir, a /pcb-free-agent prompt), then plays a canned run:
-stream-json init + a milestone `converge.py record` tool line, a lap board +
-ledger row (left to sit long enough for the monitor's size-stable artifact
-scan to render a preview; the row is what the tab's stage line shows now that
-there is no staged driver), then REPORT.md, a movie, final.kicad_pcb, and a
-terminal result event ending with a valid RESULT= line.
+allowlist, --add-dir, a /plan-pcb-placement prompt), then plays a canned run:
+stream-json init, seed 0 in the skill's layout (s0.kicad_pcb + s0.json,
+the fast-routed s0_fast.kicad_pcb and its s0_fast.score.json),
+a milestone `converge.py record` tool line + ledger row, left to sit long
+enough for the monitor to fill the candidates table and render the row's
+preview, then REPORT.md, final.kicad_pcb (the kept seed), and a terminal
+result event ending with a valid RESULT= line.
 """
 import json
 import os
@@ -43,8 +44,8 @@ def main():
             sys.stderr.write(f"fake_claude: {tool} missing from allowlist: {allowed}\n")
             return 2
     if ("input.kicad_pcb" not in prompt or "--no-delegate" in prompt
-            or "/pcb-free-agent " not in prompt):
-        # Both tab modes run the free-agent skill on the board staged into
+            or "/plan-pcb-placement " not in prompt):
+        # Both tab modes run the placement skill on the board staged into
         # the workdir; no retired loop-driver flag.
         sys.stderr.write(f"fake_claude: unexpected prompt: {prompt[:200]}\n")
         return 2
@@ -59,38 +60,48 @@ def main():
 
     emit({"type": "system", "subtype": "init", "model": "fake-model",
           "claude_code_version": "0.0-test", "cwd": workdir,
-          "skills": ["pcb-free-agent"]})
+          "skills": ["plan-pcb-placement"]})
+    # Seed 0, in the skill's run layout (SKILL.md section 2).
+    emit({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash",
+         "input": {"description": "Place seed 0",
+                   "command": "python3 -X utf8 py_placer/place_simple.py "
+                              "fixed.kicad_pcb s0.kicad_pcb --seed 0 "
+                              "--json s0.json"}}]}})
+    shutil.copyfile(staged, os.path.join(workdir, "s0.kicad_pcb"))
+    with open(os.path.join(workdir, "s0.json"), "w") as f:
+        json.dump({"final": {"cost": 1.0}, "illegal": []}, f)
+    shutil.copyfile(staged, os.path.join(workdir, "s0_fast.kicad_pcb"))
+    with open(os.path.join(workdir, "s0_fast.score.json"), "w") as f:
+        json.dump({"blocking": 0, "quality": {
+            "vias": 12, "copper_mm": 345.6, "segments": 210}}, f)
+
     # Both keys, like real Claude Code events. The skill records each
     # milestone in the converge ledger, and the ledger row written below is
-    # what the tab's stage line derives from.
+    # the stage line's last milestone.
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Bash",
          "input": {"description": "Record the milestone board",
                    "command": "python3 -X utf8 py_placer/converge.py record "
-                              "--ledger ledger.jsonl --board lap1.kicad_pcb "
+                              "--ledger ledger.jsonl --board s0.kicad_pcb "
                               "--kind quench --lever nudge"}}]}})
 
-    # A lap board + a ledger row appear mid-run; then sit quietly long enough
-    # for the monitor (1 s ticks, artifact scan every 2nd tick, two same-size
-    # scans required) to notice and render a preview frame.
-    shutil.copyfile(staged, os.path.join(workdir, "lap1.kicad_pcb"))
+    # Then sit quietly long enough for the monitor (1 s ticks, candidates
+    # rescanned every 2nd tick) to fill the table and render the preview.
     with open(os.path.join(workdir, "ledger.jsonl"), "a") as f:
         f.write(json.dumps({"iteration": 1, "kind": "quench",
                             "lever": "nudge"}) + "\n")
     emit({"type": "assistant", "message": {"content": [
-        {"type": "text", "text": "Lap 1 recorded."}]}})
+        {"type": "text", "text": "Seed 0 recorded."}]}})
     time.sleep(8)
 
     with open(os.path.join(workdir, "REPORT.md"), "w") as f:
         f.write("# Fake placement report\n\nblocking 0 -> 0 (canned).\n")
-    with open(os.path.join(workdir, "placement.gif"), "wb") as f:
-        f.write(b"GIF89a\x01\x00\x01\x00\x00\x00\x00;")
     final = os.path.join(workdir, "final.kicad_pcb")
-    shutil.copyfile(staged, final)
+    shutil.copyfile(os.path.join(workdir, "s0.kicad_pcb"), final)   # the kept seed
 
     result = json.dumps({
         "status": "complete", "board": final.replace("\\", "/"),
-        "movie": os.path.join(workdir, "placement.gif").replace("\\", "/"),
         "report": os.path.join(workdir, "REPORT.md").replace("\\", "/"),
         "blocking": 0, "summary": "canned run"})
     emit({"type": "result", "is_error": False,

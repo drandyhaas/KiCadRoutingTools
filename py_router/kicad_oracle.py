@@ -53,10 +53,10 @@ ORACLE_DRC_TIMEOUT = 240
 # the issue's own reading of the situation was the opposite of the truth.
 #
 # The issue says a single slow DRC "disables the KiCad oracle for the rest of
-# the run". It did not: the memo's ONLY read sat behind `env_knobs.LEGACY_ORACLE`
-# (KICAD_LEGACY_ORACLE, default off and set by nothing in this repo), so the
-# set was written and never consulted. The live defect was the INVERSE -- the
-# 240 s was re-paid on every round of every oracle leg, which is the pathology
+# the run". It did not: the memo's ONLY read sat behind an escape hatch that
+# was off by default and set by nothing in this repo, so the set was written
+# and never consulted. The live defect was the INVERSE -- the 240 s was
+# re-paid on every round of every oracle leg, which is the pathology
 # the memo had been added to stop. (repair_planes:2316 records the compound
 # form: a repair that cancelled cleanly at 45 s then sat in a KiCad child until
 # an external kill.)
@@ -414,14 +414,18 @@ def _net_track_components(pcb_data, net_id):
 
 def _component_points(segs, vias, comp_of_seg, comp_of_via, root,
                       max_pts: int = 40):
-    """Sample (x, y, layer) / (x, y) points across one component."""
+    """Sample (x, y, layer) / (x, y) points across one component.
+
+    Never on a protected sense branch's member copper (#1279): the branch
+    is part of the component (it carries the connectivity), but a link that
+    attaches to it off the join pad taps the sense trace."""
     pts = []
     for i, s in enumerate(segs):
-        if comp_of_seg[i] == root:
+        if comp_of_seg[i] == root and not getattr(s, 'sense', ''):
             pts.append((s.start_x, s.start_y, s.layer))
             pts.append((s.end_x, s.end_y, s.layer))
     for j, v in enumerate(vias):
-        if comp_of_via[j] == root:
+        if comp_of_via[j] == root and not getattr(v, 'sense', ''):
             pts.append((v.x, v.y))  # via: all layers
     if len(pts) > max_pts:
         stride = len(pts) // max_pts + 1
@@ -508,9 +512,12 @@ def _pad_cluster_rung(pcb_data, net_id, x, y, layer, comps, tol):
                 return comp_of_via[j], []
 
     # Bare pad group (no tracked copper): its centers stand in for its
-    # copper extent -- still better than the single reported nib.
+    # copper extent -- still better than the single reported nib. A sense
+    # pad is never one of them (#1279, as in _component_points).
     pts = []
     for p in group:
+        if getattr(p, 'sense', ''):
+            continue
         if p.drill > 0 or '*.Cu' in p.layers:
             pts.append((p.global_x, p.global_y))  # spans all layers
         else:
@@ -1052,6 +1059,8 @@ def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     comp_len = defaultdict(float)
     comp_segs = defaultdict(list)
     for i, s in enumerate(segs):
+        if getattr(s, 'sense', ''):
+            continue  # #1279: sense copper connects, it is never a target
         root = uf.find(2 * i)
         comp_len[root] += math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
         comp_segs[root].append(s)
@@ -1071,8 +1080,9 @@ def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
 def _via_abuts_graphic(vias_, segs) -> bool:
     """True if any of `vias_` overlaps a same-net GRAPHIC in `segs` (#337 art).
 
-    Graphics do not conduct in our connectivity graph (#513) but ARE copper to
-    KiCad, so a barrel touching one is joined to the net through it. Every
+    Graphics ARE copper to KiCad (and to our connectivity graph since it
+    conducts through board art), so a barrel touching one is joined to the
+    net through it. Every
     debris deleter has to honour this or it removes a real connection: the
     segment-based guards test `any(seg.graphic)` over the cluster, which is
     vacuous for a cluster that has no segments. No layer test -- a barrel
@@ -1282,25 +1292,34 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
         return samples_cache[idx]
 
     def _containing(x, y, prefer):
-        best = None
+        """(island index, contained) for an anchor, or (None, False).
+
+        An anchor on a NAMED layer is copper on that layer only, so only
+        that layer's islands can hold it. Falling through to any layer that
+        covers the point (the inner planes cover nearly everything) named
+        two parts of the PRIMARY cluster as the link's sides, and their
+        nearest approach is wherever their outlines coincide -- the board
+        edge: on one board's GND, a carved-off BGA ball was 'strapped' at
+        an In1<->F.Cu point 30 mm away, zero copper, every round.
+        A via or barrel end (None, '*.Cu') is on every layer it spans."""
+        named = prefer is not None and '*' not in str(prefer) \
+            and '&' not in str(prefer)
         for i, (layer, poly) in enumerate(islands):
+            if named and layer != prefer:
+                continue
             if point_in_poly(x, y, poly):
-                if layer == prefer:
-                    return i
-                if best is None:
-                    best = i
-        if best is not None:
-            return best
-        # Edge quantization: the ratsnest anchor can sit ON the island
-        # boundary; take the island whose edge passes within 1mm, nearest
-        # first, preferring the anchor's layer.
+                return i, True
+        # Edge quantization: the anchor can sit ON the island boundary;
+        # take the island whose edge passes within 1mm, nearest first.
         cand = []
         for i, (layer, poly) in enumerate(islands):
+            if named and layer != prefer:
+                continue
             d = min((_m.hypot(px - x, py - y)
                      for px, py, _ in _samples(i)), default=float('inf'))
             if d <= 1.0:
-                cand.append((0 if layer == prefer else 1, d, i))
-        return min(cand)[2] if cand else None
+                cand.append((d, i))
+        return (min(cand)[1], False) if cand else (None, False)
 
     same_pt = abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6
 
@@ -1377,12 +1396,21 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
                 if _lay_best is not None and _lay_best[0] <= 3.0:
                     _pref_pair = (_lay_best[1], _lay_best[2])
 
-    ia = _containing(ax, ay, al) if a_pts is None else None
-    ib = None if (same_pt or a_pts is not None) else _containing(bx, by, bl)
+    ia, ina = _containing(ax, ay, al) if a_pts is None else (None, False)
+    ib, inb = (None, False) if (same_pt or a_pts is not None) \
+        else _containing(bx, by, bl)
+    if not same_pt and ia is not None and ia == ib:
+        if ina and inb:
+            return None  # both ends inside ONE exact island: flicker class
+        # One end only lies NEAR the island the other end is in: that end
+        # is not on it (a pad whose own fill was carved away sits beside
+        # the main pour), so it seeds from its own point.
+        if not ina:
+            ia = None
+        else:
+            ib = None
     if a_pts is None and ia is None and ib is None:
         return None
-    if not same_pt and ia is not None and ia == ib:
-        return None  # both ends inside ONE exact island: flicker class
 
     # (x, y, layer, origin_island_or_None) point lists per side.
     if a_pts is not None:
@@ -1613,30 +1641,54 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
             for px, py in pts:
                 if _pt_pad_dist(px, py, pad) < need:
                     return None
+    # #1279: the net's own protected sense branch is foreign copper off its
+    # join pad; a weld never lands on or crosses it.
+    from sense_branch import terminal_sense_dist
+    if terminal_sense_dist(pcb_data, net_id, x1, y1, x2, y2, layer, w / 2.0) \
+            < reach + config.layer_clearance(layer, config.obstacle_clearance(net_id)):
+        return None
     return Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
                    width=w, layer=layer, net_id=net_id)
 
 
 def _weld_touches_endpoints(segs, vias, x0, y0, x1, y1,
-                            tol: float = 1.0) -> bool:
+                            tol: float = 1.0, layers=(None, None)) -> bool:
     """#648 sharpening of the #570 guard: the rescue was handed EXACT gap
     endpoints (strict), so its copper must actually REACH both. Copper
     merely inside the corridor box can be an unrelated fragment join -- the
     rescue's own component model credited three In3 debris segments ~2.8mm
     from either endpoint of an F.Cu zone link, three rounds running, while
     KiCad re-reported the identical link. `tol` is deliberately loose (the
-    rescue may walk an endpoint to an adjacent legal cell)."""
-    def _near(x, y):
+    rescue may walk an endpoint to an adjacent legal cell).
+
+    ...but never across layers. `layers` are the two ends' layers as the
+    link names them: an end on a named layer is reached only by copper ON
+    that layer (a segment there, or a via whose span covers it); None or
+    '*.Cu' (a via, a plated barrel) is reached on any layer. The scoped
+    rescue is layer-blind, and a GND capacitor's B.Cu pad was
+    credited, two rounds running, with a 0.28mm In1.Cu piece lying on the
+    net's existing In1 copper: xy within tol of both ends, joining nothing."""
+    from geometry_utils import via_on_layer
+
+    def _any_layer(lay):
+        return lay is None or '*' in str(lay) or '&' in str(lay)
+
+    def _near(x, y, lay):
         for s in segs:
+            if not _any_layer(lay) and s.layer != lay:
+                continue
             from geometry_utils import point_to_segment_distance as _p2s
             if _p2s(x, y, s.start_x, s.start_y, s.end_x, s.end_y) \
                     <= s.width / 2.0 + tol:
                 return True
         for v in vias:
+            if not _any_layer(lay) and not via_on_layer(v, lay):
+                continue
             if math.hypot(v.x - x, v.y - y) <= v.size / 2.0 + tol:
                 return True
         return False
-    return bool(segs or vias) and _near(x0, y0) and _near(x1, y1)
+    l0, l1 = layers
+    return bool(segs or vias) and _near(x0, y0, l0) and _near(x1, y1, l1)
 
 
 def _copper_in_corridor(segs, vias, x0, y0, x1, y1, pad: float = 3.0) -> bool:
@@ -1654,6 +1706,38 @@ def _copper_in_corridor(segs, vias, x0, y0, x1, y1, pad: float = 3.0) -> bool:
         if not (bx0 <= v.x <= bx1 and by0 <= v.y <= by1):
             return False
     return True
+
+
+def _weld_joins_seeds(segs, vias, src, tgt, tol: float = 0.06) -> bool:
+    """True when a weld routed BETWEEN two seed sets (the oracle's exact-fill
+    clusters, `(x, y[, layer])`) reaches a seed of each side on that seed's
+    layer. The seeded escalation's copper starts and ends on seeds by
+    construction; this is the check that it did, where the anchor-distance
+    test (_weld_touches_endpoints) does not apply -- a seeded route may meet
+    an island anywhere along its facing edge, not only at the nearest-
+    approach anchors."""
+    from geometry_utils import point_to_segment_distance as _p2s, via_on_layer
+
+    def _any(lay):
+        return lay is None or '*' in str(lay)
+
+    def _reaches(pts):
+        for p in pts or ():
+            x, y = p[0], p[1]
+            lay = p[2] if len(p) > 2 else None
+            for s in segs:
+                if not _any(lay) and s.layer != lay:
+                    continue
+                if _p2s(x, y, s.start_x, s.start_y, s.end_x, s.end_y) \
+                        <= s.width / 2.0 + tol:
+                    return True
+            for v in vias:
+                if not _any(lay) and not via_on_layer(v, lay):
+                    continue
+                if math.hypot(v.x - x, v.y - y) <= v.size / 2.0 + tol:
+                    return True
+        return False
+    return bool(segs or vias) and _reaches(src) and _reaches(tgt)
 
 
 def _via_drill_radius(via, fallback: float) -> float:
@@ -1850,6 +1934,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     from kicad_writer import generate_segment_sexpr, generate_via_sexpr
     from plane_region_connector import (build_base_obstacles,
                                         route_plane_connection_wide)
+    from sense_branch import join_link_end
 
     # CALL-SCOPED timeout memo (#713 item 3). One set per oracle_reconnect,
     # shared by every kicad_unconnected this call makes -- the union demand
@@ -1860,34 +1945,9 @@ def oracle_reconnect(board_file: str, net_names, config,
     # whatever ran before it in this process.
     _timed_out = set()
     kicad_cli = find_kicad_cli()
-    # Bail iff NOTHING could serve as a link source. The ladder is
-    # exact-fill (pcbnew; tried unless LEGACY_ORACLE) -> kicad-cli -> raster
-    # (opt-in), so kicad-cli being absent only matters when it is the ONLY
-    # rung left.
-    if (kicad_cli is None and env_knobs.LEGACY_ORACLE
-            and not env_knobs.RASTER_ORACLE):
-        # Only bail when kicad-cli really is the only source we could use
-        # (audit finding 7). The DEFAULT source is exact_unconnected ->
-        # pcbnew's ZONE_FILLER, which does not need kicad-cli at all, so this
-        # early return used to throw away a working leg on any machine whose
-        # kicad-cli sits outside the three hard-coded candidates -- a custom
-        # build, nix, an AppImage. Measured: with find_kicad_cli patched to
-        # None, exact_unconnected still returned 2 links on daisho while
-        # oracle_reconnect reported available=False.
-        print("  KiCad-oracle recheck: kicad-cli not found and no other "
-              "source is enabled, skipping")
-        # `reason` (#713 item 3): `available: False` was a bare bool, and the
-        # ONE caller that printed anything about it (repair_planes) blamed
-        # "kicad-cli not found" for every cause. A verdict the run did not get
-        # must say why it did not get it.
-        return {'available': False, 'reason': 'no_link_source',
-                'why': 'kicad-cli not found and no other source is enabled',
-                'rounds': 0, 'links_routed': 0,
-                'links_failed': 0, 'remaining': -1}
-
     # The cross-call skip that used to sit here is gone (#713 item 3). It read
-    # a module-global behind `env_knobs.LEGACY_ORACLE`, which nothing sets, so
-    # it never fired -- while `_fill_cost_key(board_file)`, its LEFT operand,
+    # a module-global behind an escape hatch that nothing set, so it never
+    # fired -- while `_fill_cost_key(board_file)`, its LEFT operand,
     # parsed the whole board on EVERY call to decide a membership test that
     # could not matter. What it was reaching for is now `_timed_out` below:
     # call-scoped, always live, and unable to carry a verdict between boards.
@@ -1915,6 +1975,33 @@ def oracle_reconnect(board_file: str, net_names, config,
     # carry either away. A field-for-field copy, so a board with no map
     # routes exactly as before.
     config = replace(config)
+    # The caller's drill-to-drill floor is the hole_to_hole_clearance argument
+    # (every caller passes its run's); the configs the callers build carry the
+    # dataclass's 0.20, and the oracle's #649b stitching via and its rescue
+    # escalation (net_rescue reads config.hole_to_hole_clearance) priced holes
+    # at that instead.
+    if hole_to_hole_clearance and hole_to_hole_clearance > 0:
+        config.hole_to_hole_clearance = hole_to_hole_clearance
+    # The board's copper-to-HOLE floor (#617/#1038), resolved once from the
+    # REAL project. Every NPTH check of this leg -- the link maps' track and
+    # via keep-outs (build_base_obstacles), the width upgrade, #1169's leg
+    # widening and the emission gate (wide_route_clear), the seed filter
+    # (npth_floor_ok) -- asks resolve_hole_clearance(pcb_data, config), which
+    # reads the project beside pcb_data.source_path. The board parsed below is
+    # `board_file`: the CLI finalize's half-written output, which has no
+    # project beside it yet, or the GUI's staged save. Both read as declaring
+    # nothing, so the leg held tracks only at the flat 0.20 fab floor and laid
+    # no via keep-out at all (neo6502: a 0.4 GND leg 0.21 mm off USB-PWR1's
+    # NPTH wall against the declared 0.25). An explicit config.hole_clearance
+    # wins, as it does in the resolver.
+    if not (getattr(config, 'hole_clearance', 0.0) or 0.0) > 0:
+        try:
+            from obstacle_map import resolve_hole_clearance
+            _hc = resolve_hole_clearance(None, config, project_from or board_file)
+            if _hc > 0:
+                config.hole_clearance = _hc
+        except Exception:                                   # noqa: BLE001
+            pass
     _ncl_by_name = dict(net_clearances_by_name or {})
     _bad_fields = set(net_widths_by_name or {}) - set(ORACLE_WIDTH_MAPS)
     if _bad_fields:
@@ -2019,8 +2106,7 @@ def oracle_reconnect(board_file: str, net_names, config,
             # (this leg is the longest in the chain) after the wrong process.
             progress_callback(0, 0,
                               f"KiCad-oracle: finding missing links via "
-                              f"{'kicad-cli DRC' if env_knobs.LEGACY_ORACLE else 'KiCad zone refill'} "
-                              f"(round {rnd + 1})...")
+                              f"KiCad zone refill (round {rnd + 1})...")
         links = None
         # DETERMINISTIC link source (#490): kicad-cli DRC's threaded
         # connectivity reported three different link sets on one unchanged
@@ -2028,21 +2114,20 @@ def oracle_reconnect(board_file: str, net_names, config,
         # orangecrab's repair graded 103/65/92 across identical-input runs.
         # pcbnew's ZONE_FILLER is measured-deterministic -- exact_unconnected
         # clusters its fill truth reproducibly and anchors each link at the
-        # true nearest approach. KICAD_LEGACY_ORACLE=1 restores kicad-cli.
+        # true nearest approach.
         _links_from_exact = False
-        if not env_knobs.LEGACY_ORACLE:
-            try:
-                from kicad_exact_fill import exact_unconnected
-                links = exact_unconnected(board_file, names,
-                                          project_from=project_from)
-                _links_from_exact = links is not None
-                if links is not None and rnd == 0:
-                    print("  KiCad-oracle recheck: deterministic exact-fill "
-                          "link source (pcbnew refill)")
-            except Exception as _xe:
-                print(f"  (exact link source failed: {_xe}; falling back "
-                      f"to kicad-cli)")
-                links = None
+        try:
+            from kicad_exact_fill import exact_unconnected
+            links = exact_unconnected(board_file, names,
+                                      project_from=project_from)
+            _links_from_exact = links is not None
+            if links is not None and rnd == 0:
+                print("  KiCad-oracle recheck: deterministic exact-fill "
+                      "link source (pcbnew refill)")
+        except Exception as _xe:
+            print(f"  (exact link source failed: {_xe}; falling back "
+                  f"to kicad-cli)")
+            links = None
         # SOURCE UNION (#648): kicad-cli DRC is the DEMAND gate, the exact
         # source the deterministic GEOMETRY. Measured divergences, one in
         # each direction: (a) blindness -- the island-derived source saw 6
@@ -2180,29 +2265,28 @@ def oracle_reconnect(board_file: str, net_names, config,
         def _exact_islands_map():
             if not _exact_cache['fetched']:
                 _exact_cache['fetched'] = True
-                if not env_knobs.NO_EXACT_FILL:
-                    try:
-                        from kicad_exact_fill import refill_islands
-                        print("  KiCad-oracle recheck: fetching exact fill "
-                              "islands (pcbnew refill)...")
-                        # A whole-board pcbnew refill: seconds to minutes on a
-                        # dense board, and it used to run with no status of its
-                        # own (the caller's last per-link label stayed frozen
-                        # on screen for its whole duration).
-                        if progress_callback:
-                            progress_callback(
-                                0, 0, "KiCad-oracle: refilling zones for "
-                                      "exact fill islands...")
-                        _exact_cache['islands'] = refill_islands(
-                            board_file, verbose=verbose)
-                        if _exact_cache['islands'] is not None:
-                            _ni = sum(len(v) for v in
-                                      _exact_cache['islands'].values())
-                            print(f"    exact fill: {_ni} island(s) across "
-                                  f"{len(_exact_cache['islands'])} "
-                                  f"zone-layer(s)")
-                    except Exception as _xe:
-                        print(f"    (exact fill unavailable: {_xe})")
+                try:
+                    from kicad_exact_fill import refill_islands
+                    print("  KiCad-oracle recheck: fetching exact fill "
+                          "islands (pcbnew refill)...")
+                    # A whole-board pcbnew refill: seconds to minutes on a
+                    # dense board, and it used to run with no status of its
+                    # own (the caller's last per-link label stayed frozen
+                    # on screen for its whole duration).
+                    if progress_callback:
+                        progress_callback(
+                            0, 0, "KiCad-oracle: refilling zones for "
+                                  "exact fill islands...")
+                    _exact_cache['islands'] = refill_islands(
+                        board_file, verbose=verbose)
+                    if _exact_cache['islands'] is not None:
+                        _ni = sum(len(v) for v in
+                                  _exact_cache['islands'].values())
+                        print(f"    exact fill: {_ni} island(s) across "
+                              f"{len(_exact_cache['islands'])} "
+                              f"zone-layer(s)")
+                except Exception as _xe:
+                    print(f"    (exact fill unavailable: {_xe})")
             return _exact_cache['islands']
         with open(board_file, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -2253,6 +2337,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                                                  bl_, config.clearance,
                                                  cache=_snap_cache)
                     B = (bx_, by_, bl_, bk_)
+            if nid is not None:
+                # #1279: an end on a protected sense branch off its join pad
+                # lands on the join pad (KiCad's ratsnest and the exact
+                # source's nearest approach do not know the rule).
+                A, B = (join_link_end(pcb_data, nid, A),
+                        join_link_end(pcb_data, nid, B))
             _snapped.append((net_name, A, B))
         del _snap_cache
         ours = sorted(_snapped,
@@ -2490,10 +2580,16 @@ def oracle_reconnect(board_file: str, net_names, config,
                     # #1137: the round's re-keyed class map (None when there
                     # is none), so the escalation's own obstacle map prices
                     # foreign nets at their class too
+                    # Seeded (#572 follow-up): route the exact clusters'
+                    # own seeds to each other, on their layers. The gap
+                    # derivation saw only the net's tracks/pads/vias near
+                    # the gap -- never the fill a plane link must reach --
+                    # and joined whatever lay there on any layer (on one
+                    # board, 17 B.Cu GND segments for an F.Cu ball island).
                     _esc2, _esc2_cfg = _attempt_edge(
                         pcb_data, net_id, _gap2, config,
                         config.net_clearances or None,
-                        strict_endpoints=True)
+                        strict_endpoints=True, endpoints=(_esrc, _etgt))
                 except Exception:
                     _esc2 = None
                 if _esc2 and not _esc2.get('failed'):
@@ -2508,17 +2604,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                               f"net, #658)")
                         _esc2 = None
                 if _esc2 and not _esc2.get('failed') \
-                        and (not _copper_in_corridor(
+                        and not _weld_joins_seeds(
                             _esc2.get('new_segments') or [],
-                            _esc2.get('new_vias') or [],
-                            _pa[0], _pa[1], _pb[0], _pb[1])
-                            or not _weld_touches_endpoints(
-                            _esc2.get('new_segments') or [],
-                            _esc2.get('new_vias') or [],
-                            _pa[0], _pa[1], _pb[0], _pb[1])):
+                            _esc2.get('new_vias') or [], _esrc, _etgt):
                     print(f"    {net_name}: exact-fill strap REJECTED "
-                          f"(emitted copper outside the link corridor -- "
-                          f"#570/#648 false-claim guard)")
+                          f"(its copper does not reach both exact clusters "
+                          f"on their layers -- #570/#648 false-claim guard)")
                     _esc2 = None
                 if _esc2 and not _esc2.get('failed'):
                     _e2segs = _esc2.get('new_segments') or []
@@ -2538,9 +2629,10 @@ def oracle_reconnect(board_file: str, net_names, config,
                     for _v in _e2vias:
                         new_sexprs.append(generate_via_sexpr(
                             _v.x, _v.y, _v.size, _v.drill,
-                            [routing_layers[0], routing_layers[-1]], net_id,
+                            ['F.Cu', 'B.Cu'], net_id,
                             net_name=net_name if v10 else None,
-                            tenting_attrs=_new_via_attrs))
+                            tenting_attrs=_new_via_attrs,
+                            via_type=_v.via_type))
                         pcb_data.vias.append(_v)
                         emitted_vias.append(_v)
                     print(f"    {net_name}: exact-fill strap OK (escalated: "
@@ -2609,7 +2701,8 @@ def oracle_reconnect(board_file: str, net_names, config,
             if bkind == 'main':
                 tgt = _largest_track_component_points(pcb_data, net_id)
                 if not tgt:
-                    for p in pcb_data.pads_by_net.get(net_id, []):
+                    from connectivity import routable as _routable1279
+                    for p in _routable1279(pcb_data.pads_by_net.get(net_id, [])):
                         cu = [l for l in p.layers if l.endswith('.Cu')]
                         if p.drill > 0 or '*.Cu' in p.layers:
                             tgt.append((p.global_x, p.global_y, routing_layers[0]))
@@ -2822,15 +2915,26 @@ def oracle_reconnect(board_file: str, net_names, config,
                     from net_rescue import _attempt_edge
                     _gap = (math.hypot(bx - ax, by - ay), ax, ay, bx, by)
                     # #1137: the round's re-keyed class map (see above)
+                    # Cluster mode already holds the exact clusters' seeds:
+                    # route them to each other (see the exact tier).
                     _esc, _esc_cfg = _attempt_edge(
                         pcb_data, net_id, _gap, config,
                         config.net_clearances or None,
-                        strict_endpoints=True)
+                        strict_endpoints=True,
+                        endpoints=(src, tgt) if _cluster_link else None)
                 except Exception as _ee:
                     if verbose:
                         print(f"    (weld escalation unavailable: {_ee})")
                     _esc = None
-                if _esc and not _esc.get('failed') \
+                if _cluster_link and _esc and not _esc.get('failed') \
+                        and not _weld_joins_seeds(
+                            _esc.get('new_segments') or [],
+                            _esc.get('new_vias') or [], src, tgt):
+                    print(f"    {net_name}: weld escalation REJECTED "
+                          f"(its copper does not reach both exact clusters "
+                          f"on their layers -- #570/#648 false-claim guard)")
+                    _esc = None
+                if not _cluster_link and _esc and not _esc.get('failed') \
                         and not _copper_in_corridor(
                             _esc.get('new_segments') or [],
                             _esc.get('new_vias') or [], ax, ay, bx, by):
@@ -2838,13 +2942,14 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"(emitted copper outside the link corridor -- "
                           f"#570 false-claim guard)")
                     _esc = None
-                if _esc and not _esc.get('failed') \
+                if not _cluster_link and _esc and not _esc.get('failed') \
                         and not _weld_touches_endpoints(
                             _esc.get('new_segments') or [],
-                            _esc.get('new_vias') or [], ax, ay, bx, by):
+                            _esc.get('new_vias') or [], ax, ay, bx, by,
+                            layers=(al, bl)):
                     print(f"    {net_name}: weld escalation REJECTED "
                           f"(copper reaches neither/only one gap endpoint "
-                          f"-- unrelated fragment join, #648)")
+                          f"on its layer -- unrelated fragment join, #648)")
                     _esc = None
                 # #658: the rescue's scoped fine router has no layer-cost
                 # plumbing, so a FORBIDDEN layer (cost -1, e.g. power
@@ -2969,8 +3074,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                                 'new_vias': [_Via649(
                                     x=_vx, y=_vy, size=config.via_size,
                                     drill=config.via_drill,
-                                    layers=[routing_layers[0],
-                                            routing_layers[-1]],
+                                    layers=['F.Cu', 'B.Cu'],
                                     net_id=net_id)]}
                         _esc_cfg = config
                         print(f"    {net_name}: stitching via placed at "
@@ -3023,9 +3127,10 @@ def oracle_reconnect(board_file: str, net_names, config,
                     for _v in _evias:
                         new_sexprs.append(generate_via_sexpr(
                             _v.x, _v.y, _v.size, _v.drill,
-                            [routing_layers[0], routing_layers[-1]], net_id,
+                            ['F.Cu', 'B.Cu'], net_id,
                             net_name=net_name if v10 else None,
-                            tenting_attrs=_new_via_attrs))
+                            tenting_attrs=_new_via_attrs,
+                            via_type=_v.via_type))
                         pcb_data.vias.append(_v)
                         emitted_vias.append(_v)
                     print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
@@ -3248,6 +3353,19 @@ def oracle_reconnect(board_file: str, net_names, config,
             # #1169: wide where the net's own width fits, narrow at the pinch.
             _legs = widen_link_legs(route_points, used_width, pcb_data,
                                     net_id, config)
+            if not (_legs or _extra_conn or via_positions):
+                # Nothing to write: the path only changed layer at an existing
+                # barrel, or its points coincide (the exact tier's nearest
+                # approach can be one point). KiCad has just reported these
+                # clusters apart, so no-copper is no weld -- the #572 false-
+                # weld fingerprint (a GND link reported "OK 0 seg(s),
+                # 0 via(s)" and credited every round, link still open).
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},"
+                      f"{by:.2f})  FAILED (the path lays no copper -- a "
+                      f"zero-copper weld cannot join clusters KiCad reports "
+                      f"apart, #572)")
+                failed += 1
+                continue
             for x1, y1, x2, y2, l1, _lw in _legs:
                 new_sexprs.append(generate_segment_sexpr(
                     (x1, y1), (x2, y2), _lw, l1, net_id,
@@ -3266,9 +3384,10 @@ def oracle_reconnect(board_file: str, net_names, config,
             for vx, vy in via_positions:
                 new_sexprs.append(generate_via_sexpr(
                     vx, vy, used_via_size, used_via_drill,
-                    [routing_layers[0], routing_layers[-1]], net_id,
+                    ['F.Cu', 'B.Cu'], net_id,
                     net_name=net_name if v10 else None,
-                    tenting_attrs=_new_via_attrs))
+                    tenting_attrs=_new_via_attrs,
+                    via_type=None))   # a via the oracle adds: through
             if via_positions and used_via_size < config.via_size - 1e-9:
                 # #1170: a smaller via is a descent, disclosed in
                 # design_rules like every other site's.
@@ -3291,7 +3410,7 @@ def oracle_reconnect(board_file: str, net_names, config,
             for vx, vy in via_positions:
                 _vobj = _Via(x=vx, y=vy, size=used_via_size,
                              drill=used_via_drill,
-                             layers=[routing_layers[0], routing_layers[-1]],
+                             layers=['F.Cu', 'B.Cu'],
                              net_id=net_id)
                 pcb_data.vias.append(_vobj)
                 emitted_vias.append(_vobj)
@@ -3336,13 +3455,12 @@ def oracle_reconnect(board_file: str, net_names, config,
     else:
         # ran all rounds; get the final count (same source as the rounds)
         links = None
-        if not env_knobs.LEGACY_ORACLE:
-            try:
-                from kicad_exact_fill import exact_unconnected
-                links = exact_unconnected(board_file, names,
-                                          project_from=project_from)
-            except Exception:
-                links = None
+        try:
+            from kicad_exact_fill import exact_unconnected
+            links = exact_unconnected(board_file, names,
+                                      project_from=project_from)
+        except Exception:
+            links = None
         if links is None:
             links = kicad_unconnected(board_file, kicad_cli,
                                        timed_out=_timed_out)

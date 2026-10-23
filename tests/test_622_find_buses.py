@@ -14,7 +14,8 @@ both parts the whole route does not admit. On tracked boards this pins:
 3. ulx3s: U1 -> U2 (an SDRAM in a TSOP) not taken -- no bus taken;
 4. a pair is laid whole or not at all: a leg whose partner is on a third part as well is refused, both legs of a
    point-to-point pair kept, and a base name that is a net of its own is no pair; a net whose name's last part is
-   another net's too is refused (the whole route names a net by it);
+   another net's too is refused (the whole route names a net by it); the K-ladder keeps a pair's two legs in one
+   river, so no prefix K runs a leg alone;
 5. a board with no bus: route_buses hands the board on as it came, exit 1, the summary saying none was found.
 """
 import contextlib
@@ -88,6 +89,27 @@ def main():
     got = rb.name_clashes(pcb, ['ENABLE', '/X'])
     if sorted(got) != ['ENABLE'] or 'TEST/ENABLE' not in got['ENABLE']:
         fails.append(f'name clashes {got}, want ENABLE alone, naming TEST/ENABLE')
+    # ...and the K-ladder keeps a pair's two legs in one river, the earlier leg's, side by side (make_bench.pairs_whole):
+    # a prefix K that took one leg ran it alone, as a single (the zynq LVDS bus's RX_D3_N in its second river, RX_D3_P in
+    # its fourth); a river a leg leaves empty goes
+    import make_bench as mb
+    got = mb.pairs_whole([['X', 'RX_D3_N', 'Y'], ['Z'], ['RX_D3_P', 'W'], ['V_P'], ['V_N'], ['Q_N', 'Q_P']])
+    want = [['X', 'RX_D3_N', 'RX_D3_P', 'Y'], ['Z'], ['W'], ['V_P', 'V_N'], ['Q_N', 'Q_P']]
+    if got != want:
+        fails.append(f'ladder rivers {got}, want {want}')
+    # ...side by side within one river too (the escape ladder's TX_D3_P TX_D4_P TX_D5_P TX_D3_N TX_D4_N TX_D5_N)...
+    got = mb.pairs_whole([['TX_D3_P', 'TX_D4_P', 'S', 'TX_D3_N', 'TX_D4_N']])
+    want = [['TX_D3_P', 'TX_D3_N', 'TX_D4_P', 'TX_D4_N', 'S']]
+    if got != want:
+        fails.append(f'ladder river {got}, want {want}')
+    # ...and a prefix K never cuts a pair: the leg whose other leg lies beyond K is left out (coherent_nets.whole_pairs),
+    # a single at the cut kept, and a K that cuts nothing is the plain prefix
+    from coherent_nets import whole_pairs
+    flat = ['A', 'TX_D1_N', 'TX_D1_P', 'TX_D3_P', 'TX_D3_N', 'B', 'TX_D4_P', 'TX_D4_N']
+    for k_, want in ((4, ['A', 'TX_D1_N', 'TX_D1_P']), (6, flat[:6]), (7, flat[:6]), (8, flat), (20, flat)):
+        got = whole_pairs(flat, k_)
+        if got != want:
+            fails.append(f'whole_pairs K={k_}: {got}, want {want}')
     # 5
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(BOARDS, 'qfn_interior_pads.kicad_pcb')
@@ -108,8 +130,8 @@ def main():
     if fails:
         return 1
     print('PASS: ball arrays told from row parts; the DDR3 bus taken, its resistor-pack nets and the connector left '
-          'named; a TSOP at one end not taken; a pair whole or not at all; a clashing name refused; no bus, the board as '
-          'it came')
+          'named; a TSOP at one end not taken; a pair whole or not at all, and in one river of the ladder; a clashing '
+          'name refused; no bus, the board as it came')
     return 0
 
 

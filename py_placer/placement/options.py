@@ -1,26 +1,16 @@
-"""When a board cannot hold its parts, say so WITH THE NUMBER and the options.
+"""When a board cannot hold its parts, say so WITH THE NUMBER.
 
-The prohibition this serves is written down in six places -- docs/floorplan-
-intent.md:29-40, floorplan.py:14-19, check_floorplan.py:19-24,
-rule_envelope:692, and both placement skills -- and every one of them says the
-same sentence:
+`grow_board` measures the board's area utilisation per face and what outline
+would hold the parts; `floorplan`'s overfull and crowded rules read it. A board
+that is genuinely too small is reported with the measured number, so the
+person reading it knows what to change.
 
-    the honest response to a board that is genuinely too small is to say so
-    with the measured number and stop
+`out_of_board_area` is not that number: a part sitting inside a cutout scores
+0.0 area, which is why `floorplan` disqualifies it as a budget key.
 
-The number was never computed. `out_of_board_area` is the nearest quantity and
-`floorplan.py:347-360` explicitly DISQUALIFIES it as a budget key, because a
-part sitting inside a cutout scores 0.0 area. Nothing sums a required area,
-nothing re-runs a lane ledger at another layer count, and nothing converts a
-face deficit into the millimetres of span that would clear it. So a run that
-hits a genuinely too-small board can only stop, and the person reading it has
-to go and measure by hand what to change.
-
-THIS REPORTS; IT NEVER REFUSES AND NEVER ACTS. That is the house pattern from
-the retired `placement_driver._guard_congestion` -- "ok is False ONLY when the
-evidence is missing; the numbers themselves never refuse... The executor
-decides" -- and from `lock_advisor`, which prints a paste-ready `--lock` and
-locks nothing, because a wrong auto-action fails invisibly.
+THIS REPORTS; IT NEVER REFUSES AND NEVER ACTS: `ran` is False only when the
+evidence is missing, and the numbers themselves never refuse. A wrong
+auto-action fails invisibly.
 
 Nothing here writes Edge.Cuts or a stackup. The only two things in the tree
 that write an outline stay `kicad_writer.strip_zero_length_edge_cuts` and the
@@ -29,7 +19,7 @@ corpus tool `fix_outline_gaps.py`. This proposes with a number, exactly as
 option... Do not modify the board file directly -- stackup is a fab-facing
 decision the user must own."
 
-Every option carries the house shape:
+`grow_board` returns the house shape:
 
     ran        bool -- False means NOT MEASURED, never "fine"
     reason     why it did not run
@@ -40,7 +30,7 @@ Every option carries the house shape:
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Mapping, Optional
 
 # A board packed tighter than this by courtyard area is worth remarking on even
 # when every part currently fits: the parts have to be ROUTED between, and the
@@ -138,9 +128,10 @@ def hosts_the_design(ref, gx0, gy0, gx1, gy1, fp, footprints) -> bool:
     return len(spots) >= max(4, 0.5 * len(hosted))
 
 
-#: Public since #709: the pocket census excludes the same frames from its
-#: area-weighted centroid, and `board_brief` records the repo's rule that an
-#: artifact must not sit behind a private cross-module name. The old spelling
+#: Public since #709: the pocket census (`check_pockets`, since retired)
+#: excluded the same frames from its area-weighted centroid, and
+#: `board_brief` records the repo's rule that an artifact must not sit behind
+#: a private cross-module name. The old spelling
 #: stays so nothing in-tree has to change in the same commit.
 _hosts_the_design = hosts_the_design
 
@@ -153,12 +144,12 @@ _hosts_the_design = hosts_the_design
 #: swept three candidate currencies over the tracked corpus and its
 #: pre-registered rule selected this one. `legality.rect_on` is the only place
 #: in the tree where the far-face rect is DECIDED rather than sidestepped, and
-#: it answers the drilled-pad rect; `check_pockets.courtyard_cover` charges the
-#: whole courtyard, but it answers a per-window COVER question where summing
-#: never arises, so it is not a competing answer to this one. The measurement's
-#: falsifier: charging the whole courtyard makes flat_hierarchy's far charge
-#: equal its near charge part-for-part (64 of 64 pad-bearing parts drilled),
-#: which is the same area counted twice.
+#: it answers the drilled-pad rect; `check_pockets.courtyard_cover` (since
+#: retired) charged the whole courtyard, but it answered a per-window COVER
+#: question where summing never arises, so it was not a competing answer.
+#: The measurement's falsifier: charging the whole courtyard makes
+#: flat_hierarchy's far charge equal its near charge part-for-part (64 of 64
+#: pad-bearing parts drilled), which is the same area counted twice.
 FAR_FACE_BASIS = ('the drilled-pad rect, the same rect legality.rect_on '
                   'presents on the far side')
 
@@ -185,7 +176,8 @@ def _far_face_area(fp, clearance: float) -> float:
 
 def grow_board(pcb_data, pcb_file: str, *, clearance: float,
                board_edge_clearance: float,
-               assembly_sides: Optional[str] = None) -> Dict:
+               assembly_sides: Optional[str] = None,
+               side_overrides: Optional[Mapping[str, str]] = None) -> Dict:
     """Does the total part area fit inside the outline, and by how much not?
 
     This is the number the prohibition asks for and nobody computes. It is
@@ -214,6 +206,13 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
     back-side area. It moves the 7 that do not, and flips the verdict on the
     two whose sum exceeds their usable area (orangecrab_ext_pll 0.92 -> 1.25,
     ulx3s 0.90 -> 1.34).
+
+    `side_overrides` is the plan-check projection of the declared faces
+    (`floorplan.declared_side_claims`). A plan is checked before its
+    placement exists,
+    so its necessary area bound must charge a member to the face the plan
+    requires rather than to the generator pile's incidental current layer.
+    Ordinary option callers omit it and continue to measure the board as-is.
     """
     from placement.parser import extract_courtyard_bboxes
     bi = pcb_data.board_info
@@ -291,7 +290,9 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
         # board's footprints are on F.Cu or B.Cu -- and the point is that it
         # stays inert. Same helper the census, the rule and every other
         # per-side instrument in the tree read.
-        layer = 'B.Cu' if footprint_side(fp) == 'B' else 'F.Cu'
+        planned_side = ((side_overrides or {}).get(ref)
+                        or footprint_side(fp))
+        layer = 'B.Cu' if planned_side == 'B' else 'F.Cu'
         per_side[layer] = per_side.get(layer, 0.0) + a
         # #878. `layer` again rather than a second `footprint_side` call: ONE
         # side decision per part, so the near and far charges cannot land on
@@ -304,11 +305,9 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
             far_area += far
             far_parts += 1
         # NOT the far charge: `biggest` feeds `largest_parts_mm2`, which
-        # `smaller_footprint` ranks to answer "which part is big enough that
-        # its SIZE is the constraint". That is a question about a part's own
-        # body, so adding its leads' far-face area would charge the same part
-        # twice into a ranking, and move a report this change has no business
-        # moving.
+        # answers "which part is big enough that its SIZE is the constraint".
+        # That is a question about a part's own body, so adding its leads'
+        # far-face area would charge the same part twice.
         biggest.append((round(a, 2), ref))
     biggest.sort(reverse=True)
 
@@ -373,18 +372,12 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
             'busiest_side_area_mm2': round(busiest, 2),
             'far_face_area_mm2': round(far_area, 2),
             'far_face_parts': far_parts,
-            # A STRING deliberately, so `_digest` skips it (its `else:
-            # continue`) and it can never take a slot in the text channel.
-            # The human channel for the basis is `not_modelled`, which
-            # `format_text` prints at option level -- the same split #837 made
-            # between the `charged_area_is_sum` bool and the prose.
+            # The human channel for the basis is `not_modelled`, at option
+            # level -- the same split #837 made between the
+            # `charged_area_is_sum` bool and the prose.
             'far_face_basis': FAR_FACE_BASIS,
             # #837: the area `utilisation` is ACTUALLY computed from, and a
-            # BOOL saying which rule produced it. The bool is not a stylistic
-            # choice -- `_digest` skips string values before it reaches the
-            # forced-key list (see its `else: continue`), so a string basis
-            # label can never appear in the text channel at all, and the text
-            # channel is the one a human reads.
+            # BOOL saying which rule produced it.
             'charged_area_mm2': round(charged, 2),
             'charged_area_is_sum': one_face,
             'assembly_sides_declared': assembly_sides,
@@ -402,17 +395,16 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
             'parts_without_geometry': no_geometry,
             'largest_parts_mm2': biggest[:5],
         },
-        # AT OPTION LEVEL, which is where `format_text` reads it (`_digest`
-        # never sees it, and inside `measured` it printed nowhere). Every
-        # other option puts it here for the same reason.
+        # AT OPTION LEVEL, beside `action`: inside `measured` it would read
+        # as one more number.
         #
         # #878, and what is left after it. A through-hole part's leads ARE now
         # charged on the far face, at `FAR_FACE_BASIS` -- the drilled-pad rect,
         # the model `legality.rect_on` already enforces for the placement
-        # search. What remains not-modelled is the DISAGREEMENT: the other
-        # per-face instrument, `check_pockets.courtyard_cover`, charges the
-        # whole courtyard on both faces instead, and the two still differ by
-        # that amount. (The issue's own table also named
+        # search. The other per-face instrument #878 named,
+        # `check_pockets.courtyard_cover`, charged the whole courtyard on both
+        # faces instead; it has since been retired, so that disagreement is
+        # gone. (The issue's own table also named
         # `floorplan.rule_keepout` as a third model; it is not one -- it uses
         # `part.sides` only to BIND which keep-outs apply, then hands
         # `keepout_hit` both rects and takes a max, consulting no side.)
@@ -434,10 +426,8 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
             # two models "differ by that much" when they differ by nothing.
             ([] if not far_parts else
              [f'a through-hole part is charged {FAR_FACE_BASIS}, not its '
-              f'whole courtyard -- `check_pockets.courtyard_cover` charges '
-              f'the whole courtyard on both faces, and the two per-face '
-              f'models differ by that much (#878 charged the smaller one, '
-              f'which is the model the placement search itself enforces)'
+              f'whole courtyard (#878: the model the placement search '
+              f'itself enforces)'
               + (' -- and NONE of it reaches `utilisation` here, because a '
                  'declared one-face policy charges each part exactly once on '
                  'the face the fab populates, where the leads compete with '
@@ -506,658 +496,4 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
             f"the parts fit by area ({util:.0%} of usable) but leave little "
             f"room to route between them. Consider a larger outline or a "
             f"denser layer stack before blaming the placement.")
-    return out
-
-
-def add_layers(pcb_data, pcb_file: str, *, clearance: float,
-               track_width: Optional[float] = None,
-               step: int = 2) -> Dict:
-    """Would more copper layers clear the escape-lane deficits?
-
-    Two effects, and since #700 BOTH are measured -- the second as a bound
-    rather than as an answer:
-
-    * a finer FAB FLOOR at a higher layer count narrows the lane pitch, so a
-      face supplies more lanes. That is computable, and it is what this
-      reports -- `fab_tiers.fab_floor_min` already indexes on layer count and
-      `check_channels.py` ran exactly this experiment by hand at three
-      clearances (supply 29 -> 120 -> 242). Above 4 copper layers the table
-      has one rung, so the comparison is BLIND rather than negative, and
-      `fab_floor_layer_blind` says which.
-    * nets escaping on OTHER layers relieve a face. `deficit_all_layers_*` is
-      the lower bound on what survives that relief. It is NOT the answer to
-      "would the router take the escape", which still needs a routing attempt
-      -- see `not_modelled`.
-
-    Expect the two `deficit_all_layers_*` numbers to be EQUAL, and read
-    `escape_supply_bound` for why: the relief is bounded by the via slots
-    along a face, and that count does not depend on the layer stack (the
-    derivation is in `escape.FaceLedger.supply_bound`). A pair of identical
-    numbers with no stated reason would be #700's own complaint one level
-    down, so the reason is reported beside them.
-    """
-    from placement.escape import escape_ledger, lane_pitch  # noqa: F401
-    from placement.escape import board_rule_fine_parts
-    try:
-        from fab_tiers import (count_copper_layers_in_data,
-                               count_copper_layers_in_file, fab_floor_bucket,
-                               fab_floor_min)
-    except ImportError as e:
-        return _skip(f'fab_tiers unavailable: {e}')
-
-    # File first (it is what a saved board is), then the parsed board. The
-    # file counter returns 0 for an unsaved / in-memory board whose
-    # `board_info.copper_layers` is perfectly good, and this option SKIPPED
-    # on every one of those -- reporting "could not count" about a board whose
-    # layer list was in the argument it was handed.
-    n = count_copper_layers_in_file(pcb_file) or count_copper_layers_in_data(
-        pcb_data)
-    if not n:
-        return _skip('could not count this board\'s copper layers')
-    try:
-        now = fab_floor_min(n)
-        more = fab_floor_min(n + step)
-    except Exception as e:                       # noqa: BLE001
-        return _skip(f'no fab floor for {n} or {n + step} layers: {e}')
-
-    # WHY the two floors are the same, when they are. `same_floor` below says
-    # they match; only the bucket says whether that is a measurement or a
-    # modelling limit, and this option printed the first while meaning the
-    # second on every board above 2 copper layers (#700).
-    b_now, b_more = fab_floor_bucket(n), fab_floor_bucket(n + step)
-    layer_blind = (b_now.bucket == b_more.bucket)
-
-    # #1196: the parts, fixed ONCE at the board's own rules (fine by pitch or
-    # at its track/clearance), so every rung below grades the same parts and
-    # a tighter floor cannot read as a gain by ledgering fewer of them.
-    refs = board_rule_fine_parts(pcb_data, pcb_file, track_width, clearance)
-
-    def _deficit(clr, tw, layers=None, field='deficit'):
-        return deficit_totals(
-            escape_ledger(pcb_data, pcb_file=pcb_file, clearance=clr,
-                          track_width=tw, signal_layers=layers, refs=refs),
-            field=field)
-
-    # BOTH sides must be measured at their own fab floor, or the comparison
-    # is not about layers at all. Measuring "now" at the board's clearance
-    # and "more" at the n+2 fab floor reported 43 -> 12 lanes on a board
-    # where the two floors are IDENTICAL -- the whole apparent gain was the
-    # clearance change, credited to the layer count.
-    same_floor = (now.get('clearance') == more.get('clearance')
-                  and now.get('track_width') == more.get('track_width'))
-    try:
-        d_now = _deficit(now.get('clearance', clearance),
-                         now.get('track_width', track_width))
-        d_more = _deficit(more.get('clearance', clearance),
-                          more.get('track_width', track_width))
-        d_board = _deficit(clearance, track_width)
-        # #700 item 2: the effect this option used to name as NOT MODELLED --
-        # nets escaping on the new layers instead of through a face -- now has
-        # a bound. Both sides at the board's own clearance, so the only thing
-        # that moves between them is the layer count.
-        f_now = _deficit(clearance, track_width, layers=n,
-                         field='deficit_floor')
-        f_more = _deficit(clearance, track_width, layers=n + step,
-                          field='deficit_floor')
-        # WHICH term bounds the relief. Without this the two numbers above are
-        # equal with no stated reason, which is exactly #700's complaint one
-        # level down: a number that does not move with the layer count and
-        # does not say why.
-        _led = escape_ledger(pcb_data, pcb_file=pcb_file, clearance=clearance,
-                             track_width=track_width, signal_layers=n,
-                             refs=refs)
-        _bounds = [f.supply_bound for p in _led for f in p.faces if f.deficit]
-        _slots = [f.via_slots for p in _led for f in p.faces if f.deficit]
-    except Exception as e:                       # noqa: BLE001
-        return _skip(f'the escape ledger did not run: {type(e).__name__}: {e}')
-
-    if d_now['examined'] == 0:
-        return _skip('this board has no fine-pitch part, so there is no '
-                     'escape-lane question to answer')
-
-    out = {
-        'ran': True,
-        'measured': {
-            'copper_layers': n,
-            'floor_now': {k: now.get(k) for k in ('track_width', 'clearance')},
-            'floor_at_more': {k: more.get(k)
-                              for k in ('track_width', 'clearance')},
-            # `_now` means AT THIS BOARD'S CLEARANCE -- what the board is
-            # actually short of today. It used to mean "at the fab floor for
-            # this layer count", which reported tigard as 0 while
-            # move_blocker, in the same document, named 41 deficit lanes.
-            # Two different questions cannot share the word "now".
-            'deficit_lanes_now': d_board['lanes'],
-            'deficit_parts_now': d_board['parts'],
-            'deficit_lanes_at_fab_floor': d_now['lanes'],
-            'deficit_parts_at_fab_floor': d_now['parts'],
-            'deficit_lanes_at_more': d_more['lanes'],
-            'deficit_parts_at_more': d_more['parts'],
-            'deficit_lanes_at_board_clearance': d_board['lanes'],
-            'floors_differ': not same_floor,
-            'fine_pitch_parts': d_now['examined'],
-            # WHY the floors are the same, when they are. `floors_differ` is
-            # the observation; these say whether it is a fact about fabs or
-            # about this table. `fab_floor_layer_blind` is the headline and is
-            # forced into the text digest.
-            'fab_bucket_now': b_now.bucket,
-            'fab_bucket_at_more': b_more.bucket,
-            'fab_floor_layer_blind': layer_blind,
-            'fab_bucket_saturated': b_now.saturated,
-            'fab_buckets_modelled': list(b_now.buckets),
-            # #700 item 2. A LOWER bound on the deficit: lanes short even
-            # when every other signal layer is counted. Both at the board's
-            # own clearance, so the layer count is the only thing that moves.
-            # NOT `deficit_floor_*`: `deficit_lanes_at_fab_floor` sits three
-            # tokens away in this same digest line and means a JLC fab floor,
-            # while this is a lower bound with nothing to do with fabs. One
-            # line carrying "floor" in two senses is a misreading waiting to
-            # happen. (The per-face ledger key is `deficit_floor`, in a
-            # context where only one floor exists.)
-            'deficit_all_layers_lanes_now': f_now['lanes'],
-            'deficit_all_layers_lanes_at_more': f_more['lanes'],
-            'escape_supply_bound': (max(sorted(set(_bounds)), key=_bounds.count)
-                                    if _bounds else None),
-            'via_slots_min_on_a_short_face': min(_slots) if _slots else None,
-            # COPPER layers, and named so. `add_layers` asks about a stackup
-            # this board does not have, so it hands the ledger the copper
-            # count as the signal count -- which OVER-states on a poured
-            # board (kit-dev-coldfire: 4 copper layers, 1 signal). Safe for a
-            # LOWER bound, since more assumed layers can only shrink
-            # `deficit_floor`, but it is not the ledger's own `signal_layers`
-            # and must not borrow its name.
-            'copper_layers_assumed_signal_now': n,
-            'copper_layers_assumed_signal_at_more': n + step,
-        },
-        'expected': {'deficit_lanes': 0},
-        'not_modelled': (
-            # The escape-onto-other-layers effect is now BOUNDED, not
-            # unmodelled -- so this says what is left, which is whether the
-            # router would actually take that escape.
-            'whether a net that COULD escape on another layer actually does '
-            '-- that needs a routing attempt; the bound is '
-            'deficit_all_layers_lanes_*'
-            + ('' if not layer_blind else
-               f". AND, above {b_now.buckets[-1]} copper layers, any fab-floor "
-               f"difference at all -- fab_tiers models buckets "
-               f"{list(b_now.buckets)} and nothing finer")),
-    }
-    # The BRANCHES moved to the board clearance; the prose must move with
-    # them. Quoting d_now (the fab floor) inside a branch chosen by d_board
-    # reintroduces the same "two questions, one word" defect one level down:
-    # measured on esp_prog at clearance 0.6, the else-branch printed "0
-    # deficit lane(s) remain" while d_board['lanes'] was 1.
-    gain = d_now['lanes'] - d_more['lanes']
-    if layer_blind:
-        # NOT `same_floor`. The two coincide on today's table, but they are
-        # different claims: `same_floor` compares two dicts, while this asks
-        # whether the comparison was CAPABLE of differing. Saying "more layers
-        # buy NO extra lanes" off the first is how a 6-layer board 121 escape
-        # lanes short was told to stop asking (#700).
-        out['action'] = (
-            f"this comparison is STRUCTURALLY BLIND above {b_now.bucket} "
-            f"copper layers. fab_tiers models {len(b_now.buckets)} layer "
-            f"bucket(s) ({', '.join(str(x) for x in b_now.buckets)}); both {n} "
-            f"and {n + step} land in bucket {b_now.bucket}, so fab_floor_min "
-            f"returns the SAME dict "
-            f"({now.get('track_width')} / {now.get('clearance')} mm) for both "
-            f"and this option cannot see a difference between them. That is a "
-            f"limit of the table, NOT a measurement that more layers buy "
-            f"nothing: JLC publishes one multilayer capability column and this "
-            f"repo does not invent the rest. What more layers would actually "
-            f"buy is nets escaping on the new layers, and THAT is now "
-            f"bounded: {f_now['lanes']} lane(s) are short even if all {n} "
-            f"copper layers carried signal, and {f_more['lanes']} at "
-            f"{n + step}. EXPECT THOSE TWO TO BE EQUAL -- the relief is capped "
-            f"by the via slots along a face"
-            + (f", as few as {min(_slots)} on a face that is short"
-               if _slots else "")
-            + f", and that cap does not move with the stackup. Both are LOWER "
-            f"bounds: a drop to 0 does not mean the board routes, and a board "
-            f"whose inner layers are poured has fewer signal layers than this "
-            f"assumes.")
-    elif same_floor:
-        # Reachable only if a future table gains a bucket whose floors happen
-        # to match its neighbour's. Then "identical floors" IS the measurement.
-        out['action'] = (
-            f"the fab floor is identical at {n} and {n + step} copper layers "
-            f"({now.get('track_width')} / {now.get('clearance')} mm), so more "
-            f"layers buy NO extra lanes on a face. They would only help by "
-            f"letting nets escape on the new layers instead, which needs a "
-            f"routing attempt to measure.")
-    elif d_board['lanes'] == 0:
-        # Judged at the BOARD's clearance, not the fab floor. At the floor
-        # this read 0 on boards with 41 deficit lanes and printed the
-        # false-clean below.
-        out['action'] = ("no face is short of lanes at this board's "
-                         "clearance, so more layers would not fix an escape "
-                         "problem")
-    elif gain > 0:
-        out['action'] = (
-            f"going from {n} to {n + step} copper layers takes the fab floor "
-            f"finer and removes {gain} of {d_now['lanes']} deficit lane(s) at the fab floor (this board is short {d_board['lanes']} at its own clearance) on its "
-            f"own, before counting nets that would escape on the new layers. "
-            f"Stackup is a fab-facing decision: this reports it and changes "
-            f"nothing.")
-    else:
-        out['action'] = (
-            f"{d_board['lanes']} deficit lane(s) at this board's clearance, and "
-            f"{d_more['lanes']} still remain at the fab floor for {n + step} "
-            f"layers -- the finer floor does not supply them, so this is a "
-            f"geometry problem (move what ate the span) rather than a stackup "
-            f"one.")
-    return out
-
-
-def move_blocker(pcb_data, pcb_file: str, *, clearance: float,
-                 track_width: Optional[float] = None,
-                 limit: int = 5) -> Dict:
-    """Which neighbour to move, and by how many millimetres.
-
-    `escape.FaceLedger` already carries `deficit` and `blockers` -- its own
-    dataclass calls blockers "WHO ate it -- the actionable field". What it has
-    never carried is the CONVERSION: a face short by k lanes needs
-    k * lane_pitch mm of span freed, and that one multiplication is the
-    difference between "this face is short 3 lanes" and "move C14 1.4 mm".
-    """
-    from placement.escape import escape_ledger
-    try:
-        # #1196: fine by pitch OR at this board's own rules.
-        led = escape_ledger(pcb_data, pcb_file=pcb_file, clearance=clearance,
-                            track_width=track_width, fine_at_board_rules=True)
-    except Exception as e:                       # noqa: BLE001
-        return _skip(f'the escape ledger did not run: {type(e).__name__}: {e}')
-    if not led:
-        return _skip('this board has no fine-pitch part, so no face has a '
-                     'lane budget to be short of')
-
-    rows = []
-    for part in led:
-        for face in (getattr(part, 'faces', ()) or ()):
-            d = getattr(face, 'deficit', 0)
-            if d <= 0:
-                continue
-            pitch = getattr(face, 'lane_pitch_mm', None) or 0.0
-            rows.append({
-                'ref': getattr(part, 'ref', None),
-                'face': getattr(face, 'face', None),
-                'deficit_lanes': d,
-                'lane_pitch_mm': round(pitch, 4),
-                'span_needed_mm': round(d * pitch, 3),
-                'blocked_mm': round(getattr(face, 'blocked_mm', 0.0) or 0.0,
-                                    3),
-                'blockers': list(getattr(face, 'blockers', ()) or ()),
-            })
-    rows.sort(key=lambda r: (-r['span_needed_mm'], str(r['ref'])))
-    if not rows:
-        return {'ran': True, 'measured': {'faces_in_deficit': 0},
-                'expected': {'faces_in_deficit': 0},
-                'action': 'no face is short of lanes; nothing to move'}
-    worst = rows[0]
-    who = worst['blockers'][0] if worst['blockers'] else None
-    out = {'ran': True,
-           'measured': {'faces_in_deficit': len(rows), 'worst': rows[:limit]},
-           'expected': {'faces_in_deficit': 0}}
-    out['action'] = (
-        f"{worst['ref']}'s {worst['face']} face is short {worst['deficit_lanes']} "
-        f"lane(s); freeing {worst['span_needed_mm']:.2f} mm of span there "
-        + (f"means moving {who}, which ate {worst['blocked_mm']:.2f} mm of it."
-           if who else
-           "would clear it, though nothing was identified as eating the span.")
-        + " Net ordering cannot fix a face deficit -- it only chooses which "
-          "nets strand there.")
-    return out
-
-
-def relax_clearance(pcb_data, pcb_file: str, *, clearance: float,
-                    track_width: Optional[float] = None,
-                    factors: Sequence[float] = (0.75, 0.5)) -> Dict:
-    """What a tighter clearance would buy, and what the fab allows.
-
-    Reported as a LADDER rather than a single answer, and floored at the fab
-    minimum for this board's layer count, because a lane pitch below what any
-    fab can etch predicts capacity nobody can build -- `check_channels.py:
-    152-174` measured that trap directly (declared 0.02/0.02 reported supply
-    242 against 29 at 0.2/0.2).
-    """
-    from placement.escape import board_rule_fine_parts, escape_ledger
-    floor_clr = None
-    try:
-        from fab_tiers import (count_copper_layers_in_data,
-                               count_copper_layers_in_file, fab_floor_min)
-        # Same file-then-memory order as add_layers: an unsaved board has a
-        # perfectly good layer list and used to get no fab floor at all here,
-        # so its ladder reported every rung as measurable.
-        n = (count_copper_layers_in_file(pcb_file)
-             or count_copper_layers_in_data(pcb_data))
-        if n:
-            floor_clr = fab_floor_min(n).get('clearance')
-    except Exception:                            # noqa: BLE001
-        floor_clr = None
-
-    # #1196: the parts fixed ONCE at the board's own rules, so a tighter rung
-    # grades the same parts rather than fewer of them.
-    refs = board_rule_fine_parts(pcb_data, pcb_file, track_width, clearance)
-
-    def _deficit(clr):
-        led = escape_ledger(pcb_data, pcb_file=pcb_file, clearance=clr,
-                            track_width=track_width, refs=refs)
-        # Via deficit_totals, NOT `getattr(p, 'worst_deficit', 0)`. That name
-        # is a to_dict() key, never an attribute, so the getattr returned 0 on
-        # every board and this whole option reported "no face is short of
-        # lanes" while move_blocker, in the same report, named 23 faces in
-        # deficit on tigard. Same lane definition as move_blocker (all faces,
-        # not the worst per part) so the two cannot disagree again.
-        return deficit_totals(led)['lanes']
-
-    try:
-        base = _deficit(clearance)
-    except Exception as e:                       # noqa: BLE001
-        return _skip(f'the escape ledger did not run: {type(e).__name__}: {e}')
-    if base == 0:
-        return _skip('no face is short of lanes at the current clearance, so '
-                     'relaxing it buys nothing measurable here')
-
-    ladder = []
-    for f in factors:
-        clr = round(clearance * f, 4)
-        below = floor_clr is not None and clr < floor_clr
-        row = {'clearance': clr, 'below_fab_floor': bool(below),
-               'fab_floor': floor_clr}
-        if below:
-            row['deficit_lanes'] = None
-            row['note'] = ('below the fab floor for this layer count -- not '
-                           'measured, because capacity nobody can etch is '
-                           'not capacity')
-        else:
-            row['deficit_lanes'] = _deficit(clr)
-        ladder.append(row)
-    out = {'ran': True,
-           'measured': {'clearance': clearance, 'deficit_lanes': base,
-                        'ladder': ladder, 'fab_floor_clearance': floor_clr},
-           'expected': {'deficit_lanes': 0}}
-    usable = [r for r in ladder if r.get('deficit_lanes') is not None]
-    best = min(usable, key=lambda r: r['deficit_lanes']) if usable else None
-    if best and best['deficit_lanes'] < base:
-        out['action'] = (
-            f"tightening clearance from {clearance} to {best['clearance']} mm "
-            f"takes the deficit from {base} to {best['deficit_lanes']} lane(s) "
-            f"and stays at or above this board's fab floor. That is a DRC "
-            f"decision the board owner makes, not a placement one.")
-    else:
-        out['action'] = (
-            f"tightening clearance to the fab floor does not clear the "
-            f"{base} deficit lane(s) -- the span is taken by geometry, so "
-            f"move what ate it or add layers.")
-    return out
-
-
-def narrow_track(pcb_data, pcb_file: str, *, clearance: float,
-                 track_width: Optional[float] = None,
-                 limit: int = 6) -> Dict:
-    """Which through-hole pin rows the board's track cannot cross, and the
-    width that opens them (#1196).
-
-    The lane ledgers above model a fine-pitch part's OWN escape. On a board of
-    DIPs, PGAs and headers the capacity is the other nets crossing those
-    parts' pin rows, and none of the options above sees it: interf_u at its
-    0.4 mm class track read `relax_clearance: not measured -- no face is short
-    of lanes` while its DIP rows crossed 0 of 115 gaps. Measured in the
-    router's own obstacle map on its grid (`pin_rows`), floored at the fab's
-    track width -- a width nobody can etch opens nothing.
-    """
-    import routing_defaults as defaults
-    from placement.escape import lane_pitch_parts
-    from placement.pin_rows import ladder_phrase, tht_row_crossings
-    tw, clr = lane_pitch_parts(pcb_data, pcb_file, track_width, clearance)
-    floor_tw = 0.0
-    try:
-        from fab_tiers import (count_copper_layers_in_data,
-                               count_copper_layers_in_file, fab_floor_min)
-        n = (count_copper_layers_in_file(pcb_file)
-             or count_copper_layers_in_data(pcb_data))
-        if n:
-            floor_tw = fab_floor_min(n).get('track_width') or 0.0
-    except Exception:                            # noqa: BLE001
-        floor_tw = 0.0
-    grid = defaults.GRID_STEP
-    try:
-        rep = tht_row_crossings(pcb_data, track_width=tw, clearance=clr,
-                                grid_step=grid, min_track_width=floor_tw)
-    except Exception as e:                       # noqa: BLE001
-        return _skip(f'the pin-row measurement did not run: '
-                     f'{type(e).__name__}: {e}')
-    if not rep['gaps']:
-        return _skip('this board has no through-hole pin row for a track to '
-                     'cross')
-    closed = [p for p in rep['parts'] if p['open'] < p['gaps']]
-    out = {'ran': True,
-           'measured': {'pin_gaps_open': rep['open'],
-                        'pin_gaps': rep['gaps'],
-                        'track_width': tw, 'clearance': clr,
-                        'opens_all_at': rep['opens_all_at'],
-                        'fab_floor_track_width': floor_tw,
-                        'grid_step': grid,
-                        'ladder': rep['ladder'],
-                        'parts_with_closed_gaps': [
-                            {'ref': p['ref'], 'gaps': p['gaps'],
-                             'open': p['open'], 'ladder': p['ladder']}
-                            for p in closed[:limit]]},
-           'expected': {'pin_gaps_open': rep['gaps']},
-           'not_modelled': 'diagonal crossings (a straight one is the best a '
-                           'row offers a convex pad), per-net class '
-                           'clearances, and existing copper as anything but '
-                           'an obstacle'}
-    if not closed:
-        out['action'] = (f"a {tw:g} mm track crosses every one of the "
-                         f"{rep['gaps']} through-hole pin gaps; nothing to "
-                         f"narrow")
-    else:
-        names = ', '.join(p['ref'] for p in closed[:limit])
-        out['action'] = (
-            ladder_phrase(rep, what='through-hole pin gaps')
-            + ('' if rep['opens_all_at'] is not None else
-               f", and some stay closed down to the {floor_tw:g} mm fab "
-               f"floor")
-            + f" (rows of {names}). A row the track cannot cross is a wall "
-              f"every other net routes around; the track width is a "
-              f"net-class decision the board owner makes, not a placement "
-              f"one.")
-    return out
-
-
-def smaller_footprint(pcb_data, pcb_file: str, *, clearance: float,
-                      limit: int = 5) -> Dict:
-    """Which parts are big enough that their SIZE is the constraint.
-
-    Ranked by courtyard area against the board's usable area, because that is
-    the honest signal available without a parts database: this cannot know
-    that a 0805 has a 0402 equivalent, and says so rather than pretending.
-    """
-    g = grow_board(pcb_data, pcb_file, clearance=clearance,
-                   board_edge_clearance=0.0)
-    if not g.get('ran'):
-        return _skip(g.get('reason', 'the area measurement did not run'))
-    biggest = g['measured'].get('largest_parts_mm2') or []
-    usable = g['measured'].get('usable_area_mm2') or 0.0
-    if not biggest or usable <= 0:
-        return _skip('no part geometry to rank')
-    rows = [{'ref': ref, 'area_mm2': a,
-             'share_of_usable': round(a / usable, 4)}
-            for a, ref in biggest[:limit]]
-    out = {'ran': True,
-           'measured': {'largest': rows, 'usable_area_mm2': usable},
-           'expected': {'share_of_usable': 'no single part dominating'},
-           'not_modelled': 'whether a smaller equivalent part EXISTS -- that '
-                           'needs a parts database this toolchain does not '
-                           'have'}
-    top = rows[0]
-    out['action'] = (
-        f"{top['ref']} alone occupies {top['share_of_usable']:.1%} of the "
-        f"usable area ({top['area_mm2']} mm2). If the board is short of room, "
-        f"a smaller package for it buys the most; whether one exists is a "
-        f"parts decision this tool cannot make.")
-    return out
-
-
-OPTIONS = {
-    'grow_board': grow_board,
-    'add_layers': add_layers,
-    'move_blocker': move_blocker,
-    'relax_clearance': relax_clearance,
-    'narrow_track': narrow_track,
-    'smaller_footprint': smaller_footprint,
-}
-
-
-def capacity_options(pcb_data, pcb_file: str, *, clearance: float,
-                     board_edge_clearance: float,
-                     track_width: Optional[float] = None,
-                     assembly_sides: Optional[str] = None,
-                     only: Optional[Sequence[str]] = None) -> Dict:
-    """Every option, each either measured or explaining why it was not."""
-    out: Dict[str, Dict] = {}
-    for name, fn in OPTIONS.items():
-        if only and name not in only:
-            continue
-        kw = {'clearance': clearance}
-        if name == 'grow_board':
-            kw['board_edge_clearance'] = board_edge_clearance
-            # #837, and only here. `smaller_footprint` also calls grow_board
-            # but reads `largest_parts_mm2` and `usable_area_mm2` only, and
-            # the policy touches neither.
-            kw['assembly_sides'] = assembly_sides
-        if name in ('add_layers', 'move_blocker', 'relax_clearance',
-                    'narrow_track'):
-            kw['track_width'] = track_width
-        try:
-            out[name] = fn(pcb_data, pcb_file, **kw)
-        except Exception as e:                   # noqa: BLE001 - disclosed
-            # A crash is NOT "this option does not apply here", and the two
-            # must not read alike: a leftover tuple index in add_layers once
-            # raised KeyError and arrived looking exactly like the honest
-            # "this board has no fine-pitch part" skip, on a board with 43
-            # deficit lanes. `error` is what tells them apart.
-            out[name] = dict(_skip(f'INTERNAL ERROR: {type(e).__name__}: {e}'),
-                             error=True)
-    return out
-
-
-def format_text(opts: Dict) -> str:
-    L = ["CAPACITY OPTIONS -- measured, never applied. Nothing here writes an "
-         "outline or a stackup."]
-    for name in OPTIONS:
-        o = opts.get(name)
-        if o is None:
-            continue
-        if not o.get('ran'):
-            tag = 'FAILED' if o.get('error') else 'not measured'
-            L.append(f"  {name}: {tag} -- {o.get('reason')}")
-            continue
-        # Always print what was MEASURED, not only what to do about it. An
-        # option whose numbers are comfortable still has numbers, and a line
-        # carrying only the option's name reads as "nothing found" when it
-        # actually means "measured, and fine".
-        L.append(f"  {name}: {_digest(o.get('measured') or {})}")
-        if o.get('action'):
-            for chunk in _wrap(o['action'], 74):
-                L.append(f"    {chunk}")
-        if o.get('not_modelled'):
-            L.append(f"    NOT MODELLED: {o['not_modelled']}")
-    ran = sum(1 for o in opts.values() if o.get('ran'))
-    L.append(f"  {ran} of {len(opts)} option(s) measured; "
-             f"{len(opts) - ran} could not be.")
-    return "\n".join(L)
-
-
-# Keys the text channel must never drop, whatever else is added beside them.
-# `_digest`'s positional `limit` silently truncated: adding the fab-floor pair
-# pushed `deficit_lanes_at_more` -- the "would more layers help" number the
-# whole option exists to answer -- off the end, and `parts=92` off grow_board.
-# A digest that drops the headline is not a digest.
-#
-# `fab_floor_layer_blind` is here and `fab_buckets_modelled` deliberately is
-# NOT: the second is a non-empty list, so forcing it would spend a slot
-# rendering the useless `fab_buckets_modelled[2]` and evict a real number --
-# the same eviction the `containers_excluded` comment in `_digest` records.
-#: #837 swaps `busiest_side_area_mm2` for `charged_area_mm2` rather than
-#: adding it: the forced list is a curated headline and the headline has to be
-#: the number the verdict rests on. `busiest_side_area_mm2` is still emitted
-#: and still true; it is just no longer always the one `utilisation` divides.
-#:
-#: `charged_area_is_sum` is deliberately NOT forced. Forcing it as well made
-#: the forced list one longer than `limit`, and `_digest` returns
-#: `out[:max(limit, len(forced))]` -- so on 21 of the 22 tracked boards there
-#: was no slot left for a single unforced key and `part_area_mm2` silently
-#: left the text channel, which is the eviction this list's own comments
-#: already record twice. It is a BOOL, so it renders in the unforced
-#: remainder whenever there is room, and the basis is stated in words by the
-#: action string and by `check_capacity`'s own `assembly sides:` line either
-#: way.
-_DIGEST_ALWAYS = ('deficit_lanes_now', 'deficit_lanes_at_more',
-                  'deficit_lanes_at_fab_floor', 'utilisation',
-                  'charged_area_mm2',
-                  'usable_area_mm2',
-                  'parts', 'shortfall_mm2_at_least',
-                  'proposed_square_side_mm', 'faces_in_deficit',
-                  'deficit_lanes', 'containers_excluded',
-                  # #700. `copper_layers` joins the forced set rather than
-                  # riding in on the unforced remainder: `_digest` returns
-                  # `out[:max(limit, len(forced))]`, so once add_layers' forced
-                  # count passed the limit of 5 NO unforced key could appear at
-                  # all, and the layer count -- the subject of the whole
-                  # option -- silently left the text channel. The forced list
-                  # IS add_layers' digest now, so it has to be the curated
-                  # headline rather than a supplement to one.
-                  'fab_floor_layer_blind', 'copper_layers',
-                  'deficit_all_layers_lanes_now',
-                  'deficit_all_layers_lanes_at_more',
-                  'escape_supply_bound')
-
-
-def _digest(measured: Dict, limit: int = 5) -> str:
-    """The scalar measurements, compactly. Nested rows are named, not dumped:
-    a text digest that inlined a findings list is how a summary stops being
-    one (the same trap board_brief's locks tally fell into).
-
-    `_DIGEST_ALWAYS` keys are emitted whether or not they fall inside `limit`,
-    and a non-empty dict is named with its size rather than skipped entirely --
-    `part_area_by_side_mm2` was added so a reader could check `utilisation`
-    against a number, and being a dict it never appeared in the text channel
-    it was added for.
-    """
-    bits, forced = [], []
-    for k, v in measured.items():
-        empty = isinstance(v, (list, tuple, dict)) and not v
-        if isinstance(v, bool):
-            bit = f"{k}={'yes' if v else 'no'}"
-        elif isinstance(v, (int, float)):
-            bit = f"{k}={v}"
-        elif isinstance(v, (list, tuple)):
-            bit = f"{k}[{len(v)}]"
-        elif isinstance(v, dict) and v:
-            bit = f"{k}{{{len(v)}}}"
-        else:
-            continue
-        # An EMPTY collection is never forced. Forcing `containers_excluded`
-        # unconditionally spent a slot on `[0]` and evicted
-        # usable_area_mm2/outline_area_mm2 -- the denominator `utilisation` is
-        # computed from -- on the 32 of 33 corpus boards that have no
-        # container. A digest that drops the denominator to report an empty
-        # list is worse than the truncation it was fixing.
-        (forced if (k in _DIGEST_ALWAYS and not empty) else bits).append(bit)
-    out = forced + [b for b in bits if b not in forced]
-    return ', '.join(out[:max(limit, len(forced))]) if out else 'measured'
-
-
-def _wrap(text: str, width: int) -> List[str]:
-    out, line = [], ''
-    for word in text.split():
-        if len(line) + len(word) + 1 > width:
-            out.append(line)
-            line = word
-        else:
-            line = f"{line} {word}".strip()
-    if line:
-        out.append(line)
     return out

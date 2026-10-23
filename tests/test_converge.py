@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""converge.py: the ladder, the rip invariants, and a step back that is a checkout.
+"""converge.py: the run ledger (`record`), its stop verdict (`verdict`) and
+`where`.
 
-The loop this supports failed in two measurable ways before it existed:
-
-  * every candidate cost a full chain run, so a budget of 20 bought ~8 useful
-    moves and the run stopped with nets still carrying no copper;
-  * a step back meant reading prose and reconstructing a command by hand.
-
-The verbs here are the fix. `poses` ranks with arithmetic and routes only the
-survivors; `record`/`step-back`/`replay` make the history mechanical;
-`check_rip_invariants` encodes four rules that each cost a wasted iteration.
+A run used to keep its history as prose: a step back meant reading it and
+reconstructing a board by hand, and a stop was whatever the last message said.
+`record` stores every board by content beside a row saying what produced it,
+and `verdict` reads those rows to say continue, or which kind of stop.
 """
 import json
 import os
@@ -50,7 +46,7 @@ def _lens_files(td, **verdicts):
     reopens a ledger, and a line retyped from a reply is a claim about the run
     where the row could carry a claim about a file. So every close-out arm in
     this file writes the verdict where the verifier is already required to
-    write it (the pcb-free-agent verifier brief) and passes the path.
+    write it (the plan-pcb-placement verifier brief) and passes the path.
 
     Defaults to a clean PASS for all three; name a lens to override, e.g.
     `_lens_files(td, drc='VERDICT=FAIL:lens=drc;finding=short;evidence=x')`.
@@ -65,121 +61,36 @@ def _lens_files(td, **verdicts):
     return out
 
 
-# ------------------------------------------------------------ rip invariants
-
-def test_rip_invariants_catch_all_four_traps():
-    # 1. more than one net per call
-    c = converge.check_rip_invariants(['A', 'B'], [])
-    assert any('one net per call' in x for x in c), c
-    # 2. a width-bearing net ripped without its width
-    c = converge.check_rip_invariants(['A'], ['VCC'], power_nets=['VCC'])
-    assert any('width-bearing' in x for x in c), c
-    # 3. a glob standing in for an exact name
-    c = converge.check_rip_invariants(['A'], ['QSPI_*'])
-    assert any('glob' in x and 'locked' in x for x in c), c
-    # 4. a net in both --nets and the rip set
-    c = converge.check_rip_invariants(['A'], ['A'])
-    assert any('force-reroute' in x for x in c), c
-    print("  PASS: all four rip traps are caught")
+def _lens_file(td, line, name='verdict_lens.txt'):
+    """--lens-file flags for ONE verdict line, written to `td`."""
+    p = os.path.join(td, name)
+    with open(p, 'w', encoding='utf-8') as fh:
+        fh.write(line + '\n')
+    return ['--lens-file', p]
 
 
-def test_a_safe_rip_produces_no_complaints():
-    assert converge.check_rip_invariants(['A'], ['B', 'C']) == []
-    assert converge.check_rip_invariants(
-        ['A'], ['VCC'], power_nets=[]) == []
-    print("  PASS: a scoped, exact, width-safe rip is silent")
+def _score_file(td, doc, name='score.json'):
+    """--score-file flags for one score document, written to `td`."""
+    p = os.path.join(td, name)
+    with open(p, 'w', encoding='utf-8') as fh:
+        fh.write(doc if isinstance(doc, str) else json.dumps(doc))
+    return ['--score-file', p]
 
 
-# -------------------------------------------------------------- route_verdict
-
-def test_route_verdict_counts_both_kinds_of_failure():
-    n, note = converge.route_verdict(
-        {'failed_single': ['A'], 'failed_multipoint': [{'net_name': 'B'}],
-         'multipoint_pads_total': 10, 'multipoint_pads_connected': 8})
-    assert n == 3, f"1 failed net + 2 pads short = 3, got {n}"
-    assert 'A' in note and 'B' in note
-    assert converge.route_verdict({})[0] is None
-    print("  PASS: failures = failed nets + pad deficit")
-
-
-def test_route_verdict_surfaces_a_refused_rip():
-    """A caller that cannot see a refusal will follow the router's retry hint
-    forever -- 'locked' has no override."""
-    n, note = converge.route_verdict(
-        {'failed_single': ['A'],
-         'protected_skipped': {'--rip-existing-nets': {'GND': 'locked'}}})
-    assert 'GND(locked)' in note, note
-    print("  PASS: a refused rip reaches the verdict text")
-
-
-# ---------------------------------------------------------------- the ladder
-
-def test_poses_emits_parseable_json_on_stdout():
-    """The verb's stdout is a data channel: the parser and the placement state
-    both narrate, and a single stray line makes the document unparseable."""
-    if not os.path.isfile(BOARD):
-        print("  SKIP: fixture missing")
-        return
-    r = _cv(['poses', BOARD, '--ref', 'C1', '--radius', '0.5',
-             '--step', '0.5', '--limit', '3'])
-    assert r.returncode == 0, r.stderr[-800:]
-    d = json.loads(r.stdout)             # the assertion IS that this parses
-    assert d['ref'] == 'C1' and d['poses']
-    costs = [p['cost'] for p in d['poses']]
-    assert costs == sorted(costs)
-    assert 'WARNING' in r.stderr or True   # diagnostics belong on stderr
-    print(f"  PASS: clean JSON on stdout, {len(d['poses'])} ranked poses")
-
-
-def test_route_flag_requires_the_caller_to_say_what_is_affected():
-    """Only the caller knows which nets a move can affect; guessing would
-    either route the world or miss the point."""
-    if not os.path.isfile(BOARD):
-        print("  SKIP: fixture missing")
-        return
-    r = _cv(['poses', BOARD, '--ref', 'C1', '--route'])
-    assert r.returncode == 2 and 'affected' in r.stderr
-    print("  PASS: --route without --affected is refused")
-
-
-# ------------------------------------------------------------- the bookkeeping
-
-def test_record_step_back_replay_round_trip():
+def test_record_stores_the_board_by_content():
     if not os.path.isfile(BOARD):
         print("  SKIP: fixture missing")
         return
     with tempfile.TemporaryDirectory() as td:
         led = os.path.join(td, 'l.jsonl')
-        # sys.executable, not 'echo': echo is a shell builtin, so it neither
-        # replays on Windows nor passes the record-time replayability guard.
         r = _cv(['record', '--ledger', led, '--board', BOARD,
-                 '--lever', 'seed', '--argv', sys.executable, '-c',
-                 "print('replayed-ok')"])
+                 '--lever', 'seed'])
         assert r.returncode == 0, r.stderr
         sha = json.loads(r.stdout)['result_sha']
-
-        out = os.path.join(td, 'back.kicad_pcb')
-        assert _cv(['step-back', '--ledger', led, '--iteration', '0',
-                    '--out', out]).returncode == 0
         from board_store import sha256_file
-        assert sha256_file(out) == sha, "step back must be byte-exact"
-
-        r = _cv(['replay', '--ledger', led, '--iteration', '0'])
-        assert r.returncode == 0 and 'replayed-ok' in r.stdout
-    print("  PASS: record -> step-back (byte-exact) -> replay")
-
-
-def test_record_refuses_an_argv_that_cannot_replay():
-    """Run-7 F4: entries recorded with placeholder script names made replay a
-    reconstruction -- exactly what the ledger exists to prevent."""
-    with tempfile.TemporaryDirectory() as td:
-        led = os.path.join(td, 'l.jsonl')
-        r = _cv(['record', '--ledger', led, '--board', BOARD,
-                 '--lever', 'x', '--argv', 'route_v12_placeholder.sh', 'b.pcb'])
-        assert r.returncode == 2, (r.returncode, r.stderr)
-        assert 'never replay' in r.stderr
-        assert not os.path.exists(led), "nothing may be written on refusal"
-    print("  PASS: a placeholder --argv is refused, ledger untouched")
+        stored = os.path.join(td, 'boards', sha, 'board.kicad_pcb')
+        assert sha256_file(stored) == sha, "the stored board must be byte-exact"
+    print("  PASS: record stores the board, byte-exact, under its sha")
 
 
 def test_record_final_requires_stop_condition():
@@ -224,9 +135,9 @@ def test_record_final_wants_the_lens_verdicts():
     finish clean -- stop condition 1 is then not available to it."""
     with tempfile.TemporaryDirectory() as td:
         led = os.path.join(td, 'l.jsonl')
-        r = _cv(['record', '--ledger', led, '--board', BOARD, '--lever', 'x',
-                 '--lens', 'all three passed'])
-        assert r.returncode == 2 and 'verbatim' in r.stderr, r.stderr
+        r = _cv(['record', '--ledger', led, '--board', BOARD, '--lever', 'x']
+                + _lens_file(td, 'VERDICT=all three passed'))
+        assert r.returncode == 2 and 'per-lens verdict' in r.stderr, r.stderr
         assert not os.path.exists(led), "nothing may be written on refusal"
 
         base = (['record', '--ledger', led, '--board', BOARD, '--final']
@@ -306,8 +217,8 @@ def test_record_refuses_a_lens_verdict_its_own_score_contradicts():
                                      'blocking_by': {'unrouted': 0, 'broken': 0,
                                                      'drc': None,
                                                      'undersized': None}},
-                                    'null.json'),
-                 '--lens', 'VERDICT=PASS:lens=drc'])
+                                    'null.json')]
+                + _lens_file(td, 'VERDICT=PASS:lens=drc'))
         assert r.returncode == 0, r.stderr
         assert 'CONTRADICTS' not in r.stderr, r.stderr
 
@@ -320,8 +231,8 @@ def test_record_refuses_a_lens_verdict_its_own_score_contradicts():
                  '--score-file', sc({'blocking': 9, 'board_sha': 'f' * 64,
                                      'quality': {},
                                      'blocking_by': {'unrouted': 9}},
-                                    'other.json'),
-                 '--lens', 'VERDICT=PASS:lens=connectivity'])
+                                    'other.json')]
+                + _lens_file(td, 'VERDICT=PASS:lens=connectivity'))
         assert r.returncode == 0, r.stderr
         assert 'CONTRADICTS' not in r.stderr, r.stderr
     print("  PASS: a PASS lens beside a contradicting count is refused, named")
@@ -409,9 +320,9 @@ def test_a_half_can_declare_itself_exhausted_on_the_record():
 
         for i in range(5):                       # placement plateaus normally
             assert _cv(['record', '--ledger', led, '--board', BOARD, '--kind',
-                        'placement', '--lever', f'lap {i}',
-                        '--score', json.dumps({'blocking': 0, 'quality': {},
-                                               'ungraded': []})]
+                        'placement', '--lever', f'lap {i}']
+                       + _score_file(td, {'blocking': 0, 'quality': {},
+                                          'ungraded': []}, 'lap.json')
                        ).returncode == 0
         doc = json.loads(_cv(['verdict', '--ledger', led, '--score', p]).stdout)
         assert doc['verdict'] == 'DONE-EXHAUSTED', doc['verdict']
@@ -472,8 +383,8 @@ def test_a_score_that_measured_nothing_is_reported_not_raised():
         for half, n in (('placement', 5), ('completion', 5)):
             for i in range(n):
                 assert _cv(['record', '--ledger', led, '--board', BOARD,
-                            '--kind', half, '--lever', f'{half} lap {i}',
-                            '--score', flat]).returncode == 0
+                            '--kind', half, '--lever', f'{half} lap {i}']
+                           + _score_file(td, flat, 'flat.json')).returncode == 0
 
         p = os.path.join(td, 'null.json')
         with open(p, 'w', encoding='utf-8') as fh:
@@ -550,8 +461,9 @@ def test_a_score_that_measured_nothing_is_reported_not_raised():
 
         poison = os.path.join(td, 'poison.jsonl')
         assert _cv(['record', '--ledger', poison, '--board', BOARD, '--kind',
-                    'placement', '--lever', 'malformed quality',
-                    '--score', json.dumps({'blocking': 1, 'quality': [1, 2]})]
+                    'placement', '--lever', 'malformed quality']
+                   + _score_file(td, {'blocking': 1, 'quality': [1, 2]},
+                                 'poison.json')
                    ).returncode == 0, 'record accepts it, which is the problem'
         good = os.path.join(td, 'good.json')
         with open(good, 'w', encoding='utf-8') as fh:
@@ -624,11 +536,10 @@ def test_two_scores_that_graded_different_components_do_not_compare():
         assert r.returncode == 2, (r.returncode, r.stdout[:300])
         assert 'graded FEWER components' in r.stderr, r.stderr
         assert 'impedance' in r.stderr and '--impedance-nets' in r.stderr
-        r = rec(sc(part, 'c3b.json'), '--accept-incommensurable',
-                'both re-scored at 92 out of band; they tie')
+        # Recorded --rejected, it is not a claimed improvement, and is kept.
+        r = rec(sc(part, 'c3b.json'), '--rejected')
         assert r.returncode == 0, r.stderr
-        assert json.loads(r.stdout)['accepted_incommensurable'].startswith(
-            'both re-scored'), 'the disposition belongs in the row'
+        assert json.loads(r.stdout)['accepted'] is False
 
     # ...and the verdict never CREDITS an improvement across such a pair.
     def acc(s):
@@ -750,8 +661,8 @@ def test_a_lens_verdict_is_never_skipped_silently():
                    'blocking_by': {'unrouted': 9, 'broken': 0}},
                   open(p, 'w', encoding='utf-8'))
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--kind',
-                 'completion', '--lever', 'x', '--score-file', p,
-                 '--lens', 'VERDICT=PASS:lens=connectivity'])
+                 'completion', '--lever', 'x', '--score-file', p]
+                + _lens_file(td, 'VERDICT=PASS:lens=connectivity'))
         assert r.returncode == 0, r.stderr
         assert 'did NOT run' in r.stderr and 'UNCHECKED' in r.stderr, r.stderr
 
@@ -847,42 +758,16 @@ def test_record_score_failures_want_names():
     close-out. Names print when given; a count without names draws a NOTE."""
     with tempfile.TemporaryDirectory() as td:
         led = os.path.join(td, 'l.jsonl')
-        r = _cv(['record', '--ledger', led, '--board', BOARD,
-                 '--score', '{"failures": 3}'])
+        r = _cv(['record', '--ledger', led, '--board', BOARD]
+                + _score_file(td, '{"failures": 3}', 'f3.json'))
         assert r.returncode == 0
         assert 'names no nets' in r.stderr, r.stderr
-        r = _cv(['record', '--ledger', led, '--board', BOARD,
-                 '--score', '{"failures": 2, "failed_nets": ["SWDIO", "GPIO1"]}'])
+        r = _cv(['record', '--ledger', led, '--board', BOARD]
+                + _score_file(td, '{"failures": 2, "failed_nets": '
+                                  '["SWDIO", "GPIO1"]}', 'f2.json'))
         assert r.returncode == 0
         assert 'SWDIO' in r.stderr and 'GPIO1' in r.stderr, r.stderr
     print("  PASS: failing-net names surface; a bare count draws a NOTE")
-
-
-def test_a_prose_only_entry_refuses_to_replay_without_a_traceback():
-    with tempfile.TemporaryDirectory() as td:
-        led = os.path.join(td, 'l.jsonl')
-        _cv(['record', '--ledger', led, '--board', BOARD, '--kind', 'systemic',
-             '--lever', 'restored the net classes'])
-        r = _cv(['replay', '--ledger', led, '--iteration', '0'])
-        assert r.returncode == 4, f"expected a clean refusal, got {r.returncode}"
-        assert 'Traceback' not in r.stderr, "a non-replayable entry is not a crash"
-        assert 'lever_argv' in r.stderr
-    print("  PASS: a prose entry refuses cleanly, exit 4, no traceback")
-
-
-def test_status_warns_when_the_budget_goes_to_the_instrument():
-    """The failure this makes visible: nine of eleven iterations spent on how
-    the chain measures itself, finishing with nets that never got copper."""
-    with tempfile.TemporaryDirectory() as td:
-        led = os.path.join(td, 'l.jsonl')
-        for _ in range(3):
-            _cv(['record', '--ledger', led, '--board', BOARD,
-                 '--kind', 'systemic', '--lever', 'tooling'])
-        r = _cv(['status', '--ledger', led])
-        assert r.returncode == 0
-        assert json.loads(r.stdout)['systemic'] == 3
-        assert 'SYSTEMIC' in r.stderr, "a lopsided budget must be called out"
-    print("  PASS: status splits the budget and warns on a lopsided one")
 
 
 # ------------------------------------------------------------ where --oracle
@@ -936,7 +821,7 @@ def test_where_oracle_prints_the_join_work_list():
 
 def test_record_warns_on_unbound_or_mismatched_score():
     """Run-3 B4: three ledger entries shipped embedding a PRIOR board's
-    quality because --score was free JSON with no binding to --board.
+    quality because a score was free JSON with no binding to --board.
     board_score now embeds board_sha; record warns loudly on absence or
     mismatch (a warning, not a refusal: baseline rows legitimately attach a
     parent score to a rejected candidate -- but never silently)."""
@@ -949,8 +834,7 @@ def test_record_warns_on_unbound_or_mismatched_score():
 
         def rec(score):
             return _cv(['record', '--ledger', led, '--board', BOARD,
-                        '--lever', 'x', '--score', json.dumps(score),
-                        '--argv', sys.executable, '-c', "pass"])
+                        '--lever', 'x'] + _score_file(td, score))
 
         r = rec({'blocking': 0, 'board_sha': sha256_file(BOARD)})
         assert r.returncode == 0, r.stderr
@@ -1015,8 +899,7 @@ def test_a_final_close_out_is_accepted_for_every_terminal_verdict():
         return _cv(['record', '--ledger', led, '--board', BOARD,
                     '--kind', 'completion', '--final',
                     '--stop-condition', name] + slots
-                   + ['--lever', f'close-out: {name}', '--score-file', score,
-                      '--argv', sys.executable, '-c', 'pass'])
+                   + ['--lever', f'close-out: {name}', '--score-file', score])
 
     with tempfile.TemporaryDirectory() as td:
         # DONE-EXHAUSTED: every lens passes, clean score.
@@ -1051,7 +934,7 @@ def _row_1071(i, kind, blocking, accepted=True, **extra):
     score = {'blocking': blocking}
     score.update(extra)
     return {'iteration': i, 'kind': kind, 'accepted': accepted,
-            'lever': f'{kind} lap {i}', 'lever_argv': None,
+            'lever': f'{kind} lap {i}',
             'parent_sha': None, 'result_sha': 'a' * 64, 'score': score,
             't': 1000.0 + i}
 
@@ -1120,7 +1003,7 @@ def test_1071_a_ledger_holding_a_non_count_blocking_is_read_not_raised():
         # The tigard shape: accepted T,F,T,T,F,F,T, dict blocking, no quality.
         acc = (True, False, True, True, False, False, True)
         rows = [{'iteration': i, 'kind': 'placement', 'accepted': a,
-                 'lever': f'lap {i}', 'lever_argv': None, 'parent_sha': None,
+                 'lever': f'lap {i}', 'parent_sha': None,
                  'result_sha': 'a' * 64, 't': 1000.0 + i,
                  'score': {'blocking': {'assembly_blocking_pairs': 8 - i,
                                         'drc_violations': 30 + i,
@@ -1206,9 +1089,9 @@ def test_1075_a_score_whose_blocking_is_not_a_count_is_NO_SCORE():
     inf = float('inf')
     for v in (True, float('nan'), inf, '3'):
         k = converge._score_key({'blocking': 0, 'quality': {'vias': v}})
-        assert k == (0, (inf, inf, inf)), (v, k)
+        assert k == (0, (0, inf, inf, inf)), (v, k)
     assert converge._score_key({'blocking': 0, 'quality': {'vias': 4}}) \
-        == (0, (4, inf, inf))
+        == (0, (0, 4, inf, inf))
     # A 400-digit JSON integer: `isfinite` converts an int to float and raised
     # OverflowError. As a `blocking` it is not a count (past any float, and the
     # film plots `float(b)`); as a quality item it ranks, and a ledger row
@@ -1218,7 +1101,7 @@ def test_1075_a_score_whose_blocking_is_not_a_count_is_NO_SCORE():
     assert 'digits' in (converge.blocking_defect(huge) or ''), \
         converge.blocking_defect(huge)
     assert converge._score_key({'blocking': 3, 'quality': {'vias': huge}}) \
-        == (3, (huge, inf, inf))
+        == (3, (inf, huge, inf, inf))
     with tempfile.TemporaryDirectory() as td:
         rows = [_row_1071(i, 'completion', 3, quality={'vias': huge})
                 for i in range(5)]
@@ -1228,6 +1111,20 @@ def test_1075_a_score_whose_blocking_is_not_a_count_is_NO_SCORE():
             (r.returncode, r.stderr[-300:])
     print("  PASS: a --score whose blocking is not a count is NO-SCORE, named "
           "for what it is")
+    # #1340: at equal blocking the joins the open nets need rank before vias:
+    # the lap that stranded a 9-pad rail (8 joins, 143 vias) is not better
+    # than the one with a 2-pad net open (1 join, 151 vias)
+    rail = converge._score_key({'blocking': 1, 'joins_needed': 8,
+                                'quality': {'vias': 143, 'copper_mm': 962.8,
+                                            'segments': 900}})
+    one = converge._score_key({'blocking': 1, 'joins_needed': 1,
+                               'quality': {'vias': 151, 'copper_mm': 980.3,
+                                           'segments': 950}})
+    assert one < rail, (one, rail)
+    # a score without joins_needed: 0 at blocking 0, unmeasured above it
+    assert converge._score_key({'blocking': 0, 'quality': {}})[1][0] == 0
+    assert converge._score_key({'blocking': 2, 'quality': {}})[1][0] == inf
+    print("  PASS: joins_needed ranks ahead of vias at equal blocking (#1340)")
 
 
 def test_1076_verdict_reads_a_malformed_ungraded_beside_a_real_blocking():
@@ -1282,8 +1179,11 @@ def test_1071_record_refuses_a_score_that_is_not_a_count_object():
         led = os.path.join(td, 'l.jsonl')
 
         def _argv(score_text, kind='placement'):
+            sf = os.path.join(td, 'arg_score.json')
+            with open(sf, 'w', encoding='utf-8') as fh:
+                fh.write(score_text)
             return base + ['--ledger', led, '--board', BOARD, '--kind', kind,
-                           '--lever', 'x', '--score', score_text]
+                           '--lever', 'x', '--score-file', sf]
 
         # A score that is not an object at all (#1078) -- FIRST, so a
         # regression here reads as this refusal failing, not as a traceback
@@ -1295,12 +1195,12 @@ def test_1071_record_refuses_a_score_that_is_not_a_count_object():
             r = _cv(_argv(raw)[len(base) - 1:])      # from 'record' on
             assert not os.path.exists(led), \
                 f'{raw}: the row was APPENDED before record failed (#1078)'
-            assert r.returncode == 2 and 'must be a JSON object' in r.stderr \
+            assert r.returncode == 2 and 'must hold a JSON object' in r.stderr \
                 and 'Traceback' not in r.stderr, (raw, r.returncode, r.stderr)
         for raw, phrase in _NOT_A_COUNT_1071:
             r = run_utils.check(_argv('{"blocking": %s}' % raw),
                                 refuse='Nothing was written.', code=2)
-            assert "--score's `blocking` is" in r.stderr, (raw, r.stderr)
+            assert "--score-file's `blocking` is" in r.stderr, (raw, r.stderr)
             assert phrase in r.stderr, (raw, phrase, r.stderr)
             assert not os.path.exists(led), raw
             assert not os.path.exists(os.path.join(td, 'boards')), raw
@@ -1308,7 +1208,7 @@ def test_1071_record_refuses_a_score_that_is_not_a_count_object():
         # the film reads every row.
         run_utils.check(_argv('{"blocking": false}', kind='completion'),
                         refuse="`blocking` is the boolean false", code=2)
-        # --score-file, the skill's own path.
+        # A per-term dict, the #1071 shape, refused with its remedy.
         sf = os.path.join(td, 'score.json')
         with open(sf, 'w', encoding='utf-8') as fh:
             fh.write('{"blocking": {"drc_violations": 3}}')
@@ -1349,8 +1249,8 @@ def test_1078_a_stray_ledger_line_is_skipped_not_raised():
 def test_1078_a_new_row_is_numbered_past_every_used_iteration():
     """#1078's leftover. `record` numbered a row `len(entries())`; once the
     stray `42` is skipped, a ledger whose later rows were numbered by the old
-    count (0, 42, 2) hands out 2 again, and `replay --iteration 2` then
-    matches two rows."""
+    count (0, 42, 2) hands out 2 again, and two rows then answer to
+    iteration 2."""
     with tempfile.TemporaryDirectory() as td:
         led = os.path.join(td, 'l.jsonl')
         with open(led, 'w', encoding='utf-8') as fh:

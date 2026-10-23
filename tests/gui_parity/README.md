@@ -9,18 +9,139 @@ chain's CLI steps run file-to-file.
   the genuine `PlanExecutor`, then diffs against the manifest replayed at HEAD.
   Nothing is mirrored or mocked. See "Whole-plan replay" below.
 - `test_gui_engine_parity.py`, `test_gui_livechain_rp2350.py` — **MIGRATED onto
-  the real dialog (2026-07-26)**, and the only gates that run on IN-REPO boards
-  (`splitflap_driver`, `rp2350_fpga_eensy_prePlane`). Each now expresses its GUI
-  leg as a Claude-tab **plan** and runs it through
+  the real dialog (2026-07-26)**: the two gates that run a whole plan on an
+  in-repo board (`splitflap_driver`, `rp2350_fpga_eensy_prePlane`). Each
+  expresses its GUI leg as a Claude-tab **plan** and runs it through
   `replay_plan_vs_run.replay()` — the same real `RoutingDialog` +
   `PlanExecutor`. `replay()` touches its `info` argument only for
   `input_board`, so the corpus driver works unchanged on a checked-in board;
   that is the whole trick. Nothing is mirrored or shimmed any more.
-  `diag_fullchain_carry_rp2350.py` was **deleted** — a corpus-only, one-off
-  diagnostic for the #361 carry investigation, whose findings are recorded
-  below.
+- The other gates each pin one class of GUI/CLI divergence, most of them one
+  that was found and fixed; the index below lists them all.
 
-### Why the shims went (kept for the reasoning)
+## Running the gates
+
+    python3 tests/gui_parity/<gate>.py
+
+Plain `python3` is right: a gate that needs pcbnew or wx re-execs itself into
+KiCad's bundled python (`KICAD_PYTHON` names one explicitly), and the dialog is
+built headless (`parent=None`, never shown), so no window appears. Without a
+KiCad python a gate either prints `SKIP:` or refuses with exit 2 (`NOT RUN`);
+neither is a pass. `tests/run_all.py` never collects this directory; many
+gates have a wx-free half under `tests/` that it does. If a gate hangs at ~0%
+CPU on macOS, it is the invisible restore-windows alert after a killed wx
+process: `defaults write -g ApplePersistenceIgnoreState -bool YES`.
+
+## Gate index
+
+Whole plans through the real dialog:
+- `replay_plan_vs_run.py` — a stress run's plan against its CLI chain replayed
+  at HEAD (needs the stress corpus; see "Whole-plan replay" below).
+- `test_gui_engine_parity.py` — splitflap_driver's signal + plane plan against
+  the CLI chain; it REPORTS divergence rather than passing or failing.
+- `test_gui_livechain_rp2350.py` — rp2350's pour + route chain on one live
+  board: no stage introduces DRC.
+
+Plan conversion and delivery:
+- `test_manifest_plan_parity.py` (no wx) — every routing flag survives
+  `manifest_to_plan` into its plan step.
+- `test_plan_flags_reach_dialog.py` — those flags reach the real controls and
+  engines, and the next step is back at the CLI default.
+- `test_772_cap_params_reach_engine.py` — an `optimize_caps` step's params
+  reach the cap engine.
+- `test_group_scope_parity.py` — a `route.py --group BLOCK` step routes the
+  CLI's net list (#459).
+- `test_860_qfn_escape_method_panel.py` — a QFN step's `escape_method` reaches
+  the QFN panel, not the BGA one.
+- `test_geometry_floor_leak.py` — a geometry-floor override does not leak into
+  the next step.
+- `test_fix_drc_preference_plan.py` — a plan keeps the user's "Fix DRC
+  settings" choice (#693).
+- `test_plan_refused_step_stops.py` — a step that produces nothing stops the
+  plan.
+
+Engine parameters and defaults:
+- `test_engine_kwarg_parity.py` — every engine kwarg a CLI main passes reaches
+  the GUI call (Class 1 by AST; Class 2, passed-but-inert, on the live dialog).
+- `test_cli_postpass_coverage.py` (no wx) — every CLI `main()` post-engine pass
+  has a GUI counterpart.
+- `test_cli_defaults_parity.py` (no wx) — no argparse default disagrees with
+  the `routing_defaults` constant it shadows.
+- `test_live_drc_floors_gated.py` (no wx) — every DRC-floor writer a GUI run
+  reaches is gated on "Fix DRC settings" (#693).
+- `test_966_unset_clearance.py` — clearance resolution in every tab's shared
+  config (#966).
+- `test_zero_diff_pair_width_gui.py` — a 0 class diff-pair width/gap resolves
+  the way `route_diff.py` resolves it.
+- `test_settings_roundtrip.py` — the dialog's settings save and restore.
+
+Planes tab: `test_plane_all_layers_parity.py`, `test_plane_layer_costs_gui.py`,
+`test_gnd_vias_gui.py`, `test_skip_existing_zones_gui.py`,
+`test_1056_renamed_layers_gui.py` (all described below).
+
+Fanout tab and cap placement:
+- `test_fanout_rotated_gui.py` — QFN fanout on a rotated footprint: the only
+  routing consumer of the pad locals the GUI computes.
+- `test_fanout_backside_gui.py` — BGA fanout on a part flipped to B.Cu.
+- `test_fanout_threaded_gui.py` — the escape runs on a worker thread and still
+  applies (#621).
+- `test_581_fanout_via_in_pad_gui.py`, `test_1195_qfn_floors_gui.py`,
+  `test_fanout_floor_parity_gui.py` — described below.
+- `test_666_cap_move_gui.py` — a scoped cap move is applied, re-welded and
+  kept the same way by the CLI and the Route tab.
+- `test_733_cap_edge_clearance_gui.py`, `test_733_cap_edge_control_real_dialog.py`
+  — the cap pass's edge margin has its own control, which the signal edge
+  control cannot move.
+- `test_746_cap_summary_gui.py` — the cap-optimization summary names all three
+  graze channels.
+- `test_768_cap_ceiling_real_dialog.py` — the netclass ceiling the cap pass
+  receives on both GUI call paths.
+- `test_782_fanout_netclass_clamp.py` — the fanout tab lowers the non-Default
+  classes it priced at that ceiling.
+- `test_1067_cap_intent_gui.py`, `test_1122_cap_rotation_gui.py` — the cap pass
+  under an intent's decap gate, and its declared rotations, land where the
+  CLI's `--intent` run lands.
+
+Live-board writeback and records: `test_900_live_class_clearance.py`,
+`test_live_fab_floor_origin.py`, `test_records_survive_save.py`,
+`test_1187_live_web_floor.py`, `test_live_hole_clearance.py`,
+`test_1133_staged_save_widths.py` (all described below), and
+`test_ui_thread_save.py` — `save_board_on_ui_thread` marshals a save from a
+worker thread, and gives up instead of blocking when the UI thread is not
+pumping (#688).
+
+The live model's re-sync between steps: `test_footprint_position_sync.py` and
+`test_1279_sense_branch_live.py` (below), `test_726_gui_sync.py` (both blocks
+of a duplicated reference), `test_962_paste_resync.py` (paste openings move
+with their parts).
+
+Text parser vs pcbnew (both parse paths, with pcbnew as the referee where it
+can be): `test_726_parse_path_parity.py` (duplicated references),
+`test_ref_label_pcbnew_parity.py` (reference labels, #481),
+`test_829_edge_cuts_owner_parity.py` (who owns the outline),
+`test_751_via_protection_readback.py` (via protection on a SWIG without the
+enums), `test_via_type_parse_parity.py` (via spans, #1268),
+`test_962_paste_parity.py` and `test_962_native_graphic_overrun.py` (paste
+openings and graphic copper), `test_967_pad_geometry_coverage.py`,
+`test_pad_loader_parity.py` (pcbnew's load-time rewrites),
+`test_1164_teardrop_parity.py`, `test_1211_sheet_name_parity.py`,
+`test_1248_die_length_parity.py`, `test_edge_poly_outline_parity.py`,
+`test_noncopper_zone_parity.py`, `test_zone_arc_outline_parity.py`,
+`test_zone_closing_vertex_parity.py`, and `test_714_mirror_pcbnew_parity.py`
+(the placement writer's layer flip against pcbnew's own `Flip`; the flip's
+acceptance gate, which exits 2 rather than skipping without pcbnew).
+
+Placement tab: `test_placement_apply_locks.py` (below),
+`test_placement_apply_graphics.py` (Apply lays tracks, never the result's
+copper graphics), `test_placement_fake_run.py` (the whole runner against a
+fake claude CLI, `fixtures/fake_claude.py`).
+
+Tools, not gates: `diff_engine_kwargs.py` (below), `probe_effective_floors.py`
+(the one-off probe behind the splitflap track-width measurement below), and
+`wx_pump.py` (waits on a tab's worker with a real wx MainLoop: Yield-pumping
+never fires wx timers on Windows).
+
+## Why the shims went (kept for the reasoning)
 
 The shim-based harnesses predated the discovery that the REAL dialog
 constructs headless (`parent=None`, never shown, with
@@ -32,16 +153,17 @@ argument is never executed.**
 That is not hypothetical. #493 item 3 was `swig_gui` reading the board's net
 class with `nm * 1e-6`, landing one ULP low (`0.2` → `0.19999999999999998`) and
 handing that to every engine as `clearance`. It reaches the engine through
-`_effective_geometry_floor` → `_get_netclass_parameters`; the shim harness calls
+`_effective_geometry_floor` → `_get_netclass_parameters`; the shim harness called
 `batch_route(clearance=step['clearance'], ...)` with its own literal, so it
 could never have seen it. `replay_plan_vs_run.py` caught it on its first run.
 
-The shims also rot. `test_plane_all_layers_parity.py` currently dies with
+The shims also rot. `test_plane_all_layers_parity.py` used to die with
 `AttributeError: 'Shim' object has no attribute '_cancel_requested'` — the tab
-grew a field the shim never modelled, so that gate has been failing on its own
-scaffolding, not on the behaviour it guards (confirmed pre-existing at 75acd26,
-before the #493 work). A harness that mirrors an interface has to be maintained
-in lockstep with it; one that instantiates the real thing does not.
+grew a field the shim never modelled, so that gate failed on its own
+scaffolding, not on the behaviour it guards (pre-existing at 75acd26, before
+the #493 work). It now drives the real PlanesTab. A harness that mirrors an
+interface has to be maintained in lockstep with it; one that instantiates the
+real thing does not.
 
 **And a shim does not only MISS bugs — it can INVENT them.** Because
 `test_gui_engine_parity`'s shim hand-built the plane step's config, it never ran
@@ -50,7 +172,7 @@ in lockstep with it; one that instantiates the real thing does not.
 the real dialog resolves the board's Default net class to 0.127. The gate
 reported 73 "divergent" GND plane-tap segments on splitflap, they were written
 up here as a real unfixed defect, and they do not exist in the real GUI (see the
-splitflap measurement above). That is what finally motivated the migration.
+splitflap measurement below). That is what finally motivated the migration.
 
 Their findings are still recorded below. Both gates now use the real-dialog
 path; use it for new work too.
@@ -67,10 +189,12 @@ Workdir: `tests/gui_parity/work/` (gitignored).
    design (.kicad_pcb outputs carry per-run random UUIDs -- see project
    notes: never whole-file-diff routing outputs).
 
-> **Superseded (2026-07-25, #493).** Everything in this section and the two
-> below it was measured with the shim harness before the real-dialog driver
-> existed, and its central conclusion — that bit-identical GUI/CLI copper would
-> need engine-level order canonicalization — is **wrong**. The residual was not
+> **Superseded (2026-07-25, #493).** The two sections after this one
+> ("Command/input identity findings" and the overlap ladder in
+> "Parameter-identity verification") were measured with the shim harness
+> before the real-dialog driver existed, and their central conclusion — that
+> bit-identical GUI/CLI copper would need engine-level order canonicalization
+> — is **wrong**. The residual was not
 > item ordering: it was the GUI quantising applied copper twice (1 um position
 > rounding plus `pcbnew.FromMM` truncating) and reading its net class one ULP
 > low. With those fixed, nano_eeprom_prog replays **byte-for-byte identical** at
@@ -118,14 +242,15 @@ genuine headless `RoutingDialog`:
 override checkbox is unchecked (#439), and `planes_tab.get_shared_params()`
 passes that through. So the real GUI taps at 0.127, like the CLI.
 
-**The 0.3 is the shim.** `test_gui_engine_parity.py` hand-builds its step config
-(`PLANES = dict(nets=['GND'], layers=['B.Cu'], clearance=0.15, ...)` -- no
-track_width) and calls the engine directly, so `_effective_track_width()` never
-runs and the engine's own `config.get('track_width', defaults.TRACK_WIDTH)`
-fallback supplies 0.3. This is exactly the structural blind spot described
-above: **anything between a dialog CONTROL and the engine argument is never
-executed.** Treat this 73-segment delta as harness noise, not a defect -- and as
-one more argument for migrating these gates onto the real dialog.
+**The 0.3 was the shim.** The shim-era `test_gui_engine_parity.py` hand-built
+its step config (`PLANES = dict(nets=['GND'], layers=['B.Cu'], clearance=0.15,
+...)` -- no track_width) and called the engine directly, so
+`_effective_track_width()` never ran and the engine's own
+`config.get('track_width', defaults.TRACK_WIDTH)` fallback supplied 0.3. This
+is exactly the structural blind spot described above: **anything between a
+dialog CONTROL and the engine argument is never executed.** The 73-segment
+delta was harness noise, not a defect, and it went when the gate moved onto
+the real dialog.
 
 ## Command/input identity findings (2026-07-08)
 
@@ -133,9 +258,10 @@ one more argument for migrating these gates onto the real dialog.
   hardcoded ordering_strategy='inside_out' while the real GUI default (and
   CLI default) is 'mps'. Fixed; the two legs now run the same effective
   parameters.
-- With commands matched: 381/~1200 segments common. With the
-  GUI_PARITY_INPUT=parser diagnostic (GUI leg text-parses a temp-saved
-  board, isolating the builder-vs-parser representation): 444/~1200.
+- With commands matched: 381/~1200 segments common. With the shim harness's
+  GUI_PARITY_INPUT=parser diagnostic (since removed; the GUI leg text-parsed a
+  temp-saved board, isolating the builder-vs-parser representation):
+  444/~1200.
 - Conclusion: the dominant copper fork is NOT parameters and NOT coordinate
   representation -- it is item ORDERING (pcbnew re-save normalizes element
   order; MPS ordering, spatial-index insertion and A* tie-breaks all follow
@@ -146,11 +272,12 @@ one more argument for migrating these gates onto the real dialog.
 
 ## Parameter-identity verification (KICAD_DUMP_BATCH_KWARGS)
 
-route.py's batch_route dumps its FULL parameter set (76 keys) and returns
-when KICAD_DUMP_BATCH_KWARGS=<file> is set -- diffing a CLI invocation
-against the GUI leg's call verifies the two fronts hand the engine the
-same parameters. Current state: only `return_results` (definitional) and
-`layer_costs` [] vs None (proven equivalent via get_layer_costs) differ.
+route.py's batch_route dumps its FULL parameter set (every keyword of the
+call) and returns when KICAD_DUMP_BATCH_KWARGS=<file> is set -- diffing a CLI
+invocation against the GUI leg's call verifies the two fronts hand the engine
+the same parameters. At the time of the ladder below, only `return_results`
+(definitional) and `layer_costs` [] vs None (proven equivalent via
+get_layer_costs) differed.
 
 The probe found two phantom forks in this harness itself (both the exact
 CLAUDE.md 'defaults must match in both places' class): ordering_strategy
@@ -166,17 +293,19 @@ real 0.0. Copper-overlap ladder on splitflap as each fork was removed:
 Residual ~2%: pcbnew re-save normalization (element order/precision of the
 temp file vs the original bytes), per-step .kicad_pro floor carryover, and
 in-memory vs file-based post-pass sequencing. The production GUI path
-(builder representation) sits at ~77% copper identity with full grade
-parity; closing it to ~98% is the order-canonicalization follow-up.
+(builder representation) then sat at ~77% copper identity with full grade
+parity. That gap has since closed without any order canonicalization (the
+splitflap measurement above).
 
 ### Plane engines + diff_engine_kwargs.py (the #362 sweep)
 
 The dump now also covers the PLANE engines: `create_plane` (route_planes.py)
 and the repair `route_planes` (repair_planes.py) each write a line
 via `route._dump_engine_config` in CONTINUE mode, INCLUDING `all_layers` /
-`plane_layers` (layer content/order is a live divergence class). So one
-`KICAD_DUMP_BATCH_KWARGS_CONTINUE=1` run of a whole plan captures every engine
-call -- route, diff, create_plane, repair -- in one file.
+`plane_layers` (layer content/order is a live divergence class), and so does
+`generate_bga_fanout`. So one `KICAD_DUMP_BATCH_KWARGS_CONTINUE=1` run of a
+whole plan captures every engine call -- route, diff, BGA fanout,
+create_plane, repair -- in one file.
 
 `diff_engine_kwargs.py <cli.jsonl> <gui.jsonl>` reports the non-benign per-engine
 divergences (see its docstring for how to produce the two captures and which
@@ -205,11 +334,12 @@ step). Post-fix: every plane call MATCHes, GUI board 0 DRC / plane-copper delta
 
 ## Converter parity (test_manifest_plan_parity.py)
 
-The harness above proves the ENGINE half (same batch_route kwargs -> same
-board) but hand-mirrors the plan->params mapping, so it can't catch a bug in
-`manifest_to_plan` (converter) or `ai_plan.apply_step_params` (apply).
-Those two translation layers are where the set11 rp2350_fpga_eensy GUI replay
-silently diverged from its CLI board (242 DRC violations vs 0; issue #361).
+The whole-plan harnesses run whatever plan they are handed, so they cannot see
+a flag that `manifest_to_plan` (converter) dropped before the plan existed,
+and they exercise `ai_plan.apply_step_params` (apply) only for the flags their
+plans happen to carry. Those two translation layers are where the set11
+rp2350_fpga_eensy GUI replay silently diverged from its CLI board (242 DRC
+violations vs 0; issue #361).
 
 `test_manifest_plan_parity.py` is the CONVERTER-half gate: no wx, no pcbnew.
 It reuses manifest_to_plan's own pruning to pair each kept CLI command 1:1
@@ -224,15 +354,15 @@ Current: 0 mismatches over ~6200 flag-checks / 157 corpus manifests. Catches
 all three converter-side gaps from the set11 regression (--no-bga-zones drop,
 diff pairs emitted as net names, layerless repair_planes). The apply-side
 gaps (escape_method value->index, no_gnd_vias inversion) are ai_plan.py's
-job and belong to the wx harness / a future stub-dialog apply test.
+job, and the wx gates own them (`test_plan_flags_reach_dialog.py` below).
 
 Those checks only see a flag that a manifest uses AND a table here names, so
 `route.py --bus` replayed with bus mode OFF and nothing noticed. The gate's
 `check_flag_coverage` therefore enumerates EVERY flag the argparse of each
-`FLAG_COVERAGE` tool accepts -- route.py, route_diff.py, route_planes.py and
-bga_fanout.py -- from `krt_capabilities.script_flags` (held exact by
-`tests/test_798_registrar_flags.py`), and requires each one to reach a
-control that tool's plan action can set, or to be listed for that tool as
+`FLAG_COVERAGE` tool accepts -- route.py, route_diff.py, route_planes.py,
+bga_fanout.py and qfn_fanout.py -- from `krt_capabilities.script_flags`, and
+requires each one
+to reach a control that tool's plan action can set, or to be listed for that tool as
 CLI-only or as a known gap with the reason. It also fails a reached control
 that `reset_params_to_defaults` does not restore, since a plan step that sets
 it would leak it into every later step. Its run_all half, with the negative
@@ -266,8 +396,9 @@ step without it go through `manifest_to_plan`'s CLI and the REAL PlanExecutor
 on the headless dialog, each action replaced by a probe. The flagged step's
 control AND the tab config its engine reads must hold the recorded value; the
 next step must be back at the CLI default. It also drives the QFN tab's real
-fanout run (engine spied) for `--layer` and both routing workers for
-`--net-clearances`, so the value is shown reaching the engine call.
+fanout run (engine spied) for `--layer` and the Route, Differential and
+Planes workers for `--net-clearances`, so the value is shown reaching the
+engine call.
 
 The same blindness applies one level up, to whole TOOLS: an unknown tool only
 bumps the converter's `skipped` count, so a converted plan reads complete
@@ -335,7 +466,7 @@ signature.
 which the engine was never reached, because otherwise every kwarg reads back
 absent and it passes vacuously.
 
-Its wx-free half is `tests/test_772_ai_plan_cap_params.py` (16 arms over the
+Its wx-free half is `tests/test_772_ai_plan_cap_params.py` (arms over the
 shape of the fix, ~0.1 s, collected by `run_all.py`), which also asserts
 this file exists -- `run_all.py`'s flat glob never collects this directory.
 
@@ -349,7 +480,7 @@ params and exit 1.
 ## Declared cap rotations (test_1122_cap_rotation_gui.py)
 
 Needs KiCad's python (wx + pcbnew); re-execs into it automatically, and
-exits 2 without it (a killer gate for `tests/mutate_1120_1121_1122.py`).
+exits 2 without it.
 
     python3 tests/gui_parity/test_1122_cap_rotation_gui.py
 
@@ -392,8 +523,10 @@ fronts grade clean (rip-up routing is chaotic; #362). The invariant that
 matters is GRADE parity. This gate chains the rp2350 PLANE sub-chain in its
 #562 shape — pour → ONE route step carrying the plane nets in its net list,
 whose in-run finalize is the weld/repair/oracle — on ONE live board, as the
-Claude-tab plan executor does, in-memory across steps, and asserts every
-stage grades 0 DRC like the CLI. (It was reshaped 2026-08-04: the old
+Claude-tab plan executor does, in-memory across steps, and asserts that no
+stage, on either front, INTRODUCES DRC: each stage is graded against its own
+project, and what the input board already had is graded under that same
+project and counted apart. (It was reshaped 2026-08-04: the old
 create → repair → reconnect → repair2 plan had rotted into comparing
 different chains, because the executor skips `repair_planes` steps as #562
 no-ops while the CLI leg still shelled the old repair script.) The fixture
@@ -404,10 +537,11 @@ per-step isolation on file inputs missed.
 
     python3 tests/gui_parity/test_gui_livechain_rp2350.py
 
-## #362 plane-parity regression gates
+## Focused regression gates (from the #362 plane sweep on)
 
-Focused gates that each lock in one fixed GUI/CLI plane divergence (wx-gated;
-skip cleanly without KiCad python). Run any directly:
+Gates that each lock in one fixed GUI/CLI divergence. Each needs KiCad's
+python and re-execs into it; without one it prints `SKIP:` or exits 2, never a
+pass. Run any directly:
 
 - `test_footprint_position_sync.py` -- `_sync_pcb_data_from_board` refreshes
   footprint/pad positions after optimize_caps (matched by iteration ORDER, not
@@ -436,6 +570,12 @@ skip cleanly without KiCad python). Run any directly:
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).
+- `test_plane_layer_costs_gui.py` -- and one Layer Costs value per entry of
+  that `all_layers`, placed by name from the Basic-tab field (one per copper
+  or per selected layer). The tab used to hand over the SELECTED layers'
+  costs, which create_plane read positionally against its own list; a
+  per-selected-layer field that cannot price an unselected pour layer is
+  refused before the engine. Real dialog, create_plane mocked.
 - `test_live_fab_floor_origin.py` -- a GUI routing step's live writeback
   (`apply_targets_to_board`, then `update_live_drc_floors`) records the board's
   ORIGINAL fab floors in `kicad_routing_tools.fab_floor_origin` before lowering
@@ -458,15 +598,26 @@ skip cleanly without KiCad python). Run any directly:
   rule (#498), every copper layer (not the plane step's outer+pour set), and
   the fab copper-to-edge floor; GUI and CLI place identical vias. On the
   pre-2026-09-24 code it fails 9 checks, CLI included (its rules lookup read
-  the output's not-yet-copied `.kicad_dru`).
+  the output's not-yet-copied `.kicad_dru`). Its `file` arm (#1272) sets the
+  Net Clearances File / `--net-clearances`: the file replaces the class map
+  as given on both fronts (2 checks fail before #1272: the tab ignored the
+  file, route_planes.py refused the flag).
 - `test_skip_existing_zones_gui.py` -- the Planes tab's **Skip existing
   zones** box against `route_planes.py` with and without
   `--skip-existing-zones`, on the real tab (create + apply on a live board):
   a net's single-layer pour is replaced (old one deleted, one new pour at the
   run's clearance and width), kept with the box, a multi-layer pour is never
-  deleted and is out-ranked, and a GND teardrop neither blocks the pour nor
-  goes with it. GUI and CLI leave identical GND pours; a negative control
-  strips the engine's `replace_existing` marks.
+  deleted to replace one of its layers and is out-ranked, and a GND teardrop
+  neither blocks the pour nor goes with it. GUI and CLI leave identical GND
+  pours; a negative control strips the engine's `replace_existing` marks.
+- `test_1299_multilayer_zone_replace_gui.py` -- a `(layers "F.Cu" "B.Cu")`
+  GND pour, poured on both layers and on B.Cu alone, on the real Planes tab
+  (create + apply) against `route_planes.py` (#1299). Both layers: the 2-layer
+  pour is deleted and one GND pour per layer added. One layer: it is kept
+  under a new B.Cu pour. GUI and CLI leave identical pours. Negative control:
+  the engine's check given no call layers keeps the 2-layer pour under the new
+  ones. With the tab's pre-fix apply (single-layer pours only) the both-layers
+  arm fails on the GUI side alone.
 - `test_1056_renamed_layers_gui.py` -- a board whose In1.Cu/In2.Cu are
   renamed "GND"/"+5V" in Board Setup (#1056). `board.GetLayerName()` returns
   that display name, so every live-board site that mapped through it missed:
@@ -567,45 +718,57 @@ skip cleanly without KiCad python). Run any directly:
   the kwarg from both calls, and `test_engine_kwarg_parity` could not see it
   because it read no `**kwargs` call (it now follows `GUI_KWARGS_DICTS`, and a
   pair it cannot read FAILs instead of printing SKIP).
-- `test_movie_recorder.py` -- the Advanced tab's **Make routing movie** debug
-  checkbox (#506): default OFF and inert while off; one routing step renders
-  ONE movie; a plan run (`begin_group`/`end_group`, what the AI tab's Run
-  Selected Steps brackets) renders ONE movie for ALL its steps; the path is
-  logged in GREEN; and `reset_params_to_defaults` must NOT untick it (the plan
-  executor calls that before every step, so a reset there would abandon the
-  run's movie halfway) while an explicit reset-all does.
-- `diag_fullchain_carry_rp2350.py` -- **DELETED 2026-07-26.** Was a full
-  GUI-carry reproduction (ONE board + ONE shared pcb_data across all 10 plan
-  steps, graded per stage vs the CLI) built to localize where the carry
-  diverges. A one-off diagnostic, not a gate: it needed the set11 corpus so it
-  skipped for anyone without it, and `replay_plan_vs_run.py` now does the same
-  carry through the real dialog. Its findings stay recorded above.
+- `test_via_type_parse_parity.py` -- a via's copper span (#1268). The text
+  parse, the pcbnew parse and the Route tab's live re-sync
+  (`_sync_pcb_data_from_board`) are each held, layer by layer, to pcbnew's
+  own `PCB_VIA.IsOnLayer` on a board of through, blind, buried and micro vias
+  and on the same board with every type word stripped -- which KiCad loads as
+  through vias, and which is the shape this repo's writer emits. A span read
+  off the layer pair fails the stripped board on the text side only. A third
+  arm re-creates every typed via the way the plugin does
+  (`gui_utils.set_via_layers`: the type before the layer pair, which pcbnew
+  otherwise snaps to F.Cu/B.Cu) and holds it to the original copper.
+- `test_1279_sense_branch_live.py` -- the live board keeps a `sense:` branch
+  (#1279). After the Route tab's re-sync the tracks, arc pieces and vias carry
+  what a fresh `build_pcb_data_from_board` reads (one shared extractor), copper
+  graphics survive, the branches and the protection map (memo included) match
+  a fresh build, a group drawn or removed in the session counts at the next
+  sync, and a Route-tab run with the branch's net rippable never strips the
+  sense track. Before the shared extractor the re-sync carried no uuid, no
+  KiCad lock and no arcs: 9 checks fail there. Its Apply arm holds the
+  Placement tab's Place + Route Apply to keeping the copper the run left
+  unchanged (uuid, arc, group membership) and writing no lock token the result
+  file does not carry; the wholesale remove-and-recreate failed 6 checks. Its
+  last arm moves and turns a part whose land pattern draws F.Cu copper (#908)
+  in the live session: after the sync the model's copper graphics must equal
+  a fresh build's. A sync that kept the graphics built at dialog open left the
+  tab where the part had been.
 
 ## Whole-plan replay through the real plugin (replay_plan_vs_run.py)
 
 Every stress board leaves a GUI-loadable plan beside its chain (`run_board.sh`
-→ `manifest_to_plan.py` → `<board>_plan.json`; `make_plan.py` builds the same
+→ `manifest_to_plan.py` → `<board>_plan.json`; `py_router/make_plan.py` builds the same
 file from any recorded manifest). This driver does what a user does with it —
 open the unrouted board, AI tab → **Load...** → **Run All Selected Steps** —
 with no buttons and no LLM, then diffs the result against the CLI chain.
 
-The headless driving itself lives in the repo-root **`headless_plan.py`**, which
-is also what the user-facing `run_plan.py` runs (#507) — so this harness
-exercises the shipped driver instead of a private copy. Same for the conversion:
+The headless driving itself lives in **`py_router/headless_plan.py`**, which
+is also what the user-facing `py_router/run_plan.py` runs (#507) — so this
+harness exercises the shipped driver instead of a private copy. Same for the conversion:
 `_regen_steps` calls `manifest_to_plan.plan_steps_from_manifest`, the converter's
 own function, rather than re-implementing its loop.
 
     python3 tests/gui_parity/replay_plan_vs_run.py <rundir>
     python3 tests/gui_parity/replay_plan_vs_run.py --set <runs_setN> [--boards a,b]
 
-Unlike `test_gui_engine_parity.py`, **nothing is mirrored**. The real
+**Nothing is mirrored.** The real
 `swig_gui.RoutingDialog` is constructed headless (`parent=None`, never shown —
 wx needs `WXSUPPRESS_SIZER_FLAGS_CHECK=1`, which the script sets, because
 `about_tab`'s `wxEXPAND|wxALIGN_*` sizer flags trip a debug assert) with its
 real tabs and controls, and the real `ai_plan.PlanExecutor` drives it inside
 a `wx.MainLoop`. So the whole `parse_plan_result` → `reset_params_to_defaults` →
 `apply_step_params` → `apply_step_selection` → `tab._on_*()` path is under test,
-including the two translation layers the engine harness cannot see (the
+including the two translation layers the old shim harness could not see (the
 converter and the apply side — the #361 class).
 
 **Two lessons are baked in; both were measured, not assumed.**
@@ -621,18 +784,16 @@ converter and the apply side — the #361 class).
    the recorded board alongside, reported separately as *engine drift*.
    `--cli-ref recorded` opts out and is only honest at the recording commit.
 
-2. **GUI copper is snapped to 1 µm, CLI copper is not.** Everything the GUI
-   applies goes through `pcbnew.FromMM(round(v, POSITION_DECIMALS))` with
-   `POSITION_DECIMALS = 3` (`kicad_parser.py`), so any point not already on a
-   1 µm boundary (diagonal joins, nudged vias) lands up to ~0.5 µm from the
-   CLI's full-precision text value — `167.609` vs `167.6094`. Bit-identical
-   copper is therefore impossible today for non-grid-aligned points. The
-   comparator reports a **tri-state** rather than hiding it: `IDENTICAL` (exact
-   multiset equality), `EQUIVALENT` (every leftover pairs within `--tol`, i.e.
-   only the apply rounding), `DIFFERS` (genuinely unmatched copper remains).
-   Related but separate: `--dp` defaults to 5 because pcbnew's integer-nm
-   storage vs decimal-mm text round-trips as `66.1` / `66.099999`, a 1 nm
-   artifact; dp=5 is the finest resolution at which both representations agree.
+2. **The comparison is exact, to the nanometre.** Both fronts emit copper
+   through `kicad_parser.mm_to_iu`, which rounds to pcbnew's integer-nm grid
+   (the GUI used to snap applied copper to 1 µm and truncate in
+   `pcbnew.FromMM`; see #493 below), so `--dp` defaults to 6 (1 nm, the
+   board's own resolution). The comparator still reports a **tri-state**
+   rather than hiding a residue: `IDENTICAL` (exact multiset equality),
+   `EQUIVALENT` (every leftover pairs within `--tol`, default 1 µm: a
+   representational difference only), `DIFFERS` (genuinely unmatched copper
+   remains). Loosen `--dp` only to characterise a divergence you are already
+   chasing.
 
 Compared at four levels, on the finals **and after every step** (the GUI board
 is snapshotted per step, so the report names the FIRST step producing genuinely
@@ -642,7 +803,9 @@ are comparable by construction), segments, vias, zones, and footprint poses
 (`optimize_caps` moves parts — the #362 position-sync class).
 
 Exit codes: 0 same routing (IDENTICAL or EQUIVALENT), 1 copper genuinely
-differs, 2 grade differs, 3 replay failed.
+differs, 2 grade differs, 3 replay failed. Other options (`--plan-source
+regen`, `--raw-plan`, `--max-steps N`, `--gui-board`, `--json`, `--fresh`,
+...) are in the script's docstring.
 
 Note the cost: it runs **both** legs (CLI chain + GUI chain), so budget roughly
 twice a single replay per board.
@@ -694,7 +857,11 @@ believed impossible (see the older note above about ~77% overlap); it isn't, and
 
 ## Checked-in test inputs
 
-All boards these gates need are committed under `kicad_files/`
-(`splitflap_driver.*`, `rp2350_fpga_eensy_prePlane.*`), and
-`test_manifest_plan_parity.py` falls back to `fixtures/sample_redo_commands.sh`
--- so every gate runs on a fresh checkout without the external stress corpus.
+Every input the gates read is tracked: boards under `kicad_files/` and one
+under `awx/`, fixtures under `tests/fixtures/`
+and `tests/gui_parity/fixtures/`, and boards the gates build from those in a
+temp dir. `test_manifest_plan_parity.py` always includes
+`fixtures/sample_redo_commands.sh`, and reads the stress corpus's manifests
+only when `$STRESS_DIR` has them. So every gate runs on a fresh checkout
+without the external stress corpus, except `replay_plan_vs_run.py`, whose
+input IS a stress run.

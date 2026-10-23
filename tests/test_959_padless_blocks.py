@@ -6,8 +6,8 @@ of 21 footprint blocks. The denominator was `if fp.pads` -- what the seeder
 moves -- and so it hid exactly the three blocks the seeder never touches: the
 pad-less logos. One of them sat at the pile origin for 12 laps printing silk
 across CON2's apertures, found by eye rather than by any gate. And asking
-`converge poses` about one of them died in a KeyError traceback at exit 1, the
-same code as the verdict "no legal pose".
+for a pose for one of them died in a KeyError traceback at exit 1, the same
+code as the verdict "no legal pose".
 
 Traps written against:
 
@@ -17,12 +17,13 @@ Traps written against:
   * `must_lock` looks like an answer and is not one -- it stamps a lock the
     seeder writes after seating, and this block is never seated;
   * a non-zero exit is not evidence: every CLI arm asserts the reason, and
-    the converge arm asserts there is NO traceback.
+    that there is NO traceback.
 
 The P1 pad-less census and its refusals lived in the retired placement_driver
 and left with it (its `dispositions.refs` judgement survives as
 `floorplan.stale_dispositions`, pinned in test_959_rule_roster). What stays is
-the board fact, the grade, and the three CLIs that must refuse, not crash.
+the board fact, the grade, and the pose ranker and CLI that must refuse,
+not crash.
 """
 import json
 import os
@@ -124,19 +125,6 @@ def test_rank_poses_refuses_instead_of_raising_a_bare_keyerror():
     print("  PASS: PoseUnrankable carries code 4 (a real block) / 2 (none)")
 
 
-def test_converge_poses_exits_4_with_json_and_no_traceback():
-    for key, kind in ((LOGOS[2], 'unrankable'), ('NOPE1', 'not_on_board')):
-        r = run_utils.check([sys.executable, '-X', 'utf8',
-                             run_utils.tool('converge.py'), 'poses', ESP,
-                             '--ref', key], refuse='"refused"', code=4)
-        assert 'Traceback' not in (r.stdout + r.stderr)
-        start = r.stdout.index('{')
-        doc = json.loads(r.stdout[start:r.stdout.rindex('}') + 1])
-        assert doc['refused_kind'] == kind and doc['poses'] == [], doc
-        assert key in doc['refused'] and 'knobs' in doc, doc
-    print("  PASS: converge poses refuses at exit 4 with a reason, both kinds")
-
-
 def test_place_pose_snap_on_a_padless_block_is_a_refusal():
     """`--strict-legal` on a board that is not already clean sends the pose
     down the snap path, which is where `rank_poses` is asked about the block.
@@ -174,7 +162,6 @@ TESTS = [
     test_esp_prog_has_21_blocks_and_three_are_padless,
     test_a_padless_block_with_a_courtyard_is_graded,
     test_rank_poses_refuses_instead_of_raising_a_bare_keyerror,
-    test_converge_poses_exits_4_with_json_and_no_traceback,
     test_place_pose_snap_on_a_padless_block_is_a_refusal,
 ]
 

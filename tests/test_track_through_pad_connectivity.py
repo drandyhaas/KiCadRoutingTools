@@ -9,9 +9,14 @@ credited endpoint-in-pad -- so the pad graded as a phantom disconnect, every
 retry did nothing ("nothing to route"), and the board could never reach 100%.
 KiCad grades the pad connected.
 
-check_net_connectivity must mirror _pad_on_group's conservative gate: credit
-when the centreline reaches within seg.width/2 + min(pad_dims)/4 of the pad
-CENTRE; a track merely grazing the pad outline stays disconnected.
+check_net_connectivity and _pad_on_group ask one question, KiCad's: does the
+track's copper overlap the pad's real copper anywhere along it
+(check_connected.track_reaches_pad). This test first encoded a conservative
+gate -- the centreline within seg.width/2 + min(pad_dims)/4 of the pad CENTRE
+-- and called the track shifted 0.55 mm "grazing, NOT connected"; its copper
+overlaps the pad's corner by 0.075 mm and pcbnew 10.0.3 connects it, so it is
+connected here too. Shifted 0.7 mm its copper misses the pad by 0.049 mm and
+pcbnew leaves it open (tests/test_checker_kicad_parity.py has the boundary).
 
     python3 tests/test_track_through_pad_connectivity.py
 """
@@ -70,11 +75,22 @@ def main():
     results.append(("mid-span track through pad credits connection",
                     r['connected']))
 
-    # Negative: same track shifted so the centreline passes 0.60mm from the
-    # pad centre -- outside the 0.294 gate (grazes only the outline corner).
-    seg_far = _seg(131.05 + 0.55, 77.75 - 0.55, 132.8 + 0.55, 79.5 - 0.55)
-    r = check_net_connectivity(10, [seg_far], [], [pad, far], [])
-    results.append(("grazing track does NOT credit connection",
+    # The same track shifted 0.55mm: its centreline passes through the pad's
+    # corner (0.60mm from the centre, outside the old 0.294 gate), so its
+    # copper overlaps the pad -- KiCad connects it (pcbnew 10.0.3).
+    # (U1 moves with the track: the old negative case left U1 behind, so its
+    # "not connected" held whatever the credit did.)
+    seg_corner = _seg(131.05 + 0.55, 77.75 - 0.55, 132.8 + 0.55, 79.5 - 0.55)
+    r = check_net_connectivity(10, [seg_corner], [],
+                               [pad, _pad('U1', 131.05 + 0.55, 77.75 - 0.55)], [])
+    results.append(("track over the pad's corner credits connection (KiCad does)",
+                    r['connected']))
+
+    # Shifted 0.7mm its copper misses the corner by 0.049mm: open, as in KiCad.
+    seg_far = _seg(131.05 + 0.7, 77.75 - 0.7, 132.8 + 0.7, 79.5 - 0.7)
+    r = check_net_connectivity(10, [seg_far], [],
+                               [pad, _pad('U1', 131.05 + 0.7, 77.75 - 0.7)], [])
+    results.append(("track missing the pad does NOT credit connection",
                     not r['connected']))
 
     # Board level: the whole-board checker agrees (no issues on the fixture).

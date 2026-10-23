@@ -10,8 +10,9 @@ only the disallowed item (tracks and/or vias) on the keepout's listed layers.
 
 Self-contained: builds temporary boards from kicad_files/flat_hierarchy.kicad_pcb
 by inserting a keepout zone, routes with route.py, and checks each scenario. Each
-prints PASS/FAIL plus log detail; exits non-zero if any scenario fails. Run with
-KiCad's python (needs the Rust router).
+prints PASS/FAIL plus log detail; exits non-zero if any scenario fails. Needs
+the Rust router built for this interpreter (`python3 build_router.py`); KiCad's
+python is not required.
 
 Scenarios
 ---------

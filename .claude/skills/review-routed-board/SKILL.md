@@ -54,7 +54,7 @@ Without `--baseline`, every pre-existing one reads as a violation
 part MOVE created (`graphic-board-edge`); `graphic-off-board` (copper past the
 outline) is reported either way.
 
-**Important caveat to include in the report:** `check_drc.py` does not check zone copper, minimum trace width, or netclass compliance. If the board has copper zones/planes, recommend the zone-aware check:
+**Important caveat to include in the report:** `check_drc.py` does not grade zone (pour) fill copper. It does grade per-netclass clearance and `.kicad_dru` rules, and track width / via size against the FAB floor for the layer count unless given `--min-track-width` / `--min-via-diameter` / `--min-via-drill` (pass the spec's numbers when they are tighter). If the board has copper zones/planes, recommend the zone-aware check:
 
 ```bash
 kicad-cli pcb drc board.kicad_pcb --refill-zones --format json -o /tmp/drc.json
@@ -89,6 +89,14 @@ under WARNINGS as `footprint own copper` (#995). Report them as KiCad errors the
 user will see, not as shorts. A `<no net>` item with any OTHER net is a real
 short.
 
+Two pads of ONE footprint touching on different nets are a check_drc `pad-pad`
+violation (#1306), KiCad's `shorting_items` (`clearance` at actual 0 when one
+pad has no net). Some libraries ship them (a Kelvin shunt with no net-tie
+group, a shield tab or thermal-via pad with no net): pass `--baseline <input
+board>` and a contact the input's footprint already had is accepted
+`inherited-own-pad-contact`. A contact that is NOT inherited means a tool turned
+or rewrote the footprint's pads.
+
 The cross-check is one-directional (#260): kicad-cli can refute a borderline
 check_drc *near-miss* (a sub-clearance gap), but a kicad-cli "0" does NOT clear
 an *overlap/short* finding — KiCad 10 net-unifies touching copper on load, so
@@ -120,6 +128,13 @@ for group_name, net_names in groups.items():
     # PASS if spread <= tolerance (default 0.1 mm); report worst offender otherwise
 ```
 
+A **`.kicad_dru` length window** (`(constraint length (min ..) (max ..))`) is
+an absolute bound, not a spread: `check_drc.py` grades it (Step 1's run) and
+lists each net outside it as `LENGTH-OUT-OF-RANGE`, KiCad's
+`length_out_of_range`, plus any rule it could not model as `NOT GRADED`
+(#1313). Report those rows here too; a group can pass its spread while every
+member misses the window.
+
 `net_match_length` is the measurement `board_score.py --length-groups` grades
 with, so the two cannot disagree. **Never grade raw `net_copper_lengths`
 spreads**: a net with no copper reads 0.0 mm and one with only fanout stubs
@@ -135,7 +150,8 @@ path — measure the driver→receiver path instead, and match on that:
 ```python
 path_mm = net_match_length(pcb, name_to_id['DQ0'], mode='pin_pair')
 # None = the net's first two pads are not joined by TRACK copper
-# (plane-only or broken); pin_pair_path_length(pcb, nid, pad_a, pad_b)
+# (plane-only or broken; a via centred in a pad joins it through its
+# barrel, #1314); pin_pair_path_length(pcb, nid, pad_a, pad_b)
 # measures any other pad pair
 ```
 
@@ -193,14 +209,19 @@ was routed by this tool below the recommendation — the
 For high-speed nets (use `/find-high-speed-nets` results if available, else the name-pattern tiers from `/plan-pcb-routing`), check each signal via has a GND via nearby:
 
 ```python
+from kicad_parser import pad_is_plated_through
 gnd_ids = {n.net_id for n in pcb.nets.values() if n.name and 'GND' in n.name.upper()}
-gnd_vias = [v for v in pcb.vias if v.net_id in gnd_ids]
-# Through-hole GND pads also count as return paths
+# GND vias, and plated through-hole GND pads, are return paths
+gnd_pts = [(v.x, v.y) for v in pcb.vias if v.net_id in gnd_ids]
+gnd_pts += [(p.global_x, p.global_y) for fp in pcb.footprints.values()
+            for p in fp.pads if p.net_id in gnd_ids and pad_is_plated_through(p)]
 for via in pcb.vias:
     if via.net_id in high_speed_net_ids:
-        nearest = min(((v.x-via.x)**2 + (v.y-via.y)**2)**0.5 for v in gnd_vias)
+        nearest = min((((x-via.x)**2 + (y-via.y)**2)**0.5 for x, y in gnd_pts),
+                      default=float('inf'))
         # Flag if nearest > recommended distance for the net's speed tier
-        # (ultra-high: 2.0mm, high: 3.0mm, medium: 5.0mm)
+        # (ultra-high: the 3 x (via_size + clearance) floor, 2.25mm at the
+        # default 0.5 via / 0.25 clearance; high: 3.0mm; medium: 5.0mm)
 ```
 
 ## Step 3b: Impedance & Return-Path Audit (#486)
@@ -253,10 +274,36 @@ How to read it:
 
 ## Step 4: Differential Pair Review
 
-For each differential pair (from `list_nets.py --diff-pairs`):
+Read each pair off its **copper**, never off the router's word for it (#1303).
+`board_score.py` (Step 5's run) carries a `diff_pairs` component that measures
+every pair KiCad recognises as KiCad's DRC does: coupled and uncoupled length
+(`net_queries.diff_pair_coupling`), the layers each member uses, and the P/N
+skew (`net_queries.diff_pair_skew`). Its console line names the largest skews
+and any pair with **NO COUPLED COPPER** -- P and N never run side by side,
+which is what a pair whose members took separate layers looks like (imx6ulz
+DQS0: P on In2.Cu, N on B.Cu, 0 mm coupled, 4.5 mm skew, while route_diff
+called it coupled). In Python:
 
-- **Gap consistency**: sample parallel P/N segment pairs on the same layer and confirm the spacing matches the design gap.
-- **Intra-pair skew**: compare P and N lengths; flag pairs differing by more than ~0.5mm if intra-pair matching was expected.
+```python
+from net_queries import diff_pair_copper
+rec = diff_pair_copper(pcb, p_id, n_id)   # coupled_mm, uncoupled_mm, skew_mm, layers_p/_n
+```
+
+- **Coupling**: a pair the plan routed coupled must show coupled copper. In a
+  route_diff log, `JSON_SUMMARY.uncoupled_diff_pairs` (outcome `uncoupled`)
+  lists pairs routed whose shipped copper is not coupled -- route_diff no longer
+  counts them routed, and protects one only while its members still run
+  alongside within 1 mm and both connect (`pair_reports[].protected`, #1361),
+  so the next step may reroute the rest.
+- **Skew / uncoupled length against the spec**: a `.kicad_dru` `skew` rule
+  (`(within_diff_pairs)` for P against N) or `diff_pair_uncoupled` rule is
+  graded by `check_drc.py` (`SKEW-OUT-OF-RANGE`, `DIFF-PAIR-UNCOUPLED`, KiCad's
+  `skew_out_of_range` / `diff_pair_uncoupled_length_too_long`) and counted in
+  board_score's `diff_pairs`. With no such rule the component is UNGRADED --
+  report the measured skews, and flag pairs differing by more than ~0.5mm if
+  intra-pair matching was expected. An intra-pair status in a route_diff log is
+  read off the shipped copper too (`intra_pair_matching[].delta_mm`; the
+  matcher's own number is `matcher_delta_mm`).
 - **Polarity swaps**: if the routing logs (or the user) indicate pad swaps were applied, remind that the schematic may be out of sync and `--schematic-dir` can update it.
 
 ## Step 5: The Sign-Off Report
@@ -281,12 +328,25 @@ Step 9 rather than signing off with caveats. Two traps this closes:
   numbers, or copper that meets the fab and violates the board's own tighter
   requirement signs off clean.
 
+`blocking == 0` is necessary, not sufficient: `/plan-pcb-routing`'s DONE also
+needs `check_complete.py` (repo root) to say DONE. It takes the same spec
+flags, runs `board_score` plus the instruments `board_score` has no component
+for (orphan stubs, weird copper, ...), and fails closed: exit 0 DONE, 4
+INCOMPLETE, 5 UNSOUND (the board grades clean only against floors the chain
+rewrote; pass `--authored-from <the board the chain started from>` so it can
+tell).
+
+```bash
+python3 -X utf8 check_complete.py board.kicad_pcb --authored-from <original> \
+    --min-track-width <spec> --min-via-diameter <spec> --min-via-drill <spec>
+```
+
 Then present a compact report — one pass/fail line per category, details only for failures, ending with next actions:
 
 ```
 ## Board Review: board.kicad_pcb
 
-BLOCKING=0  (unrouted=0 broken=0 drc=0 undersized=0 floorplan=0 assembly=0 net_widths=0)  vias=214 copper_mm=1893.4
+BLOCKING=0  (unrouted=0 broken=0 drc=0 undersized=0 floorplan=0 assembly=0 impedance=0 length=0 net_widths=0 diff_pairs=0)  vias=214 copper_mm=1893.4
 UNGRADED (not scored, not passed): impedance, length
 
 | Check | Result |
@@ -310,4 +370,4 @@ UNGRADED (not scored, not passed): impedance, length
    its welds unverified until route.py's plane finalize runs)
 ```
 
-When connectivity or routing failures are found, recommend `/diagnose-routing-failures` as the follow-up rather than diagnosing inline here. If they trace to part positions (pad copper off the outline, unreachable pads, `check_assembly` not buildable), recommend `/pcb-free-agent full` instead of a router retry.
+When connectivity or routing failures are found, recommend `/diagnose-routing-failures` as the follow-up rather than diagnosing inline here. If they trace to part positions (pad copper off the outline, unreachable pads, `check_assembly` not buildable), recommend `/plan-pcb-placement full` instead of a router retry.

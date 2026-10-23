@@ -24,21 +24,32 @@ unknown = get_components_needing_analysis(components)
 
 ## Step 2: Auto-Classify Obvious Components
 
-These are already handled automatically - no AI needed:
+These are already handled automatically - no AI needed (`_auto_classify_component`;
+a prefix counts only when a digit follows it, e.g. `R12`, `FB3`, except `SW` and
+`LED`):
 
 | Prefix | Role | Reason |
 |--------|------|--------|
-| R (resistor) | SHUNT | Pull-ups, voltage dividers |
-| C (capacitor) | SHUNT | Decoupling caps |
+| any part with a `power_out` pin | POWER_SOURCE | Regulator output (checked first) |
+| R (resistor) | SHUNT | Pull-ups, voltage dividers (default; reclassify a series power resistor) |
+| C (capacitor) | SHUNT | Decoupling cap: only a two-terminal cap with one side on a GND net. Any other cap stays UNKNOWN (could be a series cap) |
 | L (inductor) | PASS_THROUGH | Series filter element |
 | FB (ferrite bead) | PASS_THROUGH | Series filter element |
 | F (fuse) | PASS_THROUGH | Series protection |
 | LED | CURRENT_SINK | Consumes current |
-| SW (switch) | PASS_THROUGH | Power switching |
+| SW, S (switch) | PASS_THROUGH | Power switching |
+| U (IC) | CURRENT_SINK | Current unknown: counted as 100 mA until you classify it |
+| VR (regulator) | POWER_SOURCE | Current unknown: counted as 100 mA until you classify it |
 
 ## Step 3: AI Analysis for Unknown Components
 
-For each component in the `unknown` list, you MUST:
+`unknown` holds only the UNKNOWN parts (diodes, transistors, J/P/TB/CN
+connectors, caps that are not plain decoupling, anything unmatched). ICs and
+VR regulators are already auto-classified, but with no current rating, so every
+one counts as 100 mA in the recommendations: look them up too (Step 4) and
+re-classify them with `current_rating_ma`.
+
+For each component in the `unknown` list, and each IC/regulator, you MUST:
 
 ### 3a. Identify What It Is
 
@@ -122,6 +133,13 @@ paths = trace_power_paths(pcb_data, components)
 recommendations = get_power_net_recommendations(pcb_data, components, paths)
 ```
 
+`recommendations` is `{net_name: width_mm}`. Each net's current is the sum of
+the traced paths through it plus the power pins of the sinks and sources on it;
+every GND-named net is sized for the total sink current; nets under 50 mA
+(`min_current_ma`) are left out. Current maps to width by the IPC-2221 table
+with a 2x margin (`docs/power-nets.md`): under 50 mA 0.3 mm, under 100 mA
+0.5, under 500 mA 0.7, under 1 A 1.0, under 2 A 1.2, under 5 A 2.0, else 3.0.
+
 ## Step 6: Generate Report
 
 ```python
@@ -162,13 +180,13 @@ When analyzing a board like kit-dev-coldfire-xilinx_5213:
 ### Recommended Power Nets
 | Net | Width | Reason |
 |-----|-------|--------|
-| Net-(TB201-P1) | 0.5mm | Power input path |
-| Net-(F201-Pad1) | 0.5mm | After fuse |
-| +3.3V | 0.5mm | Main rail, 500mA total |
-| /VDDPLL | 0.3mm | PLL supply, 10mA |
+| Net-(TB201-P1) | 0.7mm | Power input path, 350mA |
+| Net-(F201-Pad1) | 0.7mm | After fuse, 350mA |
+| +3.3V | 0.7mm | Main rail: U102 200mA + U301 150mA |
+| GND | 0.7mm | Return for all sinks, 350mA |
 
 ### Routing Command
---power-nets "GND" "+3.3V" "/VDDPLL" "/VCCA" "Net-(TB201-P1)" --power-nets-widths 0.5 0.5 0.3 0.3 0.5
+--power-nets "GND" "+3.3V" "Net-(TB201-P1)" "Net-(F201-Pad1)" --power-nets-widths 0.7 0.7 0.7 0.7
 ```
 
 ## Important Notes

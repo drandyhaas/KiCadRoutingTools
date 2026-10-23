@@ -238,10 +238,7 @@ def test_the_ring_basis_is_load_bearing():
     from placement.quench import QuenchState
     import routing_defaults as rd
     st = QuenchState(pcb, path, clearance=rd.CLEARANCE,
-                     board_edge_clearance=0.55, crossing_penalty=10.0,
-                     halo_base=0.5, halo_coef=0.25, halo_weight=2.0,
-                     edge_halo=2.0, edge_weight=2.0, grid_step=rd.GRID_STEP,
-                     length_weight=1.0)
+                     board_edge_clearance=0.55)
     lo, hi, basis = fp.edge_span(st.edge_gate, bounds, 'south', r.outline)
     assert basis == 'ring' and abs((hi - lo) - 81.28) < 0.01, (lo, hi, basis)
     bbox_off = (lo + hi) / 2.0 - (bounds[0] + bbox_span / 2.0)
@@ -259,15 +256,16 @@ def test_a_non_rectangular_board_still_measures_where_it_can():
     """Per EDGE, not per board.
 
     watchy is not a simple rectangle -- 21 Edge.Cuts segments, 2 cutouts --
-    and all four of its edges still resolve to one ring run each. Abstaining
-    per board would throw away 13 correct measurements.
+    and its edges still resolve to one ring run each: every one of its six
+    edge parts (J2, M1, SW1-SW4; only an edge part claims an edge) is
+    measured. Abstaining per board would throw all six away.
     """
     r = _grade('watchy')
     assert not r.outline['simple_rectangle'], r.outline
     assert r.outline['cutouts'] == 2, r.outline
     rows = [e for e in r.edge_seating
             if e.get('along_edge_offset_mm') is not None]
-    assert len(rows) >= 10, len(rows)
+    assert len(rows) == len(r.edge_seating) >= 6, (len(rows), len(r.edge_seating))
     assert all(e['basis'] == 'ring' for e in rows), rows[:2]
     assert not r.budget_abstained or 'overlap_area' in r.budget_abstained
     print(f"  PASS: {len(rows)} entries measured on a 21-segment, 2-cutout "
@@ -429,8 +427,13 @@ def test_the_loader_refuses_every_malformed_along_edge_claim():
     # `decaps.within_radius_mm`, the caps a reference holds. 9 since #1255:
     # `assembly.body_edge_mm`, the assembler's body-to-edge band. 10 since
     # #1253: `keep_away[]`, two net groups apart. 11 since #1211:
-    # `replicate[]`, sibling sheet instances laid out as copies.
-    assert fp.READER_VERSION == 11, (
+    # `replicate[]`, sibling sheet instances laid out as copies. 12 since
+    # af45a9e7: a `proximity[]` row sourced `placement.crystals`, a crystal
+    # claim the emitter derives, graded at warn. 13: `templates[]`, a chip's
+    # datasheet layout that place_simple seats and carries. 14: a template
+    # row's `kind` and `ground_return_mm`, a switching stage's caps' ground
+    # return graded at warn.
+    assert fp.READER_VERSION == 14, (
         f"{fp.READER_VERSION}: the field vocabulary grew. Re-state this "
         f"literal and say which field arrived, the way #712, #837, #902, "
         f"#893, #959 and #1051 did")

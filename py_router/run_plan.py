@@ -9,13 +9,9 @@ and plan executor -- no window, no clicks, no AI:
 
     python3 run_plan.py board.kicad_pcb plan.json --list      # just show the steps
     python3 run_plan.py board.kicad_pcb plan.json --steps 1,3-5
-    python3 run_plan.py board.kicad_pcb plan.json --movie routing.mp4
 
 The input board is never modified: it is copied (with its ``.kicad_pro``, which
 carries the DRC floor -- #441) to the output path, and the plan runs on that.
-
-``--movie`` snapshots the board after every step and renders the whole run into
-a movie with ``make_movie.py``.
 
 Needs KiCad's bundled python (pcbnew + wx); this script re-execs into it
 automatically, so plain ``python3 run_plan.py ...`` works.
@@ -29,7 +25,6 @@ KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
 import argparse
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -73,11 +68,7 @@ def main():
     ap.add_argument('--list', action='store_true',
                     help='list the plan steps and exit (nothing is routed)')
     ap.add_argument('--snapshot-dir', default=None,
-                    help='save the board after each step here (a movie/debug chain)')
-    ap.add_argument('--movie', nargs='?', const='', default=None,
-                    metavar='OUT.mp4',
-                    help='also render a routing movie of the run (default name: '
-                         '<output>_routing.mp4); implies per-step snapshots')
+                    help='save the board after each step here (a debug chain)')
     ap.add_argument('--timeout', type=float, default=7200,
                     help='seconds before the run is abandoned (default 7200)')
     args = ap.parse_args()
@@ -128,10 +119,6 @@ def main():
     copy_board(os.path.abspath(args.board), out)
 
     snapshot_dir = args.snapshot_dir
-    temp_snapshots = None
-    if args.movie is not None and not snapshot_dir:
-        temp_snapshots = tempfile.mkdtemp(prefix='kicadrt_movie_')
-        snapshot_dir = temp_snapshots
 
     print(f"run_plan: {len(indices)} of {len(steps)} step(s) on "
           f"{os.path.basename(out)}")
@@ -155,25 +142,6 @@ def main():
         print(f"run_plan: stopped early: {result['aborted']}", file=sys.stderr)
     if result['timed_out']:
         print(f"run_plan: TIMED OUT after {args.timeout}s", file=sys.stderr)
-
-    if args.movie is not None:
-        movie_out = args.movie or (os.path.splitext(out)[0] + '_routing.mp4')
-        try:
-            from make_movie import make_movie
-            # The snapshots are the step chain; the output board is the end state.
-            written = make_movie(result['snapshots'] + [out], out=movie_out)
-            if written:
-                print(f"run_plan: movie -> {written}")
-            if (written and movie_out.lower().endswith('.mp4')
-                    and written.lower().endswith('.gif')):
-                print("run_plan: (.mp4 encoding needs imageio + imageio-ffmpeg; "
-                      "wrote a GIF instead)")
-        except Exception as e:
-            print(f"run_plan: movie failed ({e})", file=sys.stderr)
-
-    if temp_snapshots:
-        import shutil
-        shutil.rmtree(temp_snapshots, ignore_errors=True)
 
     if result['timed_out'] or result['aborted']:
         return 1

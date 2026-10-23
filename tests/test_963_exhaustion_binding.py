@@ -25,7 +25,7 @@ WHAT IS NOT DONE HERE, and why, because the obvious fix is the wrong one:
     pins that a freeze must not retract. A sha cannot tell "rewrote the file,
     same poses" from "replaced the placement", and `verdict` opens no board.
   * So converge REPORTS: `declared_stale_board` is named on every verdict,
-    with the `step-back` command that recovers the board the claim was about.
+    with where in the ledger's store the board the claim was about is kept.
     It does NOT gate the ship. A first cut did, and a verifier measured that
     refusal firing on the chain's own prescribed ordering -- see
     `test_the_ship_is_not_gated_on_the_board_having_moved`, which exists so it
@@ -183,12 +183,11 @@ def test_record_refuses_a_stale_score_on_a_declaration_and_warns_otherwise():
     """
     with tempfile.TemporaryDirectory() as td:
         led = os.path.join(td, 'l.jsonl')
-        stale = json.dumps({'blocking': 0, 'quality': {}, 'ungraded': [],
-                            'board_sha': _sha_of(DAMAGED)})
+        stale = _score(td, 'stale.json', board_sha=_sha_of(DAMAGED))
 
         r = _cv(['record', '--ledger', led, '--board', PLACED,
                  '--kind', 'completion', '--lever', 'a baseline attachment',
-                 '--rejected', '--score', stale])
+                 '--rejected', '--score-file', stale])
         assert r.returncode == 0, r.stderr
         assert 'DIFFERENT board' in r.stderr, r.stderr
         row = json.loads(r.stdout)
@@ -198,7 +197,7 @@ def test_record_refuses_a_stale_score_on_a_declaration_and_warns_otherwise():
         run_utils.check(
             _argv(['record', '--ledger', led, '--board', PLACED,
                    '--kind', 'systemic', '--exhausted', 'placement',
-                   '--exhausted-reason', 'AUDIT TEST', '--score', stale]),
+                   '--exhausted-reason', 'AUDIT TEST', '--score-file', stale]),
             refuse='grades a DIFFERENT board', code=2)
         assert len(_rows(led)) == 1, (
             'the refused declaration was written anyway: ' + repr(_rows(led)))
@@ -217,14 +216,14 @@ def test_the_stale_attachment_is_on_the_row_not_only_on_stderr():
         led = os.path.join(td, 'l.jsonl')
         r = _cv(['record', '--ledger', led, '--board', PLACED,
                  '--kind', 'placement', '--lever', 'no sha at all',
-                 '--score', json.dumps({'blocking': 0, 'quality': {}})])
+                 '--score-file', _score(td, 'unbound.json')])
         assert r.returncode == 0, r.stderr
         assert json.loads(r.stdout)['score_stale']['binding'] == 'unbound'
 
         r = _cv(['record', '--ledger', led, '--board', PLACED,
                  '--kind', 'placement', '--lever', 'bound correctly',
-                 '--score', json.dumps({'blocking': 0, 'quality': {},
-                                        'board_sha': _sha_of(PLACED)})])
+                 '--score-file', _score(td, 'bound.json',
+                                        board_sha=_sha_of(PLACED))])
         assert r.returncode == 0, r.stderr
         assert 'score_stale' not in json.loads(r.stdout), \
             'a correctly bound row must not be labelled'
@@ -277,9 +276,8 @@ def test_a_declaration_is_not_retracted_by_the_board_moving_on():
             b = DAMAGED if i % 2 else PLACED       # the board keeps changing
             assert _cv(['record', '--ledger', led, '--board', b,
                         '--kind', 'completion', '--lever', 'routing lap ' + str(i),
-                        '--score', json.dumps({'blocking': 0, 'quality': {},
-                                               'ungraded': [],
-                                               'board_sha': _sha_of(b)})]
+                        '--score-file', _score(td, f'lap{i}.json',
+                                               board_sha=_sha_of(b))]
                        ).returncode == 0, 'routing lap ' + str(i)
         sp = _score(td, 's.json', board_sha=_sha_of(DAMAGED))
         doc = json.loads(_cv(['verdict', '--ledger', led,

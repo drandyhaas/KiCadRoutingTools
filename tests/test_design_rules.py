@@ -160,11 +160,15 @@ class Conditions(unittest.TestCase):
             "A.NetClass == 'loosediffpair' && B.NetClass == 'Default'",
             "A.NetClass == '90R_DP' && B.NetName == 'GND'",
             "A.Type == 'Via' && B.Pad_Type == 'SMD' && (B.memberOfFootprint('*0402*') || B.memberOfFootprint('*0603*'))",
+            "A.inDiffPair('*')",
+            "A.NetClass == '100Ohm-diff_CSI' && A.inDiffPair('*')",
+            "A.NetClass == '85Ohm-diff' && !AB.isCoupledDiffPair() && A.Type == 'Track' && B.Type == 'Track'",
         ]
         for src in ok:
             parse_condition(src)
         for src in ("A.intersectsArea('underFPGA') || A.intersectsArea('underDDR')",
-                    "A.inDiffPair('*')",
+                    "AB.inDiffPair('*')",
+                    "!AB.isCoupledDiffPair() || A.NetClass == 'X'",
                     "A.NetClass == 'DDR4_CMD' && A.fromTo('IC14-*','IC13-*')",
                     "(A.Type == 'Track' && A.memberOfGroup('X')) || B.Length > 1mm"):
             with self.assertRaises(Unsupported):
@@ -328,6 +332,21 @@ class Precedence(unittest.TestCase):
         self.assertEqual(dr_max.draw_size('track_width', 1), 0.3)     # clamped to rule max
         self.assertEqual(_rules().draw_size('track_width', 1, default=0.3), 0.3)
         self.assertIsNone(_rules().draw_size('track_width', 1))
+
+    def test_draw_size_of_a_diff_pair_member_starts_at_the_class_pair_width(self):
+        # KiCad's "netclass (diff pair)" implicit rule: a coupled-pair member's
+        # track opt is the class diff_pair_width; custom rules still override
+        # it per field, and a layer rule's min clamps it.
+        cls = {'Default': {'track_width': 0.3, 'diff_pair_width': 0.2}}
+        dru = ('(version 1)(rule "f" (layer "F.Cu") (constraint track_width (opt 0.15mm)))'
+               '(rule "b" (layer "B.Cu") (constraint track_width (min 0.25mm)))')
+        dr = _rules(classes=cls, dru=dru)
+        self.assertEqual(dr.draw_size('track_width', 1), 0.3)
+        self.assertEqual(dr.draw_size('track_width', 1, diff_pair='DP'), 0.2)
+        self.assertEqual(dr.draw_size('track_width', 1, 'F.Cu', diff_pair='DP'), 0.15)
+        self.assertEqual(dr.draw_size('track_width', 1, 'B.Cu', diff_pair='DP'), 0.25)
+        no_dpw = _rules(classes={'Default': {'track_width': 0.3}})
+        self.assertEqual(no_dpw.draw_size('track_width', 1, diff_pair='DP'), 0.3)
 
 
 class Loader(unittest.TestCase):

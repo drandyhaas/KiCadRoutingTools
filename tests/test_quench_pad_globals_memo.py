@@ -54,7 +54,7 @@ def _parts():
         pcb = parse_kicad_pcb(os.path.join(ROOT, 'kicad_files', name))
         for ref, fp in pcb.footprints.items():
             if any(p.net_id > 0 for p in fp.pads):
-                out.append((name, _Part(ref, fp, {}, False, 0.5, 0.25)))
+                out.append((name, _Part(ref, fp, {}, False)))
     return out
 
 

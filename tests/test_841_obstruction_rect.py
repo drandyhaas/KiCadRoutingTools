@@ -54,7 +54,7 @@ from placement.legality import (_pad_carries_copper,          # noqa: E402
                                 build_part_pads,
                                 graded_parts_from_file,
                                 pad_box,
-                                pad_half_extents,
+                                pad_copper_box,
                                 part_copper_geometry)
 
 RUN_ALL_FAST_OK = True
@@ -286,19 +286,21 @@ def test_copper_is_the_union_of_the_pad_rects_and_each_pad_finds_its_own():
                 pads += 1
                 cx = (box[0] + box[2]) / 2.0
                 cy = (box[1] + box[3]) / 2.0
-                assert (abs(cx - pad.global_x) < 1e-6
-                        and abs(cy - pad.global_y) < 1e-6), (
+                # its own copper box: the pad's centre, or a custom pad's
+                # copper to one side of it (`Pad.copper_box`)
+                wcx, wcy, whx, why = pad_copper_box(pad)
+                assert (abs(cx - wcx) < 1e-6
+                        and abs(cy - wcy) < 1e-6), (
                     "{}: {} pad {} was handed a box centred at ({}, {}), not "
                     "its own ({}, {})".format(
                         os.path.basename(path), ref, pad.pad_number, cx, cy,
-                        pad.global_x, pad.global_y))
+                        wcx, wcy))
                 # ...and its SIZE, which is the half the centre cannot see:
                 # pads stacked at one point share a centre BY DEFINITION, so
                 # a centre-only check passes on every wrong hit among exactly
                 # the pads this lookup was rekeyed for. The mutation battery
                 # caught that -- `the-pad-lookup-key-drops-the-size` survived
                 # the first version of this arm.
-                whx, why = pad_half_extents(pad)
                 assert (abs((box[2] - box[0]) / 2.0 - whx) < 1e-6
                         and abs((box[3] - box[1]) / 2.0 - why) < 1e-6), (
                     "{}: {} pad {} is {:.4f}x{:.4f} but was handed a "
@@ -352,8 +354,8 @@ def test_a_padless_footprint_is_absent():
     """Rule 4. `legality.part_local_bounds` invents a +/-0.5mm box for a
     footprint with no courtyard AND no pads, and flags it `synthetic`.
     `grade_body_overlap` refuses to gate on those. A lane SUPPLY is a number
-    `options.move_blocker` turns into "move this part", so the fiction must
-    not reach it -- here it cannot, because no pads means no entry."""
+    a reader turns into "move this part", so the fiction must not reach it
+    -- here it cannot, because no pads means no entry."""
     if not run_utils.corpus_boards():
         print('SKIP: git could not name the tracked corpus')
         return

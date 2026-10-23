@@ -1,45 +1,73 @@
 # Routing Architecture
 
-This document describes the internal architecture of the KiCad Grid Router, including module structure, obstacle maps, and the A* pathfinding algorithm.
+This document describes the internal architecture of the KiCad Grid Router, including module structure, what one route step does from start to finish, obstacle maps, and the A* pathfinding algorithm.
 
 For per-module API references (function signatures, dataclass fields, usage examples) see the [Python API documentation](python-api.md).
 
 ## Module Structure
 
-The router is organized into focused modules with clear separation of concerns:
+The router is organized into focused modules. The main ones, by role:
 
 ```
 KiCadRoutingTools/
 ├── py_router/                     # Python engine + CLI entry points (#522)
-│   ├── route.py                   # Main CLI - single-ended routing
-│   ├── route_diff.py              # Main CLI - differential pair routing
-│   ├── routing_config.py          # Configuration dataclasses
+│   ├── route.py                   # Main CLI + batch_route() - single-ended routing, ends with the plane finalize (#562)
+│   ├── route_diff.py              # Main CLI + batch_route_diff_pairs() - differential pair routing
+│   ├── route_planes.py            # Main CLI - plane pours (#562 bare pour), stitching, GND return vias
+│   ├── repair_planes.py           # Plane repair engine (the finalize's) + standalone CLI
+│   │
+│   ├── routing_config.py          # GridRouteConfig, GridCoord, DiffPairNet
+│   ├── routing_defaults.py        # Every default parameter value
 │   ├── routing_state.py           # RoutingState - tracks progress and results
-│   ├── routing_context.py         # Helper functions for obstacle building
+│   ├── routing_context.py         # Per-net obstacle preparation, recording a success
 │   ├── routing_common.py          # Shared utilities for route.py and route_diff.py
-│   ├── routing_utils.py           # Shared utilities
-│   ├── obstacle_map.py            # Obstacle map building
+│   ├── routing_utils.py           # Shared utilities (pad rasterization, pos_key, layer map)
+│   ├── design_rules.py            # KiCad design rules, resolved in KiCad's order (#530)
+│   ├── kicad_dru.py               # Per-layer clearance rules from .kicad_dru (#498)
+│   ├── fab_tiers.py               # Fab floors and the escalation policy
+│   ├── obstacle_map.py            # Base obstacle map building
+│   ├── obstacle_cache.py          # Per-net obstacle cache for incremental updates
+│   ├── obstacle_costs.py          # Stub / track proximity soft costs
+│   ├── history_congestion.py      # Negotiated-congestion history cost (#590)
+│   ├── plane_fragility.py         # Soft cost on the narrow parts of a pour (#424)
 │   ├── bresenham_utils.py         # Bresenham line-walking utilities
 │   │
-│   ├── diff_pair_loop.py          # Diff pair routing main loop
 │   ├── single_ended_loop.py       # Single-ended routing main loop
+│   ├── diff_pair_loop.py          # Diff pair routing main loop
 │   ├── reroute_loop.py            # Reroute queue processing
-│   ├── diff_pair_routing.py       # Diff pair A* implementation
-│   ├── single_ended_routing.py    # Single-ended A* implementation
+│   ├── phase3_routing.py          # Multi-point tap routing (Phase 3)
+│   ├── single_ended_routing.py    # Single-ended A* routing, multi-point main + taps
+│   ├── diff_pair_routing.py       # Diff pair A* (centerline + P/N offset)
+│   ├── diff_pair_multipoint.py    # Multi-point and hybrid diff pairs
 │   │
-│   ├── layer_swap_optimization.py # Upfront layer optimization
-│   ├── layer_swap_fallback.py     # Fallback layer swap on failure
-│   ├── rip_up_reroute.py          # Rip-up and reroute logic
-│   ├── blocking_analysis.py       # Analyze blocking nets
+│   ├── net_ordering.py            # MPS, inside-out, original, bus ordering
+│   ├── bus_detection.py           # Bus groups (--bus)
+│   ├── bus_corridor.py            # One planned centerline per bus
+│   ├── layer_swap_optimization.py # Upfront layer swaps
+│   ├── layer_swap_fallback.py     # Layer swap when a route fails
+│   ├── rip_up_reroute.py          # Rip-up and restore
+│   ├── blocking_analysis.py       # Which routed nets block a failed route
 │   ├── target_swap.py             # Target assignment optimization
 │   ├── length_matching.py         # Trombone meander length matching
+│   ├── net_rescue.py              # Last-chance rescue + terminal geometry escalation
+│   │
+│   ├── plane_pad_tap.py           # Plane pad taps (finalize / repair)
+│   ├── plane_region_connector.py  # Joins between disconnected plane regions
+│   ├── kicad_oracle.py            # Reconnect against KiCad's own connectivity
+│   ├── cleanup_pipeline.py        # The one ordered post-route cleanup pipeline
+│   ├── improvement_gate.py        # Never ship a board a run made worse (#600)
+│   ├── fix_kicad_drc_settings.py  # Write the routed floors into the .kicad_pro
 │   │
 │   ├── kicad_parser.py            # KiCad file parsing (including stackup for via barrel length)
 │   ├── kicad_writer.py            # KiCad S-expression output
 │   ├── output_writer.py           # Route output and debug geometry
+│   ├── pcb_modification.py        # Add/remove routes in PCBData; the cleanup passes
+│   ├── connectivity.py            # Endpoints, connected groups, MST edges
 │   └── geometry_utils.py          # Shared geometry calculations
-└── rust_router/                   # Rust A* implementation
+└── rust_router/                   # Rust A* implementation (grid_router module)
 ```
+
+The other `py_router/` modules are documented in the README's [Module Overview](../README.md#module-overview) and in their own docstrings.
 
 ### Module Responsibilities
 
@@ -47,38 +75,123 @@ KiCadRoutingTools/
 
 | Module | Purpose |
 |--------|---------|
-| `route.py` | CLI for single-ended routing |
-| `route_diff.py` | CLI for differential pair routing |
-| `routing_config.py` | `GridRouteConfig`, `GridCoord`, `DiffPair` dataclasses |
+| `route.py` | CLI for single-ended routing; `batch_route()` is the shared engine both the CLI and the GUI call |
+| `route_diff.py` | CLI for differential pair routing; `batch_route_diff_pairs()` is its shared engine |
+| `routing_config.py` | `GridRouteConfig`, `GridCoord`, `DiffPairNet`; per-net widths and clearances (`get_net_track_width`, `obstacle_clearance`, `pair_clearance`) |
 | `routing_state.py` | `RoutingState` class tracking routing progress, results, and PCB modifications |
-| `routing_context.py` | Helper functions for building obstacles and recording route success |
+| `routing_context.py` | Prepares the working obstacle map for one net in place (`prepare_obstacles_inplace` / `restore_obstacles_inplace`) and records a route's success |
 | `routing_common.py` | Shared utilities: BGA zone setup, net resolution, length matching, pcb_data sync |
-| `routing_utils.py` | Core utilities: `pos_key()`, `segment_length()`, `build_layer_map()`, `POSITION_DECIMALS` |
-| `obstacle_map.py` | Building `GridObstacleMap` from PCB data (segments, vias, pads, BGA zones) |
+| `routing_utils.py` | Core utilities: `pos_key()`, `segment_length()`, `build_layer_map()`, rotation-aware pad rasterization (`pad_blocked_cells_array`, `iter_pad_blocked_cells`) |
+| `design_rules.py` | One resolver for every constraint, in KiCad's DRC order: pad overrides, net-class implicit rules, `.kicad_dru` rules, Board Setup minimums, the fab floor last |
+| `obstacle_map.py` | Building `GridObstacleMap` from PCB data (segments, vias, pads, BGA zones, board edge, keep-outs, drill holes) |
+| `obstacle_cache.py` | Per-net obstacle cache: remove a net's own copper, route, add the new copper back (ref-counted) |
 | `bresenham_utils.py` | Bresenham line-walking utilities used by obstacle building and blocking analysis |
-| `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, closest points) |
+| `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, closest points, `simplify_path`) |
 
 #### Routing Loops
 
 | Module | Purpose |
 |--------|---------|
+| `single_ended_loop.py` | Main loop iterating over single-ended nets to route, with the rip-up ladder |
 | `diff_pair_loop.py` | Main loop iterating over differential pairs to route; defers electrically-short legs (< ~5× connector setback) to single-ended |
 | `diff_pair_multipoint.py` | Multi-point chain routing; same-component terminal pairing, per-leg coupled/single-ended decision (`leg_electrically_short`) |
-| `single_ended_loop.py` | Main loop iterating over single-ended nets to route |
-| `reroute_loop.py` | Processes queue of routes that need rerouting after rip-up |
-| `diff_pair_routing.py` | Routes P/N pairs using centerline + offset approach with GND vias |
+| `reroute_loop.py` | Processes the queue of nets that need rerouting after rip-up |
+| `phase3_routing.py` | Phase 3 of multi-point routing: the remaining pads tapped onto each net's main route |
 | `single_ended_routing.py` | Routes individual nets using A* pathfinding; multi-point routing (3+ pads) |
+| `diff_pair_routing.py` | Routes P/N pairs using centerline + offset approach with GND vias (the Rust `PoseRouter`, orientation-aware) |
 
-#### Optimization
+#### Optimization and Recovery
 
 | Module | Purpose |
 |--------|---------|
+| `net_ordering.py` | Net order: MPS (default, crossing-aware), inside-out, original, or bus groups first |
 | `layer_swap_optimization.py` | Analyzes and performs layer swaps before routing starts |
 | `layer_swap_fallback.py` | Attempts layer swap when a route fails |
-| `rip_up_reroute.py` | Rips up blocking routes and adds them to reroute queue |
-| `blocking_analysis.py` | Identifies which previously-routed nets are blocking |
+| `rip_up_reroute.py` | Rips up blocking routes and adds them to the reroute queue; restores them when the retry fails |
+| `blocking_analysis.py` | Identifies which previously-routed nets block a failed route's search frontier |
 | `target_swap.py` | Hungarian algorithm for optimal source-to-target assignment |
 | `length_matching.py` | Adds trombone meanders to match route lengths within groups |
+| `history_congestion.py` | PathFinder-style history cost: cells repeatedly contested get dearer (#590) |
+| `net_rescue.py` | Scoped retry of still-failed nets at a finer grid / narrower floor, then a whole-net retry with width and via stepping down to the fab floor |
+
+#### Planes, Post-Route and Output
+
+| Module | Purpose |
+|--------|---------|
+| `repair_planes.py` | Plane repair engine: pad taps (`plane_pad_tap.py`) and region joins (`plane_region_connector.py`), plus the plane-copper cleanup |
+| `kicad_oracle.py` | Reconnect pass that routes the exact links KiCad's own connectivity (exact zone fill) reports open |
+| `cleanup_pipeline.py` | `run_post_route_cleanup()`: the ordered cleanup passes both routing fronts run |
+| `improvement_gate.py` | Compares the written board's connectivity against the input's and reverts a step that made it worse |
+| `fix_kicad_drc_settings.py` | Writes the clearances and sizes the board was routed to into the output's `.kicad_pro` |
+| `output_writer.py` / `kicad_writer.py` | Write the routed copper, swaps and debug geometry into the output file |
+
+## A Route Step, End to End
+
+`route.py`'s `batch_route()` runs these phases in order. The GUI's Route tab
+calls the same function (with `return_results=True`), so everything below
+happens on both fronts.
+
+1. **Read the board and its rules.** Parse the board (or take the GUI's
+   in-memory `PCBData`), resolve the `--nets` / `--component` / `--group`
+   scope, and build the `GridRouteConfig`. The config carries the per-net
+   clearances from the net classes in the sibling `.kicad_pro`, the per-layer
+   rules from `.kicad_dru`, net-filtered keep-outs, keep-away rules, BGA
+   exclusion zones and any guide corridor.
+2. **Order the nets.** Upfront layer swaps
+   (`layer_swap_optimization.py`), then MPS ordering (or inside-out,
+   original, bus).
+3. **Build the obstacle maps.** The base map holds everything that does not
+   move during the run (`build_base_obstacle_map`); the per-net cache holds
+   each routed net's own copper (`precompute_all_net_obstacles`); the
+   working map is the base plus every cached net. Soft cost fields are
+   registered too: track proximity, plane fragility, history congestion.
+4. **Route the nets** (`route_single_ended_nets`). Each net gets the working
+   map with its own copper lifted out, a probe-then-full A* search, and on
+   failure the rip-up ladder: blocking analysis names the nets in the way,
+   they are ripped, the net retries, and the ripped nets go to the reroute
+   queue (`run_reroute_loop`). See [Rip-Up and Reroute](rip-up-reroute.md).
+5. **Length matching** for any `--length-match-group` (Phase 2 of
+   multi-point routing, below).
+6. **Phase 3 taps** (`run_phase3_tap_routing`): every multi-point net's
+   remaining pads join its main route, followed by another reroute loop.
+7. **Recovery.** Nets ripped to avoid a short are re-routed (#134); ripped
+   nets whose reroute never landed get their copper restored where it does
+   not collide (`run_casualty_reconcile`); `net_rescue` retries each
+   still-open net in a scoped window at finer parameters, then the terminal
+   geometry escalation retries the whole net with width and via stepping down
+   toward the fab floor.
+8. **Cleanup** (`run_post_route_cleanup`, below), then the stale-input strip,
+   via de-duplication and the authoritative connectivity count.
+9. **Write** the output board and the routed floors into its `.kicad_pro`.
+10. **Plane finalize (#562).** On a pours-first chain the plane-net pads were
+    already welded into the fill during routing; the finalize runs the
+    `repair_planes` engine in-run for whatever the fill cannot reach (pad
+    taps, region joins, with rip authority over unprotected blockers) and a
+    KiCad-oracle pass against the exact fill. It runs even when the step had
+    nothing else to route (#1112). `KICAD_PLANE_FINALIZE=0` is the kill
+    switch.
+11. **Final reconciliation.** Up to three laps that re-run `batch_route` on
+    the nets still incomplete, against the finished board.
+12. **Late passes on the board it ships:** the audit of every ball a fanout
+    promised to serve by fill contact (#678), soft-joint bridges, the strict
+    redundant-copper collapse (#1063), dangling-via and orphan sweeps,
+    via-in-pad protection (#962), the power-width report, a final re-grade,
+    and the improvement gate (#600).
+
+`--quick` skips the rescue and escalation of step 7, the plane finalize and
+the reconciliation; `--quick 2` also skips the passes that only polish copper
+for shipping (among them the late passes of step 12). Such a board judges a
+placement; it is never shipped.
+
+`route_diff.py`'s `batch_route_diff_pairs()` follows the same shape for
+pairs: the diff-pair loop, the reroute loop, casualty reconcile, length
+matching, the same cleanup pipeline and the same writer. It has no plane
+finalize or reconciliation; the `route.py` step that follows in a chain
+does that.
+
+`route_planes.py` is a separate step that runs **first** in a chain: it pours
+the zones and places no per-pad taps (#562 bare pour). See
+[Plane Routing](route-plane.md).
 
 ## Grid Coordinate System
 
@@ -88,14 +201,23 @@ The router operates on an integer grid for efficient pathfinding. The `GridCoord
 class GridCoord:
     def __init__(self, grid_step: float = 0.1):
         self.grid_step = grid_step  # mm per grid unit
+        self.inv_step = 1.0 / grid_step
 
     def to_grid(self, x: float, y: float) -> Tuple[int, int]:
         """Convert mm coordinates to grid coordinates."""
-        return (round(x / self.grid_step), round(y / self.grid_step))
+        return (round(x * self.inv_step), round(y * self.inv_step))
 
     def to_float(self, gx: int, gy: int) -> Tuple[float, float]:
         """Convert grid coordinates to mm coordinates."""
         return (gx * self.grid_step, gy * self.grid_step)
+
+    def to_grid_dist(self, dist_mm: float) -> int:
+        """Distance in grid units, rounded down."""
+        return int(dist_mm * self.inv_step)
+
+    def to_grid_dist_safe(self, dist_mm: float) -> int:
+        """Distance in grid units, rounded UP for safety."""
+        return math.ceil(dist_mm * self.inv_step)
 ```
 
 With the default 0.1mm grid step:
@@ -105,47 +227,54 @@ With the default 0.1mm grid step:
 
 ## Obstacle Map Architecture
 
-The `GridObstacleMap` (implemented in Rust) tracks blocked cells efficiently using hash sets.
+The `GridObstacleMap` (implemented in Rust) tracks blocked cells per layer as
+**reference counts**: a cell is blocked while its count is above zero, so one
+net's copper can be removed and added back exactly even where it overlaps
+another's. Keep-outs that never change during a run (board-edge clearance,
+the area outside the outline, cutouts) live in a separate per-layer bitmap
+(#422), which costs a bit per cell instead of a hash-map entry.
 
 ### Obstacle Types
 
-1. **Blocked Cells** - Cells where tracks cannot be routed on a specific layer
-2. **Blocked Vias** - Cells where vias cannot be placed (any layer)
-3. **BGA Zones** - Rectangular areas blocking both tracks and vias
-4. **Allowed Cells** - Override for BGA zones at source/target positions
-5. **Source/Target Cells** - Override for track clearance at endpoints
-6. **Stub Proximity Costs** - Soft penalties to avoid routing near unrouted stubs
-7. **Keep-out rule areas** - KiCad `(zone ... (keepout ...))` regions blocking tracks and/or vias (per the keepout flags) on the keepout's listed layers, or all routing layers if none are listed
+1. **Blocked Cells** - Cells where tracks cannot be routed on a specific layer (ref-counted)
+2. **Static Blocked Cells** - Permanent keep-outs: board-edge clearance, off-board area, cutouts (bitmap)
+3. **Blocked Vias** - Cells where vias cannot be placed (any layer), plus one map per alternative via size a run may use (#568, #530)
+4. **BGA Zones** - Rectangular areas blocking both tracks and vias
+5. **Allowed Cells** - Override for BGA zones at source/target positions
+6. **Source/Target Cells** - Override for track clearance at endpoints
+7. **Free Via Positions** - Same-net through-hole pads, where a layer change costs nothing
+8. **Soft costs** - Stub proximity, per-layer track proximity, plane fragility, history congestion, cross-layer attraction
+9. **Keep-out areas** (stamped as blocked cells by Python) - KiCad `(zone ... (keepout ...))` rule areas blocking tracks and/or vias (per the keepout flags) on their listed layers, or all routing layers if none are listed; User-layer keepout polygons (`--keepout`); net-filtered keep-outs from `.kicad_dru` `disallow` rules, stamped only while a net a rule binds is routing; foreign pours this run cannot repair (#1260)
 
 ### Building the Obstacle Map
 
 ```python
-def build_base_obstacle_map(pcb_data, config, nets_to_route, extra_clearance=0.0):
-    """Build base obstacle map with static obstacles."""
+def build_base_obstacle_map(pcb_data, config, nets_to_route, extra_clearance=0.0,
+                            net_clearances=None, static_base=False, ...):
+    """Base obstacle map: everything that does not move during the run.
+    The nets being routed are left out; their copper is added per net."""
     obstacles = GridObstacleMap(num_layers)
 
-    # 1. Add BGA exclusion zones (block all layers + vias)
+    # 1. BGA exclusion zones (block all layers + vias)
     for zone in config.bga_exclusion_zones:
-        obstacles.set_bga_zone(min_x, min_y, max_x, max_y)
+        obstacles.set_bga_zone(min_gx, min_gy, max_gx, max_gy)
 
-    # 2. Add existing segments (with clearance expansion)
-    for seg in pcb_data.segments:
-        if seg.net_id not in nets_to_route:
-            _add_segment_obstacle(obstacles, seg, ...)
-
-    # 3. Add existing vias
-    for via in pcb_data.vias:
-        if via.net_id not in nets_to_route:
-            _add_via_obstacle(obstacles, via, ...)
-
-    # 4. Add pads
+    # 2. Existing segments, and a footprint's own copper (an SOT89 tab, an
+    #    antenna: #908), each expanded by its clearance
+    # 3. Existing vias
+    # 4. Pads (pcb_data.pads_by_net) -- each foreign obstacle priced at
+    #    max(routing-side clearance, that net's own class clearance)
     for net_id, pads in pcb_data.pads_by_net.items():
         if net_id not in nets_to_route:
-            for pad in pads:
-                _add_pad_obstacle(obstacles, pad, ...)
+            ...
 
-    # 5. Add keep-out rule areas (tracks/vias not-allowed zones), per-layer
-    add_keepout_obstacles(obstacles, pcb_data, config)
+    # 5. Board edge clearance, User-layer keepouts, KiCad keep-out rule areas,
+    #    foreign-pour barriers, drill hole-to-hole clearance
+    add_board_edge_obstacles(obstacles, pcb_data, config, ...)
+    add_user_keepout_obstacles(obstacles, pcb_data, config, ...)
+    add_rule_area_keepout_obstacles(obstacles, pcb_data, config, ...)
+    add_pour_barrier_obstacles(obstacles, pcb_data, config, ...)
+    add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route, ...)
 
     return obstacles
 ```
@@ -171,7 +300,8 @@ helpers in `routing_utils.py`).
 
 **Performance.** Every rotation-aware helper short-circuits to the original
 axis-aligned path when `rect_rotation == 0`, so orthogonal boards (the vast
-majority) pay essentially nothing. Measured per-step (redo harness, same machine):
+majority) pay essentially nothing. Measured per-step when the rotation support
+landed (June 2026; redo harness, same machine):
 
 | board | non-orthogonal pads | total routing time Δ |
 |-------|--------------------|----------------------|
@@ -185,16 +315,22 @@ changing the A* search, not pure overhead).
 
 ### Clearance Expansion
 
-Obstacles are expanded by track clearance to ensure DRC compliance. Track widths can vary based on:
+Obstacles are expanded by track width and clearance to ensure DRC compliance. Track widths can vary based on:
 - **Layer** (impedance-controlled routing): microstrip on outer layers is wider than stripline on inner layers
-- **Net** (power net routing): power/ground nets can use wider tracks than signal nets
+- **Net** (power net routing and net classes): power/ground nets can use wider tracks than signal nets
+
+and the clearance between two nets is KiCad's: `max(class a, class b)` from the
+net classes, replaced on a layer by a `.kicad_dru` layer rule (#498), and
+raised by a pad's own clearance override (`GridRouteConfig.obstacle_clearance`,
+`pair_clearance`; see [Routing Configuration](api-routing-config.md)).
 
 Clearance calculations use per-net-per-layer widths:
 
 ```python
 # Per-net-per-layer track clearance expansion
 for layer_name in config.layers:
-    # get_net_track_width checks power net overrides first, then layer widths (impedance)
+    # get_net_track_width checks power net overrides first, then net-class
+    # widths, then layer widths (impedance)
     layer_width = config.get_net_track_width(net_id, layer_name)
     expansion_mm = layer_width / 2 + clearance
     expansion_grid = coord.to_grid_dist(expansion_mm)
@@ -206,11 +342,13 @@ for layer_name in config.layers:
 
 A segment at position (x, y) blocks all cells within `expansion_grid` radius on its layer, and blocks via placement within `via_block_grid` radius.
 
-**Grid quantization safety**: Via-related clearances use `to_grid_dist_safe()` which adds half a grid step before rounding. This prevents edge cases where clearances round down and cause minor DRC violations (e.g., 0.01mm overlaps).
+**Grid quantization safety**: Via-related clearances use `to_grid_dist_safe()`, which rounds up instead of down. This prevents edge cases where clearances round down and cause minor DRC violations (e.g., 0.01mm overlaps).
 
 ## A* Pathfinding Algorithm
 
-The core routing uses A* pathfinding implemented in Rust for performance.
+The core routing uses A* pathfinding implemented in Rust for performance
+(`grid_router.GridRouter`; differential pairs use `grid_router.PoseRouter`,
+which also tracks heading).
 
 ### State Space
 
@@ -233,32 +371,40 @@ f(n) = g(n) + h(n) * heuristic_weight
 ```
 
 Move costs:
-- Orthogonal move: 1000 (1 grid step)
-- Diagonal move: 1414 (sqrt(2) grid steps)
-- Via (layer change): `via_cost * 1000`
+- Orthogonal move: 1000 (1 grid step), diagonal move: 1414 (sqrt(2) grid steps), each times the layer's cost multiplier (`--layer-costs`, 1000 = 1.0x)
+- Turn: `--turn-cost` (default 1000) per 90° of direction change, so a 45° kink costs half
+- Via (layer change): `via_cost * 1000`, scaled so a via costs the same mm-equivalent detour at any grid step (`--via-cost`, default 75); free at a same-net through-hole pad
+- Soft costs: stub and track proximity, plane fragility, history congestion, a layer-direction preference, minus a cross-layer attraction bonus
 
 ### Heuristic
 
-The heuristic uses 3D Chebyshev distance to the nearest target:
+The heuristic is the octile distance to the nearest target, scaled by the
+cheapest layer's cost so it never overestimates a move, plus one via when
+the target is on another layer:
 
 ```python
 def heuristic(gx, gy, layer, targets):
-    min_dist = infinity
+    min_h = infinity
     for tx, ty, tl in targets:
-        dx = abs(gx - tx)
-        dy = abs(gy - ty)
-        dz = abs(layer - tl) * via_cost
-        dist = max(dx, dy) + dz
-        min_dist = min(min_dist, dist)
-    return min_dist * 1000 * heuristic_weight
+        dx, dy = abs(gx - tx), abs(gy - ty)
+        diag, orth = min(dx, dy), abs(dx - dy)
+        h = (diag * 1414 + orth * 1000) * min_layer_cost / 1000
+        if layer != tl:
+            h += via_cost
+        min_h = min(min_h, h)
+    return min_h * heuristic_weight
 ```
+
+With more than 16 targets (a multi-point tap search) it uses the targets'
+bounding box instead, which is cheaper and still never overestimates.
+`--heuristic-weight` (default 2.3) above 1 trades optimality for speed.
 
 ### Multi-Source/Multi-Target Routing
 
 The router supports multiple sources and targets for flexible endpoint matching:
 
 ```python
-path, iterations = router.route_multi(
+path, iterations, blocked_cells = router.route_with_frontier(
     obstacles,
     sources=[(gx1, gy1, layer1), (gx2, gy2, layer1), ...],
     targets=[(gx3, gy3, layer2), (gx4, gy4, layer2), ...],
@@ -266,58 +412,67 @@ path, iterations = router.route_multi(
 )
 ```
 
-This allows routing from any source endpoint to any target endpoint.
+This allows routing from any source endpoint to any target endpoint. On
+failure `blocked_cells` is the search frontier the obstacles stopped, which
+the rip-up ladder's blocking analysis reads. (`route_multi` is the same
+search returning statistics instead of the frontier.)
 
-### Direction Fallback
+### Probe, Then Full Search
 
-If routing fails in one direction, the router tries the reverse:
+Each connection starts with a short probe in both directions
+(`--max-probe-iterations`, default 5000):
 
 ```python
-# Try forward direction
-path, iter1 = router.route_multi(obstacles, sources, targets, max_iter)
-
+# Probe forward, then backward, with the probe budget
+path, it1, blocked = router.route_with_frontier(obstacles, sources, targets, probe_iters)
 if path is None:
-    # Try reverse direction
-    path, iter2 = router.route_multi(obstacles, targets, sources, max_iter)
-    if path:
-        path = reversed(path)
+    path, it2, blocked = router.route_with_frontier(obstacles, targets, sources, probe_iters)
+    # A direction whose probe ran out of cells before its budget is stuck:
+    # its endpoint is walled in, so the full search is skipped.
+    if path is None and both probes used their whole budget:
+        path = full search forward, then backward
 ```
+
+The full search's budget is dynamic (#529): it starts at `--max-iterations`
+(default 200000) and is extended while the search keeps getting closer. A path
+whose own vias land closer together than the drill floor is routed once more
+with that spacing enforced (#230).
 
 ## Incremental Obstacle Updates
 
-For batch routing, obstacles are updated incrementally as each net is routed:
+For batch routing, obstacles are updated incrementally as each net is routed,
+in place on one working map:
 
 ```python
-# Build base obstacle map once
 base_obstacles = build_base_obstacle_map(pcb_data, config, all_nets)
+cache = precompute_all_net_obstacles(pcb_data, all_nets, config)   # each net's own copper
+working = build_working_obstacle_map(base_obstacles, cache)         # base + every net
 
 for net_id in nets_to_route:
-    # Clone base obstacles
-    obstacles = base_obstacles.clone()
+    # Lift this net's own copper out of the map, clear the last net's
+    # per-route costs and overrides, add proximity costs for this net
+    prepare_obstacles_inplace(working, pcb_data, config, net_id, ...)
 
-    # Add other unrouted nets' stubs as obstacles
-    for other_id in remaining_nets:
-        if other_id != net_id:
-            add_net_stubs_as_obstacles(obstacles, pcb_data, other_id, config)
+    result = route_net_with_obstacles(pcb_data, net_id, config, working)
 
-    # Route the net
-    result = route_net_with_obstacles(pcb_data, net_id, config, obstacles)
-
-    # Add routed path to pcb_data for next iteration
+    restore_obstacles_inplace(working, net_id, ...)
     if result:
         add_route_to_pcb_data(pcb_data, result)
+        # remove the net's old cache entry, recompute it from the board, add it back
+        refresh_net_obstacles(working, cache, pcb_data, config, [net_id])
 ```
 
-This approach:
-1. Builds static obstacles once (O(n) where n = total PCB elements)
-2. Clones and updates per-net (O(m) where m = remaining nets)
-3. Achieves ~7x speedup over rebuilding from scratch
+A rip-up and a restore go through the same refresh, so the working map always
+matches the copper on the board. `KICAD_OBSTACLE_LEDGER=1` audits that the
+adds and removes balance.
 
 ## Path Conversion
 
-After A* finds a path, it's converted to KiCad geometry:
+After A* finds a path, `_path_to_segments_vias` in `single_ended_routing.py`
+converts it to KiCad geometry:
 
 ```python
+path = simplify_path(path)   # drop collinear intermediate points
 for i in range(len(path) - 1):
     gx1, gy1, layer1 = path[i]
     gx2, gy2, layer2 = path[i + 1]
@@ -326,12 +481,15 @@ for i in range(len(path) - 1):
     x2, y2 = coord.to_float(gx2, gy2)
 
     if layer1 != layer2:
-        # Layer change = via
+        # Layer change = via (none where a same-net through-hole pad already is)
         vias.append(Via(x=x1, y=y1, ...))
     else:
         # Same layer = segment
         segments.append(Segment(x1, y1, x2, y2, layer=layer1, ...))
 ```
+
+Short connectors join the grid path's ends to the original, off-grid pad or
+stub positions.
 
 ## Multi-Point Routing
 
@@ -346,7 +504,7 @@ When a net has more than 2 pads (e.g., a signal that fans out to multiple destin
 
 ### MST-Based 3-Phase Solution
 
-The router computes a Minimum Spanning Tree (MST) between all pad positions using Manhattan distance, then routes edges in length order (longest first):
+The router computes a Minimum Spanning Tree (MST) over the net's terminals using Manhattan distance, then routes edges in length order (longest first). Terminals that existing copper already connects count as one node, so the MST joins connected components and never re-routes copper that is already connected (#317):
 
 ```
 Phase 1: Route longest MST edge    Phase 2: Length match      Phase 3: Route remaining MST edges
@@ -370,6 +528,13 @@ A---+  (longest edge A-C)          A~~~+~~~C                   A~~~+~~~C
   dense package (see [Bus Routing](bus-routing.md), "Multi-Point Bus
   Members"). Which edge goes first matters because the deferred edges wait
   for Phase 3, after every other net's main route.
+- If that edge cannot route, Phase 1 tries the next one (up to 8 edges,
+  #101), so one boxed pad does not fail the net. An edge that routes but
+  whose terminal copper the terminal gate refuses — it would overlap a
+  foreign track/via, or under `--escalation off` sits inside a clearance
+  only a narrower terminal could clear — is deferred the same way: it goes
+  to the back of the list and Phase 3 routes it as a tap, under the same
+  gate. The net story records `mode: terminal-gate-deferred`.
 - Bus members' main edges route with corridor/neighbor attraction, like
   point-to-point members
 - Track pending multi-point nets in `state.pending_multipoint_nets`
@@ -385,7 +550,7 @@ A---+  (longest edge A-C)          A~~~+~~~C                   A~~~+~~~C
 - Each edge must connect an already-routed pad to an unrouted pad
 - Find tap point on existing segments near the source pad
 - Route from tap point to the target pad
-- Uses `route_multipoint_taps()` in `single_ended_routing.py`
+- Uses `route_multipoint_taps()` in `single_ended_routing.py`, driven by `run_phase3_tap_routing()` in `phase3_routing.py`
 
 ### Implementation Details
 
@@ -393,8 +558,9 @@ Key functions in `single_ended_routing.py`:
 - `route_multipoint_main()` - Phase 1: Computes MST, routes longest edge
 - `route_multipoint_taps()` - Phase 3: Routes remaining MST edges by length
 
-Key utility in `routing_utils.py`:
-- `compute_mst_edges()` - Computes MST edges with indices using Prim's algorithm (supports Manhattan or Euclidean distance)
+Key utilities in `connectivity.py`:
+- `compute_component_mst_edges()` - The MST over connected components of terminals (Prim's algorithm, Manhattan distance)
+- `compute_mst_edges()` - A plain point MST (Prim's algorithm, Manhattan or Euclidean distance)
 
 State tracking in `routing_state.py`:
 - `pending_multipoint_nets` - Dict mapping net_id to main_result for Phase 3
@@ -410,13 +576,25 @@ State tracking in `routing_state.py`:
 
 ## Post-Processing
 
-After routing, segments undergo cleanup:
+After routing, `cleanup_pipeline.run_post_route_cleanup()` runs one ordered
+pipeline of passes (each implemented in `pcb_modification.py`), the same on
+both routing fronts (#319). Every pass edits `pcb_data` in place, so the board
+in memory is always the board that will be written:
 
-1. **Self-intersection fixing** - Adjusts short connector segments that cross existing tracks
-2. **Appendix collapsing** - Removes short dead-end segments created by grid snapping
-3. **Degenerate segment removal** - Filters segments shorter than 0.01mm
+1. **Snap stub gaps** - extend a stub that stopped a fraction short of same-net copper (#84)
+2. **Drop phantom copper** - copper that was ripped and never restored never ships (#133)
+3. **Prune / nudge grazes** - drop a redundant segment grazing foreign copper, or re-bend / micro-shift / move a via that must stay (#224)
+4. **Prune redundant cycles**, then collapse strictly redundant copper and remove orphan islands (#217)
+5. **Sweep dead ends** - trim dead-end spurs and unsupported vias
+6. **Neck wide segments** that graze a fine-pitch foreign pad
+7. **Smooth** staircase micro-jogs into octolinear shortcuts (#536; the route step only)
+8. **Close soft joints** - the last pass that adds copper: bridge any same-net joint that only touches
+9. **Merge collinear segments** - join same-net, same-layer, same-width pieces into one track (#811)
 
-See `pcb_modification.py` for implementation details.
+`route.py` runs the strict collapse once more at the very end, on the board it
+ships, after the plane finalize and the reconciliation have laid their copper
+(#1063). `KICAD_BOARD_LEDGER=1` checks, per net, that the copper in memory and
+the copper the writer produces are identical.
 
 ## Visualizing the Search
 

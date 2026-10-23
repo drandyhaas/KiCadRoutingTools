@@ -65,7 +65,7 @@ def install_dash_hint() -> None:
     no board, no JSON_SUMMARY, exit 2. ``--nets`` is ``nargs='+'``, so argparse
     takes a leading ``-`` as the start of a flag. The same hole is in every
     name-taking list flag across route.py, route_diff.py, route_planes.py,
-    route_disconnected_planes.py, check_drc.py and check_connected.py -- 30-odd
+    repair_planes.py, check_drc.py and check_connected.py -- 30-odd
     of them -- and the fix at each call site is the same one character:
     ``--nets=-12V``.
 

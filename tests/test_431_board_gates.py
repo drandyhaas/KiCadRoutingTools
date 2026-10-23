@@ -3,6 +3,13 @@
 Two gates that stop a placement tool producing a result-shaped non-result, and
 an advisor that says which parts should not be moved -- and never moves them.
 
+The gates' CLIs here are the live callers of `placement.placement_state`:
+`check_floorplan.py` refuses a pile (exit 3, `--allow-unplaced` overrides) and
+`place_pose.py` refuses a routed board (exit 3, `--allow-routed` overrides).
+The CLIs this file first drove (`place_optimize`, `place_route_loop`, and their
+`--suggest-locks` flag) were retired in ecd673eb; the advisor's remaining
+consumer is `board_brief` (`measurements.locks`, tests/test_board_brief.py).
+
 The advisor's strongest rule is a CODE fact, not folklore. `quench.py:207`
 keeps only `net_id > 0` pads, so a net-less NPTH mounting hole has
 `pin_count == 0` and no airwires; the only skip in the part loop is
@@ -17,7 +24,6 @@ tuned; a named ref is a contract.
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 
@@ -39,17 +45,10 @@ for _p522 in ('py_router', 'py_placer',
 
 
 from kicad_parser import parse_kicad_pcb  # noqa: E402
+import run_utils  # noqa: E402
 from placement.lock_advisor import advise_locks, to_json  # noqa: E402
 from placement.placement_state import (UNPLACED_EXIT, assess_placement)  # noqa: E402
 from placement.writer import write_placed_output  # noqa: E402
-
-#: Measured 516 s ALONE (2026-08-19, exit 0, all checks pass) -- UNDER the
-#: 600 s default, yet it times out in-suite. run_all defaults to -j 4, so
-#: it competes for CPU with three other processes while that clock runs.
-#: A budget for the contended case, not for a hung test: the standalone
-#: number is the evidence that it finishes.
-RUN_ALL_TIMEOUT = 1200
-
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KF = os.path.join(ROOT, 'kicad_files')
@@ -58,22 +57,10 @@ SMALL = os.path.join(KF, 'lvds_converter_dualclk.kicad_pcb')
 ROUTED = os.path.join(KF, 'routed_output.kicad_pcb')
 
 
-def _script_path(script):
-    """#522: the placer CLIs live in py_placer/ now, the engine in
-    py_router/. Resolve wherever the script actually is rather than
-    assuming the repo root, which silently made every case here a
-    'file not found' exit instead of a gate."""
-    for sub in ('', 'py_placer', 'py_router'):
-        cand = os.path.join(ROOT, sub, script) if sub else os.path.join(ROOT, script)
-        if os.path.isfile(cand):
-            return cand
-    return os.path.join(ROOT, script)
-
-
-def _run(script, *args):
-    return subprocess.run([sys.executable, '-X', 'utf8',
-                           _script_path(script)] + list(args),
-                          capture_output=True, text=True, cwd=ROOT, timeout=1800)
+def _argv(script, *args):
+    """`run_utils.tool` RAISES on a missing CLI, so a moved tool fails here,
+    naming itself, rather than as an exit code a gate assertion misreads."""
+    return [sys.executable, '-X', 'utf8', run_utils.tool(script)] + list(args)
 
 
 def _pile(dst):
@@ -157,9 +144,8 @@ def test_partially_unplaced_is_reported_but_not_blocking():
 
 
 def test_routed_board_is_detected():
-    """The quench models no copper: place_optimize.py has zero references to
-    segments or vias, and write_placed_output rewrites footprint positions only.
-    So placement on a routed board strands every track."""
+    """write_placed_output rewrites footprint positions only, so placement on
+    a routed board strands every track."""
     st = assess_placement(parse_kicad_pcb(ROUTED), ROUTED)
     assert st.has_copper and st.segments > 0
     assert st.blocked
@@ -167,22 +153,19 @@ def test_routed_board_is_detected():
 
 # --- the CLI contract --------------------------------------------------------
 
-def test_both_clis_refuse_with_exit_3_and_write_nothing():
+def test_the_unplaced_gate_refuses_with_exit_3_and_writes_nothing():
     d = tempfile.mkdtemp()
     try:
-        pile = _pile(os.path.join(d, 'pile.kicad_pcb'))
-        out = os.path.join(d, 'out.kicad_pcb')
-        r = _run('place_optimize.py', pile, out)
-        assert r.returncode == UNPLACED_EXIT, (r.returncode, r.stderr[-400:])
-        assert not os.path.exists(out), "refused but still wrote a board"
-
-        work = os.path.join(d, 'work')
-        r = _run('place_route_loop.py', pile, out, '--route-args', '--nets *',
-                 '--work-dir', work)
-        assert r.returncode == UNPLACED_EXIT, (r.returncode, r.stderr[-400:])
-        # The whole point of gating BEFORE round 0: no routing was attempted.
-        assert not os.path.exists(os.path.join(work, 'loop_round0_route.log')), \
-            "refused only AFTER paying for round 0's route"
+        pile = run_utils.evidence(_pile(os.path.join(d, 'pile.kicad_pcb')),
+                                  'the pile board')
+        out = os.path.join(d, 'intent.json')
+        run_utils.check(_argv('check_floorplan.py', pile, '--emit-intent', out),
+                        refuse='does not look PLACED', code=UNPLACED_EXIT)
+        assert not os.path.exists(out), "refused but still wrote an intent"
+        # ...and the override is honoured, on the same pile.
+        run_utils.check(_argv('check_floorplan.py', pile, '--emit-intent', out,
+                              '--allow-unplaced'), accept=True)
+        run_utils.evidence(out, 'the intent --allow-unplaced emitted')
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -191,10 +174,12 @@ def test_routed_gate_and_its_override():
     d = tempfile.mkdtemp()
     try:
         out = os.path.join(d, 'out.kicad_pcb')
-        assert _run('place_optimize.py', ROUTED, out).returncode == UNPLACED_EXIT
-        r = _run('place_optimize.py', ROUTED, out, '--allow-routed',
-                 '--max-passes', '1')
-        assert r.returncode == 0, r.stderr[-400:]
+        run_utils.check(_argv('place_pose.py', ROUTED, out, 'lock', 'U1'),
+                        refuse='strands every track', code=UNPLACED_EXIT)
+        assert not os.path.exists(out), "refused but still wrote a board"
+        run_utils.check(_argv('place_pose.py', ROUTED, out, '--allow-routed',
+                              'lock', 'U1'), accept=True)
+        run_utils.evidence(out, 'the board --allow-routed wrote')
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -202,10 +187,11 @@ def test_routed_gate_and_its_override():
 def test_a_normal_board_is_unaffected_by_the_gates():
     d = tempfile.mkdtemp()
     try:
-        out = os.path.join(d, 'out.kicad_pcb')
-        r = _run('place_optimize.py', SMALL, out, '--max-passes', '1')
-        assert r.returncode == 0, r.stderr[-500:]
-        assert os.path.isfile(out)
+        out = os.path.join(d, 'intent.json')
+        r = run_utils.check(_argv('check_floorplan.py', SMALL,
+                                  '--emit-intent', out), accept=True)
+        assert 'does not look PLACED' not in r.stdout + r.stderr
+        run_utils.evidence(out, 'the intent of a placed board')
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -277,9 +263,8 @@ def test_already_locked_copper_is_recognised():
 
 
 def test_high_pin_parts_are_advisory_not_locked():
-    """`place_route_loop` guards these with --max-target-pins; `place_optimize`
-    does not. Worth reporting -- but 'large' is not 'position-critical', so it
-    must not enter the lock list."""
+    """Worth reporting -- but 'large' is not 'position-critical', so it must
+    not enter the lock list."""
     adv = advise_locks(parse_kicad_pcb(TIGARD), TIGARD)
     assert adv.advisories, "expected a high-pin-count advisory on tigard"
     advised = {a['ref'] for a in adv.advisories}
@@ -292,40 +277,13 @@ def test_advice_is_deterministic():
     assert a == b
 
 
-def test_suggest_locks_writes_nothing_at_all():
-    """The promise the whole design rests on. Assert the input is untouched AND
-    that the default *_optimized.kicad_pcb output was never created."""
-    before = (os.path.getmtime(TIGARD), os.path.getsize(TIGARD))
-    default_out = os.path.splitext(TIGARD)[0] + '_optimized.kicad_pcb'
-    existed = os.path.exists(default_out)
-    r = _run('place_optimize.py', TIGARD, '--suggest-locks')
-    assert r.returncode == 0, r.stderr[-400:]
-    assert 'Nothing was locked' in r.stdout
-    assert (os.path.getmtime(TIGARD), os.path.getsize(TIGARD)) == before
-    assert os.path.exists(default_out) == existed, \
-        "--suggest-locks created an output board"
-
-
-def test_both_clis_expose_the_advisor_identically():
-    """A flag on one tool and not the other is exactly the drift CLAUDE.md warns
-    about -- here between two CLIs rather than CLI vs GUI."""
-    outs = []
-    for script in ('place_optimize.py', 'place_route_loop.py'):
-        r = _run(script, TIGARD, '--suggest-locks')
-        assert r.returncode == 0, (script, r.stderr[-400:])
-        line = [l for l in r.stdout.splitlines() if l.startswith('JSON_SUMMARY:')]
-        assert line, f"{script} printed no JSON_SUMMARY"
-        outs.append(json.loads(line[0].split('JSON_SUMMARY:', 1)[1]))
-    assert outs[0] == outs[1], f"advisor disagrees between CLIs: {outs}"
-
-
 TESTS = [
     test_no_tracked_board_reads_as_unplaced,
     test_a_pile_at_one_coordinate_is_unplaced,
     test_missing_outline_cannot_manufacture_an_unplaced_verdict,
     test_partially_unplaced_is_reported_but_not_blocking,
     test_routed_board_is_detected,
-    test_both_clis_refuse_with_exit_3_and_write_nothing,
+    test_the_unplaced_gate_refuses_with_exit_3_and_writes_nothing,
     test_routed_gate_and_its_override,
     test_a_normal_board_is_unaffected_by_the_gates,
     test_mounting_holes_are_found_by_name_not_by_count,
@@ -336,8 +294,6 @@ TESTS = [
     test_already_locked_copper_is_recognised,
     test_high_pin_parts_are_advisory_not_locked,
     test_advice_is_deterministic,
-    test_suggest_locks_writes_nothing_at_all,
-    test_both_clis_expose_the_advisor_identically,
 ]
 
 

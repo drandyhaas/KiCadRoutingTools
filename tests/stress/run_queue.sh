@@ -5,11 +5,9 @@
 # it skips finished boards and won't double-launch ones already running (incl.
 # harness Agent runs detected via the run-dir).
 #
-# Usage: run_queue.sh [max_concurrency] [model]   (defaults: 8, backend default)
-#   Backend: STRESS_AI_BACKEND=claude (default) | opencode (#503) — inherited by
-#   every run_board.sh worker. Model defaults: claude -> sonnet (the latest
-#   Sonnet) at STRESS_AI_EFFORT=high; opencode -> the user's configured opencode
-#   default (or pass provider/model explicitly).
+# Usage: run_queue.sh [max_concurrency] [model]   (defaults: 8, sonnet)
+#   The model is passed to every run_board.sh worker, which runs `claude -p`
+#   with it (default sonnet, the latest Sonnet) at STRESS_AI_EFFORT=high.
 # Watch:  tail -f ~/Documents/kicad_stress_test/QUEUE_STATUS.txt
 #
 # Concurrency is LOAD-BASED, with the first arg as a hard CEILING (default 8).
@@ -21,22 +19,24 @@
 # routing integration tests past a 900 s timeout that all passed uncontended.
 #
 # So a new board launches only when the 1-minute load average is below
-# QUEUE_LOAD_MAX (default = HALF the core count, leaving room for other work).
-# Notes on the gate:
+# QUEUE_LOAD_MAX (default = core count - 2, at least 1, leaving room for other
+# work; see LOAD_MAX below). Notes on the gate:
 #
 #   * LOAD, not swap or memory-pressure level. This box sits at
 #     kern.memorystatus_vm_pressure_level 2 ("warn") with ~6.5 GB of swap in use
 #     as its NORMAL idle state -- that is macOS compressing idle `claude`
 #     processes, not thrashing. Gating on either would wedge the queue forever.
 #     Only pressure level 4 (CRITICAL) blocks a launch.
-#   * A FLOOR (QUEUE_CONC_MIN, default 2) always launches, whatever the load.
-#     Without it, load from anything else on the machine -- a test suite, a
-#     build, another wave -- would stall the queue indefinitely with no way out.
-#   * Above the floor it launches at most ONE board per 45 s pass. The 1-minute
-#     load average is a lagging, exponentially-weighted signal: launching a burst
-#     and re-reading it immediately just overshoots, which is the failure this
-#     gate exists to prevent. Cold start is therefore fast to the floor and
-#     gentle above it.
+#   * A FLOOR (QUEUE_CONC_MIN, default 2) launches whatever the load (and the
+#     memory pressure). Without it, load from anything else on the machine -- a
+#     test suite, a build, another wave -- would stall the queue indefinitely
+#     with no way out.
+#   * Every launch, the floor's included, waits out QUEUE_LAUNCH_INTERVAL
+#     (default 60 s) since the last one, and the queue polls every 30 s, so it
+#     launches at most ONE board per pass. The 1-minute load average is a
+#     lagging, exponentially-weighted signal: launching a burst and re-reading
+#     it immediately just overshoots, which is the failure this gate exists to
+#     prevent.
 #   * Every skipped pass LOGS its reason, so a throttled queue reads as
 #     throttled rather than as hung.
 #
@@ -119,7 +119,8 @@ is_running(){  # our worker, any tool writing the run dir, or run dir touched <1
   pgrep -f "run_board.sh $1 $2" >/dev/null 2>&1 && return 0
   local d; d=$(rundir "$1" "$2")
   # A worker that wrote .worker_done has EXITED (ok OR NORESULT). run_board.sh
-  # rm's this at start (line ~24), so its PRESENCE means "no live worker here".
+  # rm's this at start, before its agent runs, so its PRESENCE means "no live
+  # worker here".
   # Without this, a NORESULT worker whose orphaned background route step kept
   # touching the run dir false-positives the mtime window below and freezes the
   # slot for the full 180 min while the watchdog (needs 3 launches) can't yet
@@ -164,10 +165,10 @@ while true; do
     break
   fi
 
-  # LOAD-BASED admission. Below the floor we fill straight to CONC_MIN (fast cold
-  # start); above it we admit at most ONE board per pass and then wait out the
-  # 45 s sleep, so the 1-minute load average -- a lagging, EWMA signal -- has time
-  # to reflect the launch instead of being overshot by a burst.
+  # LOAD-BASED admission. Below the floor the load and memory checks are
+  # skipped; every launch waits out LAUNCH_INTERVAL, so at most ONE board is
+  # admitted per pass and the 1-minute load average -- a lagging, EWMA signal --
+  # has time to reflect the launch instead of being overshot by a burst.
   launched_this_pass=0
   for item in $todo; do
     reason=$(launch_block_reason "$run_n")

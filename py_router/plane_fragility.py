@@ -674,6 +674,11 @@ def register_plane_fragility(pcb_data: PCBData, config: GridRouteConfig,
 
     `dynamic` False registers the static field whatever the environment says,
     for an engine with no commit hooks to keep a dynamic one current."""
+    if getattr(config, 'quick', 0) >= 2:
+        # --quick 2, the seed judge: no field, as with COST=0 -- it steers
+        # tracks off the pours' edges, polish a placement ranking never reads.
+        config._plane_fragility_geometry = _geometry('none', why='--quick 2')
+        return
     if dynamic is None:
         dynamic = os.environ.get('KICAD_PLANE_FRAGILITY_DYNAMIC', '1') != '0'
     cells, states, geometry, rows_by_net = _compute_cells_and_states(

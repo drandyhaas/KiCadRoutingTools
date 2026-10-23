@@ -33,6 +33,19 @@ def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, fl
     # half-extents follow from that combined angle (exact for any placement angle;
     # reduces to size/2 for an axis-aligned pad in an unrotated footprint).
     for pad in pads:
+        cb = getattr(pad, 'copper_box', None)
+        if cb is not None:
+            # A custom pad's copper to one side of it (`Pad.copper_box`, board
+            # frame about the pad): its corners into the footprint's frame.
+            t = math.radians(footprint.rotation or 0.0)
+            c, s = math.cos(t), math.sin(t)
+            for u in (cb[0], cb[2]):
+                for v in (cb[1], cb[3]):
+                    lx = pad.local_x + u * c - v * s
+                    ly = pad.local_y + u * s + v * c
+                    min_x, max_x = min(min_x, lx), max(max_x, lx)
+                    min_y, max_y = min(min_y, ly), max(max_y, ly)
+            continue
         local_tilt = math.radians((getattr(pad, 'rect_rotation', 0.0) or 0.0)
                                   + (footprint.rotation or 0.0))
         c, s = abs(math.cos(local_tilt)), abs(math.sin(local_tilt))
@@ -57,52 +70,8 @@ def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, fl
     return (min_x, min_y, max_x, max_y)
 
 
-def literal_ref_glob(ref: str) -> str:
-    """`ref` as an fnmatch pattern matching exactly itself: glob
-    metacharacters (`D[1]`, `Ref*`) are bracket-escaped. For a ref the caller
-    selected by name or geometry, handed to code that globs every ref (an
-    intent `refs` list, `reseat_scope`). Shared by place_seed's region reseat
-    and rank_rotations.py (#1113)."""
-    return ''.join('[%s]' % c if c in '*?[]' else c for c in ref)
-
-
 def snap_to_grid(value: float, grid_step: float) -> float:
     """Snap a value to the nearest grid point."""
     return round(value / grid_step) * grid_step
 
 
-def refs_in_rect(pcb_data, rect, *, by='pad') -> list:
-    """Every reference whose geometry lies in `rect`, HALF-OPEN on the far edge.
-
-    THE one implementation, because two of them is a real defect rather than a
-    tidiness point: `check_pockets` prints a rectangle and
-    `place_seed --reseat-region` lifts the parts in it, and if the two resolve
-    the same rectangle differently the census names parts the mover does not
-    touch. Half-open (`x0 <= x < x1`) so a part on a shared boundary belongs to
-    exactly one window of a tiling.
-
-    by='pad'    -- any pad centre inside the rect. What the census has always
-                   used, and the right question for "which parts cage this
-                   window", since a large part reaches into a window its origin
-                   is nowhere near.
-    by='origin' -- the footprint origin only. This is `perturb._region_unit`'s
-                   own membership rule, so it is what names the block that
-                   `--block region:qN` would move.
-    """
-    x0, y0, x1, y1 = rect
-    out = set()
-    if by == 'origin':
-        for ref, fp in pcb_data.footprints.items():
-            if ref and x0 <= fp.x < x1 and y0 <= fp.y < y1:
-                out.add(ref)
-        return sorted(out)
-    if by != 'pad':
-        raise ValueError("refs_in_rect: by must be 'pad' or 'origin'")
-    for fp in pcb_data.footprints.values():
-        # a paste/mask aperture in the rect does not put the part there (#1143)
-        for pad in non_aperture_pads(fp):
-            if (x0 <= pad.global_x < x1 and y0 <= pad.global_y < y1
-                    and pad.component_ref):
-                out.add(pad.component_ref)
-                break
-    return sorted(out)

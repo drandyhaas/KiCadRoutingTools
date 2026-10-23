@@ -5,7 +5,8 @@
   swap pad nets. If you add copper here, every subsequent routing/obstacle
   call sees it.
 - **`geometry_utils.py`** — the shared 2-D geometry primitives: distances,
-  intersections, closest points, path simplification, and a `UnionFind`.
+  intersections, closest points, path simplification, a `UnionFind`, and
+  which layers a via's copper is on.
 
 All coordinates are mm.
 
@@ -19,25 +20,29 @@ import path: `PYTHONPATH=py_router python3 <your script>` (see the
 
 ```python
 add_route_to_pcb_data(pcb_data: PCBData, result: dict,
-                      debug_lines: bool = False) -> None
+                      debug_lines: bool = False,
+                      trace_event: str = 'route') -> None
 ```
 
 Appends a routed result's copper to `pcb_data.segments` / `pcb_data.vias`,
 **after cleaning it**. `result` is a dict with `'new_segments'` (list of
 `Segment`) and `'new_vias'` (list of `Via`). Mutates `pcb_data` in place and
 also replaces `result['new_segments']` with the cleaned list, so the same
-result dict can go straight to the writer.
+result dict can go straight to the writer. `trace_event='restore'` marks a
+re-commit of ripped copper, which must land exactly as it was.
 
-Cleanup pipeline (per net):
+Cleanup (per net, on this result's new segments only):
 
-1. **Self-intersection fixing** — short connector segments that cross the
-   net's existing copper are trimmed to the crossing point; orphaned
-   downstream pieces are removed.
-2. **Appendix collapsing** — short dead-end segments left by grid snapping
-   are collapsed to micro-stubs at their junction.
-3. **Degenerate segment removal** — segments under 0.01 mm are dropped;
+1. **Degenerate segment removal** — segments under 0.01 mm are dropped;
    micro-bridges between two chains are welded shut (neighbors moved to the
    midpoint) so no gap opens.
+2. **Dead-end prune** (#84) — this route's own dead-end spurs are unwound, so
+   dead copper does not block the routes that follow. The net's copper
+   already on the board anchors junctions but is never removed here, and the
+   prune is gated: it never leaves a pad less connected or splits a copper
+   component (#1227, below).
+3. **Exactly once** — an object already on the board (a restore handing back
+   a saved result) is not appended again.
 
 Call this after each successful route and before routing the next net, so
 incremental obstacle maps stay truthful.
@@ -48,9 +53,16 @@ incremental obstacle maps stay truthful.
 remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None
 ```
 
-Inverse of `add_route_to_pcb_data` for rip-up: removes exactly the segments
-and vias recorded in `result` (matched by normalized endpoints rounded to
-`POSITION_DECIMALS`, direction-agnostic).
+Inverse of `add_route_to_pcb_data` for rip-up: removes exactly the segment
+and via OBJECTS recorded in `result`, by identity, so an input-file original
+that a reroute retraced exactly survives (#389). An object not found by
+identity (a caller holding a copy) falls back to a geometry match —
+normalized endpoints at `POSITION_DECIMALS`, layer and net — removing at most
+one item per object, newest first, and never a KiCad-locked one.
+
+Both functions bump the board's copper epoch, which memos derived from the
+copper key on. A pass that edits `pcb_data.segments` / `.vias` any other way
+must call `bump_copper_epoch(pcb_data)` itself.
 
 ### `remove_net_from_pcb_data` / `restore_net_to_pcb_data`
 
@@ -61,7 +73,8 @@ restore_net_to_pcb_data(pcb_data, segments, vias) -> None
 ```
 
 Blunter tools: strip **all** copper of a net (returning it so you can
-restore on failure), and put it back.
+restore on failure), and put it back. Graphic copper (`Segment.graphic`) is
+left in place: the file cannot lose it, so neither does the model.
 
 ```python
 from kicad_parser import parse_kicad_pcb
@@ -97,7 +110,7 @@ the routing pipeline applies both so the model and the output file agree.
 > non-orthonormal diagonals that crossed foreign copper. `collapse_appendices`
 > was already a vestigial wrapper (its short-appendix trim was removed in #148,
 > redundant with `sweep_dead_ends`). `add_route_to_pcb_data` now commits routed
-> segments directly; connectivity cleanup is handled by `prune_redundant_cycles`
+> segments with no self-intersection pass; connectivity cleanup is handled by `prune_redundant_cycles`
 > and the whole-net dead-end trim `sweep_dead_ends` (#84). The residual same-net
 > self-crossings are tracked in #162.
 
@@ -151,15 +164,32 @@ the routing pipeline applies both so the model and the output file agree.
 > unless `--keep-input-copper`), and on the "nothing to route" return too.
 
 > **#1261 -- KiCad-locked copper is read-only to every cleanup pass.** A
-> `(locked yes)` segment or via (`pcb_modification._locked`) is treated by
-> `sweep_dead_ends`, `remove_orphan_islands`, `prune_redundant_cycles`,
-> `trim_dangles_past_body_anchor`, `prune_grazing_segments`,
-> `nudge_grazing_octolinear` and `nudge_grazing_microshift` exactly as
-> `keep_input_copper` treats input copper -- it anchors their models but is
-> never removed, split, re-bent or moved -- whether or not that flag is set.
+> `(locked yes)` segment or via, or copper a `sense:` group holds (#1279) --
+> `pcb_modification._locked`, which is `kicad_parser.is_immutable_copper` --
+> is treated by `sweep_dead_ends`, `remove_orphan_islands`,
+> `prune_redundant_cycles`, `trim_dangles_past_body_anchor`,
+> `prune_grazing_segments`, `nudge_grazing_octolinear`,
+> `nudge_grazing_microshift`, `merge_collinear_segments`,
+> `trim_net_stub_debris`, the strict collapse, the dangling-via sweep and the
+> castellated retract exactly as `keep_input_copper` treats input copper -- it
+> anchors their models but is never removed, split, re-bent or moved --
+> whether or not that flag is set.
 > An island holding locked copper is kept whole, a micro-shift never moves a
 > vertex a locked segment touches, and the #284 stale-input strip and
 > `remove_route_from_pcb_data`'s signature fallback never take a locked item.
+
+> **The graze prune keeps a fill island's only link.** `prune_grazing_segments`
+> grades each removal on a zoned net twice: under the real-fill validator
+> (`check_connected.make_real_fill_validator`, no pour credit within 0.25 mm
+> of foreign copper) and under the grading model (the same
+> `check_net_connectivity` without it, which `check_connected` and route.py's
+> #209 gate read); the removal must leave both no worse. The validator's
+> denial is conservative for the pad it would over-credit and the opposite
+> for the copper being removed: a tap ending in a narrow fill island (an F.Cu
+> pocket between a BGA's fanout tracks) loses its end's credit, reads as a
+> dead end, the island's pad reads as already open, and the removal looks
+> free. A 0.5 mm csBGA's GND ball lost its 0.33 mm tail that way in
+> every route step. `tests/test_graze_prune_fill_island.py` pins it.
 
 > **#1227 -- a dead-end prune never splits copper.** Every gated dead-end pass
 > (`add_route_to_pcb_data`'s per-commit prune, `sweep_dead_ends`,
@@ -176,29 +206,34 @@ the routing pipeline applies both so the model and the output file agree.
 > component count, and that must not pay for a split.
 > `analyze_conn_excluding(..., return_uf=True)` returns the union-find it uses.
 
-> **#672 -- sub-cell slivers.** `sweep_dead_ends(..., sliver_eps=mm)` is the one
-> exception to its `protect_net_ids` exemption (nets with unfinished pads keep
-> every landing site, #473): a protected net still loses a dead-end piece
-> SHORTER than `sliver_eps` when `check_net_connectivity` grades the net no
-> worse without it. The cleanup pipeline passes one routing cell
-> (`config.grid_step`) -- but **only under `KICAD_SLIVER_TRIM=1`; the default
-> is 0.0, i.e. off**. The epsilon's rationale is sound (no A* span is shorter,
-> so such a piece can only be rip/restore/prune debris, and a stub shorter
-> than a cell offers no landing its root does not) and the motive is real
-> (a 0.02 mm sliver of a net retried across an iteration ladder shipped
-> 0.054 mm from a foreign track) -- but taking copper off a net the ladder is
-> still retrying MEASURED AS A LOST NET: on orangecrab's recorded route step,
-> paired from the same input board, `RAM_UDQS+` went from routed to
-> `failed_single` (run verdict 9 -> 10, 14 DRC either way), while the
-> self-pair half of this change alone reproduced the base copper EXACTLY
-> (6097 segments and 625 vias compared, all identical). **The corpus A/B ran
-> (2026-09-04, sets 1-5, 72 boards paired at one commit) and it does not pay:
-> real DRC 21 vs 21 unchanged, unconnected nets 86 -> 87, one board worse
-> (`core1106_cam` 0 -> 1) and none better.** It stays off. The same change
-> teaches every soft-joint detector (`_soft_joint_pairs`, `close_soft_joints`,
-> `check_drc`, `check_weird`) that the two ends of ONE segment are not a joint:
-> a lone sub-cap sliver used to pair with itself, which made
-> `_restore_soft_joint_bridges` put a just-removed dead neighbour back.
+> **#672 -- the two ends of ONE segment are not a soft joint.** Every
+> soft-joint detector (`_soft_joint_pairs`, `close_soft_joints`, `check_drc`,
+> `check_weird`) skips the pair: a lone sub-cap sliver used to pair with
+> itself, which made `_restore_soft_joint_bridges` put a just-removed dead
+> neighbour back. `sweep_dead_ends` keeps every piece of a net in
+> `protect_net_ids` (nets with unfinished pads keep every landing site, #473).
+
+### File-level post-passes
+
+```python
+compute_plane_copper_cleanup(pcb, plane_net_names, clearance=0.1,
+                             grid_step=0.05, progress_callback=None)
+    -> PlaneCleanupDelta      # connectors, segments_to_remove, vias_to_remove, snapped
+clean_plane_copper(output_file, plane_net_names, clearance=0.1,
+                   grid_step=0.05) -> Tuple[int, int]   # (snapped, removed)
+compute_castellated_landing_retract(pcb, board_edge_clearance, margin=0.02)
+    -> CastellationRetractDelta   # moves: [(segment, 'start'|'end', new_x, new_y)]
+retract_castellated_landings(output_file, board_edge_clearance) -> int
+```
+
+Each pass is a board-level core that returns a DELTA, plus a file front that
+parses a written board, applies the delta and rewrites the file. The GUI
+applies the same delta to the live pcbnew board, so the two fronts cannot
+drift. The plane cleanup runs the shared post-route cleanup pipeline (gap
+snap, graze prune, re-bend, micro-shift, cycle prune, dead-end sweep,
+soft-joint bridge) on the plane nets' copper. The castellated retract pulls a
+track end that lands on a castellated pad (`Pad.castellated`) back out of the
+board-edge clearance zone to the pad's inner reach.
 
 ## `geometry_utils.py`
 
@@ -256,6 +291,34 @@ simplify_path(path: List[Tuple[int, int, str]]) -> List[...]
 Removes collinear intermediate points from an A* path. Note: operates on
 **grid** coordinates `(gx, gy, layer)`, not mm.
 
+### Which layers a via has copper on
+
+```python
+via_on_layer(via, layer_name) -> bool
+via_copper_layers(via, copper_layers) -> List[str]
+via_end_layers(via) -> Tuple[str, str]
+via_span_layer_indices(via, routing_layers, num_layers)
+PARTIAL_VIA_TYPES = frozenset({'blind', 'buried', 'micro'})
+```
+
+A via's stored `layers` pair is not its span. KiCad loads a via with no type
+word as a THROUGH via whatever pair it carries, so only a via whose
+`Via.via_type` is blind, buried or micro covers part of the stack: the layers
+between its two end layers, in stack order. Ask these (they take a `Via` or a
+via dict) instead of reading the pair; `via_end_layers` is what a
+barrel-length measurement spans (`('F.Cu', 'B.Cu')` for a through via).
+
+```python
+from kicad_parser import Via
+from geometry_utils import via_copper_layers
+
+layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+micro = Via(0, 0, 0.3, 0.1, ['F.Cu', 'In1.Cu'], net_id=1, via_type='micro')
+untyped = Via(0, 0, 0.3, 0.1, ['F.Cu', 'In1.Cu'], net_id=1)
+print(via_copper_layers(micro, layers))     # ['F.Cu', 'In1.Cu']
+print(via_copper_layers(untyped, layers))   # all four: a through via
+```
+
 ### Example
 
 ```python
@@ -284,8 +347,9 @@ print(uf.connected('A', 'C'), uf.connected('A', 'X'))   # True False
 - **Per-net cleanup**: the dead-end / cycle cleanup helpers (`prune_redundant_cycles`,
   `sweep_dead_ends`) operate on **one net at a time** — never feed segments from
   multiple nets into one call.
-- **`remove_route_from_pcb_data` must see the same coordinates it added** —
-  if you transform geometry in between, use `remove_net_from_pcb_data`
-  instead.
+- **`remove_route_from_pcb_data` removes the objects it is given** — pass the
+  result whose objects `add_route_to_pcb_data` committed. Copies only match
+  by geometry, so if you transform or copy geometry in between, use
+  `remove_net_from_pcb_data` instead.
 - **`simplify_path` is grid-space**; everything else in `geometry_utils` is
   mm.

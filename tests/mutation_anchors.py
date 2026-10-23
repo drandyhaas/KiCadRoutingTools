@@ -17,8 +17,9 @@ implementation of that question in the tree, for two callers:
 
   * each `tests/mutate_*.py`, from `--verify-anchors`, over the rows it already
     holds in memory (`verify`); and
-  * `tests/test_718_static_test_hygiene.py`, over every battery, without
-    importing any of them (`resolve_static` -> `verify`).
+  * this module's own census (`python3 tests/mutation_anchors.py`, `census`),
+    over every battery, without importing any of them (`resolve_static` ->
+    `verify`).
 
 Both callers exist. Every battery calls `preflight`, which also HANDLES
 `--verify-anchors` and strips it from `sys.argv`, so the five hand-rolled
@@ -738,9 +739,9 @@ def main():
                         for k in sorted(kinds)) or 'no problems'
     print('\n%d battery(s), %d anchor(s): %s, %d unresolved'
           % (len(rows), total, summary, unresolved))
-    # EVERY problem kind fails, not only STALE. The exit code and the #718 gate
-    # must agree about what is wrong, or the one-second check reports green
-    # while the suite goes red on the same rows.
+    # EVERY problem kind fails, not only STALE. The census and each battery's
+    # `preflight` (which refuses on any of them) must agree about what is
+    # wrong, or the census reports green while a battery refuses to run.
     return 1 if (kinds or unresolved) else 0
 
 

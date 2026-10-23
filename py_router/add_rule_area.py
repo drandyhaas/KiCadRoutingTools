@@ -27,7 +27,9 @@ A board-level rule area of the same `--name` is replaced, so the command is
 idempotent. The output gets the input's siblings (`copy_board`), and the run
 says what it wrote.
 
-Exit 0 written; 2 for a usage error or a `--ref` the board does not have.
+Exit 0 written; 2 for an argparse usage error, a `--layers` entry that is not
+a copper layer of the board, or a `--ref` the board does not have; 1 for a
+malformed `--polygon` (a point that is not X,Y, or fewer than 3 points).
 """
 import argparse
 import os

@@ -182,20 +182,24 @@ def test_it_names_the_IC_decap_distance_WOULD_have_named():
 
 
 def test_a_cap_with_NO_rail_carrying_chip_is_not_reported():
-    """`orphans` are not `beyond`. A cap whose rail no chip carries has no IC
-    to be far from, so naming one would be an invention -- and ulx3s has TEN of
-    them (bulk and filter caps upstream of an LC network) against 7 beyond."""
+    """A cap whose rail no chip carries has no IC to be far from, so naming one
+    would be an invention -- and ulx3s has TEN of them (bulk and filter caps
+    upstream of an LC network) against 7 beyond. The decap rule
+    (`groups.decap_population`) leaves them out of the population, so
+    `orphans` is empty and none of the ten may be reported."""
     if not os.path.exists(_board('ulx3s')):
         print("  SKIP: ulx3s absent")
         return
     r, _doc, pcb = _graded('ulx3s')
     _near, beyond, orphans = groups_mod.decap_populations(pcb)
-    assert len(orphans) == 10 and len(beyond) == 7, (len(orphans), len(beyond))
+    bulk = {'C11', 'C12', 'C14', 'C22', 'C23', 'C24', 'C3', 'C4', 'C7', 'C8'}
+    assert not orphans and len(beyond) == 7, (sorted(orphans), len(beyond))
+    assert not bulk & set(groups_mod.decap_population(pcb)), sorted(bulk)
     refs = {v.ref for v in _hits(r)}
     assert refs == {c for c, _ic, _d in beyond}, sorted(refs)
-    assert not (refs & set(orphans)), sorted(refs & set(orphans))
-    print(f"  PASS: ulx3s reports the 7 beyond-radius caps and none of the 10 "
-          f"with no rail-carrying chip ({', '.join(sorted(orphans)[:4])}, ...)")
+    assert not (refs & bulk), sorted(refs & bulk)
+    print("  PASS: ulx3s reports the 7 beyond-radius caps and none of the 10 "
+          "with no rail-carrying chip (C11, C12, C14, C22, ...)")
 
 
 def test_an_exempted_cap_is_not_reported_as_ungraded_either():

@@ -774,8 +774,10 @@ def run_reroute_loop(
                                 _c652 = condense_hint(_h652)
                                 if _c652:
                                     print(f"  {_c652}")
-                                record_net_event(state, ripped_net_id,
-                                                 "fanout_dropped", _v652)
+                                if (_v652 or {}).get('verdict') == \
+                                        'fanout_dropped':
+                                    record_net_event(state, ripped_net_id,
+                                                     "fanout_dropped", _v652)
                         except Exception:
                             pass
                     # Remove from pending_multipoint_nets to prevent Phase 3 from

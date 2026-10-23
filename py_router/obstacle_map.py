@@ -26,6 +26,7 @@ import os
 import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
+from geometry_utils import via_span_layer_indices
 
 try:
     from grid_router import GridObstacleMap
@@ -139,7 +140,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             net_clearances: dict = None,
                             static_base: bool = False,
                             progress_callback=None,
-                            _rung_pass: bool = False) -> GridObstacleMap:
+                            _rung_pass: bool = False,
+                            stamp_pads: bool = True) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -153,6 +155,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             obstacle net's own class clearance). The floor maxes over the ROUTED nets only, so a
             foreign class cannot inflate it (that would over-block every routed net). An empty/
             absent map reproduces plain config.clearance behaviour exactly.
+        stamp_pads: False leaves pad COPPER off the map (their drill holes are
+            still stamped). Only for a caller that measures every pad itself,
+            exactly: qfn_fanout's stub test. Routing maps keep the default.
     """
     if net_clearances is None:
         net_clearances = {}
@@ -461,7 +466,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # the base map holds the excluded nets' (GND/P3.3V) fanout vias, and without
         # the diagonal margin a 45deg track grazes them a sub-cell under clearance.
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid,
-                          via_via_expansion_grid, diagonal_margin=defaults.DIAGONAL_MARGIN)
+                          via_via_expansion_grid, diagonal_margin=defaults.DIAGONAL_MARGIN, routing_layers=config.layers)
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
     # Priced per obstacle: max(routing-side clearance, the pad net's own class clearance)
@@ -471,7 +476,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     for _pn_i, (net_id, pads) in enumerate(pcb_data.pads_by_net.items()):
         if (_pn_i & 63) == 0:
             _report("pads", _pn_i, _n_pad_nets)
-        if net_id in nets_to_route_set:
+        if net_id in nets_to_route_set or not stamp_pads:
             continue
         for pad in pads:
             if id(pad) in _tie_partner_pad_ids:
@@ -491,6 +496,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     _flush_cell_sink(obstacles, _pad_cell_sink)
     _flush_via_sink(obstacles, _pad_via_sink)
 
+    # #1279: a protected Kelvin sense branch of a net this map is built to
+    # route is foreign copper to that net too, except on its join pad.
+    from sense_branch import stamp_base_obstacles
+    stamp_base_obstacles(obstacles, pcb_data, config, nets_to_route_set, coord,
+                         layer_map, _obstacle_clearance, extra_clearance)
+
     # Intersect each tied net's corridor with the recorded tie-copper stamps:
     # the per-net lift arrays are EXACT subsets of what the base build added
     # for that copper, so prepare/restore's balanced remove/re-add can never
@@ -499,11 +510,6 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # lifted only during the tied net's own route).
     pcb_data._net_tie_lift = _assemble_net_tie_lifts(
         _tie_corridors, _tie_recorded, layer_map)
-    # #667: the priced band = corridor cells OFF the own pad (the waived
-    # own-pad approach stays free -- the gradient IS the steering).
-    pcb_data._net_tie_price = {
-        nid: sorted(e['cells'] - e.get('safe_cells', set()))
-        for nid, e in _tie_corridors.items()}
     # NOTE (#908): this bake is UNGUARDED, so `prepare_obstacles_inplace`
     # lifts the same rows a second time when a base built for ONE net is then
     # prepared for that net. Left as it is deliberately -- fixing it changes
@@ -558,12 +564,17 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance,
                              progress=_report)
 
-    # Add user-drawn User-layer keepout polygons (issue #27) - block all copper layers
+    # Add user-drawn User-layer keepout polygons (issue #27) - block all copper layers.
+    # Both keep-out passes take the map's extra clearance like every other
+    # obstacle here: on a diff-pair CENTRELINE map (extra = the member offset)
+    # the members, not just the centreline, must stay out (found reviewing #1278).
     _report("keepouts", 0, 0, force=True)
-    add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
+    add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers,
+                               extra_clearance)
 
     # Block KiCad native keep-out rule areas (zone (keepout ...)), per-layer (PR #25)
-    add_rule_area_keepout_obstacles(obstacles, pcb_data, config)
+    add_rule_area_keepout_obstacles(obstacles, pcb_data, config,
+                                    extra_clearance=extra_clearance)
 
     # Pour islands of out-of-scope nets that this run could only cut (#1260)
     add_pour_barrier_obstacles(obstacles, pcb_data, config, extra_clearance,
@@ -595,7 +606,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # read against -- so the same rule: the record a map is read with must
         # be that map's own.
         _build_records = {_k: getattr(pcb_data, _k, None) for _k in (
-            '_net_tie_lift', '_net_tie_price',
+            '_net_tie_lift',
             '_graphic_own_pad_lift', '_graphic_own_pad_via_lift')}
         try:
             from obstacle_cache import via_rungs as _via_rungs, _small_via_pair
@@ -608,7 +619,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 _sub = build_base_obstacle_map(
                     pcb_data, _dc_replace(config, via_size=_d, via_drill=_h),
                     nets_to_route, extra_clearance, net_clearances,
-                    static_base=False, _rung_pass=True)
+                    static_base=False, _rung_pass=True, stamp_pads=stamp_pads)
                 _cells = _sub.blocked_via_cells_at_rung(0)
                 if _cells:
                     _real_obstacles.add_blocked_vias_rung_batch(
@@ -1010,13 +1021,19 @@ def _polygon_grid_cells(points_mm, coord: GridCoord):
 
 
 def add_user_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
-                               config: GridRouteConfig, coord: GridCoord, num_layers: int):
+                               config: GridRouteConfig, coord: GridCoord, num_layers: int,
+                               extra_clearance: float = 0.0):
     """Block all grid cells inside user-drawn keepout polygons on every copper layer.
 
     Keepout zones (issue #27) are hard blocks: routed tracks cannot enter them. The
     block applies to every net routed in the run. Because cells are blocked
     unconditionally, a zone drawn over a routed net's pad can make that net
     unroutable -- zones are meant for open board area, not over pads.
+
+    ``extra_clearance`` (a diff-pair centreline map: the member offset) also
+    blocks the cells within that distance of the polygon, so each member's
+    centreline stays out as a single track's does. 0 leaves the cell set
+    exactly the polygon's interior.
     """
     if not config.keepout_enabled or not pcb_data.keepout_zones:
         return
@@ -1024,6 +1041,13 @@ def add_user_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     all_cells = set()
     for zone in pcb_data.keepout_zones:
         all_cells |= _polygon_grid_cells(zone.points, coord)
+        if extra_clearance > 0:
+            gx_lo, gy_lo, nx, _ny, inside, edge_dist = _rasterize_polygon_box(
+                zone.points, coord, extra_clearance + coord.grid_step)
+            if inside is not None:
+                band_x, band_y = _box_masked_cells(
+                    gx_lo, gy_lo, nx, edge_dist < extra_clearance - GRID_TIE_EPS)
+                all_cells |= set(zip(band_x.tolist(), band_y.tolist()))
 
     if not all_cells:
         return
@@ -1117,7 +1141,8 @@ def point_to_polygon_edge_distance(x: float, y: float, polygon: List[Tuple[float
 
 def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                     config: GridRouteConfig,
-                                    layers: Optional[List[str]] = None):
+                                    layers: Optional[List[str]] = None,
+                                    extra_clearance: float = 0.0):
     """Block tracks/vias inside KiCad keep-out rule areas.
 
     Each keepout (parsed from `(zone ... (keepout ...))`) blocks track cells on its
@@ -1128,6 +1153,11 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     Cells whose centre is inside the polygon are blocked, as are cells just outside
     whose track/via copper (half-width plus clearance) would intrude past the keep-out
     boundary, so the copper itself stays out of the region rather than just the centre.
+
+    ``extra_clearance`` widens both bands, as it does every other obstacle: on a
+    diff-pair CENTRELINE map it is the member offset, without which a member's
+    copper reached into the area (lvds_converter_dualclk /CLK+: KiCad
+    items_not_allowed; found reviewing #1278).
     """
     keepouts = getattr(pcb_data.board_info, 'keepouts', None)
     if not keepouts:
@@ -1136,8 +1166,8 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     coord = GridCoord(config.grid_step)
     layer_list = layers if layers is not None else config.layers
     layer_map = build_layer_map(layer_list)
-    track_clear = config.clearance + config.track_width / 2
-    via_clear = config.clearance + config.via_size / 2
+    track_clear = config.clearance + config.track_width / 2 + extra_clearance
+    via_clear = config.clearance + config.via_size / 2 + extra_clearance
     # Restrict rasterization to the map's extent: on a local-window build a
     # whole-board ring keep-out would otherwise rasterize the entire board per
     # call (the dominant cost of repair_planes and the via-in-pad
@@ -1389,6 +1419,49 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         if len(contour) >= 3:
             _add_edge_contour_obstacles(obstacles, contour, coord, num_layers,
                                         track_edge_clearance, via_edge_clearance)
+
+
+def track_edge_point_test(pcb_data: PCBData, config: GridRouteConfig,
+                          track_width: Optional[float] = None):
+    """`ok(x, y)`: may a track of `track_width` END at the float point (x, y)?
+
+    The same keep-out `add_board_edge_obstacles` stamps -- board edge
+    clearance (else the track clearance) plus half the track width, off every
+    boundary it stamps: the outer outline(s), else the bounds rectangle, the
+    cut-outs and the milled inner contours -- measured exactly at the point
+    rather than at a grid cell. For a sub-cell weld the router draws from a
+    grid point it reached to a float it did not search: a pour-launch weld on
+    fill copper at the zone's edge clearance ends a track half its width
+    nearer the edge than the A* grid would ever let it go (smartknob GND
+    0.042 mm into the 0.5 mm band). None when the board has no outline."""
+    bi = pcb_data.board_info
+    rings = [o for o in (getattr(bi, 'board_outlines', None) or []) if len(o) >= 3]
+    if not rings and bi.board_outline and len(bi.board_outline) >= 3:
+        rings = [bi.board_outline]
+    if not rings and bi.board_bounds:
+        x0, y0, x1, y1 = bi.board_bounds
+        rings = [[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
+    rings += [c for c in (bi.board_cutouts or []) if len(c) >= 3]
+    rings += [c for c in (getattr(bi, 'board_edge_contours', None) or []) if len(c) >= 3]
+    if not rings:
+        return None
+    a = np.array([p for r in rings for p in r], dtype=float)
+    b = np.array([p for r in rings for p in (list(r[1:]) + [r[0]])], dtype=float)
+    d = b - a
+    ll = np.maximum((d * d).sum(axis=1), 1e-18)
+    edge_clearance = (config.board_edge_clearance if config.board_edge_clearance > 0
+                      else config.clearance)
+    need = edge_clearance + (track_width if track_width is not None
+                             else config.track_width) / 2
+
+    def ok(x: float, y: float) -> bool:
+        t = np.clip(((x - a[:, 0]) * d[:, 0] + (y - a[:, 1]) * d[:, 1]) / ll, 0.0, 1.0)
+        dx = a[:, 0] + t * d[:, 0] - x
+        dy = a[:, 1] + t * d[:, 1] - y
+        return float(np.min(dx * dx + dy * dy)) >= (need - 1e-6) ** 2
+
+    ok.need = need
+    return ok
 
 
 def _edge_band_pad_layer_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
@@ -2412,18 +2485,53 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # byte-identical (test_505's no-override case pins that). `npth_holes`
     # also carries #441's ring-uncovered plated holes, which check_drc's via
     # arm does not grade.
-    if npth_holes and _hole_clr > 0:
-        _via_hole_clr = (max(config.clearance, _hole_clr)
-                         + (config.via_size - config.via_drill) / 2.0)
-        if _via_hole_clr > config.hole_to_hole_clearance + 1e-9:
-            block_via_cells_near_drills(obstacles, npth_holes, config.via_drill,
-                                        _via_hole_clr, config.grid_step)
+    #
+    # Both via arms (this one and the #505 override arm) live in
+    # block_via_cells_near_npth_floors, which the plane engines' map
+    # (plane_region_connector.build_base_obstacles) calls too.
+    block_via_cells_near_npth_floors(
+        obstacles, pcb_data, npth_holes, config.via_size, config.via_drill,
+        config.clearance, config.hole_to_hole_clearance, _hole_clr,
+        config.grid_step)
+
+
+def block_via_cells_near_npth_floors(obstacles: GridObstacleMap,
+                                     pcb_data: PCBData, npth_holes,
+                                     via_size: float, via_drill: float,
+                                     clearance: float,
+                                     hole_to_hole_clearance: float,
+                                     hole_clr: float, grid_step: float):
+    """The two VIA keep-outs around no-copper holes that the hole-to-hole
+    drill stamp does not cover, shared by every map that places vias.
+
+    1. #1038: via COPPER off every hole in ``npth_holes`` at
+       ``max(clearance, hole_clr)``, the board's copper-to-hole floor
+       (``hole_clr`` = :func:`resolve_hole_clearance`; 0 = none declared,
+       and the arm stays off).
+    2. #505: via COPPER off an NPTH pad's hole at its ``local_clearance``
+       override (#326), read off ``pcb_data`` for every NPTH pad of every net.
+
+    Each arm only stamps when it reaches past the h2h drill stamp the caller
+    already laid at ``hole_to_hole_clearance``. ``npth_holes`` is the
+    caller's list of (x, y, drill) circles, net-independent (a drill does not
+    care whose net it nominally is).
+
+    The plane engines' map (``plane_region_connector.build_base_obstacles``:
+    region joins, the KiCad-oracle links, repair_planes) used to have neither
+    arm: on neo6502 the finalize's oracle links put two 0.7 mm vias 0.10 and
+    0.15 mm inside MH3's 1.85 mm override.
+    """
+    if npth_holes and hole_clr > 0:
+        _via_hole_clr = max(clearance, hole_clr) + (via_size - via_drill) / 2.0
+        if _via_hole_clr > hole_to_hole_clearance + 1e-9:
+            block_via_cells_near_drills(obstacles, npth_holes, via_drill,
+                                        _via_hole_clr, grid_step)
 
     # VIA arm of the #326 override (#505). KiCad's hole_clearance holds a via's
     # COPPER -- not merely its drill -- `local_clearance` off the hole wall. For
     # an NPTH pad nothing enforced that: the pad has no copper, so the pad-copper
-    # blocker never stamps it, and the only via keep-out is the hole-to-hole
-    # DRILL minimum above, which is measured drill-to-drill at a much smaller
+    # blocker never stamps it, and the only via keep-out is the caller's
+    # hole-to-hole DRILL minimum, which is measured drill-to-drill at a much smaller
     # value. pinci shipped 5 vias 0.76-1.13mm from 0.9/1.3mm-override mounting
     # holes, every one satisfying h2h (1.427mm) while KiCad wanted 2.225/2.625mm.
     # Scoped to NPTH like the track arm: a plated pad's own copper obstacle
@@ -2432,7 +2540,7 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # block_via_cells_near_drills builds hole_r + clearance + via_drill/2, so
     # passing lc + (via_size - via_drill)/2 yields hole_r + lc + via_size/2 --
     # the via COPPER edge held `lc` off the hole wall (same idiom as the #448
-    # slot band above).
+    # slot band in add_drill_hole_obstacles).
     _via_override: Dict[float, list] = {}
     for _pads in pcb_data.pads_by_net.values():
         for _pad in _pads:
@@ -2441,14 +2549,14 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             _lc = getattr(_pad, 'local_clearance', 0.0) or 0.0
             if _lc <= 0:
                 continue
-            _via_clr = _lc + (config.via_size - config.via_drill) / 2.0
-            if _via_clr <= config.hole_to_hole_clearance:
+            _via_clr = _lc + (via_size - via_drill) / 2.0
+            if _via_clr <= hole_to_hole_clearance:
                 continue          # the h2h stamp already covers this override
             _via_override.setdefault(round(_via_clr, 9), []).extend(
                 pad_drill_circles(_pad))
     for _clr, _circles in _via_override.items():
-        block_via_cells_near_drills(obstacles, _circles, config.via_drill,
-                                    _clr, config.grid_step)
+        block_via_cells_near_drills(obstacles, _circles, via_drill,
+                                    _clr, grid_step)
 
 
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -2754,7 +2862,7 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
         # required) -- a real cross-net via-via DRC violation the router never saw.
         via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin, routing_layers=config.layers)
         # #441: net-independent drill hole-to-hole disc (add-only: every caller of
         # this fn stamps a fresh/clone map that is discarded, never rip-removed).
         _h2h = _via_h2h_cells(via, config, coord)
@@ -3073,7 +3181,7 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
         # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
         # required) -- a real cross-net via-via DRC violation the router never saw.
         via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin, routing_layers=config.layers)
         # #441: net-independent drill hole-to-hole disc, MIRRORED in
         # remove_vias_list_from_obstacles so rip-up stays ref-count balanced.
         _h2h = _via_h2h_cells(via, config, coord)
@@ -3295,7 +3403,7 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         # (libm pow -- radius*radius rounds 1 ULP apart on rare values and
         # would flip borderline cells); integer ex*ex+ey*ey against that
         # scalar is an exact comparison, so the cell multiset is identical.
-        for layer_idx in range(num_layers):
+        for layer_idx in via_span_layer_indices(via, config.layers, num_layers):
             radius = via_track_expansion_grid[layer_idx] + diagonal_margin + off_cells
             effective_track_block_sq = radius ** 2
             track_block_range = int(math.ceil(radius))
@@ -3793,11 +3901,45 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
     # Existing same-net vias are reusable holes too (see free-via reuse). Without
     # this, only the multipoint tap path augmented the set, so the Phase-1 main edge
     # and single-ended routes dropped a duplicate via onto an existing via-in-pad.
+    # NOT a blind/micro via whose copper stops short of the stack: a layer
+    # change there joins only the layers it spans (same_net_partial_via_spans).
     for via in pcb_data.vias:
-        if via.net_id == net_id:
+        if via.net_id == net_id and not via_stops_short(via, pcb_data):
             positions.add(coord.to_grid(via.x, via.y))
 
     return positions
+
+
+def via_stops_short(via, pcb_data) -> bool:
+    """Is this a via KiCad types blind/buried/micro whose copper misses at
+    least one of the board's copper layers? Such a via is NOT a reusable hole
+    for an arbitrary layer change (found reviewing #1268): the router rode an
+    F.Cu->In1.Cu microvia to B.Cu at zero cost and emitted no via."""
+    from geometry_utils import PARTIAL_VIA_TYPES, via_copper_layers
+    if getattr(via, 'via_type', 'through') not in PARTIAL_VIA_TYPES:
+        return False
+    cu = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers',
+                      None) or ['F.Cu', 'B.Cu'])
+    return len(via_copper_layers(via, cu)) < len(cu)
+
+
+def same_net_partial_via_spans(pcb_data, net_id: int,
+                               config: GridRouteConfig) -> Dict[Tuple[int, int], frozenset]:
+    """{(gx, gy): copper layer names} for this net's vias that stop short of
+    the stack (`via_stops_short`). A layer change at such a cell rides the via
+    only between two layers of its span; any other layer change there needs a
+    via of its own. Stacked partial vias at one cell pool their spans."""
+    from geometry_utils import via_copper_layers
+    coord = GridCoord(config.grid_step)
+    cu = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers',
+                      None) or ['F.Cu', 'B.Cu'])
+    spans: Dict[Tuple[int, int], frozenset] = {}
+    for via in pcb_data.vias:
+        if via.net_id == net_id and via_stops_short(via, pcb_data):
+            cell = coord.to_grid(via.x, via.y)
+            spans[cell] = spans.get(cell, frozenset()) | frozenset(
+                via_copper_layers(via, cu))
+    return spans
 
 
 def _batch_cells_one_layer(obstacles, cells_xy: "np.ndarray", layer_idx: int,
@@ -3913,7 +4055,8 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
                       num_layers: int, via_track_expansion_grid, via_via_expansion_grid: int,
                       diagonal_margin: float = 0.0,
                       blocked_cells: List[Set[Tuple[int, int]]] = None,
-                      blocked_vias: Set[Tuple[int, int]] = None):
+                      blocked_vias: Set[Tuple[int, int]] = None,
+                      routing_layers=None):
     """Add a via as obstacle to the map.
 
     Args:
@@ -3937,13 +4080,14 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
     off_cells = math.hypot(via.x - gx * coord.grid_step,
                            via.y - gy * coord.grid_step) / coord.grid_step
 
+    span = via_span_layer_indices(via, routing_layers, num_layers)
     # Batched rasterization (issue #35) - emits the same cell multiset as the
     # per-cell loops it replaces (each layer gets the full circle pattern).
     if isinstance(obstacles, _RungViaSink):
         pass   # #1226 rung re-run: via cells only (track cells do not depend on the via)
     elif isinstance(via_track_expansion_grid, list):
         # Per-layer blocking (impedance-controlled routing)
-        for layer_idx in range(num_layers):
+        for layer_idx in span:
             layer_expansion = via_track_expansion_grid[layer_idx]
             radius = layer_expansion + diagonal_margin + off_cells
             effective_track_block_sq = radius ** 2
@@ -3957,7 +4101,7 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
         track_block_range = int(math.ceil(radius))
         offs = circle_offsets(track_block_range, effective_track_block_sq)
         cells = center + offs
-        for layer_idx in range(num_layers):
+        for layer_idx in span:
             _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
 
     # Block cells for via placement (also grown by the sub-grid offset).
@@ -4153,7 +4297,7 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                           if hasattr(config, 'get_net_track_width')
                           else config.track_width / 2)
                 entry = corridors.setdefault(
-                    own.net_id, {'cells': set(), 'safe_cells': set(),
+                    own.net_id, {'cells': set(),
                                  'partner_pad_ids': set(),
                                  'partner_net_ids': set()})
                 for partner in partners:
@@ -4243,16 +4387,6 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                         continue
                     entry['cells'].update(
                         zip(GX.ravel()[ok].tolist(), GY.ravel()[ok].tolist()))
-                    # #667: cells whose CENTER lies on the OWN pad are the
-                    # KiCad-waived approach (contact on the own pad); the
-                    # rest of the corridor is the segment-level hazard band
-                    # the #667 pricing steers away from. Uniform pricing was
-                    # measured INERT (no gradient = no steering).
-                    _on_own = _pad_dist_le_batch(cxm[ok], cym[ok], own, 1e-9)
-                    if _on_own.any():
-                        entry['safe_cells'].update(
-                            zip(GX.ravel()[ok][_on_own].tolist(),
-                                GY.ravel()[ok][_on_own].tolist()))
                     entry['partner_pad_ids'].add(id(partner))
                     entry['partner_net_ids'].add(partner.net_id)
     return {n: e for n, e in corridors.items() if e['cells']}

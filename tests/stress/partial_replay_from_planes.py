@@ -3,11 +3,15 @@
 step (default the first ``route_planes.py``), reusing an EXISTING wave's earlier
 boards for everything before that step.
 
-Use this when a code change only affects the later stages of the chain (e.g. a
-plane-routing or grading fix, not ``route.py`` / fanout / diff), so the expensive
-upstream routing can be skipped and only the affected tail re-run. Pairs with a
-prior full wave (from ``ab_replay_grade.py``) that supplies the pre-cutover
-boards.
+Use this when a code change only affects the later stages of the chain, so the
+expensive upstream routing can be skipped and only the affected tail re-run.
+Pairs with a prior full wave (from ``ab_replay_grade.py``) that supplies the
+pre-cutover boards. Since #562 a chain pours its planes FIRST and the route
+step's in-run finalize does the plane repair, so the default cutover sits at or
+near the start of most recorded chains and replays nearly all of them; for a
+change in the route step or later (its plane finalize included) pass
+``--from-script route.py``. A grading-only change needs no replay at all
+(``ab_replay_grade.py --regrade``).
 
 Per board it: finds the first REAL ``--from-script`` step (one that produces a
 board -- ``--help``/``--version`` probes are skipped), stages the input board(s)

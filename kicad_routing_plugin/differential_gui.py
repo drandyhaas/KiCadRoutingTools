@@ -700,10 +700,17 @@ class DifferentialTab(wx.Panel):
 
     def _is_short_pair(self, p_net_id, n_net_id):
         """Whether this pair would be deferred to single-ended as electrically
-        short, given the current Pair Width / Gap / Centerline Setback. Cached
-        per (params, pair)."""
+        short, given the current Pair Width / Gap / Centerline Setback and the
+        board's copper (a pair's own fanout escapes count, #1362). Cached per
+        (params, pair) and dropped when the copper changes: a sync replaces
+        the copper lists and routing in place appends to them."""
         from diff_pair_multipoint import diff_pair_is_short
         width, gap, setback = self._short_params()
+        segs, vias = self.pcb_data.segments, self.pcb_data.vias
+        copper = (id(segs), len(segs), id(vias), len(vias))
+        if copper != getattr(self, '_short_cache_copper', None):
+            self._short_cache.clear()
+            self._short_cache_copper = copper
         key = ((round(width, 6), round(gap, 6),
                 None if setback is None else round(setback, 6)),
                p_net_id, n_net_id)
@@ -1140,6 +1147,10 @@ class DifferentialTab(wx.Panel):
                 cancel_check=check_cancel,
                 progress_callback=on_progress,
             )
+            # #857: the Design rules line route_diff.py's main prints (the
+            # exit code is the CLI's alone).
+            from fab_tiers import finish_design_rules
+            finish_design_rules(None, 0)
 
             self._routing_result = {
                 'successful': successful,
@@ -1232,11 +1243,42 @@ class DifferentialTab(wx.Panel):
         msg += f"Routed: {successful}\n"
         msg += f"Failed: {failed}\n"
         if single_ended_pairs:
+            # The CLI summary's wording: a deferred pair is electrically
+            # short, or its coupled route failed (#165, and a 2-terminal
+            # pair's fallback defer), which is not the same thing.
+            from diff_pair_custody import deferred_reasons_text
+            _why = deferred_reasons_text(results_data.get('pair_reports'),
+                                         single_ended_pairs)
             msg += (f"Deferred to single-ended: {len(single_ended_pairs)} "
-                    f"(electrically short - route these single-ended next)\n")
+                    f"({_why} - route these single-ended next)\n")
         if skipped_bad_fanout:
             msg += (f"Skipped: {len(skipped_bad_fanout)} "
                     f"(fanout stubs self-overlap - fix the fanout first)\n")
+        # #1303: routed, but the copper placed on the board is not coupled
+        # (the engine measured it; the CLI prints the same "Not coupled" line).
+        uncoupled_pairs = results_data.get('uncoupled_diff_pairs', [])
+        if uncoupled_pairs:
+            # #1361: protected all the same while its members still run
+            # alongside (the engine's pair_reports[].protected).
+            _kept = sorted(r['pair'] for r in results_data.get('pair_reports') or []
+                           if r.get('outcome') == 'uncoupled' and r.get('protected'))
+            msg += (f"Not coupled: {len(uncoupled_pairs)} "
+                    f"(routed, but no coupled run on the board - not counted "
+                    f"as routed): {', '.join(uncoupled_pairs)}\n")
+            if _kept:
+                msg += (f"  still alongside, so protected: {', '.join(_kept)}\n")
+        # Companion GND return vias with no legal site (the CLI prints the
+        # same "GND vias not placed" line; each one is named in the log).
+        gnd_not_placed = results_data.get('gnd_vias_not_placed') or []
+        if gnd_not_placed:
+            msg += (f"GND vias not placed: {len(gnd_not_placed)} companion return "
+                    f"via(s) with no legal site, on "
+                    f"{', '.join(sorted({d['pair'] for d in gnd_not_placed}))}\n")
+        _intra_bad = [r['pair'] for r in results_data.get('intra_pair_matching', [])
+                      if r.get('status') not in ('matched', 'within-tolerance', 'skipped')]
+        if _intra_bad:
+            msg += (f"Intra-pair skew NOT matched on the board: "
+                    f"{', '.join(_intra_bad)}\n")
         msg += f"Time: {total_time:.1f}s\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
@@ -1256,12 +1298,6 @@ class DifferentialTab(wx.Panel):
             except Exception as e:
                 print(f"Warning: failed to build diff pair suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
-
-        # Routing movie (#506): snapshot the board this step just produced,
-        # BEFORE the completion popup blocks on the user. No-op unless the
-        # Advanced tab's "Make routing movie" box is ticked.
-        from .movie_recorder import record_movie_step
-        record_movie_step(self, 'route_diff')
 
         if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
             print(msg)  # unattended plan run: no per-step OK dialog
@@ -1509,7 +1545,9 @@ class DifferentialTab(wx.Panel):
         if hasattr(via, 'layers') and len(via.layers) >= 2:
             top_layer = get_layer_id(via.layers[0])
             bot_layer = get_layer_id(via.layers[1])
-            pcb_via.SetLayerPair(top_layer, bot_layer)
+            from .gui_utils import set_via_layers
+            set_via_layers(pcb_via, top_layer, bot_layer,
+                           getattr(via, 'via_type', None))
         # Keep a re-placed via's own tenting/plugging/filling (#489 §8).
         from .gui_utils import apply_via_protection
         apply_via_protection(pcb_via, getattr(via, 'tenting_attrs', None))
@@ -1580,30 +1618,33 @@ class DifferentialTab(wx.Panel):
 
     def _effective_diff_pair_width(self):
         """Diff-pair leg width to route with. CHECKED: the entered value.
-        UNCHECKED: the board Default net-class ``diff_pair_width`` (control value
-        fallback when the board has none). Floored at the parent's 'track_width'
-        fab floor when the parent dialog is reachable."""
+        UNCHECKED: the board Default net-class ``diff_pair_width``, resolved as
+        route_diff.py resolves it (list_nets.class_diff_pair_geometry: a 0 is
+        unset and falls back to the class track width), else the control value.
+        Floored at the parent's 'track_width' fab floor when the parent dialog
+        is reachable."""
         if self.diff_pair_width_check.GetValue():
             val = self.diff_pair_width.GetValue()
         else:
             from .swig_gui import _get_netclass_parameters
-            nc = _get_netclass_parameters('Default') or {}
-            board_val = nc.get('diff_pair_width')
-            val = board_val if board_val else self.diff_pair_width.GetValue()
+            from list_nets import class_diff_pair_geometry
+            board_val = class_diff_pair_geometry(_get_netclass_parameters('Default') or {})[0]
+            val = board_val if board_val is not None else self.diff_pair_width.GetValue()
         return self._fab_floor_via_parent('track_width', val)
 
     def _effective_diff_pair_gap(self):
         """Diff-pair gap to route with. CHECKED: the entered value. UNCHECKED:
-        the board Default net-class ``diff_pair_gap`` (control value fallback when
-        the board has none). Floored at the parent's 'clearance' fab floor when the
-        parent dialog is reachable."""
+        the board Default net-class ``diff_pair_gap``, resolved as route_diff.py
+        resolves it (a 0 is unset and falls back to the class clearance), else
+        the control value. Floored at the parent's 'clearance' fab floor when
+        the parent dialog is reachable."""
         if self.diff_pair_gap_check.GetValue():
             val = self.diff_pair_gap.GetValue()
         else:
             from .swig_gui import _get_netclass_parameters
-            nc = _get_netclass_parameters('Default') or {}
-            board_val = nc.get('diff_pair_gap')
-            val = board_val if board_val else self.diff_pair_gap.GetValue()
+            from list_nets import class_diff_pair_geometry
+            board_val = class_diff_pair_geometry(_get_netclass_parameters('Default') or {})[1]
+            val = board_val if board_val is not None else self.diff_pair_gap.GetValue()
         return self._fab_floor_via_parent('clearance', val)
 
     def get_selected_pairs(self):

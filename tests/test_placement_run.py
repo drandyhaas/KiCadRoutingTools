@@ -2,8 +2,9 @@
 
 Headless tests (no wx, no CLI, no pcbnew): workdir creation/staging, the
 instruction + RESULT= contracts, the monitor's pollers (ledger tail, board
-artifacts, stage derivation), the scavenge fallback, and the build_cmd
-allowed_tools/add_dirs extension the placement runs depend on.
+artifacts, the candidates table's scan, stage derivation), the scavenge
+fallback, and the build_cmd allowed_tools/add_dirs extension the placement
+runs depend on.
 """
 import json
 import os
@@ -23,10 +24,12 @@ import ai_backend  # noqa: E402
 import placement_run  # noqa: E402
 from placement_run import (  # noqa: E402
     PLACEMENT_ALLOWED_TOOLS, PLACEMENT_RESULT_SCHEMA, PLACEMENT_SKILL_MODES,
-    PLACEMENT_SKILLS, RUN_MARKER, RUNS_DIRNAME, build_placement_instructions,
-    build_placement_prompt, create_workdir, derive_stage, format_prune_note,
-    list_board_artifacts, newest_stable_board, parse_placement_result,
-    prune_runs, read_ledger_tail, scan_workdir_outputs, stage_inputs,
+    PLACEMENT_SKILLS, RUN_MARKER, RUNS_DIRNAME, active_candidates,
+    build_placement_instructions, build_placement_prompt, create_workdir,
+    derive_stage, format_prune_note, list_board_artifacts, mark_kept,
+    newest_run_board, newest_stable_board, parse_placement_result,
+    prune_runs, read_ledger_tail, scan_candidates, scan_workdir_outputs,
+    stage_inputs,
 )
 
 FAILURES = []
@@ -260,12 +263,12 @@ check("nothing pruned -> the note is only the unattributed-run line",
       _quiet.count("\n") == 1 and "never pruned" in _quiet, _quiet)
 
 if os.name == "nt":
-    # A file held open (a movie in a player) blocks deletion on Windows, and
+    # A file held open (a report in an editor) blocks deletion on Windows, and
     # rmtree removes .krt_run.json first there. The half-deleted run must stay
     # this board's so the next run retries it, as the note promises -- in a
     # two-board folder a marker-less run would be nobody's.
     busy = mk_run(root2, "20260101_000000_place", ba)
-    held = open(os.path.join(busy, "placement.mp4"), "w")
+    held = open(os.path.join(busy, "REPORT.md"), "w")
     try:
         res_busy = prune_runs(new_a, ba, 1)
         check("an open file fails the prune, disclosed",
@@ -331,30 +334,30 @@ check("instructions carry the RESULT schema", PLACEMENT_RESULT_SCHEMA in instr)
 check("place mode has no --no-delegate", "--no-delegate" not in instr)
 check("instructions refuse copper stripping", '"refused"' in instr)
 instr_pr = build_placement_instructions(wk, "place_route", extra="Focus on U1.")
-# The free-agent skill has no staged driver to run inline, so neither mode
+# The placement skill has no staged driver to run inline, so neither mode
 # passes the old loop driver's --no-delegate any more.
 check("place_route mode has no --no-delegate either",
       "--no-delegate" not in instr_pr)
 check("extra instructions included", "Focus on U1." in instr_pr)
 
-# Both tab modes run the one free-agent skill; the skill's own mode argument
+# Both tab modes run the one placement skill; the skill's own mode argument
 # is what tells them apart.
-check("both tab modes run pcb-free-agent",
-      PLACEMENT_SKILLS == {"place": "pcb-free-agent",
-                           "place_route": "pcb-free-agent"},
+check("both tab modes run plan-pcb-placement",
+      PLACEMENT_SKILLS == {"place": "plan-pcb-placement",
+                           "place_route": "plan-pcb-placement"},
       str(PLACEMENT_SKILLS))
 check("tab modes map to the skill's place / full modes",
       PLACEMENT_SKILL_MODES == {"place": "place", "place_route": "full"},
       str(PLACEMENT_SKILL_MODES))
 _board_fwd = os.path.abspath(staged).replace("\\", "/")
 prompt = build_placement_prompt(ai_backend.BACKENDS["claude"], wk, staged, "place")
-check("place prompt is /pcb-free-agent place <board>",
-      prompt.startswith(f"/pcb-free-agent place {_board_fwd}"), prompt[:120])
+check("place prompt is /plan-pcb-placement place <board>",
+      prompt.startswith(f"/plan-pcb-placement place {_board_fwd}"), prompt[:120])
 check("prompt names the staged board", staged.replace("\\", "/") in prompt)
 prompt_pr = build_placement_prompt(ai_backend.BACKENDS["claude"], wk, staged,
                                    "place_route")
-check("place_route prompt is /pcb-free-agent full <board>",
-      prompt_pr.startswith(f"/pcb-free-agent full {_board_fwd}"),
+check("place_route prompt is /plan-pcb-placement full <board>",
+      prompt_pr.startswith(f"/plan-pcb-placement full {_board_fwd}"),
       prompt_pr[:120])
 
 # ------------------------------------------------------------------- RESULT
@@ -366,7 +369,7 @@ open(report_md, "w").write("# report\n")
 
 ok_payload = json.dumps({
     "status": "complete", "board": final_board.replace("\\", "/"),
-    "movie": None, "report": report_md, "blocking": 0, "summary": "done"})
+    "report": report_md, "blocking": 0, "summary": "done"})
 out, errs = parse_placement_result(ok_payload)
 check("result parses", out is not None and not errs, str(errs))
 check("result board normalized",
@@ -389,9 +392,9 @@ check("refused needs no board", out is not None and out["status"] == "refused",
       str(errs))
 out, errs = parse_placement_result(json.dumps(
     {"status": "complete", "board": final_board,
-     "movie": os.path.join(wk, "nope.mp4"), "blocking": "zero"}))
-check("bad movie/blocking non-fatal",
-      out is not None and out["movie"] is None and out["blocking"] is None
+     "report": os.path.join(wk, "nope.md"), "blocking": "zero"}))
+check("bad report/blocking non-fatal",
+      out is not None and out["report"] is None and out["blocking"] is None
       and len(errs) == 2, str(errs))
 # #1075: `isinstance(True, int)` holds, so a bool (and a negative) passed.
 # The REFUSAL is asserted, not its wording: 3.0 and "0" were refused before
@@ -467,30 +470,158 @@ check("missing ledger tolerated", rows4 == [] and off4 == 0)
 
 # ------------------------------------------------------------ derive_stage
 
-# The staged drivers and their --stage ids are retired, so the transcript no
-# longer names a stage: the newest ledger row wins, then the artifact name.
+# The newest recognised tool command says what the run is doing now, the
+# newest ledger row its last milestone (both shown when both exist); without
+# either, the newest board's name (relative to the workdir) answers.
 tail = ["  -> Bash: python3 .../placement_driver.py --stage P4 --board x",
         "     [ok] stage emitted"]
 row = {"iteration": 7, "kind": "reseat", "lever": "COL4"}
-check("ledger row wins over a stage-like transcript and an artifact",
-      derive_stage(tail, row, "loop_round3.kicad_pcb") == "lap 7: reseat/COL4")
-check("a stage-like transcript alone is not a stage any more",
+check("ledger row wins over an unrecognised command and an artifact",
+      derive_stage(tail, row, "s3.kicad_pcb") == "lap 7: reseat/COL4")
+check("a stage-like transcript alone is not a stage",
       derive_stage(["Bash: loop_driver.py --stage L2"], None, None)
       == "working...")
-check("artifact wins over a stage-like transcript when no row exists",
-      derive_stage(tail, None, "loop_round3.kicad_pcb") == "placing round 3")
+check("artifact wins over an unrecognised command when no row exists",
+      derive_stage(tail, None, "s3.kicad_pcb") == "seed 3 placed")
 check("the old STAGE_LABELS table is gone",
       not hasattr(placement_run, "STAGE_LABELS"))
+check("placing a seed",
+      derive_stage(["python3 py_placer/place_simple.py wk/fixed.kicad_pcb "
+                    "wk/s3.kicad_pcb --seed 3 --json wk/s3.json"],
+                   None, None) == "placing seed 3")
+check("fast-routing a seed, with the last milestone",
+      derive_stage(["cd wk/s1_route && python3 py_router/route.py a.kicad_pcb "
+                    "b.kicad_pcb --nets '*' --quick"], row, None)
+      == "fast-routing seed 1 (lap 7: reseat/COL4)")
+check("scoring a seed",
+      derive_stage(["python3 py_tools/quick_score.py wk/s2_fast.kicad_pcb "
+                    "--json wk/s2_fast.score.json"], None, None)
+      == "scoring seed 2")
+check("the parallel form names its seeds",
+      derive_stage(["python3 py_placer/place_simple.py wk/fixed.kicad_pcb "
+                    "wk/s{seed}.kicad_pcb --seeds 0-3 --jobs 4 "
+                    "--json wk/s{seed}.json"], None, None)
+      == "placing seeds 0-3")
+check("an s{seed} board with no seed named places the default seeds",
+      derive_stage(["python3 py_placer/place_simple.py wk/fixed.kicad_pcb "
+                    "'wk/s{seed}.kicad_pcb' --jobs 4 "
+                    "--json 'wk/s{seed}.json'"], None, None)
+      == "placing the seeds")
+check("a --seed run with no seed board still names the seed",
+      derive_stage(["python3 py_placer/place_simple.py a b --seed 2"], None,
+                   None) == "placing seed 2")
 
 check("ledger row formatted",
       derive_stage([], row, None) == "lap 7: reseat/COL4")
-check("artifact heuristic route log",
-      derive_stage([], None, "loop_round2_route.log") == "routing round 2")
-check("artifact heuristic placing",
-      derive_stage([], None, "loop_round5.kicad_pcb") == "placing round 5")
-check("artifact heuristic lap board",
-      derive_stage([], None, "lap3.kicad_pcb") == "lap 3")
+check("artifact heuristic fast-routed seed",
+      derive_stage([], None, "s0_fast.kicad_pcb") == "seed 0 fast-routed")
+check("artifact heuristic fixed board",
+      derive_stage([], None, "fixed.kicad_pcb") == "fixed parts locked")
+check("artifact heuristic final board",
+      derive_stage([], None, "final.kicad_pcb") == "final board written")
 check("fallback", derive_stage([], None, None) == "working...")
+
+# -------------------------------------------------------------- candidates
+
+cand_wk = os.path.join(TMP, "candidates")
+
+
+def cput(rel, content="(kicad_pcb)\n", mtime=None):
+    p = os.path.join(cand_wk, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w").write(content)
+    if mtime is not None:
+        os.utime(p, (mtime, mtime))
+    return p
+
+
+def cscore(rel, blocking, vias, copper, segments):
+    cput(rel, json.dumps({"blocking": blocking, "quality": {
+        "vias": vias, "copper_mm": copper, "segments": segments}}))
+
+
+# s0 scored with blocking nets, s1 scored clean, s2 placed and routing, s3's
+# board written but its report not yet, s4 scored clean with fewer vias
+# (best), newest.
+cput("fixed.kicad_pcb", "(kicad_pcb fixed)\n")
+for s in (0, 1, 2, 4):
+    cput(f"s{s}.kicad_pcb", f"(kicad_pcb s{s})\n")
+    cput(f"s{s}.json", "{}")
+cput("s3.kicad_pcb", "(kicad_pcb s3)\n")
+for s in (0, 1):
+    cput(f"s{s}_fast.kicad_pcb", f"(kicad_pcb s{s} fast)\n")
+cscore("s0_fast.score.json", 2, 40, 300.0, 200)
+cscore("s1_fast.score.json", 0, 44, 310.0, 210)
+cput("s0_route/step4_route.kicad_pcb")          # working files: no row
+cput("s5_route/step4_route.kicad_pcb")          # a route folder alone: no row
+_later = os.path.getmtime(os.path.join(cand_wk, "s4.json")) + 60
+cput("s4_fast.kicad_pcb", "(kicad_pcb s4 fast)\n", mtime=_later)
+cscore("s4_fast.score.json", 0, 30, 280.0, 190)
+
+rows_c = scan_candidates(cand_wk)
+by = {r["seed"]: r for r in rows_c}
+check("one row per seed, in order",
+      [r["seed"] for r in rows_c] == [0, 1, 2, 3, 4], str(list(by)))
+check("scored row with blocking nets", by[0]["status"] == "routed"
+      and by[0]["vias"] == 40 and by[0]["copper_mm"] == 300.0)
+check("a clean seed that is not the best", by[1]["status"] == "clean")
+check("the best is the clean seed with fewest vias", by[4]["status"] == "best")
+check("placed, not yet scored", by[2]["status"] == "routing"
+      and by[2]["fast"] is None and by[2]["blocking"] is None)
+check("board without its report is still placing",
+      by[3]["status"] == "placing")
+check("a seed's route dir adds no row", 5 not in by)
+rows_a = scan_candidates(cand_wk, active=[6])
+check("the seed being placed shows before its board exists",
+      any(r["seed"] == 6 and r["status"] == "placing" for r in rows_a))
+check("active_candidates reads the newest place_simple command",
+      active_candidates(["python3 py_placer/place_simple.py f wk/s0.kicad_pcb",
+                         "python3 py_placer/place_simple.py f wk/s1.kicad_pcb"])
+      == [1])
+check("the parallel form names every seed it places",
+      active_candidates(["python3 py_placer/place_simple.py f "
+                         "wk/s{seed}.kicad_pcb --seeds 0-3 --jobs 4 "
+                         "--json wk/s{seed}.json"])
+      == [0, 1, 2, 3])
+check("the default seeds: its scattered and clustered ones",
+      active_candidates(["python3 py_placer/place_simple.py f "
+                         "'wk/s{seed}.kicad_pcb' --scattered 2 --clustered 1"])
+      == [0, 1, 2])
+check("one --seed into an s{seed} board is that seed",
+      active_candidates(["python3 py_placer/place_simple.py f "
+                         "'wk/s{seed}.kicad_pcb' --seed 7"]) == [7])
+check("an s{seed} board with --seed 3 is placing seed 3, not the default seeds",
+      derive_stage(["python3 py_placer/place_simple.py f 'wk/s{seed}.kicad_pcb' --seed 3"],
+                   None, None) == "placing seed 3")
+check("no place_simple command, no active candidate",
+      active_candidates(["python3 py_tools/board_score.py x"]) == [])
+check("newest board, relative to the workdir",
+      newest_run_board(cand_wk) == "s4_fast.kicad_pcb",
+      str(newest_run_board(cand_wk)))
+
+# KEPT: the final board is matched to a candidate by content; a final board
+# that is no candidate's falls back to the best scored row of the run.
+shutil.copyfile(os.path.join(cand_wk, "s1.kicad_pcb"),
+                os.path.join(cand_wk, "final.kicad_pcb"))
+kept = mark_kept(scan_candidates(cand_wk), cand_wk)
+check("final.kicad_pcb matched to its candidate by sha256",
+      kept is not None and kept["seed"] == 1 and kept["status"] == "KEPT")
+cput("final.kicad_pcb", "(kicad_pcb touched up)\n")
+kept2 = mark_kept(scan_candidates(cand_wk), cand_wk)
+check("an unmatched final falls back to the run's best scored row",
+      kept2["seed"] == 4, str(kept2))
+os.remove(os.path.join(cand_wk, "final.kicad_pcb"))
+scav_c = scan_workdir_outputs(cand_wk)
+check("scavenge without final takes the best candidate's PLACEMENT",
+      scav_c["board"] == os.path.join(cand_wk, "s4.kicad_pcb"),
+      str(scav_c["board"]))
+for name in os.listdir(cand_wk):
+    if name.endswith(".score.json"):
+        os.remove(os.path.join(cand_wk, name))
+scav_n = scan_workdir_outputs(cand_wk)
+check("scavenge with no score never takes a --quick board",
+      scav_n["board"] and not os.path.basename(scav_n["board"]).endswith("_fast.kicad_pcb"),
+      str(scav_n["board"]))
 
 # ---------------------------------------------------------------- scavenge
 
@@ -500,19 +631,16 @@ check("scavenge prefers final.kicad_pcb",
 check("scavenge finds report", scav["report"] == report_md)
 check("scavenge status", scav["status"] == "scavenged")
 os.remove(final_board)
-put_gif = os.path.join(wk, "placement.gif")
-open(put_gif, "wb").write(b"GIF89a")
 lap = os.path.join(wk, "lap1.kicad_pcb")
 open(lap, "w").write("(kicad_pcb lap1)\n")
 scav2 = scan_workdir_outputs(wk)
 check("scavenge falls back to newest non-input board",
       scav2["board"] == lap, str(scav2))
-check("scavenge gif fallback", scav2["movie"] == put_gif)
 empty_wk = os.path.join(TMP, "empty")
 os.makedirs(empty_wk)
 scav3 = scan_workdir_outputs(empty_wk)
 check("scavenge on empty dir is all-None",
-      scav3["board"] is None and scav3["movie"] is None and scav3["report"] is None)
+      scav3["board"] is None and scav3["report"] is None)
 
 # ----------------------------------------------- ai_backend build_cmd kwargs
 

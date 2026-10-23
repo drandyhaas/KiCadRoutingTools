@@ -17,7 +17,7 @@ so DRC is scoped to each pair's own nets (`--nets "*lvds_rx1_NN*"`), matching ho
 `test_fanout_and_route.py` checks the LVDS stage (`--nets "*lvds*"`).
 
 Run:
-    python3 tests/test_diff_pair_route.py        # uses KiCad's python (needs the Rust router)
+    python3 tests/test_diff_pair_route.py        # needs the Rust router (python3 build_router.py)
     python3 tests/test_diff_pair_route.py -v      # verbose routing output
 """
 

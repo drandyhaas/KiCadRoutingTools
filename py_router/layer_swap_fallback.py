@@ -178,8 +178,9 @@ def rank_fallback_layers(config, pcb_data, obstacles, center_x: float, center_y:
     coord = GridCoord(config.grid_step)
     r = max(1, int(probe_radius_mm / config.grid_step))
     ranked = []
+    routable = set(config.routable_layers())
     for li, layer_name in enumerate(config.layers):
-        if layer_name == current_layer:
+        if layer_name == current_layer or layer_name not in routable:
             continue
         total = blocked = 0
         for dx in range(-r, r + 1):

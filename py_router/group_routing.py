@@ -197,7 +197,9 @@ def unroute_nets(content: str, pcb_data, net_names, input_file=None
 
     Refuses KiCad-LOCKED copper. Locked means the user pinned it, and #521 gives
     that no override anywhere else in the toolchain -- an undo is not the place
-    to invent one. Nets protected for a REASON (length-matched, time-matched,
+    to invent one. A net whose copper a `sense:` group holds (#1279) is refused
+    the same way: the undo strips a net whole, and the declared sense copper
+    must survive it. Nets protected for a REASON (length-matched, time-matched,
     diff-pair) are removed: naming a net exactly is deliberate targeting, which
     is precisely the override those reasons are written to allow.
 
@@ -226,12 +228,13 @@ def unroute_nets(content: str, pcb_data, net_names, input_file=None
     """
     from kicad_writer import remove_segments_from_content
     from plane_io import _remove_vias_at_positions
-    from protected_nets import protection_map
+    from protected_nets import protection_map, is_sense_reason, never_lifts
 
     wanted = set(net_names)
     prot = protection_map(pcb_data, input_file)
     locked = sorted(n for n in wanted if prot.get(n) == 'locked')
-    targets = sorted(wanted - set(locked))
+    held = sorted(n for n in wanted if is_sense_reason(prot.get(n)))
+    targets = sorted(wanted - set(locked) - set(held))
 
     ids = {nid for nid, net in pcb_data.nets.items() if net.name in targets}
     segs = [s for s in pcb_data.segments if s.net_id in ids]
@@ -269,8 +272,9 @@ def unroute_nets(content: str, pcb_data, net_names, input_file=None
         'vias_removed': removed_vias,
         'vias_found': len(vias),
         'locked_skipped': locked,
+        'held_skipped': held,
         'protected_overridden': sorted(
-            n for n in targets if prot.get(n) and prot[n] != 'locked'),
+            n for n in targets if prot.get(n) and not never_lifts(prot[n])),
         'arcs_removed': removed_arcs,
         # Copper still in the file that no (segment) deletion could express.
         # Arcs are handled above, so what remains here is net-tagged copper

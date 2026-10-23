@@ -1,6 +1,6 @@
 ---
 name: find-high-speed-nets
-description: Analyzes a KiCad PCB to identify high-speed and impedance-controlled nets by looking up component datasheets via AI. Classifies nets by speed tier (ultra-high/high/medium/low), detects RF/antenna feeds and other controlled-impedance nets, estimates max frequencies and rise times per interface, and recommends GND return via distances AND impedance-controlled routing: target ohms, the route.py/route_diff.py --impedance commands, and near-fab-floor width/spacing (~0.1 mm gap & clearance, impedance-derived width clamped to the floor) that override and update the board's Default net class.
+description: Analyzes a KiCad PCB to identify high-speed and impedance-controlled nets by looking up component datasheets via AI. Classifies nets by speed tier (ultra-high/high/medium/low), detects RF/antenna feeds and other controlled-impedance nets, estimates max frequencies and rise times per interface, and recommends GND return via distances AND impedance-controlled routing: target ohms, the route.py/route_diff.py --impedance commands, and near-fab-floor width/spacing (~0.1 mm gap & clearance, impedance-derived width clamped to the floor) that override the board's Default net class for the run.
 ---
 
 # Find High-Speed Nets
@@ -281,14 +281,14 @@ a target for each so the plan can route them with `--impedance`:
 |----------------------|------------------|-----------|
 | RF / antenna feed (single-ended) | **50 ohm SE** | `route.py --impedance 50` |
 | RF / antenna feed (balanced pair) | **100 ohm diff** | `route_diff.py --impedance 100` |
-| USB 2.0 HS | 90 ohm diff | `route_diff.py --impedance 90` |
-| USB 3.x / PCIe / SATA | 85 ohm diff | `route_diff.py --impedance 85` |
-| Gigabit Ethernet / LVDS | 100 ohm diff | `route_diff.py --impedance 100` |
+| USB 2.0 HS / USB 3.x | 90 ohm diff | `route_diff.py --impedance 90` |
+| PCIe | 85 ohm diff | `route_diff.py --impedance 85` |
+| Gigabit Ethernet / LVDS / SATA | 100 ohm diff | `route_diff.py --impedance 100` |
 | DDR3/4 data & strobe | 40 ohm SE (SSTL) | `route.py --impedance 40` |
 | HDMI/DP (TMDS) | 100 ohm diff | `route_diff.py --impedance 100` |
 
 Split the result into **single-ended impedance nets** (RF 50, DDR SSTL 40 — these
-need the new single-ended impedance routing step) and **differential impedance
+need the single-ended impedance routing step, plan-pcb-routing's Step 2b) and **differential impedance
 pairs** (the rest — handled by `route_diff.py --impedance`).
 
 > **Stackup is required.** `--impedance` computes the trace width per layer from
@@ -410,7 +410,9 @@ Based on the highest speed class found on the board:
 recommend `max(the speed tier, that floor)`. Recommending below it asks for
 vias that cannot be placed.
 
-For this board, the tightest interface is **[interface]** at **[freq]**, so use:
+For this board, the tightest interface is **[interface]** at **[freq]**, so use
+(`route_planes.py` flags — the plan's finalize-planes step; the tool default is
+2.0 mm):
 
 ```
 --add-gnd-vias --gnd-via-distance [recommended_value]
@@ -446,7 +448,7 @@ rip-up cannot re-route the impedance nets at the wrong width, and counted as
 
 ```bash
 # Step 2b: impedance-controlled single-ended nets (e.g. the antenna feed), on an
-# outer layer over the GND pour created in Step 1c; short/direct is the router default.
+# outer layer over the GND pour created in Step 1; short/direct is the router default.
 python3 -X utf8 py_router/route.py board_diff.kicad_pcb board_imp.kicad_pcb \
     --nets RF --impedance 50 --layers F.Cu --clearance-ceiling <floor> ...
 ```
@@ -457,10 +459,15 @@ keeping the two EQUAL:**
 
 ```bash
 python3 -X utf8 py_router/route_diff.py board.kicad_pcb board_diff.kicad_pcb \
-    --nets "*USB*" "*LVDS*" --impedance 90 \
-    --diff-pair-gap 0.1 --clearance 0.1 \
+    --nets "*USB*" --impedance 90 \
+    --diff-pair-gap 0.1 --clearance-ceiling 0.1 \
     --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
+
+(One `--impedance` per call: route each target, e.g. the 100 ohm LVDS pairs, in
+its own call. In a chain the clearance floor is spelled `--clearance-ceiling`,
+as `/plan-pcb-routing` does; since #530 a bare `--clearance` sets only the
+Default class for the run.)
 
 **The coupling gap may NEVER be set below `--clearance` (#441).** KiCad grades a
 pair's P↔N coupling under the *plain copper-clearance rule* (P and N are different
@@ -471,9 +478,10 @@ not allowed to lower the board-wide clearance, so the engine now **floors the ga
 to clearance** (`route_diff` raises `diff_pair_gap` to `max(gap, clearance)` before
 routing). Plan the two so this floor never has to bite: **pick `--clearance` first,
 then set `--diff-pair-gap` ≥ that** — for tight coupling, put BOTH at the fab floor.
-A `.kicad_dru` clearance rule raises the gap the same way (#1145): a layer rule on a
-layer the pair routes on, or a track rule on the pair's class. The `--impedance`
-widths are solved at the raised gap.
+A pair whose own net class has a wider clearance gets its gap raised to it
+(#530), and a `.kicad_dru` clearance rule raises the gap the same way (#1145): a
+layer rule on a layer the pair routes on, or a track rule on the pair's class.
+The `--impedance` widths are solved at the raised gap.
 
 **Width and spacing: choose them near the fab floor (~0.1 mm), overriding the
 net class.** The stock Default net class is usually wide (e.g. `diff_pair_gap`
@@ -496,22 +504,24 @@ impedance-controlled net:
   Z_diff, so to hold e.g. 90 Ω the trace grows. Expect the width to track the gap;
   do not hand-pin `--track-width` below what `--impedance` computes at the real gap.
 
-**These override the net class, and the routed board's net class is updated to
-match.** `route_diff.py` auto-invokes `fix_kicad_drc_settings.py` after routing,
-which lowers the Default net class `diff_pair_gap` / `diff_pair_width` /
-`clearance` to the values just routed (only-loosen — never raised). So after the
-diff-pair step the `.kicad_pro` net class reads ~0.1 mm, not the stock 0.25, and
-a later planner re-reading it won't resurrect the wide value. (To write it
-without routing — e.g. before the run — call it directly:
-`python3 py_router/fix_kicad_drc_settings.py board.kicad_pcb --diff-pair-gap 0.1 --diff-pair-width 0.1 --clearance 0.1`.)
+**These override the net class for the run; only the clearance is written
+back.** `route_diff.py`'s DRC-settings writeback lowers the Default net class
+`clearance` to the clearance just routed (lower-only). The class's
+`diff_pair_gap` / `diff_pair_width` are draw defaults and no routing step writes
+them (#842), so after the diff-pair step the `.kicad_pro` still reads the stock
+0.25 mm gap, and `route_diff.py` run WITHOUT `--diff-pair-gap` reads it back.
+So every later `route_diff.py` call must pass `--diff-pair-gap` itself. What
+IS recorded is each `--impedance` net's declaration (ohms, differential,
+pair gap, coplanar gap; #521), so a later step touching those nets recomputes
+the same widths.
 
 | Interface | Target | Routed by | Pipeline step |
 |-----------|--------|-----------|---------------|
-| **RF / antenna feed (SE)** | **50 ohm SE** | `route.py --impedance 50` | **2b (new)** |
-| DDR3/4 data & strobe | 40 ohm SE (SSTL) | `route.py --impedance 40` | 2b (new) |
-| RF balanced / Ethernet / LVDS / HDMI | 100 ohm diff | `route_diff.py --impedance 100` | 2 (diff pairs) |
-| USB 2.0 HS | 90 ohm diff | `route_diff.py --impedance 90` | 2 (diff pairs) |
-| USB 3.x / PCIe / SATA | 85 ohm diff | `route_diff.py --impedance 85` | 2 (diff pairs) |
+| **RF / antenna feed (SE)** | **50 ohm SE** | `route.py --impedance 50` | **2b** |
+| DDR3/4 data & strobe | 40 ohm SE (SSTL) | `route.py --impedance 40` | 2b |
+| RF balanced / Ethernet / LVDS / HDMI / SATA | 100 ohm diff | `route_diff.py --impedance 100` | 2 (diff pairs) |
+| USB 2.0 HS / USB 3.x | 90 ohm diff | `route_diff.py --impedance 90` | 2 (diff pairs) |
+| PCIe | 85 ohm diff | `route_diff.py --impedance 85` | 2 (diff pairs) |
 | SPI / I2C / UART / GPIO | not impedance-controlled | general `route.py` | 3 (signal) |
 
 **RF/antenna extras:** route the feed **short and direct** on an outer layer over a
@@ -529,7 +539,8 @@ an antenna/RF region, recommend the user draw a `User.2` keepout around it and p
 3. **Series passives propagate speed** - The net on the other side of a termination resistor
    or AC coupling cap carries the same speed signal
 4. **Use the tightest distance** - If the board has both DDR3 (ultra-high) and I2C (low),
-   the GND return via distance should be set for the DDR3 signals (2.0 mm)
+   the GND return via distance should be set for the DDR3 signals (the
+   `3 x (via_size + clearance)` floor: 2.25 mm at the default 0.5 via / 0.25 clearance)
 5. **Diff pairs are separate** - `route_diff.py` handles GND return vias for differential
    pairs independently; this analysis is for single-ended vias from `route.py`
 6. **When in doubt, include GND return vias** - They cost only board space; omitting them

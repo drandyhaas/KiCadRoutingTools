@@ -43,12 +43,16 @@ def admissible(pcb, net):
     so a net the bench fans out is one the ladder admits."""
     import pairs as _pairs
     import rules as _rules
+    import awx_settings
+    # (a pull pad the bus step's escape fanout joined to the lane -- BUS_ATTACHED, route_bus.attach_pulls -- is none
+    # of the net's ends: its stub stands on the board, connected when the lane is)
+    attached = {h for h in (awx_settings.get('BUS_ATTACHED') or '').split(',') if h}
     bn_all = {n.name.split('/')[-1] for n in pcb.nets.values()}
     prs = _pairs.pair_names(list(bn_all), admit_all=True)   # admission ignores BRAID_PAIR_ONLY
     partner = {}
     for _b, (_pn, _nn) in prs.items():
         partner[_pn], partner[_nn] = _nn, _pn
-    pads = list(net.pads)
+    pads = [p for p in net.pads if f'{p.component_ref}.{p.pad_number}' not in attached]
     if len({p.component_ref for p in pads}) < 2:
         return False
     if len(pads) == 2:
@@ -67,10 +71,16 @@ def admissible(pcb, net):
     return len(ends) == 2 and len({p.component_ref for p in ends}) == 2
 
 
-def coherent_nets(K, board=BENCH):
+def coherent_nets(K, board=BENCH, bare_ok=None):
     """The first K routable nets of the coherent ladder: two-pad nets
     between two components that are fanned out on `board` (a free
-    stub end exists at the source)."""
+    stub end exists at the source) -- or, with `bare_ok` (default: the
+    escape fanout, FANOUT_ESCAPE), bare at both (braid.bare_lane: the
+    escape fanout lays both of its ends from the pads)."""
+    if bare_ok is None:
+        sys.path.insert(0, HERE)
+        import awx_settings
+        bare_ok = awx_settings.get('FANOUT_ESCAPE') == '1'
     flat = [n for r in _rivers(board) for n in r]
     sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
     sys.path.insert(0, HERE)
@@ -92,7 +102,8 @@ def coherent_nets(K, board=BENCH):
             te.endpoints(pcb, [n], bn)
             ok.append(n)
         except AssertionError:
-            pass
+            if bare_ok and te.bare_lane(pcb, n, bn):
+                ok.append(n)
     # A SHORT COUNT IS A DIFFERENT PROBLEM, and it was silent: "K51" is
     # 48 nets here, so the human's 81 (48 nets) and 85 (51) are both
     # right and both were in circulation for one label. Pointing --board
@@ -102,7 +113,28 @@ def coherent_nets(K, board=BENCH):
         print(f'  coherent_nets: asked K={K}, {len(ok)} net(s) qualify on '
               f'{os.path.basename(board)} -- this is a {len(ok)}-net problem',
               file=sys.stderr)
-    return ok[:K]
+    return whole_pairs(ok, K, board)
+
+
+def whole_pairs(ok, K, board=''):
+    """The first K of `ok` with no differential pair CUT: a leg whose
+    partner qualifies but falls beyond K is left out with it, so the
+    prefix is a little shorter than K rather than a problem with a pair
+    run as one leg alone (the zynq LVDS bus's escape ladder at K=40 took
+    TX_D3_P, TX_D4_P and TX_D5_P without their N legs). Said on stderr."""
+    import pairs as _pairs
+    mate = {}
+    for p_, n_ in _pairs.pair_names(ok, admit_all=True).values():
+        mate[p_], mate[n_] = n_, p_
+    head = ok[:K]
+    have = set(head)
+    cut = [n for n in head if n in mate and mate[n] not in have]
+    if cut:
+        print(f'  coherent_nets: K={K} on {os.path.basename(board)} would '
+              f'cut pair(s) {", ".join(f"{n}/{mate[n]}" for n in cut)} -- '
+              f'their leg(s) left out: a {len(head) - len(cut)}-net problem',
+              file=sys.stderr)
+    return [n for n in head if n not in cut]
 
 
 if __name__ == '__main__':

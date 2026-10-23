@@ -86,15 +86,18 @@ SCHEDULING
     are no longer directly comparable board-for-board. Reach for it only when
     wall-clock genuinely matters.
 
-*   **Memory admission is OFF by default** (`--heavy-slots 0` = no limit), so
-    the chosen order is honoured strictly. Set `--heavy-slots 1` on a small-RAM
-    box: it caps how many boards whose prior peak exceeds `--heavy-mb` run at
-    once. The corpus has ~11 boards over 2.5GB and one peaking at 6.6GB, and
-    several of those together on an 8GB machine thrash swap and get workers
-    OOM-killed -- surfacing as NORESULT rows hours in. When enabled, a blocked
-    heavy board does NOT hold a worker slot (the scheduler starts the next
-    ELIGIBLE board), so `--jobs` stay in flight -- but that IS a reordering, so
-    it trades some of the reproducibility above for safety.
+*   **Memory admission caps heavy boards at 4 by default** (`--heavy-slots 4`;
+    `0` = no limit). A board is heavy when its PRIOR peak, read from
+    `--cost-baseline`, exceeds `--heavy-mb` (default 2500) -- so with no
+    baseline every board falls back to a 500 MB guess and nothing is capped.
+    Set `--heavy-slots 1` on a small-RAM box (a LOW value serialises the
+    wave's heavy tail; see `--help`). The corpus has ~11 boards over 2.5GB and
+    one peaking at 6.6GB, and several of those together on an 8GB machine
+    thrash swap and get workers OOM-killed -- surfacing as NORESULT rows hours
+    in. When the cap bites, a blocked heavy board does NOT hold a worker slot
+    (the scheduler starts the next ELIGIBLE board), so `--jobs` stay in flight
+    -- but that IS a reordering, so it trades some of the reproducibility
+    above for safety.
 
 *   **A board never kills the wave**: a worker exception degrades to a NORESULT
     row. Per-set `summary.json` is flushed after every completion, so killing

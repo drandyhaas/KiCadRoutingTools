@@ -5,7 +5,7 @@ Proves the whole runner -> monitor -> completion loop headless: the tab
 launches the CLI with the placement contract (write-capable allowlist, one
 --add-dir, staged board), streams the transcript, derives the progress line from
 the converge ledger row a milestone writes, renders a live preview frame from a mid-run lap board,
-parses the terminal RESULT= JSON, surfaces REPORT.md + movie buttons, and
+parses the terminal RESULT= JSON, surfaces the REPORT.md button, and
 re-arms its buttons. The fake CLI is a real .cmd shim on Windows, so the
 npm-install path is under test end to end: the runner must strip the
 quote-laden prompt from argv (cmd.exe mangles list2cmdline's \" escaping)
@@ -199,17 +199,28 @@ def main():
     check("transcript flowed (init line)", "fake-model" in transcript)
     check("transcript shows the tool line (description preferred)",
           "Record the milestone board" in transcript, transcript[:400])
-    # The staged driver's `--stage P4` line is retired with that skill; the
-    # pcb-free-agent run records milestones in the converge ledger, and the
-    # tab's progress line is derived from the newest LEDGER ROW.
+    # The run records milestones in the converge ledger; the newest LEDGER
+    # ROW is the status line's last milestone, after the current activity.
     check("progress derived from the ledger row",
           any("lap 1: quench/nudge" in s for s in statuses), str(statuses))
     check("elapsed/mode in status",
           any(s.startswith("Place —") for s in statuses), str(statuses))
+    # The candidates table: seed 0 from the run folder, kept at the end (the
+    # final board is that seed's placement), selected, and previewed.
+    rows = {r["seed"]: r for r in tab._cand_rows}
+    check("candidates table filled from the run folder's seed files",
+          0 in rows and rows[0]["vias"] == 12, str(list(rows)))
+    check("the kept candidate is marked and selected",
+          rows.get(0, {}).get("status") == "KEPT"
+          and tab._sel_key == 0
+          and tab.cand_list.GetFirstSelected() == 0, str(tab._sel_key))
     if pil_ok:
-        png = os.path.join(workdir, "_gui_preview", "lap1.png")
-        check("live preview frame rendered from lap board",
+        png = os.path.join(workdir, "_gui_preview", "s0_fast.png")
+        check("the selected row's fast-routed board rendered",
               os.path.isfile(png), png)
+        check("the preview caption names the row",
+              "seed 0" in tab.preview.caption.GetLabel(),
+              tab.preview.caption.GetLabel())
     else:
         print("  [skip] preview render (Pillow not importable)")
     try:
@@ -233,8 +244,7 @@ def main():
     check("status shows finished + blocking",
           any("finished" in s and "blocking 0" in s for s in statuses),
           str(statuses))
-    check("movie button armed", tab.preview.open_movie_btn.IsEnabled())
-    check("report button armed", tab.preview.open_report_btn.IsEnabled())
+    check("report button armed", tab.open_report_btn.IsEnabled())
     check("apply armed", tab.apply_btn.IsEnabled())
     check("buttons re-armed", tab.place_btn.IsEnabled()
           and tab.place_route_btn.IsEnabled() and tab.action_btn.IsEnabled())
@@ -276,8 +286,8 @@ def main():
     tab._start_ai_run("place")
     second = tab.last_workdir
     check("second run accepted", tab._runner is not None and second != workdir)
-    check("preview cleared for the new run",
-          not tab.preview._frames and tab.preview._movie is None)
+    check("candidates and outputs cleared for the new run",
+          not tab._cand_rows and tab._report is None)
     check("second run finished before timeout",
           pump_until(lambda: tab._runner is None
                      and any("older run(s)" in t for t in logged), 90))

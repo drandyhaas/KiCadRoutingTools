@@ -11,9 +11,8 @@ returned FAIL on the same clause two hours later, and the terminal row had to be
 re-recorded -- an append-only ledger then holds two answers to one question,
 which is not a record of a verdict but a record of a disagreement.
 
-`--lens-file` is the reader, `entry["lens_source"]` is the provenance, and a
-`--final --kind completion` row refuses a bare `--lens` for connectivity, drc or
-spec.
+`--lens-file` is the reader and `entry["lens_source"]` is the provenance; it is
+the only way a verdict reaches a row.
 
 The adversarial half is the selection rule. It takes the FIRST line beginning
 `VERDICT=`, whatever that line says, so it cannot step past a malformed verdict
@@ -58,8 +57,7 @@ def _final(td, led, *extra):
     return [sys.executable, '-X', 'utf8', CV, 'record', '--ledger', led,
             '--board', BOARD, '--kind', 'completion', '--final',
             '--stop-condition', 'DONE-EXHAUSTED', '--lever', 'close-out',
-            '--score-file', _score(td)] + list(extra) + [
-            '--argv', sys.executable, '-c', 'pass']
+            '--score-file', _score(td)] + list(extra)
 
 
 def _files(td, **verdicts):
@@ -105,52 +103,6 @@ def test_a_close_out_verdict_carries_its_file_and_hash():
     print("  PASS: the row records path, abspath, sha256 and line per lens")
 
 
-def test_a_bare_lens_is_refused_on_a_close_out_and_kept_on_a_lap():
-    with tempfile.TemporaryDirectory() as td:
-        led = os.path.join(td, 'l.jsonl')
-        bare = ['--lens', 'VERDICT=PASS:lens=connectivity',
-                '--lens', 'VERDICT=PASS:lens=drc',
-                '--lens', 'VERDICT=PASS:lens=spec']
-        run_utils.check(_final(td, led, *bare),
-                        refuse='no file behind them', code=2)
-        assert not os.path.exists(led), 'nothing may be written on refusal'
-
-        # ONE bare line among two files is still a refusal, and the message
-        # names only the unsourced one.
-        mixed = _files(td)[:4] + ['--lens', 'VERDICT=PASS:lens=spec']
-        r = subprocess.run(_final(td, led, *mixed), capture_output=True,
-                           text=True, cwd=ROOT)
-        assert r.returncode == 2, r.stdout[:200]
-        assert 'lens=spec' in r.stderr and 'lens=drc' not in r.stderr, r.stderr
-
-        # A FAIL is refused for the same reason a PASS is: a STUCK close-out
-        # normally carries one, so a PASS-only rule would leave the mechanism
-        # unexercised on half the runs that print this command.
-        failing = ['--lens', 'VERDICT=FAIL:lens=spec;finding=x;evidence=y',
-                   '--lens', 'VERDICT=PASS:lens=connectivity',
-                   '--lens', 'VERDICT=PASS:lens=drc']
-        r = subprocess.run(
-            [sys.executable, '-X', 'utf8', CV, 'record', '--ledger', led,
-             '--board', BOARD, '--kind', 'completion', '--final',
-             '--stop-condition', 'STUCK', '--lever', 'x',
-             '--score-file', _score(td)] + failing
-            + ['--argv', sys.executable, '-c', 'pass'],
-            capture_output=True, text=True, cwd=ROOT)
-        assert r.returncode == 2 and 'no file behind' in r.stderr, r.stderr
-
-        # A LAP is untouched: its lenses are working notes, not a record.
-        r = subprocess.run(
-            [sys.executable, '-X', 'utf8', CV, 'record', '--ledger', led,
-             '--board', BOARD, '--kind', 'completion', '--lever', 'a lap',
-             '--lens', 'VERDICT=PASS:lens=drc',
-             '--argv', sys.executable, '-c', 'pass'],
-            capture_output=True, text=True, cwd=ROOT)
-        assert r.returncode == 0, r.stderr
-        e = json.loads(r.stdout)
-        assert e['lens_source'] == [None], e['lens_source']
-    print("  PASS: a close-out needs files; a lap does not")
-
-
 def test_the_first_verdict_line_wins_even_when_it_is_the_bad_news():
     """The selection rule, hostile cases first."""
     with tempfile.TemporaryDirectory() as td:
@@ -164,7 +116,7 @@ def test_the_first_verdict_line_wins_even_when_it_is_the_bad_news():
         r = subprocess.run(
             [sys.executable, '-X', 'utf8', CV, 'record', '--ledger', led,
              '--board', BOARD, '--kind', 'completion', '--lever', 'x',
-             '--lens-file', p, '--argv', sys.executable, '-c', 'pass'],
+             '--lens-file', p],
             capture_output=True, text=True, cwd=ROOT)
         assert r.returncode == 0, r.stderr
         e = json.loads(r.stdout)
@@ -180,9 +132,8 @@ def test_the_first_verdict_line_wins_even_when_it_is_the_bad_news():
         run_utils.check(
             [sys.executable, '-X', 'utf8', CV, 'record', '--ledger',
              os.path.join(td, 'l2.jsonl'), '--board', BOARD,
-             '--kind', 'completion', '--lever', 'x', '--lens-file', bad,
-             '--argv', sys.executable, '-c', 'pass'],
-            refuse='verbatim', code=2)
+             '--kind', 'completion', '--lever', 'x', '--lens-file', bad],
+            refuse='per-lens verdict', code=2)
 
         # A BOM must not make a file that visibly holds a verdict report that
         # it holds none.
@@ -191,8 +142,7 @@ def test_the_first_verdict_line_wins_even_when_it_is_the_bad_news():
         r = subprocess.run(
             [sys.executable, '-X', 'utf8', CV, 'record', '--ledger',
              os.path.join(td, 'l3.jsonl'), '--board', BOARD,
-             '--kind', 'completion', '--lever', 'x', '--lens-file', bom,
-             '--argv', sys.executable, '-c', 'pass'],
+             '--kind', 'completion', '--lever', 'x', '--lens-file', bom],
             capture_output=True, text=True, cwd=ROOT)
         assert r.returncode == 0, r.stderr
 
@@ -202,16 +152,14 @@ def test_the_first_verdict_line_wins_even_when_it_is_the_bad_news():
         run_utils.check(
             [sys.executable, '-X', 'utf8', CV, 'record', '--ledger',
              os.path.join(td, 'l4.jsonl'), '--board', BOARD,
-             '--kind', 'completion', '--lever', 'x', '--lens-file', none,
-             '--argv', sys.executable, '-c', 'pass'],
+             '--kind', 'completion', '--lever', 'x', '--lens-file', none],
             refuse="no line beginning 'VERDICT='", code=2)
         assert not os.path.exists(os.path.join(td, 'l4.jsonl'))
         run_utils.check(
             [sys.executable, '-X', 'utf8', CV, 'record', '--ledger',
              os.path.join(td, 'l5.jsonl'), '--board', BOARD,
              '--kind', 'completion', '--lever', 'x',
-             '--lens-file', os.path.join(td, 'nope.txt'),
-             '--argv', sys.executable, '-c', 'pass'],
+             '--lens-file', os.path.join(td, 'nope.txt')],
             # `allow`: the refusal QUOTES the OSError, so its own text contains
             # the phrase run_utils treats as an accident. Naming it here is the
             # point of that parameter -- it says "this substring is expected in
@@ -225,89 +173,9 @@ def test_the_first_verdict_line_wins_even_when_it_is_the_bad_news():
         run_utils.check(
             [sys.executable, '-X', 'utf8', CV, 'record', '--ledger',
              os.path.join(td, 'l6.jsonl'), '--board', BOARD,
-             '--kind', 'completion', '--lever', 'x', '--lens-file', chk,
-             '--argv', sys.executable, '-c', 'pass'],
-            refuse='verbatim', code=2)
+             '--kind', 'completion', '--lever', 'x', '--lens-file', chk],
+            refuse='per-lens verdict', code=2)
     print("  PASS: first VERDICT= line wins, malformed refuses, BOM is fine")
-
-
-def test_the_film_captions_a_row_that_has_no_lever():
-    """The film is "the ledger read out loud" -- so a row whose whole content
-    is a human's reason may not be read out as silence."""
-    sys.path.insert(0, os.path.join(ROOT, 'py_tools'))
-    import make_film
-    from board_store import BoardStore
-    with tempfile.TemporaryDirectory() as td:
-        store = BoardStore(os.path.join(td, 'boards'))
-        sha = store.put(BOARD)
-        led = os.path.join(td, 'l.jsonl')
-        rows = [
-            {'iteration': 0, 'kind': 'placement', 'accepted': True,
-             'result_sha': sha, 'lever': 'place_optimize --refs U1'},
-            {'iteration': 1, 'kind': 'systemic', 'accepted': True,
-             'result_sha': sha, 'lever': None,
-             'exhausted': {'half': 'placement', 'reason': 'every lever spent'}},
-            {'iteration': 2, 'kind': 'completion', 'accepted': True,
-             'result_sha': sha, 'final': True, 'stop_condition': 'STUCK'},
-        ]
-        with open(led, 'w', encoding='utf-8') as fh:
-            for row in rows:
-                fh.write(json.dumps(row) + '\n')
-        labels = [s.get('label') or '' for s in
-                  make_film.shots_from_ledger(led, work=os.path.join(td, 'f'))]
-        assert len(labels) == 3, labels
-        assert 'place_optimize --refs U1' in labels[0], labels
-        assert 'declared exhausted: every lever spent' in labels[1], labels
-        assert 'close-out: STUCK' in labels[2], labels
-    print("  PASS: the film captions a lever-less row with what it does say")
-
-
-def test_a_final_row_of_any_kind_needs_its_files():
-    """The gate is about the RECORD, so `--kind` cannot get you round it.
-
-    `_cross_check`'s per-lens supersession takes the LATEST `--final` row that
-    speaks to a lens. A one-lens `--kind systemic --final` row is trivially
-    writable, so scoping the file requirement to `completion` would leave a
-    bare `VERDICT=PASS:lens=spec` able to override a sourced FAIL -- the
-    "one record, two rules depending on something orthogonal" shape #901 was
-    filed about, rebuilt inside its own fix.
-    """
-    with tempfile.TemporaryDirectory() as td:
-        for kind in ('systemic', 'placement', 'classification'):
-            led = os.path.join(td, f'l_{kind}.jsonl')
-            run_utils.check(
-                [sys.executable, '-X', 'utf8', CV, 'record', '--ledger', led,
-                 '--board', BOARD, '--kind', kind, '--final',
-                 '--stop-condition', 'STUCK', '--lever', 'x']
-                + (['--shape', 'parameter'] if kind == 'classification'
-                   else [])
-                + [
-                 '--lens', 'VERDICT=PASS:lens=spec',
-                 '--argv', sys.executable, '-c', 'pass'],
-                refuse='no file behind them', code=2)
-            assert not os.path.exists(led), kind
-        # ...and the sourced form of the same row is accepted, so the gate
-        # refuses the missing FILE and not the kind.
-        led = os.path.join(td, 'ok.jsonl')
-        r = subprocess.run(
-            [sys.executable, '-X', 'utf8', CV, 'record', '--ledger', led,
-             '--board', BOARD, '--kind', 'systemic', '--final',
-             '--stop-condition', 'STUCK', '--lever', 'x',
-             '--lens-file', _write(td, 'verdict_spec.txt',
-                                   'VERDICT=PASS:lens=spec\n'),
-             '--argv', sys.executable, '-c', 'pass'],
-            capture_output=True, text=True, cwd=ROOT)
-        assert r.returncode == 0, r.stderr
-        # A lens outside the three is not covered by the rule.
-        r = subprocess.run(
-            [sys.executable, '-X', 'utf8', CV, 'record', '--ledger',
-             os.path.join(td, 'other.jsonl'), '--board', BOARD,
-             '--kind', 'systemic', '--final', '--stop-condition', 'STUCK',
-             '--lever', 'x', '--lens', 'VERDICT=PASS:lens=assembly',
-             '--argv', sys.executable, '-c', 'pass'],
-            capture_output=True, text=True, cwd=ROOT)
-        assert r.returncode == 0, r.stderr
-    print("  PASS: a --final row's routed-board lens needs a file, any kind")
 
 
 def test_a_file_that_is_not_text_says_so():
@@ -321,41 +189,10 @@ def test_a_file_that_is_not_text_says_so():
         run_utils.check(
             [sys.executable, '-X', 'utf8', CV, 'record', '--ledger',
              os.path.join(td, 'l.jsonl'), '--board', BOARD,
-             '--kind', 'completion', '--lever', 'x', '--lens-file', p,
-             '--argv', sys.executable, '-c', 'pass'],
+             '--kind', 'completion', '--lever', 'x', '--lens-file', p],
             refuse='is not UTF-8 text', code=2)
         assert not os.path.exists(os.path.join(td, 'l.jsonl'))
     print("  PASS: a non-text verdict file is named, not misdiagnosed")
-
-
-def test_status_names_every_unlevered_row_on_an_ordinary_ledger():
-    """#904's inherited item, on the ledger shape it actually happens on."""
-    with tempfile.TemporaryDirectory() as td:
-        led = os.path.join(td, 'l.jsonl')
-        rows = [{'iteration': i, 'kind': 'placement', 'accepted': True,
-                 'lever': f'lap {i}'} for i in range(4)]
-        rows.append({'iteration': 4, 'kind': 'systemic', 'accepted': True,
-                     'lever': None,
-                     'exhausted': {'half': 'placement',
-                                   'reason': 'every lever spent'}})
-        rows.append({'iteration': 5, 'kind': 'completion', 'accepted': True,
-                     'final': True, 'stop_condition': 'STUCK'})
-        with open(led, 'w', encoding='utf-8') as fh:
-            for row in rows:
-                fh.write(json.dumps(row) + '\n')
-        r = subprocess.run(
-            [sys.executable, '-X', 'utf8', CV, 'status', '--ledger', led],
-            capture_output=True, text=True, cwd=ROOT)
-        assert r.returncode == 0, r.stderr
-        doc = json.loads(r.stdout)          # STILL exactly one JSON document
-        assert doc['unlevered'] == 2, doc
-        assert doc['total'] == 6, doc
-        # the systemic share is 1/6, so the old nesting printed NOTHING here
-        assert 'SYSTEMIC' not in r.stderr, r.stderr
-        assert 'i4  declared exhausted: every lever spent' in r.stderr, r.stderr
-        assert 'i5  close-out: STUCK' in r.stderr, r.stderr
-        assert 'lap 0' not in r.stderr, 'a levered row needs no itemisation'
-    print("  PASS: status names the unlevered rows and stays one JSON doc")
 
 
 class _NoConverge:

@@ -104,14 +104,33 @@ BREAKS = [
       '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias')),
     ('R14', 'a poured net with no route-step width',
      ('--power-nets GND +3V3', '--power-nets GND')),
-    # Step 5b is TWO asserts and they fail on different things. The row above
-    # breaks `unsized` (poured, no route-step width); this breaks `orphans`
-    # (excluded from the route step, claimed by no Step-2b impedance route) --
+    # Step 5b's asserts fail on different things. The row above breaks
+    # `unsized` (poured, no route-step width); this breaks `orphans` (excluded
+    # from the route step, claimed by no Step-2b impedance route and by no
+    # later route step) --
     # which is the GNDA failure itself: a net excluded as "power" and never
     # picked up, ending at 0/23 pads connected while the run reported success.
     # tests/mutate_937.py found this gap by blinding `orphans` and SURVIVING.
     ('R14', 'a net excluded from the route step and claimed by nothing',
      ("--nets '*' --power-nets GND +3V3", "--nets '*' '!RF' --power-nets GND +3V3")),
+    # #1346: a claim counts only when it comes AFTER the exclusion. Here the
+    # first route step takes GND and a closing step excludes it, so the last
+    # route step to see the board -- the one whose finalize answers for the
+    # pours its own routing may cut -- never sees GND.
+    ('R14', 'a net excluded by the last route step, claimed only before it',
+     ('# Verification',
+      "# cwd=/repo\npython3 -u -X utf8 py_router/route.py final.kicad_pcb "
+      "final2.kicad_pcb --nets '*' '!GND' --power-nets GND +3V3 "
+      "--clearance 0.09\n# Verification")),
+    # The other direction of Step 5b's reconciliation: Step 2b routes a net
+    # that no route step excludes.
+    ('R14', 'a Step 2b impedance net no route step excludes',
+     ('# cwd=/repo\npython3 -u -X utf8 py_router/route.py s3.kicad_pcb '
+      'final.kicad_pcb ',
+      '# cwd=/repo\npython3 -u -X utf8 py_router/route.py s3.kicad_pcb '
+      's3i.kicad_pcb --nets RF --impedance 50 --clearance 0.09\n'
+      '# cwd=/repo\npython3 -u -X utf8 py_router/route.py s3i.kicad_pcb '
+      'final.kicad_pcb ')),
     ('R15', 'gnd-via distance under the floor',
      ('--power-nets GND +3V3 --clearance 0.09',
       '--power-nets GND +3V3 --clearance 0.09 --via-size 0.45 '
@@ -151,6 +170,28 @@ BREAKS = [
 #: Rows that must NOT be refused -- a rule demanding something the engine
 #: refuses is worse than a rule that is absent. Same shape as BREAKS.
 COMPLIANT_VARIANTS = [
+    # #1346: Step 8's pour-last flow. The signal step excludes GND, the pour
+    # comes after it, and the closing '*' route step claims GND -- Step 5b's
+    # "excluded from a stage, claimed by a later one". R14 used to union every
+    # route step's exclusions and refuse this plan, the skill's own recipe.
+    ('R14', 'GND excluded from the signal step and claimed by the closing '
+            'route step after a late pour (Step 8 pour-last)',
+     ('# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py s2.kicad_pcb '
+      's3.kicad_pcb ',
+      "# cwd=/repo\npython3 -u -X utf8 py_router/route.py s2.kicad_pcb "
+      "s2b.kicad_pcb --nets '*' '!GND' --power-nets GND +3V3 "
+      "--clearance 0.09\n"
+      '# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py s2b.kicad_pcb '
+      's3.kicad_pcb ')),
+    # The Step 2b shape: the impedance net is routed first and the route step
+    # excludes exactly it.
+    ('R14', 'a Step 2b impedance net, excluded from the route step',
+     ("# cwd=/repo\npython3 -u -X utf8 py_router/route.py s3.kicad_pcb "
+      "final.kicad_pcb --nets '*' ",
+      "# cwd=/repo\npython3 -u -X utf8 py_router/route.py s3.kicad_pcb "
+      "s3i.kicad_pcb --nets RF --impedance 50 --clearance 0.09\n"
+      "# cwd=/repo\npython3 -u -X utf8 py_router/route.py s3i.kicad_pcb "
+      "final.kicad_pcb --nets '*' '!RF' ")),
     ('R17', 'a poured inner layer priced negative in --layer-costs is the '
             'documented way to keep escapes off it (#288)',
      ('--component U1 --nets \'*\' --clearance 0.09 --layers F.Cu B.Cu',

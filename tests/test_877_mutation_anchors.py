@@ -28,7 +28,8 @@ reported a clean result for all five. They are kept as change detectors:
 Nothing here reads a battery in the repo and nothing imports one: three run
 their runner at module scope, so importing them rewrites engine files. The
 fixtures are written into a temporary directory and handed to
-`resolve_static` as data, which is exactly how the #718 gate uses it.
+`resolve_static` as data, which is exactly how `preflight` and the census
+use it.
 
     python3 tests/test_877_mutation_anchors.py
 """
@@ -310,12 +311,15 @@ def test_the_corpus_is_populated():
     Those run on fixtures; this one asserts the real corpus is still there, so
     a green suite cannot mean "found nothing to check". A floor, not a target.
     """
+    # 26 batteries / 484 anchors since the retired placement flows took their
+    # batteries with them (ecd673eb); the floor sits below that, so it trips
+    # on a scan that stopped finding them, not on a deliberate deletion.
     paths = ma.batteries()
-    assert len(paths) >= 30, (
+    assert len(paths) >= 20, (
         f'only {len(paths)} mutation batteries found -- the scan has stopped '
         f'finding them')
     total = sum(len(ma.resolve_static(p)[0]) for p in paths)
-    assert total >= 600, (
+    assert total >= 400, (
         f'only {total} anchor(s) resolved across {len(paths)} batteries -- the '
         f'resolver has stopped reading the tables')
     print(f'  PASS: {total} anchor(s) across {len(paths)} real batteries')

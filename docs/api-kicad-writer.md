@@ -12,7 +12,14 @@ Writing copper back to `.kicad_pcb` files. Two layers:
 
 Both preserve the original file content and append/edit in place — nothing
 else in the file is regenerated, so user edits, footprints, and zones
-survive untouched. Every new element gets a fresh UUID.
+survive untouched. Every new element gets a fresh UUID. The file-level
+writers also make small edits of their own on every write: copper text
+and net-less copper logos move to silkscreen ([below](#text-and-teardrops)),
+and zero-length Edge.Cuts primitives are dropped (`strip_zero_length_edge_cuts`;
+KiCad reads each as a malformed outline). `add_tracks_and_vias_to_pcb` and
+`write_routed_output` first copy the input's sibling files (`.kicad_pro`,
+`.kicad_prl`, `.kicad_dru`, `.design-brief.json`) beside the output, never
+over an existing one, so the output does not lose its DRC floor (#441).
 
 Examples run from the repository root with the engine directory on the
 import path: `PYTHONPATH=py_router python3 <your script>` (see the
@@ -35,17 +42,19 @@ import path: `PYTHONPATH=py_router python3 <your script>` (see the
 add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                            tracks: List[Dict], vias: List[Dict] = None,
                            remove_vias: List[Dict] = None,
-                           net_id_to_name: Dict[int, str] = None) -> bool
+                           net_id_to_name: Dict[int, str] = None,
+                           add_teardrops: bool = False) -> bool
 ```
 
 The main entry point for scripting. Reads `input_path`, appends the given
 copper, writes `output_path`. Returns `True` on success.
 
-`net_id_to_name` maps the parser's synthetic net IDs to names so net
-references are written name-style on KiCad 10 boards. If omitted on a
-KiCad 10 board, the mapping is derived from the file automatically (the
-synthetic IDs match any caller that got its `net_id`s from parsing that
-file), so numeric refs are never mixed into a name-style board.
+The net dialect follows the input file ([KiCad 9 vs KiCad 10](#kicad-9-vs-kicad-10)):
+`net_id_to_name` is used on a name-net board, and derived from the file when
+omitted there (the synthetic IDs match any caller that got its `net_id`s from
+parsing that file); on a numeric board it is ignored. `add_teardrops=True`
+adds KiCad teardrop settings to every pad and via, this call's new vias
+included (the CLIs' `--add-teardrops`).
 
 Track dicts:
 
@@ -66,9 +75,16 @@ Via dicts:
  'free': False}                    # optional; True adds (free yes)
 ```
 
-`remove_vias` takes dicts with `x`/`y` keys; matching vias are deleted from
-the file before the new copper is added (position-based regex match — make
-sure coordinates match the file's values).
+A via dict that re-emits a via the board already had also carries that via's
+`'tenting_attrs'`, `'inherit_when_unspecified': True` and `'via_type'` (see
+[Via protection](#via-protection-tenting_attrs) and [Via type](#via-type-via_type));
+a new via carries none of them.
+
+`remove_vias` takes dicts with `x`/`y` keys (and optionally `net_id`, which
+keeps a different net's via at that spot); one matching via per dict is
+deleted from the file before the new copper is added. The match is by
+position, with any numeric spelling of the coordinate accepted, so take the
+coordinates from a parse of the same file.
 
 There is also `add_tracks_to_pcb(input_path, output_path, tracks,
 net_id_to_name=None)` for segments only.
@@ -76,7 +92,7 @@ net_id_to_name=None)` for segments only.
 ### Example: drawing a box of tracks
 
 ```python
-from kicad_parser import parse_kicad_pcb, KICAD_10_MIN_VERSION
+from kicad_parser import parse_kicad_pcb, pcb_uses_name_nets
 from kicad_writer import add_tracks_and_vias_to_pcb
 
 board = 'kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb'
@@ -90,7 +106,7 @@ tracks = [{'start': corners[i], 'end': corners[i + 1],
 vias = [{'x': 100, 'y': 100, 'size': 0.6, 'drill': 0.3,
          'layers': ['F.Cu', 'B.Cu'], 'net_id': gnd.net_id}]
 
-names = pcb.net_id_to_name if pcb.kicad_version >= KICAD_10_MIN_VERSION else None
+names = pcb.net_id_to_name if pcb_uses_name_nets(pcb) else None
 ok = add_tracks_and_vias_to_pcb(board, 'box_output.kicad_pcb',
                                 tracks, vias, net_id_to_name=names)
 print('wrote box_output.kicad_pcb' if ok else 'failed')
@@ -99,23 +115,32 @@ print('wrote box_output.kicad_pcb' if ok else 'failed')
 ## KiCad 9 vs KiCad 10
 
 KiCad 10 files reference nets by **name**, KiCad 9 by **numeric ID**. The
-writer emits the right format based on whether you pass `net_id_to_name`:
+file-level writers (`add_tracks_to_pcb`, `add_tracks_and_vias_to_pcb`,
+`write_routed_output`) read the dialect from the INPUT file's content
+(`kicad_parser.board_uses_name_nets`, which looks at the net tokens, not the
+version stamp), so the output keeps the dialect it came in with:
 
-| You pass | Output format |
-|----------|---------------|
-| `net_id_to_name=None` | KiCad 9: `(net 42)` |
-| `net_id_to_name={42: 'GND', ...}` | KiCad 10: `(net "GND")`, plus tenting fields on vias |
+| Input file uses | `net_id_to_name` you pass | Output |
+|-----------------|---------------------------|--------|
+| a numeric `(net 42 "GND")` table | ignored | `(net 42)` |
+| name refs `(net "GND")` | used; derived from the file when `None` | `(net "GND")` |
 
-The canonical pattern (used by the CLIs):
+A file that mixes the two is what this guards against: KiCad 9 reads name
+refs in a numeric board as net-less.
+
+The S-expression generators and content helpers below have no file to look
+at: they write name refs when given a `net_name` (`use_net_name=True` for
+zones and rule areas) and numeric IDs otherwise. Choose from the parsed
+board's dialect, the pattern the CLIs use:
 
 ```python
-from kicad_parser import KICAD_10_MIN_VERSION
-names = pcb.net_id_to_name if pcb.kicad_version >= KICAD_10_MIN_VERSION else None
+from kicad_parser import pcb_uses_name_nets
+names = pcb.net_id_to_name if pcb_uses_name_nets(pcb) else None
 ```
 
-Passing the mapping for a KiCad 9 file (or `None` for a KiCad 10 file)
-produces copper KiCad won't connect to the right nets — this is the most
-common scripting mistake.
+Feeding a generator the wrong dialect — name refs into a numeric file, or
+numeric IDs into a name-net one — produces copper KiCad won't connect to the
+right nets; this is the most common scripting mistake.
 
 ## S-expression generators
 
@@ -127,19 +152,36 @@ yourself:
 generate_segment_sexpr(start, end, width, layer, net_id, net_name=None) -> str
 generate_via_sexpr(x, y, size, drill, layers, net_id,
                    free=False, net_name=None, tenting_attrs=None,
-                   inherit_when_unspecified=False) -> str
+                   inherit_when_unspecified=False, via_type=None) -> str
 generate_gr_line_sexpr(start, end, width, layer) -> str      # debug graphics
 generate_gr_text_sexpr(text, x, y, layer, size=0.5, angle=0) -> str
 generate_zone_sexpr(net_id, net_name, layer, polygon_points,
                     clearance=0.2, min_thickness=0.1,
                     thermal_gap=0.2, thermal_bridge_width=0.2,
-                    direct_connect=True, use_net_name=False) -> str
+                    direct_connect=True, use_net_name=False,
+                    priority=0) -> str
+generate_rule_area_sexpr(layers, polygon_points, name,
+                         not_allowed=('tracks', 'vias', 'copperpour'),
+                         use_net_name=False) -> str
+generate_keepout_zone_sexpr(layers, polygon_points, name,
+                            use_net_name=False) -> str  # blocks copper pour only
+zone_overlap_priorities(zones) -> List[int]   # zones: [(layer, net_id, polygon)]
 ```
 
-If `net_name` is given (or `use_net_name=True` for zones), KiCad 10 format is
-emitted; otherwise KiCad 9. `generate_zone_sexpr` is what
+If `net_name` is given (or `use_net_name=True` for zones and rule areas),
+KiCad 10 format is emitted; otherwise KiCad 9. `generate_zone_sexpr` is what
 `route_planes.py` uses to create power/ground planes; `direct_connect=True`
-makes solid pad connections instead of thermal reliefs.
+makes solid pad connections instead of thermal reliefs. Overlapping zones on
+one layer need distinct `priority` values: of different nets, or KiCad breaks
+the tie on their (freshly minted) UUIDs and the fill changes from run to run;
+of one net too, or KiCad's DRC reports them as intersecting zones (an error),
+though their copper merges either way. `zone_overlap_priorities` assigns them,
+the smaller zone winning, and leaves a zone that overlaps nothing at 0.
+
+`generate_rule_area_sexpr` writes a KiCad keep-out rule area forbidding each
+of `RULE_AREA_FLAGS` (`tracks`, `vias`, `pads`, `copperpour`, `footprints`)
+named in `not_allowed` (an unknown flag raises `ValueError`); the parser reads
+it back into `board_info.keepouts`.
 
 ```python
 from kicad_writer import generate_segment_sexpr
@@ -147,13 +189,28 @@ print(generate_segment_sexpr((100.0, 100.0), (105.0, 100.0),
                              0.25, 'F.Cu', 42))
 ```
 
+### Via type (`via_type`)
+
+`generate_via_sexpr(..., via_type=...)` takes the via's own `Via.via_type`.
+`'blind'`, `'buried'` or `'micro'` writes KiCad's type word (`(via micro ...`);
+anything else writes none. KiCad loads a via with no type word as a THROUGH via
+whatever its `(layers ...)` says, so every site that puts an EXISTING via back
+-- a restore, a re-placed or kept via, route.py's #666 re-emit, the placement
+via-nudge -- passes the type it read, and a via the tool adds passes `None`
+(it is a through via). Via dicts that copy an existing via's `layers` carry a
+`'via_type'` key for the same reason. The word is written as read, so KiCad
+10's `buried` (which KiCad 9 refuses to load) only goes back into the KiCad 10
+file it came from. On the plugin side `gui_utils.set_via_layers` does the same
+for a `PCB_VIA`, setting the type BEFORE the layer pair: pcbnew snaps a through
+via's pair to F.Cu/B.Cu as it is set. `tests/test_749_via_protection_emit_sites.py`
+holds every emit and copy site to this.
+
 ### Via protection (`tenting_attrs`)
 
 `tenting_attrs` is a via's own protection spec -- `Via.tenting_attrs`, the
 `(tenting ...)` / `(covering ...)` / `(plugging ...)` / `(capping ...)` /
-`(filling ...)` family, see `docs/api-kicad-parser.md`. Which value you pass
-is read together with `inherit_when_unspecified`, and the four combinations
-are not interchangeable (#489 s8, #741):
+`(filling ...)` family, see `docs/api-kicad-parser.md`. What is emitted
+depends on it alone (#489 s8, #741):
 
 | `tenting_attrs` | Emitted |
 |---|---|
@@ -183,20 +240,15 @@ Two rules were retired to get here:
   exposed, which is a fab error rather than a cosmetic one. It hid because
   KiCad's FACTORY policy is tented front+back, so on an ordinary board the
   stamp and the inheritance agree.
-* **`prevailing_via_protection` as the added-via default** (the #489 s8 rule).
+* **The board's prevailing via spec as the added-via default** (the #489 s8
+  rule).
   Across those same 886 boards a prevailing spec never once disagreed with the
   board's own `(setup ...)`, so it only ever wrote a redundant token -- and the
   tool then read its OWN stamps back as "the board's convention" on the next
   run. orangecrab_ext_pll's 136 `(tenting …)` tokens are byte-identical to
   `generate_via_sexpr` output; hackrf_one's pristine source has **0/498** vias
   declaring anything, its 498 tokens being KiCad 10's upgrade migration writing
-  out the factory defaults. The function remains correct and available; it is
-  simply not a default.
-
-`prevailing_via_protection(vias)` / `prevailing_via_protection_in_text(content)`
-still answer "what do this board's vias actually say", which is the right
-question if you ever need a new via to match its neighbours rather than the
-board policy. No writer calls them today.
+  out the factory defaults.
 
 **Pass the spec back for any via that already existed.** A via you re-place
 without it -- rip-up, sub-grid nudge, tap relocation -- loses its spec and
@@ -212,7 +264,7 @@ pcbnew's `*_MODE_FROM_BOARD` already means inherit.
 
 **And keep the board's net dialect**, with `via_net_name(net_id,
 net_id_to_name)` -- the ONE resolver, used by every emit site (#749 D).
-`net_id_to_name` has no key `0` on any board (`extract_nets` records
+`net_id_to_name` has no key `0` on a name-net board (`extract_nets` records
 `name_to_id[""] = 0` but never builds a `Net` for id 0), so a plain `.get`
 sends every no-net via down the numeric dialect. On a name-net board that is
 the mixed-dialect state `tests/stress/fix_mixed_net_refs.py` exists to undo.
@@ -234,13 +286,17 @@ still matters, because emitting the board's own dialect is right regardless.
 | `route.py` #666 re-emit | PRE-EXISTING copper the write lost | own spec + `inherit_when_unspecified=True` |
 | `bga_fanout`, `qfn_fanout`, `route_planes` | new | nothing -> inherits `(setup ...)`, EXCEPT a via in a pad or paste opening: Type VII (see below) |
 | `kicad_oracle` (3 weld/link sites) | new | nothing, spelled out as `None` (#749 B) |
-| `plane_io.create_plane` / `repair_planes` | new | the via's own spec, else nothing |
+| `plane_io.write_plane_output` (`create_plane`) / `repair_planes` | new | the via's own spec, else nothing |
 | `plane_io.restore_failed_reroute_nets` | RESTORED | own spec + `inherit_when_unspecified=True` (#749 C) |
 | `py_placer/placement/writer.py` | re-placed (the #313 nudge) | own spec + `inherit_when_unspecified=True` (#741) |
+| `py_tools/check_join.py` | staged join vias | the via's own spec: Type VII when under solder (#962), else nothing |
 
-`tests/test_749_via_protection_emit_sites.py` walks the AST of every module in
-that table and fails on a `generate_via_sexpr` call with no `tenting_attrs=`,
-so a NEW emit site that forgets is caught rather than discovered on a board.
+`tests/test_749_via_protection_emit_sites.py` walks the AST of the modules
+that call `generate_via_sexpr` (`kicad_oracle`, `plane_io`, `repair_planes`,
+`output_writer`, `kicad_writer`, `check_join`) and fails on a call with no
+`tenting_attrs=`, and of every module under `py_router`, `py_placer`,
+`py_tools` and `kicad_routing_plugin` for a call with no `via_type=`, so a NEW
+emit site that forgets is caught rather than discovered on a board.
 
 **GUI side**, `kicad_parser.pcbnew_via_protection_attrs(via, text_specs)` is the
 reader, not `_pcbnew_via_protection_attrs`: the shipping KiCad 10.0.0 SWIG
@@ -316,14 +372,19 @@ stub layer switching.
 ### `modify_segment_layers`
 
 ```python
-modify_segment_layers(content: str, segment_mods: List[Dict])
+modify_segment_layers(content: str, segment_mods: List[Dict],
+                      unapplied_out: List[Dict] = None)
     -> Tuple[str, int]   # (new_content, modified_count)
 ```
 
 Each mod: `{'start': (x, y), 'end': (x, y), 'net_id': int,
-'old_layer': str, 'new_layer': str}`. Matches segments by endpoints (either
-order) and net, then rewrites the layer. Falls back to coordinate+old_layer
-matching when net IDs have already been swapped.
+'old_layer': str, 'new_layer': str}`, plus `'net_name'` for a name-net file.
+Matches segments by endpoints (either order) and net, then rewrites the
+layer; chained mods on one segment land on the last layer. Falls back to
+coordinate+old_layer matching when net IDs have already been swapped. Pass a
+list as `unapplied_out` to collect the mods that matched no segment in the
+file: the in-memory board has already moved that copper, so a silent miss
+ships a file that disagrees with it.
 
 ### `swap_segment_nets_at_positions`
 
@@ -365,6 +426,26 @@ in-memory counterpart is
 [`pcb_modification.swap_pad_nets_in_pcb_data`](api-pcb-modification.md#swap_pad_nets_in_pcb_data) —
 apply both if you keep routing afterwards.
 
+### Removing copper
+
+```python
+remove_segments_from_content(content, segments, net_id_to_name=None,
+                             unmatched_out=None) -> Tuple[str, int]
+remove_vias_from_content(content, vias, net_id_to_name=None,
+                         unmatched_out=None) -> Tuple[str, int]
+assert_balanced_sexpr(text, label='board')   # raises ValueError
+```
+
+Delete whole `(segment ...)` / `(via ...)` blocks matching the given
+`Segment` / `Via` objects: a segment by its unordered endpoint pair, layer and
+net, a via by position and net. Each net token is read in whichever dialect
+its own block uses, so a mixed-dialect file still matches. Removal is a
+counted multiset: of N identical blocks, only as many as you list go.
+`unmatched_out` collects the objects that matched nothing.
+`assert_balanced_sexpr` is the backstop before a write (#523): a text
+transform that ate or duplicated a paren would ship a file KiCad cannot load
+while this repo's own text checkers grade it normally.
+
 ## Text and teardrops
 
 ```python
@@ -405,16 +486,15 @@ add_teardrops_to_vias(content: str, ...same parameters...) -> Tuple[str, int]
 
 The same for **vias**, which got teardrops on no path at all before #489 §9 —
 track-to-via teardrops matter most exactly where a 0.1 mm trace meets a 0.25 mm
-via pad in a fine-pitch escape. Two details are load-bearing:
+via pad in a fine-pitch escape. Two details:
 
 - The block is inserted **after** the via's `(uuid ...)`, as its last child.
   KiCad does not care about child order (verified by round-trip through pcbnew:
-  0 vias reported `GetTeardropsEnabled()` before, all 63 after), while this
-  repo's own via regexes require `layers → (free)? → net → (uuid)?` to be
-  contiguous (uuid itself is optional since PR #534, but an earlier insertion
-  would still split the required run) — inserting earlier would make the
-  boards we write unparseable by us. A uuid-less via has no anchor and is
-  skipped by this pass (benign: the tool's own output always writes uuids).
+  0 vias reported `GetTeardropsEnabled()` before, all 63 after), and this
+  repo's parser reads every via field after `(layers ...)` by its own token
+  (#748), so the position costs nothing either way. A uuid-less via has no
+  anchor and is skipped by this pass (benign: the tool's own output always
+  writes uuids).
 - Both writers run this pass **last**, after the run's new copper is inserted,
   so vias *this run placed* get teardrops too. Running it on the input text
   covered only pre-existing vias (63 of 81 on megadesk).
@@ -438,7 +518,10 @@ write_routed_output(input_file: str, output_file: str,
                     exclusion_zone_lines: List = None,
                     boundary_debug_labels: List = None,
                     skip_routing: bool = False,
-                    add_teardrops: bool = False) -> bool
+                    add_teardrops: bool = False,
+                    all_swap_segments: List = None,
+                    segments_to_remove: List = None,
+                    vias_to_remove: List = None) -> bool
 ```
 
 The single exit point of `route.py`/`route_diff.py`. Each entry in `results`
@@ -446,19 +529,29 @@ is one routed net's result dict; the keys that matter here are
 `new_segments` (list of `Segment`-like objects) and `new_vias` (list of
 `Via`-like objects). The remaining arguments carry layer modifications and
 swap records accumulated during routing; pass empty lists when you have
-none.
+none. `segments_to_remove` / `vias_to_remove` are input-file copper to strip
+(dead ends the final sweep flagged, #84; the old vias of a ripped and
+rerouted net, #103), and `all_swap_segments` the stub segments a bare-pad
+target swap added. Returns `False` without writing when there is nothing to
+write.
 
 Steps, in order (the order matters — layer modifications are recorded with
 post-swap net IDs, so swaps must hit the file first):
 
-1. Move copper text to silkscreen
-2. Add teardrops (optional)
-3. Apply diff-pair target swaps (segments, vias, pads)
-4. Apply single-ended target swaps
-5. Apply stub layer modifications
-6. Apply polarity pad/stub swaps
-7. Insert all new segments and vias (plus debug geometry on User layers
+1. Seed the output's sibling files; move copper text and logos to
+   silkscreen; drop zero-length Edge.Cuts
+2. Add pad teardrops (optional)
+3. Strip `segments_to_remove` / `vias_to_remove`
+4. Apply diff-pair target swaps (segments, vias, pads)
+5. Apply single-ended target swaps
+6. Apply stub layer modifications (a mod that matched nothing is named in a
+   warning)
+7. Apply polarity pad/stub swaps
+8. Strip again whatever step 3 missed because a swap or layer change had
+   not reached the file yet
+9. Insert all new segments and vias (plus debug geometry on User layers
    when `debug_lines=True`)
+10. Add via teardrops (optional), so this run's vias get them too
 
 Minimal scripted use, with routed results in hand:
 
@@ -484,8 +577,10 @@ simplified path on `User.8`, connector segments on `User.3`, stub arrows on
 
 ## Gotchas
 
-- **Pass `net_id_to_name` only for KiCad 10 files** (see
-  [above](#kicad-9-vs-kicad-10)).
+- **Generators and content helpers take the dialect you give them**: pass
+  net names only for a name-net file (`pcb_uses_name_nets`, see
+  [above](#kicad-9-vs-kicad-10)). The file-level writers decide for
+  themselves.
 - **Position-based matching is exact-ish**: net/via swap helpers round
   through `pos_key` / tolerances, but coordinates must come from the same
   parse of the same file. Re-parse after each content rewrite if you chain

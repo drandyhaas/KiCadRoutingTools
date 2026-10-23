@@ -39,6 +39,21 @@ THE INVARIANTS, and which are enforced:
   C. no cells unaccounted for by any cache  ENFORCED
   D. raw add/remove op deltas cancel        RECORDED, NOT ENFORCED
   E. map CONTENT matches the board (#806)   RECORDED, NOT ENFORCED here
+  F. route_multipoint_taps leaves no        ENFORCED
+     per-route state on its map
+
+F is the one invariant about maps the others never look at. A, B, C and D
+follow the WORKING map alone and count only ref-counted cells; Phase 3 routes
+every multipoint net on a per-net clone, and what a tap pass stamps for its own
+searches -- free vias, terminal allowed-cell rects, source/target overrides --
+are plain sets no cache object carries, which restore_obstacles_inplace empties
+on the working map before the end-of-run audit samples it. Measured on a
+ch32v003_usb route step with the tap pass leaving them behind: all 20 calls
+left them on the map they were handed (and the stub-switch retry, while it was
+still handed the first pass's map, started on them), and A, B, C and E all
+printed BALANCED / OK. The ledger's SCAFFOLD WATCH
+(obstacle_cache.ledger_scaffold_begin/_end) checks every call on every map;
+F fails on any SCAFFOLD LEAK line.
 
 E is the invariant A/B/C cannot see: an entry computed before its net was
 routed and never refreshed is removed and re-added in BALANCE while the
@@ -101,6 +116,11 @@ def parse_audit(text):
             r"^\s+cells ([+-]?\d+) vias ([+-]?\d+)\s+(\S+ @ \S+)", text, re.M),
         "repairs": sum(int(m) for m in
                        re.findall(r"\[RESIDENCY\] map repairs performed: (\d+)", text)),
+        # F: "[OBSTACLE LEDGER] SCAFFOLD LEAK route_multipoint_taps GND: 10 free-via ..."
+        "scaffold_leaks": re.findall(
+            r"\[OBSTACLE LEDGER\] SCAFFOLD LEAK (\S+) (.+?): (\d+) free-via cell", text),
+        "scaffold_checked": sum(int(m) for m in re.findall(
+            r"scaffold watch \([^)]*\): (\d+) call\(s\) checked", text)),
         # E (#806): CONTENT -- cells the board's copper owns that the working
         # map does not block, per audit label. RECORDED, not enforced here:
         # the end-of-run map of route.py legitimately drifts after its own
@@ -120,6 +140,12 @@ def report(a):
     print(f"  audit blocks: {a['audit_blocks']}   ledger blocks: {a['ledger_blocks']}")
     print(f"  BALANCED verdicts: {a['balanced']}   LEAK/DESYNC headers: {a['leak_headers']}")
     print(f"  residency map repairs performed: {a['repairs']}")
+    print(f"  scaffold watch: {a['scaffold_checked']} route_multipoint_taps call(s) "
+          f"checked, {len(a['scaffold_leaks'])} SCAFFOLD LEAK line(s)"
+          + ("   (F not exercised: no multipoint tap pass ran)"
+             if not a["scaffold_checked"] and not a["scaffold_leaks"] else ""))
+    for what, net, fv in a["scaffold_leaks"][:4]:
+        print(f"    SCAFFOLD LEAK {what} {net}: {fv} free-via cell(s) changed")
     if a["unbalanced"]:
         print(f"  UNBALANCED cache objects: {len(a['unbalanced'])}")
         for serial, net, delta in a["unbalanced"][:8]:
@@ -174,6 +200,13 @@ def verdict(a):
         f.append(f"C(free_vias): {max(_fv):+d} free-via cell(s) left registered "
                  f"at end of run -- a permissive override that outlived its "
                  f"route. Must be ZERO.")
+    # F: the same permissive state, left on a map the checks above never read
+    # (a per-net clone) by the call that stamped it.
+    if a["scaffold_leaks"]:
+        f.append(f"F: {len(a['scaffold_leaks'])} route_multipoint_taps call(s) "
+                 f"left per-route state (free vias / allowed cells / overrides) "
+                 f"on the map they were handed: "
+                 + ", ".join(net for _w, net, _fv in a["scaffold_leaks"][:5]))
     return (not f), f
 
 
@@ -210,7 +243,8 @@ def main():
     print()
     if ok:
         print("PASS: invariants A (maps return to base), B (no unbalanced cache "
-              "object) and C (no unaccounted cells) all hold.")
+              "object), C (no unaccounted cells) and F (no tap pass leaves "
+              "per-route state on its map) all hold.")
         return 0
     print("FAIL:")
     for x in failures:
@@ -336,6 +370,7 @@ def self_test():
   BALANCED: ref-counted maps (blocked_cells/blocked_vias/source_target/free_vias) return exactly to base.
 [OBSTACLE LEDGER] 1836 events, 965 cache objects touched the working map
   cache-object ledger BALANCED (leak, if any, is in raw ops below)
+  scaffold watch (route_multipoint_taps, any map): 20 call(s) checked, 0 left per-route state behind
     cells +19529 vias +5984  add_segments_list @ phase3_routing.py:try_phase3_ripup:1117
 [RESIDENCY] map repairs performed: 3
 [OBSTACLE CONTENT route_diff pre-sync] 41 nets recomputed from pcb_data: 47448 cells checked, 30862 NOT blocked in working map; 71537 via cells checked, 31330 NOT via-blocked; 31613 cells absent from their net's cache entry (20 stale entries)
@@ -347,6 +382,16 @@ def self_test():
     blocked_vias: +23699 cells unaccounted for by any net cache
 [OBSTACLE LEDGER] 1888 events, 993 cache objects touched the working map
   UNBALANCED serial 1583 (net ?): adds-removes=1, expected 0 (resident=False)
+"""
+    # F alone: every A/B/C line BALANCED, one tap pass leaving state behind --
+    # the measured shape of the leak F exists for (ch32v003_usb).
+    bad_f = """
+[OBSTACLE LEDGER] SCAFFOLD LEAK route_multipoint_taps GND: 10 free-via cell(s) changed, 1936 cell(s) opened (allowed/unblocked), 492 source/target override(s) left, totals blocked_cells +0 blocked_vias +0 blocked_vias_rungs +0 free_vias +10  @ phase3_routing.py:run_phase3_tap_routing:719 <- route.py:batch_route:4890
+[OBSTACLE AUDIT] working - sum(caches) vs base (30 net caches removed)
+  BALANCED: ref-counted maps (blocked_cells/blocked_vias/source_target/free_vias) return exactly to base.
+[OBSTACLE LEDGER] 328 events, 171 cache objects touched the working map, 30 resident at end
+  cache-object ledger BALANCED (leak, if any, is in raw ops below)
+  scaffold watch (route_multipoint_taps, any map): 20 call(s) checked, 19 left per-route state behind
 """
     ga, ba = parse_audit(good), parse_audit(bad)
     ok_g, f_g = verdict(ga)
@@ -370,6 +415,16 @@ def self_test():
     # passes; the parser must read its real counts.
     if ga["content"] != [("route_diff pre-sync", 47448, 30862, 71537, 31330, 20)]:
         fails.append(f"parser misread the content audit: {ga['content']}")
+    # F: read the watch's real counts, and fail on a leak no other invariant sees.
+    if ga["scaffold_checked"] != 20 or ga["scaffold_leaks"]:
+        fails.append(f"parser misread the scaffold watch: {ga['scaffold_checked']} "
+                     f"{ga['scaffold_leaks']}")
+    fa = parse_audit(bad_f)
+    ok_f, f_f = verdict(fa)
+    if ok_f or not any(x.startswith("F:") for x in f_f) or len(f_f) != 1:
+        fails.append(f"a SCAFFOLD LEAK alone must fail F and nothing else, got: {f_f}")
+    if fa["scaffold_leaks"] != [("route_multipoint_taps", "GND", "10")]:
+        fails.append(f"parser misread the SCAFFOLD LEAK line: {fa['scaffold_leaks']}")
     # An empty log is a BROKEN GATE, not a pass.
     ok_e, f_e = verdict(parse_audit(""))
     if ok_e or "BROKEN GATE" not in f_e[0]:
@@ -379,8 +434,9 @@ def self_test():
         for x in fails:
             print("  -", x)
         return 1
-    print("self-test OK: good passes, bad fails, empty log = BROKEN GATE, "
-          "real counts parsed, invariant D recorded but not enforced")
+    print("self-test OK: good passes, bad fails, a SCAFFOLD LEAK alone fails F, "
+          "empty log = BROKEN GATE, real counts parsed, invariant D recorded but "
+          "not enforced")
     return 0
 
 

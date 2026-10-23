@@ -1777,11 +1777,15 @@ def calculate_route_propagation_time_ps(
 
     # Time for via barrels
     if vias:
+        from geometry_utils import via_end_layers
         for via in vias:
             if via.layers and len(via.layers) >= 2:
-                barrel_length = pcb_data.get_via_barrel_length(via.layers[0], via.layers[1])
+                # A through via's barrel is the whole stack, whatever pair it
+                # carries (found reviewing #1268).
+                top, bot = via_end_layers(via)
+                barrel_length = pcb_data.get_via_barrel_length(top, bot)
                 if barrel_length > 0:
-                    eps_eff = get_via_barrel_epsilon_eff(pcb_data, via.layers[0], via.layers[1])
+                    eps_eff = get_via_barrel_epsilon_eff(pcb_data, top, bot)
                     speed = SPEED_OF_LIGHT_MM_PER_NS / math.sqrt(eps_eff)
                     via_time_ps = (barrel_length / speed) * 1000.0
                     total_time_ps += via_time_ps

@@ -65,7 +65,7 @@ import contextlib
 import json
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 SCHEMA = 1
 
@@ -74,12 +74,11 @@ SCHEMA = 1
 # Roles. The table and `infer_role` live in `placement.roles` (#1249): the
 # decap owner predicate (`placement.groups`) asks whether a part is a
 # regulator, and the placement engine must not import py_tools -- so the one
-# table moved where both can read it. Re-exported here for this tool's
-# callers.
+# table lives where both can read it. `infer_role` is re-exported here for
+# this tool's callers.
 # ---------------------------------------------------------------------------
 
-from placement.roles import (  # noqa: E402,F401
-    _ROLE_FP, _ROLE_PREFIX, _prefix, infer_role)
+from placement.roles import infer_role  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +164,7 @@ def mating_faces(pcb_data, pcb_file: str, clearance: float):
     # because run 23 seated four generic connectors mid-board and nothing said
     # so. WHERE the part's edge is, this measures from the BODY model rather
     # than reusing that function's number, because it reads `model.rect` --
-    # the quench's pad-box ladder, which this PR deliberately does not
+    # the placement state's pad-box ladder, which this PR deliberately does not
     # convert. Reusing it would put two different geometries on one sheet,
     # which is what #896 exists to stop: measured on esp_prog, USB1's pad box
     # sits 0.49mm inside the west edge while its drawn .Fab body overhangs it,
@@ -289,6 +288,30 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
     except Exception:                                        # noqa: BLE001
         faces_out = {}
 
+    # #1353: on a PILE the poses are staging, not decisions (#1103's rule,
+    # through the one pile predicate #1109 shares with emit_intent and
+    # board_brief). Every claim read off a pose -- a pin-order verdict, a
+    # leg distance, a nearest edge, a nearest-cap election -- is withheld
+    # unless every part it reads is KiCad-LOCKED, whose pose IS a decision.
+    # gp14 StickHub's pile printed 653 pin-order verdicts (124 CROSSED) and
+    # EMC leg distances with no pile notice.
+    pile = None
+    try:
+        from placement.placement_state import assess_placement
+        _st = assess_placement(pcb_data, pcb_file)
+    except Exception:                                        # noqa: BLE001
+        _st = None
+    _locked = {r for r, fp in (pcb_data.footprints or {}).items()
+               if getattr(fp, 'locked', False)}
+    if _st is not None and _st.pile:
+        pile = {'reasons': list(_st.reasons[:3]), 'locked': sorted(_locked),
+                'withheld': {}}
+
+    def _claim(*refs):
+        """A pose-derived fact about `refs` is a claim: not a pile, or
+        every one of them is locked."""
+        return pile is None or all(r in _locked for r in refs if r)
+
     parts = []
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         geom = bodies.get(ref)
@@ -297,7 +320,7 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
         if ref in declared_roles:
             inferred = role['role']
             role = {'role': declared_roles[ref], 'source': 'brief',
-                    'evidence': [f'declared in the design brief']}
+                    'evidence': ['declared in the design brief']}
             if inferred not in ('unknown', declared_roles[ref]):
                 role['contradicts_inference'] = inferred
 
@@ -347,11 +370,23 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
             'dnp': bool(getattr(fp, 'dnp', False)),
             'pads_by_face': side_pads,
             'partners': [{'ref': r, 'shared_nets': n} for n, r in partners],
-            'mating': faces_out.get(ref),
+            'mating': faces_out.get(ref) if _claim(ref) else None,
             'serves': ({'ref': tethers[ref][0],
                         'distance_mm': round(tethers[ref][1], 3)}
-                       if ref in tethers and tethers[ref][0] else None),
+                       if ref in tethers and tethers[ref][0]
+                       and _claim(ref, tethers[ref][0]) else None),
         })
+        if pile is not None:
+            if faces_out.get(ref) and not _claim(ref):
+                pile['withheld'].setdefault('parts[].mating', []).append(ref)
+            if (ref in tethers and tethers[ref][0]
+                    and not _claim(ref, tethers[ref][0])):
+                pile['withheld'].setdefault('parts[].serves', []).append(ref)
+
+    po = pin_order_rows(pcb_data, pcb_file, clearance)
+    emc = emc_roles_section(pcb_data)
+    if pile is not None:
+        _withhold_staged(po, emc, _claim, pile)
 
     return {
         'schema': SCHEMA,
@@ -364,10 +399,13 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
         # `find_differential_pairs` returns (positive, negative) tuples.
         'diff_pairs': [list(t) for t in sorted(pairs or ())],
         'parts': parts,
-        'pin_order': pin_order_rows(pcb_data, pcb_file, clearance),
+        'pin_order': po,
         # #1254: converters, crystals, oscillators and ESD arrays, each leg
         # measured and a ready `proximity[]` row beside it. Report only.
-        'emc_roles': emc_roles_section(pcb_data),
+        'emc_roles': emc,
+        # #1353: None on a placed board; on a pile, why, and every
+        # pose-derived claim withheld (by section, with the refs or count).
+        'pile': pile,
         'sources': {
             'emc_roles': 'placement.emc_roles (#1254): roles read off PIN '
                          'FUNCTIONS (SW/LX, VIN, PGND/GND; I/O or CH lines) '
@@ -405,7 +443,7 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
                       '`dist_mm` / `overhang_mm` measure to THAT edge; '
                       '`nearest_*` always to the nearest. Both from the '
                       'placement.body occupancy rect, because '
-                      'connector_edge_facts reads the quench pad-box ladder '
+                      'connector_edge_facts reads the placement state pad-box ladder '
                       'and would put two geometries on one sheet',
         },
     }
@@ -435,8 +473,8 @@ def _emc_md(sec) -> List[str]:
         L += [f"NOT MEASURED ({sec['error']}).", '']
         return L
     if not sec.get('roles'):
-        L += ['No switching converter, crystal, oscillator or ESD array is '
-              'named by the pins or the role table here.', '']
+        L += ['No switching converter, crystal, oscillator, ESD array or '
+              'ESD diode is named by the pins or the role table here.', '']
         return L
     L += [sec.get('note', ''), '', f"Legs: {sec.get('basis', '')}.", '']
     for r in sec['roles']:
@@ -468,12 +506,16 @@ def _emc_md(sec) -> List[str]:
                              f"{b['ref']}.{b['pad']}"
                              + (f" ({b['pin_function']})"
                                 if b.get('pin_function') else '')
-                             + f" | {a['net']} | {g['gap_mm']} | "
-                             f"{a['side']} / {b['side']} |")
+                             + f" | {a['net']} | "
+                             f"{'-' if g['gap_mm'] is None else g['gap_mm']}"
+                             f" | {a['side']} / {b['side']} |")
             L.append('')
             for pr in rows:
-                L.append(f"- row, worst leg {pr['worst_leg_mm']} mm: "
-                         f"`{json.dumps(pr['row'], sort_keys=True)}`")
+                _w = pr['worst_leg_mm']
+                L.append(f"- row, worst leg "
+                         + ('withheld (staging poses)' if _w is None
+                            else f"{_w} mm")
+                         + f": `{json.dumps(pr['row'], sort_keys=True)}`")
         L.append('')
     L += _keep_away_md(sec)
     return L
@@ -594,12 +636,12 @@ def pin_order_rows(pcb_data, pcb_file: str, clearance: float):
         # `PlacementModel` builds the QuenchState, resolving the board's own
         # floors and handling the no-outline fallback. Constructing one here
         # would be a second copy of a ten-argument block that has already
-        # drifted once (render vs place_optimize, before #431 fixed it).
+        # drifted once (before #431 fixed it).
         from render_placement import PlacementModel
         model = PlacementModel(pcb_data, pcb_file,
                                quench_kwargs={'clearance': clearance})
         if model.state is None:
-            return {'error': 'the quench state could not be built', 'rows': []}
+            return {'error': 'the placement state could not be built', 'rows': []}
         got = pair_inversions(model.state)
     except Exception as exc:                                 # noqa: BLE001
         return {'error': f'{type(exc).__name__}: {exc}', 'rows': []}
@@ -682,6 +724,42 @@ def pin_order_rows(pcb_data, pcb_file: str, clearance: float):
     rows.sort(key=lambda r: (r['scope'] == 'interface',
                              -(r['inversions'] or 0), r['a'], r['b']))
     return {'error': None, 'rows': rows, 'pairs': census}
+
+
+STAGED = 'withheld: the board is a pile, so this pose is staging (#1353)'
+
+
+def _withhold_staged(po, emc, claim, pile):
+    """On a pile, take every pose-derived claim out of the pin-order and
+    EMC sections unless all the parts it reads are locked (#1353), and
+    count what went into `pile['withheld']`. The netlist half stays: which
+    parts share which nets, which pins a role names, the proposed rules."""
+    rows = po.get('rows') or []
+    kept = [r for r in rows if r.get('error') or claim(r['a'], r['b'])]
+    if len(kept) != len(rows):
+        pile['withheld']['pin_order.rows'] = len(rows) - len(kept)
+        po['rows'] = kept
+    n_legs = 0
+    for role in (emc or {}).get('roles') or ():
+        for pr in role.get('proximity') or ():
+            for g in pr.get('legs') or ():
+                if not claim(g['from']['ref'], g['to']['ref']):
+                    g['gap_mm'] = None
+                    g['withheld'] = STAGED
+                    n_legs += 1
+            if any(g.get('withheld') for g in pr.get('legs') or ()):
+                pr['worst_leg_mm'] = None
+    if n_legs:
+        pile['withheld']['emc_roles legs'] = n_legs
+    n_ka = 0
+    for p in (emc or {}).get('keep_away') or ():
+        refs = [p['clock']['part']] + [s['part'] for s in p['switch_nodes']]
+        if not claim(*refs):
+            p['measured'] = {'state': STAGED}
+            p['inside_now'] = None
+            n_ka += 1
+    if n_ka:
+        pile['withheld']['emc_roles keep_away measured'] = n_ka
 
 
 def _pair_error_row(what, exc):
@@ -986,6 +1064,25 @@ def format_md(doc) -> str:
     if doc.get('panels_error'):
         L.append(f"PANELS NOT WRITTEN ({doc['panels_error']}).")
         L.append('')
+    pile = doc.get('pile')
+    if pile:
+        # #1353: BEFORE any number, as board_brief says it.
+        L.append('')
+        L.append('**This board is a PILE** ('
+                 + '; '.join(pile.get('reasons') or ()) + '): its poses are '
+                 'staging, not decisions. Every claim read off a pose -- a '
+                 'pin-order verdict, a leg distance, a mating edge, a '
+                 'nearest-cap election -- is WITHHELD unless every part it '
+                 'reads is KiCad-locked'
+                 + (f" ({', '.join(pile['locked'][:8])}"
+                    + ('...' if len(pile['locked']) > 8 else '') + ')'
+                    if pile.get('locked') else ' (none is)')
+                 + '. A part\'s printed `pose` is where the file has it. '
+                 'Withheld: '
+                 + (', '.join(f"{k} {v if isinstance(v, int) else len(v)}"
+                              for k, v in sorted(pile['withheld'].items()))
+                    or 'nothing') + '.')
+        L.append('')
     pc = doc.get('pours')
     if pc is None:
         L.append('Copper pours: NOT MEASURED.')
@@ -1006,9 +1103,17 @@ def format_md(doc) -> str:
     po = doc['pin_order']
     L.append('## Pin-order agreement')
     L.append('')
+    _po_withheld = ((pile or {}).get('withheld') or {}).get('pin_order.rows')
+    if _po_withheld:
+        L.append(f"{_po_withheld} pin-order row(s) WITHHELD: the board is a "
+                 f"pile, and a verdict measured at staging poses is not a "
+                 f"claim. Place the parts, then read this section.")
+        L.append('')
     if po.get('error'):
         L.append(f"NOT MEASURED ({po['error']}) -- this sheet cannot say "
                  f"whether any pair's order crosses.")
+    elif not po['rows'] and _po_withheld:
+        pass
     elif not po['rows']:
         L.append('No two parts share 2 or more nets, so there is no pin order '
                  'to agree about.')
@@ -1216,7 +1321,7 @@ def main(argv=None):
     # Everything the LIBRARIES print goes to stderr while the document is
     # built. `cli_banner` is not the only thing that can poison a bare-JSON
     # stdout: `parser.warn_missing_courtyards` prints to stdout from inside
-    # the quench, and on esp_prog -- 18 courtyard-less parts -- that alone
+    # the placement state, and on esp_prog -- 18 courtyard-less parts -- that alone
     # made `--json` a JSONDecodeError at char 2. The warning is worth keeping;
     # it just is not part of the document.
     with contextlib.redirect_stdout(sys.stderr):

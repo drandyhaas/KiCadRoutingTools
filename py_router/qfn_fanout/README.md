@@ -20,25 +20,43 @@ Creates escape routing for QFN (Quad Flat No-leads) and QFP (Quad Flat Package) 
   (two RP2040s, pin rows 1.7 mm apart) the second chip's USB pair could not escape
   in one order and coupled in the other. The result is now the same in either
   order (`tests/test_qfn_neighbour_escape_room.py`).
+- **A stub ends on a same-net pad it reaches** (#1332) - every clearance test skips
+  same-net pads, so a fan could clip its pin's own decoupling cap and run on past it,
+  leaving a dangling tail route.py keeps as input copper. Each stub is now walked
+  against the exact pad copper and ends at its deepest contact with the first
+  same-net pad it overlaps. If that contact joins through a web below the board's
+  connection-width floor (a corner graze), a short closing segment runs into the
+  pad -- the same connector close_soft_joints adds (#416), decided by the same
+  KiCad-exact erosion -- and only if it clears every foreign object. Such a stub has
+  no tip for the router to launch from, so it is left out of the endpoint check.
 - **Collision validation** - Checks endpoint spacing after generation
 - **Pad-geometry sanity check** - Runs `check_pads.py` on the component first; if its pads
   overlap (a sign the pad rotation/size is modelled wrong) it warns before escaping.
+- **Board rules honoured** - a `.kicad_dru` clearance rule for the escape layer replaces
+  `--clearance` exactly (the stubs live on one layer, #498); stubs and vias keep the board's
+  copper-to-edge clearance; a `--width` below the board's fab track floor is clamped up to
+  it (#223); the project's same-net-pad record (#581) is read.
+- **Auto-pick** - with no `--component`, the QFN (else QFP) candidates lose connector and
+  marker parts and are ranked by name (QFN/QFP/DFN/MLF in the footprint name), then pin
+  count; the ranking is printed.
+- **Not a QFN, said so** - a part whose pads span a single line (an edge-finger row, a
+  single-row header) is refused by name and nothing is written (#1195).
 
 ## Usage
 
 ```bash
 # Basic fanout
-python py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb
+python3 py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb
 
 # With net filter (include pattern)
-python py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb --nets "*DATA*"
+python3 py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # With exclusion pattern (all nets except GND and VCC)
-python py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
+python3 py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
     --nets "*" "!GND" "!VCC"
 
 # Specify layer and track width
-python py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
+python3 py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
     --layer F.Cu --width 0.15
 ```
 
@@ -54,22 +72,67 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `!*VCC*` | Exclude nets containing "VCC" |
 | `"*" "!GND" "!VCC"` | All nets except GND and VCC |
 
-**Note:** Nets starting with "unconnected-" (KiCad pins not connected in schematic) are automatically excluded.
+**Note:** Nets starting with "unconnected-" (KiCad pins not connected in schematic) are automatically excluded,
+and so is any net with **a single pad on the whole board** (#1342) -- a spare pin the schematic still names
+(an unused DPHY/HDMI/SD lane on a CM4/CM5 module) has nothing to connect to, so its escape would be copper
+that only blocks routing. This is bga_fanout's #122 rule (`single_pad_net_ids`), applied whatever `--nets`
+says; the run prints `Skipping N single-pad/NC net(s)` and `JSON_SUMMARY` carries `skipped_nc`. Such a net
+counts as neither requested nor failed.
 
 ## Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--component`, `-c` | Component reference | Auto-detect QFN/QFP |
-| `--output`, `-o` | Output PCB file | qfn_fanout_test.kicad_pcb |
+| `--output`, `-o` | Output PCB file | kicad_files/qfn_fanout_test.kicad_pcb |
 | `--layer`, `-l` | Routing layer for the stubs; any layer but the part's own warns, since the stubs then miss its SMD pads (#96). GUI: the QFN panel's **Escape layer** | the layer the part is mounted on |
-| `--width`, `-w` | Track width (mm) | 0.1 |
-| `--extension` | Extension past pad edge before bend (mm) | 0.1 |
+| `--width`, `--track-width`, `-w` | Track width (mm) | 0.1 |
+| `--extension` | Extension past pad edge before bend (mm) | 0.05 |
+| `--clearance` | Clearance to other-net copper (mm). Omitted, it is the board's **Default net-class** clearance, as on `route.py` (0.1 only when the board declares no Default class); `--clearance-ceiling` caps it. GUI: the QFN panel's **Clearance** box, unchecked = the board's value (#1328) | the board's Default class |
 | `--nets`, `-n` | Net patterns to include | All nets |
+| `--grid-step` | Routing grid step (mm); stub ends are snapped to it (#149). Match the `--grid-step` you give `route.py` | 0.1 |
 | `--escape-method` | `stub` (surface 45° fan) or `underpad` (via-drop); with `--nets`, `underpad` also escapes **interior (under-body) pads** (issue #410) | stub |
 | `--via-size` | Underpad escape via outer diameter (mm) | 0.45 |
 | `--via-drill` | Underpad escape via drill diameter (mm) | 0.25 |
+| `--board-edge-clearance` | Stub/via copper to the Edge.Cuts outline (mm); stubs are shortened or dropped, underpad vias near the edge rejected (#288) | the board's `min_copper_edge_clearance`, else `--clearance` |
 | `--allow-via-in-pad` | Underpad escape: let the via overlap its **own** pad so it can stagger *inward* (via-in-pad) | off |
+| `--same-net-pad-clearance` | `> 0` forbids via-in-pad (overrides `--allow-via-in-pad`) and is recorded in the sibling `.kicad_pro` for later steps (#581); `-1` allows it | the project's record, else allowed |
+| `--add-teardrops` | Add teardrop settings to all pads and vias in the output | off |
+
+The fab floor and escalation flags every routing step shares (`--fab-tier`,
+`--fab-overrides`, `--escalation`, `--clearance-ceiling`, `--strict-sizes`) and
+the post-run DRC-settings flags (`--no-fix-drc-settings`,
+`--relax-drc-severities`, `--keep-thermal`, `--enable-used-layers`) are
+described in [Configuration](../../docs/configuration.md#fab-tier-options).
+
+### Clearance: the board's own, escalating only where a pad needs it (#1328)
+
+An omitted `--clearance` is the board's Default net-class clearance, capped by
+`--clearance-ceiling` -- the reading `route.py` gives its own flags, through one
+resolver (`resolve_qfn_clearance`) that the GUI QFN panel calls too. It used to
+default to 0.1, and since a fanout's writeback clamps every net class to the
+clearance it escaped at, a chain's `--clearance-ceiling 0.15` lowered the
+Default and Power classes 0.15 -> 0.1 and every later step routed the board at
+0.1, while the same part escaped every pad at 0.15.
+
+A surface stub whose straight escape cannot clear at the run clearance used to
+be dropped. When `--escalation` allows a descent (the default, `fab`), it is
+retried down a ladder (`qfn_clearance_ladder`: 0.005 mm steps plus the tier's
+own rungs, to the deepest rung `fab_tiers.escalation_rungs` allows -- the fab
+floor under `fab`, the board's declared minimum under `board`, nothing under
+`off`) and keeps the first clearance it clears at; its 45-degree fan is
+shortened at that same clearance. A `.kicad_dru` rule on the escape layer
+states that layer's clearance, so a ruled layer does not escalate.
+
+Each escalated stub is disclosed the way `route.py` discloses a descent: a
+`clearance` row (site `qfn escape`) in `JSON_SUMMARY.design_rules` and the
+end-of-run `Design rules [...]` line, a fab-tier escalation when the rung is
+below the tier's nominal floor, and `JSON_SUMMARY.escalated` (pad, net, rung).
+The project floor written back is the lowest rung a stub actually cleared at --
+never the fab floor the ladder was allowed to reach -- and a Default class it
+lowers is recorded and announced by the writeback's descent record (#1160), so
+the next step says so. A run in which nothing escalates writes the run
+clearance, as before. `drc_grazes` is graded at that written floor.
 
 ### Under-pad (via-drop) escape — `--escape-method underpad` (issue #164)
 
@@ -116,9 +179,12 @@ via at this pitch — which on a fine-pitch part is larger than the pad. On
 already half a pad-length off centre and rung 8 reaches ±3.42 mm. Measured, the
 flag's rungs are load-bearing: with it on, this ladder won 66 of 84 accepted
 offsets on `routed_output` U2 and every one on `tigard`, `qfn_underpad_coupling`
-and `qfn_diffpair_escape`, and it owns the longest emitted stub there (2.9924 mm).
-So the offsets stay and the name was the wrong half. Set
-`KICAD_QFN_ONPAD_REACH` to confine them (see below).
+and `qfn_diffpair_escape`, and it owns the longest emitted stub there (3.0125 mm;
+the ladder asks for a 2.9924 mm offset at that rung, before the via is snapped to
+the routing grid). So the offsets stay and the name was the wrong half.
+`KICAD_QFN_ONPAD_REACH` confines them: `pad` keeps the via centre on the pad,
+`barrel` the whole barrel; `full` (the default, and any unrecognised value) leaves
+the ladder whole.
 
 A via that **does** overlap its pad is clamped to the pad edge so it cannot bulge
 past it (#202), and needs IPC-4761 Type VII (filled + capped + plated) — the run
@@ -176,6 +242,22 @@ qfn_fanout/
 - **`QFNLayout`** - Package layout parameters
 - **`PadInfo`** - Analyzed pad information
 - **`FanoutStub`** - Represents a fanout stub with two segments
+
+## Output
+
+The fanned board is written to `--output` (passed through unchanged, project
+and all, when nothing was drawn), and the run ends with a `JSON_SUMMARY:` line:
+`requested` / `escaped` / `failed` / `unescaped_nets` (a stub-less via-in-pad
+escape counts as escaped), `clearance`, `track_width`, `escape_method`,
+`via_size`, `via_drill`, `layer`, `drc_grazes` (a `check_drc` pass over the
+output at `--clearance`: `pad_via`, `via_segment`, `pad_segment`,
+`segment_segment`, `total`; #179), `min_clearance_used`, `allow_via_in_pad`
+(plus `via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre` and
+`max_stub_mm` for an underpad run), `env_knobs`, and `design_rules` when a
+feature was delivered below its requested size. Unless `--no-fix-drc-settings`,
+the output's `.kicad_pro` DRC floors are lowered to what the fanout drew (#160);
+a run that drew no copper writes no floors, and the via floors are written only
+when it drew a via.
 
 ## Algorithm
 

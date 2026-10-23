@@ -59,7 +59,7 @@ def _sample_path(path: List[Tuple[int, int, int]], step: int = 1) -> List[Tuple[
     return sampled
 
 from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
-from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, bus_attraction_context, bus_stick_config, BusGroup
+from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, bus_attraction_context, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
@@ -80,7 +80,8 @@ from net_queries import get_chip_pad_positions, calculate_route_length
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from single_ended_routing import (route_net_with_obstacles,
                                   route_multipoint_main, route_oracle_links,
-                                  deferred_diagnostics, flush_diagnostics)
+                                  deferred_diagnostics, flush_diagnostics,
+                                  uncommit_dropped_result)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
 from protected_nets import rip_refusal
 from rip_up_reroute import rip_up_net, restore_net
@@ -137,13 +138,24 @@ def _route_on_prepared_map(pcb_data, net_id, config, state, routed_net_ids,
     included), no own-pad lift, no free vias -- and the net's OWN cached copper
     back on the map as an obstacle, which blocked rescues that should succeed
     (#1146 audit: 6 of 10 two-pad nets on a fanned board against 10 of 10 on
-    a prepared map)."""
+    a prepared map).
+
+    A net carrying exact-fill oracle links (#572) routes THEM, as the main
+    pass does: endpoint derivation reads the fill model, whose zone credit
+    merges the clusters KiCad grades apart, so a derived route "succeeds" on
+    a pour cell of an island (on a GND net the stub-swap rescue reported
+    a connector pin routed with one segment and it shipped open)."""
     _stubs, via_cells = prepare_obstacles_inplace(
         state.working_obstacles, pcb_data, config, net_id,
         state.all_unrouted_net_ids, routed_net_ids, track_proximity_cache,
         layer_map, state.net_obstacles_cache,
         state.ripped_route_layer_costs, state.ripped_route_via_positions)
     try:
+        _olinks = (getattr(state, 'oracle_links_by_net', None)
+                   or {}).get(net_id)
+        if _olinks:
+            return route_oracle_links(pcb_data, net_id, config,
+                                      state.working_obstacles, _olinks)
         return route_net_with_obstacles(pcb_data, net_id, config,
                                         state.working_obstacles)
     finally:
@@ -353,9 +365,32 @@ def _stub_swap_rescue(pcb_data, net_id, config, state, results,
                         state.ripped_route_via_positions,
                         refused_sink=state.collision_refused_net_ids)
 
+    # #572: a stub carrying an exact-fill link end is the copper KiCad
+    # anchored that link on; re-layering it would leave the forced link
+    # aimed at a point with nothing under it on that layer.
+    _anchors = [(a[0], a[1], a[2]) for link in
+                ((getattr(state, 'oracle_links_by_net', None) or {})
+                 .get(net_id) or ()) for a in link]
+
+    def _carries_link_end(stub):
+        if not _anchors:
+            return False
+        from geometry_utils import point_to_segment_distance
+        from stub_layer_switching import stub_switch_segments
+        for s in stub_switch_segments(pcb_data, stub):
+            for ax_, ay_, al_ in _anchors:
+                # None / '*.Cu': a via or plated barrel, on every layer
+                if al_ is not None and '*' not in al_ and al_ != s.layer:
+                    continue
+                if point_to_segment_distance(ax_, ay_, s.start_x, s.start_y,
+                                             s.end_x, s.end_y) \
+                        <= s.width / 2.0 + 0.05:
+                    return True
+        return False
+
     for (sx, sy, slayer) in ends[:2]:
         stub = get_stub_info(pcb_data, net_id, sx, sy, slayer)
-        if stub is None:
+        if stub is None or _carries_link_end(stub):
             continue
         for dest in cand_layers:
             if dest == slayer:
@@ -391,6 +426,13 @@ def _stub_swap_rescue(pcb_data, net_id, config, state, results,
                 continue
             new_vias, seg_mods = apply_stub_layer_switch(
                 pcb_data, stub, dest, config, debug=False)
+            # The pad via must clear every existing hole (same net included)
+            # by hole-to-hole -- the same funnel as the optimizer sites.
+            from layer_swap_optimization import _swap_vias_fit_or_shrink
+            if new_vias and not _swap_vias_fit_or_shrink(pcb_data, new_vias, config):
+                revert_stub_layer_switch(pcb_data, seg_mods, new_vias)
+                _restore_rips(rips)
+                continue
             result = _route_on_prepared_map(pcb_data, net_id, config, state,
                                             routed_net_ids,
                                             track_proximity_cache, layer_map)
@@ -633,11 +675,9 @@ def route_single_ended_nets(
             single_ended_nets = reordered_nets
             print()
 
-            # Rip-resistance + reroute-attraction transport: the ladder rank
-            # (blocking_analysis) and the reroute loop run far from this
-            # scope, so carry membership on config/state (the
+            # Reroute-attraction transport: the reroute loop runs far from
+            # this scope, so carry membership on state (the
             # corridor_waypoints precedent for config-attached data).
-            config.bus_member_net_ids = bus_net_ids_set
             state.bus_net_to_group = bus_net_to_group
             state.bus_corridors = bus_corridors
             # Net-story recording: each member's group/position/corridor.
@@ -778,17 +818,13 @@ def route_single_ended_nets(
                 attraction_path = (_sample_path(_riv) if _riv is not None
                                    else _sample_path(_gp.rough_paths[net_id]))
                 reverse_direction = False
-        # Off-lane surcharge (the stick): members with a corridor pay
-        # scaled step costs everywhere EXCEPT near the lane, where the
-        # attraction discount compensates -- defection costs real money.
-        cfg_route = bus_stick_config(config, attraction_path)
         # #589 option 2 (KICAD_GLOBAL_PLAN_LAYER=pref): soft discount on the
         # net's plan-assigned layer so corridor cliques pack N layers deep
         # instead of all fighting for the probes' shared favorite layer.
         # Unchanged cfg_route when the plan/knob is off or the net has no
         # assignment.
         from global_plan import plan_layer_config, power_layer_config
-        cfg_route = plan_layer_config(cfg_route, config, net_id)
+        cfg_route = plan_layer_config(config, config, net_id)
         # #658 power discipline: power nets get their own layer economics
         # (off the highways, dive-fast) -- see power_layer_config.
         cfg_route = power_layer_config(cfg_route, config, net_id)
@@ -1056,11 +1092,14 @@ def route_single_ended_nets(
                                 # Validator-proved blocker that is PRE-EXISTING
                                 # copper: surface the rip-existing hint NOW
                                 # instead of only after the ladder exhausts --
-                                # unless it is KiCad-locked, which no flag
-                                # authorizes (#1261).
-                                from protected_nets import cached_protection_map
-                                if cached_protection_map(pcb_data).get(_bn) == 'locked':
-                                    _protected_blame.append(f"{_bn!r} (locked)")
+                                # unless it is KiCad-locked or held by a
+                                # `sense:` group, which no flag authorizes
+                                # (#1261, #1279).
+                                from protected_nets import (cached_protection_map,
+                                                            never_lifts)
+                                _bwhy = cached_protection_map(pcb_data).get(_bn)
+                                if never_lifts(_bwhy):
+                                    _protected_blame.append(f"{_bn!r} ({_bwhy})")
                                 else:
                                     _unrippable_blame.append(_bn)
                                 continue
@@ -1327,7 +1366,6 @@ def route_single_ended_nets(
                             retry_attraction_path = plan_attraction_path(
                                 config, net_id, pcb_data)
                             retry_reverse_direction = False
-                        retry_cfg = bus_stick_config(config, retry_attraction_path)
                         # #572: a forced-link net retries its EXACT links
                         # against the post-rip board (same reason as the
                         # initial attempt: derivation is model-blind to the
@@ -1339,17 +1377,17 @@ def route_single_ended_nets(
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
                         if _olinks_r:
                             retry_result = route_oracle_links(
-                                pcb_data, net_id, retry_cfg, retry_obstacles,
+                                pcb_data, net_id, config, retry_obstacles,
                                 _olinks_r,
                                 attraction_path=retry_attraction_path)
                         elif retry_multipoint_pads:
-                            retry_result = route_multipoint_main(pcb_data, net_id, retry_cfg, retry_obstacles, retry_multipoint_pads,
+                            retry_result = route_multipoint_main(pcb_data, net_id, config, retry_obstacles, retry_multipoint_pads,
                                                                  attraction_path=retry_attraction_path, state=state)
                             # Track for Phase 3 completion after length matching
                             if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                 state.pending_multipoint_nets[net_id] = retry_result
                         else:
-                            retry_result = route_net_with_obstacles(pcb_data, net_id, retry_cfg, retry_obstacles,
+                            retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles,
                                                                      attraction_path=retry_attraction_path,
                                                                      reverse_direction=retry_reverse_direction)
 
@@ -1481,6 +1519,9 @@ def route_single_ended_nets(
                                                                              state.net_obstacles_cache[_rid])
                                         _eager_ok.append((_rid, _pr))
                                         continue
+                                    # Probe mode drops the reroute; its #189
+                                    # unblock copper (#803) goes with it.
+                                    uncommit_dropped_result(pcb_data, _pr)
                                     if _p_via_cells is not None:
                                         restore_obstacles_inplace(state.working_obstacles, _rid,
                                                                   state.net_obstacles_cache, _p_via_cells)
@@ -1702,13 +1743,18 @@ def route_single_ended_nets(
                         _c652 = condense_hint(_h652)
                         if _c652:
                             print(f"  {_c652}")
-                        record_net_event(state, net_id, "fanout_dropped",
-                                         _v652)
+                        if (_v652 or {}).get('verdict') == 'fanout_dropped':
+                            record_net_event(state, net_id, "fanout_dropped",
+                                             _v652)
                 except Exception:
                     pass
+                # A forced oracle link (#572) failed between its OWN
+                # endpoints: attribute there (#1324).
+                _link301 = (result or {}).get('failed_link')
                 hint301, blockers301 = preexisting_blocker_hint(
                     _cells301, config, pcb_data, net_id,
-                    routed_net_ids=state.routed_net_ids, return_names=True)
+                    routed_net_ids=state.routed_net_ids, return_names=True,
+                    anchors=list(_link301) if _link301 else None)
                 if hint301:
                     _c301 = condense_hint(hint301)
                     if _c301:

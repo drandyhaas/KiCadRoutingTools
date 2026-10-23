@@ -38,7 +38,6 @@ sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 from kicad_parser import BoardInfo, Net, PCBData, Pad, Segment, Via
 from routing_config import GridRouteConfig
 import repair_planes as rdp
-import route_trace
 
 GND, SIG = 2, 5
 FAILURES = []
@@ -97,10 +96,8 @@ def main():
 
     orig_tap = rdp.tap_pad_with_escalation
     orig_blk = rdp._via_site_consensus_blocker
-    orig_cap = route_trace.plane_capture
     rdp.tap_pad_with_escalation = fake_tap
     rdp._via_site_consensus_blocker = lambda *a, **k: SIG
-    route_trace.plane_capture = lambda *a, **k: None
     ripped_net_ids, partial_restores = [], []
     try:
         res = rdp._tap_pad_with_ripup(
@@ -114,7 +111,6 @@ def main():
     finally:
         rdp.tap_pad_with_escalation = orig_tap
         rdp._via_site_consensus_blocker = orig_blk
-        route_trace.plane_capture = orig_cap
 
     _check("the tap still reports failure", res is None)
 

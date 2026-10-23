@@ -118,6 +118,9 @@ REGISTRY = {
         NO_LIFT, 'QFN fanout; as for BGA fanout'),
     ('py_router/qfn_fanout/__init__.py', '_underpad_via_escape'): (
         NO_LIFT, 'QFN under-pad escape; as for BGA fanout'),
+    ('py_router/qfn_fanout/__init__.py', '_map_at'): (
+        NO_LIFT, "QFN fanout's stub map at an escalation rung or a power "
+                 "net's width (#1328, #1318); built as generate_qfn_fanout's"),
     ('py_router/route_planes.py', 'main'): (
         NO_LIFT, 'plane base map (the standalone plane CLI)'),
     ('py_router/route_planes.py', 'route_plane_connection'): (

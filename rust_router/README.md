@@ -1,57 +1,100 @@
 # Rust Grid Router
 
-High-performance A* grid router implemented in Rust with Python bindings via PyO3.
+The compiled half of KiCad Routing Tools: the Python extension module
+`grid_router`, built from this crate with PyO3. It holds the router's A*
+searches and obstacle map, the placer's per-move kernels, and the grid searches
+of the `awx/` whole-route bus router. The rest is Python that calls in here.
 
-**Current Version: 0.23.0**
+**Current Version: 0.23.7** (the crate version in `Cargo.toml`)
 
-> **Release note:** the 0.20.0 per-platform binaries are published as of
-> [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
-> and `/VERSION` + `metadata.json` name that release. `build_router.py`
-> fetches them directly -- a plain `python build_router.py` is enough, and
-> `--from-source` is only needed when testing local Rust changes.
+> **Release note:** the newest published release is
+> [v0.23.7](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.23.7)
+> (2026-10-23), and its binaries are crate 0.23.7 (the placement kernels).
+>
+> A release's binaries are built from the crate at its tag, and `/VERSION` can
+> lead `Cargo.toml` (a Python-only release bumps only `/VERSION`), so a release
+> can carry an older crate than its own number:
+>
+> | Release | Crate binaries |
+> |---|---|
+> | v0.23.7 | 0.23.7 |
+> | v0.23.1 | 0.23.1 |
+> | v0.23.0 | 0.23.0 |
+> | v0.22.0, v0.22.1 | 0.22.0 |
+> | v0.21.5 | 0.21.4 |
+> | v0.21.1 to v0.21.4 | 0.21.1 |
+> | v0.20.2 to v0.20.4 | 0.20.1 |
+> | v0.20.0, v0.20.1 | 0.20.0 |
 
 ## Features
 
-- Grid-based A* pathfinding with octilinear routing (8 directions)
-- Multi-source, multi-target routing
-- Via cost and layer transitions
-- BGA exclusion zone with allowed cell overrides
-- Stub proximity costs to discourage routing near unrouted stubs (flat cost model for accurate heuristic estimation)
-- **Turn cost penalty** for direction changes - encourages straighter paths with fewer wiggles
-- **Cross-layer track attraction** for vertical alignment - attracts routes to stack on top of tracks on other layers
-- **Layer cost preferences** - per-layer cost multipliers to prefer certain layers (e.g., keep signals on F.Cu, avoid B.Cu). Default: F.Cu=1.0x, others=3.0x
-- **Pose-based routing with Dubins heuristic** for differential pair centerlines (orientation-aware A*)
-- **Rectangular pad obstacle blocking** with proper rotation handling
-- **Collinear via constraint** for differential pair routing (ensures clean via geometry)
-- **Via exclusion zones** to prevent routes from conflicting with their own vias (for diff pair P/N offset tracks)
-- ~10x speedup vs Python implementation
+Routing (`GridObstacleMap`, `GridRouter`, `PoseRouter`), about 10x faster than
+the original pure-Python A* it replaced (measured then; there is no Python A* left to compare with):
+
+- Grid A* with octilinear moves (8 directions), multi-source and multi-target, with via cost and layer transitions
+- **Per-layer costs** (`layer_costs`) to prefer some layers (route.py's default: all 1.0x on 4+ layers, else F.Cu 1.0x and the others 3.0x); a negative entry makes a layer FORBIDDEN -- never routed on, still an obstacle, spanned by through-vias (#206)
+- **Per-layer direction preferences**: a penalty on progress along a layer's non-preferred axis, diagonals included (#452), in both routers (#658)
+- **Turn cost** proportional to the turn angle, for straighter paths with fewer wiggles
+- **Proximity costs**: stub proximity, per-layer track proximity, BGA exclusion zones and their proximity rings, and an optional proximity term in the heuristic for dense boards
+- **Cross-layer track attraction** ("vertical alignment"): routes stack over tracks on other layers, leaving room for vias
+- **Bus path attraction**: a member follows an earlier member's path, by a direction-aware step discount and an optional potential-shaped term (#656)
+- **Wide tracks**: an exact swept-capsule clearance check with a fractional, per-layer margin (#156/#173)
+- **Via legality per via size** ("rungs", #568/#530), and **free vias**: an existing same-net hole is reused at no cost
+- **Pose-based routing with a Dubins heuristic** for differential-pair centerlines: headings at both ends, P/N via spacing, straight runs around vias, GND-via sites, a cumulative-turn limit
+- **Frontier analysis**: a failed search returns the cells that stopped it, and `identify_blocking_obstacles` maps those cells to the nets that own them, for rip-up
+- A reference-counted obstacle map that nets are stamped into and removed from incrementally, a bitmap for permanent board geometry (#422), and column-span batch stamping (#815)
+
+Placement (`placement_kernels.rs`): the airwire trees, crossings, foreign-pad
+hits, group gaps, courtyard overlaps and congestion that the placer prices for
+every candidate move.
+
+Whole-route bus router (`awx/`): the snap step's grid search for a single lane
+and for a pair (`lane_search`, `pair_search`).
 
 ## Installing
 
-Most users do **not** need to build this themselves. From the project root:
+Most users do **not** build this themselves. From the project root:
 
 ```bash
-python build_router.py
+python3 build_router.py
 ```
 
-This downloads a prebuilt binary for your OS (Linux x86_64, macOS arm64
-+ x86_64, or Windows x86_64) from the project's
-[GitHub Releases](https://github.com/drandyhaas/KiCadRoutingTools/releases)
-and drops it into `rust_router/`. Prebuilts use PyO3's `abi3-py39`, so one
-binary works for any Python 3.9+ interpreter.
+It installs `rust_router/grid_router.so` (`grid_router.pyd` on Windows) and
+checks that it imports, in a fresh interpreter. In order:
 
-Useful flags:
+1. If this checkout's `rust_router/` differs from `origin/main` (committed
+   branch changes, local edits or untracked files; outside a git checkout this
+   step is skipped), it builds from source:
+   release binaries are built from main's crate, and one could carry the right
+   version string yet take different arguments (#615).
+2. Otherwise it looks up the latest GitHub Release. If `Cargo.toml` is newer
+   than that release, no published binary can match, so it builds from source.
+   Otherwise it downloads the binary for your platform (Linux x86_64, macOS
+   arm64 or x86_64, Windows x86_64) from
+   [GitHub Releases](https://github.com/drandyhaas/KiCadRoutingTools/releases).
+   Prebuilts use PyO3's `abi3-py39`, so one binary works for any Python 3.9+.
+3. If the download fails, or the downloaded binary's version is not the one in
+   `Cargo.toml` (a stale release asset), it builds from source.
 
 ```bash
-python build_router.py --from-source   # build locally instead of downloading
-python build_router.py --tag v0.15.0   # pin to a specific release
-python build_router.py --clean         # remove all build artifacts
+python3 build_router.py --from-source   # skip the download and build locally
+python3 build_router.py --tag v0.23.7   # download that release (skips 1 and 2; 3 still applies)
+python3 build_router.py --clean         # remove target/ and every grid_router.so/.pyd copy
 ```
 
 ## Building from source
 
-If a prebuilt isn't available for your platform, or you're hacking on the
-router, build with cargo via `python build_router.py --from-source`.
+`--from-source`, and every fallback above, runs `cargo build --release` in
+`rust_router/` and copies the library to where Python imports it:
+
+| Platform | Built | Installed as |
+|---|---|---|
+| Linux | `target/release/libgrid_router.so` | `rust_router/grid_router.so` |
+| macOS | `target/release/libgrid_router.dylib` | `rust_router/grid_router.so` |
+| Windows | `target/release/grid_router.dll` | `rust_router/grid_router.pyd` |
+
+It also deletes stale `grid_router.*` copies from the project root, which would
+shadow this one, and checks the import. Use it rather than running cargo by hand.
 
 ### Prerequisites
 
@@ -66,65 +109,38 @@ router, build with cargo via `python build_router.py --from-source`.
 1. Install Rust from https://rustup.rs/
 2. Ensure you have a C compiler (gcc/clang) installed
 
-## Release process (maintainers)
+## Releases (maintainers)
 
-Tagging a commit `vX.Y.Z` triggers `.github/workflows/release.yml`, which
-builds the router on four runners and attaches the binaries to a GitHub
-Release of the same name:
+The checklist is [docs/release-pipeline.md](../docs/release-pipeline.md). In
+short: pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which builds
+the four binaries from the tagged crate (macOS x86_64 cross-compiled on the
+arm64 runner) and attaches them to the GitHub Release that `build_router.py`
+downloads from. A crate change bumps `Cargo.toml` and adds an entry to the
+[Version History](#version-history), and the release that ships it sets
+`/VERSION` and `metadata.json` to the same version; a Python-only release bumps
+only `/VERSION` and republishes the current crate's binaries.
 
-```bash
-git tag v0.15.0
-git push origin v0.15.0
-```
+## Version check at startup
 
-`build_router.py` then serves that release to users automatically.
+`route.py`, `route_diff.py`, `route_planes.py` and `repair_planes.py` run
+`py_router/startup_checks.py` as they start. It puts `rust_router/` first on
+`sys.path`, imports `grid_router`, and requires its `__version__` to equal the
+version in `Cargo.toml` (it also checks numpy, scipy and shapely against
+`requirements.txt`). A missing or mismatched module stops the run with the
+reason and `python3 build_router.py`; nothing is rebuilt automatically.
+`install_plugin.py` makes the same version check, and the plugin's About tab
+shows the version it loaded.
 
-**Manual build (alternative):**
-```bash
-cd rust_router
-cargo build --release
-```
-
-### Installing the Python Module
-
-After building, copy the compiled library to this directory:
-
-**Windows:**
-```bash
-cp target/release/grid_router.dll grid_router.pyd
-```
-
-**Linux:**
-```bash
-cp target/release/libgrid_router.so grid_router.so
-```
-
-**macOS:**
-```bash
-cp target/release/libgrid_router.dylib grid_router.so
-```
-
-The `route.py` script automatically adds this directory to the Python path.
-
-### Automatic Version Checking
-
-When `route.py` starts, it automatically:
-1. Checks that numpy is installed
-2. Verifies the Rust library version matches `Cargo.toml`
-3. Rebuilds automatically if there's a version mismatch
-
-This ensures you're always running the correct version of the Rust router.
-
-### Using maturin (alternative)
-
-```bash
-pip install maturin
-maturin develop --release
-```
+The crate's global allocator is mimalloc. The routing modules import
+`py_router/rust_alloc.py` before `grid_router`; it sets `MIMALLOC_PURGE_DELAY=0`
+(unless already set) so the memory of discarded obstacle maps goes back to the
+OS (#419).
 
 ## Usage from Python
 
 ```python
+import sys
+sys.path.insert(0, "rust_router")   # from the project root
 import grid_router
 from grid_router import GridObstacleMap, GridRouter
 
@@ -165,125 +181,245 @@ else:
     print(f"No path found after {iterations} iterations")
 ```
 
-## Benchmark
+The path has one point per grid step. Real callers stamp many cells at once
+with the batch methods, which take numpy `int32` arrays, e.g.
+`obstacles.add_blocked_cells_batch(np.array(cells, dtype=np.int32))`.
 
-Run the full 32-net benchmark from the parent directory:
+## Microbenchmark
 
 ```bash
-python py_router/route.py kicad_files/fanout_starting_point.kicad_pcb kicad_files/routed.kicad_pcb \
-  "Net-(U2A-DATA_23)" "Net-(U2A-DATA_20)" ...
+python3 rust_router/microbench.py              # 9 repeats, 400 x 400 maze, 2 layers
+python3 rust_router/microbench.py --repeats 5 --size 500
 ```
 
-### Performance Results
-
-| Metric | Value |
-|--------|-------|
-| 32 net routing | ~7 seconds |
-| Success rate | **32/32 (100%)** |
-| Total iterations | ~285,000 |
-| DRC violations | None (DATA nets) |
-
-Speedup vs Python implementation: **~10x**
-
-Note: With proper rectangular pad blocking using `int()` instead of `round()` for grid discretization, the router correctly places vias on QFN pads while maintaining clearance to adjacent pads.
+It times `route_with_frontier` through a serpentine maze (walls every
+`--wall-pitch` cells with a `--gap`-cell opening alternating top and bottom, on
+`--layers` layers) and prints the iterations and the fastest of the repeats;
+building the map is outside the timer. For a change meant to leave routing
+byte-identical, the printed `iterations` must be the same for both binaries;
+only the time may differ.
 
 ## API Reference
+
+Everything the module exports:
+
+```bash
+python3 -c "import sys; sys.path.insert(0, 'rust_router'); import grid_router; print(grid_router.__version__, [n for n in dir(grid_router) if not n.startswith('_')])"
+```
+
+Grid coordinates are integer cells and layers are indices into the routing
+layer list. Costs are integers scaled by 1000: an orthogonal step costs 1000, a
+diagonal 1414.
 
 ### GridObstacleMap
 
 ```python
-obstacles = GridObstacleMap(num_layers: int)
+obstacles = GridObstacleMap(num_layers)   # obstacles.num_layers is read-only
 ```
 
-Methods:
-- `add_blocked_cell(gx, gy, layer)` - Mark a cell as blocked on a specific layer
-- `add_blocked_cells_batch(cells)` - Add multiple blocked cells at once. `cells` is a list of `(gx, gy, layer)` tuples. Uses reference counting for correct incremental updates.
-- `remove_blocked_cells_batch(cells)` - Remove multiple blocked cells at once. `cells` is a list of `(gx, gy, layer)` tuples. Decrements reference counts and only unblocks when count reaches 0.
-- `add_blocked_via(gx, gy)` - Mark a position as blocked for vias
-- `set_bga_zone(min_gx, min_gy, max_gx, max_gy)` - Set BGA exclusion zone
-- `add_allowed_cell(gx, gy)` - Override BGA zone blocking for a cell
-- `set_stub_proximity(gx, gy, cost)` - Set proximity cost for a cell
-- `add_stub_proximity_costs_batch(costs)` - Set multiple stub proximity costs at once. `costs` is a list of `(gx, gy, cost)` tuples.
-- `is_blocked(gx, gy, layer)` - Check if cell is blocked
-- `is_via_blocked(gx, gy)` - Check if via position is blocked
-- `get_stub_proximity_cost(gx, gy)` - Get proximity cost for a cell
-- `add_cross_layer_track(gx, gy, layer)` - Mark a position as having a track on specified layer (for vertical attraction)
-- `get_cross_layer_attraction(gx, gy, current_layer, radius, bonus)` - Get attraction bonus for positions near tracks on other layers
-- `clear_cross_layer_tracks()` - Clear all cross-layer track data
-- `is_in_any_proximity_zone(gx, gy)` - Check if position is in any proximity zone (stub or BGA). Used to decide if proximity heuristic should be applied for a route.
-- `clone()` - Create a deep copy of the obstacle map (for incremental caching)
+Batch methods take numpy `int32` arrays (a list or an `int64` array is
+refused); the rest take ints and lists of tuples. Used by `py_router/`
+(`obstacle_map.py`, `obstacle_cache.py`, `obstacle_costs.py`, the plane
+builders and every router).
+
+**Blocking.** Cells and vias are reference-counted, so nets can be stamped and
+removed independently: a cell is blocked while its count is above zero.
+- `add_blocked_cell(gx, gy, layer)`, `add_blocked_via(gx, gy)`
+- `add_blocked_cells_batch(cells)` / `remove_blocked_cells_batch(cells)`: N x 3 (gx, gy, layer)
+- `add_blocked_vias_batch(vias)` / `remove_blocked_vias_batch(vias)`: N x 2 (gx, gy)
+- `add_blocked_cell_spans_batch(spans)` / `remove_blocked_cell_spans_batch(spans)`: N x 4 (gx, y_lo, y_hi, layer), both y bounds inclusive -- the same cells as the cell form, one row per column
+- `add_blocked_via_spans_batch(spans)` / `remove_blocked_via_spans_batch(spans)`: N x 3 (gx, y_lo, y_hi)
+- `merge_blocked_from(other)`: add another map's counts to this one
+
+**Permanent geometry** (#422): one bit per cell, never removed -- the board
+edge band, outside the outline, cutouts.
+- `add_static_blocked_cell(gx, gy, layer)`, `add_static_blocked_cells_batch(cells)`, `add_static_blocked_cell_spans_batch(spans)`
+- `add_static_blocked_via(gx, gy)`, `add_static_blocked_vias_batch(vias)`, `add_static_blocked_via_spans_batch(spans)`
+- `freeze_dynamic_to_static()`: move every counted cell and via into the permanent bitmaps (for a base map that is never edited again)
+
+**Via sizes ("rungs", #568/#530).** Rung 0 is the configured via; rung r >= 1
+is another via size with its own counted map. A rung nobody populated answers
+as rung 0.
+- `add_blocked_via_rung(rung, gx, gy)`, `remove_blocked_via_rung(rung, gx, gy)`
+- `add_blocked_vias_rung_batch(rung, vias)`, `remove_blocked_vias_rung_batch(rung, vias)`
+- `is_via_blocked_rung(gx, gy, rung)`, `rung_count()`, `rung_len(rung)`, `blocked_via_cells_at_rung(rung)` (sorted list of (gx, gy))
+- `add_blocked_via_small(gx, gy)`, `remove_blocked_via_small(gx, gy)`, `add_blocked_vias_small_batch(vias)`, `remove_blocked_vias_small_batch(vias)`: the rung-1 forms
+
+**Queries**
+- `is_blocked(gx, gy, layer)`, `is_via_blocked(gx, gy)`
+- `segment_blocked(gx1, gy1, gx2, gy2, layer, r)`: is any blocked cell centre within `r` cells of the segment (the wide-track swept-capsule test; `r <= 0` tests the end cell only)
+- `is_blocked_with_margin(gx, gy, layer, margin)`: any blocked cell in the square of half-side `margin` (what `segment_blocked` replaced)
+- `open_via_cells_within(cx, cy, radius)`: every via-legal cell within Chebyshev `radius`, nearest first (the plane via-site search)
+
+**Per-route overrides**
+- `set_bga_zone(min_gx, min_gy, max_gx, max_gy)`: add a BGA exclusion zone (several allowed)
+- `add_allowed_cell(gx, gy)`, `add_allowed_rect(min_gx, min_gy, max_gx, max_gy)` (inclusive; an inverted range adds nothing), `clear_allowed_cells()`: cells a BGA zone does not block
+- `add_source_target_cell(gx, gy, layer)`, `clear_source_target_cells()`: endpoint cells that can be routed to through ordinary blocking (not through a BGA zone)
+- `add_free_via(gx, gy)`, `add_free_vias_batch([(gx, gy), ...])`, `is_free_via(gx, gy)`, `clear_free_vias()`: existing same-net holes, where a layer change costs nothing and via blocking does not apply
+
+**Proximity costs**
+- `set_stub_proximity(gx, gy, cost)`, `get_stub_proximity_cost(gx, gy)`, `clear_stub_proximity()`
+- `add_stub_proximity_costs_batch(stubs, radius, max_cost)`: a linear falloff from `max_cost` at each (gx, gy) to 0 at `radius`, keeping the larger value where fields overlap
+- `add_stub_proximity_costs_grouped(groups, max_zone_rects=None)`: groups of `(points, radius, max_cost)`, the larger value within a group and the sum across groups (the larger inside `max_zone_rects`); what `KICAD_PROXIMITY_SUM` uses
+- `set_layer_proximity(gx, gy, layer, cost)`, `set_layer_proximity_batch(costs)` (N x 4: layer, gx, gy, cost), `get_layer_proximity_cost(gx, gy, layer)`, `clear_layer_proximity()`
+- `set_endpoint_exempt([(gx, gy), ...], radius)`, `clear_endpoint_exempt()`: no stub proximity cost near this route's own ends
+- `set_bga_proximity_radius(radius)`, `is_in_bga_proximity(gx, gy)`, `is_in_any_proximity_zone(gx, gy)` (stub cost here, or within the BGA ring)
+
+**Cross-layer attraction**
+- `add_cross_layer_track(gx, gy, layer)`, `clear_cross_layer_tracks()`
+- `get_cross_layer_attraction(gx, gy, current_layer, attraction_radius, attraction_bonus)`: the bonus for tracks on OTHER layers near (gx, gy); none in stub-proximity or BGA zones
+- `build_attraction_field(attraction_radius, attraction_bonus)`: precompute that bonus per layer so the lookup is O(1) (boards of up to 8 layers)
+
+**Copies and statistics**
+- `clone()`, `clone_fresh()` (a copy without the source/target cells), `shrink_to_fit()`
+- `get_stats()`: (blocked cells, blocked vias, stub-proximity cells, layer-proximity cells, cross-layer cells, source/target cells, free vias, via-rung cells)
+- `get_static_stats()`: (static cells, static vias); `dynamic_refcount_stats()`: (distinct cells, cells counted >= 2, highest count, distinct vias, vias counted >= 2)
+
+The Python side does not call `merge_blocked_from`, `is_blocked_with_margin`,
+`is_in_any_proximity_zone`, `build_attraction_field` or
+`dynamic_refcount_stats` at present.
 
 ### GridRouter
 
+The single-ended A*. Used by `single_ended_routing.py`, `route.py`,
+`route_diff.py`, `route_planes.py`, `plane_region_connector.py` and
+`diff_pair_routing.py`.
+
 ```python
-router = GridRouter(via_cost: int, h_weight: float, turn_cost: int = 1000, via_proximity_cost: int = 1,
-                    vertical_attraction_radius: int = 0, vertical_attraction_bonus: int = 0,
-                    layer_costs: List[int] = None, proximity_heuristic_cost: int = 0)
+router = GridRouter(via_cost, h_weight, turn_cost=None, via_proximity_cost=1,
+                    vertical_attraction_radius=0, vertical_attraction_bonus=0,
+                    layer_costs=None, proximity_heuristic_cost=None,
+                    layer_direction_preferences=None, direction_preference_cost=0,
+                    attraction_radius=0, attraction_bonus=0,
+                    attraction_cross_layer_pct=0, attraction_potential=0)
 ```
 
 Parameters:
-- `via_cost`: Cost for layer transitions (scaled by 1000)
-- `h_weight`: Heuristic weight (>1 for faster but less optimal routes)
-- `turn_cost`: Cost for direction changes (encourages straighter paths, default 1000)
-- `via_proximity_cost`: Multiplier for stub proximity cost when placing vias. Higher values discourage vias near stubs. Use 0 to block vias entirely in stub proximity zones.
-- `vertical_attraction_radius`: Grid units radius for cross-layer track attraction (0 = disabled)
-- `vertical_attraction_bonus`: Cost reduction for positions aligned with tracks on other layers
-- `layer_costs`: Per-layer cost multipliers (1000 = 1.0x, 3000 = 3.0x). Affects movement cost, source initialization, and via transitions. Switching to a cheaper layer discounts via cost (can be free)
-- `proximity_heuristic_cost`: Expected proximity cost per grid step added to heuristic (0 = auto-compute). Auto-computed as `max(stub, track, bga) * 0.375 * 1000 / grid_step`. This tightens the heuristic for boards with high proximity costs, dramatically reducing search space (up to 6x speedup).
+- `via_cost`: cost of a layer change
+- `h_weight`: heuristic weight (>1 for faster but less optimal routes)
+- `turn_cost`: the cost of a 90-degree turn (None = 1000); a 45-degree turn costs half, a 135-degree turn 1.5x, a reversal 2x
+- `via_proximity_cost`: multiplier on the proximity cost (stub + destination-layer) at a via's cell, added to the via cost; 0 = no extra cost
+- `vertical_attraction_radius`, `vertical_attraction_bonus`: cross-layer track attraction (0 = off); a step never drops below a tenth of its move cost
+- `layer_costs`: per-layer multipliers (1000 = 1.0x, 3000 = 3.0x) on moves, on starting on a layer and on vias (a via onto a cheaper layer is discounted, down to free); a negative entry forbids the layer
+- `proximity_heuristic_cost`: expected proximity cost per grid step added to the heuristic (None = 0, off). Python sets it before each route with `set_proximity_heuristic_cost`, from the proximity zones the route's ends lie in (`GridRouteConfig.get_proximity_heuristic_for_zones`: each such zone's cost times its radius, summed, times `--proximity-heuristic-factor`); a route with both ends outside every zone gets 0
+- `layer_direction_preferences`: per layer 0 = horizontal, 1 = vertical, 255 = none; `direction_preference_cost`: charged per move that advances along the non-preferred axis, diagonals included (0 = off)
+- `attraction_radius`, `attraction_bonus`: bus path attraction to the path given by `set_attraction_path` -- a discount on moves in the same direction as the path near it, `attraction_bonus / 50` percent at full strength, capped at 90% (0 = off)
+- `attraction_cross_layer_pct`: percent of that attraction granted on layers other than the path's (0 = same layer only)
+- `attraction_potential`: strength of the potential-shaped attraction (#656): moves are charged the change in a potential that peaks on the path, so cycles never pay and a via onto the path's layer earns a one-time gain (0 = off)
 
 Methods:
-- `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0)` - Find path from any source to any target
-  - `collinear_vias`: If True, after a via the route must continue straight for one step, then can only turn ±45° (for differential pair routing)
-  - `via_exclusion_radius`: Grid cells to exclude around placed vias. Prevents the route from drifting near its own vias, which is important for diff pair routing where P/N tracks are offset from centerline.
-  - Returns `(path, iterations, stats)` where:
-    - `path`: `List[(gx, gy, layer)]` or `None`
-    - `iterations`: Number of A* iterations
-    - `stats`: Dict with search statistics (cells_expanded, cells_pushed, heuristic_ratio, expansion_ratio, etc.)
-- `set_proximity_heuristic_cost(cost)` - Set the proximity heuristic cost before each route. Called by Python when source/target endpoints are inside a proximity zone.
+- `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0.0, max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0)` -- a path from any source to any target; sources and targets are lists of (gx, gy, layer)
+  - Returns `(path, iterations, stats)`: `path` a list of (gx, gy, layer) or None; `stats` a dict: `cells_expanded`, `cells_pushed`, `cells_revisited`, `duplicate_skips`, `path_length`, `path_cost`, `initial_h`, `best_h`, `iteration_tranches`, `final_g`, `open_set_size`, `closed_set_size`, `via_count`, and when defined `heuristic_ratio`, `expansion_ratio`, `revisit_ratio`, `skip_ratio`
+  - `collinear_vias`: symmetric geometry around each via, `±45° -> D -> via -> D -> ±45°`, with at least 2 steps before it
+  - `via_exclusion_radius`: cells kept clear around the route's own vias
+  - `start_direction` (dx, dy): the first `direction_steps` moves stay within 45 degrees of it; `end_direction` (float dx, dy): the arrival stays within 60 degrees of it
+  - `track_margin`: extra half-width of a wide track in fractional cells, a float or a per-layer list (#156); above 0 the swept-capsule test applies
+  - `max_iterations_ceiling`: above `max_iterations`, the search earns further `max_iterations` tranches up to the ceiling while it keeps closing in by `max(quantum_cells, quantum_pct% of the remaining estimate)` (#529; 0 = off); `grace_tranches` tolerates that many tranches without progress (0 = off; see 0.19.3)
+  - `via_rung`: which via size's legality to search with (0 = the configured via)
+- `route_with_frontier(...)`: the same arguments; returns `(path, iterations, blocked_cells)`, where `blocked_cells` (a list of (gx, gy, layer) that stopped the search) is empty on success
+- `set_proximity_heuristic_cost(cost)`: set before each route
+- `set_attraction_path([(gx, gy, layer), ...])`, `clear_attraction_path()`: the path bus members are attracted to (an empty list clears it)
 
 ### PoseRouter
 
-Orientation-aware A* router using Dubins path length as heuristic. Used for differential pair centerline routing where start and end orientations are constrained by stub directions.
+Orientation-aware A* using the Dubins path length as its heuristic, for
+differential-pair centerlines whose start and end headings are fixed by the
+stubs. Used by `diff_pair_routing.py` and `diff_pair_custody.py`.
 
 ```python
-router = PoseRouter(via_cost: int, h_weight: float, turn_cost: int, min_radius_grid: float,
-                    via_proximity_cost: int = 50,
-                    vertical_attraction_radius: int = 0, vertical_attraction_bonus: int = 0,
-                    proximity_heuristic_cost: int = 0)
+router = PoseRouter(via_cost, h_weight, turn_cost, min_radius_grid,
+                    via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=4,
+                    gnd_via_perp_offset=0, gnd_via_along_offset=0,
+                    vertical_attraction_radius=0, vertical_attraction_bonus=0,
+                    proximity_heuristic_cost=0, layer_costs=None,
+                    layer_direction_preferences=None, direction_preference_cost=0)
 ```
 
 Parameters:
-- `via_cost`: Cost for layer transitions (scaled by 1000)
-- `h_weight`: Heuristic weight (>1 for faster but less optimal routes)
-- `turn_cost`: Cost for 45° in-place turn (typically `min_radius * π/4 * 1000`)
-- `min_radius_grid`: Minimum turning radius in grid units
-- `via_proximity_cost`: Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
-- `vertical_attraction_radius`: Grid units radius for cross-layer track attraction (0 = disabled)
-- `vertical_attraction_bonus`: Cost reduction for positions aligned with tracks on other layers
-- `proximity_heuristic_cost`: Expected proximity cost per grid step added to Dubins heuristic (0 = disabled). Tightens the heuristic for boards with high proximity costs, reducing search space. Note: Python passes 1/10th of the computed value for diff pairs due to the more constrained pose-based search.
+- `via_cost`, `h_weight`: as for GridRouter
+- `turn_cost`: cost of a 45-degree turn (typically `min_radius * pi/4 * 1000`)
+- `min_radius_grid`: minimum turning radius in grid units (the Dubins heuristic, and the straight run around vias)
+- `via_proximity_cost`: as for GridRouter -- (stub + destination-layer proximity) x this, added to the via cost; 0 = no extra cost
+- `diff_pair_spacing`: P/N spacing in grid units; above 0 the cumulative-turn limit applies
+- `max_turn_units`: that limit, in 45-degree units, so a pair cannot loop
+- `gnd_via_perp_offset`, `gnd_via_along_offset`: where GND vias go beside each signal via pair (grid units; 0 = no GND vias)
+- `vertical_attraction_radius`, `vertical_attraction_bonus`, `layer_costs`, `layer_direction_preferences`, `direction_preference_cost`: as for GridRouter
+- `proximity_heuristic_cost`: as for GridRouter; Python passes a tenth of the single-ended value, the pose search being more constrained
 
 Methods:
-- `route_pose(obstacles, src_x, src_y, src_layer, src_theta, tgt_x, tgt_y, tgt_layer, tgt_theta, max_iterations, diff_pair_via_spacing=None)`
-  - `src_theta`, `tgt_theta`: Direction indices 0-7 (0=East, 1=NE, 2=North, ..., 7=SE)
-  - `diff_pair_via_spacing`: Optional grid units for P/N via offset check. When set, via placement verifies that both +offset and -offset positions perpendicular to heading are clear.
-  - Returns `(path, iterations)` where path is `List[(gx, gy, theta_idx, layer)]` or `None`
-- `route_pose_with_frontier(...)` - Same as `route_pose` but returns blocked cells on failure for blocking analysis
-  - Returns `(path, iterations, blocked_cells)` where `blocked_cells` is a list of `(gx, gy, layer)` tuples
-- `set_proximity_heuristic_cost(cost)` - Set the proximity heuristic cost before each route. Called by Python when source/target endpoints are inside a proximity zone.
+- `route_pose(obstacles, src_x, src_y, src_layer, src_theta_idx, tgt_x, tgt_y, tgt_layer, tgt_theta_idx, max_iterations, diff_pair_via_spacing=None)`
+  - Headings are direction indices 0-7: 0 = East, 1 = NE, 2 = North, ... 7 = SE (y grows downward, so North is -y)
+  - `diff_pair_via_spacing`: grid units; a via is placed only where the P and N via positions (perpendicular offsets from the centerline) are clear too
+  - Returns `(path, iterations, gnd_via_directions)`: `path` a list of (gx, gy, theta_idx, layer) or None; `gnd_via_directions` one entry per layer change, 1 = GND vias ahead, -1 = behind
+- `route_pose_with_frontier(...)`: the same arguments; returns `(path, iterations, blocked_cells, gnd_via_directions)`, `blocked_cells` filled only on failure
+- `set_proximity_heuristic_cost(cost)`: set before each route
 
-Constraints enforced by PoseRouter:
-- **First move straight**: First move from start must be in the start direction (no immediate turn)
-- **Minimum turn radius**: Enforced for ALL route steps - turns must respect `min_radius_grid` to ensure smooth paths
-- **Straight after via**: After placing a via, must continue straight for `min_radius_grid + 1` steps before turning (ensures P/N offset tracks clear vias before turning)
-- **Diff pair via clearance**: When `diff_pair_via_spacing` is set, checks that P/N via positions (perpendicular offsets from centerline) are clear
-- **Via proximity cost**: When `via_proximity_cost > 0`, vias near stubs incur a cost penalty instead of being blocked
+The search's rules:
+- **Turns are moves**: a turn changes the heading by 45 degrees while stepping (no turning in place) and pays `turn_cost`; the first move from the start goes straight on its heading
+- **Straight around vias**: a via needs at least 2 steps from the start and `straight_after_via` straight steps before it, and owes that many straight steps after it -- `max(ceil(min_radius_grid) + 1, 3)`, or `gnd_via_along_offset + 2` if larger -- so the P/N tracks clear the vias before turning
+- **Diff-pair via clearance**: with `diff_pair_via_spacing`, both P/N via sites must be via-legal; with GND vias on, the GND sites ahead of the via or, failing that, behind it must be too
+- **Cumulative turn**: for a pair, the turn summed over each of two staggered 100-step windows stays within `max_turn_units` x 45 degrees
+- **Via proximity**: a via in a proximity zone is priced, never banned
 
-The Dubins heuristic computes the shortest path length considering:
-- Start and end positions
-- Required start and end headings
-- Minimum turning radius constraint
+The Dubins heuristic is the shortest path length between the start and end
+poses under the minimum turning radius, which keeps routes smooth at the pads'
+entry and exit angles.
 
-This produces smoother routes that properly respect entry/exit angles at pads.
+### identify_blocking_obstacles
+
+```python
+counts = identify_blocking_obstacles(blocked, segments, vias, pads,
+                                     expansion_grid, via_expansion_grid, num_layers)
+```
+
+Which nets' copper touches the cells a failed search was stopped by, as
+`{net_id: count}`: each segment, via or pad counts once for its net. The arrays
+are numpy `int64`: `blocked` N x 3 (gx, gy, layer), `segments` M x 6 (gx1, gy1,
+gx2, gy2, layer, net_id), `vias` V x 3 (gx, gy, net_id), `pads` P x 6 (gx, gy,
+expansion x, expansion y, net_id, layer bitmask), all foreign to the net being
+routed. Used by the rip-up blocking analysis in `single_ended_routing.py`.
+
+### Placement kernels
+
+Called by `py_placer/placement/` for every candidate move. Each computes the
+Python expression its docstring names, with the same tie rules; arrays are
+numpy `float64` (labels, owners and net ids `int64`, `pad_use`'s `on` bool). The placer has no Python
+fallback, so placement needs a binary that has all of them.
+
+| Function | Computes | Used by |
+|---|---|---|
+| `crossing_pairs(a, b, net_w=None)` | The airwire pairs (rows x1, y1, x2, y2, net) of `a` and `b` that cross -- never two of one net, never two sharing an end -- as (ii, jj, w), `w` the larger `net_w` of the two | `quench.py` |
+| `mst_prim(xs, ys)` | `compute_mst_edges`' Euclidean Prim tree in O(n) memory, as [(i, j, d)] | `quench.py` |
+| `mst_l1(xs, ys)` | A net's Manhattan Prim tree: (total, [(i, j)]) | `simple.py` |
+| `mst_l1_tree(xs, ys, owners)` | The same over sorted pad points, with each edge's end parts: (total, edges m x 4, ends m x 2); over 160 points by octant neighbours and Kruskal | `simple.py` |
+| `gap_tree(rects)` | A group's Prim tree over courtyard gaps: (total, [(i, j, gap)]) | `simple.py` |
+| `seg_rect_hits(s, p)` | Segments that touch rects (box test, then Liang-Barsky): (ii, jj) | `simple.py` |
+| `seg_crossings(a, b=None, labels=None)`, `seg_cross_pairs(a, b=None, labels=None)` | Proper crossings between two segment sets, or within one across `labels`: the count, or (ii, jj) | `simple.py` |
+| `seg_cross_counts(m, mlab, o=None, olab=None, skip=None)` | Crossings tallied per pair of labels: (pairs, [(a, b, count)]) | `simple.py` |
+| `pad_hit_sums(s, ends, labs, p, w, pnets, owners, skip_nets=None, skip_owners=None)` | Tree edges over foreign pads, pad weight summed per (net, owner) | `simple.py` |
+| `net_box(e, length, h, ex, ey, gx0, gy0, cell, nx, ny)` | A net's congestion demand on the grid, as its two factors | `simple.py` |
+| `pad_use(a, on, ex, ey, gx0, gy0, cell, nx, ny)` | A part's pad copper per layer on the congestion grid | `simple.py` |
+| `cong_delta(d, c, uses, win, dem, usev, cell2, pitch)` | The change a move makes to the congestion overflow total, over the cells it reaches | `simple.py` |
+| `cong_block_slack(d, c, pitch, block, win, out)`, `cong_delta_blocks(d, c, uses, win, dem, usev, cell2, pitch, slack, block)` | Each block's least slack, and `cong_delta` visiting only the blocks that can overflow | `simple.py` |
+| `overlap_sum(total, h, mine, live, crects, faces)` | The courtyard overlap of the moving parts against every other part, added to `total` | `simple_anneal.py` |
+
+### lane_search, pair_search
+
+```python
+path, expanded = lane_search(band, bad, vbad, arc, dist, dv, s, e, d0, dn, lays, gate, room0,
+                             arc_hi, rvia, w_via, w_dev, w_bend, g, tw, step,
+                             start_ok, end_ok, out_ok, in_ok, strict)
+path, expanded, farthest, state = pair_search(band, bad, vbad, arc, dist, tol, soft, dv, starts, ends,
+                                              multi, lays, gate, room0, room1, total, rvia, w_via,
+                                              w_dev, w_bend, w_keep, w_share, g, step, cap, rt, st,
+                                              pr, cross, xs, xo)
+```
+
+The whole-route snap's grid searches (`awx/whole_snap.py`) for a single lane and
+for a pair, ported so exactly that the snapped plan is byte-identical to the
+Python search's. `whole_snap` searches in Python when the loaded binary lacks
+them. The parameters are described at the top of `src/lane_search.rs` and
+`src/pair_search.rs`.
 
 ## Architecture
 
@@ -291,25 +427,117 @@ This produces smoother routes that properly respect entry/exit angles at pads.
 
 ```
 src/
-├── lib.rs           # Module declarations, Python bindings
-├── types.rs         # Shared types: GridState, OpenEntry, PoseState, constants
-├── obstacle_map.rs  # GridObstacleMap implementation
-├── router.rs        # GridRouter A* implementation
-├── dubins.rs        # Dubins path calculator for orientation heuristic
-└── pose_router.rs   # PoseRouter for orientation-aware routing
+├── lib.rs                # module registration, identify_blocking_obstacles, the mimalloc allocator
+├── types.rs              # state keys, open-set entries, DIRECTIONS, costs, search sinks, RouteStats
+├── obstacle_map.rs       # GridObstacleMap
+├── router.rs             # GridRouter: the grid A* (one GridSearch core, tiled NodeStore)
+├── dubins.rs             # Dubins path length, the PoseRouter heuristic
+├── pose_router.rs        # PoseRouter: orientation-aware A* for diff-pair centerlines
+├── placement_kernels.rs  # the placer's per-move kernels
+├── lane_search.rs        # awx whole-route snap: a single lane's grid search
+└── pair_search.rs        # awx whole-route snap: a pair's grid search
 ```
 
 ### Key Components
 
-- **GridObstacleMap**: Pre-computed obstacle data using reference-counted FxHashMap for O(1) lookups and correct incremental updates
-- **GridRouter**: A* implementation with binary heap and packed state keys
-- **PoseRouter**: Orientation-aware A* with Dubins path heuristic
+- **GridObstacleMap**: reference-counted FxHashMaps (cells per layer, vias, one per via rung) are the truth; a per-layer bitmap caches "count above zero" for the hot `is_blocked` test, and permanent geometry is held only in static bitmaps
+- **GridRouter**: one `GridSearch` core behind both entry points (`route_multi` collects stats, `route_with_frontier` collects the frontier); a binary heap, and nodes in a tiled store (64 x 64-cell tiles, 12 bytes a node, the closed flag in the parent index's top bit)
+- **PoseRouter**: one `pose_search` core behind `route_pose` / `route_pose_with_frontier`, each pose's state in one FxHashMap entry
 - **DubinsCalculator**: Computes shortest Dubins path length (LSL, RSR, LSR, RSL, RLR, LRL)
-- **State keys**: Packed into u64 for fast hashing (20 bits x, 20 bits y, 8 bits layer)
+- **State keys**: packed into u64 for fast hashing (grid: 20 bits x, 20 bits y, 8 bits layer; pose: 19 bits x, 19 bits y, 3 bits heading, 8 bits layer)
 - **Hash function**: Uses rustc-hash (FxHash) for faster integer hashing than default SipHash
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
+- **lane_search / pair_search**: each orders its heap as Python's tuples order, so the same states are expanded in the same order as the Python search
+- **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.23.7 (2026-10-18)
+- **Congestion priced only where it can change** (`placement_kernels.rs`):
+  `cong_block_slack(d, c, pitch, block, win, out)` keeps each 8 x 8 block's
+  least slack (capacity less demand), and `cong_delta_blocks(..., slack,
+  block)` is `cong_delta` to the bit, visiting only the blocks where a cell
+  can overflow before or after the move; the rest add nothing to the
+  overflow total either way.
+
+### 0.23.6 (2026-10-18)
+- **The simple path's overlap in Rust** (`placement_kernels.rs`):
+  `overlap_sum(total, h, mine, live, crects, faces)` adds the overlap of the
+  moving parts against every other part (their committed rects, grown by
+  half the courtyard gap, faces that meet only) to `total`, in the order the
+  Python loop added it, so the same value to the bit.
+- `mst_l1_tree` builds the tree of a net with more than 160 points by an
+  octant sweep over a Fenwick tree instead of a BTreeMap, candidates sorted
+  on their lengths' bits: the same lengths summed in the same ascending
+  order, so the same total to the bit, 2.8x faster at 340 points (111 to
+  40 us).
+- `pad_hit_sums` also drops the segments that miss the rects' union box, and
+  buckets the rects on a grid when there are many pairs: the same tallies.
+
+### 0.23.5 (2026-10-18)
+- **Congestion priced where a move reaches** (`placement_kernels.rs`):
+  `net_box(...)` gives a net's congestion share as its two factors (the
+  cells' overlap with its box along y and x, and its length over the box's
+  area), `pad_use(a, on, ...)` a part's pad copper per layer, and
+  `cong_delta(d, c, uses, win, dem, usev, cell2, pitch)` the change a move
+  makes to the overflow total, summed over the cells its terms reach. They
+  replace `over2` and `net_demand`.
+- `pad_hit_sums` and `seg_cross_counts` test each rect or committed edge
+  against the union box of the moving segments before testing pairs, and
+  `seg_cross_counts` skips pairs whose boxes do not meet.
+- `mst_l1_tree` builds the tree of a net with more than 160 points (a
+  ground with hundreds of pads) by Kruskal over each point's nearest
+  neighbour per octant, O(n log n) where Prim is O(n^2): the same length,
+  other ties (1200 points: 0.56 ms against 2.2 ms).
+
+### 0.23.4 (2026-10-18)
+- **More simple-path kernels** (`placement_kernels.rs`), so a move of the
+  annealer in `py_placer/placement/simple_anneal.py` is priced mostly in Rust:
+  `gap_tree(rects)`, a group's Prim tree over courtyard gaps;
+  `mst_l1_tree(xs, ys, owners)`, a net's Manhattan tree over its sorted pad
+  positions, returning its edges and end parts as arrays;
+  `seg_cross_counts(m, mlab, o=None, olab=None, skip=None)`, crossings
+  tallied per pair of nets; `pad_hit_sums(...)`, tree edges over foreign pads
+  summed per (net, owner); `over2(dw, uses, cell2, pitch)`, a congestion
+  window's overflow squared, summed as numpy's pairwise sum does; and
+  `net_demand(...)`, a net's congestion block. Each gives the values the
+  Python code it replaced gave, bit for bit, so a placement is unchanged.
+
+### 0.23.3 (2026-10-17)
+- **Simple-path kernels** (`placement_kernels.rs`) for the annealer in
+  `py_placer/placement/simple_anneal.py`, which prices its cost model
+  (`py_placer/placement/simple.py`) on every move: `mst_l1(xs, ys)`, a net's
+  Manhattan Prim tree; `seg_rect_hits(s, p)`, tree edges against pads (box
+  test, then Liang-Barsky); `seg_crossings(a, b=None, labels=None)`, proper
+  crossings between two sets of tree edges or within one set across labels,
+  and `seg_cross_pairs`, the same returning the crossing pairs.
+  Each matches the Python code it replaced, operation for operation, so a
+  placement is unchanged.
+
+### 0.23.2 (2026-10-16)
+- **Placement kernels** (`placement_kernels.rs`) for the quench polish in
+  `py_placer/placement/quench.py`, which calls them for every candidate pose:
+  `crossing_pairs(a, b, net_w=None)`, the airwire pairs that cross (box test,
+  orientation test, same-net and shared-endpoint exclusions, in row-major
+  order), and `mst_prim(xs, ys)`, `compute_mst_edges`' Prim tree in O(n)
+  memory. Both are the Python computations they replace, operation for
+  operation, so a placement is unchanged.
+
+### 0.23.1 (2026-10-13)
+
+- **`pair_search`**: the whole-route snap's grid search for a PAIR
+  (`awx/whole_snap.py`, `route()` -> `search(..., poses=True)`), ported
+  exactly as `lane_search` ports a single's -- A* over (cell, heading, vias
+  taken, straight steps owed, straight steps taken) from pose to pose, the pair
+  router's own moves (45-degree turns at most, each only with no straight step
+  owed; a via only after the via's straight steps, one heading through it), an
+  opposite-hands pair's first dive its crossover (its clearance a test the
+  Python makes, called back and kept), the staircase and share prices, and the
+  multi-start search from every start pose to any end pose (no heuristic; with
+  no path, the farthest along the lane it got). The heap orders entries as
+  Python's tuples do, so the same states are expanded in the same order: the
+  snapped plans are byte-identical to the Python search's. An older binary
+  searches in Python.
 
 ### 0.23.0 (2026-09-26)
 
@@ -437,6 +665,9 @@ src/
   > 0 (no loop farming), constant-potential travel earns nothing (no meander
   reward), and a via onto the lane's layer collects a one-time jump that can
   compete with `via_cost`. 0 (default) = bit-identical legacy behavior.
+
+### 0.20.1 and earlier
+
 - **0.20.1**: **`via_proximity_cost 0` = no extra cost, ban mode removed.**
   0 used to hard-block vias in stub/BGA proximity zones -- the only knob whose
   0 was its strongest setting (and a ~200x CPU hazard). 0 now means "no extra
@@ -451,6 +682,9 @@ src/
   equivalent that effectively forbade diff-pair layer changes near escape
   fields). BGA proximity rides the layer-proximity map, so
   `--bga-proximity-cost 0` now truly disarms it for diff pairs too.
+  Added later at the same crate version: `add_stub_proximity_costs_grouped(groups,
+  max_zone_rects=None)`, the per-source SUM composition that `KICAD_PROXIMITY_SUM`
+  selects (off by default). First published in v0.20.2.
 - **0.20.0**: Removed `VisualRouter`/`SearchSnapshot` and `visual_router.rs` with the pygame visualizer (#569) -- the debugging workflow it served is covered by grading, manifest replay and the GUI. **#568 per-rung via legality** — `blocked_vias_small`, a second
   refcounted via-block map at the small fab-rung reserve (subset semantics:
   EMPTY = unpopulated, rung>=1 queries fall back to `blocked_vias`, so
@@ -564,6 +798,10 @@ src/
   `add_static_blocked_cell(s_batch)`, `add_static_blocked_via(s_batch)`,
   `get_static_stats()`. `clone`/`clone_fresh`/`shrink_to_fit` handle the new
   bitmaps; `get_stats()` arity is unchanged. Routing results are identical.
+  Added later at the same crate version: `freeze_dynamic_to_static()`, which
+  moves a finished base map's counted cells and vias into the static bitmaps
+  (the working clone then carries the base as bits and only the per-net caches
+  as counts), and the `dynamic_refcount_stats()` diagnostic.
 
 - **0.18.1**: **S3-b (#385)** — admissible bounding-box heuristic for large
   target lists. `heuristic_to_targets` was O(targets) per push (min octile
@@ -632,25 +870,15 @@ src/
 - **0.2.0**: Added `add_allowed_cell()` for BGA zone overrides, added `__version__` attribute
 - **0.1.0**: Initial release with basic A* routing
 
-## Pad Rotation and Rectangular Blocking
+## Pad obstacles (Python side)
 
-The `route.py` script uses rectangular pad blocking with proper rotation handling:
-
-```python
-# Pads are blocked with rectangular bounds based on their rotated dimensions
-# For a QFN pad with size (0.875, 0.2) and 90° rotation:
-# - Board-space size becomes (0.2, 0.875)
-# - Via blocking zone: pad_half_x + via_radius + clearance in X
-#                      pad_half_y + via_radius + clearance in Y
-
-for pad in pads:
-    # size_x and size_y are already rotated by kicad_parser.py
-    # Use int() instead of round() to avoid over-blocking
-    via_expand_x = int((pad.size_x / 2 + via_clear_mm) / grid_step)
-    via_expand_y = int((pad.size_y / 2 + via_clear_mm) / grid_step)
-    for ex in range(-via_expand_x, via_expand_x + 1):
-        for ey in range(-via_expand_y, via_expand_y + 1):
-            obstacles.add_blocked_via(gx + ex, gy + ey)
-```
-
-This ensures vias are only placed where they have proper clearance to all adjacent pads, even for tightly-spaced QFN pins (0.4mm pitch).
+Pads reach the map from Python, as batches: `_add_pad_obstacle` in
+`py_router/obstacle_map.py` rasterizes each one with `pad_blocked_cells_array`
+(`py_router/routing_utils.py`). A pad is a rounded rectangle at its board-space
+size (a circle or oval as a stadium, a roundrect by its corner ratio), tilted by
+`pad.rect_rotation` and measured from its true, sub-cell centre (#70); a custom
+pad is rasterized from its own polygons (#188). Track cells are blocked within
+half the track width plus the clearance, resolved per layer (net classes,
+`.kicad_dru` layer rules, the pad's own clearance override); via cells within
+half the via size plus that clearance. So a via lands between fine-pitch QFN
+pads only where it clears every one of them.

@@ -17,8 +17,8 @@ expression engine would silently manufacture wrong clearances):
       * a ``(condition "A.onLayer('X') || B.onLayer('Y') ...")`` expression
         containing ONLY onLayer terms joined by ``||``
   - a rule with NO scope applies to every copper layer (KiCad semantics)
-  - later rules override earlier ones per layer (KiCad evaluates last-to-
-    first, first match wins)
+  - later rules override earlier ones per layer (KiCad's engine walks the
+    rules forward in file order; the last matching rule wins each field)
   - ``(severity ignore)`` rules are skipped
 
 THE SECOND CHANNEL, and it is not the same shape. TRACK-SCOPED rules
@@ -77,6 +77,9 @@ _ONLAYER = re.compile(r"[AB]\s*\.\s*onLayer\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
 # exactly one X.NetClass=='C' term (optionally the mirror Y.NetClass!='C').
 _TRACK_TYPE = re.compile(r"([AB])\s*\.\s*Type\s*==\s*['\"]track['\"]", re.IGNORECASE)
 _NC_TERM = re.compile(r"([AB])\s*\.\s*NetClass\s*([!=]=)\s*['\"]([^'\"]+)['\"]")
+# KiCad's "keep pairs apart" term (#1295): the rule binds every pair except a
+# diff pair's P against its own N.
+_NOT_COUPLED = re.compile(r"!\s*AB\s*\.\s*isCoupledDiffPair\s*\(\s*\)")
 
 
 class TrackRule(NamedTuple):
@@ -85,16 +88,29 @@ class TrackRule(NamedTuple):
     ``other_only`` is True for the ``A.NetClass=='C' && B.NetClass!='C'``
     shape: the requirement binds only member-vs-NON-member pairs, so a
     member's own siblings (the coupled half of a diff pair) are exempt.
+
+    ``except_coupled`` is True when the condition also ANDs in
+    ``!AB.isCoupledDiffPair()`` (#1295): a pair whose two nets KiCad's
+    MatchDpSuffix couples (``nets_coupled``) is exempt. ``layer_clause`` is
+    the rule's ``(layer ...)`` token (a layer name, ``outer``, ``inner``), or
+    None for every layer.
     """
     name: str
     cls: str
     other_only: bool
     clearance_mm: float
+    except_coupled: bool = False
+    layer_clause: Optional[str] = None
 
 
-def _parse_track_condition(expr: str) -> Optional[Tuple[str, bool]]:
-    """(class, other_only) when ``expr`` is exactly the honored track-pair
-    subset; None otherwise (the rule falls back to the skip note)."""
+def _parse_track_condition(expr: str) -> Optional[Tuple[str, bool, bool]]:
+    """(class, other_only, except_coupled) when ``expr`` is exactly the
+    honored track-pair subset; None otherwise (the rule falls back to the
+    skip note)."""
+    except_coupled = len(_NOT_COUPLED.findall(expr))
+    if except_coupled > 1:
+        return None
+    expr = _NOT_COUPLED.sub("", expr)
     types = {t.upper() for t in _TRACK_TYPE.findall(expr)}
     ncs = _NC_TERM.findall(expr)
     residue = _NC_TERM.sub("", _TRACK_TYPE.sub("", expr))
@@ -110,8 +126,49 @@ def _parse_track_condition(expr: str) -> Optional[Tuple[str, bool]]:
         oside, ocls = ne[0]
         if oside == side or ocls != cls:
             return None
-        return cls, True
-    return cls, False
+        return cls, True, bool(except_coupled)
+    return cls, False, bool(except_coupled)
+
+
+def track_rule_on_layer(rule: TrackRule, layer: Optional[str]) -> bool:
+    """Whether ``rule`` binds on ``layer``. A rule with no layer clause binds
+    on every layer; ``layer`` None (the caller cannot say) binds too, which
+    over-requires rather than under-requires."""
+    lc = rule.layer_clause
+    if lc is None or layer is None or lc in ('*.Cu', '*'):
+        return True
+    if lc == 'outer':
+        return layer in ('F.Cu', 'B.Cu')
+    if lc == 'inner':
+        return layer.endswith('.Cu') and layer not in ('F.Cu', 'B.Cu')
+    return layer == lc
+
+
+def nets_coupled(name_a: Optional[str], name_b: Optional[str]) -> bool:
+    """KiCad's AB.isCoupledDiffPair() for two tracks: B's net is the
+    MatchDpSuffix complement of A's (#1293/#1295). Symmetric, and decided on
+    the NAMES: a pair our detector couples under another convention (DP/DM)
+    is not coupled to KiCad, so a "keep pairs apart" rule binds it."""
+    if not name_a or not name_b:
+        return False
+    from design_rules import match_dp_suffix
+    rv, comp, _base = match_dp_suffix(name_a)
+    return bool(rv) and comp == name_b
+
+
+def coupled_net_pairs(net_names: Dict[int, str]) -> List[Tuple[int, int]]:
+    """Every (P, N) pair of net ids KiCad's MatchDpSuffix couples, each once
+    (P is the positive side)."""
+    by_name = {nm: nid for nid, nm in net_names.items() if nm}
+    out = []
+    from design_rules import match_dp_suffix
+    for nid, nm in net_names.items():
+        if not nm:
+            continue
+        rv, comp, _base = match_dp_suffix(nm)
+        if rv > 0 and comp in by_name:
+            out.append((nid, by_name[comp]))
+    return out
 
 
 def _to_mm(tok: str) -> Optional[float]:
@@ -233,6 +290,7 @@ def _parse_dru(text: str, copper_layers: List[str]
         clearance_mm = None
         severity_ignore = False
         condition = None
+        layer_clause = None
         has_layer_clause = False
         for item in node:
             if not isinstance(item, list) or not item:
@@ -243,6 +301,7 @@ def _parse_dru(text: str, copper_layers: List[str]
                 condition = item[1]
             if item[0] == "layer":
                 has_layer_clause = True
+                layer_clause = item[1] if len(item) >= 2 else None
             if item[0] == "constraint" and len(item) >= 2 and item[1] == "clearance":
                 for sub in item[2:]:
                     if isinstance(sub, list) and sub and sub[0] == "min" and len(sub) >= 2:
@@ -252,14 +311,23 @@ def _parse_dru(text: str, copper_layers: List[str]
         if severity_ignore:
             notes.append(f"rule '{name}': severity ignore, skipped")
             continue
+        # A track rule may carry a copper (layer ...) clause (#1295); any other
+        # clause keeps the rule out of the channel.
+        copper_clause = (not has_layer_clause or (
+            isinstance(layer_clause, str)
+            and (layer_clause in ('outer', 'inner', '*.Cu', '*')
+                 or layer_clause.endswith('.Cu'))))
         track = (_parse_track_condition(condition)
-                 if condition and not has_layer_clause else None)
+                 if condition and copper_clause else None)
         if track is not None:
-            cls, other_only = track
-            track_rules.append(TrackRule(str(name), cls, other_only, clearance_mm))
+            cls, other_only, except_coupled = track
+            track_rules.append(TrackRule(str(name), cls, other_only, clearance_mm,
+                                         except_coupled, layer_clause))
             notes.append(f"rule '{name}': track-to-track clearance "
                          f"{clearance_mm}mm for class '{cls}'"
                          f"{' vs other classes only' if other_only else ''}"
+                         f"{', its own coupled partner exempt' if except_coupled else ''}"
+                         f"{f' on {layer_clause}' if layer_clause else ''}"
                          f" -- handled by the track channel")
             continue
         layers = _rule_layers(node, copper_layers, notes)
@@ -337,8 +405,232 @@ def read_board_track_clearances(board_path: str) -> Tuple[List[TrackRule], List[
     return parse_dru_track_clearances(text)
 
 
+# ---------------------------------------------------------------------------
+# THE THIRD CHANNEL: length windows (#1313)
+# ---------------------------------------------------------------------------
+# `(constraint length (min ..) (opt ..) (max ..))` bounds each matching net's
+# routed length; KiCad's DRC reports `length_out_of_range` outside it. No
+# router step routes to it (design_rules lists the kind as unconsumed), so this
+# channel is for the GRADER: check_drc reads it and measures each net the way
+# KiCad's length DRC does (net_queries.net_match_length, mode 'total'). Before
+# it, check_drc and board_score read a board clean that KiCad failed 8 times.
+#
+# Honoured conditions: none (every net), or `||`-joined terms each of which is
+# `A.NetClass == 'X'`, `A.NetName == 'X'`, `A.hasNetclass('X')` or
+# `A.inDiffPair('X')`. KiCad's string `==` matches `*` / `?` wildcards
+# case-insensitively (libeval VALUE::EqualTo -> WildCompareString), so these
+# do too. NetClass is read as membership, as the track channel reads it.
+# inDiffPair is KiCad's inDiffPairFunc (#1303): the net has a MatchDpSuffix
+# complement that exists on the board, and its base name -- or the base
+# without its trailing '_' -- matches X with wxString::Matches, which is
+# case-SENSITIVE. Anything else -- another predicate, `&&`, a (layer ..)
+# clause, a time-domain bound -- is kept as an UNSUPPORTED rule with its
+# reason, never dropped: a grader must say what it did not grade.
+#
+# The same channel carries the diff-pair constraints (#1303), selected with
+# `kinds`: `skew` (KiCad's skew_out_of_range, with its `within_diff_pairs`
+# option) and `diff_pair_uncoupled` (diff_pair_uncoupled_length_too_long).
+# check_drc grades both; each kind is its own rule list, because KiCad picks
+# the binding rule per constraint type.
+_LEN_TERM = re.compile(
+    r"^A\s*\.\s*(?:(NetClass|NetName)\s*==\s*['\"]([^'\"]*)['\"]"
+    r"|(hasNetclass|inDiffPair)\s*\(\s*['\"]([^'\"]*)['\"]\s*\))$")
+_TIME_VAL = re.compile(r"^-?[0-9.]+\s*(fs|ps|ns|us|s)$")
+#: The constraint kinds this channel reads.
+LENGTH_KINDS = ('length', 'skew', 'diff_pair_uncoupled')
+
+
+class LengthRule(NamedTuple):
+    """One `length` (or, by `kind`, `skew` / `diff_pair_uncoupled`)
+    constraint. `terms` is a tuple of ('netclass'|'netname'|'indiffpair',
+    pattern) alternatives -- () for an unconditioned rule (every net) -- or
+    None when the scope is outside the honoured subset, with the reason in
+    `unsupported`. Bounds are mm; a missing bound is None.
+    `within_diff_pairs` is the skew option: grade each pair's P against its
+    own N instead of every bound net against the longest."""
+    name: str
+    min_mm: Optional[float]
+    opt_mm: Optional[float]
+    max_mm: Optional[float]
+    terms: Optional[Tuple[Tuple[str, str], ...]]
+    unsupported: str = ''
+    severity: str = 'error'
+    kind: str = 'length'
+    within_diff_pairs: bool = False
+
+
+def _parse_length_condition(expr: Optional[str]):
+    """(terms, reason): terms as LengthRule.terms, reason '' when honoured."""
+    if expr is None or not expr.strip():
+        return (), ''
+    if '&&' in expr or '!' in expr:
+        return None, f"condition {expr!r} is not an ||-list of net terms"
+    terms = []
+    for raw in expr.split('||'):
+        t = raw.strip()
+        while t.startswith('(') and t.endswith(')'):
+            t = t[1:-1].strip()
+        m = _LEN_TERM.match(t)
+        if not m:
+            return None, f"condition term {raw.strip()!r} is not modelled"
+        if m.group(1) == 'NetName':
+            terms.append(('netname', m.group(2)))
+        elif m.group(3) == 'inDiffPair':
+            terms.append(('indiffpair', m.group(4)))
+        else:
+            terms.append(('netclass', m.group(2) if m.group(1) else m.group(4)))
+    return tuple(terms), ''
+
+
+_KIND_NOUN = {'length': 'length window', 'skew': 'skew window',
+              'diff_pair_uncoupled': 'max uncoupled length'}
+
+
+def parse_dru_length_rules(text: str, kinds=('length',)
+                           ) -> Tuple[List[LengthRule], List[str]]:
+    """Every constraint of `kinds` (default `length` alone, #1313) in
+    .kicad_dru text, in FILE order, and notes. A rule carrying several of the
+    kinds gives one entry per kind. A `(severity ignore)` rule is dropped with
+    a note (KiCad grades nothing there); every other rule is returned,
+    honoured or not."""
+    rules: List[LengthRule] = []
+    notes: List[str] = []
+    for node in _parse_nodes(_tokenize(text)):
+        if not isinstance(node, list) or not node or node[0] != "rule":
+            continue
+        name = node[1] if len(node) > 1 and not isinstance(node[1], list) else "?"
+        found = []                  # (kind, bounds, within_diff_pairs, time-valued)
+        condition = None
+        layer_clause = None
+        severity = 'error'
+        for item in node:
+            if not isinstance(item, list) or not item:
+                continue
+            if item[0] == "severity" and len(item) >= 2:
+                severity = str(item[1])
+            elif item[0] == "condition" and len(item) >= 2:
+                condition = item[1]
+            elif item[0] == "layer":
+                layer_clause = item[1] if len(item) >= 2 else ''
+            elif item[0] == "constraint" and len(item) >= 2 and item[1] in kinds:
+                bounds, within, timed = {}, False, False
+                for sub in item[2:]:
+                    if isinstance(sub, list) and len(sub) >= 2 \
+                            and sub[0] in ('min', 'opt', 'max'):
+                        bounds[sub[0]] = _to_mm(sub[1])
+                        timed = timed or bool(_TIME_VAL.match(str(sub[1]).strip()))
+                    elif isinstance(sub, list) and sub and sub[0] == 'within_diff_pairs':
+                        within = True
+                found.append((item[1], bounds, within, timed))
+        if not found:
+            continue
+        if severity == 'ignore':
+            for kind, _b, _w, _t in found:
+                notes.append(f"rule '{name}': {_KIND_NOUN.get(kind, kind)}, "
+                             f"severity ignore -- skipped")
+            continue
+        terms, why = _parse_length_condition(condition)
+        if layer_clause is not None and terms is not None:
+            terms, why = None, f"a (layer {layer_clause}) clause is not modelled"
+        for kind, bounds, within, timed in found:
+            t, w = terms, why
+            if timed and t is not None:
+                t, w = None, "a time-domain bound (ps/ns) is not modelled"
+            rules.append(LengthRule(str(name), bounds.get('min'), bounds.get('opt'),
+                                    bounds.get('max'), t, w, severity, kind, within))
+    return rules, notes
+
+
+def read_board_length_rules(board_path: str, kinds=('length',)
+                            ) -> Tuple[List[LengthRule], List[str]]:
+    """Auto-read the sibling ``<board>.kicad_dru`` length windows (#1313) --
+    or, by `kinds`, its skew / diff_pair_uncoupled rules (#1303).
+    ([], []) when there is no dru file."""
+    dru = os.path.splitext(board_path)[0] + ".kicad_dru" if board_path else ""
+    if not dru or not os.path.isfile(dru):
+        return [], []
+    try:
+        text = open(dru, encoding="utf-8").read()
+    except OSError as e:
+        return [], [f"could not read {dru}: {e}"]
+    return parse_dru_length_rules(text, kinds)
+
+
+def length_rule_matches(rule: LengthRule, net_name: str, classes,
+                        net_names=None) -> Optional[bool]:
+    """Does `rule` bind the net? None when its scope is not modelled (the
+    caller cannot know). `classes` is the net's class memberships; a net with
+    none is in Default. `net_names` (every net name on the board) lets an
+    inDiffPair term require the complement net to exist, as KiCad does;
+    without it the complement is taken as present."""
+    if rule.terms is None:
+        return None
+    if not rule.terms:
+        return True
+    cls = list(classes or ('Default',))
+    for kind, pat in rule.terms:
+        if kind == 'netname':
+            if _kicad_wild_eq(pat, net_name or ''):
+                return True
+        elif kind == 'indiffpair':
+            if in_diff_pair(net_name or '', pat, net_names):
+                return True
+        elif any(_kicad_wild_eq(pat, c) for c in cls):
+            return True
+    return False
+
+
+def in_diff_pair(net_name: str, pattern: str, net_names=None) -> bool:
+    """KiCad's `A.inDiffPair('pattern')` (pcbexpr_functions.cpp
+    inDiffPairFunc, 10.0.0): the net has a MatchDpSuffix complement that
+    exists on the board, and its base name -- or, when the base ends in '_',
+    the base without it -- matches `pattern` with wxString::Matches (`*`/`?`,
+    case-sensitive)."""
+    from design_rules import match_dp_suffix
+    rv, comp, base = match_dp_suffix(net_name)
+    if not rv or (net_names is not None and comp not in net_names):
+        return False
+    if _wx_matches(pattern, base):
+        return True
+    return base.endswith('_') and _wx_matches(pattern, base[:-1])
+
+
+def _wx_matches(pattern: str, text: str) -> bool:
+    """wxString::Matches: `*` and `?` wildcards, case-sensitive."""
+    rx = ''.join('.*' if ch == '*' else '.' if ch == '?' else re.escape(ch)
+                 for ch in pattern)
+    return re.fullmatch(rx, text, re.DOTALL) is not None
+
+
+def _kicad_wild_eq(pattern: str, text: str) -> bool:
+    """KiCad's string `==`: case-insensitive, `*` and `?` wildcards and
+    nothing else special (WildCompareString) -- unlike fnmatch, a `[` in a
+    net name is literal."""
+    rx = ''.join('.*' if ch == '*' else '.' if ch == '?' else re.escape(ch)
+                 for ch in pattern)
+    return re.fullmatch(rx, text, re.IGNORECASE | re.DOTALL) is not None
+
+
+def binding_length_rule(rules: List[LengthRule], net_name: str, classes,
+                        net_names=None):
+    """The rule KiCad applies to the net: rules are evaluated LAST-to-first and
+    the first match wins (as the layer channel reads them). Returns (rule,
+    None), (None, None) when no rule binds, or (None, rule) when the walk
+    reaches an unsupported rule first -- whether IT binds is unknown, so the
+    net cannot be graded. Pass the rules of ONE kind: KiCad picks per kind."""
+    for r in reversed(rules):
+        m = length_rule_matches(r, net_name, classes, net_names)
+        if m is None:
+            return None, r
+        if m:
+            return r, None
+    return None, None
+
+
 def track_pair_clearance(track_rules: List[TrackRule], a_cls, b_cls,
-                         resolved: float) -> Tuple[float, Optional[TrackRule]]:
+                         resolved: float, *, coupled: bool = False,
+                         layer: Optional[str] = None
+                         ) -> Tuple[float, Optional[TrackRule]]:
     """THE pair-exact track-rule resolver: (effective mm, the rule that RAISED
     it or None).
 
@@ -347,6 +639,12 @@ def track_pair_clearance(track_rules: List[TrackRule], a_cls, b_cls,
     over it, so a rule at or below it is inert and the fab floor can never be
     dragged down. ``a_cls`` / ``b_cls`` are the two nets' class-membership sets
     from ``list_nets.net_class_memberships``.
+
+    #1295: ``coupled`` says the two nets are a diff pair's P and N to KiCad
+    (``nets_coupled``), which exempts them from an ``except_coupled`` rule;
+    ``layer`` is where the two tracks meet, which a rule's layer clause must
+    take in (None binds it everywhere, the over-requiring answer). A caller
+    that passes neither gets the #735 answer for every rule shape.
 
     One site, deliberately. ``check_drc`` graded the seg-seg pair through a
     closure of this body and ``fanout_clearance``'s connector gate had no
@@ -361,6 +659,10 @@ def track_pair_clearance(track_rules: List[TrackRule], a_cls, b_cls,
     if not track_rules:
         return eff, rule
     for r in track_rules:
+        if r.except_coupled and coupled:
+            continue
+        if r.layer_clause is not None and not track_rule_on_layer(r, layer):
+            continue
         a_in, b_in = r.cls in a_cls, r.cls in b_cls
         binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))
         if binds and r.clearance_mm > eff:
@@ -435,7 +737,14 @@ def effective_track_clearances(track_rules: List[TrackRule],
     under an ``other_only`` rule -- the route-the-pair-tight-first workflow
     survives. Monolithic runs mixing classes over-block non-member pairs, the
     same over-approximation shape PR392 accepted; route a ruled class in its
-    own invocation for exact pricing."""
+    own invocation for exact pricing.
+
+    #1295: a "keep pairs apart" rule (``except_coupled``) prices like a rule
+    without the term -- a member's partner is a member too, so its stamp is
+    raised for the partner as well; the P<->N pricing sites read the exact
+    value from ``config.track_partner_clearances`` instead. A rule's layer
+    clause is not read here either: one value per net prices it on every
+    layer. Both over-block, neither under-blocks."""
     if not track_rules:
         return {}
     routed = set(routed_net_ids or ())
@@ -466,7 +775,15 @@ def install_track_clearances(config, track_clearances, input_file,
     read the sibling .kicad_dru, resolve class memberships through
     list_nets.net_class_memberships (the SAME resolver the netclass clearance
     map uses), and compute the effective per-obstacle map for this call's
-    routed set. Announces what is honored, once per (board, rules)."""
+    routed set. Announces what is honored, once per (board, rules).
+
+    #1295: with a "keep pairs apart" rule, ``config.track_partner_clearances``
+    ({frozenset({P, N}): mm}) carries the pair-exact track-rule value of each
+    diff pair KiCad couples by name, for ``pair_clearance``'s P<->N sites --
+    the per-net map above prices the partner too. Empty otherwise, and on the
+    explicit-dict path, whose map a parent resolved (a nested sub-run then
+    prices P<->N at that map, over-requiring)."""
+    config.track_partner_clearances = {}
     if track_clearances is not None:
         config.track_clearances = dict(track_clearances)
         return
@@ -485,8 +802,15 @@ def install_track_clearances(config, track_clearances, input_file,
     eff = effective_track_clearances(rules, memberships, nets.keys(),
                                      routed_net_ids or nets.keys())
     config.track_clearances = eff
+    if any(r.except_coupled for r in rules):
+        config.track_partner_clearances = {
+            frozenset((p, n)): track_pair_clearance(
+                rules, memberships.get(p, ()), memberships.get(n, ()), 0.0,
+                coupled=True)[0]
+            for p, n in coupled_net_pairs(nets) if p in eff or n in eff}
     _key = (os.path.abspath(input_file),
-            tuple(sorted((r.name, r.cls, r.other_only, r.clearance_mm)
+            tuple(sorted((r.name, r.cls, r.other_only, r.clearance_mm,
+                          r.except_coupled, r.layer_clause or '')
                          for r in rules)))
     if _key not in _TRACK_ANNOUNCED:
         _TRACK_ANNOUNCED.add(_key)
@@ -495,13 +819,15 @@ def install_track_clearances(config, track_clearances, input_file,
                   f"(raise-only on seg-seg pairs): '{r.name}' class "
                   f"'{r.cls}' {r.clearance_mm:g}mm"
                   f"{' (vs other classes only)' if r.other_only else ''}"
+                  f"{' (its own coupled partner exempt)' if r.except_coupled else ''}"
+                  f"{f' (on {r.layer_clause}; the router prices it on every layer)' if r.layer_clause else ''}"
                   f" -- {len(eff)} net(s) priced")
 
 
 _ANNOUNCED = set()  # (board path, map items) already printed this process
 
 
-def _install_rules_quietly(config, input_file, pcb_data):
+def _install_rules_quietly(config, input_file, pcb_data, net_keepouts=False):
     """#530: attach the full DesignRules table as ``config.rules`` at the same
     chokepoint every engine already passes through for the layer map. Report-
     only in this phase (the resolver announces unsupported rules once per
@@ -519,7 +845,8 @@ def _install_rules_quietly(config, input_file, pcb_data):
             fab = fab_floors(len(copper) or 2)
         except Exception:                                       # noqa: BLE001
             fab = None
-        install_design_rules(config, input_file, pcb_data, fab_floor=fab)
+        install_design_rules(config, input_file, pcb_data, fab_floor=fab,
+                             net_keepouts=net_keepouts)
     except Exception as e:                                      # noqa: BLE001
         print(f"  WARNING: design rules not installed ({e})")
 
@@ -550,10 +877,27 @@ def min_rule_clearance(board_path: str) -> Optional[float]:
     ABSOLUTE floor that outranks custom rules, so leaving it above a RELAXING
     rule re-manufactures phantom violations on copper legally routed at the
     rule value. Uses a generous synthetic copper list -- for the minimum it
-    only matters that every plausibly-referenced layer resolves."""
+    only matters that every plausibly-referenced layer resolves.
+
+    A coupled-pair rule (``AB.isCoupledDiffPair()``, #1293) counts too: KiCad
+    grades a pair's gap at max(this minimum, its class diff_pair_gap), so a
+    board minimum above the rule fails every pair built at the rule's value
+    (measured on KiCad 10: 6 diff_pair_gap_out_of_range at 0.25, 0 at 0.15)."""
     copper = ["F.Cu", "B.Cu"] + [f"In{i}.Cu" for i in range(1, 31)]
     lmap, _ = read_board_layer_clearances(board_path, copper)
-    return min(lmap.values()) if lmap else None
+    vals = list(lmap.values())
+    dru = os.path.splitext(board_path)[0] + ".kicad_dru" if board_path else ""
+    if dru and os.path.isfile(dru):
+        try:
+            from design_rules import parse_dru
+            with open(dru, encoding="utf-8") as fh:
+                rules, _ = parse_dru(fh.read())
+            vals += [r.constraints["clearance"]["min"] for r in rules
+                     if r.coupled and not r.unsupported
+                     and "min" in r.constraints.get("clearance", {})]
+        except Exception:                                       # noqa: BLE001
+            pass
+    return min(vals) if vals else None
 
 
 def _record_board_copper(config, pcb_data) -> None:
@@ -599,7 +943,8 @@ def resolve_layer_clearances(layer_clearances, input_file, pcb_data=None,
 
 def pair_gap_rule_floor(layer_map: Dict[str, float], layers,
                         track_rules: List[TrackRule] = (),
-                        p_cls=frozenset(), n_cls=frozenset()
+                        p_cls=frozenset(), n_cls=frozenset(),
+                        coupled: bool = False
                         ) -> Tuple[float, Optional[str]]:
     """The largest .kicad_dru clearance that binds a diff pair's P against
     its own N on a layer in ``layers``, and what set it: (mm, why), or
@@ -608,24 +953,29 @@ def pair_gap_rule_floor(layer_map: Dict[str, float], layers,
     KiCad grades P against N like any two nets, so a layer rule (#498) on a
     layer the pair routes on and a track rule (#735) whose class takes in
     the pair (``track_pair_clearance``, pair-exact: an ``other_only`` rule
-    exempts a member's own partner) both bind the coupled run. The caller
-    raises the coupling gap to this and never lowers it, so a rule that
-    RELAXES its layer below the class changes nothing. One value over every
-    layer: a per-layer gap would need per-layer geometry."""
+    exempts a member's own partner, and so does a "keep pairs apart" rule
+    when ``coupled`` -- the two names are a pair to KiCad, #1295) both bind
+    the coupled run. The caller raises the coupling gap to this and never
+    lowers it, so a rule that RELAXES its layer below the class changes
+    nothing. One value over every layer: a per-layer gap would need
+    per-layer geometry."""
     best, why = 0.0, None
     for layer in layers or ():
         v = layer_map.get(layer) if layer_map else None
         if v is not None and v > best:
             best, why = v, f"the .kicad_dru clearance rule on {layer}"
     if track_rules:
-        v, rule = track_pair_clearance(track_rules, p_cls, n_cls, best)
-        if rule is not None:
-            best, why = v, (f"the .kicad_dru track rule '{rule.name}' "
-                            f"(class '{rule.cls}')")
+        for layer in list(layers or ()) or [None]:
+            v, rule = track_pair_clearance(track_rules, p_cls, n_cls, best,
+                                           coupled=coupled, layer=layer)
+            if rule is not None:
+                best, why = v, (f"the .kicad_dru track rule '{rule.name}' "
+                                f"(class '{rule.cls}')")
     return best, why
 
 
-def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None):
+def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None,
+                             net_keepouts=False):
     """Resolve and install the #498 per-layer map on ``config``, engine-side so
     BOTH fronts inherit it (the CLI passes nothing; the GUI passes nothing --
     there is deliberately no flag or control, the .kicad_dru is the single
@@ -633,17 +983,19 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
     mirroring the net_clearances pattern; None -> read the sibling .kicad_dru
     of ``input_file``, expanded over the BOARD's full copper list (rules may
     target layers outside the routed subset -- via keep-outs still need them)
-    and pinned up to the fab tier's clearance floor. Prints what is honored."""
+    and pinned up to the fab tier's clearance floor. Prints what is honored.
+    ``net_keepouts``: the caller stamps net-filtered keep-outs (route.py /
+    route_diff.py), so the design rules derive them (net_keepouts.py)."""
     if layer_clearances is not None:
         config.layer_clearances = dict(layer_clearances)
-        _install_rules_quietly(config, input_file, pcb_data)
+        _install_rules_quietly(config, input_file, pcb_data, net_keepouts)
         _record_board_copper(config, pcb_data)
         return
     if not input_file:
         # Engines whose signatures carry no input path (planes, fanout, oracle
         # sub-configs) discover the board file via PCBData.source_path.
         input_file = getattr(pcb_data, 'source_path', "") or ""
-    _install_rules_quietly(config, input_file, pcb_data)
+    _install_rules_quietly(config, input_file, pcb_data, net_keepouts)
     lmap, notes, copper = _read_layer_map(input_file, pcb_data, config.layers)
     # The copper list the map is expanded over, for pad_pair_clearance (a
     # `*.Cu` pad's shared layers are the BOARD's, not the routed subset's).

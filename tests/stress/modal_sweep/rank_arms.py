@@ -22,8 +22,9 @@ obvious ways to compute it are all subtly wrong:
   before it can be compared at all.
 
 The verdict is `nets_incomplete` -- unrouted plus connectivity-issue nets, and
-NOT `nets_incomplete + conn`, which is what modal_app's screened gate scores and
-counts every connectivity-issue net twice (see `verdict`). Lower is better. DRC
+NOT `nets_incomplete + conn`, which counts every connectivity-issue net twice
+(see `verdict`; modal_app's screened gate scored that sum until 2d6a5c8c, and
+now scores `nets_incomplete` alone too). Lower is better. DRC
 is reported alongside but NOT folded in: it is a separate gate (a #590 arm that
 wins on connectivity while adding real DRC must not be armed), and mixing them
 into one number hides exactly that trade.
@@ -43,9 +44,9 @@ from pathlib import Path
 def verdict(r: dict):
     """Incomplete nets, or None if this row cannot be scored.
 
-    `nets_incomplete` ALREADY equals unrouted + connectivity-issue nets, so the
-    `nets_incomplete + conn` that modal_app's screened gate uses counts every
-    connectivity-issue net twice. ab_replay_grade says so where it defines the
+    `nets_incomplete` ALREADY equals unrouted + connectivity-issue nets, so
+    `nets_incomplete + conn` (what modal_app's screened gate once scored) counts
+    every connectivity-issue net twice. ab_replay_grade says so where it defines the
     same verdict for its own A/B: grade on total incomplete nets, "NOT the conn
     count alone", because a net that loses its copper entirely LEAVES the conn
     bucket for the unrouted bucket -- conn can fall while the board got worse.

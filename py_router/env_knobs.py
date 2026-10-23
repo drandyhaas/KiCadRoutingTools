@@ -62,12 +62,8 @@ def refresh() -> None:
     g = globals()
 
     # --- routing behavior switches (default ON, env turns OFF) -------------
-    g['SEAM_REASK'] = _on_default('KICAD_SEAM_REASK', '')          # '' not in _OFF -> on
-    g['ISLAND_LAUNCH'] = _on_default('KICAD_ISLAND_LAUNCH')
-    g['MULTIPOINT_STUB_SWITCH'] = _on_default('KICAD_MULTIPOINT_STUB_SWITCH')
     g['HYBRID_COUPLE'] = _on_default('KICAD_HYBRID_COUPLE', '')
     g['BUS_MULTIPOINT_SPAN'] = _on_default('KICAD_BUS_MULTIPOINT_SPAN')
-    g['BARE_BALL_ZONE_EXEMPT'] = _on_default('KICAD_BARE_BALL_ZONE_EXEMPT')
     g['DIRECT_FIRST'] = _on_default('KICAD_DIRECT_FIRST')
     # In-loop stub-debris trim (default ON, KICAD_STUB_DEBRIS_TRIM=0
     # reverts): when a route commits, immediately prune the unused
@@ -93,23 +89,11 @@ def refresh() -> None:
     # rules.min_hole_clearance 0.25 -> 0.0889. =0 restores the old staleness
     # for A/B.
     g['INRUN_FLOOR_SYNC'] = _s('KICAD_INRUN_FLOOR_SYNC', '1') != '0'
-    # #667 net-tie band pricing (mm-equivalent cost per band cell,
-    # DIFFERENTIAL: the own-pad approach stays free, off-pad corridor
-    # cells are priced). Measured INERT on cynthion at 0.5 and 5.0 --
-    # the residual violations are the no-legal-landing footprint class
-    # (a tab flush inside the partner outline admits NO flag-free tip
-    # position, bisected to 5um), which no cost can steer. Default OFF;
-    # kept for corpus A/B on boards with mid-route plough-throughs.
-    try:
-        g['TIE_BAND_COST'] = float(_s('KICAD_TIE_BAND_COST', '0') or 0)
-    except ValueError:
-        g['TIE_BAND_COST'] = 0.0
     g['NET_RESCUE'] = _s('KICAD_NET_RESCUE', '1') != '0'
     # #658 in-run river packing: pack each routed bus member's runs against
     # already-committed sibling runs at the copper choke point, BEFORE the
     # route becomes an obstacle -- the vacated lane is then free for every
-    # later net in the SAME pass (the pack_river post-pass frees it only
-    # for the next chain step). Experimental; default off pending the
+    # later net in the SAME pass. Experimental; default off pending the
     # multi-board screen.
     g['PACK_INLINE'] = _s('KICAD_PACK_INLINE', '0') != '0'
     # #666 bare-ball escape rung inside the net rescue: a stripped or
@@ -223,15 +207,6 @@ def refresh() -> None:
     # economy. '0' reverts. Default ON.
     g['FANOUT_POUR_TRACK'] = _s('KICAD_FANOUT_POUR_TRACK', '1') != '0'
     g['FANOUT_POUR_TRACK_R'] = float(_s('KICAD_FANOUT_POUR_TRACK_R', '2.0') or 2.0)
-    # #669: '1' makes escape-method 'auto' retry channel drops with DOGBONE
-    # first, then underpad only if dogbone still dropped balls. Default OFF:
-    # the sets1-5 corpus A/B REJECTED it as a default (autodb0/autodb1 arms
-    # at 21b1c0e5: +10 incomplete nets and +59 kicad DRC vs the underpad-only
-    # retry -- dogbone gap vias claim inter-ball streets that recorded chains'
-    # later steps collide with). Explicit --escape-method dogbone remains the
-    # populated-array doctrine; this knob is the opt-in ladder for chains
-    # whose params are chosen for dogbone.
-    g['FANOUT_AUTO_DOGBONE'] = _s('KICAD_FANOUT_AUTO_DOGBONE', '0') == '1'
     # #652 directive 2: rip-swap rescue for terminally dropped fanout balls
     # (evict the nearest committed neighbour escape, re-escape both as a pair
     # at the fab floor; strict-win only). '0' reverts. Default ON.
@@ -281,77 +256,19 @@ def refresh() -> None:
     # --env` so an A/B arm can replay those manifests like-for-like. Never
     # set it for a real run -- pass --clearance-ceiling instead.
     g['CLEARANCE_LEGACY_CEILING'] = _s('KICAD_CLEARANCE_LEGACY_CEILING') == '1'
-    # #431: the placement-movie camera. 'off' (default) keeps every existing
-    # movie bit-for-bit; one variable turns it on for the GUI recorder,
-    # run_plan.py --movie and the stress renderer at once, which is the
-    # CLI/GUI parity story for a feature with no GUI control of its own.
-    g['MOVIE_CAMERA'] = _s('KICAD_MOVIE_CAMERA', 'off')
 
-    # RETIRED movie knobs: `stage3d` is the only film layout, so these
-    # select nothing any more. Read ONLY so a value still set in someone's
-    # shell is SAID (once, by `frame_layout.warn_retired_knobs`) rather than
-    # ignored in silence. KICAD_MOVIE_PANELS was #887's iso panel;
-    # KICAD_MOVIE_LAYOUT chose between the retired layouts.
-    g['MOVIE_RETIRED'] = {k: os.environ[k]
-                          for k in ('KICAD_MOVIE_LAYOUT', 'KICAD_MOVIE_PANELS')
-                          if os.environ.get(k)}
-
-    # #946/#1012: the render theme. 'light' (default since #1081, at the
-    # requester's call: the stage3d film's mockup is light) for EVERY render;
-    # 'dark' -- KiCad's own canvas -- is one flag or variable away. Same shape and same reason as MOVIE_CAMERA
-    # above: the GUI recorder passes no render parameters at all
-    # (movie_recorder.py:160 is `make_movie(boards, out=out, quiet=True)`), so
-    # one variable is how a feature with no dialog control of its own reaches
-    # every front end at once. The knob is for a PRODUCER making a figure for a
-    # light-background document, not for a viewer -- a rendered file's ground
-    # cannot be changed afterwards.
+    # #946/#1012: the render theme. 'light' (default since #1081) for EVERY
+    # render; 'dark' -- KiCad's own canvas -- is one flag or variable away.
+    # The knob is for a PRODUCER making a figure for a light-background
+    # document, not for a viewer -- a rendered file's ground cannot be changed
+    # afterwards.
     g['RENDER_THEME'] = _s('KICAD_RENDER_THEME', 'light')
-
-    # #946/#1018: the film's target aspect ('' = the stage3d frame's own
-    # 16:9). Same shape and same reason as MOVIE_CAMERA: one variable
-    # reaches every front end at once.
-    g['MOVIE_ASPECT'] = _s('KICAD_MOVIE_ASPECT', '')
-    # #1081: the stage3d board -- 'auto' (the 3D board when this machine can
-    # render it, else the X-ray, said), '2d' (always the X-ray) or 'blender'
-    # (the hi-fi Cycles backend, #1089). The one way a front end with no
-    # flag of its own -- the GUI recorder, place_route_loop -- chooses.
-    g['MOVIE_BOARD3D'] = _s('KICAD_MOVIE_BOARD3D', 'auto')
-
-    # #1036: the routing movie's FRAME BUDGET. A per-segment route trace
-    # (KICAD_ROUTE_TRACE=1) plays one frame per event, and run 32's 22-board
-    # chain over ~9000 segments made ~6100 frames -- a 17-minute film at
-    # 6 fps. Over budget, a traced step falls back to the chunked
-    # board-to-board reveal and the movie SAYS so. 2400 frames is 400 s at
-    # the default 6 fps. 0 = no budget. Same shape and same reason as
-    # MOVIE_CAMERA: one variable reaches every front end at once.
-    g['MOVIE_MAX_FRAMES'] = _i('KICAD_MOVIE_MAX_FRAMES', 2400)
-
-    # #1036 review: the least footprint displacement (mm) that counts as a
-    # PLACEMENT move for the movie. Below it a pose change is drift -- a
-    # 0.05 mm nudge a router or a writer left behind -- and it turns no
-    # camera on and glides nothing; the per-step substrate still draws it. A
-    # rotation always counts. Same shape and reason as MOVIE_CAMERA.
-    g['MOVIE_MOVE_MIN_MM'] = _f('KICAD_MOVIE_MOVE_MIN_MM', 0.5)
 
     # --- truthy diagnostics / overrides -------------------------------------
     g['UNBLOCK_DEBUG'] = _truthy('KICAD_UNBLOCK_DEBUG')
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')
     g['OBSTACLE_AUDIT'] = _truthy('KICAD_OBSTACLE_AUDIT')
     g['PLANE_MAP_PARITY'] = _truthy('KICAD_PLANE_MAP_PARITY')
-    # #672 sub-cell sliver trim on PROTECTED (still-being-retried) nets.
-    # The self-pair half of #672 is a correctness fix and is always on;
-    # this half REMOVES COPPER, and measured on orangecrab's recorded
-    # route step (paired, same input board, chains otherwise identical)
-    # it cost a net: RAM_UDQS+ went from routed to failed_single, the
-    # run verdict 9 -> 10, while the self-pair fix alone reproduced the
-    # base copper EXACTLY (6097 segments and 625 vias compared, all
-    # identical).
-    # CORPUS A/B RAN (2026-09-04, sets 1-5 on Modal, 72 boards complete in
-    # both arms, same commit d0278273): real DRC 21 vs 21 -- unchanged --
-    # and unconnected nets 86 -> 87. ONE board moved and it moved the wrong
-    # way (core1106_cam 0 -> 1); no board improved. So it STAYS OFF: the
-    # trim has no measured upside and a measured, if small, cost.
-    g['SLIVER_TRIM'] = _opt_in('KICAD_SLIVER_TRIM')
     # #678 pour-promise DEFENCE (the copper-changing half: the
     # pad-anchored custody weld links and the ship-time promise-scoped
     # oracle weld). OPT-IN, for the reason KICAD_ORACLE_SUMMARY below
@@ -379,7 +296,6 @@ def refresh() -> None:
     # Disclosure is fine to make environment-dependent; copper is not.
     g['POUR_PROMISE_WELD'] = _opt_in('KICAD_POUR_PROMISE_WELD')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
-    g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
     # route.py's end-of-run oracle summary check (one staged
     # kicad-cli DRC per run). Now OPT-IN (KICAD_ORACLE_SUMMARY=1), reverted
     # from default-on: it was billed as "strictly additive -- only ADDS
@@ -404,18 +320,14 @@ def refresh() -> None:
     # check for. Opt in and you accept a weaker source knowingly.
     g['RASTER_ORACLE'] = _opt_in('KICAD_RASTER_ORACLE')
     # HOT knobs (measured, not guessed): on splitflap_driver one route reads
-    # KICAD_VIA_RUNG 902 times and KICAD_POUR_LAUNCH 316 -- they sit inside
-    # per-net / per-endpoint loops, which is exactly the "hammers the environ
-    # dict from hot paths" this module exists for. Every other bare-read knob
-    # in the tree measured 1-2 reads per run and is left at its call site.
+    # KICAD_VIA_RUNG 902 times -- these sit inside per-net / per-endpoint
+    # loops, which is exactly the "hammers the environ dict from hot paths"
+    # this module exists for. Every other bare-read knob in the tree
+    # measured 1-2 reads per run and is left at its call site.
     # Parse semantics preserved: VIA_RUNG is a =='2' string test with default
-    # '2' (so '1' or anything else disarms), the POUR_LAUNCH pair are =='1'
-    # tests with default '1' (default ON, any other value disables), and
-    # POUR_LAUNCH_FRAG keeps its `or 0` empty-value rule -- see below for the
-    # one deliberate deviation.
+    # '2' (so '1' or anything else disarms), and POUR_LAUNCH_FRAG keeps its
+    # `or 0` empty-value rule -- see below for the one deliberate deviation.
     g['VIA_RUNG_2'] = os.environ.get('KICAD_VIA_RUNG', '2') == '2'
-    g['POUR_LAUNCH'] = os.environ.get('KICAD_POUR_LAUNCH', '1') == '1'
-    g['POUR_LAUNCH_COPPER'] = os.environ.get('KICAD_POUR_LAUNCH_COPPER', '1') == '1'
     # NOT _f(): the call site was `float(get(name, '1.0') or 0)`, so an
     # EMPTY value means 0.0 (threshold disabled) where _f would hand back the
     # 1.0 default -- silently re-enabling a threshold someone turned off,
@@ -428,7 +340,6 @@ def refresh() -> None:
         g['POUR_LAUNCH_FRAG'] = float(_plf or 0)
     except ValueError:
         g['POUR_LAUNCH_FRAG'] = 1.0
-    g['NO_GATE_ORACLE'] = _truthy('KICAD_NO_GATE_ORACLE')
     g['GATE_DEBUG'] = _truthy('KICAD_GATE_DEBUG')
     g['NO_SWEEP_PLATED'] = _truthy('KICAD_NO_SWEEP_PLATED')
     g['NO_SOFT_JOINT_BRIDGE'] = _truthy('KICAD_NO_SOFT_JOINT_BRIDGE')
@@ -440,7 +351,6 @@ def refresh() -> None:
     # "x,y" via position string ('' = off; consumers test truthiness + parse)
     g['RESCUE_DEBUG_VIA'] = _s('KICAD_RESCUE_DEBUG_VIA')
     g['MEM_PROBE'] = _truthy('KICAD_MEM_PROBE')
-    g['NO_STATIC_BASE'] = _truthy('KICAD_NO_STATIC_BASE')
     g['ALLOW_STAGGERED_BGA'] = _truthy('KICAD_ALLOW_STAGGERED_BGA')
     g['QFN_UNDERPAD_NO_ALT_STAGGER'] = _truthy('QFN_UNDERPAD_NO_ALT_STAGGER')
     # #846 how far --allow-via-in-pad's escape-axis ladder may reach:
@@ -466,9 +376,6 @@ def refresh() -> None:
     # 'all', so a typo cannot silently disable the gate.
     g['QFN_UNDERPAD_ERASED_GATE'] = _s('KICAD_QFN_UNDERPAD_ERASED_GATE',
                                        'all').strip().lower()
-    g['LEGACY_ORACLE'] = _truthy('KICAD_LEGACY_ORACLE')
-    g['NO_EXACT_FILL'] = _truthy('KICAD_NO_EXACT_FILL')
-    g['NO_FILL_NETCLASS'] = _truthy('KICAD_NO_FILL_NETCLASS')  # fill-model A/B
 
     # --- numeric knobs -------------------------------------------------------
     # Rasterization memo budget (MB, shared convention across the capsule/
@@ -478,7 +385,6 @@ def refresh() -> None:
     # there.
     g['RASTER_CACHE_MB'] = _f('KICAD_RASTER_CACHE_MB', 256.0)
     g['BUS_XLAYER_PCT'] = _i('KICAD_BUS_XLAYER_PCT', 35)
-    g['BUS_OFFLANE_MULT'] = _f('KICAD_BUS_OFFLANE_MULT', 1.0)   # off-lane surcharge (1.0 = off)
     # #622 victim-priority restore (ported from bus622-take2 a693919b): a rip
     # victim whose terminal reroute failed AND whose full restore is
     # short-refused gets its channel back -- the squatting nets (routed since
@@ -520,7 +426,6 @@ def refresh() -> None:
     g['SEAM_SE_RATIO'] = _f('KICAD_SEAM_SE_RATIO', 1.3)
     g['SEAM_SE_MAX'] = _i('KICAD_SEAM_SE_MAX', 16)
     g['HYBRID_COUPLE_RADIUS'] = _f('KICAD_HYBRID_COUPLE_RADIUS', 1.0)
-    g['BUS_RIP_RESISTANCE'] = _s('KICAD_BUS_RIP_RESISTANCE', '')  # float-or-empty; consumer parses
     g['CONGESTION_COST'] = _f('KICAD_CONGESTION_COST', 0.0)
     g['CONGESTION_BIN'] = _f('KICAD_CONGESTION_BIN', 1.0)
     g['CONGESTION_THRESHOLD'] = _f('KICAD_CONGESTION_THRESHOLD', 0.30)
@@ -728,6 +633,41 @@ def active_env_knobs() -> dict:
             continue
         out[k] = v if len(v) <= 200 else v[:197] + '...'
     return dict(sorted(out.items()))
+
+
+#: #1302: what a REPLAY must not inherit. A variable that LOCATES something on
+#: the recording machine (an interpreter, kicad-cli, a directory) or belongs
+#: to a harness (the cloud sweep, a timing ledger, a GUI-gate save log) says
+#: nothing about the copper, and replayed on another machine it points at a
+#: path that is not there.
+_NOT_REPLAYED = __import__('re').compile(
+    r'^(KICAD|KRT)_(\w*PYTHON\w*|CLI(_\w+)?|SWEEP_\w+|\w+_DIR)$')
+_NOT_REPLAYED_NAMES = frozenset({'KICAD_SAVELOG', 'KICAD_IMAGE',
+                                 'KRT_CMD_TIMING_LEDGER'})
+
+
+def is_replay_knob(name: str) -> bool:
+    """A KICAD_*/KRT_* knob a replay must reproduce (#1302): not a KiCad
+    install path, and not a machine-local or harness variable."""
+    if not (name.startswith('KICAD') or name.startswith('KRT_')):
+        return False
+    if _INSTALL_PREFIX.match(name) or name in _INSTALL_NAMES:
+        return False
+    return not (_NOT_REPLAYED.match(name) or name in _NOT_REPLAYED_NAMES)
+
+
+def replay_env_knobs() -> dict:
+    """{name: EXACT value} of the knobs a replay must reproduce (#1302).
+
+    `active_env_knobs` minus the machine-local and harness variables above,
+    and with the values whole: that function truncates a long value for the
+    log line, and a truncated knob replays a different run. The redo
+    recorder writes these as the command's `NAME=value` prefix, which is
+    what the routing skill tells an agent to type, so a manifest replays the
+    step as it ran instead of the defaults.
+    """
+    return dict(sorted((k, v) for k, v in os.environ.items()
+                       if is_replay_knob(k)))
 
 
 def env_knobs_line() -> str:

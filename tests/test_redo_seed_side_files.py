@@ -33,7 +33,7 @@ def main():
         # A real side-file the chain needs...
         open(os.path.join(src, "net_clearances_1v8.json"), "w").write('{"+1V8": 0.25}')
         # ...and a stale OUTPUT from the original run that must NOT be carried.
-        open(os.path.join(src, "trace.json"), "w").write("{}")
+        open(os.path.join(src, "summary.json"), "w").write("{}")
         # A file whose name collides with a numeric flag value, to prove the
         # existence test (not an extension test) is what gates copying.
         open(os.path.join(src, "0.25"), "w").write("decoy")
@@ -42,7 +42,7 @@ def main():
             (src, ["py_router/route.py", "a.kicad_pcb", "b.kicad_pcb",
                    "--net-clearances", "net_clearances_1v8.json",
                    "--clearance", "0.25", "--nets", "+3.3V",
-                   "--routetrace", "trace.json"]),
+                   "--json-out", "summary.json"]),
         ]
         seeded = seed_side_files(manifest, cmds, dst)
 
@@ -54,8 +54,8 @@ def main():
         else:
             print("PASS: --net-clearances side-file carried into the replay dir")
 
-        if "trace.json" in seeded:
-            failures.append("a stale OUTPUT file (--routetrace trace.json) was "
+        if "summary.json" in seeded:
+            failures.append("a stale OUTPUT file (--json-out summary.json) was "
                             "pre-seeded into the replay dir")
         else:
             print("PASS: output-flag value not pre-seeded")

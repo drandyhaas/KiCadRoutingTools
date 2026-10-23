@@ -162,7 +162,12 @@ def main():
             if is_fragment(block):
                 skipped += 1
                 continue
+            # UTF-8, explicitly: Python reads a source file as UTF-8, but this
+            # temp file was written in the LOCALE encoding, so without
+            # `-X utf8` on Windows (cp1252) a block with an em-dash died as
+            # "SyntaxError: Non-UTF-8 code starting with '\x97'".
             with tempfile.NamedTemporaryFile('w', suffix='.py', dir=REPO_ROOT,
+                                             encoding='utf-8',
                                              delete=False) as f:
                 f.write(block)
                 path = f.name
@@ -174,8 +179,10 @@ def main():
                     [os.path.join(REPO_ROOT, 'py_router'),
                      os.path.join(REPO_ROOT, 'py_tools'),
                      _env.get('PYTHONPATH', '')]).rstrip(os.pathsep)
+                # The child runs with -X utf8, so its output is UTF-8 too.
                 r = subprocess.run([sys.executable, '-X', 'utf8', path],
                                    capture_output=True, text=True,
+                                   encoding='utf-8', errors='replace',
                                    timeout=300, cwd=REPO_ROOT, env=_env)
             finally:
                 os.unlink(path)

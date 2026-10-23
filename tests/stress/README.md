@@ -29,7 +29,8 @@ for f in $STRESS_DIR/boards_set1/*.kicad_pcb; do
   $KIPY strip_routing.py "$(basename ${f%.kicad_pcb})"
 done                                         # -> $STRESS_DIR/boards_unrouted_set1/
 
-# 4. Sanity-check the corpus parses with the repo parser
+# 4. Sanity-check that set 1's SOURCE boards parse with the repo parser
+#    (sources/github_set1/manifest.json; it does not read the stripped corpus)
 python3 validate_boards.py
 ```
 
@@ -39,20 +40,32 @@ Drive the whole corpus with the queue manager:
 
 ```bash
 bash run_queue.sh [max_concurrency=8] [model=sonnet]   # from tests/stress/
-bash stress_status.sh                              # monitor: DONE/RUNNING/TODO + free slots
+bash stress_status.sh                              # monitor: DONE/RUNNING/TODO + admit/hold
 ```
 
-`run_queue.sh` keeps N headless agent workers (`claude -p` by default; `STRESS_AI_BACKEND=opencode` switches to `opencode run`, #503 - model arg is then `provider/model`) in flight until every board
-has a results JSON, deriving all state from disk (safe to stop and restart — it
-skips finished boards and won't double-launch running ones). Each worker
-(`run_board.sh <board> <set> [model]`) routes one board per `RUNBOOK.md`
-(analysis -> fanout -> diff pairs -> signal routing -> power planes -> plane
-repair -> DRC/connectivity/orphan verification -> compare-to-original), writing
-`$STRESS_DIR/results_set<N>/<board>.json` (schema in the runbook) plus a
-`FINDINGS.md`, and an `agent_narrative.md` routing decision trail derived from the
-captured `transcript.jsonl` by `extract_narrative.py`. The full mechanism, fresh-machine prereqs (including the one-time
-permission authorization the headless workers need), and a manual fallback are
-in `RUNBOOK.md` → "Orchestration".
+`run_queue.sh` keeps N headless agent workers (`claude -p`, at
+`STRESS_AI_EFFORT=high`) in flight until every board of every
+`boards_unrouted_set*/` on disk has a results JSON (`QUEUE_SETS="11 12"` restricts
+it to those sets), deriving all state from disk (safe to stop and restart — it
+skips finished boards and won't double-launch running ones). It also starts
+`queue_watchdog.sh`, which writes a stub FAILED results JSON for a board launched
+3 times (`QUEUE_MAX_LAUNCH`) without one, so the queue always terminates. Each
+worker (`run_board.sh <board> <set> [model]`) routes one board per `RUNBOOK.md`
+(analysis -> power pours -> fanout -> diff pairs -> one signal route step whose
+in-run plane finalize replaces the old repair step (#562) -> DRC/connectivity/
+orphan verification -> compare-to-original), writing
+`results_set<N>/<board>.json` (schema in the runbook) plus a `FINDINGS.md`, and an
+`agent_narrative.md` routing decision trail derived from the captured
+`transcript.jsonl` by `extract_narrative.py`. After the agent exits the worker
+also re-grades the final board itself (`grade_final.py` →
+`authoritative_grade.json`; `MISGRADE` in `.worker_done` when the agent's
+self-report disagrees), renders it and films the run (`render_run.py`: the
+snapshots and `routing.mp4`), runs the parser-parity
+check (`validate_pcb_data.txt`) and converts the manifest to a GUI plan
+(`<board>_plan.json`). The queue scripts read the data root from `$STRESS_ROOT`
+(same default as `$STRESS_DIR`). The full mechanism, fresh-machine prereqs
+(including the one-time permission authorization the headless workers need), and
+a manual fallback are in `RUNBOOK.md` → "Orchestration".
 
 Operational limits (baked into the scripts / learned the hard way):
 
@@ -77,8 +90,10 @@ picks parameters afresh each time — so two runs of the same board aren't
 identical, which makes it impossible to cleanly A/B an engine change.
 
 To fix this, each board-mutating tool (`route.py`, `route_diff.py`,
-`route_planes.py`, `repair_planes.py`, `bga_fanout.py`) **self-records**
-its invocation (fully quoted argv + cwd) to a manifest via
+`route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`,
+`copy_board.py`, `add_rule_area.py`, `fill_for_delivery.py`, and the placement
+steps `place_fanout_clearance.py`, `place_pose.py`, `beautify_labels.py`)
+**self-records** its invocation (fully quoted argv + cwd) to a manifest via
 `redo_record.record_invocation()` at the top of `main()`. Recording is gated on
 the `REDO_MANIFEST` env var (a no-op when unset); `run_board.sh` sets it to
 `<run-dir>/redo_commands.sh` for every board run. Self-recording is reliable even
@@ -86,9 +101,13 @@ when a command isn't routed through `run_limited.sh` — which the agent does
 inconsistently — so the manifest is a complete, replayable transcript of the run.
 
 `redo_stress_test.py` replays a manifest — no LLM, no API calls,
-seconds-to-minutes instead of tens of minutes, and immune to API outages. The
-router is deterministic, so a replay reproduces the recorded board exactly (only
-the freshly-assigned track/via UUIDs differ; geometry and nets are identical).
+seconds-to-minutes instead of tens of minutes, and immune to API outages. Routing
+is deterministic, so a replay at the recording's commit, on the same machine and
+Python, reproduces its copper (only the freshly-assigned track/via UUIDs differ;
+compare arms on one machine). The exception is a chain whose
+route step consults the KiCad oracle: its kicad-cli reports jitter run to run (two
+replays of identical code over orangecrab's chain graded 1 vs 3 DRC), so judge
+such a change over many boards, never one replay pair.
 
 By default the replay is **pruned to the file-dependency chain** that produces
 the final board (issue #231): the agent's superseded retries (a route command it
@@ -103,19 +122,26 @@ reached in far fewer steps (e.g. ottercast 24 → 11 commands, same DRC). Pass
 python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh
 
 # A/B an engine change: replay the SAME manifest into two fresh dirs with
-# --remap (rewrites the original run-dir path prefix so absolute intermediate
-# paths land in the new dir; the source board's own absolute path still resolves):
+# --workdir (every command runs there, so relative outputs chain inside it and a
+# recorded `# cwd=` cannot overwrite the original run; the source board's own
+# absolute path still resolves):
 python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
-    --remap /…/runs_set1/<board>:/tmp/redo_baseline      # with your change reverted
+    --workdir <scratch>/redo_baseline      # with your change reverted
 python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
-    --remap /…/runs_set1/<board>:/tmp/redo_change         # with your change applied
-# then diff the two final boards (ignore uuid lines) / re-grade DRC + connectivity.
+    --workdir <scratch>/redo_change        # with your change applied
+# then re-grade DRC + connectivity on both final boards (never diff the files:
+# outputs carry fresh UUIDs).
 ```
 
-Flags: `--skip-checks` (omit the non-mutating `check_*` commands for speed),
-`--dry-run` (print the plan), `--continue-on-error` (push past a failing command
-instead of stopping — the recorded sequence already contains the agent's retries,
-so a recorded failure is normal and is followed by its successful retry).
+Flags: `--workdir DIR` (above; `--remap OLD:NEW` is the older, path-prefix way
+to redirect outputs), `--skip-checks` (omit the non-mutating `check_*` commands
+for speed), `--dry-run` (print the plan), `--continue-on-error` (push past a
+failing command instead of stopping — the recorded sequence already contains the
+agent's retries, so a recorded failure is normal and is followed by its
+successful retry), `--timeout SECONDS` (per-command cap, default 3 h, 0 = none),
+`--skip-validate` (skip the final board's parser-parity check). A replay also
+renders the final board and films the run (`render_run.py`) and writes
+`git_version.txt`.
 
 Recording is opt-in: set `REDO_MANIFEST=<path>` to capture a manual run (only the
 board-mutating tools record; re-run `check_*` separately for grading), or leave it
@@ -146,7 +172,10 @@ python3 tests/stress/ab_replay_grade.py --compare ab/old/summary.json ab/new/sum
 ```
 
 The two waves must be sequential (they share the live repo's git state), but the
-boards within a wave run in parallel (`--jobs`, default 4).
+boards within a wave run in parallel (`--jobs`, default 4). To leave the working
+tree alone, check the other side out in a git worktree and point the wave at it
+with `--extra-remap /repo/:/repo/.claude/worktrees/<wt>/` (manifests bake tool
+paths absolutely).
 
 **Provenance — every output dir records its checkout.** Each wave dir gets a
 `git_version.txt` (+ `git_version.json`) naming the exact commit that produced it
@@ -196,8 +225,10 @@ python3 tests/stress/ab_wave_report.py --new ~/…/ab_main_0728a \
 no longer drains the pool to idle before the next set starts), in plain corpus
 order by default — by set, then board name — which keeps runs reproducible and
 comparable board-for-board. `--order lpt` opts into longest-job-first for a
-shorter makespan at the cost of a data-dependent order, and `--heavy-slots 1`
-opts into memory admission on a small-RAM box (off by default, since it reorders).
+shorter makespan at the cost of a data-dependent order. Memory admission caps
+the boards whose peak in the `--cost-baseline` wave exceeds `--heavy-mb`
+(default 2500) at `--heavy-slots` at once (default 4; `0` = no cap; `1` on a
+small-RAM box, at the cost of a serialised tail).
 It calls `ab_replay_grade.do_board`, so grading and the `summary.json` schema are
 identical.
 `ab_wave_report.py` aggregates every set against each baseline arm on
@@ -229,9 +260,9 @@ Both the original run and a replay record per-command wall-clock so routing
 performance can be compared across code versions:
 
 - **Original run** — alongside `redo_commands.sh`, `record_invocation()` writes a
-  sibling `redo_timings.jsonl` (one JSON line per command: `seconds`, `cwd`,
-  `argv`, appended on process exit via `atexit`). The manifest itself stays a
-  clean, replayable script.
+  sibling `redo_commands.timings.jsonl` (one JSON line per command: `seconds`,
+  `cwd`, `argv`, appended on process exit via `atexit`). The manifest itself
+  stays a clean, replayable script.
 - **Replay** — `redo_stress_test.py` times each command, prints a slowest-first
   breakdown, and with `--timings-out PATH` writes the per-command timings as JSON.
   Timing the deterministic replay (not the LLM run, whose wall time is interleaved
@@ -239,7 +270,7 @@ performance can be compared across code versions:
 
 The two files together also **identify attempts that DIED** (#599): the manifest
 line is written when a command *starts*, but the timings record only on a clean
-exit, so a manifest command with no matching `redo_timings.jsonl` entry was
+exit, so a manifest command with no matching `redo_commands.timings.jsonl` entry was
 killed part-way — by the caller's command timeout, the memory watchdog, or a
 crash. That is the cheapest way to tell a wave's wasted attempts from its real
 work. Such an attempt does not corrupt a replay: it wrote no output, and
@@ -266,6 +297,28 @@ python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.min.sh \
     --timings-out <run-dir>/redo_timings.replay.json
 ```
 
+### More replay tools
+
+All in `RUNBOOK.md` → "Replaying & A/B (no LLM)" and "Corpus-scale A/B and
+bisect on the cloud", with the rules that make their results trustworthy:
+
+- `redo_diff_stage.py` — replays only the fanout + diff-pair stages of every board
+  whose manifest has a `route_diff.py` step.
+- `partial_replay_from_planes.py` — replays a manifest from a mid-chain step,
+  staging the earlier boards from a prior wave.
+- `cloud_replay_sets.py` — replays whole sets on Modal, keeps the routed boards,
+  and A/Bs against the recorded runs re-graded; `cloud_arms_to_sweep.py` merges
+  such waves for `modal_sweep/rank_arms.py`.
+- `corpus_bisect.sh` — scores one engine commit across the corpus on Modal.
+- `pernet_via_ab.py` — A/Bs per-net via sizes, which recorded manifests never
+  exercise.
+- `migrate_manifests.py` — rewrites recorded manifests when a CLI flag is
+  removed.
+
+Other directories here: `modal_sweep/` (routing-parameter sweeps on Modal, and
+the engine behind the cloud replay), `modal_suite/` (the test suite on Modal;
+see `tests/README.md`) and `placement_ab/` (judging placements by routing them).
+
 ## Routing-constraint validation (what params to route with)
 
 `measure_routing.py <routed.kicad_pcb>...` reports the geometry actually used
@@ -283,8 +336,10 @@ usage — next to its net-class definitions. Validated findings:
   fine-pitch escape (butterstick 0.8 vs the original's 0.45; lily58/crkbd QFN
   escapes need ~0.45–0.6, unroutable at 0.8).
 - **Clearance**: route at the net-class clearance; a fine-pitch escape may drop
-  toward the manufacturing floor (never below). Route non-Default-class nets
-  separately with their own clearance.
+  toward the manufacturing floor (never below). Nets of other classes keep their
+  own class clearance: the routing CLIs read every class from the sibling
+  `.kicad_pro` and honour KiCad's pairwise `max(classA, classB)` (PR392). In a
+  chain pass the floor as `--clearance-ceiling` (#530).
 - **Track width**: the netclass `track_width` is a *minimum*. Real boards route
   signals at/above it and widen power/high-current nets to several distinct
   widths (2–4 mm power buses are common). One uniform `--track-width` under-builds
@@ -299,6 +354,9 @@ usage — next to its net-class definitions. Validated findings:
   violations (the dominant set-1/set-2 DRC source) while still flagging anything
   genuinely sub-manufacturable. `min_clearance` is deliberately not used as the
   floor — it is an unreliable edit-floor (often 0, sometimes a stale large value).
+  The routing steps record the clearance they actually used in the output
+  `.kicad_pro`, so a bare `check_drc.py <board>` grades at it; pass the flags to
+  fix the grading value for a controlled A/B.
 - **DRC baseline** for judging our routing is the **original routed board's**
   violation count *at the same floor* (a few clearance-independent hole/pad
   violations remain, e.g. megadesk 1, piantor 6), not 0.
@@ -315,7 +373,12 @@ Wired into RUNBOOK step 11b; output goes into the results JSON `comparison` /
 
 ## Board sets
 
-Sets 1–3 are exactly **15 boards** each; set 4 starts smaller and grows:
+Sets 1–26 are **15 boards** each; sets 27–30 are smaller or larger (9, 5, 12
+and 22 boards). `set1monster`, `set2monster` and `set3monster` hold boards too
+heavy for an ordinary set (what `validate_candidate.py` tiers `monster`: more
+than 8 copper layers or 500+ footprints). Every set `N` has its
+`manifest_setN.json`, `fetch_setN.py` and `prep_setN.sh` here; RUNBOOK →
+"Building a board set" is the recipe. The first four:
 
 - **Set 1** — the original 15 (curated in `fetch_boards.py` / `normalize_boards.py`).
   `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`
@@ -338,11 +401,11 @@ Sets 1–3 are exactly **15 boards** each; set 4 starts smaller and grows:
   `prep_set3.sh` upgrades them first — extra coverage of that rescue path. Boards
   live in `boards_unrouted_set3/`; results in `results_set3/`.
 - **Set 4** — listed in `manifest_set4.json`, fetched by `fetch_set4.py` to
-  `$STRESS_DIR/sources/github_set4/`. Starts as a single board:
-  `Rahul9-spb/FPGA-1` (`PCB/FPGA_SDRAM.kicad_pcb`) — an FPGA + SDRAM design
-  (BGA/QFN/SOIC/SOT, 4-layer, KiCad 10; 126 footprints / 305 nets). Append more
-  entries to the manifest (and a `MAP` line in `prep_set4.sh`) to grow it. Boards
-  live in `boards_unrouted_set4/`; results in `results_set4/`.
+  `$STRESS_DIR/sources/github_set4/`. It started as a single board,
+  `Rahul9-spb/FPGA-1` (`PCB/FPGA_SDRAM.kicad_pcb`, an FPGA + SDRAM design,
+  4-layer), and grew to 15 (rp2040/rp2350 dev boards, icepi_zero, zynq_ad9364,
+  openstint, picodvi, ...). Boards live in `boards_unrouted_set4/`; results in
+  `results_set4/`.
 
 Prepare set 2 / set 3 / set 4 (KiCad Python; loads each board once):
 
@@ -363,31 +426,33 @@ reference.
 
 ## Parser workarounds baked into strip_routing.py
 
-These mask real kicad_parser issues found during corpus preparation; the
-corpus works around them so routing results aren't confounded:
+These masked real kicad_parser issues found during corpus preparation. The
+parser issues are fixed now (each item says how), but the prep scripts still
+apply the normalizations, so every set is prepared the same way:
 
-1. `power`-type copper layers are dropped from `copper_layers`
-   (kicad_parser.py only accepts `signal`) — boards commonly type their
-   plane layers `power`.
-2. Edge.Cuts regexes cross-match through other `gr_*` elements (lazy
+1. `power`-type copper layers were dropped from `copper_layers` (the parser
+   accepted only `signal`) — boards commonly type their plane layers `power`.
+   Workaround: retype every copper layer `signal`. Fixed by #76: any `.Cu`
+   layer of a copper use-type counts.
+2. Edge.Cuts regexes cross-matched through other `gr_*` elements (lazy
    `.*?(layer "Edge.Cuts")`), corrupting outline and bounds when silk/fab
-   board graphics precede edge lines in the file.
-3. KiCad 6/7 files storing the reference as `(fp_text reference ...)` parse
-   with all footprints collapsed onto one dict key (normalization to
-   KiCad 10 format avoids it).
-4. Mixed net-reference styles: `bga_fanout`/`qfn_fanout` write numeric
-   `(net N)` refs into KiCad 10 boards (no `net_id_to_name` passed to
-   `add_tracks_and_vias_to_pcb`), and `extract_segments()`/`extract_vias()`
-   use an either/or regex fallback that silently drops ALL name-style
-   elements when any numeric ones exist — blinding every downstream tool.
-   Workaround: `fix_mixed_net_refs.py` is run on every fanout output
-   (see RUNBOOK rule 5).
+   board graphics preceded edge lines in the file. Workaround: regenerate
+   Edge.Cuts as plain chained lines and drop non-copper board graphics. Fixed by
+   #77 (a bounded element gap).
+3. KiCad 6/7 files storing the reference as `(fp_text reference ...)` parsed
+   with all footprints collapsed onto one dict key. Workaround: normalize to
+   KiCad 10 format. Fixed by #78 (the `fp_text` fallback).
+4. Mixed net-reference styles: `bga_fanout`/`qfn_fanout` wrote numeric
+   `(net N)` refs into KiCad 10 boards, and `extract_segments()`/`extract_vias()`
+   used an either/or regex fallback that silently dropped ALL name-style
+   elements when any numeric ones existed — blinding every downstream tool.
+   Fixed by #79/#80 (name-style refs written, both styles read additively);
+   `fix_mixed_net_refs.py` still runs on every fanout output as a regression
+   check (RUNBOOK rule 5).
 5. Board-edge obstacle memory blowup: `_add_polygon_edge_obstacles`
-   (obstacle_map.py) allocates O(grid_cells × outline_vertices) float64
+   (obstacle_map.py) allocated O(grid_cells × outline_vertices) float64
    broadcast arrays — a 432-vertex keyboard outline on a 222×90 mm board
-   wants ~7 GB and OOMs the machine (route.py and
-   repair_planes.py affected; route_planes.py has a frugal
-   board-edge path and is fine). Workaround: strip_routing.py
+   wanted ~7 GB and OOMed the machine. Workaround: strip_routing.py
    Douglas-Peucker-simplifies regenerated outlines to ≤0.025 mm tolerance,
-   keeping vertex counts low. Fix candidate: chunk the broadcast, or port
-   route_planes.py's implementation.
+   keeping vertex counts low. Fixed by #81 (the broadcasts are chunked; that
+   outline now peaks at ~0.7 GB).

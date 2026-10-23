@@ -214,18 +214,14 @@ def audit_pour_promises(pcb_data, promises: Dict[str, dict],
     kept = detached = None
     if board_file and os.path.isfile(board_file):
         try:
-            import env_knobs
-            if not env_knobs.NO_EXACT_FILL:
-                from kicad_exact_fill import refill_islands_ex
-                islands, status = refill_islands_ex(board_file,
-                                                    project_from=project_from)
-                if status.ok and islands is not None:
-                    kept, detached = _audit_exact(pcb_data, found, islands)
-                    out['source'] = 'exact'
-                else:
-                    out['why'] = f"exact fill unavailable: {status.why()}"
+            from kicad_exact_fill import refill_islands_ex
+            islands, status = refill_islands_ex(board_file,
+                                                project_from=project_from)
+            if status.ok and islands is not None:
+                kept, detached = _audit_exact(pcb_data, found, islands)
+                out['source'] = 'exact'
             else:
-                out['why'] = 'exact fill disabled (KICAD_NO_EXACT_FILL)'
+                out['why'] = f"exact fill unavailable: {status.why()}"
         except Exception as e:
             out['why'] = f"exact fill failed: {e}"
     elif board_file:

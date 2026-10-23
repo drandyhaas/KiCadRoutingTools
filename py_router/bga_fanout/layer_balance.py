@@ -306,12 +306,16 @@ def rebalance_layers(
                 if route.layer in total_layer_counts:
                     total_layer_counts[route.layer] += 1
 
+            # A pair on a layer outside the balance set (an overflow route the
+            # greedy pass put on a costlier --layer-costs tier) is neither
+            # counted nor moved, as in phase 1.
             edge_layer_counts = {layer: 0 for layer in all_layers}
             processed = set()
             for route in routes:
                 if route.pair_id in edge_pair_ids and route.pair_id not in processed:
                     processed.add(route.pair_id)
-                    edge_layer_counts[route.layer] += 1
+                    if route.layer in edge_layer_counts:
+                        edge_layer_counts[route.layer] += 1
 
             max_edge_layer = max(all_layers, key=lambda l: edge_layer_counts[l])
             min_edge_count = min(edge_layer_counts.values())

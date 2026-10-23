@@ -54,10 +54,7 @@ def _state(path=ULX):
     if path not in _CACHE:
         pcb = parse_kicad_pcb(path)
         st = QuenchState(pcb, path, clearance=defaults.CLEARANCE,
-                         board_edge_clearance=0.55, crossing_penalty=10.0,
-                         halo_base=0.5, halo_coef=0.25, halo_weight=2.0,
-                         edge_halo=2.0, edge_weight=2.0,
-                         grid_step=defaults.GRID_STEP, length_weight=1.0)
+                         board_edge_clearance=0.55)
         _CACHE[path] = (pcb, st, derive_groups(pcb, ('kicad', 'sheet')))
     return _CACHE[path]
 

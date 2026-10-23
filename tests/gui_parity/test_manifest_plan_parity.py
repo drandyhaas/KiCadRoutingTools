@@ -758,7 +758,8 @@ def check_owner_scoping():
 #
 # This arm asks the question of EVERY flag route.py's argparse accepts --
 # krt_capabilities.script_flags, which tests/test_798_registrar_flags.py
-# proves EXACT against the real parser -- and requires each to be accounted
+# proves EXACT against the real parser -- and
+# requires each to be accounted
 # for in exactly ONE way:
 #
 #   reached           the converter carries it into a plan param that the
@@ -803,6 +804,12 @@ ROUTE_CLI_ONLY = {
                     "GUI edits a live board KiCad fills itself",
     '--enable-used-layers': "adds used layers back to the output FILE's "
                             "(layers) table; changes no copper",
+    # A placement review's first round or the seed judge (the placement
+    # skill's review pass, which runs the CLIs from the GUI's Place + Route
+    # too): it skips the recovery tail, and at level 2 the shipping polish;
+    # its board is never shipped, so no recorded chain carries it.
+    '--quick': "a placement review / seed judge, never a shipped board; "
+               "the GUI routes to ship",
     # Diagnostics: console or User-layer output only, never copper.
     '--verbose': "console verbosity only",
     '--stats': "prints A* search statistics only",
@@ -842,7 +849,7 @@ _PROBE_VALUE = 'PROBE_VALUE'
 # the flag means the same thing there (the shared registrars and the file /
 # diagnostic flags); the rest are the tool's own.
 _SAME_AS_ROUTE = ('--debug-lines', '--debug-memory', '--enable-used-layers',
-                  '--keep-thermal', '--output', '--overwrite',
+                  '--keep-thermal', '--output', '--overwrite', '--quick',
                   '--schematic-dir', '--strict-sizes', '--verbose')
 
 DIFF_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in _SAME_AS_ROUTE}
@@ -1651,7 +1658,9 @@ _MAINS = {
 #: them, so each is a site of its own.
 _EXITING_HELPERS = ('fab_tier_from_args', 'read_brief_keep_away',
                     'load_net_clearances', 'load_intent_or_exit',
-                    'tether_gate_spec', 'declared_cap_rotations')
+                    'tether_gate_spec', 'declared_cap_rotations',
+                    # the shared end-of-run --strict-sizes exit 3 (#857)
+                    'finish_design_rules')
 
 
 def refusal_sites(tool):
@@ -1788,6 +1797,10 @@ _POST_PARSE_WITNESSES = (
      '--nets GND VCC --plane-layers In1.Cu In2.Cu', None),
     ('_repair_count_mismatch', 'repair_planes.py a.kicad_pcb b.kicad_pcb '
      '--nets GND VCC --plane-layers In1.Cu', 'counts must match'),
+    ('_power_nets_count_mismatch', 'qfn_fanout.py a.kicad_pcb --output b.kicad_pcb '
+     '--power-nets GND +3V3 --power-nets-widths 0.3', 'must have the same length'),
+    ('_power_nets_count_mismatch', 'qfn_fanout.py a.kicad_pcb --output b.kicad_pcb '
+     '--power-nets GND +3V3 --power-nets-widths 0.3 0.3', None),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '
      '--clearance nan', 'finite number'),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '
@@ -1857,7 +1870,7 @@ def check_refused_tools():
     for tool in ('place_optimize.py', 'place_route_loop.py',
                  'place_seed.py', 'place_reconstruct.py', 'place_portfolio.py',
                  'place_pose.py', 'render_placement.py', 'beautify_labels.py',
-                 'add_rule_area.py'):
+                 'add_rule_area.py', 'place_intent_sides.py'):
         if tool not in m2p.REFUSED_TOOLS:
             bad.append((tool, "dropped from REFUSED_TOOLS -- a board tool with "
                               "no plan step that converts silently breaks the "

@@ -20,7 +20,7 @@ scipy>=1.7.0
 # (placement/parser.py, #1094) calls shapely.distance / shapely.points.
 shapely>=2.0
 
-# Rasterization: board stills, review sheets, the routing movie and the film.
+# Rasterization: board stills and review sheets.
 # Listed because a fresh clone that followed the README could not render
 # anything without it -- but it is the RASTER path and nothing else, so its
 # absence DISABLES rendering rather than stopping anything (#943).
@@ -35,8 +35,7 @@ shapely>=2.0
 #
 # Routing does not touch it, and neither does the GUI plugin:
 # `deps_check.OPTIONAL_PACKAGES` names it, so a machine without Pillow gets the
-# plugin with its movie checkbox and placement preview turned off, not a dialog
-# it cannot dismiss.
+# plugin with its placement preview turned off, not a dialog it cannot dismiss.
 #
 # The floor is deliberately LOW: everything the renderer needs (alpha_composite,
 # LANCZOS, ImageChops, PngInfo) is far older than this, and a low floor keeps
@@ -51,8 +50,3 @@ shapely>=2.0
 # dependency declaration, where "the version at which the intended path works"
 # would then have been false.)
 Pillow>=9.2.0
-
-# NOT listed, deliberately: imageio and imageio-ffmpeg. They are needed only to
-# write .mp4, they are imported inside a function, and their absence is AUDIBLE
-# -- animate_route prints "mp4 unavailable (...); falling back to GIF" and
-# writes a sibling .gif. For mp4:  pip install imageio imageio-ffmpeg

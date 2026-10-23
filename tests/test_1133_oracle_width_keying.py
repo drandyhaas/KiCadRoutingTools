@@ -116,7 +116,7 @@ def test_oracle_legs_and_payload_carry_names():
         a.asname for n in ast.walk(route) if isinstance(n, ast.ImportFrom)
         for a in n.names if a.name == 'oracle_reconnect' and a.asname}
     calls = [c for nm in aliases for c in _calls(route, nm)]
-    assert len(calls) == 4, len(calls)
+    assert len(calls) == 5, len(calls)          # + the pour re-audit leg
     for c in calls:
         k = _kw(c, 'net_widths_by_name')
         assert k is not None and not isinstance(

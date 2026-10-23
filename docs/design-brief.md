@@ -1,15 +1,17 @@
-# The design brief: what the board cannot know (#711)
+# The design brief: what the board cannot know
 
 Placement in this toolchain infers everything about a board from the board.
 `emit_intent` says so in its own docstring — *"a starter intent READ OFF the
 board … the emitted intent grades CLEAN by construction"* — and every
 connector's edge is **guessed** from its current pose by `_nearest_edge`, which
-is the only source of an edge anywhere in the toolchain.
+is the only source of an edge anywhere in the toolchain. On a pile not even
+that: no unlocked part's pose is read, so the emitted intent claims no edge
+for it at all (`context.pose_claims_withheld`, #1103).
 
 A board file cannot say which end of a stick the USB plug is, which header a
 ribbon mates with, or where the enclosure rib runs. Those are facts about the
-product, and until now there was nowhere to put them: `board_brief.py
---requirements` takes prose, carries it verbatim, and is read by nothing.
+product, and the board file has nowhere to put them (`board_brief.py
+--requirements` takes prose and carries it verbatim; no tool reads it).
 
 The design brief is that channel.
 
@@ -27,64 +29,57 @@ python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json
 
 `--brief PATH` overrides the sibling. `--no-brief` suppresses discovery — the
 OFF arm, without which there is no way to measure what declaring changed.
-`--require-brief` exits 4 when none was found, the parallel of
-`--require-rules` one level up.
+`--require-brief` exits 4 when none was found, or when the one found declares
+nothing gradable — the parallel of `--require-rules` one level up.
+`--require-brief-coverage` exits 4 unless every clause the brief declares
+reached a verdict: `--require-rules` counts RULES, and a grade can run six of
+them and measure no clause its brief declared. A clause declared `"unknown"`,
+and one this toolchain carries by design, never blocks. `board_brief.py`
+takes the same `--brief` / `--no-brief`.
 
 ## It is a compiler, not a second constraint system
 
 Everything a brief declares becomes an intent entry that the existing rules
-already grade and the existing seat search already honours — ordinarily an
-`edge_connectors[]` or a `keepouts[]` one. Provenance rides in
+already grade, and that `place_simple` reads wherever it reads the intent
+("Which rules the placer can see" in [floorplan-intent.md](floorplan-intent.md))
+— ordinarily an `edge_connectors[]` or a `keepouts[]` one. Provenance rides in
 `source: "brief"` and `context`, both of which
 [the intent schema](floorplan-intent.md) already accepts.
 
 | brief | becomes | provenance |
 |---|---|---|
-| `interfaces[]` with an `edge` | an `edge_connectors[]` entry — `edge`, `overhang_mm`, `center_on_edge` / `along_edge_band`, and `class: "edge_receptacle"` when `user_facing` is true | `source: "brief"` |
+| `interfaces[]` with an `edge` | an `edge_connectors[]` entry — `edge`, `overhang_mm`, `center_on_edge` / `along_edge_band`, `mating_face`, and `class: "edge_receptacle"` when `user_facing` is true | `source: "brief"` |
 | `interfaces[]` with `edge: "unknown"` | an entry with **no** `edge` key | `source: "brief"`, a `note` naming the unknown |
 | `keepouts[]` | `keepouts[]`, verbatim; `kind` and `why` move into `context` | `context.source` |
 | `proximity[]` | `proximity[]`, one row per member of a list `ref`; `why` and `requirement` move into `context` | `source: "brief"`, `context.proximity_note` |
 | `fixed[]` | `context.brief.fixed` — carried; a row with a `pose` also compiles to `fixed_poses[]` (see below) | `basis: "declared"` |
 | `arrays[]` | `arrays[]`, one intent row per brief row, validated by the intent's own loader; `requirement` moves into `context` | `source: "brief"`, `context.brief_row` |
-| `mount_mode`, `cable_entry`, `cable_envelope_mm`, `product.user_top_side` | compiled by `connector_consequences` into `max_setback_mm`, `side` and cable `keepouts[]` -- see [below](#connector-declarations-compile-to-clauses-959) | `context.basis`, `context.compiled_from` |
-| `assembly.body_edge_mm` | `assembly.body_edge_mm`, merged into the emitted `assembly` block; `why` and `requirement` move into `assembly.context.body_edge_mm`. Graded by check_assembly's `body_edge_band`, not by a floorplan rule (see [below](#assemblybody_edge_mm-the-assemblers-edge-rule-1255)) | `context.basis`: `declared`, `min_reader` 9 |
-| `keep_away` | `keep_away[]`, one intent row per rule, in its canonical spelling; `why` and `requirement` move into `context`. Graded by `keep_away`, and read by the routing engines too (see [below](#keep_away-two-net-groups-apart-1253)) | `source: "brief"`, `context.keep_away_note`, `min_reader` 10 |
+| `mount_mode`, `cable_entry`, `cable_envelope_mm`, `product.user_top_side` | compiled by `connector_consequences` into `max_setback_mm`, `side` and cable `keepouts[]` -- see [below](#connector-declarations-compile-to-clauses) | `context.basis`, `context.compiled_from` |
+| `assembly.body_edge_mm` | `assembly.body_edge_mm`, merged into the emitted `assembly` block; `why` and `requirement` move into `assembly.context.body_edge_mm`. Graded by check_assembly's `body_edge_band`, not by a floorplan rule (see [below](#assemblybody_edge_mm-the-assemblers-edge-rule)) | `context.basis`: `declared`, `min_reader` 9 |
+| `keep_away` | `keep_away[]`, one intent row per rule, in its canonical spelling; `why` and `requirement` move into `context`. Graded by `keep_away`, and read by the routing engines too (see [below](#keep_away-two-net-groups-apart)) | `source: "brief"`, `context.keep_away_note`, `min_reader` 10 |
 | `product`, `unknown[]` | `context` | — |
 
-### The one key the compiler adds, and why that is the rule rather than an exception
+### The compiler declares nothing that nothing grades
 
-Until [#902](https://github.com/drandyhaas/KiCadRoutingTools/issues/902) this
-section said the compiler adds **no** intent key. It adds exactly one now,
-`proximity[]`, and the principle is unchanged — because the principle was never
-"never add a key". It is **never declare what nothing grades**, and this key
-is only half of the change: the other half is the rule in `floorplan`
-that grades the compiled rows, and a build carrying this key without
-that rule declares something nothing measures.
-
-It needed a key of its own because no existing entry means *these two named
-parts, this far apart*:
+Every key the brief compiles is graded: by a floorplan rule, or, for
+`assembly.body_edge_mm`, by check_assembly. Where no existing intent entry
+meant what the brief says, the key arrived with its own rule: `proximity[]`
+(`proximity`), `keep_away[]` (`keep_away`), `arrays[]` (`array_formation`)
+and `fixed_poses[]` (an anchor graded as `zone_containment`). `proximity[]`
+is the plainest case, because no other entry means *these two named parts,
+this far apart*:
 
 - `decaps.max_distance_mm` is **one board-wide budget over a derived
-  population**, not a claim about a named pair — and its partner election is
-  exactly what #902 is about. A decap is syntactic (`ref` starts with `C`,
-  bridges two nets), so an inductor, a crystal or an ESD array is never its
-  subject. When #902 landed, the IC it is tethered to had to carry ≥ 4 copper
-  pads, so a 3-pad SOT-89 regulator was never a tether target: on the board
-  that motivated the issue the election gave `C1 → USB1 2.03 mm` and
-  `C3 → U1 1.83 mm`, the regulator's own bulk caps graded against a USB socket
-  and a bridge IC. Since #1249 a supply owner (`groups.supply_owners`) is
-  elected too, and both caps tether to U2 at 0.95 mm — but the election still
-  measures to a pad box, not a named pin.
+  population**, not a claim about a named pair. A decap is a `C*` part
+  bridging ground (or a stacked domain) and a chip's supply rail, so an
+  inductor, a crystal or an ESD array is never its subject, and its partner
+  is elected by the grader and measured to a pad box, not to a named pin.
 - A **keep-out is an exclusion, not an attraction.** Compiling "beside" into
   "not inside" grades the opposite claim.
 
-So the honest choice was a key that arrives with a rule, rather than a spelling
-that quietly graded something else.
-
-A board that carries no brief costs nothing: discovery returns the empty value
-and every code path is the one that existed before. `--no-brief` on a board that
-*does* carry one reproduces the pre-brief document exactly, and a test asserts
-it.
+A board that carries no brief costs nothing: discovery returns the empty value.
+`--no-brief` on a board that *does* carry one gives exactly the document the
+board alone gives.
 
 ## The smallest useful brief is three fields and one row per connector
 
@@ -106,6 +101,8 @@ it.
       "along_edge": "center",                // "center" | {"from":f, "to":f} | "unknown"
       "along_edge_tolerance_mm": 0.5,        // REQUIRED with "center"
       "overhang_mm": { "min": 0.0, "max": 0.65 },
+      "mating_face": "+y",                   // +x|-x|+y|-y in the footprint's own frame, or "unknown":
+                                             // the side it opens on, for a body that names none
       "mount_mode": "edge_mount",            // compiled -- see below
       "cable_entry": "in_plane",             // compiled -- see below
       "cable_envelope_mm": { "depth": 2.0 }, // or "unknown"; NO default
@@ -133,21 +130,20 @@ it.
 ```
 
 `user_top_side` is which face the **user looks at** — an enclosure fact. It is
-not the intent's `assembly.sides` (#837), which is which faces the **fab
+not the intent's `assembly.sides`, which is which faces the **fab
 populates**. The two are independent and cannot contradict each other: a
 back-populated board whose front carries the label is `assembly.sides: "B"`
 with `user_top_side: "F"`, and that is coherent. With a perpendicular-cable
-connector, `user_top_side` compiles to the face that cable plugs into, graded as `edge_connector_side` at a fixed WARN that no search reads (see
-below); on its own it is carried and graded by nothing, and the brief report
-says so under `not_graded`. `assembly.sides` is graded by `rule_assembly_side`
+connector, `user_top_side` compiles to the face that cable plugs into, graded as `edge_connector_side` at a fixed WARN, and
+applied by `place_simple` before it places (see below); on its own it is
+carried and graded by nothing, and the brief report says so under
+`not_graded`. `assembly.sides` is graded by `rule_assembly_side`
 and charged by
-`options.grow_board` — which since
-[#878](https://github.com/drandyhaas/KiCadRoutingTools/issues/878) also charges
-a through-hole part's leads against the face it is *not* mounted on, so the
+`options.grow_board`, which also charges a through-hole part's leads against the face it is *not* mounted on, so the
 busier face is the busier **obstructed** one.
 
 Every key is optional. Strictness is the same as the intent's, at every level
-and for the same reason (#710): a typo'd key that loads clean is a constraint
+and for the same reason: a typo'd key that loads clean is a constraint
 the author believes they set and nothing ever checks.
 
 `schema` is matched exactly and `min_reader` is the field vocabulary — the same
@@ -166,10 +162,10 @@ apart everywhere:
 | **not declared** | the key is absent | `brief_absent` — nobody looked |
 
 `edge: "unknown"` compiles to an entry with **no** `edge` key, and that path is
-already correct everywhere: the seeder's stage 1 skips edge-less entries, the
-repair path refuses honestly, and `emit_intent` refuses to name an edge for an
-implausible pose. "I do not know" reaches machinery that knows what to do
-with it.
+already correct everywhere: the edge rule skips its wrong-edge conjunct for
+an edge-less entry, the placer reads no edge (only an entry's `side`), and
+`emit_intent` refuses to name an edge for an implausible pose. "I do not
+know" reaches machinery that knows what to do with it.
 
 When no brief is found the tool says so, and says what is filling the gap:
 
@@ -183,12 +179,12 @@ nothing here declares design intent.
 `brief_unknown_keys`, `brief_absent` and `brief_drift`, so all of this is
 machine-visible rather than prose.
 
-## `proximity[]`: the constraint the netlist implies and nothing measures (#902)
+## `proximity[]`: the constraint the netlist implies and nothing measures
 
 A 3 mm crystal loop and a 30 mm one have **identical connectivity**. Every
 instrument in this toolchain reads the board, and the board cannot tell them
-apart, so "Y1 beside U1, as short as possible" was ungradable until this key
-existed. One row is one claim is one limit:
+apart, so "Y1 beside U1, as short as possible" is ungradable without this key.
+One row is one claim is one limit:
 
 | key | | |
 |---|---|---|
@@ -198,6 +194,15 @@ existed. One row is one claim is one limit:
 | `basis` | optional, default `pad_edge` | `pad_edge` or `body` |
 | `pads` | optional, or `"unknown"` | `{"REF": ["1", "2"]}` — pad numbers as **strings** |
 | `requirement`, `why`, `note`, `context` | optional | carried into the compiled entry's `context` |
+
+Each compiled row is graded by `proximity` and priced by `place_simple`: the
+subject is pulled toward its partner's pads on shared nets, and each mm past
+`max_mm` costs ("Which rules the placer can see" in
+[floorplan-intent.md](floorplan-intent.md)). `--emit-intent` also claims each
+passive crystal at its IC's oscillator pins, and its load caps at the
+crystal, at derived default limits graded as warnings; declare the row here
+when the loop must be held to a tighter number or graded as an error, and the
+brief's row replaces the derived one.
 
 **A list `ref` is sugar and is expanded at compile time.**
 `{"ref": ["C1","C3"], "near": "U2", "max_mm": 2.0}` becomes two intent rows.
@@ -246,17 +251,14 @@ This key is where the three-state contract above does its most visible work.
 
 `pad_edge` measures pad copper to pad copper (`legality.pad_rect` +
 `rect_gap`), which is the currency `decap_pin_distance` already uses. `body`
-measures the drawn bodies through
-[#896](https://github.com/drandyhaas/KiCadRoutingTools/issues/896)'s one body
-model, and it exists because two parts a brief wants "together" may share no
+measures the drawn bodies through the one body model (`placement.body`), and
+it exists because two parts a brief wants "together" may share no
 net at all — an auto-reset transistor pair has no pad pair to measure.
 
-`basis: "courtyard"` is refused *with the measurement that decided it*: since
-#896, `placement.body` is a **ladder** — courtyard, then fab, then silk ∪ pads,
-then the pad bbox — and it answers with whichever rung the library drew. On the
-board this rule was written for, **0 of 21 footprints draw a courtyard**: 10
-answer from fab, 4 from silk, 4 from the pad bbox and 3 draw nothing at all. So
-a claim spelled `courtyard` would grade nothing there. The rung that actually
+`basis: "courtyard"` is refused: `placement.body` is a **ladder** — courtyard,
+then fab, then silk ∪ pads, then the pad bbox — and it answers with whichever
+rung the library drew. Many boards' footprints draw no courtyard at all, and a
+claim spelled `courtyard` would grade nothing there. The rung that actually
 answered is reported beside each number, so it is never read without knowing
 what it rests on.
 
@@ -337,15 +339,12 @@ rather than only the refusal:
   other.
 
 A **duplicate `ref`** is refused too. Two rows for one part is two claims with
-no rule for which wins, and the three consumers disagree about it in three
-different ways: the grade charges *both*, the repair dispatch keeps the *last*,
-and the seeder's even distribution shifts *every other connector on that edge*.
-`blocks` already refuses a duplicate name for the same reason.
+no rule for which wins, and the grade would charge *both*. `blocks` already
+refuses a duplicate name for the same reason.
 
 ## `fixed[]` is carried, a `pose` compiles, and it is never `must_lock`
 
-Since [#1054](https://github.com/drandyhaas/KiCadRoutingTools/issues/1054) a
-`fixed[]` row may carry the exact pose the part is to be placed at:
+A `fixed[]` row may carry the exact pose the part is to be placed at:
 
 ```jsonc
 "fixed": [ { "ref": "H1", "why": "M3 enclosure standoff",
@@ -358,13 +357,13 @@ which is reported as a declared unknown. The row compiles to an intent
 `fixed_poses[]` entry with `basis: "declared"` and `min_reader` 7, which the
 grade anchors exactly as it anchors a `mechanical.json` pose (the
 `fixed_poses[]` section of [floorplan-intent.md](floorplan-intent.md)) and
-the seeder's stage 0 SEATS: exactly at that pose, refused with its reasons and
-never nudged when the pose is illegal, and stamped `(locked yes)`. Its
+`place_simple` SEATS: written exactly at that pose before anything is placed,
+never searched or nudged, and held there for the whole anneal. Its
 clause id is `fixed[REF].pose`, graded by that anchor. A ref with a pose that
 is also a declared `interfaces[]` row is refused by name: the interface
-compiles to an edge connector the seeder seats at its band, and a pose seats it
-exactly. A row with a pose may also carry `accept_courtyard_overlap: [refs]`
-(#1060), passed through to the intent entry as written -- a named waiver of
+compiles to an edge connector graded at its band, and a pose fixes it
+exactly. A row with a pose may also carry `accept_courtyard_overlap: [refs]`,
+passed through to the intent entry as written -- a named waiver of
 COURTYARD overlap only, with a required `why`, for a human pose that overlaps a
 part it is designed to (see the fixed-poses section of
 [floorplan-intent.md](floorplan-intent.md)); on a row with no pose it is
@@ -372,24 +371,20 @@ refused. A pose never becomes `must_lock`; merging over an emitted intent drops
 an edge entry the EMITTER inferred for the same ref, and says so under
 `context.brief.contradictions`.
 
-#711 asks for fixed poses to become `place_fixed` ops plus `must_lock`. Neither
-is available here, and both refusals are deliberate:
-
-- **`place_fixed`** and the rest of that plan-op vocabulary are named only in
-  comments in `py_tools/board_brief.py`. There is no plan-op implementation in
-  this repository; those ops live in a downstream consumer.
-- **`must_lock`** is refused on measured evidence. `emit_intent` writes it empty
-  and its own comment records why: filling it made `place_seed --repair` treat
-  those refs as seeder-owned and **lift the user's locks** — "unlock exactly the
-  parts the user locked, and move them", measured on two run-7 boards. It also
-  buys nothing, because `resolve_intent_gate` already freezes every edge claim
-  inside the quench, so a brief-declared connector is already pinned where it
-  matters.
+**`must_lock`** is refused here. A lock is the board's own `(locked yes)`,
+which every placement tool keeps, and `emit_intent` writes the key empty: a
+lock list in the intent would be a second, disagreeing record of it. A
+connector whose pose is a fact is declared with a `pose`, which compiles to a
+`fixed_poses[]` entry that `place_simple` seats and holds.
+`board_brief` used to recommend `place_fixed`, a plan op that does not exist
+in this repository; it now names the tools that do (#1353): an intent
+`fixed_poses[]` row (or a brief `fixed[]` row's `pose`), or `place_pose set`
+and `lock`.
 
 So every `fixed[]` row reaches `context.brief.fixed`, where a reader and a
 later tool can see it; only a `pose` reaches an engine, through `fixed_poses[]`.
 
-## `arrays[]`: parts that form one row (#1051)
+## `arrays[]`: parts that form one row
 
 ```jsonc
 "arrays": [ { "name": "rn_bus_a", "members": ["RN1", "RN2", "RN3", "RN4"],
@@ -400,11 +395,9 @@ later tool can see it; only a `pose` reaches an engine, through `fixed_poses[]`.
 The same row the intent's `arrays[]` carries, plus the prose slot
 `requirement` -- validated by the INTENT's own loader, so a row the brief
 accepts is a row the compiled intent loads. It compiles 1:1, with `min_reader`
-7, is graded by `array_formation`, and is seated by the seeder as one row
-where stage 2.45 finds a pose for it -- else member by member, named in
-`array_unseated` -- and moves in the quench as a rigid group while it is a
-formed row (an unformed one is not held: `rigid.unformed`; a member leaves
-only by a disclosed release). Which rows to declare is the
+7, and is graded by `array_formation`. No placement tool reads it: to keep a
+row's parts together while placing, put them in one group of the groups
+file. Which rows to declare is the
 author's decision: `check_floorplan --suggest-arrays` lists candidates with
 their evidence, and the ones it `declined` with why. `serves` and `order` may be
 `"unknown"` (the author looked and does not know), `rotation` too; each is
@@ -415,38 +408,38 @@ member that is also a declared interface or a fixed pose is refused by name.
 Merged over an emitted intent, a row drops any edge entry the emitter inferred
 for a member, and says so.
 
-## Connector declarations compile to clauses (#959)
+## Connector declarations compile to clauses
 
-Before #959 `mount_mode`, `cable_entry` and `user_top_side` were carried into
-`context` and graded by nothing: the #959 comment changed each one and no
-measurement moved. They now compile, in `design_brief.connector_consequences`,
-which every tool that reads a brief against a board calls -- `check_floorplan`
-on both its emit and grade paths, `--plan-only`, and `board_brief` -- so the
-grade and drift see exactly what the emit wrote.
+`mount_mode`, `cable_entry` and `user_top_side` compile, in
+`design_brief.connector_consequences`. Every tool that reads a brief against a
+board calls it through `design_brief.compile_with_consequences` --
+`check_floorplan` on both its emit and grade paths, `--plan-only`, and
+`board_brief` -- so the grade and drift see exactly what the emit wrote.
 
-The mapping is the one the evidence supports, **not** the issue's literal one.
-It was measured on five as-built boards (esp_prog, tigard, splitflap_driver,
-glasgow_revC, ulx3s -- their briefs are `tests/fixtures/959/asbuilt/`), which
-must gain no ERROR from it:
+The mapping is calibrated on five as-built boards (esp_prog, tigard,
+splitflap_driver, glasgow_revC, ulx3s -- their briefs are
+`tests/fixtures/959/asbuilt/`), none of which gains an ERROR from it:
 
 | declaration | compiles to | basis |
 |---|---|---|
 | `mount_mode: edge_mount` | `max_setback_mm` 0.75, on the drawn body (the courtyard when the library drew no fab or silk outline) | `derived_default` -- two shipping edge-mount bodies sit past the receptacle seat's 0.5 mm: tigard J7 at 0.60, rp2350 J3 at 0.614. As built the seat binds on neither, because each courtyard reaches the edge and the seat is asked only of a part whose courtyard sits a margin inside; 0.75 admits those bodies wherever it does bind |
-| `mount_mode: through_edge` | the same `max_setback_mm` 0.75: the part reaches the edge, read on the drawn body when the entry is an edge receptacle (the class `user_facing`, the emitter's classifier or a declared edge assigns) and on the courtyard otherwise. How far PAST it is `overhang_mm`, declared or emitted, never derived -- an overhang floor of 0 is vacuous (a body inside the board reads 0 overhang), and writing one replaced the emitted `overhang_mm` and dropped its `max` | `derived_default` |
-| `mount_mode: top_mount` / `bottom_mount` | an exemption, reported `carried`: NOT held to the edge-receptacle seat; its declared edge and overhang still grade it, and nothing measures the mount itself | declared -- `user_facing` made 8 vertical headers edge receptacles and failed them all on the as-built boards |
-| `cable_entry: perpendicular_top` / `_bottom`, with `product.user_top_side` | `side`: the face the cable plugs into, graded as `edge_connector_side` | declared; a fixed **WARN** an intent cannot raise, read by no seat search, quench or repair |
+| `mount_mode: through_edge` | the same `max_setback_mm` 0.75: the part reaches the edge, read on the drawn body when the entry is an edge receptacle (the class `user_facing`, the emitter's classifier or a declared edge assigns) and on the courtyard otherwise. How far PAST it is `overhang_mm`, declared or emitted, never derived -- an overhang floor of 0 is vacuous (a body inside the board reads 0 overhang) | `derived_default` |
+| `mount_mode: top_mount` / `bottom_mount` | an exemption, reported `carried`: NOT held to the edge-receptacle seat; its declared edge and overhang still grade it, and nothing measures the mount itself | declared -- without it, `user_facing` would make vertical headers edge receptacles and fail them |
+| `cable_entry: perpendicular_top` / `_bottom`, with `product.user_top_side` | `side`: the face the cable plugs into, graded as `edge_connector_side` | declared; a fixed **WARN** an intent cannot raise; `place_simple` applies the face before it places |
 | `cable_entry: in_plane` | reported `carried`: the declared `edge` is already a clause and in-plane adds none; with `edge: "unknown"` it is reported unmeasured | declared |
+| `cable_entry: none` | nothing: carried, and listed under `not_graded` | declared |
 | `cable_envelope_mm: {depth}` (in-plane) or `{clear}` (perpendicular) | a `cable:<REF>` keep-out -- a band `depth` in from the edge across the body, or the body plus `clear` on the cable's face -- ONLY for a FILE-locked part (off an unlocked one it would move with every seed), and for an in-plane band only when the body reaches within `depth` of its declared edge. A `cable:<REF>` keep-out the brief declares itself wins | declared |
 
 `user_facing` compiles no face. That the user reaches a part says nothing
-about which face it sits on, and reading it as the viewing face put three
+about which face it sits on, and reading it as the viewing face would put
 B-side connectors on shipping boards (a DSUB-9, a JST-SH, a microSD) on the
 wrong one.
 
-**There is no default cable envelope.** No clearance passed every as-built
-control, and the in-plane band the literal mapping proposed lay inside each
-connector's own body. An envelope that is `"unknown"` or absent is reported
-`unmeasured`, naming the dimension. z-height and insertion travel are never
+**There is no default cable envelope.** No clearance passes every as-built
+control, and a fixed in-plane band lies inside some connectors' own bodies. An envelope that is `"unknown"` or absent is reported
+`unmeasured`, naming the dimension. An envelope on an interface whose
+`cable_entry` is absent, `none` or `"unknown"` is refused at load: it
+describes a cable nothing says the part has. z-height and insertion travel are never
 measured: a keep-out is a 2D projection, and the row says so.
 
 Each consequence is a row in the check's `consequences` list and in the
@@ -465,7 +458,7 @@ keep-out finding names the part that intrudes, never the connector), a fired
 carries authority `assumption`: the declaration is the author's, the number is
 this code's.
 
-## `assembly.body_edge_mm`: the assembler's edge rule (#1255)
+## `assembly.body_edge_mm`: the assembler's edge rule
 
 ```jsonc
 "assembly": {"body_edge_mm": 2.5,
@@ -488,7 +481,7 @@ path, an intent without the value drifts. A connector whose interface
 declares an `edge` is listed apart from the band rather than counted, like an
 edge-class part.
 
-## `keep_away`: two net groups apart (#1253)
+## `keep_away`: two net groups apart
 
 ```jsonc
 "keep_away": [
@@ -515,9 +508,13 @@ two copies. Both read it through `keep_away.brief_rule_rows`:
   the intent's `severity` promotes it. The rule is described in [the floorplan
   intent](floorplan-intent.md).
 - The routing engines (`route.py`, `route_diff.py`, the GUI's Route and
-  Differential tabs) read the same key off the brief beside the board and price
-  it on the tracks, added to any `--keep-away` they are given. The brief
-  travels with every routed output, so later steps keep it.
+  Differential tabs) read the same key off the brief beside the board
+  (`keep_away.resolve_keep_away`, in the engine, so there is no flag or GUI
+  control) and price it on the tracks, added to any `--keep-away` they are
+  given; the run prints `Keep-away: N rule(s) read from the design brief`.
+  `route.py` and `route_diff.py` refuse a malformed `keep_away` there before
+  routing (exit 2, the parser's message); it is never skipped.
+  The brief travels with every routed output, so later steps keep it.
 
 On the `--intent` path a rule the brief declares and the intent lacks drifts.
 So does a rule the intent carries from the brief that the brief no longer
@@ -555,7 +552,7 @@ reads a proposal until it is pasted.
 ## Deferred, and named rather than silently absent
 
 Height limits as geometry, thermal, panel/depanel, a cable keep-out WITHOUT a
-declared envelope (a declared `cable_envelope_mm` derives one since #959),
+declared envelope (a declared `cable_envelope_mm` derives one),
 subsystem decomposition,
 a side POLICY beyond the advisory connector face, a mounting datum as a
 coordinate frame, and HARD/SOFT as a severity axis. Each is expressible today only as an `unknown[]`
@@ -563,9 +560,8 @@ entry or a `context` note. HARD/SOFT in particular needs a precedence decision
 against the intent's existing per-rule `severity` and `connector_affinity`'s
 forced WARN, and that is a decision to take deliberately rather than in passing.
 
-`proximity[]` came off this list in #902, but only its part-to-part form. Its
-unresolvable relatives stay deferred and are named here rather than discovered
-later: proximity to a **net's** centroid rather than to a part, proximity to a
+Of proximity, only the part-to-part form is declarable. Its relatives stay
+deferred and are named here rather than discovered later: proximity to a **net's** centroid rather than to a part, proximity to a
 board FEATURE (an edge, a mounting hole, a keep-out) rather than to a part, and
 a per-side or per-layer qualifier. Each needs an anchor the current rule has no
 way to resolve.
@@ -573,13 +569,7 @@ way to resolve.
 ## The sibling travels with the board
 
 `.design-brief.json` is in `copy_board.SIBLING_EXTS`, and **every** other site
-that copies a board's siblings imports that one list. There were nine
-independent hand-written copies of it before this change — **four** of them the
-narrower `('.kicad_pro', '.kicad_dru')` form (`ai_gui.py`, `plane_score.py`,
-`check_join.py`, `placement_run.py`) — and the one the placement CLIs actually
-go through, `placement/portfolio.copy_siblings`, was not the one anybody would
-think to edit. `tests/test_711_sibling_lists.py` refuses a tenth.
+that copies a board's siblings imports that one list.
 
 Stranding it does not fail: it silently reverts the next step to inferring what
-the sibling declared, which is the whole class of bug `.kicad_pro` and
-`.kicad_dru` already taught this repo about.
+the sibling declared, as a stranded `.kicad_pro` or `.kicad_dru` would.

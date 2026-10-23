@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """`reconstruct.fit_family_orbits` must be SILENT on healthy boards.
 
-Same shape, and for the same reason, as `tests/test_run8_airwire_refuted.py`:
-a detector that fires on ordinary layout is not a detector. The airwire source
+Same shape, and for the same reason, as `tests/test_run8_airwire_refuted.py`
+(deleted in ecd673eb): a detector that fires on ordinary layout is not a
+detector. The airwire source
 was refuted at 6 of 33, and an un-guarded orbit fit is a related failure -- a
 near-collinear family of resistors fits an enormous circle exactly as a long
 airwire fits a damage vector.

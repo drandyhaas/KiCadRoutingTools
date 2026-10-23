@@ -70,25 +70,20 @@ def _tool_path(root, mod):
 # missing(), which looks up un-inventoried names itself.
 KNOWN_MODULES = (
     'route.py', 'route_diff.py', 'route_planes.py', 'repair_planes.py',
-    'place_optimize.py', 'place_route_loop.py', 'place_fanout_clearance.py',
+    'place_simple.py', 'place_fanout_clearance.py',
     'bga_fanout.py', 'qfn_fanout.py',
     'check_drc.py', 'check_connected.py', 'check_floorplan.py',
     'check_impedance.py', 'check_orphan_stubs.py', 'check_pads.py',
-    'check_pockets.py', 'place_seed.py',
     'kicad_unconnected.py', 'net_forensics.py', 'copy_board.py',
     # #910. The opt-in DELIVERY step: a routed board ships zone
     # outlines with no filled_polygon, so an unrefilled grade reports
     # plane opens that are not real. A tool nobody can discover gets
     # used by nobody.
     'fill_for_delivery.py',
-    'make_movie.py', 'render_placement.py', 'list_nets.py', 'route_summary.py',
-    # The two pre-route placement instruments. `check_channels.py` is the
-    # per-face lane ledger the placement skill tells an operator to run before
-    # blaming the router; `check_capacity.py` is the only tool that answers
-    # "would more copper layers help" (#700) and was in no capability list and
-    # no .md file anywhere -- an instrument nobody can discover produces no
-    # findings.
-    'check_channels.py', 'check_capacity.py',
+    'render_placement.py', 'list_nets.py', 'route_summary.py',
+    # After a first route: what to move (open and costly nets, congested
+    # areas), and the routed nets drawn side by side.
+    'route_review.py', 'render_nets.py',
     # #891. The per-part context sheet a model reasons from -- body and
     # its source, pads by board face, pin-order agreement, partners. An
     # instrument nobody can discover produces no findings.
@@ -103,8 +98,8 @@ KNOWN_MODULES = (
 
 # Scripts whose flag set a consumer may want to pin.
 FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
-                'repair_planes.py', 'place_route_loop.py',
-                'place_optimize.py', 'check_drc.py', 'check_floorplan.py',
+                'repair_planes.py', 'place_simple.py',
+                'check_drc.py', 'check_floorplan.py',
                 'bga_fanout.py', 'qfn_fanout.py')
 # NOT here, deliberately: `place_pose.py`. This tuple's contract, enforced by
 # `tests/test_798_registrar_flags.py`, is that every flag the source registers
@@ -214,10 +209,10 @@ def _registrar_functions(path):
     because BOTH of the ways the module-level rule got the answer wrong are
     module-shaped:
 
-      * `placement/cli_gates.py` holds FOUR registrars and each placement CLI
-        calls a different subset. Unioning the module credits
-        `place_portfolio.py` with `--suggest-locks`, which argparse rejects --
-        a FALSE POSITIVE, the direction this module exists to prevent.
+      * `placement/cli_gates.py` holds several registrars and each placement
+        CLI calls a different subset. Unioning the module credits a CLI with
+        flags it never registered, which argparse rejects -- a FALSE
+        POSITIVE, the direction this module exists to prevent.
       * `fix_kicad_drc_settings.py` registers `--keep-thermal`,
         `--enable-used-layers` and `--no-fix-drc-settings` into route.py's
         parser via `add_drc_fix_args(parser)`, and owns a CLI as well. The

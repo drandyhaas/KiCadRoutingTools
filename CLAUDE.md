@@ -39,10 +39,10 @@ lines of such code from awx.)
 Use `build_router.py` to build the Rust router:
 
 ```bash
-python build_router.py
+python3 build_router.py
 ```
 
-This builds the Rust module, copies the library to the correct location, and verifies the version. Do not run `cargo build` directly.
+This installs the Rust module (a matching prebuilt release binary, else a local build), copies the library to the correct location, and verifies the version. Do not run `cargo build` directly.
 
 **Prefer Python-only solutions; avoid changing the Rust router (`rust_router/`)
 unless clearly necessary and agreed.** A Rust change forces a crate version bump,
@@ -50,7 +50,7 @@ a `build_router.py --from-source` rebuild, and re-distributing prebuilt per-plat
 binaries via GitHub Releases — heavy overhead. When a feature seems to need a Rust
 change, surface that cost early and check for a Python-only approach first.
 
-**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **`/VERSION` can lead `Cargo.toml`**: a python-only release bumps only `/VERSION`'s patch and still republishes the current crate's binaries -- which is also the cheapest way to unstick a release whose assets were built from an older crate. A plain `python3 build_router.py` downloads and keeps the release's prebuilt binary when it matches `Cargo.toml`; it skips the download when `Cargo.toml` is ahead of the release tag, and when the tag matches but the asset inside is stale it detects the version mismatch after install and rebuilds from source. Both checks verify in a fresh subprocess: an in-process re-import of a compiled extension reports the previously-loaded library. `--from-source` just skips the lookup.
+**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **`/VERSION` can lead `Cargo.toml`**: a python-only release bumps only `/VERSION`'s patch and still republishes the current crate's binaries -- which is also the cheapest way to unstick a release whose assets were built from an older crate. A plain `python3 build_router.py` downloads and keeps the release's prebuilt binary when it matches `Cargo.toml`; it skips the download when `Cargo.toml` is ahead of the release tag, and when the tag matches but the asset inside is stale it detects the version mismatch after install and rebuilds from source. Both checks verify in a fresh subprocess: an in-process re-import of a compiled extension reports the previously-loaded library. Before any of that, a checkout whose `rust_router/` differs from `origin/main` builds from source without trying the download, because release binaries are built from main's crate (#615); `--tag` forces a prebuilt. `--from-source` just skips the lookup.
 
 ## Testing & Verification
 
@@ -71,7 +71,10 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **`route.py` reads/writes a sibling `<output>.kicad_pro` DRC floor.** Re-running
   to the same output path reads it back and silently changes the routing (looks
   like non-determinism; it isn't). For clean A/B comparisons, route to a FRESH
-  output path each run (or `rm` the `.kicad_pro` first).
+  output path each run (or `rm` the `.kicad_pro` first). The leftover is kept
+  (an existing output sibling is never overwritten), but every routing writer
+  now WARNS when the output's `.kicad_pro` predates the step and its rules
+  differ from the input's (`warn_leftover_output_project`).
 - **Never `cp` a board without its `.kicad_pro` (#441).** The sibling `.kicad_pro`
   carries the DRC floor (the Default-netclass clearance/track/via the chain routed
   to). A bare `cp a.kicad_pcb b.kicad_pcb` strands it: the next route step reads no
@@ -95,20 +98,6 @@ Validate routed boards against the *real* spec, with the right checker — most
   is missing tests nothing — and process substitution (`<(echo ...)`) is not a
   file on Windows. Measured: a negative control copied to a temp dir died on
   `ModuleNotFoundError` and was read as "the gate refused".
-- **A skill's claims are gated three ways, and each gate says what it cannot
-  see (#923).** `tests/test_431_skill_commands.py` holds every cited `--flag`
-  to the real argparse, every quoted DEFAULT to the real default (read from
-  `--help` where the parser is built under `if __name__ == '__main__'` and
-  cannot be imported), and every `exits N` annotation to whether that flag can
-  reach `gate_or_exit` at all. (The staged placement and combined drivers it
-  also read through `--dump-all` / `--dump-refusals` were retired with their
-  skills in favour of `/pcb-free-agent`, which prescribes no stages.)
-  `tests/test_923_output_key_claims.py` is the third: it RUNS the instruments
-  the skills quote (`check_floorplan`, `render_placement`, `board_score`) on a
-  tracked fixture and resolves every cited key against what they really wrote (`hot[].ratio` was never an emitted key;
-  `broken.poured_nets_meaning` is written under `components.`). A claim about a
-  tool it does not run, or one in prose naming no instrument, is still
-  invisible -- both files say so.
 - **A mutation battery calls `preflight(__file__)` from
   `tests/mutation_anchors.py`, right after its `ROWS`.** A stale anchor then
   refuses in one second instead of reporting BROKEN after the witnesses are
@@ -121,16 +110,18 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **Read the failure buckets by their real definitions.** `failed_single` = "no
   result at all"; `open_single` = a KEPT result whose pads are still disconnected
   (non-multipoint only — a multipoint shortfall is already the pad deficit). A
-  verdict is `len(failed_single) + len(open_single) + pad-deficit`, which is what
-  `place_route_loop` counts. Reading only `failed_single` + the deficit is how a
+  verdict is `len(failed_single) + len(open_single) + pad-deficit`. Reading only
+  `failed_single` + the deficit is how a
   board shipping open copper reports `failures=0`: a NON-multipoint open net
   contributes to neither term. `terminal_restores` names rip victims restored at
   terminal failure with their outcome (`full` is the only success; `full_open`
   and `stub` ship broken). `stacked_copper` discloses same-net duplicate copper
   KiCad's DRC will never flag — the writer drops exact via re-emissions before
-  writing, and whatever still stacks (e.g. two same-net barrels at one point with
-  DIFFERENT drill/size, which is a fab question, not a bookkeeping one) is named
-  in the summary rather than shipped silently.
+  writing, the end-of-run dedup (#162) keeps only the widest of same-net
+  segments stacked on one span (locked and held copper left alone), and
+  whatever still stacks (e.g. two same-net barrels at one point with DIFFERENT
+  drill/size, which is a fab question, not a bookkeeping one) is named in the
+  summary rather than shipped silently.
 - **Net classes are RESPECTED (PR392); `--clearance` sets the DEFAULT class and
   `--clearance-ceiling` caps every class (#530 decision 2, replacing #439's implicit
   switch).** The router honors KiCad's pairwise `max(classA, classB)` between nets of
@@ -176,7 +167,6 @@ Validate routed boards against the *real* spec, with the right checker — most
   - The PLACEMENT CLI `place_fanout_clearance.py` keeps its `--clearance` = ceiling
     contract (#768/#769, pinned by its test family); the GUI fanout tab prices that
     ceiling from the Min Clearance override alone (`placement_clearance_ceiling`).
-    Gated by the phase-7 corpus A/B in `docs/design-rules-proposal.md` before merge.
   - **`place_fanout_clearance.py` obeys the same two branches (#768/#769)**, and
     it is the only PLACEMENT step that does, because it is the only one that
     lays copper (the #313 via nudge) and therefore the only one that writes a
@@ -198,7 +188,7 @@ Validate routed boards against the *real* spec, with the right checker — most
     gets it too.
   - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
     the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
-    `list_nets.board_constraint`), else the fixed default.
+    `list_nets.resolve_cli_floor`, where a declared 0 reads as unset), else the fixed default.
 - **A board may DECLARE what it is for (#711), in a sibling
   `<board>.design-brief.json`.** Placement otherwise infers everything from the
   board: `emit_intent` is "a starter intent READ OFF the board", and every
@@ -207,14 +197,15 @@ Validate routed boards against the *real* spec, with the right checker — most
   UNLOCKED part's pose is read (#1103: `context.pose_claims_withheld`). The brief is the channel for the
   facts a board file cannot contain -- which connectors are user-facing, which
   edge each belongs on and **where along it**, what the enclosure forbids. It is
-  auto-discovered by `check_floorplan.py` and `board_brief.py` the way
+  auto-discovered by `check_floorplan.py`, `board_brief.py` and `board_context.py` the way
   `kicad_dru` discovers a `.kicad_dru`, carried by `copy_board.SIBLING_EXTS`
   (which every other sibling-copy site now imports), and **compiled** into the
   existing intent by `check_floorplan --emit-intent` rather than being a second
-  constraint system -- so it adds no intent key, and the placement CLIs receive
+  constraint system -- every clause lands in an intent key the grade reads (`edge_connectors`,
+  `keepouts`, `proximity`, `arrays`, `fixed_poses`, `keep_away`, `assembly`), and the placement CLIs receive
   it through the `--intent` they already take rather than through a flag of
   their own. (Unlike `.kicad_dru`, which EVERY routing step reads, the brief is
-  read by those two tools and reaches the rest as a compiled intent -- with ONE
+  read by those tools and reaches the rest as a compiled intent -- with ONE
   exception, #1253: its `keep_away` list of route.py `AGG:VICTIM:GAP` rules is
   ALSO read by the routing engines, `batch_route` and `batch_route_diff_pairs`,
   the way `.kicad_dru` is (input_file, else `PCBData.source_path`), through
@@ -222,8 +213,8 @@ Validate routed boards against the *real* spec, with the right checker — most
   or GUI control; the run prints `Keep-away: N rule(s) read from the design
   brief`. One declaration, two readers through one parser
   (`keep_away.brief_rule_rows`): check_floorplan grades it pad edge to pad
-  edge on the placement, WARN unless `severity` promotes it, and no placement
-  search reads it, `floorplan.GRADE_ONLY_RULES`.)
+  edge on the placement, WARN unless `severity` promotes it, and the placer
+  does not read it.)
   `--brief PATH` overrides, `--no-brief` is the OFF arm,
   `--require-brief` refuses a grade with nothing declared behind it. On the
   `--intent` path it reports DRIFT instead of merging, because the graded
@@ -246,8 +237,8 @@ Validate routed boards against the *real* spec, with the right checker — most
   same way (`--mechanical` / `--no-mechanical`): reconciled against the brief
   and the outline, value by value with an authority, and compiled into
   grade-only anchors, whose refs must be locked -- or named, unlocked,
-  by a plan `fixed_poses[]` entry at the declared pose (with its `rot` where the
-  file has one), which the seeder's stage 0 seats and locks (#1054).
+  by an intent `fixed_poses[]` entry at the declared pose (with its `rot` where the
+  file has one), which `place_simple` seats and holds (#1054).
   `docs/floorplan-intent.md` has the authority table.
 - **Protected nets (#521): matched groups and routed diff pairs are recorded in
   the sibling `.kicad_pro`** (`kicad_routing_tools.protected_nets`, written next
@@ -326,15 +317,17 @@ Validate routed boards against the *real* spec, with the right checker — most
   class (zynq: 499 clearance violations at its 0.2 class, routed ~0.1), so keeping the
   stock class in the output manufactures phantom sub-class DRC on copper routed
   correctly at the fab floor. Helpers: `list_nets.board_default_netclass_clearance` /
-  `board_constraint`; the GUI mirrors this with per-floor **override checkboxes** (Min
-  Clearance / Min Hole-to-Hole / Min Edge Clearance — unchecked = use the board's own
-  minimum, checked = clamp to the entered value). The old `--clamp-netclasses` **and**
-  `--no-clamp-netclasses` flags are **removed** (the `--clearance` ceiling replaces
+  `board_constraint`; the GUI mirrors this with per-floor **override checkboxes** (Track Width / Min
+  Clearance / Via Size / Via Drill / Min Hole Clearance / Min Edge Clearance — unchecked =
+  use the board's own value, checked = the entered value; a checked Min Clearance sets
+  the Default class, the CLI's `--clearance`, and the separate **Clearance ceiling** box
+  caps every class, the CLI's `--clearance-ceiling`). The old `--clamp-netclasses` **and**
+  `--no-clamp-netclasses` flags are **removed** (`--clearance-ceiling` replaces
   both; `--net-clearances <json>` gives explicit per-net control). Grade multi-class
   boards at the netclasses that survived (`kicad_drc_compare._staged_copy`).
 
 - **The whole suite is `python3 tests/run_all.py`, and it fans out onto Modal.**
-  ~594 files, ~40 minutes of one laptop -- so on battery, or when you just want
+  ~770 files, ~40 minutes of one laptop -- so on battery, or when you just want
   the answer, use `modal run tests/stress/modal_suite/run_all_modal.py`
   (default 50 shards, about the length of the slowest shard). `--shards N`,
   `--filters "908 910"` for one family, `--fast` for the unit lane.
@@ -344,9 +337,8 @@ Validate routed boards against the *real* spec, with the right checker — most
   `tests/run_all_durations.json` (refresh it with `run_all_modal.py
   --write-durations`, which refuses a red run, and commit it when the cost
   shape moves), and a test of independent rows may declare `RUN_ALL_PARTS = N`
-  and take `--part I/N` to run as N units -- `test_placement_ab` does (8).
-  No packing beats the slowest single unit (`test_compare_seeds`, ~730 s), so
-  that is the fan-out's floor: 50 shards finished green in 765 s (2026-10-05).
+  and take `--part I/N` to run as N units. No packing beats the slowest
+  single unit, so that unit is the fan-out's floor.
   Three things that decide whether you can trust the result:
   - **The verdict is each shard's own exit code, never the parsed counts.** A
     container that OOMs prints no summary line at all, so a driver deciding on
@@ -372,19 +364,19 @@ Validate routed boards against the *real* spec, with the right checker — most
     That recipe (`from_registry` + `USER root`, since the official image runs
     as USER kicad; + `python-is-python3`, since Modal's builder shells out to
     `python -m pip`; + `--break-system-packages` for PEP 668) is the proven
-    way to give the suite image KiCad too, and would recover exactly the two
-    genuinely KiCad-gated self-skips: `test_887_iso_render` (wants the
-    kicad-cli BINARY; Pillow, its other precondition, is already in
-    `requirements.txt`) and `test_910_fill_for_delivery` (wants KiCad's
-    bundled python). The env-level default is OFF because a new base image is
+    way to give the suite image KiCad too, and would recover exactly the
+    genuinely KiCad-gated self-skips: `test_910_fill_for_delivery` and the two
+    `test_1279_*_pcbnew` tests (each wants KiCad's bundled python), and the three whose pcbnew/wx half re-runs under
+    KiCad's python and exits 77 without one -- `test_505_min_connection_clamp`,
+    `test_505_gui_half_runs` and `test_engine_kwarg_parity_launch`.
+    The env-level default is OFF because a new base image is
     a NEW BASELINE ERA that voids cross-wave numeric comparisons -- a reason
     that does NOT apply to the pass/fail suite, which compares no numbers
     across runs.
-    **Two other `run_all` self-skips are NOT about KiCad at all**:
-    `test_887_run24_regression` and `test_run8_starved_face_gate` want
-    recorded artifacts under `wk/`, which is gitignored (0 files tracked),
-    so they self-skip on ANY clean clone -- verified locally WITH KiCad
-    present. No image change moves them.
+    **One other kind of `run_all` self-skip is NOT about KiCad at all**: the
+    `test_622_*` tests that plan with CP-SAT skip without `ortools`, which
+    `requirements.txt` does not list. No image change moves it.
+    `tests/README.md` keeps the full list.
   - The image is a clean checkout of HEAD, so it is reproducible and you can
     keep editing while it runs; `KICAD_SWEEP_DIRTY=1` ships the working tree
     instead and stamps the provenance `+dirty` (use it to run the suite over
@@ -394,7 +386,8 @@ Validate routed boards against the *real* spec, with the right checker — most
     code defect: a missing git INDEX (`corpus_boards()` asks `git ls-files`, so
     with no `.git` it returns `[]` and corpus tests grade an empty set instead
     of skipping), missing Pillow, missing pytest, and a Python version
-    mismatch. The image now rebuilds the index from `git ls-files --force`
+    mismatch. The image now rebuilds the index by replaying the host's
+    `git ls-files -z` list through `git add --force --pathspec-from-file`
     (never `git add -A`, which honours .gitignore and drops a
     tracked-before-the-rule board), installs `requirements.txt`, and matches
     the interpreter you launched with -- and it ASSERTS the board count against
@@ -408,25 +401,13 @@ Validate routed boards against the *real* spec, with the right checker — most
 and zero `unrouted` and zero `broken` nets at the end. It is NOT restoring
 parts to the poses they had before.**
 
-This is stated here because the perturbed-corpus rig (#411) grades on
-`recovery` and `home /N`, which measure **distance to the original pose** —
-and those are the wrong headline for this goal. A placement that is
-electrically excellent but arranged differently scores ~0 recovery. Measured,
-run 10: `recovery` **−0.0014** and `home` **0/30** on a run that took
-copper-free DRC 9 → 0, assembly blocking 4 → 0, and `check_assembly` from NOT
-BUILDABLE to **buildable**. The headline said failure about a board that had
-become strictly more buildable.
-
 So, when grading a placement:
 
 - **Lead with the routed outcome** — `board_score`'s `blocking`
-  (`unrouted + broken` first, then the rest), with `quality` (vias,
-  copper_mm, segments) as the tie-break once `blocking` is 0.
-- **Keep `recovery` as a DIAGNOSTIC, never the score.** It is how you catch a
-  run that wandered — `collateral_pad_rms` rising (run 10: 0.000 → 3.670 mm)
-  means parts nothing had damaged were moved, which is a real defect. But a
-  negative recovery on a board that got more buildable is not a failure of
-  the run.
+  (`unrouted + broken` first, then the rest), then `joins_needed` (the joins
+  the open nets still need: a missing 17-pad rail is 16, one stranded pad 1,
+  where `blocking` counts each as one net), with `quality` (vias, copper_mm,
+  segments) as the tie-break after that.
 - **The human original is a BENCHMARK TO APPROACH, not a pose to match**
   (its vias / copper_mm / segments), because a human layout is one solution,
   not the only one.
@@ -459,17 +440,27 @@ but only `check_drc --baseline <the run's starting board>` can tell an
 inherited graze from one a part move created (`graphic-board-edge`); without
 it they read `unverified`. Pass `--baseline` whenever you have that board.
 
-**Scope a placement search to the refs the gate names.** When a gate names
-specific parts, free exactly those and lock everything else. A global sweep
-orders its violators by its own priority — usually worst-off-board first — and
-may never reach the ones actually blocking you. Measured: freeing 2 parts and
-locking the other 105 cleared both blocking pairs in **63 seconds**, where
-whole-board sweeps ran 10+ minutes without touching them.
+**Another part's pad ON that copper is the same blind spot (#1266).** Pad
+legality measured pads against pads, so `place_pose set C3 135.6 96.69 --rot
+180` parked esp_prog C3 on U2's tab -- one pad across its edge, one wholly
+inside the filled shape -- `legal`, `buildable`, and check_drc saw only the
+first. `check_drc.footprint_graphic_pad_census` is the one measurement:
+check_drc grades the interior, `grade_pad_legality` publishes it as
+`graphic_pad_*` (place_pose gates on it), the seat gate
+(`LegalityContext.pair_shortfall`, which `place_simple`'s final legality
+reads) charges it against pads with an off-board seed licensing nothing, and check_assembly gates a contact the way
+it gates courtyards -- a member MOVED vs `--baseline`, report-only without
+one -- because human boards ship such contacts by design (net ties on Kelvin
+shunt pads, a jumper on an antenna feed; a tie's own net is never a stack).
 
-**Repair searches start from the part's CURRENT pose**, which carries no
-information once a part is tens of millimetres from where it belongs. Expect
-cost to grow sharply with the displacement cap, and prefer re-seating such a
-part over nudging it.
+**Judge a placement by routing it, over seeds.** `py_placer/place_simple.py`
+gives the same placement for the same board, inputs and `--seed`, but seeds
+differ more than most changes to its objective or inputs: on ch32v003_usb,
+seeds 0-3 of one configuration routed 24-54 vias. So place several seeds of
+each arm, route each by the board's recorded chain (blocking first, then
+joins_needed, then vias, copper_mm, segments), and LOOK at the routed boards -- the objective's
+own cost, crossings and hpwl are proxies for ranking unrouted candidates,
+never the verdict.
 
 ## Stress testing & A/B replay
 
@@ -492,62 +483,11 @@ one. A change that touches per-net vias is A/B'd with
 `tests/stress/pernet_via_ab.py`, which replays each board's recorded route step
 with `--via-size` stripped (176 boards qualify).
 
-**A new PLACEMENT objective term goes through `tests/test_placement_ab.py`
-before it ships on.** It runs the same board twice (flag off, flag on), writes
-both, and grades both with an *independent* check — `floorplan.grade(...,
-with_health=True)` re-derives its corridors from the FINAL poses, so a term that
-only improves the model it is computed from shows up as "improved nothing". Add
-a row to `ROWS`, do not add a file. Five rules the table encodes and that are
-easy to get wrong:
-
-- **Judge on ≥3 DISTINCT boards, paired and directional** (improve on ≥ N−1,
-  regress on none), never a per-board absolute. Neutral boards are printed, not
-  dropped. This is **enforced in `gate()`**, not just stated here (#694): the
-  old rule counted trial *rows*, so one improving row on one board passed, and
-  `--row` made that the convenient path. The refusal applies to rows **on
-  trial**, and every row in the table today is pinned — so a real run does not
-  reach it and `--self-test` does. A term whose per-board direction is a coin
-  flip passes the rule 1 run in 2^N (1 in 8 at N=3), which the run prints when
-  a term is on trial.
-- **Keep the row that disagrees.** A term that helps on one board of three is
-  not a term, and deleting the dissenting row is how that becomes folklore.
-- **A rejected term keeps its rows**, marked `rejected` with its measured
-  `expect`, so it stays a change detector instead of a permanent red mark that
-  someone eventually deletes along with the finding.
-- **Numbers live in `tests/placement_ab_baseline.json`, never in a `why`
-  string.** Every run re-measures and compares it per key and per arm, reporting
-  a reversed direction (`INVERTED`) apart from a moved value (`DRIFT`), a
-  baseline row `ROWS` no longer declares (`ORPHAN`), and a baseline that is not
-  shaped like one (`MALFORMED`). A `why` records the MECHANISM only. This exists
-  because `corridor-ulx3s` sat rejected on a recorded claim whose signal had
-  reversed while the gate printed PASS (#694) — and the reason is worth getting
-  right, because the obvious reading is wrong: **the gate never compared the
-  signal.** `_verdict` collapses the signal, the guards and intent errors into
-  ONE mark, and only that mark is checked against `expect`, so the reversal was
-  MASKED by a different criterion turning the mark `regress` for its own
-  reasons. An aggregate verdict cannot say which of its inputs moved.
-  **A placement-engine change that moves these numbers re-records the baseline
-  (`--write-baseline`) in the same commit**, after reading the table; a partial
-  run refuses to write one, and a missing baseline FAILs rather than passing.
-  `--baseline ""` is the deliberate way to run without the comparison, and
-  `--self-test` runs the gate and comparator logic in milliseconds at the top of
-  every invocation.
-- **A mark resting on intent errors names the rules that moved**
-  (`intent errors A -> B (zone_containment X -> Y)`). An unattributed error
-  count is what let #694's inverted row keep reading as an intact finding.
-
-Two traps measured the hard way: the first run of that harness reported the
-corridor term inert because it had been pointed at a **merged** net glob whose
-`cover` was 0.46 — a phantom corridor (declare sub-buses separately; `SDRAM_A*`
-scores 0.81, `SDRAM_*` 0.46). And grade intent errors **paired**, not against
-zero: both arms quench the board, so both walk parts out of the emitted intent's
-zones for reasons the flag did not cause.
-
-Every metric in that harness is still a **proxy**, so `tests/test_placement_probe.py`
-(opt-in, slower) actually routes. It scopes the route **causally, not by which
-parts moved** — the nets `net_affinity` flagged plus the declared corridor nets,
-fixed from the OFF board and identical on both. Scoping by moved parts is
-circular: a term that moves nothing would score a perfect null.
+**A new PLACEMENT objective term ships on by the routed result.** Route both
+arms over the same seeds on representative boards (the rule above), compare
+paired per board and seed, and keep the arm that routes better on most of
+them and worse on none by more than the seed spread. A term that only lowers
+the objective it is part of has shown nothing.
 
 ## Keep CLI and GUI routing in sync
 
@@ -620,9 +560,9 @@ through there too.
   `SaveBoard()`, as canonical trees: numbers to integer nanometres (so the
   tolerance is exactly zero, not a float epsilon), `at` angles folded, children
   sorted, and the uuid multiset asserted rather than normalised away. **Exits 2
-  when pcbnew is absent and does NOT self-skip** — `tests/mutate_714.py` uses
-  it as a killer gate, and a killer gate that exits 0 reports every row it
-  guards as SURVIVED. Run it whenever you touch `placement/writer.py`'s flip
+  when pcbnew is absent and does NOT self-skip**: it is the flip's acceptance
+  gate, and a gate that exits 0 without running reads as a pass. Run it
+  whenever you touch `placement/writer.py`'s flip
   path or `kicad_parser.flip_layer_token`; ~2 min. Its wx-free siblings are
   `tests/test_714_{mirror_discriminates,side_self_consistency,flip_roundtrip,
   refusals,identity_write_unchanged}.py`, which `run_all.py` does collect.
@@ -640,8 +580,9 @@ through there too.
   rename, or REMOVE a dialog control** — deleting one without updating
   `settings_persistence` crashes on close and loses the user's settings
   (that shipped once; see 31f359c). Seconds to run, no routing.
-- `tests/gui_parity/test_fanout_rotated_gui.py` — needs KiCad python; the only
-  gate that runs a **fanout** step. Drives the REAL FanoutTab on a rotated
+- `tests/gui_parity/test_fanout_rotated_gui.py` — needs KiCad python; the first
+  gate that ran a **fanout** step (the other fanout gates are indexed in
+  `tests/gui_parity/README.md`). Drives the REAL FanoutTab on a rotated
   QFN (haasoscope U2, QFN-76 @ 90°) and compares against the CLI's text-parsed
   engine call, replaying the tab's OWN captured kwargs so the two fronts cannot
   differ by a parameter. Asserts side classification parity (the check that
@@ -649,9 +590,9 @@ through there too.
   Seconds to run. Its wx-free half is `tests/test_rotated_footprint_frame.py`
   (round-trip invariants + change detectors, ~1 s, runs under `run_all.py`).
   **Fanout is the only routing consumer of `pad.local_x/local_y`**, and those
-  are the one PCBData field the GUI COMPUTES rather than reads — see the
-  `_global_to_local` entry in `.gui-parity-checked` for the bug that motivated
-  these.
+  are the one PCBData field the GUI COMPUTES rather than reads — the gate's own
+  docstring and fix commit 301ee1b3 record the `_global_to_local` bug that
+  motivated these.
 - `tests/gui_parity/test_fanout_backside_gui.py` — needs KiCad python; the
   same shape for a **flipped BGA** (bus622-take5's `flip_frame`, which
   re-derives every pad's locals when it turns the board over). Builds its own
@@ -672,8 +613,10 @@ through there too.
   fires wx timers on Windows -- the fanout gates sat out 16-35 min budgets
   there and graded empty results while the worker had finished in 0.5 s.
 - `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
-  plan through the GUI engine path and grades against the CLI chain
-  (`KICAD_DUMP_BATCH_KWARGS` diffs the full batch_route param set, ~105 keys).
+  plan through the GUI engine path and grades the two final boards against
+  each other. The key-by-key diff of the full batch_route param set is a
+  separate tool, `tests/gui_parity/diff_engine_kwargs.py`, over two
+  `KICAD_DUMP_BATCH_KWARGS` captures.
 
   **How to run it (it is NOT a special-session thing — just run it):**
 
@@ -683,8 +626,9 @@ through there too.
   ```
 
   It **re-execs into KiCad's bundled python automatically** (it probes
-  `/Applications/KiCad/KiCad.app/.../bin/python3`, then `/usr/bin/python3`, then
-  the Windows path), so plain `python3` is the correct way to launch it — you do
+  `$KICAD_PYTHON`, then the running interpreter, then the platform's KiCad
+  install -- the macOS app or a versioned Windows install on any drive -- and
+  `/usr/bin/python3` last; `py_router/kicad_locate.py`), so plain `python3` is the correct way to launch it — you do
   NOT need to find the interpreter yourself. The dialog is constructed HEADLESS
   (`parent=None`, never shown, `WXSUPPRESS_SIZER_FLAGS_CHECK=1`), so no window
   appears and no display setup is needed. It routes the small in-repo board
@@ -871,7 +815,9 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   (`segment.graphic_ring`, #1181) is stamped by the obstacle map and graded by
   check_drc, lifted only for the shape's one own-pad net (or a declared tie
   group), and a touching track or via grants net-tie copper its net but no
-  other footprint's (KiCad gives that copper none). #962 adds what a
+  other footprint's (KiCad gives that copper none). A PAD grants a part's
+  copper its net only when it is that part's own pad (#1266): a foreign pad
+  over one vertex of esp_prog U2's tab used to waive its own short. #962 adds what a
   MEASUREMENT needs: `segment.drawn_width`
   (the stroke as drawn -- `width` models a stroke-0 fill at the track width),
   `graphic_kind`, `graphic_circle` (the true circle; the outline is a 16-gon)
@@ -948,8 +894,16 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   fix. Two consequences worth knowing: a pair graded above the board-wide
   clearance is disclosed in `grade_pad_legality`'s `required` key (print it via
   `legality.format_required_clause`, never a hand-copied string), and
-  `placement/fanout_clearance.py` is a SEPARATE flat-scalar channel that still
-  has this bug.
+  `placement/fanout_clearance.py` prices its pairs through the same model
+  (#725).
+- `pad.zone_connection` - RESOLVED zone-connection override ('none', 'thermal',
+  'solid', 'thru_hole_only'; None = the zone decides): the pad's own
+  `(zone_connect N)`, else its footprint's, both parse paths. Ask
+  `kicad_parser.pad_joins_zone(pad, zone)` / `pad_zone_connection(pad, zone)`,
+  never the raw field: a pad a zone does not join (NONE) gets no pour credit in
+  `check_net_connectivity` and is knocked out of the fill model at the zone's
+  clearance, so it needs its own track (a GND solder-jumper half with
+  `(zone_connect 0)` shipped open while every grade credited the pour).
 
 ### Through-Hole vs SMD Pads
 
@@ -972,15 +926,25 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `segment.net_id` - Net ID
 - `segment.locked` - KiCad `(locked yes)`: user-pinned copper; its net is never
   rip-eligible (#521), no override
+- `segment.held_by` - the `sense:<REF>.<PAD>` KiCad group holding this copper
+  immutable (#1279, a declared Kelvin sense branch). A pass that moves,
+  rewrites or removes existing copper must test
+  `kicad_parser.is_immutable_copper(item)` (locked OR held), never `locked`
+  alone; the hold is never written as `(locked yes)` and does not make the
+  net's routes of the run unrippable
 
 ### Via Attributes
 
 - `via.x`, `via.y` - Position
 - `via.size` - Via outer diameter
 - `via.drill` - Drill diameter
-- `via.layers` - Layer span
+- `via.layers` - Layer pair as written. Whether the via spans only part of the
+  stack is `via.via_type` (`through`/`blind`/`buried`/`micro`); read a via's
+  copper through `geometry_utils.via_on_layer` / `via_copper_layers`, never off
+  this pair
 - `via.net_id` - Net ID
 - `via.locked` - KiCad `(locked yes)` (see `segment.locked`)
+- `via.held_by` - the `sense:` group holding this via immutable (see `segment.held_by`)
 - `via.tenting_attrs` - Protection spec `{token: raw inner s-expr}` for
   `tenting`/`covering`/`plugging`/`capping`/`filling` (#489 §8); `{}` = the board
   specified nothing. Read by BOTH parse paths in the same normalized form. Pass it
@@ -1018,8 +982,7 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   redundant: three boards (nanovoltmeter_marge, hexberry_fpga, pedal_404) declare
   `(tenting (front no) (back no))` board-wide and had every added via stamped
   tented — a fab error, hidden because KiCad's FACTORY policy is tented so the
-  two agree on an ordinary board. `prevailing_via_protection` still exists and is
-  still correct; it is just not a default any more. When RE-PLACING a via, also pass
+  two agree on an ordinary board. When RE-PLACING a via, also pass
   `inherit_when_unspecified=True` (#741). An empty spec now emits nothing in
   every case (`kicad_writer.via_protection_sexpr`), so the via keeps inheriting
   the board's `(setup ...)` — what it had, and what the GUI side

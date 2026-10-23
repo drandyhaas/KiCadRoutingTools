@@ -133,6 +133,9 @@ import escape_moves as em  # noqa: E402
 from coherent_nets import coherent_nets  # noqa: E402
 import rules as _rules  # noqa: E402  ONE source for every design rule
 import probe_memo as pm  # noqa: E402  the probe / screen memo (never pay for one twice)
+# (the board-text walk, in make_bench: the whole route strips a window with it and never imports this research CLI,
+# whose import writes the environment)
+from make_bench import walk_blocks, block_geom, in_box, strip_window  # noqa: E402,F401
 
 from escape_moves import LAYERS  # noqa: E402,F401  -- ONE source
 
@@ -319,7 +322,6 @@ def count_copper(board, nid):
 
 PAD_MM = 2.0          # the window round an array (fanout_once's re-lay strip)
 TOL = 0.002           # mm: a text block is the same copper as a parsed item
-_NUM = r'(-?[\d.]+)'
 
 
 # ---------------------------------------------------------------- text
@@ -330,62 +332,14 @@ def dmenu_full(st):
     return st.get('dmenu_full', st['dmenu'])
 
 
-def walk_blocks(txt, token, remove):
-    """Every top-level `(token ...)` block: `remove(block)` True drops it.
-    Paren-balanced, either net dialect (te.strip_net_items's walk)."""
-    out, i = [], 0
-    while True:
-        j = txt.find('(' + token, i)
-        while j >= 0 and txt[j + 1 + len(token)] not in ' \n\t':
-            j = txt.find('(' + token, j + 1)
-        if j < 0:
-            out.append(txt[i:])
-            break
-        k, depth = j, 0
-        while True:
-            c = txt[k]
-            if c == '(':
-                depth += 1
-            elif c == ')':
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
-        block = txt[j:k + 1]
-        if remove(block):
-            out.append(txt[i:j].rstrip(' \t'))
-            e = k + 1
-            if e < len(txt) and txt[e] == '\n':
-                e += 1
-            i = e
-        else:
-            out.append(txt[i:k + 1])
-            i = k + 1
-    return ''.join(out)
-
-
 def block_net(block, nid, name):
     m = re.search(r'\(net (\d+)\)', block)
     m2 = re.search(r'\(net "([^"]+)"\)', block)
     return (m and int(m.group(1)) == nid) or (m2 and m2.group(1) == name)
 
 
-def block_geom(block, token):
-    if token == 'segment':
-        s = re.search(r'\(start ' + _NUM + ' ' + _NUM + r'\)', block)
-        e = re.search(r'\(end ' + _NUM + ' ' + _NUM + r'\)', block)
-        L = re.search(r'\(layer "?([^")\s]+)"?\)', block)
-        return ((float(s.group(1)), float(s.group(2))), (float(e.group(1)), float(e.group(2))), L.group(1))
-    a = re.search(r'\(at ' + _NUM + ' ' + _NUM + r'\)', block)
-    return ((float(a.group(1)), float(a.group(2))), None, None)
-
-
 def _near(p, q):
     return abs(p[0] - q[0]) < TOL and abs(p[1] - q[1]) < TOL
-
-
-def in_box(p, box):
-    return box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3]
 
 
 def strip_to_fanout_copper(txt, nm, nid, name, pcb_f, box):
@@ -460,25 +414,6 @@ def salvage_missing_ends(F1, R, names, byname, sbox, dbox, log=print):
             f.write(txt)
         log(f'  derived board: ends salvaged from the routed board -- {fixed}')
     return fixed
-
-
-def strip_window(txt, nets, byname, box):
-    """`txt` with those nets' copper inside `box` removed (a segment
-    wholly inside, a via inside): fanout_once's re-lay strip, as text."""
-    ids = {byname[nm][0]: byname[nm][1].name for nm in nets}
-
-    def rm(token):
-        def f(block):
-            m = re.search(r'\(net (\d+)\)', block)
-            m2 = re.search(r'\(net "([^"]+)"\)', block)
-            nid = int(m.group(1)) if m else next((i for i, n in ids.items() if m2 and n == m2.group(1)), None)
-            if nid not in ids:
-                return False
-            a, b, _ = block_geom(block, token)
-            return in_box(a, box) and (b is None or in_box(b, box))
-        return f
-    txt = walk_blocks(txt, 'segment', rm('segment'))
-    return walk_blocks(txt, 'via', rm('via'))
 
 
 def write_board(txt, out, pro_from):

@@ -212,7 +212,8 @@ ROWS = [
     # --- the grader's delegation ------------------------------------------
     ('check_drc-stops-delegating', 'drc',
      '        return track_pair_clearance(_track_rules, _cls_of.get(net_a, ()),\n'
-     '                                    _cls_of.get(net_b, ()), eff)',
+     '                                    _cls_of.get(net_b, ()), eff,\n'
+     '                                    coupled=coupled, layer=layer)',
      '        return eff, None',
      (T735, TDRUC), 'KILLED'),
 ]

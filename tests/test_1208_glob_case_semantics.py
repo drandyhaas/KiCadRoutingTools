@@ -31,9 +31,7 @@ import net_queries                                             # noqa: E402
 
 TREES = ('py_router', 'py_tools', 'py_placer', 'kicad_routing_plugin')
 # file -> why its plain fnmatch is a FILE glob, matched as the platform does.
-PATH_GLOBS = {
-    os.path.join('py_tools', 'make_film.py'): 'reject globs over board file paths',
-}
+PATH_GLOBS = {}
 failures = []
 
 

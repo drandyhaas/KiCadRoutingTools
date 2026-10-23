@@ -108,7 +108,7 @@ DOORS = ('placement', 'routing', 'combined')
 #: the registry lie, and a catalogue that lies is worse than none:
 #:   `conditional` -- writes a board only under an opt-in flag
 #:                    (`check_drc --debug-lines`, `check_join --keep-staged`)
-#:                    or only to a scratch copy (`plane_score`). Calling these
+#:                    or only to a scratch copy. Calling these
 #:                    actors tells a reader to scope something that reports.
 #:   `driver`      -- emits workflow instructions and touches no board. The
 #:                    two tape heads. `instrument` would be true of the board

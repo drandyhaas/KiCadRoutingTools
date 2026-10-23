@@ -147,7 +147,6 @@ def get_dialog_settings(dialog):
         'skip_routing_check': dialog.skip_routing_check.GetValue(),
         'debug_memory_check': dialog.debug_memory_check.GetValue(),
         'stats_check': dialog.stats_check.GetValue(),
-        'make_movie_check': dialog.make_movie_check.GetValue(),
 
         # Swappable nets options
         'update_schematic_check': dialog.update_schematic_check.GetValue(),
@@ -224,6 +223,8 @@ def get_dialog_settings(dialog):
         # #381 D7: QFN-specific track width / clearance (default 0.1/0.1).
         'fanout_qfn_track_width': dialog.fanout_tab.qfn_options.qfn_track_width.GetValue(),
         'fanout_qfn_clearance': dialog.fanout_tab.qfn_options.qfn_clearance.GetValue(),
+        # #1328: unchecked = the board's Default net-class clearance.
+        'fanout_qfn_clearance_check': dialog.fanout_tab.qfn_options.qfn_clearance_check.GetValue(),
         'fanout_qfn_underpad': dialog.fanout_tab.qfn_options.underpad_escape.GetValue(),
         'fanout_qfn_allow_via_in_pad': dialog.fanout_tab.qfn_options.allow_via_in_pad.GetValue(),
         # By NAME: the choice lists the board's own copper layers.
@@ -549,11 +550,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.debug_memory_check.SetValue(settings['debug_memory_check'])
     if 'stats_check' in settings:
         dialog.stats_check.SetValue(settings['stats_check'])
-    if 'make_movie_check' in settings:
-        # Restoring the box does NOT arm the recorder: its baseline is taken
-        # when the user ticks it (or when a plan run starts), so a restored
-        # tick still records from the board as it stands at that moment.
-        dialog.make_movie_check.SetValue(settings['make_movie_check'])
 
     # Restore swappable nets options
     if 'update_schematic_check' in settings:
@@ -747,6 +743,11 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.qfn_options.qfn_track_width.SetValue(settings['fanout_qfn_track_width'])
     if 'fanout_qfn_clearance' in settings:
         dialog.fanout_tab.qfn_options.qfn_clearance.SetValue(settings['fanout_qfn_clearance'])
+    # #1328: a legacy dict carries no box -> unchecked, the board's value
+    # (the value it saved was the old fixed default the box now replaces).
+    _qcc = bool(settings.get('fanout_qfn_clearance_check', False))
+    dialog.fanout_tab.qfn_options.qfn_clearance_check.SetValue(_qcc)
+    dialog.fanout_tab.qfn_options.qfn_clearance.Enable(_qcc)
     if 'fanout_qfn_underpad' in settings:
         dialog.fanout_tab.qfn_options.underpad_escape.SetValue(settings['fanout_qfn_underpad'])
     if 'fanout_qfn_allow_via_in_pad' in settings:
@@ -832,7 +833,7 @@ def restore_dialog_settings(dialog, settings):
         dialog.ai_tab.restore_plan_state(plan_state)
 
     # Placement sub-tab (issue #481). Restoring the last workdir re-surfaces
-    # a previous session's movie/report/preview buttons when the artifacts
+    # a previous session's report/preview buttons when the artifacts
     # still exist on disk.
     if 'ai_active_subtab' in settings and hasattr(dialog, 'ai_notebook'):
         idx = settings['ai_active_subtab']

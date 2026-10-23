@@ -197,6 +197,7 @@ def to_axis_aligned_frame(pcb_data: PCBData, ref: str
 
     for z in rp.zones or []:
         z.polygon = [fwd(x, y) for (x, y) in z.polygon]
+        z.holes = [[fwd(x, y) for (x, y) in h] for h in (getattr(z, 'holes', None) or ())]
     for gp in list(rp.guide_paths or []) + list(rp.keepout_zones or []):
         if hasattr(gp, 'points'):
             gp.points = [fwd(x, y) for (x, y) in gp.points]

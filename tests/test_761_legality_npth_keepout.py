@@ -881,7 +881,8 @@ class TestInertOnTheTrackedCorpusAtFilePoses(unittest.TestCase):
 
         This is the arm that tells them apart: raise `--clearance` until the
         keep-out DOES bind and assert exactly which boards light up. At 0.20 --
-        what `corpus_noop_sweep` and `test_placement_ab` both run at -- the
+        what `corpus_noop_sweep` and `test_placement_ab` both ran at (both
+        deleted in ecd673eb) -- the
         census is silent on all 22 boards; at 0.50 it fires on three, and only
         in the hole channel.
 

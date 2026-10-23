@@ -24,11 +24,11 @@ TWO SEPARATE DEFECTS, and the second is the one the issue does not name:
     report.
 
 The rule itself -- `--json-out` implies `--quiet` unless `--pair` or `--focus`
-makes the narrative the deliverable -- is held over every emitted command by
+makes the narrative the deliverable -- was held over every emitted command by
 `tests/test_431_skill_commands.py::
-test_a_render_that_writes_its_keys_to_a_file_does_not_print_them`, which shares
-that file's `--dump-all`/`--dump-refusals` cache. This file is the part that
-has to RUN something.
+test_a_render_that_writes_its_keys_to_a_file_does_not_print_them` until
+9acfa55e removed that case. This file is the part that has to RUN
+something.
 
 placement_driver was retired with its skill, so the checks that read ITS
 emitted recipe and self-test text left with it; what `render_placement` does

@@ -6,8 +6,7 @@ one JSON row per command to ``<workdir>/cmd_timing.jsonl``. Until now that file
 was consumed by a WATCH SUBAGENT doing arithmetic by hand at the end of a run --
 a mandate that lived only inside a work dir (``wk/run24/esp_prog/watch/timing.md``)
 and died with it. The step table, the stage subtotals, the totals and the three
-longest steps are a deterministic script's job; this is that script, and the
-movie overlay reads the same numbers, so there is ONE reader and two consumers.
+longest steps are a deterministic script's job; this is that script.
 
     python3 -X utf8 py_router/cmd_timing.py <WORKDIR|LEDGER.jsonl> [--json]
 
@@ -21,20 +20,13 @@ argument, and never exits non-zero because a run was slow. It reports.
 There is no rate, no projection and no ETA anywhere in here, and a test walks
 this module's AST to keep it that way.
 
-Why it lives in py_router/: ``make_movie.py`` puts only its own directory on
-``sys.path`` and is imported in-process by the GUI recorder, ``run_plan.py``,
-``place_route_loop.py`` and ``render_run.py``, so a sibling import costs nothing
-and a path bootstrap would cost every one of them. ``py_tools/_path.py`` already
-inserts ``../py_router``, so ``make_film.py`` gets this for free. Shipped code
-must not import from ``tests/``, which is why the reader is not beside its
-writer -- an asymmetry that is correct, since only the harness WRITES the ledger
-while the movie, the film, the loop and the audit pass all READ it.
+Shipped code must not import from ``tests/``, which is why the reader is not
+beside its writer -- an asymmetry that is correct, since only the harness
+WRITES the ledger while the report and the audit pass READ it.
 
 ``import cmd_timing`` touches no third-party module at all -- not numpy, not
 Pillow -- so the report CLI runs on a machine that has none. A test asserts it
-by inspecting ``sys.modules`` after a bare import in a fresh interpreter. Any
-future drawing helper here must keep its PIL import inside the function, the
-way ``py_tools/make_film._badge`` does.
+by inspecting ``sys.modules`` after a bare import in a fresh interpreter.
 """
 from __future__ import annotations
 
@@ -56,17 +48,9 @@ class LedgerError(ValueError):
     """A ledger line that is not a JSONL row, named by file and line number.
 
     A ValueError, NOT a SystemExit, and the difference is not cosmetic. This is
-    a LIBRARY function with two consumers: the report CLI, where exiting is
-    right, and the movie, where a clock is decoration that "may never take the
-    movie down" -- its own words at make_movie.py. SystemExit derives from
-    BaseException, so it walked straight through every `except Exception` guard
-    meant to contain it:
-
-      * place_route_loop's end-of-run movie block would have killed the whole
-        PLACEMENT RUN, after the routing was done;
-      * the GUI recorder's worker thread would have died with no log line;
-      * make_movie's CLI, which catches only FileNotFoundError, would have died
-        with a bare message.
+    a LIBRARY function: the report CLI is where exiting is right, and
+    SystemExit derives from BaseException, so it would walk straight through
+    every `except Exception` guard a library caller puts around it.
 
     And the triggering input is ordinary, not exotic: tee_cmd APPENDS a row per
     command, so any run killed mid-write -- run 22 died to a token limit exactly
@@ -138,9 +122,7 @@ def find_ledger(start, max_up=3):
 
     ``start`` may be the ledger itself, a directory, or a board inside a work
     dir. Walks that directory then up to ``max_up`` parents, which is what lets
-    BOTH ``make_movie.py <workdir>`` and the board-sequence form
-    (``make_movie.py .../frozen.kicad_pcb .../r1_pour.kicad_pcb ...``, which is
-    literally what run 24's own R7-movie step ran) find the same file.
+    a work dir and a board inside it find the same file.
 
     A ``.jsonl`` file given directly is taken AS the ledger whatever it is
     called. Requiring the canonical basename here rejected every ledger that is
@@ -309,24 +291,6 @@ def longest(rows, n=3):
                                    r.get('t_start') if r.get('t_start') is not None
                                    else float('inf')))
     return ranked[:max(0, int(n))]
-
-
-def utc_iso(epoch):
-    """``2026-08-20T10:03:32Z`` for an epoch instant, or '' for None.
-
-    UTC, and the `Z` is part of the value. The ledger's own `iso_start` is
-    LOCAL time with no offset (``time.strftime(..., time.localtime(t0))`` at
-    tee_cmd.py:179), which is unambiguous only on the machine that wrote it --
-    so it is echoed verbatim in the report, where the reader is that machine's
-    owner, and never used for a frame, which travels. `t_start` is epoch
-    seconds, so this is a total function of a recorded fact.
-    """
-    if epoch is None:
-        return ''
-    import datetime
-    return (datetime.datetime.fromtimestamp(float(epoch),
-                                            datetime.timezone.utc)
-            .strftime('%Y-%m-%dT%H:%M:%SZ'))
 
 
 def fmt_hms(seconds):
@@ -514,459 +478,6 @@ def report_data(rows, ledger_path=None):
     }
 
 
-# --------------------------------------------------------------------------
-# the run clock: which instant a movie frame is showing
-# --------------------------------------------------------------------------
-
-#: ``wall_s`` is what the command that produced this board COST -- the other
-#: reading of "how long did this take". `t` says where in the run the beat sits;
-#: `wall_s` says how long its own step ran, and only the matched row knows that.
-Anchor = collections.namedtuple(
-    'Anchor', 'label board first last t stage basis wall_s')
-
-
-def _basenames(row):
-    """Every argv entry's basename, backslashes normalised.
-
-    The ledger carries the argv as the OS gave it, so on Windows a board
-    appears as `work\\r1.kicad_pcb`. Comparing basenames is what makes the
-    match a match; comparing substrings would let `r3.kicad_pcb` find
-    `xr3.kicad_pcb`.
-    """
-    out = []
-    for a in (row.get('argv') or ()):
-        try:
-            out.append(os.path.basename(str(a).replace('\\', '/')))
-        except Exception:                                       # noqa: BLE001
-            continue
-    return out
-
-
-def anchor_steps(marks, rows, mtimes=None):
-    """One ``Anchor`` per mark: when that step's board came into existence.
-
-    ``t`` is a run-clock epoch instant or None, and ``basis`` NAMES HOW IT WAS
-    FOUND so a frame can print it rather than implying a precision the match
-    does not have.
-
-    The primary witness is the board's MTIME landing inside a row's
-    ``[t_start, t_end]``. tee_cmd writes ``t0 = time.time()`` and a file's mtime
-    is the same epoch clock, and it runs commands serially and blocks on each --
-    so at most one row can contain an mtime, and the resolution is unique by
-    construction. Measured on run 24: zero overlapping rows in 153, and 16 of
-    17 chain boards resolved to exactly one row (r1_pour -> R1-pour,
-    r3_route -> R3-route, r7_lc -> R7-layercosts). The 17th is the seed board,
-    whose mtime precedes the run by 101 s -- the right answer, not a miss.
-
-    What mtime identifies is WHEN THE CONTENT CAME INTO EXISTENCE, which is
-    usually but not always the command that wrote the file: `copy_board.py` uses
-    `shutil.copy2`, which preserves mtime, so a copied board resolves to the row
-    that produced its SOURCE. Two of run 24's sixteen are copies. That is the
-    right instant for a movie -- the frame shows that content -- but it is not
-    the same claim as "the command that wrote this path".
-
-    argv matching is the FALLBACK, not the primary, because mtime is destroyed
-    by copying a work dir and by `make_film --from-ledger`, which materialises
-    boards out of a content-addressed store.
-
-    It is a fallback rather than the rule because it is wrong FAR more often
-    than it looks. Graded against the mtime answer over run 24's 17 chain
-    boards: raw first-mention picks the wrong command 10 times, and the rule
-    actually implemented below -- prefer an exit-0 mention -- still picks wrong
-    9 times, five of them by more than a minute (worst: `routed`, off by 470 s).
-    The exit-0 preference does fix `r4`, landing 0.1 s from the truth.
-
-    (An earlier version of this docstring said "wrong three times" and named
-    r4, routed and r5_prune. Each anecdote is accurate, but three was the number
-    of examples looked at, not the number of failures -- r1, r2 and r3 are three
-    MORE instances of the same dry-run category the text presented as happening
-    once. Understating a fallback's error rate by 3x is how it stops being
-    treated as a fallback.)
-
-    ``mtimes`` overrides ``os.path.getmtime`` (tests, and any caller that knows
-    better).
-    """
-    rows = [r for r in (rows or [])
-            if r.get('t_start') is not None and r.get('t_end') is not None]
-    out = []
-    for m in (marks or []):
-        label, board, first, last = m[0], m[1], m[2], m[3]
-        t, stage, basis, wall = None, None, 'none', None
-        mt = None
-        if mtimes and board in mtimes:
-            mt = mtimes[board]
-        else:
-            try:
-                mt = os.path.getmtime(board)
-            except OSError:
-                mt = None
-        if mt is not None:
-            inside = [r for r in rows if r['t_start'] <= mt <= r['t_end']]
-            if inside:
-                t, stage, basis = mt, inside[0].get('label'), 'mtime'
-                wall = inside[0].get('wall_s')
-        if t is None and mt is not None and rows and mt < min(
-                r['t_start'] for r in rows):
-            # A file OLDER than the run's first wrapped command was not written
-            # by any of them, so this is checked BEFORE argv. Measured on run
-            # 24: board.kicad_pcb predates the run by 101 s, and argv-first gave
-            # it `L1-driver` at t+107 -- the first successful command that
-            # merely READ it, which is a worse answer than "it was already
-            # there". Clamped to t0, because the film opens at the run's start.
-            t, basis = min(r['t_start'] for r in rows), 'pre-run'
-        if t is None:
-            base = os.path.basename(str(board).replace('\\', '/'))
-            hits = [r for r in rows if base in _basenames(r)]
-            clean = [r for r in hits if r.get('exit') in (0, '0')]
-            pick = (clean or hits)
-            if pick:
-                r0 = min(pick, key=lambda r: r['t_start'])
-                t, stage = r0['t_end'], r0.get('label')
-                wall = r0.get('wall_s')
-                basis = 'argv' if clean else 'argv?'
-        if t is None and mt is not None and rows:
-            # No `elif mt < t0: pre-run` here. That branch used to exist and
-            # became UNREACHABLE when the pre-run test moved above the argv
-            # fallback: it fires on exactly `mt < t0`, so nothing could ever
-            # reach a second copy. The mutation battery is what found it --
-            # deleting the live branch left the dead one answering, so the row
-            # survived and pointed straight at the duplicate.
-            t0 = min(r['t_start'] for r in rows)
-            t1 = max(r['t_end'] for r in rows)
-            if t0 <= mt <= t1:
-                t, basis = mt, 'mtime-loose'
-        out.append(Anchor(label, board, first, last, t, stage, basis, wall))
-
-    # Monotone clamp in MARK order. The movie's step order is the chain and is
-    # authoritative, so an earlier-looking instant is a mapping error, not time
-    # running backwards. A clamped anchor's basis gains '+clamped', because a
-    # corrected number must never be presented as a measured one.
-    prev = None
-    fixed = []
-    for a in out:
-        if a.t is not None and prev is not None and a.t < prev:
-            a = a._replace(t=prev, basis=a.basis + '+clamped')
-        if a.t is not None:
-            prev = a.t
-        fixed.append(a)
-    return fixed
-
-
-Reading = collections.namedtuple(
-    'Reading', 'elapsed_s stage basis instant interpolated')
-
-
-class RunClock(object):
-    """Frame index -> where that frame sits on the RUN's wall clock.
-
-    **It counts UP, and there is deliberately no countdown.**
-
-    A countdown was possible and would have been exact -- the movie is built
-    after the run, so `t1 - instant` is the subtraction of two recorded facts,
-    not a forecast. It was implemented, measured against run 24, and then
-    removed, because exact is not the same as legible: a countdown READS as
-    "time left in this video", and it means "time that remained in the run".
-    A 25-frame GIF that finishes in four seconds while showing
-    "remaining 0:15:57" is inviting exactly that misreading. `+1:01:42 of
-    1:17:39` carries the same information with no way to misread it, and the
-    viewer can subtract if they want the other number.
-
-    Taking it out also deleted the machinery it needed: a `covered` predicate
-    over whether the ledger spanned the film, its shortfall message, and an
-    exact-or-absent branch in both the overlay and the metadata. None of that
-    was wrong; all of it existed only to make one redundant line safe.
-
-    The basis is the run clock and nothing else. Tool time is not it: in run 24
-    the wrapped commands account for 253.3 s of a 4658.7 s run -- 5.4% -- so a
-    clock driven by tool time would sit near zero for over an hour.
-
-    Within a step's frame span the instant is INTERPOLATED between two measured
-    endpoints (this step's and the next resolved one's) and never projected past
-    the last. Copper reveal is not uniform in time, so an interpolated figure is
-    a smoothing rather than a measurement, and the overlay says so.
-    """
-
-    def __init__(self, anchors, tot, n_frames):
-        self.anchors = list(anchors or [])
-        self.tot = tot
-        self.n = int(n_frames)
-        self.resolved = [a for a in self.anchors if a.t is not None]
-
-    def unmapped(self):
-        """The beats with no instant, or [] when every one resolved.
-
-        What `covered` used to gate is now just disclosure: the frames that
-        could not be placed say so individually, and this names them for a
-        caller that wants a one-line summary.
-        """
-        return [a.label for a in self.anchors if a.t is None]
-
-    def at(self, i):
-        """The ``Reading`` for frame ``i``. ``instant`` is an ABSOLUTE epoch."""
-        t = self.tot
-        if not self.anchors or t is None or t.t0 is None:
-            return Reading(None, None, 'no ledger', None, False)
-        k = None
-        for j, a in enumerate(self.anchors):
-            if a.first <= i < a.last:
-                k = j
-                break
-        if k is None:
-            # Before the first mark: `build_boards` opens with its own
-            # `m.snapshot("input")` BEFORE the step loop, so frame 0 is always
-            # here. Its instant is the run's start, and it borrowed the first
-            # anchor's stage and basis until #887's pre-push review -- which
-            # made frame 0 announce, say, `stage R1-pour / mapped by mtime`
-            # about a board R1-pour never touched and mtime never witnessed.
-            # A number is allowed to be approximate here; a BASIS is a claim
-            # about where the number came from, and that one was false. Its own
-            # name, and no stage, because no wrapped command produced this
-            # frame.
-            if i < self.anchors[0].first:
-                return Reading(0.0, None, 'run-start', t.t0, False)
-            k = len(self.anchors) - 1
-        a = self.anchors[k]
-        if a.t is None:
-            return Reading(None, a.stage, 'none', None, False)
-        nxt = next((b for b in self.anchors[k + 1:] if b.t is not None), None)
-        interp = False
-        inst = a.t
-        if nxt is not None and nxt.first > a.first:
-            frac = (i - a.first) / float(max(1, nxt.first - a.first))
-            frac = min(1.0, max(0.0, frac))
-            inst = a.t + (nxt.t - a.t) * frac
-            interp = frac not in (0.0,)
-        return Reading(max(0.0, inst - t.t0), a.stage, a.basis, inst, interp)
-
-    def lines(self, i):
-        """The overlay text for frame ``i``. Three lines, four when licensed.
-
-        The first token is literally RUN CLOCK -- never ETA, never a bare "time
-        left" -- because the frame must say what the number is before it says
-        the number. It counts UP, `+elapsed of total`, and the `at` line gives
-        the absolute UTC instant, so a frame lifted out of the movie is still
-        placeable in time. There is no countdown; see the class docstring for
-        why an exact one was removed rather than kept.
-        """
-        r = self.at(i)
-        t = self.tot
-        if r.elapsed_s is None:
-            out = ['RUN CLOCK  --']
-            if r.basis == 'none':
-                out.append('stage  not in the ledger')
-                out.append('basis  cmd_timing.jsonl - this beat has no wrapped '
-                           'command')
-            else:
-                out.append('basis  no cmd_timing.jsonl beside this chain')
-            return out
-        total = fmt_hms(t.run_s) if t and t.run_s is not None else '--'
-        out = ['RUN CLOCK  +%s%s of %s'
-               % (fmt_hms(r.elapsed_s), ' ~' if r.interpolated else '', total)]
-        # A `pre-run` or `run-start` beat has no stage BECAUSE no wrapped
-        # command produced it -- it is the board the run started from. Saying
-        # "unlabelled" there reads as a defect in the ledger rather than as the
-        # fact it is. (The two differ in what is known: `pre-run` is a board
-        # whose mtime PREDATES the run, `run-start` is the opening snapshot,
-        # which has no board of its own at all.)
-        stage = r.stage or ('the board the run started from'
-                            if (r.basis or '').startswith(('pre-run',
-                                                           'run-start'))
-                            else 'unlabelled')
-        out.append('stage  %s' % stage)
-        how = 'interpolated within %s' % stage if r.interpolated else \
-            'mapped by %s' % (r.basis or 'nothing')
-        out.append('basis  cmd_timing.jsonl - %d wrapped commands, %s'
-                   % (t.n if t else 0, how))
-        # UTC, from the epoch instant. NOT the ledger's `iso_start`, which
-        # tee_cmd writes as LOCAL time with no offset -- unambiguous only on
-        # the machine that produced it. `t_start` is epoch seconds, so UTC is a
-        # total function of it and means the same thing everywhere the movie is
-        # watched. The `Z` is part of the value, not decoration.
-        if r.instant is not None:
-            out.append('at  %s' % utc_iso(r.instant))
-        return out
-
-    def meta(self, i):
-        """The PNG text block for frame ``i``. Every value a recorded fact.
-
-        **`krt:utc` is the one to read.** An absolute UTC instant makes a frame
-        self-describing: it needs no ledger, no run start and no knowledge of
-        the machine that produced it to be placed in time, so the timeline
-        survives outside the movie -- which is the whole reason the block exists.
-        `krt:t_epoch` is the same instant unrounded, for arithmetic.
-
-        Deliberately NOT here: the ledger's own `iso_start`, which is local time
-        with no offset and therefore ambiguous the moment the PNG leaves the
-        machine; `krt:eta` and `krt:progress`, because a prediction and a
-        percentage both invite being read as forecasts; and `krt:remaining_s`,
-        which was exact but read as "time left in this video" -- see the class
-        docstring.
-        """
-        r = self.at(i)
-        t = self.tot
-        m = {
-            'krt:frame': i,
-            'krt:frames': self.n,
-            'krt:clock_basis': r.basis or 'none',
-            'krt:ledger_rows': t.n if t else 0,
-        }
-        if r.stage:
-            m['krt:stage'] = r.stage
-        if r.instant is not None:
-            m['krt:utc'] = utc_iso(r.instant)
-            m['krt:t_epoch'] = round(r.instant, 3)
-        if r.elapsed_s is not None:
-            m['krt:elapsed_s'] = round(r.elapsed_s, 1)
-            m['krt:elapsed_hms'] = fmt_hms(r.elapsed_s)
-        if t and t.run_s is not None:
-            m['krt:run_total_s'] = round(t.run_s, 1)
-            m['krt:run_total_hms'] = fmt_hms(t.run_s)
-            m['krt:run_started_utc'] = utc_iso(t.t0)
-            m['krt:tool_s'] = round(t.tool_s, 1)
-            m['krt:outside_s'] = round(t.outside_s, 1)
-        for k, a in enumerate(self.anchors):
-            if a.first <= i < a.last:
-                m['krt:step'] = a.label
-                # What that step COST, which is the other reading of "how long
-                # did this take": the elapsed figure says where in the run this
-                # frame sits, and this says how long its own command ran.
-                if a.wall_s is not None:
-                    m['krt:step_wall_s'] = round(a.wall_s, 3)
-                break
-        return m
-
-
-def clock_for(marks, ledger_path, n_frames, mtimes=None):
-    """A ``RunClock`` for a movie, or None when there is no ledger to read."""
-    if not ledger_path or not marks:
-        return None
-    rows = load_rows(ledger_path)
-    if not rows:
-        return None
-    return RunClock(anchor_steps(marks, rows, mtimes=mtimes),
-                    totals(rows), n_frames)
-
-
-#: Padding inside the clock band, in pixels.
-_CLOCK_PAD = 6
-
-
-def _clock_font(frame_h):
-    from route_render import load_font
-    return load_font(max(11, frame_h // 55))
-
-
-def _wrap_clock(lines, avail, measure):
-    """``lines`` broken on spaces to fit ``avail`` px. Wraps, never clips.
-
-    A one-line clock overflowed a 700 px frame the first time it was drawn, and
-    PIL clips at the edge in silence -- the same trap ``_label`` documents,
-    where a strip ending at a plausible-looking field reads as the whole story.
-    """
-    out = []
-    for ln in lines or ():
-        cur = ''
-        for word in str(ln).split(' '):
-            cand = (cur + ' ' + word) if cur else word
-            if cur and measure(cand) > avail:
-                out.append(cur)
-                cur = word
-            else:
-                cur = cand
-        out.append(cur)
-    return out
-
-
-def clock_band_height(all_lines, width, frame_h):
-    """The band height for a WHOLE movie: one number, from every frame's text.
-
-    It is computed across all frames on purpose. Frames carry different numbers
-    of wrapped lines -- a step whose stage name wraps has one more than its
-    neighbour -- so a per-frame height would make the frames different sizes,
-    which is the one thing `save_movie` cannot take: `_write_mp4` fails and the
-    Pillow GIF fallback silently RESIZES every later frame to the first.
-    """
-    from PIL import Image, ImageDraw
-
-    if not all_lines:
-        return 0
-    probe = ImageDraw.Draw(Image.new('RGB', (8, 8)))
-    font = _clock_font(frame_h)
-
-    def measure(s):
-        try:
-            bb = probe.textbbox((0, 0), s, font=font)
-            return bb[2] - bb[0]
-        except Exception:                                       # noqa: BLE001
-            return 8 * len(s)
-
-    try:
-        bb = probe.textbbox((0, 0), 'Ag', font=font)
-        lh = (bb[3] - bb[1]) + 4
-    except Exception:                                           # noqa: BLE001
-        lh = 16
-    avail = max(60, int(width) - 2 * _CLOCK_PAD - 6)
-    worst = max((len(_wrap_clock(ln, avail, measure)) for ln in all_lines
-                 if ln), default=0)
-    return (lh * worst + 2 * _CLOCK_PAD) if worst else 0
-
-
-def add_clock_band(frame, lines, band_h, theme=None):
-    """``frame`` with a clock BAND grown underneath it. Returns a NEW image.
-
-    **The band exists instead of an overlay, and that is the whole point.** The
-    clock used to be drawn bottom-left ON the board, mirroring
-    ``BoardRenderer._label``'s top-left corner -- but ``_label`` is one short
-    line and the clock is four, so its black box covered a quarter of the X-ray
-    panel, including copper the movie exists to show. Reviewers of #887 said so
-    about the first published still, and they were right: an instrument that
-    hides the measurement is not an instrument.
-
-    Growing the frame instead means the clock can never occlude anything. Every
-    frame grows by the SAME ``band_h`` -- take it from ``clock_band_height``
-    over the whole movie, never per frame -- so the constant-frame-size
-    invariant holds by construction.
-
-    PIL is imported HERE, the ``make_film._badge`` way, so ``import cmd_timing``
-    stays free of third-party modules.
-    """
-    if not lines or not band_h:
-        return frame
-    from PIL import Image, ImageDraw
-
-    W, H = frame.size
-    # The ACTIVE theme (#946/C4); it was DARK whatever `--theme` said.
-    import render_theme
-    _TH = render_theme.theme(theme, strict=False)
-    out = Image.new('RGB', (W, H + int(band_h)), _TH.rgb('chrome_band'))
-    out.paste(frame, (0, 0))
-    d = ImageDraw.Draw(out)
-    font = _clock_font(H)
-
-    def measure(s):
-        try:
-            bb = d.textbbox((0, 0), s, font=font)
-            return bb[2] - bb[0]
-        except Exception:                                       # noqa: BLE001
-            return 8 * len(s)
-
-    try:
-        bb = d.textbbox((0, 0), 'Ag', font=font)
-        lh = (bb[3] - bb[1]) + 4
-    except Exception:                                           # noqa: BLE001
-        lh = 16
-    avail = max(60, W - 2 * _CLOCK_PAD - 6)
-    for i, ln in enumerate(_wrap_clock(lines, avail, measure)):
-        y = H + _CLOCK_PAD + i * lh
-        if y + lh > H + band_h:
-            # The band was sized for the worst frame in the movie, so this
-            # cannot happen -- but a clipped clock is a wrong clock, not a
-            # cosmetic problem, so it stops rather than drawing off the end.
-            break
-        d.text((_CLOCK_PAD, y), ln, fill=_TH.rgb('chrome_text'), font=font)
-    return out
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -981,7 +492,7 @@ def main(argv=None):
               file=sys.stderr)
         return 2
     # The CLI is where exiting on a malformed ledger is the right answer; the
-    # library raises so its other consumer, the movie, can keep going.
+    # library raises so a library caller can keep going.
     try:
         rows = load_rows(ledger)
     except LedgerError as exc:

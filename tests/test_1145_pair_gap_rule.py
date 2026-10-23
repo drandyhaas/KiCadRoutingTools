@@ -15,9 +15,12 @@ The raise takes the widest rule over the layers the pair may route on (a
 forbidden layer does not count) and never lowers the gap. It happens twice:
 call-level before the --impedance solve, so the solved widths are those of
 the built gap, and per pair, where a pair's own net-class gap (#435, the CLI
-default) replaces the call's. The #318 neck now prices P against N at the
-pair value, so a diagonal's nanometre rounding is necked under the layer rule
-as it is under a class.
+default) replaces the call's. The #318 neck prices P against N at the pair
+value, and leaves a run AT it alone: the margin-0 grades below discount the
+writer's coordinate rounding (kicad_writer.EDGE_ROUNDING_MM, sqrt(2) nm),
+which a diagonal coupled exactly at the rule reads inside it by. That neck
+used to shave such a run's P by 0.4 um instead, lowering the project's track
+floor with it.
 
 Rows:
   - kicad_dru.pair_gap_rule_floor: routed layers only, track rules
@@ -48,6 +51,7 @@ for _d in ('py_router', 'tests'):
     sys.path.insert(0, os.path.join(ROOT, _d))
 
 from run_utils import evidence  # noqa: E402
+from kicad_writer import EDGE_ROUNDING_MM  # noqa: E402
 
 LAYER_RULE = ('(version 1)\n(rule "tight_f" (layer "F.Cu") '
               '(constraint clearance (min 0.3mm)))\n')
@@ -116,6 +120,8 @@ def _route(dru, pro=None, hybrid=False, widths=None, **kw):
                                     print_summary=False, check_sizes=False,
                                     clearance_margin=m)
                          for m in (0.0, 0.05)}
+            viols[0.0] = [v for v in viols[0.0]
+                          if v.get('overlap_mm', 1.0) > EDGE_ROUNDING_MM]
     finally:
         diff_pair_loop._maybe_swap_to_hybrid = swap
     return log.getvalue(), r[0], r[1], viols
@@ -195,8 +201,7 @@ def test_per_pair_floor_keeps_the_clearance():
     clearance, no rules file. The class gap replaced the call's floored one
     and the pair was built inside clearance; the #318 neck then cleared it by
     narrowing P and N, to different widths. Now the gap is floored and both
-    members keep their width (a diagonal's 1 nm rounding may still neck one
-    by a few hundred nm, hence the tolerance)."""
+    members keep their width exactly: a run at the rule is not necked."""
     from routing_defaults import TRACK_WIDTH
     widths = {}
     log, ok, bad, viols = _route(None, pro=_pro(gap=0.15),
@@ -208,7 +213,7 @@ def test_per_pair_floor_keeps_the_clearance():
     assert sorted(widths) == ['DPA_N', 'DPA_P', 'DPB_N', 'DPB_P'], \
         f'fixture: all four members must carry copper {sorted(widths)}'
     necked = {nm: min(ws) for nm, ws in widths.items()
-              if min(ws) < TRACK_WIDTH - 1e-3}
+              if min(ws) < TRACK_WIDTH - 1e-9}
     assert not necked, f'members necked below {TRACK_WIDTH}: {necked}'
 
 

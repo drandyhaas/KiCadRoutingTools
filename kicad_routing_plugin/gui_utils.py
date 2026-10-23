@@ -160,6 +160,42 @@ def ui_thread_status(status_text, progress_bar, message):
         _IN_UI_STATUS = False
 
 
+def layer_costs_for_layers(costs, layers, selected_layers, copper_layers):
+    """The Basic tab's Layer Costs values as one cost per entry of `layers`.
+
+    The control is read the way it is written: one value per SELECTED routing
+    layer, else one per board copper layer (its default, its tooltip's order
+    and an AI plan's order). Either way the values are placed on `layers` BY
+    NAME -- the engines price them positionally, and a plane step routes on
+    F.Cu + its pour layers + B.Cu, not on the selected layers. Returns [] when
+    the control is empty. A count that matches neither list is returned as
+    typed: the engine reads it positionally against `layers`, and refuses it
+    when it is not one value per layer (routing_config.layer_costs_count_error).
+    Raises ValueError, naming the layers, when the values are for the selected
+    layers and `layers` holds one that is not selected (found reviewing #1269:
+    the Planes tab handed create_plane the selected layers' costs against its
+    own layer list, so a 4-layer board's default costs priced the wrong
+    layers and left the unrequested inner layer routable)."""
+    costs = list(costs or [])
+    if not costs:
+        return []
+    by_name = None
+    for names in (selected_layers, copper_layers):
+        if names and len(costs) == len(names):
+            by_name = dict(zip(names, costs))
+            break
+    if by_name is None:
+        return costs
+    missing = [l for l in layers if l not in by_name]
+    if missing:
+        raise ValueError(
+            f"Layer Costs gives {len(costs)} value(s), one per selected layer "
+            f"({' '.join(selected_layers)}), but this step also routes on "
+            f"{' '.join(missing)}: give one value per copper layer "
+            f"({' '.join(copper_layers)}) instead")
+    return [by_name[l] for l in layers]
+
+
 from contextlib import contextmanager
 
 
@@ -307,6 +343,22 @@ def apply_via_protection(pcb_via, tenting_attrs):
             pass
 
     return applied
+
+
+def set_via_layers(pcb_via, top_id, bottom_id, via_type=None):
+    """Give a PCB_VIA its type, THEN its layer pair -- in that order.
+
+    A PCB_VIA is born THROUGH, and pcbnew snaps a through via's pair to
+    F.Cu/B.Cu as it is set: setting the pair first and the type after leaves
+    a microvia spanning the whole stack (probed on pcbnew 10.0.3 and 9.0.6).
+    `via_type` is the Via's own Via.via_type; None or 'through' (every via the
+    tool adds) keeps pcbnew's default type, as before. Found reviewing #1268:
+    every site re-created an existing blind/micro via as a through via."""
+    from kicad_parser import pcbnew_viatype_value
+    vt = pcbnew_viatype_value(via_type)
+    if vt is not None:
+        pcb_via.SetViaType(vt)
+    pcb_via.SetLayerPair(top_id, bottom_id)
 
 
 def apply_castellated_landing_retract(board, board_edge_clearance):
@@ -1159,7 +1211,9 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                                    layers=None, layer_costs=None,
                                    net_widths_by_name=None,
                                    progress_callback=None,
-                                   net_clearances_by_name=None):
+                                   net_clearances_by_name=None,
+                                   board_edge_clearance=None,
+                                   same_net_pad_clearance=None):
     """Staged-save kicad-oracle recheck against the LIVE pcbnew board.
 
     The CLI plane fronts (and route.py's plane finalize, #562) finish with
@@ -1185,6 +1239,11 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
     re-keys them onto it. For the same reason the oracle hands its copper
     back on the LIVE board's netcodes (`net_ids_by_name` below) before this
     applies it with SetNetCode.
+
+    `board_edge_clearance` and `same_net_pad_clearance` (#1290) are the
+    engine run's resolved copper-to-edge floor and #581 via clearance, which
+    the CLI's oracle config carries. Omitted (or not > 0), the edge is the
+    live board's own rule and vias may land in same-net pads, as before.
     """
     try:
         import os
@@ -1207,6 +1266,8 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                         or 0) / 1e6
         except Exception:
             _edge_mm = 0.0
+        if board_edge_clearance and board_edge_clearance > 0:
+            _edge_mm = board_edge_clearance       # the run's floor (#1290)
         # #658 (audit finding): this config used to be BARE -- no layers, no
         # layer_costs, no power_net_widths -- so the weld router here ran at
         # UNIFORM layer economics while the CLI finalize priced them, and the
@@ -1222,6 +1283,8 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
             _cfg_kw['layers'] = list(layers)
         if layer_costs:
             _cfg_kw['layer_costs'] = list(layer_costs)
+        if same_net_pad_clearance and same_net_pad_clearance > 0:
+            _cfg_kw['same_net_pad_clearance'] = same_net_pad_clearance
         ocfg = GridRouteConfig(
             clearance=clearance, track_width=track_width,
             via_size=via_size, via_drill=via_drill, grid_step=grid_step,
@@ -1365,8 +1428,9 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
             via.SetWidth(mm_to_iu(v.size))
             via.SetNetCode(v.net_id)
             lys = v.layers or ['F.Cu', 'B.Cu']
-            via.SetLayerPair(board.GetLayerID(lys[0]),
-                             board.GetLayerID(lys[-1]))
+            set_via_layers(via, board.GetLayerID(lys[0]),
+                           board.GetLayerID(lys[-1]),
+                           getattr(v, 'via_type', None))
             apply_via_protection(via, getattr(v, 'tenting_attrs', None))
             board.Add(via)
         if orc.get('links_routed'):

@@ -179,7 +179,7 @@ ROWS = [
      "PROHIBITION = re.compile(r'NOT\\s+`blocking == 0`|not on that count')",
      (T_918,), KILLED),
 
-    # ---- RETIRED with the staged skills (pcb-free-agent replaced them) ----
+    # ---- RETIRED with the staged skills (plan-pcb-placement replaced them) ----
     # #941 row 10 (`blocking-count-regated`, an expected SURVIVOR on the
     # placement skill's text), all six #942 rows (the delegated prompts in
     # loop_driver.py, killed by test_942_subagent_contract), `cap-restated`

@@ -8,10 +8,11 @@ until the code changes, which is the trap
 reason the stale formula below survived for as long as the term did.
 
 1. **No prose gates on `check_assembly`'s `blocking == 0`.** `check_assembly`
-   decides NOT BUILDABLE on FIVE conjuncts and publishes `buildable` so nobody
-   has to re-derive them; `blocking` is the first conjunct alone and means
-   "pad intersections". A gate written against it passes a board that is
-   unbuildable through the other four.
+   decides NOT BUILDABLE on several conjuncts (five when this was written,
+   eleven since) and publishes `buildable` so nobody has to re-derive them;
+   `blocking` is the first conjunct alone and means "pad intersections". A
+   gate written against it passes a board that is unbuildable through any of
+   the others.
 
    This IS #918's acceptance, which asks for `grep -rn "blocking == 0"` over
    every enrolled skill dir to return "nothing **that is a gate**" -- the last
@@ -47,10 +48,10 @@ BOARD_SCORE = os.path.join(ROOT, 'py_tools', 'board_score.py')
 #: missing (#941): it is the third door, it discusses `blocking` in its own
 #: right, and an unlisted directory is where the next restatement lands -- the
 #: same registration hole this file's own docstring is about one level up.
-#: `pcb-free-agent` replaced the two placement skills (#1009) and is enrolled
+#: `plan-pcb-placement` replaced the two placement skills (#1009) and is enrolled
 #: in their place for the same reason.
 SKILL_DIRS = [
-    os.path.join(ROOT, '.claude', 'skills', 'pcb-free-agent'),
+    os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement'),
     os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing'),
     os.path.join(ROOT, '.claude', 'skills', 'review-routed-board'),
 ]

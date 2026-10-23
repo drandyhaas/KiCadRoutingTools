@@ -10,13 +10,13 @@ silent through a crash, and silence is indistinguishable from "still
 running". That is the failure this file exists to avoid, so `bugs` matches
 the signatures you would ACT on -- tracebacks, refusals, leaks, rejected
 laps, a `blocking` that went UP -- and `cheats` matches the ways a run could
-report success without earning it: the answer key read, a scope narrowed to
-the nets that were failing, a grader floor overridden.
+report success without earning it: a scope narrowed to the nets that were
+failing, a grader floor overridden, the toolchain edited.
 
 NEITHER WATCHER GRADES ON TIME. `cheats` ends at a MARKER -- a fact on disk,
 the same on every machine -- and `bugs` runs until you stop it. Nothing here
 compares an elapsed time to a threshold and decides something. The
-`subprocess.run(..., timeout=)` values below are the ordinary guard against a
+`subprocess.run(..., timeout=)` value below is the ordinary guard against a
 hung CHILD process, and `--report-wait` bounds how long the last marker is
 waited for; each one is REPORTED when it fires rather than swallowed, and
 none of them changes a verdict. (That paragraph used to say "Neither watcher
@@ -24,15 +24,14 @@ BUDGETS on time ... Nothing here compares an elapsed time to a threshold",
 which `--report-wait` would have made a lie about its own file.)
 
 TWO MARKERS, because there are two things to audit and they do not exist at
-the same moment. `DONE` means THE COPPER IS FROZEN, and it triggers the audits
-that read the BOARD. `REPORT.md` is written after those, because it has to
-carry their verdicts -- which used to make it, in SKILL.md's own words, "the
-one artifact the cheat watcher cannot audit". So `cheats` now stays alive past
-DONE and ends at `REPORT_DONE`. Measured on run 29: three of its four watcher
-files were written before DONE, its `REPORT.md` grew 287 -> 393 lines while a
-watcher was reading it and finished at 686, and its DONE marker was REWRITTEN
-29 minutes after the board audits had already run against the board it then
-superseded.
+the same moment. `DONE` means THE COPPER IS FROZEN, and it names the board the
+run ships. `REPORT.md` is written after it -- which used to make it, in
+SKILL.md's own words, "the one artifact the cheat watcher cannot audit". So
+`cheats` now stays alive past DONE and ends at `REPORT_DONE`. Measured on run
+29: three of its four watcher files were written before DONE, its `REPORT.md`
+grew 287 -> 393 lines while a watcher was reading it and finished at 686, and
+its DONE marker was REWRITTEN 29 minutes later, naming a different shipped
+board.
 
 `logs/<label>.done` is a DIFFERENT marker family -- tee_cmd's per-command
 completion signal -- and is not this.
@@ -42,12 +41,11 @@ completion signal -- and is not this.
 
     # ways the run could pass without earning it; ends at the REPORT marker
     python3 -X utf8 tests/stress/run_watch.py cheats --workdir wk/run20 \
-        --truthdir wk/run20_truth --done wk/run20/DONE \
-        --report-done wk/run20/REPORT_DONE
+        --done wk/run20/DONE --report-done wk/run20/REPORT_DONE
 
     # the pre-#963 contract, for replaying over a finished run
     python3 -X utf8 tests/stress/run_watch.py cheats --workdir wk/run20 \
-        --truthdir wk/run20_truth --report-done ''
+        --report-done ''
 
 Exit codes: 0 normal, 2 usage, 1 from `--self-test` when a self-check fails.
 `bugs` never exits on its own.
@@ -76,8 +74,6 @@ from converge import blocking_defect  # noqa: E402
 SIGNATURES = (
     ('TRACEBACK', 'Traceback (most recent call last)'),
     ('LEAK', 'VERDICT: LEAK'),
-    ('UNAIDED-VIOLATION', 'UnaidedViolation'),
-    ('PROVENANCE', 'UNAIDED VIOLATION'),
     ('NOT-BUILDABLE', 'NOT BUILDABLE'),
     ('REFUSED', 'refusing'),
     ('REFUSED', 'REFUSED'),
@@ -350,11 +346,11 @@ NET_SCOPED = ('route.py',)
 #: Fourth field: the tools on which the flag lowers a bar. Measured on run 20 --
 #: 683 raw substring hits, 24 once anchored to a real command line, 6 once
 #: scoped to the tools where the flag means what the `why` says.
-#: The two RETIRED skill drivers (removed for /pcb-free-agent). They installed
+#: The two RETIRED skill drivers (removed for /plan-pcb-placement). They installed
 #: no cli_banner, so their invocations are only ever seen through a teed
 #: `cmd_timing.jsonl` row -- see _scan_ledger_argv. Kept so a RECORDED run
 #: still replays with its driver flags reported; tests/test_run20_run_watch.py
-#: pins that exemption (`_REPLAY_ONLY`).
+#: pinned that exemption (`_REPLAY_ONLY`) until it was deleted (ecd673eb).
 DRIVERS = ('placement_driver.py', 'loop_driver.py')
 #: Every CLI that calls `fab_tiers.add_fab_tier_args`, which is what actually
 #: supplies `--fab-tier` / `--fab-overrides`. Scoped to GRADERS + ROUTERS
@@ -396,8 +392,7 @@ CHEAT_FLAGS = (
     ('SCOPE', '--nets', 'routes a SUBSET -- "0 unrouted" over 6 of 84 nets '
                         'is not the same claim', NET_SCOPED),
     # `--ignore-nets` HAS NO ENTRY, deliberately. The flag exists only on
-    # `place_optimize.py`, `place_seed.py`, `place_portfolio.py`,
-    # `compare_seeds.py` and `render_placement.py`, where it scopes AIRWIRE
+    # `render_placement.py`, where it scopes AIRWIRE
     # SCORING -- it is how you tell the panel not to draw 80 GND stubs -- and
     # reporting it there buried the real uses in run 20. No tool that
     # produces a VERDICT declares it, so an entry scoped to the graders or
@@ -516,108 +511,19 @@ def _use_key(label, flag, tool, toks):
             hashlib.sha1(payload.encode('utf-8', 'replace')).hexdigest()[:16])
 
 
-#: JSONL keys that carry a REAL argv, in priority order. `lever_argv` is a
-#: converge lever; `argv` / `cmdline` are what tests/stress/tee_cmd.py records
-#: for EVERY invocation a timed run makes. Run 22 wrote 203 such rows and this
-#: watcher extracted nothing from any of them, because it looked only for
-#: `lever_argv` -- so every driver invocation was invisible (the drivers
-#: install no cli_banner, so they print no CMD: line of their own either).
+#: JSONL keys that carry a REAL argv, in priority order. `lever_argv` is in
+#: ledgers written by older converge versions; `argv` / `cmdline` are what
+#: tests/stress/tee_cmd.py records for every invocation a timed run makes.
 _ARGV_KEYS = ('lever_argv', 'argv', 'cmdline')
-
-
-def _is_staging_cmd(toks):
-    """Is this `CMD:` argv an invocation of either stager? (#903)
-
-    Extracted rather than left inline for one reason: inline, the only way to
-    exercise it was a whole `cheats` run, so its mutation row was declared a
-    SURVIVOR with "neither stager prints a CMD: line" as the reason. That
-    explains why the counter is unreliable in the FIELD; it does not explain
-    why it cannot be TESTED, and a review showed it is testable in about a
-    second. An exclusion needs evidence like a claim does.
-    """
-    return any(str(t).endswith(('stage_blind.py', 'stage_unaided.py'))
-               for t in toks)
-
-
-def _provenance_lines(stdout):
-    """The lines of a `provenance_audit` run worth relaying (#972).
-
-    VERDICT, the unclaimed list, the `lineage:` line -- and the REASON, which
-    is the line after VERDICT. The reason is the only place the audit names
-    drifted parts and the write a broken lineage descends from, and the exit-5
-    text below tells the reader to read it; relaying only VERDICT/unclaimed
-    left that instruction pointing at a line the watcher never printed.
-    """
-    lines = (stdout or '').splitlines()
-    return [ln.strip() for i, ln in enumerate(lines)
-            if ln.startswith('VERDICT') or 'unclaimed' in ln
-            or ln.lstrip().startswith('lineage:')
-            or (i and lines[i - 1].startswith('VERDICT'))]
-
-
-def _ledger_stagings(path):
-    """Re-stagings recorded in a pose-provenance ledger (#903).
-
-    A SECOND source for the restage counter, and the sounder one. The `CMD:`
-    counter beside it can only see a staging the operator teed, and neither
-    stager installs `cli_banner` -- the first stage in particular CREATES the
-    work dir, so there is nowhere to tee it to yet (run 25's journal says
-    exactly this). The log counter can therefore see the second staging and
-    not the first, and `stages > 1` never fires.
-
-    A ledger row is the harder evidence: the staging write of an ALREADY-armed
-    dir records itself, so every row here is a re-stage by construction (the
-    first stage arms afterwards and writes none). One row is already a finding.
-    """
-    n = 0
-    # `errors='replace'`, and ValueError caught alongside OSError, for the
-    # reason every other reader in this file already has them: a
-    # UnicodeDecodeError is a ValueError, not an OSError, so one non-UTF-8
-    # byte anywhere in a `.jsonl` escaped as an uncaught exception and killed
-    # `cheats` BEFORE the DONE block -- so the fence audit and the provenance
-    # audit never ran, and a watcher's silence reads as clean. This was the
-    # only reader here that could die; `_scan_ledger_argv` catches both and
-    # the `CMD:` reader already replaces.
-    try:
-        with open(path, encoding='utf-8', errors='replace') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(r, dict):
-                    continue
-                if str(r.get('lever') or '') not in ('stage_unaided.py',
-                                                     'stage_blind.py'):
-                    continue
-                # ...AND WROTE INTO THIS DIR. A NESTED work dir's FIRST
-                # staging is governed by the outer regime (its own manifest
-                # does not exist yet), so its row lands in this ledger -- and
-                # counting it reported a re-stage on a dir that was staged
-                # exactly once. Measured: two first-stagings, one nested,
-                # reported "1 re-staging(s)". The docstring's "every row here
-                # is a re-stage by construction" is true only of a dir's OWN
-                # boards, which is what this test says.
-                p = r.get('path')
-                if not p:
-                    continue
-                if os.path.dirname(os.path.abspath(p)) != os.path.abspath(
-                        os.path.dirname(os.path.abspath(path))):
-                    continue
-                n += 1
-    except (OSError, ValueError):
-        return 0
-    return n
 
 
 def _scan_ledger_argv(path, seen, rel):
     """Cheat flags in a ledger row's `lever_argv` -- the second source of truth.
 
-    `lever_argv` is a real command the run executed (converge refuses one whose
-    argv[0] could never replay). `lever` beside it is free prose and is NEVER
+    `lever_argv` is a real command the run executed, where a row carries one
+    (an older converge ledger; a row without it is read for `argv` /
+    `cmdline`, else skipped). `lever` beside it is free prose and
+    is NEVER
     matched: run 20's levers narrate the flags they used, which is exactly the
     disclosure the run is supposed to make, and reporting it as a finding
     punishes the disclosure.
@@ -746,12 +652,10 @@ _DONE_SHIPPED_RE = re.compile(r'sha256\s+([0-9a-f]{64})')
 def report_audit(workdir, report_path, done_path, done_sha_at_audit):
     """Lines about REPORT.md -- the artifact nothing could audit before.
 
-    `REPORT.md` is written AFTER `DONE`, and correctly: it has to carry the
-    fence and provenance verdicts, which do not exist until DONE triggers them.
-    SKILL.md concedes the consequence in its own words -- "that makes the
-    report the one artifact the cheat watcher cannot audit". This is the
-    consequence removed, by keeping the watcher alive past DONE rather than by
-    reordering a run that is not wrong.
+    `REPORT.md` is written AFTER `DONE`. SKILL.md concedes the consequence in
+    its own words -- "that makes the report the one artifact the cheat
+    watcher cannot audit". This is the consequence removed, by keeping the
+    watcher alive past DONE rather than by reordering a run that is not wrong.
 
     Run 29 is the case that makes it worth doing. `REPORT.md:23` -- the "What
     ships" table, the FIRST table in the document -- names sha `0b2f0d5e...`,
@@ -762,7 +666,7 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
     WHAT THIS DOES NOT CHECK, so its silence is not read as a clean bill: the
     marker is written by the run being audited, so a run can write it, be
     audited, and then extend the file -- which is exactly what run 29 did to
-    DONE. Check 5 records the report's own digest and length at audit time so a
+    DONE. Check 4 records the report's own digest and length at audit time so a
     later reader can tell. And the waiver coverage the close-out demands is not
     checked here: the flag set lives in `watch_cheats`'s own scan loop and
     handing it down is a larger change than this earns.
@@ -781,23 +685,8 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
     if not raw.strip():
         out.append('REPORT %s is empty -- that is not a pass' % report_path)
 
-    # 1. the two terminal verdicts, QUOTED. This process printed them; the
-    #    report is supposed to carry them verbatim rather than summarised,
-    #    which is SKILL.md's own reason for quoting them.
-    for who in ('FENCE', 'PROVENANCE'):
-        lines = [ln for ln in raw.splitlines() if who in ln.upper()]
-        if not lines:
-            out.append('REPORT names no %s verdict -- SKILL.md requires both '
-                       'quoted verbatim, with their exit codes' % who)
-        elif not any(('exit' in ln.lower() or 'VERDICT' in ln.upper())
-                     for ln in lines):
-            out.append('REPORT mentions %s but quotes no verdict or exit code '
-                       'for it -- a summary is what the quoting rule exists '
-                       'to prevent' % who)
-
-    # 2. the sha the report names as SHIPPED is the sha the audits examined.
-    #    Run 29 fails this, and it is the check that makes the marker not
-    #    theatre.
+    # 1. the sha the report names as SHIPPED is the sha DONE ships. Run 29
+    #    fails this, and it is the check that makes the marker not theatre.
     done_raw = ''
     try:
         with io.open(done_path, encoding='utf-8', errors='replace') as fh:
@@ -819,8 +708,8 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
         # that names no board makes this check inert -- which looks exactly
         # like agreement.
         out.append('REPORT the DONE marker names no `sha256 <digest>`, so '
-                   'whether the report describes the board the audits read '
-                   'was NOT checked')
+                   'whether the report describes the shipped board was NOT '
+                   'checked')
     elif not _named(shipped):
         out.append(
             'REPORT names none of the digest(s) DONE ships (%s) anywhere in '
@@ -846,19 +735,18 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
                 % (first.group(0)[:12],
                    ', '.join(sorted(h[:12] + '...' for h in shipped))))
 
-    # 3. DONE did not change between the two triggers.
+    # 2. DONE did not change between the two triggers.
     now = _sha(done_path)
     if done_sha_at_audit and not now:
         out.append('REPORT the DONE marker could not be re-hashed, so whether '
-                   'it changed between the two audits was NOT checked')
+                   'it changed after it was declared was NOT checked')
     if done_sha_at_audit and now and now != done_sha_at_audit:
-        out.append('REPORT the DONE marker was REWRITTEN between the board '
-                   'audits and this one (sha %s... -> %s...) -- the audits '
-                   'above were re-run, and anything quoted from the earlier '
-                   'pass is about a superseded board'
+        out.append('REPORT the DONE marker was REWRITTEN after it was '
+                   'declared (sha %s... -> %s...) -- anything reported '
+                   'against the earlier marker is about a superseded board'
                    % (done_sha_at_audit[:12], now[:12]))
 
-    # 4. THERE IS NO CHECK 4, and its absence is the point. It compared
+    # 3. THERE IS NO CHECK 3, and its absence is the point. It compared
     #    `getmtime(ledger.jsonl)` with `getmtime(REPORT.md)` and emitted an
     #    accusation from the difference -- the ONE mtime-derived finding in
     #    a file whose own docstring says freshness is sha256 and never
@@ -869,7 +757,7 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
     #    reaching for -- a report about a board the run has since replaced
     #    -- and they do it from CONTENT.
 
-    # 5. the report's own digest and length, recorded so a later extension is
+    # 4. the report's own digest and length, recorded so a later extension is
     #    detectable by anyone comparing. Never a finding on its own.
     out.append('REPORT audited %s: sha %s..., %d bytes, %d lines'
                % (os.path.basename(report_path), (_sha(report_path) or '?')[:12],
@@ -877,8 +765,8 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
     return out
 
 
-def _await_report(workdir, done_path, done_sha, truthdir, root, report_done,
-                  report_wait, poll):
+def _await_report(workdir, done_path, done_sha, report_done, report_wait,
+                  poll):
     """Wait past DONE for the report marker, then audit REPORT.md.
 
     Three arms for an OLD run directory, because replaying this watcher over a
@@ -899,130 +787,19 @@ def _await_report(workdir, done_path, done_sha, truthdir, root, report_done,
     _deadline = time.monotonic() + report_wait if report_wait else None
     while True:
         if os.path.exists(report_done):
-            now = _sha(done_path)
-            if now and done_sha and now != done_sha:
-                print('DONE was REWRITTEN between the two audits (sha %s... -> '
-                      '%s...) -- re-running the audits that read the BOARD'
-                      % (done_sha[:12], now[:12]), flush=True)
-                _board_audits(workdir, truthdir, root)
             for line in report_audit(workdir, report, done_path, done_sha):
                 print(line, flush=True)
             return 0
         if _deadline is not None and time.monotonic() >= _deadline:
             print('REPORT no %s after %g s -- REPORT.md was NOT audited '
-                  '(verdict quoting, shipped-sha agreement and DONE stability '
-                  'unchecked). That is not a pass.'
+                  '(shipped-sha agreement and DONE stability unchecked). '
+                  'That is not a pass.'
                   % (os.path.basename(report_done), report_wait), flush=True)
             return 0
         time.sleep(max(poll, 0.01))
 
 
-def _board_audits(workdir, truthdir, root):
-    """The two audits that read the BOARD rather than the log.
-
-    Lifted out of `watch_cheats` (#963) because they have to be runnable
-    TWICE. Run 29 shows why: `os.path.exists(DONE)` fired at 14:22:23 and
-    this watcher returned 0, and the DONE on disk today says "THIS MARKER
-    WAS REWRITTEN" and names a different shipped sha. So `FENCE VERDICT:
-    CLEAN` and `PROVENANCE VERDICT: UNAIDED VIOLATION` in that run's
-    watcher log are verdicts about a board superseded 29 minutes later by
-    ledger rows 45 and 46.
-
-    Prints its own lines, as before. Returns nothing: this watcher
-    reports, it does not grade.
-    """
-    import subprocess
-    control = os.path.join(truthdir or '', 'control.kicad_pcb')
-    if truthdir and os.path.isfile(control):
-        try:
-            r = subprocess.run(
-                [sys.executable, '-X', 'utf8',
-                 os.path.join(root, 'tests', 'stress',
-                              'fence_audit.py'),
-                 '--control', control, '--workdir', workdir],
-                capture_output=True, text=True, timeout=900)
-            _said = False
-            for line in (r.stdout or '').splitlines():
-                if 'VERDICT' in line or line.startswith('  LEAK'):
-                    print(f'FENCE {line.strip()}', flush=True)
-                    _said = True
-            # 0 CLEAN and 4 LEAK are the audit's ANSWERS. Anything
-            # else is the audit failing to run, and printing nothing
-            # for it reads exactly like a clean fence -- the failure
-            # this whole file exists to avoid.
-            if r.returncode not in (0, 4) or not _said:
-                _tail = ((r.stderr or r.stdout or '').strip()
-                         .splitlines() or [''])[-1]
-                print(f'FENCE did NOT report a verdict '
-                      f'(exit {r.returncode}): {_tail[:160]} -- that '
-                      f'is not a pass', flush=True)
-        except Exception as e:                 # noqa: BLE001
-            print(f'FENCE could not run ({type(e).__name__}: {e}) -- '
-                  f'that is not a pass', flush=True)
-    else:
-        print('FENCE no control board found, so blindness was NOT '
-              'verified -- that is not a pass', flush=True)
-    try:
-        r = subprocess.run(
-            [sys.executable, '-X', 'utf8',
-             os.path.join(root, 'tests', 'stress',
-                          'provenance_audit.py'),
-             '--workdir', workdir],
-            capture_output=True, text=True, timeout=900)
-        _said = False
-        for line in _provenance_lines(r.stdout):
-            print(f'PROVENANCE {line}', flush=True)
-            _said = True
-        # 0/4/5 are its verdicts (CLEAN / VIOLATION / UNPROVEN); 2 is
-        # a usage error and anything else is a crash. Silence there
-        # reads as CLEAN.
-        if r.returncode not in (0, 4, 5) or not _said:
-            _tail = ((r.stderr or r.stdout or '').strip()
-                     .splitlines() or [''])[-1]
-            print(f'PROVENANCE did NOT report a verdict '
-                  f'(exit {r.returncode}): {_tail[:160]} -- that is '
-                  f'not a pass', flush=True)
-        if r.returncode == 4:
-            print('PROVENANCE exit 4 -- a pose in the delivered board '
-                  'traces to no registered lever, or is not where the '
-                  'recorded writes put it, i.e. something moved parts '
-                  'that was not the engine', flush=True)
-        if r.returncode == 5:
-            # NAMED, not graded. Before #903 nothing armed a regime,
-            # so 5 was the only reachable answer and saying anything
-            # about it would have been noise. Both stagers arm now, so
-            # a 5 on a staged work dir has three causes worth telling
-            # apart -- and it stays exit 0 here, because
-            # provenance_audit's own docstring makes 5 load-bearing:
-            # "I cannot prove it" and "I proved it false" must be
-            # different numbers. Grading it would also fail every
-            # work dir staged before this change.
-            print('PROVENANCE exit 5 -- UNPROVEN. Since #903 both '
-                  'stagers ARM the regime, so a dir they staged '
-                  'should not read 5. The reasons: this dir was '
-                  'staged by neither stager; it was MOVED after '
-                  'staging (the manifest holds an absolute path); the '
-                  'manifest describes a different board than the '
-                  'staged one; no delivered board sits beside the '
-                  'staged one (pass --delivered); NOTHING MOVED -- no '
-                  'ledger and no pose differs from the staged board, '
-                  'which on a finished run is the interesting one; a '
-                  'part the lineage expects is missing (deleted or '
-                  'renamed); a recorded write read a board no '
-                  'recorded write produced and re-moved every part '
-                  'that differs (#972); the pose digests cannot link; '
-                  'or the audit itself raised (no VERDICT line above, '
-                  'the exception is on its stderr). Read the '
-                  'reason line above rather than guessing from this '
-                  'list. Not a violation -- but the claim "the engine '
-                  'placed this board" is unproven, so it may not be '
-                  'made', flush=True)
-    except Exception as e:                     # noqa: BLE001
-        print(f'PROVENANCE could not run ({type(e).__name__}: {e})',
-              flush=True)
-
-
-def watch_cheats(workdir, truthdir, done_path, poll, report_done=None,
+def watch_cheats(workdir, done_path, poll, report_done=None,
                  report_wait=REPORT_WAIT_SEC):
     """Ways this run could report success without earning it.
 
@@ -1030,23 +807,15 @@ def watch_cheats(workdir, truthdir, done_path, poll, report_done=None,
     a run may have a good reason; what it may not do is use one silently. So
     each line states what was seen and why it matters, and the run answers.
 
-    What this CANNOT see, stated so nobody reads silence as proof: it cannot
-    tell that a file was read. Blindness to the control is enforced after the
-    fact by `fence_audit` -- which compares the DELIVERED BOARD's poses, so
-    bypassing the tool does not bypass the check -- and that is run here when
-    the run declares itself done.
+    What this CANNOT see, stated so nobody reads silence as proof: a flag
+    counts only where it was PASSED -- on a `CMD:` line or in a ledger row's
+    argv -- so a tool that prints no banner and was not teed is invisible to
+    it, and the NOTE count below is how that blindness announces itself.
     """
     root = _repo_root()
     seen = set()
-    truth0 = {}
-    if truthdir and os.path.isdir(truthdir):
-        for r, _d, fs in os.walk(truthdir):
-            for n in fs:
-                p = os.path.join(r, n)
-                truth0[os.path.relpath(p, truthdir)] = _sha(p)
     dirty0 = _git_dirty(root)
     print(f'WATCHING for shortcuts: {len(CHEAT_FLAGS)} flags, '
-          f'{len(truth0)} truth file(s) fingerprinted, '
           + ('git baseline clean'
              if dirty0 == [] else
              f'git baseline has {len(dirty0)} pre-existing change(s)'
@@ -1054,30 +823,7 @@ def watch_cheats(workdir, truthdir, done_path, poll, report_done=None,
           flush=True)
 
     while True:
-        # 1. the truth dir must not move. It is the answer key.
-        if truthdir and os.path.isdir(truthdir):
-            for r, _d, fs in os.walk(truthdir):
-                for n in fs:
-                    p = os.path.join(r, n)
-                    rel = os.path.relpath(p, truthdir)
-                    now = _sha(p)
-                    was = truth0.get(rel)
-                    if was is None and rel not in truth0:
-                        key = ('truth-new', rel)
-                        if key not in seen:
-                            seen.add(key)
-                            print(f'TRUTH-CHANGED a file appeared in the '
-                                  f'truth dir after staging: {rel}',
-                                  flush=True)
-                    elif now != was:
-                        key = ('truth-mod', rel)
-                        if key not in seen:
-                            seen.add(key)
-                            print(f'TRUTH-CHANGED {rel} was modified after '
-                                  f'staging -- the control is the thing the '
-                                  f'fence compares against', flush=True)
-
-        # 2. the toolchain must not move either.
+        # 1. the toolchain must not move.
         dirty = _git_dirty(root)
         if dirty is not None and dirty0 is not None:
             for row in dirty:
@@ -1090,17 +836,15 @@ def watch_cheats(workdir, truthdir, done_path, poll, report_done=None,
                           f'because the gate changed has measured nothing',
                           flush=True)
 
-        # 3. flags that lower the bar, and repeat staging.
+        # 2. flags that lower the bar.
         #
         # Two sources of truth, and only two. A flag that appears anywhere else
         # was MENTIONED, not passed:
         #   * a `CMD:` line, written by cli_banner from sys.orig_argv (27 tools)
-        #   * a ledger row's `lever_argv`, which IS an executed command --
-        #     never its `lever`, which is prose. converge.py deliberately does
-        #     not install cli_banner ("converge's stdout is a JSON API"), so its
-        #     invocations reach us only this way.
-        stages = 0
-        led_stages = 0
+        #   * a ledger row's `lever_argv` (or a teed `argv` / `cmdline`),
+        #     which IS an executed command -- never its `lever`, which is
+        #     prose. A tool that installs no cli_banner reaches us only this
+        #     way.
         unanchored = 0
         for path in _walk(workdir):
             if not path.endswith(('.log', '.txt', '.jsonl')):
@@ -1122,14 +866,6 @@ def watch_cheats(workdir, truthdir, done_path, poll, report_done=None,
                         unanchored += 1
                     continue
                 tool, toks = parsed
-                # BOTH stagers (#903). This counter matched `stage_blind.py`
-                # alone, which was complete only while `stage_unaided.py`
-                # could not restage at all -- nothing armed a regime, so a
-                # second unaided stage was neither permitted nor meaningful.
-                # It is permitted now, so counting one stager and not the
-                # other is a blind spot this change would otherwise open.
-                if _is_staging_cmd(toks):
-                    stages += 1
                 for label, flag, why in _cheat_hits(tool, toks):
                     key = _use_key(label, flag, tool, toks)
                     if key in seen:
@@ -1140,11 +876,6 @@ def watch_cheats(workdir, truthdir, done_path, poll, report_done=None,
             if path.endswith('.jsonl'):
                 for out in _scan_ledger_argv(path, seen, rel):
                     print(out, flush=True)
-                # A recorded re-stage counts as a staging invocation the log
-                # may never have carried (#903). Counted SEPARATELY so the
-                # report can name which source saw it -- "the log shows 2"
-                # would be false on a dir whose evidence is a ledger row.
-                led_stages += _ledger_stagings(path)
         # Key on the FACT, not the count. The running count was in the key,
         # so every increment was a fresh event: the line promised "counted,
         # not reported individually" and then reported every increment.
@@ -1157,37 +888,19 @@ def watch_cheats(workdir, truthdir, done_path, poll, report_done=None,
                   f'0 while a run is clearly using tools, a tool has stopped '
                   f'printing its CMD: banner and this watcher has gone blind.',
                   flush=True)
-        # Either source is enough, and each counts a different thing: a
-        # teed `CMD:` line is one staging invocation, while a ledger row is
-        # one RE-staging by construction (the first stage arms afterwards and
-        # records nothing). So the thresholds differ, and the report names
-        # which source saw it rather than claiming the log did.
-        if (stages > 1 or led_stages) and ('restage',) not in seen:
-            seen.add(('restage',))
-            _src = (f'the log shows {stages} staging invocation(s)'
-                    if stages > 1 else '')
-            _lsrc = (f'a pose-provenance ledger records {led_stages} '
-                     f're-staging(s)' if led_stages else '')
-            print(f'RESTAGE {" and ".join(x for x in (_src, _lsrc) if x)} -- '
-                  f'a second staging is a different subject (a re-drawn, '
-                  f'possibly easier damage, or a re-piled board), and the run '
-                  f'must say which one it reports', flush=True)
 
-        # 4. done: run the two audits that check the board rather than
-        #    the log -- and do NOT stop there. `cheats` used to return 0
-        #    here, which is why run 29's audits graded a board that was
-        #    replaced half an hour later, and why REPORT.md -- written
-        #    after DONE, because it has to carry these two verdicts --
-        #    was audited by nobody. Its own cheat watcher recorded the
-        #    file growing 287 -> 393 lines WHILE it was reading it; the
-        #    final file is 686.
+        # 3. done: record the marker's digest -- and do NOT stop there.
+        #    `cheats` used to return 0 here, which is why REPORT.md --
+        #    written after DONE -- was audited by nobody. Run 29's own cheat
+        #    watcher recorded the file growing 287 -> 393 lines WHILE it was
+        #    reading it; the final file is 686.
         if os.path.exists(done_path):
-            print('DONE declared -- running the audits that read the BOARD, '
-                  'not the log', flush=True)
+            print('DONE declared -- the copper is frozen'
+                  + (f'; waiting for {os.path.basename(report_done)} to '
+                     f'audit REPORT.md' if report_done else ''), flush=True)
             _done_sha = _sha(done_path)
-            _board_audits(workdir, truthdir, root)
-            return _await_report(workdir, done_path, _done_sha, truthdir,
-                                 root, report_done, report_wait, poll)
+            return _await_report(workdir, done_path, _done_sha, report_done,
+                                 report_wait, poll)
         time.sleep(poll)
 
 
@@ -1195,8 +908,8 @@ def _self_test():
     """Checkable in the field, where the harness runs and pytest does not.
 
     Modelled on the retired `loop_driver.py --self-test`. The full fixtures
-    live in tests/test_run20_run_watch.py; this is the subset that needs no
-    files.
+    lived in tests/test_run20_run_watch.py (deleted in ecd673eb); this is the
+    subset that needs no files.
     """
     bad = []
 
@@ -1269,19 +982,16 @@ def main(argv=None):
                                       'marker, or at DONE with '
                                       "--report-done ''")
     c.add_argument('--workdir', required=True)
-    c.add_argument('--truthdir', help='the answer key, fingerprinted at arm '
-                                      'time and re-checked (default: '
-                                      'WORKDIR + "_truth")')
-    c.add_argument('--done', help='path whose existence triggers the final '
-                                  'audits (default: WORKDIR/DONE)')
+    c.add_argument('--done', help='path whose existence means the copper is '
+                                  'frozen and ends the scan (default: '
+                                  'WORKDIR/DONE)')
     c.add_argument('--report-done', default=None,
                    help='path whose existence triggers the REPORT.md audit '
                         '(default: WORKDIR/REPORT_DONE). DONE means the '
-                        'copper is frozen and is what the board audits wait '
-                        'for; REPORT.md is written after them, because it '
-                        'carries their verdicts. Pass an EMPTY string to '
-                        'exit at DONE, which is what this watcher did '
-                        'before #963. Not logs/<label>.done -- that is '
+                        'copper is frozen; REPORT.md is written after it. '
+                        'Pass an EMPTY string to exit at DONE, which is '
+                        'what this watcher did before #963. Not '
+                        'logs/<label>.done -- that is '
                         "tee_cmd's per-command marker and a different "
                         'family.')
     c.add_argument('--report-wait', type=float, default=REPORT_WAIT_SEC,
@@ -1307,12 +1017,11 @@ def main(argv=None):
         except KeyboardInterrupt:
             return 0
         return 0
-    truth = a.truthdir or (a.workdir.rstrip('/\\') + '_truth')
     done = a.done or os.path.join(a.workdir, 'DONE')
     try:
         _rd = (os.path.join(a.workdir, 'REPORT_DONE')
                if a.report_done is None else a.report_done)
-        return watch_cheats(a.workdir, truth, done, a.poll,
+        return watch_cheats(a.workdir, done, a.poll,
                             report_done=_rd, report_wait=a.report_wait)
     except KeyboardInterrupt:
         return 0

@@ -168,8 +168,9 @@ data.
 ## Stackup-aware calculations
 
 These read geometry and Er from the parsed board's stackup
-(`pcb.board_info.stackup`); layers default to Er = 4.0 when the stackup
-doesn't specify it.
+(`pcb.board_info.stackup`); a dielectric with no Er in the stackup counts as
+4.0. A board with no stackup at all gets no impedance answer here — see
+[Gotchas](#gotchas).
 
 ```python
 get_layer_impedance_params(pcb, layer_name) -> Optional[LayerImpedanceParams]
@@ -179,25 +180,31 @@ Resolves a copper layer to its impedance context: copper thickness,
 dielectric height(s), Er, and whether it's microstrip (outer) or stripline
 (inner). `LayerImpedanceParams` fields: `layer_name`, `copper_thickness`,
 `dielectric_height`, `dielectric_constant`, `is_outer_layer`,
-`height_above`, `height_below`, `er_above`, `er_below`.
+`height_above`, `height_below`, `er_above`, `er_below`. `None` when the board
+has no stackup or the layer is not a copper layer in it.
 
 ```python
 calculate_impedance_for_layer(pcb, layer_name, trace_width,
-                              spacing=0.0) -> dict
+                              spacing=0.0, coplanar_gap=0.0) -> dict
 ```
 
 Impedance of a given width on a given layer. Returns
-`{'layer', 'is_microstrip', 'z0', 'params', ...}` plus `'zdiff'`/`'zodd'`
-when `spacing > 0`. Picks microstrip vs stripline automatically, and the
-asymmetric stripline formula when the two plane distances differ by > 10%.
+`{'layer', 'is_microstrip', 'z0', 'params'}` plus `'zdiff'`/`'zodd'`
+when `spacing > 0`, or `{'error': ...}` when the layer is not in the
+stackup. Picks microstrip vs stripline automatically, and the
+asymmetric stripline formula when the two plane distances differ by > 10%
+(`is_asymmetric_stripline`). `coplanar_gap > 0` models an OUTER layer as
+CPWG instead of microstrip (and adds `'is_coplanar'`, `'coplanar_gap'`); it
+is ignored on inner layers, where the two planes dominate.
 
 ```python
 calculate_width_for_impedance(pcb, layer_name, target_z0,
-                              spacing=0.0, is_differential=False) -> dict
+                              spacing=0.0, is_differential=False,
+                              coplanar_gap=0.0) -> dict
 ```
 
 Inverse: returns `{'calculated_width_mm', 'calculated_width_mils',
-'verified_z0', ...}` (or an `'error'` key).
+'verified_z0', 'is_coplanar', ...}` (or an `'error'` key).
 
 ```python
 calculate_layer_widths_for_impedance(pcb, layers, target_z0,
@@ -205,8 +212,9 @@ calculate_layer_widths_for_impedance(pcb, layers, target_z0,
                                      fallback_width=0.1,
                                      min_width=0.0,
                                      coplanar_gap=0.0,
-                                     floor_desc="--track-width; ...",
-                                     clamp_report=None) -> Dict[str, float]
+                                     floor_desc="--track-width; lower it to reach the target",
+                                     clamp_report=None,
+                                     unsolved_report=None) -> Dict[str, float]
 ```
 
 The function impedance-controlled routing actually uses: width per layer
@@ -215,7 +223,10 @@ failure), ready to assign to `GridRouteConfig.layer_widths`. Pass a dict as
 `clamp_report` to collect `{layer: [solved_mm, floor_mm]}` for every clamped
 layer — the routing engines forward it to `JSON_SUMMARY` as
 `impedance_width_clamped` (#610). `floor_desc` names `min_width`'s source in
-the clamp warning.
+the clamp warning. Pass a list as `unsolved_report` to collect the layers
+that fell back to `fallback_width` because nothing could be solved (#906): a
+fallback and a solved width are the same kind of number, so a caller asking
+whether the impedance was ACHIEVED reads this, not the widths.
 
 ```python
 impedance_width_floor(track_width, width_from_class,
@@ -246,15 +257,23 @@ For time matching (`--time-matching`): signals travel faster on outer
 layers (microstrip, part of the field in air) than inner ones (stripline).
 
 ```python
-get_layer_epsilon_eff(pcb, layer_name) -> float   # (er+1)/2 microstrip, er stripline
+get_layer_epsilon_eff(pcb, layer_name, width=0.0, side_gap=0.0) -> float
 get_layer_ps_per_mm(pcb, layer_name) -> float
 get_via_barrel_epsilon_eff(pcb, layer1, layer2) -> float
 calculate_route_propagation_time_ps(segments, vias=None,
                                     pcb_data=None) -> float
 ```
 
+`get_layer_epsilon_eff` is `(er+1)/2` on an outer layer and `er` on an inner
+one; 4.0 when the layer is not in a stackup. Given a `width`, an outer layer
+uses the width-dependent Hammerstad value instead (the flat `(er+1)/2` is a
+lower bound, so it under-reads delay, #486), and with a `side_gap` close
+enough to matter (`cpwg_applies`) the CPWG value. Called without them, as
+every length/time-matching call site does, it gives the flat answer.
+
 `calculate_route_propagation_time_ps` sums per-segment delay by layer plus
-via barrel delays. Without `pcb_data` it assumes FR4 microstrip
+via barrel delays (a through via's barrel is the whole stack, whatever layer
+pair it carries). Without `pcb_data` it assumes FR4 microstrip
 (eps_eff ≈ 2.65) everywhere.
 
 ```python
@@ -285,15 +304,26 @@ print_impedance_routing_plan(pcb, pcb.board_info.copper_layers, target_z0=50.0)
 
 Human-readable tables: Z0/Zdiff per layer at a given geometry, and the
 per-layer width plan for a target impedance (the same output `route.py
---impedance` prints).
+--impedance` prints). `print_impedance_routing_plan` also takes `spacing`,
+`is_differential`, `min_width` (marks a clamped layer) and `coplanar_gap`,
+as `calculate_layer_widths_for_impedance` does.
 
 ## Gotchas
 
-- **No stackup → defaults.** Boards without a stackup section fall back to
-  Er 4.0 and generic geometry; results are then rough. Run
-  `/recommend-stackup` to set up a real stackup first.
-- **`IMPEDANCE_WIDTH_SCALE` is 1.0** (#486) and applies only in the
-  stackup-aware `calculate_*` functions, not the raw solvers.
+- **No stackup → no impedance.** On a board without a stackup section
+  `get_layer_impedance_params` returns `None`, the `calculate_*` functions
+  return `{'error': ...}`, and `calculate_layer_widths_for_impedance` gives
+  every layer `fallback_width` (and lists it in `unsolved_report`). The
+  routers (`route.py`, `route_diff.py`) print "No stackup found in PCB file.
+  Using fixed track width." and, from `achievability_note`, the width the
+  target would need on a `nominal_stackup` (1.6 mm FR4, Er 4.5), set against
+  the gap between the pins the nets leave from (`tightest_pin_gap`, #909) — an
+  assumption, printed as one; nothing writes that stackup. The delay
+  functions assume Er 4.0. Run `/recommend-stackup` to set up a real stackup
+  first.
+- **`IMPEDANCE_WIDTH_SCALE` is 1.0** (#486) and applies only in
+  `calculate_layer_widths_for_impedance` and `print_impedance_routing_plan`,
+  not in `calculate_width_for_impedance` or the raw solvers.
 - **These are closed-form approximations** (IPC-2141 / Hammerstad), good to
   a few percent in normal geometries — fine for routing decisions, not a
   substitute for your fab's impedance calculator on critical interfaces.
@@ -338,12 +368,9 @@ because two of them were silently wrong on real boards.
   all of it: at a fixed width the asymmetric Zdiff prediction runs ~10% low
   against a method-of-moments solve. Because Zdiff is steep in `w`, the solved
   *width* is much closer (~3%), which is what routing consumes. Closing the rest
-  needs a two-plane closed form or fab-calibrated tables. Deriving the coupling
-  from the true plate separation `h1+h2+t` was tried and measured *worse*
-  (~18% low), so the near plane appears to govern coupling as well as
-  capacitance. Treat inner-layer differential targets on strongly asymmetric
-  stacks as ~5% figures, and confirm against your fab's coupon data when the
-  window is tight.
+  needs a two-plane closed form or fab-calibrated tables. Treat inner-layer
+  differential targets on strongly asymmetric stacks as ~5% figures, and
+  confirm against your fab's coupon data when the window is tight.
 
 Post-route verification lives in `check_impedance.py`:
 
@@ -355,3 +382,9 @@ python3 py_tools/check_impedance.py routed.kicad_pcb --json report.json
 It reports, per net: length over a reference-plane void, plane-split crossings,
 the measured coplanar side-gap distribution, and the implied Z0 error against
 what the route call assumed.
+
+A split is a move from one piece of reference copper to another: a different
+fill component, or another net's pour. Two pours of the same net that overlap
+on a layer fill as one sheet of copper, so their overlapping components count
+as one reference (#1299). Before that, a trace passing from one such pour's
+fill to the other's was graded as a split.

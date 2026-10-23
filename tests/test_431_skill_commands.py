@@ -11,7 +11,7 @@ the doc-vs-code gate: `run_doc_examples.gridrouteconfig_undocumented_fields` and
 
 Explicitly NOT testable, and worth saying rather than pretending: whether Claude
 *decides correctly* what to do with a given placement. The mitigations are
-design, not assertion -- the free-agent skill's independent verifier and the
+design, not assertion -- the placement skill's independent verifier and the
 board-state gates that refuse the worst case outright. (The staged placement
 skill's measure-then-decide assertions left with that skill.)
 
@@ -113,15 +113,22 @@ def _all_skill_text():
 # from the real parsers -- so every one is a source.
 SOURCES = [
     '.claude/skills/plan-pcb-routing/SKILL.md',
-    # The free-agent skill replaced the staged placement and combined skills
-    # (and their drivers). It prescribes no procedure, but every command it
-    # does spell -- the milestone record, the film, the verifier's checks --
-    # is one the executor runs verbatim. Its reference page carries most of
-    # them (#549: a block moved out of SKILL.md must not go flag-unchecked).
-    '.claude/skills/pcb-free-agent/SKILL.md',
-    '.claude/skills/pcb-free-agent/references/verifier.md',
+    # The placement skill (pcb-free-agent until a22397f9, which renamed it and
+    # folded in the retired pcb-group-place). Every command it spells -- the
+    # lock, the intent, place_simple's seeds, the judging route, the milestone
+    # record, the verifier's checks -- is one the executor runs verbatim. Its
+    # reference pages carry many of them (#549: a block moved out of SKILL.md
+    # must not go flag-unchecked).
+    '.claude/skills/plan-pcb-placement/SKILL.md',
+    '.claude/skills/plan-pcb-placement/references/verifier.md',
+    # What a part IS, read before grouping parts: any flag a future entry
+    # cites is held to the real parser like the rest.
+    '.claude/skills/plan-pcb-placement/references/part-roles.md',
+    # Every placement lesson, human habits and routed measurements: the
+    # commands it cites (converge.py where, render_placement, the survey) are
+    # run as written.
+    '.claude/skills/plan-pcb-placement/references/placement-lessons.md',
     'docs/floorplan-intent.md',
-    'docs/placement-optimization.md',
     'docs/claude-skills.md',
     'py_placer/placement/README.md',
     'README.md',
@@ -250,8 +257,8 @@ def _parser_for(tool):
     if hasattr(mod, 'build_parser'):
         p = mod.build_parser()
     else:
-        # place_optimize / place_route_loop build the parser inside main(); run
-        # it with --help intercepted so we get the parser without executing.
+        # A tool that builds its parser inside main(): run it with
+        # parse_args intercepted so we get the parser without executing.
         import argparse
         got = {}
         real_parse = argparse.ArgumentParser.parse_args
@@ -970,7 +977,9 @@ def test_the_placement_tools_are_actually_mentioned():
     """Guards the reverse failure: the gate passing because the skill stopped
     mentioning placement at all."""
     skill = _all_skill_text()
-    for token in ('place_optimize.py', 'render_placement.py', '--suggest-locks',
+    # place_simple places and place_pose locks (place_optimize and its
+    # --suggest-locks were retired in ecd673eb).
+    for token in ('place_simple.py', 'render_placement.py', 'place_pose.py',
                   'Step 0'):
         assert token in skill, f"{token} missing from the skill"
 
@@ -1015,11 +1024,12 @@ def test_exit_code_contract_is_documented():
 
     The substring check this used to be was satisfied by a false claim: the
     placement skill annotated `place_optimize.py <board> --suggest-locks` with
-    "exits 3 if not [placed]", and `--suggest-locks` returns 0 from its own
+    "exits 3 if not [placed]", and `--suggest-locks` returned 0 from its own
     branch above `gate_or_exit` -- measured exit 0 on a copper-carrying board,
-    and the same file says so 350 lines further down. That is blind spot 1 of
+    and the same file said so 350 lines further down. That is blind spot 1 of
     #923 in one line: the flag exists, the exit contract it is documented with
-    does not.
+    does not. (place_optimize was retired in ecd673eb; the analyser's controls
+    now read check_floorplan, whose `--suggest-arrays` returns above its gate.)
     """
     from placement.placement_state import UNPLACED_EXIT
     assert UNPLACED_EXIT == 3
@@ -1028,14 +1038,14 @@ def test_exit_code_contract_is_documented():
         "the skill must state the exit-3 contract it tells Claude to rely on"
 
     # The positive control, and it is the real code rather than a fixture: the
-    # analyser must SEE place_optimize's --suggest-locks branch returning above
-    # the gate, and must not see one where there is none. Without this pair a
-    # broken analyser reports every claim as fine.
-    assert _returns_before_gate('py_placer/place_optimize.py',
-                                'suggest_locks'), \
-        'the analyser no longer sees the --suggest-locks early return; either ' \
-        'place_optimize changed or this check stopped working'
-    assert not _returns_before_gate('py_placer/place_optimize.py',
+    # analyser must SEE check_floorplan's --suggest-arrays branch returning
+    # above the gate, and must not see one where there is none. Without this
+    # pair a broken analyser reports every claim as fine.
+    assert _returns_before_gate('py_tools/check_floorplan.py',
+                                'suggest_arrays'), \
+        'the analyser no longer sees the --suggest-arrays early return; ' \
+        'either check_floorplan changed or this check stopped working'
+    assert not _returns_before_gate('py_tools/check_floorplan.py',
                                     'allow_unplaced'), \
         'the analyser reports a branch that does not return above the gate'
 
@@ -1085,12 +1095,12 @@ def test_exit_code_contract_is_documented():
                     n += len(_cited_flags(b, tool))
         return n
 
-    _hit = ('# --suggest-locks exits 3 when the board is unplaced\n'
-            'python3 -X utf8 py_placer/place_optimize.py b.kicad_pcb '
-            '--suggest-locks\n')
+    _hit = ('# --emit-intent exits 3 when the board is unplaced\n'
+            'python3 -X utf8 py_tools/check_floorplan.py b.kicad_pcb '
+            '--emit-intent\n')
     _miss = ('The tool exits 3 when the board is unplaced.\n'
-             'python3 -X utf8 py_placer/place_optimize.py b.kicad_pcb '
-             '--suggest-locks\n')
+             'python3 -X utf8 py_tools/check_floorplan.py b.kicad_pcb '
+             '--emit-intent\n')
     assert _scan(_hit) == 1, (
         'the exit-code scanner no longer finds an annotated command -- so its '
         f'{checked} is a claim about the scanner, not about the skills')
@@ -1126,7 +1136,7 @@ def test_routing_only_stays_the_default_path():
     actions = re.findall(r"['\"]([a-z_]+)['\"]", m.group(1))
     assert actions, actions
     for bad in ('place', 'placement', 'place_optimize', 'place_route_loop',
-                'quench', 'floorplan'):
+                'place_simple', 'quench', 'floorplan'):
         assert bad not in actions, (
             f"{bad!r} became a plan action. ai_plan drops unknown actions and "
             f"runs the rest, so a placement step in a plan silently routes an "
@@ -1138,7 +1148,9 @@ def test_routing_only_stays_the_default_path():
     template = max((f for f in fences if '"action"' in f or 'Step-by-Step' in f),
                    key=len, default='')
     assert template, "the example plan template was not found"
-    for tool in ('place_optimize.py', 'place_route_loop.py'):
+    # The placement CLIs of today (place_optimize and place_route_loop, which
+    # this named first, were retired in ecd673eb).
+    for tool in ('place_simple.py', 'place_pose.py'):
         assert tool not in template, \
             f"{tool} appeared in the plan template; placement is CLI-only"
     print(f"  PASS: {len(actions)} plan actions, none placement; "
@@ -1152,11 +1164,11 @@ def test_verdict_lines_do_not_collide_with_the_gui_result_contract():
     src = open(os.path.join(ROOT, 'kicad_routing_plugin', 'ai_backend.py'),
                encoding='utf-8').read()
     assert 'RESULT=' in src, "the host contract moved; re-check this gate"
-    # The VERDICT= verifier contract lives in the free-agent skill's verifier
+    # The VERDICT= verifier contract lives in the placement skill's verifier
     # brief (it replaced the staged skills' verifier prompts). A MISSING file
     # fails rather than being skipped: skipping is how this check went on
     # passing against two retired files that no longer existed.
-    for rel in ('.claude/skills/pcb-free-agent/references/verifier.md',):
+    for rel in ('.claude/skills/plan-pcb-placement/references/verifier.md',):
         path = os.path.join(ROOT, rel)
         assert os.path.isfile(path), f'{rel} is missing; re-aim this gate'
         text = open(path, encoding='utf-8').read()

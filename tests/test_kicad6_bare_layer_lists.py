@@ -181,8 +181,10 @@ def test_enable_used_layers_reads_a_bare_list(tmp):
 def test_zone_layer_span_reads_a_bare_list():
     from plane_io import _zone_layer_span
     zone = re.search(r'\(zone .*?\n  \)', KICAD6_BOARD, re.S).group(0)
-    assert _zone_layer_span(zone) == {'F&B.Cu'}, _zone_layer_span(zone)
-    assert _zone_layer_span(_quoted_twin(zone)) == {'F&B.Cu'}
+    # Expanded as pcbnew loads it and as kicad_parser.extract_zones reads it
+    # (#1299): the writer must remove exactly the pours the engine replaced.
+    assert _zone_layer_span(zone) == {'F.Cu', 'B.Cu'}, _zone_layer_span(zone)
+    assert _zone_layer_span(_quoted_twin(zone)) == {'F.Cu', 'B.Cu'}
     print('  plane_io: a bare (layers F&B.Cu) zone span is read')
 
 

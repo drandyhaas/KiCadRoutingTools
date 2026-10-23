@@ -48,9 +48,6 @@ without KiCad:
    the copper itself differs by the declared term, so a run that did nothing
    cannot pass.
 5. `board_score --length-groups` discloses the term (`pad_to_die_mm`).
-6. `placement_score --length-groups` adds the same term to each member's
-   length floor (same pads, same mode), its die_delay to the ps figure, and
-   on a straight route the floor equals board_score's measure.
 
 Run:
     python3 tests/test_1248_pad_to_die.py
@@ -472,65 +469,6 @@ def test_board_score_cli(tmp):
           'the published pad_to_die_mm net names are audited and all exist', audit)
 
 
-def test_placement_floor(tmp):
-    print('\n6. placement_score\'s length floors add the term board_score adds')
-    sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
-    import placement_score as ps
-    from impedance import get_layer_ps_per_mm
-    # SE1/SE2: straight 40 mm 2-part nets, SE1's first pad declaring 3.0 mm
-    # and 20 ps. SE3: three parts, the THIRD pad declaring 2.0 mm, so the two
-    # modes pick different pads.
-    pads = [('P1', 10, 12, 'SE1', '(die_length 3.0) (die_delay 20)'),
-            ('P2', 50, 12, 'SE1', ''), ('P3', 10, 18, 'SE2', ''),
-            ('P4', 50, 18, 'SE2', ''), ('P5', 10, 24, 'SE3', ''),
-            ('P6', 30, 24, 'SE3', ''), ('P7', 50, 24, 'SE3', '(die_length 2.0)')]
-    src = _synthetic(os.path.join(tmp, 'floor.kicad_pcb'), pads)
-    plain = _synthetic(os.path.join(tmp, 'floor_plain.kicad_pcb'),
-                       [(r, x, y, n, '') for r, x, y, n, _e in pads])
-    pcb, pcb0 = parse_kicad_pcb(src), parse_kicad_pcb(plain)
-    G = {'G': {'nets': ['SE1', 'SE2', 'SE3'], 'tolerance_mm': 0.1}}
-    g = ps.length_group_floors(pcb, G)['groups']['G']
-    g0 = ps.length_group_floors(pcb0, G)['groups']['G']
-    floors = {n: m['floor_mm'] for n, m in g['members'].items()}
-    check(floors == {'SE1': 43.0, 'SE2': 40.0, 'SE3': 42.0},
-          'each floor = copper floor + every pad\'s die_length (total mode): '
-          'SE1 40+3, SE3 40+2 (its third pad)', floors)
-    check(g0['members']['SE1']['floor_mm'] == 40.0
-          and 'pad_to_die_mm' not in g0 and 'pad_to_die_ps' not in g0,
-          'control, no token: the copper floor, nothing disclosed', g0)
-    check((g['longest_net'], g['longest_floor_mm'], g['spread_mm'],
-           g['copper_to_add_mm']) == ('SE1', 43.0, 3.0, 4.0),
-          'the group reads the die-inclusive floors: longest SE1 43, spread '
-          '3, copper to add 3 + 1', g)
-    check(g.get('pad_to_die_mm') == {'SE1': 3.0, 'SE3': 2.0}
-          and g.get('pad_to_die_ps') == {'SE1': 20.0},
-          'the group names the terms it added', g)
-    want_ps = round(40.0 * get_layer_ps_per_mm(pcb, 'F.Cu') + 20.0, 1)
-    check(g['longest_floor_ps']['outer']['ps'] == want_ps,
-          'the ps figure is the copper\'s time + die_delay (%.1f), never a '
-          'converted die_length' % want_ps, g['longest_floor_ps'])
-    gp = ps.length_group_floors(pcb, {'G': dict(G['G'], mode='pin_pair')})
-    gp = gp['groups']['G']
-    check(gp['members']['SE3']['floor_mm'] == 40.0
-          and gp['members']['SE1']['floor_mm'] == 43.0,
-          'pin_pair mode adds only the first two pads\' term, as board_score',
-          {n: m['floor_mm'] for n, m in gp['members'].items()})
-
-    # The floor bounds what board_score grades, term included: on a straight
-    # route the two are the same number.
-    out = os.path.join(tmp, 'floor_out.kicad_pcb')
-    if _run(['py_router/route.py', src, out, '--nets', 'SE1', 'SE2'] + COMMON,
-            'route.py on the floor board') is None:
-        return
-    routed = parse_kicad_pcb(evidence(out, 'routed floor board'))
-    nid = ids(routed)
-    graded = {n: net_match_length(routed, nid[n]) for n in ('SE1', 'SE2')}
-    check(all(graded[n] is not None and abs(graded[n] - floors[n]) <= 0.01
-              for n in graded),
-          'board_score\'s measure of the straight route = the floor (both '
-          'carry SE1\'s 3.0 mm)', (graded, floors))
-
-
 def main():
     tmp = tempfile.mkdtemp(prefix='t1248_')
     try:
@@ -543,7 +481,6 @@ def main():
         test_route_diff_intra(tmp)
         test_route_pair_group(tmp)
         test_board_score_cli(tmp)
-        test_placement_floor(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('\n%d failure(s)' % len(FAILURES))

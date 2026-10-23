@@ -41,9 +41,20 @@ import sys
 sys.path.insert(0, "py_router")
 from impedance import calculate_width_for_impedance, calculate_impedance_for_layer
 
-# After (hypothetically) applying the proposed stackup values:
-w = calculate_width_for_impedance(pcb, 'F.Cu', target_z0=50.0)
+# After (hypothetically) applying the proposed stackup values to
+# pcb.board_info.stackup in memory -- each call returns a dict:
+r = calculate_width_for_impedance(pcb, 'F.Cu', target_z0=50.0)
+print(r.get('calculated_width_mm'), r.get('verified_z0'), r.get('error'))
+r = calculate_width_for_impedance(pcb, 'F.Cu', target_z0=90.0,
+                                  spacing=0.1, is_differential=True)
+# and the reverse: the Z0 a given width gives on a layer
+z = calculate_impedance_for_layer(pcb, 'In1.Cu', trace_width=0.15)
 ```
+
+`error` is set (and no width) when the layer is not in the stackup. On a board
+with no stackup at all, `impedance.achievability_note(pcb, layer, target)`
+answers "is this target reachable on a board like this?" against a nominal
+1.6 mm FR-4 stackup, with numbers (#909).
 
 Warn when a target is unachievable with manufacturable geometry (e.g. 50Ω microstrip needing a wider trace than the design's clearances allow, or a width below the fab's minimum) and propose the nearest workable option (thinner prepreg, different layer, relaxed target).
 

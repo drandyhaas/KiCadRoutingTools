@@ -426,9 +426,9 @@ def _grade(a, doc):
     # ---- 2. the instruments board_score has no component for ---------------
     extra = {}
     if not a.skip_slow:
-        # check_orphan_stubs hardcodes four layers, so on a 6+ layer board the
-        # inner ones are never scanned and it says nothing about them. Ask per
-        # layer instead of accepting a partial sweep as a clean one.
+        # Ask check_orphan_stubs per layer (it scans every copper layer by
+        # default, but one exit per layer is what names which layers carry
+        # orphans and which runs failed), over the layers read above.
         stub_hits, stub_ran, stub_exits = 0, [], {}
         for ly in layers:
             c, o = _run([os.path.join('py_tools', 'check_orphan_stubs.py'),

@@ -565,7 +565,7 @@ _TOUCH = 1e-6        # two spans that meet at a point DO conflict (see below)
 
 
 def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True, stack: bool = False,
-              xing: Optional[int] = None) -> bool:
+              xing: Optional[int] = None, reach: Optional[float] = None) -> bool:
     """Two moves that cannot both be laid: a shared lane stretch or a
     shared site -- and, `strict`, a lane matched within `tol` (half a
     fine-pitch gap) or one's via site in the other's lane. The strict
@@ -583,7 +583,10 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True, stack: 
     (the whole route's ends): two exits at one point conflict only on one
     layer (an F lane stacks over a B one), and two on one layer closer
     than _STACK_PITCH do. `xing`: the crossing rule (SEL_XING's values),
-    SEL_XING when not given -- a caller meaning another rule passes it"""
+    SEL_XING when not given -- a caller meaning another rule passes it.
+    `reach`: how far a via keeps the other move's run off it (_VIA_REACH,
+    the router's grid ring, when not given -- rules.fan_via_clear for
+    moves laid exactly as they are)"""
     xing = SEL_XING if xing is None else xing
     spans, ospans = _lane_spans(m), _lane_spans(om)
     for key, a, b in spans:
@@ -620,8 +623,8 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True, stack: 
     # cannot both be laid whatever their layers (K28: SODT0's site in
     # SCKE0's column gap, SDQ0's in SDQ14's row gap -- the fanout, which
     # now lays the plan's moves exactly, refused the second of each pair)
-    if any(_site_in_lane(om, key, a, b) for key, a, b in spans) \
-            or any(_site_in_lane(m, ok, oa, ob) for ok, oa, ob in ospans):
+    if any(_site_in_lane(om, key, a, b, reach) for key, a, b in spans) \
+            or any(_site_in_lane(m, ok, oa, ob, reach) for ok, oa, ob in ospans):
         return True
     # two teeth cannot share one exit point: the braid orders lanes by their
     # offset at the array, whatever their layers, and two lanes at one
@@ -648,10 +651,10 @@ _EXIT_TOL = 0.16    # half a fine-pitch gap
 _STACK_PITCH = _rules.active().track + _rules.active().clearance + _rules.HUG_OVER   # two lanes' centres side by side
 
 
-_VIA_REACH = 0.30   # via radius + clearance + half a track, rounded up
+_VIA_REACH = _rules.fan_via_reach(_rules.active())   # a via's reach for another net's escape run (rules.py)
 
 
-def _site_in_lane(dm: Move, key, a, b) -> bool:
+def _site_in_lane(dm: Move, key, a, b, reach: Optional[float] = None) -> bool:
     """Does dm's via (any layer) sit inside the lane `key` over [a, b]?
     ANY via: a via-in-pad's barrel stands at the ball's centre, exactly
     where another net's run along that row LINE on the back layer passes
@@ -661,9 +664,10 @@ def _site_in_lane(dm: Move, key, a, b) -> bool:
     if dm.site is None:
         return False
     sx, sy = dm.site
+    R = _VIA_REACH if reach is None else reach
     if key[0] == 'row':
-        return abs(sy - key[1]) < _VIA_REACH and a - _VIA_REACH < sx < b + _VIA_REACH
-    return abs(sx - key[1]) < _VIA_REACH and a - _VIA_REACH < sy < b + _VIA_REACH
+        return abs(sy - key[1]) < R and a - R < sx < b + R
+    return abs(sx - key[1]) < R and a - R < sy < b + R
 
 
 def lanes_free(m: Move, sel: Dict[str, Move], me: str,

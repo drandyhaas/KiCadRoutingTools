@@ -12,7 +12,7 @@ edge, hole-to-hole, all for free -- then adds the join-specific checks the
 DRC deliberately does not do: layer transitions without a via, and same-net
 via stacks (KiCad permits those, so only this tool will ever flag them).
 
-    python check_join.py BOARD NET x,y,layer x,y,layer ... [via:x,y ...]
+    python3 py_tools/check_join.py BOARD NET x,y,layer x,y,layer ... [via:x,y ...]
 
 The polyline is the join: consecutive points on the SAME layer become track
 segments; a layer change between consecutive points must happen at the SAME
@@ -47,8 +47,8 @@ def build_parser():
                     "before committing it.",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""
 Examples:
-  python check_join.py b.kicad_pcb SWDIO 132.1,75.4,F.Cu 133.0,75.4,F.Cu
-  python check_join.py b.kicad_pcb GPIO1 130.0,70.0,F.Cu 130.0,70.0,B.Cu \\
+  python3 py_tools/check_join.py b.kicad_pcb SWDIO 132.1,75.4,F.Cu 133.0,75.4,F.Cu
+  python3 py_tools/check_join.py b.kicad_pcb GPIO1 130.0,70.0,F.Cu 130.0,70.0,B.Cu \\
       130.5,72.0,B.Cu via:130.0,70.0
 """)
     p.add_argument('board', help='the .kicad_pcb the join would be added to')
@@ -168,7 +168,8 @@ def _stage_board(board, out_path, pcb, net_id, cand_segs, cand_vias):
         blocks.append(generate_via_sexpr(v.x, v.y, v.size, v.drill,
                                          v.layers, net_id,
                                          net_name=net_name,
-                                         tenting_attrs=getattr(v, 'tenting_attrs', None)))
+                                         tenting_attrs=getattr(v, 'tenting_attrs', None),
+                                         via_type=getattr(v, 'via_type', None)))
     tail = content.rstrip()
     if not tail.endswith(')'):
         raise ValueError(f"{board} does not end with a closing paren")

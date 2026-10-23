@@ -222,3 +222,52 @@ def locked_items(path):
     import re
     return sorted(re.findall(r'\((?:segment|via) [^\n]*\(locked yes\)[^\n]*\)',
                              text))
+
+
+def with_partner_pads(src, dst, origin, *, cols=1, pitch=1.0):
+    """Write `src` to `dst` with a partner pad for every net that has ONE pad
+    on the board, and return the partnered net names (#1342).
+
+    The synthetic QFN fixtures name nets that exist only on the package --
+    no real board does that, and the fanouts skip such a net as an NC pin
+    (bga_fanout since #122, qfn_fanout since #1342), because it has nothing
+    to connect to. A test that fans those nets gives each one somewhere to
+    go: one `synth:PARTNER` footprint whose pads sit on a grid at `origin`
+    (`cols` per row, `pitch` apart) -- keep it clear of the escapes under
+    test. Each pad keeps the board's net dialect (`(net N "name")` or the
+    name-only form). Siblings (.kicad_pro, ...) are carried when dst differs.
+    """
+    import contextlib
+    import io
+    import re
+    from kicad_parser import parse_kicad_pcb
+    with contextlib.redirect_stdout(io.StringIO()), \
+            contextlib.redirect_stderr(io.StringIO()):
+        pcb = parse_kicad_pcb(src)
+        if os.path.abspath(src) != os.path.abspath(dst):
+            from copy_board import copy_board
+            copy_board(src, dst)
+    names = sorted(pcb.nets[nid].name for nid, pads in pcb.pads_by_net.items()
+                   if nid and len(pads) == 1 and nid in pcb.nets)
+    with open(src, encoding='utf-8') as fh:
+        text = fh.read()
+    pads = []
+    for i, name in enumerate(names):
+        m = re.search(r'\(net (\d+) "%s"\)' % re.escape(name), text)
+        net = ('(net %s "%s")' % (m.group(1), name) if m
+               else '(net "%s")' % name)
+        pads.append('\t\t(pad "%d" smd rect (at %s %s) (size 0.5 0.5) '
+                    '(layers "F.Cu" "F.Mask") %s)\n'
+                    % (i + 1, round((i % cols) * pitch, 6),
+                       round((i // cols) * pitch, 6), net))
+    if pads:
+        block = ('\t(footprint "synth:PARTNER" (layer "F.Cu") '
+                 '(uuid "13421342-0000-4000-8000-000000001342") (at %s %s)\n'
+                 '\t\t(property "Reference" "TP_PARTNER" (at 0 -1 0) '
+                 '(layer "F.SilkS"))\n%s\t)\n' % (origin[0], origin[1],
+                                                 ''.join(pads)))
+        i = text.rstrip().rfind(')')
+        text = text[:i] + block + text[i:]
+    with open(dst, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+    return names

@@ -32,10 +32,10 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS = os.path.join(ROOT, '.claude', 'skills')
-#: The staged placement and combined skills were retired for pcb-free-agent,
+#: The staged placement and combined skills were retired for plan-pcb-placement,
 #: which inherits the lint: a frequency word standing in for a measurement is
 #: the same defect whichever skill spells it.
-OWNED = ('plan-pcb-routing', 'pcb-free-agent')
+OWNED = ('plan-pcb-routing', 'plan-pcb-placement')
 
 FAILURES = []
 

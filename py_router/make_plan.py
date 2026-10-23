@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Make a GUI routing plan (plan.json) from a recorded command chain (#507).
 
-A plan JSON is what the GUI's AI tab loads (Load... next to "Parsed result")
+A plan JSON is what the GUI's AI Drive tab loads (its Routing sub-tab: Load...
+next to "Parsed result")
 and what ``run_plan.py`` executes headless. Every stress run writes one; this
 makes the same file on demand from any recorded manifest:
 
@@ -13,7 +14,7 @@ makes the same file on demand from any recorded manifest:
 ``REDO_MANIFEST`` points somewhere, so a hand-run chain becomes a plan too:
 
     export REDO_MANIFEST=$PWD/redo_commands.sh
-    python3 py_router/bga_fanout.py board.kicad_pcb s1.kicad_pcb --component U1
+    python3 py_router/bga_fanout.py board.kicad_pcb -o s1.kicad_pcb --component U1
     python3 py_router/route.py s1.kicad_pcb s2.kicad_pcb --nets '/SPI*'
     python3 py_router/make_plan.py .            # -> plan.json, ready to Load in the GUI
 
@@ -153,8 +154,9 @@ def main():
         return 1
 
     print(f"{len(steps)} step(s) written to {out}"
-          + (f" ({skipped} command(s) skipped: kept but not GUI steps, or "
-             f"rejected by their tool's parser)" if skipped else ""))
+          + (f" ({skipped} command(s) skipped: kept but not GUI steps, "
+             f"rejected by their tool's parser, or upstream of a rejected "
+             f"one)" if skipped else ""))
     if args.list:
         for i, step in enumerate(steps, 1):
             print("  " + describe(step, i))
