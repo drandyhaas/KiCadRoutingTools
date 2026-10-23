@@ -30,16 +30,22 @@ congestion before the router starts:
 
 --finish runs step 6 alone on a board another chain has already prepared and
 routed (an agent's chain, say): the poured planes are read from the board's
-zones, and route.py only touches the nets still unconnected.
+pours, and the input board is itself a candidate, so a pass ships only if it
+beats it. route.py works on the nets still open, but like any route step it
+may rip and reroute existing copper and runs its plane finalize.
 
 Every step runs as its own process in <output>.autoplan/, so a step that
-fails or does not improve is skipped and the chain continues from the last
-good board. Route passes stop once a pass closes no nets, and a further pass
+fails is skipped and the chain continues from the last good board. Each route
+pass is graded: open nets as check_connected reports them (the KiCad
+cross-check off, so the grade is deterministic) and real violations as
+check_drc reports them. A pass is kept only if it is no worse on both and
+better on one; the first pass that is not kept ends the passes. A further pass
 starts only while the router iterations spent, plus the last pass's again,
-stay within --effort-factor times the first pass's: a count the router
-reproduces exactly, so the same board always gets the same passes. If no
-route pass succeeds, the best board the chain has ships (with --finish, the
-input board itself). The chain is written to <output>.autoplan/plan.json.
+stay within --effort-factor times the first pass's -- a forecast from counts
+the router reproduces exactly, not a cap on the pass itself -- and not at all
+when a pass reported no iterations. If no route pass succeeds, the best board
+the chain has ships (with --finish, the input board itself). The chain and
+every grade are written to <output>.autoplan/plan.json.
 """
 from __future__ import annotations
 
@@ -48,12 +54,15 @@ from __future__ import annotations
 KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
 
 import argparse
+import fnmatch
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -88,11 +97,44 @@ def _exact_ok(name):
 
 
 def _glob(name):
-    """The fnmatch pattern matching exactly this net, safe to pass on the
-    command line: glob metacharacters are bracketed, and so is a leading '-'
-    that argparse would otherwise read as an option ('-BATT' -> '[-]BATT')."""
-    pat = ''.join(f'[{c}]' if c in '[]*?' else c for c in name)
-    return '[-]' + pat[1:] if not _exact_ok(pat) else pat
+    """A pattern that selects exactly this net through every selector the
+    chain's tools use, and that argparse passes as a value.
+
+    The selectors (net_queries) match a pattern with no '/' against a net's
+    last sheet component too ('GND' selects '/Analog/GND'), and read a leading
+    '!' as an exclusion. A sheet-qualified name ('/Analog/GND') is already
+    full-matched only. Any other name gets its LAST character as a class that
+    also holds '/' -- a net name never ends in '/', so the class admits no
+    other net -- and a leading '-' or '!' becomes a class that is not read as
+    an option or an exclusion: '[--]' (only '-') and '[ -!]' (a space or '!';
+    no net name starts with a space). 'GND' -> 'GN[D/]', '-BATT' ->
+    '[--]BAT[T/]', '!RESET' -> '[ -!]RESE[T/]'. Glob metacharacters are
+    bracketed. `_selects_exactly` still checks each pattern against the
+    board's own nets."""
+    def esc(c):
+        return f'[{c}]' if c in '[]*?' else c
+
+    def tail(c):
+        return {']': '[]/]', '!': '[/!]'}.get(c, f'[{c}/]')
+
+    if name.startswith('/'):
+        return ''.join(esc(c) for c in name)
+    head = {'-': '[--]', '!': '[ -!]'}.get(name[0])
+    if len(name) == 1:
+        return head or tail(name)
+    return (head or esc(name[0])) + ''.join(esc(c) for c in name[1:-1]) + tail(name[-1])
+
+
+def _selects_exactly(pattern, name, names):
+    """True when PATTERN selects NAME and no other of NAMES, read the ways the
+    chain's tools read it: net_queries.net_pattern_matches (--nets, the
+    fanouts' filters and their '!' exclusions) and plain fnmatchcase
+    (route.py --power-nets)."""
+    from net_queries import net_pattern_matches
+    if pattern.startswith(('!', '-')):
+        return False
+    return all(net_pattern_matches(n, pattern) == (n == name)
+               and fnmatch.fnmatchcase(n, pattern) == (n == name) for n in names)
 
 
 # --------------------------------------------------------------------------
@@ -138,7 +180,7 @@ def fanout_parts(pcb):
 
 
 def analyze(board, finish=False):
-    from kicad_parser import parse_kicad_pcb
+    from kicad_parser import parse_kicad_pcb, pour_zones
     from list_nets import (read_design_rules, effective_floors,
                            find_power_nets, find_differential_pairs,
                            board_default_netclass_clearance)
@@ -178,8 +220,9 @@ def analyze(board, finish=False):
 
     if finish:
         # The board's own pours: their nets are power nets, and an INNER
-        # layer carrying one is a plane the signals should keep off.
-        zones = [z for z in pcb.zones if not z.in_footprint and z.net_name]
+        # layer carrying one is a plane the signals should keep off. Teardrops
+        # are zones too, but routing output on a signal net, not a pour.
+        zones = [z for z in pour_zones(pcb.zones) if not z.in_footprint and z.net_name]
         planes = sorted({(z.net_name, z.layer) for z in zones})
         plane_nets = sorted({n for n, _ in planes})
         power_nets = plane_nets + [n for n, _ in rails if n not in plane_nets]
@@ -201,50 +244,141 @@ def analyze(board, finish=False):
         p, n = (pr[0], pr[1]) if isinstance(pr, (tuple, list)) else (pr.p, pr.n)
         pairs += [getattr(p, 'name', p), getattr(n, 'name', n)]
 
+    # Every net the chain names by pattern, with the pattern that selects it
+    # alone on this board. A net no pattern isolates is left out of the
+    # lists that name it (a diff pair goes as a pair) and reported.
+    names = sorted({n.name for n in pcb.nets.values() if n.name})
+    globs, unnamed = {}, []
+    for n in dict.fromkeys(plane_nets + power_nets + pairs):
+        g = _glob(n)
+        if _selects_exactly(g, n, names):
+            globs[n] = g
+        else:
+            unnamed.append(n)
+    if unnamed:
+        print(f"AUTOPLAN: no pattern selects only {', '.join(unnamed)} on this "
+              f"board; left out of the power, exclusion and pair lists", flush=True)
+    power_nets = [n for n in power_nets if n in globs]
+    pairs = [n for i in range(0, len(pairs) - 1, 2) for n in pairs[i:i + 2]
+             if pairs[i] in globs and pairs[i + 1] in globs]
+
     return dict(layers=layers, clearance=clearance, track=track, via=via,
                 drill=drill, fine_via=fine_via, fine_drill=fine_drill,
                 fab_clearance=_num(eff['drc_clearance']), planes=planes,
                 plane_nets=plane_nets, power_nets=power_nets,
                 layer_costs=layer_costs, parts=parts, grid=grid,
-                congested=congested, n_nets=n_nets, pair_nets=pairs)
+                congested=congested, n_nets=n_nets, pair_nets=pairs,
+                globs=globs)
 
 
 # --------------------------------------------------------------------------
 # Running steps
 
 
+#: Prints the nets check_connected leaves incomplete (unrouted or broken),
+#: one JSON list on its own line; run in a child so its output and state stay
+#: out of this process.
+_CONN_PROBE = (
+    "import contextlib, io, json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "from check_connected import run_connectivity_check\n"
+    "with contextlib.redirect_stdout(io.StringIO()):\n"
+    "    issues = run_connectivity_check(sys.argv[2], quiet=True)\n"
+    "print('AUTOPLAN_OPEN: ' + json.dumps(sorted({i['net_name'] for i in issues"
+    " if i.get('net_name')})))\n")
+
+
+def _recorded_clearance(board):
+    """The clearance BOARD's .kicad_pro records, or None. check_drc grades at
+    the board's own recorded floors when there is one -- copper a step routed
+    below the chain's clearance (a fine tap) is legal there -- and only
+    otherwise at the chain's clearance, as the corpus grader does."""
+    from fix_kicad_drc_settings import project_copper_clearance
+    try:
+        with open(board[:-len('.kicad_pcb')] + '.kicad_pro') as fh:
+            return project_copper_clearance(json.load(fh))
+    except (OSError, ValueError):
+        return None
+
+
+def _child_env():
+    env = dict(os.environ)
+    env.pop('REDO_MANIFEST', None)   # the parent records the one invocation
+    return env
+
+
 class Chain:
-    def __init__(self, board, work):
+    def __init__(self, board, work, clearance=None, baseline=None):
         self.work = work
         self.cur = os.path.abspath(board)
         self.n = 0
         self.steps = []
-        self.last_iterations = 0
+        self.last_iterations = None
+        self.clearance = clearance
+        self.baseline = baseline
+
+    def grade(self, board):
+        """{'open': n, 'open_nets': [...], 'drc': n} for BOARD, or None when a
+        checker could not grade it.
+
+        open: the nets check_connected reports unrouted or broken, every one
+        (no capped name list, no pad counts), with its KiCad cross-check off
+        so the same board always grades the same. drc: check_drc's real
+        violations at the board's recorded floors (else the chain's
+        clearance), the chain's input as baseline."""
+        env = _child_env()
+        env['KICAD_NO_GRADE_RECONCILE'] = '1'
+        r = subprocess.run([sys.executable, '-X', 'utf8', '-c', _CONN_PROBE, HERE, board],
+                           capture_output=True, text=True, env=env)
+        m = re.search(r'^AUTOPLAN_OPEN: (\[.*\])$', r.stdout, re.M)
+        if r.returncode != 0 or not m:
+            print(f"  grade: check_connected failed on {os.path.basename(board)}",
+                  flush=True)
+            return None
+        open_nets = json.loads(m.group(1))
+        fd, jpath = tempfile.mkstemp(suffix='.json', dir=self.work)
+        os.close(fd)
+        argv = [sys.executable, '-X', 'utf8', os.path.join(HERE, 'check_drc.py'),
+                board, '--quiet', '--json', jpath]
+        if self.clearance is not None and _recorded_clearance(board) is None:
+            argv += ['--clearance', str(self.clearance)]
+        if self.baseline:
+            argv += ['--baseline', self.baseline]
+        subprocess.run(argv, capture_output=True, text=True, env=_child_env())
+        try:
+            with open(jpath) as fh:
+                drc = int(json.load(fh)['violations'])
+        except (OSError, ValueError, KeyError):
+            print(f"  grade: check_drc failed on {os.path.basename(board)}", flush=True)
+            return None
+        finally:
+            os.remove(jpath)
+        return {'open': len(open_nets), 'open_nets': open_nets, 'drc': drc}
 
     def run(self, kind, args, tag):
         """Run one tool from the current board to a fresh output; returns
         (output path or None, JSON_SUMMARY dict or None, JSON_SUMMARY_MIN).
         ``last_iterations`` is the router iterations its JSON_SUMMARY lines
-        report, summed -- the same effort count the replay harness uses."""
+        report, summed -- the same effort count the replay harness uses --
+        or None when the run printed no JSON_SUMMARY at all."""
         self.n += 1
         out = os.path.join(self.work, f'step{self.n:02d}_{tag}.kicad_pcb')
         argv = [sys.executable, '-u', '-X', 'utf8', TOOLS[kind]] + \
             [a.replace('{IN}', self.cur).replace('{OUT}', out) for a in args]
         log = out[:-len('.kicad_pcb')] + '.log'
-        env = dict(os.environ)
-        env.pop('REDO_MANIFEST', None)
         with open(log, 'w') as fh:
             rc = subprocess.run(argv, cwd=self.work, stdout=fh,
-                                stderr=subprocess.STDOUT, env=env).returncode
+                                stderr=subprocess.STDOUT, env=_child_env()).returncode
         text = open(log, errors='replace').read()
         summary = summary_min = None
-        self.last_iterations = 0
+        self.last_iterations = None
         for m in re.finditer(r'^JSON_SUMMARY: (\{.*\})$', text, re.M):
             try:
                 summary = json.loads(m.group(1))
             except ValueError:
                 continue
-            self.last_iterations += int(summary.get('total_iterations') or 0)
+            self.last_iterations = ((self.last_iterations or 0)
+                                    + int(summary.get('total_iterations') or 0))
         m = re.search(r'^JSON_SUMMARY_MIN: (\{.*\})$', text, re.M)
         if m:
             try:
@@ -264,22 +398,12 @@ class Chain:
             self.cur = out
 
 
-def _open_count(summary_min):
-    if not summary_min:
-        return None
-    ppo = summary_min.get('pad_pairs_open') or {}
-    return (len(summary_min.get('failed_single') or [])
-            + len(summary_min.get('open_single') or [])
-            + int(summary_min.get('multipoint_deficit') or 0)
-            + int(ppo.get('count', 0) if isinstance(ppo, dict) else 0))
-
-
 def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
-    ch = Chain(board, work)
+    ch = Chain(board, work, clearance=a['clearance'], baseline=os.path.abspath(board))
     L = a['layers']
     costs = [str(c) for c in a['layer_costs']]
     if finish:
-        return route_passes(ch, a, L, costs, effort_factor)
+        return route_passes(ch, a, L, costs, effort_factor, finish=True)
 
     # 2. planes, first
     if a['planes']:
@@ -290,7 +414,7 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
         ch.accept(out)
 
     # 3. fanout, each part, with a retry ladder keeping the best escape
-    excl = [f'!{_glob(n)}' for n in a['plane_nets']]
+    excl = [f"!{a['globs'][n]}" for n in a['plane_nets'] if n in a['globs']]
     fanned = False
     for ref, tool, pitch in a['parts']:
         fine = pitch <= 0.65
@@ -344,7 +468,7 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
     # 5. diff pairs first
     if a['pair_nets']:
         out, s, _ = ch.run('diff', [
-            '{IN}', '{OUT}', '--nets', *[_glob(n) for n in a['pair_nets']],
+            '{IN}', '{OUT}', '--nets', *[a['globs'][n] for n in a['pair_nets']],
             '--track-width', str(max(0.1, a['track'])),
             '--diff-pair-gap', str(max(0.1, a['clearance'])),
             '--clearance-ceiling', str(a['clearance']),
@@ -356,9 +480,16 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
     return route_passes(ch, a, L, costs, effort_factor)
 
 
-def route_passes(ch, a, L, costs, effort_factor=2.0):
+def _improves(g, best):
+    """G is no worse than BEST on open nets and on DRC, and better on one."""
+    return (g['open'] <= best['open'] and g['drc'] <= best['drc']
+            and (g['open'], g['drc']) != (best['open'], best['drc']))
+
+
+def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False):
     """6. route every net; up to two more passes while nets are open, each
-    pass still closes some, and the effort stays within budget."""
+    pass improves on the best board so far, and the effort stays within
+    budget. Returns (chain, best board or None, its grade or None)."""
     args = ['{IN}', '{OUT}', '--nets', '*', '--no-bga-zones',
             '--clearance-ceiling', str(a['clearance']),
             '--track-width', str(a['track']),
@@ -366,33 +497,76 @@ def route_passes(ch, a, L, costs, effort_factor=2.0):
             '--layers', *L, '--layer-costs', *costs,
             '--grid-step', str(a['grid'])]
     if a['power_nets']:
-        args += ['--power-nets', *[_glob(n) for n in a['power_nets']],
+        args += ['--power-nets', *[a['globs'][n] for n in a['power_nets']],
                  '--power-nets-widths',
                  *[str(RAIL_WIDTH)] * len(a['power_nets'])]
     if a['congested']:
         args += ['--max-ripup', '5']
-    best = None                        # (open, out)
-    first = spent = 0
+    best = None                        # (grade, board)
+    if finish:
+        g = ch.grade(ch.cur)
+        if g is None:
+            print("  the input could not be graded: no route pass runs", flush=True)
+            return ch, None, None
+        ch.steps.append({'tool': 'grade', 'tag': 'input', 'grade': g})
+        best = (g, ch.cur)
+        print(f"  input: {g['open']} open, {g['drc']} DRC", flush=True)
+        if g['open'] == 0:
+            return ch, ch.cur, g
+    first = spent = None
     for i in range(ROUTE_PASSES):
-        if i and spent + ch.last_iterations > effort_factor * first:
-            print(f"  route pass {i + 1} not started: {spent} iterations "
-                  f"spent, the last pass took {ch.last_iterations}, budget "
-                  f"{effort_factor:g} x {first}", flush=True)
-            break
-        out, _, smin = ch.run('route', args, 'route' + (f'_p{i + 1}' if i else ''))
-        spent += ch.last_iterations
-        if not i:
-            first = ch.last_iterations
+        if i:
+            if ch.last_iterations is None:
+                print(f"  route pass {i + 1} not started: the last pass reported "
+                      f"no iterations to budget from", flush=True)
+                break
+            if spent + ch.last_iterations > effort_factor * first:
+                print(f"  route pass {i + 1} not started: {spent} iterations "
+                      f"spent, the last pass took {ch.last_iterations}, budget "
+                      f"{effort_factor:g} x {first}", flush=True)
+                break
+        out, _, _ = ch.run('route', args, 'route' + (f'_p{i + 1}' if i else ''))
+        if ch.last_iterations is not None:
+            spent = (spent or 0) + ch.last_iterations
+            if first is None:
+                first = ch.last_iterations
         if not out:
             break
-        n_open = _open_count(smin)
-        progress = best is None or (n_open is not None and n_open < best[0])
-        if best is None or (n_open is not None and n_open <= best[0]):
-            best = (n_open if n_open is not None else 1 << 30, out)
+        g = ch.grade(out)
+        ch.steps[-1]['grade'] = g
+        if g is None:
+            if best is None:           # still the routed board, just ungraded
+                best = (None, out)
+                ch.accept(out)
+            break
+        print(f"  {os.path.basename(out)}: {g['open']} open, {g['drc']} DRC", flush=True)
+        if best is not None and not _improves(g, best[0]):
+            print(f"  not kept: no better than {os.path.basename(best[1])} "
+                  f"({best[0]['open']} open, {best[0]['drc']} DRC)", flush=True)
+            break
+        best = (g, out)
         ch.accept(out)
-        if not n_open or not progress:
+        if g['open'] == 0:
             break
     return ch, (best[1] if best else None), (best[0] if best else None)
+
+
+def _effort_factor(text):
+    v = float(text)
+    if not math.isfinite(v) or v < 0:
+        raise argparse.ArgumentTypeError(f'must be a finite number >= 0, not {text}')
+    return v
+
+
+def _ship(src, dst):
+    """Copy board SRC and its siblings to DST, removing any sibling DST has
+    that SRC does not, so the shipped set is exactly SRC's."""
+    from copy_board import copy_board, SIBLING_EXTS
+    sb, db = src[:-len('.kicad_pcb')], dst[:-len('.kicad_pcb')]
+    for ext in SIBLING_EXTS:
+        if os.path.exists(db + ext) and not os.path.exists(sb + ext):
+            os.remove(db + ext)
+    copy_board(src, dst)
 
 
 def main():
@@ -406,11 +580,12 @@ def main():
     ap.add_argument('--finish', action='store_true',
                     help='only the final route passes, on a board already '
                          'prepared and routed by another chain')
-    ap.add_argument('--effort-factor', type=float, default=2.0,
+    ap.add_argument('--effort-factor', type=_effort_factor, default=2.0,
                     help='a route pass after the first starts only while the '
                          'router iterations spent, plus the last pass\'s '
                          'again, stay within this many times the first '
-                         'pass\'s (default 2)')
+                         'pass\'s (default 2). A forecast, not a cap: a pass '
+                         'that starts runs to its end')
     args = ap.parse_args()
 
     a = analyze(args.input_file, finish=args.finish)
@@ -419,14 +594,22 @@ def main():
         return 0
     out = os.path.abspath(args.output_file)
     work = out + '.autoplan'
-    if os.path.isdir(work):
-        shutil.rmtree(work)
-    os.makedirs(work)
     from copy_board import copy_board
-    src = os.path.join(work, 'input.kicad_pcb')
-    copy_board(os.path.abspath(args.input_file), src)
-    ch, final, n_open = run_plan(src, out, a, work, finish=args.finish,
-                                 effort_factor=args.effort_factor)
+    # Stage the input before clearing the work directory: it may live there
+    # (a previous run's step board).
+    stage = tempfile.mkdtemp(prefix='.autoplan_input_', dir=os.path.dirname(out))
+    try:
+        staged = os.path.join(stage, 'input.kicad_pcb')
+        copy_board(os.path.abspath(args.input_file), staged)
+        if os.path.isdir(work):
+            shutil.rmtree(work)
+        os.makedirs(work)
+        src = os.path.join(work, 'input.kicad_pcb')
+        copy_board(staged, src)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    ch, final, grade = run_plan(src, out, a, work, finish=args.finish,
+                                effort_factor=args.effort_factor)
     if not final and (args.finish or ch.cur != src):
         # No route pass finished: ship the best board the chain has -- the
         # input itself for --finish, else the last step that succeeded.
@@ -435,15 +618,17 @@ def main():
               f"{os.path.basename(final)}", flush=True)
     with open(os.path.join(work, 'plan.json'), 'w') as fh:
         json.dump({'analysis': a, 'steps': ch.steps, 'final': final,
-                   'open': n_open}, fh, indent=1)
+                   'grade': grade}, fh, indent=1)
     if not final:
         print("AUTOPLAN: no route pass produced a board", flush=True)
         return 1
-    copy_board(final, out)
+    _ship(final, out)
     print("AUTOPLAN_SUMMARY: " + json.dumps(
-        {'final_step': os.path.basename(final), 'open': n_open,
+        {'final_step': os.path.basename(final),
+         'open': grade['open'] if grade else None,
+         'drc': grade['drc'] if grade else None,
          'steps': len(ch.steps),
-         'skipped': [s['tag'] for s in ch.steps if not s['ok']]}), flush=True)
+         'skipped': [s['tag'] for s in ch.steps if not s.get('ok', True)]}), flush=True)
     return 0
 
 

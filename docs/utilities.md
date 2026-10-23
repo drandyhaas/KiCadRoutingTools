@@ -2080,6 +2080,13 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
 
 A step that fails is skipped and the chain continues from the last good board.
 
+Each route pass is graded: open nets are the nets `check_connected` reports
+unrouted or broken (its KiCad cross-check off, so the same board always grades
+the same), and DRC is `check_drc`'s real violations at the board's recorded
+floors. A pass is kept only if it is no worse than the best board so far on
+both and better on one; the first pass that is not kept ends the passes, and
+a tie keeps the earlier board.
+
 ### Usage
 
 ```bash
@@ -2088,23 +2095,34 @@ python py_router/autoplan.py input.kicad_pcb output.kicad_pcb [OPTIONS]
 Options:
   --dry-run          Print the analysis (AUTOPLAN_ANALYSIS) and exit
   --finish           Run step 6 alone on a board another chain has already
-                     prepared and routed: the poured planes are read from the
-                     board's zones, and route.py touches only the nets still
-                     unconnected
+                     prepared and routed: the planes are read from the board's
+                     pours (not its teardrops), and the input board is graded
+                     first and ships unless a pass beats it. route.py works on
+                     the nets still open, but like any route step it may rip
+                     and reroute existing copper and runs its plane finalize
   --effort-factor F  A route pass after the first starts only while the router
                      iterations spent, plus the last pass's again, stay within
-                     F times the first pass's (default 2). Passes also stop
-                     once a pass closes no nets. Iterations are the
-                     JSON_SUMMARY total_iterations the router reproduces
-                     exactly, so the same board always gets the same passes.
+                     F times the first pass's (default 2; a finite number >= 0).
+                     A forecast, not a cap: a pass that starts runs to its
+                     end. Iterations are the JSON_SUMMARY total_iterations the
+                     router reproduces exactly, so the same board always gets
+                     the same passes; a pass that reports none starts no other.
 ```
 
-The chain, each step's arguments, return code and iterations are written to
-`<output>.autoplan/plan.json`; the last line is `AUTOPLAN_SUMMARY` with the
-final step and the router's open count. If no route pass succeeds, the best
-board the chain has ships (with `--finish`, the input board itself). Net names
-reach every tool as fnmatch patterns matching exactly that net, so a name
-beginning with `-` (`-BATT`) is passed as `[-]BATT`.
+The chain, each step's arguments, return code, iterations and grade are
+written to `<output>.autoplan/plan.json`; the last line is `AUTOPLAN_SUMMARY`
+with the final step and its open and DRC counts. If no route pass succeeds,
+the best board the chain has ships (with `--finish`, the input board itself),
+replacing the output and its whole sibling set. The input may be a board
+inside `<output>.autoplan/` from an earlier run: it is staged before that
+directory is cleared.
+
+Net names reach every tool as patterns that select that net alone through the
+tools' own selectors, which also match a pattern's last sheet component and
+read a leading `!` as an exclusion: `GND` is passed as `GN[D/]`, `-BATT` as
+`[--]BAT[T/]`, `!RESET` as `[ -!]RESE[T/]`, and a sheet-qualified name as
+written. Each pattern is checked against the board's nets; a net no pattern
+isolates is left out of the power, exclusion and pair lists, and named.
 
 ### Example
 
