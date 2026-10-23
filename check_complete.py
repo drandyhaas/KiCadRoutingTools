@@ -3,8 +3,8 @@
 
     python3 -X utf8 check_complete.py BOARD [--authored-from ORIGINAL] \
         [--intent J] [--impedance-nets G...] [--length-groups J] \
-        [--net-min-widths J] [--min-track-width MM] [--min-via-diameter MM] \
-        [--clearance MM] [--json PATH]
+        [--net-min-widths J] [--spec J] [--min-track-width MM] \
+        [--min-via-diameter MM] [--clearance MM] [--json PATH]
 
 `board_score` is the authority on `blocking`, and it is honest about being
 incomplete -- but read alone it says "done" too easily, three separate ways:
@@ -477,6 +477,7 @@ def _grade(a, doc):
                           ('--baseline', a.baseline),
                           ('--length-groups', a.length_groups),
                           ('--net-min-widths', a.net_min_widths),
+                          ('--spec', a.spec),
                           ('--min-track-width', a.min_track_width),
                           ('--min-via-diameter', a.min_via_diameter),
                           ('--min-via-drill', a.min_via_drill)):
@@ -718,6 +719,9 @@ def main(argv=None):
     ap.add_argument('--impedance-nets', nargs='+', action='extend', default=None)
     ap.add_argument('--length-groups', default=None)
     ap.add_argument('--net-min-widths', default=None)
+    ap.add_argument('--spec', default=None, metavar='JSON',
+                    help='audit.py spec, handed to board_score: its audit '
+                         'component counts the spec checks that failed (#1237)')
     ap.add_argument('--min-track-width', type=float, default=None)
     ap.add_argument('--min-via-diameter', type=float, default=None)
     ap.add_argument('--min-via-drill', type=float, default=None)

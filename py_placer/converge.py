@@ -86,7 +86,8 @@ LENS_COMPONENTS = {
     'connectivity': ('unrouted', 'broken'),
     # diff_pairs: the .kicad_dru pair-rule rows #1303 split out of `drc`
     'drc': ('drc', 'undersized', 'diff_pairs'),
-    'spec': ('impedance', 'floorplan', 'length', 'net_widths'),
+    # audit: board_score --spec, the failed audit.py checks (#1237)
+    'spec': ('impedance', 'floorplan', 'length', 'net_widths', 'audit'),
     'intent': ('floorplan',),
 }
 
