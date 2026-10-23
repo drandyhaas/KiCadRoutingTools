@@ -12,6 +12,7 @@ runnable tool in the clone with a one-line purpose.
   [KiCad's unconnected count](#kicad-unconnected-count-kicad_unconnectedpy) ·
   [board score](#board-score-board_scorepy) ·
   [is it done?](#completion-check-check_completepy) ·
+  [spec audit](#spec-audit-auditpy) ·
   [orphan stubs](#orphan-stub-checker-check_orphan_stubspy) ·
   [pad geometry](#pad-geometry-checker-check_padspy) ·
   [cycles](#cycle-checker-check_cyclespy) ·
@@ -867,7 +868,7 @@ One authoritative score for a board, so a loop can tell better from worse:
 
 ```
 blocking = unrouted + broken + drc + undersized + floorplan + assembly
-           + impedance + length + net_widths
+           + impedance + length + net_widths + diff_pairs + audit
 quality  = (vias, copper_mm, segments)     # compared only once blocking == 0
 ```
 
@@ -902,6 +903,9 @@ python3 -X utf8 py_tools/board_score.py routed.kicad_pcb --baseline start.kicad_
   ungraded).
 - `--min-track-width` / `--min-via-diameter` / `--min-via-drill` /
   `--size-margin` — the board's spec size floors, when tighter than the fab's.
+- `--spec JSON` — runs [`audit.py`](#spec-audit-auditpy) with that spec; the
+  `audit` component counts the checks that failed and lists the ones it could
+  not judge.
 - `--label` — free text carried into the JSON.
 
 Stdout carries a `SCORE_JSON=` line (each assembly list capped at 20 entries,
@@ -935,9 +939,65 @@ components do not block DONE but are named in the verdict line.
 `--authored-from` is the board the chain started from (its project carries
 the floors this one should still respect); `--baseline` is handed to
 `board_score`. It takes `board_score`'s spec flags (`--clearance`, `--intent`,
-`--impedance-nets`, `--length-groups`, `--net-min-widths`, the size floors),
+`--impedance-nets`, `--length-groups`, `--net-min-widths`, `--spec`, the size floors),
 `--skip-slow` (only `board_score`, not the added instruments) and `--timeout S`
 per instrument (default 3600). Exit 2 usage, 3 board state.
+
+## Spec Audit (`audit.py`)
+
+Judges a routed board against a spec and reports every check that passed,
+failed or could not be judged, with the reason for each failure (#1237). It
+never infers what the board should do: the spec says so, and the audit
+measures the copper. Each finding gives `measured`, `limit`, `units`,
+`where`, `items` and `limit_from` (the spec, the board's own files, or
+`fab_tiers`).
+
+```bash
+python3 -X utf8 py_tools/audit.py routed.kicad_pcb --spec spec.json \
+    [--baseline start.kicad_pcb] [--json report.json]
+```
+
+Without a spec only the spec-free checks run: `check_weird`'s advisory
+categories and `check_via_mask`'s two. The spec (keys starting with `_` are
+comments; anything unknown is exit 2):
+
+```json
+{
+  "pairs": {"USB": {"nets": ["/USB_DP", "/USB_DM"], "impedance_ohm": 90,
+                    "tolerance_pct": 10, "max_skew_mm": 0.15,
+                    "max_uncoupled_mm": 3.0, "gap_max_mm": 0.2}},
+  "reference_nets": ["GND"],
+  "length_groups": {"BYTE0": {"nets": ["/DQ0", "/DQ1"], "tolerance_mm": 0.1}},
+  "net_min_widths": {"VBUS": 0.4},
+  "currents": {"VBUS": {"amps": 1.5, "source": "J1.1", "loads": ["U1.3"],
+                        "max_rise_c": 10, "max_drop_mv": 100}},
+  "decoupling": {"C3": {"ic": "U1", "pins": ["4"], "max_distance_mm": 2.0,
+                        "max_vias": 1}}
+}
+```
+
+| check | judges |
+|---|---|
+| `pair.impedance` | each coupled stretch's differential impedance (`impedance.calculate_impedance_for_layer`, IPC-2141 edge-coupled: approximate) against the target and tolerance |
+| `pair.skew`, `pair.uncoupled` | KiCad's skew and uncoupled length (`net_queries.diff_pair_skew`, `diff_pair_coupling`) |
+| `pair.reference` | `check_impedance`'s reference-plane crossings under the pair; `reference_nets` limits which pours count |
+| `length.match` | `net_match_length` spread per group (`mode` `total` or `pin_pair`) |
+| `net.min_width` | every segment of a matching net, at the stricter of the spec and the board's own `min_track_width` |
+| `current.capacity`, `current.via` | each track piece's and via's current against the IPC-2152-form rating at `max_rise_c` (default 10) |
+| `current.drop` | each load's DC drop from the source |
+| `decoupling.path` | the shortest track path from the cap to each IC pin, and the vias on it |
+
+A stretch counts as coupled inside the pair's gap window: `gap_max_mm`, else
+the board's `diff_pair_gap` rule, else its netclass diff pair gap, else (for
+impedance) the layer's dielectric height. The current checks solve
+`dc_network`'s resistor network of the net's tracks and vias (copper at
+20 C, via plating `via_plating_mm`, default 0.020 mm); pours are left out,
+so resistances read high and a load joined only through a pour is not
+judged. A list of `loads` is judged one load at a time at the full `amps`; a
+dict gives each load its own current, solved together. Exit 0 every judged
+check passed; 4 a check failed; 3 board state; 2 bad arguments or spec; 1
+crash. `board_score --spec` and `check_complete --spec` count the failed
+checks in `blocking`.
 
 ## Route Review (`route_review.py`)
 

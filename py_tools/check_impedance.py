@@ -267,7 +267,9 @@ class LayerCopper:
     same-net pour, and none once the stale pour was deleted.
     """
 
-    def __init__(self, pcb, layer: str):
+    def __init__(self, pcb, layer: str, net_ids=None):
+        # net_ids: when given, only pours of these nets are reference copper
+        # (#1237's `reference_nets`); None keeps every net's pour.
         self.layer = layer
         self.entries: List[Tuple[int, int, object]] = []   # (idx, net_id, model)
         # Rasterization pitch of the coarsest model on this layer. Occupancy is
@@ -287,6 +289,8 @@ class LayerCopper:
                 continue
             if not zone.net_id:
                 continue        # unassigned pour is not a reference
+            if net_ids is not None and zone.net_id not in net_ids:
+                continue
             try:
                 model = get_zone_model(pcb, zone)
             except Exception:
@@ -493,7 +497,8 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                       coplanar_gap: float = 0.0,
                       gap_tolerance: float = DEFAULT_GAP_TOLERANCE,
                       board_name: str = "",
-                      net_declared_gaps: Optional[Dict[int, float]] = None) -> BoardImpedanceReport:
+                      net_declared_gaps: Optional[Dict[int, float]] = None,
+                      reference_net_ids=None) -> BoardImpedanceReport:
     """Walk every routed segment and measure what the pre-route model assumed.
 
     Args:
@@ -519,6 +524,9 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             (#521). A net with an entry audits at ITS declared gap (0 = that
             net was declared non-coplanar); nets without one fall back to
             ``coplanar_gap``.
+        reference_net_ids: When given, only pours of these net ids count as
+            reference copper, so a trace over another net's pour reads as a
+            void (#1237). None = any net's pour, as before.
 
     Returns:
         BoardImpedanceReport. Diagnostic only; pcb is not modified.
@@ -588,7 +596,7 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
     def copper_for(layer: str) -> LayerCopper:
         got = copper_cache.get(layer)
         if got is None:
-            got = LayerCopper(pcb, layer)
+            got = LayerCopper(pcb, layer, reference_net_ids)
             copper_cache[layer] = got
         return got
 
