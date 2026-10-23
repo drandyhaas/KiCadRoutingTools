@@ -82,14 +82,32 @@ Categories:
                      at any length. Measured on six routed boards: every
                      finding is one of KiCad's track_dangling warnings.
 
+ADVISORY categories (#1233-#1235): connected, DRC-clean copper the corpus A/B
+counts (tests/stress/ab_replay_grade.py). They are printed and written to --json, but they never set the
+exit code, and `check_weird()` returns them only when asked
+(`advisory=True`), so check_complete's DONE and every in-process caller read
+exactly what they read before. All three skip graphic copper and the pieces of
+a linearised arc track (segments sharing one non-empty uuid), and carry NO
+size, so --tolerance never filters them.
+  off-angle-corner   a joint of exactly two track segments of one net on one
+                     layer, not on a same-net pad, whose turn (deviation from
+                     straight) is more than 1 degree from 0, 45 and 90. A 135
+                     degree turn, an acute corner, counts.
+  short-fragment     a segment shorter than --fragment-floor (default 0.1 mm)
+                     with neither end on a same-net pad or via.
+  off-centre-via-end a track end on one of a same-net via's copper layers,
+                     reaching the via's copper but not at its centre.
+
 This script NEVER modifies the board (read-only; nothing is written back).
 Net 0 (unconnected) copper is skipped -- "same-net" semantics do not apply.
 
 Usage:
     python3 check_weird.py board.kicad_pcb [--nets PATTERN ...] [--thorough]
-                                           [--max-print N]
+                                           [--max-print N] [--json PATH]
+                                           [--no-advisory]
+                                           [--fragment-floor MM]
 
-Exit code 0 when clean, 1 when any findings.
+Exit code 0 when no non-advisory finding, 1 otherwise.
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -119,7 +137,15 @@ from pcb_modification import (_point_anchored, _prune_net_cycles, _pt_seg_dist,
 CATEGORIES = ['dangling-end', 'soft-joint', 'redundant-cycle',
               'removable-segment', 'stacked-copper', 'unsupported-via',
               'dangling-via', 'orphan-island', 'narrow-pad-joint',
-              'kicad-dangling']
+              'kicad-dangling', 'off-angle-corner', 'short-fragment',
+              'off-centre-via-end']
+# Reported, never in the exit code, returned by check_weird() only on request.
+ADVISORY_CATEGORIES = ('off-angle-corner', 'short-fragment', 'off-centre-via-end')
+PERMITTED_TURNS_DEG = (0.0, 45.0, 90.0)
+TURN_TOLERANCE_DEG = 1.0
+FRAGMENT_FLOOR_MM = 0.1
+_NM = 1e-6                 # the board file's own resolution (1 nm)
+_JOINT_DECIMALS = 6         # endpoints meet at a corner when equal to 1 nm
 # Cost cap for the removable scan (skip unless --thorough): the removal pass's
 # own cap (#1063), so the checker never grades a net the pass may not clean.
 MAX_SEGS_PER_NET = STRICT_REMOVAL_MAX_SEGS
@@ -1017,15 +1043,139 @@ def _check_terminal_web(pcb_data, net_id, name, net_segs, net_pads, floor,
                     size=None))
 
 
+def _arc_piece_ids(net_segs) -> set:
+    """id() of every segment that is one chord of a linearised arc track: the
+    parser gives every chord of one `(arc ...)` that arc's uuid (#1233)."""
+    by_uuid = defaultdict(list)
+    for s in net_segs:
+        if s.uuid and not s.graphic:
+            by_uuid[s.uuid].append(s)
+    return {id(s) for group in by_uuid.values() if len(group) > 1 for s in group}
+
+
+def _on_own_pad(x, y, layer, net_pads) -> bool:
+    return any(endpoint_reaches_pad(x, y, 0.0, [layer], p) for p in net_pads)
+
+
+def _on_own_via(x, y, layer, net_vias, copper_layers) -> bool:
+    return any(endpoint_reaches_via(x, y, 0.0, v, [layer], copper_layers)
+               for v in net_vias)
+
+
+def _check_off_angle_corners(net_id, name, net_segs, net_pads, findings,
+                             tolerance=TURN_TOLERANCE_DEG):
+    """#1233: see the module docstring."""
+    arcs = _arc_piece_ids(net_segs)
+    ends = defaultdict(list)
+    for s in net_segs:
+        if s.graphic:
+            continue
+        a, b = (s.start_x, s.start_y), (s.end_x, s.end_y)
+        for p, q in ((a, b), (b, a)):
+            key = (s.layer, round(p[0], _JOINT_DECIMALS), round(p[1], _JOINT_DECIMALS))
+            ends[key].append((s, q))
+    for (layer, x, y), legs in ends.items():
+        if len(legs) != 2 or any(id(s) in arcs for s, _q in legs):
+            continue
+        u = [(q[0] - x, q[1] - y) for _s, q in legs]
+        n0, n1 = math.hypot(*u[0]), math.hypot(*u[1])
+        if n0 <= 0.0 or n1 <= 0.0 or _on_own_pad(x, y, layer, net_pads):
+            continue
+        cos = (u[0][0] * u[1][0] + u[0][1] * u[1][1]) / (n0 * n1)
+        turn = 180.0 - math.degrees(math.acos(max(-1.0, min(1.0, cos))))
+        if min(abs(turn - t) for t in PERMITTED_TURNS_DEG) > tolerance:
+            findings.append(_finding(
+                'off-angle-corner', name, layer, x, y,
+                f"two segments turn {turn:.2f} deg (permitted "
+                f"{'/'.join('%g' % a for a in PERMITTED_TURNS_DEG)} "
+                f"+-{tolerance:g})"))
+
+
+def _check_short_fragments(net_id, name, net_segs, net_vias, net_pads,
+                           copper_layers, findings, floor=FRAGMENT_FLOOR_MM):
+    """#1234: see the module docstring."""
+    arcs = _arc_piece_ids(net_segs)
+    for s in net_segs:
+        if s.graphic or id(s) in arcs:
+            continue
+        length = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        if length >= floor - _NM:   # 1 nm: 5.1 - 5.0 is 0.0999...
+            continue
+        if any(_on_own_pad(x, y, s.layer, net_pads)
+               or _on_own_via(x, y, s.layer, net_vias, copper_layers)
+               for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y))):
+            continue
+        findings.append(_finding(
+            'short-fragment', name, s.layer, s.start_x, s.start_y,
+            f"segment ({s.start_x:.4f}, {s.start_y:.4f})-({s.end_x:.4f}, "
+            f"{s.end_y:.4f}) is {length:.4f} mm, under {floor:g} mm, and "
+            f"enters no pad or via"))
+
+
+def _check_off_centre_via_ends(net_id, name, net_segs, net_vias,
+                               copper_layers, findings):
+    """#1235: see the module docstring."""
+    seen = set()
+    for s in net_segs:
+        if s.graphic:
+            continue
+        for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            for v in net_vias:
+                if not endpoint_reaches_via(x, y, 0.0, v, [s.layer], copper_layers):
+                    continue
+                d = math.hypot(x - v.x, y - v.y)
+                key = (s.layer, round(x, _JOINT_DECIMALS), round(y, _JOINT_DECIMALS), id(v))
+                if d <= _NM or key in seen:
+                    continue
+                seen.add(key)
+                findings.append(_finding(
+                    'off-centre-via-end', name, s.layer, x, y,
+                    f"track ends {d:.4f} mm from the centre of the via at "
+                    f"({v.x:.4f}, {v.y:.4f})"))
+
+
+def advisory_findings(pcb_data: PCBData,
+                      net_patterns: Optional[List[str]] = None,
+                      fragment_floor: float = FRAGMENT_FLOOR_MM) -> List[Dict]:
+    """The ADVISORY categories alone (#1233-#1235), every finding unfiltered.
+    The A/B grade (tests/stress/ab_replay_grade.py) counts them from here."""
+    findings: List[Dict] = []
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        segs_by_net[s.net_id].append(s)
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    copper_layers = (getattr(pcb_data.board_info, 'copper_layers', None)
+                     or ['F.Cu', 'B.Cu'])
+    for net_id in sorted(set(segs_by_net)):
+        if net_id == 0:
+            continue
+        name = _net_name(pcb_data, net_id)
+        if net_patterns is not None and not matches_any_pattern(name, net_patterns):
+            continue
+        net_segs = segs_by_net[net_id]
+        net_vias = vias_by_net.get(net_id, [])
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        _check_off_angle_corners(net_id, name, net_segs, net_pads, findings)
+        _check_short_fragments(net_id, name, net_segs, net_vias, net_pads,
+                               copper_layers, findings, floor=fragment_floor)
+        _check_off_centre_via_ends(net_id, name, net_segs, net_vias,
+                                   copper_layers, findings)
+    return findings
+
+
 def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                 thorough: bool = False, quiet: bool = True,
-                tolerance: float = 0.1
+                tolerance: float = 0.1, advisory: bool = False,
+                fragment_floor: float = FRAGMENT_FLOOR_MM
                 ) -> Tuple[List[Dict], List[Tuple[str, int]]]:
     """Run every check. Returns (findings, skipped_nets) where each finding is
     {'category', 'net', 'layer', 'x', 'y', 'detail', 'size'} and skipped_nets
     lists (net_name, segment_count) nets the removable-segment scan skipped.
     Findings whose characteristic size (mm) is below `tolerance` are dropped
-    (0 = report everything). Read-only: pcb_data is not modified."""
+    (0 = report everything). The ADVISORY categories are appended only when
+    `advisory` is True. Read-only: pcb_data is not modified."""
     findings: List[Dict] = []
     skipped_nets: List[Tuple[str, int]] = []
 
@@ -1096,6 +1246,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
     if tolerance and tolerance > 0:
         findings = [f for f in findings
                     if f.get('size') is None or f['size'] + 1e-9 >= tolerance]
+    if advisory:
+        findings += advisory_findings(pcb_data, net_patterns, fragment_floor)
     return findings, skipped_nets
 
 
@@ -1104,15 +1256,24 @@ def print_report(findings: List[Dict], skipped_nets: List[Tuple[str, int]],
     by_cat = defaultdict(list)
     for f in findings:
         by_cat[f['category']].append(f)
+    blocking = [f for f in findings if f['category'] not in ADVISORY_CATEGORIES]
+    if blocking:
+        print(f"\nFOUND {len(blocking)} WEIRD THINGS:\n")
+    else:
+        print("\nNO WEIRD THINGS FOUND!")
     if findings:
-        print(f"\nFOUND {len(findings)} WEIRD THINGS:\n")
         # CATEGORIES is hand-maintained, so a check whose category was
         # never registered would print NOTHING while still counting toward the
         # headline and the exit code (#696: that shipped, and blocked DONE with
         # nothing on screen to act on). Report the strays too, after the
         # registered ones, so a future omission can only ever cost ordering.
         unregistered = [c for c in sorted(by_cat) if c not in CATEGORIES]
-        for cat in CATEGORIES + unregistered:
+        advisory = [c for c in CATEGORIES if c in ADVISORY_CATEGORIES]
+        for cat in [c for c in CATEGORIES if c not in ADVISORY_CATEGORIES] \
+                + unregistered + advisory:
+            if cat == advisory[0]:
+                n = sum(len(by_cat.get(c, [])) for c in advisory)
+                print(f"\n  ADVISORY ({n}, not in the exit code):")
             items = by_cat.get(cat, [])
             print(f"  {cat}: {len(items)}")
             limit = len(items) if (max_print is not None and max_print <= 0) \
@@ -1123,8 +1284,6 @@ def print_report(findings: List[Dict], skipped_nets: List[Tuple[str, int]],
             if len(items) > limit:
                 print(f"    ... and {len(items) - limit} more "
                       f"(use --max-print 0 to show all)")
-    else:
-        print("\nNO WEIRD THINGS FOUND!")
     if skipped_nets:
         print(f"\n  removable-segment: skipped {len(skipped_nets)} net(s) "
               f"with >{MAX_SEGS_PER_NET} segments "
@@ -1159,15 +1318,38 @@ def main():
     parser.add_argument('--max-print', type=int, default=20,
                         help='Max findings printed per category '
                              '(<=0 prints all; default 20)')
+    parser.add_argument('--no-advisory', action='store_true',
+                        help='Skip the advisory categories (off-angle-corner, '
+                             'short-fragment, off-centre-via-end). They never '
+                             'set the exit code either way.')
+    parser.add_argument('--fragment-floor', type=float,
+                        default=FRAGMENT_FLOOR_MM, metavar='MM',
+                        help='short-fragment length floor in mm (default '
+                             f'{FRAGMENT_FLOOR_MM:g})')
+    parser.add_argument('--json', metavar='PATH', default=None,
+                        help='Write {"counts", "findings", "skipped_nets"} '
+                             'here; counts has every registered category')
     args = parser.parse_args()
 
     print(f"Loading PCB file: {args.pcb}")
     pcb_data = parse_kicad_pcb(args.pcb)
     findings, skipped_nets = check_weird(pcb_data, args.nets,
                                           tolerance=args.tolerance,
-                                         thorough=args.thorough, quiet=False)
+                                         thorough=args.thorough, quiet=False,
+                                         advisory=not args.no_advisory,
+                                         fragment_floor=args.fragment_floor)
     print_report(findings, skipped_nets, max_print=args.max_print)
-    sys.exit(1 if findings else 0)
+    if args.json:
+        import json
+        counts = {c: sum(1 for f in findings if f['category'] == c)
+                  for c in CATEGORIES}
+        with open(args.json, 'w', encoding='utf-8') as fh:
+            json.dump({'counts': counts, 'advisory': list(ADVISORY_CATEGORIES),
+                       'findings': findings,
+                       'skipped_nets': [list(x) for x in skipped_nets]},
+                      fh, indent=1)
+    sys.exit(1 if any(f['category'] not in ADVISORY_CATEGORIES
+                      for f in findings) else 0)
 
 
 if __name__ == '__main__':

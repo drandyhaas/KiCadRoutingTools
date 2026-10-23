@@ -480,6 +480,12 @@ class Pad:
     # pad_zone_connection(pad, zone) applies the zone and THT rules. Set by
     # BOTH parse paths.
     zone_connection: Optional[str] = None
+    # #1232: the pad's OWN `(solder_mask_margin mm)`, raw. None means the pad
+    # sets none, so the footprint's and then the board's apply
+    # (mask_apertures.resolve_mask_margin, KiCad's
+    # PAD::GetSolderMaskExpansion precedence). Set by BOTH parse paths.
+    # Appended.
+    mask_margin: Optional[float] = None
 
 
 _VIA_BIRTH_WATCH = None
@@ -821,6 +827,9 @@ class Footprint:
     # Pad.zone_connection, which already carries it for every pad without one
     # of its own). None = not set. Appended.
     zone_connection: Optional[str] = None
+    # #1232: the footprint-level `(solder_mask_margin mm)`, raw (None = not
+    # set). Pads without their own inherit it; see Pad.mask_margin. Appended.
+    mask_margin: Optional[float] = None
 
 
 #: The (attr ...) flags `Footprint.attrs` keeps -- the ones the text form and
@@ -896,6 +905,9 @@ class BoardInfo:
     # A via with no spec of its own inherits this. check_drc's via-in-paste
     # grade reads it per token.
     via_protection_setup: Dict[str, str] = field(default_factory=dict)
+    # #1232: board `(setup (pad_to_mask_clearance X))`, the last rung of the
+    # solder-mask expansion precedence (0 = not set, KiCad's default).
+    pad_to_mask_clearance: float = 0.0
 
 
 @dataclass
@@ -4874,6 +4886,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
         # clearance above, so a PAD's own token cannot be mistaken for one.
         fp_paste_margin, fp_paste_ratio = _paste_overrides(fp_text[:_clr_end],
                                                            _file_version)
+        fp_mask_margin = _mask_override(fp_text[:_clr_end], _file_version)
         # Footprint-level zone connection override. KiCad writes it right
         # after the header (clearance ...); its own bound, because the one
         # above stops at '(zone', which is a prefix of '(zone_connect'.
@@ -4947,6 +4960,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             paste_margin=fp_paste_margin,
             paste_margin_ratio=fp_paste_ratio,
             zone_connection=fp_zone_connection,
+            mask_margin=fp_mask_margin,
             parsed_pose=(fp_x, fp_y, fp_rotation, fp_layer),
             attrs=fp_attrs,
             has_model=fp_has_model,
@@ -5212,6 +5226,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 copper_box=copper_box,
                 zone_connection=(zone_connect_from_text(pad_text)
                                  or fp_zone_connection),
+                mask_margin=_mask_override(pad_text, _file_version),
             )
 
             footprint.pads.append(pad)
@@ -5996,6 +6011,33 @@ def _paste_overrides(text: str, version: int = 0):
         mv = mv if mv else None
         rv = rv if rv else None
     return mv, rv
+
+
+def _mask_override(text: str, version: int = 0) -> Optional[float]:
+    """`(solder_mask_margin mm)` written directly in `text` (a pad block, or a
+    footprint HEADER the caller has already bounded); None where unset (#1232).
+
+    An explicit 0 follows the same file-version rule as the paste margin
+    (PASTE_ZERO_IS_UNSET_MAX_VERSION): probed on pcbnew 10.0.7, a 20240108
+    file's `(solder_mask_margin 0)` loads unset at pad and footprint level,
+    and a 20240202 file's loads as an override of 0.
+    """
+    m = re.search(r'\(solder_mask_margin\s+(-?[\d.]+)\)', text)
+    mv = float(m.group(1)) if m else None
+    if version and version <= PASTE_ZERO_IS_UNSET_MAX_VERSION:
+        mv = mv if mv else None
+    return mv
+
+
+def extract_board_setup_mask_clearance(content: str) -> float:
+    """The board's `(setup (pad_to_mask_clearance X))` in mm, 0 when unset
+    (#1232): the last rung of the solder-mask expansion precedence."""
+    setup = _balanced_token_text(content, 'setup') or ''
+    v = _balanced_token_text(setup, 'pad_to_mask_clearance')
+    try:
+        return float(v) if v is not None else 0.0
+    except ValueError:
+        return 0.0
 
 
 def _shape_layer_names(blk: str) -> List[str]:
@@ -7815,6 +7857,7 @@ def _parse_kicad_pcb(filepath: str, guide_layer: str,
     # the shared builder, fed this path's graphics.
     (board_info.pad_to_paste_clearance, board_info.pad_to_paste_clearance_ratio,
      board_info.via_protection_setup) = extract_board_setup_paste_and_protection(content)
+    board_info.pad_to_mask_clearance = extract_board_setup_mask_clearance(content)
     paste_apertures = build_paste_apertures(
         footprints, board_info, extract_paste_graphics(content))
     graphic_copper_unmeasured = extract_unmodelled_footprint_copper(content)
@@ -8142,6 +8185,17 @@ def _pcbnew_paste_overrides(obj, to_mm):
         r = None
     return (to_mm(m) if m is not None else None,
             float(r) if r is not None else None)
+
+
+def _pcbnew_mask_override(obj, to_mm) -> Optional[float]:
+    """`(solder_mask_margin mm)` a live pcbnew PAD or FOOTPRINT sets for
+    itself; None where unset (#1232). pcbnew 10 returns None for an unset
+    optional (probed on 10.0.7)."""
+    try:
+        m = obj.GetLocalSolderMaskMargin()
+    except Exception:
+        m = None
+    return to_mm(m) if m is not None else None
 
 
 def _pcbnew_paste_graphics(board, live_fps, live_keys, get_layer_name, to_mm):
@@ -9116,6 +9170,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         # header read. pcbnew 10 returns None when unset (probed), else IU / a
         # ratio.
         fp_paste_margin, fp_paste_ratio = _pcbnew_paste_overrides(fp, to_mm)
+        fp_mask_margin = _pcbnew_mask_override(fp, to_mm)
         # Footprint-level zone connection override, parity with the text read.
         fp_zone_connection = zone_connect_from_pcbnew(fp)
 
@@ -9250,6 +9305,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             paste_margin=fp_paste_margin,
             paste_margin_ratio=fp_paste_ratio,
             zone_connection=fp_zone_connection,
+            mask_margin=fp_mask_margin,
             parsed_pose=(fp_x, fp_y, fp_rotation, fp_layer),
             attrs=fp_attrs,
             has_model=fp_has_model,
@@ -9547,6 +9603,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 copper_box=copper_box,
                 zone_connection=(zone_connect_from_pcbnew(pad)
                                  or fp_zone_connection),
+                mask_margin=_pcbnew_mask_override(pad, to_mm),
             )
 
             footprint.pads.append(pad_obj)
@@ -9920,6 +9977,7 @@ def _pcbnew_paste_setup(board, board_info, to_mm) -> None:
         board_info.pad_to_paste_clearance = to_mm(_ds962.m_SolderPasteMargin)
         board_info.pad_to_paste_clearance_ratio = float(_ds962.m_SolderPasteMarginRatio)
         board_info.via_protection_setup = via_protection_setup_from_design_settings(_ds962)
+        board_info.pad_to_mask_clearance = to_mm(_ds962.m_SolderMaskExpansion)
     except Exception as _e962:
         print(f"  WARNING: could not read the board's paste/via-protection setup "
               f"from pcbnew ({type(_e962).__name__}: {_e962}); using KiCad's "
@@ -10727,6 +10785,10 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
         bzc = getattr(bf, 'zone_connection', None); fzc = getattr(ff, 'zone_connection', None)
         if bzc != fzc:
             diffs.append(f"Footprint {ref} zone_connection: board={bzc} file={fzc}")
+        # #1232: footprint-level solder-mask margin, inherited like the above.
+        bmm = getattr(bf, 'mask_margin', None); fmm = getattr(ff, 'mask_margin', None)
+        if (bmm is None) != (fmm is None) or (bmm is not None and not close(bmm, fmm)):
+            diffs.append(f"Footprint {ref} mask_margin: board={bmm} file={fmm}")
         # #1211: the schematic sheet, which `place_pose replicate` resolves a
         # channel by (name) and maps its parts by (path). A pcbnew accessor
         # that moved would hand the GUI a board with no sheets.
@@ -10834,6 +10896,10 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 bzc = getattr(bp, 'zone_connection', None); fzc = getattr(fp, 'zone_connection', None)
                 if bzc != fzc:
                     diffs.append(f"Pad {ref}:{bp.pad_number} zone_connection: board={bzc} file={fzc}")
+                # #1232: the pad's own solder-mask margin (None = inherits).
+                bmm = getattr(bp, 'mask_margin', None); fmm = getattr(fp, 'mask_margin', None)
+                if (bmm is None) != (fmm is None) or (bmm is not None and not close(bmm, fmm)):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} mask_margin: board={bmm} file={fmm}")
                 # Roundrect corner ratio - only consumed (and only meaningful) for
                 # roundrect pads; pcbnew returns a default ratio on every pad shape,
                 # so comparing it on circle/rect pads is pure noise.
@@ -11062,6 +11128,10 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     if bi_b.via_protection_setup != bi_f.via_protection_setup:
         diffs.append(f"Via protection setup: board={bi_b.via_protection_setup} "
                      f"file={bi_f.via_protection_setup}")
+    # #1232: the last rung of the solder-mask expansion precedence.
+    if not close(bi_b.pad_to_mask_clearance, bi_f.pad_to_mask_clearance):
+        diffs.append(f"Board mask setup: board={bi_b.pad_to_mask_clearance} "
+                     f"file={bi_f.pad_to_mask_clearance}")
     # The copper-to-hole floor each front prices NPTH holes at (#1038's via
     # keep-out turns on above 0). The board side reads pcbnew's in-memory
     # rule, the file side the project; on a board pcbnew just loaded from
