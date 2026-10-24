@@ -22,6 +22,8 @@ Checks that need no spec always run: check_weird's advisory categories
       pair.skew        net_queries.diff_pair_skew (KiCad's skew measure)
       pair.uncoupled   net_queries.diff_pair_coupling's uncoupled length
                        (KiCad's)
+      A routed pair with no stretch inside the window fails pair.impedance
+      (the finding gives its closest parallel stretch).
       A stretch is COUPLED when its gap is within the pair's gap window: the
       spec's `gap_max_mm`, else the board's diff_pair_gap rule maximum, else
       its netclass diff pair gap (design_rules.DesignRules). With none of
@@ -35,8 +37,10 @@ Checks that need no spec always run: check_weird's advisory categories
                    "mode": "total" | "pin_pair"}}, board_score's format
                    (tolerance_mm defaults to 0.1, mode to total)
       length.match     net_queries.net_match_length spread; a net not on the
-                       board fails, as board_score counts it
-  net_min_widths  {"<net glob>": mm}, board_score's format; first glob wins
+                       board, or a group of fewer than 2 nets, fails, as
+                       board_score counts it
+  net_min_widths  {"<net glob>": mm}, board_score's format ("_" keys are
+                  comments); first glob wins
       net.min_width    every segment of the net, at the STRICTER of the spec
                        and the board's own min_track_width
   currents        {"VBUS": {"amps": 1.5, "source": "J1.1",
@@ -63,7 +67,10 @@ Checks that need no spec always run: check_weird's advisory categories
                        length), and the distinct vias on it
 
 A check reports "passed", "failed" (with findings) or "not_judged" (with the
-reason it could not be judged, never a pass). Every failure is reported.
+reason it could not be judged, never a pass). Every failure is reported. A
+name the spec gives that the board does not have (a net, a pad, a part) is a
+failed finding about the spec, never not_judged; not_judged is for copper the
+board does not have yet (an unrouted net, a load not joined to its source).
 
 Exit codes, as check_floorplan and board_score: 0 every judged check passed,
 1 crash, 2 bad arguments, a malformed spec (wrong key, type or range) or an
@@ -205,6 +212,9 @@ def load_spec(path: Optional[str]) -> dict:
     if not (isinstance(refs, list) and all(isinstance(x, str) and x for x in refs)):
         raise SpecError('reference_nets must be a list of net names')
     widths = spec.get('net_min_widths', {})
+    if isinstance(widths, dict):
+        widths = spec['net_min_widths'] = {k: v for k, v in widths.items()
+                                           if not (isinstance(k, str) and k.startswith('_'))}
     if not isinstance(widths, dict) or not all(
             isinstance(k, str) and k and _valid('pos', v) for k, v in widths.items()):
         raise SpecError('net_min_widths must map net globs to widths in mm > 0')
@@ -244,6 +254,11 @@ def _finding(reason, measured=None, limit=None, units=None, where=None,
             out[k] = v
     out.update(extra)
     return out
+
+
+def _spec_finding(what, items, limit_from):
+    """A finding about the spec: it names something the board does not have."""
+    return _finding(f'{what} (named by the spec)', items=items, limit_from=limit_from)
 
 
 def _where(layer, x, y):
@@ -416,8 +431,9 @@ def pair_checks(pcb, spec, board_path):
             ('pair.impedance', 'impedance_ohm'), ('pair.skew', 'max_skew_mm'),
             ('pair.uncoupled', 'max_uncoupled_mm')) if key in entry]
         if missing:
-            out += [_check(cid, name, reason=f'net(s) {missing} are not on the board')
-                    for cid in wanted]
+            out += [_check(cid, name, findings=[_spec_finding(
+                f'net(s) {missing} are not on the board', missing,
+                f'spec: pairs.{name}.nets')]) for cid in wanted]
             continue
         items = [p_name, n_name]
         gmin, gmax, gsrc = pair_gap_window(pcb, board_path, p_id, entry, name)
@@ -431,6 +447,7 @@ def pair_checks(pcb, spec, board_path):
                     'the board has no stackup: dielectric heights and Er are unknown')))
             else:
                 from impedance import calculate_impedance_for_layer, get_layer_impedance_params
+                every = coupled_stretches(pcb, p_id, n_id)
                 stretches = coupled_stretches(pcb, p_id, n_id, gmax)
                 if gmax is None:
                     window = {'gap_max_mm': 'the layer dielectric height',
@@ -439,7 +456,23 @@ def pair_checks(pcb, spec, board_path):
                                  if (get_layer_impedance_params(pcb, st[0]) is not None
                                      and st[2] <= get_layer_impedance_params(
                                          pcb, st[0]).dielectric_height + 5e-4)]
+                routed = all(any(t.net_id == i and not t.graphic for t in pcb.segments)
+                             for i in (p_id, n_id))
                 found = []
+                if routed and not stretches:
+                    # the pair runs outside its window everywhere: never
+                    # coupled is a failure, not a pass that was not judged
+                    near = min(every, key=lambda st: st[2]) if every else None
+                    z = (calculate_impedance_for_layer(pcb, near[0], near[1], spacing=near[2])
+                         .get('zdiff') if near else None)
+                    found.append(_finding(
+                        'no stretch of the pair runs inside its gap window' + (
+                            f'; the closest parallel stretch, gap {near[2]:.3f} mm over '
+                            f'{near[3]:.3f} mm, reads {z:.1f} ohm' if near and z is not None
+                            else '; no P and N tracks run parallel'),
+                        measured=_r(z, 2), limit=[_r(lo, 2), _r(hi, 2)], units='ohm',
+                        where=_where(near[0], near[4], near[5]) if near else None,
+                        items=items, limit_from=src))
                 for layer, width, gap, length, x, y in stretches:
                     z = calculate_impedance_for_layer(pcb, layer, width, spacing=gap).get('zdiff')
                     if z is None or not (lo <= z <= hi):
@@ -450,8 +483,8 @@ def pair_checks(pcb, spec, board_path):
                             measured=_r(z, 2), limit=[_r(lo, 2), _r(hi, 2)], units='ohm',
                             where=_where(layer, x, y), items=items, limit_from=src))
                 out.append(_check('pair.impedance', name, findings=found,
-                                  reason=None if stretches else
-                                  'the pair has no stretch inside its gap window',
+                                  reason=None if stretches or routed else
+                                  "a member of the pair has no track copper",
                                   model='impedance.calculate_impedance_for_layer '
                                         '(IPC-2141 edge-coupled, approximate)',
                                   gap_window=window))
@@ -485,8 +518,9 @@ def pair_checks(pcb, spec, board_path):
                                                           'source': gsrc or 'none (KiCad: '
                                                           'every parallel facing span)'}))
         if ref_missing:
-            out.append(_check('pair.reference', name, reason=(
-                f'reference_nets {ref_missing} are not on the board')))
+            out.append(_check('pair.reference', name, findings=[_spec_finding(
+                f'reference_nets {ref_missing} are not on the board', ref_missing,
+                'spec: reference_nets')]))
             continue
         from check_impedance import analyze_impedance
         rep = analyze_impedance(pcb, [_glob.escape(p_name), _glob.escape(n_name)],
@@ -519,11 +553,13 @@ def length_checks(pcb, spec):
                 continue
             v = net_match_length(pcb, nid, mode)
             (unrouted.append(n) if v is None else lengths.__setitem__(n, v))
-        if missing:
+        if missing or len(entry['nets']) < 2:
             # a finding about the spec, as board_score --length-groups counts it
             out.append(_check('length.match', name, findings=[_finding(
-                f'net(s) {missing} named by the group are not on the board',
-                items=missing, limit_from=f'spec: length_groups.{name}.nets')]))
+                f'net(s) {missing} named by the group are not on the board' if missing
+                else 'the group names fewer than 2 nets: there is nothing to match',
+                items=missing or list(entry['nets']),
+                limit_from=f'spec: length_groups.{name}.nets')]))
             continue
         if unrouted:
             out.append(_check('length.match', name, reason=(
@@ -598,26 +634,33 @@ def current_checks(pcb, spec, board_thickness_mm=None):
         nid = net_id_of(pcb, name)
         source = entry['source']
         src_pads = pads_of(pcb, source)
-        problem, load_pads = None, {}
+        problem, spec_bad, load_pads = None, None, {}
         if nid is None:
-            problem = f'net {name} is not on the board'
+            spec_bad = (f'net {name} is not on the board', [name], f'spec: currents.{name}')
         elif not src_pads:
-            problem = f"source pad {source} is not on the board"
+            spec_bad = (f'source pad {source} is not on the board', [source],
+                        f'spec: currents.{name}.source')
         elif any(p.net_id != nid for p in src_pads):
-            problem = f"source pad {source} is not on {name}"
+            spec_bad = (f'source pad {source} is not on {name}', [source],
+                        f'spec: currents.{name}.source')
         loads = entry.get('loads')
-        if problem is None:
+        if spec_bad is None:
             if loads is None:
                 loads = _default_loads(pcb, nid, source)
             load_pads = {ld: pads_of(pcb, ld) for ld in loads}
             bad = sorted(ld for ld, ps in load_pads.items()
                          if not ps or any(p.net_id != nid for p in ps))
             if bad:
-                problem = f'load pad(s) {bad} are not pads of {name}'
+                spec_bad = (f'load pad(s) {bad} are not pads of {name}', bad,
+                            f'spec: currents.{name}.loads')
             elif source in load_pads:
-                problem = f'the source {source} is also a load'
+                spec_bad = (f'the source {source} is also a load', [source],
+                            f'spec: currents.{name}.loads')
             elif not load_pads:
                 problem = f'{name} has no load pad'
+        if spec_bad:
+            out += [_check(cid, name, findings=[_spec_finding(*spec_bad)]) for cid in wanted]
+            continue
         net = None
         if problem is None:
             terminals = dict(load_pads)
@@ -754,18 +797,21 @@ def decoupling_checks(pcb, spec):
         max_vias = entry.get('max_vias')
         found, problems, measured = [], [], {}
         if fp is None:
-            out.append(_check('decoupling.path', cap, reason=f'{cap} is not on the board'))
+            out.append(_check('decoupling.path', cap, findings=[_spec_finding(
+                f'{cap} is not on the board', [cap], f'spec: decoupling.{cap}')]))
             continue
         for pin in entry['pins']:
             ic_pads = pads_of(pcb, f'{ic}.{pin}')
             if not ic_pads:
-                problems.append(f'{ic}.{pin} is not on the board')
+                found.append(_spec_finding(f'{ic}.{pin} is not on the board', [f'{ic}.{pin}'],
+                                           f'spec: decoupling.{cap}.ic, pins'))
                 continue
             net_id = ic_pads[0].net_id
             cap_pads = [p for p in fp.pads if p.net_id == net_id and net_id]
             if not cap_pads:
-                problems.append(f'{cap} has no pad on the net of {ic}.{pin} '
-                                f'({ic_pads[0].net_name})')
+                found.append(_spec_finding(
+                    f'{cap} has no pad on the net of {ic}.{pin} ({ic_pads[0].net_name})',
+                    [cap, f'{ic}.{pin}'], f'spec: decoupling.{cap}'))
                 continue
             got = _shortest_path(pcb, net_id, cap_pads, ic_pads)
             if got is None:

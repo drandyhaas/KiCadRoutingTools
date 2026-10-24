@@ -1003,8 +1003,9 @@ python3 -X utf8 py_tools/board_score.py routed.kicad_pcb --baseline start.kicad_
   `--size-margin` — the board's spec size floors, when tighter than the fab's.
 - `--spec JSON` — runs [`audit.py`](#spec-audit-auditpy) with that spec; the
   `audit` component counts the spec checks that failed and lists the ones it
-  could not judge. The spec-free checks are listed in `spec_free_failed` and
-  never counted.
+  could not judge; when it judged no spec check at all (an empty spec, or
+  every check not judged) the component is ungraded. The spec-free checks are
+  listed in `spec_free_failed` and never counted.
 - `--label` — free text carried into the JSON.
 
 Stdout carries a `SCORE_JSON=` line (each assembly list capped at 20 entries,
@@ -1072,9 +1073,9 @@ python3 -X utf8 py_tools/audit.py routed.kicad_pcb --spec spec.json \
 
 Without a spec only the spec-free checks run: `check_weird`'s advisory
 categories and `check_via_mask`'s two. The spec (keys starting with `_` are
-comments; an unknown key, or a value of the wrong type or range, is exit 2;
-an empty `reference_nets` means any pour counts;
-`tolerance_mm` and `mode` are optional as in `board_score`):
+comments, inside `net_min_widths` too; an unknown key, or a value of the
+wrong type or range, is exit 2; an empty `reference_nets` means any pour
+counts; `tolerance_mm` and `mode` are optional as in `board_score`):
 
 ```json
 {
@@ -1096,7 +1097,7 @@ an empty `reference_nets` means any pour counts;
 | `pair.impedance` | each coupled stretch's differential impedance (`impedance.calculate_impedance_for_layer`, IPC-2141 edge-coupled: approximate) against the target and tolerance |
 | `pair.skew`, `pair.uncoupled` | KiCad's skew and uncoupled length (`net_queries.diff_pair_skew`, `diff_pair_coupling`) |
 | `pair.reference` | `check_impedance`'s reference-plane crossings under the pair; `reference_nets` limits which pours count |
-| `length.match` | `net_match_length` spread per group (`mode` `total` or `pin_pair`) |
+| `length.match` | `net_match_length` spread per group (`mode` `total` or `pin_pair`); a group with a net not on the board, or fewer than 2 nets, fails |
 | `net.min_width` | every segment of a matching net, at the stricter of the spec and the board's own `min_track_width` |
 | `current.capacity`, `current.via` | each track piece's and via's current against the IPC-2152-form rating at `max_rise_c` (default 10) |
 | `current.drop` | each load's DC drop from the source |
@@ -1104,7 +1105,12 @@ an empty `reference_nets` means any pour counts;
 
 A stretch counts as coupled inside the pair's gap window: `gap_max_mm`, else
 the board's `diff_pair_gap` rule, else its netclass diff pair gap, else (for
-impedance) the layer's dielectric height. The current checks solve
+impedance) the layer's dielectric height. A routed pair with no stretch inside
+its window fails `pair.impedance`, and the finding gives the impedance of its
+closest parallel stretch. A name the spec gives that the board does not have
+(a pair or reference net, a current net, source or load pad, a decoupling cap
+or IC pin) is a failed finding about the spec; not judged is only for copper
+the board lacks (an unrouted net, a load not joined to its source). The current checks solve
 `dc_network`'s resistor network of the net's tracks and vias (copper at
 20 C, via plating `via_plating_mm`, default 0.020 mm, each via step's barrel
 the stackup's length between its layers less half the copper of an end
@@ -1118,7 +1124,9 @@ the full `amps`; a dict gives each load its own current, solved together.
 Without `loads`, every other numbered copper pad of the net is a load. Exit 0 every judged
 check passed; 4 a check failed; 3 the board is missing, not text, cut short
 or not a board; 2 bad arguments, spec or baseline; 1 crash. `board_score --spec` and
-`check_complete --spec` count the failed spec checks in `blocking`.
+`check_complete --spec` count the failed spec checks in `blocking`; when no
+spec check was judged (an empty spec, or every check not judged) the audit
+component is ungraded.
 
 ## Route Review (`route_review.py`)
 
