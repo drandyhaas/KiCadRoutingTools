@@ -123,7 +123,12 @@ class SpecError(Exception):
 
 
 def _number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:            # an int too large for a float
+        return False
 
 
 def _valid(kind, v) -> bool:
@@ -809,8 +814,11 @@ def board_thickness_mm(board_path):
 def _closes(text: str) -> bool:
     """Does `text` hold one `(kicad_pcb ...)` expression that closes, with
     nothing after it but whitespace? Quoted strings (with backslash escapes)
-    are skipped. A board cut short opens more than it closes."""
-    t = text.lstrip()
+    are skipped, and so is a leading byte-order mark. A board cut short opens
+    more than it closes. `text` is read the way KiCad reads it
+    (`repair_bare_teardrop_tokens`, #1149), so a teardrop child without its
+    `(` does not close the board early."""
+    t = text.lstrip('\ufeff \t\r\n')
     if not t.startswith('(kicad_pcb'):
         return False
     depth, i, n, quoted = 0, 0, len(t), False
@@ -834,13 +842,13 @@ def _closes(text: str) -> bool:
 
 
 def _parse(path, what):
-    from kicad_parser import parse_kicad_pcb
+    from kicad_parser import parse_kicad_pcb, repair_bare_teardrop_tokens
     try:
         with open(path, encoding='utf-8') as fh:
             text = fh.read()
     except (OSError, UnicodeDecodeError) as exc:
         raise BoardError(f'{what} {path} cannot be read as text: {exc}')
-    if not _closes(text):
+    if not _closes(repair_bare_teardrop_tokens(text)[0]):
         raise BoardError(f'{what} {path} is not one complete (kicad_pcb ...) '
                          f'expression: it is cut short or not a board')
     try:
