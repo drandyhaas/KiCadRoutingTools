@@ -2992,6 +2992,37 @@ python3 py_tools/clean_ignored.py --delete -y  # delete without asking
 
 It always works from the repository root, wherever it is run from.
 
+## kicad-cli Path (`kicad_cli_path.py`)
+
+Prints the path of `kicad-cli` as the repo's own tools resolve it
+(`kicad_oracle.find_kicad_cli`: `$KICAD_CLI`, then PATH and the packaged
+locations such as the macOS app bundle, then versioned Windows installs). A
+stock macOS KiCad keeps the binary off PATH, so a bare `kicad-cli` exits 127
+there; use this instead in shell recipes:
+
+```bash
+KCLI=$(python3 py_tools/kicad_cli_path.py) && "$KCLI" pcb drc board.kicad_pcb --format json -o drc.json
+```
+
+stdout carries only the path. Exit 1, with the reason on stderr, means no
+`kicad-cli` was found.
+
+## PDF Pages (`pdf_text.py`)
+
+Finds pages, prints page text, or renders a page of a datasheet PDF, through
+whichever backend the machine has: poppler, pypdf, PyMuPDF, or macOS's own
+PDFKit (no install needed on a Mac).
+
+```bash
+python3 py_tools/pdf_text.py ds.pdf --find "layout example" "typical application"
+python3 py_tools/pdf_text.py ds.pdf --pages 31-33
+python3 py_tools/pdf_text.py ds.pdf --render 41 --out fig41.png --dpi 200
+```
+
+`--find` prints `page N: <line>` for each matching line; `--render` writes a
+PNG to open as an image. `--backend` forces one. Exit 2 is a bad argument or
+an unreadable file, exit 3 that no backend could do it.
+
 ## Common Workflows
 
 ### Route and Verify

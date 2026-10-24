@@ -57,7 +57,8 @@ outline) is reported either way.
 **Important caveat to include in the report:** `check_drc.py` does not grade zone (pour) fill copper. It does grade per-netclass clearance and `.kicad_dru` rules, and track width / via size against the FAB floor for the layer count unless given `--min-track-width` / `--min-via-diameter` / `--min-via-drill` (pass the spec's numbers when they are tighter). If the board has copper zones/planes, recommend the zone-aware check:
 
 ```bash
-kicad-cli pcb drc board.kicad_pcb --refill-zones --format json -o /tmp/drc.json
+KCLI=$(python3 py_tools/kicad_cli_path.py)
+"$KCLI" pcb drc board.kicad_pcb --refill-zones --format json -o /tmp/drc.json
 ```
 
 **Ignore silk and dangling violations** when reading that report — they are not

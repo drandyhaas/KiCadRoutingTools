@@ -419,7 +419,8 @@ leaving that pose expensive.
      `wk/<run>/datasheets/<part>/`, one folder per part: a download is data,
      not code. Delete the folder before you hand back (§3.3). WebFetch
      mangles a PDF, so download it (`curl -sSL -o <folder>/<part>.pdf <url>`)
-     and open it with the Read tool and `pages`, a few at a time.
+     and read it with `py_tools/pdf_text.py` (below), not the Read tool's
+     `pages`: that needs poppler, which many machines lack (#1417).
 
    You need three things from it:
    - the **layout guidelines**. They say what matters most and sometimes
@@ -445,14 +446,19 @@ leaving that pose expensive.
      fetched. A reference design's pick-and-place file gives each part's
      centre and turn exactly (Altium's in mils, +y up). Use it to read the
      arrangement, then fit as below; never copy its coordinates.
-   - **Finding the pages.** The table of contents names them. Where poppler
-     is installed:
-     - `pdftotext -layout -f N -l N <pdf> -` prints page N, to grep for the
-       headings;
-     - `pdftoppm -r 300 -f N -l N -png <pdf> <prefix>` renders a figure too
-       small to read: crop it and Read the crop;
-     - `pdfimages -j` extracts a figure the PDF holds as an embedded image,
-       which rendering cannot sharpen.
+   - **Finding the pages.** `py_tools/pdf_text.py` uses whatever the
+     machine has -- poppler, pypdf, PyMuPDF, or on macOS the system's own
+     PDFKit, so it needs no install there -- and names the backend it used:
+     - `python3 py_tools/pdf_text.py <pdf> --find "layout example" "typical application"`
+       prints `page N: <line>` for each heading (the table of contents
+       lists them too);
+     - `python3 py_tools/pdf_text.py <pdf> --pages N` prints page N's text;
+     - `python3 py_tools/pdf_text.py <pdf> --render N --out <folder>/pN.png --dpi 200`
+       renders the figure; Read the PNG, and render at a higher `--dpi`
+       (300) and crop when it is too small to read.
+     Exit 3 means no backend is present: install poppler or `pip install
+     pypdf`. Where poppler is installed, `pdfimages -j` extracts a figure
+     the PDF holds as an embedded image, which rendering cannot sharpen.
 3. **Match the drawing to the board, by net and pin function, never by
    designator.** The datasheet's C1 is not the board's C1: a bitaxe agent
    found Q1, Q2, R4, R10 and C1 naming different parts in the two, so
@@ -890,8 +896,9 @@ Routing Completes): run them once, here, not again inside the routing.
    KiCad's own silk classes:
    ```bash
    python3 -X utf8 py_placer/beautify_labels.py <board> wk/<run>/labelled.kicad_pcb
-   kicad-cli pcb drc <board> --severity-all --format json -o wk/<run>/silk_before.json
-   kicad-cli pcb drc wk/<run>/labelled.kicad_pcb --severity-all --format json -o wk/<run>/silk_after.json
+   KCLI=$(python3 py_tools/kicad_cli_path.py)
+   "$KCLI" pcb drc <board> --severity-all --format json -o wk/<run>/silk_before.json
+   "$KCLI" pcb drc wk/<run>/labelled.kicad_pcb --severity-all --format json -o wk/<run>/silk_after.json
    python3 -c "import json,sys,collections;[print(f,dict(collections.Counter(x['type'] for x in json.load(open(f))['violations'] if x['type'].startswith('silk')))) for f in sys.argv[1:]]" wk/<run>/silk_before.json wk/<run>/silk_after.json
    ```
    `beautify_labels` moves reference labels clear of pads, holes, the edge
@@ -900,8 +907,10 @@ Routing Completes): run them once, here, not again inside the routing.
    it can trade one overlap for another: one board went from 4 KiCad silk
    errors to 0, another from 54 to 76. Keep `labelled.kicad_pcb` as the
    board only when its silk count is lower, and put both counts in
-   REPORT.md. Without `kicad-cli`, keep the board as it was and say the
-   silk is ungraded.
+   REPORT.md. `kicad-cli` is often not on PATH (macOS keeps it in the app
+   bundle), which is why the block resolves it with `kicad_cli_path.py`, the
+   tools' own lookup (#1418). Only when THAT exits 1 is there no
+   `kicad-cli`: then keep the board as it was and say the silk is ungraded.
 2. **`full` mode: deliver a filled copy, last (#910).** A routed board
    carries its zones as outlines with no fill: KiCad shows the planes empty
    until they are refilled (press B), and a DRC that does not refill reads

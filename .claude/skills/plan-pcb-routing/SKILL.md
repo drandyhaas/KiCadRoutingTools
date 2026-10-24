@@ -3305,9 +3305,13 @@ hunt for.
    (`kicad_drc_compare` drops the silk classes by design), so read KiCad's
    own (it can take minutes on a silk-heavy board, #333):
    ```bash
-   kicad-cli pcb drc board_final.kicad_pcb --severity-all --format json -o /tmp/silk_drc.json
+   KCLI=$(python3 py_tools/kicad_cli_path.py)
+   "$KCLI" pcb drc board_final.kicad_pcb --severity-all --format json -o /tmp/silk_drc.json
    python3 -c "import json,collections;v=json.load(open('/tmp/silk_drc.json'))['violations'];print(dict(collections.Counter(x['type'] for x in v if x['type'].startswith('silk'))) or 'no silk violations')"
    ```
+   `kicad_cli_path.py` resolves the binary the way the tools do (#1418): a
+   stock macOS KiCad keeps it in the app bundle, off PATH, where a bare
+   `kicad-cli` exits 127. Report the silk as ungraded only when it exits 1.
    Report each silk class in the summary. The tidy is
    `python3 -X utf8 py_placer/beautify_labels.py board_final.kicad_pcb board_labels.kicad_pcb`:
    it moves reference labels clear of pads, holes, the edge and each other,
