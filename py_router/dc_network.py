@@ -68,8 +68,10 @@ def build(pcb, net_id: int, terminals: Dict[str, list],
     repeats conducts through all of them.
 
     A via step's barrel is the stackup's length between its two layers
-    (`get_via_barrel_length`). Without one it is `board_thickness_mm` shared
-    out by the layers' order, and the network says so in `assumptions`."""
+    (`get_via_barrel_length`), less half of an inner end layer's copper, so
+    the steps of one via add up to its whole barrel. Without a stackup it is
+    `board_thickness_mm` shared out by the layers' order, and the network says
+    so in `assumptions`."""
     from net_queries import _net_track_graph
     from plane_resistance import COPPER_RESISTIVITY
     plating = VIA_PLATING_MM if via_plating_mm is None else float(via_plating_mm)
@@ -77,10 +79,19 @@ def build(pcb, net_id: int, terminals: Dict[str, list],
     order = list(getattr(pcb.board_info, 'copper_layers', None) or [])
     assumed_barrel = []
 
+    stack_cu = {e.name: e.thickness for e in
+                (getattr(pcb.board_info, 'stackup', None) or []) if e.layer_type == 'copper'}
+
     def barrel(span):
         l1, l2 = span
         b = pcb.get_via_barrel_length(l1, l2) if hasattr(pcb, 'get_via_barrel_length') else 0.0
         if b > 0:
+            # get_via_barrel_length counts both end layers' copper in full;
+            # an INNER end is shared with the next step, so each step takes
+            # half of it and the steps add up to the F.Cu-B.Cu barrel.
+            for layer in (l1, l2):
+                if order and layer not in (order[0], order[-1]):
+                    b -= (stack_cu.get(layer) or 0.0) / 2.0
             return b
         thick = board_thickness_mm or 0.0
         if thick > 0 and l1 in order and l2 in order and len(order) > 1:

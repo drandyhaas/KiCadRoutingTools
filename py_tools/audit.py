@@ -132,7 +132,7 @@ def _valid(kind, v) -> bool:
     if kind == 'nonneg':
         return _number(v) and v >= 0
     if kind == 'int':
-        return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+        return _number(v) and float(v).is_integer() and v >= 0
     if kind == 'str':
         return isinstance(v, str) and v != ''
     if kind == 'strs':
@@ -196,8 +196,9 @@ def load_spec(path: Optional[str]) -> dict:
             raise SpecError(f'pairs.{name}.nets must name exactly two nets')
         if 'impedance_ohm' in entry and 'tolerance_pct' not in entry:
             raise SpecError(f'pairs.{name} gives impedance_ohm without tolerance_pct')
-    if 'reference_nets' in spec and not _valid('strs', spec['reference_nets']):
-        raise SpecError('reference_nets must be a non-empty list of net names')
+    refs = spec.get('reference_nets', [])
+    if not (isinstance(refs, list) and all(isinstance(x, str) and x for x in refs)):
+        raise SpecError('reference_nets must be a list of net names')
     widths = spec.get('net_min_widths', {})
     if not isinstance(widths, dict) or not all(
             isinstance(k, str) and k and _valid('pos', v) for k, v in widths.items()):
@@ -546,12 +547,12 @@ def width_checks(pcb, spec, board_path):
     for s in pcb.segments:
         if not s.graphic and names.get(s.net_id):
             by_net.setdefault(names[s.net_id], []).append(s)
-    out, used = [], set()
+    out, matched = [], set()
     for name, segs in sorted(by_net.items()):
+        matched |= {p for p in want if fnmatch.fnmatchcase(name, p)}
         pat = next((p for p in want if fnmatch.fnmatchcase(name, p)), None)
         if pat is None:
             continue
-        used.add(pat)
         limit, src = float(want[pat]), f'spec: net_min_widths[{pat!r}]'
         if floor is not None and floor > limit:
             limit, src = floor, floor_from
@@ -561,7 +562,7 @@ def width_checks(pcb, spec, board_path):
                  for s in segs if s.width < limit - 1e-9]
         out.append(_check('net.min_width', name, findings=found))
     for pat in want:
-        if pat not in used:
+        if pat not in matched:
             out.append(_check('net.min_width', pat, reason=(
                 'the glob matches no net with track copper')))
     return out
@@ -805,9 +806,47 @@ def board_thickness_mm(board_path):
     return NOMINAL_BOARD_THICKNESS_MM
 
 
+def _closes(text: str) -> bool:
+    """Does `text` hold one `(kicad_pcb ...)` expression that closes, with
+    nothing after it but whitespace? Quoted strings (with backslash escapes)
+    are skipped. A board cut short opens more than it closes."""
+    t = text.lstrip()
+    if not t.startswith('(kicad_pcb'):
+        return False
+    depth, i, n, quoted = 0, 0, len(t), False
+    while i < n:
+        ch = t[i]
+        if quoted:
+            if ch == '\\':
+                i += 1
+            elif ch == '"':
+                quoted = False
+        elif ch == '"':
+            quoted = True
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return not t[i + 1:].strip()
+        i += 1
+    return False
+
+
 def _parse(path, what):
     from kicad_parser import parse_kicad_pcb
-    pcb = parse_kicad_pcb(path)
+    try:
+        with open(path, encoding='utf-8') as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BoardError(f'{what} {path} cannot be read as text: {exc}')
+    if not _closes(text):
+        raise BoardError(f'{what} {path} is not one complete (kicad_pcb ...) '
+                         f'expression: it is cut short or not a board')
+    try:
+        pcb = parse_kicad_pcb(path)
+    except Exception as exc:                                   # noqa: BLE001
+        raise BoardError(f'{what} {path} does not parse: {type(exc).__name__}: {exc}')
     if not getattr(pcb.board_info, 'copper_layers', None):
         raise BoardError(f'{what} {path} declares no copper layers: it is not a board')
     return pcb
