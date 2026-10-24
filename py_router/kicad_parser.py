@@ -10778,8 +10778,12 @@ def save_extracted_data(pcb_data: PCBData, output_path: str):
             return {k: serialize(v) for k, v in obj.__dict__.items()}
         elif isinstance(obj, dict):
             return {str(k): serialize(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
+        elif isinstance(obj, (list, tuple)):
             return [serialize(item) for item in obj]
+        elif isinstance(obj, (set, frozenset)):
+            # #1436: keepout `layers` is a set; JSON has no set type. Sort
+            # (by repr, so mixed element types cannot raise) for stable output.
+            return [serialize(item) for item in sorted(obj, key=repr)]
         else:
             return obj
 
