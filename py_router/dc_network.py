@@ -68,10 +68,12 @@ def build(pcb, net_id: int, terminals: Dict[str, list],
     repeats conducts through all of them.
 
     A via step's barrel is the stackup's length between its two layers
-    (`get_via_barrel_length`), less half of an inner end layer's copper, so
-    the steps of one via add up to its whole barrel. Without a stackup it is
+    (`get_via_barrel_length`), less half the copper of an end layer that is
+    not one of the via's own ends, so the steps of one via (through, blind or
+    buried) add up to its whole barrel. Without a stackup it is
     `board_thickness_mm` shared out by the layers' order, and the network says
     so in `assumptions`."""
+    from geometry_utils import via_end_layers
     from net_queries import _net_track_graph
     from plane_resistance import COPPER_RESISTIVITY
     plating = VIA_PLATING_MM if via_plating_mm is None else float(via_plating_mm)
@@ -82,15 +84,17 @@ def build(pcb, net_id: int, terminals: Dict[str, list],
     stack_cu = {e.name: e.thickness for e in
                 (getattr(pcb.board_info, 'stackup', None) or []) if e.layer_type == 'copper'}
 
-    def barrel(span):
+    def barrel(span, via):
         l1, l2 = span
         b = pcb.get_via_barrel_length(l1, l2) if hasattr(pcb, 'get_via_barrel_length') else 0.0
         if b > 0:
             # get_via_barrel_length counts both end layers' copper in full;
-            # an INNER end is shared with the next step, so each step takes
-            # half of it and the steps add up to the F.Cu-B.Cu barrel.
+            # a step end that is not one of the via's own ends is shared with
+            # the next step, so each step takes half of it and the steps add
+            # up to the via's whole barrel (through, blind or buried).
+            ends = via_end_layers(via)
             for layer in (l1, l2):
-                if order and layer not in (order[0], order[-1]):
+                if layer not in ends:
                     b -= (stack_cu.get(layer) or 0.0) / 2.0
             return b
         thick = board_thickness_mm or 0.0
@@ -102,7 +106,7 @@ def build(pcb, net_id: int, terminals: Dict[str, list],
     def weight(kind, obj, length, span):
         if kind == 'seg':
             return rho_ohm_mm * length / (max(obj.width, 1e-6) * _copper_mm(pcb, obj.layer))
-        return rho_ohm_mm * barrel(span) / (math.pi * max(obj.drill or 0.0, 1e-6) * plating)
+        return rho_ohm_mm * barrel(span, obj) / (math.pi * max(obj.drill or 0.0, 1e-6) * plating)
 
     raw = []
     pads = [p for group in terminals.values() for p in group]
@@ -149,7 +153,7 @@ def build(pcb, net_id: int, terminals: Dict[str, list],
             continue
         a, b = node(n1), node(n2)
         if a != b:
-            length = barrel(span) if kind == 'via' else w * max(obj.width, 1e-6) * \
+            length = barrel(span, obj) if kind == 'via' else w * max(obj.width, 1e-6) * \
                 _copper_mm(pcb, obj.layer) / rho_ohm_mm
             net.edges.append(Edge(a, b, max(w, _SHORT_OHM * 10), kind, obj, length))
     for name, group in terminals.items():

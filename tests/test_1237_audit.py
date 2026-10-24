@@ -38,11 +38,15 @@ Synthetic boards whose answers are computed independently:
        is reported, a length group's missing net fails, tolerance_mm is
        optional; (11) one finding per segment and per via; (12) a via step's
        barrel is the stackup's length between its two layers, less half of
-       an inner end layer's copper, so a via's steps add up to its barrel.
+       the copper of an end layer that is not one of the via's own ends, so
+       a via's steps add up to its barrel.
 9. The review of the fixes: an empty reference_nets and an integral float
    max_vias are valid; a glob shadowed by an earlier one gets no "matches
    nothing" record; a binary file and a board cut short are exit 3 (exit 2
    as a baseline).
+10. The review of those: a teardrop child without its "(" (#1149) and a
+   leading byte-order mark still audit; a blind or buried via's steps add
+   up to its barrel; an integer too large for a float is exit 2.
 
     python3 tests/test_1237_audit.py
 """
@@ -313,6 +317,43 @@ def fix_review_cases():
     check('9. a board cut short is exit 3', run(cut)[0] == 3)
 
 
+TD_BAD = ('(teardrops (best_length_ratio 0.5) (max_length 1) (best_width_ratio 1) '
+          '(max_width 2) (curved_edges no)filter_ratio 0.9) (enabled yes))')
+
+
+def second_fix_review_cases():
+    plain = open(plain_board()).read()
+    td = os.path.join(WORK, 'teardrop.kicad_pcb')
+    with open(td, 'w') as fh:
+        fh.write(plain.replace('(net 3 "/A")))', '(net 3 "/A") %s))' % TD_BAD))
+    rc, _d, out = run(td)
+    check('10. a teardrop child without its "(" still audits', rc == 0, out[-300:])
+    bom = os.path.join(WORK, 'bom.kicad_pcb')
+    with open(bom, 'w', encoding='utf-8') as fh:
+        fh.write('\ufeff' + plain)
+    rc, _d, out = run(bom)
+    check('10. a leading byte-order mark still audits', rc == 0, out[-300:])
+    huge = 10 ** 400
+    for spec in ({'decoupling': {'C1': {'ic': 'U1', 'pins': ['1'], 'max_distance_mm': 9,
+                                        'max_vias': huge}}},
+                 {'decoupling': {'C1': {'ic': 'U1', 'pins': ['1'], 'max_distance_mm': huge}}}):
+        rc, _d, out = run(os.path.join(WORK, 'dec.kicad_pcb'), spec)
+        check('10. an integer too large for a float is exit 2', rc == 2, out[-200:])
+    for name, (l1, l2) in (('blind', ('F.Cu', 'In2.Cu')), ('buried', ('In1.Cu', 'In2.Cu'))):
+        v = ('(via %s (at 102 100) (size 0.6) (drill 0.3) (layers "%s" "%s") (net 3))\n'
+             % ('blind' if name == 'blind' else 'buried', l1, l2))
+        body = (pad('C1', 100, 100, 3, '/A', layers='"%s"' % l1)
+                + pad('U1', 104, 100, 3, '/A', layers='"%s"' % l2)
+                + seg(100, 100, 102, 100, 3, layer=l1) + v + seg(102, 100, 104, 100, 3, layer=l2))
+        pcb = parse_kicad_pcb(board4(body, name))
+        net = dc_network.build(pcb, 3, {'C1.1': [pcb.footprints['C1'].pads[0]],
+                                        'U1.1': [pcb.footprints['U1'].pads[0]]})
+        steps = sum(e.length_mm for e in net.edges if e.kind == 'via')
+        full = pcb.get_via_barrel_length(l1, l2)
+        check(f"10. a {name} via's steps add up to its {full:.4f} mm barrel",
+              abs(steps - full) < 1e-9, f'{steps:.4f}')
+
+
 def plain_board():
     return os.path.join(WORK, 'plain.kicad_pcb')
 T_CU = 0.035
@@ -500,6 +541,7 @@ def main():
 
     review_cases()
     fix_review_cases()
+    second_fix_review_cases()
 
     print(f"\n{'ALL PASS' if not FAILS else '%d FAIL' % len(FAILS)}")
     return 1 if FAILS else 0

@@ -1107,8 +1107,9 @@ the board's `diff_pair_gap` rule, else its netclass diff pair gap, else (for
 impedance) the layer's dielectric height. The current checks solve
 `dc_network`'s resistor network of the net's tracks and vias (copper at
 20 C, via plating `via_plating_mm`, default 0.020 mm, each via step's barrel
-the stackup's length between its layers less half of an inner end layer's
-copper, so a via's steps add up to its whole barrel, or the board thickness
+the stackup's length between its layers less half the copper of an end
+layer that is not one of the via's own ends, so a via's steps add up to its
+whole barrel, or the board thickness
 shared out by layer order when the stackup does not give it); pours are left out, so
 resistances read high and a load joined only through a pour is not judged.
 Every pad of a named source or load conducts, so a part whose pad number
