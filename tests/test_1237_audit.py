@@ -24,8 +24,20 @@ Synthetic boards whose answers are computed independently:
    and with reference_nets naming another net the same pour does not count.
 6. length.match and net.min_width; the board's own min_track_width wins when
    it is stricter than the spec.
-7. board_score --spec counts the failed checks in blocking; without --spec
-   the audit component is ungraded.
+7. board_score --spec counts the failed SPEC checks in blocking, never the
+   spec-free ones; without --spec the audit component is ungraded.
+8. The review of #1237, one case per finding:
+   (1) a via on a board with no stackup is rated, its barrel the board
+       thickness; (3) an unrouted pair's uncoupled length is not_judged;
+   (4) a file that is not a board is exit 3, as a baseline exit 2;
+   (5) a value of the wrong type or range is exit 2, never a crash or a
+       character-by-character read; (6) a reference net not on the board is
+       not_judged; (7) one through via on four layers is one via;
+   (8) a terminal's pads that share a number conduct together; (9) a pad
+       with no number is no default load; (10) a width glob matching nothing
+       is reported, a length group's missing net fails, tolerance_mm is
+       optional; (11) one finding per segment and per via; (12) a via step's
+       barrel is the stackup's length between its two layers.
 
     python3 tests/test_1237_audit.py
 """
@@ -118,6 +130,153 @@ def get(doc, cid, subject=None):
 
 
 RHO_OHM_MM = COPPER_RESISTIVITY * 1e3
+
+STACKUP4 = ('(stackup (layer "F.Cu" (type "copper") (thickness 0.035))'
+            ' (layer "dielectric 1" (type "prepreg") (thickness 0.2) (epsilon_r 4.5))'
+            ' (layer "In1.Cu" (type "copper") (thickness 0.035))'
+            ' (layer "dielectric 2" (type "core") (thickness 1.0) (epsilon_r 4.5))'
+            ' (layer "In2.Cu" (type "copper") (thickness 0.035))'
+            ' (layer "dielectric 3" (type "prepreg") (thickness 0.2) (epsilon_r 4.5))'
+            ' (layer "B.Cu" (type "copper") (thickness 0.035)))')
+
+
+def board4(body, name):
+    text = ('(kicad_pcb (version 20240202) (generator "t")\n'
+            ' (general (thickness 1.54))\n'
+            ' (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)'
+            ' (31 "B.Cu" signal) (39 "F.Mask" user) (38 "B.Mask" user) (44 "Edge.Cuts" user))\n'
+            ' (setup %s)\n'
+            ' (net 0 "") (net 3 "/A")\n'
+            ' (gr_rect (start 80 80) (end 140 120) (layer "Edge.Cuts") (width 0.1))\n'
+            '%s\n)\n') % (STACKUP4, body)
+    path = os.path.join(WORK, name + '.kicad_pcb')
+    with open(path, 'w') as fh:
+        fh.write(text)
+    return path
+
+
+def review_cases():
+    # (1) no stackup: the via is still rated, at the board thickness
+    nostack_via = board(pad('J1', 100, 100, 3, '/A') + pad('U1', 110, 100, 3, '/A', layers='"B.Cu" "B.Mask"')
+                        + seg(100, 100, 105, 100, 3) + via(105, 100, 3, drill=0.3)
+                        + seg(105, 100, 110, 100, 3, layer='B.Cu'), stackup=False, name='nsv')
+    rc, doc, _o = run(nostack_via, {'currents': {'/A': {'amps': 50, 'source': 'J1.1'}}})
+    c = get(doc, 'current.via', '/A')
+    check('8(1). no stackup: a via over its rating fails', c['status'] == 'failed', str(c))
+    check('8(1). ...and the barrel assumption is stated',
+          any('board thickness' in a for a in c.get('assumptions', [])), str(c.get('assumptions')))
+    # (3) a pair with pads only
+    pads_only = board(pad('J1', 100, 100, 1, '/P') + pad('U1', 110, 100, 1, '/P')
+                      + pad('J2', 100, 102, 5, '/N') + pad('U2', 110, 102, 5, '/N'), name='po')
+    rc, doc, _o = run(pads_only, {'pairs': {'D': {'nets': ['/P', '/N'], 'max_uncoupled_mm': 1}}})
+    check('8(3). an unrouted pair: uncoupled is not_judged',
+          get(doc, 'pair.uncoupled', 'D')['status'] == 'not_judged')
+    # (4) not a board
+    junk = os.path.join(WORK, 'junk.kicad_pcb')
+    with open(junk, 'w') as fh:
+        fh.write('not a board')
+    check('8(4). a file that is not a board is exit 3', run(junk)[0] == 3)
+    check('8(4). ...and as a baseline exit 2', run(plain_board(), extra=['--baseline', junk])[0] == 2)
+    # (5) values
+    cur = {'amps': 1, 'source': 'J1.1'}
+    bad_values = [
+        ('amps "abc"', {'currents': {'/A': dict(cur, amps='abc')}}),
+        ('amps -1', {'currents': {'/A': dict(cur, amps=-1)}}),
+        ('max_rise_c null', {'currents': {'/A': dict(cur, max_rise_c=None)}}),
+        ('loads {U1.1: "x"}', {'currents': {'/A': dict(cur, loads={'U1.1': 'x'})}}),
+        ('loads "U1.1"', {'currents': {'/A': dict(cur, loads='U1.1')}}),
+        ('source 5', {'currents': {'/A': dict(cur, source=5)}}),
+        ('tolerance_mm "x"', {'length_groups': {'G': {'nets': ['/A'], 'tolerance_mm': 'x'}}}),
+        ('mode "bogus"', {'length_groups': {'G': {'nets': ['/A'], 'mode': 'bogus'}}}),
+        ('nets "/A"', {'length_groups': {'G': {'nets': '/A'}}}),
+        ('max_vias "x"', {'decoupling': {'C1': {'ic': 'U1', 'pins': ['1'],
+                                                'max_distance_mm': 1, 'max_vias': 'x'}}}),
+        ('pins "12"', {'decoupling': {'C1': {'ic': 'U1', 'pins': '12', 'max_distance_mm': 1}}}),
+        ('max_skew_mm "x"', {'pairs': {'D': {'nets': ['/A', '/B'], 'max_skew_mm': 'x'}}}),
+        ('net_min_widths -1', {'net_min_widths': {'/A': -1}}),
+        ('net_min_widths true', {'net_min_widths': {'/A': True}}),
+    ]
+    for what, spec in bad_values:
+        rc, _d, out = run(plain_board(), spec)
+        check(f'8(5). {what} is exit 2', rc == 2, out[-200:])
+    # (6) a reference net not on the board
+    rc, doc, _o = run(os.path.join(WORK, 'pair.kicad_pcb'),
+                      {'pairs': {'D': {'nets': ['/P', '/N']}}, 'reference_nets': ['GNDX']})
+    c = get(doc, 'pair.reference', 'D')
+    check('8(6). reference_nets naming no net is not_judged', c['status'] == 'not_judged'
+          and 'GNDX' in c['reason'], str(c))
+    # (7) + (12) one through via on four layers
+    four = board4(pad('C1', 100, 100, 3, '/A') + pad('U1', 104, 100, 3, '/A', layers='"B.Cu" "B.Mask"')
+                  + seg(100, 100, 102, 100, 3) + via(102, 100, 3)
+                  + seg(102, 100, 104, 100, 3, layer='B.Cu'), 'four')
+    rc, doc, _o = run(four, {'decoupling': {'C1': {'ic': 'U1', 'pins': ['1'],
+                                                   'max_distance_mm': 10, 'max_vias': 1}}})
+    c = get(doc, 'decoupling.path', 'C1')
+    check('8(7). one through via on four layers is one via',
+          c['status'] == 'passed' and c['measured']['U1.1']['vias'] == 1, str(c))
+    rc, doc, _o = run(four, {'currents': {'/A': {'amps': 50, 'source': 'C1.1'}}})
+    c = get(doc, 'current.via', '/A')
+    check('8(11). a through via over its rating is one finding',
+          c['status'] == 'failed' and len(c['findings']) == 1, str(c))
+    part = board4(pad('C1', 100, 100, 3, '/A') + pad('U1', 104, 100, 3, '/A', layers='"F.Cu" "F.Mask"')
+                  + seg(100, 100, 102, 100, 3) + via(102, 100, 3)
+                  + seg(102, 100, 103, 100, 3, layer='In1.Cu') + via(103, 100, 3)
+                  + seg(103, 100, 104, 100, 3), 'part')
+    pcb = parse_kicad_pcb(part)
+    step = pcb.get_via_barrel_length('F.Cu', 'In1.Cu')
+    v_ohm = RHO_OHM_MM * step / (math.pi * 0.3 * dc_network.VIA_PLATING_MM)
+    want = (RHO_OHM_MM * 4 / (0.5 * T_CU) + 2 * v_ohm) * 1e3   # 2 + 1 + 1 mm of track
+    rc, doc, _o = run(part, {'currents': {'/A': {'amps': 1, 'source': 'C1.1', 'max_drop_mv': 1000}}})
+    d = get(doc, 'current.drop', '/A')['measured']['U1.1']
+    check(f'8(12). an F.Cu-In1.Cu step is charged its {step:.4f} mm barrel',
+          abs(d - want) < 0.01, f'{d} vs {want:.3f}')
+    # (8) repeated pad numbers
+    two_ones = ('(footprint "L:P" (layer "F.Cu") (at 100 100) (property "Reference" "J1")'
+                ' (pad "1" smd rect (at 0 -1) (size 1 1) (layers "F.Cu" "F.Mask") (net 3 "/A"))'
+                ' (pad "1" smd rect (at 0 1) (size 1 1) (layers "F.Cu" "F.Mask") (net 3 "/A")))\n')
+    second = board(two_ones + pad('U1', 110, 101, 3, '/A') + seg(100, 101, 110, 101, 3), name='second')
+    rc, doc, _o = run(second, {'currents': {'/A': {'amps': 1, 'source': 'J1.1', 'max_drop_mv': 1000}}})
+    d = get(doc, 'current.drop', '/A')
+    one = RHO_OHM_MM * 10 / (0.5 * T_CU)
+    check("8(8). a track to the source's second '1' pad is judged",
+          d['status'] != 'not_judged' and abs(d['measured']['U1.1'] - one * 1e3) < 0.01, str(d))
+    both = board(two_ones + pad('U1', 110, 100, 3, '/A', size='1 3')
+                 + seg(100, 99, 110, 99, 3) + seg(100, 101, 110, 101, 3), name='both')
+    rc, doc, _o = run(both, {'currents': {'/A': {'amps': 1, 'source': 'J1.1', 'max_drop_mv': 1000}}})
+    d = get(doc, 'current.drop', '/A')['measured']['U1.1']
+    check("8(8). both '1' pads tracked in parallel halve the drop",
+          abs(d - one * 1e3 / 2) < 0.01, f'{d} vs {one * 1e3 / 2:.3f}')
+    # (9) a numberless pad
+    numberless = board(pad('J1', 100, 100, 3, '/A') + pad('U1', 110, 100, 3, '/A')
+                       + pad('H1', 120, 100, 3, '/A', num='') + seg(100, 100, 110, 100, 3),
+                       name='numberless')
+    rc, doc, _o = run(numberless, {'currents': {'/A': {'amps': 0.1, 'source': 'J1.1'}}})
+    check('8(9). a pad with no number is not a default load',
+          get(doc, 'current.capacity', '/A')['status'] == 'passed',
+          str(get(doc, 'current.capacity', '/A')))
+    # (10) records for everything the spec names
+    rc, doc, _o = run(plain_board(), {'net_min_widths': {'/NOPE*': 0.2}})
+    c = get(doc, 'net.min_width', '/NOPE*')
+    check('8(10). a width glob that matches nothing is not_judged, not absent',
+          c is not None and c['status'] == 'not_judged', str(doc['checks'][-1]))
+    rc, doc, _o = run(plain_board(), {'length_groups': {'G': {'nets': ['/A', '/MISSING']}}})
+    check("8(10). a length group's missing net fails, as board_score counts it",
+          get(doc, 'length.match', 'G')['status'] == 'failed')
+    rc, doc, _o = run(os.path.join(WORK, 'pair.kicad_pcb'),
+                      {'length_groups': {'G': {'nets': ['/P', '/N']}}})
+    check('8(10). tolerance_mm is optional (0.1 mm, as board_score)',
+          get(doc, 'length.match', 'G')['status'] == 'passed')
+    # (11) one finding per segment, however the graph cuts it
+    tee = board(pad('J1', 100, 100, 3, '/A') + pad('U1', 110, 100, 3, '/A') + pad('U2', 105, 105, 3, '/A')
+                + seg(100, 100, 110, 100, 3, w=0.1) + seg(105, 100, 105, 105, 3, w=0.1), name='tee')
+    rc, doc, _o = run(tee, {'currents': {'/A': {'amps': 5, 'source': 'J1.1', 'loads': ['U1.1']}}})
+    c = get(doc, 'current.capacity', '/A')
+    check('8(11). a segment cut by a T-junction is one capacity finding',
+          c['status'] == 'failed' and len(c['findings']) == 1, str(c))
+
+
+def plain_board():
+    return os.path.join(WORK, 'plain.kicad_pcb')
 T_CU = 0.035
 
 
@@ -286,11 +445,22 @@ def main():
     score = json.load(open(js))
     check('7. board_score --spec counts the failed spec check',
           score['blocking_by'].get('audit') == 1, str(score['blocking_by']))
+    jog = board(pad('J1', 100, 100, 3, '/A') + pad('U1', 108, 101.5, 3, '/A')
+                + seg(100, 100, 104, 100, 3) + seg(104, 100, 106.598, 101.5, 3)
+                + seg(106.598, 101.5, 108, 101.5, 3), name='jog')
+    sp = spec_file({'net_min_widths': {'/A': 0.1}}, 'bs2')
+    subprocess.run([sys.executable, bs, jog, '--spec', sp, '--json', js],
+                   capture_output=True, text=True)
+    comp = json.load(open(js))['components']['audit']
+    check('7. (review 2) a spec-free failure is listed, never counted',
+          comp['count'] == 0 and 'weird.off_angle_corner' in comp['spec_free_failed'], str(comp))
     subprocess.run([sys.executable, bs, plain, '--json', js], capture_output=True, text=True)
     score = json.load(open(js))
     check('7. without --spec the audit is ungraded',
           score['blocking_by'].get('audit') is None
           and any('audit' in str(u) for u in score.get('ungraded', [])), str(score.get('ungraded')))
+
+    review_cases()
 
     print(f"\n{'ALL PASS' if not FAILS else '%d FAIL' % len(FAILS)}")
     return 1 if FAILS else 0

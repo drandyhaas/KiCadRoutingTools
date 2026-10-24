@@ -556,11 +556,12 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     joining rules); `pad_nodes` maps id(pad) to the pad's per-layer hub nodes.
     None when the net has no segments at all.
 
-    By default an edge weighs its length. `weight(kind, obj, length)` replaces
-    that for the copper edges ('seg' with a Segment and the piece's length,
-    'via' with a Via and the barrel step's length); joins inside a pad or a
-    via stay 0. `edges`, a list, receives every edge as (n1, n2, weight, kind,
-    obj), kind None for those joins (#1237's DC network, dc_network.py).
+    By default an edge weighs its length. `weight(kind, obj, length, span)`
+    replaces that for the copper edges ('seg' with a Segment and the piece's
+    length, span None; 'via' with a Via, the barrel step's length and the
+    step's (layer, layer) span); joins inside a pad or a via stay 0. `edges`,
+    a list, receives every edge as (n1, n2, weight, kind, obj, span), kind
+    None for those joins (#1237's DC network, dc_network.py).
     """
     segments = [s for s in pcb_data.segments if s.net_id == net_id]
     if not segments:
@@ -588,15 +589,15 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
 
     adjacency: Dict[int, List[Tuple[int, float]]] = {}
 
-    def add_edge(n1, n2, w: float, kind=None, obj=None):
+    def add_edge(n1, n2, w: float, kind=None, obj=None, span=None):
         if n1 == n2:
             return
         if kind is not None and weight is not None:
-            w = weight(kind, obj, w)
+            w = weight(kind, obj, w, span)
         adjacency.setdefault(n1, []).append((n2, w))
         adjacency.setdefault(n2, []).append((n1, w))
         if edges is not None:
-            edges.append((n1, n2, w, kind, obj))
+            edges.append((n1, n2, w, kind, obj, span))
 
     copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
     from kicad_parser import pad_is_plated_through
@@ -726,13 +727,13 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             per_step = barrel / max(1, len(dlayers) - 1)
             for l1, l2 in zip(dlayers, dlayers[1:]):
                 if l1 in layer_nodes and l2 in layer_nodes:
-                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step, 'via', obj)
+                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step, 'via', obj, (l1, l2))
                 elif l1 in layer_nodes or l2 in layer_nodes:
                     # An intermediate layer with no copper of this net still has
                     # to be walked THROUGH -- keep the chain intact.
                     for l in (l1, l2):
                         layer_nodes.setdefault(l, _new_node(cx, cy, l))
-                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step, 'via', obj)
+                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step, 'via', obj, (l1, l2))
         else:
             hubs = list(layer_nodes.values())
             if pad_is_plated_through(obj) and len(hubs) > 1:

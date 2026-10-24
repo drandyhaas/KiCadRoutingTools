@@ -33,7 +33,9 @@ Checks that need no spec always run: check_weird's advisory categories
   reference_nets  ["GND"]: the nets whose pours may carry a pair's return
   length_groups   {"BYTE0": {"nets": [...], "tolerance_mm": 0.1,
                    "mode": "total" | "pin_pair"}}, board_score's format
-      length.match     net_queries.net_match_length spread
+                   (tolerance_mm defaults to 0.1, mode to total)
+      length.match     net_queries.net_match_length spread; a net not on the
+                       board fails, as board_score counts it
   net_min_widths  {"<net glob>": mm}, board_score's format; first glob wins
       net.min_width    every segment of the net, at the STRICTER of the spec
                        and the board's own min_track_width
@@ -43,9 +45,11 @@ Checks that need no spec always run: check_weird's advisory categories
                    "via_plating_mm": 0.02}}
       A list of loads is judged one load at a time, each drawing all `amps`;
       a dict gives each load's own current, solved together. No `loads`
-      means every other pad of the net, as a list. The copper is
+      means every other numbered copper pad of the net, as a list. Every pad
+      of a named terminal conducts (a pad number can repeat). The copper is
       dc_network's resistor network of the net's tracks and vias (pours left
-      out, so resistances read high).
+      out, so resistances read high); one finding per track or via, at its
+      worst current.
       current.capacity each track piece's current against the IPC-2152-form
                        rating (plane_resistance.calculate_max_current_ipc2152)
                        at its width, its layer's copper and `max_rise_c`
@@ -55,14 +59,16 @@ Checks that need no spec always run: check_weird's advisory categories
   decoupling      {"C3": {"ic": "U1", "pins": ["4"], "max_distance_mm": 2.0,
                    "max_vias": 1}}
       decoupling.path  the shortest track path from the cap's pad on the
-                       pin's net to the pin, and the vias on it
+                       pin's net to the pin (via barrels counted in the
+                       length), and the distinct vias on it
 
 A check reports "passed", "failed" (with findings) or "not_judged" (with the
 reason it could not be judged, never a pass). Every failure is reported.
 
 Exit codes, as check_floorplan and board_score: 0 every judged check passed,
-1 crash, 2 bad arguments or a malformed spec, 3 the board cannot be read,
-4 a check failed.
+1 crash, 2 bad arguments, a malformed spec (wrong key, type or range) or an
+unreadable baseline, 3 the board is missing or not a board, 4 a check failed.
+board_score --spec counts only the spec checks, never the spec-free ones.
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -82,14 +88,33 @@ import sys
 from typing import Dict, List, Optional
 
 DEFAULT_RISE_C = 10.0
+#: The checks that run with no spec. Reported, never blocking: board_score's
+#: audit component counts only the others.
+SPEC_FREE_IDS = ('weird.off_angle_corner', 'weird.short_fragment',
+                 'weird.off_centre_via_end', 'via.mask_contact', 'via.mask_web')
+#: board_score --length-groups' default, so the two read one format alike.
+DEFAULT_LENGTH_TOLERANCE_MM = 0.1
 
 _SPEC_KEYS = {
     'pairs': ({'nets'}, {'impedance_ohm', 'tolerance_pct', 'max_skew_mm',
                          'max_uncoupled_mm', 'gap_max_mm'}),
-    'length_groups': ({'nets', 'tolerance_mm'}, {'mode'}),
+    'length_groups': ({'nets'}, {'tolerance_mm', 'mode'}),
     'currents': ({'amps', 'source'}, {'loads', 'max_rise_c', 'max_drop_mv',
                                       'via_plating_mm'}),
     'decoupling': ({'ic', 'pins', 'max_distance_mm'}, {'max_vias'}),
+}
+
+#: Every value's kind: 'pos' a number > 0, 'nonneg' a number >= 0, 'int' a
+#: whole number >= 0, 'str' a non-empty string, 'strs' a non-empty list of
+#: them, ('enum', ...) one of the names.
+_FIELD_KINDS = {
+    'pairs': {'nets': 'strs', 'impedance_ohm': 'pos', 'tolerance_pct': 'pos',
+              'max_skew_mm': 'nonneg', 'max_uncoupled_mm': 'nonneg', 'gap_max_mm': 'pos'},
+    'length_groups': {'nets': 'strs', 'tolerance_mm': 'nonneg',
+                      'mode': ('enum', 'total', 'pin_pair')},
+    'currents': {'amps': 'pos', 'source': 'str', 'max_rise_c': 'pos',
+                 'max_drop_mv': 'nonneg', 'via_plating_mm': 'pos'},
+    'decoupling': {'ic': 'str', 'pins': 'strs', 'max_distance_mm': 'nonneg', 'max_vias': 'int'},
 }
 
 
@@ -97,10 +122,33 @@ class SpecError(Exception):
     pass
 
 
+def _number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _valid(kind, v) -> bool:
+    if kind == 'pos':
+        return _number(v) and v > 0
+    if kind == 'nonneg':
+        return _number(v) and v >= 0
+    if kind == 'int':
+        return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+    if kind == 'str':
+        return isinstance(v, str) and v != ''
+    if kind == 'strs':
+        return isinstance(v, list) and v and all(isinstance(x, str) and x for x in v)
+    return v in kind[1:]
+
+
+_KIND_TEXT = {'pos': 'a number > 0', 'nonneg': 'a number >= 0',
+              'int': 'a whole number >= 0', 'str': 'a non-empty string',
+              'strs': 'a non-empty list of strings'}
+
+
 def load_spec(path: Optional[str]) -> dict:
     """The spec at `path`, validated; {} without one. Keys starting with '_'
-    are comments. Anything else unknown is an error, so a typo cannot silently
-    leave a check unjudged."""
+    are comments. Anything else unknown, missing or of the wrong type or range
+    is an error (exit 2), so a typo cannot silently leave a check unjudged."""
     if not path:
         return {}
     try:
@@ -128,17 +176,32 @@ def load_spec(path: Optional[str]) -> dict:
             if keys - required - optional:
                 raise SpecError(f'{section}.{name} has unknown key(s) '
                                 f'{sorted(keys - required - optional)}')
+            for key in sorted(keys - {'loads'}):
+                kind = _FIELD_KINDS[section][key]
+                if not _valid(kind, entry[key]):
+                    want = _KIND_TEXT.get(kind) or 'one of %s' % list(kind[1:])
+                    raise SpecError(f'{section}.{name}.{key} must be {want}, '
+                                    f'not {entry[key]!r}')
+            if section == 'currents' and 'loads' in entry:
+                loads = entry['loads']
+                ok = (_valid('strs', loads) if isinstance(loads, list) else
+                      isinstance(loads, dict) and loads and all(
+                          isinstance(k, str) and k and _valid('pos', v)
+                          for k, v in loads.items()))
+                if not ok:
+                    raise SpecError(f'currents.{name}.loads must be a non-empty list '
+                                    f'of "REF.PAD" or a map of them to amps > 0')
     for name, entry in spec.get('pairs', {}).items():
-        if not (isinstance(entry['nets'], list) and len(entry['nets']) == 2):
+        if len(entry['nets']) != 2:
             raise SpecError(f'pairs.{name}.nets must name exactly two nets')
         if 'impedance_ohm' in entry and 'tolerance_pct' not in entry:
             raise SpecError(f'pairs.{name} gives impedance_ohm without tolerance_pct')
-    if not isinstance(spec.get('reference_nets', []), list):
-        raise SpecError('reference_nets must be a list of net names')
+    if 'reference_nets' in spec and not _valid('strs', spec['reference_nets']):
+        raise SpecError('reference_nets must be a non-empty list of net names')
     widths = spec.get('net_min_widths', {})
     if not isinstance(widths, dict) or not all(
-            isinstance(v, (int, float)) for v in widths.values()):
-        raise SpecError('net_min_widths must map net globs to widths in mm')
+            isinstance(k, str) and k and _valid('pos', v) for k, v in widths.items()):
+        raise SpecError('net_min_widths must map net globs to widths in mm > 0')
     return spec
 
 
@@ -332,10 +395,11 @@ def pair_gap_window(pcb, board_path, p_id, entry, name):
 
 
 def pair_checks(pcb, spec, board_path):
-    from net_queries import diff_pair_skew, diff_pair_coupling
+    from net_queries import diff_pair_skew, diff_pair_coupling, net_pads_joined
     out = []
     ref_names = spec.get('reference_nets') or []
     ref_ids = None
+    ref_missing = [n for n in ref_names if net_id_of(pcb, n) is None]
     if ref_names:
         ref_ids = {net_id_of(pcb, n) for n in ref_names} - {None}
     for name, entry in spec.get('pairs', {}).items():
@@ -398,7 +462,11 @@ def pair_checks(pcb, spec, board_path):
                                                  units='mm', items=items,
                                                  limit_from=f'spec: pairs.{name}.max_skew_mm')],
                                   measured=_r(sk['skew_mm'])))
-        if 'max_uncoupled_mm' in entry:
+        if 'max_uncoupled_mm' in entry and not (net_pads_joined(pcb, p_id)
+                                                 and net_pads_joined(pcb, n_id)):
+            out.append(_check('pair.uncoupled', name, reason=(
+                "a member's pads are not joined by track copper")))
+        elif 'max_uncoupled_mm' in entry:
             cp = diff_pair_coupling(pcb, p_id, n_id, gap_min=gmin, gap_max=gmax)
             limit = float(entry['max_uncoupled_mm'])
             u = cp['uncoupled_mm']
@@ -410,12 +478,16 @@ def pair_checks(pcb, spec, board_path):
                               measured=_r(u), gap_window={'gap_max_mm': gmax,
                                                           'source': gsrc or 'none (KiCad: '
                                                           'every parallel facing span)'}))
+        if ref_missing:
+            out.append(_check('pair.reference', name, reason=(
+                f'reference_nets {ref_missing} are not on the board')))
+            continue
         from check_impedance import analyze_impedance
         rep = analyze_impedance(pcb, [_glob.escape(p_name), _glob.escape(n_name)],
                                 reference_net_ids=ref_ids, include_plane_nets=True)
         found = [_finding(c.describe(), measured=_r(c.length_mm), units='mm',
                           where=_where(c.layer, c.x, c.y), items=[c.net_name],
-                          limit_from=('spec: reference_nets' if ref_ids
+                          limit_from=('spec: reference_nets' if ref_ids is not None
                                       else 'any filled pour on the reference layer'),
                           kind=c.kind, ref_layer=c.ref_layer)
                  for net in rep.nets for c in net.crossings]
@@ -441,17 +513,24 @@ def length_checks(pcb, spec):
                 continue
             v = net_match_length(pcb, nid, mode)
             (unrouted.append(n) if v is None else lengths.__setitem__(n, v))
-        if missing or unrouted:
+        if missing:
+            # a finding about the spec, as board_score --length-groups counts it
+            out.append(_check('length.match', name, findings=[_finding(
+                f'net(s) {missing} named by the group are not on the board',
+                items=missing, limit_from=f'spec: length_groups.{name}.nets')]))
+            continue
+        if unrouted:
             out.append(_check('length.match', name, reason=(
-                f'not on the board: {missing}; ' if missing else '') + (
-                f'not joined by track copper: {unrouted}' if unrouted else '')))
+                f'not joined by track copper: {unrouted}')))
             continue
         spread = max(lengths.values()) - min(lengths.values())
-        tol = float(entry['tolerance_mm'])
+        tol = float(entry.get('tolerance_mm', DEFAULT_LENGTH_TOLERANCE_MM))
         out.append(_check('length.match', name, findings=[] if spread <= tol + 1e-9 else [
             _finding(f'length spread {spread:.4f} mm ({mode})', measured=_r(spread),
                      limit=tol, units='mm', items=sorted(lengths),
-                     limit_from=f'spec: length_groups.{name}.tolerance_mm',
+                     limit_from=(f'spec: length_groups.{name}.tolerance_mm'
+                                 if 'tolerance_mm' in entry else
+                                 'audit.DEFAULT_LENGTH_TOLERANCE_MM'),
                      lengths={k: _r(v) for k, v in sorted(lengths.items())})],
             measured=_r(spread)))
     return out
@@ -467,11 +546,12 @@ def width_checks(pcb, spec, board_path):
     for s in pcb.segments:
         if not s.graphic and names.get(s.net_id):
             by_net.setdefault(names[s.net_id], []).append(s)
-    out = []
+    out, used = [], set()
     for name, segs in sorted(by_net.items()):
         pat = next((p for p in want if fnmatch.fnmatchcase(name, p)), None)
         if pat is None:
             continue
+        used.add(pat)
         limit, src = float(want[pat]), f'spec: net_min_widths[{pat!r}]'
         if floor is not None and floor > limit:
             limit, src = floor, floor_from
@@ -480,6 +560,10 @@ def width_checks(pcb, spec, board_path):
                           items=[name], limit_from=src)
                  for s in segs if s.width < limit - 1e-9]
         out.append(_check('net.min_width', name, findings=found))
+    for pat in want:
+        if pat not in used:
+            out.append(_check('net.min_width', pat, reason=(
+                'the glob matches no net with track copper')))
     return out
 
 
@@ -487,89 +571,101 @@ def width_checks(pcb, spec, board_path):
 # Currents: capacity, vias and voltage drop over dc_network
 # ---------------------------------------------------------------------------
 
-def current_checks(pcb, spec):
+def _default_loads(pcb, nid, source):
+    """Every other copper pad of the net with a number: what `loads` means when
+    the spec leaves it out."""
+    from paste_apertures import pad_has_copper
+    return sorted({f'{p.component_ref}.{p.pad_number}' for p in pcb.pads_by_net.get(nid, [])
+                   if str(p.pad_number) and pad_has_copper(p)} - {source})
+
+
+def current_checks(pcb, spec, board_thickness_mm=None):
     import dc_network
     from plane_resistance import calculate_max_current_ipc2152, stackup_copper_oz, OZ_TO_METERS
     out = []
     for name, entry in spec.get('currents', {}).items():
         amps = float(entry['amps'])
         rise = float(entry.get('max_rise_c', DEFAULT_RISE_C))
+        plating = float(entry.get('via_plating_mm', dc_network.VIA_PLATING_MM))
         wanted = ['current.capacity', 'current.via'] + (
             ['current.drop'] if 'max_drop_mv' in entry else [])
         nid = net_id_of(pcb, name)
-        src_pads = pads_of(pcb, entry['source'])
-        problem = None
+        source = entry['source']
+        src_pads = pads_of(pcb, source)
+        problem, load_pads = None, {}
         if nid is None:
             problem = f'net {name} is not on the board'
         elif not src_pads:
-            problem = f"source pad {entry['source']} is not on the board"
+            problem = f"source pad {source} is not on the board"
         elif any(p.net_id != nid for p in src_pads):
-            problem = f"source pad {entry['source']} is not on {name}"
+            problem = f"source pad {source} is not on {name}"
         loads = entry.get('loads')
         if problem is None:
             if loads is None:
-                loads = sorted({f'{p.component_ref}.{p.pad_number}'
-                                for p in pcb.pads_by_net.get(nid, [])} - {entry['source']})
+                loads = _default_loads(pcb, nid, source)
             load_pads = {ld: pads_of(pcb, ld) for ld in loads}
             bad = sorted(ld for ld, ps in load_pads.items()
                          if not ps or any(p.net_id != nid for p in ps))
             if bad:
                 problem = f'load pad(s) {bad} are not pads of {name}'
+            elif source in load_pads:
+                problem = f'the source {source} is also a load'
+            elif not load_pads:
+                problem = f'{name} has no load pad'
         net = None
         if problem is None:
-            all_pads = src_pads + [p for ps in load_pads.values() for p in ps]
-            net = dc_network.build(pcb, nid, all_pads, entry.get('via_plating_mm'))
+            terminals = dict(load_pads)
+            terminals[source] = src_pads
+            net = dc_network.build(pcb, nid, terminals, plating, board_thickness_mm)
             if net is None:
                 problem = f'{name} has no track copper'
         if problem:
             out += [_check(cid, name, reason=problem) for cid in wanted]
             continue
-        ground = net.pad_node.get(id(src_pads[0]))
+        ground = net.terminal_node.get(source)
         if isinstance(loads, dict):
             scenarios = [{ld: float(a) for ld, a in loads.items()}]
         else:
             scenarios = [{ld: amps} for ld in loads]
-        worst = [0.0] * len(net.edges)
+        worst = {}                      # (kind, id(obj)) -> (amps, obj)
         drops, unreachable = {}, set()
         for sc in scenarios:
             inj = {}
             for ld, a in sc.items():
-                node = net.pad_node.get(id(load_pads[ld][0]))
+                node = net.terminal_node.get(ld)
                 if node is None or ground is None:
                     unreachable.add(ld)
                     continue
                 inj[node] = inj.get(node, 0.0) - a
-            if ground is None:
+            if ground is None or not inj:
                 continue
-            potential, currents, lost = dc_network.solve(net, inj, ground)
+            potential, currents, _lost = dc_network.solve(net, inj, ground)
             for ld in sc:
-                node = net.pad_node.get(id(load_pads[ld][0]))
+                node = net.terminal_node.get(ld)
                 if node is None or potential.get(node) is None:
                     unreachable.add(ld)
                 else:
                     drops[ld] = max(drops.get(ld, 0.0), abs(potential[node]))
-            for i, c in enumerate(currents):
-                if c is not None:
-                    worst[i] = max(worst[i], abs(c))
-        note = sorted(unreachable)
+            for e, c in zip(net.edges, currents):
+                if c is None:
+                    continue
+                key = (e.kind, id(e.obj))
+                if abs(c) > worst.get(key, (0.0, None))[0]:
+                    worst[key] = (abs(c), e.obj)
         cap, via = [], []
-        for e, i_a in zip(net.edges, worst):
-            if i_a <= 0:
-                continue
-            o = e.obj
-            if e.kind == 'seg':
-                oz = stackup_copper_oz(pcb, o.layer)
-                rating = calculate_max_current_ipc2152(o.width, oz, rise)
+        for (kind, _oid), (i_a, o) in worst.items():
+            if kind == 'seg':
+                rating = calculate_max_current_ipc2152(o.width, stackup_copper_oz(pcb, o.layer), rise)
                 if i_a > rating + 1e-9:
                     cap.append(_finding(
                         f'{i_a:.3f} A through a {o.width:.3f} mm track on {o.layer} '
                         f'rated {rating:.3f} A at {rise:g} C rise',
                         measured=_r(i_a), limit=_r(rating), units='A',
-                        where=_where(o.layer, o.start_x, o.start_y), items=[name],
+                        where=_where(o.layer, (o.start_x + o.end_x) / 2, (o.start_y + o.end_y) / 2),
+                        items=[name],
                         limit_from=f'spec: currents.{name}.amps, max_rise_c; '
                                    f'IPC-2152 form (plane_resistance)'))
             else:
-                plating = float(entry.get('via_plating_mm', dc_network.VIA_PLATING_MM))
                 rating = calculate_max_current_ipc2152(
                     math.pi * (o.drill or 0.0), plating / (OZ_TO_METERS * 1e3), rise)
                 if i_a > rating + 1e-9:
@@ -580,13 +676,14 @@ def current_checks(pcb, spec):
                         where=_where('via', o.x, o.y), items=[name],
                         limit_from=f'spec: currents.{name}.amps, max_rise_c, via_plating_mm; '
                                    f'IPC-2152 form (plane_resistance)'))
+        note = sorted(unreachable)
         reason = f'load(s) {note} not joined to the source by track copper' if note else None
         common = {'assumptions': net.assumptions}
         out.append(_check('current.capacity', name, findings=cap, reason=reason, **common))
         out.append(_check('current.via', name, findings=via, reason=reason, **common))
         if 'max_drop_mv' in entry:
             limit = float(entry['max_drop_mv'])
-            found = [_finding(f'{v * 1e3:.1f} mV from {entry["source"]} to {ld}',
+            found = [_finding(f'{v * 1e3:.1f} mV from {source} to {ld}',
                               measured=_r(v * 1e3, 2), limit=limit, units='mV',
                               items=[name, ld], limit_from=f'spec: currents.{name}.max_drop_mv')
                      for ld, v in sorted(drops.items()) if v * 1e3 > limit + 1e-9]
@@ -600,36 +697,45 @@ def current_checks(pcb, spec):
 # Decoupling
 # ---------------------------------------------------------------------------
 
-def _shortest_path(pcb, net_id, pad_a, pad_b):
-    """(length mm, via count) of the shortest track path between two pads of
-    one net, or None when no track path joins them."""
+def _shortest_path(pcb, net_id, pads_a, pads_b):
+    """(length mm, via count) of the shortest track path from any of `pads_a`
+    to any of `pads_b` (one net), or None when no track path joins them. A via
+    counts once however many layer steps of its barrel the path walks."""
     from net_queries import _net_track_graph
     edges = []
-    graph = _net_track_graph(pcb, net_id, (pad_a, pad_b), edges=edges)
+    graph = _net_track_graph(pcb, net_id, list(pads_a) + list(pads_b), edges=edges)
     if graph is None:
         return None
     _adj, pad_nodes = graph
     adj = {}
-    for n1, n2, w, kind, _obj in edges:
-        v = 1 if kind == 'via' else 0
-        adj.setdefault(n1, []).append((n2, w, v))
-        adj.setdefault(n2, []).append((n1, w, v))
-    starts, goals = pad_nodes.get(id(pad_a)) or [], set(pad_nodes.get(id(pad_b)) or [])
-    best = {n: (0.0, 0) for n in starts}
-    heap = [(0.0, 0, i, n) for i, n in enumerate(starts)]
+    for n1, n2, w, kind, obj, _span in edges:
+        tag = id(obj) if kind == 'via' else None
+        adj.setdefault(n1, []).append((n2, w, kind, tag))
+        adj.setdefault(n2, []).append((n1, w, kind, tag))
+    starts = [h for p in pads_a for h in (pad_nodes.get(id(p)) or [])]
+    goals = {h for p in pads_b for h in (pad_nodes.get(id(p)) or [])}
+    # state = (node, the via whose barrel the path is in, or None)
+    best = {(n, None): (0.0, 0) for n in starts}
+    heap = [(0.0, 0, i, n, None) for i, n in enumerate(starts)]
     count = len(heap)
     while heap:
-        d, v, _, n = heapq.heappop(heap)
-        if (d, v) > best.get(n, (math.inf, 0)):
+        d, v, _, n, cur = heapq.heappop(heap)
+        if (d, v) > best.get((n, cur), (math.inf, 0)):
             continue
         if n in goals:
             return d, v
-        for m, w, dv in adj.get(n, ()):
+        for m, w, kind, tag in adj.get(n, ()):
+            if kind == 'via':
+                nxt, dv = tag, (0 if tag == cur else 1)
+            elif kind == 'seg':
+                nxt, dv = None, 0
+            else:
+                nxt, dv = cur, 0        # a join inside a pad or a via keeps the state
             cand = (d + w, v + dv)
-            if cand < best.get(m, (math.inf, 0)):
-                best[m] = cand
+            if cand < best.get((m, nxt), (math.inf, 0)):
+                best[(m, nxt)] = cand
                 count += 1
-                heapq.heappush(heap, (cand[0], cand[1], count, m))
+                heapq.heappush(heap, (cand[0], cand[1], count, m, nxt))
     return None
 
 
@@ -649,19 +755,20 @@ def decoupling_checks(pcb, spec):
             if not ic_pads:
                 problems.append(f'{ic}.{pin} is not on the board')
                 continue
-            ic_pad = ic_pads[0]
-            cap_pads = [p for p in fp.pads if p.net_id == ic_pad.net_id and p.net_id]
+            net_id = ic_pads[0].net_id
+            cap_pads = [p for p in fp.pads if p.net_id == net_id and net_id]
             if not cap_pads:
-                problems.append(f'{cap} has no pad on the net of {ic}.{pin} ({ic_pad.net_name})')
+                problems.append(f'{cap} has no pad on the net of {ic}.{pin} '
+                                f'({ic_pads[0].net_name})')
                 continue
-            got = _shortest_path(pcb, ic_pad.net_id, cap_pads[0], ic_pad)
+            got = _shortest_path(pcb, net_id, cap_pads, ic_pads)
             if got is None:
-                problems.append(f'{cap}.{cap_pads[0].pad_number} and {ic}.{pin} are not '
-                                f'joined by track copper')
+                problems.append(f'{cap} and {ic}.{pin} are not joined by track copper')
                 continue
             length, vias = got
             measured[f'{ic}.{pin}'] = {'path_mm': _r(length), 'vias': vias}
-            items = [f'{cap}.{cap_pads[0].pad_number}', f'{ic}.{pin}', ic_pad.net_name]
+            items = [f"{cap}.{'/'.join(sorted({str(p.pad_number) for p in cap_pads}))}",
+                     f'{ic}.{pin}', ic_pads[0].net_name]
             if length > limit + 1e-9:
                 found.append(_finding(f'{length:.3f} mm of track from {items[0]} to {items[1]}',
                                       measured=_r(length), limit=limit, units='mm', items=items,
@@ -679,15 +786,41 @@ def decoupling_checks(pcb, spec):
 
 # ---------------------------------------------------------------------------
 
-def audit(board_path, spec, baseline_path=None):
+class BoardError(Exception):
+    pass
+
+
+def board_thickness_mm(board_path):
+    """The board file's `(general (thickness X))`, else impedance's nominal."""
+    import re
+    from impedance import NOMINAL_BOARD_THICKNESS_MM
+    try:
+        with open(board_path, encoding='utf-8', errors='replace') as fh:
+            head = fh.read(20000)
+        m = re.search(r'\(general\b[^()]*(?:\([^()]*\)[^()]*)*?\(thickness\s+([\d.]+)', head)
+        if m and float(m.group(1)) > 0:
+            return float(m.group(1))
+    except (OSError, ValueError):
+        pass
+    return NOMINAL_BOARD_THICKNESS_MM
+
+
+def _parse(path, what):
     from kicad_parser import parse_kicad_pcb
-    pcb = parse_kicad_pcb(board_path)
-    base = parse_kicad_pcb(baseline_path) if baseline_path else None
+    pcb = parse_kicad_pcb(path)
+    if not getattr(pcb.board_info, 'copper_layers', None):
+        raise BoardError(f'{what} {path} declares no copper layers: it is not a board')
+    return pcb
+
+
+def audit(board_path, spec, baseline_path=None):
+    pcb = _parse(board_path, 'board')
+    base = _parse(baseline_path, 'baseline') if baseline_path else None
     checks = spec_free_checks(pcb, base)
     checks += pair_checks(pcb, spec, board_path)
     checks += length_checks(pcb, spec)
     checks += width_checks(pcb, spec, board_path)
-    checks += current_checks(pcb, spec)
+    checks += current_checks(pcb, spec, board_thickness_mm(board_path))
     checks += decoupling_checks(pcb, spec)
     summary = {s: sum(1 for c in checks if c['status'] == s)
                for s in ('passed', 'failed', 'not_judged')}
@@ -717,7 +850,11 @@ def main(argv=None):
     except SpecError as exc:
         print(f'spec error: {exc}', file=sys.stderr)
         return 2
-    report = audit(args.board, spec, args.baseline)
+    try:
+        report = audit(args.board, spec, args.baseline)
+    except BoardError as exc:
+        print(str(exc), file=sys.stderr)
+        return 3 if str(exc).startswith('board') else 2
     for c in report['checks']:
         subject = f" {c['subject']}" if 'subject' in c else ''
         detail = (f" ({len(c['findings'])} finding(s))" if c['status'] == 'failed'
