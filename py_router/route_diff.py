@@ -342,6 +342,40 @@ def coupled_pair_floors(pcb_data, input_file, pairs, routable_layers):
     return floors, cmap
 
 
+def _write_json_out(json_out: Optional[str], document: Optional[dict]) -> None:
+    """Publish ``document`` at ``json_out`` (#1421), route.py's contract.
+
+    All-or-nothing through route_summary.write_summary_file, so a reader never
+    sees half a document; a failure is a WARNING with no file, the case every
+    --json-out reader already handles.
+    """
+    if not json_out or document is None:
+        return
+    try:
+        from route_summary import write_summary_file
+        write_summary_file(json_out, document)
+        print(f"  route summary written to {json_out}")
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  WARNING: could not write --json-out {json_out}: "
+              f"{type(_e).__name__}: {_e}")
+
+
+def _nothing_to_do_document(status: str, extra: Optional[dict] = None) -> dict:
+    """The --json-out document of a run that legitimately routed nothing.
+
+    Same shape as route.py's _write_summary_min_file: the empty tally, WHY it
+    is empty, and the env-knob echo -- so a caller can tell "nothing to do"
+    from a crash that wrote no file.
+    """
+    document = {'successful': 0, 'failed': 0, 'status': status, **(extra or {})}
+    try:
+        import env_knobs as _ek
+        document['env_knobs'] = _ek.active_env_knobs()
+    except Exception:                                           # noqa: BLE001
+        pass
+    return document
+
+
 def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 # #530: cap every auto-read net class at this clearance (the
@@ -440,6 +474,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 add_teardrops: bool = False,
                 return_results: bool = False,
                 pcb_data=None,
+                # #1421: write the run's JSON_SUMMARY to this file (route.py's
+                # --json-out). The GUI passes nothing: it reads results_data.
+                json_out: Optional[str] = None,
                 net_clearances: dict = None,
                 # Net-name globs to PROTECT for this run (reason 'user', #521):
                 # rip machinery skips matches, and they persist to the output
@@ -1070,6 +1107,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 seen_net_ids.add(nid)
     if not net_ids:
         print("No valid nets to route!")
+        _write_json_out(json_out, _nothing_to_do_document('no_valid_nets'))
         if return_results:
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
@@ -1092,6 +1130,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # lands here, so the report is emitted on this path too.
         from keep_away import disclose_keep_away
         _ka_done = disclose_keep_away(pcb_data, config)
+        _write_json_out(json_out, _nothing_to_do_document(
+            'already_connected',
+            {'keep_away': _ka_done} if _ka_done is not None else None))
         if return_results:
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [],
                                'keep_away': keep_away_entries(_ka_done)}
@@ -2228,6 +2269,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if _dr857 is not None:
         summary['design_rules'] = _dr857
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
+    # #1421: the --json-out document; written at the end of the run, once
+    # the via-protection record below has been stamped onto it.
+    _json_out_doc = summary
 
     # Write output file or return results for direct application
     if return_results:
@@ -2336,9 +2380,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # opening, after the write/return split and after everything that lays
     # copper. GUI: the in-memory vias `differential_gui` applies. CLI: the
     # written file.
+    _rec962 = None
     try:
         import fab_notes as _fn962
-        _rec962 = None
         if return_results:
             _v962 = [v for r in (results_data.get('results') or [])
                      for v in (r.get('new_vias') or [])]
@@ -2420,6 +2464,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         run_obstacle_audit(base_obstacles, state.working_obstacles,
                            state.net_obstacles_cache, label="route_diff",
                            pcb_data=pcb_data, config=config)
+
+    # #1421: route.py's --json-out, here too. Written last so the document
+    # carries the via-protection record (#962), which the printed
+    # JSON_SUMMARY predates.
+    if json_out:
+        if _rec962 is not None:
+            _json_out_doc['via_in_pad'] = _rec962
+        _write_json_out(json_out, _json_out_doc)
 
     if return_results:
         return successful, failed, total_time, results_data
@@ -2630,6 +2682,11 @@ Examples:
                         help="Enable MPS-aware layer swaps to reduce crossing conflicts")
     parser.add_argument("--mps-segment-intersection", action="store_true",
                         help="Force MPS to use segment intersection for crossing detection")
+    parser.add_argument("--json-out", metavar="FILE", default=None,
+                        help="Also write the run's JSON_SUMMARY to FILE (route.py's flag, same "
+                             "meaning), with the via-in-pad record the printed line predates. A "
+                             "run with nothing to route writes a document whose 'status' says why. "
+                             "Prefer this over parsing stdout.")
     parser.add_argument("--keep-input-copper", action="store_true",
                         help="Treat the input file's own copper as read-only in the post-route "
                              "cleanup passes (see route.py --keep-input-copper)")
@@ -3040,7 +3097,8 @@ Examples:
                 mps_segment_intersection=args.mps_segment_intersection,
                 keep_input_copper=args.keep_input_copper,
                 schematic_dir=args.schematic_dir,
-                add_teardrops=args.add_teardrops)
+                add_teardrops=args.add_teardrops,
+                json_out=args.json_out)
 
     # Make the output project's DRC design rules consistent with the floors we
     # just routed to (issue #160), mirroring route.py, so a manual DRC in KiCad

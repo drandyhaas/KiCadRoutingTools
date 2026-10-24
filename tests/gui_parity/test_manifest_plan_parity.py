@@ -849,7 +849,8 @@ _PROBE_VALUE = 'PROBE_VALUE'
 # the flag means the same thing there (the shared registrars and the file /
 # diagnostic flags); the rest are the tool's own.
 _SAME_AS_ROUTE = ('--debug-lines', '--debug-memory', '--enable-used-layers',
-                  '--keep-thermal', '--output', '--overwrite', '--quick',
+                  '--json-out', '--keep-thermal', '--output', '--overwrite',
+                  '--quick',
                   '--schematic-dir', '--strict-sizes', '--verbose')
 
 DIFF_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in _SAME_AS_ROUTE}

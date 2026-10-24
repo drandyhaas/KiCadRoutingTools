@@ -740,7 +740,7 @@ See [Length Matching](length-matching.md#time-matching) for how propagation dela
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--json-out FILE` | - | Also write the run's `JSON_SUMMARY` to FILE. This is the merged tally: when the end-of-run reconciliation fires, stdout carries a second, subset-scoped summary, and scraping either one alone is wrong. Prefer this over parsing stdout |
+| `--json-out FILE` | - | Also write the run's `JSON_SUMMARY` to FILE. This is the merged tally: when the end-of-run reconciliation fires, stdout carries a second, subset-scoped summary, and scraping either one alone is wrong. Prefer this over parsing stdout. `route_diff.py` takes it too, with the same meaning (#1421). A run with nothing to route still writes the file, with a `status` saying why |
 | `--write-fill` | off | After writing the board, fill its zones with KiCad's own zone filler so the file carries `(filled_polygon ...)` blocks (#910); without it the board ships zone outlines only. Needs KiCad's bundled python |
 | `--capabilities` | off | Print this clone's module and flag inventory as JSON and exit (see `krt_capabilities.py --require`) |
 

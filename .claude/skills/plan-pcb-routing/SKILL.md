@@ -3095,8 +3095,12 @@ router has nothing to improve there: the escalation ladder never fires and the
 copper comes back byte-identical. (When the scope holds a poured net, the step
 still runs the plane finalize and the end-of-run cleanup, #1112, so copper can
 be tidied, but no connected net is re-routed.) To change the geometry of copper the router is
-happy with you must **rip** it (`--rip-existing-nets <exact names>`) or route the
-whole board. Run 20 spent a lap discovering this — a targeted via fix produced
+happy with, name the nets in `--nets` and pass **`--force-reroute`**: it strips
+their copper and re-routes them from scratch (#515). `--rip-existing-nets` is
+NOT that lever: it only lets the router rip a net that BLOCKS another route, so
+a connected net named in both `--nets` and `--rip-existing-nets` is dropped as
+already connected and ships unchanged (the run warns "will NOT be re-routed").
+Otherwise, route the whole board. Run 20 spent a lap discovering this — a targeted via fix produced
 vias at identical coordinates in both boards.
 
 **When the hint names a rail or a protected pair, rip THAT ONE, alone** (#1039),
