@@ -961,6 +961,7 @@ python3 -X utf8 py_tools/audit.py routed.kicad_pcb --spec spec.json \
 Without a spec only the spec-free checks run: `check_weird`'s advisory
 categories and `check_via_mask`'s two. The spec (keys starting with `_` are
 comments; an unknown key, or a value of the wrong type or range, is exit 2;
+an empty `reference_nets` means any pour counts;
 `tolerance_mm` and `mode` are optional as in `board_score`):
 
 ```json
@@ -994,15 +995,16 @@ the board's `diff_pair_gap` rule, else its netclass diff pair gap, else (for
 impedance) the layer's dielectric height. The current checks solve
 `dc_network`'s resistor network of the net's tracks and vias (copper at
 20 C, via plating `via_plating_mm`, default 0.020 mm, each via step's barrel
-the stackup's length between its layers, or the board thickness shared out
-by layer order when the stackup does not give it); pours are left out, so
+the stackup's length between its layers less half of an inner end layer's
+copper, so a via's steps add up to its whole barrel, or the board thickness
+shared out by layer order when the stackup does not give it); pours are left out, so
 resistances read high and a load joined only through a pour is not judged.
 Every pad of a named source or load conducts, so a part whose pad number
 repeats is one terminal. A list of `loads` is judged one load at a time at
 the full `amps`; a dict gives each load its own current, solved together.
 Without `loads`, every other numbered copper pad of the net is a load. Exit 0 every judged
-check passed; 4 a check failed; 3 the board is missing or not a board; 2 bad
-arguments, spec or baseline; 1 crash. `board_score --spec` and
+check passed; 4 a check failed; 3 the board is missing, not text, cut short
+or not a board; 2 bad arguments, spec or baseline; 1 crash. `board_score --spec` and
 `check_complete --spec` count the failed spec checks in `blocking`.
 
 ## Route Review (`route_review.py`)

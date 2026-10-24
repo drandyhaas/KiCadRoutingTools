@@ -37,7 +37,12 @@ Synthetic boards whose answers are computed independently:
        with no number is no default load; (10) a width glob matching nothing
        is reported, a length group's missing net fails, tolerance_mm is
        optional; (11) one finding per segment and per via; (12) a via step's
-       barrel is the stackup's length between its two layers.
+       barrel is the stackup's length between its two layers, less half of
+       an inner end layer's copper, so a via's steps add up to its barrel.
+9. The review of the fixes: an empty reference_nets and an integral float
+   max_vias are valid; a glob shadowed by an earlier one gets no "matches
+   nothing" record; a binary file and a board cut short are exit 3 (exit 2
+   as a baseline).
 
     python3 tests/test_1237_audit.py
 """
@@ -223,13 +228,20 @@ def review_cases():
                   + seg(102, 100, 103, 100, 3, layer='In1.Cu') + via(103, 100, 3)
                   + seg(103, 100, 104, 100, 3), 'part')
     pcb = parse_kicad_pcb(part)
-    step = pcb.get_via_barrel_length('F.Cu', 'In1.Cu')
+    step = pcb.get_via_barrel_length('F.Cu', 'In1.Cu') - 0.035 / 2   # In1.Cu is inner
     v_ohm = RHO_OHM_MM * step / (math.pi * 0.3 * dc_network.VIA_PLATING_MM)
     want = (RHO_OHM_MM * 4 / (0.5 * T_CU) + 2 * v_ohm) * 1e3   # 2 + 1 + 1 mm of track
     rc, doc, _o = run(part, {'currents': {'/A': {'amps': 1, 'source': 'C1.1', 'max_drop_mv': 1000}}})
     d = get(doc, 'current.drop', '/A')['measured']['U1.1']
     check(f'8(12). an F.Cu-In1.Cu step is charged its {step:.4f} mm barrel',
-          abs(d - want) < 0.01, f'{d} vs {want:.3f}')
+          abs(d - want) < 0.005, f'{d} vs {want:.4f}')
+    full = pcb.get_via_barrel_length('F.Cu', 'B.Cu')
+    v_full = RHO_OHM_MM * full / (math.pi * 0.3 * dc_network.VIA_PLATING_MM)
+    want = (RHO_OHM_MM * 4 / (0.5 * T_CU) + v_full) * 1e3
+    rc, doc, _o = run(four, {'currents': {'/A': {'amps': 1, 'source': 'C1.1', 'max_drop_mv': 1000}}})
+    d = get(doc, 'current.drop', '/A')['measured']['U1.1']
+    check(f"8(12). a through via's three steps add up to its {full:.3f} mm barrel",
+          abs(d - want) < 0.005, f'{d} vs {want:.4f}')
     # (8) repeated pad numbers
     two_ones = ('(footprint "L:P" (layer "F.Cu") (at 100 100) (property "Reference" "J1")'
                 ' (pad "1" smd rect (at 0 -1) (size 1 1) (layers "F.Cu" "F.Mask") (net 3 "/A"))'
@@ -273,6 +285,32 @@ def review_cases():
     c = get(doc, 'current.capacity', '/A')
     check('8(11). a segment cut by a T-junction is one capacity finding',
           c['status'] == 'failed' and len(c['findings']) == 1, str(c))
+
+
+def fix_review_cases():
+    rc, _d, out = run(os.path.join(WORK, 'pair.kicad_pcb'),
+                      {'pairs': {'D': {'nets': ['/P', '/N']}}, 'reference_nets': []})
+    check('9. an empty reference_nets is valid (any pour counts)', rc in (0, 4), out[-200:])
+    rc, _d, out = run(os.path.join(WORK, 'dec.kicad_pcb'),
+                      {'decoupling': {'C1': {'ic': 'U1', 'pins': ['1'], 'max_distance_mm': 9,
+                                             'max_vias': 2.0}}})
+    check('9. max_vias 2.0 is valid', rc in (0, 4), out[-200:])
+    rc, _d, out = run(os.path.join(WORK, 'dec.kicad_pcb'),
+                      {'decoupling': {'C1': {'ic': 'U1', 'pins': ['1'], 'max_distance_mm': 9,
+                                             'max_vias': 1.5}}})
+    check('9. max_vias 1.5 is not', rc == 2, out[-200:])
+    rc, doc, _o = run(plain_board(), {'net_min_widths': {'/A': 0.1, '/*': 0.3}})
+    check('9. a glob shadowed by an earlier one gets no "matches nothing" record',
+          get(doc, 'net.min_width', '/*') is None, str(doc['checks'][-2:]))
+    binfile = os.path.join(WORK, 'bin.kicad_pcb')
+    with open(binfile, 'wb') as fh:
+        fh.write(bytes(range(256)) * 12)
+    check('9. a binary file is exit 3', run(binfile)[0] == 3)
+    check('9. ...and as a baseline exit 2', run(plain_board(), extra=['--baseline', binfile])[0] == 2)
+    cut = os.path.join(WORK, 'cut.kicad_pcb')
+    with open(cut, 'w') as fh:
+        fh.write(open(os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb')).read()[:5000])
+    check('9. a board cut short is exit 3', run(cut)[0] == 3)
 
 
 def plain_board():
@@ -461,6 +499,7 @@ def main():
           and any('audit' in str(u) for u in score.get('ungraded', [])), str(score.get('ungraded')))
 
     review_cases()
+    fix_review_cases()
 
     print(f"\n{'ALL PASS' if not FAILS else '%d FAIL' % len(FAILS)}")
     return 1 if FAILS else 0
