@@ -12,10 +12,12 @@ runnable tool in the clone with a one-line purpose.
   [KiCad's unconnected count](#kicad-unconnected-count-kicad_unconnectedpy) ·
   [board score](#board-score-board_scorepy) ·
   [is it done?](#completion-check-check_completepy) ·
+  [spec audit](#spec-audit-auditpy) ·
   [orphan stubs](#orphan-stub-checker-check_orphan_stubspy) ·
   [pad geometry](#pad-geometry-checker-check_padspy) ·
   [cycles](#cycle-checker-check_cyclespy) ·
   [copper hygiene](#copper-hygiene-checker-check_weirdpy) ·
+  [vias in mask openings](#via-mask-checker-check_via_maskpy) ·
   [non-orthonormal segments](#non-orthonormal-segment-checker-check_orthonormalpy) ·
   [impedance](#impedance-audit-check_impedancepy) ·
   [reachability](#reachability-check-check_reachabilitypy) ·
@@ -889,7 +891,7 @@ One authoritative score for a board, so a loop can tell better from worse:
 
 ```
 blocking = unrouted + broken + drc + undersized + floorplan + assembly
-           + impedance + length + net_widths
+           + impedance + length + net_widths + diff_pairs + audit
 quality  = (vias, copper_mm, segments)     # compared only once blocking == 0
 ```
 
@@ -924,6 +926,11 @@ python3 -X utf8 py_tools/board_score.py routed.kicad_pcb --baseline start.kicad_
   ungraded).
 - `--min-track-width` / `--min-via-diameter` / `--min-via-drill` /
   `--size-margin` — the board's spec size floors, when tighter than the fab's.
+- `--spec JSON` — runs [`audit.py`](#spec-audit-auditpy) with that spec; the
+  `audit` component counts the spec checks that failed and lists the ones it
+  could not judge; when it judged no spec check at all (an empty spec, or
+  every check not judged) the component is ungraded. The spec-free checks are
+  listed in `spec_free_failed` and never counted.
 - `--label` — free text carried into the JSON.
 
 Stdout carries a `SCORE_JSON=` line (each assembly list capped at 20 entries,
@@ -957,9 +964,80 @@ components do not block DONE but are named in the verdict line.
 `--authored-from` is the board the chain started from (its project carries
 the floors this one should still respect); `--baseline` is handed to
 `board_score`. It takes `board_score`'s spec flags (`--clearance`, `--intent`,
-`--impedance-nets`, `--length-groups`, `--net-min-widths`, the size floors),
+`--impedance-nets`, `--length-groups`, `--net-min-widths`, `--spec`, the size floors),
 `--skip-slow` (only `board_score`, not the added instruments) and `--timeout S`
 per instrument (default 3600). Exit 2 usage, 3 board state.
+
+## Spec Audit (`audit.py`)
+
+Judges a routed board against a spec and reports every check that passed,
+failed or could not be judged, with the reason for each failure (#1237). It
+never infers what the board should do: the spec says so, and the audit
+measures the copper. Each finding gives `measured`, `limit`, `units`,
+`where`, `items` and `limit_from` (the spec, the board's own files, or
+`fab_tiers`).
+
+```bash
+python3 -X utf8 py_tools/audit.py routed.kicad_pcb --spec spec.json \
+    [--baseline start.kicad_pcb] [--json report.json]
+```
+
+Without a spec only the spec-free checks run: `check_weird`'s advisory
+categories and `check_via_mask`'s two. The spec (keys starting with `_` are
+comments, inside `net_min_widths` too; an unknown key, or a value of the
+wrong type or range, is exit 2; an empty `reference_nets` means any pour
+counts; `tolerance_mm` and `mode` are optional as in `board_score`):
+
+```json
+{
+  "pairs": {"USB": {"nets": ["/USB_DP", "/USB_DM"], "impedance_ohm": 90,
+                    "tolerance_pct": 10, "max_skew_mm": 0.15,
+                    "max_uncoupled_mm": 3.0, "gap_max_mm": 0.2}},
+  "reference_nets": ["GND"],
+  "length_groups": {"BYTE0": {"nets": ["/DQ0", "/DQ1"], "tolerance_mm": 0.1}},
+  "net_min_widths": {"VBUS": 0.4},
+  "currents": {"VBUS": {"amps": 1.5, "source": "J1.1", "loads": ["U1.3"],
+                        "max_rise_c": 10, "max_drop_mv": 100}},
+  "decoupling": {"C3": {"ic": "U1", "pins": ["4"], "max_distance_mm": 2.0,
+                        "max_vias": 1}}
+}
+```
+
+| check | judges |
+|---|---|
+| `pair.impedance` | each coupled stretch's differential impedance (`impedance.calculate_impedance_for_layer`, IPC-2141 edge-coupled: approximate) against the target and tolerance |
+| `pair.skew`, `pair.uncoupled` | KiCad's skew and uncoupled length (`net_queries.diff_pair_skew`, `diff_pair_coupling`) |
+| `pair.reference` | `check_impedance`'s reference-plane crossings under the pair; `reference_nets` limits which pours count |
+| `length.match` | `net_match_length` spread per group (`mode` `total` or `pin_pair`); a group with a net not on the board, or fewer than 2 nets, fails |
+| `net.min_width` | every segment of a matching net, at the stricter of the spec and the board's own `min_track_width` |
+| `current.capacity`, `current.via` | each track piece's and via's current against the IPC-2152-form rating at `max_rise_c` (default 10) |
+| `current.drop` | each load's DC drop from the source |
+| `decoupling.path` | the shortest track path from the cap to each IC pin, and the vias on it |
+
+A stretch counts as coupled inside the pair's gap window: `gap_max_mm`, else
+the board's `diff_pair_gap` rule, else its netclass diff pair gap, else (for
+impedance) the layer's dielectric height. A routed pair with no stretch inside
+its window fails `pair.impedance`, and the finding gives the impedance of its
+closest parallel stretch. A name the spec gives that the board does not have
+(a pair or reference net, a current net, source or load pad, a decoupling cap
+or IC pin) is a failed finding about the spec; not judged is only for copper
+the board lacks (an unrouted net, a load not joined to its source). The current checks solve
+`dc_network`'s resistor network of the net's tracks and vias (copper at
+20 C, via plating `via_plating_mm`, default 0.020 mm, each via step's barrel
+the stackup's length between its layers less half the copper of an end
+layer that is not one of the via's own ends, so a via's steps add up to its
+whole barrel, or the board thickness
+shared out by layer order when the stackup does not give it); pours are left out, so
+resistances read high and a load joined only through a pour is not judged.
+Every pad of a named source or load conducts, so a part whose pad number
+repeats is one terminal. A list of `loads` is judged one load at a time at
+the full `amps`; a dict gives each load its own current, solved together.
+Without `loads`, every other numbered copper pad of the net is a load. Exit 0 every judged
+check passed; 4 a check failed; 3 the board is missing, not text, cut short
+or not a board; 2 bad arguments, spec or baseline; 1 crash. `board_score --spec` and
+`check_complete --spec` count the failed spec checks in `blocking`; when no
+spec check was judged (an empty spec, or every check not judged) the audit
+component is ungraded.
 
 ## Route Review (`route_review.py`)
 
@@ -2359,8 +2437,28 @@ category each:
 - `kicad-dangling` -- a joint segment whose ends both lie on other same-net
   tracks, which KiCad's DRC reports as `track_dangling` (#1217).
 
+Three more categories are **advisory**: connected, DRC-clean copper the corpus
+A/B counts. They are printed under `ADVISORY` and written to
+`--json`, never set the exit code, and `check_weird()` returns them only with
+`advisory=True`, so `check_complete.py` and every in-process caller see what
+they saw before. Graphic copper and the chords of a linearised arc track are
+skipped.
+
+- `off-angle-corner` -- two track segments of one net meet on one layer, off
+  any same-net pad, turning by more than 1 degree from 0, 45 or 90 (a 135
+  degree turn, an acute corner, counts) (#1233);
+- `short-fragment` -- a segment shorter than `--fragment-floor` (0.1 mm) with
+  neither end on a same-net pad or via (#1234);
+- `off-centre-via-end` -- a track end reaching a same-net via's copper on one
+  of its layers, but not at its centre (#1235).
+
+`py_tools/check_orthonormal.py` overlaps `off-angle-corner`: it flags the
+skewed SEGMENTS longer than about one grid cell, so a long off-45 run shows in
+both, while an acute 135 degree turn between two orthonormal segments shows
+only here.
+
 It never modifies the board — use it as a triage pass before or after the
-other checkers. Exit 1 when anything is found, else 0.
+other checkers. Exit 1 when a non-advisory category finds anything, else 0.
 
 **Removable** is graded by the same predicate route.py's post-route cleanup
 removes by (`pcb_modification.StrictRemovalModel`, #1063): a segment, or an
@@ -2389,6 +2487,10 @@ Options:
                         soft-joint, narrow-pad-joint and kicad-dangling carry no
                         size and are always reported
   --max-print INT       Max findings printed per category (<=0 prints all; default 20)
+  --no-advisory         Skip the advisory categories
+  --fragment-floor MM   short-fragment length floor (default 0.1)
+  --json PATH           Write {"counts", "findings", "skipped_nets"}; counts
+                        carries every registered category
 ```
 
 ### Examples
@@ -2403,6 +2505,46 @@ python3 py_router/check_weird.py routed.kicad_pcb --nets "*lvds*" --tolerance 0
 # Include the slow removable-segment scan on large nets
 python3 py_router/check_weird.py routed.kicad_pcb --thorough
 ```
+
+## Via Mask Checker (`check_via_mask.py`)
+
+Vias whose copper ring reaches into, or crowds, a pad's solder-mask opening
+(#1232). A pad's opening is its copper grown by its resolved solder-mask
+expansion (`mask_apertures`, pinned to pcbnew's `GetSolderMaskExpansion`).
+
+- `via-mask-contact` -- the via's ring touches or overlaps a pad's opening on
+  a side the via reaches, its centre outside that pad's copper. Any net.
+  Against a pad whose same-net paste opening on that side holds the via's
+  barrel, the contact is `check_drc`'s `via-in-paste` and is not repeated
+  here; the via is still graded against every other pad.
+- `via-mask-web` -- a via plugged with soldermask on that side (KiCad
+  `plugging`, resolved per side against the board setup) whose ring is closer
+  to a pad opening than `--plug-web` (default
+  `fab_tiers.JLC_PLUGGED_VIA_MASK_WEB_MM`, 0.35 mm, JLCPCB's figure for
+  soldermask-plugged vias).
+
+A positive margin rounds the opening's corners at the margin, as KiCad plots
+it. Openings of trapezoid and chamfered pads, and of custom pads with a
+negative margin, are approximate; a finding against one names the reason in
+its `approximation` field, and the report counts them.
+
+KiCad's own `solder_mask_bridge` rule reports an opening that exposes copper
+of two different nets; it says nothing about a same-net via, and the corpus
+A/B's KiCad grade does not count it.
+
+```bash
+python3 py_tools/check_via_mask.py board.kicad_pcb [OPTIONS]
+
+Options:
+  --baseline BOARD   Accept findings this board (e.g. the unrouted input)
+                     already had: same category, pad and side, from a via on
+                     the same net name within half the smaller diameter
+  --plug-web MM      The via-mask-web limit
+  --json PATH        Write {"counts", "findings", "inherited"}
+  --max-print INT    Findings printed per category (<=0 prints all)
+```
+
+Read-only. Exit 1 when anything not accepted is found, else 0.
 
 ## Non-Orthonormal Segment Checker (`check_orthonormal.py`)
 
