@@ -16,7 +16,7 @@ Synthetic boards whose answers are computed independently:
      not_judged, never a pass.
 4. decoupling.path: the shortest track path (via barrels counted, as
    net_queries measures length) and its via count, against max_distance_mm
-   and max_vias; a pin that does not exist is not_judged.
+   and max_vias; a pin that does not exist fails (a finding about the spec).
 5. pairs on a stackup board: each coupled stretch's impedance equals
    impedance.calculate_impedance_for_layer at its width and gap; the window
    from gap_max_mm leaves a wider stretch out; skew and uncoupled length;
@@ -32,7 +32,7 @@ Synthetic boards whose answers are computed independently:
    (4) a file that is not a board is exit 3, as a baseline exit 2;
    (5) a value of the wrong type or range is exit 2, never a crash or a
        character-by-character read; (6) a reference net not on the board is
-       not_judged; (7) one through via on four layers is one via;
+       a failed finding about the spec (since section 11); (7) one through via on four layers is one via;
    (8) a terminal's pads that share a number conduct together; (9) a pad
        with no number is no default load; (10) a width glob matching nothing
        is reported, a length group's missing net fails, tolerance_mm is
@@ -47,6 +47,13 @@ Synthetic boards whose answers are computed independently:
 10. The review of those: a teardrop child without its "(" (#1149) and a
    leading byte-order mark still audit; a blind or buried via's steps add
    up to its barrel; an integer too large for a float is exit 2.
+11. The whole-PR review: a name the spec gives that the board lacks (pair
+   net, current net/source/load, decoupling cap) fails; a routed pair
+   entirely outside its gap window fails pair.impedance at its closest
+   stretch, an unrouted one is not judged; board_score grades no audit when
+   no spec check was judged (an empty spec); "_" keys in net_min_widths are
+   comments; a one-net length group fails; converge compares a score from
+   before the audit component with one after.
 
     python3 tests/test_1237_audit.py
 """
@@ -212,8 +219,8 @@ def review_cases():
     rc, doc, _o = run(os.path.join(WORK, 'pair.kicad_pcb'),
                       {'pairs': {'D': {'nets': ['/P', '/N']}}, 'reference_nets': ['GNDX']})
     c = get(doc, 'pair.reference', 'D')
-    check('8(6). reference_nets naming no net is not_judged', c['status'] == 'not_judged'
-          and 'GNDX' in c['reason'], str(c))
+    check('8(6). reference_nets naming no net fails, a finding about the spec',
+          c['status'] == 'failed' and 'GNDX' in c['findings'][0]['reason'], str(c))
     # (7) + (12) one through via on four layers
     four = board4(pad('C1', 100, 100, 3, '/A') + pad('U1', 104, 100, 3, '/A', layers='"B.Cu" "B.Mask"')
                   + seg(100, 100, 102, 100, 3) + via(102, 100, 3)
@@ -354,6 +361,77 @@ def second_fix_review_cases():
               abs(steps - full) < 1e-9, f'{steps:.4f}')
 
 
+def full_review_cases():
+    from impedance import calculate_impedance_for_layer
+    pair_b, dec_b = os.path.join(WORK, 'pair.kicad_pcb'), os.path.join(WORK, 'dec.kicad_pcb')
+    rc, doc, _o = run(pair_b, {'pairs': {'D': {'nets': ['/P', '/USB_DM'], 'max_skew_mm': 1}}})
+    c = get(doc, 'pair.skew', 'D')
+    check('11. a pair net not on the board fails', rc == 4 and c['status'] == 'failed', str(c))
+    for what, entry in (('a current net', ('/NOPE', {'amps': 1, 'source': 'J1.1'})),
+                        ('a current source', ('/A', {'amps': 1, 'source': 'J9.1'})),
+                        ('a current load', ('/A', {'amps': 1, 'source': 'J1.1', 'loads': ['U9.1']}))):
+        rc, doc, _o = run(plain_board(), {'currents': {entry[0]: entry[1]}})
+        c = get(doc, 'current.capacity', entry[0])
+        check(f'11. {what} not on the board fails', c['status'] == 'failed', str(c))
+    rc, doc, _o = run(dec_b, {'decoupling': {'C9': {'ic': 'U1', 'pins': ['1'], 'max_distance_mm': 5}}})
+    check('11. a decoupling cap not on the board fails',
+          get(doc, 'decoupling.path', 'C9')['status'] == 'failed')
+    # a routed pair whose only stretch is outside its window
+    wide = board(pad('J1', 100, 100, 1, '/P', size='0.2 0.2') + pad('J2', 100, 100.8, 5, '/N', size='0.2 0.2')
+                 + pad('U1', 120, 100, 1, '/P', size='0.2 0.2') + pad('U2', 120, 100.8, 5, '/N', size='0.2 0.2')
+                 + seg(100, 100, 120, 100, 1, w=0.2) + seg(100, 100.8, 120, 100.8, 5, w=0.2), name='wide')
+    z = calculate_impedance_for_layer(parse_kicad_pcb(wide), 'F.Cu', 0.2, spacing=0.6)['zdiff']
+    for gap in ({'gap_max_mm': 0.2}, {}):
+        rc, doc, _o = run(wide, {'pairs': {'D': dict({'nets': ['/P', '/N'], 'impedance_ohm': 90,
+                                                      'tolerance_pct': 10}, **gap)}})
+        c = get(doc, 'pair.impedance', 'D')
+        check(f'11. a pair routed outside its window {gap or "(dielectric height)"} '
+              f'fails at its closest stretch, {z:.1f} ohm',
+              c['status'] == 'failed' and c['findings'][0]['measured'] == round(z, 2), str(c))
+    bare = board(pad('J1', 100, 100, 1, '/P') + pad('J2', 100, 101, 5, '/N')
+                 + pad('U1', 120, 100, 1, '/P') + pad('U2', 120, 101, 5, '/N'), name='bare')
+    rc, doc, _o = run(bare, {'pairs': {'D': {'nets': ['/P', '/N'], 'impedance_ohm': 90,
+                                             'tolerance_pct': 10}}})
+    check('11. an unrouted pair is not judged for impedance',
+          get(doc, 'pair.impedance', 'D')['status'] == 'not_judged')
+    rc, doc, out = run(plain_board(), {'net_min_widths': {'_comment': 'rails', '/A': 0.4}})
+    check('11. a "_" key in net_min_widths is a comment', rc in (0, 4)
+          and get(doc, 'net.min_width', '_comment') is None, out[-200:])
+    rc, doc, _o = run(plain_board(), {'length_groups': {'G': {'nets': ['/A']}}})
+    check('11. a one-net length group fails, as board_score counts it',
+          get(doc, 'length.match', 'G')['status'] == 'failed')
+    bs = os.path.join(ROOT, 'py_tools', 'board_score.py')
+    js = os.path.join(WORK, 'score11.json')
+    unrouted_pair = {'pairs': {'D': {'nets': ['/P', '/N'], 'impedance_ohm': 90, 'tolerance_pct': 10}}}
+    for what, target, spec in (('an empty spec', plain_board(), {}),
+                               ('a spec judging nothing (an unrouted pair)', bare, unrouted_pair)):
+        subprocess.run([sys.executable, bs, target, '--spec', spec_file(spec, 'e11'), '--json', js],
+                       capture_output=True, text=True)
+        score = json.load(open(js))
+        comp = score['components']['audit']
+        check(f'11. board_score grades no audit for {what}',
+              comp['ran'] is False and comp['count'] is None and 'audit' in score['ungraded'],
+              str(comp))
+    sp = spec_file({'pairs': {'U': {'nets': ['/USB_DP', '/USB_DM'], 'max_skew_mm': 0.1}}}, 'typo')
+    subprocess.run([sys.executable, bs, plain_board(), '--spec', sp, '--json', js],
+                   capture_output=True, text=True)
+    check('11. a spec whose names are not on the board blocks (skew and reference)',
+          json.load(open(js))['blocking_by'].get('audit') == 2)
+    sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
+    from converge import commensurability
+    before = {'blocking': 5, 'blocking_by': {'unrouted': 5}, 'ungraded': [], 'components': {}}
+    after = {'blocking': 4, 'blocking_by': {'unrouted': 4, 'audit': None}, 'ungraded': ['audit'],
+             'components': {'audit': {'ran': False, 'reason': 'no --spec given'}}}
+    check('11. converge: a score from before the audit component compares with one after',
+          commensurability(before, after) is None, str(commensurability(before, after)))
+    graded = {'blocking': 5, 'blocking_by': {'unrouted': 4, 'audit': 1}, 'ungraded': [],
+              'components': {}}
+    lost = {'blocking': 4, 'blocking_by': {'unrouted': 4}, 'ungraded': [], 'components': {}}
+    got = commensurability(graded, lost)
+    check('11. converge: a score that drops a graded audit is still a false improvement',
+          got is not None and got[0] == ['audit'] and got[2] is True, str(got))
+
+
 def plain_board():
     return os.path.join(WORK, 'plain.kicad_pcb')
 T_CU = 0.035
@@ -454,8 +532,8 @@ def main():
               and abs(c['measured']['U1.1']['path_mm'] - path) < 0.001, str(c))
     rc, doc, _o = run(dec, {'decoupling': {'C1': {'ic': 'U1', 'pins': ['9'],
                                                   'max_distance_mm': 5}}})
-    check('4. a pin that does not exist is not_judged',
-          get(doc, 'decoupling.path', 'C1')['status'] == 'not_judged')
+    check('4. a pin that does not exist fails',
+          get(doc, 'decoupling.path', 'C1')['status'] == 'failed')
 
     # ---- 5. pairs -------------------------------------------------------------
     from impedance import calculate_impedance_for_layer
@@ -480,8 +558,9 @@ def main():
     rc, doc, _o = run(pb, {'pairs': {'D': {'nets': ['/P', '/N'], 'impedance_ohm': z,
                                            'tolerance_pct': 5, 'gap_max_mm': 0.1,
                                            'max_uncoupled_mm': 1.0}}})
-    check('5. a gap window below the 0.15 mm gap leaves the stretch out',
-          get(doc, 'pair.impedance', 'D')['status'] == 'not_judged')
+    c = get(doc, 'pair.impedance', 'D')
+    check('5. a gap window below the 0.15 mm gap: the routed pair is never coupled, so fails',
+          c['status'] == 'failed' and c['findings'][0]['measured'] == round(z, 2), str(c))
     check('5. ...and the whole pair runs uncoupled',
           get(doc, 'pair.uncoupled', 'D')['status'] == 'failed')
     rc, doc, _o = run(pb, {'pairs': {'D': {'nets': ['/P', '/N'], 'max_skew_mm': 0.01,
@@ -542,6 +621,7 @@ def main():
     review_cases()
     fix_review_cases()
     second_fix_review_cases()
+    full_review_cases()
 
     print(f"\n{'ALL PASS' if not FAILS else '%d FAIL' % len(FAILS)}")
     return 1 if FAILS else 0

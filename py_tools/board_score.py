@@ -1088,8 +1088,9 @@ def score_audit(root: str, board: str, spec_file: str, tmp: str,
     `not_judged`, not counted, as the other components treat what they
     cannot see. The spec-free checks audit.py always runs (check_weird's
     advisory categories, check_via_mask) are listed in `spec_free_failed` and
-    never counted: they are reported, not blocking. Without --spec the
-    component is ungraded."""
+    never counted: they are reported, not blocking. Without --spec, or when
+    audit.py judged no spec check at all (an empty spec, or every check not
+    judged), the component is ungraded."""
     if not spec_file:
         return skipped('no --spec given; the spec audit is ungraded')
     if not os.path.isfile(spec_file):
@@ -1105,8 +1106,14 @@ def score_audit(root: str, board: str, spec_file: str, tmp: str,
     with open(out_json, encoding='utf-8') as fh:
         rep = json.load(fh)
     from audit import SPEC_FREE_IDS
-    failed = [c for c in rep['checks'] if c['status'] == 'failed'
-              and c['id'] not in SPEC_FREE_IDS]
+    spec_checks = [c for c in rep['checks'] if c['id'] not in SPEC_FREE_IDS]
+    failed = [c for c in spec_checks if c['status'] == 'failed']
+    if not any(c['status'] in ('passed', 'failed') for c in spec_checks):
+        out = skipped('the spec audit judged no spec check (an empty spec, or '
+                      'every check not judged)')
+        out['not_judged'] = [f"{c['id']} {c.get('subject', '')}: {c.get('reason')}".strip()
+                             for c in spec_checks]
+        return out
     return {'ran': True, 'count': len(failed), 'summary': rep['summary'],
             'failed': [f"{c['id']} {c.get('subject', '')}".strip() for c in failed],
             'spec_free_failed': [c['id'] for c in rep['checks'] if c['status'] == 'failed'
