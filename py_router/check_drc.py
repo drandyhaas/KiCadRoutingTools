@@ -3491,6 +3491,19 @@ def check_via_size(via: Via, min_via_diameter: float, min_via_drill: float,
     return dia_bad, drill_bad, dia_short, drill_short
 
 
+def check_via_annular(via: Via, min_ring: float,
+                      size_margin: float = 0.0) -> Tuple[bool, float]:
+    """Check a via's annular ring, (size - drill) / 2, against ``min_ring``
+    (#1433). A drill at or above the pad's size has no ring at all.
+
+    Returns (ring_too_small, shortfall_mm).
+    """
+    if not via.size or not via.drill:
+        return False, 0.0
+    short = min_ring - (via.size - via.drill) / 2.0
+    return short > max(size_margin, SIZE_EPS_MM), short
+
+
 def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, layer: str = "User.7"):
     """Write debug lines to PCB file showing violation locations.
 
@@ -4098,6 +4111,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
         eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
         eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
+        # #1433: the annular ring the floor's smallest via implies -- the same
+        # number route.py's enforce_fab_floors pins an explicit via up to.
+        # Diameter and drill pass one at a time, so without this a via whose
+        # drill is wider than its pad graded clean.
+        eff_min_via_ring = max(0.0, (fab['via_diameter'] - fab['via_drill']) / 2.0)
         # #530: the board's OWN size minimums -- Board Setup rules.min_* and
         # every .kicad_dru track_width / via_diameter / hole_size rule, resolved
         # per net and layer in KiCad's order, raised to the fab floor -- are
@@ -5676,6 +5694,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             _vd, _vh = _via_floors(via)
             dia_bad, drill_bad, dia_short, drill_short = check_via_size(
                 via, _vd, _vh, size_margin)
+            ring_bad, ring_short = check_via_annular(via, eff_min_via_ring,
+                                                     size_margin)
+            if ring_bad:
+                net_name = pcb_data.nets.get(via.net_id, None)
+                violations.append({
+                    'type': 'via-annular',
+                    'net1': net_name.name if net_name else f"net_{via.net_id}",
+                    'size': via.size,
+                    'drill': via.drill,
+                    'ring': (via.size - via.drill) / 2.0,
+                    'min_ring': eff_min_via_ring,
+                    'shortfall_mm': ring_short,
+                    'via_loc': (via.x, via.y),
+                })
             if dia_bad or drill_bad:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
@@ -6041,6 +6073,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     elif vtype == 'via-drill-size':
                         print(f"  Via:{v['net1']} drill hole too small for fab")
                         print(f"    Drill: {v['drill']:.4f}mm < min {v['min_drill']:.4f}mm "
+                              f"(short {v['shortfall_mm']:.4f}mm)")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'via-annular':
+                        print(f"  Via:{v['net1']} annular ring too small for fab")
+                        print(f"    Size {v['size']:.4f}mm, drill {v['drill']:.4f}mm: ring "
+                              f"{v['ring']:.4f}mm < min {v['min_ring']:.4f}mm "
                               f"(short {v['shortfall_mm']:.4f}mm)")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     # #326: attribute above-global requirements (pad/footprint

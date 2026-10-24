@@ -70,7 +70,8 @@ import tempfile
 # the split matters because they take different levers -- a size violation is a
 # re-route at a different width/via, a clearance violation is a routing conflict.
 # Source: check_drc.py's `by_type` grouping (:2801) over the 'type' key.
-SIZE_TYPES = frozenset({'track-width', 'via-size', 'via-drill-size'})
+SIZE_TYPES = frozenset({'track-width', 'via-size', 'via-drill-size',
+                        'via-annular'})
 
 # Seg-seg pairs whose violation exists ONLY because a .kicad_dru track
 # rule raised the pair clearance (check_drc tags them with a distinct type and

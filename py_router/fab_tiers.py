@@ -793,7 +793,60 @@ def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):
               f"pinning up to {floor}. Pass --fab-overrides "
               f"to declare a smaller fab capability, or raise the value to silence this.")
         pinned[name] = floor
+    # #1433: the size and drill floors hold one value at a time; the via must
+    # also keep a copper ring around its hole.
+    if 'via_size' in params and 'via_drill' in params:
+        vs = pinned.get('via_size', params.get('via_size'))
+        vd = pinned.get('via_drill', params.get('via_drill'))
+        new_vs = via_size_for_annular_ring(vs, vd, copper_layer_count, tier,
+                                           overrides)
+        if new_vs is not None and vs is not None and new_vs > vs:
+            ring = min_via_annular_ring(copper_layer_count, tier, overrides)
+            print(f"  WARNING: --via-size {vs} with --via-drill {vd} leaves an "
+                  f"annular ring of {(vs - vd) / 2.0:.4g} mm, below the "
+                  f"{ring:.4g} mm the physical fab floor's via implies (a "
+                  f"drill wider than its pad has no ring at all); pinning "
+                  f"--via-size up to {new_vs}. Pass --fab-overrides to "
+                  f"declare a smaller fab capability, or give a via that "
+                  f"holds its drill to silence this.")
+            pinned['via_size'] = new_vs
     return pinned
+
+
+def min_via_annular_ring(copper_layer_count, tier=None, overrides=None):
+    """The smallest via annular ring (mm) the PHYSICAL fab floor implies (#1433).
+
+    The ring is (diameter - drill) / 2. The floor's smallest via -- the
+    advanced rung's 0.25/0.15, or the --fab-overrides file's -- fixes it at
+    0.05, which is also the smallest ring on any corpus board. Deliberately
+    NOT the floor's `annular` key: that is the PTH-pad recommendation
+    (0.15-0.25), which every via the router lays would fail. None when the
+    floor declares no via.
+    """
+    dia = fab_floor_for_param('via_size', copper_layer_count, tier, overrides)
+    drill = fab_floor_for_param('via_drill', copper_layer_count, tier, overrides)
+    if dia is None or drill is None:
+        return None
+    return max(0.0, round((dia - drill) / 2.0, 6))
+
+
+def via_size_for_annular_ring(via_size, via_drill, copper_layer_count,
+                              tier=None, overrides=None):
+    """`via_size`, pinned UP so the via keeps the floor's annular ring (#1433).
+
+    The size/drill floors are checked one value at a time, so a via could pass
+    both and have no copper ring at all: `--via-size 0.45 --via-drill 0.508`
+    laid 138 vias whose drill is wider than their pad. The DRILL is the hole
+    the caller asked for, so the pad grows to drill + 2 x ring. Returns the
+    value unchanged when either is None or the ring already holds. Shared by
+    the CLIs' enforce_fab_floors and the GUI's effective via size.
+    """
+    if via_size is None or via_drill is None:
+        return via_size
+    ring = min_via_annular_ring(copper_layer_count, tier, overrides)
+    if ring is None or (via_size - via_drill) / 2.0 >= ring - 1e-9:
+        return via_size
+    return round(via_drill + 2.0 * ring, 4)
 
 
 def check_param_floors(copper_layer_count, tier=None, overrides=None, **params):

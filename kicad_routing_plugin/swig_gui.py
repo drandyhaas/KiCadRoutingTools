@@ -893,7 +893,20 @@ class RoutingDialog(wx.Dialog):
         return self.same_net_pad_clearance.GetValue()
 
     def _effective_via_size(self):
-        return self._effective_geometry_floor('via_size')
+        """Pinned up so the via keeps the fab floor's annular ring around the
+        effective drill (#1433) -- parity with the CLI's enforce_fab_floors,
+        through the same fab_tiers.via_size_for_annular_ring."""
+        val = self._effective_geometry_floor('via_size')
+        try:
+            from fab_tiers import via_size_for_annular_ring, parse_fab_overrides
+            ncu = len(self.pcb_data.board_info.copper_layers) or 2
+            tier = self.fab_tier.GetString(self.fab_tier.GetSelection())
+            path = self.fab_overrides_path.GetValue().strip()
+            ovr = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
+            return via_size_for_annular_ring(val, self._effective_via_drill(),
+                                             ncu, tier, ovr)
+        except Exception:
+            return val
 
     def _effective_via_drill(self):
         return self._effective_geometry_floor('via_drill')
