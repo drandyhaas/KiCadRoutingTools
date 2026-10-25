@@ -11,9 +11,9 @@ clamped negative margin, a copper-less pad, a through-hole pad):
 - **Parity.** compare_pcb_data reports no mask difference between the paths.
 - **A native oracle.** For every pad on a mask layer, the resolved margin from
   EACH path equals pcbnew's own `PAD.GetSolderMaskExpansion(layer)`.
-- **Witnesses.** esp_prog carries a board, a footprint and a pad margin, and
-  glasgow a 0.375 mm pad margin; a parser that read none would pass the parity
-  arm and fail here.
+- **Witnesses.** The tracked boards carry a board, a footprint and a pad
+  margin, one pad margin of 0.375 mm; a parser that read none would pass the
+  parity arm and fail here.
 
 Needs pcbnew; re-execs into KiCad's python automatically. Exits 2 when no
 pcbnew python is found, rather than 0.
@@ -140,7 +140,7 @@ def main():
         check(not wrong, '%s: every pad mask margin equals pcbnew GetSolderMaskExpansion (%d)'
               % (name, n), '; '.join(wrong[:3]))
     check(seen['board'] > 0 and seen['footprint'] > 0 and seen['pad'] >= 0.375,
-          'witness: board, footprint and pad margins (glasgow 0.375) were read',
+          'witness: board, footprint and pad margins (one of 0.375) were read',
           str(seen))
 
     print('\n%d failure(s)' % len(FAILURES))

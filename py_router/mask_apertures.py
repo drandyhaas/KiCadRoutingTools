@@ -13,8 +13,8 @@ pcbnew 10.0.7:
 
 A positive margin grows the copper by the Minkowski sum, so the opening's
 corners are ROUNDED at the margin: KiCad plots a 0.3 x 1.3 mm rect pad with a
-0.2 mm margin as a `RoundRect` aperture of corner radius 0.2 (watchy J3,
-F.Mask Gerber from kicad-cli 10.0.7). The distance to such an opening is the
+0.2 mm margin as a `RoundRect` aperture of corner radius 0.2 (F.Mask Gerber
+from kicad-cli 10.0.7). The distance to such an opening is the
 distance to the copper minus the margin, so custom pads, roundrect corners
 and `rect_rotation` hold through `check_drc.point_to_pad_distance`. A negative
 margin shrinks the pad (`paste_apertures._inflated_pad`).

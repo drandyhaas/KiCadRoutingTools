@@ -68,7 +68,10 @@ Checks that need no spec always run: check_weird's advisory categories
                        length), and the distinct vias on it
 
 A check reports "passed", "failed" (with findings) or "not_judged" (with the
-reason it could not be judged, never a pass). Every failure is reported. A
+reason it could not be judged, never a pass). Every failure is reported, and
+each failed finding names the step that fixes it in `fix` (a router command
+with this net's flags, a computed width or via count, or the spec entry to
+correct). A
 name the spec gives that the board does not have (a net, a pad, a part) is a
 failed finding about the spec, never not_judged; not_judged is for copper the
 board does not have yet (an unrouted net, a load not joined to its source).
@@ -226,9 +229,69 @@ def load_spec(path: Optional[str]) -> dict:
 # Report shapes
 # ---------------------------------------------------------------------------
 
+def _q(net):
+    """A net name as a shell word."""
+    import shlex
+    return shlex.quote(str(net))
+
+
+#: The step that fixes a failed finding, by check id: f(subject, finding).
+#: A finding that carries its own `fix` (a computed width or via count, a
+#: spec error) keeps it.
+_FIXES = {
+    'weird.off_angle_corner': lambda s, f: (
+        f"re-route {f['items'][0]}: py_router/route.py --nets {_q(f['items'][0])} "
+        f"--rip-existing-nets {_q(f['items'][0])}"),
+    'weird.short_fragment': lambda s, f: _FIXES['weird.off_angle_corner'](s, f),
+    'weird.off_centre_via_end': lambda s, f: _FIXES['weird.off_angle_corner'](s, f),
+    'via.mask_contact': lambda s, f: (
+        f"move the via of {f['items'][0]} out of pad {f['items'][1]}'s mask opening, "
+        f"or re-route it: py_router/route.py --nets {_q(f['items'][0])} "
+        f"--rip-existing-nets {_q(f['items'][0])}"),
+    'via.mask_web': lambda s, f: (
+        f"move the via of {f['items'][0]} {f['limit']} mm or more from pad "
+        f"{f['items'][1]}'s mask opening, or re-route it: py_router/route.py --nets "
+        f"{_q(f['items'][0])} --rip-existing-nets {_q(f['items'][0])}"),
+    'pair.impedance': lambda s, f: (
+        f"re-route the pair at its impedance: py_router/route_diff.py --nets "
+        f"{' '.join(_q(n) for n in f['items'])} --impedance {sum(f['limit']) / 2:g}"),
+    'pair.skew': lambda s, f: (
+        f"length-match the pair: py_router/route_diff.py --nets "
+        f"{' '.join(_q(n) for n in f['items'])} --diff-pair-intra-match"),
+    'pair.uncoupled': lambda s, f: (
+        f"re-route the pair coupled: py_router/route_diff.py --nets "
+        f"{' '.join(_q(n) for n in f['items'])}"),
+    'pair.reference': lambda s, f: (
+        f"route {f['items'][0]} over unbroken copper of its reference pour on "
+        f"{f.get('ref_layer') or 'the reference layer'}, or move what splits the pour there"),
+    'length.match': lambda s, f: (
+        f"length-match the group: py_router/route.py --nets "
+        f"{' '.join(_q(n) for n in f['items'])} --length-match-group "
+        f"{' '.join(_q(n) for n in f['items'])} --length-match-tolerance {f['limit']:g}"),
+    'net.min_width': lambda s, f: (
+        f"re-route {s} at its width: py_router/route.py --nets {_q(s)} "
+        f"--rip-existing-nets {_q(s)} --power-nets {_q(s)} --power-nets-widths {f['limit']:g}"),
+    'current.drop': lambda s, f: (
+        f"lower the path's resistance: widen {s} (py_router/route.py --power-nets {_q(s)} "
+        f"--power-nets-widths W), or carry it on a pour (py_router/route_planes.py "
+        f"--nets {_q(s)} --plane-layers LAYER)"),
+    'decoupling.path': lambda s, f: (
+        f"move {s} closer to {f['items'][1]} and re-route {f['items'][2]}"
+        if f.get('units') == 'mm' else
+        f"move {s} to {f['items'][1]}'s side of the board, so the path needs fewer vias"),
+}
+
+
 def _check(cid, subject=None, findings=None, reason=None, **extra):
     """One check record: failed with findings, not_judged with a reason, else
-    passed."""
+    passed. Each finding gets the `fix` of its check id (_FIXES) unless it
+    names its own."""
+    for f in findings or ():
+        if 'fix' not in f and cid in _FIXES:
+            try:
+                f['fix'] = _FIXES[cid](subject, f)
+            except (KeyError, IndexError, TypeError):
+                pass
     if findings:
         status = 'failed'
     elif reason:
@@ -259,7 +322,9 @@ def _finding(reason, measured=None, limit=None, units=None, where=None,
 
 def _spec_finding(what, items, limit_from):
     """A finding about the spec: it names something the board does not have."""
-    return _finding(f'{what} (named by the spec)', items=items, limit_from=limit_from)
+    return _finding(f'{what} (named by the spec)', items=items, limit_from=limit_from,
+                    fix=f'correct {limit_from[len("spec: "):]} in the spec, or add '
+                        f'what it names to the board')
 
 
 def _where(layer, x, y):
@@ -560,7 +625,8 @@ def length_checks(pcb, spec):
                 f'net(s) {missing} named by the group are not on the board' if missing
                 else 'the group names fewer than 2 nets: there is nothing to match',
                 items=missing or list(entry['nets']),
-                limit_from=f'spec: length_groups.{name}.nets')]))
+                limit_from=f'spec: length_groups.{name}.nets',
+                fix=f'correct length_groups.{name}.nets in the spec')]))
             continue
         if unrouted:
             out.append(_check('length.match', name, reason=(
@@ -620,6 +686,19 @@ def _default_loads(pcb, nid, source):
     from paste_apertures import pad_has_copper
     return sorted({f'{p.component_ref}.{p.pad_number}' for p in pcb.pads_by_net.get(nid, [])
                    if str(p.pad_number) and pad_has_copper(p)} - {source})
+
+
+def _width_for(amps, oz, rise, top=20.0):
+    """The narrowest track width (mm, to 1 um) whose IPC-2152-form rating at
+    `oz` copper and `rise` carries `amps`; None when even `top` mm does not."""
+    from plane_resistance import calculate_max_current_ipc2152
+    if calculate_max_current_ipc2152(top, oz, rise) < amps:
+        return None
+    lo, hi = 0.0, top
+    while hi - lo > 1e-3:
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if calculate_max_current_ipc2152(mid, oz, rise) < amps else (lo, mid)
+    return math.ceil(hi * 1000) / 1000          # printed to 1 um, never rounded down
 
 
 def current_checks(pcb, spec, board_thickness_mm=None):
@@ -711,8 +790,10 @@ def current_checks(pcb, spec, board_thickness_mm=None):
             if kind == 'pour':
                 continue                # a pour is not rated: see the docstring
             if kind == 'seg':
-                rating = calculate_max_current_ipc2152(o.width, stackup_copper_oz(pcb, o.layer), rise)
+                oz = stackup_copper_oz(pcb, o.layer)
+                rating = calculate_max_current_ipc2152(o.width, oz, rise)
                 if i_a > rating + 1e-9:
+                    need = _width_for(i_a, oz, rise)
                     cap.append(_finding(
                         f'{i_a:.3f} A through a {o.width:.3f} mm track on {o.layer} '
                         f'rated {rating:.3f} A at {rise:g} C rise',
@@ -720,7 +801,12 @@ def current_checks(pcb, spec, board_thickness_mm=None):
                         where=_where(o.layer, (o.start_x + o.end_x) / 2, (o.start_y + o.end_y) / 2),
                         items=[name],
                         limit_from=f'spec: currents.{name}.amps, max_rise_c; '
-                                   f'IPC-2152 form (plane_resistance)'))
+                                   f'IPC-2152 form (plane_resistance)',
+                        fix=(f'widen {name} to {need:.3f} mm or more: py_router/route.py '
+                             f'--nets {_q(name)} --rip-existing-nets {_q(name)} '
+                             f'--power-nets {_q(name)} --power-nets-widths {need:.3f}'
+                             if need else f'carry {name} on a pour: py_router/route_planes.py '
+                                          f'--nets {_q(name)} --plane-layers LAYER')))
             else:
                 rating = calculate_max_current_ipc2152(
                     math.pi * (o.drill or 0.0), plating / (OZ_TO_METERS * 1e3), rise)
@@ -731,7 +817,11 @@ def current_checks(pcb, spec, board_thickness_mm=None):
                         measured=_r(i_a), limit=_r(rating), units='A',
                         where=_where('via', o.x, o.y), items=[name],
                         limit_from=f'spec: currents.{name}.amps, max_rise_c, via_plating_mm; '
-                                   f'IPC-2152 form (plane_resistance)'))
+                                   f'IPC-2152 form (plane_resistance)',
+                        fix=(f'carry it on {math.ceil(i_a / rating)} vias of drill '
+                             f'{o.drill:.3f} mm in parallel, or a larger drill '
+                             f'(py_router/route.py --via-drill)' if rating > 0 else
+                             'give the via a drill (py_router/route.py --via-drill)')))
         note = sorted(unreachable)
         reason = f'load(s) {note} not joined to the source by copper' if note else None
         common = {'assumptions': net.assumptions}

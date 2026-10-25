@@ -1064,7 +1064,10 @@ failed or could not be judged, with the reason for each failure (#1237). It
 never infers what the board should do: the spec says so, and the audit
 measures the copper. Each finding gives `measured`, `limit`, `units`,
 `where`, `items` and `limit_from` (the spec, the board's own files, or
-`fab_tiers`).
+`fab_tiers`), and `fix`: the step that fixes it, such as a `route.py` or
+`route_diff.py` command for the net, the track width or via count that
+carries the current, or the spec entry to correct. `plan-pcb-placement`'s
+`grade.py` passes a spec file as `--audit-spec FILE`.
 
 ```bash
 python3 -X utf8 py_tools/audit.py routed.kicad_pcb --spec spec.json \

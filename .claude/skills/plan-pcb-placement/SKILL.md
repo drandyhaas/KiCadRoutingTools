@@ -1154,6 +1154,6 @@ Routing Completes): run them once, here, not again inside the routing.
    python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/measure.py --self --evidence wk/<run>
    ```
    Add `--spec <name>=<value>` to `grade.py` for each spec flag the board
-   declares. `measure.py` must run from your own shell; if it refuses (exit
+   declares, and `--audit-spec <file>` for an `audit.py` spec. `measure.py` must run from your own shell; if it refuses (exit
    3), quote the refusal.
 4. The datasheet folder deleted (`rm -rf wk/<run>/datasheets`).

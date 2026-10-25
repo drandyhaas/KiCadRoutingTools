@@ -62,6 +62,10 @@ Synthetic boards whose answers are computed independently:
    a pour is not rated, so current that runs only through one leaves
    capacity not judged; decoupling walks a pour, straight and diagonally
    (octile: never short, at most 9 % long).
+13. Every failed finding of every run above names the step that fixes it
+   (`fix`); each tool and flag a fix names exists in that tool's --help; a
+   capacity fix's width carries the current, or no track up to 20 mm does and
+   the fix is a pour.
 
     python3 tests/test_1237_audit.py
 """
@@ -145,7 +149,14 @@ def run(board_path, spec=None, extra=()):
         args += ['--spec', spec_file(spec)]
     r = subprocess.run(args, capture_output=True, text=True)
     doc = json.load(open(js)) if r.returncode in (0, 4) else None
+    for c in (doc or {}).get('checks', ()):
+        for f in c.get('findings', ()):
+            SEEN_FINDINGS.append((c['id'], f))
     return r.returncode, doc, r.stdout + r.stderr
+
+
+#: every failed finding any run produced, for section 13
+SEEN_FINDINGS = []
 
 
 def get(doc, cid, subject=None):
@@ -493,6 +504,43 @@ def pour_cases():
               got is not None and straight - 0.21 <= got <= straight * 1.09, str(c))
 
 
+def fix_cases():
+    import re
+    import shlex
+    missing = sorted({cid for cid, f in SEEN_FINDINGS if not f.get('fix')})
+    ids = sorted({cid for cid, _f in SEEN_FINDINGS})
+    check(f'13. every failed finding names its fix ({len(SEEN_FINDINGS)} findings, '
+          f'{len(ids)} check ids)', not missing, str(missing))
+    flags = {}
+    bad = []
+    for cid, f in SEEN_FINDINGS:
+        for cmd in re.findall(r'(py_router/\w+\.py[^,;()]*)', f.get('fix', '')):
+            words = shlex.split(cmd)
+            tool = words[0]
+            if tool not in flags:
+                from run_utils import tool as tool_path
+                h = subprocess.run([sys.executable, tool_path(os.path.basename(tool)), '--help'],
+                                   capture_output=True, text=True).stdout
+                flags[tool] = set(re.findall(r'(--[a-z0-9-]+)', h))
+            bad += [f'{tool} {w}' for w in words[1:] if w.startswith('--') and w not in flags[tool]]
+    check(f'13. every tool and flag a fix names exists ({len(flags)} tools)',
+          flags and not bad, str(sorted(set(bad))))
+    from plane_resistance import calculate_max_current_ipc2152
+    caps = [f for cid, f in SEEN_FINDINGS if cid == 'current.capacity' and 'rated' in f['reason']]
+    ok = []
+    for f in caps:
+        w = re.search(r'--power-nets-widths ([0-9.]+)', f['fix'])
+        rise = float(re.search(r'at ([0-9.]+) C rise', f['reason']).group(1))
+        if w:
+            ok.append(calculate_max_current_ipc2152(float(w.group(1)), 1.0, rise)
+                      >= f['measured'] - 1e-6)
+        else:       # wider than any track: the fix is a pour
+            ok.append('route_planes.py' in f['fix']
+                      and calculate_max_current_ipc2152(20.0, 1.0, rise) < f['measured'])
+    check(f'13. a capacity fix\'s width carries the current ({len(caps)} findings)',
+          caps and all(ok), str([f['fix'] for f in caps][:2]))
+
+
 def plain_board():
     return os.path.join(WORK, 'plain.kicad_pcb')
 T_CU = 0.035
@@ -684,6 +732,7 @@ def main():
     second_fix_review_cases()
     full_review_cases()
     pour_cases()
+    fix_cases()
 
     print(f"\n{'ALL PASS' if not FAILS else '%d FAIL' % len(FAILS)}")
     return 1 if FAILS else 0
