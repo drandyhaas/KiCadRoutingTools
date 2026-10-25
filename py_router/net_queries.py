@@ -1332,7 +1332,8 @@ def net_match_pad_to_die(pcb_data: PCBData, net_id: int,
 
 
 def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
-                     tolerance: float = 0.02, weight=None, edges=None):
+                     tolerance: float = 0.02, weight=None, edges=None,
+                     hub_layers=None, nodes=None):
     """(adjacency, pad_nodes) over ONE net's track copper, with `pads` attached.
 
     The weighted graph `pin_pair_path_length` walks (see its docstring for the
@@ -1345,9 +1346,14 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     step's (layer, layer) span); joins inside a pad or a via stay 0. `edges`,
     a list, receives every edge as (n1, n2, weight, kind, obj, span), kind
     None for those joins (#1237's DC network, dc_network.py).
+
+    `hub_layers` (pour layers, for the DC network): every via and pad gets a
+    hub node on each of these layers it spans, joined or not, and the net
+    needs no segment to have a graph. `nodes`, a list, receives every node's
+    (x, y, layer) by node id.
     """
     segments = [s for s in pcb_data.segments if s.net_id == net_id]
-    if not segments:
+    if not segments and not hub_layers:
         return None
 
     # Point interning: endpoints within `tolerance` are ONE node (the same
@@ -1499,7 +1505,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                 if hit(nx, ny):
                     add_edge(hub, node, 0.0)
                     joined = True
-            if joined or kind == 'pad' \
+            if joined or kind == 'pad' or layer in (hub_layers or ()) \
                     or layer in via_contact_layers.get(id(obj), ()):
                 layer_nodes[layer] = hub
 
@@ -1531,6 +1537,8 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             if layer in vh and layer in ph:
                 add_edge(vh[layer], ph[layer], 0.0)
 
+    if nodes is not None:
+        nodes.extend(_node_xy)
     return adjacency, pad_nodes
 
 

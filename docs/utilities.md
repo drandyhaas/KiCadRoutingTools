@@ -1099,9 +1099,9 @@ counts; `tolerance_mm` and `mode` are optional as in `board_score`):
 | `pair.reference` | `check_impedance`'s reference-plane crossings under the pair; `reference_nets` limits which pours count |
 | `length.match` | `net_match_length` spread per group (`mode` `total` or `pin_pair`); a group with a net not on the board, or fewer than 2 nets, fails |
 | `net.min_width` | every segment of a matching net, at the stricter of the spec and the board's own `min_track_width` |
-| `current.capacity`, `current.via` | each track piece's and via's current against the IPC-2152-form rating at `max_rise_c` (default 10) |
+| `current.capacity`, `current.via` | each track piece's and via's current against the IPC-2152-form rating at `max_rise_c` (default 10); a pour carries current but is not rated |
 | `current.drop` | each load's DC drop from the source |
-| `decoupling.path` | the shortest track path from the cap to each IC pin, and the vias on it |
+| `decoupling.path` | the shortest copper path (tracks, vias and the net's pours) from the cap to each IC pin, and the vias on it |
 
 A stretch counts as coupled inside the pair's gap window: `gap_max_mm`, else
 the board's `diff_pair_gap` rule, else its netclass diff pair gap, else (for
@@ -1111,13 +1111,18 @@ closest parallel stretch. A name the spec gives that the board does not have
 (a pair or reference net, a current net, source or load pad, a decoupling cap
 or IC pin) is a failed finding about the spec; not judged is only for copper
 the board lacks (an unrouted net, a load not joined to its source). The current checks solve
-`dc_network`'s resistor network of the net's tracks and vias (copper at
+`dc_network`'s resistor network of the net's tracks, vias and pours (copper at
 20 C, via plating `via_plating_mm`, default 0.020 mm, each via step's barrel
 the stackup's length between its layers less half the copper of an end
 layer that is not one of the via's own ends, so a via's steps add up to its
 whole barrel, or the board thickness
-shared out by layer order when the stackup does not give it); pours are left out, so
-resistances read high and a load joined only through a pour is not judged.
+shared out by layer order when the stackup does not give it). A pour is its
+fill as `plane_fill_model` predicts it, cut into blocks of about 0.2 mm
+joined at one sheet resistance per square; a pad feeds it over its whole
+area, thermal spokes are not modelled, and overlapping pours of the net on
+one layer are one sheet. When the current runs only through pour copper,
+`current.capacity` is not judged. `decoupling.path` walks a pour block to
+block with diagonals, so a path across one reads at most about 8 % long.
 Every pad of a named source or load conducts, so a part whose pad number
 repeats is one terminal. A list of `loads` is judged one load at a time at
 the full `amps`; a dict gives each load its own current, solved together.

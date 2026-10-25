@@ -54,6 +54,14 @@ Synthetic boards whose answers are computed independently:
    no spec check was judged (an empty spec); "_" keys in net_min_widths are
    comments; a one-net length group fails; converge compares a score from
    before the audit component with one after.
+12. Pours (plane_fill_model's fill as a resistor grid): a strip pour fed by
+   full-width pads drops rho L / (W t); two overlapping pours of the net
+   on one layer are one strip; two pours that do not touch leave the load
+   unjoined; a via joins pours on two layers, above the plain strip and
+   barrel sum (spreading at the via), and without it the load is unjoined;
+   a pour is not rated, so current that runs only through one leaves
+   capacity not judged; decoupling walks a pour, straight and diagonally
+   (octile: never short, at most 9 % long).
 
     python3 tests/test_1237_audit.py
 """
@@ -432,6 +440,59 @@ def full_review_cases():
           got is not None and got[0] == ['audit'] and got[2] is True, str(got))
 
 
+def zone(net, name, x0, y0, x1, y1, layer='F.Cu'):
+    return ('(zone (net %d) (net_name "%s") (layer "%s") (hatch edge 0.5)'
+            ' (connect_pads (clearance 0.2)) (min_thickness 0.1) (fill yes)'
+            ' (polygon (pts (xy %g %g) (xy %g %g) (xy %g %g) (xy %g %g))))\n'
+            % (net, name, layer, x0, y0, x1, y0, x1, y1, x0, y1))
+
+
+def pour_cases():
+    ends = pad('J1', 100.5, 100, 3, '/A', size='1 4')
+    far = pad('U1', 119.5, 100, 3, '/A', size='1 4')
+    spec = {'currents': {'/A': {'amps': 1, 'source': 'J1.1', 'loads': ['U1.1'],
+                                'max_drop_mv': 1000}}}
+    strip = RHO_OHM_MM * 18 / (4 * T_CU) * 1e3          # mV between the pads
+    for what, body in (('one strip pour', zone(3, '/A', 100, 98, 120, 102)),
+                       ('two overlapping pours', zone(3, '/A', 100, 98, 110.5, 102)
+                        + zone(3, '/A', 109.5, 98, 120, 102))):
+        rc, doc, _o = run(board(ends + far + body, name='strip'), spec)
+        d = get(doc, 'current.drop', '/A')
+        check(f'12. {what} 4 x 18 mm drops rho L / (W t) = {strip:.3f} mV',
+              d['status'] == 'passed' and abs(d['measured']['U1.1'] - strip) < 0.01 * strip, str(d))
+    c = get(doc, 'current.capacity', '/A')
+    check('12. ...a pour is not rated: capacity is not judged',
+          c['status'] == 'not_judged' and 'pour' in c['reason'], str(c))
+    check('12. ...and the pour model is disclosed',
+          any('plane_fill_model' in a for a in c['assumptions']), str(c['assumptions']))
+    rc, doc, _o = run(board(ends + far + zone(3, '/A', 100, 98, 109.5, 102)
+                            + zone(3, '/A', 110.5, 98, 120, 102), name='split'), spec)
+    check('12. two pours that do not touch leave the load unjoined',
+          get(doc, 'current.drop', '/A')['status'] == 'not_judged')
+    back = pad('U1', 119.5, 100, 3, '/A', size='1 4', layers='"B.Cu" "B.Mask"')
+    two = ends + back + zone(3, '/A', 100, 98, 110.5, 102) + zone(3, '/A', 109.5, 98, 120, 102,
+                                                                 layer='B.Cu')
+    floor = strip + RHO_OHM_MM * parse_kicad_pcb(board(two, name='nv')).get_via_barrel_length(
+        'F.Cu', 'B.Cu') / (math.pi * 0.3 * dc_network.VIA_PLATING_MM) * 1e3
+    rc, doc, _o = run(board(two + via(110, 100, 3), name='twolayer'), spec)
+    d = get(doc, 'current.drop', '/A')
+    check(f'12. a via joins two layers\' pours, above the {floor:.3f} mV strip + barrel',
+          d['status'] == 'passed' and floor < d['measured']['U1.1'] < 1.5 * floor, str(d))
+    rc, doc, _o = run(board(two, name='noview'), spec)
+    check('12. ...and without the via the load is unjoined',
+          get(doc, 'current.drop', '/A')['status'] == 'not_judged')
+    for what, (x, y), straight in (('straight', (110, 100), 9.0),
+                                   ('diagonal', (108, 106), math.hypot(7, 5))):
+        b = board(pad('C1', 100, 100, 3, '/A') + pad('U1', x, y, 3, '/A')
+                  + zone(3, '/A', 98, 98, 112, 108), name='dec_' + what)
+        rc, doc, _o = run(b, {'decoupling': {'C1': {'ic': 'U1', 'pins': ['1'],
+                                                    'max_distance_mm': 20}}})
+        c = get(doc, 'decoupling.path', 'C1')
+        got = c.get('measured', {}).get('U1.1', {}).get('path_mm')
+        check(f'12. decoupling walks a pour {what}: {straight:.2f} mm edge to edge',
+              got is not None and straight - 0.21 <= got <= straight * 1.09, str(c))
+
+
 def plain_board():
     return os.path.join(WORK, 'plain.kicad_pcb')
 T_CU = 0.035
@@ -622,6 +683,7 @@ def main():
     fix_review_cases()
     second_fix_review_cases()
     full_review_cases()
+    pour_cases()
 
     print(f"\n{'ALL PASS' if not FAILS else '%d FAIL' % len(FAILS)}")
     return 1 if FAILS else 0

@@ -51,9 +51,9 @@ Checks that need no spec always run: check_weird's advisory categories
       a dict gives each load's own current, solved together. No `loads`
       means every other numbered copper pad of the net, as a list. Every pad
       of a named terminal conducts (a pad number can repeat). The copper is
-      dc_network's resistor network of the net's tracks and vias (pours left
-      out, so resistances read high); one finding per track or via, at its
-      worst current.
+      dc_network's resistor network of the net's tracks, vias and pours (the
+      fill as plane_fill_model predicts it); one finding per track or via, at
+      its worst current. A pour carries current and drop but is not rated.
       current.capacity each track piece's current against the IPC-2152-form
                        rating (plane_resistance.calculate_max_current_ipc2152)
                        at its width, its layer's copper and `max_rise_c`
@@ -62,7 +62,8 @@ Checks that need no spec always run: check_weird's advisory categories
       current.drop     each load's DC drop from the source (with max_drop_mv)
   decoupling      {"C3": {"ic": "U1", "pins": ["4"], "max_distance_mm": 2.0,
                    "max_vias": 1}}
-      decoupling.path  the shortest track path from the cap's pad on the
+      decoupling.path  the shortest copper path (tracks, vias and the
+                       pin's net's pours) from the cap's pad on the
                        pin's net to the pin (via barrels counted in the
                        length), and the distinct vias on it
 
@@ -667,7 +668,7 @@ def current_checks(pcb, spec, board_thickness_mm=None):
             terminals[source] = src_pads
             net = dc_network.build(pcb, nid, terminals, plating, board_thickness_mm)
             if net is None:
-                problem = f'{name} has no track copper'
+                problem = f'{name} has no track or pour copper'
         if problem:
             out += [_check(cid, name, reason=problem) for cid in wanted]
             continue
@@ -676,8 +677,10 @@ def current_checks(pcb, spec, board_thickness_mm=None):
             scenarios = [{ld: float(a) for ld, a in loads.items()}]
         else:
             scenarios = [{ld: amps} for ld in loads]
-        worst = {}                      # (kind, id(obj)) -> (amps, obj)
+        import numpy as np
+        peak = np.zeros(len(net.edges))  # each edge's worst |current|
         drops, unreachable = {}, set()
+        solver = dc_network.Solver(net, ground) if ground is not None else None
         for sc in scenarios:
             inj = {}
             for ld, a in sc.items():
@@ -686,23 +689,27 @@ def current_checks(pcb, spec, board_thickness_mm=None):
                     unreachable.add(ld)
                     continue
                 inj[node] = inj.get(node, 0.0) - a
-            if ground is None or not inj:
+            if solver is None or not inj:
                 continue
-            potential, currents, _lost = dc_network.solve(net, inj, ground)
+            potential, currents, _lost = solver.solve(inj)
             for ld in sc:
                 node = net.terminal_node.get(ld)
-                if node is None or potential.get(node) is None:
+                if node is None or np.isnan(potential[node]):
                     unreachable.add(ld)
                 else:
-                    drops[ld] = max(drops.get(ld, 0.0), abs(potential[node]))
-            for e, c in zip(net.edges, currents):
-                if c is None:
-                    continue
-                key = (e.kind, id(e.obj))
-                if abs(c) > worst.get(key, (0.0, None))[0]:
-                    worst[key] = (abs(c), e.obj)
+                    drops[ld] = max(drops.get(ld, 0.0), abs(float(potential[node])))
+            np.fmax(peak, np.abs(currents), out=peak)
+        worst = {}                      # (kind, id(obj)) -> (amps, obj)
+        for e, c in zip(net.edges, peak.tolist()):
+            if e.kind == 'pour' or c <= 0:
+                continue
+            key = (e.kind, id(e.obj))
+            if c > worst.get(key, (0.0, None))[0]:
+                worst[key] = (c, e.obj)
         cap, via = [], []
         for (kind, _oid), (i_a, o) in worst.items():
+            if kind == 'pour':
+                continue                # a pour is not rated: see the docstring
             if kind == 'seg':
                 rating = calculate_max_current_ipc2152(o.width, stackup_copper_oz(pcb, o.layer), rise)
                 if i_a > rating + 1e-9:
@@ -726,9 +733,13 @@ def current_checks(pcb, spec, board_thickness_mm=None):
                         limit_from=f'spec: currents.{name}.amps, max_rise_c, via_plating_mm; '
                                    f'IPC-2152 form (plane_resistance)'))
         note = sorted(unreachable)
-        reason = f'load(s) {note} not joined to the source by track copper' if note else None
+        reason = f'load(s) {note} not joined to the source by copper' if note else None
         common = {'assumptions': net.assumptions}
-        out.append(_check('current.capacity', name, findings=cap, reason=reason, **common))
+        cap_reason = reason
+        if not reason and not any(k == 'seg' for k, _o in worst) and any(
+                e.kind == 'pour' and c > 0 for e, c in zip(net.edges, peak.tolist())):
+            cap_reason = 'the current runs only through pour copper, which is not rated'
+        out.append(_check('current.capacity', name, findings=cap, reason=cap_reason, **common))
         out.append(_check('current.via', name, findings=via, reason=reason, **common))
         if 'max_drop_mv' in entry:
             limit = float(entry['max_drop_mv'])
@@ -747,15 +758,23 @@ def current_checks(pcb, spec, board_thickness_mm=None):
 # ---------------------------------------------------------------------------
 
 def _shortest_path(pcb, net_id, pads_a, pads_b):
-    """(length mm, via count) of the shortest track path from any of `pads_a`
-    to any of `pads_b` (one net), or None when no track path joins them. A via
-    counts once however many layer steps of its barrel the path walks."""
+    """(length mm, via count) of the shortest copper path from any of `pads_a`
+    to any of `pads_b` (one net): tracks, via barrels, and the net's pours
+    walked block to block (`dc_network.pour_edges`, diagonals included). None
+    when no copper joins them. A via counts once however many layer steps of
+    its barrel the path walks."""
     from net_queries import _net_track_graph
-    edges = []
-    graph = _net_track_graph(pcb, net_id, list(pads_a) + list(pads_b), edges=edges)
+    from dc_network import pour_edges, pour_layers
+    edges, nodes = [], []
+    graph = _net_track_graph(pcb, net_id, list(pads_a) + list(pads_b), edges=edges,
+                             hub_layers=pour_layers(pcb, net_id), nodes=nodes)
     if graph is None:
         return None
     _adj, pad_nodes = graph
+    pad_hubs = {h: p for p in list(pads_a) + list(pads_b) for h in (pad_nodes.get(id(p)) or [])}
+    extra, joins, _notes = pour_edges(pcb, net_id, nodes, len(nodes), metric='mm',
+                                      pad_hubs=pad_hubs)
+    edges += extra + joins
     adj = {}
     for n1, n2, w, kind, obj, _span in edges:
         tag = id(obj) if kind == 'via' else None
@@ -776,7 +795,7 @@ def _shortest_path(pcb, net_id, pads_a, pads_b):
         for m, w, kind, tag in adj.get(n, ()):
             if kind == 'via':
                 nxt, dv = tag, (0 if tag == cur else 1)
-            elif kind == 'seg':
+            elif kind in ('seg', 'pour'):
                 nxt, dv = None, 0
             else:
                 nxt, dv = cur, 0        # a join inside a pad or a via keeps the state
@@ -815,14 +834,14 @@ def decoupling_checks(pcb, spec):
                 continue
             got = _shortest_path(pcb, net_id, cap_pads, ic_pads)
             if got is None:
-                problems.append(f'{cap} and {ic}.{pin} are not joined by track copper')
+                problems.append(f'{cap} and {ic}.{pin} are not joined by copper')
                 continue
             length, vias = got
             measured[f'{ic}.{pin}'] = {'path_mm': _r(length), 'vias': vias}
             items = [f"{cap}.{'/'.join(sorted({str(p.pad_number) for p in cap_pads}))}",
                      f'{ic}.{pin}', ic_pads[0].net_name]
             if length > limit + 1e-9:
-                found.append(_finding(f'{length:.3f} mm of track from {items[0]} to {items[1]}',
+                found.append(_finding(f'{length:.3f} mm of copper from {items[0]} to {items[1]}',
                                       measured=_r(length), limit=limit, units='mm', items=items,
                                       limit_from=f'spec: decoupling.{cap}.max_distance_mm'))
             if max_vias is not None and vias > int(max_vias):
