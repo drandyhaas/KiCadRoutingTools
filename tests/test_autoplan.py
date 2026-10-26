@@ -6,15 +6,19 @@
    --nets), `matches_net_filter` with '!' exclusions (the fanouts) and
    `identify_power_nets` (--power-nets) -- and never starts with '!' or '-'.
    A net no pattern isolates on the board is left out of the analysis.
-2. `analyze` on in-repo boards: planes on B.Cu for 2 layers and on the first
+2. `fanout_parts` reads the pads: a grid array or a four-sided perimeter
+   package is fanned out, at the pitch measured along its pad rows; a
+   two-row part, a connector or magnetics by name, and a part whose pads
+   form neither shape are not.
+3. `analyze` on in-repo boards: planes on B.Cu for 2 layers and on the first
    two inner layers for 4+, plane layers priced up, fine-pitch parts fanned
    out on the fine grid.
-3. `route_passes` with a scripted chain: a pass is kept only when it is no
+4. `route_passes` with a scripted chain: a pass is kept only when it is no
    worse on open nets and DRC and better on one; --finish keeps the input
    unless a pass beats it; the iteration budget is a forecast from reported
    counts, and a pass that reports none starts no other.
-4. --effort-factor refuses a non-finite or negative value.
-5. Real runs on splitflap_driver: end to end, --finish, and --finish on a
+5. --effort-factor refuses a non-finite or negative value.
+6. Real runs on splitflap_driver: end to end, --finish, and --finish on a
    board inside the output's own work directory with a stale sibling at the
    output -- graded by check_connected, not by autoplan's own summary.
 """
@@ -72,6 +76,70 @@ def test_glob():
                f"--power-nets {pat!r} widens only {n!r}")
     expect(not AP._selects_exactly(AP._glob('!D[0]'), '!D[0]', ['!D[0]', ' D[0]']),
            "'!D[0]' beside ' D[0]' cannot be isolated, and that is detected")
+
+
+def _pad(x, y, w=0.25, h=0.8, drill=0.0):
+    return SimpleNamespace(local_x=x, local_y=y, size_x=w, size_y=h, drill=drill,
+                           pad_type='thru_hole' if drill else 'smd')
+
+
+def _fp(name, pads):
+    return SimpleNamespace(footprint_name=name, pads=pads)
+
+
+def _qfn(n_side, pitch, ep=True):
+    """A four-sided package, n_side pads a side, with an exposed pad and two
+    sub-pads inside it."""
+    half = (n_side - 1) * pitch / 2
+    edge = half + 0.6
+    pads = []
+    for i in range(n_side):
+        o = -half + i * pitch
+        pads += [_pad(-edge, o, 0.8, 0.25), _pad(edge, o, 0.8, 0.25),
+                 _pad(o, -edge), _pad(o, edge)]
+    if ep:
+        pads += [_pad(0, 0, 2 * half, 2 * half), _pad(-0.3, 0, 0.3, 0.3), _pad(0.3, 0, 0.3, 0.3)]
+    return pads
+
+
+def _grid(nx, ny, px, py, drill=0.0):
+    return [_pad(i * px, j * py, 0.3, 0.3, drill) for i in range(nx) for j in range(ny)]
+
+
+def _two_rows(n, pitch):
+    return ([_pad(i * pitch, 0) for i in range(n)]
+            + [_pad(i * pitch, 2.0) for i in range(n)])
+
+
+def test_fanout_parts():
+    print("fanout_parts")
+    parts = {
+        'U1': _fp('Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm', _qfn(12, 0.5)),
+        'U2': _fp('Package_QFP:LQFP-64_10x10mm_P0.5mm', _qfn(16, 0.5, ep=False)),
+        'U3': _fp('lib:MT53D_LPDDR4', _grid(10, 20, 0.8, 0.65)),
+        'U4': _fp('Package_BGA:BGA-256_17x17mm', _grid(16, 16, 1.0, 1.0)),
+        'U5': _fp('Package_DFN_QFN:DFN-8-1EP_3x2mm_P0.5mm', _two_rows(4, 0.5)),
+        'U6': _fp('Package_QFP:LQFP-32_7x7mm_P0.8mm', _qfn(8, 0.8, ep=False)),
+        'J1': _fp('Connector_USB:USB_C_Receptacle', _qfn(12, 0.5)),
+        'J2': _fp('lib:Bus_M.2_Socket_Key_M', _two_rows(35, 0.5)),
+        'J3': _fp('lib:SomeEdgeThing', _two_rows(30, 0.5)),
+        'T1': _fp('lib:Trans_Eth_4.7x3.3mm', _qfn(3, 0.65)),
+        'RN1': _fp('Resistor_SMD:R_Array_Convex_4x0402', _two_rows(4, 0.5)),
+        'U7': _fp('Package_DIP:PLCC-44_THT-Socket', _grid(11, 11, 2.54, 2.54, drill=0.9)),
+        'U8': _fp('lib:scatter', [_pad(0, 0), _pad(0.37, 1.1), _pad(1.9, 0.2), _pad(2.6, 2.2),
+                                  _pad(0.9, 3.1), _pad(3.3, 0.8), _pad(1.4, 1.7)]),
+    }
+    got = {r: (t, p) for r, t, p in AP.fanout_parts(SimpleNamespace(footprints=parts))}
+    expect(got.get('U1') == ('qfn', 0.5), f"QFN with an exposed pad: perimeter at 0.5 ({got.get('U1')})")
+    expect(got.get('U2') == ('qfn', 0.5), f"LQFP-64: perimeter at 0.5 ({got.get('U2')})")
+    expect(got.get('U3') == ('bga', 0.65), f"0.8 x 0.65 grid: each axis on its own lattice, pitch 0.65 ({got.get('U3')})")
+    expect(got.get('U4') == ('bga', 1.0), f"16 x 16 grid at 1.0, depth 8 ({got.get('U4')})")
+    expect('U6' not in got, "LQFP-32 at 0.8 with 32 pads: a perimeter, under the >40-pad bar")
+    for r, why in (('U5', 'a two-row DFN'), ('J1', 'a connector by name, whatever its pads'),
+                   ('J2', 'an M.2 socket'), ('J3', 'two rows, whatever its name'),
+                   ('T1', 'magnetics by name'), ('RN1', "a resistor array's corner pads are not sides"),
+                   ('U7', 'a through-hole socket'), ('U8', 'pads that form no shape')):
+        expect(r not in got, f"{r} not fanned out: {why}")
 
 
 def test_analyze():
@@ -251,6 +319,7 @@ def test_run():
 
 def main():
     test_glob()
+    test_fanout_parts()
     test_analyze()
     test_passes()
     test_effort_factor()

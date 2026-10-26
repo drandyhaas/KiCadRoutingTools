@@ -15,8 +15,10 @@ congestion before the router starts:
                    escapes), all from list_nets.read_design_rules
   2. planes        GND on In1.Cu and the dominant rail on In2.Cu on 4+ layer
                    boards, GND on B.Cu on 2-layer boards; poured first
-  3. fanout        every BGA/PGA/LGA with interior depth or fine pitch
-                   (bga_fanout) and every fine-pitch QFN/QFP (qfn_fanout),
+  3. fanout        every grid array with interior depth or fine pitch
+                   (bga_fanout) and every fine-pitch four-sided perimeter
+                   package (qfn_fanout), read from the pads and their pitch
+                   along a row -- never a connector, socket or magnetics --
                    plane nets excluded; a part that drops escapes is retried
                    at the fab clearance with the fine via, then with the
                    under-pad method, keeping the attempt that escaped most
@@ -141,41 +143,116 @@ def _selects_exactly(pattern, name, names):
 # Board analysis
 
 
-def _grid_depth(fp):
-    """Rows of a grid array from its edge to its centre (columns // 2)."""
-    xs = {round(p.local_x, 2) for p in fp.pads}
-    ys = {round(p.local_y, 2) for p in fp.pads}
-    return min(len(xs), len(ys)) // 2
+#: Footprint-name fragments of parts that are never escape-routed: connectors,
+#: sockets and headers (pins reached in place) and magnetics. Matched against
+#: the upper-cased library:footprint name.
+NOT_FANOUT_NAMES = ('CONN', 'SOCKET', 'HEADER', 'PINHEADER', 'BUS_M.2', 'M.2_',
+                    'USB', 'RJ45', 'HDMI', 'SFP', 'TRANSFORMER', 'TRANS_', 'XFMR',
+                    'MAGJACK', 'MAGNETIC')
+
+
+def _mode(values):
+    """The most common value after rounding to 1 um, the smallest on a tie."""
+    from collections import Counter
+    c = Counter(round(v, 3) for v in values if v > 1e-3)
+    return min(c, key=lambda v: (-c[v], v)) if c else None
+
+
+def pad_shape(fp):
+    """('grid', pitch, depth), ('perimeter', pitch, None) or None for FP's pads.
+
+    Read in the footprint's own frame (local_x/local_y), from the copper pads
+    left once each exposed pad (a pad over 3x the median area) and anything
+    inside one (its sub-pads) is set aside.
+
+    grid: >= 3 distinct columns and rows, at least one pad off the bounding
+    edges, and the columns and rows each on a lattice of their own pitch: the
+    commonest spacing between neighbouring pads of one row (x) or one column
+    (y). The part's pitch is the finer of the two; depth is rows from the
+    edge to the centre.
+    perimeter: every pad on one of the four bounding edges, at least two on
+    each side away from its corners. The pitch is the median spacing between neighbours along a side.
+    Anything else -- two rows (a connector, a DFN, a transformer), one row, a
+    scatter -- is neither."""
+    pads = [p for p in fp.pads if p.pad_type != 'np_thru_hole']
+    if len(pads) < 6:
+        return None
+    area = sorted(p.size_x * p.size_y for p in pads)
+    med = area[len(area) // 2]
+    big = [p for p in pads if p.size_x * p.size_y > 3 * med]
+
+    def under(p, q):
+        r = max(q.size_x, q.size_y) / 2
+        return abs(p.local_x - q.local_x) <= r and abs(p.local_y - q.local_y) <= r
+    pts = sorted({(round(p.local_x, 3), round(p.local_y, 3)) for p in pads
+                  if p not in big and not any(under(p, q) for q in big)})
+    if len(pts) < 6:
+        return None
+    xs = sorted({x for x, _ in pts})
+    ys = sorted({y for _, y in pts})
+    x0, x1, y0, y1 = xs[0], xs[-1], ys[0], ys[-1]
+    tol = 0.02
+
+    def steps(vals):
+        v = sorted(vals)
+        return [b - a for a, b in zip(v, v[1:])]
+
+    def on_lattice(vals, pitch):
+        return all(abs(d / pitch - round(d / pitch)) < 0.1 for d in steps(vals))
+
+    interior = [(x, y) for x, y in pts
+                if x0 + tol < x < x1 - tol and y0 + tol < y < y1 - tol]
+    if len(xs) >= 3 and len(ys) >= 3 and interior:
+        rows = {}
+        cols = {}
+        for x, y in pts:
+            rows.setdefault(y, []).append(x)
+            cols.setdefault(x, []).append(y)
+        # Each axis has its own pitch (LPDDR packages: 0.8 x 0.65 mm); the
+        # finer one is the part's escape pitch.
+        px = _mode([d for r in rows.values() for d in steps(r)])
+        py = _mode([d for c in cols.values() for d in steps(c)])
+        if px and py and on_lattice(xs, px) and on_lattice(ys, py):
+            return ('grid', min(px, py), min(len(xs), len(ys)) // 2)
+        return None
+    # A side counts only the pads strictly between the two perpendicular
+    # edges: a two-row part's end pads sit on a corner, not on a side.
+    mid_x = lambda x: x0 + tol < x < x1 - tol
+    mid_y = lambda y: y0 + tol < y < y1 - tol
+    sides = {'l': [y for x, y in pts if abs(x - x0) <= tol and mid_y(y)],
+             'r': [y for x, y in pts if abs(x - x1) <= tol and mid_y(y)],
+             't': [x for x, y in pts if abs(y - y0) <= tol and mid_x(x)],
+             'b': [x for x, y in pts if abs(y - y1) <= tol and mid_x(x)]}
+    on_edge = sum(1 for x, y in pts if abs(x - x0) <= tol or abs(x - x1) <= tol
+                  or abs(y - y0) <= tol or abs(y - y1) <= tol)
+    if on_edge != len(pts) or any(len(v) < 2 for v in sides.values()):
+        return None
+    d = sorted(s for v in sides.values() for s in steps(v) if s > 1e-3)
+    return ('perimeter', round(d[len(d) // 2], 3), None) if d else None
 
 
 def fanout_parts(pcb):
-    """[(ref, tool, pitch)] for the parts the skill fans out (Step 3)."""
-    from kicad_parser import detect_package_type, detect_bga_pitch
+    """[(ref, tool, pitch)] for the parts the skill fans out (Step 3): a grid
+    array (bga_fanout) or a four-sided perimeter package (qfn_fanout), read
+    from the pads themselves -- never a connector or magnetics by name."""
     out = []
     for ref, fp in pcb.footprints.items():
-        pads = [p for p in fp.pads if p.pad_type != 'np_thru_hole']
-        if len(pads) < 6:
-            continue
-        kind = detect_package_type(fp)
-        if kind not in ('BGA', 'QFN', 'QFP'):
-            continue
-        th = sum(1 for p in pads if (p.drill or 0) > 0)
         name = (fp.footprint_name or '').upper()
+        if any(k in name for k in NOT_FANOUT_NAMES):
+            continue
+        pads = [p for p in fp.pads if p.pad_type != 'np_thru_hole']
+        th = sum(1 for p in pads if (p.drill or 0) > 0)
         if th > len(pads) - th and 'PGA' not in name:
             continue
-        pitch = round(detect_bga_pitch(fp), 3)
-        if not pitch:
+        shape = pad_shape(fp)
+        if shape is None:
             continue
-        if kind == 'BGA':
-            if pitch >= 2.0:
-                continue
-            if _grid_depth(fp) > 2 or pitch <= 0.5:
+        kind, pitch, depth = shape
+        if kind == 'grid':
+            if pitch < 2.0 and (depth > 2 or pitch <= 0.5):
                 out.append((ref, 'bga', pitch))
-        else:
-            if pitch >= 1.27:
-                continue
-            if pitch <= 0.5 or (len(pads) > 40 and pitch <= 0.8):
-                out.append((ref, 'qfn', pitch))
+        elif pitch < 1.27 and (pitch <= 0.5 or (len(pads) > 40 and pitch <= 0.8)):
+            out.append((ref, 'qfn', pitch))
     return sorted(out)
 
 

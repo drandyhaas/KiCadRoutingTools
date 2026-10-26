@@ -2204,8 +2204,16 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    via for fine-pitch escapes (`list_nets.read_design_rules`).
 2. **Planes first**: GND and the dominant rail on the first two inner layers
    on 4+ layer boards, GND on B.Cu on 2-layer boards.
-3. **Fanout**: `bga_fanout.py` / `qfn_fanout.py` on every part that meets the
-   skill's fanout predicate (grid depth or fine pitch), plane nets excluded.
+3. **Fanout**: the part's shape is read from its pads, in its own frame,
+   exposed pads set aside. A grid array (rows and columns each on a regular
+   lattice, with interior pads) gets `bga_fanout.py` when it is more than two
+   rows deep or at 0.5 mm or finer; a four-sided perimeter package gets
+   `qfn_fanout.py` at 0.5 mm or finer, or above 40 pads at 0.8 mm or finer.
+   The pitch is measured along a pad row (each axis of a grid separately; the
+   finer one counts). A two-row part (DFN, a connector), a part whose pads
+   form neither shape, a through-hole part other than a PGA, and any
+   connector, socket, header or magnetics by footprint name
+   (`autoplan.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
    A part that drops escapes is retried at the fab clearance with the fine
    via, then with the under-pad method, keeping the attempt that escaped most.
 4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts.
