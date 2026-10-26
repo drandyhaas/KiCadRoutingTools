@@ -526,9 +526,11 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     # names, so no authority machinery ever receives them (a47f244).
     prot_txt = ""
     try:
-        from protected_nets import protection_map
-        _pmap = protection_map(pcb_data,
-                               getattr(pcb_data, 'source_path', None))
+        from protected_nets import effective_protection_map
+        # The effective set (#1395): a net this run lifted by exact name is
+        # not one the router "will NEVER rip".
+        _pmap = effective_protection_map(
+            pcb_data, getattr(pcb_data, 'source_path', None))
         if _pmap and anchors:
             from geometry_utils import point_to_segment_distance
             _pnames = []
@@ -968,6 +970,19 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
     if result is None:
         return _ret("")
     iters = result.get('iterations_forward', 0) + result.get('iterations_backward', 0)
+    refused = result.get('pad_entry_refused')
+    if refused:
+        # #1452: a narrower track DID reach the pad; --escalation off refused
+        # it because no route kept the net's width outside the pad entry.
+        # Advising a smaller track would ask for exactly what was refused.
+        return _ret(
+            f"Hint: under --escalation off a wide net may narrow only within "
+            f"{refused['allowance_mm']:g} mm of a pad; this edge spans "
+            f"{refused['span_mm']:g} mm and a {refused['neck_width_mm']:g} mm "
+            f"track reaches it, but no route keeps "
+            f"{refused['net_width_mm']:g} mm outside that pad entry. Open a "
+            f"wider channel to the pad, or allow narrowing (--escalation fab).",
+            dict(refused, verdict='pad_entry_allowance', iterations=iters))
     if iters >= 20000:
         return _ret("")
     finer = config.grid_step / 2
@@ -982,12 +997,21 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
             grid_advice = (f"--grid-step {finer:g} scoped to just the failing nets "
                            f"via --nets (board-global it is ~{cells / 1e6:.0f}M "
                            f"cells/layer and may exhaust memory)")
+    # A suggested clearance / track is only ever NARROWER than the run's own
+    # (#1394): advising 0.15 to a run already at 0.09 / 0.0762 asked for a
+    # wider clearance and track, the opposite of the lever.
+    narrower = []
+    if config.clearance > 0.15:
+        narrower.append("--clearance 0.15")
+    if config.track_width > 0.15:
+        narrower.append("--track-width 0.15")
+    advice = " ".join([grid_advice] + narrower)
     return _ret(
         f"Hint: search exhausted after only {iters} iterations with no rippable "
         f"blockers - the start/target pads are boxed in by static obstacles "
         f"(neighboring pads + clearance), not by congestion. For fine-pitch "
         f"parts try a finer grid and/or smaller clearance/track, e.g. "
-        f"{grid_advice} --clearance 0.15 --track-width 0.15 "
+        f"{advice} "
         f"(current: grid {config.grid_step:g}, clearance {config.clearance:g}, "
         f"track {config.track_width:g} mm)",
         # The same decision as data: the iteration count it was made on and

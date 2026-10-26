@@ -54,9 +54,10 @@ than ignored, because an author who wrote one believes it is being honoured:
 
 * an envelope or outline -- `floorplan`'s module docstring is the rule, the
   board outline is not ours to change;
-* a height limit -- nothing in the placement stack measures z (no height in
-  `legality.GradedPart`, none in the parser), so a declared limit would grade
-  nothing at all. A constraint the author believes they set and the grader
+* a height limit -- nothing in the placement stack grades a board-wide one:
+  heights are judged per part and per area (#1443, `placement.heights`):
+  which part fits under which, a declared cover, a keep-out's
+  `max_height_mm`; so a declared board-wide limit would grade nothing at all. A constraint the author believes they set and the grader
   never checks is the exact failure `_reject_unknown` exists to prevent.
 """
 from __future__ import annotations
@@ -102,7 +103,14 @@ class BriefError(fp.IntentError):
 
 _TOP_LEVEL_KEYS = {'schema', 'kind', 'board', 'units', 'min_reader',
                    'product', 'interfaces', 'keepouts', 'fixed', 'unknown',
-                   'proximity', 'context', 'arrays', 'assembly', 'keep_away'}
+                   'proximity', 'context', 'arrays', 'assembly', 'keep_away',
+                   'covers', 'heights'}
+#: #1443. What stands over the board and how tall the parts are, from
+#: datasheets: `covers[]` (a card in its socket, a module on its stacking
+#: connector) and `heights[]` (a part's height, or the room under its body).
+#: The rows ARE the intent's (validated by the intent loader's own
+#: `_cover_claims` / `_height_claims`) and compile into it 1:1, so a cover
+#: worked out once from the datasheets travels with the board.
 #: #1253. Two NET groups no closer than GAP mm: a list of rules in route.py's
 #: own `--keep-away` syntax (`AGGRESSOR:VICTIM:GAP`, `class=` terms), each a
 #: string or `{"rule": ..., "why": ...}`, or "unknown". ONE declaration with
@@ -125,10 +133,11 @@ _REFUSED_TOP_LEVEL = {
     'outline': 'the board outline is READ from the board, never authored',
     'board_size': 'board size is a mechanical decision this toolchain does '
                   'not make; nothing here writes Edge.Cuts',
-    'height': 'nothing in the placement stack measures height -- there is no '
-              'z in legality.GradedPart and none in the parser -- so a '
-              'declared limit would grade nothing, which is worse than not '
-              'declaring it',
+    'height': 'nothing in the placement stack grades a board-wide height '
+              'limit -- heights are judged per part and per area (#1443): '
+              "which part fits under which, an intent's covers[], a "
+              "keep-out's max_height_mm -- so a declared limit would grade "
+              'nothing, which is worse than not declaring it',
 }
 
 _PRODUCT_KEYS = {'form_factor', 'primary_axis', 'held_by', 'user_top_side'}
@@ -247,6 +256,9 @@ class Brief:
     #: Defaulted, like `proximity`.
     keep_away: Tuple[Dict[str, object], ...] = ()
     keep_away_unknown: bool = False
+    #: #1443. Declared covers and part heights. Defaulted, like `proximity`.
+    covers: Tuple[Dict[str, object], ...] = ()
+    heights: Tuple[Dict[str, object], ...] = ()
 
 
 # --------------------------------------------------------------------------
@@ -802,6 +814,11 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
     except ValueError as exc:
         raise BriefError(str(exc)) from None
 
+    # #1443. Validated by the intent's own loader, so a row the brief accepts
+    # is a row the compiled intent loads.
+    covers = fp._cover_claims(raw)
+    heights = fp._height_claims(raw)
+
     unknown = fp._str_tuple(raw.get('unknown'), 'unknown')
     return Brief(schema=SCHEMA_VERSION, kind=KIND,
                  board=str(raw.get('board') or ''), units=units,
@@ -811,7 +828,8 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
                  context=fp._obj(raw.get('context'), 'context'),
                  source_path=source_path, arrays=tuple(arrays),
                  assembly=dict(assembly), keep_away=tuple(keep_away),
-                 keep_away_unknown=raw.get('keep_away') == BRIEF_UNKNOWN)
+                 keep_away_unknown=raw.get('keep_away') == BRIEF_UNKNOWN,
+                 covers=tuple(covers), heights=tuple(heights))
 
 
 def _fixed_pose(f: Dict, where: str, interface_refs) -> None:
@@ -1209,6 +1227,24 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         fragment['proximity'] = prox
     if arrs:
         fragment['arrays'] = arrs
+    # #1443. Compiled 1:1, as `arrays[]`: the row's own `source` is where its
+    # numbers came from (a datasheet), so the brief's provenance rides in
+    # `context`.
+    for key, rows, ident in (('covers', brief.covers, 'connector'),
+                             ('heights', brief.heights, 'ref')):
+        out_rows = []
+        for i, row in enumerate(rows):
+            entry = dict(row)
+            ctx = dict(row.get('context') or {})
+            ctx.update({'brief_row': i, 'from': 'brief'})
+            entry['context'] = ctx
+            declared.append(f"{key}[{row[ident]}]")
+            for m in [row[ident]] + [str(x['ref']) for x in row.get('standoffs') or ()]:
+                if refs_known and refset and m not in refset:
+                    unmatched.append(m)
+            out_rows.append(entry)
+        if out_rows:
+            fragment[key] = out_rows
     if fposes:
         fragment['fixed_poses'] = fposes
     # A RUNNING MAX, not a literal, since #902: a brief carrying both an
@@ -1234,6 +1270,8 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
     if kaway:
         # #1253: reader 10 introduced `keep_away[]`.
         need_reader = max(need_reader, 10)
+    if fragment.get('covers') or fragment.get('heights'):
+        need_reader = max(need_reader, fp.COVERS_READER)
     if need_reader:
         fragment['min_reader'] = need_reader
 
@@ -1268,6 +1306,10 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         counts['arrays'] = len(brief.arrays)
     if brief.keep_away:
         counts['keep_away'] = len(brief.keep_away)
+    if brief.covers:
+        counts['covers'] = len(brief.covers)
+    if brief.heights:
+        counts['heights'] = len(brief.heights)
     if fposes:
         counts['fixed_poses'] = len(fposes)
     report = {
@@ -1726,7 +1768,8 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
     # outrank.
     # #1253 `keep_away` too: the emitter writes none, since which nets are
     # noisy is not readable off a board.
-    for key in ('arrays', 'fixed_poses', 'keep_away'):
+    # #1443 `covers` and `heights` too: the emitter writes neither.
+    for key in ('arrays', 'fixed_poses', 'keep_away', 'covers', 'heights'):
         if fragment.get(key):
             out[key] = list(emitted.get(key) or []) + list(fragment[key])
     # #1255. Merged INTO the emitted block, which carries the observed
@@ -1988,6 +2031,27 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
                     + ', the intent '
                     + (f"says {theirs!r}" if theirs is not None
                        else 'does not declare it')))
+    # #1443. Keyed on the connector / the part; every field but `context`,
+    # both sides read by the intent's own loader so `42` and `42.0` agree.
+    for key, ident, norm in (('covers', 'connector', fp._cover_claims),
+                             ('heights', 'ref', fp._height_claims)):
+        try:
+            rows = norm({key: intent_doc.get(key)})
+        except fp.IntentError:
+            rows = list(intent_doc.get(key) or [])
+        have_rows = {str(r.get(ident)): r for r in rows}
+        for r in (fragment.get(key) or []):
+            name = str(r.get(ident))
+            cur = have_rows.get(name)
+            cid = f"{key}[{name}]"
+            if cur is None:
+                out.append((cid, f"{name}: the brief declares this in {key}[]; "
+                                 f"the intent has no entry for it"))
+                continue
+            for k in sorted((set(r) | set(cur)) - {'context'}):
+                if r.get(k) != cur.get(k):
+                    out.append((cid, f"{key}[{name}].{k}: brief says "
+                                     f"{r.get(k)!r}, the intent {cur.get(k)!r}"))
     # #1054. Keyed on the ref.
     have_fp = {str(f.get('ref')): f for f in (intent_doc.get('fixed_poses')
                                               or [])}

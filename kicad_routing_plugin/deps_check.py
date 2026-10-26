@@ -81,8 +81,12 @@ from startup_checks import (                                   # noqa: E402
 # Routing needs none of it -- `startup_checks.check_render_dependencies` is a
 # separate gate for exactly this reason, and gating the GUI on Pillow here
 # re-made, one layer up, the mistake that function was written to record.
+#
+# ortools is the BUS STEP's (#1355): awx/route_bus.py and the whole route plan
+# with CP-SAT, which nothing the plugin runs imports.
 OPTIONAL_PACKAGES = {
     "Pillow": "board renders and the placement preview",
+    "ortools": "the bus step and the whole route (awx/route_bus.py, awx/whole_route.py)",
 }
 
 

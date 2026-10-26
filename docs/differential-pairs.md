@@ -698,25 +698,34 @@ the GUI diff tab gets the same answer:
 - **The measure** (`net_queries.diff_pair_coupling` / `diff_pair_skew`, see
   [the API](api-net-analysis.md)) is KiCad's: coupled length as KiCad 10's
   diff-pair coupling DRC computes it, in its integer geometry, and P/N skew as
-  its skew DRC does. Both matched kicad-cli 10.0.0 to 0.1 µm.
-- **Coupled** means the pair's copper carries at least one pitch (track width +
-  gap) of coupled run at a gap no wider than 1.5x the gap the pair was routed at
-  (`diff_pair_custody.measure_pair_copper`). The router lays its coupled run AT
-  the gap (a 45° run lands ~12 µm wider after grid snapping); its via approach
-  tracks and a hybrid's single-ended legs sit 3-6x apart and do not count. The
-  floor is one pitch, not a fraction: a hybrid's coupled middle can be 1.4 mm of
-  a 3 mm pair and is still the coupled route, while two legs that only pass each
-  other at a corner leave 2 µm to 0.15 mm.
+  its skew DRC does, from lengths measured as the installed kicad-cli's release
+  measures them (#1432). Both matched kicad-cli 10.0.0 to 0.1 µm.
+- **Coupled** means the pair's coupled run -- at a gap no wider than 1.5x the
+  gap the pair was routed at -- is at least one pitch (track width + gap) long
+  AND covers at least 10% of the pair's length
+  (`diff_pair_custody.measure_pair_copper`, `meets_coupled_floor`; the share is
+  `COUPLED_SHARE_FLOOR`, #1429). The router lays its coupled run AT the gap (a
+  45° run lands ~12 µm wider after grid snapping); its via approach tracks and a
+  hybrid's single-ended legs sit 3-6x apart and do not count. The pair's length
+  is the longer member's track length, `max(length_p_mm, length_n_mm)` -- the
+  length KiCad's coupling test measures against (its `diff_pair_uncoupled`
+  actual is that length minus the coupled run), so the share is
+  `coupled / (coupled + uncoupled)`. The pitch rejects two legs that only pass
+  each other at a corner (2 µm to 0.15 mm); the share rejects a coupled sliver
+  on a long pair (0.5 mm of a 21.5 mm pair used to read `coupled`). A hybrid's
+  coupled middle (1.4 mm of a 3 mm pair) passes both.
 - **Every claimed pair carries its record** as `pair_reports[].copper`:
   `coupled_mm`, `uncoupled_mm`, `length_p_mm` / `length_n_mm`, `layers_p` /
-  `layers_n`, `skew_mm`, the gap window and `coupled`.
+  `layers_n`, `skew_mm`, the gap window, `coupled_floor_mm`, `coupled_share`
+  (coupled run over the pair's length, capped at 1), `coupled_share_floor` and
+  `coupled`.
 - **A pair routed but not coupled** is outcome `uncoupled`, listed in
   `JSON_SUMMARY.uncoupled_diff_pairs` (and the GUI's completion dialog), and is
   **not** counted in `routed_diff_pairs` / `successful`. The end-of-run summary
   names it with what does ship:
 
   ```
-  Not coupled:   1 pair(s) routed whose shipped copper is not coupled (#1303; not credited as routed; protected only while the members still run alongside, #1361): /DRAM/DRAM_DQS0 (0.000mm coupled of 21.081mm; P on F.Cu/In2.Cu, N on B.Cu/F.Cu; skew 4.510mm; 0.000mm alongside within 1mm, not protected)
+  Not coupled:   1 pair(s) routed whose shipped copper is not coupled (#1303: under one pitch or 10% of the pair's length, #1429; not credited as routed; protected only while the members still run alongside, #1361): /DRAM/DRAM_DQS0 (0.000mm coupled of 21.081mm (0.0%); P on F.Cu/In2.Cu, N on B.Cu/F.Cu; skew 4.510mm; 0.000mm alongside within 1mm, not protected)
   ```
 
   A `partial` pair with no coupled copper is flagged `no_coupled_trunk` and
@@ -727,9 +736,10 @@ the GUI diff tab gets the same answer:
   Not coupled at the routed gap is not split (#1361). A pair that is not
   coupled also carries `alongside_mm`: KiCad's coupled length again, at any gap
   up to 1 mm (`diff_pair_custody.ALONGSIDE_GAP_MM`, the radius beyond which the
-  seam re-ask's score counts copper as split). When that is at least one pitch
-  and both members end terminal to terminal, the pair stays protected and its
-  report says `"protected": true`. The case is the seam re-ask: on ulx3s it
+  seam re-ask's score counts copper as split), and its share `alongside_share`.
+  When that run passes the same two floors as `coupled` -- one pitch and 10% of
+  the pair's length (#1429) -- and both members end terminal to terminal, the
+  pair stays protected and its report says `"protected": true`. The case is the seam re-ask: on ulx3s it
   routes GPDI straight from the AC caps to the HDMI pins, P and N 0.8 mm apart
   (the connector's pin pitch), with 0.17-0.40 mm of skew. Unprotected, the
   chain's next steps ripped GPDI_D1 and laid P on In2.Cu beside N on F.Cu.

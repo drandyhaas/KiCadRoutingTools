@@ -213,7 +213,10 @@ def _same_rect(a, b):
     return abs(a[0] - b[0]) <= 1e-3 and abs(a[1] - b[1]) <= 1e-3 and abs(da) <= 0.01
 
 
-SIBLINGS = ('.kicad_pro', '.ladder.txt', '.kicad_dru')
+# (a board's every sibling, copy_board.SIBLING_EXTS -- the project, the local settings, the rules and the brief --
+# and the ladder: a turned board without its brief or rules was graded and handed on without them, #1316)
+from copy_board import SIBLING_EXTS as _SIBLING_EXTS  # noqa: E402
+SIBLINGS = tuple(_SIBLING_EXTS) + ('.ladder.txt',)
 
 
 def turn_file(src, dst, k, cx, cy):

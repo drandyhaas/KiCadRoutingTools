@@ -119,6 +119,26 @@ _IGNORE_SEVERITIES = [
 ]
 
 
+_CLI_VERSION_CACHE = {}
+
+
+def kicad_cli_version(cli: Optional[str] = None) -> Optional[str]:
+    """The version string `kicad-cli version` prints (e.g. '10.0.7'), or None
+    when no kicad-cli is found or it does not answer. Cached per binary."""
+    cli = cli or find_kicad_cli(warn=False)
+    if not cli:
+        return None
+    if cli not in _CLI_VERSION_CACHE:
+        try:
+            r = subprocess.run([cli, 'version'], capture_output=True, text=True,
+                               timeout=30)
+            m = re.search(r'\d+\.\d+\.\d+', r.stdout or '')
+            _CLI_VERSION_CACHE[cli] = m.group(0) if m else None
+        except Exception:                                    # noqa: BLE001
+            _CLI_VERSION_CACHE[cli] = None
+    return _CLI_VERSION_CACHE[cli]
+
+
 def find_kicad_cli(warn: bool = True) -> Optional[str]:
     # `warn=False` resolves SILENTLY, for a module that looks kicad-cli up at
     # IMPORT and says the not-found warning itself later -- a CLI whose output
@@ -919,6 +939,38 @@ def _merge_collinear(route_points, keep=frozenset()):
                     continue
         out.append(p)
     return out
+
+
+def _fold_close_via_hop(route_points, keep_xy, drop_xy):
+    """Drop the layer change at `drop_xy` by moving the hop that joins it to
+    the link's previous layer change at `keep_xy` onto the layer the path
+    leaves `drop_xy` on: in -> mid (keep), a run on mid, mid -> out (drop)
+    becomes in -> out at `keep_xy` and the run on out, so the dropped hole is
+    never drilled. A #340 connector on `out` would join the same points but
+    leave the run on mid as a stub hanging off the kept via.
+
+    Returns (route_points, keep_still_changes_layer) -- False when in == out,
+    so the hop was a dip and `keep_xy` needs no hole either -- or None when
+    another layer change lies between the two (the caller bridges instead).
+    """
+    def _at(p, xy):
+        return abs(p[0] - xy[0]) < 1e-6 and abs(p[1] - xy[1]) < 1e-6
+    changes = [i for i in range(len(route_points) - 1)
+               if route_points[i][2] != route_points[i + 1][2]
+               and _at(route_points[i], route_points[i + 1])]
+    jd = next((i for i in changes if _at(route_points[i], drop_xy)), None)
+    before = [i for i in changes if jd is not None and i < jd]
+    if not before or not _at(route_points[before[-1]], keep_xy):
+        return None
+    ik = before[-1]
+    out_l = route_points[jd + 1][2]
+    pts = (list(route_points[:ik + 1])
+           + [(x, y, out_l) for x, y, _l in route_points[ik + 1:jd + 1]]
+           + list(route_points[jd + 2:]))
+    if pts[ik][2] == out_l:
+        del pts[ik + 1]
+        return pts, False
+    return pts, True
 
 
 def clamp_emitted_width(route_points, extra_conn, used_width, nominal_width,
@@ -3280,7 +3332,8 @@ def oracle_reconnect(board_file: str, net_names, config,
             # hole-to-hole of an existing same-net via (0.355mm overlaps on
             # splitflap GND). Reuse the existing via instead: skip the new
             # hole and bridge to the existing barrel with short connectors
-            # on the two layers the path changes between (#340 style).
+            # on the two layers the path changes between (#340 style). The
+            # link's own new vias are held to the same floor below.
             _own_vias = [v for v in pcb_data.vias if v.net_id == net_id]
             # #479 reuse-audit gap 1: same-net PAD barrels are drill holes
             # too -- a new via within hole-to-hole of one is the same #282
@@ -3305,6 +3358,25 @@ def oracle_reconnect(board_file: str, net_names, config,
                     if math.hypot(vx - _ev.x, vy - _ev.y) < _lim:
                         _near = _ev
                         break
+                if _near is None:
+                    # The link's OWN new holes keep the same floor: the
+                    # search never spaces its own drills (via_exclusion_radius
+                    # 0), and a 0.8mm upgrade route shipped two GND vias one
+                    # diagonal cell apart. A later hole too close to a kept
+                    # one is folded into it, or bridged to it like a barrel.
+                    for _kx, _ky in _kept_vias:
+                        if math.hypot(vx - _kx, vy - _ky) < \
+                                used_via_drill + hole_to_hole_clearance:
+                            _near = _SN(x=_kx, y=_ky)
+                            break
+                    if _near is not None:
+                        _fold = _fold_close_via_hop(
+                            route_points, (_near.x, _near.y), (vx, vy))
+                        if _fold is not None:
+                            route_points, _k_still = _fold
+                            if not _k_still:
+                                _kept_vias.remove((_near.x, _near.y))
+                            continue
                 if _near is None or (abs(_near.x - vx) < 1e-6
                                      and abs(_near.y - vy) < 1e-6):
                     _kept_vias.append((vx, vy))

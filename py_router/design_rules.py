@@ -1404,7 +1404,8 @@ class DesignRules:
                            f"has no consumer in this tool yet")
             if graded:
                 out.append(f".kicad_dru rule '{name}': {', '.join(graded)} is not "
-                           f"routed to; check_drc grades it")
+                           f"routed to (a --length-match-group aims its target "
+                           f"into a length window); check_drc grades it")
         out.extend(self.notes)
         return out
 

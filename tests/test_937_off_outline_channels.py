@@ -80,16 +80,27 @@ def t_both_channels_are_published_and_well_formed():
 def t_the_precise_channel_never_names_a_part_the_coarse_one_misses():
     """An invariant, not a coincidence: the coarse outline is the real one
     INFLATED, so copper outside the real outline is necessarily outside the
-    inflated one too. If this ever fails, one of the two is wrong."""
+    inflated one too. If this ever fails, one of the two is wrong.
+
+    One deliberate exception (#1424): the coarse census exempts a castellated
+    module whose half-holes straddle the outline by design and whose other
+    pads are inside, as the per-pad GATE does. The per-pad channel still LISTS
+    such a part (a ranking magnitude), so a part it names that the coarse one
+    does not must be exactly that case: zero gating overrun, not gating."""
     with tempfile.TemporaryDirectory() as tmp:
         bad = []
         for board in _boards():
             doc, _r = _assembly(board, tmp)
             coarse = {r[0] for r in doc.get('oob_pad_refs') or []}
             exact = {r[0] for r in doc.get('oob_pad_copper_refs') or []}
-            if exact - coarse:
-                bad.append(f'{board}: per-pad names {sorted(exact - coarse)} '
-                           f'which the inflated-outline census does not')
+            overrun = doc.get('oob_pad_copper_overrun_mm') or {}
+            gating = {r[0] if isinstance(r, (list, tuple)) else r
+                      for r in doc.get('oob_pad_copper_gating_refs') or []}
+            extra = sorted(r for r in exact - coarse
+                           if (overrun.get(r) or 0.0) > 1e-9 or r in gating)
+            if extra:
+                bad.append(f'{board}: per-pad names {extra} which the '
+                           f'inflated-outline census does not')
     assert not bad, '\n'.join(bad)
     print('  PASS: the per-pad channel is a subset of the coarse one on every '
           'tracked board')

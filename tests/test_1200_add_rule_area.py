@@ -17,8 +17,11 @@ Checks (tracked esp_prog):
   3. Refusals, by reason: a --ref the board lacks, a layer it lacks.
   4. route.py routes Net-(R3-Pad2) through a 3 x 2 mm box without the area
      (non-vacuity) and around it with the area, still routed.
-  5. With kicad-cli present: KiCad reports items_not_allowed for that free
-     route once the area is added -- the rule area is real to KiCad.
+  5. Once the area is added to that free route, check_drc reports its copper
+     inside the area, and (with kicad-cli present) KiCad reports the same count
+     as items_not_allowed under a custom rule naming the area -- the area is
+     real to KiCad. kicad-cli 10.0.0 does not enforce a rule area's own
+     keep-out, so the named rule is what it can grade.
 
     python3 tests/test_1200_add_rule_area.py
 """
@@ -163,18 +166,35 @@ def main():
         check('with the area the net routes around it',
               res['ko'][0] == 1 and res['ko'][1] > 0 and res['ko'][2] == 0, str(res['ko']))
 
-        # 5. KiCad agrees the area is real.
+        # 5. The graders agree the area is real: the free route with the area
+        # added on top is copper inside it.
+        fpk = os.path.join(tmp, 'free_ko.kicad_pcb')
+        tool(os.path.join(tmp, 'out_free.kicad_pcb'), fpk, '--name', 'KO',
+             '--rect', *BOX)
+        run_utils.evidence(fpk, 'the free route with the area added')
+        r = subprocess.run([sys.executable, '-X', 'utf8', 'py_router/check_drc.py', fpk],
+                           cwd=ROOT, capture_output=True, text=True, encoding='utf-8',
+                           errors='replace')
+        n_ours = r.stdout.count("in keep-out rule area 'KO'")
+        check('check_drc reports the free route inside the area', n_ours >= 1,
+              str(n_ours))
         if os.path.isfile(KICAD_CLI):
-            fpk = os.path.join(tmp, 'free_ko.kicad_pcb')
-            tool(os.path.join(tmp, 'out_free.kicad_pcb'), fpk, '--name', 'KO',
-                 '--rect', *BOX)
+            # kicad-cli 10.0.0 does not enforce a rule area's own keep-out (a
+            # track across one, written by pcbnew itself, reports nothing), but
+            # it does enforce a custom rule naming the area -- which still
+            # proves KiCad reads the area's name and outline as written.
+            with open(os.path.splitext(fpk)[0] + '.kicad_dru', 'w') as f:
+                f.write('(version 1)\n(rule ko_by_name\n'
+                        '  (constraint disallow track via)\n'
+                        '  (condition "A.intersectsArea(\'KO\')"))\n')
             rep = os.path.join(tmp, 'drc.json')
             subprocess.run([KICAD_CLI, 'pcb', 'drc', '--format', 'json',
                             '--severity-all', '-o', rep, fpk], capture_output=True)
+            run_utils.evidence(rep, 'the KiCad DRC report')
             n = sum(1 for v in json.load(open(rep)).get('violations', [])
-                    if v.get('type') == 'items_not_allowed') if os.path.isfile(rep) else 0
-            check('KiCad reports the free route inside the area as not allowed',
-                  n >= 1, str(n))
+                    if v.get('type') == 'items_not_allowed')
+            check('KiCad reports the same copper inside the area as not allowed',
+                  n == n_ours, f'kicad {n}, check_drc {n_ours}')
         else:
             print('  [skip] kicad-cli not present: KiCad cross-check not run')
     finally:

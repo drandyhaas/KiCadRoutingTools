@@ -995,7 +995,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
     parser.add_argument('input', help='Routed .kicad_pcb file')
-    parser.add_argument('--nets', nargs='+', metavar='PATTERN',
+    parser.add_argument('--nets', nargs='+', action='extend', metavar='PATTERN',
                         help='Only analyze these nets (fnmatch patterns). '
                              'Default: every routed net.')
     parser.add_argument('--sample-step', type=float, default=DEFAULT_SAMPLE_STEP,

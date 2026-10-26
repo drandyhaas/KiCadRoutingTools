@@ -227,6 +227,42 @@ def measure(pcb, decl) -> Dict:
             'tolerance_mm': decl['tolerance_mm']}
 
 
+def decap_limit_findings(pcb, board, state, row, intent) -> List[Dict]:
+    """The intent's decap limits against a fitted row (#1416): each member the
+    limits grade, standing at its template pose for the anchor's pose on
+    `pcb`, that ends past a limit -- `[{'ref', 'rule', 'name', 'value',
+    'limit'}]`, worst first. `intent` is a loaded `floorplan.Intent`; a limit
+    it does not grade at error is not measured. The numbers are the tether
+    gate's (`quench.TetherGateView`, the grade's own pairings measured as the
+    grade measures them), so a member listed here is the finding
+    check_floorplan reports on a seed that holds the row as drawn."""
+    from . import floorplan as fp
+    from .quench import TetherGateView
+    spec = {k: v for k, v in fp.tether_gate_spec(intent).items()
+            if k in ('decap_distance', 'decap_pin_distance')}
+    if not spec:
+        return []
+    a = pcb.footprints[row['anchor']]
+    apose = (a.x, a.y, (a.rotation or 0.0) % 360.0)
+    over = {m['ref']: member_target(apose, m) for m in row['members']
+            if m['ref'] in state.parts}
+    for r, pose in over.items():
+        state.parts[r].ensure_rotation(pose[2])
+    view = TetherGateView(pcb, board, state.parts, spec)
+    seen, out = set(), []
+    for r in over:
+        for i in view._tethers_of.get(r, ()):
+            if i in seen:
+                continue
+            seen.add(i)
+            t = view._tether_terms[i]
+            v = view._tether_value(i, over)
+            if v > t.threshold + 1e-6:
+                out.append({'ref': r, 'rule': t.rule, 'name': t.name,
+                            'value': round(v, 3), 'limit': round(t.threshold, 3)})
+    return sorted(out, key=lambda f: (f['limit'] - f['value'], f['ref']))
+
+
 # -- a switching stage's ground return ----------------------------------------
 
 def ground_return_rows(pcb, decl, rects_of) -> List[Dict]:

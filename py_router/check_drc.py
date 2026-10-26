@@ -2812,6 +2812,13 @@ VIA_IN_PASTE_ACCEPTED = ('protected-via-in-paste', 'inherited-via-in-paste',
                          'undeclarable-via-in-paste')
 
 
+#: #1388: a rule that binds no net grades nothing, and "N rule(s)" read as
+#: graded and clean.
+_UNBOUND_RULE_NOTE = ("NOT GRADING: rule '{rname}' binds no net on this board "
+                      "(its condition names a class or net the board lacks, or a "
+                      "later rule takes every net it matches) -- it grades nothing")
+
+
 def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     """Grade every `.kicad_dru` length window (#1313).
 
@@ -2824,7 +2831,8 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     net is KiCad's (last matching rule in file order). A net is measured as
     KiCad's length DRC measures it, `net_queries.net_match_length(mode
     'total')`: its track and via-barrel copper plus every pad's pad-to-die
-    length. A net out of its window is a `length-out-of-range` violation. Two
+    length, as the installed kicad-cli's release measures them
+    (`net_queries.length_measure_release`, #1432). A net out of its window is a `length-out-of-range` violation. Two
     populations are reported and NOT graded: a net whose pads are not joined
     by track copper (not routed yet; the connectivity check already counts
     it), and a net whose binding rule's scope is not modelled -- named with
@@ -2880,10 +2888,15 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                 'max_mm': rule.max_mm,
                 'excess_mm': round(abs(length - limit), 4),
             })
+    from kicad_dru import unbound_length_rules
+    unbound = [r.name for r in unbound_length_rules(rules, names, member)]
+    from net_queries import installed_kicad_release, length_measure_release
     summary = {'rules': len(rules), 'graded': graded,
+               'calibrated_to_kicad': length_measure_release(),
+               'installed_kicad': installed_kicad_release(),
                'out_of_range': sum(1 for v in violations
                                    if v['type'] == 'length-out-of-range'),
-               'unmeasured': unmeasured,
+               'unmeasured': unmeasured, 'unbound_rules': unbound,
                'not_graded': {k: {'reason': r, 'nets': n}
                               for k, (r, n) in undecided.items()}}
     if not quiet:
@@ -2895,6 +2908,11 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
         for rname, (why, nets) in undecided.items():
             print(f"  NOT GRADED: rule '{rname}' ({why}) -- {len(nets)} net(s) "
                   f"it may bind are not graded here; KiCad still grades them")
+        for rname in unbound:
+            print(f"  {_UNBOUND_RULE_NOTE.format(rname=rname)}")
+        if graded:
+            from net_queries import length_measure_note
+            print(f"  (length) {length_measure_note()}")
         for n in notes:
             print(f"  .kicad_dru: {n}")
     return summary
@@ -3044,7 +3062,11 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                 'limit_mm': rp.max_mm,
                 'gap_window': [gmin, gap.max]})
 
+    from kicad_dru import unbound_length_rules
+    unbound = [r.name for kind_rules in (skew_rules, unc_rules)
+               for r in unbound_length_rules(kind_rules, names, member)]
     summary = {'rules': len(rules),
+               'unbound_rules': unbound,
                'skew_graded': n_skew,
                'skew_out_of_range': sum(1 for v in violations
                                         if v['type'] == 'skew-out-of-range'),
@@ -3065,6 +3087,8 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
         for rname, (why, nn) in undecided.items():
             print(f"  NOT GRADED: rule '{rname}' ({why}) -- {len(nn)} net(s)/pair(s) "
                   f"it may bind are not graded here; KiCad still grades them")
+        for rname in unbound:
+            print(f"  {_UNBOUND_RULE_NOTE.format(rname=rname)}")
         for n in notes:
             print(f"  .kicad_dru: {n}")
     return summary
@@ -3173,6 +3197,231 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
              counts['undeclarable-via-in-paste'],
              '; pass --baseline <input board> to accept the vias the board '
              'already had' if n_viol and baseline_pd is None else ''))
+
+
+def _keepout_area_layers(ko, routing_layers):
+    """The copper layers a rule area covers: its `(layers ...)` tokens with
+    `*.Cu` / `F&B.Cu` expanded the way pad layers are, or every copper layer
+    when it names none (as the router's stamp reads it)."""
+    names = list(ko.get('layers') or ())
+    if not names:
+        return list(routing_layers)
+    out = set(expand_pad_layers(names, routing_layers))
+    return [l for l in routing_layers if l in out]
+
+
+def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
+                   segments=None, vias=None):
+    """Copper inside a keep-out RULE AREA (`(zone ... (keepout ...))`).
+
+    For every area in `pcb_data.board_info.keepouts` (board-level and
+    footprint-owned alike -- the parser reads both, in board coordinates):
+
+    - `(tracks not_allowed)`: a non-graphic track segment on one of the
+      area's copper layers whose COPPER (the centreline grown by half its
+      width) reaches into the area -- the outer outline minus its holes;
+    - `(vias not_allowed)`: a via whose copper disk reaches into it, when the
+      via has copper (`geometry_utils.via_on_layer`) on one of its layers.
+
+    "Reaches into" means by more than `tol`; a centreline inside the area
+    always does. Pads, footprints and zone fill are NOT graded (fill pulls
+    back from a keep-out by construction; pad and footprint rules are not
+    modelled). `net_ids` (None = every net) restricts the items graded.
+    `segments` / `vias` grade those items instead of the board's -- copper a
+    generator is about to lay (`keepout_refusal`).
+
+    One row per (item, area): `type` 'keepout', `item` 'track'/'via',
+    `area` (the area's name, '' when it has none), `area_in_footprint`,
+    `net1`, `layer` (a via's layers in the area, comma-joined), `loc` (a point
+    of the item inside the area, or its nearest point to it), `inside_mm`
+    (centreline length inside the area; 0 for a via or a graze) and
+    `intrusion_mm` (how far the copper reaches past the area's edge: exact
+    for a graze and a via; for a centreline inside, half the width plus its
+    deepest point, sampled every 0.05 mm or finer).
+
+    Every segment is tested only against the areas whose bounding box its
+    copper's box meets, and the distances are one vectorized shapely call per
+    area.
+    """
+    kos = [ko for ko in (getattr(pcb_data.board_info, 'keepouts', None) or [])
+           if len(ko.get('polygon') or ()) >= 3
+           and (not ko.get('tracks_allowed', True)
+                or not ko.get('vias_allowed', True))]
+    if not kos:
+        return []
+    import shapely
+    from shapely.geometry import Polygon, Point
+    from shapely.validation import make_valid
+    from shapely.ops import nearest_points
+
+    def _net(nid):
+        n = pcb_data.nets.get(nid)
+        return n.name if n is not None else f"net_{nid}"
+
+    segs = [s for s in (pcb_data.segments if segments is None else segments)
+            if not getattr(s, 'graphic', False)
+            and (net_ids is None or s.net_id in net_ids)]
+    vias = [v for v in (pcb_data.vias if vias is None else vias)
+            if net_ids is None or v.net_id in net_ids]
+    if segs:
+        sx1 = np.array([s.start_x for s in segs], dtype=np.float64)
+        sy1 = np.array([s.start_y for s in segs], dtype=np.float64)
+        sx2 = np.array([s.end_x for s in segs], dtype=np.float64)
+        sy2 = np.array([s.end_y for s in segs], dtype=np.float64)
+        shw = np.array([s.width for s in segs], dtype=np.float64) / 2.0
+        slayer = np.array([s.layer for s in segs], dtype=object)
+        lo_x, hi_x = np.minimum(sx1, sx2) - shw, np.maximum(sx1, sx2) + shw
+        lo_y, hi_y = np.minimum(sy1, sy2) - shw, np.maximum(sy1, sy2) + shw
+        lines = None        # built on the first area that has candidates
+    if vias:
+        vx = np.array([v.x for v in vias], dtype=np.float64)
+        vy = np.array([v.y for v in vias], dtype=np.float64)
+        vr = np.array([v.size for v in vias], dtype=np.float64) / 2.0
+    rows = []
+    for ko in kos:
+        region = Polygon(ko['polygon'],
+                         [h for h in (ko.get('holes') or ()) if len(h) >= 3])
+        if not region.is_valid:
+            # a self-touching outline: keep its areal parts (make_valid can
+            # hand back a collection carrying stray lines, which has no
+            # boundary to measure against)
+            from geometry_utils import areal_parts
+            from shapely.geometry import MultiPolygon
+            parts = areal_parts(make_valid(region))
+            region = parts[0] if len(parts) == 1 else MultiPolygon(parts)
+        if region.is_empty:
+            continue
+        shapely.prepare(region)
+        boundary = region.boundary
+        bx0, by0, bx1, by1 = region.bounds
+        layers = _keepout_area_layers(ko, routing_layers)
+        base = {'type': 'keepout', 'area': ko.get('name') or '',
+                'area_in_footprint': bool(ko.get('in_footprint'))}
+        if segs and not ko.get('tracks_allowed', True) and layers:
+            cand = np.nonzero(np.isin(slayer, layers)
+                              & (lo_x <= bx1) & (hi_x >= bx0)
+                              & (lo_y <= by1) & (hi_y >= by0))[0]
+            if len(cand):
+                if lines is None:
+                    lines = shapely.linestrings(np.stack(
+                        [np.column_stack([sx1, sy1]),
+                         np.column_stack([sx2, sy2])], axis=1))
+                dist = shapely.distance(region, lines[cand])
+                for i, d in zip(cand.tolist(), dist.tolist()):
+                    hw = float(shw[i])
+                    if d > 0.0 and hw - d <= tol:
+                        continue
+                    line = lines[i]
+                    if d > 0.0:
+                        inside_mm, reach = 0.0, hw - d
+                        loc = nearest_points(line, region)[0]
+                    else:
+                        inter = region.intersection(line)
+                        inside_mm = float(inter.length)
+                        # the centreline's deepest point inside, sampled
+                        # every <= 0.05 mm along the line (flagged rows only)
+                        n = int(min(400, max(2, math.ceil(line.length / 0.05)))) + 1
+                        smp = shapely.line_interpolate_point(
+                            line, np.linspace(0.0, line.length, n))
+                        smp = smp[shapely.contains(region, smp)]
+                        reach = hw + (float(shapely.distance(boundary, smp).max())
+                                      if len(smp) else 0.0)
+                        loc = (inter.representative_point() if not inter.is_empty
+                               else line.centroid)
+                    s = segs[i]
+                    rows.append(dict(base, item='track', forbids='tracks',
+                                     net1=_net(s.net_id), net_id=s.net_id,
+                                     layer=s.layer,
+                                     loc=(round(loc.x, 4), round(loc.y, 4)),
+                                     seg_loc=(s.start_x, s.start_y, s.end_x, s.end_y),
+                                     width=s.width,
+                                     inside_mm=round(inside_mm, 4),
+                                     intrusion_mm=round(reach, 4)))
+        if vias and not ko.get('vias_allowed', True) and layers:
+            cand = np.nonzero((vx - vr <= bx1) & (vx + vr >= bx0)
+                              & (vy - vr <= by1) & (vy + vr >= by0))[0]
+            if len(cand):
+                pts = shapely.points(np.column_stack([vx[cand], vy[cand]]))
+                dist = shapely.distance(region, pts)
+                for i, d, p in zip(cand.tolist(), dist.tolist(), pts):
+                    r = float(vr[i])
+                    if d > 0.0 and r - d <= tol:
+                        continue
+                    v = vias[i]
+                    on = [l for l in layers if via_on_layer(v, l)]
+                    if not on:
+                        continue
+                    reach = (r - d) if d > 0.0 else r + boundary.distance(p)
+                    loc = nearest_points(p, region)[1] if d > 0.0 else p
+                    rows.append(dict(base, item='via', forbids='vias',
+                                     net1=_net(v.net_id), net_id=v.net_id,
+                                     layer=','.join(on),
+                                     loc=(round(loc.x, 4), round(loc.y, 4)),
+                                     via_loc=(v.x, v.y), size=v.size,
+                                     inside_mm=0.0,
+                                     intrusion_mm=round(reach, 4)))
+    return rows
+
+
+def keepout_refusal(pcb_data, segments=(), vias=()):
+    """Why these not-yet-laid items may not be laid ('' when they may): the
+    first one whose copper reaches into a keep-out rule area forbidding it,
+    measured by `keepout_census` -- so a generator refuses exactly what this
+    checker would report. Free on a board with no forbidding area."""
+    bi = getattr(pcb_data, 'board_info', None)
+    if not getattr(bi, 'keepouts', None):
+        return ''
+    rows = keepout_census(pcb_data,
+                          list(getattr(bi, 'copper_layers', None) or ()),
+                          segments=list(segments), vias=list(vias))
+    if not rows:
+        return ''
+    r = rows[0]
+    return (f"{r['item']} on {r['layer']} would reach {r['intrusion_mm']:.3f}mm into "
+            f"keep-out rule area {r['area'] or '(unnamed)'} ({r['forbids']} not allowed)")
+
+
+def _keepout_key(row):
+    """What makes a keep-out row "the same" on two boards: the area, the item
+    kind, the net NAME (ids differ between dialects), the layer and the item's
+    own geometry to a micron."""
+    g = row.get('seg_loc') or row.get('via_loc') or ()
+    return (row['area'], row['item'], row['net1'], row['layer'],
+            tuple(round(float(c), 3) for c in g))
+
+
+def _keepout_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                  violations, accepted, tol, quiet):
+    """Copper in a keep-out rule area (`keepout_census`) as `keepout`
+    violations. A row the `--baseline` board already had -- the same item at
+    the same place in the same-named area -- is accepted `inherited-keepout`:
+    it is the input's own copper, not the run's.
+
+    check_drc's own class: kicad-cli 10.0.0 reported no `items_not_allowed`
+    for a track through a tracks-not-allowed rule area when we measured it, so
+    kicad_drc_compare keeps these on a labelled channel of their own."""
+    rows = keepout_census(pcb_data, routing_layers, tol=tol,
+                          net_ids=matching_net_ids)
+    inherited = set()
+    if rows and baseline_pd is not None:
+        inherited = {_keepout_key(r) for r in keepout_census(
+            baseline_pd, routing_layers, tol=tol)}
+    n_viol = n_inh = 0
+    for r in rows:
+        if _keepout_key(r) in inherited:
+            r['accepted'] = 'inherited-keepout'
+            accepted.append(r)
+            n_inh += 1
+        else:
+            violations.append(r)
+            n_viol += 1
+    if quiet or not rows:
+        return
+    print("Copper in keep-out rule areas: %d (violations), %d inherited from "
+          "--baseline (accepted)%s" % (
+              n_viol, n_inh,
+              '; pass --baseline <input board> to accept the copper the board '
+              'already had there' if n_viol and baseline_pd is None else ''))
 
 
 def _baseline_footprint_poses(baseline):
@@ -3489,6 +3738,19 @@ def check_via_size(via: Via, min_via_diameter: float, min_via_drill: float,
     dia_bad = dia_short > max(size_margin, SIZE_EPS_MM)
     drill_bad = drill_short > max(size_margin, SIZE_EPS_MM)
     return dia_bad, drill_bad, dia_short, drill_short
+
+
+def check_via_annular(via: Via, min_ring: float,
+                      size_margin: float = 0.0) -> Tuple[bool, float]:
+    """Check a via's annular ring, (size - drill) / 2, against ``min_ring``
+    (#1433). A drill at or above the pad's size has no ring at all.
+
+    Returns (ring_too_small, shortfall_mm).
+    """
+    if not via.size or not via.drill:
+        return False, 0.0
+    short = min_ring - (via.size - via.drill) / 2.0
+    return short > max(size_margin, SIZE_EPS_MM), short
 
 
 def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, layer: str = "User.7"):
@@ -4098,6 +4360,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
         eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
         eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
+        # #1433: the annular ring the floor's smallest via implies -- the same
+        # number route.py's enforce_fab_floors pins an explicit via up to.
+        # Diameter and drill pass one at a time, so without this a via whose
+        # drill is wider than its pad graded clean.
+        eff_min_via_ring = max(0.0, (fab['via_diameter'] - fab['via_drill']) / 2.0)
         # #530: the board's OWN size minimums -- Board Setup rules.min_* and
         # every .kicad_dru track_width / via_diameter / hole_size rule, resolved
         # per net and layer in KiCad's order, raised to the fab floor -- are
@@ -4105,6 +4372,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         _size_rules = None
         try:
             from design_rules import DesignRules as _DR
+            from design_rules import SIZE_KINDS as _SZK
             _size_rules = _DR.from_project(pcb_data, pcb_file, fab_floor=fab,
                                            copper_layers=copper_layers)
             if not (_size_rules.board_min or _size_rules.rules):
@@ -4132,6 +4400,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
                   f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm"
                   + ("; per-net board/rule minimums applied (#530)" if _size_rules else ""))
+            # #1390: a .kicad_dru size rule whose condition is not modelled
+            # (A.insideCourtyard(), ...) binds copper the minimums above
+            # know nothing about, and used to vanish: the clearance half got
+            # a note, the track_width half none, and KiCad's own DRC then
+            # reported errors this grader called clean.
+            if _size_rules is not None:
+                for _r in _size_rules.rules:
+                    if _r.unsupported and not _r.honoured:
+                        _sk = sorted(k for k in _r.constraints if k in _SZK)
+                        if _sk:
+                            print(f"  NOT GRADED (size): rule '{_r.name}' "
+                                  f"({', '.join(_sk)}): {_r.unsupported} -- "
+                                  f"the copper it binds is not graded here; "
+                                  f"KiCad still enforces it")
 
     # Helper to check if a net_id matches the filter patterns
     def net_matches_filter(net_id: int) -> bool:
@@ -5676,6 +5958,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             _vd, _vh = _via_floors(via)
             dia_bad, drill_bad, dia_short, drill_short = check_via_size(
                 via, _vd, _vh, size_margin)
+            ring_bad, ring_short = check_via_annular(via, eff_min_via_ring,
+                                                     size_margin)
+            if ring_bad:
+                net_name = pcb_data.nets.get(via.net_id, None)
+                violations.append({
+                    'type': 'via-annular',
+                    'net1': net_name.name if net_name else f"net_{via.net_id}",
+                    'size': via.size,
+                    'drill': via.drill,
+                    'ring': (via.size - via.drill) / 2.0,
+                    'min_ring': eff_min_via_ring,
+                    'shortfall_mm': ring_short,
+                    'via_loc': (via.x, via.y),
+                })
             if dia_bad or drill_bad:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
@@ -5700,6 +5996,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
     _via_in_paste_pass(pcb_data, matching_via_nets, _baseline_pd, violations,
                        _accepted_edge, quiet)
+    _keepout_pass(pcb_data, routing_layers, matching_net_ids, _baseline_pd,
+                  violations, _accepted_edge,
+                  _grade_tol(clearance, clearance_margin), quiet)
     _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet)
     _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet)
 
@@ -5993,6 +6292,22 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               + ("" if v.get('format_can_declare', True) else
                                  "  [this file format cannot declare it per via: "
                                  "state Type VII on the fab drawing, or move the via]"))
+                    elif vtype == 'keepout':
+                        _an = (f"'{v['area']}'" if v['area'] else '(unnamed)') + (
+                            ' [footprint rule area]' if v.get('area_in_footprint') else '')
+                        if v['item'] == 'track':
+                            print(f"  Track:{v['net1']} in keep-out rule area {_an} "
+                                  f"(tracks not allowed)")
+                            print(f"    Layer: {v['layer']}, copper {v['intrusion_mm']:.3f}mm "
+                                  f"past the area edge, {v['inside_mm']:.3f}mm of "
+                                  f"centreline inside, at ({v['loc'][0]:.2f},{v['loc'][1]:.2f})")
+                            print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                        else:
+                            print(f"  Via:{v['net1']} in keep-out rule area {_an} "
+                                  f"(vias not allowed)")
+                            print(f"    Layer(s): {v['layer']}, copper {v['intrusion_mm']:.3f}mm "
+                                  f"past the area edge")
+                            print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     elif vtype == 'skew-out-of-range':
                         print(f"  {v['net1']}: {v['skew_mm']:.4f}mm shorter than "
                               f"{v['net2']} ({v['length_mm']:.4f} vs "
@@ -6041,6 +6356,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     elif vtype == 'via-drill-size':
                         print(f"  Via:{v['net1']} drill hole too small for fab")
                         print(f"    Drill: {v['drill']:.4f}mm < min {v['min_drill']:.4f}mm "
+                              f"(short {v['shortfall_mm']:.4f}mm)")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'via-annular':
+                        print(f"  Via:{v['net1']} annular ring too small for fab")
+                        print(f"    Size {v['size']:.4f}mm, drill {v['drill']:.4f}mm: ring "
+                              f"{v['ring']:.4f}mm < min {v['min_ring']:.4f}mm "
                               f"(short {v['shortfall_mm']:.4f}mm)")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     # #326: attribute above-global requirements (pad/footprint
@@ -6100,7 +6421,7 @@ if __name__ == "__main__":
                              f'Raises the floor, never lowers it.')
     parser.add_argument('--clearance-margin', type=float, default=0.05,
                         help='Fraction of clearance to use as tolerance (default: 0.05 = 5%%). Violations smaller than clearance*margin are ignored.')
-    parser.add_argument('--nets', '-n', nargs='+', default=None,
+    parser.add_argument('--nets', '-n', nargs='+', action='extend', default=None,
                         help='Optional net name patterns to focus on (fnmatch wildcards supported, e.g., "*lvds*")')
     parser.add_argument('--debug-lines', '-d', action='store_true',
                         help='Write debug lines to User.7 layer showing violation locations')
@@ -6459,6 +6780,11 @@ if __name__ == "__main__":
                 violations=sum(1 for v in _real if v.get('type') == 'via-in-paste'),
                 **{k.split('-')[0]: sum(1 for v in violations if v.get('accepted') == k)
                    for k in VIA_IN_PASTE_ACCEPTED}),
+            # copper in keep-out rule areas, the inherited ones included
+            'keepout': dict(
+                violations=sum(1 for v in _real if v.get('type') == 'keepout'),
+                inherited=sum(1 for v in violations
+                              if v.get('accepted') == 'inherited-keepout')),
             'items': [dict(item,
                            short=(isinstance(item.get('overlap_mm'), (int, float))
                                   and item['overlap_mm'] >= _clearance_for(item)))

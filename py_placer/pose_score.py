@@ -42,7 +42,7 @@ def _offsets(radius: float, step: float):
 def make_state(pcb_data, board_path: str, *, clearance: Optional[float] = None,
                board_edge_clearance: Optional[float] = None, extra_locked_refs=None,
                keepouts=None, intent_zones=None, exclusive_zones=None,
-               estimate_courtyards=False, estimate_skip=()):
+               estimate_courtyards=False, estimate_skip=(), declared_heights=None):
     """A QuenchState for `pcb_data`: its parts, their poses and the seat
     gate. `place_simple` keeps one for the whole run; the pose tools build
     one per call. A floor left None is the board's own
@@ -70,7 +70,10 @@ def make_state(pcb_data, board_path: str, *, clearance: Optional[float] = None,
         exclusive_zones=exclusive_zones,
         # #1300: a courtyard-less part seated on an estimated courtyard;
         # `place_simple` asks, a grading caller does not.
-        estimate_courtyards=estimate_courtyards, estimate_skip=estimate_skip)
+        estimate_courtyards=estimate_courtyards, estimate_skip=estimate_skip,
+        # #1443: the intent's declared covers and part heights
+        # (`Intent.height_declarations`), passed through like the keep-outs.
+        declared_heights=declared_heights)
 
 
 class PoseUnrankable(KeyError):

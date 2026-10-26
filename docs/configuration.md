@@ -62,8 +62,14 @@ a list of exclusions only implies `*`. A pattern without a sheet path (`GND`,
 `VCC*`) also matches the last path component of a hierarchical net (`/GND`),
 so the plain spelling works on a sheet-qualified board. A `!`-name that is
 itself a net on the board is that net (an active-low signal), and `\!` escapes
-the `!`. `unconnected-*` nets are left out of a wildcard; name one to route
-it.
+the `!`. A single-pad `unconnected-*` net is left out of a wildcard. A
+multi-pad one on ONE footprint (a connector's shield or mounting tabs, a
+reversible footprint's doubled pins) is an open net to `check_connected` and
+`board_score` until it is routed, as KiCad counts it, so the wildcard routes it,
+after every named net (#1405) -- unless the footprint declares those pads
+jumpered. One whose pads lie on SEVERAL footprints (separate no-connect pins
+sharing an auto-name, as on a panel of copies) is neither routed nor counted
+open; name it to route it.
 
 **Placement blocks** (`route.py` only) route the nets of one block -- a
 schematic sheet, a KiCad group, an IC and its decaps:
@@ -142,6 +148,16 @@ Safety rails:
 python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-reroute
 ```
 
+`route_diff.py --force-reroute` is the same for differential pairs: both
+members of every selected pair are stripped and the pair is routed again AS a
+coupled pair (`route.py` routes single-ended and would de-pair it). A pair is
+re-routed together or not at all: if one member is protected or plane-owning
+the other stays too. A routed pair is protected, so name both members exactly:
+
+```bash
+python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS_N" --force-reroute
+```
+
 ### Geometry Options
 
 | Option | Default | Description |
@@ -175,7 +191,7 @@ the Route tab). The defaults (`auto`, `fab`) live in `routing_defaults.py`
 |--------|---------|-------------|
 | `--fab-tier` | `auto` | `auto` (the standard floor, escalating to advanced when a fine-pitch fan-out, plane tap or last-resort via cannot fit; warned and counted), `standard` (no extra fab cost, **hard**) or `advanced` (tighter, "more costly", **hard**) |
 | `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
-| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums; an unset key falls back to the fab tier floor, except clearance, which falls back to the Default net class's clearance, #1160; with `--no-fix-drc-settings` descents stop at what KiCad grades the unchanged project at: a rule it leaves out at KiCad's factory value, #1287, and clearance at the Default class floored at `min_clearance`, #1262), `off` (never; the net fails and is reported -- except a wide power/impedance net's pad-entry neck of at most 2 mm of path, `routing_defaults.PAD_ENTRY_NECK_MM`) |
+| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums; an unset key falls back to the fab tier floor, except clearance, which falls back to the Default net class's clearance, #1160; a `min_clearance` the writeback lowered to a pad clearance override is not read as the board's own minimum: the value it replaced is recorded in `kicad_routing_tools.pad_override_min_clearance` and read instead while the rule still holds the capped value, #1369; with `--no-fix-drc-settings` descents stop at what KiCad grades the unchanged project at: a rule it leaves out at KiCad's factory value, #1287, and clearance at the Default class floored at `min_clearance`, #1262), `off` (never; the net fails and is reported -- except a wide power/impedance net's pad-entry neck of at most 2 mm of path, `routing_defaults.PAD_ENTRY_NECK_MM`) |
 | `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired -- on every routing CLI that takes it (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`); an exit code the run already had for its own reason wins. For a net with its own width -- `--power-nets`, an impedance width, a wider net class -- this means copper that SHIPS under width (one `design_rules` row per net), not every narrower routing attempt: a power net on `route.py` is measured over the whole net (#1033); an impedance- or class-width net, and `repair_planes.py`'s `--power-nets` taps, over the copper the run laid, so a fanout stub an earlier step drew at its own width is not counted |
 
 The tier is a **floor ladder**:
@@ -237,9 +253,11 @@ request is never pinned up to a board minimum, only to the fab floor. Under
 `off` nothing is narrowed and a net that cannot complete at the requested
 geometry fails and is reported, with one bounded exception: a wide (power or
 impedance) net may neck below its width for at most 2 mm of routed path
-(`routing_defaults.PAD_ENTRY_NECK_MM`) on one edge or one via-to-pad tap --
-the pad-entry stretch a wide rail cannot keep into a narrow pin. A longer neck
-fails the edge. A power net's under-width copper is recorded like any other
+(`routing_defaults.PAD_ENTRY_NECK_MM`) at a pad entry -- the stretch a wide
+rail cannot keep into a narrow pin: a whole edge that short, the last stretch
+into the pin of a longer edge whose rest keeps the net's width (#1452), or one
+via-to-pad tap. A longer neck fails the edge, and the failure names the
+allowance and the edge's span rather than advising a smaller track. A power net's under-width copper is recorded like any other
 narrowing (below), so `--strict-sizes` still sees it.
 
 **Net-filtered keep-outs.** A KiCad rule area has no net dimension, so a
@@ -359,7 +377,7 @@ live board via the pcbnew API.
 |--------|---------|-------------|
 | `--power-nets` | - | Glob patterns for power nets (e.g., `"*GND*" "*VCC*"`) |
 | `--power-nets-widths` | - | Track widths in mm for each power-net pattern (must match `--power-nets` length) |
-| `--neckdown-length` | 2.5 | Length in mm of the pad-entry zone at each pad end of a neck-down route (a failed wide power route retried at the default width): the power width capped at the pad's short side where it fits, the default width only where it does not (#1318) |
+| `--neckdown-length` | 2.5 | Length in mm of the pad-entry zone at each pad end of a neck-down route (a failed wide power route retried at the default width): the power width capped at the pad's short side where it fits, the default width only where it does not (#1318). Under `--escalation off` capped at 2 mm less the taper (#1452) |
 | `--neckdown-taper-length` | 0.5 | Narrow-to-wide width taper length in mm (0 = abrupt) |
 | `--no-power-tap-neckdown` | off | Disable the neck-down retry of failed wide power routes |
 
@@ -740,7 +758,7 @@ See [Length Matching](length-matching.md#time-matching) for how propagation dela
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--json-out FILE` | - | Also write the run's `JSON_SUMMARY` to FILE. This is the merged tally: when the end-of-run reconciliation fires, stdout carries a second, subset-scoped summary, and scraping either one alone is wrong. Prefer this over parsing stdout |
+| `--json-out FILE` | - | Also write the run's `JSON_SUMMARY` to FILE. This is the merged tally: when the end-of-run reconciliation fires, stdout carries a second, subset-scoped summary, and scraping either one alone is wrong. Prefer this over parsing stdout. `route_diff.py` takes it too, with the same meaning (#1421). A run with nothing to route still writes the file, with a `status` saying why |
 | `--write-fill` | off | After writing the board, fill its zones with KiCad's own zone filler so the file carries `(filled_polygon ...)` blocks (#910); without it the board ships zone outlines only. Needs KiCad's bundled python |
 | `--capabilities` | off | Print this clone's module and flag inventory as JSON and exit (see `krt_capabilities.py --require`) |
 

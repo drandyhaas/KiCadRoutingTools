@@ -68,7 +68,12 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   (read `pile` and `has_copper` on its `JSON_SUMMARY` line; `poured_nets`
   names the nets a pour already serves) and
   `python3 -X utf8 py_tools/board_context.py <board> --md` (every part's value,
-  pin functions, nets by face, what each cap serves, `CROSSED` pin-order pairs).
+  pin functions, nets by face, what each cap serves, `CROSSED` pin-order pairs,
+  and, from the project's schematic, each sheet's drawn blocks with the notes
+  beside them and the designer's layout notes). It finds the schematic beside
+  the board (`<board>.kicad_sch`); if its `## Schematic` section says none was
+  found and the project has one elsewhere, run it again with
+  `--schematic <root .kicad_sch>`.
 - **Read `references/part-roles.md` before you judge what a part is.** A
   prefix, a footprint name or pins named IN/OUT mislead: an RF amplifier
   reads as a regulator, a crystal's load cap as a decap.
@@ -90,8 +95,9 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   pad edge, and a ready `proximity` row with `max_mm` left null. Ask the
   user for the limits (crystal to its load pins, input cap to the
   regulator's VIN and PGND, inductor to SW, ESD array or diode to its
-  connector), put the rows in the brief's or the intent's `proximity`, and
-  report which you were given. Ask
+  connector, and each row of the schematic's layout notes, §3.3), put the
+  rows in the brief's or the intent's `proximity`, and report which you
+  were given. Ask
   in the same breath about `emc_roles.keep_away`: per crystal or oscillator,
   a rule keeping its clock nets away from every switch node, with its
   measured gap and a `brief_row` ready to paste into the brief's
@@ -194,10 +200,34 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
 - **Every part the board does not lock (and the intent does not seat in
   `fixed_poses[]`) is in exactly one group.** Fixed parts may be listed too:
   a connector in its interface's group anchors it.
-- **Group by function, not by sheet or by net count:** the power entry and its
-  conditioning, the core and its decaps, its clock, an interface with its
-  protection and series parts, signal conditioning, the user interface (LEDs
-  with their resistors, buttons). Five to eight groups suit a small board.
+- **Group by function:** the power entry and its conditioning, the core and
+  its decaps, its clock, an interface with its protection and series parts,
+  signal conditioning, the user interface (LEDs with their resistors,
+  buttons). Five to eight groups suit a small board. Never group by net count.
+- **Start from the schematic when `board_context` read one** (its
+  `## Schematic` section). The designer drew the functions there:
+  - **Sheets are the first cut.** Take each sheet as a group, put a small
+    sheet in the group it serves (a connector sheet with its interface), and
+    split a sheet that holds several functions (an MCU sheet with USB and
+    LEDs) along its blocks.
+  - **Keep each drawn block in one group.** A block is the parts drawn
+    together (a regulator with its caps, a crystal with its load caps, an LED
+    with its resistor). Split one only for a reason you write in the group's
+    `why`, such as a cap drawn beside the wrong chip.
+  - **Read the notes.** A note beside a block ("ESP32 3V3 LDO", "Buck
+    Converter (12v -> 5v)") says what the block is: use it for the group's
+    name and `why`, and for the template candidates (a buck or boost note
+    names a switching stage).
+  - **A layout note is the designer's own proximity claim** ("C11 close to
+    pin45"). Put each row the `### Layout notes` subsection prints into the
+    intent's `proximity[]`, with a `why` quoting the note, and ask the user
+    for each limit along with the EMC rows (§2). With nobody to ask, use
+    2.0 mm for a part named at a pin (a row with `pads`) and 5.0 mm for a
+    part named near a part. A note that does not name its subject lists the
+    parts drawn nearest it: write its row only when the note, those parts
+    and the nets leave no doubt which two parts, and which pin, it means.
+    Never write a row marked STALE: the note names a part that is not on
+    that pin's net. Name the rows you added, and their limits, in REPORT.md.
 - **A cap belongs with the IC whose supply pin it decouples.** A load or RC
   cap belongs with its crystal or its button.
 - **Crystals are claimed for you.** `place_simple` claims each passive
@@ -220,6 +250,24 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
   the regulator sits by its power entry -- say `near` its entry's group.
 - **Faces:** give a group a `side` (`F`/`B`) only to put all its parts on that
   face; without one each part keeps its face.
+- **`flippable`: the group's parts that may stand on the back.** A part stays
+  on the front unless place_simple needs the room for it. List one only when
+  the board is assembled on both faces: set the intent's `assembly.sides` to
+  `"both"` (the emitter writes what the pile shows, `"F"`, which forbids
+  every flip). On the 171 of 437 human boards that use both faces (share of
+  boards with any on the back, of those that have the kind):
+  - **list** SMD passives of any size (85% of boards put some on the back),
+    SMD diodes (68%), SMD transistors (55%), resistor networks, small SMD ICs
+    (SOT, SOIC, QFN under 50 mm2 of courtyard, about 50%), and internal SMD
+    connectors: FPC (8 of 17), card slots (10 of 22), wire-to-board (10 of 25);
+  - **do not list** big parts (SMD over 150 mm2: 31%; over 500 mm2: 1 of 27),
+    BGAs (5 of 32), QFPs (6 of 30), modules (4 of 16), through-hole parts
+    (passives 3 of 26, DIP 0 of 11, switches 8 of 47), LEDs and switches the
+    user sees or presses, a switching stage's inductor and loop caps (the
+    loop stays on one face), and every connector facing the outside (barrel
+    0 of 14, RJ45 0 of 11, HDMI 0 of 9, USB 1 of 13 SMD);
+  - two-layer boards use the back far less (73 of 230, against 69 of 165
+    four-layer), so list little there.
 - **Name the template candidates** in the group that holds each one, as
   `"templates": [{"chip": "U2", "kind": "switching stage", "why": "buck
   converter; its datasheet's layout figure"}]`. §3.5 copies each one's
@@ -300,14 +348,16 @@ python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --intent wk
 ```
 
 For each edge connector, read its edge, its facing (`facing ... pass`, or
-`facing abstained (...)` when its body names no face) and the group you gave
-it. Then decide, from the part's function and its datasheet:
+`facing abstained (...)` when its body names no face, `facing exempt (...)`
+when its class is not graded for a face) and the group you gave it. Then decide, from the part's function and its datasheet:
 
 - **The edge, and roughly where along it** when that matters (a USB or
   barrel jack where the enclosure opens, a debug header out of the user's
   way): `edge`, and `along_edge_band` as fractions of the edge.
 - **The mating face of a connector whose facing abstained** (a side-entry
-  JST drawn symmetric about its pads): find the side its opening is on in the
+  JST drawn symmetric about its pads) **or is exempt** (a side-push switch
+  of class `edge_actuator`, whose actuator points one way and is graded only
+  once a face is declared): find the side its opening is on in the
   datasheet's PCB-layout drawing and write `mating_face` (`+x`/`-x`/`+y`/`-y`,
   the footprint's own frame). The side of its solder tabs, away from the
   contact row, is a hint to check against the drawing, not a rule: it is
@@ -334,8 +384,10 @@ it. Then decide, from the part's function and its datasheet:
   flush instead, ch32v003_usb's USB-C J1 sat 0.88 mm deeper than its drawing
   and the board routed with about 15 mm more copper a seed. The band is
   read at zero margin, on the drawn body or else the courtyard (#1301): an
-  overhang of x reads x, so write the distance the part reaches past the
-  edge and never add the board's edge margin to it. check_floorplan's
+  overhang of x reads x past the DECLARED edge (one distance along that
+  edge's normal; what the part does past another edge is reported on its own
+  and bounded by the band's maximum, #1403), so write the distance the part reaches past the edge and never add
+  the board's edge margin to it. check_floorplan's
   `overhang_basis` says which of the two it read.
 
 Write these into the intent's `edge_connectors[]` entries, the rows into
@@ -346,6 +398,61 @@ wrong with `place_pose ... set ... lock` as in §3.1. Run check_floorplan again:
 no `edge_connector` error, and no `edge_oversubscribed` warning (an edge
 declared more connectors than fit on it together: move one to another edge,
 drop a declaration, or widen a band now, before placing).
+
+### 3.4b Covers (your judgement)
+
+A card in a socket (M.2, mini-PCIe), a module on a mezzanine or stacking
+connector (a compute module) or a shield on headers stands over the board.
+Parts may go under it only where they fit, and the board does not say how
+low it reaches, so declare it. Without a declaration nothing judges the area
+under a card, and a tall part can be placed there.
+
+1. **Find each socket or stacking connector that takes a card or module**,
+   from its footprint, value and datasheet, and run:
+   ```bash
+   python3 -X utf8 py_tools/cover_facts.py wk/<run>/fixed.kicad_pcb --refs J3
+   ```
+   Without `--refs` it lists every connector of ten pads or more and every
+   part whose models raise a body. Per connector it prints its height, each 3D model it names that does not
+   resolve, what its resolved models raise over the board (a card or module
+   model) with that model's underside, the standoffs and mounting holes on
+   its axes (distance along the axis and off it), and the parts under the
+   raised extent now. Facts, not decisions.
+2. **The underside, from the datasheets.** The card's lowest point above the
+   board is the socket's card height (or the stacking height) less what
+   hangs below the card: nothing for a single-sided card, its bottom-side
+   height for a double-sided one. A measured card model draws ONE card
+   type: weigh its underside against the datasheets, never take it as the
+   answer. When it cannot be established, declare the conservative value
+   (the lowest card the socket takes) and say so in the hand-back.
+3. **Choose the standoff for each card length** the board takes (the facts
+   list each with its distance), and the card's width and reach.
+4. **Write the row** into the design brief's `covers[]`
+   (`<board>.design-brief.json` beside the board, which travels with it and
+   compiles into the intent on every emit; re-emit, §3.2): `connector`, `side`,
+   `axis_deg` (the facts' axis), `width_mm`, `underside_mm`, `length_mm`
+   (how far the body reaches from the connector's origin), `offset_mm` (the
+   standoff's "off" when the card's centre line misses the connector's
+   origin), `standoffs` (each `ref` with `length_mm`, the facts' distance
+   along), `removable` and `source` (the datasheets and figures). The
+   emitted intent then carries it with `min_reader` 15. **`removable`, case by case:** true when the body comes
+   off in service -- a card in its socket, a module on a connector it can be
+   pulled from -- so a test point under it can still be probed with it out;
+   false when it stays (soldered, glued, a fixed shield or one the enclosure
+   holds down). Say which and why in the row's `source`.
+5. **Run check_floorplan again** (§3.4): no `cover` or `cover_unresolved`
+   warning. A `cover` warning names a standoff not where the row puts it:
+   fix the row, or move the standoff.
+
+`place_simple` then holds each standoff at its length from the connector and
+admits a part under the body only when its height is known and its top is
+0.5 mm or more under the underside; check_assembly gates one that is not. A
+part whose height nothing gives (no 3D model, no IPC-7351 name) is never put
+under it: declare its height in the brief's `heights[]` (`ref`,
+`height_mm`, `source`) only from its datasheet, never a guess. A module whose 3D model is drawn
+solid down to the board takes its datasheet's underside the same way
+(`underside_mm`). An enclosure's height limit over an area is a keep-out
+with `max_height_mm`.
 
 ### 3.5 Datasheet layouts (your judgement)
 
@@ -389,7 +496,8 @@ leaving that pose expensive.
      `wk/<run>/datasheets/<part>/`, one folder per part: a download is data,
      not code. Delete the folder before you hand back (§3.3). WebFetch
      mangles a PDF, so download it (`curl -sSL -o <folder>/<part>.pdf <url>`)
-     and open it with the Read tool and `pages`, a few at a time.
+     and read it with `py_tools/pdf_text.py` (below), not the Read tool's
+     `pages`: that needs poppler, which many machines lack (#1417).
 
    You need three things from it:
    - the **layout guidelines**. They say what matters most and sometimes
@@ -415,14 +523,19 @@ leaving that pose expensive.
      fetched. A reference design's pick-and-place file gives each part's
      centre and turn exactly (Altium's in mils, +y up). Use it to read the
      arrangement, then fit as below; never copy its coordinates.
-   - **Finding the pages.** The table of contents names them. Where poppler
-     is installed:
-     - `pdftotext -layout -f N -l N <pdf> -` prints page N, to grep for the
-       headings;
-     - `pdftoppm -r 300 -f N -l N -png <pdf> <prefix>` renders a figure too
-       small to read: crop it and Read the crop;
-     - `pdfimages -j` extracts a figure the PDF holds as an embedded image,
-       which rendering cannot sharpen.
+   - **Finding the pages.** `py_tools/pdf_text.py` uses whatever the
+     machine has -- poppler, pypdf, PyMuPDF, or on macOS the system's own
+     PDFKit, so it needs no install there -- and names the backend it used:
+     - `python3 py_tools/pdf_text.py <pdf> --find "layout example" "typical application"`
+       prints `page N: <line>` for each heading (the table of contents
+       lists them too);
+     - `python3 py_tools/pdf_text.py <pdf> --pages N` prints page N's text;
+     - `python3 py_tools/pdf_text.py <pdf> --render N --out <folder>/pN.png --dpi 200`
+       renders the figure; Read the PNG, and render at a higher `--dpi`
+       (300) and crop when it is too small to read.
+     Exit 3 means no backend is present: install poppler or `pip install
+     pypdf`. Where poppler is installed, `pdfimages -j` extracts a figure
+     the PDF holds as an embedded image, which rendering cannot sharpen.
 3. **Match the drawing to the board, by net and pin function, never by
    designator.** The datasheet's C1 is not the board's C1: a bitaxe agent
    found Q1, Q2, R4, R10 and C1 naming different parts in the two, so
@@ -786,6 +899,14 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    python3 -X utf8 py_router/route_planes.py {in} {out} --nets GND --plane-layers B.Cu
    python3 -X utf8 py_router/route.py {in} {out} --nets '*' --json-out {dir}/route.json
    ```
+   The chain is ONE arm of the routing recipe, and the arms can pick different
+   seeds. Where `plan-pcb-routing` prescribes two arms for the board's class
+   (a 2-layer through-hole board without buses: its defaults, and
+   `--layer-costs 1.0 1.0 --via-cost 600`), write one chain per arm
+   (`judge_chain_A.txt`, `judge_chain_B.txt`), judge the seeds under each, and
+   keep a seed that wins under the arm the final route will use; where both
+   arms will be routed, one that ranks first or second under both. Any other
+   board has one chain: the recipe `plan-pcb-routing` prescribes for it.
 2. **Fast-route and score the seeds `wk/<run>/judge.json` names** (the
    `--judge` legal seeds, buildable and floorplan-clean first, then lowest
    `final.cost`; place_simple grades each seed with `check_assembly
@@ -818,7 +939,14 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    which say nothing about the placement.) It ends by ranking the seeds
    and naming the best. `--jobs N` routes N seeds at once: a judging route
    takes up to about 1.3 GB on a small board and 5 GB on a 350-part one.
-   Never ship a `--quick` board.
+   Never ship a `--quick` board. Level 2 is a screen, not a verdict: its
+   copper reads -2% to +8% off the full route's per seed, and when every seed
+   routes its blocking is decided by one open net. Seeds that lie within that
+   spread of the best (the same defects, blocking within 1, copper within 10%)
+   are NOTEd; settle them with `--confirm close`, which routes those seeds
+   again at the full level (`--quick` off every route step, into
+   `s<S>_full.kicad_pcb` and `s<S>_full.score.json`) and names the best of
+   them by the same key (`--confirm K` confirms the K best instead).
 3. **Keep the best** by the placement's own defects first (floorplan errors
    plus the assembly count), then blocking, then `joins_needed`, then vias,
    copper_mm, segments (`quick_score.judge_key`): every seed whose floorplan
@@ -860,8 +988,9 @@ Routing Completes): run them once, here, not again inside the routing.
    KiCad's own silk classes:
    ```bash
    python3 -X utf8 py_placer/beautify_labels.py <board> wk/<run>/labelled.kicad_pcb
-   kicad-cli pcb drc <board> --severity-all --format json -o wk/<run>/silk_before.json
-   kicad-cli pcb drc wk/<run>/labelled.kicad_pcb --severity-all --format json -o wk/<run>/silk_after.json
+   KCLI=$(python3 py_tools/kicad_cli_path.py)
+   "$KCLI" pcb drc <board> --severity-all --format json -o wk/<run>/silk_before.json
+   "$KCLI" pcb drc wk/<run>/labelled.kicad_pcb --severity-all --format json -o wk/<run>/silk_after.json
    python3 -c "import json,sys,collections;[print(f,dict(collections.Counter(x['type'] for x in json.load(open(f))['violations'] if x['type'].startswith('silk')))) for f in sys.argv[1:]]" wk/<run>/silk_before.json wk/<run>/silk_after.json
    ```
    `beautify_labels` moves reference labels clear of pads, holes, the edge
@@ -870,8 +999,10 @@ Routing Completes): run them once, here, not again inside the routing.
    it can trade one overlap for another: one board went from 4 KiCad silk
    errors to 0, another from 54 to 76. Keep `labelled.kicad_pcb` as the
    board only when its silk count is lower, and put both counts in
-   REPORT.md. Without `kicad-cli`, keep the board as it was and say the
-   silk is ungraded.
+   REPORT.md. `kicad-cli` is often not on PATH (macOS keeps it in the app
+   bundle), which is why the block resolves it with `kicad_cli_path.py`, the
+   tools' own lookup (#1418). Only when THAT exits 1 is there no
+   `kicad-cli`: then keep the board as it was and say the silk is ungraded.
 2. **`full` mode: deliver a filled copy, last (#910).** A routed board
    carries its zones as outlines with no fill: KiCad shows the planes empty
    until they are refilled (press B), and a DRC that does not refill reads
@@ -913,6 +1044,12 @@ Routing Completes): run them once, here, not again inside the routing.
   brief's `keepouts[]` grades and places only; no routing step reads it:
   `python3 -X utf8 py_router/add_rule_area.py <in> <out> --name ANT_KEEPOUT --ref U1 --rect X0 Y0 X1 Y1`
   (#1200).
+- **A mounting hole's screw head needs its ring WRITTEN too (#1442).** KiCad
+  checks a hole's own clearance only, so a route runs up to it. Before routing,
+  `python3 -X utf8 py_router/add_rule_area.py <in> <out> --name MOUNT --mounting-holes`
+  writes the head ring (0.4 x the drill past the edge) as a keep-out the
+  router honours, and `python3 -X utf8 py_tools/check_mounting_holes.py <board> --ring MM`
+  names any other-net copper left inside it.
 - **Re-placing strands routed copper.** Strip the copper and re-route.
 
 **Routing**
@@ -929,8 +1066,12 @@ Routing Completes): run them once, here, not again inside the routing.
   Pour first (`route_planes.py`), then route with the plane nets inside
   `--nets` (`'*'` covers them). Do not end on `repair_planes.py`.
 - **Widths are requests.** After each route, read
-  `power_widths.<net>.under_mm`; grade power widths with
-  `board_score --net-min-widths`.
+  `power_widths.<net>.under_mm`. The widths `route.py` was asked for
+  (`--power-nets-widths`) are recorded with the board, and `board_score`
+  measures them with no flag (`net_widths.requested_under`, a pad neck at the
+  pad's own width excused) and reports them without counting them. A width a
+  net MUST have goes in `--net-min-widths`, which is graded. A board's
+  net-class `track_width` is not graded (the router discloses copper under it).
 - **Around a 0.8 mm BGA, the router can run out of lanes:** finer tracks and
   vias, a cheaper ground-plane layer cost (`--layer-costs`). Both go below
   the board's authored floors, so disclose that (§6). On later steps of a
@@ -993,6 +1134,8 @@ Routing Completes): run them once, here, not again inside the routing.
    - **the result first:** a table of the mode's DONE conditions with measured
      values, the `blocking_by` breakdown, and vias / copper_mm / segments;
    - **the groups and every judgement call** in them, with its reason;
+   - **covers and declared heights** (§3.4b): each row and its source, and
+     any value declared conservatively because it could not be established;
    - **which stop rule fired**, and every remaining blocker BY NAME with its
      measurement;
    - **floors:** where the run went below the board's authored or fab floors

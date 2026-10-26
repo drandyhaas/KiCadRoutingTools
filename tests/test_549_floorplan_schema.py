@@ -140,15 +140,24 @@ KEY_SETS = {
         # #1211: sibling sheet instances laid out as copies of one.
         'replicate',
         # a chip's datasheet layout, seated and carried by place_simple.
-        'templates'},
+        'templates',
+        # #1443: a body a connector carries, and declared part heights.
+        'covers', 'heights'},
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                     'tolerance_mm', 'context',
                     # #893: a DECISION and a SET, never both on one block.
                     'rotation', 'rotation_candidates'} | FREE,
-    '_KEEPOUT_KEYS': {'name', 'rect', 'circle', 'sides', 'allow',
+    # #1443: `max_height_mm`, a part of known height no taller may stand in it.
+    '_KEEPOUT_KEYS': {'name', 'rect', 'circle', 'sides', 'allow', 'max_height_mm',
                       'context'} | FREE,
+    # #1443: one declared cover, every number the author's, and its standoffs.
+    '_COVER_KEYS': {'connector', 'side', 'axis_deg', 'width_mm', 'underside_mm',
+                    'length_mm', 'offset_mm', 'standoffs', 'removable', 'source',
+                    'context'} | FREE,
+    '_COVER_STANDOFF_KEYS': {'ref', 'length_mm', 'rot'},
+    '_HEIGHT_KEYS': {'ref', 'height_mm', 'underside_mm', 'source', 'context'} | FREE,
     '_EDGE_CONNECTOR_KEYS': {
         'ref', 'edge', 'overhang_mm', 'max_setback_mm', 'class', 'source',
         'suspect', 'suspect_reason', 'overhang_capped',
@@ -256,6 +265,9 @@ def test_the_key_sets_are_exactly_what_is_documented():
         '_FIXED_POSE_KEYS': 'fixed_poses[]',
         '_KEEP_AWAY_KEYS': 'keep_away[]',
         '_REPLICATE_KEYS': 'replicate[]',
+        '_COVER_KEYS': 'covers[]',
+        '_COVER_STANDOFF_KEYS': 'covers[].standoffs[]',
+        '_HEIGHT_KEYS': 'heights[]',
     }
     checked = 0
     for name, row in sorted(TABLE_ROWS.items()):
@@ -297,7 +309,8 @@ def test_an_intent_using_every_known_key_loads():
                    {'name': 'mcu', 'refs': ['U1'],
                     'rotation_candidates': [0, 90, 180, 270]}],
         'keepouts': [{'name': 'k', 'rect': [0, 0, 6, 6], 'sides': ['F'],
-                      'allow': ['MH1'], 'note': 'n', 'context': {'why': 'w'}},
+                      'allow': ['MH1'], 'note': 'n', 'context': {'why': 'w'},
+                      'max_height_mm': 1.0},
                      {'name': 'k2', 'circle': [50, 5, 8], 'sides': ['F', 'B'],
                       'allow': [], 'note': '', 'context': {}}],
         'edge_connectors': [{
@@ -380,6 +393,13 @@ def test_an_intent_using_every_known_key_loads():
                        'members': [{'ref': 'C1', 'at': [1.5, 0.0], 'rot': 90,
                                     'pads': {'C1': ['1'], 'U1': ['3']}, 'note': 'n'}],
                        'fitted': {'legs_gap_mm': {'C1': 0.2}, 'gap_mm': 0.15}}],
+        # #1443. A declared cover, every key on one row, and part heights.
+        'covers': [{'connector': 'J3', 'side': 'F', 'axis_deg': 90, 'width_mm': 22,
+                    'underside_mm': 2.5, 'length_mm': 44, 'offset_mm': 0.0,
+                    'standoffs': [{'ref': 'MH2', 'length_mm': 42, 'rot': 0}],
+                    'removable': True, 'source': 's', 'why': 'w', 'note': 'n', 'context': {'why': 'w'}}],
+        'heights': [{'ref': 'U9', 'height_mm': 0.8, 'underside_mm': 2.0, 'source': 's',
+                     'why': 'w', 'note': 'n', 'context': {'why': 'w'}}],
     }
     # Every key of every set must appear above, or this proves less than it
     # claims -- the point is coverage of the vocabulary, not of a sample.
@@ -406,6 +426,8 @@ def test_an_intent_using_every_known_key_loads():
     for r in raw['replicate']:
         seen |= set(r)
     seen |= set(raw['dispositions'])
+    seen |= set(raw['covers'][0]) | set(raw['covers'][0]['standoffs'][0])
+    seen |= set(raw['heights'][0])
     for k in raw['keepouts']:
         seen |= set(k)
     missing = sorted({k for keys in KEY_SETS.values() for k in keys} - seen)
@@ -709,7 +731,13 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'template_unresolved',
                                         # a switching stage's caps' ground
                                         # return
-                                        'template_ground_return'}
+                                        'template_ground_return',
+                                        # #1387: a keep-out binding a
+                                        # template member, not its chip
+                                        'plan_template_keepout',
+                                        # #1443: a cover the board cannot
+                                        # resolve
+                                        'cover_unresolved'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         # Two names accept one direction only, and say so at load:

@@ -832,6 +832,52 @@ def default_netclass(board):
     return None
 
 
+def persist_live_tool_records(board, same_net_pad_clearance=None):
+    """Record the step's tool records on the live board: protected nets,
+    impedance declarations, pour-served balls and an active same-net pad via
+    clearance. The GUI twin of the CLI's record block, and INDEPENDENT of the
+    DRC-floor writeback: "Fix DRC settings after routing" unchecked keeps the
+    floors where they are, it must not void the protection of the step's
+    routed pairs (#1415). Callers run it whether or not
+    ``update_live_drc_floors`` does (which itself calls it first). Best-effort:
+    never raises."""
+    # #521: manual (non-plan) runs consume the engine-noted protection
+    # candidates here -- the per-step floor update is the GUI's step boundary.
+    # Recorded in the board's records (tool_records): its .kicad_pro, like the
+    # CLI writeback, AND the board itself, because KiCad's own project save
+    # rewrites the .kicad_pro from the copy it loaded and drops them. A board
+    # with no project, or no file yet, records on the board alone.
+    try:
+        from protected_nets import (consume_protection_candidates,
+                                    consume_impedance_specs,
+                                    consume_pour_served_pads,
+                                    persist_protected_nets,
+                                    persist_impedance_specs,
+                                    persist_pour_served_pads,
+                                    pro_path_for_board)
+        if board is not None:
+            _bf = board.GetFileName() or ""
+            _pro = pro_path_for_board(_bf) if _bf else ""
+            persist_protected_nets(_pro, consume_protection_candidates(),
+                                   board=board)
+            persist_impedance_specs(_pro, consume_impedance_specs(), board=board)
+            # #1379: the power widths this step was asked for, measured and disclosed.
+            from protected_nets import consume_power_widths, persist_power_widths
+            persist_power_widths(_pro, consume_power_widths(), board=board)
+            # #678: the fanout tab's pour-served balls, same step boundary.
+            persist_pour_served_pads(_pro, consume_pour_served_pads(),
+                                     board=board)
+            # #581: an ACTIVE same-net pad via clearance, as every CLI routing
+            # step records it, so a later chain step keeps vias off same-net
+            # pads too (the persist is a no-op for <= 0).
+            if same_net_pad_clearance is not None:
+                from protected_nets import persist_same_net_pad_clearance
+                persist_same_net_pad_clearance(_pro, same_net_pad_clearance,
+                                               board=board)
+    except Exception:
+        pass
+
+
 def update_live_drc_floors(board, *, clearance=None, track_width=None,
                            via_size=None, via_drill=None,
                            hole_to_hole=None, edge_clearance=None,
@@ -874,38 +920,7 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
     "floors relaxed" line to every fanout run as a side effect of a clamp fix.
 
     Best-effort: never raises."""
-    # #521: manual (non-plan) runs consume the engine-noted protection
-    # candidates here -- the per-step floor update is the GUI's step boundary.
-    # Recorded in the board's records (tool_records): its .kicad_pro, like the
-    # CLI writeback, AND the board itself, because KiCad's own project save
-    # rewrites the .kicad_pro from the copy it loaded and drops them. A board
-    # with no project, or no file yet, records on the board alone.
-    try:
-        from protected_nets import (consume_protection_candidates,
-                                    consume_impedance_specs,
-                                    consume_pour_served_pads,
-                                    persist_protected_nets,
-                                    persist_impedance_specs,
-                                    persist_pour_served_pads,
-                                    pro_path_for_board)
-        if board is not None:
-            _bf = board.GetFileName() or ""
-            _pro = pro_path_for_board(_bf) if _bf else ""
-            persist_protected_nets(_pro, consume_protection_candidates(),
-                                   board=board)
-            persist_impedance_specs(_pro, consume_impedance_specs(), board=board)
-            # #678: the fanout tab's pour-served balls, same step boundary.
-            persist_pour_served_pads(_pro, consume_pour_served_pads(),
-                                     board=board)
-            # #581: an ACTIVE same-net pad via clearance, as every CLI routing
-            # step records it, so a later chain step keeps vias off same-net
-            # pads too (the persist is a no-op for <= 0).
-            if same_net_pad_clearance is not None:
-                from protected_nets import persist_same_net_pad_clearance
-                persist_same_net_pad_clearance(_pro, same_net_pad_clearance,
-                                               board=board)
-    except Exception:
-        pass
+    persist_live_tool_records(board, same_net_pad_clearance)
     _clamped = []
     try:
         import pcbnew
@@ -1019,6 +1034,11 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                 _clr_floor = _dru_min
         except Exception:
             pass
+        # #1369: the floor WITHOUT the pad-override cap below, and the rule
+        # the board declared before this writer, for the provenance record.
+        _mc_uncapped = float(_clr_floor) if _clr_floor is not None else None
+        _mc_before = (bds.m_MinClearance / 1e6
+                      if 'min_clearance' in _declared else None)
         # #530: never above the smallest pad override the run honoured (KiCad
         # floors an override at min_clearance) -- parity with compute_targets.
         try:
@@ -1028,6 +1048,11 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
         except Exception:
             pass
         lower('m_MinClearance', _clr_floor)
+        # #1369: a rule lowered for a pad override is recorded as such, so
+        # --escalation board reads the board's own minimum (the file
+        # writeback records the same in the project).
+        from fix_kicad_drc_settings import record_live_pad_override_floor
+        record_live_pad_override_floor(board, _mc_before, _mc_uncapped)
         lower('m_TrackMinWidth', track_width, min_w)
         lower('m_ViasMinSize', via_size, min_via)
         lower('m_MinThroughDrill', via_drill, min_hole)

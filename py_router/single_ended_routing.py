@@ -2299,7 +2299,7 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     if path is None:
         dir_msg = "single direction" if use_single_direction else "both directions"
         _diag(f"No route found after {total_iterations} iterations ({dir_msg})")
-        return {
+        _failed = {
             'failed': True,
             'iterations': total_iterations,
             'blocked_cells_forward': forward_blocked,
@@ -2307,6 +2307,12 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
             'iterations_forward': fwd_iters,
             'iterations_backward': bwd_iters,
         }
+        # #1452: --escalation off refused a neck this net needed (this run);
+        # the failure hint names the pad-entry allowance, not a smaller track.
+        _refused = _PAD_ENTRY_REFUSALS.get(net_id)
+        if _refused:
+            _failed['pad_entry_refused'] = _refused
+        return _failed
 
     _diag(f"Route found in {total_iterations} iterations, path length: {len(path)}")
 
@@ -2669,6 +2675,124 @@ def _neckdown_allowed(config, span_mm=None):
     if may_narrow():
         return True
     return span_mm is not None and span_mm <= PAD_ENTRY_NECK_MM + 1e-9
+
+
+def _pad_entry_zone_mm(config):
+    """Length of the pad-entry zone _neck_pass lays at the pad-capped width
+    (config.neckdown_length). Under ``--escalation off`` the zone and the
+    taper beyond it together stay within PAD_ENTRY_NECK_MM (#1452): a zone
+    longer than the allowance would ship more narrow copper at a pad than the
+    policy lets any edge carry."""
+    from fab_tiers import may_narrow
+    if may_narrow():
+        return config.neckdown_length
+    taper = max(0.0, config.neckdown_taper_length)
+    return max(0.0, min(config.neckdown_length, PAD_ENTRY_NECK_MM - taper))
+
+
+# #1452: nets an edge of which failed this run because ``--escalation off``
+# refused the neck a narrow route needed (net_id -> details). The failed
+# result of _route_net_with_obstacles_impl carries it so the failure hint
+# names the pad-entry allowance instead of advising a smaller track. Cleared
+# at the outermost batch_route entry; a pad-entry neck that lands drops it.
+_PAD_ENTRY_REFUSALS = {}
+
+
+def _oriented(res):
+    """The path of a _route_connection_at_margin result, sources -> targets."""
+    path = [tuple(c) for c in res[0]]
+    if res[4]:
+        path.reverse()
+    return path
+
+
+# #1452: landing cells tried per pad end before a pad-entry neck gives up.
+_PAD_ENTRY_LANDING_TRIES = 4
+
+
+def _pad_entry_neck_route(router, obstacles, config, sources, targets, track_margin,
+                          narrow_margins, pcb_data, net_id, print_prefix,
+                          direction_labels, single_direction, waypoints,
+                          pad_sources):
+    """Under ``--escalation off``: a route at the net's width everywhere but
+    a narrow pad entry no longer than the pad-entry zone (#1452).
+
+    The neck-down ladder narrows a whole edge, which ``off`` allows only on
+    an edge no longer than PAD_ENTRY_NECK_MM, so a long edge to a fine-pitch
+    pin -- a pin a wide track cannot pass between its neighbours to reach --
+    was left open. Instead the edge is routed in two legs: at full width from
+    the sources to a LANDING cell near the target (any cell within the zone
+    of a target cell the wide track can reach), then at the narrow width from
+    that cell into the target, kept only when that leg is no longer than the
+    zone. A landing whose narrow leg is too long (the far side of a part) is
+    dropped with its neighbourhood and the next one tried. With
+    ``pad_sources`` (both ends are terminals, not trunk copper) the same is
+    tried from the other end, for a fine-pitch pad at the source end.
+
+    Returns (path or None, iterations). The path runs sources -> targets;
+    every narrow cell lies within the zone of the pad end it enters, which
+    _neck_pass lays from that end at the pad-capped width.
+    """
+    step = config.grid_step
+    budget = _pad_entry_zone_mm(config) - step
+    if budget <= 0:
+        return None, 0
+    radius = int(budget * 0.75 / step)
+    iters = 0
+
+    def _len(path):
+        return sum(math.hypot(p[0] - q[0], p[1] - q[1])
+                   for p, q in zip(path, path[1:])) * step
+
+    def _one_end(srcs, tgts, wps):
+        nonlocal iters
+        landing = set()
+        r2 = radius * radius
+        for (tx, ty, tl) in {(t[0], t[1], t[2]) for t in tgts[:16]}:
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    if dx * dx + dy * dy <= r2:
+                        landing.add((tx + dx, ty + dy, tl))
+        landing -= {(t[0], t[1], t[2]) for t in tgts}
+        # Only cells the wide track can stand on: an unreachable target set
+        # would send the wide leg's search over the whole board.
+        landing = {q for q in landing
+                   if not obstacles.segment_blocked(
+                       q[0], q[1], q[0], q[1], q[2],
+                       float(_margin_at(track_margin, q[2])))}
+        excl = max(2, int(round(0.25 / step)))
+        for _ in range(_PAD_ENTRY_LANDING_TRIES):
+            if not landing:
+                return None
+            wide = _route_connection_at_margin(
+                router, obstacles, config, srcs, sorted(landing), track_margin,
+                pcb_data, net_id, print_prefix, direction_labels,
+                single_direction, wps)
+            iters += wide[1]
+            if wide[0] is None:
+                return None
+            w = _oriented(wide)
+            c = w[-1]
+            narrow = _route_connection_at_margin(
+                router, obstacles, config, [c], tgts, narrow_margins,
+                pcb_data, net_id, print_prefix, direction_labels,
+                single_direction, None)
+            iters += narrow[1]
+            if narrow[0] is not None:
+                nl = _oriented(narrow)
+                if nl[0] == c and _len(nl) <= budget + 1e-9:
+                    return w + nl[1:]
+            landing = {q for q in landing
+                       if q[2] != c[2] or abs(q[0] - c[0]) > excl
+                       or abs(q[1] - c[1]) > excl}
+        return None
+
+    path = _one_end(list(sources), list(targets), waypoints)
+    if path is None and pad_sources:
+        back = _one_end(list(targets), list(sources), waypoints)
+        if back is not None:
+            path = list(reversed(back))
+    return path, iters
 
 
 def _impedance_neckdown_allowed():
@@ -3212,7 +3336,7 @@ def _pending_now(pending_vias, placed):
 def _route_with_via_unblock(router, obstacles, config, sources, targets, track_margin,
                             pcb_data, net_id, print_prefix="",
                             direction_labels=("forward", "backward"), single_direction=False,
-                            waypoints=None, pending_vias=None):
+                            waypoints=None, pending_vias=None, pad_sources=True):
     """_route_main_connection plus a via-in-pad unblock (issue #189), generic over
     single-ended, multipoint-main and tap routes.
 
@@ -3230,7 +3354,7 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     """
     res = _route_main_connection(router, obstacles, config, sources, targets, track_margin,
                                  pcb_data, net_id, print_prefix, direction_labels,
-                                 single_direction, waypoints)
+                                 single_direction, waypoints, pad_sources=pad_sources)
     if res[0] is not None:
         return res + ([], [])
     layer_names = config.layers
@@ -3265,7 +3389,7 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
             _r1 = _route_main_connection(
                 router, obstacles, _rcfg, sources, targets, track_margin,
                 pcb_data, net_id, print_prefix, direction_labels,
-                single_direction, waypoints)
+                single_direction, waypoints, pad_sources=pad_sources)
             if _r1[0] is not None:
                 print(f"{print_prefix}{GREEN}Boxed endpoint unblocked by "
                       f"rung-{_rp[0]}/{_rp[1]} via search (no pre-placed "
@@ -3333,7 +3457,7 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
         retry_config = replace(config, max_iterations=config.max_probe_iterations)
         res2 = _route_main_connection(router, obstacles, retry_config, new_sources, new_targets, track_margin,
                                       pcb_data, net_id, print_prefix, direction_labels,
-                                      single_direction, waypoints)
+                                      single_direction, waypoints, pad_sources=pad_sources)
         if res2[0] is None:
             # Second rung: the stuck side got its via but the retry still failed --
             # the OTHER side often needs layer access too. Its probe burns the full
@@ -3375,7 +3499,8 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
                 retry_config = replace(config, max_iterations=2 * config.max_probe_iterations)
                 res2 = _route_main_connection(router, obstacles, retry_config, new_sources, new_targets,
                                               track_margin, pcb_data, net_id, print_prefix,
-                                              direction_labels, single_direction, waypoints)
+                                              direction_labels, single_direction, waypoints,
+                                              pad_sources=pad_sources)
         if res2[0] is None:
             # The via placed but didn't rescue the route. Memoise the pad as failed so
             # route_multipoint_taps' next rip-reroute pass doesn't redo the expensive
@@ -3490,11 +3615,33 @@ def uncommit_dropped_result(pcb_data, dropped, kept=None) -> None:
         [s for s in dropped.get('new_segments') or () if id(s) not in spare])
 
 
+def _union_frontier_cells(first, second):
+    """`first` then the cells of `second` it lacks (order kept, no repeats)."""
+    if not second:
+        return first
+    if not first:
+        return second
+    seen = set()
+    out = []
+    for c in list(first) + list(second):
+        k = tuple(c) if isinstance(c, (list, tuple)) else c
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(c)
+    return out
+
+
 def _route_main_connection(router, obstacles, config, sources, targets, track_margin,
                            pcb_data, net_id, print_prefix="",
                            direction_labels=("forward", "backward"), single_direction=False,
-                           waypoints=None):
+                           waypoints=None, pad_sources=True):
     """Route sources->targets; wide routes that fail retry narrow (issue #72/#180).
+
+    Under ``--escalation off`` a wide edge the ladder may not narrow (or a
+    short one it could not) gets a pad-entry neck instead (#1452,
+    _pad_entry_neck_route): full width up to the last stretch into the pad.
+    ``pad_sources`` False (a tap from trunk copper) keeps the source end wide.
 
     "Wide" covers POWER-configured nets (neck floor = the layer routing width)
     and, when KICAD_IMPEDANCE_NECKDOWN allows (default yes, #465),
@@ -3531,9 +3678,53 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
     if result[0] is not None or not (power_wide or imp_wide):
         return result + (False, None)
     span_mm = _edge_span_mm(sources, targets, config.grid_step)
-    if not _neckdown_allowed(config, span_mm):
-        return result + (False, None)
     neck_floor = layer_w if power_wide else config.track_width
+
+    def _pad_entry_neck(prior):
+        # #1452: --escalation off refused (or could not use) the ladder.
+        # Keep the edge at its width and narrow only a pad-entry stretch.
+        from fab_tiers import may_narrow
+        if may_narrow() or not config.power_tap_neckdown:
+            return prior + (False, None)
+        n_margins = (config.base_track_margins() if power_wide
+                     else config.track_margins_for_width(config.track_width))
+        path, it = _pad_entry_neck_route(
+            router, obstacles, config, sources, targets, track_margin, n_margins,
+            pcb_data, net_id, print_prefix, direction_labels, single_direction,
+            waypoints, pad_sources)
+        iters = prior[1] + it
+        if path is not None:
+            _PAD_ENTRY_REFUSALS.pop(net_id, None)
+            print(f"{print_prefix}{YELLOW}Wide {'power' if power_wide else 'impedance'} "
+                  f"route blocked - kept at {net_w:.4f}mm with a pad-entry neck "
+                  f"to {neck_floor:.4f}mm (at most the {PAD_ENTRY_NECK_MM:g}mm "
+                  f"pad-entry allowance, --escalation off){RESET}")
+            return ((path, iters) + prior[2:4] + (False,) + prior[5:7]
+                    + (True, None))
+        # Would the edge route at the neck width at all? Only then did the
+        # policy refuse something.
+        narrow = _route_connection_at_margin(
+            router, obstacles, config, sources, targets, n_margins,
+            pcb_data, net_id, print_prefix, direction_labels, single_direction,
+            waypoints)
+        iters += narrow[1]
+        if narrow[0] is None:
+            # No route even at the neck width: the policy refused nothing.
+            # Rip-up reads both frontiers, as on the long-trunk retry (#1400).
+            fwd = _union_frontier_cells(prior[2], narrow[2])
+            bwd = _union_frontier_cells(prior[3], narrow[3])
+            return (prior[0], iters, fwd, bwd) + prior[4:] + (False, None)
+        _PAD_ENTRY_REFUSALS[net_id] = {
+            'span_mm': round(span_mm, 3), 'allowance_mm': PAD_ENTRY_NECK_MM,
+            'net_width_mm': net_w, 'neck_width_mm': neck_floor}
+        print(f"{print_prefix}{YELLOW}Neck-down refused (--escalation off): the "
+              f"edge spans {span_mm:.2f}mm and only a {neck_floor:.4f}mm track "
+              f"reaches it, but no route keeps {net_w:.4f}mm outside the "
+              f"{PAD_ENTRY_NECK_MM:g}mm pad-entry allowance{RESET}")
+        return (prior[0], iters) + prior[2:] + (False, None)
+
+    if not _neckdown_allowed(config, span_mm):
+        return _pad_entry_neck(result)
 
     if span_mm <= SHORT_POWER_EDGE_MM:
         # Short edge: step the width down, widest-that-fits wins; segments use it.
@@ -3559,7 +3750,7 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
                 return (r[0], total_iters) + r[2:] + (False, w)
         # (The mid-retry _via_rung_retry that used to fire here was removed
         # 2026-08-05 -- see the note above _rung_search_pair.)
-        return (result[0], total_iters) + result[2:] + (False, None)
+        return _pad_entry_neck((result[0], total_iters) + result[2:])
 
     # Long trunk: keep the existing single wide->narrow retry + neck-down.
     # Power necks to the LAYER width (base_track_margins: the impedance extra
@@ -3572,12 +3763,19 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         router, obstacles, config, sources, targets, retry_margins,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
     if retry[0] is None:
-        # Keep the WIDE attempt's frontier for rip-up analysis: blockers found
-        # by the narrow frontier only help a narrow route, but ripped nets
-        # re-route at their own wide width and can fail entirely.
+        # Rip-up analysis reads the UNION of both attempts' frontiers (#1400).
+        # The wide attempt alone cannot see a wall the narrow route meets: it
+        # cannot leave a narrow pad entry past its static neighbours, so its
+        # frontier never reaches the cells a narrower track would. The net
+        # then routes at the neck-down width, so the walls THAT search meets
+        # are the ones a rip must clear. The wide frontier stays first, so a
+        # blocker both searches meet ranks as it did before.
         # (The mid-retry _via_rung_retry that used to fire here was removed
         # 2026-08-05 -- see the note above _rung_search_pair.)
-        return (result[0], result[1] + retry[1]) + result[2:] + (False, None)
+        fwd = _union_frontier_cells(result[2], retry[2])
+        bwd = _union_frontier_cells(result[3], retry[3])
+        return ((result[0], result[1] + retry[1], fwd, bwd) + result[4:]
+                + (False, None))
     return (retry[0], result[1] + retry[1]) + retry[2:] + (True, None)
 
 
@@ -5569,7 +5767,7 @@ def _route_multipoint_taps_impl(
                 router, obstacles, config, sources, targets, track_margin,
                 pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
                 waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), []),
-                pending_vias=all_vias
+                pending_vias=all_vias, pad_sources=False
             )
 
             if path is None:
@@ -5619,7 +5817,8 @@ def _route_multipoint_taps_impl(
                         (path, _it2, _fb2, _bb2, reversed_tap_path, _, _,
                          necked_down, uniform_width) = _route_main_connection(
                             router, obstacles, _retry_cfg, sources, _tgts2,
-                            track_margin, pcb_data, net_id, print_prefix="      ")
+                            track_margin, pcb_data, net_id, print_prefix="      ",
+                            pad_sources=False)
                     finally:
                         # A kept via gets its lasting ring as this edge's
                         # in-progress via (_register_inprogress_via below).
@@ -5934,7 +6133,8 @@ def _tap_target_layer(tgt_pad, layer_names, path_end_layer) -> str:
     return path_end_layer
 
 
-def _bridge_inside_own_through_via(pcb_data, net_id, config, layer, a, b) -> bool:
+def _bridge_inside_own_through_via(pcb_data, net_id, config, layer, a, b,
+                                   path_vias=()) -> bool:
     """True when a terminal bridge a->b would be a track on `layer`, a layer
     `config` forbids track on, and both ends lie in the copper of ONE through
     via of this net (#1294).
@@ -5948,13 +6148,31 @@ def _bridge_inside_own_through_via(pcb_data, net_id, config, layer, a, b) -> boo
     on the plane layer, inside the via. A through via's disc is on every
     copper layer, so it already overlaps the copper at both ends wherever
     that copper is, and the bridge joins nothing it does not. A blind or
-    micro via, or an end outside the disc, keeps its bridge."""
-    if pcb_data is None or layer not in config.layers \
-            or layer in config.routable_layers():
+    micro via, or an end outside the disc, keeps its bridge.
+
+    The same holds on a ROUTABLE layer where the bridge would reach into a
+    keep-out rule area forbidding tracks there (#1442): the via already joins
+    both ends, and the stub is copper check_drc reports (as it measures it,
+    `keepout_refusal`). There the via may be one the same path places
+    (`path_vias`: a path whose first move is a layer change drills at its
+    own end), not yet on the board."""
+    if pcb_data is None or layer not in config.layers:
         return False
+    if layer in config.routable_layers():
+        if not getattr(getattr(pcb_data, 'board_info', None), 'keepouts', None):
+            return False
+        from check_drc import keepout_refusal
+        if not keepout_refusal(pcb_data, segments=[Segment(
+                start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
+                width=config.get_net_track_width(net_id, layer),
+                layer=layer, net_id=net_id)]):
+            return False
     from geometry_utils import via_on_layer
     tol = 1e-6
-    for v in pcb_data.vias:
+    cands = list(pcb_data.vias)
+    if layer in config.routable_layers():
+        cands += list(path_vias)
+    for v in cands:
         if v.net_id != net_id:
             continue
         radius = (getattr(v, 'size', 0) or 0) / 2.0
@@ -6128,6 +6346,7 @@ def _path_to_segments_vias(
 
     # Add connecting segment from original start to first path point if needed
     # (skipped when merged: the first path segment now ends at the exact point)
+    start_bridge = None
     if start_original and not merge_start:
         first_grid_x, first_grid_y = pts[0]
         orig_x, orig_y, orig_layer = start_original
@@ -6140,18 +6359,16 @@ def _path_to_segments_vias(
         if ((abs(orig_x - first_grid_x) > 0.001 or abs(orig_y - first_grid_y) > 0.001)
                 and (orig_layer == path_start_layer or pcb_data is None
                      or _terminal_copper_on_layer(pcb_data, net_id, orig_x, orig_y,
-                                                  path_start_layer))
-                and not _bridge_inside_own_through_via(
-                    pcb_data, net_id, config, path_start_layer,
-                    (orig_x, orig_y), (first_grid_x, first_grid_y))):
-            seg = Segment(
+                                                  path_start_layer))):
+            # decided after the path's own vias exist (the bridge guard
+            # counts a via this path drills at its start)
+            start_bridge = (Segment(
                 start_x=orig_x, start_y=orig_y,
                 end_x=first_grid_x, end_y=first_grid_y,
                 width=config.get_net_track_width(net_id, path_start_layer),
                 layer=path_start_layer,
                 net_id=net_id
-            )
-            segments.append(seg)
+            ), path_start_layer, (orig_x, orig_y), (first_grid_x, first_grid_y))
 
     # Convert path points to segments and vias
     for i in range(len(path) - 1):
@@ -6211,6 +6428,11 @@ def _path_to_segments_vias(
                 )
                 segments.append(seg)
 
+    if start_bridge is not None and not _bridge_inside_own_through_via(
+            pcb_data, net_id, config, start_bridge[1], start_bridge[2],
+            start_bridge[3], path_vias=vias):
+        segments.insert(0, start_bridge[0])
+
     # Add connecting segment from last path point to original end if needed
     # (skipped when merged: the last path segment now ends at the exact point)
     if end_original and not merge_end:
@@ -6226,7 +6448,8 @@ def _path_to_segments_vias(
                                                   path_end_layer))
                 and not _bridge_inside_own_through_via(
                     pcb_data, net_id, config, path_end_layer,
-                    (last_grid_x, last_grid_y), (orig_x, orig_y))):
+                    (last_grid_x, last_grid_y), (orig_x, orig_y),
+                    path_vias=vias)):
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
@@ -6665,7 +6888,9 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
                layer_map: Dict[str, int], track_margin, net_id: int,
                neck_w=None, zone_cap=None, pcb_data=None):
     """Narrow the last neckdown_length mm of the run (the pad is at the list
-    END) only where the pad-entry width does not fit; beyond that, keep the
+    END; under ``--escalation off`` at most the pad-entry allowance less the
+    taper, _pad_entry_zone_mm, #1452) only where the pad-entry width does not
+    fit; beyond that, keep the
     wide width only where the wide clearance fits -- piece by piece (#1033),
     not all-or-nothing per segment. Never re-widens an already-narrow segment
     (so a second pass from the other end preserves the first pass's neck).
@@ -6714,6 +6939,7 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
         seg.width = zw
         return _widen_fitting_pieces(seg, f, narrow_w, coord)
 
+    zone_len = _pad_entry_zone_mm(config)
     out = []  # built in reverse (pad-first)
     cum = 0.0
     for seg in reversed(segments):
@@ -6722,12 +6948,12 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
         length = _seg_length(seg)
         if seg.width <= narrow_w:
             out.append(seg)
-        elif cum >= config.neckdown_length:
+        elif cum >= zone_len:
             out.extend(reversed(_widen_fitting_pieces(seg, fits, narrow_w, coord)))
-        elif cum + length > config.neckdown_length:
+        elif cum + length > zone_len:
             # Straddles the neck boundary: split there (the far piece,
-            # touching the pad side, is neckdown_length - cum long)
-            near, far = _split_segment_at(seg, config.neckdown_length - cum)
+            # touching the pad side, is zone_len - cum long)
+            near, far = _split_segment_at(seg, zone_len - cum)
             out.extend(reversed(_zone(far, narrow_w)))
             out.extend(reversed(_widen_fitting_pieces(near, fits, narrow_w, coord)))
         else:

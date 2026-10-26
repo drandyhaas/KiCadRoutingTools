@@ -1271,7 +1271,9 @@ def _board_window(pcb_data, centres, reach):
             and max(s.start_y, s.end_y) >= y0 and min(s.start_y, s.end_y) <= y1]
     vias = [v for v in pcb_data.vias if x0 <= v.x <= x1 and y0 <= v.y <= y1]
     return SimpleNamespace(segments=segs, vias=vias, nets=pcb_data.nets,
-                           pads_by_net=getattr(pcb_data, 'pads_by_net', {}))
+                           pads_by_net=getattr(pcb_data, 'pads_by_net', {}),
+                           # the keep-out rule areas the via checks honour
+                           board_info=getattr(pcb_data, 'board_info', None))
 
 
 def _gnd_via_ring_site(centres, anchor, config, gnd_net_id, pcb_data,

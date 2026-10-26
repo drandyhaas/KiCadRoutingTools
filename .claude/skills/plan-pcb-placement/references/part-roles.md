@@ -139,7 +139,9 @@ it was, how to tell, and the board.
   group a part belongs to by its SIGNAL nets, and ignore ground and supply rails.
 - **Sheet groups can be empty of meaning.** Some boards carry one sheet path per
   symbol (ch32v003_usb: 25 paths for 25 parts), so grouping by sheet says nothing
-  there. Check the count before trusting it.
+  there. Check the count before trusting it. `board_context`'s `## Schematic`
+  names the sheets and how many parts each holds, and says how many parts
+  matched their symbols: a low count means the schematic and the board disagree.
 - **A pin function equal to the pad number** ("1", "2") carries no information.
 - **The decap rule reads nets, not roles.** `check_groups`, `place_simple` and the
   grade count as a decap any 2-net cap from ground to a rail some chip (not a

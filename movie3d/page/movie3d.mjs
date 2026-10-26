@@ -179,16 +179,35 @@ function buildParts(sc, root) {
       const [x0, y0, x1, y1, h] = P.body;
       const bg = new THREE.BoxGeometry(Math.max(x1 - x0, 0.1), h, Math.max(y1 - y0, 0.1));
       // a fixed part's body is ghosted: it never moves, and must not hide
-      // the parts that do
+      // the parts that do; so is a cover's (#1443), the parts under it shown
+      const ghost = P.fixed || P.cover;
       const body = new THREE.Mesh(bg, new THREE.MeshStandardMaterial({
         color: P.fixed ? rgb([150, 150, 156]) : col.clone().lerp(grey, soft), roughness: 0.55, metalness: 0.05,
-        transparent: P.fixed, opacity: P.fixed ? 0.32 : 1.0, depthWrite: !P.fixed }));
-      if (P.fixed) sided(body, 3, up);
+        transparent: ghost, opacity: ghost ? 0.32 : 1.0, depthWrite: !ghost }));
+      if (ghost) sided(body, 3, up);
       body.position.set((x0 + x1) / 2, up * (h / 2 + PAD_T * 0.5), (y0 + y1) / 2);
       body.castShadow = true;
       body.receiveShadow = true;
       grp.add(body);
       boxed = body;
+    }
+    // a declared cover's body (#1443: a card in its socket, which has no
+    // model of its own): a see-through slab from its underside up, moving
+    // with its connector
+    if (P.card) {
+      const [x0, y0, x1, y1, under] = P.card;
+      const t = 0.8;
+      const cg = new THREE.BoxGeometry(Math.max(x1 - x0, 0.1), t, Math.max(y1 - y0, 0.1));
+      const slab = new THREE.Mesh(cg, new THREE.MeshStandardMaterial({
+        color: col.clone().lerp(rgb([200, 210, 255]), 0.5), roughness: 0.6, metalness: 0.0,
+        transparent: true, opacity: 0.18, depthWrite: false }));
+      slab.position.set((x0 + x1) / 2, up * (under + t / 2 + PAD_T * 0.5), (y0 + y1) / 2);
+      sided(slab, 4, up);
+      grp.add(slab);
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(cg),
+                                           new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.7 }));
+      edges.position.copy(slab.position);
+      grp.add(edges);
     }
     root.add(grp);
     S.parts.push({ P, grp, near, far, up, boxed, col });
@@ -198,9 +217,11 @@ function buildParts(sc, root) {
 function poseParts(fr) {
   const d = S.sc.thickness;
   S.parts.forEach((part, i) => {
-    const [x, y, rot, h] = fr.p[i];
+    // a fifth value turns the part over about its own x axis: a part drawn
+    // by the face it ends on, shown on the face it was on then (record.py)
+    const [x, y, rot, h, turn] = fr.p[i];
     part.grp.position.set(x, h, y);
-    part.grp.rotation.set(0, rad(rot), 0);
+    part.grp.rotation.set(rad(turn || 0), rad(rot), 0, 'YXZ');
     // the far face's copper shows only while the part stands on the board
     const onBoard = Math.abs(h - (part.up > 0 ? d : 0)) < 1e-3;
     for (const m of part.far) m.visible = onBoard;
@@ -294,7 +315,10 @@ async function loadModels(url, sc) {
       clone.matrixAutoUpdate = false;
       clone.matrix.multiplyMatrices(pose[3] === 'B' ? flip : new THREE.Matrix4(), rest);
       // a ghost's own stencil value (1-254): see the depth pass below
-      const gid = part.P.fixed ? (S.ghostId = (S.ghostId || 0) % 254 + 1) : 0;
+      // a fixed part and a cover (#1443) are ghosted: see-through, so the
+      // parts that move, and the parts under a cover, stay in view
+      const ghost = part.P.fixed || part.P.cover;
+      const gid = ghost ? (S.ghostId = (S.ghostId || 0) % 254 + 1) : 0;
       let k = 0;
       clone.traverse((c) => {
         if (!c.isMesh) return;
@@ -303,7 +327,8 @@ async function loadModels(url, sc) {
           // kicad-cli writes no metallicFactor, so glTF's default of 1 makes
           // every model a mirror -- near black with no environment to reflect
           if ('metalness' in q) { q.metalness = 0.15; q.roughness = 0.6; }
-          if (part.P.fixed) {
+          if (!part.P.fixed && q.color) q.color.lerp(part.col, sc.tint ?? 0.5);
+          if (ghost) {
             q.transparent = true; q.opacity = 0.32; q.depthWrite = false;
             // its front faces pass the depth pass's test within a hair, and
             // the first to land on a pixel marks it, so no other face of
@@ -311,16 +336,14 @@ async function loadModels(url, sc) {
             Object.assign(q, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4,
                                stencilWrite: true, stencilRef: gid, stencilFunc: THREE.NotEqualStencilFunc,
                                stencilZPass: THREE.ReplaceStencilOp });
-          } else if (q.color) {
-            q.color.lerp(part.col, sc.tint ?? 0.5);
           }
           return q;
         });
         c.material = Array.isArray(c.material) ? mats : mats[0];
         c.castShadow = true;
-        c.receiveShadow = !part.P.fixed;
+        c.receiveShadow = !ghost;
         // a fixed order, so the same face lands first every frame
-        if (part.P.fixed) sided(c, 3 + 1e-6 * k++, part.up);
+        if (ghost) sided(c, 3 + 1e-6 * k++, part.up);
       });
       part.grp.add(clone);
       // a model Claude found on the web (find_models.py) must sit on its
@@ -331,7 +354,7 @@ async function loadModels(url, sc) {
         misfit.push(part.P.ref);
         return;
       }
-      if (part.P.fixed) {
+      if (ghost) {
         // a ghost is dozens of overlapping see-through meshes, which three
         // sorts by their origins every frame: as the camera orbits, two at
         // nearly one depth swap places and the blend flashes (a USB-C ghost's

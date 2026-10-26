@@ -51,7 +51,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from kicad_parser import Footprint, PCBData
 from bga_fanout.types import BGAGrid
-from bga_fanout.geometry import clamp_via_to_pad
+from bga_fanout.geometry import clamp_via_to_pad, endpoint_on_pad
 from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
 from routing_defaults import HOLE_TO_HOLE_CLEARANCE
 
@@ -854,15 +854,17 @@ def generate_underpad_escape(footprint: Footprint,
     # segment loop below). This lets the under-pad pass run AFTER diff pairs (or
     # anything else) were fanned first - it fills in only the remaining balls and
     # routes clear of the existing fanout.
+    # "Fanned" = a same-net track end lands in one of this array's balls (the
+    # ball's copper, not a window round its centre: #1411).
     TOL = 0.05
-    bga_pad_pts = {}
+    bga_pads_by_net = {}
     for p in fp_pads:
-        bga_pad_pts.setdefault(p.net_id, []).append((p.global_x, p.global_y))
+        bga_pads_by_net.setdefault(p.net_id, []).append(p)
     fanned_net_ids = set()
     for s in pcb_data.segments:
-        for (px, py) in bga_pad_pts.get(s.net_id, ()):
-            if ((abs(s.start_x - px) < TOL and abs(s.start_y - py) < TOL)
-                    or (abs(s.end_x - px) < TOL and abs(s.end_y - py) < TOL)):
+        for _bp in bga_pads_by_net.get(s.net_id, ()):
+            if (endpoint_on_pad(_bp, s.start_x, s.start_y, TOL)
+                    or endpoint_on_pad(_bp, s.end_x, s.end_y, TOL)):
                 fanned_net_ids.add(s.net_id)
                 break
 

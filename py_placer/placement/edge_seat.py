@@ -79,6 +79,10 @@ ROTS = (0.0, 90.0, 180.0, 270.0)
 #: The step a seat line is scanned at, and the precision each change found
 #: between two steps is then bisected to.
 SCAN_STEP_MM = 0.5
+#: How many places along an edge the seat's depth is read (#1412). One sample
+#: at the edge's midpoint seats a part at a notch's depth along the whole edge
+#: whenever the midpoint falls in a notch.
+DEPTH_SAMPLES = 9
 REFINE_MM = 0.02
 #: The step and the reach of a part's slide to a legal spot on its edge after
 #: the anneal.
@@ -196,10 +200,19 @@ class _Probe:
     def band_read(self, ref, edge, pose) -> Tuple[float, str]:
         """`(amount, basis)`: the overhang the grade reads at `pose`, and
         the currency it reads it in (`connector_geometry.band_amount`)."""
-        from .connector_geometry import band_amount, courtyard_overhang
+        from .connector_geometry import band_amount, courtyard_overhang_past
         # #1301: the courtyard at ZERO margin, as the grade reads it
-        legacy = courtyard_overhang(self.geo, self.state.parts[ref].rect(*pose))
-        return band_amount(self.geo, ref, edge, legacy, 0.0, pose=pose)[:2]
+        legacy, cy_others = courtyard_overhang_past(
+            self.geo, self.state.parts[ref].rect(*pose), edge)
+        amount, basis, row = band_amount(self.geo, ref, edge, legacy, 0.0, pose=pose)
+        # The grade reads the DECLARED edge alone and reports another edge's
+        # overhang on its own (#1403). The seat holds the stricter rule and
+        # seats only where no OTHER edge is crossed either: a courtyard longer
+        # than its edge stays unseated, with its reading (#1325), rather than
+        # being seated hanging off the corners.
+        others = (row.get('other_body_edge_overhang_mm')
+                  if row.get('body_measured') else cy_others) or {}
+        return amount + sum(others.values()), basis
 
     def copper_clear(self, ref, pose) -> bool:
         """Every pad's copper the board's edge clearance inside the outline
@@ -480,11 +493,14 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
             continue
         cls = c.get('class') or classify_part(pcb.footprints[ref], ref).name
         if cls not in SEATED_CLASSES:
+            # The row IS the declaration: `rule_edge_connector` grades the
+            # edge of every row whatever its class, so a row the seat skipped
+            # shipped a part the grade failed (#1384). Seated as a
+            # connector_affinity part would be; said so.
             what = (f"declared class {cls}" if c.get('class')
                     else cls or 'no part class')
             notes.append(f"{ref} is declared on the {c['edge']} edge but is not an edge part "
-                         f"({what}): placed as any other part")
-            continue
+                         f"by class ({what}): seated there as declared")
         entries.append(c)
     if not entries:
         return out, notes, unseated
@@ -552,6 +568,24 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
                         squeezed.add(rot)
                         continue
             free = _free_stretches(probe, c, edge, axis, coord, rot, lo, hi, fixed, tally)
+            # The depth was read at the edge's midpoint, and a notch there
+            # makes it the notch's depth for every position (#1412): read it at
+            # DEPTH_SAMPLES places along the span too, and keep the depth
+            # with the most room. A straight edge reads one depth everywhere,
+            # so the extra reads cost nothing there.
+            tried = {round(coord, 3)}
+            for k in range(DEPTH_SAMPLES):
+                alt, _f = _seat_coord(probe, ref, edge, rot, axis,
+                                      lo + (hi - lo) * k / (DEPTH_SAMPLES - 1),
+                                      aim)
+                if alt is None or round(alt, 3) in tried:
+                    continue
+                tried.add(round(alt, 3))
+                more = _free_stretches(probe, c, edge, axis, alt, rot, lo, hi,
+                                       fixed)
+                if (sum(f1 - f0 for f0, f1 in more)
+                        > sum(f1 - f0 for f0, f1 in free) + EPS):
+                    coord, free = alt, more
             if free:
                 lines[rot] = Line(coord, tuple(free))
         if not lines:
@@ -608,7 +642,7 @@ def seat_state(pcb, pcb_file, intent, blocks, clearance, edge, fixed=(),
                estimate_courtyards=True, estimate_skip=()):
     """The placement state `place_simple` seats and anneals on: the board's
     floors, the intent's `fixed_poses[]` refs held (`fixed`), its keep-outs,
-    and every declared zone binding its members (containment) and, when
+    its declared covers and heights (#1443), and every declared zone binding its members (containment) and, when
     exclusive, keeping strangers out -- the board's bounds open a zone side
     on the outline to an edge-claim member (#1174). A part that draws no
     courtyard is seated on an estimated one (#1300), here as in place_simple,
@@ -625,7 +659,9 @@ def seat_state(pcb, pcb_file, intent, blocks, clearance, edge, fixed=(),
                                  intent_zones=list(zones),
                                  exclusive_zones=[z for z in zones if z['exclusive']],
                                  estimate_courtyards=estimate_courtyards,
-                                 estimate_skip=estimate_skip)
+                                 estimate_skip=estimate_skip,
+                                 declared_heights=(intent.height_declarations()
+                                                   if intent is not None else None))
 
 
 def oversubscribed(pcb, pcb_file, intent, clearance, edge, group_sources=()

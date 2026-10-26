@@ -574,11 +574,15 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
         qpy = entry[4] if len(entry) > 4 else None
         # Via-to-via. Same-net floor was via_size*0.5 -- BELOW drill
         # hole-to-hole for standard vias (#479 audit gap 2); both are via_drill.
+        # The drill floor holds for a DIFFERENT-net pair too: KiCad grades
+        # every pair of holes. Priced at the copper rule alone, a board
+        # declaring min_hole_to_hole 0.3 got 0.25/0.15 vias in the pads of a
+        # 0.4 mm-pitch connector, each pair 0.25 hole to hole.
         # Skipped for a REUSE: no drill and no via copper is added, so there is
         # no new pair for this run to space.
         if adds_via:
-            floor = (via_size + clearance) if qn != net_id \
-                else max(via_size * 0.5, via_drill + hole_to_hole)
+            floor = max(via_size + clearance if qn != net_id
+                        else via_size * 0.5, via_drill + hole_to_hole)
             if math.hypot(vx - qx, vy - qy) < floor - 1e-6:
                 return True
         if qn == net_id:
@@ -861,7 +865,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                       for s in pcb_data.segments]
 
     pitch = layout.pad_pitch or 0.5
-    need_cc = via_size + clearance              # min centre-to-centre, different nets
+    # Min centre-to-centre, different nets: the copper rule, or the drill
+    # rule when the board's hole-to-hole asks more (it is net-independent).
+    need_cc = max(via_size + clearance, via_drill + _h2h)
     stagger = (math.sqrt(max(0.0, need_cc * need_cc - pitch * pitch)) + 0.05
                if need_cc > pitch else 0.0)
     step = max(stagger, grid_step, 0.05)        # offset increment along the escape axis
@@ -898,12 +904,14 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             if _pt_rings_dist(vx, vy, _edge_rings) < via_size / 2 + _edge_clear - 1e-6:
                 return False
         for fx, fy, fs, fn, fd in foreign_vias:
+            # The DRILLS are an obstacle whatever the net: hole-to-hole is
+            # net-independent (#282/#479 audit gap 2), and on a board whose
+            # min_hole_to_hole outgrows via_size + clearance - via_drill it is
+            # the binding rule against a foreign via too.
+            if math.hypot(vx - fx, vy - fy) < (via_drill + fd) / 2 + _h2h - 1e-6:
+                return False
             if fn == net_id:
-                # Same-net copper is no obstacle, but the DRILLS still are:
-                # hole-to-hole is net-independent (#282/#479 audit gap 2).
-                if math.hypot(vx - fx, vy - fy) < (via_drill + fd) / 2 + _h2h - 1e-6:
-                    return False
-                continue
+                continue                        # same-net copper is no obstacle
             if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + clearance - 1e-6:
                 return False
         for hx, hy, hd in _drilled_pad_holes:
@@ -1248,6 +1256,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
           f"{f', {n_alt} side(s) used an alternative stagger' if n_alt else ''})")
     if dropped:
         print(f"    dropped (no clear via offset): {dropped}")
+        if via_drill + _h2h > via_size + clearance:
+            # #618's disclosure, for this escape: the drill rule, not the
+            # copper one, set the via spacing that left these pads without one.
+            print(f"    the {_h2h:g}mm hole-to-hole floor ({_h2h_src}) sets the"
+                  f" via spacing here; the levers are a smaller --via-drill, a"
+                  f" fab tier whose floor this pitch can meet, or the board's"
+                  f" own min_hole_to_hole")
     if clamp_n:
         print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
     # Cleared HERE and repopulated in the same breath, but the engine

@@ -57,6 +57,7 @@ already grade, and that `place_simple` reads wherever it reads the intent
 | `mount_mode`, `cable_entry`, `cable_envelope_mm`, `product.user_top_side` | compiled by `connector_consequences` into `max_setback_mm`, `side` and cable `keepouts[]` -- see [below](#connector-declarations-compile-to-clauses) | `context.basis`, `context.compiled_from` |
 | `assembly.body_edge_mm` | `assembly.body_edge_mm`, merged into the emitted `assembly` block; `why` and `requirement` move into `assembly.context.body_edge_mm`. Graded by check_assembly's `body_edge_band`, not by a floorplan rule (see [below](#assemblybody_edge_mm-the-assemblers-edge-rule)) | `context.basis`: `declared`, `min_reader` 9 |
 | `keep_away` | `keep_away[]`, one intent row per rule, in its canonical spelling; `why` and `requirement` move into `context`. Graded by `keep_away`, and read by the routing engines too (see [below](#keep_away-two-net-groups-apart)) | `source: "brief"`, `context.keep_away_note`, `min_reader` 10 |
+| `covers[]`, `heights[]` | `covers[]` / `heights[]`, one intent row per brief row, validated by the intent's own loader; the row's `source` (its datasheet) is kept. Graded by the `cover` rule, check_assembly's `height` pairs and the placer (see [below](#covers-and-heights-what-stands-over-the-board)) | `context.brief_row`, `context.from: "brief"`, `min_reader` 15 |
 | `product`, `unknown[]` | `context` | — |
 
 ### The compiler declares nothing that nothing grades
@@ -318,8 +319,10 @@ merely unknown — an author who wrote one believes it is being honoured:
   toolchain writes `Edge.Cuts`.
 - **`board_size`** — the same fact one step earlier: board size is a mechanical
   decision this toolchain does not make.
-- **`height`** — nothing in the placement stack measures z. There is no height
-  in `legality.GradedPart` and none in the parser, so a declared limit would
+- **`height`** — nothing in the placement stack grades a board-wide height
+  limit. Heights are judged per part and per area (#1443): which part fits
+  under which, a declared `covers[]` body, a keep-out's `max_height_mm` (see
+  `floorplan-intent.md`), so a declared board-wide limit would
   grade **nothing**, which is worse than not declaring it: it is exactly the
   "constraint the author believes they set and the grader never checks" failure
   the strict key sets exist to prevent.
@@ -549,9 +552,30 @@ ulx3s, `/power/L1,/power/L2,/power/L3:CLK_25MHz:3` is already inside at
 1.05 mm, with the oscillator Y1 and the buck U4 on opposite faces. Nothing
 reads a proposal until it is pasted.
 
+## `covers[]` and `heights[]`: what stands over the board
+
+```jsonc
+"covers": [{ "connector": "J3", "side": "F", "axis_deg": 90, "width_mm": 22,
+             "underside_mm": 2.5, "length_mm": 44, "removable": true,
+             "standoffs": [{ "ref": "H2", "length_mm": 42 }],
+             "source": "socket datasheet: 2.5 mm card height; single-sided 2242 card" }],
+"heights": [{ "ref": "U7", "height_mm": 1.1, "source": "U7 datasheet, package drawing" }]
+```
+
+A card in a socket, a module on a stacking connector or a shield on headers
+stands over the board, and how low it reaches depends on the socket and on
+the card fitted -- which the board file does not say. The rows are the
+intent's own (`docs/floorplan-intent.md`, "`covers[]` and `heights[]`"):
+every number is the author's, from the datasheets, and `py_tools/
+cover_facts.py` prints what the board does know. They live in the brief
+because a cover worked out once has to survive every later emit: the brief
+travels with the board, and each `--emit-intent` compiles its rows in again.
+`removable` says whether the body comes off in service, which decides
+whether a test point may stand under it.
+
 ## Deferred, and named rather than silently absent
 
-Height limits as geometry, thermal, panel/depanel, a cable keep-out WITHOUT a
+A board-wide height limit, thermal, panel/depanel, a cable keep-out WITHOUT a
 declared envelope (a declared `cable_envelope_mm` derives one),
 subsystem decomposition,
 a side POLICY beyond the advisory connector face, a mounting datum as a

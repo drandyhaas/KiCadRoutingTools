@@ -30,7 +30,13 @@ Exit codes:
     2   argparse, including an unreadable or malformed intent file
     3   the board is not in a state this tool can work on (unplaced / no
         trustworthy outline) -- the placement-family convention
-    4   graded successfully, error-severity violations found
+    4   graded successfully, error-severity violations found; ALSO a grade
+        that is clean but INCOMPLETE ("NOT FULLY GRADED": a channel the
+        intent asked for was never measured -- a budget key the emitter
+        withheld, an armed rule the board cannot answer). Clear it by
+        declaring the value, or by writing why it stays ungraded:
+        `dispositions.withheld.<key>` / `dispositions.rules.<rule>`
+        (#1420). `--exit-zero` suppresses it as it does the violations.
 
 4 rather than 1 because 3 is already taken and 1 is ambiguous with a crash: a
 caller has to be able to tell "the floorplan is wrong" from "the grader is

@@ -31,6 +31,7 @@ import grid_router  # noqa: E402  the placement kernels: crossing_pairs, mst_pri
 from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local
+from placement import heights as _heights
 from placement import legality
 from placement.legality import (CONTAINER_RATIO, CONTAINMENT_FRAC,
                                 BoardOutlineGate, containment_frac,
@@ -1161,7 +1162,11 @@ class QuenchState:
                  # ...except these refs, which keep the basis the board
                  # draws (place_simple's fallback for a part the estimates
                  # leave no legal pose)
-                 estimate_skip=()):
+                 estimate_skip=(),
+                 # --- #1443: the intent's declared covers and heights, plain
+                 # data (`Intent.height_declarations`), over the measured
+                 # ones. None: the models' heights alone.
+                 declared_heights=None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -1326,6 +1331,11 @@ class QuenchState:
             self.courtyards_ignored = False
         self.keepouts = _fpk.with_derived_keepouts(keepouts, pcb_data,
                                                    pcb_file)
+        # #1451: and the rule areas forbidding footprints that stay where
+        # they are (board level, or a KiCad-locked owner's) -- the search's
+        # half of check_assembly's items_not_allowed gate
+        self.keepouts = tuple(self.keepouts) + _fpk.rule_area_keepouts(
+            pcb_data, {r for r, p in self.parts.items() if p.locked})
         # A plug SEATED at its edge is the mechanical fact its keep-out is
         # derived from: moved inland, the region would go with it and the
         # parts it kept off the tongue would be free to return. So the
@@ -1341,8 +1351,14 @@ class QuenchState:
         self.keepouts_for: Dict[str, Tuple[Dict, ...]] = {}
         if self.keepouts:
             from . import floorplan as _fp
+            # #1443: a height-limited keep-out admits a part of known height
+            _kh = (_heights.for_board(pcb_data, pcb_file, declared_heights)
+                   if any(k.get('max_height_mm') is not None for k in self.keepouts)
+                   else None)
             for _ref, _p in self.parts.items():
-                _binding = _fp.keepouts_for_ref(self.keepouts, _ref, _p.sides)
+                _binding = _fp.keepouts_for_ref(
+                    self.keepouts, _ref, _p.sides,
+                    _kh.height(_ref) if _kh is not None else None)
                 if _binding:
                     self.keepouts_for[_ref] = _binding
 
@@ -1412,6 +1428,25 @@ class QuenchState:
         self.container_refs = set(self.container_kinds)
         self.pin_frame_refs = {r for r, k in self.container_kinds.items()
                                if k == 'pin_frame'}
+        # #1443: what fits under what, read off the parts' 3D models. A
+        # pair with a COVER in it (a part with room under it) whose heights
+        # are both known is judged on the heights (`_height_pair`), its own
+        # face only; every other pair keeps its occupancy test. A cover
+        # whose raised body reaches past its own box (`_overhangs`) is
+        # swept by that reach.
+        self.heights = _heights.for_board(pcb_data, pcb_file, declared_heights)
+        self.covers = {r for r in self.heights.covers
+                       if r in self.parts and r not in self.container_refs}
+        self._overhangs = set()
+        for _r in self.covers:
+            _lb = self.heights.covers[_r].lift_box
+            _ob = self.parts[_r].bounds_by_rot[0.0]
+            if _lb is not None and (_lb[0] < _ob[0] or _lb[1] < _ob[1]
+                                    or _lb[2] > _ob[2] or _lb[3] > _ob[3]):
+                self._overhangs.add(_r)
+        if self.covers:
+            print(f"  heights: {self.heights.note}; room under "
+                  + ', '.join(sorted(self.covers)))
         self._pin_census_obj = None
         self._pin_copper = {}
         if self.container_refs:
@@ -1568,6 +1603,110 @@ class QuenchState:
         near = None if q is None else ix.near(q, clr + _NEAR_SLACK_MM)
         return self.parts.items() if near is None else near
 
+    def _height_pair(self, part, x, y, rot, other, inside=True) -> Optional[float]:
+        """#1443: the area the two parts' bodies share at these poses (`part`
+        at (x, y, rot), `other` where it stands), 0.0 when one fits under the
+        other, or None when the heights cannot judge the pair. `inside`
+        False: the raised bodies alone (`heights.Cover.blocked`)."""
+        if part.ref not in self.covers and other.ref not in self.covers:
+            return None
+        return self.heights.pair(
+            part.ref, (part.x if x is None else x, part.y if y is None else y,
+                       part.rot if rot is None else rot),
+            part.bounds_by_rot[0.0], part.side,
+            other.ref, (other.x, other.y, other.rot),
+            other.bounds_by_rot[0.0], other.side, self.clearance, inside)
+
+    def _height_verdict(self, part, x, y, rot, other):
+        """#1443: `heights.Heights.verdict` for `part` at (x, y, rot) and
+        `other` where it stands -- (cleared, over, inside) -- or None."""
+        if part.ref not in self.covers and other.ref not in self.covers:
+            return None
+        return self.heights.verdict(
+            part.ref, (part.x if x is None else x, part.y if y is None else y,
+                       part.rot if rot is None else rot),
+            part.bounds_by_rot[0.0], part.side,
+            other.ref, (other.x, other.y, other.rot),
+            other.bounds_by_rot[0.0], other.side, self.clearance)
+
+    def cover_reach(self, ref, x=None, y=None, rot=None):
+        """The board box cover `ref`'s height rule reaches at a pose
+        (`heights.Heights.reach`), memoised by pose: the anneal asks it for
+        every fixed cover on every trial."""
+        p = self.parts[ref]
+        key = (ref, p.x if x is None else x, p.y if y is None else y,
+               p.rot if rot is None else rot)
+        memo = self.__dict__.setdefault('_reach_memo', {})
+        got = memo.get(key)
+        if got is None:
+            if len(memo) > 4096:
+                memo.clear()
+            got = memo[key] = self.heights.reach(ref, key[1:], p.bounds_by_rot[0.0])
+        return got
+
+    def _height_clear(self, ref, x, y, rot, other_ref) -> bool:
+        """True when the heights say `ref` at this pose and `other_ref` fit,
+        one under the other -- so neither body check refuses the pair."""
+        if not self.covers or other_ref not in self.parts:
+            return False
+        return self._height_pair(self.parts[ref], x, y, rot,
+                                 self.parts[other_ref]) == 0.0
+
+    def _height_blocked_at(self, ref, x, y, rot, exclude=None) -> float:
+        """#1443: the summed area of `ref`'s pairs at this pose that the
+        heights judge and find too low -- for a board whose project waives
+        the courtyard rule, where nothing else keeps a part from under a
+        raised body."""
+        part = self.parts[ref]
+        rects = part.rects(x, y, rot)
+        tot = 0.0
+        for other_ref, other in self._sweep_heights(part, rects, x, y, rot, 0.0):
+            if other_ref == ref or (exclude and other_ref in exclude) \
+                    or other_ref in self.container_refs:
+                continue
+            hp = self._height_pair(part, x, y, rot, other, inside=False)
+            if hp:
+                if self._why is not None:
+                    self._veto('height', other_ref, path='height')
+                tot += hp
+        return tot
+
+    @staticmethod
+    def _far_gap(part, rects, other):
+        """The two parts' gap on the shared faces other than `part`'s own (a
+        drilled part's far side), or None: what still binds a pair the
+        heights judged on its own face."""
+        own = frozenset((part.side,))
+        orr = other.rects()
+        return legality.pair_min_gap(part.sides - own, part.side, rects[0],
+                                     rects[1], other.sides - own, other.side,
+                                     orr[0], orr[1])
+
+    def _sweep_heights(self, part, rects, x, y, rot, clr):
+        """`_sweep_others`, widened by a cover's raised body: the moving
+        part's when it is one, and every overhanging cover's that reaches it."""
+        q = rects
+        if part.ref in self.covers:
+            reach = self.cover_reach(part.ref, x, y, rot)
+            if reach is not None:
+                r0 = rects[0]
+                q = ((min(r0[0], reach[0]), min(r0[1], reach[1]),
+                      max(r0[2], reach[2]), max(r0[3], reach[3])), rects[1])
+        others = self._sweep_others(q, clr)
+        if not self._overhangs:
+            return others
+        others = list(others)
+        have = {r for r, _o in others}
+        r0 = q[0]
+        for r in self._overhangs:
+            if r in have or r == part.ref:
+                continue
+            o = self.parts[r]
+            reach = self.cover_reach(r)
+            if reach is not None and rect_gap(r0, reach) < clr:
+                others.append((r, o))
+        return others
+
     def violation_parts(self, ref, x=None, y=None, rot=None,
                         exclude: Optional[Set[str]] = None,
                         limit: Optional[float] = None):
@@ -1608,12 +1747,16 @@ class QuenchState:
             # a part on a pin the grader gates (second phase-3 verifier).
             overlap = self._waived_overlap(ref, x, y, rot, others, exclude,
                                            limit, board)
+            if self.covers:
+                overlap += self._height_blocked_at(ref, x, y, rot, exclude)
             if limit is not None and board + overlap > limit:
                 return board, overlap
             return board, overlap + self._pin_violation(ref, x, y, rot,
                                                         exclude)
         clr = self.clearance
-        others = self._sweep_others(rects, clr)
+        covers = self.covers
+        others = (self._sweep_heights(part, rects, x, y, rot, clr) if covers
+                  else self._sweep_others(rects, clr))
         rect = rects[0]
         tht = part.has_tht
         skip_containers = (ref in self.container_refs)
@@ -1622,6 +1765,23 @@ class QuenchState:
                 continue
             if skip_containers or other_ref in self.container_refs:
                 continue    # run-6: container = frame, not body
+            if covers and (ref in covers or other_ref in covers):
+                hv = self._height_verdict(part, x, y, rot, other)
+                if hv is not None:
+                    # #1443: two bodies meeting under a raised body are a full
+                    # clearance short; a part with room under the other skips
+                    # the occupancy test below (its far side still binds);
+                    # any other pair is priced as before
+                    if hv[1] > 0.0:
+                        overlap += clr + math.sqrt(hv[1])
+                    if hv[0]:
+                        if tht or other.has_tht:
+                            gap = self._far_gap(part, rects, other)
+                            if gap is not None and gap < clr:
+                                overlap += clr - gap
+                        if limit is not None and board + overlap > limit:
+                            return board, overlap
+                        continue
             if tht or other.has_tht:
                 gap = part.gap_to(other, rects)
                 if gap is None:
@@ -2125,9 +2285,15 @@ class QuenchState:
             # .Fab bodies overlapping, pads clear (#1101 review).
             if legal and self._body_overlap_at(ref, x, y, rot, exclude):
                 legal = False
+            # #1443: the courtyard is waived, the heights are not -- a part
+            # under a raised body too low for it is two bodies in one place
+            if legal and self.covers and self._height_blocked_at(ref, x, y, rot, exclude):
+                legal = False
         elif legal:
             clr = self.clearance
-            others = self._sweep_others(rects, clr)
+            covers = self.covers
+            others = (self._sweep_heights(part, rects, x, y, rot, clr) if covers
+                      else self._sweep_others(rects, clr))
             tht = part.has_tht
             skip_containers = (ref in self.container_refs)
             for other_ref, other in others:
@@ -2135,6 +2301,23 @@ class QuenchState:
                     continue
                 if skip_containers or other_ref in self.container_refs:
                     continue    # run-6: container = frame, not body
+                if covers and (ref in covers or other_ref in covers):
+                    hv = self._height_verdict(part, x, y, rot, other)
+                    if hv is not None and (hv[0] or hv[1] > 0.0):
+                        # #1443: two bodies meeting under a raised body, or a
+                        # part with room under the other (its occupancy test
+                        # skipped, its far side still binding)
+                        bad = hv[1] > 0.0
+                        if not bad and (tht or other.has_tht):
+                            gap = self._far_gap(part, rects, other)
+                            bad = gap is not None and gap < clr
+                        if bad:
+                            legal = False
+                            if self._why is not None:
+                                self._veto('height' if hv[1] > 0.0 else 'courtyard',
+                                           other_ref, path='height')
+                            break
+                        continue
                 if tht or other.has_tht:
                     # Either part reaches the far side: fall through to the
                     # shared-side rule, which needs both parts' rect pairs.
@@ -2791,6 +2974,8 @@ class QuenchState:
             rb = self.fab_rect(other_ref)
             if rb is None or rect_overlap_area(ra, rb) <= _BODY_OVERLAP_EPS:
                 continue
+            if self._height_clear(ref, x, y, rot, other_ref):
+                continue    # #1443: one fits under the other
             if mine is None:
                 mine = self.fab_shape(ref, x, y, rot)
             theirs = self.fab_shape(other_ref)
@@ -2866,6 +3051,8 @@ class QuenchState:
                 orect = self.fab_rect(other_ref)
                 if orect is None or rect_gap(box, orect) > 0.0:
                     continue
+                if self._height_clear(ref, x, y, rot, other_ref):
+                    continue    # #1443: one fits under the other
                 theirs = self.fab_shape(other_ref)
                 if theirs is None:
                     continue
@@ -2892,6 +3079,8 @@ class QuenchState:
             ob = other.padbox()
             if ob is None or rect_gap(mrect, ob) > 0.0:
                 continue
+            if self._height_clear(ref, x, y, rot, other_ref):
+                continue    # #1443: one fits under the other
             if mine_body is None:
                 mine_body = self.fab_shape(ref, x, y, rot)
                 if mine_body is None:
@@ -2961,6 +3150,8 @@ class QuenchState:
             area = rect_overlap_area(ra, rb)
             if area <= 1e-9:
                 continue
+            if self._height_clear(ref, x, y, rot, other_ref):
+                continue    # #1443: one fits under the other
             frac = containment_frac(area, ra, rb)
             if frac is not None and frac >= CONTAINMENT_FRAC:
                 if self._why is not None:

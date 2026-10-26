@@ -133,12 +133,27 @@ paths = trace_power_paths(pcb_data, components)
 recommendations = get_power_net_recommendations(pcb_data, components, paths)
 ```
 
-`recommendations` is `{net_name: width_mm}`. Each net's current is the sum of
-the traced paths through it plus the power pins of the sinks and sources on it;
-every GND-named net is sized for the total sink current; nets under 50 mA
-(`min_current_ma`) are left out. Current maps to width by the IPC-2221 table
-with a 2x margin (`docs/power-nets.md`): under 50 mA 0.3 mm, under 100 mA
-0.5, under 500 mA 0.7, under 1 A 1.0, under 2 A 1.2, under 5 A 2.0, else 3.0.
+`recommendations` is `{net_name: width_mm}`. A sink's `current_rating_ma` is
+its TOTAL supply current: it is charged once to each supply net it draws on
+(not once per pin), up the chain to the source that feeds it through the
+pass-through parts and regulators in between. A source's rating is a limit,
+not a load, and is never added. Each ground net carries the sinks that have a
+pad on it, once each. Nets under 50 mA (`min_current_ma`) are left out.
+Current maps to width by the IPC-2221 table with a 2x margin
+(`docs/power-nets.md`): under 50 mA 0.3 mm, under 100 mA 0.5, under 500 mA
+0.7, under 1 A 1.0, under 2 A 1.2, under 5 A 2.0, else 3.0.
+
+How a classified part finds its nets: by the pad's pintype and pin function
+(`power_in`/`power_out`, VCC/VDD/VBUS/VBAT-style names), else by net names that
+look like rails (`+3V3`, `VBUS`, `GND`). A regulator's output is a `power_out`
+or OUT-named pin and its input an IN-named or `power_in` pin; a regulator is
+traced from its output to its input, never the other way. A pass-through with
+three terminals (a FET, a load switch) conducts between its non-ground nets.
+When a part's pads and nets say nothing (heater nets, an unlabeled connector),
+name them: `classify_component(components, 'V1', role, current_rating_ma=300,
+supply_nets=['/HEAT_A', '/HEAT_B'])`. A classified part that still reaches no
+net raises a warning from `get_power_net_recommendations` -- read it, it means
+that part contributed no width.
 
 ## Step 6: Generate Report
 

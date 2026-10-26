@@ -54,6 +54,10 @@ ground pad, through other members' pads on that ground, to the chip's
 ground pins or a member transistor's (`placement.templates.ground_returns`)
 -- and a NOTE for one past `ground_return_mm` (3 mm, or the sketch's own),
 which the grade then warns about (`template_ground_return`).
+`--intent` also measures each member at its template pose against that
+intent's decap limits (`decaps.max_distance_mm`, `max_pin_distance_mm`, the
+ones it grades at error) and WARNS by name for one past a limit
+(`fitted.decap_limits`): a row held as drawn would fail the grade.
 `--write-intent`
 writes INTENT with the row added to its `templates[]` (a row for the same
 anchor is replaced, so a re-fit may write over its own input) and
@@ -188,6 +192,23 @@ def main(argv=None):
     if row['fitted'].get('context'):
         print(f"  locked neighbours of the locked chip, as obstacles and partners: "
               f"{', '.join(row['fitted']['context'])}")
+    # the row against the decap limits of the intent it is written into
+    # (#1416): a member held past a limit the grade counts at ERROR fails every
+    # placement that holds the row as drawn
+    over = []
+    if a.intent:
+        from placement.templates import decap_limit_findings
+        try:
+            over = decap_limit_findings(pcb, a.board, state, row,
+                                        floorplan.load_intent(a.intent))
+        except (OSError, ValueError) as ex:
+            print(f"  NOTE: the intent's decap limits were not checked against the row: {ex}")
+        for f in over:
+            print(f"  WARNING: {f['ref']} at its template pose reads {f['value']:.2f} mm against "
+                  f"the intent's {f['rule']} limit of {f['limit']:.2f} mm, which it grades "
+                  f"ERROR: a placement holding the row as drawn fails it. Seat the member "
+                  f"nearer the chip in the sketch, or change the limit")
+        row['fitted']['decap_limits'] = over
     if a.out:
         with open(a.out, 'w', encoding='utf-8') as fh:
             json.dump(row, fh, indent=1)
@@ -211,7 +232,7 @@ def main(argv=None):
         except ValueError as ex:
             print(f"fit_template: the written intent does not load: {ex}", file=sys.stderr)
             return 2
-    print(f"JSON_SUMMARY: {json.dumps({'anchor': row['anchor'], 'members': len(row['members']), 'legs_gap_mm': row['fitted']['legs_gap_mm']})}")
+    print(f"JSON_SUMMARY: {json.dumps({'anchor': row['anchor'], 'members': len(row['members']), 'legs_gap_mm': row['fitted']['legs_gap_mm'], 'decap_over': sorted({f['ref'] for f in over})})}")
     return 0
 
 

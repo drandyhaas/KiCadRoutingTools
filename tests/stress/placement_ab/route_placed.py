@@ -108,6 +108,14 @@ def main(argv=None):
         subprocess.run([sys.executable, os.path.join(repo, 'py_router', 'copy_board.py'), placed,
                         os.path.join(dst, f'{a.board}.kicad_pcb')], check=True, capture_output=True)
     open(os.path.join(man, 'redo_commands.sh'), 'w').write('\n'.join(lines))
+    # a side file a step reads by its bare name in the run directory (a
+    # `--net-clearances net_clearances_usbd.json`) comes along, as the chain ran
+    named = {t.strip("'\"") for x in lines if not x.lstrip().startswith('#') for t in x.split()}
+    for f in sorted(named):
+        src = os.path.join(run_dir, f)
+        if '/' not in f and not f.endswith(('.kicad_pcb', '.kicad_pro', '.kicad_prl')) \
+                and os.path.isfile(src):
+            shutil.copy2(src, os.path.join(out, f))
     remaps = []
     for old, new in ((baked_in, ind), (baked_run, out), (baked_repo, repo)):
         if old and old != new:

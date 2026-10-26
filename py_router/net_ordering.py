@@ -123,6 +123,22 @@ def order_nets_mps(
     return ordered_net_ids, total_layer_swaps
 
 
+def order_pin_joins_last(net_ids: List[Tuple[str, int]]) -> List[Tuple[str, int]]:
+    """Move the 'unconnected-*' nets to the end, keeping both partitions' order (#1405).
+
+    Such a net joins one footprint's same-number pads (a reversible
+    footprint's doubled pins, a connector's shield tabs), which no signal
+    depends on. Routed early, it claims corridors the named nets need; routed
+    last it gets what a separate final step used to give it.
+    """
+    pin_join = [t for t in net_ids if (t[0] or '').lower().startswith('unconnected-')]
+    if not pin_join or len(pin_join) == len(net_ids):
+        return net_ids
+    print(f"Pin-join nets last (#1405): {len(pin_join)} 'unconnected-*' "
+          f"net(s) routed after the named nets")
+    return [t for t in net_ids if t not in pin_join] + pin_join
+
+
 def order_nets_inside_out(
     pcb_data: PCBData,
     net_ids: List[Tuple[str, int]],

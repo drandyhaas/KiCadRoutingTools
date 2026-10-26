@@ -1,0 +1,27 @@
+{
+  "meta": {
+    "filename": "edge_neck.kicad_pro",
+    "version": 3
+  },
+  "board": {
+    "design_settings": {
+      "rules": {
+        "min_copper_edge_clearance": 0.05
+      }
+    }
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "name": "Default",
+        "clearance": 0.2,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      }
+    ],
+    "meta": {
+      "version": 4
+    }
+  }
+}

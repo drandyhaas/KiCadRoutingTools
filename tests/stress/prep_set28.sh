@@ -16,9 +16,21 @@ mkdir -p "$STRESS/boards_unrouted_set28" "$STRESS/boards_set28"
 MAP=(
   "act_probe_2ghz|act_probe_2ghz"
   "agri_smart_switch|agri_smart_switch"
+  "mdior|mdior"
   "mez_rx|mez_rx"
+  "olimex_gatemate_a1_evb|olimex_gatemate_a1_evb"
+  "olimex_rp2350pc|olimex_rp2350pc"
+  "pocketbeagle|pocketbeagle"
+  "prusa_buddy_mini|prusa_buddy_mini"
+  "prusa_cw1_controller|prusa_cw1_controller"
+  "reform_kintex_som|reform_kintex_som"
+  "reform_rk3588_som|reform_rk3588_som"
   "rein_r1|rein_r1"
   "storm_tracker|storm_tracker"
+  "tillitis_tkey|tillitis_tkey"
+  "timiq_rf|timiq_rf"
+  "vesc_bldc4|vesc_bldc4"
+  "yardstickone|yardstickone"
 )
 
 for entry in "${MAP[@]}"; do

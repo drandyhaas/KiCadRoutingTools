@@ -634,6 +634,16 @@ def extract_fab_shapes(pcb_file: str) -> Dict[str, Dict[str, tuple]]:
     return _extract_outline_shapes(pcb_file, _FAB_LAYER, '.Fab"')
 
 
+def extract_silk_shapes(pcb_file: str) -> Dict[str, Dict[str, tuple]]:
+    """Per-side F/B.SilkS OUTLINES, `{ref: {side: (geometry, how)}}` (#1401);
+    `extract_silk_sides`' shape-keeping twin. `how` is `OUTLINE_POLYGON` when
+    the silk CLOSES into a loop (a drawn housing) and `OUTLINE_HULL` when it
+    does not (corner brackets, side ticks), where the convex hull of what was
+    drawn stands in. Only the first is an outline a part can be said to sit
+    inside."""
+    return _extract_outline_shapes(pcb_file, _SILK_LAYER, '.SilkS"')
+
+
 def extract_courtyard_bboxes(pcb_file: str) -> Dict[str, Bbox]:
     """
     Parse courtyard (F.CrtYd / B.CrtYd) extents from each footprint block.

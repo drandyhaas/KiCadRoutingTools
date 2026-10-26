@@ -7,8 +7,9 @@ this tool read it: on imx6ulz (gp14 H21) KiCad reported 8 DRAM_LDQ nets out
 of their 11.5-14.5 mm window while check_drc and board_score read clean.
 check_drc now reads the windows through `kicad_dru.read_board_length_rules`,
 measures each net with `net_match_length` (mode 'total', KiCad's length DRC
-measure) and reports a net outside its window as `length-out-of-range`;
-board_score counts the rows in its `drc` component.
+measure, as the installed kicad-cli's release measures it since #1432) and
+reports a net outside its window as `length-out-of-range`; board_score counts
+the rows in its `drc` component.
 
 Fixture: routed_output.kicad_pcb copied with a `.kicad_dru` and a net class
 BUS (pattern `Net-(U2A-BE_*`) added to its project. The windows are set from
@@ -49,24 +50,38 @@ sys.path.insert(0, TESTS_DIR)
 from check_drc import run_drc                                   # noqa: E402
 from copy_board import copy_board                               # noqa: E402
 from kicad_parser import parse_kicad_pcb                        # noqa: E402
+import net_queries                                              # noqa: E402
 from net_queries import net_match_length                        # noqa: E402
 from run_utils import evidence                                  # noqa: E402
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'routed_output.kicad_pcb')
 UNROUTED = '/fpga_adc/VA11'
 # KiCad's own measure of these routed_output nets: the `actual` of its
-# length_out_of_range reports, kicad-cli 10.0.0 (`pcb drc --severity-all`) on
-# this fixture, 2026-10-21. Most carry vias-in-pad whose tracks leave on an
-# inner layer of the 10-layer, 1.59 mm stack; charging those vias the whole
-# stack read BE_1 18.50 mm and DATA_13 17.77 mm.
+# length_out_of_range reports (`pcb drc --severity-all`) on this fixture, per
+# release -- kicad-cli 10.0.0 (2026-10-21) and 10.0.7 (2026-10-25, #1432: 11 of
+# the 13 differ). The measure is pinned to each with the release forced. Most
+# carry vias-in-pad whose tracks leave on an inner layer of the 10-layer,
+# 1.59 mm stack; charging those vias the whole stack read BE_1 18.50 mm and
+# DATA_13 17.77 mm.
 KICAD_MM = {
-    'Net-(U2A-BE_0)': 18.8847, 'Net-(U2A-BE_1)': 15.6614,
-    'Net-(U2A-BE_2)': 15.2877, 'Net-(U2A-DATA_0)': 24.4315,
-    'Net-(U2A-DATA_11)': 18.0903, 'Net-(U2A-DATA_12)': 24.1856,
-    'Net-(U2A-DATA_13)': 15.1494, 'Net-(U2A-DATA_14)': 21.3243,
-    'Net-(U2A-DATA_15)': 17.4839, 'Net-(U2A-DATA_16)': 15.6106,
-    'Net-(U2A-DATA_17)': 16.8717, 'Net-(U2A-DATA_18)': 15.6413,
-    'Net-(U2A-DATA_19)': 15.1546,
+    '10.0.0': {
+        'Net-(U2A-BE_0)': 18.8847, 'Net-(U2A-BE_1)': 15.6614,
+        'Net-(U2A-BE_2)': 15.2877, 'Net-(U2A-DATA_0)': 24.4315,
+        'Net-(U2A-DATA_11)': 18.0903, 'Net-(U2A-DATA_12)': 24.1856,
+        'Net-(U2A-DATA_13)': 15.1494, 'Net-(U2A-DATA_14)': 21.3243,
+        'Net-(U2A-DATA_15)': 17.4839, 'Net-(U2A-DATA_16)': 15.6106,
+        'Net-(U2A-DATA_17)': 16.8717, 'Net-(U2A-DATA_18)': 15.6413,
+        'Net-(U2A-DATA_19)': 15.1546,
+    },
+    '10.0.7': {
+        'Net-(U2A-BE_0)': 18.8453, 'Net-(U2A-BE_1)': 15.6462,
+        'Net-(U2A-BE_2)': 15.2725, 'Net-(U2A-DATA_0)': 24.4163,
+        'Net-(U2A-DATA_11)': 18.0903, 'Net-(U2A-DATA_12)': 24.1704,
+        'Net-(U2A-DATA_13)': 15.3782, 'Net-(U2A-DATA_14)': 21.3091,
+        'Net-(U2A-DATA_15)': 17.4687, 'Net-(U2A-DATA_16)': 15.6106,
+        'Net-(U2A-DATA_17)': 16.8565, 'Net-(U2A-DATA_18)': 15.6261,
+        'Net-(U2A-DATA_19)': 15.1394,
+    },
 }
 failures = []
 
@@ -92,7 +107,8 @@ def lengths(pcb):
 
 
 def via_span_unit():
-    """kicad_via_length: the barrel over the layers the via joins, exactly."""
+    """kicad_via_length: the barrel over the layers the via joins, as 10.0.0
+    and as 10.0.7 charge it."""
     from kicad_parser import (BoardInfo, Net, Pad, PCBData, Segment,
                               StackupLayer, Via)
     from net_queries import kicad_via_length
@@ -114,28 +130,50 @@ def via_span_unit():
     def seg(layer, x0):
         return Segment(start_x=x0, start_y=0.0, end_x=5.0, end_y=0.0, width=0.1,
                        layer=layer, net_id=1)
-    fb = pcb.get_via_barrel_length('F.Cu', 'B.Cu')
-    f1 = pcb.get_via_barrel_length('F.Cu', 'In1.Cu')
-    cases = [
-        ('via-in-pad, track on In1.Cu: F.Cu to In1.Cu', [seg('In1.Cu', 0.0)], [pad], f1),
-        ('tracks on F.Cu and B.Cu: the whole stack', [seg('F.Cu', 0.0), seg('B.Cu', 0.0)], [], fb),
-        ('a track ending 0.04 mm off the centre adds nothing (KiCad: exact)',
-         [seg('In1.Cu', 0.0), seg('In2.Cu', 0.04)], [pad], f1),
-        ('one joined layer charges nothing', [seg('In1.Cu', 0.0)], [], 0.0),
+    # 10.0.0 charges the stackup between the joined layers, both copper layers
+    # whole, and joins only track ends exactly at the centre; 10.0.7 counts
+    # half of an INNER copper layer that ends the span (10.0.2) and joins any
+    # end inside the via pad (10.0.4).
+    fb = 4 * 0.035 + 3 * 0.5
+    f1_00, f1_07 = 0.035 + 0.5 + 0.035, 0.035 + 0.5 + 0.035 / 2
+    f2_07 = 0.035 + 0.5 + 0.035 + 0.5 + 0.035 / 2
+    i12_00, i12_07 = 0.035 + 0.5 + 0.035, 0.035 / 2 + 0.5 + 0.035 / 2
+    cases = [   # label, segments, pads, (10.0.0, 10.0.7)
+        ('via-in-pad, track on In1.Cu: F.Cu to In1.Cu (10.0.7: half of In1.Cu)',
+         [seg('In1.Cu', 0.0)], [pad], (f1_00, f1_07)),
+        ('tracks on F.Cu and B.Cu: the whole stack',
+         [seg('F.Cu', 0.0), seg('B.Cu', 0.0)], [], (fb, fb)),
+        ('tracks on In1.Cu and In2.Cu (10.0.7: half of each)',
+         [seg('In1.Cu', 0.0), seg('In2.Cu', 0.0)], [], (i12_00, i12_07)),
+        ('a track ending 0.04 mm off the centre adds nothing in 10.0.0, its '
+         'layer in 10.0.7 (inside the via pad)',
+         [seg('In1.Cu', 0.0), seg('In2.Cu', 0.04)], [pad], (f1_00, f2_07)),
+        ('a track ending 0.2 mm off the centre, outside the via pad, adds nothing',
+         [seg('In1.Cu', 0.0), seg('In2.Cu', 0.2)], [pad], (f1_00, f1_07)),
+        ('one joined layer charges nothing', [seg('In1.Cu', 0.0)], [], (0.0, 0.0)),
     ]
-    for label, segs, pads, want in cases:
-        got = kicad_via_length(via, segs, pads, pcb)
-        check(f'via span: {label}', abs(got - want) < 1e-9, f'{got:.4f} vs {want:.4f}')
+    for label, segs, pads, wants in cases:
+        for release, want in zip(('10.0.0', '10.0.7'), wants):
+            got = kicad_via_length(via, segs, pads, pcb, release=release)
+            check(f'via span {release}: {label}', abs(got - want) < 1e-9,
+                  f'{got:.4f} vs {want:.4f}')
 
 
 def main():
     via_span_unit()
     src, _ = quiet(parse_kicad_pcb, evidence(BOARD, 'routed_output board'))
+    for release, pins in KICAD_MM.items():
+        net_queries.use_length_measure_release(release)
+        try:
+            L = lengths(src)
+        finally:
+            net_queries.use_length_measure_release(None)
+        off = {n: (L.get(n), k) for n, k in pins.items()
+               if L.get(n) is None or f'{L[n]:.4f}' != f'{k:.4f}'}
+        check(f"net_match_length measures these nets as KiCad {release}'s "
+              f"length DRC does, at its 4 decimals", not off, str(off))
+    # The windows below are set from the measure this machine grades with.
     L = lengths(src)
-    off = {n: (L.get(n), k) for n, k in KICAD_MM.items()
-           if L.get(n) is None or abs(L[n] - k) > 5e-4}
-    check("net_match_length measures these nets as KiCad's length DRC does",
-          not off, str(off))
     be1, be2 = L['Net-(U2A-BE_1)'], L['Net-(U2A-BE_2)']
     lo, hi = min(be1, be2) - 0.5, max(be1, be2) + 0.5
     wild = sorted(n for n, v in L.items() if v is not None

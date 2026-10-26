@@ -60,6 +60,16 @@ the same way.
    is left illegal that a shove frees; when no run is legal, the one that
    left the fewest parts illegal is kept, the earlier on a tie. On
    ch32v003_usb (22 movable parts) the whole run takes about 2.5 s.
+   The intent's decap limits are a soft term, so a seed can end a fraction
+   of a mm past one: each limit still broken is WARNED (rail, cap, pin, the
+   distance against the limit; none with `--decap-limit-weight 0`, which
+   leaves the limits to check_floorplan) and carried in the report as `decap_residual`,
+   and `--repair-decaps` first moves each such cap to the nearest legal pose
+   inside its limit that worsens no other limit, naming the cap no legal pose
+   frees (`placement/decap_repair.py`). A BGA's far-face parts under its ball
+   field are counted too (`bga_field`), and a `proximity` claim that names no
+   pads but a limit is WARNED, being priced over legs the grade does not read
+   (`claim_arity`).
 
 Exit codes: 0 placed, 2 unreadable input, a part in two groups, or a face the
 board cannot take (two declarations disagree, or a KiCad-locked part is
@@ -81,6 +91,11 @@ import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 MOVES_PER_PART = 500
 #: Further anneals, each from a fresh start, when one leaves parts illegal.
 RESTARTS = 2
+#: mm a part's courtyard may come within of a neighbour's when no run gives it
+#: a legal pose at the board clearance: the part is then legal at that
+#: closeness (reported as `tight`), and only then -- the board clearance is
+#: broken only where it is the one thing between the board and buildable.
+TIGHT_CLEARANCE_MM = 0.01
 #: The default seeds (an OUT carrying {seed}, no seed named): how many are
 #: placed with each start, and how many of the legal ones of lowest
 #: `final.cost` are named for a judging route. Over 11 boards, 6 scattered + 6
@@ -90,6 +105,9 @@ RESTARTS = 2
 SCATTERED_SEEDS = 6
 CLUSTERED_SEEDS = 6
 JUDGED_SEEDS = 6
+#: A part whose pad copper reaches further than this (mm) past its drawn
+#: courtyard is named before the anneal (#1386).
+PAD_REACH_WARN_MM = 0.3
 #: Anchored seeds (`--anchored`) are opt-in, numbered after the clustered ones.
 #: Over 10 boards, 6 scattered + 6 anchored routed better than the default
 #: seeds on two (covg blocking 3.1 -> 0.1, bitaxe) and worse on three (tigard,
@@ -173,7 +191,9 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
     # datasheet templates (`placement.templates`): each member joins its
     # chip's group, as a claimed part joins its partner's
     from placement.templates import validate as validate_templates
-    tmpls = (list(intent.templates) if intent is not None
+    # ... and each declared cover's standoffs, held at their lengths from
+    # its connector the same way (#1443, `Intent.cover_templates`)
+    tmpls = (list(intent.templates) + intent.cover_templates() if intent is not None
              else validate_templates(base.get('templates')))
     tmembers = {m['ref'] for t in tmpls for m in t['members']}
     for t in tmpls:
@@ -189,7 +209,7 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
         members = [r for r in g['refs'] if r in state.parts]
         if len(members) >= 2 and any(r in movable for r in members):
             groups.append((g['name'], members))
-    claims, limits = [], []
+    claims, limits, padless = [], [], []
     for c in rows:
         s, p = str(c['ref']), str(c['near'])
         if s not in pcb.footprints or p not in pcb.footprints:
@@ -207,6 +227,8 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
             claims.append((s, p, legs))
             m = c.get('max_mm')
             limits.append(float(m) if isinstance(m, (int, float)) else None)
+            if isinstance(m, (int, float)) and not pads.get(s) and len(legs) > 1:
+                padless.append((s, p, float(m), legs))
     # decaps: each cap from a supply rail to ground, matched to that rail's
     # supply pins (`simple.Model._sites`) by the rule check_groups reports by
     # (`BoardView.decaps`) -- not a claimed part, and not a cap whose IC is in
@@ -236,6 +258,16 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
                      + '|'.join(pcb.nets[n].name for n in view.decap_rails()[r]) + " serves "
                      + ', '.join(sorted({ic for ic, _n in pins}))
                      + (" (no IC of its group is on its rail)" if r in foreign else ""))
+    # a claim with a limit and no `pads` is priced over every shared-net pad,
+    # while check_floorplan grades the ONE closest pad pair (#1426)
+    model_arity = []
+    rail_names = {pcb.nets[i].name for i in view.rails}
+    for s, p, m, legs in padless:
+        nets = sorted({q.net_name for q in pcb.footprints[s].pads
+                       if q.net_id and str(q.pad_number) in {l[0] for l in legs}})
+        model_arity.append({'ref': s, 'near': p, 'max_mm': m, 'legs': len(legs),
+                            'nets': nets,
+                            'rails': [n for n in nets if n in rail_names]})
     # congestion counts every net that is routed as tracks: all but ground,
     # which is poured as a plane
     cnets = sorted(n for n in state.net_refs if n and not is_ground(pcb.nets[n].name))
@@ -252,6 +284,8 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
                   halo_coef=args.halo_coef, halo_weight=args.halo_weight,
                   claim_limits=limits, claim_limit_weight=args.claim_limit_weight,
                   templates=tmpls, template_weight=args.template_weight)
+    model.claim_arity = model_arity
+    model.tmpl_tolerance = {t['anchor']: t.get('tolerance_mm') for t in tmpls}
     # the unlocked parts the intent declares on an edge, seated there; an
     # edge that cannot hold all its declared parts together seats the most
     # that fit and records itself (`edge_oversubscribed`)
@@ -336,6 +370,60 @@ def _asm_text(asm):
     return f"NOT BUILDABLE ({', '.join(asm.get('fired') or ()) or 'check_assembly'})"
 
 
+def arity_text(rec):
+    """One WARNING body for a `proximity` claim with a limit and no `pads`
+    (`build`'s `claim_arity` rows, #1426)."""
+    rails = f" (rail nets: {', '.join(rec['rails'])})" if rec['rails'] else ''
+    return (f"proximity {rec['ref']} near {rec['near']} (max {rec['max_mm']:g} mm) names no "
+            f"pads: it is priced over {rec['legs']} shared-net pad legs on "
+            f"{', '.join(rec['nets'])}{rails}, but check_floorplan grades the ONE closest "
+            f"pad pair, so the objective can call it broken while the grade passes it; "
+            f"name the facing pads in `pads` so both read the same ones")
+
+
+def settled(pcb, state, model, movable):
+    """The run place_simple keeps, once it is chosen: a no-op the placement
+    movie hooks (`placement_story.install`), since the kept run may be one
+    built before the last."""
+
+
+def _face_board(base, pcb, choice, out_dir, tag, board):
+    """`base` written to `out_dir` with each part of `choice` ({ref: why}) on
+    the other face of the one it has in `pcb` (the writer's flip, at its
+    pose), the board's siblings beside it; the new path."""
+    from placement.faces import face_of, other
+    from placement.portfolio import copy_siblings
+    from placement.writer import write_placed_output
+    out = os.path.join(out_dir, f"{tag}_{os.path.basename(base)}")
+    fps = pcb.footprints
+    write_placed_output(base, out, [
+        {'reference': r, 'new_x': round(fps[r].x, 6), 'new_y': round(fps[r].y, 6),
+         'new_rotation': (fps[r].rotation or 0.0) % 360.0, 'new_side': other(face_of(fps[r]))}
+        for r in sorted(choice)])
+    copy_siblings(board, out)
+    return out
+
+
+def _bga_field(path):
+    """`placement.escape.ball_field_census` of the placed board at `path`:
+    the far-face parts under each ball grid's field (#1425); [] when none, or
+    when the board cannot be read back."""
+    from placement.escape import ball_field_census
+    try:
+        return ball_field_census(parse_kicad_pcb(path))
+    except (OSError, ValueError):
+        return []
+
+
+def _field_text(rec):
+    """'U1 (17x17 balls at 0.8 mm): 40 B.Cu part(s) centred under its ball
+    field, 26 in its outer 4 rows'."""
+    from placement.escape import ESCAPE_RINGS
+    return (f"{rec['bga']} ({rec['balls']} balls at {rec['pitch']:g} mm): {rec['parts']} "
+            f"{rec['face']} part(s) centred under its ball field, {rec['outer']} in its "
+            f"outer {ESCAPE_RINGS} rows (the rows a fan-out escapes through)")
+
+
 def _fp_text(fp):
     """'3 floorplan error(s) (decap_pin_distance)', '' when clean or absent."""
     e = (fp or {}).get('errors')
@@ -384,7 +472,10 @@ def _many_seeds(ap, a):
         if act.dest in skip or not act.option_strings:
             continue
         val = getattr(a, act.dest)
-        if val is not None:
+        if act.nargs == 0:      # a switch: its name alone
+            if val:
+                passed.append(act.option_strings[0])
+        elif val is not None:
             passed += [act.option_strings[0], str(val)]
     jobs = max(1, a.jobs or min(len(seeds), 4))
     runs = []
@@ -397,6 +488,17 @@ def _many_seeds(ap, a):
         cmd = ([sys.executable, '-X', 'utf8', os.path.abspath(__file__), a.board, out]
                + passed + ['--seed', str(s)] + (['--json', js] if js else []))
         runs.append((s, out, cmd))
+    # #1443: measure the parts' heights once, here, so the seeds read the
+    # cached measurement instead of each exporting the board at once
+    try:
+        import contextlib
+        import io
+        from kicad_parser import parse_kicad_pcb
+        from placement import heights
+        with contextlib.redirect_stdout(io.StringIO()):
+            heights.for_board(parse_kicad_pcb(a.board), a.board)
+    except Exception:                                        # noqa: BLE001
+        pass
     print(f"place_simple: seeds {', '.join(map(str, seeds))} ({jobs} at a time)")
     live, done, summaries = [], {}, {}
     pending = list(runs)
@@ -425,7 +527,10 @@ def _many_seeds(ap, a):
             ill = summary.get('illegal') or []
             start = summary.get('start')
             fpt = ', '.join(t for t in (_fp_text(summary.get('floorplan')),
-                                        _asm_text(summary.get('assembly'))) if t)
+                                        _asm_text(summary.get('assembly')),
+                                        *(f"{r['outer']} {r['face']} part(s) in {r['bga']}'s "
+                                          f"outer rows" for r in summary.get('bga_field') or ()
+                                          if r['outer'])) if t)
             print(f"  seed {s}{f' ({start})' if start in ('clustered', 'anchored') else ''}: "
                   f"cost {fin['cost']:.1f}, {summary['moves']} moves in "
                   f"{summary['seconds']['anneal']} s"
@@ -493,6 +598,9 @@ def _name_judged(a, seeds, summaries):
            # together, likewise
            'oversubscribed': next((summaries[s]['oversubscribed'] for s in seeds
                                    if summaries.get(s, {}).get('oversubscribed')), []),
+           # the claims priced over legs the grade does not read, likewise (#1426)
+           'claim_arity': next((summaries[s]['claim_arity'] for s in seeds
+                                if summaries.get(s, {}).get('claim_arity')), []),
            # each placed seed's check_floorplan --intent errors (None: not
            # graded), keyed by seed as JSON keys must be
            'floorplan': {str(s): (summaries[s].get('floorplan') or {}).get('errors')
@@ -501,6 +609,12 @@ def _name_judged(a, seeds, summaries):
            # None not graded) against the board it was placed from
            'assembly': {str(s): (summaries[s].get('assembly') or {}).get('blocking')
                         for s in seeds if s in summaries},
+           # each placed seed's template members past their tolerance (#1387)
+           'template_off': {str(s): summaries[s].get('template_off') or []
+                            for s in seeds if s in summaries},
+           # each placed seed's far-face parts under a ball field (#1425)
+           'bga_field': {str(s): summaries[s].get('bga_field') or []
+                         for s in seeds if s in summaries},
            'baseline': (os.path.abspath(a.board) if getattr(a, 'board', None)
                         else None)}
     path = os.path.join(os.path.dirname(a.out.format(seed=seeds[0])), 'judge.json')
@@ -524,6 +638,8 @@ def _name_judged(a, seeds, summaries):
         elif fp and fp.get('errors') is None:
             print(f"  WARNING: seed {s} is judged with its {_fp_text(fp)}: grade it with "
                   f"check_floorplan --intent before keeping it")
+    for rec in doc['claim_arity']:
+        print(f"  WARNING: {arity_text(rec)}")
     for r, why in sorted(doc['refused'].items()):
         print(f"  WARNING: {r}'s declared pose is not legal, in every seed: "
               f"{'; '.join(why)}")
@@ -532,7 +648,8 @@ def _name_judged(a, seeds, summaries):
         print(f"  WARNING: {crowding_text(rec)}")
 
 
-def main(argv=None):
+def build_parser():
+    """The command line, also the one place the weights' defaults live."""
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('board', help='the board; the parts it locks stay put')
     ap.add_argument('out', help='the placed board to write')
@@ -563,6 +680,11 @@ def main(argv=None):
                     help='per mm past an intent decap limit it grades at error '
                          '(decaps.max_distance_mm, max_pin_distance_mm), measured as the '
                          'grade measures it (default 10; 0 leaves the limits unpriced)')
+    ap.add_argument('--repair-decaps', action='store_true', default=None,
+                    help='after the anneal, move each cap still past an intent decap limit to '
+                         'the nearest legal pose inside it, when that makes no other limit '
+                         'worse (default: off). Either way a limit still broken is WARNED, '
+                         'naming the rail, cap, pin and the distance reached')
     ap.add_argument('--group-weight', type=float, default=5.0,
                     help='per mm of gap in a group\'s tree over its members\' '
                          'courtyards (default 5)')
@@ -633,6 +755,11 @@ def main(argv=None):
                     help='with several seeds, how many run at once (default: one per '
                          'seed, at most 4)')
     ap.add_argument('--json', help='write the report here')
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
     a = ap.parse_args(argv)
     starts = [f for f, v in (('--scattered', a.scattered), ('--clustered', a.clustered),
                              ('--anchored', a.anchored)) if v is not None]
@@ -741,6 +868,17 @@ def main(argv=None):
     from placement import simple_anneal
     from placement.simple import legal
     state, model, movable, notes = build(pcb, src, doc, base, a, intent, blocks, set(fixed))
+    # FACES the groups file leaves open (`flippable`, placement/faces.py): a
+    # part keeps its face unless the front has no room for it (after the
+    # anneal, below)
+    from placement import faces
+    flip_ok, face_notes = faces.flippable_refs(doc, movable, sides, intent.assembly_sides())
+    for r, why in sorted(faces.flip_refusals(src, flip_ok).items() if flip_ok else ()):
+        face_notes.append(f"{r} is flippable but stays: {why}")
+        flip_ok.discard(r)
+    face_src, face_pcb = src, pcb       # the board before any face of our choosing
+    for n in face_notes:
+        print(f"  NOTE: {n}")
     for n in notes:
         print(f"  NOTE: {n}")
     for r, why in sorted(model.edge_unseated.items()):
@@ -749,6 +887,8 @@ def main(argv=None):
     from placement.edge_seat import crowding_text
     for rec in model.edge_oversubscribed:
         print(f"  WARNING: {crowding_text(rec)}")
+    for rec in model.claim_arity:
+        print(f"  WARNING: {arity_text(rec)}")
     print(f"place_simple: {len(movable)} movable part(s), fixed: "
           f"{', '.join(sorted(r for r in state.parts if r not in movable)) or 'none'}")
     for name, members in model.groups:
@@ -776,6 +916,19 @@ def main(argv=None):
             too_big.add(r)
             print(f"  WARNING: {r} ({w:.2f} x {h:.2f} mm) does not fit in the usable area "
                   f"({ux1 - ux0:.2f} x {uy1 - uy0:.2f} mm) at either quarter turn")
+    # a part whose pad copper reaches past its drawn courtyard is priced on the
+    # courtyard here, but check_assembly gates courtyard plus pad copper, so a
+    # neighbour can end over the pad (#1386)
+    from placement.seeder import _pad_copper_overhang
+    wide = {r: round(_pad_copper_overhang(state, r), 2) for r in sorted(state.parts)
+            if _pad_copper_overhang(state, r) > PAD_REACH_WARN_MM}
+    if wide:
+        print("  WARNING: pad copper reaches past the drawn courtyard: " + ', '.join(
+            f"{r} {v:.2f} mm" + (' (locked)' if r not in movable else '')
+            for r, v in wide.items())
+            + "; the anneal prices the courtyard, check_assembly gates courtyard plus "
+              "pad copper, so a neighbour can end over such a pad and the seed grade "
+              "NOT BUILDABLE (ranked below the buildable seeds)")
     t1 = time.time()
     moves = a.moves or MOVES_PER_PART * len(movable)
 
@@ -788,6 +941,28 @@ def main(argv=None):
         else:
             fits = legal(st, r, p.x, p.y, p.rot)
         return fits and st.intent_clear(r, p.grade_rects(p.x, p.y, p.rot))
+
+    def tight_ok(r, st=None, mdl=None):
+        """`ok` with the seat's courtyard clearance down to TIGHT_CLEARANCE_MM."""
+        st = st or state
+        was = st.clearance
+        if was <= TIGHT_CLEARANCE_MM:
+            return False
+        st.clearance = TIGHT_CLEARANCE_MM
+        try:
+            return ok(r, st, mdl)
+        finally:
+            st.clearance = was
+
+    def settle(st, mdl, kp):
+        """`kp` with its poses applied and its parts that are legal only
+        closer than the board clearance (`tight_ok`) no longer illegal."""
+        for r, pose in kp[1].items():
+            st.parts[r].ensure_rotation(pose[2])
+            st.apply_move(r, *pose)
+        mdl.reprice_all()
+        close = [r for r in kp[0] if r not in too_big and tight_ok(r, st, mdl)]
+        return ([r for r in kp[0] if r not in close],) + tuple(kp[1:])
 
     def runs(st, mdl):
         """The restarts on one state: `(kept, k)`, the run that left the
@@ -838,12 +1013,73 @@ def main(argv=None):
             kept2, k2 = runs(st2, mdl2)
             if len(kept2[0]) < len(kept[0]):
                 state, model, kept, k, fallback = st2, mdl2, kept2, k2, sorted(skip)
+    # a flippable part the front had no room for goes to the back, or makes
+    # room by sending its group's flippable parts there, and the board is
+    # annealed again: kept only when it leaves fewer parts without room (no
+    # legal pose, then decap limits, then claim limits), never for cost
+    # alone -- a part stays on its face unless the other face is needed
+    from placement import decap_repair
+    face_report = {'flippable': sorted(flip_ok), 'needed': {},
+                   'needed_kept': None}
+
+    def outcome(st, mdl, kp):
+        """Rank of a run (its poses applied): parts without a legal pose
+        (a tight one counts as legal), decap limits, claim limits, cost."""
+        for r, pose in kp[1].items():
+            st.parts[r].ensure_rotation(pose[2])
+            st.apply_move(r, *pose)
+        mdl.reprice_all()
+        return (len(set(kp[0]) - too_big), len(decap_repair.residual(mdl)),
+                mdl.claims_broken(), mdl.total()['cost'])
+    if movable:
+        kept = settle(state, model, kept)
+    if flip_ok and movable:
+        before = outcome(state, model, kept)
+        want = faces.needed_flips(faces.needs(model, set(kept[0]) - too_big),
+                                  flip_ok, doc, set())
+        if want:
+            face_report['needed'] = want
+            print("  NOTE: no room on their face, annealing again with them on the other: "
+                  + ', '.join(f"{r} ({why})" for r, why in sorted(want.items())))
+            tmp = tmp or tempfile.mkdtemp(prefix='place_simple_')
+            src2 = _face_board(face_src, face_pcb, want, tmp, 'needed', a.board)
+            pcb2 = parse_kicad_pcb(src2)
+            blocks2, _problems = floorplan.resolve_blocks(intent, pcb2, sources)
+            st2, mdl2, _m2, _n2 = build(pcb2, src2, doc, base, a, intent, blocks2, set(fixed))
+            kept2, k2 = runs(st2, mdl2)
+            kept2 = settle(st2, mdl2, kept2)
+            after = outcome(st2, mdl2, kept2)
+            better = after[:3] < before[:3]
+            face_report['needed_kept'] = better
+            print(f"  NOTE: with them flipped: {after[0]} part(s) without a legal pose, "
+                  f"{after[1]} decap limit(s), {after[2]} claim limit(s) broken, cost "
+                  f"{after[3]:.1f}, against {before[0]}, {before[1]}, {before[2]}, "
+                  f"{before[3]:.1f}; {'kept' if better else 'not kept: no part gained room'}")
+            if better:
+                state, model, kept, k, src, pcb = st2, mdl2, kept2, k2, src2, pcb2
+                blocks, fallback = blocks2, []
+            else:
+                outcome(state, model, kept)
+    settled(pcb, state, model, movable)
     _ill, poses, res = kept
     for r, pose in poses.items():
         state.parts[r].ensure_rotation(pose[2])
         state.apply_move(r, *pose)
     model.reprice_all()
     final = model.total()
+    # the intent's decap limits are a soft term, so the anneal can stop a
+    # fraction of a mm past one; --repair-decaps then moves each cap to the
+    # nearest legal pose inside its limit (#1382)
+    from placement import decap_repair
+    mended = None
+    if a.repair_decaps and movable:
+        def legal_at(r, x, y, rot):
+            if r in model.edge_seats:
+                return False
+            return (legal(state, r, x, y, rot)
+                    and state.intent_clear(r, state.parts[r].grade_rects(x, y, rot)))
+        mended = decap_repair.repair(model, movable, legal_at, seats=model.edge_seats)
+        final = model.total()
     t2 = time.time()
     # each template member's drift from its template pose, worst pad
     from placement.templates import pad_deviation
@@ -851,20 +1087,63 @@ def main(argv=None):
     for i, (anc, m) in enumerate(model.tmpl):
         P = state.parts[m['ref']]
         _mean, worst = pad_deviation(P, (P.x, P.y, P.rot), model.template_target(i))
-        drift.append({'anchor': anc, 'ref': m['ref'], 'worst_mm': round(worst, 3)})
+        drift.append({'anchor': anc, 'ref': m['ref'], 'worst_mm': round(worst, 3),
+                      'tolerance_mm': model.tmpl_tolerance.get(anc)})
     # a refused declared pose is the intent's, the same in every seed: it is
     # reported apart (`refused`), not counted against the seed (#1297)
     illegal = [r for r in movable if not ok(r)]
+    # closer than the board clearance only where no run found it a legal pose
+    # (TIGHT_CLEARANCE_MM): legal, and named with the gap it stands at
+    from placement.simple import rect_gap
+    tight = {}
+    for r in [r for r in illegal if r not in too_big and tight_ok(r)]:
+        P = state.parts[r]
+        gap, near = min(((rect_gap(P.rect(), q.rect()), o) for o, q in state.parts.items()
+                         if o != r and P.sides & q.sides), default=(None, None))
+        tight[r] = {'gap_mm': None if gap is None else round(gap, 4), 'neighbour': near}
+    illegal = [r for r in illegal if r not in tight]
     print(f"place_simple: annealed {res['moves']} moves in {t2 - t1:.1f} s; {_line(final)}")
     if res.get('repaired'):
         print("  NOTE: the last run never came clean; its overlaps were shoved apart where it stood")
     if res['reseated']:
         print(f"  NOTE: moved to the nearest legal pose after the anneal: {', '.join(res['reseated'])}")
+    for r, t in sorted(tight.items()):
+        print(f"  NOTE: {r} has no legal pose at the board clearance "
+              f"({state.clearance:g} mm); seated {t['gap_mm']:g} mm from {t['neighbour']}, "
+              f"legal down to {TIGHT_CLEARANCE_MM:g} mm because nothing else seats it")
     if illegal:
         print(f"  WARNING: no legal pose found for: {', '.join(illegal)}")
+    if mended is not None:
+        for m in mended['moved']:
+            print(f"  NOTE: decap {m['ref']} ({m['rail']}) moved {m['mm']:.2f} mm to "
+                  f"({m['to'][0]:g}, {m['to'][1]:g}, {m['to'][2]:g}) to meet its limit")
+        print(f"  decap repair: {mended['before']} limit(s) broken -> {mended['after']} "
+              f"({mended['seconds']} s)")
+    # what is still past an intent decap limit, named: rail, cap, pin, the
+    # distance reached against the limit (#1382, #1423)
+    resid = mended['stuck'] if mended is not None else decap_repair.residual(model)
+    for r in resid:
+        print(f"  WARNING: {decap_repair.residual_text(r)}"
+              + (decap_repair.stuck_text(r) if mended is not None else ''))
     if drift:
         print("  template drift (worst pad, mm): " + ', '.join(
             f"{d['ref']} {d['worst_mm']:.2f}" for d in drift))
+    # a member left past its template's tolerance is check_floorplan's
+    # `template` WARN, which does not move the judge: say so here (#1387)
+    off = [d for d in drift if d['tolerance_mm'] is not None
+           and d['worst_mm'] > d['tolerance_mm'] + 1e-6]
+    if off:
+        print("  WARNING: off its datasheet template past the tolerance: " + ', '.join(
+            f"{d['ref']} ({d['anchor']}) {d['worst_mm']:.2f} mm > {d['tolerance_mm']:g}"
+            for d in off) + "; check_floorplan grades this a WARN (unless the intent's "
+            "`severity` promotes `template`), so the judge ranks the seed no lower for it")
+    # a keep-out that binds a template member but not its chip forbids the
+    # template pose where the chip stands (#1387)
+    tk = [f for f in floorplan.template_keepout_findings(
+        intent, state.parts, lambda r: (state.parts[r].x, state.parts[r].y, state.parts[r].rot))
+        if f['forced']]
+    for f in tk:
+        print(f"  WARNING: {floorplan.template_keepout_text(f)}")
     # an `apart` hint whose groups still touch prices the least gap over all
     # their member pairs, 0 at any pose where they touch: a flat
     # weight x APART_MM that steered nothing (#1330)
@@ -891,6 +1170,12 @@ def main(argv=None):
     # and its assembly, against the board it was placed from: report only
     asm = _assembly(a.out, a.board, a.intent)
     print(f"  assembly: {_asm_text(asm) or 'buildable'} (check_assembly --baseline)")
+    # the parts the placement stood on the far face of a ball grid, under its
+    # ball field (#1425): the rows a fan-out escapes through are the ones to
+    # count. Report only.
+    bga_field = _bga_field(a.out)
+    for rec in bga_field:
+        print(f"  {_field_text(rec)}")
     final.pop('per_group', None)
     final.pop('per_hint', None)
     report = {'final': final, 'moves': res['moves'], 'seed': a.seed,
@@ -898,18 +1183,21 @@ def main(argv=None):
                         else 'scattered'), 'runs': k + 1,
               'declared': sorted(f['reference'] for f in flips),
               'reseated': res['reseated'], 'repaired': bool(res.get('repaired')),
-              'illegal': illegal, 'refused': refused, 'estimate_fallback': fallback,
-              'oversubscribed': model.edge_oversubscribed, 'floorplan': fp, 'assembly': asm,
+              'illegal': illegal, 'tight': tight, 'refused': refused, 'estimate_fallback': fallback,
+              'oversubscribed': model.edge_oversubscribed, 'claim_arity': model.claim_arity,
+              'floorplan': fp, 'assembly': asm, 'bga_field': bga_field,
+              'decap_residual': resid, 'decap_repair': mended,
               'unseated': model.edge_unseated, 'notes': notes,
               'groups': model.groups, 'stats': res['stats'], 'templates': drift,
-              'hints_saturated': saturated,
+              'hints_saturated': saturated, 'template_keepout': tk, 'pad_overhang': wide,
+              'template_off': off, 'faces': face_report,
               'seconds': {'setup': round(t1 - t0, 1), 'anneal': round(t2 - t1, 1)}}
     if a.json:
         json.dump(report, open(a.json, 'w', encoding='utf-8'), indent=1)
     print('JSON_SUMMARY: ' + json.dumps({k: report[k] for k in
-                                          ('final', 'moves', 'seed', 'start', 'reseated', 'illegal',
-                                           'refused', 'oversubscribed', 'floorplan', 'assembly',
-                                           'hints_saturated', 'estimate_fallback', 'seconds')}))
+                                          ('final', 'moves', 'seed', 'start', 'reseated', 'illegal', 'tight',
+                                           'refused', 'oversubscribed', 'claim_arity', 'floorplan',
+                                           'assembly', 'bga_field', 'template_off', 'decap_residual', 'hints_saturated', 'estimate_fallback', 'faces', 'seconds')}))
     return 4 if illegal or refused or model.edge_oversubscribed else 0
 
 

@@ -381,6 +381,27 @@ def _ver_tuple(v):
     return tuple(out)
 
 
+def _release_ref_candidates(remote_urls):
+    """Refs to compare rust_router/ against, best first: `<remote>/main` for
+    every remote whose URL is GITHUB_REPO (the source the release assets are
+    built from), then origin/main, then the local main. `remote_urls` maps a
+    remote name to its URL."""
+    want = GITHUB_REPO.lower()
+
+    def _is_release(url):
+        u = url.strip().lower()
+        if u.endswith('.git'):
+            u = u[:-len('.git')]
+        return u.rstrip('/').endswith(('github.com/' + want,
+                                       'github.com:' + want))
+    refs = [name + '/main' for name, url in sorted(remote_urls.items())
+            if _is_release(url)]
+    for r in ('origin/main', 'main'):
+        if r not in refs:
+            refs.append(r)
+    return refs
+
+
 def _crate_matches_release_source(script_dir):
     """Does the working tree's rust_router/ match main -- the source the release
     assets are built from?
@@ -400,9 +421,17 @@ def _crate_matches_release_source(script_dir):
     try:
         if _git('rev-parse', '--git-dir').returncode != 0:
             return None
-        # Prefer origin/main (current even when the local main branch is stale
-        # or absent, as in a clone that checked out another branch).
-        ref = next((r for r in ('origin/main', 'main')
+        # The release assets are built from GITHUB_REPO's main, so compare
+        # against the remote that IS that repository (in a fork clone `origin`
+        # is the fork, which can be stale or ahead, #1419); only then origin,
+        # then the local main (current even when it is stale or absent, as in
+        # a clone that checked out another branch).
+        cfg = _git('config', '--get-regexp', r'^remote\..*\.url$')
+        urls = {}
+        for line in (cfg.stdout.splitlines() if cfg.returncode == 0 else []):
+            key, _, url = line.partition(' ')
+            urls[key[len('remote.'):-len('.url')]] = url.strip()
+        ref = next((r for r in _release_ref_candidates(urls)
                     if _git('rev-parse', '--verify', '--quiet',
                             r + '^{commit}').returncode == 0), None)
         if ref is None:

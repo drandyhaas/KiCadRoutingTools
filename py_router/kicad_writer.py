@@ -57,17 +57,10 @@ def move_copper_text_to_silkscreen(content: str) -> str:
         if start == -1:
             break
 
-        # Find the matching closing paren by counting nesting
-        depth = 0
-        end = start
-        for j in range(start, len(content)):
-            if content[j] == '(':
-                depth += 1
-            elif content[j] == ')':
-                depth -= 1
-                if depth == 0:
-                    end = j + 1
-                    break
+        # Find the matching closing paren. #1437: string-aware -- a text
+        # like "note :(" used to be counted as nesting, the block swallowed
+        # the items after it, and their copper (layer ...) went to silk.
+        end = _sexpr_block_end(content, start)
 
         # Extract the gr_text block
         block = content[start:end]
@@ -484,6 +477,81 @@ def stamp_via_protection_in_content(content: str, stamps_by_uuid: dict):
         pos = at
     out.append(content[pos:])
     return ''.join(out), len(edits)
+
+
+def strip_via_protection_in_content(content: str, drops_by_uuid: dict):
+    """Remove protection tokens from the `(via ...)` blocks named by uuid (#1367).
+
+    `drops_by_uuid` is {via uuid: [token, ...]}. Only a token that is a direct
+    child of the via block is removed, together with the line it stands on.
+    The inverse of `stamp_via_protection_in_content`: it undoes the explicit
+    tokens a pcbnew re-save wrote onto vias that had none, so the via inherits
+    the board's `(setup ...)` again. Returns `(content, n_vias_edited)`."""
+    if not drops_by_uuid:
+        return content, 0
+    from kicad_parser import _via_blocks
+    uuid_re = re.compile(r'\(uuid\s+"([^"]+)"\)')
+    edits = []   # (absolute start, absolute end) spans to delete
+    n_vias = 0
+    for start, blk in _via_blocks(content):
+        um = uuid_re.search(blk)
+        if not um or um.group(1) not in drops_by_uuid:
+            continue
+        spans = []
+        depth, in_str, i = 0, False, 0
+        while i < len(blk):
+            c = blk[i]
+            if in_str:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == '(':
+                depth += 1
+                if depth == 2:
+                    m = re.match(r'\(([A-Za-z_]+)', blk[i:])
+                    if m and m.group(1) in drops_by_uuid[um.group(1)]:
+                        j, d2, s2 = i, 0, False
+                        while j < len(blk):
+                            cj = blk[j]
+                            if s2:
+                                if cj == '\\':
+                                    j += 2
+                                    continue
+                                if cj == '"':
+                                    s2 = False
+                            elif cj == '"':
+                                s2 = True
+                            elif cj == '(':
+                                d2 += 1
+                            elif cj == ')':
+                                d2 -= 1
+                                if d2 == 0:
+                                    break
+                            j += 1
+                        k = i
+                        while k > 0 and blk[k - 1] in ' \t':
+                            k -= 1
+                        if k > 0 and blk[k - 1] == '\n':
+                            k -= 1
+                        spans.append((start + k, start + j + 1))
+            elif c == ')':
+                depth -= 1
+            i += 1
+        if spans:
+            edits.extend(spans)
+            n_vias += 1
+    if not edits:
+        return content, 0
+    out, pos = [], 0
+    for a, b in sorted(edits):
+        out.append(content[pos:a])
+        pos = b
+    out.append(content[pos:])
+    return ''.join(out), n_vias
 
 
 def via_net_name(net_id: int, net_id_to_name: dict) -> Optional[str]:
@@ -1175,8 +1243,12 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
         for via_to_remove in remove_vias:
             x, y = via_to_remove['x'], via_to_remove['y']
             want_net = via_to_remove.get('net_id')
+            # #1438: KiCad writes the via TYPE as a bare keyword after the
+            # head -- `(via blind`, `(via buried`, `(via micro` -- so a
+            # head-then-newline pattern left every non-through via in place.
             pattern = re.compile(
-                rf'\t\(via\s*\n\s*\(at\s+{_num_pat(x)}\s+{_num_pat(y)}\)[\s\S]*?\n\t\)')
+                r'\t\(via(?:[ \t]+(?:blind|buried|micro|through))?[ \t]*\r?\n'
+                rf'\s*\(at\s+{_num_pat(x)}\s+{_num_pat(y)}\)[\s\S]*?\n\t\)')
             for m in pattern.finditer(content):
                 block = m.group(0)
                 # Net gate (was net-blind): never delete a DIFFERENT net's via
@@ -1474,6 +1546,14 @@ def modify_segment_layers(content: str, segment_mods: List[Dict],
     return result, count
 
 
+# #1439: a locked segment is spelled `(segment locked (start ...` (bare head,
+# older files) or with a `(locked)` / `(locked yes)` child after `(width ...)`.
+# The swap's head pattern allowed neither, so locked copper silently kept its
+# old net. Same forms kicad_parser accepts.
+_SEG_LOCK_HEAD = r'(?:\s+locked)?'
+_SEG_LOCK_CHILD = r'(?:\(locked(?:\s+(?:yes|no|true|false))?\s*\)\s+)?'
+
+
 def swap_segment_nets_at_positions(content: str, positions: set,
                                    old_net_id: int, new_net_id: int,
                                    layer: str = None,
@@ -1499,10 +1579,10 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
     if use_names:
         # KiCad 10: match (net "name")
-        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+"((?:[^"\\]|\\.)*)"\)'
+        segment_pattern = r'\(segment' + _SEG_LOCK_HEAD + r'\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+' + _SEG_LOCK_CHILD + r'\(layer\s+"?([^")]+)"?\).*?\(net\s+"((?:[^"\\]|\\.)*)"\)'
     else:
         # KiCad 9: match (net <id>)
-        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
+        segment_pattern = r'\(segment' + _SEG_LOCK_HEAD + r'\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+' + _SEG_LOCK_CHILD + r'\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
 
     count = 0
 
@@ -1541,6 +1621,41 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
     result = re.sub(segment_pattern, replace_net, content, flags=re.DOTALL)
     return result, count
+
+
+def _sexpr_block_end(content: str, start: int) -> int:
+    """Index just past the balanced s-expression opening at ``start``.
+
+    Quote-aware AND escape-aware (#1440): KiCad writes a quote inside a
+    string as ``\\"``, and a scan that took that quote as the closing
+    delimiter flipped in/out of string state for the rest of the block, so a
+    ``(`` in such a net name swallowed the NEXT block into this one. Returns
+    ``len(content)`` when the block never closes.
+    """
+    n = len(content)
+    depth = 0
+    in_str = False
+    esc = False
+    k = start
+    while k < n:
+        ch = content[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return k + 1
+        k += 1
+    return n
 
 
 def assert_balanced_sexpr(text: str, label: str = 'board'):
@@ -1661,24 +1776,7 @@ def remove_segments_from_content(content: str, segments: List,
             out.append(content[pos:])
             break
         out.append(content[pos:j])
-        depth = 0
-        in_str = False
-        k = j
-        while k < n:
-            ch = content[k]
-            if in_str:
-                if ch == '"':
-                    in_str = False
-            elif ch == '"':
-                in_str = True
-            elif ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    k += 1
-                    break
-            k += 1
+        k = _sexpr_block_end(content, j)
         block = content[j:k]
         ms, me, ml = start_re.search(block), end_re.search(block), layer_re.search(block)
         keep = True
@@ -1768,24 +1866,7 @@ def remove_vias_from_content(content: str, vias: List,
             out.append(content[pos:])
             break
         out.append(content[pos:j])
-        depth = 0
-        in_str = False
-        k = j
-        while k < n:
-            ch = content[k]
-            if in_str:
-                if ch == '"':
-                    in_str = False
-            elif ch == '"':
-                in_str = True
-            elif ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    k += 1
-                    break
-            k += 1
+        k = _sexpr_block_end(content, j)
         block = content[j:k]
         ma = at_re.search(block)
         keep = True

@@ -3685,13 +3685,18 @@ def _generate_bga_fanout_core(footprint: Footprint,
 
     # Check for existing fanouts if requested
     fanned_out_nets: Set[int] = set()
+    # The balls skipped below: a ball is skipped when it is fanned ITSELF,
+    # not when its net is -- a ground net with copper on one ball still has
+    # every other ball to escape.
+    fanned_out_balls: Set[Tuple[float, float]] = set()
     pre_occupied_exits: Dict[Tuple[str, str, float], str] = {}
     if check_for_previous:
-        fanned_out_nets, pre_occupied_exits = find_existing_fanouts(
-            pcb_data, footprint, grid, channels
+        fanned_out_nets, pre_occupied_exits, fanned_out_balls = find_existing_fanouts(
+            pcb_data, footprint, grid, channels, return_balls=True
         )
         if fanned_out_nets:
-            print(f"  Found {len(fanned_out_nets)} nets with existing fanouts (will skip)")
+            print(f"  Found {len(fanned_out_nets)} nets with existing fanouts "
+                  f"({len(fanned_out_balls)} fanned ball(s) will be skipped)")
         if pre_occupied_exits:
             print(f"  Found {len(pre_occupied_exits)} occupied exit positions")
 
@@ -3811,12 +3816,11 @@ def _generate_bga_fanout_core(footprint: Footprint,
         if net_filter and not matches_net_filter(pad.net_name, net_filter):
             continue
         # Escape-priority pass restriction (issue #129): only the pass's own
-        # balls are routed; _ignore_prefanned lets pass 2 fan the extra balls
-        # of nets pass 1 just fanned (whose copper now trips the net-level
-        # "already fanned" detection).
+        # balls are routed; _ignore_prefanned makes pass 2's filter
+        # membership authoritative over the "already fanned" skip.
         if _pad_filter is not None and (pad.global_x, pad.global_y) not in _pad_filter:
             continue
-        if check_for_previous and pad.net_id in fanned_out_nets \
+        if check_for_previous and (pad.global_x, pad.global_y) in fanned_out_balls \
                 and not _ignore_prefanned:
             continue
         fanned_net_ids.add(pad.net_id)
@@ -3966,9 +3970,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 continue
 
             # Skip if this pad already has a fanout (check_for_previous mode).
-            # _ignore_prefanned: pass 2 fans the extra balls of nets pass 1
-            # just fanned (whose copper trips this net-level detection).
-            if check_for_previous and pad.net_id in fanned_out_nets \
+            # _ignore_prefanned: pass 2's filter membership is authoritative.
+            if check_for_previous and (pad.global_x, pad.global_y) in fanned_out_balls \
                     and not _ignore_prefanned:
                 continue
 

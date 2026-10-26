@@ -287,6 +287,46 @@ def new_copper_width_shortfall(segments, name_of, input_keys, requested_of):
     return out
 
 
+def via_identity(v, net_name):
+    """A via's geometry as a hashable key: net (by NAME, so a re-parsed
+    board's renumbered nets still match), position to 1 um and diameter. Equal
+    keys are the same barrel; a key the input board lacks is a via the run
+    laid (or re-laid)."""
+    return (net_name, round(v.x, 3), round(v.y, 3), round(v.size, 3))
+
+
+def new_via_shortfall(vias, name_of, input_keys, requested_of):
+    """Per net, the vias THIS run laid that ship smaller than the diameter
+    requested for the net (#1371), read off the shipped board rather than
+    recorded per placement attempt.
+
+    `vias` is the shipped copper (the written board, or the GUI's write
+    model); a via whose :func:`via_identity` is in `input_keys` was on the
+    input board and is not this run's. `requested_of(net_name)` is the
+    diameter asked for, or None for a net this report does not cover.
+
+    Returns {net_name: {requested_mm, min_mm, count, sizes}} for every net
+    with at least one new via more than 1 um under its request -- `count`
+    those vias, `sizes` {diameter: how many}."""
+    out: Dict[str, Dict] = {}
+    for v in vias:
+        if not v.net_id:
+            continue
+        name = name_of(v.net_id)
+        req = requested_of(name)
+        if req is None or via_identity(v, name) in input_keys:
+            continue
+        if v.size >= req - 1e-3:
+            continue
+        r = out.setdefault(name, {'requested_mm': round(float(req), 4),
+                                  'min_mm': None, 'count': 0, 'sizes': {}})
+        d = round(float(v.size), 4)
+        r['count'] += 1
+        r['sizes'][d] = r['sizes'].get(d, 0) + 1
+        r['min_mm'] = d if r['min_mm'] is None else min(r['min_mm'], d)
+    return out
+
+
 def resolve_net_ids(pcb_data: PCBData, net_names: List[str]) -> List[Tuple[str, int]]:
     """
     Resolve net names to (name, id) tuples.
@@ -827,6 +867,20 @@ def run_length_matching(
             net_name_to_result[net_name] = result
 
     all_routed_names = list(net_name_to_result.keys())
+    # #1391: a named-pattern group also takes the board's own copper -- a member
+    # an earlier step routed and left protected is not in this run's results
+    # (protected nets are never registered as rip candidates), yet it belongs to
+    # the group and sets its target. The group matcher measures it from the
+    # board (`_seed_group_members_from_board`).
+    _have = set(all_routed_names)
+    _board_copper_names = []
+    _with_copper = ({s.net_id for s in pcb_data.segments}
+                    | {v.net_id for v in pcb_data.vias})
+    for _nid in _with_copper:
+        _n = pcb_data.nets.get(_nid)
+        if _n is not None and _n.name and _n.name not in _have:
+            _board_copper_names.append(_n.name)
+    _board_copper_names.sort()
     # #1247: the `auto` grouper's input is this call's scope, never the
     # pre-existing nets registered as rip candidates.
     auto_input_names = []
@@ -885,7 +939,8 @@ def run_length_matching(
                                 all_processed_vias.extend(result['new_vias'])
         else:
             # Find nets matching the patterns in this group
-            matching_nets = find_nets_matching_patterns(all_routed_names, group)
+            matching_nets = find_nets_matching_patterns(
+                all_routed_names + _board_copper_names, group)
             formed_groups.append({'name': ' '.join(group), 'source': 'patterns',
                                   'patterns': list(group),
                                   'members': sorted(matching_nets)})
@@ -918,6 +973,14 @@ def run_length_matching(
     except AttributeError:
         pass
     if report is not None:
+        # #1391: each member's verdict (matched / over_target / unmatched /
+        # unmeanderable / unmatched_board_copper, with the shortfall and the
+        # .kicad_dru window it was graded against).
+        _status = getattr(config, '_length_match_status', None) or {}
+        for g in formed_groups:
+            _ms = {m: _status[m] for m in g['members'] if m in _status}
+            if _ms:
+                g['member_status'] = _ms
         report['groups'] = formed_groups
     return net_name_to_result
 

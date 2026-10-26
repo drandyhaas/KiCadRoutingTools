@@ -38,6 +38,15 @@ is error). Reported as kicad_starved_thermal with the pads it names, never
 matched against check_drc (which has no thermal model) and never part of the
 CONSISTENT verdict or the exit code.
 
+Graded SEPARATELY too (#1376): KiCad's `track_dangling` -- a track end that
+nothing counts for -- at the project's severity (a warning unless the author
+set it). check_weird and check_orphan_stubs hold a looser model of the same
+defect (a tail past an anchor under 3 x the width is allowed, a track touching
+only one end is credited), so a delivered board they call clean can still
+carry them. Reported as kicad_track_dangling with the net and position, never
+matched against check_drc and never part of the CONSISTENT verdict or the exit
+code.
+
 Usage:
   python3 tests/stress/kicad_drc_compare.py <board.kicad_pcb> [...]
   python3 tests/stress/kicad_drc_compare.py --wave <wave_dir>   # summary.json
@@ -116,6 +125,13 @@ CD_SIZE_TYPES = {"track-width", "via-size", "via-drill-size"}
 # where every one would read checkdrc_only. They get a labelled channel of
 # their own, `via_in_paste`, and never count as edge accepts.
 CD_VIA_PASTE_TYPES = {"via-in-paste"}
+# Copper in a keep-out rule area (check_drc `keepout`): check_drc-only by
+# construction -- kicad-cli 10.0.0 reported no `items_not_allowed` for a track
+# through a tracks-not-allowed rule area in our measurement, even on a board
+# pcbnew built itself. Its own labelled channel, `keepout`, off the copper
+# match; any `items_not_allowed` KiCad does report is counted beside it.
+CD_KEEPOUT_TYPES = {"keepout"}
+KICAD_KEEPOUT_TYPE = "items_not_allowed"
 # #1313: a .kicad_dru length window. KiCad's twin (`length_out_of_range`) is
 # not a copper type above, so check_drc's is out of the copper match too --
 # in it, every one would read checkdrc_only. #1303's diff-pair rules
@@ -144,7 +160,37 @@ KICAD_COURTYARD_TYPES = {"courtyards_overlap"}
 # the repo named. Graded at the project's severity, like the copper classes
 # before #526 lifted them, and never in the copper match.
 KICAD_THERMAL_TYPES = {"starved_thermal"}
-_THERMAL_PAD_RE = re.compile(r"Pad\s+(\S+)\s+\[[^\]]*\]\s+of\s+(\S+)")
+
+# Dangling track ends (#1376): a fifth LABELED channel. KiCad reports
+# `track_dangling` where check_weird / check_orphan_stubs, which allow a short
+# tail past an anchor and credit a track touching one end, call the copper
+# clean. Like the thermal class it is graded at the project's severity and
+# never in the copper match.
+KICAD_DANGLING_TYPES = {"track_dangling"}
+# KiCad 10 spells a through-hole pad "PTH pad 7 [GND] of JP1" (lower-case
+# `pad`, #1406) and an SMD one "Pad 1 [GND] of BUS1 on bottom_copper".
+_THERMAL_PAD_RE = re.compile(
+    r"(?:\b(?:N?PTH|SMD)\s+)?\b[Pp]ad\s+(\S+)\s+\[[^\]]*\]\s+of\s+(\S+)")
+
+#: #1390: the error types of KiCad's LAST report that no channel of this
+#: comparator classifies ({type: count}). A type outside the copper, web,
+#: thermal and courtyard classes used to be dropped without a word, so a
+#: `track_width` error read `kicad=0 ... CONSISTENT`. Set by `run_kicad_drc`,
+#: read by `compare_board_data` right after `kicad_items_for` returns.
+LAST_UNCLASSIFIED = {}
+
+
+def unclassified_error_types(data):
+    """{type: count} of the error-severity violations in a kicad-cli report
+    that no class here grades."""
+    known = (KICAD_COPPER_TYPES | KICAD_WEB_TYPES | KICAD_THERMAL_TYPES
+             | KICAD_COURTYARD_TYPES | KICAD_DANGLING_TYPES)
+    out = {}
+    for v in data.get("violations", []):
+        t = v.get("type", "")
+        if t and t not in known and v.get("severity", "error") == "error":
+            out[t] = out.get(t, 0) + 1
+    return out
 
 MATCH_RADIUS_MM = 0.5
 
@@ -187,6 +233,8 @@ def run_kicad_drc(board: str):
             os.unlink(out_json)
         except OSError:
             pass
+    LAST_UNCLASSIFIED.clear()
+    LAST_UNCLASSIFIED.update(unclassified_error_types(data))
     return parse_kicad_report(data), None
 
 
@@ -208,6 +256,19 @@ def parse_kicad_report(data):
             out.append({"type": vtype, "nets": frozenset(),
                         "pos": (0.0, 0.0), "desc": v.get("description", ""),
                         "kinds": tuple(sorted(refs)[:2]),
+                        "severity": v.get("severity", "")})
+            continue
+        if vtype in KICAD_DANGLING_TYPES:
+            # at the project's severity: a warning by default, so the
+            # error-only filter below must not drop it
+            item = (v.get("items") or [{}])[0]
+            d = item.get("description", "") or ""
+            p = item.get("pos") or {}
+            out.append({"type": vtype,
+                        "nets": frozenset([d[d.index("[") + 1:d.index("]")]]
+                                          if "[" in d and "]" in d else []),
+                        "pos": (float(p.get("x", 0.0)), float(p.get("y", 0.0))),
+                        "desc": d, "kinds": ("track",),
                         "severity": v.get("severity", "")})
             continue
         if (vtype not in KICAD_COPPER_TYPES and vtype not in KICAD_WEB_TYPES
@@ -906,9 +967,11 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     requested = clearance
     if recorded is not None:
         clearance = recorded
+    LAST_UNCLASSIFIED.clear()
     kicad, err = kicad_items_for(board, clearance)
     if err:
         return {"board": label, "skip": err}
+    unclassified = dict(LAST_UNCLASSIFIED)
     # Min copper web (#406): split the web class out BEFORE baseline
     # subtraction and matching -- the positional subtraction pass is
     # type-blind, so pooling would let a baseline clearance item consume a
@@ -930,6 +993,9 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # #1334: thermal spokes split out the same way, for the same reason.
     thermal_items = [v for v in kicad if v["type"] in KICAD_THERMAL_TYPES]
     kicad = [v for v in kicad if v["type"] not in KICAD_THERMAL_TYPES]
+    # #1376: dangling track ends split out the same way.
+    dangling_items = [v for v in kicad if v["type"] in KICAD_DANGLING_TYPES]
+    kicad = [v for v in kicad if v["type"] not in KICAD_DANGLING_TYPES]
     # Run-6: the courtyard channel splits out the same way (never enters the
     # copper match), then reconciles against check_assembly's class-waiver
     # verdicts by ref pair. `unmatched` on either side is the alarm.
@@ -978,20 +1044,25 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
                      "pairs": rows}
     except Exception as e:  # noqa: BLE001 -- reporting channel, not a gate
         courtyard = {"error": str(e)[:150], "kicad": len(court_items)}
-    pre = web_pre = thermal_pre = 0
+    pre = web_pre = thermal_pre = dangling_pre = 0
     if baseline and os.path.exists(baseline):
         base_items, berr = kicad_items_for(baseline, clearance)
         if not berr and base_items:
             base_web = [v for v in base_items if v["type"] in KICAD_WEB_TYPES]
             base_thermal = [v for v in base_items
                             if v["type"] in KICAD_THERMAL_TYPES]
+            base_dangling = [v for v in base_items
+                             if v["type"] in KICAD_DANGLING_TYPES]
             base_items = [v for v in base_items
                           if v["type"] not in KICAD_WEB_TYPES
-                          and v["type"] not in KICAD_THERMAL_TYPES]
+                          and v["type"] not in KICAD_THERMAL_TYPES
+                          and v["type"] not in KICAD_DANGLING_TYPES]
             kicad, pre = _subtract_baseline(kicad, base_items)
             web_items, web_pre = _subtract_baseline(web_items, base_web)
             thermal_items, thermal_pre = _subtract_baseline(thermal_items,
                                                             base_thermal)
+            dangling_items, dangling_pre = _subtract_baseline(dangling_items,
+                                                              base_dangling)
     # #962: the unrouted input doubles as check_drc's --baseline, so a
     # footprint-graphic graze a PART MOVE created is graded (not accepted) and
     # cannot consume KiCad's matching finding below.
@@ -1012,6 +1083,14 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
         "kicad": None,      # KiCad has no via-in-paste check
     }
     cd = [c for c in cd if c["type"] not in CD_VIA_PASTE_TYPES]
+    keepout = {
+        "check_drc": sum(1 for c in cd if c["type"] in CD_KEEPOUT_TYPES
+                         and not c.get("accepted")),
+        "inherited": sum(1 for c in cd if c.get("accepted") == "inherited-keepout"),
+        # what kicad-cli itself reported (also in kicad_unclassified)
+        "kicad": unclassified.get(KICAD_KEEPOUT_TYPE, 0),
+    }
+    cd = [c for c in cd if c["type"] not in CD_KEEPOUT_TYPES]
     # #995: a part's own copper against its own pad's net -- its own channel,
     # never the edge family's `intentional` count.
     cd_own = [c for c in cd if c.get("accepted") == "footprint-own-copper"]
@@ -1034,6 +1113,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
         except Exception:  # noqa: BLE001 -- best-effort, tolerate a bad input
             cd_base = None
         cd_base = [c for c in (cd_base or []) if c["type"] not in CD_VIA_PASTE_TYPES
+                   and c["type"] not in CD_KEEPOUT_TYPES
                    and c.get("accepted") != "footprint-own-copper"]
         cd, _cd_sub = _subtract_baseline(cd, cd_base or [])
         cd_pre += _cd_sub
@@ -1130,10 +1210,18 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             "kicad_starved_thermal": len(thermal_items),
             "starved_thermal_preexisting": thermal_pre,
             "starved_thermal_items": thermal_items,
+            # #1376: dangling track ends, at the project's severity (report only)
+            "kicad_track_dangling": len(dangling_items),
+            "track_dangling_preexisting": dangling_pre,
+            "track_dangling_items": dangling_items,
             # run-6: the labeled courtyard channel (never silently filtered)
             "courtyard": courtyard,
             # #962 D6: check_drc-only by construction (KiCad has no check)
             "via_in_paste": via_in_paste,
+            # check_drc-only by construction (kicad-cli 10.0.0 reported none)
+            "keepout": keepout,
+            # #1390: KiCad error types no channel grades, never dropped
+            "kicad_unclassified": unclassified,
             "kicad_only_items": kicad_only, "checkdrc_only_items": cd_only}
 
 
@@ -1144,8 +1232,8 @@ _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "matched", "kicad_only", "checkdrc_only",
                  "pairs_kicad_only", "pairs_checkdrc_only",
                  "kicad_connection_width", "connection_width_min",
-                 "kicad_starved_thermal",
-                 "courtyard", "via_in_paste")
+                 "kicad_starved_thermal", "kicad_track_dangling",
+                 "courtyard", "via_in_paste", "keepout")
 
 
 def compare_board(board: str, label: str = None, clearance: float = None,
@@ -1179,10 +1267,20 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     cw_note += (f" thermal={_st}"
                 + (f" (+{_st_pre} pre-existing, subtracted)" if _st_pre
                    else ""))
+    _td = data.get("kicad_track_dangling", 0)
+    _td_pre = data.get("track_dangling_preexisting", 0)
+    cw_note += (f" dangling={_td}"
+                + (f" (+{_td_pre} pre-existing, subtracted)" if _td_pre
+                   else ""))
     print(f"{label}: kicad={data['kicad']}{pre_note} check_drc={data['check_drc']}{cd_pre_note} "
           f"matched={data['matched']} kicad_only={data['kicad_only']} checkdrc_only={data['checkdrc_only']}{ie_note} | "
           f"net-pairs: both={data['pairs_both']} kicad_only={data['pairs_kicad_only']} "
           f"checkdrc_only={data['pairs_checkdrc_only']} |{cw_note}  {data['verdict']}")
+    if data.get("kicad_unclassified"):
+        print("    NOT CLASSIFIED (KiCad errors this comparator does not "
+              "grade, so 'CONSISTENT' says nothing about them): "
+              + ", ".join(f"{t}={n}" for t, n in
+                          sorted(data["kicad_unclassified"].items())))
     for kv in data["kicad_only_items"]:
         print(f"    KICAD-ONLY  {kv['type']:16s} {sorted(kv['nets'])} @ {kv['pos']}  {kv.get('desc','')[:60]}")
     for cv in data["checkdrc_only_items"]:
@@ -1193,6 +1291,9 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     for tv in data.get("starved_thermal_items", []):
         print(f"    STARVED-THERMAL {','.join(tv.get('pads', ())) or '?':12s} "
               f"{sorted(tv['nets'])} @ {tv['pos']}  {tv.get('desc', '')[:60]}")
+    for dv in data.get("track_dangling_items", []):
+        print(f"    TRACK-DANGLING {sorted(dv['nets'])} @ {dv['pos']}  "
+              f"{dv.get('desc', '')[:60]}")
     vip = data.get("via_in_paste")
     if vip and any(vip.get(k) for k in ("check_drc", "protected", "inherited",
                                         "undeclarable")):
@@ -1200,6 +1301,11 @@ def compare_board(board: str, label: str = None, clearance: float = None,
               f"protected={vip['protected']} inherited={vip['inherited']} "
               f"undeclarable={vip.get('undeclarable', 0)} "
               f"(KiCad has no such check)")
+    ko = data.get("keepout")
+    if ko and any(ko.get(k) for k in ("check_drc", "inherited", "kicad")):
+        print(f"    KEEPOUT     check_drc={ko['check_drc']} "
+              f"inherited={ko['inherited']} kicad_items_not_allowed={ko['kicad']} "
+              f"(check_drc's own class: kicad-cli 10.0.0 reported none)")
     court = data.get("courtyard")
     if court is not None:
         if "error" in court:
@@ -1267,6 +1373,9 @@ def main():
     # #1334: report only -- never part of the verdict or the exit code.
     print(f"starved_thermal: "
           f"{sum(r.get('kicad_starved_thermal') or 0 for r in rows)} item(s) "
+          f"at the project's severity on {len(rows)} board(s)")
+    print(f"track_dangling: "
+          f"{sum(r.get('kicad_track_dangling') or 0 for r in rows)} item(s) "
           f"at the project's severity on {len(rows)} board(s)")
     # #995: a board that was never compared is not a board that agreed. With
     # no kicad-cli every board SKIPs, and this used to print "0 boards

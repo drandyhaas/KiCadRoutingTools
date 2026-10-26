@@ -272,6 +272,11 @@ def main(argv=None):
                          cand_vias)
             if args.keep_staged:
                 shutil.copy(staged, args.keep_staged)
+                # A kept board is a board-mutating step a chain continues
+                # from, so it self-records like copy_board; a pure check
+                # writes nothing and records nothing (#1397).
+                from redo_record import record_invocation
+                record_invocation()
                 from copy_board import SIBLING_EXTS   # ONE list (#711)
                 for ext in SIBLING_EXTS:
                     sib = os.path.splitext(staged)[0] + ext

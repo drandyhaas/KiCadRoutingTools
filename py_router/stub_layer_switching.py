@@ -6,6 +6,7 @@ source and target stubs are on different layers.
 """
 from __future__ import annotations
 
+import copy
 import math
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
@@ -543,6 +544,38 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
             pcb_data.vias.remove(via)
 
 
+def swap_channel_mark(state) -> Tuple[int, int]:
+    """Where the run's stub-switch write channel stands now: the lengths of
+    state.all_segment_modifications and state.all_swap_vias. Hand it to
+    rewind_swap_channel to undo every switch committed after it."""
+    return (len(state.all_segment_modifications), len(state.all_swap_vias))
+
+
+def rewind_swap_channel(pcb_data: 'PCBData', state, mark) -> int:
+    """Undo every stub layer switch committed to the run's write channel since
+    `mark` (swap_channel_mark), for a caller that DISCARDS a route attempt and
+    puts back the copper the net had before it.
+
+    A switch is committed with the route it rescued -- route_multipoint_main's
+    main-edge switch extends state.all_segment_modifications / all_swap_vias
+    the moment its retry routes -- so ripping that route leaves the moved stub
+    and its pad via behind, and the writer ships them beside the restored
+    tree. The tree's own via-in-pad was ripped first, so the switch's pad via
+    sized itself to the freed pad: two same-net barrels of different sizes at
+    one point. The copper goes back on pcb_data (revert_stub_layer_switch,
+    newest first) and the entries leave the channel. The channel only grows
+    while an attempt runs. Returns the number of entries undone."""
+    n_mods, n_vias = mark
+    mods = state.all_segment_modifications[n_mods:]
+    vias = state.all_swap_vias[n_vias:]
+    if not mods and not vias:
+        return 0
+    revert_stub_layer_switch(pcb_data, list(reversed(mods)), vias)
+    del state.all_segment_modifications[n_mods:]
+    del state.all_swap_vias[n_vias:]
+    return len(mods) + len(vias)
+
+
 def check_segments_overlap(segments: List[Segment], other_segments: List[Segment],
                            y_tolerance: float = STUB_OVERLAP_Y_TOLERANCE) -> bool:
     """
@@ -864,6 +897,13 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
                 nm = net.name if net else f"net {pnid}"
                 return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
                                f"{nm} pad {pad.component_ref}.{pad.pad_number} (gap {d:.3f}mm)")
+    # A keep-out rule area forbidding vias, as check_drc grades it.
+    from check_drc import keepout_refusal
+    why = keepout_refusal(pcb_data, vias=[Via(
+        x=pad_x, y=pad_y, size=2 * via_r, drill=config.via_drill,
+        layers=['F.Cu', 'B.Cu'], net_id=net_id)])
+    if why:
+        return False, f"pad via at ({pad_x:.2f},{pad_y:.2f}): {why}"
     return True, ""
 
 
@@ -1059,6 +1099,18 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
                     nm = net.name if net else f"net {pnid}"
                     return False, (f"stub on {dest_layer} would graze {nm} pad "
                                    f"{pad.component_ref}.{pad.pad_number} (gap {best:.3f}mm)")
+    # A keep-out rule area forbidding tracks on dest_layer, as check_drc grades it.
+    from check_drc import keepout_refusal
+    moved = []
+    for seg in segments:
+        m = copy.copy(seg)
+        m.layer = dest_layer
+        if not (getattr(m, 'width', 0) and m.width > 0):
+            m.width = config.track_width
+        moved.append(m)
+    why = keepout_refusal(pcb_data, segments=moved)
+    if why:
+        return False, f"stub: {why}"
     return True, ""
 
 

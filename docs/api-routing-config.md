@@ -588,7 +588,7 @@ on the corpus.
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `power_tap_neckdown` | `True` | Retry failed wide power taps with a narrow neck from the pad |
-| `neckdown_length` | `2.5` | Length of the pad-entry zone at each pad end: the power width capped at the pad's short side where it fits, narrow only where it does not (#1318) |
+| `neckdown_length` | `2.5` | Length of the pad-entry zone at each pad end: the power width capped at the pad's short side where it fits, narrow only where it does not (#1318). Under `--escalation off` capped at `PAD_ENTRY_NECK_MM` less `neckdown_taper_length` (#1452) |
 | `neckdown_taper_length` | `0.5` | Taper from narrow to full width (0 = abrupt) |
 
 ### Clearance details and DRC margins

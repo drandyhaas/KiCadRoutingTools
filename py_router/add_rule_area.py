@@ -27,6 +27,17 @@ A board-level rule area of the same `--name` is replaced, so the command is
 idempotent. The output gets the input's siblings (`copy_board`), and the run
 says what it wrote.
 
+    python3 py_router/add_rule_area.py in.kicad_pcb out.kicad_pcb \\
+        --name MOUNT --mounting-holes
+
+`--mounting-holes` (#1442) writes one such area per mounting hole -- the
+screw-head ring of `mounting_holes.py`, 0.4 x the drill past the hole's edge,
+or `--ring MM` -- named `<name>_<ref>` and forbidding tracks and vias (the pour
+stays allowed). A hole whose pad carries a net (a ground ring under a plated
+hole) gets none: its own copper has to reach it. KiCad's `unconnected-*` net of
+a pin left unconnected is not such a net, so that hole gets its area (pads stay
+allowed in it). `check_mounting_holes.py` grades the result.
+
 Exit 0 written; 2 for an argparse usage error, a `--layers` entry that is not
 a copper layer of the board, or a `--ref` the board does not have; 1 for a
 malformed `--polygon` (a point that is not X,Y, or fewer than 3 points).
@@ -134,17 +145,29 @@ def main():
                        help='rectangle corners, mm')
     shape.add_argument('--polygon', nargs='+', metavar='X,Y',
                        help='polygon vertices, mm, at least 3')
+    shape.add_argument('--mounting-holes', action='store_true',
+                       help='one area per mounting hole: its screw-head ring '
+                            '(see mounting_holes.py); --name is the prefix')
+    p.add_argument('--ring', type=float, default=None, metavar='MM',
+                   help='with --mounting-holes: how far past the hole edge '
+                        'the screw head reaches (default 0.4 x the drill)')
     p.add_argument('--ref', default=None,
                    help="coordinates are in this footprint's local frame as "
                         "the file stores it (its pads' frame), so the area "
                         "follows the part")
     p.add_argument('--layers', nargs='+', default=None,
                    help='copper layers (default: every copper layer)')
-    p.add_argument('--forbid', nargs='+', default=['tracks', 'vias', 'copperpour'],
+    p.add_argument('--forbid', nargs='+', default=None,
                    choices=list(RULE_AREA_FLAGS),
                    help='what the area does not allow (default: tracks vias '
-                        'copperpour)')
+                        'copperpour; with --mounting-holes: tracks vias)')
     args = p.parse_args()
+    if args.mounting_holes and args.ref:
+        p.error('--ref names a footprint frame for --rect / --polygon; '
+                '--mounting-holes finds the holes itself')
+    if args.forbid is None:
+        args.forbid = (['tracks', 'vias'] if args.mounting_holes
+                       else ['tracks', 'vias', 'copperpour'])
 
     from kicad_parser import parse_kicad_pcb, pcb_uses_name_nets
     from kicad_writer import generate_rule_area_sexpr
@@ -159,7 +182,25 @@ def main():
         print(f"add_rule_area: error: {', '.join(bad)} not a copper layer of "
               f"this board ({', '.join(copper)})", file=sys.stderr)
         return 2
-    pts, frame = area_points(args, pcb)
+    if args.mounting_holes:
+        from mounting_holes import mounting_holes, keepout_polygon
+        areas, skipped = [], []
+        for hole in mounting_holes(pcb):
+            if hole.nets:
+                skipped.append(hole.ref)
+                continue
+            areas.append((f"{args.name}_{hole.ref}", keepout_polygon(hole, args.ring),
+                          f"{hole.ref}'s screw-head ring (drill {hole.drill:g}, "
+                          f"{hole.ring(args.ring):.2f} mm past the edge)"))
+        if skipped:
+            print(f"add_rule_area: left open, they carry a net: "
+                  f"{', '.join(skipped)}")
+        if not areas:
+            print("add_rule_area: no mounting hole to write a ring for")
+            return 0
+    else:
+        pts, frame = area_points(args, pcb)
+        areas = [(args.name, pts, frame)]
 
     if os.path.abspath(args.output_file) != os.path.abspath(args.input_file):
         from copy_board import copy_board
@@ -167,22 +208,22 @@ def main():
             copy_board(args.input_file, args.output_file)
     with open(args.output_file, encoding='utf-8', newline='') as f:
         text = f.read()
-    text, replaced = remove_named_rule_areas(text, args.name)
-    zone = generate_rule_area_sexpr(layers, pts, args.name,
-                                    not_allowed=tuple(args.forbid),
-                                    use_net_name=pcb_uses_name_nets(pcb))
-    close = text.rstrip().rfind(')')
-    text = text[:close].rstrip('\n') + '\n' + zone + '\n' + text[close:]
+    for name, pts, frame in areas:
+        text, replaced = remove_named_rule_areas(text, name)
+        zone = generate_rule_area_sexpr(layers, pts, name,
+                                        not_allowed=tuple(args.forbid),
+                                        use_net_name=pcb_uses_name_nets(pcb))
+        close = text.rstrip().rfind(')')
+        text = text[:close].rstrip('\n') + '\n' + zone + '\n' + text[close:]
+        xs, ys = [x for x, _ in pts], [y for _, y in pts]
+        print(f"add_rule_area: wrote rule area {name!r} on {', '.join(layers)}: "
+              f"{', '.join(args.forbid)} not allowed; {len(pts)} points from "
+              f"{frame}, bbox ({min(xs):.3f}, {min(ys):.3f})-({max(xs):.3f}, "
+              f"{max(ys):.3f})"
+              + (f"; replaced {replaced} earlier area(s) of that name" if replaced
+                 else ""))
     with open(args.output_file, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
-
-    xs, ys = [x for x, _ in pts], [y for _, y in pts]
-    print(f"add_rule_area: wrote rule area {args.name!r} on {', '.join(layers)}: "
-          f"{', '.join(args.forbid)} not allowed; {len(pts)} points from "
-          f"{frame}, bbox ({min(xs):.3f}, {min(ys):.3f})-({max(xs):.3f}, "
-          f"{max(ys):.3f})"
-          + (f"; replaced {replaced} earlier area(s) of that name" if replaced
-             else ""))
     print(f"Wrote {args.output_file}")
     return 0
 

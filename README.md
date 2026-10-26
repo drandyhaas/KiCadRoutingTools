@@ -88,6 +88,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 **Placement, fanout & optimization**
 - [Placement by function](py_placer/placement/README.md): parts sorted into functional groups, one objective annealed (`place_simple.py`) over 12 seeds (6 started scattered, 6 with each group gathered), and a fast route (`route.py --quick 2`) of the 6 the objective rates best to keep the best (`/plan-pcb-placement`)
 - [The design brief](docs/design-brief.md) — state what the board is FOR, in a sibling the toolchain reads: which connectors are user-facing, which edge each belongs on and where along it
+- [Parts under other parts](docs/floorplan-intent.md#covers-and-heights-what-stands-over-the-board) — part heights read off the 3D models, so a low part may stand under a module or shield can where it fits; a card in its socket (M.2) or a module on a stacking connector is declared in the brief and moves with its connector, admitting only parts known to fit under it
 - [Floorplan intent, graded](docs/floorplan-intent.md) — declare where parts belong and check the board against it, so "the render looks fine" stops being a verdict
 - BGA / QFN fanout with decoupling-cap placement cleanup, Hungarian target-swap, and schematic sync
 
@@ -190,7 +191,7 @@ Other useful skills:
 > /recommend-plane-mappings kicad_files/my_board.kicad_pcb   # Which nets get planes, on which layers
 > /diagnose-routing-failures my_board.kicad_pcb /tmp/route_output.txt  # Root-cause failed routes, get a retry command
 > /review-routed-board my_board_routed.kicad_pcb             # Post-route QA: DRC, connectivity, length match, GND vias
-> /plan-pcb-placement full kicad_files/my_board.kicad_pcb    # Group, place seeds, fast-route, review until clean, then route end to end
+> /plan-pcb-placement full kicad_files/my_board.kicad_pcb    # Group, place 12 seeds, fast-route the 6 cheapest, keep the best, route end to end
 ```
 
 See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
@@ -575,6 +576,12 @@ python3 py_router/check_connected.py kicad_files/output.kicad_pcb --routed-only
 # half-width), so T-junction taps and copper-overlap joints are not miscounted.
 python3 py_tools/check_orphan_stubs.py kicad_files/output.kicad_pcb
 
+# Other-net copper inside the screw-head ring of each mounting hole (KiCad checks
+# a hole's clearance only). Declare the ring before routing with
+# add_rule_area.py --name MOUNT --mounting-holes. --ring MM sets how far past the
+# hole edge the head reaches (default 0.4 x the drill).
+python3 py_tools/check_mounting_holes.py kicad_files/output.kicad_pcb --ring 1.3
+
 # Pad-geometry sanity check: flags same-footprint, different-net pads whose copper
 # overlaps (a short). A non-zero result almost always means a pad's rotation/size
 # is modelled wrong - the usual cause is a QFN/QFP/BGA placed at a non-orthogonal
@@ -764,6 +771,7 @@ KiCadRoutingTools/
 ├── py_tools/                 # Leaf diagnostic / analysis tools
 │   ├── check_impedance.py        # Verify impedance-controlled widths/gaps
 │   ├── check_orphan_stubs.py     # Orphan stub detector
+│   ├── check_mounting_holes.py   # Other-net copper under a mounting hole's screw head
 │   ├── check_cycles.py           # Redundant-loop (cycle) + overlapping-via checker
 │   ├── check_orthonormal.py      # Long non-orthonormal track detector
 │   ├── net_forensics.py          # Per-net copper forensics
@@ -833,7 +841,7 @@ KiCadRoutingTools/
     ├── recommend-stackup/    # Stackup review/recommendation skill
     ├── recommend-plane-mappings/  # Net-to-plane-layer assignment skill
     ├── diagnose-routing-failures/  # Failure root-cause and retry skill
-    ├── plan-pcb-placement/   # Place by function, fast-route seeds, review until clean, route; one verifier, report
+    ├── plan-pcb-placement/   # Place by function, fast-route seeds, keep the best, route; one verifier, report
     ├── review-routed-board/  # Post-route QA and sign-off skill
     └── stress-test-router/   # Batch stress-test on real-world boards + issue filing (dev/QA)
 ```
@@ -903,9 +911,9 @@ Key functions in `net_queries.py`:
 Key functions in `py_tools/analyze_power_paths.py` (used by `/analyze-power-nets` skill):
 - `analyze_pcb(filepath)` - Load PCB and extract components for analysis
 - `get_components_needing_analysis(components)` - Get components requiring AI classification
-- `classify_component(components, ref, role, current_ma, notes)` - Set component classification
-- `trace_power_paths(pcb, components)` - Trace current from sinks to sources
-- `get_power_net_recommendations(pcb, components, paths)` - Get recommended track widths
+- `classify_component(components, ref, role, current_rating_ma, notes, supply_nets)` - Set component classification (`supply_nets` names the rails of a part whose pads carry no pintype and whose nets are not rail-named)
+- `trace_power_paths(pcb, components)` - Trace each load upstream (regulators entered output to input only) to the source feeding it
+- `get_power_net_recommendations(pcb, components, paths)` - Get recommended track widths (a sink's rating is charged once per net; a source's rating is a limit, never a load)
 
 ### Optimization
 
@@ -978,6 +986,7 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 | `judge_seeds.py` | The seed judge: the seeds judge.json names routed by one quick (level 2) chain and scored | [Utilities](docs/utilities.md#seed-judge-runner-judge_seedspy) |
 | `board_brief.py` | Assemble what a placement author needs to read, in one artifact | [Utilities](docs/utilities.md#board-brief-board_briefpy) · [Design Brief](docs/design-brief.md) |
 | `check_floorplan.py` | Grade a board against a declared floorplan intent | [Floorplan Intent](docs/floorplan-intent.md) |
+| `cover_facts.py` | What the board knows about a card or module over it: connector heights, card models and their undersides, standoffs on its axes, the parts under it | [Floorplan Intent](docs/floorplan-intent.md#covers-and-heights-what-stands-over-the-board) |
 | `check_*.py` | DRC / connectivity / hygiene / pad checks | [Utilities](docs/utilities.md) |
 | `check_complete.py` | Is the board DONE? One fail-closed verdict over the checks | [Utilities](docs/utilities.md#completion-check-check_completepy) |
 | `krt_registry.py` | Every runnable tool in the clone, what it is for, and which door (placement / routing) serves it | [Utilities](docs/utilities.md#tool-inventory-krt_registrypy-krt_capabilitiespy) |

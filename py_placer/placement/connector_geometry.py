@@ -354,12 +354,14 @@ class ConnectorGeometry:
                    body_signed_position_mm=signed,
                    body_bounds_mm=list(rect),
                    other_body_edge_overhang_mm=others,
-                   # The body's overhang SUMMED over every side -- the form
-                   # of the occupancy reading it replaces, at zero margin, so
-                   # a corner part counts both sides against its band exactly
-                   # as it did before #961. Equal to `body_overhang_mm`
-                   # whenever the body crosses no second edge.
-                   body_outside_mm=max(0.0, signed) + sum(others.values()))
+                   # The overhang the band is graded on: ONE signed distance
+                   # past the DECLARED edge along its normal (#1403). It was
+                   # summed over every side the body crosses, so a corner
+                   # part read 3x (a rounded outline) or another edge's
+                   # overhang read as the mating edge's; the other edges'
+                   # overhang is `other_body_edge_overhang_mm`, graded on its
+                   # own (`edge_connector_other_edge`).
+                   body_outside_mm=max(0.0, signed))
         return row
 
 
@@ -442,21 +444,115 @@ def geometry_for(holder, pcb_data, pcb_file):
 
 def courtyard_overhang(geometry, rect, skip_rings=None):
     """How far the courtyard `rect` lies past the outline, read at ZERO
-    margin: the occupancy reading (`rect_outside_amount`, summed over the
-    sides it crosses) with the edge margin taken out. A mechanical
-    quantity -- an overhang of x reads x at any margin. `skip_rings` is the
-    caller's own (the part's milled rings, as the oob census skips them)."""
+    margin: the occupancy reading (`rect_outside_amount`) with the edge
+    margin taken out. A RANKING quantity, summed over every side the rect
+    crosses and, on a non-rectangular outline, over each off-board corner --
+    so it is NOT "an overhang of x reads x": a courtyard 0.84 mm past one
+    edge of a rounded outline reads 2.5. The band a connector is graded on
+    is `courtyard_overhang_past` (#1403). `skip_rings` is the caller's own
+    (the part's milled rings, as the oob census skips them)."""
     return float(geometry.zero_gate().rect_outside_amount(
         rect, skip_rings=skip_rings))
+
+
+def _board_region(gate):
+    """The board as one shapely region (outer rings minus cutouts), built once
+    per gate; None when it cannot be built."""
+    region = getattr(gate, '_region_1403', False)
+    if region is False:
+        try:
+            from shapely.geometry import Polygon
+            from shapely.ops import unary_union
+            outers = (gate.outer if gate.outer and not isinstance(gate.outer[0], tuple)
+                      else [gate.outer])
+            region = unary_union([Polygon(o).buffer(0) for o in outers if len(o) >= 3])
+            if gate.cutouts:
+                region = region.difference(unary_union(
+                    [Polygon(c).buffer(0) for c in gate.cutouts if len(c) >= 3]))
+        except Exception:                                    # noqa: BLE001
+            region = None
+        gate._region_1403 = region
+    return region
+
+
+def _depth_beyond(region, rect):
+    """The farthest any part of `rect` lies from `region` (0.0 when it lies
+    within it): one distance, whatever number of sides, corners or notches the
+    rect crosses. The vertices of the part outside are exact for a rect that
+    overhangs a straight edge; a rect lying in a notch has its deepest point
+    in the middle of the void, so the part outside is also sampled on a grid
+    (to the grid's resolution, <= 0.1 mm)."""
+    import shapely
+    from shapely.geometry import box
+    out = box(*rect).difference(region)
+    if out.is_empty or out.area <= 1e-12:
+        return 0.0
+    pts = []
+    for g in getattr(out, 'geoms', [out]):
+        if g.geom_type != 'Polygon':
+            continue
+        pts.extend(g.exterior.coords)
+        for ring in g.interiors:
+            pts.extend(ring.coords)
+    x0, y0, x1, y1 = out.bounds
+    nx = max(2, min(80, int((x1 - x0) / 0.1) + 2))
+    ny = max(2, min(80, int((y1 - y0) / 0.1) + 2))
+    for i in range(nx):
+        for j in range(ny):
+            pts.append((x0 + (x1 - x0) * i / (nx - 1), y0 + (y1 - y0) * j / (ny - 1)))
+    arr = shapely.points(pts)
+    inside = shapely.contains(out, arr) | shapely.touches(out, arr)
+    arr = arr[inside]
+    if len(arr) == 0:
+        return 0.0
+    return float(shapely.distance(region, arr).max())
+
+
+def courtyard_overhang_past(geometry, rect, edge, skip_rings=None):
+    """`(amount, others)` for the courtyard `rect` against the DECLARED
+    `edge` (#1403): `amount` is one distance past that edge along its normal
+    (0 when inside) and `others` the same for each other compass edge. On an
+    outline with rings (a rounded corner, a notch, a cutout) `amount` also
+    counts how far the rest of the rect -- cut off at the other edges' lines
+    -- reaches beyond the board, so a courtyard hanging off a rounded corner
+    or into a notch is not read as flush. It is never the sum of every
+    off-board corner and near side that `courtyard_overhang` ranks poses by.
+    Falls back to that summed reading when the edge or the bounds are
+    unknown."""
+    b = geometry.bounds
+    if edge not in EDGES or b is None:
+        return courtyard_overhang(geometry, rect, skip_rings), {}
+    outside = dict(zip(EDGES, (b[0] - rect[0], rect[2] - b[2],
+                               b[1] - rect[1], rect[3] - b[3])))
+    amount = max(0.0, outside[edge])
+    others = {e: max(0.0, v) for e, v in outside.items() if e != edge}
+    gate = geometry.zero_gate()
+    if gate.active:
+        region = _board_region(gate)
+        if region is not None:
+            # What the rect does past another edge's line is `others`; the
+            # rest of it is measured against the outline, so a corner that
+            # hangs off a rounded outline or into a notch counts for the
+            # declared edge, by its distance from the board.
+            clip = (rect[0] if edge == 'west' else max(rect[0], b[0]),
+                    rect[1] if edge == 'north' else max(rect[1], b[1]),
+                    rect[2] if edge == 'east' else min(rect[2], b[2]),
+                    rect[3] if edge == 'south' else min(rect[3], b[3]))
+            depth = (_depth_beyond(region, clip)
+                     if clip[0] < clip[2] and clip[1] < clip[3] else 0.0)
+            amount = max(amount, float(depth))
+        else:
+            amount = max(amount, float(courtyard_overhang(geometry, rect, skip_rings)))
+    return float(amount), others
 
 
 def band_amount(geometry, ref, edge, legacy_amount, margin, pose=None):
     """`(amount, basis, row)`: the number a declared `overhang_mm` band is
     graded on, and the currency it is in.
 
-    Drawn body measurable -> the body's overhang past the outline at zero
-    margin, summed over the sides it crosses (`body_outside_mm`, the same
-    form as the occupancy reading). Otherwise -> `legacy_amount`, the
+    Drawn body measurable -> the body's overhang past the DECLARED edge at
+    zero margin (`body_outside_mm`, #1403: one signed distance along that
+    edge's normal, not a sum over the sides it crosses). Otherwise -> `legacy_amount`, the
     caller's courtyard reading, taken at `margin`, so every call site keeps
     its own rings and tolerance wherever the body cannot be read.
 

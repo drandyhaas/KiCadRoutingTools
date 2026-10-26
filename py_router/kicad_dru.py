@@ -627,6 +627,31 @@ def binding_length_rule(rules: List[LengthRule], net_name: str, classes,
     return None, None
 
 
+def unbound_length_rules(rules: List[LengthRule], net_names: Dict[int, str],
+                         memberships) -> List[LengthRule]:
+    """Rules of ONE kind that bind NO net on the board (#1388).
+
+    A rule is bound when :func:`binding_length_rule` returns it for at least
+    one net. One whose condition names a class or net the board does not have
+    (or whose every candidate net is taken by a later rule) grades nothing,
+    and a report that counts it among "N rule(s)" reads as graded and clean.
+    A rule whose scope is not modelled is never listed: whether it binds is
+    unknown, and the callers already name it NOT GRADED. ``memberships`` is
+    ``list_nets.net_class_memberships`` for ``net_names``."""
+    board_names = set(n for n in net_names.values() if n)
+    bound = set()
+    for nid, name in net_names.items():
+        if not name:
+            continue
+        rule, blocker = binding_length_rule(rules, name, memberships.get(nid),
+                                            board_names)
+        if rule is not None:
+            bound.add(id(rule))
+        if blocker is not None:
+            bound.add(id(blocker))
+    return [r for r in rules if r.terms is not None and id(r) not in bound]
+
+
 def track_pair_clearance(track_rules: List[TrackRule], a_cls, b_cls,
                          resolved: float, *, coupled: bool = False,
                          layer: Optional[str] = None

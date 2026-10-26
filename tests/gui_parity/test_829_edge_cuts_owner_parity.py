@@ -96,6 +96,32 @@ def main():
                   t.owns_board_outline == want_struct,
                   f"got {t.owns_board_outline}")
 
+    # The review boards (#829's three containment traps) and #1409's window
+    # beside its pads, on and off the board: the pcbnew path gathers the
+    # owner's pads itself, so the pad rule must agree here too.
+    import tempfile
+    for label, build in FIX.REVIEW_BOARDS.items():
+        text_src, want = build()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, 'review.kicad_pcb')
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write(text_src)
+            text = parse_kicad_pcb(path)
+            live = build_pcb_data_from_board(pcbnew.LoadBoard(path))
+        for ref, want_struct in want.items():
+            t = text.footprints.get(ref)
+            g = live.footprints.get(ref)
+            if t is None or g is None:
+                check(f"{label} {ref}: present on both paths", False,
+                      f"text={t is not None} pcbnew={g is not None}")
+                continue
+            check(f"{label} {ref}: owns_board_outline agrees",
+                  t.owns_board_outline == g.owns_board_outline,
+                  f"text={t.owns_board_outline} pcbnew={g.owns_board_outline}")
+            check(f"{label} {ref}: owns_board_outline == {want_struct}",
+                  t.owns_board_outline == want_struct,
+                  f"got {t.owns_board_outline}")
+
     print()
     if fails:
         print(f"{len(fails)} FAILED")

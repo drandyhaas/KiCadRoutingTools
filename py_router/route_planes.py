@@ -2308,7 +2308,7 @@ def _signal_copper(pcb_data, plane_net_ids):
 
 
 def _resolve_zone_clearance(zone_clearance, clearance, min_thickness,
-                            pcb_data, via_size, net_names=None):
+                            pcb_data, via_size, net_names=None, record=True):
     """Resolve the pour clearance (see call site). None -> the routed
     clearance; then, if a BGA via lattice the pour must serve (a field with a
     ball on a plane net, or a plane-net via in it) leaves less than
@@ -2323,12 +2323,18 @@ def _resolve_zone_clearance(zone_clearance, clearance, min_thickness,
     clearance (escalated, or an explicit tight --zone-clearance) only
     survives refill if the project floor drops with it. Without the record,
     the .kicad_pro writeback kept the nominal floor and the refilled pour
-    sealed the very BGA corridors the escalation opened."""
+    sealed the very BGA corridors the escalation opened.
+
+    ``record`` False leaves the ledger to the caller: a run that keeps every
+    existing zone (``skip_existing_zones``) draws no pour of its own, so there
+    is no regrown pour for the floor to follow -- recording its resolved value
+    lowered the Default class for nothing (#1369)."""
     zc = _resolve_zone_clearance_impl(
         zone_clearance, clearance, min_thickness, pcb_data, via_size,
         net_names)
-    import clearance_ledger
-    clearance_ledger.record(zc)
+    if record:
+        import clearance_ledger
+        clearance_ledger.record(zc)
     return zc
 
 
@@ -2353,7 +2359,15 @@ def _resolve_zone_clearance_impl(zone_clearance, clearance, min_thickness,
     # the one that passes between its vias one pitch apart.
     need = []            # (clearance, ref, pitch, via) per field that threads
     unthreaded = []      # (ref, pitch, via, clearance it would need)
+    from kicad_parser import non_aperture_pads, pads_form_matrix
     for fp in find_components_by_type(pcb_data, 'BGA'):
+        # A via LATTICE needs a ball matrix: detect_package_type calls every
+        # LGA/CSP/WLP a 'BGA' (so their interior lands stay clear of routes,
+        # #144), but a perimeter land pattern has no interior balls for the
+        # pour to thread between -- an 8-pad LGA read as a field lowered the
+        # whole board's clearance for a lattice it does not have (#1369).
+        if not pads_form_matrix(non_aperture_pads(fp)):
+            continue
         pitch = detect_bga_pitch(fp)
         if not pitch:
             continue
@@ -3345,7 +3359,7 @@ def create_plane(
     # (but still warned about when they cannot thread).
     zone_clearance = _resolve_zone_clearance(
         zone_clearance, clearance, min_thickness, pcb_data, via_size,
-        net_names)
+        net_names, record=False)
     # (this call's virtual vias, filled per net below: none carried over from an earlier call on the same pcb_data)
     pcb_data._deferred_pad_seeds = {}
 
@@ -3468,6 +3482,12 @@ def create_plane(
             _zp = int(getattr(zone_to_replace, 'priority', 0) or 0)
             if _zp > shared_layer_priority.get(net_name, 0):
                 shared_layer_priority[net_name] = _zp
+
+    # The resolved pour clearance reaches the clearance ledger only when this
+    # call draws a pour (#1369): kept zones refill at their own clearance.
+    if any(should_create_zones):
+        import clearance_ledger
+        clearance_ledger.record(zone_clearance)
 
     # Step 3: Get board bounds for zone polygon
     board_bounds = pcb_data.board_info.board_bounds
@@ -4817,8 +4837,9 @@ Examples:
 
     # Make the output project's KiCad DRC constraints consistent with the routed
     # clearances/sizes (issue #160); only edits the .kicad_pro, never the board.
-    if not args.no_fix_drc_settings and not args.dry_run \
-            and args.output_file and os.path.isfile(args.output_file):
+    _wrote_output = (not args.dry_run and args.output_file
+                     and os.path.isfile(args.output_file))
+    if not args.no_fix_drc_settings and _wrote_output:
         try:
             import clearance_ledger
             eff_clearance = clearance_ledger.effective(args.clearance)
@@ -4860,9 +4881,11 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+    if _wrote_output:
         # #581: record an ACTIVE same-net pad via clearance in the output's
         # project so every later chain step keeps its vias off same-net pads
-        # too. After fix_project_for_output so the .kicad_pro exists.
+        # too. After fix_project_for_output so the .kicad_pro exists; written
+        # even under --no-fix-drc-settings (#1415).
         try:
             from protected_nets import (persist_same_net_pad_clearance,
                                         pro_path_for_board)

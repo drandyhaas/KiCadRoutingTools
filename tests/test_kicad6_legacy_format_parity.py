@@ -150,11 +150,13 @@ def test_outline_and_courtyard(tmp):
     from placement.parser import extract_courtyard_bboxes
     path = _write(tmp, 'legacy.kicad_pcb', LEGACY_BOARD)
     bi = parse_kicad_pcb(path).board_info
-    assert len(bi.board_outline) == 68, len(bi.board_outline)   # pcbnew's re-save parses to 68
+    # pcbnew's re-save parses to 148 too (the rounded corners linearised at
+    # kicad_parser.EDGE_CHORD_EPS, #1404; it was 68 at the old 5 um sag)
+    assert len(bi.board_outline) == 148, len(bi.board_outline)
     assert bi.board_bounds == (10.0, 10.0, 50.0, 40.0), bi.board_bounds
     cy = extract_courtyard_bboxes(path)['JP1']
     assert abs(cy[2] - 1.5) < 1e-6, f'the legacy fp_arc must reach x=1.5: {cy}'
-    print('  outline: rounded corners kept (68 vertices); the courtyard keeps its arc')
+    print('  outline: rounded corners kept (148 vertices); the courtyard keeps its arc')
 
 
 def test_zone_layer_sets(tmp):

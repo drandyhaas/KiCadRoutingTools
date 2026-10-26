@@ -2695,7 +2695,13 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
     copper is what the next chain step welds to (#473). A pad is never
     removed. Locked copper and ``protected_ids``
     (``id()`` of input copper under --keep-input-copper) are never touched,
-    and a removal that would need one is skipped."""
+    and a removal that would need one is skipped.
+
+    The same gate removes the DEAD TAILS of a finished net (#1372): track ends
+    that join nothing (`prune_dead_end_segments`'s test), on a net with no pour
+    whose pads are all joined, when the removal leaves every pad as joined and
+    adds no dangling end, dangling via or soft joint. ``stats['tails']`` counts
+    them."""
     from collections import defaultdict
     from check_weird import (via_support_parts, _check_dangles,
                              _check_unsupported_vias)
@@ -2703,8 +2709,46 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
                                  point_in_polygon)
     copper = list(getattr(board.board_info, 'copper_layers', None)
                   or ['F.Cu', 'B.Cu'])
+    import copy as _copy
     removed_s, removed_v = [], []
+    tails = []
+    added_s = []                 # welded replacements for removed segments
     tol = 1e-3
+
+    def weld_pair(v, a, b):
+        """Two segments whose ends met inside a dangling via's barrel (#1372):
+        ``(old, new)`` with one of them moved so the two ends coincide, or
+        None. The via then joins nothing and can go without taking the
+        connection with it. The segment that moves is the one the sweep may
+        change; its replacement is a copy with a fresh identity."""
+        r = (getattr(v, 'size', 0.6) or 0.6) / 2.0
+        best = None
+        for ea in ((a.start_x, a.start_y, 'start'), (a.end_x, a.end_y, 'end')):
+            for eb in ((b.start_x, b.start_y, 'start'), (b.end_x, b.end_y, 'end')):
+                da = math.hypot(ea[0] - v.x, ea[1] - v.y)
+                db = math.hypot(eb[0] - v.x, eb[1] - v.y)
+                if da > r or db > r:
+                    continue
+                d = math.hypot(ea[0] - eb[0], ea[1] - eb[1])
+                if best is None or d < best[0]:
+                    best = (d, ea, eb)
+        if best is None or best[0] < tol:
+            # ends that already meet need no weld: the via goes alone
+            return None
+        _d, ea, eb = best
+        for mover, near, other_pt in ((a, ea, eb), (b, eb, ea)):
+            if keep_out(mover) or getattr(mover, 'graphic', False):
+                continue
+            new = _copy.copy(mover)
+            if near[2] == 'start':
+                new.start_x, new.start_y = other_pt[0], other_pt[1]
+            else:
+                new.end_x, new.end_y = other_pt[0], other_pt[1]
+            new.uuid = ''
+            new.start_x_str = new.start_y_str = ''
+            new.end_x_str = new.end_y_str = ''
+            return mover, new
+        return None
 
     def grade(nid, segs, vias, pads, zones):
         r = check_net_connectivity(nid, segs, vias, pads, zones)
@@ -2765,7 +2809,7 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
         for nid in sorted(net_ids):
             segs = [s for s in board.segments if s.net_id == nid]
             vias = [v for v in board.vias if v.net_id == nid]
-            if not vias:
+            if not vias and not segs:
                 continue
             pads = board.pads_by_net.get(nid, [])
             zones = [z for z in (getattr(board, 'zones', None) or [])
@@ -2789,6 +2833,9 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
                                         pads, zones)
                     if gone_s is None:
                         continue
+                welded = None
+                if len(sup) == 1 and not fixed and len(tsegs) == 2:
+                    welded = weld_pair(v, tsegs[0], tsegs[1])
                 if base is None:
                     base = grade(nid, segs, vias, pads, zones)
                 if base[0]:
@@ -2798,6 +2845,10 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
                     break
                 gid = {id(x) for x in gone_s}
                 t_segs = [s for s in segs if id(s) not in gid]
+                if welded is not None:
+                    # Two ends that met inside the barrel: the via is the
+                    # only thing joining them, so move one onto the other.
+                    t_segs = [s for s in t_segs if s is not welded[0]] + [welded[1]]
                 t_vias = [w for w in vias if w is not v]
                 after = grade(nid, t_segs, t_vias, pads, zones)
                 # No pad less connected, no dangling end where there was
@@ -2808,17 +2859,62 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
                     continue
                 segs, vias, base = t_segs, t_vias, after
                 removed_s.extend(gone_s)
+                if welded is not None:
+                    removed_s.append(welded[0])
+                    added_s.append(welded[1])
                 removed_v.append(v)
                 progressed = True
+            # Dead tails (#1372): a track end that joins nothing on a net whose
+            # pads are all joined. The in-run cleanup scopes an unfinished net
+            # out (#473) and the later passes never revisit it, so a net the
+            # finalize or the reconciliation finished ships its tails until a
+            # second identical run sweeps them. Pour nets are left alone (a
+            # tail's anchor in a pour is the fill's word, not the model's).
+            if zones or not segs:
+                continue
+            if base is None:
+                base = grade(nid, segs, vias, pads, zones)
+            if base[0] or not base[1]:
+                continue
+            fixed_segs = [x for x in segs
+                          if keep_out(x) or getattr(x, 'graphic', False)]
+            _fixed_ids = {id(x) for x in fixed_segs}
+            cands = [x for x in segs if id(x) not in _fixed_ids]
+            _kept, dead = prune_dead_end_segments(cands, fixed_segs, vias, pads)
+            if not dead:
+                continue
+            did = {id(x) for x in dead}
+            t_segs = [x for x in segs if id(x) not in did]
+            after = grade(nid, t_segs, vias, pads, zones)
+            if (after[0] > base[0] or (after[1] - base[1])
+                    or after[2] > base[2] or (after[3] - base[3])):
+                continue
+            segs, base = t_segs, after
+            removed_s.extend(dead)
+            tails.extend(dead)
+            progressed = True
         if removed_s or removed_v:
             gs = {id(x) for x in removed_s}
             gv = {id(x) for x in removed_v}
             board.segments = [s for s in board.segments if id(s) not in gs]
+            _on = {id(s) for s in board.segments}
+            board.segments.extend(a for a in added_s
+                                  if id(a) not in _on and id(a) not in gs)
             board.vias = [v for v in board.vias if id(v) not in gv]
         if not progressed:
             break
+    # A weld's replacement that a later round removed never reached the file,
+    # and a removed segment that was only ever a replacement is not a strip.
+    _gone = {id(x) for x in removed_s}
+    _born = {id(a) for a in added_s}
+    final_added = [a for a in added_s if id(a) not in _gone]
+    removed_s = [x for x in removed_s if id(x) not in _born]
     if stats is not None:
-        stats['nets'] = len({x.net_id for x in removed_s + removed_v})
+        stats['nets'] = len({x.net_id for x in removed_s + removed_v
+                             + final_added})
+        stats['tails'] = len([t for t in tails if id(t) not in _born])
+        stats['added'] = final_added
+        stats['welds'] = len(final_added)
     return removed_s, removed_v
 
 

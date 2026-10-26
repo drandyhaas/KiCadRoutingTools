@@ -423,6 +423,13 @@ def get_net_history_summary(state: RoutingState, net_id: int, pcb_data: 'PCBData
             if hint:
                 lines.append(f"       {hint}")
 
+        elif event == "boxed_in_static" and details.get("verdict") == "pad_entry_allowance":
+            # #1452: not boxed in at the geometry -- the escalation policy
+            # refused the neck the route needed.
+            lines.append(f"[{seq}] Neck refused (--escalation off): edge spans "
+                         f"{details.get('span_mm', '?')} mm, pad-entry allowance "
+                         f"{details.get('allowance_mm', '?')} mm")
+
         elif event == "boxed_in_static":
             geom = details.get("geometry") or {}
             iters = details.get("iterations", "?")

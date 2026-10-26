@@ -188,6 +188,50 @@ def test_make_unplaced_moves_and_unlocks_by_default_and_keeps_on_request():
     print("  PASS: default piles + unlocks USB1; --keep-locked leaves it locked in place")
 
 
+def test_make_unplaced_reads_kicad6_lock_and_text_spellings():
+    """KiCad 6 writes a footprint lock as a bare word in the header,
+    `(footprint "X" locked (layer ...`, and a text that does not keep upright
+    as a fourth `(at)` token, `(at -4.8 0.9 90 unlocked)`. make_unplaced
+    stripped only a `(locked yes)` line, so the part was piled still locked
+    and the run failed its own check (esp-rust-board's U4); and the writer
+    refused the four-token `(at)` outright (fusb302 and cider could not be
+    piled at all)."""
+    from kicad_parser import iter_footprint_blocks, parse_kicad_pcb
+    run_utils.evidence(ESP)
+    with open(ESP, encoding='utf-8', newline='') as fh:
+        text = fh.read()
+    for start, end, fp_text, _raw, key in iter_footprint_blocks(text):
+        if key == 'USB1':
+            new = re.sub(r'^(\(footprint\s+"[^"]*")', r'\1 locked', fp_text,
+                         count=1)
+            new = new.replace('(property "Reference" "USB1"\n\t\t\t(at -4.8 0.9 90)',
+                              '(property "Reference" "USB1"\n\t\t\t(at -4.8 0.9 90 unlocked)', 1)
+            assert new.count(' locked') == fp_text.count(' locked') + 1, \
+                'control: the bare lock was not written'
+            assert '90 unlocked)' in new, 'control: the unlocked text was not written'
+            text = text[:start] + new + text[end:]
+            break
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, 'esp6.kicad_pcb')
+        with open(src, 'w', encoding='utf-8', newline='') as fh:
+            fh.write(text)
+        assert parse_kicad_pcb(src).footprints['USB1'].locked, \
+            'control: the parser does not read the bare lock'
+        out = os.path.join(td, 'pile.kicad_pcb')
+        r = run_utils.check(PY + [os.path.join(SCRIPTS, 'make_unplaced.py'), src, out],
+                            accept=True)
+        assert 'unplaced=True' in r.stdout and 'unlocked   1: USB1' in r.stdout, \
+            r.stdout[-800:] + r.stderr[-800:]
+        pile = parse_kicad_pcb(out)
+        assert not pile.footprints['USB1'].locked, 'the bare lock survived'
+        with open(out, encoding='utf-8', newline='') as fh:
+            piled = fh.read()
+        block = next(t for _s, _e, t, _r, k in iter_footprint_blocks(piled) if k == 'USB1')
+        assert re.search(r'\(property "Reference" "USB1"\s+\(at \S+ \S+ 0 unlocked\)', block), \
+            'the unlocked text was not reset to 0 with its token kept'
+    print("  PASS: KiCad 6's bare lock is unlocked and its `unlocked` text kept, reset to 0")
+
+
 def test_make_unplaced_refuses_a_routed_input_before_writing():
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(ROOT, 'kicad_files', 'qfn_interior_pads.kicad_pcb')

@@ -431,9 +431,9 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
 
     board_info = copy.copy(pcb_data.board_info)
     board_info.board_bounds = (min_x, min_y, max_x, max_y)
-    # Real board bounds, so the edge-band pad exemption (#338) can tell a pad
-    # at the TRUE board edge from one merely straddling the synthetic window
-    # boundary (the latter must not punch reach holes in the window fence).
+    # Real board bounds: a window side strictly inside them is synthetic, and
+    # on a polygonal board (whose outline the window keeps) the track edge
+    # band fences exactly those sides (_add_board_edge_track_obstacles).
     board_info.parent_board_bounds = (getattr(pcb_data.board_info,
                                               'parent_board_bounds', None)
                                       or bb)

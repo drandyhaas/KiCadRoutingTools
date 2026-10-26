@@ -1023,6 +1023,26 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         gx_flat, gy_flat, cell_mask = _board_edge_cell_mask_cached(
             pcb_data, coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y,
             grid_margin, track_edge_clearance)
+        # A make_local_window copy keeps a polygonal board's outline, which
+        # blocks only what lies outside the BOARD: a window side inside the
+        # board stays open, and past this band the map holds nothing at all,
+        # so a trace search walks out of the window into copper the window
+        # never loaded (a rescue tap's via->pad trace crossed a foreign track
+        # that way). Fence every such side with the rectangular branch's band;
+        # a side the window shares with the board's own bounds is the
+        # outline's. The cached mask is shared, so it is never edited in place.
+        parent = getattr(pcb_data.board_info, 'parent_board_bounds', None)
+        if parent:
+            fence = np.zeros_like(cell_mask)
+            if min_x > parent[0]:
+                fence |= gx_flat < gmin_x + track_expand
+            if min_y > parent[1]:
+                fence |= gy_flat < gmin_y + track_expand
+            if max_x < parent[2]:
+                fence |= gx_flat > gmax_x - track_expand
+            if max_y < parent[3]:
+                fence |= gy_flat > gmax_y - track_expand
+            cell_mask = cell_mask | fence
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, cell_mask, [layer_idx])
     else:
         # Rectangular board - simple bounding box band, vectorized.

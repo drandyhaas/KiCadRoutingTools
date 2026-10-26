@@ -32,6 +32,10 @@ Key fields:
   It is censused before the plane finalize; route.py's end-of-run dedup (#162)
   then removes exact same-span copies, so read `check_weird` on the output for
   what shipped.
+- `close_same_net_vias` (#1414): same-net via pairs this run laid under the drill
+  hole-to-hole floor (check_drc `VIA-DRILL-HOLE`); `different_net_crossings` (#1375):
+  different-net tracks crossing on one layer among the run's copper (a short;
+  check_drc `SEGMENT-CROSSING`). Both ship despite `failed 0`: say so.
 - `failed_multipoint`: nets with unconnected pads, including pad coordinates
 - `blockers`: per still-failed net, the run's LAST frontier blocking analysis
   (#409): `{net, stage, blocked_by: [{net, blocked_count, unique_cells,

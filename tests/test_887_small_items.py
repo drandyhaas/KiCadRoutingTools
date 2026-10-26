@@ -70,7 +70,13 @@ def _declared_distributions():
 #: distribution name -> the module it provides, where they differ.
 DIST_TO_MODULE = {'Pillow': 'PIL'}
 
-SRC_DIRS = ('py_router', 'py_tools', 'py_placer')
+#: awx too since #1355: its bus step imported ortools at module scope in three
+#: files, declared nowhere, and the step laid nothing without it.
+SRC_DIRS = ('py_router', 'py_tools', 'py_placer', 'awx')
+
+#: A module imported at module scope ONLY by the tool it is the runtime of,
+#: which cannot start without it: awx's Modal launchers are run BY `modal run`.
+LAUNCHER_ONLY = {'modal': ('awx/modal_curve.py', 'awx/modal_k.py', 'awx/modal_whole.py')}
 
 
 def _repo_local_names():
@@ -139,7 +145,8 @@ def test_every_module_scope_third_party_import_is_declared():
     for d in SRC_DIRS:
         base = os.path.join(ROOT, d)
         for root, _dirs, files in os.walk(base):
-            if '__pycache__' in root:
+            # (a run's scratch, awx/tmp, is not the source)
+            if '__pycache__' in root or 'tmp' in os.path.relpath(root, ROOT).replace('\\', '/').split('/'):
                 continue
             for f in files:
                 if not f.endswith('.py'):
@@ -148,7 +155,8 @@ def test_every_module_scope_third_party_import_is_declared():
                 for name in _module_scope_imports(p):
                     checked += 1
                     if (name in stdlib or name in local or name.startswith('_')
-                            or name.lower() in declared):
+                            or name.lower() in declared
+                            or os.path.relpath(p, ROOT).replace('\\', '/') in LAUNCHER_ONLY.get(name, ())):
                         continue
                     undeclared.setdefault(name, []).append(
                         os.path.relpath(p, ROOT))

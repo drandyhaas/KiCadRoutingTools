@@ -55,6 +55,11 @@ import urllib.parse
 import urllib.request
 import zipfile
 
+#: #937 registry: a prototype in its own directory, in no door; it reads a
+#: board and writes only movie3d/cache/found/, never a board. Read by
+#: krt_registry.py by AST.
+KRT_TOOL = {'scope': [], 'kind': 'utility'}
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 FOUND = os.path.join(HERE, 'cache', 'found')
@@ -69,9 +74,10 @@ def model_key(path):
     return os.path.splitext(os.path.basename(path.replace('\\', '/')))[0].lower()
 
 
-#: how models.stage_models names a part whose footprint names no model at
+#: how model_export.stage_models names a part whose footprint names no model at
 #: all: this prefix and the footprint's library name
-NO_MODEL = 'no model: '
+sys.path.insert(0, os.path.join(REPO, 'py_router'))
+from model_export import NO_MODEL  # noqa: E402
 
 
 def footprint_key(name):

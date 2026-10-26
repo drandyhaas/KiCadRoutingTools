@@ -588,6 +588,61 @@ def restore_write_entry(pruned: dict, input_ids) -> Optional[dict]:
             'iterations': pruned.get('iterations', 0), 'extends': pruned}
 
 
+def select_force_reroute_nets(pcb_data: PCBData, net_ids, overrides,
+                              input_file=None):
+    """The nets ``--force-reroute`` may strip, and their copper, shared by
+    route.py and route_diff.py.
+
+    ``net_ids`` is the ``[(name, id)]`` the step was asked to route and
+    ``overrides`` the ``--nets`` patterns, which are the #521 exact-name
+    override. A net with no copper routes normally anyway; a plane
+    (zone-owning) net belongs to route_planes; a protected net (length-matched
+    group, routed diff pair) is skipped unless named EXACTLY (no glob) in
+    ``overrides``; KiCad-locked copper is never stripped. The exact-name
+    overrides are stashed on ``pcb_data`` so the in-run ladders honour the
+    ones this pre-run filter did (run-6 z2).
+
+    Returns ``{net_id: (segments, vias)}`` -- the saved copper, NOT yet removed
+    from ``pcb_data`` (the caller strips it and keeps the objects for custody).
+    """
+    from kicad_parser import pour_zones
+    zone_nids = {z.net_id for z in pour_zones(pcb_data.zones)}
+    copper_nids = ({s.net_id for s in pcb_data.segments}
+                   | {v.net_id for v in pcb_data.vias})
+    cand, skipped_plane = [], []
+    for name, nid in net_ids:
+        if nid not in copper_nids:
+            continue  # no existing copper -- routes normally anyway
+        if nid in zone_nids:
+            skipped_plane.append(name)
+            continue
+        cand.append((name, nid))
+    if skipped_plane:
+        print(f"--force-reroute: skipping {len(skipped_plane)} plane "
+              f"(zone-owning) net(s) -- planes belong to route_planes: "
+              f"{', '.join(skipped_plane[:6])}"
+              f"{', ...' if len(skipped_plane) > 6 else ''}")
+    ripped: Dict[int, Tuple[list, list]] = {}
+    if not cand:
+        return ripped
+    from protected_nets import (protection_map, filter_rippable_names,
+                                stash_rip_overrides)
+    prot = protection_map(pcb_data, input_file)
+    overrides = list(overrides)
+    stash_rip_overrides(pcb_data, overrides)
+    keep = set(n for n, _ in cand)
+    if prot:
+        keep = set(filter_rippable_names(
+            [n for n, _ in cand], prot, override_patterns=overrides,
+            context="--force-reroute"))
+    for name, nid in cand:
+        if name not in keep:
+            continue
+        ripped[nid] = ([s for s in pcb_data.segments if s.net_id == nid],
+                       [v for v in pcb_data.vias if v.net_id == nid])
+    return ripped
+
+
 def partition_force_restores(force_ripped, pcb_data: PCBData,
                              clearance: float, skip_net_ids=None,
                              config: Optional[GridRouteConfig] = None):

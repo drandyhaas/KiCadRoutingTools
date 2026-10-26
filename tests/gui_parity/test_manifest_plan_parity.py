@@ -849,7 +849,8 @@ _PROBE_VALUE = 'PROBE_VALUE'
 # the flag means the same thing there (the shared registrars and the file /
 # diagnostic flags); the rest are the tool's own.
 _SAME_AS_ROUTE = ('--debug-lines', '--debug-memory', '--enable-used-layers',
-                  '--keep-thermal', '--output', '--overwrite', '--quick',
+                  '--json-out', '--keep-thermal', '--output', '--overwrite',
+                  '--quick',
                   '--schematic-dir', '--strict-sizes', '--verbose')
 
 DIFF_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in _SAME_AS_ROUTE}
@@ -1781,6 +1782,10 @@ _POST_PARSE_WITNESSES = (
     ('_output_twice', 'route.py a.kicad_pcb b.kicad_pcb --output b.kicad_pcb',
      None),
     ('_route_group_empty', "route.py a.kicad_pcb --group ' '", 'empty name'),
+    ('_diff_force_reroute_unscoped', 'route_diff.py a.kicad_pcb b.kicad_pcb '
+     '--force-reroute', 'explicit net scope'),
+    ('_diff_force_reroute_unscoped', 'route_diff.py a.kicad_pcb b.kicad_pcb '
+     '--force-reroute --nets X_P X_N', None),
     ('_keep_away', 'route.py a.kicad_pcb b.kicad_pcb --nets X --keep-away A:B:x',
      '--keep-away'),
     ('_route_force_reroute_unscoped', 'route.py a.kicad_pcb b.kicad_pcb '
@@ -1801,6 +1806,11 @@ _POST_PARSE_WITNESSES = (
      '--power-nets GND +3V3 --power-nets-widths 0.3', 'must have the same length'),
     ('_power_nets_count_mismatch', 'qfn_fanout.py a.kicad_pcb --output b.kicad_pcb '
      '--power-nets GND +3V3 --power-nets-widths 0.3 0.3', None),
+    ('_route_power_nets_count_mismatch', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --power-nets GND +3V3 --power-nets-widths 0.3',
+     'must have the same length'),
+    ('_route_power_nets_count_mismatch', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --power-nets GND +3V3', None),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '
      '--clearance nan', 'finite number'),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '

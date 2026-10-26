@@ -30,9 +30,11 @@ orthogonal to the tier and bounds every descent site in the engine:
                with one bounded exception: a wide (power / impedance) net may
                neck below its width for at most
                ``routing_defaults.PAD_ENTRY_NECK_MM`` (2 mm) of routed path
-               on one edge or one via-to-pad tap -- the pad-entry stretch a
-               wide rail cannot keep into a narrow pin. A longer neck fails
-               the edge. A power net's under-width copper is in the ledger
+               at a pad entry -- the stretch a wide rail cannot keep into a
+               narrow pin: a whole edge that short, the last stretch into the
+               pin of a longer edge whose rest keeps the net's width (#1452),
+               or one via-to-pad tap. A longer neck fails the edge, and the
+               failure names the allowance and the edge's span. A power net's under-width copper is in the ledger
                (route.py's ``power copper shipped under width`` row), so
                ``--strict-sizes`` still sees it.
   - ``board``  a failing net may be retried narrower / with a smaller
@@ -233,6 +235,42 @@ def get_escalation_policy():
 def may_narrow():
     """False under ``--escalation off``: no descent site may shrink anything."""
     return _ESCALATION != 'off'
+
+
+#: The ``kicad_routing_tools`` record that says ``rules.min_clearance`` holds a
+#: PAD clearance override, not a board minimum (#1369):
+#: ``{"rule": <the min_clearance the #530 cap wrote, mm>,
+#:    "board": <what the board's own min_clearance reads without it, mm>}``.
+#: Written by the DRC-floor writebacks (fix_kicad_drc_settings
+#: ``record_pad_override_floor`` / ``record_live_pad_override_floor``, through
+#: tool_records); read by :func:`board_declared_min_clearance`.
+PAD_OVERRIDE_FLOOR_KEY = "pad_override_min_clearance"
+
+
+def board_declared_min_clearance(min_clearance, records):
+    """``rules.min_clearance`` as the BOARD declares it, for
+    ``--escalation board`` (#1369).
+
+    The writeback caps ``rules.min_clearance`` at the smallest pad clearance
+    override the router honoured (#530), because KiCad floors an override
+    there. That number is a property of one part, not a minimum the board
+    declares, yet the escalation resolver read it as "the board's own
+    minimum" and rescued nets that carry no override down to it. When the
+    project's ``records`` (the ``kicad_routing_tools`` namespace, read through
+    tool_records) carry :data:`PAD_OVERRIDE_FLOOR_KEY` and the rule still
+    holds the value that record says the cap wrote, the board's own minimum is
+    the record's ``board`` value. Any other rule value -- one a later step or
+    the user changed -- is the board's, and is returned as it is."""
+    rec = (records or {}).get(PAD_OVERRIDE_FLOOR_KEY)
+    if not isinstance(rec, dict) or not isinstance(min_clearance, (int, float)):
+        return min_clearance
+    try:
+        rule, board = float(rec.get("rule")), float(rec.get("board"))
+    except (TypeError, ValueError):
+        return min_clearance
+    if board > 0 and abs(float(min_clearance) - rule) <= 5e-6:
+        return board
+    return min_clearance
 
 
 def board_floors_from_rules(rules, default_class_clearance=None):
@@ -793,7 +831,65 @@ def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):
               f"pinning up to {floor}. Pass --fab-overrides "
               f"to declare a smaller fab capability, or raise the value to silence this.")
         pinned[name] = floor
+    # #1433: the size and drill floors hold one value at a time; the via must
+    # also keep a copper ring around its hole.
+    if 'via_size' in params and 'via_drill' in params:
+        vs = pinned.get('via_size', params.get('via_size'))
+        vd = pinned.get('via_drill', params.get('via_drill'))
+        new_vs = via_size_for_annular_ring(vs, vd, copper_layer_count, tier,
+                                           overrides)
+        if new_vs is not None and vs is not None and new_vs > vs:
+            ring = min_via_annular_ring(copper_layer_count, tier, overrides)
+            print(f"  WARNING: --via-size {vs} with --via-drill {vd} leaves an "
+                  f"annular ring of {(vs - vd) / 2.0:.4g} mm, below the "
+                  f"{ring:.4g} mm the physical fab floor's via implies (a "
+                  f"drill wider than its pad has no ring at all); pinning "
+                  f"--via-size up to {new_vs}. Pass --fab-overrides to "
+                  f"declare a smaller fab capability, or give a via that "
+                  f"holds its drill to silence this.")
+            pinned['via_size'] = new_vs
     return pinned
+
+
+def min_via_annular_ring(copper_layer_count, tier=None, overrides=None):
+    """The smallest via annular ring (mm) the PHYSICAL fab floor implies (#1433).
+
+    The ring is (diameter - drill) / 2. The floor's smallest via -- the
+    advanced rung's 0.25/0.15, or the --fab-overrides file's -- fixes it at
+    0.05, which is also the smallest ring on any corpus board. Deliberately
+    NOT the floor's `annular` key: that is the PTH-pad recommendation
+    (0.15-0.25), which every via the router lays would fail. None when the
+    floor declares no via.
+    """
+    dia = fab_floor_for_param('via_size', copper_layer_count, tier, overrides)
+    drill = fab_floor_for_param('via_drill', copper_layer_count, tier, overrides)
+    if dia is None or drill is None:
+        return None
+    return max(0.0, round((dia - drill) / 2.0, 6))
+
+
+def via_size_for_annular_ring(via_size, via_drill, copper_layer_count,
+                              tier=None, overrides=None):
+    """`via_size`, pinned UP so the via keeps the floor's annular ring (#1433).
+
+    The size/drill floors are checked one value at a time, so a via could pass
+    both and have no copper ring at all: `--via-size 0.45 --via-drill 0.508`
+    laid 138 vias whose drill is wider than their pad. The DRILL is the hole
+    the caller asked for, so the pad grows to drill + 2 x ring. Returns the
+    value unchanged when either is None or the ring already holds. Shared by
+    the CLIs' enforce_fab_floors and the GUI's effective via size.
+    """
+    if via_size is None or via_drill is None:
+        return via_size
+    ring = min_via_annular_ring(copper_layer_count, tier, overrides)
+    if ring is None or (via_size - via_drill) / 2.0 >= ring - 1e-9:
+        return via_size
+    # Rounded UP to the 0.1 um grid, never to nearest: an imperial drill
+    # (0.35052 = 13.8 mil) plus 2 x 0.05 is 0.45052, which round() made
+    # 0.4505 -- a ring of 0.04999, 10 nm under the floor the pin exists to
+    # meet, and every pinned via graded short.
+    import math
+    return math.ceil((via_drill + 2.0 * ring) * 1e4 - 1e-6) / 1e4
 
 
 def check_param_floors(copper_layer_count, tier=None, overrides=None, **params):
@@ -873,6 +969,31 @@ def replace_track_rows(net_ids, shipped, site):
             'site': site,
             'count': 1, 'length_mm': round(float(under), 2),
         })
+
+
+def replace_via_rows(shipped, site):
+    """#1371: make the ledger's via rows describe the vias that SHIP.
+
+    ``via_diameter`` rows are recorded per placement ATTEMPT (the last-resort
+    via-in-pad ladder, rescues, the plane-tap ladder, layer-swap pad vias), so
+    they name vias that never shipped (a tap the weld then rejected) and count
+    one placement several times, while the rung-1 via search ships small vias
+    and records nothing. Drop every ``via_diameter`` row and add one row per
+    (net, diameter) from the census of this run's shipped vias.
+    ``shipped`` is [(net_id, net_name, requested, {diameter: count}), ...],
+    from ``routing_common.new_via_shortfall``. Other kinds are untouched."""
+    _LEDGER['narrowed'] = [r for r in _LEDGER['narrowed']
+                           if r.get('kind') != 'via_diameter']
+    for nid, name, req, sizes in shipped or ():
+        for dia, n in sorted(sizes.items()):
+            if dia >= req - 1e-9:
+                continue
+            _LEDGER['narrowed'].append({
+                'net': int(nid), 'net_name': name, 'kind': 'via_diameter',
+                'requested': round(float(req), 4),
+                'delivered': round(float(dia), 4),
+                'site': site, 'count': int(n),
+            })
 
 
 def escalation_summary():
@@ -1241,7 +1362,24 @@ def set_policy_from_args(args, pcb_path=None):
                 proj = json.load(f)
             rules = ((proj.get('board') or {}).get('design_settings') or {}).get('rules') or {}
             dflt = project_default_class_clearance(proj)
-            floors = board_floors_from_rules(rules, dflt)
+            # #1369: a min_clearance the #530 cap lowered to a pad override
+            # is not the board's minimum; the records say what is.
+            _declared = dict(rules)
+            try:
+                import tool_records
+                _mc = board_declared_min_clearance(
+                    rules.get('min_clearance'),
+                    tool_records.effective_namespace(pcb_path))
+            except Exception:                                   # noqa: BLE001
+                _mc = rules.get('min_clearance')
+            if _mc != rules.get('min_clearance'):
+                _declared['min_clearance'] = _mc
+                if getattr(args, 'escalation', None) == 'board':
+                    print(f"  --escalation board: rules.min_clearance "
+                          f"{rules.get('min_clearance'):g} mm is a pad clearance "
+                          f"override the writeback capped the rule at, not a "
+                          f"board minimum; the board's own is {_mc:g} mm (#1369)")
+            floors = board_floors_from_rules(_declared, dflt)
             graded = graded_default_clearance(rules.get('min_clearance'), dflt)
         except (OSError, ValueError, AttributeError):
             # No readable project: KiCad grades such a board at its factory

@@ -19,15 +19,26 @@ afterwards rather than asserting it, refusing if a class went missing.
 Usage:
     python3 py_tools/fill_for_delivery.py routed.kicad_pcb -o delivered.kicad_pcb
 
+A pre-KiCad-10 board comes back in KiCad 10's file format (pcbnew saves what it
+runs), which can declare per-via protection. The re-save writes explicit
+`(capping no)` / `(filling no)` tokens on every via; they are removed again (they
+say nothing the board did not), and the vias in a pad or paste opening are
+declared Type VII, as the route step does on a KiCad 10 file. `--baseline` names
+the board BEFORE the routing that made the input: vias it already had under
+solder keep what it gave them. The format change is printed, and a filled copy
+with more unprotected vias-in-paste than its input is refused.
+
 Exit codes:
     0  filled, net classes intact
-    1  the fill did not run, or a net class went missing
+    1  the fill did not run, a net class went missing, or the filled copy is
+       worse than its input
 
 On exit 1 the destination holds the board and its siblings COPIED but not
 filled -- that copy is useful (grade it with `kicad-cli pcb drc
 --refill-zones`, or press B in KiCad) and the run says so -- except on the
-net-class refusal, where the destination is removed entirely, because a board
-graded against rules it no longer carries is worse than no board.
+net-class refusal and the via-in-paste refusal, where the destination is
+removed entirely: a board graded against rules it no longer carries, or one
+with more unprotected vias in paste than its input, is worse than no board.
 """
 from __future__ import annotations
 
@@ -92,6 +103,36 @@ def _unconnected(pcb_path):
                 pass
 
 
+def _remove_output(output):
+    """Delete a refused output with its siblings: a `.kicad_pro` / `.kicad_dru`
+    left behind with no board is debris a later step can pick up as a DRC
+    floor."""
+    from copy_board import SIBLING_EXTS
+    stem = os.path.splitext(output)[0]
+    for ext in ('.kicad_pcb',) + tuple(SIBLING_EXTS):
+        try:
+            os.unlink(stem + ext)
+        except OSError:
+            pass
+
+
+def _via_in_paste_violations(path, baseline_pd):
+    """How many vias in a solder-paste opening `check_drc` would report as
+    violations on this board (None when it cannot be measured)."""
+    try:
+        from kicad_parser import parse_kicad_pcb
+        from check_drc import _via_in_paste_pass
+        violations, accepted = [], []
+        _via_in_paste_pass(parse_kicad_pcb(path), None, baseline_pd,
+                           violations, accepted, True)
+        return len(violations)
+    except Exception as exc:  # noqa: BLE001 -- a measurement that cannot run says so
+        print(f"WARNING: vias in solder paste not measured on {path} "
+              f"({type(exc).__name__}: {exc}); the filled copy is not "
+              f"compared against its input for them")
+        return None
+
+
 def main() -> int:
     from redo_record import record_invocation
     record_invocation()
@@ -106,6 +147,10 @@ def main() -> int:
     ap.add_argument('--timeout', type=int, default=None,
                     help='seconds to allow the KiCad fill (default: the '
                          'exact-fill budget)')
+    ap.add_argument('--baseline', default=None,
+                    help='the board BEFORE the routing that made the input: '
+                         'vias it already had under solder keep what it gave '
+                         'them when the re-save lets Type VII be declared')
     ap.add_argument('--exit-zero', action='store_true',
                     help='report problems but exit 0')
     args = ap.parse_args()
@@ -133,7 +178,8 @@ def main() -> int:
 
     st = write_filled_board(args.input_file, args.output, verbose=True,
                             timeout=args.timeout or EXACT_FILL_TIMEOUT,
-                            project_from=args.input_file)
+                            project_from=args.input_file,
+                            baseline_file=args.baseline)
     if not st.ok:
         print(f"FILL NOT WRITTEN: {st.reason}"
               + (f" ({st.detail})" if st.detail else ''))
@@ -148,15 +194,28 @@ def main() -> int:
         lost = sorted(want - got)
         print(f"REFUSING: net class(es) lost in the filled output: "
               f"{', '.join(lost)}")
-        # The SIBLINGS go too: a `.kicad_pro` / `.kicad_dru` left behind with
-        # no board is debris a later step can pick up as a DRC floor.
-        from copy_board import SIBLING_EXTS
-        _stem = os.path.splitext(args.output)[0]
-        for _ext in ('.kicad_pcb',) + tuple(SIBLING_EXTS):
-            try:
-                os.unlink(_stem + _ext)
-            except OSError:
-                pass
+        # The SIBLINGS go too (see _remove_output).
+        _remove_output(args.output)
+        return 0 if args.exit_zero else 1
+
+    baseline_pd = None
+    if args.baseline:
+        from kicad_parser import parse_kicad_pcb
+        baseline_pd = parse_kicad_pcb(args.baseline)
+    in_viol = _via_in_paste_violations(args.input_file, baseline_pd)
+
+    rec = st.via_protection
+    if rec:
+        print(f"  file format: {rec['format_in']} -> {rec['format_out']} "
+              f"(the re-save is KiCad 10's; KiCad 9 cannot open this copy)")
+        print(f"  via protection: {rec['stripped']} via(s) given back the "
+              f"board's own policy (the re-save's explicit 'no' tokens "
+              f"removed)")
+    out_viol = _via_in_paste_violations(args.output, baseline_pd)
+    if in_viol is not None and out_viol is not None and out_viol > in_viol:
+        print(f"REFUSING: the filled copy has {out_viol} unprotected via(s) in "
+              f"a solder-paste opening, its input {in_viol}")
+        _remove_output(args.output)
         return 0 if args.exit_zero else 1
 
     after = _unconnected(args.output)

@@ -1971,6 +1971,22 @@ def _seam_ratio_floor():
         return 1.3
 
 
+def _rewind_reask_stub_switches(net_id, pcb_data, config, state, swap_mark):
+    """Undo the stub layer switches a losing seam re-ask committed, between
+    ripping its tree and restoring the original: they belong to the tree being
+    discarded. Left in place, the moved stub's pad via shipped beside the
+    restored tree's own via-in-pad at the same pad -- two same-net barrels of
+    different sizes, which KiCad grades as a hole-to-hole violation. The net's
+    obstacle entry is rebuilt from the reverted copper here, because a #134
+    refused restore returns before restore_net rebuilds it."""
+    from stub_layer_switching import rewind_swap_channel
+    from obstacle_cache import refresh_net_obstacles
+    if rewind_swap_channel(pcb_data, state, swap_mark):
+        refresh_net_obstacles(state.working_obstacles,
+                              state.net_obstacles_cache, pcb_data, config,
+                              [net_id])
+
+
 def seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
                        gnd_net_id, all_unrouted_net_ids, routed_net_ids,
                        remaining_net_ids, routed_net_paths, routed_results,
@@ -2052,6 +2068,8 @@ def seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
         history_conflict=False)   # #590: own-tree re-ask, not contention
     if saved is None:
         return False
+    from stub_layer_switching import swap_channel_mark
+    swap_mark = swap_channel_mark(state)
     cfg_polish = carry_run_state(config, _dc_replace(config, max_rip_up_count=0))
     _reroute_phase3_ripped_nets(
         [(net_id, saved, ripped_ids, was_in)], pcb_data, cfg_polish, state,
@@ -2079,6 +2097,7 @@ def seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
             state.net_obstacles_cache, state.ripped_route_layer_costs,
             state.ripped_route_via_positions, layer_map,
             history_conflict=False)   # #590: undoing our own re-ask
+    _rewind_reask_stub_switches(net_id, pcb_data, config, state, swap_mark)
     restore_net(net_id, saved, ripped_ids, was_in, pcb_data, routed_net_ids,
                 routed_net_paths, routed_results, diff_pair_by_net_id or {},
                 remaining_net_ids, results, config, track_proximity_cache,
@@ -2167,6 +2186,7 @@ def se_seam_reask(state, pcb_data, config, base_obstacles, gnd_net_id,
     print(f"\n=== #444 SE seam re-ask: {len(candidates)} composed tree(s) "
           f"above {ratio_floor:.2f}x MST bound ===")
     cfg_polish = carry_run_state(config, _dc_replace(config, max_rip_up_count=0))
+    from stub_layer_switching import swap_channel_mark
     improved = 0
     for _ratio, _old_len, nid in candidates:
         name = pcb_data.nets[nid].name if nid in pcb_data.nets else str(nid)
@@ -2182,6 +2202,7 @@ def se_seam_reask(state, pcb_data, config, base_obstacles, gnd_net_id,
             state.ripped_route_via_positions, layer_map)
         if saved is None:
             continue
+        swap_mark = swap_channel_mark(state)
         _reroute_phase3_ripped_nets(
             [(nid, saved, ripped_ids, was_in)], pcb_data, cfg_polish, state,
             routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
@@ -2211,6 +2232,7 @@ def se_seam_reask(state, pcb_data, config, base_obstacles, gnd_net_id,
                 state.working_obstacles, state.net_obstacles_cache,
                 state.ripped_route_layer_costs,
                 state.ripped_route_via_positions, layer_map)
+        _rewind_reask_stub_switches(nid, pcb_data, config, state, swap_mark)
         restore_net(nid, saved, ripped_ids, was_in, pcb_data, routed_net_ids,
                     routed_net_paths, routed_results,
                     diff_pair_by_net_id or {}, remaining_net_ids, results,

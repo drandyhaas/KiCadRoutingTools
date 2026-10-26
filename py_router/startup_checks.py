@@ -73,6 +73,7 @@ IMPORT_TESTS = {
     "scipy": "from scipy.optimize import linear_sum_assignment",
     "shapely": "from shapely.geometry import Polygon",
     "Pillow": "from PIL import Image",
+    "ortools": "from ortools.sat.python import cp_model",
 }
 
 # pip distribution name -> the module whose `__version__` is read to decide
@@ -86,11 +87,17 @@ VERSION_MODULES = {
     "scipy": "scipy",
     "shapely": "shapely",
     "Pillow": "PIL",
+    "ortools": "ortools",
 }
 
 # The packages ROUTING needs. Pillow is not among them and must not become one:
 # it is the raster path, gated separately by `check_render_dependencies` (#887).
 ROUTING_PACKAGES = ("numpy", "scipy", "shapely")
+
+# ...and what the BUS STEP needs beyond them (#1355): awx/route_bus.py and the
+# whole route plan with CP-SAT. Its own gate, `check_bus_dependencies`, for the
+# reason Pillow has one: routing never imports it.
+BUS_PACKAGES = ("ortools",)
 
 # Last-resort floors for an install that shipped without requirements.txt.
 # requirements.txt is the source of truth (`requirement_floors` reads it and
@@ -453,6 +460,25 @@ def check_python_dependencies():
             problems,
             "ERROR: Python libraries missing or too old for KiCad Routing "
             "Tools:"))
+
+
+def check_bus_dependencies():
+    """Check the libraries the BUS STEP needs beyond routing's: ortools (#1355).
+
+    The bus step's fanout, ends model and whole solve import
+    `ortools.sat.python.cp_model`, each in a stage of its own, so without it
+    `route_bus.py` ran for minutes, printed `fanout exit 1` and `the whole route
+    laid nothing (exit 2)`, and named the missing module only in a stage log
+    under its work directory. route_bus.py and whole_route.py call this before
+    they start. Loads the probe (`load=True`): the step imports it anyway.
+    Raises StartupCheckError naming what is missing or too old.
+    """
+    problems = dependency_problems(BUS_PACKAGES, load=True)
+    if problems:
+        raise StartupCheckError(format_problems(
+            problems,
+            "ERROR: the bus step (awx/route_bus.py) needs Python libraries "
+            "that are missing or too old:"))
 
 
 def _raise_if_missing(missing, exc=StartupCheckError):

@@ -90,6 +90,9 @@ def ids_by_name(pcb):
 #   /A  routed, 10.0 mm        /B  routed, 10.4 mm (a 0.2 mm jog each end)
 #   /C  no copper              /D  a 2 mm stub off its first pad only
 #   /E  three pads, a track joins the first two only
+# The pads are 0.1 mm: KiCad's length DRC cuts a run where it leaves the pad its
+# track ends at (every release; modelled since #1432), so a 0.2 mm jog inside a
+# 1 mm pad would not count as 0.2 mm.
 SYN_NETS = ['/A', '/B', '/C', '/D', '/E']
 
 
@@ -97,7 +100,7 @@ def _fp(ref, x, y, net_id, net):
     return (' (footprint "L:P" (layer "F.Cu") (at %s %s)\n'
             '  (property "Reference" "%s" (at 0 -2 0) (layer "F.SilkS") '
             '(effects (font (size 1 1) (thickness 0.15))))\n'
-            '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") '
+            '  (pad "1" smd rect (at 0 0) (size 0.1 0.1) (layers "F.Cu") '
             '(net %d "%s")))\n' % (x, y, ref, net_id, net))
 
 

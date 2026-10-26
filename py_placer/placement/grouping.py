@@ -34,6 +34,14 @@ are fixed members, the rest of the group is placed around them, and nothing
 moves them. `edge` is one of N/S/E/W (the board side a group belongs on),
 `near` / `apart` name other groups.
 
+`flippable` names the group's parts that may stand on the other face of the
+board -- the agent's judgement of the parts, like the groups (`placement.
+faces`). A part keeps the face it has unless the front has no room for it (no
+legal pose, or past a decap or claim limit), when place_simple sends it, or
+its group's other flippable parts, to the back. A part
+not listed never changes face, and a group's `side` puts all of it on one
+face whatever this says.
+
 `templates` names the group's TEMPLATE CANDIDATES: chips whose datasheet
 layout the agent will copy into an intent `templates[]` row (the
 plan-pcb-placement skill's §3.5):
@@ -59,7 +67,7 @@ EDGES = ('N', 'S', 'E', 'W')
 # one may too, and the full name is unambiguous.
 _EDGE_NAMES = {'north': 'N', 'south': 'S', 'east': 'E', 'west': 'W'}
 GROUP_KEYS = ('name', 'role', 'refs', 'anchor', 'why', 'edge', 'side', 'near',
-              'apart', 'note', 'templates')
+              'apart', 'note', 'templates', 'flippable')
 #: What a template candidate is: a stage that switches current through an
 #: inductor, transformer, flying or bootstrap cap, or a motor; or the parts
 #: between a radio chip's RF pins and its antenna.
@@ -143,6 +151,14 @@ def validate_doc(doc, where: str = 'groups') -> Dict:
             v = g.get(key) or []
             if not isinstance(v, list):
                 raise GroupsError(f"{where}: group {name!r} `{key}` must be a list of group names")
+        fl = g.get('flippable')
+        if fl is not None:
+            if not isinstance(fl, list) or not all(isinstance(r, str) for r in fl):
+                raise GroupsError(f"{where}: group {name!r} `flippable` must be a list of refs")
+            stray = sorted(set(fl) - set(refs))
+            if stray:
+                raise GroupsError(f"{where}: group {name!r} `flippable` names {stray}, "
+                                  f"which are not among its refs")
         _check_templates(g, name, refs, where, chips)
     for i, g in enumerate(groups):
         for key in ('near', 'apart'):

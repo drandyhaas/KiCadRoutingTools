@@ -25,6 +25,7 @@ KRT_TOOL = {'scope': ['routing'], 'kind': 'instrument'}
 
 import _path  # noqa: F401  (#522: makes ../py_router importable)
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Optional, Tuple
 from enum import Enum
@@ -34,7 +35,7 @@ from kicad_parser import parse_kicad_pcb, PCBData, Footprint, Pad, non_aperture_
 # closure inside `get_power_net_recommendations`; they are the repo's only
 # pin-level power predicate and every other caller was locked out of them.
 from net_queries import (  # noqa: F401  (POWER_PIN_KEYWORDS is a public re-export)
-    POWER_PIN_KEYWORDS, is_power_pin)
+    POWER_PIN_KEYWORDS, is_power_pin, is_ground_net_name, is_power_net_name)
 
 
 class ComponentRole(Enum):
@@ -59,6 +60,8 @@ class ComponentInfo:
     role: ComponentRole = ComponentRole.UNKNOWN
     current_rating_ma: Optional[float] = None  # Estimated current in mA
     notes: str = ""                    # Additional notes from AI analysis
+    supply_nets: Optional[List[str]] = None  # Nets the agent names as this part's rails
+    classified: bool = False           # classify_component() was called on it
 
 
 @dataclass
@@ -204,7 +207,8 @@ def classify_component(components: Dict[str, ComponentInfo],
                        ref: str,
                        role: ComponentRole,
                        current_rating_ma: Optional[float] = None,
-                       notes: str = "") -> None:
+                       notes: str = "",
+                       supply_nets: Optional[List[str]] = None) -> None:
     """
     Set the classification for a component based on AI analysis.
 
@@ -214,167 +218,243 @@ def classify_component(components: Dict[str, ComponentInfo],
         role: The determined role
         current_rating_ma: Estimated current in milliamps
         notes: Any notes from the analysis
+        supply_nets: The nets this part draws on (a sink) or feeds (a source),
+            for a part whose pads carry no pintype or pin function and whose
+            nets are not named like rails. Optional: without it the pads are
+            read by pintype, pin function, then net name.
     """
     if ref in components:
+        if supply_nets:
+            known = set(components[ref].net_connections.values())
+            missing = [n for n in supply_nets if n not in known]
+            if missing:
+                raise ValueError(f"{ref} has no pad on net(s) {missing}")
         components[ref].role = role
         components[ref].current_rating_ma = current_rating_ma
         components[ref].notes = notes
+        components[ref].supply_nets = list(supply_nets) if supply_nets else None
+        components[ref].classified = True
+
+
+_GROUND_PIN_PREFIXES = ('GND', 'VSS', 'AGND', 'DGND', 'PGND')
+#: Supply pin FUNCTIONS beyond ``net_queries.POWER_PIN_KEYWORDS`` (which stays
+#: as it is, since the placement side reads it too): the names a connector, a
+#: bank-supply pin or a battery pin carries (``VBUS``, ``IOVDD_1``, ``VBAT``).
+_SUPPLY_FUNCTION_TOKENS = ('VDD', 'VCC', 'VBUS', 'VBAT', 'VSYS')
+
+
+def _is_supply_pad(pinfunction: str, pintype: str) -> bool:
+    fn = (pinfunction or '').upper()
+    return (is_power_pin(pinfunction, pintype)
+            or any(t in fn for t in _SUPPLY_FUNCTION_TOKENS)
+            or fn.startswith(('VIN', 'VOUT')))
+
+
+def _is_connected(net_name: str) -> bool:
+    return bool(net_name) and 'unconnected' not in net_name.lower()
+
+
+def _supply_nets(comp: ComponentInfo) -> Tuple[List[str], List[str]]:
+    """The (rail nets, ground nets) a classified part draws on or feeds.
+
+    A pad is a ground pad when its net is in the GND family or its pin
+    function says GND/VSS; it is a supply pad when the pin-level predicate
+    says so (``is_power_pin``: a power_in/power_out pintype or a VCC/VDD-style
+    pin function). A part whose pads carry neither (no pintype and no pin
+    function in the footprint) falls back to its pads on nets NAMED like a rail,
+    so a classification is never silently dropped for want of pin metadata
+    (#1378). ``comp.supply_nets`` -- the agent saying so -- outranks both.
+    """
+    rails: List[str] = []
+    grounds: List[str] = []
+    for pad, net in comp.net_connections.items():
+        if not _is_connected(net):
+            continue
+        fn = comp.pin_functions.get(pad, '')
+        pt = comp.pin_types.get(pad, '')
+        if is_ground_net_name(net) or fn.upper().startswith(_GROUND_PIN_PREFIXES):
+            if net not in grounds:
+                grounds.append(net)
+        elif _is_supply_pad(fn, pt) and net not in rails:
+            rails.append(net)
+    if comp.supply_nets:
+        rails = [n for n in comp.supply_nets if n not in grounds]
+    elif not rails:
+        for net in comp.net_connections.values():
+            if (_is_connected(net) and net not in grounds and net not in rails
+                    and is_power_net_name(net)):
+                rails.append(net)
+    return rails, grounds
+
+
+def _regulator_terminals(comp: ComponentInfo) -> Tuple[List[str], List[str]]:
+    """(output nets, input nets) of a POWER_SOURCE part.
+
+    Outputs are power_out pins or OUT-named pins; inputs are IN-named pins or
+    power_in pins on a non-ground net, read only when the part has outputs. A
+    part with no typed output (a connector, a battery holder, a regulator whose
+    footprint carries no pintypes) offers its supply rails as outputs and has
+    no input, so it is a root source.
+    """
+    outs: List[str] = []
+    ins: List[str] = []
+    if not comp.supply_nets:
+        for pad, pt in comp.pin_types.items():
+            net = comp.net_connections.get(pad, '')
+            if not _is_connected(net) or is_ground_net_name(net):
+                continue
+            fn = comp.pin_functions.get(pad, '').upper()
+            if ('power_out' in (pt or '').split('+')
+                    or fn in ('OUT', 'VOUT', 'OUTPUT')) and net not in outs:
+                outs.append(net)
+    for pad, net in comp.net_connections.items():
+        if (not outs or not _is_connected(net) or is_ground_net_name(net)
+                or net in outs or net in ins):
+            continue
+        fn = comp.pin_functions.get(pad, '').upper()
+        pt = (comp.pin_types.get(pad, '') or '').split('+')
+        if fn in ('IN', 'VIN', 'INPUT') or ('power_in' in pt and 'no_connect' not in pt):
+            ins.append(net)
+    if not outs:
+        rails, _ = _supply_nets(comp)
+        if not rails:
+            # Nothing on the part looks like a rail: the classification is the
+            # agent's word that it brings power on, so every non-ground net is
+            # a terminal. A net no sink draws on and no pass-through joins is
+            # never reached by the search, so a data pin here costs nothing.
+            rails = [n for n in dict.fromkeys(comp.net_connections.values())
+                     if _is_connected(n) and not is_ground_net_name(n)]
+        return rails, []
+    return outs, ins
 
 
 def trace_power_paths(pcb_data: PCBData,
                       components: Dict[str, ComponentInfo]) -> List[PowerPath]:
     """
-    Trace current paths from sinks back to sources through pass-through components.
+    Trace the current each load draws back to the source that feeds it.
 
-    Returns list of PowerPath objects describing each current path.
+    Paths run per (sink part, supply net the sink draws on), so a rail shared
+    by several loads is traced for every one of them (#1380). The search runs
+    UPSTREAM over a directed graph: a PASS_THROUGH part conducts between its
+    non-ground nets in both directions (a 3-terminal FET or load switch
+    included, #1378), and a regulator is entered only from its output to its
+    input, never the other way (#1381), because a regulator's input rail does
+    not draw from its output. Every branch stops at the first source that has
+    nothing further upstream (a battery and a USB input feeding one rail are
+    two paths, each rail on each branch carrying the load); a source on the
+    sink's own net is a one-net path. When no branch reaches such a root, the
+    path ends at the nearest regulator crossed, so its input rail still
+    carries the load. The recommendation charges a sink once per net however
+    many paths name it.
+
+    ``nets_in_path`` runs source side first.
     """
-    paths = []
+    paths: List[PowerPath] = []
 
-    # Build adjacency: net_id -> [(component_ref, other_net_id)]
-    net_adjacency: Dict[int, List[Tuple[str, int]]] = {}
+    # Pass-through conduction. A FET or load switch has three nets (the gate
+    # being a control net); a clique over the non-ground nets is safe because
+    # a dead-end net never lies on the route to a source.
+    upstream: Dict[str, List[Tuple[str, str]]] = {}   # net -> [(via_ref, net)]
+
+    def link(ref: str, a: str, b: str) -> None:
+        upstream.setdefault(a, []).append((ref, b))
 
     for ref, comp in components.items():
         if comp.role != ComponentRole.PASS_THROUGH:
             continue
+        nets = []
+        for net in comp.net_connections.values():
+            if _is_connected(net) and not is_ground_net_name(net) and net not in nets:
+                nets.append(net)
+        for a in nets:
+            for b in nets:
+                if a != b:
+                    link(ref, a, b)
 
-        # Get connected nets (excluding unconnected)
-        connected_nets = []
-        for pad_num, net_name in comp.net_connections.items():
-            if 'unconnected' in net_name.lower():
-                continue
-            # Find net_id
-            for net_id, net in pcb_data.nets.items():
-                if net.name == net_name:
-                    connected_nets.append(net_id)
-                    break
-
-        # If exactly 2 connected nets, create adjacency
-        if len(connected_nets) == 2:
-            net_a, net_b = connected_nets
-            if net_a not in net_adjacency:
-                net_adjacency[net_a] = []
-            if net_b not in net_adjacency:
-                net_adjacency[net_b] = []
-            net_adjacency[net_a].append((ref, net_b))
-            net_adjacency[net_b].append((ref, net_a))
-
-    # Also add regulator connections (output -> input)
+    # Source terminals; a regulator with an input continues the search.
+    sources_at: Dict[str, List[str]] = {}
+    continues: Set[Tuple[str, str]] = set()       # (source ref, output net)
     for ref, comp in components.items():
         if comp.role != ComponentRole.POWER_SOURCE:
             continue
+        outs, ins = _regulator_terminals(comp)
+        for out in outs:
+            sources_at.setdefault(out, []).append(ref)
+            if ins:
+                continues.add((ref, out))
+                for inn in ins:
+                    if inn != out:
+                        link(ref, out, inn)
 
-        output_nets = []
-        input_nets = []
-
-        for pad_num, pintype in comp.pin_types.items():
-            net_name = comp.net_connections.get(pad_num, "")
-            if 'unconnected' in net_name.lower():
-                continue
-
-            pinfunction = comp.pin_functions.get(pad_num, "").upper()
-
-            # Find net_id
-            net_id = None
-            for nid, net in pcb_data.nets.items():
-                if net.name == net_name:
-                    net_id = nid
-                    break
-
-            if net_id is None:
-                continue
-
-            if pintype == 'power_out' or pinfunction in ('OUT', 'VOUT', 'OUTPUT'):
-                output_nets.append(net_id)
-            elif pinfunction in ('IN', 'VIN', 'INPUT'):
-                input_nets.append(net_id)
-
-        # Connect outputs to inputs
-        for out_net in output_nets:
-            for in_net in input_nets:
-                if out_net != in_net:
-                    if out_net not in net_adjacency:
-                        net_adjacency[out_net] = []
-                    if in_net not in net_adjacency:
-                        net_adjacency[in_net] = []
-                    net_adjacency[out_net].append((ref, in_net))
-                    net_adjacency[in_net].append((ref, out_net))
-
-    # Find sink nets (power_in pins on sink components)
-    sink_nets: Dict[int, str] = {}  # net_id -> sink_component_ref
     for ref, comp in components.items():
         if comp.role != ComponentRole.CURRENT_SINK:
             continue
-        for pad_num, pintype in comp.pin_types.items():
-            if pintype == 'power_in':
-                net_name = comp.net_connections.get(pad_num, "")
-                for net_id, net in pcb_data.nets.items():
-                    if net.name == net_name:
-                        sink_nets[net_id] = ref
-                        break
-
-    # Find source nets (power_out pins on source components, or power input connectors)
-    source_nets: Dict[int, str] = {}  # net_id -> source_component_ref
-    for ref, comp in components.items():
-        if comp.role != ComponentRole.POWER_SOURCE:
-            continue
-        for pad_num, pintype in comp.pin_types.items():
-            net_name = comp.net_connections.get(pad_num, "")
-            for net_id, net in pcb_data.nets.items():
-                if net.name == net_name:
-                    # For regulators, the output is the source
-                    # For power inputs (connectors), all connected nets could be sources
-                    pinfunction = comp.pin_functions.get(pad_num, "").upper()
-                    if pintype == 'power_out' or pinfunction in ('OUT', 'VOUT', 'OUTPUT'):
-                        source_nets[net_id] = ref
-                    elif ref.startswith(('J', 'P', 'TB')):
-                        # Power input connector - could be a source
-                        source_nets[net_id] = ref
-                    break
-
-    # BFS from each sink to find paths to sources
-    for sink_net_id, sink_ref in sink_nets.items():
-        visited = {sink_net_id: (None, None)}  # net_id -> (prev_net_id, via_component)
-        queue = [sink_net_id]
-
-        while queue:
-            net_id = queue.pop(0)
-
-            # Check if we reached a source
-            if net_id in source_nets and net_id != sink_net_id:
-                # Reconstruct path
-                path_nets = []
-                path_components = []
-                current = net_id
-                while current is not None:
-                    path_nets.append(pcb_data.nets[current].name)
-                    prev_net, via_comp = visited[current]
-                    if via_comp:
-                        path_components.append(via_comp)
-                    current = prev_net
-
-                path_nets.reverse()
-                path_components.reverse()
-
-                # Estimate current based on sink
-                sink_comp = components.get(sink_ref)
-                current_ma = sink_comp.current_rating_ma if sink_comp and sink_comp.current_rating_ma else 100.0
-
+        current_ma = comp.current_rating_ma or 100.0
+        rails, _ = _supply_nets(comp)
+        for start in rails:
+            visited = {start: (None, None)}
+            queue = [start]
+            roots = []               # (net, source ref): one path each
+            fallback = None          # first net entered through a regulator
+            while queue:
+                net = queue.pop(0)
+                here = [r for r in sources_at.get(net, ()) if (r, net) not in continues]
+                if here:
+                    roots.extend((net, r) for r in sorted(here))
+                    continue         # nothing upstream of a root is this load's
+                for via, other in upstream.get(net, ()):
+                    if other in visited:
+                        continue
+                    visited[other] = (net, via)
+                    queue.append(other)
+                    if (fallback is None and
+                            components[via].role == ComponentRole.POWER_SOURCE):
+                        fallback = (other, via)
+            if not roots and fallback is not None:
+                roots = [fallback]
+            for end, source_ref in roots:
+                nets_in, via_in = [], []
+                cur = end
+                while cur is not None:
+                    nets_in.append(cur)
+                    prev, via = visited[cur]
+                    if via:
+                        via_in.append(via)
+                    cur = prev
                 paths.append(PowerPath(
-                    source_component=source_nets[net_id],
-                    sink_component=sink_ref,
-                    nets_in_path=path_nets,
-                    components_in_path=path_components,
-                    estimated_current_ma=current_ma
-                ))
-
-            # Expand through pass-through components
-            if net_id in net_adjacency:
-                for comp_ref, other_net in net_adjacency[net_id]:
-                    if other_net not in visited:
-                        visited[other_net] = (net_id, comp_ref)
-                        queue.append(other_net)
-
+                    source_component=source_ref,
+                    sink_component=ref,
+                    nets_in_path=nets_in,
+                    components_in_path=via_in,
+                    estimated_current_ma=current_ma))
     return paths
+
+
+def classified_parts_without_nets(components: Dict[str, ComponentInfo]
+                                  ) -> List[str]:
+    """Refs the agent classified (``classify_component``) that reach no net (#1378).
+
+    A sink or source with no supply or ground net, or a pass-through joining
+    fewer than two non-ground nets, contributes nothing to a width; the cure
+    is to name its nets (``classify_component(..., supply_nets=[...])``).
+    """
+    lost = []
+    for ref, comp in components.items():
+        if not comp.classified:
+            continue
+        if comp.role == ComponentRole.CURRENT_SINK:
+            rails, grounds = _supply_nets(comp)
+            if not rails and not grounds:
+                lost.append(ref)
+        elif comp.role == ComponentRole.POWER_SOURCE:
+            if not _regulator_terminals(comp)[0]:
+                lost.append(ref)
+        elif comp.role == ComponentRole.PASS_THROUGH:
+            nets = {n for n in comp.net_connections.values()
+                    if _is_connected(n) and not is_ground_net_name(n)}
+            if len(nets) < 2:
+                lost.append(ref)
+    return lost
 
 
 def get_power_net_recommendations(pcb_data: PCBData,
@@ -383,6 +463,12 @@ def get_power_net_recommendations(pcb_data: PCBData,
                                   min_current_ma: float = 50.0) -> Dict[str, float]:
     """
     Get recommended track widths for power nets based on traced paths.
+
+    A sink's ``current_rating_ma`` is its total supply current and is charged
+    ONCE to every supply net it draws on, whether through a traced path or
+    straight from its pins (#1377). A source's rating is a limit, not a load,
+    and is never added. Each ground net carries the sinks that have a pad on
+    it, once each.
 
     Args:
         pcb_data: Parsed PCB data
@@ -393,50 +479,32 @@ def get_power_net_recommendations(pcb_data: PCBData,
     Returns:
         Dict of net_name -> recommended_width_mm
     """
-    # Accumulate current on each net
+    lost = classified_parts_without_nets(components)
+    if lost:
+        warnings.warn(
+            f"classified part(s) {', '.join(sorted(lost))} reach no power net, so "
+            f"they contribute no width; name their nets with "
+            f"classify_component(..., supply_nets=[...])", stacklevel=2)
+
     net_currents: Dict[str, float] = {}
+    charged: Set[Tuple[str, str]] = set()          # (sink ref, net)
+
+    def charge(ref: str, net: str, ma: float) -> None:
+        if (ref, net) not in charged:
+            charged.add((ref, net))
+            net_currents[net] = net_currents.get(net, 0.0) + ma
 
     for path in paths:
         for net_name in path.nets_in_path:
-            if net_name not in net_currents:
-                net_currents[net_name] = 0.0
-            net_currents[net_name] += path.estimated_current_ma
-
-    # Also add direct power connections (power_in pins on sinks, power_out on sources)
-    # These may not appear in traced paths if there's no pass-through component
-    # Also detect mislabeled power pins by their function name.
-    #
-    # The table and the predicate MOVED to `net_queries` (#705) and are imported
-    # at module scope. They lived here as a closure and a local tuple, which
-    # made them unreachable to every other caller -- so the placement side had
-    # no pin-level power predicate at all, and issue #705's channel 2 would have
-    # had to copy them. This module's public behaviour is unchanged: the only
-    # semantic difference is that a compound pintype is token-split rather than
-    # compared whole, and the tracked corpus carries no compound spelling except
-    # `X+no_connect`, on which the two forms agree.
+            charge(path.sink_component, net_name, path.estimated_current_ma)
 
     for ref, comp in components.items():
-        if comp.role == ComponentRole.CURRENT_SINK:
-            current = comp.current_rating_ma or 100.0
-            for pad_num, pintype in comp.pin_types.items():
-                pinfunction = comp.pin_functions.get(pad_num, "")
-                if is_power_pin(pinfunction, pintype):
-                    net_name = comp.net_connections.get(pad_num, "")
-                    if net_name and 'unconnected' not in net_name.lower():
-                        if net_name not in net_currents:
-                            net_currents[net_name] = 0.0
-                        net_currents[net_name] += current
-
-        elif comp.role == ComponentRole.POWER_SOURCE:
-            current = comp.current_rating_ma or 100.0
-            for pad_num, pintype in comp.pin_types.items():
-                pinfunction = comp.pin_functions.get(pad_num, "")
-                if pintype == 'power_out' or is_power_pin(pinfunction, pintype):
-                    net_name = comp.net_connections.get(pad_num, "")
-                    if net_name and 'unconnected' not in net_name.lower():
-                        if net_name not in net_currents:
-                            net_currents[net_name] = 0.0
-                        net_currents[net_name] += current
+        if comp.role != ComponentRole.CURRENT_SINK:
+            continue
+        current = comp.current_rating_ma or 100.0
+        rails, grounds = _supply_nets(comp)
+        for net_name in rails + grounds:
+            charge(ref, net_name, current)
 
     # Convert current to track width from the IPC-2221 width table (see
     # docs/power-nets.md) with a 2x safety factor. That table is IPC-2221's, not
@@ -464,28 +532,9 @@ def get_power_net_recommendations(pcb_data: PCBData,
         else:
             return 3.00   # IPC: 1.50 -> 2x = 3.00; consider using planes
 
-    # Generate recommendations
-    recommendations = {}
-    for net_name, current_ma in net_currents.items():
-        if current_ma >= min_current_ma:
-            recommendations[net_name] = current_to_width(current_ma)
-
-    # Calculate total return current for GND nets based on all current sinks
-    total_sink_current = sum(
-        comp.current_rating_ma or 100.0
-        for comp in components.values()
-        if comp.role == ComponentRole.CURRENT_SINK
-    )
-
-    # Add ground nets sized for return current
-    for net_id, net in pcb_data.nets.items():
-        if 'GND' in net.name.upper():
-            # Use total sink current for main GND, or existing calculated current if higher
-            gnd_current = max(net_currents.get(net.name, 0), total_sink_current)
-            if gnd_current >= min_current_ma:
-                recommendations[net.name] = current_to_width(gnd_current)
-
-    return recommendations
+    return {net_name: current_to_width(current_ma)
+            for net_name, current_ma in net_currents.items()
+            if current_ma >= min_current_ma}
 
 
 def format_analysis_report(pcb_data: PCBData,
@@ -523,6 +572,12 @@ def format_analysis_report(pcb_data: PCBData,
         if comp.role == ComponentRole.CURRENT_SINK:
             current_str = f"{comp.current_rating_ma}mA" if comp.current_rating_ma else "unknown"
             lines.append(f"  {comp.ref}: {comp.value} ({current_str})")
+
+    lost = classified_parts_without_nets(components)
+    if lost:
+        lines.append("\n## Classified parts that reach no power net\n")
+        lines.append(f"  {', '.join(sorted(lost))} -- they contribute no width; "
+                     f"name their nets with classify_component(..., supply_nets=[...])")
 
     # Power paths
     lines.append("\n## Traced Power Paths\n")

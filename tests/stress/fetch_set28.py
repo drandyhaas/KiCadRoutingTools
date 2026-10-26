@@ -39,6 +39,17 @@ The repo publishes it placed but not finished ("Routing: In Progress"):
 its copper leaves 27 nets unrouted and 17 broken, so like mez_rx its
 reference is not a human benchmark -- a partial one rather than an empty one.
 
+Twelve boards joined 2026-10-25 from Infinionist's placement A/B list
+(KRT discussion #118): timiq_rf, reform_kintex_som, reform_rk3588_som,
+prusa_buddy_mini, mdior, olimex_rp2350pc, olimex_gatemate_a1_evb,
+prusa_cw1_controller, vesc_bldc4, yardstickone, tillitis_tkey and
+pocketbeagle -- shipping products and lab instruments, 4 to 8 layers,
+50 to 467 footprints. Every raw_url is pinned to the commit they ran.
+Five (timiq_rf, vesc_bldc4: KiCad 4; prusa_buddy_mini, prusa_cw1_controller,
+pocketbeagle: KiCad 5) predate the format validate_candidate admits and
+ship no .kicad_pro; prep_set2's pcbnew load normalises them, and they
+were validated on a kicad-cli-upgraded copy.
+
 Downloads each board and its sibling project files -- the .kicad_pro (DRC floor,
 #441) and the .kicad_dru (per-layer clearance rules, #498) --
 into $STRESS_DIR/sources/github_set28/. After fetching, run `bash prep_set28.sh`

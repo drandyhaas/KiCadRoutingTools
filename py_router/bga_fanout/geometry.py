@@ -20,6 +20,28 @@ from bga_fanout.constants import POSITION_TOLERANCE
 MOVABLE_PASSIVE_PREFIXES = ('C', 'R', 'FB')
 
 
+def endpoint_on_pad(pad, x: float, y: float, tol: float) -> bool:
+    """True when a track end at (x, y) lands on `pad`'s copper (#1411).
+
+    "Fanned" means a same-net track end sits in the ball's copper, not
+    within a few microns of its centre: a route laid by another step may
+    start anywhere inside the ball (0.15-0.2 mm off-centre is common), and
+    a centre-only test calls that net unfanned, re-escapes it and drops its
+    existing copper from the obstacle grid. `tol` keeps the old centre
+    window as a floor so a pad smaller than it still matches."""
+    dx = x - pad.global_x
+    dy = y - pad.global_y
+    if abs(dx) < tol and abs(dy) < tol:
+        return True
+    if (getattr(pad, 'shape', '') or '') == 'circle':
+        return math.hypot(dx, dy) <= min(pad.size_x, pad.size_y) / 2.0
+    rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rr:
+        c, s = math.cos(math.radians(rr)), math.sin(math.radians(rr))
+        dx, dy = dx * c + dy * s, -dx * s + dy * c
+    return abs(dx) <= pad.size_x / 2.0 and abs(dy) <= pad.size_y / 2.0
+
+
 def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
     """Copper pads of foreign footprints that NO later pipeline step will move:
     locked footprints, and any part place_fanout_clearance won't relocate

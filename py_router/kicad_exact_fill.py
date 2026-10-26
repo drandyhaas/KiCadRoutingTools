@@ -439,6 +439,10 @@ class RefillStatus(NamedTuple):
     reason: str
     detail: str = ''
     elapsed_s: Optional[float] = None
+    #: `write_filled_board` only (#1367): the record of what the re-save did to
+    #: the board's file format and via protection, or None when it did not
+    #: change the format (see `fab_notes.reconcile_resaved_via_protection`).
+    via_protection: Optional[dict] = None
 
     @property
     def ok(self) -> bool:
@@ -624,8 +628,17 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
 def write_filled_board(board_file: str, dst_file: str,
                        timeout: int = EXACT_FILL_TIMEOUT,
                        verbose: bool = False,
-                       project_from: str = None) -> RefillStatus:
+                       project_from: str = None,
+                       baseline_file: str = None) -> RefillStatus:
     """Write a FILLED copy of `board_file` to `dst_file` (#910).
+
+    The save is KiCad's, so a board older than KiCad 10 comes back in KiCad
+    10's file format, with an explicit `(capping no) (filling no)` on every
+    via. Those tokens are undone and the vias in a pad or paste opening are
+    declared Type VII (#1367, `fab_notes.reconcile_resaved_via_protection`);
+    `baseline_file` is the board BEFORE the routing that made `board_file`,
+    whose own vias under solder keep what it gave them. What was done rides
+    in the returned status's `via_protection`.
 
     The routed deliverable carries zone OUTLINES with no `(filled_polygon ...)`
     -- `kicad_writer` writes the `(fill yes ...)` properties and nothing in the
@@ -681,6 +694,18 @@ def write_filled_board(board_file: str, dst_file: str,
             return RefillStatus('refill_failed',
                                 f'rc={r.returncode} {_why}'.strip(),
                                 time.monotonic() - _t0)
+        # The re-save is KiCad 10's: undo the migration's explicit via tokens
+        # and declare Type VII where it is owed (#1367). Done on the temp
+        # copy, so a failure here never touches the destination.
+        via_rec = None
+        try:
+            from fab_notes import reconcile_resaved_via_protection
+            via_rec = reconcile_resaved_via_protection(
+                staged, filled, baseline_file, quiet=not verbose)
+        except Exception as e:  # noqa: BLE001 -- the fill itself succeeded
+            if verbose:
+                print(f"  (via protection after the re-save not reconciled: "
+                      f"{type(e).__name__}: {e})")
         # Written only once the refill succeeded, so a failure never leaves a
         # half-written deliverable behind.
         shutil.copyfile(filled, dst_file)
@@ -696,7 +721,7 @@ def write_filled_board(board_file: str, dst_file: str,
                             time.monotonic() - _t0)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-    return RefillStatus('ok', '', time.monotonic() - _t0)
+    return RefillStatus('ok', '', time.monotonic() - _t0, via_rec)
 
 
 def parse_filled_islands(text: str

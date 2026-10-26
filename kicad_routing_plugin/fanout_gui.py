@@ -2311,6 +2311,12 @@ class FanoutTab(wx.Panel):
                     print(f"  {_line}")
             except Exception as _e:
                 print(f"(live DRC floor update skipped: {_e})")
+        elif not _fcfg.get('fix_drc_settings', True):
+            # The tool records (pour-served balls, protected nets) are not DRC
+            # floors: an unchecked box must not void them (#1415).
+            from .gui_utils import persist_live_tool_records
+            persist_live_tool_records(
+                board, _fcfg.get('same_net_pad_clearance'))
 
         # Refresh the view
         pcbnew.Refresh()

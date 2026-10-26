@@ -173,14 +173,56 @@ COUPLED_GAP_FACTOR = 1.5
 ALONGSIDE_GAP_MM = 1.0
 
 
+#: #1429: the least share of a pair's length its coupled run must cover for
+#: the pair to read COUPLED, on top of the one-pitch floor
+#: (`coupled_floor_mm`). The pitch alone let a sliver pass on any length: a
+#: 21.5 mm pair carrying 0.5 mm coupled read 'coupled', kept its routed
+#: credit and its #521 protection. 10% catches such slivers and spares a short
+#: pair whose fan-in from far-apart pads is most of its length (a USB pair
+#: coupled over a quarter of it); over the corpus's routed pairs it reads 62 of
+#: 1008 that pass the pitch as uncoupled. A hybrid's coupled middle (1.4 mm of
+#: a 3 mm pair) is well above it.
+COUPLED_SHARE_FLOOR = 0.10
+
+
 def coupled_floor_mm(track_width: float, gap: float) -> float:
     """#1303: the least coupled run that makes a pair's copper COUPLED: one
     pair pitch (track width + gap). Below it the "coupling" is where two legs
     happen to pass each other -- a corner sliver of 2 um to 0.15 mm on
-    recorded runs -- not a run the router laid coupled; at or above it the
-    pair keeps its credit however short the run, because a hybrid's coupled
-    middle can be 1.4 mm of a 3 mm pair and is still the coupled route."""
+    recorded runs -- not a run the router laid coupled. It is a floor, not
+    the whole test: the run must also cover COUPLED_SHARE_FLOOR of the pair's
+    length (#1429, `meets_coupled_floor`)."""
     return (track_width or 0.0) + (gap or 0.0)
+
+
+def pair_length_mm(rec: Dict) -> float:
+    """#1429: a pair's length for the coupled share: the longer member's
+    TRACK length, max(length_p_mm, length_n_mm). It is the length KiCad's
+    coupling test measures `coupled_mm` against -- its diff_pair_uncoupled
+    "actual" is max(P, N) - coupled, tracks only, no via barrel or pad --
+    so coupled + uncoupled is this length, and the share is the coupled
+    part of the same copper."""
+    return max(rec.get('length_p_mm') or 0.0, rec.get('length_n_mm') or 0.0)
+
+
+def coupled_share(coupled_mm: float, length_mm: float) -> float:
+    """#1429: coupled_mm / length_mm, capped at 1 (KiCad's measure counts a
+    span once per facing partner segment, so the sum can exceed the length);
+    0 for a pair with no track length."""
+    if not length_mm or length_mm <= 0:
+        return 0.0
+    return min(1.0, coupled_mm / length_mm)
+
+
+def meets_coupled_floor(coupled_mm: float, length_mm: float,
+                        floor_mm: float) -> bool:
+    """#1429: True when `coupled_mm` of a pair `length_mm` long is a coupled
+    run: at least one pitch (`floor_mm`, `coupled_floor_mm`) AND at least
+    COUPLED_SHARE_FLOOR of the length. The single test behind both
+    `coupled` and `alongside` in `measure_pair_copper`."""
+    eps = 1e-9
+    return (coupled_mm >= floor_mm - eps
+            and coupled_mm >= COUPLED_SHARE_FLOOR * length_mm - eps)
 
 
 def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
@@ -199,11 +241,14 @@ def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
     {pair_name: record} for every pair with a coupled-route result on both
     members: `net_queries.diff_pair_copper` measured with the gap window
     (none, COUPLED_GAP_FACTOR x gap), plus 'gap_mm', 'gap_window_mm',
-    'coupled_floor_mm' and 'coupled' (coupled_mm >= the floor).
+    'coupled_floor_mm', 'coupled_share' (coupled_mm over `pair_length_mm`),
+    'coupled_share_floor' and 'coupled' (`meets_coupled_floor`: coupled_mm
+    at least one pitch AND at least COUPLED_SHARE_FLOOR of the length, #1429).
 
     #1361: a record that is not coupled also carries 'alongside_mm' (the same
     KiCad measure with the window (none, ALONGSIDE_GAP_MM)),
-    'alongside_window_mm' and 'alongside' (alongside_mm >= the same floor).
+    'alongside_window_mm', 'alongside_share' and 'alongside' (the same two
+    floors, #1429: a sliver alongside is no more a pair than a sliver coupled).
     It reports nothing -- the outcome stays 'uncoupled' -- it is what #521
     protection reads (`route_diff.coupled_protection_pairs`)."""
     from net_queries import diff_pair_copper, diff_pair_coupling, CopperIndex
@@ -228,12 +273,16 @@ def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
             print(f"{RED}#1303: could not measure {pair_name}'s copper "
                   f"({type(exc).__name__}: {exc}){RESET}")
             out[pair_name] = {'error': f'{type(exc).__name__}: {exc}',
-                              'coupled': True, 'skew_mm': None, 'gap_mm': gap}
+                              'coupled': True, 'coupled_share': None,
+                              'skew_mm': None, 'gap_mm': gap}
             continue
         floor = coupled_floor_mm(width, gap)
+        length = pair_length_mm(rec)
         rec.update(gap_mm=gap, gap_window_mm=[None, None if hi is None else round(hi, 4)],
                    coupled_floor_mm=round(floor, 4),
-                   coupled=rec['coupled_mm'] >= floor - 1e-9)
+                   coupled_share=round(coupled_share(rec['coupled_mm'], length), 4),
+                   coupled_share_floor=COUPLED_SHARE_FLOOR,
+                   coupled=meets_coupled_floor(rec['coupled_mm'], length, floor))
         if not rec['coupled']:
             try:
                 along = diff_pair_coupling(pcb_data, pair.p_net_id, pair.n_net_id,
@@ -247,7 +296,8 @@ def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
                 along = 0.0
             rec.update(alongside_mm=round(along, 4),
                        alongside_window_mm=[None, ALONGSIDE_GAP_MM],
-                       alongside=along >= floor - 1e-9)
+                       alongside_share=round(coupled_share(along, length), 4),
+                       alongside=meets_coupled_floor(along, length, floor))
         out[pair_name] = rec
     return out
 

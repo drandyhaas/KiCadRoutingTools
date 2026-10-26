@@ -186,11 +186,38 @@ def round_board():
     return _HDR + board + '\n' + ur + '\n)\n', {'U_R': False}
 
 
+def local_window_board(off=False, rot=None):
+    """#1409: a window BESIDE its part's pads (it encloses none of them) is
+    carried wherever the part sits -- on the board, or 30 mm off it, turned
+    or not. `U_RING` draws a ring around the whole board; it encloses its own
+    pads and so stays structural."""
+    x0, y0, x1, y1 = BOARD_RECT
+    pads = ('\n    (pad "1" smd rect (at -1.5 0) (size 0.6 0.6) '
+            '(layers "F.Cu") (uuid "w1"))'
+            '\n    (pad "2" smd rect (at 1.5 0) (size 0.6 0.6) '
+            '(layers "F.Cu") (uuid "w2"))')
+    ring = '\n'.join(
+        f'    (fp_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) {_STROKE} '
+        f'(layer "Edge.Cuts"))'
+        for a, b in (((-25, -20), (25, -20)), ((25, -20), (25, 20)),
+                     ((25, 20), (-25, 20)), ((-25, 20), (-25, -20))))
+    parts = [_edge_rect(x0, y0, x1, y1, 'edge'),
+             _fp('U_WIN', 10.0, 40.0 if off else 10.0,
+                 pads + '\n' + _window(0.8), rot=rot),
+             _fp('U_RING', 20.0, 15.0, _pads() + '\n' + ring)]
+    return _HDR + '\n'.join(parts) + '\n)\n', {'U_WIN': False, 'U_RING': True}
+
+
 REVIEW_BOARDS = {
     'panelised (open path inside the panel frame)': panel_board,
     'rectangle spelled with 4 segments': lambda: rect_board(4),
     'rectangle spelled with 8 segments': lambda: rect_board(8),
     'round window on a round board': round_board,
+    'window beside its pads, part on the board': local_window_board,
+    'window beside its pads, part off the board':
+        lambda: local_window_board(off=True),
+    'window beside its pads, part off the board and turned':
+        lambda: local_window_board(off=True, rot=37.5),
 }
 
 

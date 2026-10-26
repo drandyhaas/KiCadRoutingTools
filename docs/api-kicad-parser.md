@@ -175,12 +175,12 @@ pads that `net_id`'s copper may ignore because a footprint's
 | `drill` | float | Drill diameter (0 for SMD, > 0 for through-hole). Oval/slot drills (`(drill oval w h)`) report `max(w, h)` so they keep `> 0` / through-hole semantics. Read in exponent form too: `(drill 1e-06)` is 1 nm, not 1 mm. |
 | `drill_w`, `drill_h` | float | A slot drill's size in the PAD frame (`0` = round). Use `pad_drill_capsule` / `pad_drill_circles` ([helpers](#pad-and-copper-helpers)) for the real slot geometry, not `drill` |
 | `hole_x`, `hole_y` | Optional[float] | The drill position when the pad's copper is OFFSET from it (`(drill (offset x y))`, castellated-module paddles); `None` = the hole is at `global_x`/`global_y`. `global_x`/`global_y` is always the COPPER centre |
-| `polygons` | Optional[List[List[Tuple]]] | A custom pad's real copper outline(s), GLOBAL mm (see below); `None` for ordinary pads, which `size_x`/`size_y` model exactly |
+| `polygons` | Optional[List[List[Tuple]]] | A custom pad's real copper outline(s), or a chamfered-rect pad's outline, GLOBAL mm (see below); `None` for ordinary pads, which `size_x`/`size_y` model exactly |
 | `pinfunction` | str | Pin function from the schematic (`'TX'`, `'~RESET'`) |
 | `pintype` | str | Pin electrical type (`'passive'`, `'input'`, `'power_in'`) |
 | `pad_type` | str | Pad kind: `'smd'`, `'thru_hole'`, `'np_thru_hole'`, `'connect'`. NPTH pads carry **no copper** (their size is just the mask opening, even when `layers` lists `*.Cu`), so copper-clearance checks skip them; only their drill hole matters. |
-| `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5) |
-| `geometry_approximations` | Tuple[str, ...] | Shape variants simplified by the parser, currently chamfered pads and per-layer padstacks. Both text and live-board paths disclose them. An empty tuple does not certify arbitrary custom geometry; exactness still depends on the consumer's supported shapes. Placement edge grading retains approximate findings but marks these variants unmeasured. |
+| `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5); on a chamfered-rect pad, the rounding of its corners that are not chamfered |
+| `geometry_approximations` | Tuple[str, ...] | Shape variants simplified by the parser, currently chamfered pads (whose outline is in `polygons`, but whose box is still what placement's edge grade and a grown paste opening read) and per-layer padstacks. Both text and live-board paths disclose them. An empty tuple does not certify arbitrary custom geometry; exactness still depends on the consumer's supported shapes. Placement edge grading retains approximate findings but marks these variants unmeasured. |
 | `rect_rotation` | float | Residual rectangle tilt in the global frame, in (-90, 90]. `0` for axis-aligned pads (the common case); non-zero only for pads on non-orthogonal angles. |
 | `local_clearance` | float | The pad's **resolved** clearance override in mm (issue #326): its own `(clearance …)` token, else the footprint-level override, else `0` (= use the global/netclass clearance). KiCad enforces `max(the two items' clearances)` per pair; the router's obstacle stamps and `check_drc` honor this the same way. Negative (shrinking) overrides clamp to `0`. |
 | `castellated` | bool | KiCad's `(property pad_prop_castellated)`: a deliberate half-hole pad **on** the board outline. Set by both parse paths. The routing mains run a castellated-landing retract post-pass that pulls track ends landing inside such a pad's edge-clearance zone back to the pad's inner reach (`pcb_modification.retract_castellated_landings`). |
@@ -215,6 +215,22 @@ copper's own box `(x0, y0, x1, y1)` about `global_x`/`global_y`, board frame
 5.0 x 4.6 to one side); None otherwise. Both parse paths set it, from the same
 points as the box (text) and from pcbnew's effective shape. Placement reads it
 through `legality.pad_copper_box`; routing reads `polygons`.
+
+A **chamfered-rect** pad -- KiCad's `roundrect` (or `rect`) with
+`(chamfer <corners>)` and `(chamfer_ratio r)`, which KiCad's Eagle importer
+writes for octagon pads -- carries its outline in `polygons` too (#1450), so
+the cut corners are not copper to the obstacle map, `check_drc`,
+`check_connected` and `check_pads`. Each named corner (`top_left`,
+`top_right`, `bottom_left`, `bottom_right`, in the pad's own frame, which KiCad
+mirrors when it flips a footprint) is cut by `r * min(w, h)` along each side;
+every other corner is rounded by `roundrect_rratio * min(w, h)` (0.25 when the
+file names none, as pcbnew loads it), and the outline is turned by the pad's
+absolute angle about the copper centre. The text parser builds it with
+`chamfered_rect_polygon`; `build_pcb_data_from_board` takes pcbnew's effective
+polygon, and the two agree to within pcbnew's arc error. `shape` reads
+`'roundrect'` and `size_x`/`size_y` stay the pad's box. A pad with a per-layer
+padstack keeps its box. A paste opening with a positive margin is the grown
+box (a superset); at zero or a negative margin it is the copper outline.
 
 ### `Segment`
 
@@ -293,7 +309,7 @@ docs).
 | `sheet_name`, `sheet_file` | str | The schematic sheet's NAME and FILE as the file spells them (#1211): KiCad 8+ header tokens `(sheetname "/CH1/")` / `(sheetfile "strip.kicad_sch")`, or KiCad 6/7's `Sheetname` / `Sheetfile` properties (KiCad 6 dev files spell them `Sheet name` / `Sheet file`; either property counts only up to file version `SHEET_PROPERTIES_MAX_VERSION` (20230619), where pcbnew stops reading it -- in a later file it is an ordinary user field) (the value is a path `"/CH1/"` on some boards, a bare name `"IO_Buffer_B"` on others; not normalised). Read from the block header only, escapes undone. `build_pcb_data_from_board` reads `FOOTPRINT.GetSheetname()` / `GetSheetfile()`, which return the same spelling for both forms (KiCad 10.0.0); `compare_pcb_data` diffs all three sheet fields, and `tests/gui_parity/test_1211_sheet_name_parity.py` pins the parity. `''` = the file names none |
 | `net_tie_groups` | List[List[str]] | Pad-number groups the footprint deliberately shorts (`(net_tie_pad_groups "1, 2")` — Kelvin shunts, net-ties). KiCad's clearance exemption between the grouped pads is **local**: a tied net's copper may contact the partner pad only where the contact lies on its own pad. Query per-net via `pcb.net_tie_exempt_pad_ids(net_id)`. |
 | `owns_edge_cuts` | bool | The footprint draws Edge.Cuts geometry of its own (`fp_line`/`fp_rect`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_curve` on that layer, issue #829). Its `(at x y rot)` therefore transforms part of the board outline. |
-| `owns_board_outline` | bool | ...and that geometry is **the board's own boundary** rather than a relief the part carries, so moving the footprint would resize the board (issue #829). A footprint is *carried* (this stays `False`, and it remains movable) only when its Edge.Cuts segments **close on themselves** — a window, slot or milled relief — **and** that shape lies inside the outline the board draws without it. An open path cannot be a cut-out, so it is always the boundary. crkbd draws 184 per-LED windows as carried geometry, and #628 measured that freezing such a part costs it every legal pose it has. **Movers gate on this field, never on `owns_edge_cuts`.** Computed by `kicad_parser.footprint_outline_owners` (text) and `footprint_outline_owners_from_pcbnew` (live board), which share the one decision function `classify_outline_owners`. |
+| `owns_board_outline` | bool | ...and that geometry is **the board's own boundary** rather than a relief the part carries, so moving the footprint would resize the board (issue #829). A footprint is *carried* (this stays `False`, and it remains movable) only when its Edge.Cuts segments **close on themselves** — a window, slot or milled relief — **and** either the footprint has pads and the shape **encloses none of them** (judged in the footprint's own frame, so the answer is the same wherever the part sits, on the board or off it; issue #1409), or the shape lies inside the outline the board draws without it. An open path cannot be a cut-out, so it is always the boundary. The first test reads which side of the ring the part's copper is on: a hole beside or under a part leaves its pads outside the ring, while a ring that IS the board's edge has the part's pads inside it (a castellated pad ON the ring counts as inside). A ring around one of its own pads (a plated slot) and a pad-less footprint's ring are judged only by the second test, at the part's current pose. crkbd draws 184 per-LED windows as carried geometry, and #628 measured that freezing such a part costs it every legal pose it has. **Movers gate on this field, never on `owns_edge_cuts`.** Computed by `kicad_parser.footprint_outline_owners` (text) and `footprint_outline_owners_from_pcbnew` (live board), which share the one decision function `classify_outline_owners`. |
 
 
 **Footprint copper** (issue #908). A footprint may draw copper of its own on
@@ -363,7 +379,7 @@ layers only.
 | `board_edge_contours` | List[List[Tuple]] | Inner Edge.Cuts contours that enclose pads (#505): not cutouts (that would put the pads off-board) but still milled edges, so copper keeps its edge clearance from them |
 | `min_clearance_used` | Optional[float] | The smallest copper clearance a routing step actually used this run (`None` until one records it); the routers fold it into the `.kicad_pro` DRC floor |
 | `stackup` | List[StackupLayer] | Physical stackup, top to bottom (empty if the board has none) |
-| `keepouts` | List[dict] | KiCad keepout rule areas (board-level AND footprint-owned): `{'polygon': [...], 'holes': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool, 'copper_pour_allowed': bool, 'in_footprint': bool, 'name': str}` (`name` is the area's `(name ...)`, `''` without one: a `.kicad_dru` area predicate names it) |
+| `keepouts` | List[dict] | KiCad keepout rule areas (board-level AND footprint-owned): `{'polygon': [...], 'holes': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool, 'copper_pour_allowed': bool, 'pads_allowed': bool, 'footprints_allowed': bool, 'in_footprint': bool, 'owner': str, 'name': str}` (`name` is the area's `(name ...)`, `''` without one: a `.kicad_dru` area predicate names it; `owner` is the key of the footprint a footprint-owned area sits in, `''` for a board-level one; a pad or footprint inside an area that forbids it is KiCad's `items_not_allowed`, graded by `legality.rule_area_item_findings`, #1451) |
 | `pad_to_paste_clearance`, `pad_to_paste_clearance_ratio` | float | The board-level paste margin and ratio from `(setup ...)`, the last term of a pad's paste-margin resolution (#962) |
 | `via_protection_setup` | Dict[str, str] | The board's via protection policy, `{token: inner}` for all five tokens (`tenting`, `covering`, `plugging`, `capping`, `filling`), canonicalised from KiCad 10's per-token form and the legacy `(tenting front back)` form; a token the board does not declare takes KiCad's factory value (#962) |
 
@@ -686,7 +702,7 @@ actually consumes: board info (layers, bounds, and the stackup layer by layer:
 name, type, thickness, epsilon_r, loss tangent), nets, duplicate references,
 footprint locks, sheet fields and net-tie groups, footprint and per-pad
 geometry (position, size, `rect_rotation`, `roundrect_rratio`,
-`local_clearance`, `zone_connection` (pad and footprint), drill, layers, and a custom pad's `polygons`, compared as
+`local_clearance`, `zone_connection` (pad and footprint), drill, layers, and a custom or chamfered pad's `polygons`, compared as
 the UNION each path describes -- pcbnew merges the primitives into one ring,
 the text parser keeps one per primitive -- by `_polygon_union_excess`, both
 ways), track and via geometry (matched as a multiset, not just counts; net 0

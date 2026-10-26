@@ -183,6 +183,10 @@ def _inflated_pad(pad, mx: float, my: float):
       margin. A positive margin grows the polygons. A negative one leaves them
       un-shrunk, which is a superset (a via can only be flagged more, never
       less), and the caller discloses it.
+    - chamfered rect (#1450), the other pad carrying `polygons`: a positive
+      margin is the grown box with its grown radius, without the outline, a
+      superset of KiCad's grown chamfer. At zero or a negative margin the
+      opening is the copper outline, un-shrunk (a superset, disclosed).
     """
     if getattr(pad, 'shape', '') == 'custom':
         polys = getattr(pad, 'polygons', None)
@@ -198,6 +202,8 @@ def _inflated_pad(pad, mx: float, my: float):
     if getattr(pad, 'shape', '') == 'circle':
         sy = sx
     changes = {'size_x': sx, 'size_y': sy}
+    if getattr(pad, 'polygons', None) and (mx > 0 or my > 0):
+        changes['polygons'] = None
     if getattr(pad, 'shape', '') == 'roundrect':
         r0 = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
         r1 = max(0.0, r0 + min(mx, my))
@@ -254,6 +260,8 @@ def pad_aperture(pad, fp, board_info, layer: str) -> Optional[PasteAperture]:
     approx = tuple(getattr(pad, 'geometry_approximations', ()) or ())
     if custom and mx < 0:
         approx = approx + ('custom pad paste reduction not applied (superset)',)
+    elif not custom and getattr(pad, 'polygons', None) and (mx < 0 or my < 0):
+        approx = approx + ('chamfered pad paste reduction not applied (superset)',)
     return PasteAperture(
         owner_ref=getattr(pad, 'component_ref', '') or '',
         layer=layer,

@@ -390,6 +390,10 @@ def main(argv=None):
     clearance = _floors['clearance']
     track = _floors['track_width']
     via = _floors['via_diameter']
+    # #1402: copper keeps the board's copper-to-edge floor from the outline,
+    # every cutout and a mouse-bite row's slots; the field walls them.
+    edge_clearance = list_nets.board_floor_knobs(
+        args.board, design_rules=dr)[1]
     try:
         net_clearances = list_nets.net_clearance_map_by_id(
             args.board, {i: n.name for i, n in pcb.nets.items()}, dr)
@@ -444,7 +448,7 @@ def main(argv=None):
             pcb, seed, net_name=args.net, net_id=net_id, layers=layers,
             view=view, track_mm=track, via_mm=via, base_clearance=clearance,
             net_clearances=net_clearances, step=args.step,
-            margin_mm=args.margin)
+            margin_mm=args.margin, edge_clearance=edge_clearance)
         # run-23: NO-TARGET at the default view means the net's other island
         # sits beyond --margin, NOT that the question is unanswerable -- and
         # the manual retry ladder measured badly (--margin 12 took 128s,
@@ -507,7 +511,7 @@ def main(argv=None):
                     layers=layers, view=[x0, y0, x1, y1], track_mm=track,
                     via_mm=via, base_clearance=clearance,
                     net_clearances=net_clearances, step=step2,
-                    margin_mm=args.margin)
+                    margin_mm=args.margin, edge_clearance=edge_clearance)
                 # The widened step grows with the ISLAND DISTANCE (span/1200),
                 # and nothing about that distance says the answer is still
                 # resolvable. A bottleneck is only resolved to +/- one step, so
@@ -640,7 +644,7 @@ def main(argv=None):
     else:
         print(f"board      {os.path.basename(args.board)}")
         print(f"knobs      clearance {clearance}mm, track {track}mm, "
-              f"via {via}mm ({source})")
+              f"via {via}mm ({source}), outline edge {edge_clearance:g}mm")
         print(r.format_text())
         # WHERE, beside how much. The number alone sent run 20 to two more
         # tools and a hand-assembled paragraph. Not on a wide-open result:

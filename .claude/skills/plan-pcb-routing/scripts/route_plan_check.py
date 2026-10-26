@@ -264,15 +264,36 @@ def r_diff_gap_not_below_clearance(p):
     return bad
 
 
+def _keeps_a_relief_pour(p, argv):
+    """True when this route_planes command's `--thermal-relief` REPLACES a
+    designer's relief pour (SKILL.md Step 3, "A pour the board already has",
+    #1329): the board (needs --board) already carries a thermal-connected
+    pour on a net the command pours. Without the board the claim cannot be
+    checked, so it is not credited (#1406)."""
+    if tool_of(argv) != 'route_planes.py' or p.board is None:
+        return False
+    pats = values(argv, '--nets')
+    return any(getattr(z, 'pad_connection', None) == 'thermal'
+               and any(fnmatch.fnmatchcase(z.net_name, pat) for pat in pats)
+               for z in getattr(p.board, 'zones', []) or [])
+
+
 def r_no_teardrops_or_thermal(p):
     """SKILL.md :1044 -- do not recommend `--add-teardrops` (7% of human
-    boards use them) and do not set `--thermal-relief`."""
+    boards use them) and do not set `--thermal-relief`, except to re-pour a
+    designer's thermal-relief pour and keep its relief (Step 3, #1329)."""
     bad = []
     for argv in p.argvs:
         for flag in ('--add-teardrops', '--thermal-relief'):
-            if flag in argv:
-                bad.append(f'{tool_of(argv)} passes {flag}, which the skill '
-                           f'says to leave alone')
+            if flag not in argv:
+                continue
+            if flag == '--thermal-relief' and _keeps_a_relief_pour(p, argv):
+                continue
+            bad.append(f'{tool_of(argv)} passes {flag}, which the skill '
+                       f'says to leave alone'
+                       + (' unless the pour it replaces is already a '
+                          'thermal-relief pour (pass --board to show it)'
+                          if flag == '--thermal-relief' else ''))
     return bad
 
 

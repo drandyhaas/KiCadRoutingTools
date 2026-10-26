@@ -32,12 +32,23 @@ Trust nothing it told you. Measure it yourself, from the repo root.
 4. **`full` mode, also:**
    - `python3 -X utf8 py_tools/board_score.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD> --json <RUN DIR>/verify_<N>_score.json`: blocking 0, unrouted 0, broken 0;
    - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD>`: DONE;
-   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD> --authored-from <INPUT BOARD>`: **report it, not gating**, and name any floor it lists;
+   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD> --authored-from <INPUT BOARD>`: **report it, not gating**, and name any floor it lists. (Without `--authored-from` check_complete reads the floors against the project's recorded `fab_floor_origin` and DISCLOSES copper below them in its reason, without changing the verdict. The Board Setup minimums are the spec: pass `--min-track-width` / `--min-via-diameter` / `--min-via-drill` with them;)
    - `python3 -X utf8 py_router/check_connected.py <BOARD>`: no disconnected pads;
    - `python3 -X utf8 py_router/check_drc.py <BOARD> --baseline <INPUT BOARD> --clearance-margin 0.1`: no real violations.
 5. **Declared classes.** Name every `ungraded` component as UNEXAMINED. If the
    board declares a class (diff pairs, impedance, length groups, power widths,
-   high-speed nets) and its component is ungraded, the verdict is FAIL. For
+   high-speed nets) and its component is ungraded, the verdict is FAIL.
+   The tools also name declarations they found and report them without
+   blocking `check_complete`: a project diff-pair net class with no
+   `.kicad_dru` skew / diff_pair_uncoupled rule binding it is
+   `diff_pairs.declared` (write the rule with the budget the board needs,
+   e.g. `(rule "pair skew" (condition "A.NetClass == '<class>'") (constraint
+   skew (max 0.15mm) (within_diff_pairs)))` in `<BOARD>.kicad_dru`); the
+   project's `net_impedance` records and the power widths the run asked of
+   `route.py` are measured with no flag (`impedance.declared_failing`,
+   `net_widths.requested_under`). Read them and report them. A net-class
+   `track_width` is not a spec (the router discloses copper under it in
+   `design_rules`), so it is not an ungraded declaration. For
    declared diff pairs, length groups or high-speed nets, also run the
    `review-routed-board` skill's Steps 2–4 (length matching, return vias,
    impedance, diff pairs) and report them.

@@ -88,6 +88,9 @@ REGISTRY = {
     'persist_protected_nets': ['_write_drc_floors', 'update_live_drc_floors'],
     # #521 companion: per-net impedance declarations recorded the same way.
     'persist_impedance_specs': ['_write_drc_floors', 'update_live_drc_floors'],
+    # #1379 companion: the power-net widths a step was asked for, recorded so
+    # board_score measures the board against them (disclosed, not counted).
+    'persist_power_widths': ['_write_drc_floors', 'update_live_drc_floors'],
     # #678 companion: the balls a BGA fanout promised to serve by fill contact,
     # recorded in the sibling .kicad_pro so a later route step's plane finalize
     # can audit the promise. Same shape and same two GUI writeback sites as its
@@ -124,6 +127,11 @@ REGISTRY = {
     # function from the copper it applied.
     'plane_fix_kwargs': ['_apply_results_to_board_body'],
     'drawn_copper': ['plane_fix_kwargs'],
+    # #1369: route_diff writes the copper-to-hole floor it HELD, lowered only
+    # to what the copper it drew needs (off the files on the CLI). The
+    # Differential tab decides with the same two cores (step_copper_to_hole,
+    # held_hole_clearance) from the copper it applied.
+    'step_hole_clearance': ['_held_hole_clearance'],
     # #857: the end-of-run `Design rules [...]` line (and, CLI-only, the
     # --strict-sizes exit 3). route.py's line comes from inside batch_route on
     # both fronts; route_diff / route_planes / the fanouts print it from their
@@ -351,6 +359,7 @@ _TERMINAL = (ast.Return, ast.Raise, ast.Continue, ast.Break)
 SAME_SYMBOL_TWINS = {
     'persist_protected_nets',
     'persist_impedance_specs',
+    'persist_power_widths',
     'persist_pour_served_pads',
     'fanout_fix_kwargs',
     'plane_fix_kwargs',

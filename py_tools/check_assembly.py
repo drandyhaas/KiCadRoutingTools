@@ -36,7 +36,9 @@ with a member moved vs --baseline (see PAD ON ANOTHER PART'S COPPER, #1266;
 armed by --baseline like the courtyard gate) OR two of one part's own pads
 touching on two different real nets, KiCad's shorting_items (see OWN PADS
 TOUCHING, #1306; with --baseline a pair the baseline's footprint already had
-does not gate).
+does not gate) OR a pad or footprint inside a rule area that forbids it,
+an item the --baseline did not have (see IN A RULE AREA THAT FORBIDS IT,
+#1451; report-only without --baseline).
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -57,6 +59,8 @@ _GATE_EXEMPT_WHY = {
     'container_class': 'a board-sized container is involved',
     'intent_declared': "named in the intent's overlap_waivers",
     'silk_drawn': 'a silk-drawn body, which never gates (#896)',
+    'silk_enclosed': ('inside a CLOSED silk-drawn body: gates when a member '
+                      'moved vs --baseline (#1401)'),
 }
 
 
@@ -182,6 +186,7 @@ def main():
     # and never the containment gate, which `waivers` above also reach.
     courtyard_waivers = ()
     declared_keepouts = ()
+    declared_heights = None
     # #1255: the body-to-edge band the intent declares (None = nothing
     # declared, and the census reports against the derived default without
     # gating), and the refs whose edge it declares.
@@ -199,6 +204,8 @@ def main():
             # replaces the derived plug region here as it does in the seat
             # predicate.
             declared_keepouts = tuple(_intent.keepouts or ())
+            # #1443: declared covers and part heights, over the models'
+            declared_heights = _intent.height_declarations()
         except Exception as exc:
             print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
             return 2
@@ -213,7 +220,8 @@ def main():
     g = grade_body_overlap(pcb, clearance, intent_waivers=waivers,
                            pcb_file=args.board,
                            courtyard_severity=_cy_sev_arg,
-                           courtyard_waivers=courtyard_waivers)
+                           courtyard_waivers=courtyard_waivers,
+                           declared_heights=declared_heights)
     leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board,
                              declared_keepouts=declared_keepouts)
     # #697: name any pair graded ABOVE `clearance` and what raised it, or the
@@ -275,9 +283,12 @@ def main():
     dup_refs = dict(getattr(pcb, 'duplicate_references', None) or {})
 
     new_advisory = None
+    base_courtyard_keys = None
+    base_silk_keys = set()
     moved_refs = None
     base_pile = False
     own_pad_inherited = None
+    rule_inherited = None
     if args.baseline:
         try:
             base_pcb = parse_kicad_pcb(args.baseline)
@@ -307,8 +318,13 @@ def main():
                                     pcb_file=args.baseline,
                                     courtyard_severity=_cy_sev_arg)
             base_keys = {(q.a, q.b, q.kind) for q in gb['pairs']}
+            # #1401: the closed-silk enclosures the baseline already had
+            base_silk_keys = {frozenset((q.a, q.b))
+                              for q in gb.get('silk_enclosed_pairs') or ()}
         new_advisory = [q for q in g['advisory_pairs']
                         if (q.a, q.b, q.kind) not in base_keys]
+        base_courtyard_keys = {(a, b) for a, b, k in base_keys
+                               if k == 'courtyard'}
         # Refs whose POSE differs from the baseline: the courtyard gate's
         # currency (`legality.moved_refs` says why membership is not enough).
         # A function in legality, so a mover can ask the same question.
@@ -318,6 +334,9 @@ def main():
             (r['ref'], r['index_a'], r['index_b'])
             for r in legality.own_pad_channel(base_pcb)['own_pad_contact_rows']
             if r['short']}
+        # #1451: the rule-area items the baseline already had.
+        rule_inherited = {tuple(r) for r in legality.rule_area_item_findings(
+            base_pcb, args.baseline)['rule_area_items']}
 
     print(f"Assembly audit of {args.board} (clearance {clearance}):")
     if dup_refs:
@@ -340,6 +359,9 @@ def main():
           f"  courtyard_blocking {g['courtyard_blocking']}"
           + (f"  new-vs-baseline {len(new_advisory)}"
              if new_advisory is not None else ""))
+    if g.get('heights') and g['heights'] != 'no heights':
+        print(f"  heights (#1443): {g['heights']}; {g.get('height_clear', 0)} pair(s) "
+              f"clear, one part under the other's body")
     if base_pile:
         print(f"  baseline {args.baseline} is a pile: its overlaps are staging, "
               f"not a baseline (#1103), so every advisory pair counts as new")
@@ -347,8 +369,8 @@ def main():
     _body_src = g.get('body_sources') or {}
     for q in g['pairs']:
         label = ('BLOCKING' if q.kind == 'pad_intersection'
-                 else ('COURTYARD-BLOCKING'
-                       if q.kind == 'courtyard' and (q.a, q.b) in _cb_keys
+                 else (('HEIGHT-BLOCKING' if q.kind == 'height' else 'COURTYARD-BLOCKING')
+                       if q.kind in ('courtyard', 'height') and (q.a, q.b) in _cb_keys
                        else (f'waived:{q.waiver}' if q.waived
                              else 'advisory')))
         star = ''
@@ -689,6 +711,26 @@ def main():
     if g['courtyard_blocking'] and moved_refs is not None:
         courtyard_gating = legality.courtyard_gating(
             g['courtyard_blocking_pairs'], moved_refs)
+    # #1385: the project declares courtyards_overlap an ERROR, so KiCad reports
+    # every real courtyard pair whatever its size, including the sliver the
+    # run-23 floors keep advisory. A pair a MOVED member created gates; one the
+    # baseline already carried stays a disclosure.
+    courtyard_error_gating = []
+    if g.get('courtyard_error_pairs') and moved_refs is not None:
+        _have = {(q.a, q.b) for q in courtyard_gating}
+        courtyard_error_gating = [
+            q for q in legality.courtyard_error_gating(
+                g['courtyard_error_pairs'], moved_refs, base_courtyard_keys)
+            if (q.a, q.b) not in _have]
+        if courtyard_error_gating:
+            print(f"  COURTYARD ERRORS ({len(courtyard_error_gating)}): the "
+                  f"project sets courtyards_overlap to 'error', so KiCad's DRC "
+                  f"reports each pair below whatever its size; a member of "
+                  f"each moved vs the baseline -- they GATE")
+            for q in courtyard_error_gating:
+                print(f"    {q.a} <-> {q.b}  {q.area_mm2}mm2  depth "
+                      f"{q.depth_mm}mm  side {q.side}")
+            courtyard_gating = courtyard_gating + courtyard_error_gating
     if g['courtyard_blocking']:
         _gate_note = (
             f"{len(courtyard_gating)} of {g['courtyard_blocking']} GATE "
@@ -707,10 +749,37 @@ def main():
                 _who = [r for r in (q.a, q.b) if r in moved_refs]
                 _mv = ('  GATES (moved: ' + ' '.join(_who) + ')' if _who
                        else '  baseline\'s own (no member moved)')
-            print(f"    {q.a} <-> {q.b}  {q.area_mm2}mm2  depth "
-                  f"{q.depth_mm}mm  side {q.side}{_mv}")
+            _what = (f"under a raised body too low for it" if q.kind == 'height'
+                     else f"depth {q.depth_mm}mm")
+            print(f"    {q.a} <-> {q.b}  {q.area_mm2}mm2  {_what}  "
+                  f"side {q.side}{_mv}")
         print("    A deliberate overlap is accepted by naming the pair in the "
               "intent's `overlap_waivers`, where the acceptance is visible.")
+
+    # #1401: a part inside another's CLOSED silk-drawn body gates when a
+    # member MOVED vs the baseline, as courtyard contacts do; report-only
+    # without --baseline, and never for a pair the baseline already carried.
+    silk_gating = []
+    _silk_pairs = g.get('silk_enclosed_pairs') or []
+    if _silk_pairs:
+        if moved_refs is not None:
+            silk_gating = [q for q in _silk_pairs
+                           if (q.a in moved_refs or q.b in moved_refs)
+                           and frozenset((q.a, q.b)) not in base_silk_keys]
+        print(f"  INSIDE A CLOSED SILK BODY ({len(_silk_pairs)}): "
+              + (f"{len(silk_gating)} GATE (a member moved vs the baseline)"
+                 if moved_refs is not None else
+                 "REPORT-ONLY: pass --baseline <the board the run started "
+                 "from> to gate the ones your moves created"))
+        _gate_ids = {id(q) for q in silk_gating}
+        for q in _silk_pairs:
+            _who = [r for r in (q.a, q.b) if moved_refs and r in moved_refs]
+            print(f"    {q.a} <-> {q.b}  {q.contained_frac:.0%} of the smaller "
+                  f"body" + (f"  GATES (moved: {' '.join(_who)})" if id(q) in _gate_ids
+                             else "  baseline's own (the baseline had it)"
+                             if frozenset((q.a, q.b)) in base_silk_keys
+                             else "  baseline's own (no member moved)"
+                             if moved_refs is not None else ''))
 
     # #1250: a TEST POINT whose pad copper lies under another part's drawn
     # body -- no probe or bed-of-nails pin can reach it. The marker waiver
@@ -947,15 +1016,38 @@ def main():
         if len(own_contacts) > 20:
             print(f"    ... and {len(own_contacts) - 20} more (--json lists "
                   f"every one)")
+    # #1451, the THIRTEENTH: a pad or footprint inside a rule area that
+    # forbids it (KiCad: items_not_allowed), board-level or footprint-owned
+    # -- an RF module's antenna keep-out. A row GATES when the --baseline did
+    # not have it; without one it is REPORT-ONLY, because a pristine board
+    # ships such items (a module's own paste pads inside its own area).
+    rule_items = leg.get('rule_area_items') or []
+    rule_gating = [r for r in rule_items if rule_inherited is not None
+                   and tuple(r) not in rule_inherited]
+    if rule_items:
+        print(f"  IN A RULE AREA THAT FORBIDS IT ({len(rule_items)} item(s), "
+              f"KiCad: items_not_allowed; {len(rule_gating)} GATE"
+              + (" -- an item the --baseline did not have"
+                 if rule_inherited is not None
+                 else "; REPORT-ONLY: pass --baseline <the board the run "
+                      "started from> to gate")
+              + ")" + (" -- NOT BUILDABLE" if rule_gating else ''))
+        for r in (rule_gating + [r for r in rule_items if r not in rule_gating])[:20]:
+            print(f"    {r[2]} {r[3]} in '{r[0] or 'rule area'}'"
+                  + (f" of {r[1]}" if r[1] else ' (board level)')
+                  + ("  baseline's own" if rule_inherited is not None
+                     and r not in rule_gating else ''))
+        if len(rule_items) > 20:
+            print(f"    ... and {len(rule_items) - 20} more (--json lists every one)")
     # #1250, the NINTH: a test point a move left under another part's body
     # (`tp_gating`, above). #1255, the TENTH: a body inside the body-to-edge
     # band the intent DECLARES (`edge_band_gating`, empty when undeclared).
     not_buildable = bool(g['blocking'] or locked_contact or stack_groups
-                         or g['containment_blocking']
+                         or g['containment_blocking'] or silk_gating
                          or courtyard_gating or off_outline_pads or mating
                          or graphic_gating
                          or pin_hits or tp_gating or edge_band_gating
-                         or own_gating)
+                         or own_gating or rule_gating)
     verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
 
@@ -1023,6 +1115,11 @@ def main():
                                           if moved_refs is not None else None),
             'courtyard_blocking_gating_pairs': [q._asdict()
                                                 for q in courtyard_gating],
+            # #1385: of those, the pairs below the run-23 floors that gate
+            # only because the project declares the rule an error.
+            'courtyard_error_gating_pairs': [q._asdict()
+                                             for q in courtyard_error_gating],
+            'silk_enclosed_gating_pairs': [q._asdict() for q in silk_gating],
             # #1095: the severity the courtyard channel was graded at (None
             # = KiCad's default, error) and the waiver label it gave.
             'courtyard_severity': g.get('courtyard_severity'),
@@ -1034,6 +1131,11 @@ def main():
                                        else 'no-baseline: report-only'),
             'courtyard_pairs': [q._asdict() for q in g['pairs']
                                 if q.kind == 'courtyard'],
+            # #1443: the heights the grade read, and the parts under a raised
+            # body too low for them (kind 'height', in courtyard_blocking)
+            'heights': g.get('heights'),
+            'height_clear': g.get('height_clear', 0),
+            'height_pairs': [q._asdict() for q in g['pairs'] if q.kind == 'height'],
             'courtyard_advisory': sum(
                 1 for q in g['advisory_pairs'] if q.kind == 'courtyard'
                 and q not in g['courtyard_blocking_pairs']),
@@ -1143,6 +1245,11 @@ def main():
                                      for r in own_gating],
             'own_pad_contacts': own_contacts,
             'own_pad_basis': leg.get('own_pad_basis'),
+            # #1451: pads and footprints in a rule area forbidding them --
+            # every row, and the gating ones (None without --baseline).
+            'rule_area_items': rule_items,
+            'rule_area_gating': (rule_gating if rule_inherited is not None
+                                 else None),
             # #1031: pads in a board rule-area keep-out band -- the same
             # non-gating contract as the two off-outline channels.
             'oob_keepout_copper_count': leg.get('oob_keepout_copper_count', 0),

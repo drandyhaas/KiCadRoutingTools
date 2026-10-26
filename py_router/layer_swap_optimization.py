@@ -156,6 +156,11 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
             if point_to_segment_distance(v.x, v.y, sg.start_x, sg.start_y,
                                          sg.end_x, sg.end_y) < need:
                 return False, "pad via grazes a foreign track (via-segment)"
+    # A keep-out rule area forbidding vias, as check_drc grades it.
+    from check_drc import keepout_refusal
+    why = keepout_refusal(pcb_data, vias=new_vias)
+    if why:
+        return False, f"pad {why}"
     return True, ""
 
 

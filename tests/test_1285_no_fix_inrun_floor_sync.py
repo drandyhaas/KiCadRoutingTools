@@ -44,7 +44,7 @@ from run_utils import check as run_check, evidence, tool        # noqa: E402
 from synth import RoutingBoard                                  # noqa: E402
 
 FAILS = []
-SYNC_LINE = 'In-run DRC floors (#650): lowered'
+SYNC_LINE = 'In-run DRC floors (#650): set'
 
 
 def check(name, cond, detail=''):

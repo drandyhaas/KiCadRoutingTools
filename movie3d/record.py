@@ -51,6 +51,8 @@ from placement_story import Story, _ease, _lerp, install  # noqa: E402
 FRAMES = 120        # anneal frames per run (place_movie's default): the budget the tweens share
 TWEEN = 3           # frames each anneal step takes: FRAMES / TWEEN snapshots, each played as a move
 HOP = 1.2           # mm a part hops at most on an anneal step (a shorter step hops less)
+FLIP_S = 1.2        # seconds a part takes to turn over onto its other face
+FLIP_RISE = 1.5     # mm a turning part clears its own body by
 SPEEDUP = 4.0       # the anneal plays this much faster at its end than at its start
 FPS = 12.0
 FLY = 8             # frames a fixed part takes to fly to its place (at most)
@@ -246,7 +248,25 @@ class Recorder(Story):
         area = (bb[2] - bb[0]) * (bb[3] - bb[1]) if bb else 0.0
         parts = [part_scene(r, pcb.footprints[r], st.parts.get(r), colour.get(r, fixed_rgb),
                             r not in self.movable, area) for r in self.refs]
+        # #1443: a part other parts may stand under -- measured room under
+        # its model, or a cover the intent declares -- is drawn see-through,
+        # so the parts under it stay in view; a declared cover's body (a card
+        # with no model of its own) is drawn as a slab from its underside
+        covers = getattr(getattr(st, 'heights', None), 'covers', None) or {}
+        for p in parts:
+            c = covers.get(p['ref'])
+            if c is None:
+                continue
+            p['cover'] = True
+            decl = getattr(c, 'decl', None)
+            if decl is not None:
+                p['card'] = [round(float(v), 4) for v in decl[0]] + [round(float(decl[1]), 4)]
+        self.colour, self.fixed_rgb, self.area = colour, fixed_rgb, area
         self.side = {p['ref']: p['side'] for p in parts}
+        # each part's face as drawn, 0 front up, 180 turned onto the back:
+        # the scene draws a part as it ends, and a frame turns it from there
+        self.phi = {r: (180.0 if s == 'B' else 0.0) for r, s in self.side.items()}
+        self._phi0 = dict(self.phi)
         self.bodyh = {p['ref']: (p['body'][4] if p['body'] else 0.0) for p in parts}
         self.court = {p['ref']: p['court'] for p in parts}
         self.fixed = {p['ref'] for p in parts if p['fixed']}
@@ -422,6 +442,52 @@ class Recorder(Story):
             self.shot(label, moved=self.movable, poses=poses, lifts=lifts)
         self.view = self.home
         self.shot(label, times=self.hold)
+
+    def on_faces(self, changed, old):
+        """The parts place_simple put on another face turn over where they
+        lie -- in the pile before the scatter, on the board after an anneal
+        -- rising clear of their bodies and settling on the new face."""
+        refs = sorted(r for r in changed if r in self.idx)
+        if not refs:
+            return
+        n = max(2, int(round(FLIP_S * self.a.fps)))
+        pile = self.run == 0
+        at = {r: (self.pile[r] if pile and r in self.pile else old.get(r) or
+                  (self.state.parts[r].x, self.state.parts[r].y, self.state.parts[r].rot))
+              for r in refs}
+        h0 = {r: self.base(r, at[r][0], at[r][1]) for r in refs}
+        p0 = {r: self.phi[r] for r in refs}
+        for r in refs:
+            self.side[r] = changed[r]
+        h1 = {r: self.base(r, at[r][0], at[r][1]) for r in refs}
+        p1 = {r: 180.0 if changed[r] == 'B' else 0.0 for r in refs}
+        up = {r: self.bodyh.get(r, 0.0) + FLIP_RISE for r in refs}
+        to_b = [r for r in refs if changed[r] == 'B']
+        label = (f"to the back: {', '.join(to_b)}" if len(to_b) == len(refs) else
+                 f"to the {'back' if to_b else 'front'}: {', '.join(refs)}")
+        label = "faces: " + label + ("" if pile else " (no room on their face)")
+        poses = {**(self.pile if pile else {}), **at}
+        for i in range(1, n + 1):
+            t = _ease(i / n)
+            lifts = {r: h0[r] + (h1[r] - h0[r]) * t + up[r] * math.sin(math.pi * t) for r in refs}
+            for r in refs:
+                self.phi[r] = p0[r] + (p1[r] - p0[r]) * t
+            self.shot(label, moved=refs, poses=poses, lifts=lifts, phi=dict(self.phi))
+        self.shot(label, moved=refs, times=self.hold, poses=poses, phi=dict(self.phi))
+        # the scene draws each part as it ends: from its new footprint, and
+        # its model exported from the board it is on now
+        fps = self.pcb.footprints
+        for r in refs:
+            P = part_scene(r, fps[r], self.state.parts.get(r), self.colour.get(r, self.fixed_rgb),
+                           r not in self.movable, self.area)
+            self.scene['parts'][self.idx[r]] = P
+            self.court[r] = P['court']
+            self.bodyh[r] = P['body'][4] if P['body'] else 0.0
+            self.scene['export_poses'][r] = [fps[r].x, fps[r].y, fps[r].rotation or 0.0, changed[r]]
+        src = getattr(self.pcb, 'source_path', '')
+        if src and os.path.isfile(src):
+            with open(src, encoding='utf-8') as f:
+                self.model_src = (f.read(),) + tuple(self.model_src[1:])
 
     def anneal_snapshots(self):
         return self.a.frames // max(1, self.a.tween)
@@ -603,9 +669,24 @@ class Recorder(Story):
         # the board turns over about the screen's horizontal as the turn
         # starts, held for the whole turn while the camera orbits on
         turn_az = next((az[i] for i, f in enumerate(self.frames) if 'flip' in f), None)
+        # a part that changed face is drawn by its last footprint: each frame
+        # turns it from there to the face it was on then (`phi`, carried
+        # forward from the frame that last set it; before the first turn,
+        # the face it started on)
+        last = {r: (180.0 if s == 'B' else 0.0) for r, s in self.side.items()}
+        turning = sorted({r for f in self.frames for r, v in (f.get('phi') or {}).items()
+                          if v != self._phi0[r]})
+        cur = self._phi0
         out = []
         for i, f in enumerate(self.frames):
             g = dict(f)
+            cur = g.pop('phi', cur)
+            turned = {r: (cur[r] - last[r]) % 360.0 for r in turning}
+            if any(turned.values()):
+                g['p'] = [list(q) for q in g['p']]
+                for r, v in turned.items():
+                    if v:
+                        g['p'][self.idx[r]].append(round(v, 3))
             g['az'] = az[i]
             g['el'] = ELEV
             if 'flip' in g:

@@ -270,8 +270,12 @@ def _rotate_pad_angles(fp_text: str, delta_rot: float) -> str:
     return _PAD_AT.sub(fix_pad, fp_text)
 
 
-#: A text node's own `(at x y [angle])`.
-_TEXT_AT = re.compile(r'\(at\s+([^\s()]+)\s+([^\s()]+)(?:\s+([^\s()]+))?\)')
+#: A text node's own `(at x y [angle] [unlocked])`. KiCad 6/7 write a text
+#: that does not keep upright as a fourth token, `(at 0 -1.85 90 unlocked)`
+#: (KiCad 8+ writes an `(unlocked yes)` node instead); the angle is a number,
+#: so the word is never read as one, and a rewrite puts it back.
+_TEXT_AT = re.compile(r'\(at\s+([^\s()]+)\s+([^\s()]+)(?:\s+(' + AT_NUM
+                      + r'))?(\s+unlocked)?\)')
 
 
 def _rotate_text_angles(fp_text: str, delta_rot: float, ref: str) -> str:
@@ -347,11 +351,14 @@ def _rewrite_text_ats(fp_text: str, ref: str, new_at, what: str) -> str:
                 # the block ships with its pads turned and its texts not.
                 raise SideFlipUnsupported(
                     f"{ref}: a text node has an `(at ...)` {what} "
-                    f"cannot parse -- expected two or three plain numbers. "
+                    f"cannot parse -- expected two or three plain numbers "
+                    f"and KiCad 6/7's optional `unlocked`. "
                     f"Refusing rather than rotating the pads and leaving the "
                     f"text where it was: {node[:120]!r}")
             continue
         rep = new_at(m.group(1), m.group(2), m.group(3))
+        if m.group(4):
+            rep = rep[:-1] + ' unlocked)'
         if rep != node[m.start():m.end()]:
             pieces.append((s + m.start(), s + m.end(), rep))
     if not pieces:
@@ -386,9 +393,10 @@ def _move_zone_pts(fp_text: str, ref: str, old_x: float, old_y: float,
     with its pads. At +delta_rot the zone turns the other way, which agrees
     with the pads only at 0 and 180 degrees.
 
-    The flip path is deliberately untouched -- a zone there is still refused
-    by `_FLIP_NAMED_REFUSALS`, because a mirror is not a rigid motion and this
-    helper has no rule for it.
+    A footprint `(point ...)` is absolute too and is carried the same way. A
+    mirror is not a rigid motion, so the flip mirrors zones and points first
+    (`_flip_zone`, `_flip_point`) and then calls this for the rigid rest of
+    the pose change.
 
     A zone whose `(pts ...)` does not parse is a refusal, not a skip: the
     writer returns True unconditionally, so a silently-untouched zone is
@@ -399,11 +407,34 @@ def _move_zone_pts(fp_text: str, ref: str, old_x: float, old_y: float,
         # An unchanged pose must write the zone byte for byte, or the
         # identity write (test_714_identity_write_unchanged) re-spells it.
         return fp_text
+    rad = math.radians(-delta_rot)  # KiCad's sense, as local_to_global
+    c, s_ = math.cos(rad), math.sin(rad)
+
+    def carried(fx, fy):
+        rx = old_x + (fx - old_x) * c - (fy - old_y) * s_
+        ry = old_y + (fx - old_x) * s_ + (fy - old_y) * c
+        # Minimal decimals, as KiCad writes them: a flip composed with a
+        # rotation and then undone must give the zone back byte for byte.
+        return f"{_fmt_mm(rx + dx)} {_fmt_mm(ry + dy)}"
+
     pieces = []
     for head, s, e in _iter_sexpr_children(fp_text, 0):
+        node = fp_text[s:e]
+        if head == 'point':
+            # A footprint `(point ...)` is absolute too (pcbnew 10.0 probe),
+            # so it is carried by the same motion as the zone.
+            m = re.search(r'\(at\s+([^\s()]+)\s+([^\s()]+)\)', node)
+            if not m:
+                raise SideFlipUnsupported(
+                    f"{ref}: a (point ...) has no two-number (at x y) this "
+                    f"move can carry: {node[:120]!r}")
+            rep = (node[:m.start()]
+                   + f"(at {carried(float(m.group(1)), float(m.group(2)))})"
+                   + node[m.end():])
+            pieces.append((s, e, rep))
+            continue
         if head != 'zone':
             continue
-        node = fp_text[s:e]
         if re.search(r'\(filled_polygon\b', node):
             # A fill is also absolute, and a moved outline with a stale fill
             # is a second way to ship copper where the part used to be.
@@ -421,19 +452,16 @@ def _move_zone_pts(fp_text: str, ref: str, old_x: float, old_y: float,
                 f"leaving its keep-out zone behind: {node[:120]!r}")
         if not polygons:
             continue
-        rad = math.radians(-delta_rot)  # KiCad's sense, as local_to_global
-        c, s_ = math.cos(rad), math.sin(rad)
         rep_parts = []
         prev_end = 0
         for m in polygons:
-            new_pts = []
-            for x, y in re.findall(r'\(xy\s+([^\s()]+)\s+([^\s()]+)\)', m.group(1)):
-                fx, fy = float(x), float(y)
-                rx = old_x + (fx - old_x) * c - (fy - old_y) * s_
-                ry = old_y + (fx - old_x) * s_ + (fy - old_y) * c
-                new_pts.append(f"(xy {rx + dx:.6f} {ry + dy:.6f})")
+            # Each point rewritten where it stands, so the polygon keeps the
+            # board's own layout and a move undone gives back the same bytes.
             rep_parts.append(node[prev_end:m.start()])
-            rep_parts.append("(polygon (pts " + " ".join(new_pts) + "))")
+            rep_parts.append(re.sub(
+                r'\(xy\s+([^\s()]+)\s+([^\s()]+)\)',
+                lambda p: f"(xy {carried(float(p.group(1)), float(p.group(2)))})",
+                m.group(0)))
             prev_end = m.end()
         rep_parts.append(node[prev_end:])
         rep = ''.join(rep_parts)
@@ -463,12 +491,12 @@ class SideFlipUnsupported(Exception):
     and nothing cross-checks the pads, so the board would grade plausibly and
     wrongly forever.
 
-    Refusing is cheap, measured over the 22 tracked boards (1349 footprint
-    blocks): the refusal set touches at most 7 of them -- `primitives` 6,
-    `zone` 1 -- while `chamfer`, `rect_delta`, `fp_text_box` and `group` have
-    NO witness at all. A construct the corpus does not contain is a construct
-    no gate here can validate, so any rule for it would be an unfalsifiable
-    guess.
+    Refusing is cheap, measured over the stress corpus's 71503 footprint
+    blocks: about 200 refuse, most of them per-layer padstacks, the rest a few
+    footprints each (`rect_delta`, `dimension`, KiCad 6's `tedit`). Every
+    construct the corpus carries in quantity has a rule, compared against
+    pcbnew's own flip by `tests/gui_parity/test_714_mirror_pcbnew_parity.py`
+    on corpus parts (`tests/fixtures/714/flip_witnesses.kicad_pcb`).
     """
 
 
@@ -491,15 +519,13 @@ _COORD_LITERAL = re.compile(r'^-?\d+(\.\d+)?$')
 # `jumper_pad_groups`, `net_tie_pad_groups`, `thermal_gap`, `thermal_width`,
 # `tstamp`, `version`, `zone_connect`.
 #
-# Which raises the obvious objection: `chamfer` and `rect_delta` are refused
-# for having no witness, so why are these passed through? Because the doctrine
-# is about GEOMETRY, not about familiarity. Every name here is a scalar, an
+# Which raises the obvious objection: `rect_delta` is refused for want of a
+# measured rule, so why are these passed through? Because the doctrine is
+# about GEOMETRY, not about familiarity. Every name here is a scalar, an
 # identifier or a flag that a reflection cannot act on -- a cost weight, a
-# uuid, a margin, a pad-number group, a version string. `chamfer` and
-# `rect_delta` describe SHAPE, and their behaviour under a mirror is a real
-# question with a real answer that this corpus cannot supply. Passing through a
-# number that has no orientation is not a guess; guessing how a corner name
-# reflects is.
+# uuid, a margin, a pad-number group, a version string. `rect_delta` describes
+# SHAPE, and its behaviour under a mirror is a real question; `chamfer` was
+# one too, until pcbnew's own flip answered it (`_flip_chamfer`).
 _FLIP_PASSTHROUGH = frozenset({
     'uuid', 'descr', 'tags', 'path', 'attr', 'embedded_fonts', 'sheetfile',
     'sheetname', 'units', 'locked', 'variant', 'solder_mask_margin',
@@ -511,6 +537,13 @@ _FLIP_PASSTHROUGH = frozenset({
     # render time, so mirroring its offset double-applies it. Probed on
     # tigard J1 and orangecrab J4 -- pcbnew leaves both byte-identical.
     'model',
+    # Data a reflection cannot act on, which pcbnew 10.0's flip leaves
+    # unchanged: an embedded file's name and checksum, the placed flag,
+    # component classes, a footprint paste ratio, and a footprint-internal
+    # group (its members are uuids, which the flip keeps). Pinned by the
+    # corpus parts in `tests/fixtures/714/flip_witnesses.kicad_pcb`.
+    'embedded_files', 'placed', 'component_classes',
+    'solder_paste_margin_ratio', 'group',
 })
 _FLIP_GRAPHICS = frozenset({'fp_line', 'fp_rect', 'fp_circle', 'fp_poly',
                             'fp_curve', 'fp_arc'})
@@ -518,36 +551,30 @@ _FLIP_TEXTS = frozenset({'property', 'fp_text'})
 # `(layer ...)` and `(at ...)` are the footprint's OWN; `pad` and
 # `private_layers` have their own handlers.
 _FLIP_HANDLED = (_FLIP_GRAPHICS | _FLIP_TEXTS
-                 | {'layer', 'at', 'pad', 'private_layers'})
+                 | {'layer', 'at', 'pad', 'private_layers', 'zone', 'point'})
 
 # Constructs we refuse BY NAME, so the message can say which and why, rather
 # than falling through the generic "unknown node kind" arm.
 _FLIP_NAMED_REFUSALS = {
-    'zone': ("a footprint-internal (zone ...) stores its (pts (xy ...)) in "
-             "ABSOLUTE board coordinates, so mirroring it needs a flip centre "
-             "that this call does not have -- the pose may change in the same "
-             "write. One witness on the tracked corpus"),
     'fp_text_box': "no tracked board carries one, so no gate here can validate a rule for it",
-    'group': "no tracked board carries one, so no gate here can validate a rule for it",
 }
 # ...and inside a pad.
 _PAD_REFUSALS = {
-    'primitives': ("a custom pad's sub-geometry frame is unconfirmed against "
-                   "pcbnew; 6 witnesses on the tracked corpus, none of them "
-                   "enough to validate a rule"),
-    'chamfer': ("corner NAMES under a mirror are unmeasured -- no tracked "
-                "board carries a chamfered pad"),
-    'rect_delta': ("trapezoid pad deltas under a mirror are unmeasured -- no "
-                   "tracked board carries one"),
+    'rect_delta': ("trapezoid pad deltas under a mirror are unmeasured -- 4 "
+                   "corpus footprints carry one"),
+    'padstack': ("a per-layer padstack swaps its front definition (the pad's "
+                 "own shape, size and options) with its B.Cu entry field by "
+                 "field under pcbnew's flip, and this mirror has no rule for "
+                 "that swap"),
 }
 
 # Pad children this mirror knows what to do with. `at`, `layers` and `drill`
 # are TRANSFORMED; the rest are mirror-invariant -- sizes, margins, net and pin
 # metadata, thermal and teardrop settings, which a reflection does not touch.
-# Measured: these 22 heads are every pad child kind on the 22 tracked boards
-# (9491 pads), with `primitives` the only one refused. Anything outside the set
-# refuses, so a KiCad that adds a pad child -- `padstack` is the live example
-# in 9/10 -- stops the flip instead of being emitted unmirrored.
+# Measured: these heads are every pad child kind on the 22 tracked boards
+# (9491 pads), plus the ones the stress corpus carries in quantity. Anything
+# outside the set refuses, so a KiCad that adds a pad child stops the flip
+# instead of being emitted unmirrored.
 _PAD_HANDLED = frozenset({
     'at', 'size', 'layers', 'uuid', 'net', 'pintype', 'pinfunction',
     'roundrect_rratio', 'drill', 'remove_unused_layers', 'solder_paste_margin',
@@ -555,6 +582,11 @@ _PAD_HANDLED = frozenset({
     'clearance', 'thermal_bridge_angle', 'solder_paste_margin_ratio',
     'thermal_bridge_width', 'thermal_gap', 'thermal_width', 'die_length',
     'zone_layer_connections', 'tstamp', 'locked', 'chamfer_ratio',
+    # A flag, left alone by pcbnew's flip.
+    'keep_end_layers',
+    # TRANSFORMED in `_flip_pad`: a custom pad's sub-shapes and the chamfered
+    # corner names.
+    'primitives', 'chamfer',
     # #1248: KiCad 10's pad-to-die DELAY (ps) is a per-pad scalar like
     # `die_length` and mirror-invariant the same way: pcbnew's FOOTPRINT::Flip
     # leaves both values unchanged (probed on 10.0.0). No tracked board
@@ -775,6 +807,18 @@ def _flip_pad(node: str, ref: str, old_rot: float, new_rot: float) -> str:
                 f"untouched leaves a pad whose geometry contradicts the face "
                 f"it claims, and nothing downstream raises.")
 
+    # A custom pad's sub-shapes and a chamfered pad's corner names live in the
+    # pad's OWN frame, which the flip mirrors in y like the footprint's.
+    # Rewritten first, on the spans just walked, so nothing above shifts them.
+    subs = []
+    for head, s, e in _iter_sexpr_children(node, 0):
+        if head == 'primitives':
+            subs.append((s, e, _flip_primitives(node[s:e], ref)))
+        elif head == 'chamfer':
+            subs.append((s, e, _flip_chamfer(node[s:e], ref)))
+    for s, e, new in reversed(subs):
+        node = node[:s] + new + node[e:]
+
     lm = re.search(r'\(layers\b', node)
     if lm:
         lend = find_matching_paren(node, lm.start())
@@ -812,26 +856,171 @@ def _flip_pad(node: str, ref: str, old_rot: float, new_rot: float) -> str:
     return node
 
 
+def _swap_arc_ends(node: str) -> str:
+    """Exchange an arc's `(start ...)` and `(end ...)` points.
+
+    An arc's SWEEP is start->mid->end. Mirroring the three points reverses the
+    sweep, so KiCad exchanges start and end to restore it. Measured on sonde_u
+    U2 and rp2350 SW1, and on a custom pad's `gr_arc` primitives. This is
+    invisible to every geometric check -- the same curve passes through the
+    same three points either way -- which is why the acceptance gate compares
+    nodes.
+    """
+    sm = re.search(r'\(start\s+(\S+)\s+(\S+)\)', node)
+    em = re.search(r'\(end\s+(\S+)\s+(\S+)\)', node)
+    if sm and em:
+        s_body, e_body = f"{sm.group(1)} {sm.group(2)}", f"{em.group(1)} {em.group(2)}"
+        lo, hi = sorted((sm, em), key=lambda m: m.start())
+        lo_new = f"(start {e_body})" if lo is sm else f"(end {s_body})"
+        hi_new = f"(end {s_body})" if hi is em else f"(start {e_body})"
+        node = (node[:lo.start()] + lo_new + node[lo.end():hi.start()]
+                + hi_new + node[hi.end():])
+    return node
+
+
 def _flip_graphic(node: str, head: str, ref: str) -> str:
     """Mirror one `fp_*` graphic node."""
     node = _mirror_xy_pairs(node, ref)
     node = _flip_layer_nodes(node)
     if head == 'fp_arc':
-        # An arc's SWEEP is start->mid->end. Mirroring the three points
-        # reverses the sweep, so KiCad exchanges start and end to restore it.
-        # Measured on sonde_u U2 and rp2350 SW1. This is invisible to every
-        # geometric check -- the same curve passes through the same three
-        # points either way -- which is why the acceptance gate compares nodes.
-        sm = re.search(r'\(start\s+(\S+)\s+(\S+)\)', node)
-        em = re.search(r'\(end\s+(\S+)\s+(\S+)\)', node)
-        if sm and em:
-            s_body, e_body = f"{sm.group(1)} {sm.group(2)}", f"{em.group(1)} {em.group(2)}"
-            lo, hi = sorted((sm, em), key=lambda m: m.start())
-            lo_new = f"(start {e_body})" if lo is sm else f"(end {s_body})"
-            hi_new = f"(end {s_body})" if hi is em else f"(start {e_body})"
-            node = (node[:lo.start()] + lo_new + node[lo.end():hi.start()]
-                    + hi_new + node[hi.end():])
+        node = _swap_arc_ends(node)
     return node
+
+
+# The sub-shapes a custom pad's `(primitives ...)` carries on the corpus
+# (4586 gr_arc, 3715 gr_poly, 1313 gr_line, 742 gr_circle, 188 gr_rect).
+_PRIMITIVE_KINDS = frozenset({'gr_poly', 'gr_line', 'gr_arc', 'gr_circle',
+                              'gr_rect'})
+
+
+def _flip_primitives(node: str, ref: str) -> str:
+    """Mirror a custom pad's `(primitives ...)` in the pad's own frame.
+
+    pcbnew 10.0 negates every sub-shape point's y, exactly as for a footprint
+    graphic, and exchanges a `gr_arc`'s start and end for the same reason an
+    `fp_arc`'s are. A kind outside the measured five refuses, and so does an
+    `(arc ...)` inside a polygon's point list: no flipped part carrying one has
+    been compared against pcbnew.
+    """
+    pieces = []
+    for head, s, e in _iter_sexpr_children(node, 0):
+        child = node[s:e]
+        if head not in _PRIMITIVE_KINDS:
+            raise SideFlipUnsupported(
+                f"{ref}: a custom pad's (primitives ...) carries a ({head} ...), "
+                f"which this mirror has no rule for. Refusing to guess at its "
+                f"mirror image.")
+        if head == 'gr_poly' and re.search(r'\(arc\b', child):
+            raise SideFlipUnsupported(
+                f"{ref}: a custom pad's (gr_poly ...) carries an (arc ...) in "
+                f"its point list, whose mirror image is unmeasured against "
+                f"pcbnew. Refusing to guess at it.")
+        new = _mirror_xy_pairs(child, ref)
+        if head == 'gr_arc':
+            new = _swap_arc_ends(new)
+        pieces.append((s, e, new))
+    for s, e, new in reversed(pieces):
+        node = node[:s] + new + node[e:]
+    return node
+
+
+# KiCad's own order for a chamfer's corners, as it writes them.
+_CHAMFER_ORDER = ('top_left', 'top_right', 'bottom_left', 'bottom_right')
+_CHAMFER_MIRROR = {'top_left': 'bottom_left', 'bottom_left': 'top_left',
+                   'top_right': 'bottom_right', 'bottom_right': 'top_right'}
+
+
+def _flip_chamfer(node: str, ref: str) -> str:
+    """Mirror a pad's `(chamfer <corners>)`: top and bottom exchange.
+
+    Corners are named in the pad's own frame, which the flip mirrors in y, so
+    pcbnew 10.0 writes `top_left` as `bottom_left` and `top_right` as
+    `bottom_right` (and back); left and right stay. The result is written in
+    KiCad's own corner order, which is what pcbnew writes.
+    """
+    m = re.match(r'\(chamfer((?:\s+[a-z_]+)*)\s*\)$', node)
+    toks = m.group(1).split() if m else None
+    if toks == []:
+        return node                      # `(chamfer)`: no corner is cut
+    if toks is None or any(t not in _CHAMFER_MIRROR for t in toks):
+        raise SideFlipUnsupported(
+            f"{ref}: a pad's {node!r} names a corner outside "
+            f"{', '.join(_CHAMFER_ORDER)}. Refusing to guess at its mirror.")
+    flipped = {_CHAMFER_MIRROR[t] for t in toks}
+    return '(chamfer ' + ' '.join(c for c in _CHAMFER_ORDER if c in flipped) + ')'
+
+
+def _mirror_about(tok: str, centre: str, ref: str, where: str) -> str:
+    """`2 * centre - tok`, exactly, as a plain decimal literal.
+
+    For a coordinate stored ABSOLUTE (a footprint zone's points, a `point`),
+    the flip mirrors about the footprint's position rather than about zero.
+    Decimal arithmetic on the two literals, so the flip and the flip back are
+    an exact involution, the same property the sign toggle gives the local
+    coordinates.
+    """
+    from decimal import Decimal
+    for t in (tok, centre):
+        if not _COORD_LITERAL.match(t):
+            raise SideFlipUnsupported(
+                f"{ref}: the coordinate {t!r} in {where} is outside the literal "
+                f"grammar -?\\d+(\\.\\d+)?. Refusing rather than round-tripping "
+                f"it through float.")
+    v = 2 * Decimal(centre) - Decimal(tok)
+    out = format(v, 'f')
+    if '.' in out:
+        out = out.rstrip('0').rstrip('.')
+    return '0' if out in ('-0', '') else out
+
+
+def _flip_layer_list(node: str) -> str:
+    """Toggle the names in `node`'s `(layers ...)`, keeping a list that names
+    both faces as written: it is its own mirror, and pcbnew writes it in the
+    same order."""
+    lm = re.search(r'\(layers\b', node)
+    if not lm:
+        return node
+    lend = find_matching_paren(node, lm.start())
+    body = node[lm.end():lend]
+    toks = layer_list_tokens(body)
+    if {flip_layer_token(t) for t in toks} == set(toks):
+        return node
+    return node[:lm.end()] + map_layer_list_tokens(body, flip_layer_token) + node[lend:]
+
+
+def _flip_zone(node: str, ref: str, y0: str) -> str:
+    """Mirror a footprint-internal `(zone ...)` about the footprint's y.
+
+    Its outline is stored in ABSOLUTE board coordinates, so pcbnew 10.0's flip
+    sends each point to `y' = 2*y0 - y`, in the same order, and toggles the
+    zone's layers. A fill is absolute too, and refuses here as it does on a
+    move (`_move_zone_pts`).
+    """
+    if re.search(r'\(filled_polygon\b', node):
+        raise SideFlipUnsupported(
+            f"{ref}: a footprint-internal (zone ...) carries a "
+            f"(filled_polygon ...), which this flip does not carry. Refusing "
+            f"rather than leaving its fill behind: {node[:120]!r}")
+
+    def fix(m):
+        return f"(xy {m.group(1)} {_mirror_about(m.group(2), y0, ref, 'zone')})"
+
+    node = re.sub(r'\(xy\s+([^\s()]+)\s+([^\s()]+)\)', fix, node)
+    node = _flip_layer_nodes(node)
+    return _flip_layer_list(node)
+
+
+def _flip_point(node: str, ref: str, y0: str) -> str:
+    """Mirror a footprint `(point ...)`: an ABSOLUTE `(at x y)` sent to
+    `y' = 2*y0 - y` by pcbnew 10.0's flip, and its layer toggled."""
+    m = re.search(r'\(at\s+([^\s()]+)\s+([^\s()]+)\)', node)
+    if not m:
+        raise SideFlipUnsupported(
+            f"{ref}: a (point ...) has no two-number (at x y) this mirror can "
+            f"read: {node[:120]!r}")
+    rep = f"(at {m.group(1)} {_mirror_about(m.group(2), y0, ref, 'point')})"
+    node = node[:m.start()] + rep + node[m.end():]
+    return _flip_layer_nodes(node)
 
 
 # #878: the rule itself lives in `legality`; this module reads it off
@@ -856,7 +1045,7 @@ def _block_side(fp_text: str) -> str:
 
 
 def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
-                          new_rot: float) -> str:
+                          new_rot: float, old_y: Optional[str] = None) -> str:
     """Mirror a whole footprint block to the other face (#714).
 
     A paren-balanced walk over the block's top-level children with a per-kind
@@ -869,6 +1058,11 @@ def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
     the final rotation. Note that means this differs from `pcbnew`'s `Flip`,
     which negates the orientation itself; a caller that wants pcbnew's result
     passes the negated angle, which is what the parity gate does.
+
+    `old_y` is the footprint's y BEFORE this write, as its literal: a
+    footprint zone and a `point` are stored in absolute coordinates and mirror
+    about it. The caller then carries them through the rest of the pose change
+    (`_move_zone_pts`), exactly as it does on a move.
     """
     # The block MUST declare a side of its own, and this is checked rather
     # than assumed: `_block_side` defaults to 'F' when there is no top-level
@@ -915,6 +1109,13 @@ def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
                          node)
         elif head == 'pad':
             new = _flip_pad(node, ref, old_rot, new_rot)
+        elif head in ('zone', 'point'):
+            if old_y is None:
+                raise SideFlipUnsupported(
+                    f"{ref}: a ({head} ...) is stored in absolute coordinates "
+                    f"and mirrors about the footprint's own y, which this call "
+                    f"was not given.")
+            new = (_flip_zone if head == 'zone' else _flip_point)(node, ref, old_y)
         elif head in _FLIP_TEXTS:
             # The mirror FLAG is conditional on the text living on a sided
             # layer, and only the flag is. Measured against pcbnew 10.0.0: a
@@ -926,7 +1127,9 @@ def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
             # on the tracked corpus sit on a User layer, and not one of the
             # thirteen parity fixtures carried one until orangecrab U3 and J1
             # were added for exactly this.
-            sided = bool(re.search(r'\(layer\s+"[FB]\.', node))
+            # Inner copper counts as sided here: pcbnew 10.0 adds the flag to
+            # a footprint text on `In1.Cu` / `In2.Cu` exactly as on a face.
+            sided = bool(re.search(r'\(layer\s+"(?:[FB]\.|In\d+\.Cu")', node))
             # A TEXT's angle composes with the pose change exactly as a pad's
             # does; `180 - a` alone is the special case `new_rot == -old_rot`,
             # i.e. pcbnew's own bare Flip, and it is wrong by the rotation
@@ -1166,7 +1369,17 @@ def write_placed_output(input_file: str, output_file: str,
             # 180. One code path per mode, so the ordinary write below cannot
             # regress.
             new_fp_text = _flip_footprint_block(new_fp_text, key,
-                                                old_rot, new_rot)
+                                                old_rot, new_rot,
+                                                old_y=at_match.group(2))
+            # Zones and points mirrored about the OLD position, which leaves
+            # them where pcbnew's bare flip puts them: the part at its old x/y
+            # with its orientation negated. From there to the requested pose
+            # is a rigid motion, the move path's own.
+            new_fp_text = _move_zone_pts(
+                new_fp_text, key,
+                float(at_match.group(1)), float(at_match.group(2)),
+                (new_rot + old_rot) % 360, new_x - float(at_match.group(1)),
+                new_y - float(at_match.group(2)))
         else:
             delta_rot = (new_rot - old_rot) % 360
             if delta_rot != 0:
@@ -1346,13 +1559,22 @@ def write_placed_output(input_file: str, output_file: str,
     # blind to an interior cutout moving and to a rotated circular window,
     # and rings are blind to an open stub that never chains. Only a board
     # with footprint-embedded Edge.Cuts arms it.
-    if _outline_owner_map(input_file):
+    _owners = _outline_owner_map(input_file)
+    if _owners:
         from kicad_parser import structural_outline_fingerprint, read_board_text
+        # Carried versus structural is decided ONCE, on the input (#1409): it
+        # is judged at each part's current pose, so a part carrying a milled
+        # window would be "carried" before a move off the board and
+        # "structural" after it, and its own legal move read as the outline
+        # changing. The same set masks both texts.
+        _carried = {ref for ref, structural in _owners.items()
+                    if not structural}
         # The same read as `content` (#1149), or a repaired footprint block
         # would read as an outline change.
         _before = structural_outline_fingerprint(
-            read_board_text(input_file, quiet=True))
-        if _before != structural_outline_fingerprint(content):
+            read_board_text(input_file, quiet=True), carried=_carried)
+        if _before != structural_outline_fingerprint(content,
+                                                     carried=_carried):
             raise OutlineOwnerMove(
                 f"this write would have CHANGED THE BOARD OUTLINE of "
                 f"{output_file}. The placement stack does not resize boards: "

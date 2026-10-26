@@ -261,6 +261,32 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
     return soft_pts
 
 
+def _end_cap_on_track(fx, fy, s, seg_index) -> bool:
+    """Does the end cap of ``s`` at (fx, fy) overlap the copper of another
+    same-net track of ``s``'s layer that is not ``s``'s own chain (shares no
+    vertex with it)? The cap radius is half of ``s``'s width and the other
+    track's copper is its body at half its width, the overlap test
+    ``_check_soft_joints`` uses for two ends (#1373)."""
+    cx0, cy0 = int(fx // _CELL), int(fy // _CELL)
+    own = ((round(s.start_x, 3), round(s.start_y, 3)),
+           (round(s.end_x, 3), round(s.end_y, 3)))
+    seen = set()
+    for ncx in (cx0 - 1, cx0, cx0 + 1):
+        for ncy in (cy0 - 1, cy0, cy0 + 1):
+            for o in seg_index.get((s.layer, ncx, ncy), ()):
+                if o is s or id(o) in seen or getattr(o, 'graphic', False):
+                    continue
+                seen.add(id(o))
+                if ((round(o.start_x, 3), round(o.start_y, 3)) in own
+                        or (round(o.end_x, 3), round(o.end_y, 3)) in own):
+                    continue
+                if (_pt_seg_dist(fx, fy, o.start_x, o.start_y,
+                                 o.end_x, o.end_y)
+                        < (s.width + o.width) / 2.0 - 1e-6):
+                    return True
+    return False
+
+
 def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                    soft_pts, findings, join_tol: float = 0.0, copper_layers=()):
     """Degree-1 endpoints that _point_anchored calls unanchored and that are
@@ -349,6 +375,14 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
             if any(point_in_polygon(fx, fy, z.polygon)
                    for z in zones_by_layer.get(s.layer, ())):
                 continue  # lands in a same-net zone fill outline
+            # The end CAP overlapping another same-net track's copper (its
+            # body or its end cap) is a joint -- KiCad and check_orphan_stubs
+            # both call it connected (#1373); only a vertex, an interior T or
+            # a <=0.1mm gap used to be credited. A segment sharing a vertex
+            # with this one is its own chain: a sharp fold back onto it is a
+            # dead-end stub, not a joint, so it gives no credit here.
+            if _end_cap_on_track(fx, fy, s, seg_index):
+                continue
             # Two long tracks whose ends miss each other by a few um (a
             # nudge/micro-shift split pair) are OFF BY that microgap, not by
             # their segment lengths: within join_tol they are connected
@@ -656,6 +690,122 @@ def stacked_copper_over_model(segs_by_net, vias_by_net, net_name):
         _check_stacked(nid, net_name(nid), segs_by_net.get(nid, []),
                        vias_by_net.get(nid, []), findings)
     return findings
+
+
+def different_net_crossings(segs_by_net, is_new, net_name, cell: float = 1.0):
+    """Same-layer segment pairs of DIFFERENT nets whose centre lines meet,
+    where at least one segment is new this run (#1375).
+
+    Two such tracks are a short, whatever the clearance rule says: KiCad
+    reports tracks_crossing and check_drc a SEGMENT-CROSSING. A router that
+    retries a leg after a via-in-pad unblock searched the board without
+    some committed copper and laid a detour through it, and the run still
+    reported success. This audit runs on the copper about to be written, so
+    the pair is named before it ships. `is_new(segment)` says whether the run
+    laid it; `net_name` is a net_id -> str callable. Graphic copper is
+    immutable art and is skipped. Returns one dict per pair: the two nets,
+    the layer and a point on the first centre line."""
+    from collections import defaultdict
+    from geometry_utils import segment_to_segment_distance
+    items = []
+    boxes = []
+    isnew = []
+    buckets = defaultdict(list)
+    for nid, segs in segs_by_net.items():
+        for s in segs:
+            if getattr(s, 'graphic', False):
+                continue
+            i = len(items)
+            items.append((nid, s))
+            x0, x1 = sorted((s.start_x, s.end_x))
+            y0, y1 = sorted((s.start_y, s.end_y))
+            boxes.append((x0, x1, y0, y1))
+            isnew.append(bool(is_new(s)))
+            for cx in range(int(x0 // cell), int(x1 // cell) + 1):
+                for cy in range(int(y0 // cell), int(y1 // cell) + 1):
+                    buckets[(s.layer, cx, cy)].append(i)
+    out, seen = [], set()
+    for idx in buckets.values():
+        if len(idx) < 2:
+            continue
+        for a in range(len(idx)):
+            na, sa = items[idx[a]]
+            for b in range(a + 1, len(idx)):
+                nb, sb = items[idx[b]]
+                if na == nb or not (isnew[idx[a]] or isnew[idx[b]]):
+                    continue
+                ba, bb = boxes[idx[a]], boxes[idx[b]]
+                if (ba[1] < bb[0] - 1e-9 or bb[1] < ba[0] - 1e-9
+                        or ba[3] < bb[2] - 1e-9 or bb[3] < ba[2] - 1e-9):
+                    continue
+                key = (min(idx[a], idx[b]), max(idx[a], idx[b]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if segment_to_segment_distance(
+                        sa.start_x, sa.start_y, sa.end_x, sa.end_y,
+                        sb.start_x, sb.start_y, sb.end_x, sb.end_y) > 1e-9:
+                    continue
+                # Where the centre lines meet; a parallel touch reports the
+                # first segment's start.
+                px, py = sa.start_x, sa.start_y
+                d1x, d1y = sa.end_x - sa.start_x, sa.end_y - sa.start_y
+                d2x, d2y = sb.end_x - sb.start_x, sb.end_y - sb.start_y
+                den = d1x * d2y - d1y * d2x
+                if abs(den) > 1e-12:
+                    t = ((sb.start_x - sa.start_x) * d2y
+                         - (sb.start_y - sa.start_y) * d2x) / den
+                    if -1e-9 <= t <= 1 + 1e-9:
+                        px, py = sa.start_x + t * d1x, sa.start_y + t * d1y
+                out.append({'net_a': net_name(na), 'net_b': net_name(nb),
+                            'layer': sa.layer,
+                            'at': [round(px, 4), round(py, 4)]})
+    out.sort(key=lambda d: (d['net_a'], d['net_b'], d['at']))
+    return out
+
+
+def close_same_net_via_pairs(vias_by_net, is_new, hole_to_hole, net_name):
+    """Same-net via pairs whose drills sit closer than `hole_to_hole` (edge to
+    edge) where at least one via is new this run (#1414).
+
+    A route's own vias are not spaced from one another when the guarded
+    re-route (#230) cannot connect, and the flawed path used to ship with
+    nothing said. check_drc grades the pair as VIA-DRILL-HOLE and KiCad
+    grades hole-to-hole; this names it before the write. `is_new(via)` says
+    whether the run laid the via; `net_name` is a net_id -> str callable.
+    Returns dicts with net, the two centres, sizes/drills, centre distance,
+    the drill gap and the floor."""
+    out = []
+    if not hole_to_hole or hole_to_hole <= 0:
+        return out
+    from bisect import bisect_right
+    for nid in sorted(vias_by_net):
+        vs = vias_by_net[nid]
+        new = [is_new(v) for v in vs]
+        new_idx = [k for k, f in enumerate(new) if f]
+        if not new_idx:
+            continue
+        for i in range(len(vs)):
+            a = vs[i]
+            # a new via meets every later one; an old one only the later new
+            # ones -- the same pairs, in the same order, without the all-pairs
+            # scan of a stitched net's input vias
+            later = (range(i + 1, len(vs)) if new[i]
+                     else new_idx[bisect_right(new_idx, i):])
+            for j in later:
+                b = vs[j]
+                cc = math.hypot(a.x - b.x, a.y - b.y)
+                gap = cc - (a.drill or 0.0) / 2.0 - (b.drill or 0.0) / 2.0
+                if gap < hole_to_hole - 1e-6:
+                    out.append({'net': net_name(nid),
+                                'via_a': [round(a.x, 4), round(a.y, 4)],
+                                'via_b': [round(b.x, 4), round(b.y, 4)],
+                                'size_drill_a': [a.size, a.drill],
+                                'size_drill_b': [b.size, b.drill],
+                                'centre_distance_mm': round(cc, 4),
+                                'drill_gap_mm': round(gap, 4),
+                                'floor_mm': hole_to_hole})
+    return out
 
 
 def via_support_parts(v, net_segs, net_pads, net_zones, copper_layers):

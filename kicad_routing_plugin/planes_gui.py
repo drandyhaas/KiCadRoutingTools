@@ -1943,6 +1943,11 @@ class PlanesTab(wx.Panel):
                 hole_to_hole=_pkw['hole_to_hole'],
                 # #581: recorded as route_planes.py records it
                 same_net_pad_clearance=_cfg.get('same_net_pad_clearance'))
+        else:
+            # records are not DRC floors (#1415)
+            from .gui_utils import persist_live_tool_records
+            persist_live_tool_records(
+                board, _cfg.get('same_net_pad_clearance'))
 
         # (No oracle recheck here, #562: after plane CREATION the remaining
         # gaps are deliberate -- the route step's in-run plane finalize and

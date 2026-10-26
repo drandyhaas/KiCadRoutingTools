@@ -24,6 +24,7 @@ any machine with the same Python stack -- but Modal is Linux and the KiCad
 image's Python, so place every arm of an A/B here, not some on a Mac.
 """
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -71,12 +72,20 @@ def main(argv=None):
             if os.path.isfile(stem + ext):
                 files['board' + ext] = open(stem + ext, 'rb').read()
         for s in seeds_of(a.seeds):
-            name = f'{a.prefix}_{key}_s{s}'
             if os.path.exists(os.path.join(out, key, f's{s}.json')):
                 print(f'{a.prefix} {key} s{s}: have', flush=True)
                 continue
             args = ['{in}/board.kicad_pcb', f'{{out}}/s{s}.kicad_pcb', '--groups', '{in}/groups.json',
                     '--intent', '{in}/intent.json', '--seed', str(s), '--json', f'{{out}}/s{s}.json', *extra]
+            # The call's name carries a digest of its inputs: a pending call
+            # is collected rather than respawned by NAME, so two arms that
+            # share a key (the same board, different groups) and run at once
+            # would otherwise collect each other's placements.
+            h = hashlib.sha256()
+            for k in sorted(files):
+                h.update(k.encode() + b'\0' + files[k])
+            h.update('\0'.join(args).encode())
+            name = f'{a.prefix}_{key}_s{s}_{h.hexdigest()[:10]}'
             jobs.append((key, s, name, files, args))
     if not jobs:
         return 0

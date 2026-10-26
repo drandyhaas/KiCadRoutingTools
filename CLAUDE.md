@@ -222,7 +222,9 @@ Validate routed boards against the *real* spec, with the right checker — most
   class value: `"unknown"` (the author looked) is reported apart from an absent
   key (nobody looked), and neither is ever guessed. `envelope`, `outline` and
   `height` are refused BY NAME -- the outline is not ours to change, and nothing
-  in the placement stack measures z, so a declared height limit would grade
+  in the placement stack grades a BOARD-WIDE height limit (heights are judged
+  per part and per area: which part fits under which, a declared `covers[]`
+  body, a keep-out's `max_height_mm`, #1443), so a declared one would grade
   nothing at all. See `docs/design-brief.md`.
   **Since #959 the connector declarations COMPILE** (`design_brief.
   compile_with_consequences`, which `check_floorplan` and `board_brief` call,
@@ -308,7 +310,10 @@ Validate routed boards against the *real* spec, with the right checker — most
   (#900)** — the net classes carry the clearance the board was routed to. They
   used to share one key, so one part with a 2 mil pad override turned a
   requested `--clearance 0.15` into a 0.0508 board, which the next step then
-  read back as the board's own Default class.
+  read back as the board's own Default class. The pad-override cap is also
+  RECORDED (`kicad_routing_tools.pad_override_min_clearance`, both fronts,
+  #1369), so `--escalation board` reads the board's own minimum rather than
+  one part's override as the board floor.
   Grade a ruled board with plain `check_drc.py` (it auto-reads); a hand-rolled
   checker that ignores the dru will manufacture phantom flags on relaxed layers
   and miss real ones on tightened layers.
@@ -374,8 +379,9 @@ Validate routed boards against the *real* spec, with the right checker — most
     that does NOT apply to the pass/fail suite, which compares no numbers
     across runs.
     **One other kind of `run_all` self-skip is NOT about KiCad at all**: the
-    `test_622_*` tests that plan with CP-SAT skip without `ortools`, which
-    `requirements.txt` does not list. No image change moves it.
+    `test_622_*` tests that plan with CP-SAT skip without `ortools`. It is the
+    bus step's dependency, listed in `requirements.txt` (#1355), so the suite
+    image has it and runs them; a local Python without it still skips them.
     `tests/README.md` keeps the full list.
   - The image is a clean checkout of HEAD, so it is reproducible and you can
     keep editing while it runs; `KICAD_SWEEP_DIRTY=1` ships the working tree
@@ -787,8 +793,21 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   (that geometry is the BOARD's boundary rather than a relief the part
   carries). A footprint is CARRIED -- `owns_board_outline` False, still
   movable -- only when its segments **close on themselves** (a window, slot or
-  milled relief) AND that shape lies inside the outline the board draws without
-  it. An open path cannot be a cut-out, so it is always boundary.
+  milled relief) AND either the footprint has pads and the shape **encloses
+  none of them**, judged in the footprint's own frame (#1409), or that shape
+  lies inside the outline the board draws without it. An open path cannot be a
+  cut-out, so it is always boundary. The pad test is the one that does not
+  flip with a move: containment is judged at the part's CURRENT pose, so on
+  its own a carried window read structural once its part was off the board,
+  and on a pile `place_pose set` could never bring the part back. It reads
+  which side of the ring the part's copper is on -- a hole beside or under a
+  part leaves its pads outside the ring, a ring that IS the board's edge has
+  them inside (a castellated pad ON the ring counts as inside). A bounding box
+  of pads and courtyard does NOT separate the two: a reverse-mount LED window
+  stands further past its part's pads and courtyard than a module's drawn
+  board outline stands past its own pads. A ring around one of the part's own
+  pads (a plated slot) and a pad-less footprint's ring are left to
+  containment, as before.
   **Anything that MOVES a footprint gates on `owns_board_outline`, never on
   `owns_edge_cuts`** -- a relief parented to a part travels WITH it by the
   designer's intent (crkbd draws 184 per-LED windows that way; #628 measured

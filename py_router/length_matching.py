@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from kicad_parser import Segment, PCBData
 from routing_config import GridRouteConfig
 from routing_utils import segment_length
+from terminal_colors import RED, RESET
 from net_queries import calculate_route_length, expand_pad_layers
 from geometry_utils import (
     point_to_segment_distance,
@@ -1901,6 +1902,13 @@ def _seed_group_members_from_board(
     way but flagged `routed_this_run`, because telling the user to "route the
     whole group in one step" when they just did is advice that costs them a
     re-run to disprove.
+
+    Only a member whose pads the board's copper CONNECTS is seeded (#1391): a
+    net that failed (this run or earlier) and kept residual copper -- an
+    escape stub, a kept spur -- is not a route, so it neither sets the target
+    nor joins the group the caller records as protected. Graded by the
+    authoritative, zone/fill-aware `check_net_connectivity`, as the router's
+    already-routed filter grades it.
     """
     from net_queries import calculate_route_length
 
@@ -1923,11 +1931,15 @@ def _seed_group_members_from_board(
             vias_by.setdefault(v.net_id, []).append(v)
 
     seeded = {}
+    incomplete = []
     for nid, name in wanted.items():
         segs = segs_by.get(nid, [])
         if not segs:
             continue  # no copper on the board either -- genuinely unrouted
         vias = vias_by.get(nid, [])
+        if not _board_net_connected(pcb_data, nid, segs, vias):
+            incomplete.append(name)
+            continue
         seeded[name] = {
             'new_segments': segs,
             'new_vias': vias,
@@ -1935,7 +1947,91 @@ def _seed_group_members_from_board(
             'from_board': True,
             'routed_this_run': name in in_run_names,
         }
+    if incomplete:
+        print(f"  Length matching group: {len(incomplete)} member(s) left out "
+              f"-- board copper does not connect their pads (not routed, so "
+              f"neither measured nor protected): {', '.join(sorted(incomplete))}")
     return seeded
+
+
+def _board_net_connected(pcb_data, net_id, segs, vias) -> bool:
+    """True when the board's copper connects every pad of `net_id` (within
+    each board outline), graded as `filter_already_routed` grades it."""
+    from check_connected import check_net_connectivity, net_break_within_outlines
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+             if z.net_id == net_id]
+    result = check_net_connectivity(net_id, segs, vias, pads, zones,
+                                    tolerance=0.02, pcb_data=pcb_data)
+    broken, _ = net_break_within_outlines(pcb_data, result)
+    return not broken
+
+
+def dru_length_window(names, pcb_data):
+    """The `.kicad_dru` length window that binds a matching group (#1391):
+    ``(lo, hi, rule_names)`` with ``lo`` the largest ``min`` and ``hi`` the
+    smallest ``max`` over the rules binding the members (either may be None),
+    or None when the board declares no length rule that binds a member.
+
+    The rule binding a net is KiCad's (last matching rule in file order), read
+    from the sibling ``.kicad_dru`` as check_drc reads it. A member whose
+    binding rule's scope is not modelled contributes nothing: the window is
+    then only what the decidable members declare."""
+    path = getattr(pcb_data, 'source_path', '') or ''
+    if not path:
+        return None
+    try:
+        from kicad_dru import read_board_length_rules, binding_length_rule
+        from list_nets import net_class_memberships
+        rules, _notes = read_board_length_rules(path)
+        if not rules:
+            return None
+        ids = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
+        board_names = set(ids)
+        member = net_class_memberships(path, {ids[n]: n for n in names if n in ids})
+    except Exception:                                           # noqa: BLE001
+        return None
+    lo = hi = None
+    used = []
+    for n in sorted(names):
+        nid = ids.get(n)
+        if nid is None:
+            continue
+        rule, _blocker = binding_length_rule(rules, n, member.get(nid), board_names)
+        if rule is None or (rule.min_mm is None and rule.max_mm is None):
+            continue
+        if rule.name not in used:
+            used.append(rule.name)
+        if rule.min_mm is not None:
+            lo = rule.min_mm if lo is None else max(lo, rule.min_mm)
+        if rule.max_mm is not None:
+            hi = rule.max_mm if hi is None else min(hi, rule.max_mm)
+    if lo is None and hi is None:
+        return None
+    return lo, hi, used
+
+
+def clamp_target_to_window(target, window, tolerance):
+    """`target` moved into the dru window so a member that lands within the
+    match tolerance of it still lands inside the window: into
+    ``[lo + tol, hi - tol]``, or the middle of a window narrower than two
+    tolerances. Returns ``(target, note)``; note is '' when unchanged."""
+    lo, hi, _rules = window
+    t = target
+    a = None if lo is None else lo + tolerance
+    b = None if hi is None else hi - tolerance
+    if a is not None and b is not None and a > b:
+        a = b = (lo + hi) / 2.0
+    if a is not None and t < a:
+        t = a
+    if b is not None and t > b:
+        t = b
+    if abs(t - target) < 1e-9:
+        return target, ''
+    return t, (f"{target:.2f}mm -> {t:.2f}mm to sit inside the "
+               f".kicad_dru length window "
+               f"[{'-' if lo is None else format(lo, 'g')}, "
+               f"{'-' if hi is None else format(hi, 'g')}]mm")
 
 
 def apply_length_matching_to_group(
@@ -2040,7 +2136,34 @@ def apply_length_matching_to_group(
     # stays copper, so the meander loop below still works on copper.
     die = {n: member_pad_to_die(r, n, pcb_data) for n, r in group_results.items()}
     target_length = max(r['route_length'] + die[n] for n, r in group_results.items())
+    # #1391: the board's .kicad_dru length window binds what check_drc and
+    # KiCad grade, so the group aims INTO it: short members meander up to the
+    # window's min, never past its max. A member already past the max cannot
+    # be shortened here and is reported, not matched.
+    window = dru_length_window(list(group_results), pcb_data)
+    if window is not None:
+        target_length, _wnote = clamp_target_to_window(
+            target_length, window, config.length_match_tolerance)
+        if _wnote:
+            print(f"  Length matching group: target {_wnote} "
+                  f"(rule {', '.join(window[2])})")
     print(f"  Length matching group: {len(group_results)} nets ({diff_pair_count} diff pairs, {single_count} single-ended), target={target_length:.2f}mm")
+    member_status: Dict[str, dict] = {}
+    _lo, _hi = (window[0], window[1]) if window is not None else (None, None)
+
+    def _record(name, length, state, shortfall=0.0):
+        rec = {'length_mm': round(length, 3), 'target_mm': round(target_length, 3),
+               'status': state}
+        if shortfall:
+            rec['shortfall_mm'] = round(shortfall, 3)
+        if _lo is not None or _hi is not None:
+            rec['window_mm'] = [_lo, _hi]
+            if (_lo is not None and length < _lo - 1e-6) or \
+                    (_hi is not None and length > _hi + 1e-6):
+                rec['in_window'] = False
+            else:
+                rec['in_window'] = True
+        member_status[name] = rec
     if any(die.values()):
         print(f"  Pad-to-die included (#1248): "
               + _pad_to_die_note(die, group_results, pcb_data, 'mm'))
@@ -2083,6 +2206,10 @@ def apply_length_matching_to_group(
             # Copper already written in an earlier step: it sets the target, it
             # cannot be lengthened here.
             print(f"    {net_name}: {current_length:.2f}mm (existing board copper, not modified)")
+            _record(net_name, current_length,
+                    'matched' if abs(delta) <= config.length_match_tolerance
+                    else ('unmatched_board_copper' if delta > 0 else 'over_target'),
+                    max(delta, 0.0))
             if delta > config.length_match_tolerance:
                 if result.get('routed_this_run'):
                     print(f"    WARNING: {net_name} is {delta:.2f}mm SHORT of the group target "
@@ -2098,7 +2225,16 @@ def apply_length_matching_to_group(
 
         if delta <= config.length_match_tolerance:
             suffix = " (diff pair)" if result.get('is_diff_pair') else ""
-            print(f"    {net_name}{suffix}: {current_length:.2f}mm (OK, within tolerance)")
+            if delta < -config.length_match_tolerance:
+                # Longer than the (window-clamped) target: it cannot be
+                # shortened by meandering.
+                print(f"    {RED}{net_name}{suffix}: {current_length:.2f}mm is "
+                      f"{-delta:.2f}mm LONGER than the target {target_length:.2f}mm "
+                      f"and cannot be shortened here{RESET}")
+                _record(net_name, current_length, 'over_target')
+            else:
+                print(f"    {net_name}{suffix}: {current_length:.2f}mm (OK, within tolerance)")
+                _record(net_name, current_length, 'matched')
             continue
 
         suffix = " (diff pair)" if result.get('is_diff_pair') else ""
@@ -2113,6 +2249,17 @@ def apply_length_matching_to_group(
         )
 
         print(f"      {net_name}: new length = {new_length + die[net_name]:.2f}mm ({bump_count} bumps)")
+        _final = new_length + die[net_name]
+        _left = target_length - _final
+        if abs(_left) <= config.length_match_tolerance:
+            _record(net_name, _final, 'matched')
+        else:
+            print(f"      {RED}{net_name}: NOT matched, {abs(_left):.2f}mm "
+                  f"{'short of' if _left > 0 else 'past'} the target "
+                  f"{target_length:.2f}mm{RESET}")
+            _record(net_name, _final,
+                    'unmeanderable' if bump_count == 0 else 'unmatched',
+                    max(_left, 0.0))
 
         if result.get('is_diff_pair'):
             result.update(modified)
@@ -2127,6 +2274,15 @@ def apply_length_matching_to_group(
         if group_clearance_index is not None:
             group_clearance_index.add_segments(new_segments, index_margin)
 
+    # Per-member verdicts for the summary (run_length_matching reads them).
+    try:
+        statuses = getattr(config, '_length_match_status', None)
+        if statuses is None:
+            statuses = {}
+            config._length_match_status = statuses
+        statuses.update(member_status)
+    except AttributeError:
+        pass
     return net_results
 
 

@@ -41,7 +41,9 @@ at the chain's sizes (resolve_rules: the routing CLIs' flags, an omitted one res
    of the step's copper, its own put back.
 6. It is graded there: the nets handed on connected (check_connected), no violation on a bus net and the whole
    board no worse than it came (check_drc, each board at its own project's floor; the rows of the board's .kicad_dru
-   length and skew rules are named, not counted -- the bus is laid untuned, #1363).
+   length and skew rules are named, not counted -- the bus is laid untuned, #1363). The arrays' other balls the step
+   WALLED IN -- reachable on the board as it came, and from nowhere past the locked lanes at the fab ladder's finest
+   rung -- are named (walled_grade: the BUS line's walled=, the summary's 'walled'); each such net ships open.
 7. Handed on only clean: OUT is the routed board, its routed nets protected in its project (#521: route.py's rip
    candidacy and the plane finalize leave them alone, as do the nets the board came with protected -- an earlier
    bus's), the open ones left to the chain's A* -- else OUT is the board as it came, and A* routes the whole bus.
@@ -679,11 +681,12 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         summary['others_put_back'] = sorted(put_others)
     v, c = wr.grade_counts(routed_pcb, set(nets))
     planes = plane_grade(pcb, board, routed_pcb, log)
+    walled = walled_grade(board, routed_pcb, [src] + dest.split('+'), names, log)
     g = (f'BUS {src}->{dest} K={K} {grade.split(" ", 2)[2] if grade else ""} | on the board: vias={v} copper={c}mm '
          f'connected={int(cc == 0)} drc={int(ok_drc)} (bus {d_bus}, board {d_out} vs {d_in} in'
          + (f', {length_rows["bus"]} length rows' if length_rows.get('bus') else '') + ') '
          + (f'planes={planes["out"]} vs {planes["in"]} in ' if planes and planes.get('out') is not None else '')
-         + f'secs={int(time.time() - t0)}')
+         + f'walled={len(walled["walled"])} secs={int(time.time() - t0)}')
     summary['drc'] = dict(bus=d_bus, board=d_out, input=d_in)
     if length_rows.get('bus'):
         summary['length_rows'] = dict(bus=length_rows['bus'], board=length_rows.get('board'),
@@ -692,6 +695,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             f'counted (#1363): {os.path.join(work, "drc_bus.log")}')
     if planes:
         summary['planes'] = planes
+    summary['walled'] = walled
     if joint_fanout:
         summary['joint_fanout'] = {r: sorted(others[r]) for r in others}
     if cc != 0 or d_bus != 0 or None in (d_out, d_in):
@@ -705,10 +709,21 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
 
     # 7. handed on: OUT, its routed nets protected in its project (#521) -- route.py's rip candidacy and the plane
     # finalize leave them alone
-    from copy_board import copy_board
+    from copy_board import SIBLING_EXTS, copy_board
     from protected_nets import persist_protected_nets, pro_path_for_board, read_protected_nets
     with contextlib.redirect_stdout(sys.stderr):
         copy_board(routed_pcb, out)
+    # ...with the board's own siblings: the step changes none of its rules (.kicad_dru), its brief or its local
+    # settings, and a work board on the way lost them -- OUT went on with its .kicad_pro alone, and KiCad graded it
+    # without the length windows its rules declare (#1316). The project stays the routed board's: its DRC floor is
+    # the one the step routed to
+    import shutil
+    for ext in SIBLING_EXTS:
+        if ext == '.kicad_pro':
+            continue
+        src_ = board[:-len('.kicad_pcb')] + ext
+        if os.path.isfile(src_):
+            shutil.copyfile(src_, out[:-len('.kicad_pcb')] + ext)
     if held:
         # (the pull pads back on their nets: the rest of the chain connects each to its lane)
         with open(out, encoding='utf-8') as f:
@@ -770,6 +785,159 @@ def plane_grade(pcb, board, routed, log=print):
     log(f'  planes crossed on {", ".join(sorted(pour))}: {out["out"]} island link(s) routed vs {out["in"]} as it came'
         + (f'; SPLIT by the bus: {", ".join(out["split"])}' if out['split'] else ''))
     return out
+
+
+def walled_grade(board, routed, refs, names, log=print):
+    """(#1348) the balls of the step's arrays `refs` on no bus net (`names`) that the step WALLED IN: from the ball, a
+    track of the fab ladder's finest rung reaches the rest of its net on the board as it came and not as routed. The
+    lanes are handed on locked, so no later step reaches such a ball, at any size, and its net ships open -- and no
+    other check of the step's sees it: the bus's grade is its own nets', and the board's DRC finds no violation in a
+    ball nothing reaches. Measured: imx6ulz's U2.F1 (VMEM), escaped by a stub to the array's face, a DDR lane on In2.Cu
+    under the stub's end and two on F.Cu turning across it. A ball whose net has no other pad has nothing to reach and
+    is not asked. {balls, rung, walled: ['REF.PAD'], secs}"""
+    from kicad_parser import parse_kicad_pcb
+    from list_nets import escalation_rungs
+    t0 = time.time()
+    bus = {short_name(n) for n in names}
+    with contextlib.redirect_stdout(io.StringIO()):
+        b_out = parse_kicad_pcb(routed)
+    finest = escalation_rungs(len(b_out.board_info.copper_layers or ()) or 4)[-1]
+    rung = (finest['track_width'], finest['via_diameter'], finest['clearance'])
+    asked = {}
+    for r in refs:
+        foot = b_out.footprints.get(r)
+        if foot is None:
+            continue
+        asked[r] = [p.pad_number for p in foot.pads
+                    if p.net_id and p.net_name and short_name(p.net_name) not in bus and p.pad_type != 'np_thru_hole'
+                    and len(b_out.nets[p.net_id].pads) > 1]
+
+    def caged_on(pcb, keys):
+        out = []
+        for r in keys:
+            foot = pcb.footprints.get(r)
+            if foot is None:
+                continue
+            near = _cropped(pcb, foot)
+            by_num = {p.pad_number: p for p in foot.pads}
+            out += [f'{r}.{n}' for n in keys[r] if n in by_num and _caged(near, by_num[n], *rung)]
+        return out
+    now = caged_on(b_out, asked)
+    walled = []
+    if now:
+        with contextlib.redirect_stdout(io.StringIO()):
+            b_in = parse_kicad_pcb(board)
+        was = set(caged_on(b_in, {r: [k.split('.', 1)[1] for k in now if k.split('.', 1)[0] == r] for r in asked}))
+        walled = [k for k in now if k not in was]
+    out = dict(balls=sum(len(v) for v in asked.values()), rung=list(rung), walled=walled,
+               secs=round(time.time() - t0, 1))
+    if walled:
+        nets_ = {f'{r}.{p.pad_number}': p.net_name for r in asked for p in b_out.footprints[r].pads}
+        log(f'  WALLED IN by the step, reached from nowhere at {rung[0]}/{rung[1]}/{rung[2]} (the fab ladder\'s finest): '
+            + ', '.join(f'{k} ({nets_.get(k)})' for k in walled) + ' -- each net ships open past the locked lanes')
+    return out
+
+
+CAGE_VIEW, CAGE_STEP = 4.0, 0.025       # mm round the ball (check_reachability's --margin), the raster's cell
+
+
+def _cropped(pcb, foot):
+    """PCB with only the copper within CAGE_VIEW (and a millimetre) of `foot`'s pads -- each ball's raster reads no
+    more, and a board's every track read per ball per layer was most of the census's time (sdi_mipi_conv: 22 s)"""
+    import copy
+    g = CAGE_VIEW + 1.0
+    xs, ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
+    x0, y0, x1, y1 = min(xs) - g, min(ys) - g, max(xs) + g, max(ys) + g
+    c = copy.copy(pcb)
+    c.segments = [s for s in pcb.segments if max(s.start_x, s.end_x) >= x0 and min(s.start_x, s.end_x) <= x1
+                  and max(s.start_y, s.end_y) >= y0 and min(s.start_y, s.end_y) <= y1]
+    c.vias = [v for v in pcb.vias if x0 <= v.x <= x1 and y0 <= v.y <= y1]
+    c.footprints = {k: f for k, f in pcb.footprints.items()
+                    if any(x0 - 3 <= p.global_x <= x1 + 3 and y0 - 3 <= p.global_y <= y1 + 3 for p in f.pads)}
+    return c
+
+
+def _caged(pcb, pad, track, via, clearance):
+    """no track `track` wide gets from `pad` to the rest of its net within CAGE_VIEW of it -- nor, where the view holds
+    none of the rest, to the view's edge -- changing layers where a via `via` wide fits on every layer or at a via of
+    the net's own. check_reachability's question (placement.reachability: its slack field, its own-copper islands) at
+    one width: each layer's room thresholded and labelled, the layers joined where a via goes, not a widest path. The
+    net's own vias join layers here as its copper does -- check_reachability joins them only where a new via of its
+    --via fits, and read main's imx6ulz U1.N4, escaped through its own 0.3 mm via, CAGED. Pours are not read: a
+    foreign one is filled round what is laid, and a ball's own counts as no copper to reach"""
+    import numpy as np
+    from scipy import ndimage
+    if os.path.join(HERE, '..', 'py_placer') not in sys.path:
+        sys.path.insert(0, os.path.join(HERE, '..', 'py_placer'))
+    from placement.reachability import slack_field
+    nid, step = pad.net_id, CAGE_STEP
+    view = (pad.global_x - CAGE_VIEW, pad.global_y - CAGE_VIEW, pad.global_x + CAGE_VIEW, pad.global_y + CAGE_VIEW)
+    layers = list(pcb.board_info.copper_layers)
+    home = next((L for L in layers if L in pad.layers), layers[0])
+    layers = [home] + [L for L in layers if L != home]
+    frees, owns, room = [], [], []
+    for L in layers:
+        s, o, D = slack_field(pcb, nid, L, view, clearance, None, step)
+        frees.append(s >= track)
+        owns.append(o)
+        room.append(D)
+    h, w = frees[0].shape
+    via_ok = np.logical_and.reduce([D >= via / 2.0 for D in room])
+    own_via = []
+    for v in pcb.vias:
+        cx, cy = int((v.x - view[0]) / step), int((v.y - view[1]) / step)
+        if v.net_id == nid and 0 <= cx < w and 0 <= cy < h:
+            own_via.append((cy, cx))
+
+    def joined(masks, extra, vias):
+        """labels of `masks` per layer, offset to be unique, and their union-find: joined at the `extra` cells and, with
+        `vias`, wherever a via fits (via_ok) and two layers' masks both hold the cell"""
+        labs, n = [], 0
+        for m in masks:
+            lab, k = ndimage.label(m)
+            labs.append(np.where(lab > 0, lab + n, 0))
+            n += k
+        par = np.arange(n + 1)
+
+        def find(a):
+            while par[a] != a:
+                par[a] = par[par[a]]
+                a = par[a]
+            return a
+
+        def union(ids):
+            ids = [int(i) for i in ids if i]
+            for a in ids[1:]:
+                ra, rb = find(a), find(ids[0])
+                if ra != rb:
+                    par[ra] = rb
+        if vias:
+            for i in range(len(labs)):
+                for j in range(i + 1, len(labs)):
+                    a, b = labs[i][via_ok], labs[j][via_ok]
+                    m = (a > 0) & (b > 0)
+                    for x, y in set(zip(a[m].tolist(), b[m].tolist())):
+                        union((x, y))
+        for cy, cx in extra:
+            union([lab[cy, cx] for lab in labs])
+        return labs, find, n
+    # the ball's own island: its net's copper joined through its own vias; the target, the rest of its net in the view
+    olabs, ofind, on = joined(owns, own_via, False)
+    sy, sx = int((pad.global_y - view[1]) / step), int((pad.global_x - view[0]) / step)
+    if not olabs[0][sy, sx]:
+        return False                        # (no copper of its own at its centre: not this check's to say)
+    sroot = ofind(int(olabs[0][sy, sx]))
+    roots = np.array([ofind(i) for i in range(on + 1)])
+    tgt = [o & (roots[ol] != sroot) for o, ol in zip(owns, olabs)]
+    if not any(t.any() for t in tgt):
+        edge = np.zeros((h, w), dtype=bool)
+        edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
+        tgt = [edge] * len(layers)
+    flabs, ffind, _n = joined(frees, own_via, True)
+    if not flabs[0][sy, sx]:
+        return True
+    root = ffind(int(flabs[0][sy, sx]))
+    return not any(ffind(int(i)) == root for lab, t in zip(flabs, tgt) for i in np.unique(lab[t & (lab > 0)]))
 
 
 def array_others(pcb, ref, names):
@@ -1458,6 +1626,13 @@ def main():
         ap.error('OUT is needed, and --src and --dest go together')
     if a.bus and a.src is not None:
         ap.error('--bus names the buses: no --src/--dest with it')
+    # (before the run is spent: without ortools every stage that plans fails in a log of its own, #1355)
+    from startup_checks import StartupCheckError, check_bus_dependencies
+    try:
+        check_bus_dependencies()
+    except StartupCheckError as e:
+        print(f'route_bus: {e}', file=sys.stderr)
+        sys.exit(2)
     try:
         buses = [parse_bus(b) for b in a.bus] if a.bus else None
     except ValueError as e:

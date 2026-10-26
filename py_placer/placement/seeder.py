@@ -406,7 +406,7 @@ def _holes_outside(state, gate, ref: str, x: float, y: float,
     straddles the outline, as check_assembly's copper gate exempts its pad
     (`legality.pad_copper_overrun_mm`; #1297: rp2350's Teensy U8, 33)."""
     from kicad_parser import pad_drill_capsule
-    from .legality import _on_board, footprint_at_pose
+    from .legality import _on_board, _pad_has_no_copper, footprint_at_pose
     fp = (state.pcb_data.footprints or {}).get(ref)
     if fp is None:
         return 0, 0
@@ -418,7 +418,16 @@ def _holes_outside(state, gate, ref: str, x: float, y: float,
         (x1, y1), (x2, y2), r = pad_drill_capsule(p)
         pts = [(cx + r * math.cos(k * math.pi / 8), cy + r * math.sin(k * math.pi / 8))
                for cx, cy in {(x1, y1), (x2, y2)} for k in range(16)]
-        if getattr(p, 'castellated', False) and any(
+        # A castellated half-hole, or a copper-less NPTH drill (a mouse-bite
+        # perforation, a tooling hole cut into the edge): its centre lies ON
+        # the outline by design, so it straddles it while still touching the
+        # board (#1413). One verdict for every such drill: the same 0.5 mm hole
+        # on a slot's contour (a milled ring, on-board inside) and on the outer
+        # edge used to be judged differently. A hole wholly off the board is
+        # still past it.
+        if (getattr(p, 'castellated', False)
+                or (getattr(p, 'pad_type', '') == 'np_thru_hole'
+                    and _pad_has_no_copper(p))) and any(
                 _on_board(gate, px, py) for px, py in pts):
             continue
         if gate.points_overrun_mm(pts) > 1e-9:
@@ -663,7 +672,25 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
         if other == ref or other not in state.parts:
             continue
         opose = obstacles[other]
-        if ref not in containers and other not in containers:
+        # #1443: a pair the heights judge -- one part under the other's body
+        # -- is judged on them, at zero clearance as the courtyards are here;
+        # its holes still bind
+        hv = None
+        covers = getattr(state, 'covers', None)
+        if covers and (ref in covers or other in covers) \
+                and ref not in containers and other not in containers:
+            o = state.parts[other]
+            hv = state.heights.pair(ref, tuple(pose), part.bounds_by_rot[0.0], part.side,
+                                    other, tuple(opose), o.bounds_by_rot[0.0], o.side)
+        if hv is not None:
+            if hv > 0.0 and frozenset((ref, other)) not in waived:
+                conflicts[other] = (f"under {other}'s body, or {other} under its, "
+                                    f"too low ({hv:.3f}mm2)")
+            else:
+                _dh = _drill_conflict(state, ref, pose, other, opose)
+                if _dh:
+                    conflicts[other] = _dh
+        elif ref not in containers and other not in containers:
             area, w, h = _courtyard_overlap(state, ref, pose, other, opose)
             if area > FIXED_OVERLAP_EPS_MM2:
                 if frozenset((ref, other)) in waived:
@@ -899,7 +926,9 @@ def stamp_unlocked(board_file: str, refs: Sequence[str]) -> int:
     blocks, so nothing here can reach them.
     """
     from kicad_parser import iter_footprint_blocks
-    with open(board_file, 'r', encoding='utf-8') as f:
+    # newline='' both ways: only text is removed, so the board keeps its own
+    # line endings (make_unplaced verifies its output byte-for-byte nearby).
+    with open(board_file, 'r', encoding='utf-8', newline='') as f:
         content = f.read()
     want = set(refs)
     count = 0
@@ -920,6 +949,6 @@ def stamp_unlocked(board_file: str, refs: Sequence[str]) -> int:
             continue
         content = content[:start] + new_head + tail + content[end:]
         count += 1
-    with open(board_file, 'w', encoding='utf-8') as f:
+    with open(board_file, 'w', encoding='utf-8', newline='') as f:
         f.write(content)
     return count

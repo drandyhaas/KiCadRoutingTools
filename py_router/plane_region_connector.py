@@ -459,6 +459,13 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     if not plane_models:
         return None
 
+    # A fixed layer order (#1398). The caller hands a set of layer-name
+    # strings, whose iteration order follows PYTHONHASHSEED; the anchor
+    # attribution below takes the FIRST layer whose island an anchor touches,
+    # so a hash-ordered walk made the discovered regions (and the joins
+    # routed from them) differ from one process to the next.
+    zone_layers = sorted(zone_layers)
+
     min_x, min_y, max_x, max_y = zone_bounds
     min_gx, min_gy = coord.to_grid(min_x, min_y)
     max_gx, max_gy = coord.to_grid(max_x, max_y)

@@ -518,6 +518,33 @@ six others.
     18.3 mm for more. They stay on one face (median 100% of members).
   - *Apply:* a group with a `side` is put on that face before placing; leave `side`
     out to keep each part on the face it is on.
+- **Parts drawn together on the schematic are placed together.**
+  - *Humans:* on 239 boards whose schematics were fetched from their repositories,
+    how close two parts are drawn predicts whether they are among the board's 10%
+    closest pairs with a median AUC of 0.76, against 0.60 for how strongly the
+    netlist connects them and 0.66 for sheet plus netlist, on 88% of boards. It
+    still predicts with the netlist distance held fixed (0.79 for parts sharing a
+    net, 0.73 for parts sharing none). A drawn block (`board_context`, a median 3.6
+    parts) sits 0.20 as wide as random parts of its size, against 0.45 for as many
+    netlist clusters, on 91% of boards. For 4-8 groups, sheet plus netlist is as
+    tight as the drawing on hierarchical boards.
+  - *Routed:* on 4 corpus boards placed from a pile (12 seeds each, every seed
+    fast-routed), group membership written with the schematic routed better than
+    membership written without it on all 4, with the groups' `near`/`apart`/`edge`
+    hints removed from both: more clean seeds or a lower median of blocking nets
+    (esp-rust-board 7 vs 4 clean of 12, nudac a median of 1 vs 3).
+  - *Apply:* take the groups from the sheets and keep each drawn block in one
+    group (SKILL.md §3.3).
+- **A designer's layout note ("C11 close to pin45") is ignored unless it becomes
+  a `proximity` row.**
+  - *Routed:* on 8 corpus boards placed from a pile with the same groups, 12 seeds
+    each and every seed fast-routed, the noted pairs met their limit (2.0 mm at a
+    pin, 5.0 mm part to part) in 58 of 180 seeds without the rows and 164 of 180
+    with them, with no measurable routing cost. Without a row the placer put
+    usb_fm_radio's C6 a median 11 mm from its pin. Notes go stale: on usb_fm_radio
+    two of four pin notes name a cap a renumbering moved to another rail.
+  - *Apply:* SKILL.md §3.3. The human designers kept these pairs closer than 2 mm
+    in about half the cases, so a limit the user gives outranks the default.
 - **On a 4-layer board, leave about 1 mm between neighbouring groups.** Inside a group,
   parts are about 0.2 mm apart. 2-layer boards show no such gutter.
   - *Humans:* boundary parts sit 1.02 mm from the nearest part of another group and

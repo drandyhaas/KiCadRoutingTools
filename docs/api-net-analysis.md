@@ -254,8 +254,11 @@ print(f"{net.name}: {calculate_route_length(segs, vias, pcb):.2f} mm")
 ### Per-net and pin-pair length
 
 ```python
-net_copper_length(pcb_data, net_id, include_vias=True) -> float
-net_copper_lengths(pcb_data, net_ids=None, include_vias=True) -> Dict[int, float]
+net_copper_length(pcb_data, net_id, include_vias=True, release=None) -> float
+net_copper_lengths(pcb_data, net_ids=None, include_vias=True, release=None)
+    -> Dict[int, float]
+length_measure_release(release=None) -> str   # the KiCad release measured as
+use_length_measure_release(release)           # force one; None = installed
 ```
 
 Ask "how long is net N?" directly from a parsed board, without hand-slicing
@@ -267,15 +270,45 @@ Both report **total net copper**. That equals the signal path only on a clean
 point-to-point net; on a multipoint/fly-by net, or one carrying a stub, it is
 the sum of every branch and matches no path at all.
 
-Each via is charged as **KiCad's length DRC** charges it (#1313,
-`kicad_via_length`): the barrel between the outermost and innermost of its
-layers where a same-net track has an endpoint exactly at the via, or a
-same-net pad is centred on it (a via-in-pad joins the pad's layer). One joined
-layer charges nothing. A via-in-pad on F.Cu whose track leaves on In1.Cu is
-charged F.Cu→In1.Cu, not the whole stack. On routed_output (10 layers,
-1.59 mm) this matches kicad-cli 10.0.0's `length_out_of_range` actuals to
-0.1 µm on every routed net it reported. `calculate_route_length` — the
-router's own measure, used for meander sizing — still charges the full span.
+The net is measured as **KiCad's length DRC** measures it (#1313, #1432;
+`kicad_net_length_nm`, `kicad_via_length`), in integer nanometres as KiCad does,
+and **as the KiCad release that grades the board measures it**. KiCad changed
+this measure within the 10.0 series by up to about one via barrel per via, so
+each change is gated on the release that made it:
+
+| from | the length DRC |
+|---|---|
+| 10.0.0 | charges a via the stackup between the outermost and innermost layers of the tracks that end exactly at its centre (both end copper layers whole); with one such track, a pad anchored at the via and not on that track's layer adds its first copper layer (a via-in-pad); a via no track ends at keeps the layers its tracks touch (one: to the via's far end; none: the whole via). Same-layer tracks merge into one run only where no other unmerged track, on any layer, ends, and an arc never merges into a run. A run that ends at a pad's anchor is cut where it leaves the pad's outline polygon (a circle pad is at least 16 inscribed sides) and measured to the anchor. |
+| 10.0.2 | counts half of each inner copper layer that ends a via's span. |
+| 10.0.4 | also joins a via to every track that ends inside its pad, charges a via no track ends at nothing, and cuts a run whose end lies in a via pad at the pad edge, measuring it to the via centre. |
+| 10.0.5 | always adds the side layer of the pad connected to a via (an SMD or connector pad's first copper layer, a through-hole pad's footprint side), and merges arcs into runs. |
+| 10.0.7 | merges same-layer tracks wherever exactly two same-layer track ends meet, also where tracks of other layers end there (at a via). |
+
+The release is `length_measure_release()`: the installed kicad-cli's
+(`installed_kicad_release()`, read once per process), held to the releases
+modelled -- a newer one measures as the newest (`LENGTH_MEASURE_NEWEST`,
+10.0.7), an older one as the oldest (`LENGTH_MEASURE_OLDEST`, 10.0.0) -- or the
+newest with no kicad-cli. `release=` on `net_copper_length`,
+`net_copper_lengths`, `kicad_net_length_nm` and `kicad_via_length`, or
+`use_length_measure_release(release)` for everything after it, forces one;
+`length_measure_note()` is the line check_drc prints, naming the release
+measured as and the installed one when they differ. A via-in-pad on F.Cu whose
+track leaves on In1.Cu is charged F.Cu to In1.Cu (from 10.0.2, to half of
+In1.Cu), not the whole stack.
+
+Each release's measure equals that kicad-cli's `length_out_of_range` actuals,
+at its four decimals, on every net it reported of three routed boards and of
+`tests/fixtures/1432/length_cases.kicad_pcb` (one net per change above), for
+10.0.0, 10.0.2, 10.0.4, 10.0.5, 10.0.6 and 10.0.7
+(`tests/test_1432_kicad_release_length.py`, which also checks every net of a
+routed board live against the installed kicad-cli). Items are taken in board
+file order where KiCad takes them in memory order, which matters only where a
+joint could merge either way. Not modelled: true arc length (an arc is measured
+on the parser's chords, within a few um of KiCad's), oval/custom/tilted pad
+outlines (the exact outline is used), and a board with no `(stackup)` block
+(KiCad builds a default stack from the board thickness; here the barrel is 0).
+`calculate_route_length` -- the router's own measure, used for meander sizing --
+still charges the full span.
 
 ```python
 pin_pair_path_length(pcb_data, net_id, pad_a, pad_b, tolerance=0.02)
@@ -386,8 +419,9 @@ parent track leaves, does not block) and, given a window, the gap is in
 `layers_p` / `layers_n`, and `arc_chords` (tracks parsed from `(arc ...)`, which
 the parser linearises -- nonzero means the figures are approximate).
 `diff_pair_skew` is each member's `net_match_length(mode='total')` and their
-difference, `None` while a member's pads are not joined. On a routed imx6ulz
-board and a ten-case fixture both matched kicad-cli 10.0.0's actuals to 0.1 um.
+difference, `None` while a member's pads are not joined; the lengths are
+measured as `length_measure_release()` (above). On a routed board and a
+ten-case fixture both matched kicad-cli 10.0.0's actuals to 0.1 um.
 
 ```python
 net_signal_length(pcb_data, net_id, tolerance=0.02) -> Optional[float]

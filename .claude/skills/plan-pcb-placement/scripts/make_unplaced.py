@@ -178,23 +178,16 @@ def _drop_blocks(path, spans):
 
 
 def _unlock(dst, refs):
-    """Remove `(locked yes)` from the named blocks, through the parser's keys."""
-    with open(dst, encoding='utf-8', newline='') as fh:
-        text = fh.read()
-    parts, pos, done = [], 0, []
-    for start, end, fp_text, _raw, key in iter_footprint_blocks(text):
-        if key not in refs or '(locked yes)' not in fp_text:
-            continue
-        new = re.sub(r'\n[ \t]*\(locked yes\)[ \t]*(?=\r?\n)', '', fp_text,
-                     count=1)
-        if new != fp_text:
-            parts += [text[pos:start], new]
-            pos = end
-            done.append(key)
-    parts.append(text[pos:])
-    with open(dst, 'w', encoding='utf-8', newline='') as fh:
-        fh.write(''.join(parts))
-    return sorted(done)
+    """Unlock the named blocks; returns the ones it changed.
+
+    Through `seeder.stamp_unlocked`, the one unlock writer, which reads every
+    lock spelling the parser does: `(locked yes)`, the 2021 `(locked)`, and
+    KiCad 6's bare word in the header, `(footprint "X" locked (layer ...`.
+    This used to strip a `(locked yes)` line only, so on a KiCad 6 board a
+    locked part was piled and left locked -- a part no placer may move, and
+    the run failed its own check (esp-rust-board's U4)."""
+    from placement.seeder import stamp_unlocked
+    return [ref for ref in sorted(refs) if stamp_unlocked(dst, [ref])]
 
 
 def build(src: str, dst: str, keep_locked: bool = False,
@@ -259,7 +252,7 @@ def build(src: str, dst: str, keep_locked: bool = False,
     if not write_placed_output(src, dst, placements, pcb_data=pcb):
         print('refuse: write_placed_output returned False', file=sys.stderr)
         return 1
-    unlocked = _unlock(dst, set(movable))
+    unlocked = _unlock(dst, set(movable) & set(was_locked))
     # #1163: the zones that outline the placement go, unless asked to stay.
     # Measured on the written board's text (the writer does not touch a
     # board-level zone) against the SOURCE pad poses.

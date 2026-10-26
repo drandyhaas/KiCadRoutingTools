@@ -672,7 +672,10 @@ def route_single_ended_nets(
                 if nid not in bus_net_ids_set:
                     reordered_nets.append((net_name, nid))
 
-            single_ended_nets = reordered_nets
+            # #1405: a reversible part's doubled pins can read as a bus;
+            # their joins still route after every named net
+            from net_ordering import order_pin_joins_last
+            single_ended_nets = order_pin_joins_last(reordered_nets)
             print()
 
             # Reroute-attraction transport: the reroute loop runs far from
@@ -965,6 +968,7 @@ def route_single_ended_nets(
 
             # Try rip-up and reroute for single-ended nets (similar to diff pairs)
             ripped_up = False
+            _ladder_ripped = []     # #1394: nets the rip ladder ripped (then restored)
             if routed_net_paths and result:
                 # Find the direction that failed faster (likely more constrained)
                 fwd_iters = result.get('iterations_forward', 0)
@@ -1676,6 +1680,9 @@ def route_single_ended_nets(
                             "top_blockers": top_blocker_names
                         })
                         print(f"  {RED}All rip-up attempts failed: Restoring {len(ripped_items)} net(s){RESET}")
+                        _ladder_ripped = [
+                            (pcb_data.nets[_it[0]].name if _it[0] in pcb_data.nets
+                             else f"Net {_it[0]}") for _it in ripped_items]
                         for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
                             restore_net(rid, saved_result, ripped_ids, was_in_results,
                                        pcb_data, routed_net_ids, routed_net_paths,
@@ -1687,15 +1694,26 @@ def route_single_ended_nets(
                                 successful += 1
 
             if not ripped_up:
-                record_net_event(state, net_id, "reroute_failed", {
-                    "reason": "no rippable blockers found"
-                })
-                print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                 from routing_diagnostics import (static_boxin_hint,
                                                  preexisting_blocker_hint,
                                                  condense_hint)
-                hint, _boxin = static_boxin_hint(result, config, pcb_data,
-                                                 return_verdict=True)
+                if _ladder_ripped:
+                    # #1394: the ladder DID find blockers, ripped them and
+                    # restored them when the retry still failed. "No rippable
+                    # blockers" and the static box-in verdict (a search that
+                    # died with nothing to rip) are both false here.
+                    print(f"  {RED}ROUTE FAILED - ripping {len(_ladder_ripped)} "
+                          f"blocker net(s) ({', '.join(_ladder_ripped[:5])}"
+                          f"{', ...' if len(_ladder_ripped) > 5 else ''}) "
+                          f"did not free a path{RESET}")
+                    hint, _boxin = '', None
+                else:
+                    record_net_event(state, net_id, "reroute_failed", {
+                        "reason": "no rippable blockers found"
+                    })
+                    print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
+                    hint, _boxin = static_boxin_hint(result, config, pcb_data,
+                                                     return_verdict=True)
                 if hint:
                     hint = condense_hint(hint)
                     if hint:

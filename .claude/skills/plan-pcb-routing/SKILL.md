@@ -582,7 +582,15 @@ for fine-pitch boards (#111/#115):**
   these are the size new objects are *drawn at*. Of these, only **clearance** is
   a DRC-enforced minimum. `track_width` and `via_diameter`/`drill` are **not** DRC
   floors — they are just defaults, so a board can (and the human originals do) use
-  a **smaller** via/track than the net-class nominal and still pass DRC.
+  a **smaller** via/track than the net-class nominal and still pass DRC. The
+  router honours a non-Default class's `track_width` and discloses copper that
+  ships under it (`design_rules`, "class-width copper shipped under width"), but
+  no DONE grader holds a board to it. **A width you REQUIRE of a net is a
+  request, not a class value:** `--power-nets` / `--power-nets-widths` records
+  it in the output's `kicad_routing_tools` records, and `board_score` measures
+  it with no flag and reports copper under it (`net_widths.requested_under`)
+  without counting it. A width the board MUST have goes in
+  `board_score --net-min-widths`, which grades it.
 - **Board Constraints** (`min_clearance`, `min_track_width`, `min_via_diameter`,
   `min_hole_to_hole`, `min_through_hole_diameter`): **these are the actual DRC
   floors.** `--design-rules` reads them from `design_settings.rules` and combines
@@ -623,8 +631,8 @@ Use the printed flags as-is:
   or falls back** — `route_diff.py`'s `JSON_SUMMARY` lists it in `failed_diff_pairs`,
   `single_ended_diff_pairs`, `partial_diff_pairs` (coupled, but the member audit
   found member pads left open) or `uncoupled_diff_pairs` (#1303: routed, but the
-  copper it ships is not coupled -- members on separate layers, or apart wider than
-  the gap; route_diff reads this off the board, not off its own result, and protects
+  copper it ships is not coupled -- members on separate layers, apart wider than
+  the gap, or coupled over less than one pitch or 10% of the pair's length; route_diff reads this off the board, not off its own result, and protects
   such a pair only while its members still run alongside within 1 mm
   (`pair_reports[].protected`, #1361), so a retry may rip the rest), or DRC shows an
   intra-pair / via-via graze — re-run
@@ -1409,7 +1417,9 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    pitch). Do not hand-pick a pitch from corpus statistics.
    **Do not recommend `--add-teardrops`** (7% of human boards use teardrops)
    and **do not set `--thermal-relief`** — leave the tool's default connection
-   style alone.
+   style alone. The one exception is re-pouring a designer's thermal-relief
+   pour that should keep its relief (Step 3, "A pour the board already
+   has"); `route_plan_check` R07 allows the flag only then, with `--board`.
 5. **Verification** - DRC and connectivity checks (plane repair is inside
    step 3's finalize — there is no separate repair step, #562)
 
@@ -1439,6 +1449,27 @@ Present the plan to the user as a numbered list with explanations:
 
 ## Step-by-Step Routing Commands
 
+### Step 0 of the example chain: Keep copper out from under the screw heads (mounting holes, #1442)
+A mounting hole is checked against the board's hole clearance only: the screw
+head, washer or standoff that sits on it is not in the board file, so a route
+can run right up to the hole and pass every DRC. Before the first step, write
+each bare mounting hole's screw-head ring as a copper keep-out (tracks and vias
+forbidden, the pour allowed):
+
+python3 -X utf8 py_router/add_rule_area.py board.kicad_pcb board_step0.kicad_pcb \
+    --name MOUNT --mounting-holes 2>&1 | tee /tmp/step0_mount.txt
+
+A mounting hole here is a footprint that is one round drill of 2 mm or more
+with no signal net; a hole whose pad carries a net (a ground ring) gets no area,
+since its own copper has to reach it. The ring reaches 0.4 x the drill past the
+hole's edge (an ISO 7380 head); pass `--ring MM` for a wider washer or standoff.
+Read the list it prints: a hole that takes no screw (a test-fixture or alignment
+hole) needs no ring -- leave the step out then. When it writes nothing ("no
+mounting hole to write a ring for"), go on from `board.kicad_pcb`; otherwise
+every later step reads `board_step0.kicad_pcb` in its place, and check_drc
+grades the areas like any keep-out (`keepout`). Measured over the corpus's
+mounting-hole boards, the rings cost the routed result nothing.
+
 ### Step 1: Pour the Power Planes (FIRST — before fanout and routing, #424/#562)
 A bare pour: nets and layers ONLY. No `--add-gnd-vias`, no `--stitch-*` —
 those adapt to signals that don't exist yet and run in Step 3 instead. **The pour runs FIRST, before fanout**: the fanout's
@@ -1465,8 +1496,9 @@ designer's thermal-relief pour comes back solid, which matters on a
 hand-soldered through-hole board. Before the pour, look for existing pours on
 the plane nets. If the designer's pour should stay as drawn (its outline,
 connection style or clearance), add `--skip-existing-zones` for that step. If
-it should be replaced but keep thermal relief, add `--thermal-relief`. Then
-check the listed changes.
+it should be replaced but keep thermal relief, add `--thermal-relief`
+(`route_plan_check --board` accepts it exactly when the board's pour on that net
+is a thermal-relief pour). Then check the listed changes.
 
 A multi-layer pour, such as `(layers "F.Cu" "B.Cu")`, is ONE zone and is
 replaced only when this run pours the net on every layer it covers (#1299), so
@@ -1582,7 +1614,7 @@ python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
 
 **What it hands on, and how to check it.** The last line of its log is the
 grade -- `BUS U1->U2 K=.. lanes=../.. vias=.. ... | on the board: ...
-connected=1 drc=.. planes=.. vs .. in` -- and `<out stem>.bus/summary.json`
+connected=1 drc=.. planes=.. vs .. in walled=..` -- and `<out stem>.bus/summary.json`
 names every net routed and every one refused, with why. It exits 0 when the
 bus is handed on routed, connected and clean, and 1 when OUT is the board as it
 came (then the rest of the chain routes the whole bus with A*: carry on from
@@ -1604,7 +1636,9 @@ Check, besides the BUS line: `check_connected.py` on OUT, and its PLANES --
 refill and count each pour's islands. On h616_lpddr4 the LPDDR4 lanes on In2
 split the VCC_DRAM island under the memory in two, which the step's own
 `planes=` count did not flag, and `route.py` then could not reach one of its
-pads past the protected bus.
+pads past the protected bus. A non-zero `walled=` names balls of the arrays
+(not the bus's) that no later step can reach past the locked lanes: report
+those nets as open, do not spend `route.py` rounds on them.
 
 **Known limits (it is experimental):** a bus's pairs run at the step's own
 pitch, not the net class's diff-pair gap (DDR 0.093/0.093 on h616_lpddr4,
@@ -1928,7 +1962,9 @@ signatures:
 - **A net walled by its own protected diff partner** (`no rippable
   blockers` naming the partner): the #521 override — name BOTH members
   EXACTLY with `--nets P N --force-reroute`, then one more all-nets
-  iteration (override passes may pay off one pass late).
+  iteration (override passes may pay off one pass late). Run it with
+  **`route_diff.py`** so the pair comes back coupled: `route.py` routes
+  single-ended and would de-pair it (#1399).
 - **Bare-ball / island signatures** are now handled automatically
   in-engine (bare-ball fanout rescue incl. the cap-move, per-island
   stitcher) — if a net still ships bare, check the rescue log lines
@@ -2459,7 +2495,15 @@ Key options:
   `matched` means the board's P/N skew is inside `--length-match-tolerance`.
   Where the pair has a hard skew budget, declare it as a `.kicad_dru`
   `(constraint skew (max ..) (within_diff_pairs))` rule: check_drc and
-  board_score grade it, as KiCad does
+  board_score grade it, as KiCad does. A board whose project declares a
+  diff-pair net class (a `diff_pair_gap`/`diff_pair_width` that differs from
+  Default's) needs such a rule: board_score only MEASURES a pair nothing
+  grades, and `check_complete` names the declaration in its reason
+  (DISCLOSED, not counted) until a rule binds it, e.g.
+  `(rule "pair skew" (condition "A.NetClass == '100ohm'") (constraint skew
+  (max 0.15mm) (within_diff_pairs)))` in `<board>.kicad_dru`. A rule whose
+  condition names a class or net the board lacks grades nothing, and check_drc
+  says `NOT GRADING`
 - `--swappable-nets "*rx*"` - Allow target swap optimization for memory lanes
 
 ### QFN/QFP Components (Perimeter Pads)
@@ -2825,6 +2869,8 @@ contain structured data including:
 - `open_single`: Nets that KEPT a result whose copper still leaves pads disconnected (non-multipoint only). A run is clean only when `failed_single` AND `open_single` are both empty — a board can ship open copper with `failed_single: []`
 - `terminal_restores`: `{net: outcome}` for rip victims restored at terminal failure — `full` is the only success; `full_open`/`stub` ship broken
 - `stacked_copper`: Same-net duplicate copper KiCad's DRC never flags (disclosure only, not a routing failure). It is taken before the plane finalize; the end-of-run dedup (#162, the `Stacked copper (#162, end of run)` line) then removes the exact same-span copies the run ships, the widest kept, so `check_weird` on the output is the reading of what shipped
+- `close_same_net_vias` (#1414): same-net via pairs this run laid with drills closer than `--hole-to-hole-clearance` (the guarded re-route could not connect, so the unspaced path shipped); check_drc grades them `VIA-DRILL-HOLE`
+- `different_net_crossings` (#1375): different-net tracks crossing on one layer among the copper this run laid -- a short that `failed 0` does not cover; check_drc grades `SEGMENT-CROSSING`
 - `failed_multipoint`: List of nets with unconnected pads (includes pad coordinates)
 - `blockers`: Per still-failed net, which routed nets wall it off (`blocked_by` with cell counts; #409)
 - `pad_pairs_connected`/`pad_pairs_total` + `pad_pairs_open`: Pad-pair routability tallies (PRR = connected/total) and per-open-net outcome — route-time failures are opens; shorts are DRC's domain (#409 follow-up)
@@ -3095,8 +3141,14 @@ router has nothing to improve there: the escalation ladder never fires and the
 copper comes back byte-identical. (When the scope holds a poured net, the step
 still runs the plane finalize and the end-of-run cleanup, #1112, so copper can
 be tidied, but no connected net is re-routed.) To change the geometry of copper the router is
-happy with you must **rip** it (`--rip-existing-nets <exact names>`) or route the
-whole board. Run 20 spent a lap discovering this — a targeted via fix produced
+happy with, name the nets in `--nets` and pass **`--force-reroute`**: it strips
+their copper and re-routes them from scratch (#515); for a differential
+pair use `route_diff.py --nets P N --force-reroute`, which re-routes it as a
+coupled pair (#1399). `--rip-existing-nets` is
+NOT that lever: it only lets the router rip a net that BLOCKS another route, so
+a connected net named in both `--nets` and `--rip-existing-nets` is dropped as
+already connected and ships unchanged (the run warns "will NOT be re-routed").
+Otherwise, route the whole board. Run 20 spent a lap discovering this — a targeted via fix produced
 vias at identical coordinates in both boards.
 
 **When the hint names a rail or a protected pair, rip THAT ONE, alone** (#1039),
@@ -3107,10 +3159,13 @@ side effect, not about the one the hint names. And on a board with pours, the
 retry's `--nets` carries the poured nets too (#1032).
 
 **The hint's suggested values are an EXAMPLE, not a derivation — read its
-`(current: ...)` tail.** On a board already routing at 0.15/0.15 the box-in hint
-recommends `--clearance 0.15 --track-width 0.15`, the values already in force,
-so the only novel token in the whole sentence is the grid. The tail is what
-tells you that, and the grid alone is not a lever (see below).
+`(current: ...)` tail.** The box-in hint suggests a clearance or track only when
+it is narrower than the run's own (`0.15` against a run above it), so on a board
+already routing at or below 0.15 the only novel token in the whole sentence is
+the grid. The tail tells you that, and the grid alone is not a lever (see
+below). A failure printed as `ROUTE FAILED - ripping N blocker net(s) (...) did
+not free a path` is not a box-in at all: the ladder found blockers, ripped and
+restored them.
 
 ### Diagnose and Retry
 
@@ -3305,9 +3360,13 @@ hunt for.
    (`kicad_drc_compare` drops the silk classes by design), so read KiCad's
    own (it can take minutes on a silk-heavy board, #333):
    ```bash
-   kicad-cli pcb drc board_final.kicad_pcb --severity-all --format json -o /tmp/silk_drc.json
+   KCLI=$(python3 py_tools/kicad_cli_path.py)
+   "$KCLI" pcb drc board_final.kicad_pcb --severity-all --format json -o /tmp/silk_drc.json
    python3 -c "import json,collections;v=json.load(open('/tmp/silk_drc.json'))['violations'];print(dict(collections.Counter(x['type'] for x in v if x['type'].startswith('silk'))) or 'no silk violations')"
    ```
+   `kicad_cli_path.py` resolves the binary the way the tools do (#1418): a
+   stock macOS KiCad keeps it in the app bundle, off PATH, where a bare
+   `kicad-cli` exits 127. Report the silk as ungraded only when it exits 1.
    Report each silk class in the summary. The tidy is
    `python3 -X utf8 py_placer/beautify_labels.py board_final.kicad_pcb board_labels.kicad_pcb`:
    it moves reference labels clear of pads, holes, the edge and each other,

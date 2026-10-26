@@ -764,6 +764,20 @@ class RoutingDialog(wx.Dialog):
             v = mins.get(src)
             if isinstance(v, (int, float)) and v > 1e-9:
                 out[key] = float(v)
+        if 'clearance' in out:
+            # #1369: a min_clearance the writeback capped at a pad clearance
+            # override is not a board minimum; the board's records say what
+            # is (fab_tiers.board_declared_min_clearance, as the CLI reads it).
+            try:
+                import pcbnew
+                import tool_records
+                from fab_tiers import board_declared_min_clearance
+                _b = pcbnew.GetBoard()
+                if _b is not None:
+                    out['clearance'] = float(board_declared_min_clearance(
+                        out['clearance'], tool_records.live_namespace(_b)))
+            except Exception:
+                pass
         if 'clearance' not in out:
             # #1160: an unset Board Setup minimum leaves the Default class as
             # the clearance every Default net is graded at -- the CLI's
@@ -893,7 +907,22 @@ class RoutingDialog(wx.Dialog):
         return self.same_net_pad_clearance.GetValue()
 
     def _effective_via_size(self):
-        return self._effective_geometry_floor('via_size')
+        """Pinned up so the via keeps the fab floor's annular ring around the
+        effective drill (#1433) -- parity with the CLI's enforce_fab_floors,
+        through the same fab_tiers.via_size_for_annular_ring. Like the CLI,
+        which pins only when --via-size AND --via-drill are both given, this
+        pins only when both override checkboxes are checked; a board-derived
+        value is the board's own and is left as it is."""
+        val = self._effective_geometry_floor('via_size')
+        if not (self.via_size_check.GetValue() and self.via_drill_check.GetValue()):
+            return val
+        from fab_tiers import via_size_for_annular_ring, parse_fab_overrides
+        ncu = len(self.pcb_data.board_info.copper_layers) or 2
+        tier = self.fab_tier.GetString(self.fab_tier.GetSelection())
+        path = self.fab_overrides_path.GetValue().strip()
+        ovr = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
+        return via_size_for_annular_ring(val, self._effective_via_drill(),
+                                         ncu, tier, ovr)
 
     def _effective_via_drill(self):
         return self._effective_geometry_floor('via_drill')
@@ -1492,7 +1521,8 @@ class RoutingDialog(wx.Dialog):
             "Protected nets (length-matched groups, routed diff pairs) are skipped "
             "unless selected by exact name; KiCad-locked copper is never ripped; "
             "plane nets are skipped (use the Planes tab). If the re-route fails "
-            "outright, the original copper is restored.")
+            "outright, the original copper is restored. On the Differential "
+            "Pairs tab the selected pairs are re-routed as coupled pairs.")
         options_inner.Add(self.force_reroute, 0, wx.ALL, 3)
 
         # Keep input copper (#84 / --keep-input-copper): the flip side of rip --
@@ -2329,12 +2359,15 @@ class RoutingDialog(wx.Dialog):
         # the list for connectivity checking
         self.all_nets = []
 
+        from net_queries import multipad_unconnected_to_route
+        multipad_nc = multipad_unconnected_to_route(self.pcb_data)
         for net_id, net in self.pcb_data.nets.items():
             name = net.name
             if not name:
                 continue
-            # Skip unconnected nets
-            if name.lower().startswith('unconnected-'):
+            # Skip no-connect nets, except the multi-pad ones nothing joins
+            # (#1405), which the CLI wildcard routes
+            if name.lower().startswith('unconnected-') and name not in multipad_nc:
                 continue
             # Skip nets with fewer than 2 pads
             if len(net.pads) < 2:
@@ -4460,6 +4493,13 @@ class RoutingDialog(wx.Dialog):
                 edge_clearance=config.get('board_edge_clearance'),
                 # #581: recorded as route.py records --same-net-pad-clearance
                 same_net_pad_clearance=config.get('same_net_pad_clearance'))
+        else:
+            # The tool records (protected nets, impedance, same-net pad
+            # clearance) are not DRC floors: an unchecked box must not void
+            # them (#1415, as route.py --no-fix-drc-settings).
+            from .gui_utils import persist_live_tool_records
+            persist_live_tool_records(
+                board, config.get('same_net_pad_clearance'))
 
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""

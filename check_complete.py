@@ -146,14 +146,19 @@ def kicad_hole_clearance(board, value, timeout=3600):
     """KiCad's own copper-to-hole grade of ``board`` at ``value`` mm (#1198).
 
     A staged copy (the board and its siblings) whose project declares
-    ``min_hole_clearance = value`` at error severity, through kicad-cli with
-    zones refilled -- KiCad refills before fab, and the stored fill was poured
-    at whatever value the chain lowered the rule to. KiCad's hole_clearance
-    covers every hole: via drills, PTH barrels and NPTH, which check_drc's hole
-    arms (NPTH only) do not.
+    ``min_hole_clearance = value`` at error severity, through kicad-cli on the
+    fill AS SHIPPED (#1370): a delivered fill was poured at whatever value the
+    chain lowered the rule to, and re-pouring it at the authored value here
+    graded copper nobody ships. KiCad's hole_clearance covers every hole: via
+    drills, PTH barrels and NPTH, which check_drc's hole arms (NPTH only) do
+    not.
 
-    -> ``{'count': N, 'min_actual': mm or None}``, or ``{'error': why}`` when
-    kicad-cli is missing or produced no report. Never raises."""
+    -> ``{'count': N, 'min_actual': mm or None, 'items': [...]}`` where each
+    item is ``{'kinds': (...), 'actual': mm}`` naming the KIND of the
+    violating pair (its two items' kinds, sorted -- KiCad does not report the
+    same pairs on two runs of one board, so positions cannot be matched across
+    boards); or ``{'error': why}`` when kicad-cli is missing or
+    produced no report. Never raises."""
     import re
     import tempfile
     from copy_board import copy_board
@@ -185,7 +190,7 @@ def kicad_hole_clearance(board, value, timeout=3600):
         try:
             r = subprocess.run([cli, 'pcb', 'drc', '--format', 'json',
                                 '--units', 'mm', '--severity-all',
-                                '--refill-zones', '--output', out, dst],
+                                '--output', out, dst],
                                capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return {'error': f'kicad-cli timed out after {timeout:g} s'}
@@ -200,6 +205,7 @@ def kicad_hole_clearance(board, value, timeout=3600):
         shutil.rmtree(tmp, ignore_errors=True)
     actual = []
     count = 0
+    items = []
     for v in report.get('violations', []):
         if v.get('type') != 'hole_clearance' or v.get('severity') != 'error':
             continue
@@ -207,7 +213,48 @@ def kicad_hole_clearance(board, value, timeout=3600):
         m = re.search(r'actual\s+(-?[0-9.]+)\s*mm', v.get('description') or '')
         if m:
             actual.append(float(m.group(1)))
-    return {'count': count, 'min_actual': min(actual) if actual else None}
+        # What kind of pair it is (track-via, pad-NPTH pad, ...). KiCad does
+        # not report the same pairs on two runs of ONE board -- it keeps one of
+        # several overlapping violations, and a re-run of an identical file
+        # shares barely half its tracks -- so the pair itself cannot be matched
+        # across boards; its kind can.
+        kinds = tuple(sorted(
+            (re.match(r'[A-Za-z]+(?: pad)?', it.get('description') or '')
+             or [''])[0] for it in v.get('items') or ()))
+        items.append({'kinds': kinds,
+                      'actual': float(m.group(1)) if m else None})
+    return {'count': count, 'min_actual': min(actual) if actual else None,
+            'items': items}
+
+
+def _unmatched_by_reference(board_items, ref_items):
+    """The board's violations the reference does NOT break in kind, at least
+    as badly (#1370).
+
+    ``reference_too`` used to compare the two boards' MINIMUM distances. A
+    reference with one pad on a hole at 0.0 mm then excused every violation
+    of a board whose copper the reference never had: track-to-via pairs
+    against pad-to-hole ones, a different set of items. A violation is the
+    reference's too only when the reference breaks the same KIND of pair
+    (its two items' kinds) at a distance no larger than the board's worst of
+    that kind. Returns the board's violations that fail that."""
+    ref = {}
+    for it in ref_items or ():
+        a = it.get('actual')
+        if a is not None:
+            ref[it['kinds']] = min(a, ref.get(it['kinds'], a))
+    worst = {}
+    for it in board_items or ():
+        a = it.get('actual')
+        if a is not None:
+            worst[it['kinds']] = min(a, worst.get(it['kinds'], a))
+    out = []
+    for it in board_items or ():
+        k = it['kinds']
+        r = ref.get(k)
+        if it.get('actual') is None or r is None or r > worst[k] + _MIN_TOL:
+            out.append(it)
+    return out
 
 
 def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
@@ -234,19 +281,38 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     from fix_kicad_drc_settings import (FAB_FLOOR_KEYS,
                                         FAB_FLOOR_KEYS_MEASURABLE,
                                         find_project, scan_board_minima)
-    if not authored_from:
-        return {'ran': False, 'reason': 'no --authored-from: the chain rewrites '
-                                        'the floors in place, so there is '
-                                        'nothing left to compare against'}
-    pro = find_project(authored_from)
-    if not os.path.isfile(pro):
-        return {'ran': False, 'reason': f'no project beside {authored_from}'}
-    try:
-        with open(pro, encoding='utf-8') as fh:
-            authored = ((json.load(fh).get('board') or {})
-                        .get('design_settings') or {}).get('rules') or {}
-    except Exception as exc:                                # noqa: BLE001
-        return {'ran': False, 'reason': f'unreadable project: {exc}'}
+    pro = None
+    source = 'authored_from'
+    if authored_from:
+        pro = find_project(authored_from)
+        if not os.path.isfile(pro):
+            return {'ran': False, 'reason': f'no project beside {authored_from}'}
+        try:
+            with open(pro, encoding='utf-8') as fh:
+                authored = ((json.load(fh).get('board') or {})
+                            .get('design_settings') or {}).get('rules') or {}
+        except Exception as exc:                            # noqa: BLE001
+            return {'ran': False, 'reason': f'unreadable project: {exc}'}
+    else:
+        # #1368: without a reference board the floors a chain rewrote are
+        # still on record -- the writeback seeds
+        # ``kicad_routing_tools.fab_floor_origin`` with what the board
+        # declared BEFORE the first step lowered anything. Grade against it
+        # instead of declaring nothing left to compare with. Only a board no
+        # tool ever wrote back has no origin, and there the project IS the
+        # declaration.
+        try:
+            import tool_records
+            authored = dict(tool_records.effective_namespace(board)
+                            .get('fab_floor_origin') or {})
+        except Exception as exc:                            # noqa: BLE001
+            return {'ran': False, 'reason': f'unreadable fab_floor_origin: {exc}'}
+        if not authored:
+            return {'ran': False,
+                    'reason': 'no --authored-from and the project records no '
+                              'fab_floor_origin: no earlier declaration to '
+                              'compare the floors with'}
+        source = 'fab_floor_origin'
     now = scan_board_minima(board) or {}
     try:
         with open(find_project(board), encoding='utf-8') as fh:
@@ -255,7 +321,10 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     except (OSError, ValueError):
         declared_now = {}
     try:
-        ref_min = scan_board_minima(authored_from) or {}
+        # No reference board under the origin source: nothing is excused as
+        # `reference_too`, so every breach counts.
+        ref_min = (scan_board_minima(authored_from) or {}) if authored_from \
+            else {}
     except Exception:                                           # noqa: BLE001
         ref_min = {}
     grade_holes = hole_grader or (
@@ -311,6 +380,13 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
                                   'declared': dec})
             continue
         row = {'key': key, 'label': label, 'authored': was, 'declared': dec}
+        if not authored_from:
+            # Against the recorded origin the floors are DISCLOSED, not
+            # graded (see _grade): a KiCad DRC run to measure one is not paid.
+            row['why'] = ('lowered since the recorded fab_floor_origin; pass '
+                          '--authored-from to have KiCad measure it')
+            unmeasured.append(row)
+            continue
         g = grade_holes(board, was) or {'error': 'no grade'}
         if g.get('error'):
             row['why'] = f'not measured: {g["error"]}'
@@ -321,18 +397,30 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
             measured_kept.append(row)
             continue
         row['on_board'] = g.get('min_actual')
-        rg = grade_holes(authored_from, was) or {'error': 'no grade'}
+        if authored_from:
+            rg = grade_holes(authored_from, was) or {'error': 'no grade'}
+        else:
+            rg = {'error': 'no reference board (graded against the recorded '
+                           'fab_floor_origin)'}
         if rg.get('error'):
             row['reference_error'] = rg['error']
         else:
             row['reference_violations'] = rg['count']
             row['reference'] = rg.get('min_actual')
-        if rg.get('count') and row['on_board'] is not None \
-                and row['reference'] is not None \
-                and row['on_board'] >= row['reference'] - _MIN_TOL:
-            reference_too.append(row)
-        else:
-            relaxed.append(row)
+        # #1370: the reference excuses a violation only on the SAME pair, at
+        # least as badly. Without the pairs of both boards the reference
+        # cannot be compared, which counts against the board.
+        if not rg.get('error') and rg.get('count') \
+                and g.get('items') and rg.get('items') is not None:
+            left = _unmatched_by_reference(g['items'], rg['items'])
+            row['not_in_reference'] = len(left)
+            if not left:
+                reference_too.append(row)
+                continue
+            lefts = [i['actual'] for i in left if i.get('actual') is not None]
+            if lefts:
+                row['on_board'] = min(lefts)
+        relaxed.append(row)
     # #1160: the Default CLASS clearance, declared vs declared (no measured
     # counterpart: clearance is pairwise). Counted only when an automatic
     # descent lowered it -- the board's project carries the writeback's
@@ -340,6 +428,8 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     # chain's own --clearance / --clearance-ceiling is a decision, not a
     # relaxation (stock classes are aspirational).
     try:
+        if not pro:
+            raise OSError('no reference project')       # origin source
         from fab_tiers import project_default_class_clearance
         from fix_kicad_drc_settings import CLASS_CLEARANCE_RELAXED_KEY
         with open(pro, encoding='utf-8') as fh:
@@ -362,7 +452,7 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     return {'ran': True, 'relaxed': relaxed, 'unmeasured': unmeasured,
             'vacuous': vacuous, 'declared_kept': declared_kept,
             'measured_kept': measured_kept, 'reference_too': reference_too,
-            'authored_from': authored_from}
+            'authored_from': authored_from, 'source': source}
 
 
 def _grade(a, doc):
@@ -485,6 +575,27 @@ def _grade(a, doc):
         reasons.append('a component RAN and could not answer: '
                        + ', '.join(unknown))
     reasons += [r for r in (ungraded_bad, unknown_bad) if r]
+    # #1388: a component nothing asked for is UNEXAMINED and does not block.
+    # One the BOARD declares (a diff-pair class with no rule to grade its
+    # pairs) is named apart, so the promise nobody checked travels with the
+    # verdict -- disclosed, not a blocker.
+    notes = []
+    _comps = (score.get('components') or {}) if isinstance(score, dict) else {}
+    for _name in ungraded:
+        if _name == 'undersized.dru_rules':
+            # #1390: a .kicad_dru size rule check_drc cannot model.
+            reasons.append(
+                '.kicad_dru size rule(s) nothing grades: '
+                + ', '.join(repr(r) for r in
+                            (_comps.get('undersized') or {}).get('ungraded_rules', ()))
+                + ' -- the copper they bind is unchecked here and KiCad still '
+                  'enforces it')
+            continue
+        _c = _comps.get(_name)
+        if isinstance(_c, dict) and _c.get('declared'):
+            notes.append(f'{_name}: the board DECLARES it '
+                           f'({", ".join(sorted(_c["declared"]))}) and nothing '
+                           f'grades it -- {_c.get("reason")}')
     # ONE rule for what a `blocking` is (`converge.blocking_defect`, #1075):
     # `false` is falsy, so it used to read as a clean board and exit DONE.
     from converge import blocking_defect
@@ -514,7 +625,22 @@ def _grade(a, doc):
     # vanish, because `fab_floors.relaxed == []` is exactly the sentence a
     # reader takes for "every declared floor is honoured". Append it to the
     # INCOMPLETE reasons so it travels with the verdict.
-    if floors.get('unmeasured'):
+    # #1368: floors read against the recorded fab_floor_origin (no
+    # --authored-from) are DISCLOSED, not graded: the chain's own descent
+    # (escalation, an explicit --track-width / --via-size) lowered them, and
+    # says so in its design_rules. --authored-from grades them.
+    from_origin = floors.get('source') == 'fab_floor_origin'
+    if from_origin and (floors.get('relaxed') or floors.get('unmeasured')):
+        _lo = ', '.join(f'{r["label"]} {r["authored"]} -> '
+                        + (f'{r["on_board"]} on the board'
+                           if r.get('on_board') is not None
+                           else f'{r.get("declared")} declared')
+                        for r in list(floors.get('relaxed') or ())
+                        + list(floors.get('unmeasured') or ()))
+        notes.append(f'floors below the recorded fab_floor_origin ({_lo}); '
+                     f'confirm the fab supports them, or pass --authored-from '
+                     f'to grade them')
+    if floors.get('unmeasured') and not from_origin:
         _um = ', '.join(f'{r["label"]} (declared {r["authored"]}'
                         + (f', the project now declares {r["declared"]}'
                            if r.get('declared') is not None else '')
@@ -526,7 +652,7 @@ def _grade(a, doc):
                        f'honoured: {_um} -- grade the copper with KiCad\'s DRC '
                        f'at the authored value (check_drc\'s hole arms cover '
                        f'NPTH only)')
-    if floors.get('relaxed'):
+    if floors.get('relaxed') and not from_origin:
         worst = ', '.join(f'{r["label"]} {r["authored"]} -> {r["on_board"]}'
                           for r in floors['relaxed'])
         verdict, code_out = 'UNSOUND', UNSOUND
@@ -541,6 +667,8 @@ def _grade(a, doc):
         verdict, code_out = 'DONE', DONE
         why = 'every component that could be graded is graded and clean'
 
+    if notes:
+        why += '. DISCLOSED, not counted: ' + '; '.join(notes)
     if floors.get('reference_too'):
         def _ref(r):
             n = (f' over {r["violations"]}' if 'violations' in r else '')
@@ -551,6 +679,13 @@ def _grade(a, doc):
         why += ('. DECLARED, AND BROKEN BY THE REFERENCE TOO, at least as '
                 'badly (reported, not counted against this board): '
                 + ', '.join(_ref(r) for r in floors['reference_too']))
+    if not floors.get('ran'):
+        # #1368: a floor check that did not run examined nothing. It cannot
+        # block (a board nothing ever wrote back has no earlier declaration,
+        # and its project IS the spec), but it is named like every other
+        # component nothing graded, with WHY it did not run.
+        ungraded = list(ungraded) + [
+            'fab_floors (' + str(floors.get('reason') or 'did not run') + ')']
     if ungraded:
         # "Not asked" is one reason, not the only one: a --length-groups file
         # whose nets are not routed yet is asked and still cannot measure
@@ -580,7 +715,7 @@ def main(argv=None):
                          '--authored-from, which reads that board\'s FLOORS')
     ap.add_argument('--clearance', type=float, default=None)
     ap.add_argument('--intent', default=None)
-    ap.add_argument('--impedance-nets', nargs='+', default=None)
+    ap.add_argument('--impedance-nets', nargs='+', action='extend', default=None)
     ap.add_argument('--length-groups', default=None)
     ap.add_argument('--net-min-widths', default=None)
     ap.add_argument('--min-track-width', type=float, default=None)

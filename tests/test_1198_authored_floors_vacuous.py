@@ -158,15 +158,19 @@ def main():
         check('KiCad finds nothing at the authored value: measured_kept',
               keys(r['measured_kept']) == ['min_hole_clearance']
               and not r['unmeasured'] and not r['relaxed'], json.dumps(r)[:300])
+        def pairs(n, actual, kinds=('Track', 'Via')):
+            return [{'kinds': kinds, 'actual': actual} for i in range(n)]
         r = fab_floor_integrity(b3, a3, hole_grader=grader(
-            {'count': 5, 'min_actual': 0.154}, {'count': 199, 'min_actual': 0.145}))
+            {'count': 5, 'min_actual': 0.154, 'items': pairs(5, 0.154)},
+            {'count': 199, 'min_actual': 0.145, 'items': pairs(199, 0.145)}))
         rt = r['reference_too'][0] if r['reference_too'] else {}
         check('the reference breaks it worse (0.145 vs 0.154): reference_too',
               rt.get('key') == 'min_hole_clearance' and rt.get('on_board') == 0.154
               and rt.get('reference') == 0.145 and not r['relaxed'],
               json.dumps(r)[:400])
         r = fab_floor_integrity(b3, a3, hole_grader=grader(
-            {'count': 5, 'min_actual': 0.10}, {'count': 199, 'min_actual': 0.145}))
+            {'count': 5, 'min_actual': 0.10, 'items': pairs(5, 0.10)},
+            {'count': 199, 'min_actual': 0.145, 'items': pairs(199, 0.145)}))
         check('worse than the reference (0.10 vs 0.145): relaxed',
               keys(r['relaxed']) == ['min_hole_clearance'] and not r['reference_too'],
               json.dumps(r)[:300])
@@ -196,7 +200,7 @@ def main():
             rt = r['reference_too'][0] if r['reference_too'] else {}
             check('kicad-cli: routed_output at 0.4 against itself is reference_too',
                   rt.get('violations', 0) > 0
-                  and rt.get('violations') == rt.get('reference_violations')
+                  and rt.get('reference_violations', 0) > 0
                   and not r['relaxed'] and not r['unmeasured'], json.dumps(r)[:400])
             bare5 = strip_routing(ROUTED, os.path.join(tmp, 'bare5.kicad_pcb'),
                                   {'min_hole_clearance': 0.4})

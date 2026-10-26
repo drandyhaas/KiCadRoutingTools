@@ -432,8 +432,10 @@ def test_the_loader_refuses_every_malformed_along_edge_claim():
     # claim the emitter derives, graded at warn. 13: `templates[]`, a chip's
     # datasheet layout that place_simple seats and carries. 14: a template
     # row's `kind` and `ground_return_mm`, a switching stage's caps' ground
-    # return graded at warn.
-    assert fp.READER_VERSION == 14, (
+    # return graded at warn. 15 since #1443: `covers[]`, a body a connector
+    # carries; `heights[]`, declared part heights; a keep-out's
+    # `max_height_mm`.
+    assert fp.READER_VERSION == 15, (
         f"{fp.READER_VERSION}: the field vocabulary grew. Re-state this "
         f"literal and say which field arrived, the way #712, #837, #902, "
         f"#893, #959 and #1051 did")

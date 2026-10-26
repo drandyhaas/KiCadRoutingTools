@@ -52,12 +52,17 @@ via needs filled+capped on the fab drawing, or it must move out of the opening.
 Without `--baseline`, every pre-existing one reads as a violation
 (one corpus board carries 136). The same flag grades a graze of footprint graphic copper that a
 part MOVE created (`graphic-board-edge`); `graphic-off-board` (copper past the
-outline) is reported either way.
+outline) is reported either way. `KEEPOUT` rows are tracks or vias inside a
+keep-out rule area that forbids them (an antenna clearance, a mounting hole's
+screw-head ring); kicad-cli 10.0.0 did not report these when measured, so
+check_drc is the only instrument. `--baseline` accepts copper the input already
+had there as `inherited-keepout`; report what still fires as a routing defect.
 
 **Important caveat to include in the report:** `check_drc.py` does not grade zone (pour) fill copper. It does grade per-netclass clearance and `.kicad_dru` rules, and track width / via size against the FAB floor for the layer count unless given `--min-track-width` / `--min-via-diameter` / `--min-via-drill` (pass the spec's numbers when they are tighter). If the board has copper zones/planes, recommend the zone-aware check:
 
 ```bash
-kicad-cli pcb drc board.kicad_pcb --refill-zones --format json -o /tmp/drc.json
+KCLI=$(python3 py_tools/kicad_cli_path.py)
+"$KCLI" pcb drc board.kicad_pcb --refill-zones --format json -o /tmp/drc.json
 ```
 
 **Ignore silk and dangling violations** when reading that report — they are not
@@ -291,7 +296,9 @@ rec = diff_pair_copper(pcb, p_id, n_id)   # coupled_mm, uncoupled_mm, skew_mm, l
 
 - **Coupling**: a pair the plan routed coupled must show coupled copper. In a
   route_diff log, `JSON_SUMMARY.uncoupled_diff_pairs` (outcome `uncoupled`)
-  lists pairs routed whose shipped copper is not coupled -- route_diff no longer
+  lists pairs routed whose shipped copper is not coupled (a coupled run under
+  one pitch or under 10% of the pair's length, `pair_reports[].copper.
+  coupled_share`) -- route_diff no longer
   counts them routed, and protects one only while its members still run
   alongside within 1 mm and both connect (`pair_reports[].protected`, #1361),
   so the next step may reroute the rest.

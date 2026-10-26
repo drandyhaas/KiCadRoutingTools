@@ -1354,10 +1354,12 @@ def repair_planes(
     # locked copper included -- a candidate blocker. If protection cannot be
     # read, say so and rip nothing this run (the tap fails over its other
     # candidates, as it does for a protected blocker).
-    from protected_nets import protection_map
+    # The effective set (#1395): a net the route step's main pass made
+    # rippable by naming it EXACTLY stays rippable for this finalize.
+    from protected_nets import effective_protection_map
     _protection_read = True
     try:
-        _prot_names = protection_map(pcb_data)
+        _prot_names = effective_protection_map(pcb_data)
     except Exception as e:
         _protection_read = False
         _prot_names = {}
@@ -3200,6 +3202,7 @@ def repair_planes(
             # list against the exact/kicad oracle before printing; entries the
             # oracle proves connected are reported separately, not as opens.
             _confirmed, _cleared = list(failed_repair_pads), []
+            _open_links_left: Dict[str, int] = {}
             try:
                 if _gate_oracle_links[0] is None:
                     _q = _gate_oracle_query()
@@ -3228,6 +3231,24 @@ def repair_planes(
                                   if _pad_open_per_oracle(e)]
                     _cleared = [e for e in failed_repair_pads
                                 if e not in _confirmed]
+                    # #1374: clearing the listed pads does not clear their
+                    # NET. KiCad anchors an island's link at the island's
+                    # nearest approach, which is rarely at the pad the fill
+                    # model blamed, so a net the oracle still calls split is
+                    # not "confirmed connected" by the absence of a link
+                    # endpoint at a listed pad.
+                    _listed_nets = set()
+                    for _e in failed_repair_pads:
+                        _sp = _e.split(' ', 1)
+                        if (len(_sp) == 2 and _sp[1].startswith('(')
+                                and _sp[1].endswith(')')):
+                            # one wrapping pair: a net named '+3V3(A)' keeps
+                            # its own ')'
+                            _listed_nets.add(_sp[1][1:-1])
+                    for _lk in _olinks:
+                        if _lk[0] in _listed_nets:
+                            _open_links_left[_lk[0]] = \
+                                _open_links_left.get(_lk[0], 0) + 1
             except Exception:
                 pass    # incl. NameError when the gate closure never built
             if _cleared:
@@ -3236,6 +3257,12 @@ def repair_planes(
                       f"{', '.join(_cleared)}")
             if _confirmed:
                 print(f"  Pads still unconnected: {', '.join(_confirmed)}")
+            elif _open_links_left:
+                print("  Pads still unconnected: none of the listed pads "
+                      "sit at a KiCad link, but KiCad's exact fill still "
+                      "reports the net(s) split: "
+                      + ", ".join(f"{_n} ({_k} link(s))" for _n, _k
+                                  in sorted(_open_links_left.items())))
             else:
                 print("  Pads still unconnected: none (all model-only; "
                       "confirmed connected by the oracle)")

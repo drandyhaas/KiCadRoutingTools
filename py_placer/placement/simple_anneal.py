@@ -246,6 +246,8 @@ class Annealer:
                    for c, f in [P[r].rects()] for t in far_boxes(f)))
         self.lam = LAM_START
         self.shoving = False        # an escape may shove: only in `repair`
+        # #1443: the parts with room under them (`QuenchState.covers`)
+        self.cover_list = sorted(r for r in st.covers if r not in self.containers)
 
     # -- poses -----------------------------------------------------------------
     def pose(self, r):
@@ -394,6 +396,62 @@ class Annealer:
                 fix += self._far_area(a, b) - (ox * oy if ox > 0 and oy > 0 else 0.0)
         return fix
 
+    def _height_pairs(self, mine):
+        """[(a, b, verdict)]: each pair with a part in `mine` that the heights
+        judge (#1443, `QuenchState._height_verdict`: cleared, over, inside),
+        once, when the heights change what the pair costs -- one fits under
+        the other, or their bodies meet under a raised body. A cover's pairs
+        are looked for as far as its raised body reaches; a seated part's are
+        left to `_seat_correction`. Covers are few, so a part that is not one
+        is tested against each cover's reach box, not the index."""
+        st = self.st
+        covers = st.covers
+        P, h = st.parts, self.half
+        out, seen = [], set()
+        g = 2 * h
+        for a in mine:
+            if a in self.containers or a in self.seats:
+                continue
+            if a in covers:
+                R = st.cover_reach(a)
+                cand = self.model._ixp.query((R[0] - g, R[1] - g, R[2] + g, R[3] + g))
+                cand.update(mine)
+            else:
+                G = self._grown(a)
+                cand = []
+                for b in self.cover_list:
+                    R = st.cover_reach(b)
+                    if R[0] - g < G[2] and G[0] < R[2] + g and R[1] - g < G[3] and G[1] < R[3] + g:
+                        cand.append(b)
+                if not cand:
+                    continue
+            for b in cand:
+                if b == a or b in self.containers or b in self.seats:
+                    continue
+                key = (a, b) if a < b else (b, a)
+                if key in seen:
+                    continue
+                seen.add(key)
+                v = st._height_verdict(P[a], None, None, None, P[b])
+                if v is not None and (v[0] or v[1] > 0.0):
+                    out.append((a, b, v))
+        return out
+
+    def _height_correction(self, mine):
+        """What the heights change in a move's overlap, which the Rust sum
+        prices on the grown courtyards: the bodies' meeting area added, and a
+        pair with room for one under the other unpriced."""
+        fix = 0.0
+        for a, b, (cleared, over, _ins) in self._height_pairs(mine):
+            fix += over
+            if cleared and self.faces[a] & self.faces[b]:
+                A, B = self._grown(a), self._grown(b)
+                ox = min(A[2], B[2]) - max(A[0], B[0])
+                oy = min(A[3], B[3]) - max(A[1], B[1])
+                if ox > 0 and oy > 0:
+                    fix -= ox * oy
+        return fix
+
     def _pins(self, mine):
         """A pin frame's pins (mm2): courtyard over its drilled holes, the
         holes check_assembly's pin_in_courtyard tests (`QuenchState.
@@ -510,15 +568,25 @@ class Annealer:
                 total += self._far_correction(mine)
             if self.frames:
                 total += self._pins(mine)
+            if self.st.covers:
+                total += self._height_correction(mine)
             return total
         if self.frames:
             total += self._pins(mine)
         mset = set(mine)
         grown = {}
+        judged = {}
+        if self.st.covers:
+            for a, b, (cleared, over, _ins) in self._height_pairs(mine):
+                total += over
+                if cleared:
+                    judged[(a, b) if a < b else (b, a)] = True
         for a in mine:
             A = grown.get(a) or grown.setdefault(a, self._grown(a))
             for b in self.names:
                 if b == a or (b in mset and b < a) or not self.faces[a] & self.faces[b]:
+                    continue
+                if judged and ((a, b) if a < b else (b, a)) in judged:
                     continue
                 less = self._seat_pair(a, b) if self.seats else 0.0
                 if less is None:
@@ -694,6 +762,15 @@ class Annealer:
                 if (r in self.far_parts and b in self.far_parts and self._cross(r, b)
                         and self._far_area(r, b, at, poses.get(b)) <= 0.0):
                     continue
+                if self.st.covers and (r in self.st.covers or b in self.st.covers):
+                    P = self.st.parts
+                    pa = at if at is not None else self.pose(r)
+                    pb = poses.get(b) or self.pose(b)
+                    if self.st.heights.pair(
+                            r, pa, P[r].bounds_by_rot[0.0], P[r].side,
+                            b, pb, P[b].bounds_by_rot[0.0], P[b].side,
+                            self.st.clearance) == 0.0:
+                        continue        # #1443: one fits under the other
                 out.append((b, B))
         return out
 
@@ -1123,14 +1200,14 @@ def scatter(model, movable: List[str], seed: int = 0, clustered: bool = False,
     model.reprice_all()
 
 
-def anneal(model, movable: List[str], *, moves: int = 11000, seconds: float = 0.0,
+def anneal(model, movable: List[str], *, moves: int = 11000,
            seed: int = 0, log=None, repair: bool = False, seats=None) -> Dict:
     """Anneal from the live poses and leave the best overlap-free placement
     seen applied, each part then held to the exact legality. With `repair`,
     a run that never came clean is first mended where it stands
     (`Annealer.repair`). Returns
     {'moves' (executed), 'seconds', 'loop_seconds', 'start', 'best',
-    'tracked_best', 't0', 'stats': {kind: (tried, kept)}, 'capped',
+    'tracked_best', 't0', 'stats': {kind: (tried, kept)},
     'reseated' (parts moved to their nearest legal pose afterwards),
     'repaired' (the run never came clean and `Annealer.repair` mended it)}."""
     a = Annealer(model, movable, seed=seed, seats=seats)
@@ -1147,7 +1224,7 @@ def anneal(model, movable: List[str], *, moves: int = 11000, seconds: float = 0.
     kinds = a.kinds()
     reach0 = a.span / 6.0
     late = int(BIG_UNTIL * moves)       # from here no group turns or swaps
-    run = {'capped': False, 'done': 0}  # `seconds` stops the loop early; moves executed
+    run = {'done': 0}                   # moves executed
     stats = {k: [0, 0] for k in kinds}
 
     def begin():
@@ -1159,9 +1236,6 @@ def anneal(model, movable: List[str], *, moves: int = 11000, seconds: float = 0.
     def loop(v, k0, k1):
         wts = [MOVES[k] if k0 < late or k not in BIG_GROUP_MOVES else 0.0 for k in kinds]
         for k in range(k0, k1):
-            if seconds and time.time() - t_start > seconds:
-                run['capped'] = True
-                return
             run['done'] += 1
             frac = k / moves
             T = t0 * (T_END / t0) ** frac
@@ -1243,10 +1317,10 @@ def anneal(model, movable: List[str], *, moves: int = 11000, seconds: float = 0.
         start = v['cur']
         loop(v, 0, moves)
     best, best_poses = v['best']
-    capped, done = run['capped'], run['done']
+    done = run['done']
     loop_seconds = time.time() - t_loop
     repaired = False
-    if repair and best_poses is None and not capped and a.repair(T_END) < CLEAN:
+    if repair and best_poses is None and a.repair(T_END) < CLEAN:
         best_poses, repaired = {r: a.pose(r) for r in a.mov}, True
     for r in a.mov:     # the QuenchState's own state, airwires and all
         pose = best_poses[r] if best_poses is not None else a.pose(r)
@@ -1278,6 +1352,6 @@ def anneal(model, movable: List[str], *, moves: int = 11000, seconds: float = 0.
     model.reprice_all()
     final = model.total()['cost']
     return {'moves': done, 'seconds': round(time.time() - t_start, 2), 'start': start,
-            'best': final, 'tracked_best': best, 't0': t0, 'capped': capped,
+            'best': final, 'tracked_best': best, 't0': t0,
             'reseated': reseated, 'repaired': repaired, 'loop_seconds': round(loop_seconds, 3),
             'stats': {kk: tuple(v) for kk, v in stats.items()}}

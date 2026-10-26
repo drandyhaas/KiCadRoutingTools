@@ -46,6 +46,7 @@ PRO_NAMESPACE = "kicad_routing_tools"
 PRO_KEY = "protected_nets"
 IMPEDANCE_KEY = "net_impedance"
 SNPC_KEY = "same_net_pad_clearance"
+POWER_WIDTHS_KEY = "power_widths"
 
 _GLOB_CHARS = set('*?[')
 
@@ -87,6 +88,19 @@ def note_impedance_specs(mapping: Dict[str, dict]) -> None:
 
 def consume_impedance_specs() -> Dict[str, dict]:
     return _consume(IMPEDANCE_KEY)
+
+
+def note_power_widths(mapping: Dict[str, float]) -> None:
+    """Record the track widths this step was ASKED to give power nets
+    (--power-nets / --power-nets-widths, resolved to net names): {net: mm}.
+    board_score reads it back and measures the board against it without being
+    handed a width file -- disclosed (`net_widths.requested_under`), not
+    counted: the router narrows a power route that does not fit and says so."""
+    _note(POWER_WIDTHS_KEY, mapping)
+
+
+def consume_power_widths() -> Dict[str, float]:
+    return _consume(POWER_WIDTHS_KEY)
 
 
 def pro_path_for_board(board_path: str) -> str:
@@ -212,6 +226,14 @@ def persist_impedance_specs(pro_path: str, mapping: Dict[str, dict],
                         board=board)
 
 
+def persist_power_widths(pro_path: str, mapping: Dict[str, float],
+                         verbose: bool = True, board=None) -> bool:
+    return _persist_map(pro_path, POWER_WIDTHS_KEY,
+                        {k: round(float(v), 4) for k, v in mapping.items()},
+                        "Power-net widths (measured by board_score)", verbose,
+                        board=board)
+
+
 def persist_same_net_pad_clearance(pro_path: str, value: float,
                                    verbose: bool = True, board=None) -> bool:
     """Record an ACTIVE (> 0) same-net pad via clearance (#581) so every later
@@ -294,6 +316,24 @@ def read_impedance_specs(pro_path: str) -> Dict[str, dict]:
 
 def read_impedance_for_pcb_data(pcb_data, input_file: Optional[str] = None) -> Dict[str, dict]:
     return _dict_map_from(_pcb_data_namespace(pcb_data, input_file), IMPEDANCE_KEY)
+
+
+def _widths_from(ns: dict) -> Dict[str, float]:
+    m = (ns or {}).get(POWER_WIDTHS_KEY) or {}
+    out: Dict[str, float] = {}
+    if isinstance(m, dict):
+        for k, v in m.items():
+            try:
+                out[str(k)] = float(v)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def read_power_widths(pro_path: str) -> Dict[str, float]:
+    """Power-net widths the board's routing steps were asked for
+    ({} when none were recorded)."""
+    return _widths_from(_namespace(pro_path))
 
 
 # --- #678: pour-served balls are a COMMITMENT, carried down the chain -------
@@ -426,6 +466,22 @@ def protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[str, str]
 
 
 
+
+
+def effective_protection_map(pcb_data, input_file: Optional[str] = None
+                             ) -> Dict[str, str]:
+    """protection_map() minus the nets this run's operator named EXACTLY
+    (the stashed rip overrides, `stash_rip_overrides`): the ONE protected set
+    a run reads once its main pass has lifted the overrides (#1395). The
+    plane finalize's blocker rip-up, its nested sub-runs and the failure hints
+    all see the net the main pass made rippable as rippable, instead of
+    refusing it as "protected, cannot rip". 'locked' and `sense:` reasons
+    have no override (`never_lifts`) and stay in the map."""
+    m = protection_map(pcb_data, input_file)
+    lifted = rip_override_names(pcb_data)
+    if not lifted:
+        return m
+    return {n: r for n, r in m.items() if never_lifts(r) or n not in lifted}
 
 
 def exact_names(patterns: Optional[Iterable[str]]) -> Set[str]:

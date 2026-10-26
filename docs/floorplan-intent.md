@@ -139,11 +139,11 @@ suspect, suspect_reason, why
 
 | object | keys |
 |---|---|
-| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `assembly`, `proximity`, `keep_away`, `replicate`, `templates`, `dispositions`, `arrays`, `fixed_poses`, `context` |
+| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `assembly`, `proximity`, `keep_away`, `replicate`, `templates`, `covers`, `heights`, `dispositions`, `arrays`, `fixed_poses`, `context` |
 | `envelope` | `rect`, `tolerance_mm` |
 | `defaults` | `zone_tolerance_mm` |
 | `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `rotation`, `rotation_candidates`, `why` (or `note` / `reason`), `context`. `rigid` is refused by name: its only reader, the retired quench engine, is gone, and `place_simple` moves each group of the groups file together |
-| `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `why` (or `note` / `reason`), `context` |
+| `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `max_height_mm` (a part whose height is KNOWN and no more than this may stand in it; see "`covers[]` and `heights[]`" below; needs `min_reader` 15), `why` (or `note` / `reason`), `context` |
 | `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `side` (`F`/`B`, the connector's face, graded as the advisory `edge_connector_side`; needs `min_reader` 6), `mating_face` (`+x`/`-x`/`+y`/`-y`, see "Which way it opens" below), `class`, `why` (or `note` / `reason`), `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
 | `edge_connectors[].overhang_mm` | `min`, `max` |
 | `edge_connectors[].center_on_edge` | `tolerance_mm` (required — see below) |
@@ -154,12 +154,15 @@ suspect, suspect_reason, why
 | `keep_away[]` | `rule` (ONE rule in route.py's `--keep-away` syntax, `AGGRESSOR:VICTIM:GAP`), `why` (or `note` / `reason`), `context`, and the compiler-written `source` (see "`keep_away[]`" below; needs `min_reader` 10) |
 | `replicate[]` | `from` (a sheet instance: its name or path, as `place_pose replicate --from` takes it), `to` (a list of them), `anchor`, `allow_net_mismatch` (`REF.PAD` entries), `only` or `skip` (refs; not both), `search_mm`, `tolerance_mm`, `why` (or `note` / `reason`), `context`, `source` (see "`replicate[]`" below; needs `min_reader` 11) |
 | `templates[]` | `anchor` (the chip), `members` (each `ref`, `at` [dx, dy] mm and `rot`, a quarter turn, in the chip's own frame; `pads` and `note` as the fit wrote them), `tolerance_mm`, `kind` (`switching stage` or `rf front end`), `ground_return_mm`, `source`, `why` (or `note` / `reason`), `context`, and the fit-written `fitted` (see "`templates[]`" below; needs `min_reader` 13, and 14 with `kind` or `ground_return_mm`) |
+| `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `standoffs`, `removable`, `source`, `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
+| `covers[].standoffs[]` | `ref`, `length_mm`, `rot` |
+| `heights[]` | `ref`, `height_mm`, `underside_mm`, `source`, `why` (or `note` / `reason`), `context` (needs `min_reader` 15) |
 | `arrays[]` | `name`, `members` (an ORDERED list of literal refs, at least two), `serves` (a ref, or `"unknown"`), `order` (`"pin"`, `"declared"` or `"unknown"`), `rotation` (degrees, `"shared"` or `"unknown"`), `pitch_mm` (`"auto"` or mm), `axis` (`"auto"`, `"x"` or `"y"`), `allow_mixed`, `why` (or `note` / `reason`), `context`, and the compiler-written `source` (see "Arrays" below; needs `min_reader` 7) |
 | `fixed_poses[]` | `ref`, `x`, `y`, `rot` (degrees or `"unknown"`), `side` (`"F"`, `"B"` or `"unknown"`), `basis` (`"declared"`, `"mechanical"` or `"derived_default"`), `why` (or `note` / `reason`), `context`, `accept_courtyard_overlap` (a list of literal refs) (see "Fixed poses" below; needs `min_reader` 7) |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 45 rule names below |
+| `severity` | any of the rule names below |
 | `overlap_waivers[]` | `pair`, `why` (or `note` / `reason`), `context` |
 | `dispositions` | `rules`, `withheld`, `refs`, `contradictions` -- each `{key: why}`, a non-empty written reason (see "The rule roster" below) |
 | `must_lock` | a list of reference globs (no nested keys) |
@@ -192,12 +195,12 @@ findings raised outside the rule loop: `intent_zone_outside_envelope`, `intent_z
 `mechanical_drift` (raised only when a `mechanical.json` is read, and
 settable to `error` only -- `warn` is refused, since the pose is a recorded
 fact),
-the twelve `plan_check` findings (`plan_zone_exclusive_unsatisfiable`,
+the thirteen `plan_check` findings (`plan_zone_exclusive_unsatisfiable`,
 `block_glob_literal`, `plan_fixed_outside_zone`, `plan_fixed_pose_conflict`,
 `plan_zone_overfull`,
 `plan_zone_crowded`, `plan_edge_overfull`, `plan_edge_crowded`,
 `plan_board_overfull`, `plan_board_crowded`, `plan_fixed_overlap`,
-`plan_fixed_overlap_budget`), `edge_connector_side` (settable to `warn`
+`plan_fixed_overlap_budget`, `plan_template_keepout`), `edge_connector_side` (settable to `warn`
 only -- `error` is refused, because the rule is advisory by design),
 `edge_oversubscribed` (raised by check_floorplan's grade and by
 `--plan-only`), plus seven more raised BESIDE a rule's own name —
@@ -217,8 +220,8 @@ Every name defaults to **error** except these, which default to **warn**:
 and `replicate_unresolved`, `template`, `template_unresolved` and
 `template_ground_return`,
 `keepout_allow_unresolved`,
-`intent_zone_overlap`, `fixed_pose_overlap_waived`, `plan_fixed_overlap` and
-the three `plan_*_crowded` findings and `edge_oversubscribed`;
+`intent_zone_overlap`, `fixed_pose_overlap_waived`, `plan_fixed_overlap`,
+`plan_template_keepout` and the three `plan_*_crowded` findings and `edge_oversubscribed`;
 `pins_to_edge` and
 `edge_connector_side` are always warn; `mechanical_drift` is warn for a
 move the anchor already reports and error for a turn. Writing
@@ -310,6 +313,7 @@ Each `min_reader` level and the keys it covers:
 | 12 | a `proximity[]` row whose `context.source` is `placement.crystals` |
 | 13 | `templates[]` |
 | 14 | `templates[].kind`, `templates[].ground_return_mm` |
+| 15 | `covers[]`, `heights[]`, `keepouts[].max_height_mm` |
 
 The emitter and the design-brief compiler stamp the level their output needs.
 
@@ -671,7 +675,9 @@ writeback rewrites both inputs, so one pose read differently placed and
 routed. On daplink, with nothing moved, J2/J3 read 7.0062 placed (margin
 0.55) and 6.6562 routed (margin 0.2), and P1 read 1.0500 and 0.7000; three
 band errors appeared after routing. An overhang of x now reads x at any
-margin, so write a band as the distance the part reaches past the edge, and
+margin (past the declared edge alone, along its normal: the overhang past another
+edge rides in the evidence row's `other_edge_overhang_mm`, and is an
+`edge_connector` error only above the band's maximum), so write a band as the distance the part reaches past the edge, and
 never add the board's edge margin to it. A band written in the old currency
 reads the margin too high: daplink's hand-written J2/J3 `{7.0, 7.4}` and P1
 `{1.05, 1.35}` added 0.55, and now read 6.4562 and 0.5000 placed and routed
@@ -871,6 +877,8 @@ status from this list:
 | `array_unresolved` | an array names a member, or a `serves` part, this board does not have | — |
 | `array_conflict` | an array cannot be formed as declared: a member locked in the file, mixed footprints without `allow_mixed`, a block rotation contradicting the row's, members split across zoned blocks | `rotations_for_ref`, `resolve_blocks` |
 | `fixed_pose_unresolved` | a `fixed_poses[]` ref is not on this board (**error**), or the anchor cannot grade it (**warn**, with the reason); a part off its fixed pose is reported as `zone_containment` on the anchor block `fixed:<ref>`. Also an `accept_courtyard_overlap` ref the board does not have (**error**) | `reconcile.anchor_blocks` |
+| `cover` | a declared cover's standoff is not where the row puts it: `length_mm` along the axis from the connector's origin, on the centre line, within 0.3 mm. One finding per cover, naming the worst standoff. **warn** by default; `severity` may promote it. What stands UNDER the body is graded with every other part pair, by check_assembly's height pairs | `heights.along_axis` on the standoff's pose in the connector's frame |
+| `cover_unresolved` | a cover names a ref the board does not have, or its connector is on the other face from the row's `side` (**warn** by default) | — |
 | `fixed_pose_overlap_waived` | a `fixed_poses[].accept_courtyard_overlap` pair, with its measured courtyard overlap on this board, or with none (a stale waiver) (**warn**) | `legality.pair_overlap_area` |
 
 Where a rule and a placement tool measure the same quantity (zones,
@@ -892,7 +900,7 @@ reading.
 | `zone_side` | yes | **applied before placing**: a member on the other face is flipped at its pose (the writer's flip) | — |
 | `fixed_poses[]` (anchor `fixed:<ref>`) | yes, as `zone_containment` on the anchor | **seated and held**: written at the declared pose before placing, and fixed for the whole anneal | — |
 | `proximity` | yes | **priced**: each claimed pad's distance to its partner's nearest pad on its net (pad centres) is a term of the objective, and each mm a claimed pad is past `max_mm`, pad edge to pad edge as the grade measures it, costs `--claim-limit-weight` (default 10). A claimed part's `jump` move aims at its partner's pads, a move of the partner carries the parts holding their claim on it, and a claimed part joins its partner's group. The crystal claims -- each passive crystal at its IC's oscillator pins (through a series resistor where a leg has one) and its load caps at the crystal (`placement/crystals.py`, `max_mm` 8.1 and 2.2, derived defaults) -- are written into `proximity[]` by `--emit-intent` with `context.source` `placement.crystals`; `place_simple` derives the same rows itself for an intent that lacks them, and a pair the intent already claims keeps the intent's row | the term reads pads on shared nets whatever the `basis`, so a claim whose parts share no net is not priced. A crystal row is graded at **warn** whatever `severity.proximity` says, and `place_fanout_clearance --intent` does not hold it: its limit is the human corpus's 75th percentile, which one human board in four exceeds. Copy the row without that `source` to make it an error-graded claim of your own (reader 12) |
-| `edge_connector` | yes | **seated**: an unlocked edge part (connector, receptacle, switch or test pad, by the entry's declared `class`, else the part's inferred one, as the grade reads it) declared on an edge is held there, its mating face (`mating_face` where the body names none) pointing out and flush with the low end of its `overhang_mm` band, and only slides along it, within its `along_edge_band` / `center_on_edge` when it declares one; its `side` is applied before placing | a part that is not an edge part by class (a cap or a jumper by the edge) is emitted with its observed overhang as a band and no edge, so it is placed like any other part. Lock a connector at its edge pose in the file, or declare that pose in `fixed_poses[]`, when the position along the edge is fixed |
+| `edge_connector` | yes | **seated**: an unlocked edge part (connector, receptacle, switch or test pad, by the entry's declared `class`, else the part's inferred one, as the grade reads it) declared on an edge is held there, its mating face (`mating_face` where the body names none) pointing out and flush with the low end of its `overhang_mm` band, and only slides along it, within its `along_edge_band` / `center_on_edge` when it declares one; its `side` is applied before placing | a part that is not an edge part by class (a cap or a jumper by the edge) is emitted with its observed overhang as a band and no edge, so it is placed like any other part; a row an author DECLARES on an edge is seated whatever its class (the grade reads every row's edge), with a NOTE when the class is not an edge part. Lock a connector at its edge pose in the file, or declare that pose in `fixed_poses[]`, when the position along the edge is fixed |
 | `must_lock` | yes | — | it is a claim about the FILE; no pose satisfies or violates it. `place_simple` holds the parts the file locks |
 | `assembly_side` | yes | — | no move carries a side; a part changes face only by a declaration (the `zone_side` row). **warn** by default so it cannot become a permanent red mark |
 | `envelope` | yes | — | a claim about the intent FILE against the board, not about any pose |
@@ -1138,6 +1146,15 @@ Two things read it:
   or on the other face is one finding naming the worst members; every
   template prints a line, and `--json` carries the readings as
   `templates[]`.
+- **A keep-out against a template** (`plan_template_keepout`, **warn** by
+  default, raised by `--plan-only`): a keep-out that binds a member but not
+  the chip (the chip's reference is in its `allow`, the member's is not)
+  forbids the template pose wherever the chip stands under it. Where the chip's
+  pose is known (locked in the board, or a `fixed_poses[]` entry) the member's
+  template pose is tested against the region and the finding says it lies
+  inside; otherwise it says the region admits the chip but binds the member.
+  `place_simple` names the same conflict for a placed chip, and a member left
+  past its `tolerance_mm`, in its report (`template_keepout`, `template_off`).
 - **The ground return** (`template_ground_return`, **warn** by default), on a
   row whose `kind` is `switching stage`. A member can sit exactly at its
   template pose and the template still be wrong: an output cap fitted with
@@ -1157,6 +1174,82 @@ Two things read it:
   NOTE for a cap past the limit, so the sketch can be fixed before anything
   is placed. A row with no `kind`, or an `rf front end` (whose shunt parts
   ground at their own vias), is not measured.
+
+### `covers[]` and `heights[]`: what stands over the board
+
+```jsonc
+"covers": [{ "connector": "J3", "side": "F", "axis_deg": 90,
+             "width_mm": 22, "underside_mm": 2.5, "length_mm": 44,
+             "standoffs": [{ "ref": "H2", "length_mm": 42 }], "removable": true,
+             "source": "socket datasheet: 2.5 mm card height; single-sided 2242 card" }],
+"heights": [{ "ref": "U7", "height_mm": 1.1, "source": "U7 datasheet, package drawing" }]
+```
+
+A card in a socket (an M.2 card), a module on a stacking connector or a
+shield on headers stands over the board, and a part may go under it only
+where it fits. How low the body reaches depends on the socket's height and on
+the card fitted -- single-sided, or double-sided with its bottom-side parts --
+which the board does not say, so a cover is DECLARED, never derived. Every
+number is the author's and the loader fills none in: `side`, `axis_deg`,
+`width_mm`, `underside_mm`, `removable` and `source` are required, and
+`length_mm` or a standoff. `removable` says whether the body comes off in
+service (a card out of its socket for test and rework) or stays (a module
+soldered to its stacking connector, a shield fixed on). `py_tools/cover_facts.py BOARD` prints what the board does know
+(the connector's height, a card model attached to it and its measured
+underside, the standoffs on its axes with their distances, the parts under
+it now); the skill's "Covers" step says how an agent gets from those facts
+and the datasheets to a row.
+
+The body is a rectangle in the connector's own frame (its footprint's local
+axes): from the connector's origin along `axis_deg` (0 = local +x, 90 =
+local +y) to `length_mm`, else to its farthest standoff, `width_mm` wide
+about a centre line `offset_mm` to the axis's left (default 0), with its
+lowest point `underside_mm` over the connector's face. It moves and turns
+with the connector.
+
+Under it (`placement.heights`, the rule #1443 judges a part's model by):
+
+- a part whose height is KNOWN -- from its 3D model, its IPC-7351 name or a
+  `heights[]` row -- fits when its top is `MARGIN_MM` (0.5 mm) or more below
+  the underside; it is then free to stand there, and is otherwise refused
+  over the area it reaches under the body (its model cell by cell, else its
+  occupancy);
+- a part whose height is unknown, or that something reaches from above (a
+  connector, a switch, a test point), is refused: nothing is risked on a
+  guess. The one exception is a test point under a `removable` body: the
+  probe reaches it with the card out, so it is judged by its height like any
+  other part (a bare test pad still needs a known height, from a model or a
+  `heights[]` row);
+- the standoffs are not judged.
+
+A declared body wins over a model's on the area it declares (a card model's
+underside is that model's card type, and a generic model draws one). The
+seat gate and the anneal price it, and check_assembly gates it as a
+`height` pair (`HEIGHT-BLOCKING`; with `--baseline`, the pairs a move made).
+Each standoff is held `length_mm` along the axis from the connector:
+`place_simple` seats and carries it as a template member anchored on the
+connector, and the `cover` rule reports one off its place. A part may not be
+both a cover's and a template's. `place_pose --intent` judges a hand move
+the same way: a move that newly puts a part under a declared body where it
+does not fit is refused (`height_pairs new: C2/J1`, exit 4), and `--snap`
+ranks only poses clear of it.
+
+Declare both keys in the design brief (`covers[]`, `heights[]`,
+`docs/design-brief.md`) rather than in a hand-edited intent: the brief sits
+beside the board and travels with it, and `check_floorplan --emit-intent`
+compiles its rows into the intent 1:1 (an intent that lacks one reports it
+as drift).
+
+`heights[]` declares a part's `height_mm` (a part with no model then has a
+known height) and its `underside_mm` (the room under a module whose model is
+drawn solid to the board: across its occupancy, outside its drawn courtyard
+and pads, as a model's underside would be read). Declared values win over
+measured ones. Take them from a datasheet, never a guess.
+
+A keep-out's `max_height_mm` turns it into a height limit: a part whose
+height is known and no more than that may stand in it; an unknown height, a
+taller part and a through-hole part (its leads stand on the other face) are
+bound as by any keep-out.
 
 ### A through-hole part is in a keep-out from either side
 

@@ -104,6 +104,21 @@ FIXTURES = [
     ('orangecrab_ext_pll', 'J1'),   # property on Eco1.User
 ]
 
+# Corpus parts carrying the constructs the tracked boards barely have, pasted
+# under a tracked 10.0 board's six-layer header (`WITNESS_BOARD`). Each prefix
+# names what its parts carry: custom-pad primitives (every primitive kind, a
+# rotated and a B-side part), chamfered corners (symmetric and one-corner
+# sets), footprint zones and points (absolute coordinates), groups, embedded
+# files, component classes, the placed flag, a footprint paste ratio and
+# keep_end_layers. Up to three parts per construct, from different boards.
+WITNESS_BOARD = 'tests/fixtures/714/flip_witnesses'
+WITNESS_REFS = (
+    [f'WPRIM{i}' for i in range(1, 7)] + [f'WCHAM{i}' for i in range(1, 5)]
+    + [f'W{t}{i}' for t in ('ZONE', 'SPMR', 'KEL', 'GRP', 'PT', 'PLC', 'EMB')
+       for i in range(1, 4)]
+    + ['WCCL1', 'WCCL2'])
+FIXTURES += [(WITNESS_BOARD, r) for r in WITNESS_REFS]
+
 # Fixtures INJECTED into a copy of a tracked board, for pad children no
 # tracked board carries. (board, ref, {pad number: tokens added after the
 # pad's `(net ...)`, where pcbnew 10 writes them}). #1248: the pad-to-die
@@ -153,14 +168,18 @@ PASSES = ([(b, r, d, inj) for (b, r, inj) in _ALL for d in COMPOSED_DELTAS]
 
 # A run that compared nothing must fail. Floors are below today's counts so a
 # board changing is not a failure, and far above zero so a vacuous run is.
-MIN_FIXTURES = 36
+MIN_FIXTURES = 36 + 3 * 33
 MIN_PADS = 1200
 MIN_NON_PAD_NODES = 1200
 # Surfaces at least one fixture must actually carry, so the set cannot silently
 # stop covering them. Counted on PCBNEW's output, so the die tokens also prove
 # pcbnew read the injection back rather than dropping it on both sides.
 REQUIRED_SURFACES = ('fp_arc', 'fp_curve', 'model', 'fp_poly', 'fp_circle',
-                     'die_length', 'die_delay')
+                     'die_length', 'die_delay', 'primitives', 'gr_arc',
+                     'gr_poly', 'gr_line', 'gr_circle', 'gr_rect', 'chamfer',
+                     'zone', 'point', 'group', 'embedded_files',
+                     'component_classes', 'placed', 'keep_end_layers',
+                     'solder_paste_margin_ratio')
 
 _NUM = re.compile(r'^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$')
 
@@ -326,7 +345,9 @@ _MID_WAIVER_NM = 1
 # number, so adding a pass does not silently push the run through a cap it
 # was sitting exactly on -- it was at 6 of 6 the moment the composed
 # passes landed, which is a boundary, not a margin.
-MAX_WAIVED = 2 * 3 + 3
+# The custom-pad witnesses add their `gr_arc` primitives: 18 mid coordinates
+# lose the same nanometre, on each of the 3 flip passes.
+MAX_WAIVED = 2 * 3 + 3 + 18 * 3
 
 
 def _diff(a, b, path='', out=None, limit=40, waived=None):
@@ -378,7 +399,8 @@ def main(argv=None):
     injected = {}
     try:
         for board, ref, delta, inj in PASSES:
-            src = os.path.join(REPO, 'kicad_files', board + '.kicad_pcb')
+            src = (os.path.join(REPO, board + '.kicad_pcb') if '/' in board
+                   else os.path.join(REPO, 'kicad_files', board + '.kicad_pcb'))
             if not os.path.isfile(src):
                 problems.append(f"{board}: board not tracked -- fixture stale")
                 continue
@@ -431,7 +453,7 @@ def main(argv=None):
                         f"(x moved={after_x != before_x}); refusing to compare "
                         f"against a different flip")
                 direction_checked = True
-            kout = os.path.join(tmp, f"{board}_{ref}_kicad.kicad_pcb")
+            kout = os.path.join(tmp, f"{os.path.basename(board)}_{ref}_kicad.kicad_pcb")
             pcbnew.SaveBoard(kout, b)
 
             # ---- path A: our writer. pcbnew NEGATES the orientation, and this
@@ -439,7 +461,7 @@ def main(argv=None):
             # hand it the negated angle to compare like with like.
             fp0 = parse_kicad_pcb(src).footprints[ref]
             side = 'F' if (fp0.layer or 'F').startswith('B') else 'B'
-            ours = os.path.join(tmp, f"{board}_{ref}_ours.kicad_pcb")
+            ours = os.path.join(tmp, f"{os.path.basename(board)}_{ref}_ours.kicad_pcb")
             if rotate_only:
                 # No `new_side`: this exercises the ordinary rotation path,
                 # the one every placement lap takes.

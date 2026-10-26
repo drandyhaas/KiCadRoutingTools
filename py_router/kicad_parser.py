@@ -422,8 +422,9 @@ class Pad:
     # outline(s) in GLOBAL board mm for custom comb/finger pads (issue #188).
     # When set, the obstacle map and DRC rasterize these polygons instead of the
     # size_x x size_y bounding box, so the finger channels (and the empty side of
-    # an off-anchor pad) stay routable. None for ordinary rect/circle/roundrect
-    # pads, which the bounding box models exactly.
+    # an off-anchor pad) stay routable. A chamfered-rect pad (#1450) carries
+    # its outline here too, so a cut corner is not copper. None for ordinary
+    # rect/circle/roundrect pads, which the bounding box models exactly.
     castellated: bool = False  # KiCad (property pad_prop_castellated): a
     # deliberate half-hole pad ON the board edge (run-6 fix 1.7). Consumers:
     # the castellated-landing retract post-pass pulls track endpoints that
@@ -778,8 +779,10 @@ class Footprint:
     owns_board_outline: bool = False
     # #829. `owns_edge_cuts` is the FACT (this footprint's pose transforms a
     # piece of Edge.Cuts); `owns_board_outline` is the DECISION that follows
-    # from it -- True only when that geometry lies outside every ring the
-    # board-level Edge.Cuts forms, i.e. it IS part of the board boundary.
+    # from it -- True when that geometry IS part of the board boundary: an
+    # open path, or a closed ring that encloses some of the part's own pads
+    # (or has none to judge by) and lies outside the board-level outline
+    # (`classify_outline_owners`).
     # A milled relief or a window parented to a part so it travels with the
     # part (crkbd's 184 per-LED windows; #628's owned rings) is
     # owns_edge_cuts=True, owns_board_outline=False, and stays movable.
@@ -872,7 +875,7 @@ class BoardInfo:
     # inside the panel frame -- dropping it outright let the router lay copper
     # straight across the milled gap between the two keyboard halves (85 items).
     board_edge_contours: List[List[Tuple[float, float]]] = field(default_factory=list)
-    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed, name}
+    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed, pads_allowed, footprints_allowed, owner, name}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
     # None until a step records one. Routers fold this into the .kicad_pro DRC
@@ -1481,6 +1484,113 @@ def _adaptive_circle_n(r: float, eps: float = 0.001, lo: int = 16,
     return max(lo, min(hi, n))
 
 
+#: KiCad's chamfer corner names (`(chamfer top_left ...)`) in the pad's own
+#: frame (y down), walked clockwise on screen.
+CHAMFER_CORNERS = (('top_left', -1, -1), ('top_right', 1, -1),
+                   ('bottom_right', 1, 1), ('bottom_left', -1, 1))
+
+
+def chamfered_rect_polygon(cx: float, cy: float, w: float, h: float,
+                           abs_rotation_deg: float, corners, chamfer_ratio: float,
+                           corner_radius: float) -> List[Tuple[float, float]]:
+    """The copper outline of KiCad's chamfered rect pad, in board mm (#1450).
+
+    KiCad writes a chamfered-rect pad (Eagle's octagon pads come through its
+    importer this way) as `roundrect` plus `(chamfer <corners>)` and
+    `(chamfer_ratio r)`. Its outline (TransformRoundChamferedRectToPolygon) is
+    the `w` x `h` rect centred on the copper (`cx`, `cy`) with each named
+    corner cut by a 45-degree flat `chamfer_ratio * min(w, h)` along each side,
+    and every OTHER corner rounded by `corner_radius` (the pad's roundrect
+    radius, `roundrect_rratio * min(w, h)`) -- a chamfered corner is never
+    rounded. As in pcbnew, the radius is at most half the short side and the
+    chamfer is not clamped (a ratio past 0.5 overlaps, there too).
+
+    `corners` are names from CHAMFER_CORNERS in the pad's own frame, which
+    KiCad already mirrors when it flips a footprint, so the file's names and
+    the pad's ABSOLUTE angle (`abs_rotation_deg`, applied with KiCad's negate
+    convention as for custom pads) place the outline. Arcs are inscribed with
+    1 um of sagitta, below pcbnew's own 5 um max error."""
+    hx, hy = w / 2.0, h / 2.0
+    short = min(w, h)
+    cut = max(0.0, chamfer_ratio) * short
+    r = max(0.0, min(corner_radius, short / 2.0))
+    named = set(corners)
+    # Chords of a quarter arc with 1 um of sagitta each.
+    n_arc = (min(64, max(2, math.ceil(
+        (math.pi / 2.0) / (2.0 * math.acos(max(-1.0, 1.0 - 0.001 / r))))))
+        if r > 0 else 0)
+    local: List[Tuple[float, float]] = []
+    k = len(CHAMFER_CORNERS)
+    for i, (name, sx, sy) in enumerate(CHAMFER_CORNERS):
+        ccx, ccy = sx * hx, sy * hy
+        _pn, psx, psy = CHAMFER_CORNERS[(i - 1) % k]
+        _nn, nsx, nsy = CHAMFER_CORNERS[(i + 1) % k]
+        # Unit vectors from this corner along its incoming / outgoing side.
+        ux_in, uy_in = (psx - sx) / 2.0, (psy - sy) / 2.0
+        ux_out, uy_out = (nsx - sx) / 2.0, (nsy - sy) / 2.0
+        if name in named:
+            if cut > 0:
+                local.append((ccx + ux_in * cut, ccy + uy_in * cut))
+                local.append((ccx + ux_out * cut, ccy + uy_out * cut))
+            else:
+                local.append((ccx, ccy))
+        elif r > 0:
+            # The quarter arc about the inset corner, from the incoming side
+            # to the outgoing one (+90 degrees on screen, every corner).
+            acx, acy = ccx - sx * r, ccy - sy * r
+            a0 = math.atan2(ccy + uy_in * r - acy, ccx + ux_in * r - acx)
+            for j in range(n_arc + 1):
+                a = a0 + (math.pi / 2.0) * j / n_arc
+                local.append((acx + r * math.cos(a), acy + r * math.sin(a)))
+        else:
+            local.append((ccx, ccy))
+    # Two cuts meeting mid-side (ratio 0.5) leave a repeated vertex.
+    pts: List[Tuple[float, float]] = []
+    for p in local:
+        if not pts or math.hypot(p[0] - pts[-1][0], p[1] - pts[-1][1]) > 1e-9:
+            pts.append(p)
+    if len(pts) > 1 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1e-9:
+        pts.pop()
+    rad = math.radians(-abs_rotation_deg)
+    c, s = math.cos(rad), math.sin(rad)
+    return [(cx + x * c - y * s, cy + x * s + y * c) for x, y in pts]
+
+
+_CHAMFER_RE = re.compile(r'\(chamfer\s+([^()]*)\)')
+
+
+#: KiCad's default `chamfer_ratio`, and the `roundrect_rratio` its loader
+#: gives a chamfered pad whose file names none (PADSTACK's defaults).
+CHAMFER_RATIO_DEFAULT = 0.2
+ROUNDRECT_RRATIO_DEFAULT = 0.25
+
+
+def chamfered_pad_from_text(pad_text: str, pad_shape: str, w: float, h: float,
+                            cx: float, cy: float, abs_rotation_deg: float):
+    """`([outline], roundrect_rratio)` for a chamfered-rect pad block, else
+    None (#1450).
+
+    `w`/`h` are the pad-frame `(size ...)`, (`cx`, `cy`) the copper centre.
+    KiCad loads a `rect` or `roundrect` pad naming a corner as its chamfered
+    rect, whose other corners take the pad's `roundrect_rratio` (0.25 when the
+    file has none, at most 0.5) -- the ratio returned, as pcbnew reports it. A
+    per-layer padstack is left to its box (its layers may differ), and a pad
+    naming no corner is not chamfered."""
+    if pad_shape not in ('rect', 'roundrect') or re.search(r'\(padstack\s', pad_text):
+        return None
+    m = _CHAMFER_RE.search(pad_text)
+    names = {n for n, _x, _y in CHAMFER_CORNERS}
+    corners = [t for t in (m.group(1).split() if m else ()) if t in names]
+    if not corners or w <= 0 or h <= 0:
+        return None
+    cm = re.search(r'\(chamfer_ratio\s+(%s)\)' % AT_NUM, pad_text)
+    ratio = float(cm.group(1)) if cm else CHAMFER_RATIO_DEFAULT
+    rm = re.search(r'\(roundrect_rratio\s+(%s)\)' % AT_NUM, pad_text)
+    rratio = max(0.0, min(0.5, float(rm.group(1)) if rm else ROUNDRECT_RRATIO_DEFAULT))
+    return ([chamfered_rect_polygon(cx, cy, w, h, abs_rotation_deg, corners,
+                                    ratio, rratio * min(w, h))], rratio)
+
+
 def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                                 pad_abs_rotation_deg: float):
     """Real copper outline(s) of a custom pad in GLOBAL board mm (issue #188).
@@ -1912,6 +2022,39 @@ def _pcbnew_custom_copper_is_anchor(pad, to_mm, eps: float = 1e-4) -> bool:
         return n > 0
     except Exception:
         return False
+
+
+def _pcbnew_chamfered_pad_polygons(pad, to_mm):
+    """`[outline]` in board mm for a live pcbnew chamfered-rect pad, else None
+    (#1450) -- `chamfered_pad_from_text` for the GUI path.
+
+    The outline is pcbnew's effective polygon, which tests/
+    test_1450_chamfered_pad_pcbnew.py holds the text path's
+    chamfered_rect_polygon to. Should pcbnew give none, the pad keeps its box
+    (as a custom pad does). A per-layer padstack is left to its box, as on the
+    text path."""
+    try:
+        import pcbnew as _pn
+        if pad.GetShape() != getattr(_pn, 'PAD_SHAPE_CHAMFERED_RECT', object()):
+            return None
+        if not pad.GetChamferPositions():
+            return None
+        if hasattr(pad, 'Padstack') and pad.Padstack().Mode() != _pn.PADSTACK.MODE_NORMAL:
+            return None
+    except Exception:
+        return None
+    try:
+        poly_set = pad.GetEffectivePolygon(pad.GetLayer())
+        polys = []
+        for oi in range(poly_set.OutlineCount()):
+            ol = poly_set.Outline(oi)
+            pts = [(to_mm(ol.CPoint(i).x), to_mm(ol.CPoint(i).y))
+                   for i in range(ol.PointCount())]
+            if len(pts) >= 3:
+                polys.append(pts)
+        return polys or None
+    except Exception:
+        return None
 
 
 def pad_is_plated_through(pad) -> bool:
@@ -3093,7 +3236,9 @@ def footprint_outline_owners(content: str) -> Dict[str, bool]:
       Moving it resizes the board, which is never a placement decision. A board
       whose outline lives entirely in footprints (Adiuvo's rp2350_fpga_eensy)
       has no board-level rings at all, so every owner is structural.
-    * **Carried** (`False`) -- the shape sits inside the board outline: a
+    * **Carried** (`False`) -- a closed shape beside the part's own copper
+      (#1409: it encloses none of the part's pads, wherever the part sits), or
+      one inside the board outline: a
       milled relief or a window the designer PARENTED to the part precisely so
       it would travel with it. crkbd draws 184 per-LED cutout windows this way
       (see `_collect_edge_cuts_segments`), and #628 exists to keep exactly this
@@ -3118,8 +3263,9 @@ def footprint_outline_owners(content: str) -> Dict[str, bool]:
     segs_by_ref = _collect_footprint_edge_segments_by_ref(content)
     board_only = _mask_footprint_blocks(content)
     outers, _cutouts = extract_board_contours(board_only)
-    return classify_outline_owners(segs_by_ref,
-                                   extract_board_bounds(board_only), outers)
+    return classify_outline_owners(
+        segs_by_ref, extract_board_bounds(board_only), outers,
+        own_pads=_footprint_own_pads_by_ref(content, set(segs_by_ref)))
 
 
 def outline_fingerprint(board_info) -> Tuple:
@@ -3150,8 +3296,18 @@ def outline_fingerprint(board_info) -> Tuple:
     )
 
 
-def structural_outline_fingerprint(content: str) -> Tuple:
+def structural_outline_fingerprint(content: str, carried=None) -> Tuple:
     """`outline_fingerprint` of the board's STRUCTURAL outline only (#829).
+
+    `carried` (#1409), a set of refs, replaces the classification read off
+    `content` itself. A write compares the board BEFORE and AFTER one move, and
+    a ring the part's own pads cannot settle (one around a pad of its own, or
+    a pad-less footprint's) is judged by containment at the footprint's
+    CURRENT pose (`classify_outline_owners` rule 2b): carried while the part
+    is on the board and structural once it is off, so classifying each text
+    separately read a legal move of the part off the board as the outline
+    changing. The caller decides once, on the input, and passes the
+    same set for both texts.
 
     The board-level Edge.Cuts plus the footprints that draw the boundary --
     with every CARRIED owner masked out. That distinction is the whole reason
@@ -3164,8 +3320,9 @@ def structural_outline_fingerprint(content: str) -> Tuple:
     Invariant under any permitted placement move, by construction. A change
     means something moved a footprint that draws the board.
     """
-    owners = footprint_outline_owners(content)
-    carried = {ref for ref, structural in owners.items() if not structural}
+    if carried is None:
+        owners = footprint_outline_owners(content)
+        carried = {ref for ref, structural in owners.items() if not structural}
     if carried:
         content = _mask_footprint_blocks(content, only_refs=carried)
     outers, cutouts = extract_board_contours(content)
@@ -3197,19 +3354,111 @@ def _segments_close_on_themselves(segments, tol: float = 0.01) -> bool:
     return all(d % 2 == 0 for d in deg.values())
 
 
-def classify_outline_owners(owners, board_only_bounds, board_only_outers):
+# #1409: a pad centre within this distance (mm) of a ring counts as ON it --
+# the chainer's own tolerance. On the ring is not "beside the hole": a
+# castellated pad sits on the edge its part draws.
+_OWN_PAD_EPS = 0.01
+
+
+def _footprint_own_pad_centres(block: str):
+    """The LOCAL-frame centres of every pad in one footprint block (#1409):
+    each pad's `(at x y ...)`, which the file stores in the footprint's own
+    coordinates. Read wherever the part sits, so the answer cannot change with
+    its pose. A pad whose `(at ...)` does not parse is skipped."""
+    out = []
+    for pm in PAD_HEAD_RE.finditer(block):
+        pad_text = block[pm.start():find_matching_paren(block, pm.start())]
+        at = AT_NODE_RE.search(pad_text)
+        if at is not None:
+            out.append((float(at.group(1)), float(at.group(2))))
+    return out
+
+
+def _footprint_own_pads_by_ref(content: str, refs):
+    """`{ref: (fx, fy, rot, [local pad centres])}` for the footprints in
+    `refs`: the pose the classifier needs to carry a ring into the footprint's
+    own frame, and the footprint's pads in that frame."""
+    out = {}
+    for start, end, key in _footprint_blocks_by_key(content):
+        if key not in refs:
+            continue
+        block = content[start:end]
+        pose = footprint_pose(block)
+        if pose is None:
+            continue
+        out[key] = pose + (_footprint_own_pad_centres(block),)
+    return out
+
+
+def _dist_to_segment(px, py, a, b) -> float:
+    (x1, y1), (x2, y2) = a, b
+    dx, dy = x2 - x1, y2 - y1
+    ll = dx * dx + dy * dy
+    t = 0.0 if ll == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / ll))
+    return math.hypot(px - x1 - t * dx, py - y1 - t * dy)
+
+
+def _ring_spares_own_pads(segs, own) -> bool:
+    """Is this closed ring a hole BESIDE its footprint's copper (#1409)?
+
+    `own` is `(fx, fy, rot, [local pad centres])`. True when the footprint has
+    at least one pad and no pad centre lies inside the ring or on it, judged
+    in the footprint's LOCAL frame -- the ring is carried there by
+    `_global_to_local`, the pose's exact inverse -- so the answer is the same
+    at every pose.
+
+    Inside is even-odd over the ring's segments, which needs no chaining and
+    reads several loops (a part's row of slots) at once. A segment drawn twice
+    is counted once: a doubled loop would otherwise cancel itself out and
+    enclose nothing.
+    """
+    if own is None:
+        return False
+    fx, fy, rot, pads = own
+    if not pads:
+        return False
+    uniq = {}
+    for a, b in segs:
+        la = _global_to_local(fx, fy, rot, *a)
+        lb = _global_to_local(fx, fy, rot, *b)
+        ka = (round(la[0], 3), round(la[1], 3))
+        kb = (round(lb[0], 3), round(lb[1], 3))
+        uniq.setdefault((min(ka, kb), max(ka, kb)), (la, lb))
+    local = list(uniq.values())
+    for px, py in pads:
+        inside = False
+        for (x1, y1), (x2, y2) in local:
+            if (y1 > py) != (y2 > py):
+                if x1 + (py - y1) * (x2 - x1) / (y2 - y1) > px:
+                    inside = not inside
+        if inside:
+            return False
+        if any(_dist_to_segment(px, py, a, b) <= _OWN_PAD_EPS
+               for a, b in local):
+            return False
+    return True
+
+
+def classify_outline_owners(owners, board_only_bounds, board_only_outers,
+                            own_pads=None):
     """`{ref: owns_board_outline}` from per-ref SEGMENTS and the board's own
     outline. Shared by BOTH parse paths (#829) so they cannot decide
-    differently -- each supplies its own three inputs, the rule lives here once.
+    differently -- each supplies its own inputs, the rule lives here once.
 
-    `owners` is `{ref: [((x1,y1),(x2,y2)), ...]}` in global mm.
+    `owners` is `{ref: [((x1,y1),(x2,y2)), ...]}` in global mm. `own_pads`
+    (#1409) is `{ref: (fx, fy, rot, [local pad centres])}`: each owner's pose
+    and its own pads in its LOCAL frame (`_footprint_own_pad_centres`); a ref
+    missing from it is judged by rule 2b alone.
 
     A footprint is CARRIED (its geometry travels with it, and it stays movable)
-    only when BOTH hold:
+    only when:
 
       1. its Edge.Cuts segments CLOSE ON THEMSELVES -- it is a window, a slot,
          a relief: a shape cut out of the board; and
-      2. that shape lies inside the outline the board draws without it.
+      2a. the footprint has pads and that shape encloses none of them, judged
+          in the footprint's own frame (#1409) -- a hole beside the part's
+          copper, which the part carries wherever it is; or, failing that,
+      2b. that shape lies inside the outline the board draws without it.
 
     Anything else is STRUCTURAL. Closedness carries most of the weight, and it
     is what the first version of this function lacked. Deciding on containment
@@ -3227,13 +3476,46 @@ def classify_outline_owners(owners, board_only_bounds, board_only_outers):
 
     An open path cannot be a cut-out, so all three become structural on rule 1
     without consulting containment at all.
+
+    Rule 2a is why the answer does not flip with a move (#1409). Rule 2b is
+    judged at the part's CURRENT pose: a part carrying a milled window read
+    carried on the board and structural once off it, so a pile made by any
+    means froze it there (`place_pose set` refused to bring it back: "draws
+    the board outline"). 2a reads only the part's own geometry, which is
+    rigid in its frame. It asks which side of the ring the part's copper is
+    on, because that is what tells a hole from a boundary: a hole cut beside
+    or under a part leaves its pads on the board, outside the ring; a ring
+    that IS the board's edge has the part's pads on the board, inside it (a
+    module drawing its own outline encloses most of its pads, and its
+    castellations sit ON the ring, which counts as enclosed). Measured over
+    every closed footprint ring in the stress corpus: each window, slot and
+    relief encloses no pad of its part, each footprint-drawn board outline
+    encloses at least half of its own. A bounding box of the part's pads and
+    courtyard does NOT separate them -- an LED window under a reverse-mount
+    part stands up to 0.74 mm proud of it, further than a footprint-drawn
+    board outline stands past its own pads (0.41 mm). A ring around a
+    drilled pin (a plated slot) encloses that pad, and a pad-less footprint
+    has nothing to judge by, so both are left to 2b, as before.
     """
     if not owners:
         return {}
+    own_pads = own_pads or {}
+    out = {}
+    pending = {}
+    for ref, segs in owners.items():
+        if not _segments_close_on_themselves(segs):
+            out[ref] = True                                    # rule 1
+        elif _ring_spares_own_pads(segs, own_pads.get(ref)):
+            out[ref] = False                                   # rule 2a
+        else:
+            pending[ref] = segs                                # rule 2b
+    if not pending:
+        return out
     if board_only_bounds is None:
         # The board-level Edge.Cuts draws nothing at all, so the footprints ARE
-        # the outline (rp2350_fpga_eensy). Every owner is structural.
-        return {ref: True for ref in owners}
+        # the outline. Every owner rule 2a did not settle is structural.
+        out.update({ref: True for ref in pending})
+        return out
 
     rings = [r for r in (board_only_outers or []) if len(r) >= 3]
 
@@ -3254,11 +3536,7 @@ def classify_outline_owners(owners, board_only_bounds, board_only_outers):
             return (x0 - _OUTLINE_EPS <= px <= x1 + _OUTLINE_EPS
                     and y0 - _OUTLINE_EPS <= py <= y1 + _OUTLINE_EPS)
 
-    out = {}
-    for ref, segs in owners.items():
-        if not _segments_close_on_themselves(segs):
-            out[ref] = True
-            continue
+    for ref, segs in pending.items():
         out[ref] = not all(inside(*p) for seg in segs for p in seg)
     return out
 
@@ -3371,8 +3649,27 @@ def _bezier_to_segments(p0, p1, p2, p3, num_segments: int = 16):
     return list(zip(pts, pts[1:]))
 
 
-def _circle_to_segments(cx, cy, r, num_segments: int = 64):
-    """Circle -> closed ring of line segments."""
+#: Chord sag allowed on an Edge.Cuts arc or circle (#1404). Copper is cleared
+#: against the LINEARISED outline, and a chord lies inside its arc: on a convex
+#: edge (a round cutout, a rounded corner seen from the copper side) the
+#: polygon is that sag FARTHER from the copper than the true edge, so a track
+#: the router thought exactly at the edge floor sat up to the sag inside it
+#: (KiCad: 0.1980 against 0.2000 with the 5 um default). 0.5 um keeps the
+#: model inside the sub-micron slack the grid-tie epsilon and KiCad's own
+#: reporting resolution leave.
+EDGE_CHORD_EPS = 0.0005
+
+
+def _circle_to_segments(cx, cy, r, num_segments: int = 64,
+                        chord_eps: float = 0.0):
+    """Circle -> closed ring of line segments. With `chord_eps` the ring has
+    as many segments as keep the chord sag at or under it (never fewer than
+    `num_segments`, at most 2048)."""
+    if chord_eps and r > 0:
+        max_step = 2.0 * math.acos(max(-1.0, min(1.0, 1.0 - chord_eps / r)))
+        if max_step > 0:
+            num_segments = max(num_segments,
+                               min(2048, int(math.ceil(2 * math.pi / max_step))))
     pts = [(cx + r * math.cos(2 * math.pi * k / num_segments),
             cy + r * math.sin(2 * math.pi * k / num_segments))
            for k in range(num_segments + 1)]
@@ -3400,7 +3697,8 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
         sx, sy = float(m.group(1)), float(m.group(2))
         mx, my = float(m.group(3)), float(m.group(4))
         ex, ey = float(m.group(5)), float(m.group(6))
-        segments.extend(_arc_to_segments((sx, sy), (mx, my), (ex, ey)))
+        segments.extend(_arc_to_segments((sx, sy), (mx, my), (ex, ey),
+                                         chord_eps=EDGE_CHORD_EPS))
 
     # gr_rect - expand to 4 line segments
     rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
@@ -3436,7 +3734,8 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
         cx, cy, ex, ey = (float(v) for v in m.groups())
         r = math.hypot(ex - cx, ey - cy)
         if r > 1e-6:
-            segments.extend(_circle_to_segments(cx, cy, r))
+            segments.extend(_circle_to_segments(cx, cy, r,
+                                                chord_eps=EDGE_CHORD_EPS))
 
     # Footprint-embedded Edge.Cuts (#304): reversible split keyboards draw
     # per-LED cutout windows as fp_lines on Edge.Cuts inside the LED
@@ -3498,14 +3797,16 @@ def _collect_footprint_edge_segments_by_ref(content: str):
         for m in re.finditer(r'\(fp_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
                              + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
             g = [float(v) for v in m.groups()]
-            for p1, p2 in _arc_to_segments((g[0], g[1]), (g[2], g[3]), (g[4], g[5])):
+            for p1, p2 in _arc_to_segments((g[0], g[1]), (g[2], g[3]), (g[4], g[5]),
+                                           chord_eps=EDGE_CHORD_EPS):
                 out.append((to_g(*p1), to_g(*p2)))
         for m in re.finditer(r'\(fp_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
                              + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
             cx, cy, ex, ey = (float(v) for v in m.groups())
             r = math.hypot(ex - cx, ey - cy)
             if r > 1e-6:
-                for p1, p2 in _circle_to_segments(cx, cy, r):
+                for p1, p2 in _circle_to_segments(cx, cy, r,
+                                                  chord_eps=EDGE_CHORD_EPS):
                     out.append((to_g(*p1), to_g(*p2)))
         # fp_curve: without it a footprint-embedded curved edge never reaches
         # the chainer, so the outline cannot close and the true extent is
@@ -4761,6 +5062,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             # rotation into the dimensions so all downstream axis-aligned
             # geometry stays exact; genuine diagonal pads keep a residual
             # rect_rotation the obstacle/DRC geometry applies.
+            _frame_size = (size_x, size_y)  # pad frame, for a chamfer (#1450)
             if not custom_resolved:
                 size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
@@ -4858,6 +5160,17 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             if pad_shape == 'custom':
                 pad_polygons = _custom_pad_global_polygons(
                     pad_text, global_x, global_y, pad_rotation)
+            elif '(chamfer' in pad_text:
+                # A chamfered rect (#1450): its cut corners are not copper,
+                # and every consumer that reads `polygons` measures them so.
+                # Shape and ratio as pcbnew loads it (a chamfered `rect` is
+                # its roundrect).
+                _chamfered = chamfered_pad_from_text(
+                    pad_text, pad_shape, _frame_size[0], _frame_size[1],
+                    global_x, global_y, pad_rotation)
+                if _chamfered is not None:
+                    pad_polygons, roundrect_rratio = _chamfered
+                    pad_shape = 'roundrect'
 
             pad = Pad(
                 component_ref=reference,
@@ -6521,7 +6834,16 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
 
 
 def _iter_zone_blocks(content: str):
-    """Yield the inner body of each top-level ``(zone ...)`` block.
+    """Yield `(body, in_footprint)` for each ``(zone ...)`` block
+    (`_iter_zone_spans` without the offset)."""
+    for _at, body, in_footprint in _iter_zone_spans(content):
+        yield body, in_footprint
+
+
+def _iter_zone_spans(content: str):
+    """Yield `(offset, body, in_footprint)` for each ``(zone ...)`` block: the
+    offset of its opening paren in `content`, which names the footprint block
+    a footprint-owned zone sits in (`extract_keepouts`).
 
     Zones are at the top level, indented with a single tab. Uses ``\\r?\\n`` to
     handle both Unix and Windows line endings. Each yielded string is the
@@ -6552,7 +6874,7 @@ def _iter_zone_blocks(content: str):
         body_start = open_idx + len('(zone')
         if zone_end <= body_start:
             continue
-        yield content[body_start:zone_end], in_footprint
+        yield open_idx, content[body_start:zone_end], in_footprint
 
 
 # --- Zone outlines as pcbnew loads them ---------------------------------------
@@ -7276,17 +7598,24 @@ def pad_joins_zone(pad, zone) -> bool:
 def extract_keepouts(content: str) -> List[dict]:
     """Extract keep-out rule areas (zones with a (keepout ...) clause and no net fill).
 
-    These define regions where tracks, vias and/or zone fill are not allowed
-    — e.g. an antenna-flange RF clearance. Returns a list of dicts:
+    These define regions where tracks, vias, zone fill, pads and/or
+    footprints are not allowed — e.g. an antenna-flange RF clearance. Returns
+    a list of dicts:
         {polygon: [(x,y),...], layers: set(layer_names),
          tracks_allowed: bool, vias_allowed: bool, copper_pour_allowed: bool,
-         in_footprint: bool, name: str}
+         pads_allowed: bool, footprints_allowed: bool,
+         in_footprint: bool, owner: str, name: str}
+    `owner` is the key (as `parse_kicad_pcb` names it, `iter_footprint_blocks`)
+    of the footprint a footprint-owned area sits in, '' for a board-level one.
+    A pad or a footprint inside an area forbidding it is KiCad's
+    `items_not_allowed` (#1451, `legality.rule_area_item_findings`).
     `name` is the area's `(name ...)` ('' when it has none): a .kicad_dru
     condition names the area it restricts (`A.intersectsArea('corridor')`),
     and an area that allows everything can still be one (net_keepouts).
     """
     keepouts = []
-    for zc, in_footprint in _iter_zone_blocks(content):
+    spans = None
+    for zone_at, zc, in_footprint in _iter_zone_spans(content):
         # The keepout clause holds nested sub-clauses, e.g.
         #   (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) ...)
         # so capture its full balanced-paren body rather than just the first ).
@@ -7310,6 +7639,13 @@ def extract_keepouts(content: str) -> List[dict]:
         # zone fill, splitting planes into islands -- the fill model must see
         # them or it grades keep-out-split planes as one piece.
         copper_pour_allowed = 'copperpour not_allowed' not in ko_body
+        pads_allowed = 'pads not_allowed' not in ko_body
+        footprints_allowed = 'footprints not_allowed' not in ko_body
+        owner = ''
+        if in_footprint:
+            if spans is None:
+                spans = [(s0, e0, key) for s0, e0, _t, _r, key in iter_footprint_blocks(content)]
+            owner = next((key for s0, e0, key in spans if s0 <= zone_at < e0), '')
 
         # Layers: (layers "F.Cu" "In1.Cu" ...) or single (layer "F.Cu").
         # v5/v6 write tokens UNQUOTED ((layers F&B.Cu)) -- accept both (#369 A5).
@@ -7353,7 +7689,9 @@ def extract_keepouts(content: str) -> List[dict]:
         keepouts.append({'polygon': polys[0], 'holes': polys[1:], 'layers': layers,
                          'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed,
                          'copper_pour_allowed': copper_pour_allowed,
-                         'in_footprint': in_footprint,
+                         'pads_allowed': pads_allowed,
+                         'footprints_allowed': footprints_allowed,
+                         'in_footprint': in_footprint, 'owner': owner,
                          'name': nm.group(1).replace('\\"', '"') if nm else ''})
     return keepouts
 
@@ -9080,6 +9418,10 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                                 max(x for _r in pad_polygons for x, _ in _r) - global_x,
                                 max(y for _r in pad_polygons for _, y in _r) - global_y)
             else:
+                # A chamfered rect (#1450): its cut corners are not copper.
+                # pcbnew's effective polygon is the outline the text parser
+                # builds (chamfered_rect_polygon), already in board mm.
+                pad_polygons = _pcbnew_chamfered_pad_polygons(pad, to_mm)
                 # Resolve the pad rectangle into board space (keyed on the absolute
                 # total rotation, not pad_rotation alone — see the text-parser path).
                 size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
@@ -9710,8 +10052,10 @@ def footprint_outline_owners_from_pcbnew(board, to_mm):
         return {}
 
     owners = {}
+    own_pads = {}
     try:
-        _extract_board_contours_from_pcbnew(board, to_mm, owners_out=owners)
+        _extract_board_contours_from_pcbnew(board, to_mm, owners_out=owners,
+                                            own_pads_out=own_pads)
     except Exception:
         return {}
     if not owners:
@@ -9741,11 +10085,32 @@ def footprint_outline_owners_from_pcbnew(board, to_mm):
             board, to_mm, include_footprints=False)
     except Exception:
         outers = []
-    return classify_outline_owners(owners, board_bounds, outers)
+    return classify_outline_owners(owners, board_bounds, outers,
+                                   own_pads=own_pads)
+
+
+def _pcbnew_footprint_own_pads(fp, to_mm):
+    """The pcbnew mirror of `_footprint_own_pads_by_ref` for one footprint
+    (#1409): `(fx, fy, rot, [local pad centres])`. pcbnew hands back pad
+    positions in BOARD coordinates, so each is carried into the footprint's
+    frame by `_global_to_local` -- the pose's exact inverse, the same one the
+    classifier applies to the ring -- which lands on the file's own `(at x y)`
+    to within a nanometre."""
+    pos = fp.GetPosition()
+    fx, fy = to_mm(pos.x), to_mm(pos.y)
+    rot = fp.GetOrientationDegrees()
+    pads = []
+    for pad in fp.Pads():
+        try:
+            pp = pad.GetPosition()
+            pads.append(_global_to_local(fx, fy, rot, to_mm(pp.x), to_mm(pp.y)))
+        except Exception:                                        # noqa: BLE001
+            continue
+    return (fx, fy, rot, pads)
 
 
 def _extract_board_contours_from_pcbnew(board, to_mm, include_footprints=True,
-                                        owners_out=None):
+                                        owners_out=None, own_pads_out=None):
     """Extract board outline and cutout polygons from Edge.Cuts drawings via pcbnew.
 
     Returns (outers, cutouts): the OUTER boundary rings (largest first --
@@ -9789,14 +10154,16 @@ def _extract_board_contours_from_pcbnew(board, to_mm, include_footprints=True,
             segs.extend(_arc_to_segments(
                 (to_mm(start.x), to_mm(start.y)),
                 (to_mm(mid.x), to_mm(mid.y)),
-                (to_mm(end.x), to_mm(end.y))
+                (to_mm(end.x), to_mm(end.y)),
+                chord_eps=EDGE_CHORD_EPS
             ))
         elif shape_type == getattr(pcbnew, 'SHAPE_T_CIRCLE', getattr(pcbnew, 'S_CIRCLE', -1)):
             c = drawing.GetCenter()
             e = drawing.GetEnd()
             r = math.hypot(to_mm(e.x) - to_mm(c.x), to_mm(e.y) - to_mm(c.y))
             if r > 1e-6:
-                segs.extend(_circle_to_segments(to_mm(c.x), to_mm(c.y), r))
+                segs.extend(_circle_to_segments(to_mm(c.x), to_mm(c.y), r,
+                                                chord_eps=EDGE_CHORD_EPS))
         elif shape_type == getattr(pcbnew, 'SHAPE_T_BEZIER', getattr(pcbnew, 'S_CURVE', -1)):
             p0, p3 = drawing.GetStart(), drawing.GetEnd()
             c1, c2 = drawing.GetBezierC1(), drawing.GetBezierC2()
@@ -9879,6 +10246,15 @@ def _extract_board_contours_from_pcbnew(board, to_mm, include_footprints=True,
                         _oref = fp.GetReference() or ("#" + str(
                             fp.m_Uuid.AsString()) if hasattr(fp, 'm_Uuid')
                             else "?")
+                        # #1409: the owner's own pads, keyed with its
+                        # segments so the two can never be matched up wrong.
+                        # Two owners sharing one reference pool their
+                        # segments under it, so no one footprint's pads
+                        # describe the pool: leave it to containment.
+                        if own_pads_out is not None:
+                            own_pads_out[_oref] = (
+                                None if _oref in own_pads_out
+                                else _pcbnew_footprint_own_pads(fp, to_mm))
                     owners_out.setdefault(_oref, []).extend(_segs)
     except Exception:
         pass
@@ -10778,8 +11154,12 @@ def save_extracted_data(pcb_data: PCBData, output_path: str):
             return {k: serialize(v) for k, v in obj.__dict__.items()}
         elif isinstance(obj, dict):
             return {str(k): serialize(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
+        elif isinstance(obj, (list, tuple)):
             return [serialize(item) for item in obj]
+        elif isinstance(obj, (set, frozenset)):
+            # #1436: keepout `layers` is a set; JSON has no set type. Sort
+            # (by repr, so mixed element types cannot raise) for stable output.
+            return [serialize(item) for item in sorted(obj, key=repr)]
         else:
             return obj
 
@@ -10877,9 +11257,19 @@ def _is_ball_grid(pads) -> bool:
     # ball/pin array populates several of each; a pin header does not.
     uniform = [p for p in pads
                if (round(p.size_x, 2), round(p.size_y, 2)) == dominant_size]
+    return pads_form_matrix(uniform)
+
+
+def pads_form_matrix(pads) -> bool:
+    """Do the pads fill a 2-D matrix: >=3 rows AND >=3 columns that each hold
+    >=3 of them? Such an array has INTERIOR pads, every neighbour ring of which
+    is more pads -- the geometry a via lattice (a pour that must thread between
+    drop vias) is about. A perimeter land pattern (LGA-12, a 2-row header) has
+    none: every pad is on the periphery. Pad-local coordinates, so the answer
+    does not depend on placement rotation."""
     row_counts = {}
     col_counts = {}
-    for p in uniform:
+    for p in pads:
         ry = round(p.local_y, 2)
         rx = round(p.local_x, 2)
         row_counts[ry] = row_counts.get(ry, 0) + 1

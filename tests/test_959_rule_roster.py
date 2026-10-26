@@ -82,6 +82,10 @@ ARM_WITH = {
     # #1211: a declared channel copy arms its grade.
     'replicate': {'replicate': [{'from': 'CH1', 'to': ['CH2']}]},
     'template': {'templates': [{'anchor': 'U1', 'members': [{'ref': 'C1', 'at': [1.0, 0.0], 'rot': 0}]}]},
+    # #1443: a declared cover arms its standoff check.
+    'cover': {'covers': [{'connector': 'J1', 'side': 'F', 'axis_deg': 0, 'width_mm': 22,
+                          'underside_mm': 1.5, 'standoffs': [{'ref': 'H1', 'length_mm': 42}],
+                          'removable': True, 'source': 'socket datasheet'}]},
 }
 
 

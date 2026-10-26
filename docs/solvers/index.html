@@ -58,20 +58,22 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 </head>
 <body>
 <nav class="toc"><a class="home" href="../">&larr; KiCadRoutingTools</a>
-<a href="#sec-films">Films</a><a href="#pipeline">Pipeline</a><a href="#ends">Ends</a><a href="#cpsat">CP-SAT</a><a href="#sec-lp">HiGHS LP</a><a href="#simplex">How an LP is solved</a><a href="dual/">The dual as forces &rarr;</a><a href="#sec-loop">Negotiation</a><a href="#sec-after">Polish &middot; snap &middot; audit &middot; route</a><a href="#summary">Side by side</a></nav>
+<a href="#sec-films">Films</a><a href="#pipeline">Pipeline</a><a href="#ends">Ends</a><a href="#frame">Frame</a><a href="#cpsat">CP-SAT</a><a href="#sec-lp">HiGHS LP</a><a href="#simplex">How an LP is solved</a><a href="dual/">The dual as forces &rarr;</a><a href="#sec-loop">Negotiation</a><a href="#sec-after">Polish &middot; snap &middot; audit &middot; route</a><a href="#rounds">Rounds</a><a href="#summary">Side by side</a></nav>
 <main>
 
 <h1>What CP-SAT and HiGHS actually do in the whole route</h1>
-<p class="lede">The whole route (<code>awx/whole_chain.sh</code>, on <code>bus622-take5</code>) plans every lane's complete path before it routes anything. That plan is built by <b>two solvers with different jobs</b>. CP-SAT settles <i>discrete</i> questions: who crosses whom, and on which layer. HiGHS then solves a <i>continuous</i> question: how far sideways each lane sits at every point along the way. Everything below is interactive. The toys use the same ideas and constraint shapes as the code, at toy scale.</p>
+<p class="lede">The whole route (<code>awx/whole_route.py</code>, run on a real board by the bus step <code>awx/route_bus.py</code>, on <code>bus622-take5</code>) plans every lane's complete path between two ball grid arrays before it routes anything. That plan is built by <b>two solvers with different jobs</b>. CP-SAT settles <i>discrete</i> questions: who crosses whom, and on which layer. HiGHS then solves a <i>continuous</i> question: how far sideways each lane sits at every point along the way. Between them sits the <b>frame</b>, which turns the board into one road per lane, so both solvers can work along a single coordinate. Most sections below have an interactive toy. The toys use the same ideas and constraint shapes as the code, at toy scale.</p>
 
 <h3>The words you will meet</h3>
 <dl class="gl">
-<dt>lane</dt><dd>one net's planned path through the bus, from the source BGA to the destination BGA.</dd>
-<dt>trunk</dt><dd>the long, parallel stretch of the bus between the two BGAs, where lanes run side by side and may cross.</dd>
-<dt>tooth / berth</dt><dd>where a lane escapes at the source (tooth) and arrives at the destination (berth). Each fixes the layer the lane starts and ends on.</dd>
+<dt>lane</dt><dd>one net's planned path through the bus, from the source BGA to the destination BGA. A differential pair is one lane.</dd>
+<dt>tooth / berth</dt><dd>where a lane escapes at the source (tooth) and arrives at the destination (berth): the end of its escape stub, just outside the array. A surface stub fixes the layer the lane starts or ends on. A stub that ends in a via (a <b>via end</b>) leaves the layer to the solve.</dd>
+<dt>trunk</dt><dd>a straight line from the source array's pad box through the destination's. Lanes that arrive on the destination's facing side end on it.</dd>
+<dt>ring</dt><dd>a road round the destination, outside its pads and the parts hugging it. A lane whose berth is on another side of the destination leaves the trunk and rides a ring to it.</dd>
+<dt>cut</dt><dd>(two meanings) the point where an array's outline is unrolled into one order: the destination's, away from its facing side, where its two rings meet and which decides which way round each lane goes, and the source's, on its far face (<a href="#frame">the frame</a>); and a "not this combination" rule sent back to CP-SAT after a later stage found a plan that cannot be drawn (<a href="#sec-loop">the loop</a>).</dd>
+<dt>u</dt><dd>a lane's route coordinate: distance along the trunk from its tooth (or from the end of its lead-in, for a tooth on the source's far side), then along its ring to its berth. Every crossing and layer change is a position in <code>u</code>.</dd>
 <dt>crossing</dt><dd>a pair of lanes whose order is swapped between source and destination. They must pass through each other, so at that point they sit on different layers.</dd>
-<dt>via</dt><dd>a layer change. Vias are what the discrete plan tries to minimise.</dd>
-<dt>cut</dt><dd>a "not this combination" rule sent back to CP-SAT after the LP found a plan that cannot be drawn.</dd>
+<dt>via</dt><dd>a layer change. Vias are what the discrete plan tries to minimise. Every via is a through via.</dd>
 <dt>convex</dt><dd>a region with no dents, holes or separate pieces: every point between two allowed points is allowed too. An LP's region always is, which is why the LP finds the best answer overall and not just the best nearby (<a href="#sec-lp">section 2</a>).</dd>
 </dl>
 <div class="legend"><span><i style="background:var(--F)"></i>F.Cu (top layer)</span><span><i style="background:var(--B)"></i>B.Cu (bottom layer)</span><span><i style="background:#fff;border:2px solid #1d2330"></i>via</span></div>
@@ -80,7 +82,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 
 <!-- ======================= FILMS ======================= -->
 <h2 id="sec-films">Watch a whole run</h2>
-<p>Two films of real <code>whole_chain.sh</code> runs on the H3-to-DDR3 bench (BGA <code>U1</code> to DDR3 <code>DU1</code>), made by <code>awx/whole_movie.py</code>. Each walks the stages in order: the ends, the frame, the solve, the geometry, the polish, the snap, the audit and the route. Beside the board it draws what each solver decides:</p>
+<p>Two films of real runs of the whole route on a two-layer bench (a processor's BGA to a DDR3 memory), made by <code>awx/whole_movie.py</code> in September. Each walks the stages in order: the ends, the frame, the solve, the geometry, the polish, the snap, the audit and the route. The stages are the same today; what has been added since (more than two layers, the escape fanout, the winding cut) is described below. Beside the board the film draws what each solver decides:</p>
 <ul>
  <li><b>The solve (CP-SAT)</b> is a braid under the board, sharing its x axis. Each strand is a lane, its height is the lane's order, and its colour is its layer. Two strands that cross differ in colour, and a white ring is a via. The search is replayed from the plans CP-SAT really found, in the order it found them, with the bound that proved the last one. On the board above, the lanes swap exactly where the solve put each crossing.</li>
  <li><b>The geometry (HiGHS LP)</b> is drawn as forces on the board. Every rule that holds a lane where it is has a <b>shadow price</b> in the LP's dual, and the price is how hard it pushes: a neighbour on the same layer, a via's room, a pad, the board edge, a turn limit.</li>
@@ -101,7 +103,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 
 <!-- ======================= 0. PIPELINE ======================= -->
 <h2 id="pipeline">0 &nbsp; The pipeline, and where the two solvers sit</h2>
-<p>Click a stage. Dashed arrows are the feedback that makes this a negotiation instead of a one-way pipe. <code>whole_chain.sh</code> repeats the fanout up to 3 rounds, and <code>whole_loop.sh</code> repeats geometry, polish and audit up to 6 rounds.</p>
+<p>Click a stage. Dashed arrows are the feedback that makes this a negotiation instead of a one-way pipe. <code>whole_route.py</code> repeats the fanout for up to 3 rounds (<code>--rounds</code>; the bus step in the routing chain runs 2), and within a round its loop repeats solve, geometry, polish and audit for up to 6 rounds (<code>LOOP_ROUNDS</code>).</p>
 <div class="card">
   <svg id="pipe" viewBox="0 0 1000 300"></svg>
   <div class="row"><button id="pipePlay" class="primary">Play the flow</button><span class="stat" id="pipeStat"></span></div>
@@ -110,9 +112,10 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 
 <!-- ======================= 1. CP-SAT ======================= -->
 <h3 id="ends">0a &nbsp; Ends and fanout: the ends decide the braid (<code>fanout_from_plan.py</code>, <code>whole_ends.py</code>)</h3>
-<p>Before any solver runs, the fanout decides where every lane <i>leaves</i> the source BGA (its <b>tooth</b>) and where it <i>arrives</i> at the destination (its <b>berth</b>), including which layer it is on at each end. Those choices fix the whole puzzle: the <b>order</b> of teeth around the source and of berths around the destination decides which pairs must cross, and the end layers decide what each crossing costs. That is why the fanout is not a separate chore. <code>whole_ends</code> scores candidate ends by the vias the resulting braid would need (an estimate from the ends alone), and the fanout picks the cheapest. Crowded ends found later by the audit come back here as feedback.</p>
+<p>Before any solver runs, the fanout decides where every lane <i>leaves</i> the source BGA (its <b>tooth</b>) and where it <i>arrives</i> at the destination (its <b>berth</b>), including which layer it is on at each end. Those choices fix the whole puzzle: the <b>order</b> of teeth around the source and of berths around the destination decides which pairs must cross, and the end layers decide what each crossing costs. That is why the fanout is not a separate chore. <code>whole_ends</code> scores candidate ends by the vias the resulting braid would need (an estimate from the ends alone), and the fanout lays the cheapest, then judges what it actually laid. Crowded ends found later by the audit come back here as feedback.</p>
+<p>The ends are chosen from a <b>menu</b> of ways out of each ball. With the <b>escape fanout</b> (<code>route_bus</code>'s <code>escape</code> mode) the menu is the human's: every netted ball of both arrays is first <b>dog-boned</b> (a short stub to a via on a diagonal gap point, <code>dogbone_arrays.py</code>), an outer ball with a clear way out is left on the surface, and a lane may then leave its ball's via on any routing layer: half a pitch onto a ball line, a sidestep to a line beside it, or onto an empty street through the array (<code>escape_plan.py</code>). An array an earlier bus already routed through is planned <i>whole</i> each round with the new bus, its other nets and plane balls included (<code>joint_escape.py</code>). The bus step has two other modes. <code>joint</code> also fans out the arrays' other nets and plane balls: the bus is laid round a via site kept free in every other ball, and the rest are planned together round it in one CP-SAT model, plane balls sharing drop vias or strapped to a neighbour. <code>plain</code> fans out the bus alone.</p>
 <div class="card">
-  <p style="margin-top:0">Five lanes leave the source (left, fixed order) and must be given berths at the destination (right). Press a <b>&#8645;</b> button to swap two neighbouring berths, and click a <b>layer badge</b> to flip an end's layer. The counters give the crossings your choice forces and the <i>minimum</i> vias for them (found exactly, as in 1a). Then press <b>Best ends</b>: it tries all 120 berth orders for the layers you set, which is what the fanout's ends model does with its escape menus.</p>
+  <p style="margin-top:0">Five lanes leave the source (left, fixed order) and must be given berths at the destination (right). Press a <b>&#8645;</b> button to swap two neighbouring berths, and click a <b>layer badge</b> to flip an end's layer. The counters give the crossings your choice forces and the <i>minimum</i> vias for them (found exactly, as in 1a). Then press <b>Best ends</b>: it tries all 120 berth orders for the layers you set. That is a brute-force version of the choice the ends model makes from its escape menus, which are far too big to try in full (<a href="#ends-search">0b</a>).</p>
   <svg id="eSvg" viewBox="0 0 800 260"></svg>
   <div class="row"><button id="eBest" class="primary">Best ends</button><button id="eRev">Reverse berths</button><button id="eLay">New layers</button><button id="eId">Same order</button>
    <span class="stat">crossings: <b id="eCross">0</b></span><span class="stat">minimum vias: <b id="eVias">0</b></span></div>
@@ -130,23 +133,49 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
   <div class="log" id="kLog" style="min-height:56px"></div>
   <details><summary>How this maps onto the real search</summary>
   <ul>
-   <li>The real objective is more than vias: nets over two vias (100 each), vias of the ends and the estimated route, ride length at a fixed exchange rate per via, trunk congestion, and the audits' feedback. The crossings' count is the last tie-break, exactly as here.</li>
+   <li>The real objective is one sum in vias: every via of the ends and the estimated route (a pair's change is two, its two barrels); five more for every via a net carries past two; each lane's ride at a fixed exchange rate per via; congestion on the trunk; <b>stacking</b> (two lanes' ends at one point on different layers where either changes layer); what blocks a lane's straight way out of its exit; a plane ball the ends wall in; and the audits' feedback, priced by place. The crossings' count is the last tie-break, exactly as here.</li>
    <li>Options that conflict are never taken (<code>select_moves._conflict</code>). An option with two or more conflicts is skipped, not ejected.</li>
-   <li>Here the teeth are fixed. In the real run the search is done twice: berths against the teeth as laid, then with the teeth free too (a tooth move must save more than half a via, because it costs a re-fanout).</li>
-   <li>The kick moves 3 lanes to random options and stops after 4 kicks in a row that find nothing (at most 12). The finalists are re-ranked by the exact CP-SAT route.</li>
+   <li>Here the teeth are fixed. In the real run the search is done twice: berths against the teeth as laid, then with the teeth free too (a tooth move must save more than half a via, because it costs a re-fanout). On the escape fanout nothing is laid yet, so both ends are free from the first search.</li>
+   <li>The kick moves 3 lanes to random options and stops after 4 kicks in a row that find nothing (at most 12). Then <b>ban kicks</b>: the three most crossed lanes have their current ends banned, the search runs with and without the bans, and the better state stands. The finalists are re-ranked by the exact CP-SAT route.</li>
+   <li>On more than two layers the estimate and the search loop run in the router's Rust core (<code>ends_kernel.py</code>), forming the same numbers in the same order as the Python, so both walk the same states.</li>
   </ul></details>
 </div>
-<p><b>Why a local search here, when the rest of the pipeline uses CP-SAT and an LP.</b> The search starts from the fanout's own greedy choice of berths (every berth clear of the others), or on a re-plan from the previous round's, and improves it by the moves above. CP-SAT is still used, but as the final judge rather than the search: the best few ends the search reaches are re-ranked on the exact route (<code>best_exact</code>). The ends are hard to put in one exact model, for three reasons:</p>
+<p><b>Why a local search here, when the rest of the pipeline uses CP-SAT and an LP.</b> The search starts from the fanout's own greedy choice of berths (every berth clear of the others), from CP-SAT's joint ends on an escape fanout (below), or on a re-plan from the previous round's, and improves it by the moves above. CP-SAT is still used, but as the final judge rather than the search: the best few ends the search reaches are re-ranked on the exact route (<code>best_exact</code>). The ends are hard to put in one exact model, for three reasons:</p>
 <ul>
  <li><b>Scoring one choice of ends is itself a solve.</b> What a set of ends really costs is the via count of the route they force, and that is the whole CP-SAT solve of section 1: seconds to tens of seconds for each candidate. A model that chose the ends and the route together would be that solve with every lane's menu of exits added to it. So the search steers by an <b>estimate</b> that takes milliseconds and is exact in its parts: on each layer, the crossings a lane must leave the layer for are a permutation graph, whose least cover is found exactly by a chain.</li>
  <li><b>Much of what the fanout can lay is a check, not an equation</b>: two exits that conflict, another net's copper between a pair's tips, a move the fanout refused. A search simply skips such a move, where a model would need each one written as a constraint.</li>
  <li><b>Some terms are not linear</b>: congestion is priced by the square of the overload, and whether a lane's one layer change can serve all of its crossings depends on the order it meets them in.</li>
 </ul>
 <p>What it gives up is a proof. CP-SAT proves the fewest vias <i>for the ends it is given</i>, and the LP the best geometry for that plan, but nothing proves the ends themselves are the best. The search stops at a local optimum. The kicks and the exact re-ranking make a poor one less likely, but do not rule it out.</p>
+<p><b>Where CP-SAT does choose the ends.</b> On the escape fanout, before any local search, one CP-SAT model picks every lane's tooth and berth together from the same menus (the <b>joint ends</b>): one choice per lane and end, the same conflicts, and two lanes whose orders differ round the boxes crossing on different layers. It counts the fanout's vias and <b>ten vias a crossing</b>, so it puts crossings first: the local search's objective prices a crossing at a hundredth of a via, and on a dense bus it bought stacks back with crossings the solve could then not place. Whichever ends are chosen are then put to the <b>solve's check</b>: the bench they would make is built in memory and the whole solve (section 1) is run on it under its strict rules. If it finds no plan, the crowded lanes are priced and the ends are searched again (up to four times). The ends model also chooses the <b>cut</b> on the destination's far side, which is where <a href="#frame">the frame</a> takes over.</p>
+
+<h3 id="frame">0c &nbsp; The frame: one road per lane, both arrays unrolled (<code>whole_frame.py</code>)</h3>
+<p>The ends are points round two arrays, but both solvers want each lane to be <b>one road with one coordinate</b>. The frame builds those roads from the board alone.</p>
+<p><b>One lane, worked through.</b> Take a lane whose berth is on the destination's <i>far</i> side, facing away from the source. It leaves its tooth and runs along the <b>trunk</b>, the straight line from the source's pad box to the destination's. In front of the destination it reaches the <b>arrival line</b> (<code>H0</code>). There it leaves the trunk onto the <b>north ring</b>, a road round the destination outside its pads, follows it round the corner and down the far side, and drops into its berth (lane D in the figure below). Its route coordinate <code>u</code> is how far it has come: 32 mm along the trunk, then 23.7 mm along the ring, so <code>u</code> runs from 0 to 55.7. A lane whose berth faces the source never leaves the trunk at all. Every crossing and every via the solve places is a position in <code>u</code>.</p>
+<p><b>Which way round</b> is decided by the <b>cut</b>, one point on the destination's outline away from the facing side. Berths on one side of the cut go round the north, the others round the south. Now <b>unroll</b> the destination: cut its outline there and straighten it into a line. The berths stand in one order, north to south. <b>Two lanes cross exactly when that order and the teeth's disagree.</b></p>
+<p><b>The source is unrolled too</b>, from a cut on its own <i>far</i> face, but it has no rings. A tooth on its facing face starts on the trunk. A tooth on its north or south face runs along that face and joins the trunk past the corner, and its <code>u</code> counts that run. A tooth on its far face cannot be carried by the trunk at all (the trunk's columns stand across that stretch), so it goes straight out of the face and round the corner on a <b>lead-in</b>: north of the source's cut round the north, south of it round the south, then on as a side face's lane. On each side the lane launched first rides outermost. So the teeth stand in one order too, north to south, and the source's cut decides which way a far-face tooth goes round. Everything the solve needs to know about who crosses whom is in those two lists: moving either cut changes the crossings, and with them the vias. It also changes how far each lane rides round.</p>
+<div class="card">
+  <p style="margin-top:0">Nine lanes leave all four faces of the source (left) and berth on all four sides of the destination (right). <b>Click a grey dot</b> on the destination's outline, or on the source's far face, to put that array's cut there. A dashed stretch is a lead-in. Below the board, the two unrolled orders: a pair of lines that crosses there is a pair of lanes that crosses on the board. <b>Click a lane</b> (or its chip below) to see its <code>u</code>.</p>
+  <svg id="fSvg" viewBox="0 0 900 515"></svg>
+  <div class="row"><button id="fFar" class="primary">Default cuts</button><button id="fFew">Fewest crossings</button><button id="fShort">Shortest ride</button>
+   <span class="stat">crossings <b id="fX">-</b></span><span class="stat">ride <b id="fR">-</b> mm</span><span class="stat">north ring <b id="fN">-</b> &middot; trunk <b id="fW">-</b> &middot; south ring <b id="fS">-</b></span></div>
+  <div class="log" id="fLog" style="min-height:56px"></div>
+</div>
+<p><b>Default cuts</b> puts them where the code does without the ends model's say: the destination's at the middle of the widest gap between its far side's berths, the source's at the gap between its far-face teeth with the fewest crossings. In the real run the ends model chooses the destination's cut: it scores the ends at each candidate cut and keeps the best (<a href="#ends">0a</a>). Crossings are cheap only when the two lanes can be on different layers there, so fewer crossings usually means fewer vias, and a cut that winds lanes round the far side can win even though they ride further. A lane winding round the destination to arrive from the far side is what a human layout often does too.</p>
+<details><summary>What the real frame does beyond this toy</summary>
+<ul>
+ <li><b>The flow frame first.</b> The bus step turns the board a whole number of quarter turns so the source-to-destination direction points along +x (<code>flow_frame.py</code>: exact on the 0.1 mm lattice, and turned back after). A board whose differential pairs have the other chirality is also turned over in memory. So the trunk always runs west to east, and the destination's <i>west</i> face is the one facing the source.</li>
+ <li><b>The trunk</b> is one straight line from the source's pad box centre through the destination's. The faces are the pad boxes' own, grown to where the stubs end.</li>
+ <li><b>The rings</b> go round the destination's <b>hull</b>: its pads, the berths, and other parts' pads within a lane's reach of them. Their lanes stack outward in berth order, the lane that berths first innermost. A part standing in that stack is passed on the inside when the ring's lanes fit between it and the destination, and gone round when they do not. Each ring starts outside the destination's corner, stepped back along the trunk until it clears the hull (<code>Hk</code>).</li>
+ <li><b><code>u</code></b> is the distance along the trunk's spine, then along the ring's spine. A lane's sideways moves are not counted, which is why its copper is longer than its <code>u</code>. Placing it sideways is the geometry's job (<a href="#sec-lp">section 2</a>).</li>
+ <li><b>The source's side</b> (<code>perim_s</code>, <code>src_cut</code>, <code>lead_ins</code>): a lead-in leaves its tooth straight out of the far face, runs along it and turns the corner on a 45-degree chamfer, the lanes of a side nesting a lane's room apart and outside any copper in their way (a part's pad, another net's via or track on the lead-in's layer). A far-face tooth still inside the array has no way round, and the fanout is told to free it. The ends model prices a far-face tooth past any via count, so a lane takes one only when it has no other way out.</li>
+ <li><b>The cut</b> rides from the ends model to the frame in the fanout's plan file (<code>dest_cut</code>), so the model and the solve unroll the destination at the same point. Without it the frame takes the middle of the widest gap between the far face's berths. A cut off the far face (the <b>winding cut</b>) is taken only when its ends predict fewer vias and beat the far cut's objective by a via.</li>
+ <li><b>Several destinations</b> (one source fanning out to two parts): the trunk runs to the first, and each other part's lanes leave it on a <b>branch</b> of their own, outside the first one's ring.</li>
+</ul></details>
 
 <h2 id="cpsat">1 &nbsp; CP-SAT: the discrete plan (<code>whole_solve.py</code>)</h2>
-<p>Bus lanes leave the source BGA in one order (the <b>launch order</b>, set by each lane's <i>tooth</i>) and must arrive at the destination in another (the <b>berth order</b>). Every pair that is inverted between the two <b>has to cross</b>. Two copper lanes cannot cross on the same layer, so at each crossing one lane is on <span class="F">F.Cu</span> and the other on <span class="B">B.Cu</span>. Each layer change costs a <b>via</b>. Each lane also starts on a fixed layer (its tooth) and ends on a fixed layer (its berth).</p>
-<p>The CP-SAT model is exactly that puzzle: booleans for "which lane is on top at this crossing", integers for "where along the trunk the crossing happens", and constraints tying them together. It <b>minimises vias and proves the minimum</b>. Below, an instance of that puzzle with the numbers shrunk to 5 lanes.</p>
+<p>Bus lanes leave the source BGA in one order (the <b>launch order</b>: the teeth, unrolled) and must arrive at the destination in another (the <b>berth order</b>: the destination unrolled from the cut, <a href="#frame">0c</a>). Every pair that is inverted between the two <b>has to cross</b>, once, at a position in <code>u</code> both lanes share. Two copper lanes cannot cross on the same layer, so at each crossing they are on different layers: on two layers one is on <span class="F">F.Cu</span> and the other on <span class="B">B.Cu</span>. Each layer change costs a <b>via</b>. A lane whose stub ends on the surface starts (or ends) on that layer; a lane whose stub ends in a via may leave it on any layer its run fits on.</p>
+<p>The CP-SAT model is exactly that puzzle, for every lane at once: booleans for "which lane is on which layer at this crossing", integers for "where along <code>u</code> the crossing happens" and "where each lane changes layer" (up to three changes a lane), and constraints tying them together. It <b>minimises vias and proves the minimum</b>. Below, an instance of that puzzle with the numbers shrunk to 5 lanes on two layers.</p>
 
 <h3>1a &nbsp; The layer puzzle, and how a solver searches it</h3>
 <div class="card">
@@ -179,12 +208,22 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
    <li><b>Propagation.</b> Every constraint prunes domains as soon as a variable is fixed. Two crossing lanes on opposite layers is a boolean <code>XOR</code>; a lane's change count has to match its start/end layer mismatch (<code>AddBoolXOr(act + [1 if tooth==berth])</code>), so fixing one boolean can force many others with no search.</li>
    <li><b>Conflict learning.</b> When a branch fails, it works out <i>why</i> and adds a new clause ruling out every assignment with that same reason, not just this one. The same dead end is never entered twice.</li>
    <li><b>LP relaxation and core-based bounds.</b> Extra sub-solvers (<code>default_lp, max_lp, core, objective_lb_search</code>) compute lower bounds on vias, which is what lets it stop with a <i>proof</i>. <code>whole_solve</code> stops as soon as <code>floor(best/W_V) &lt;= floor(bound/W_V)</code>: the via count is proved, and only the smaller tie-break term is left.</li>
-   <li><b>Determinism.</b> Budgets are counted in work (<code>max_num_deterministic_batches=100</code>), never in seconds; clause sharing is off. The same board gives the same plan on every machine. Only a proved plan is passed on.</li>
+   <li><b>Its work by need.</b> The bound-raising workers run first, a probe of 10 batches: if their plan meets their bound, that is the solve. Otherwise the plan-finding workers (quick restarts, search without the LP, core-based search) run on from the probe's plan and bound, at most 100 batches. A re-solve starts from the round before's plan, laid out whole as a hint.</li>
+   <li><b>Determinism.</b> Budgets are counted in work (interleaved batches), never in seconds; the workers share no clauses. The same model gives the same plan on every run.</li>
+   <li><b>Never nothing.</b> A round's first solve keeps the best plan it found even when it cannot prove it (<code>SOLVE_UNPROVED</code>), marked unproved, and the nets that plan leaves over two vias go back to the ends. A model with no plan at all is solved again as a <b>crowd diagnosis</b>: every lane free to break what its crossings need, the fewest such lanes the only price. The lanes it names go back to the fanout to be given other ends.</li>
   </ul></details>
 </div>
 
-<h3>1b &nbsp; Where along the trunk: time-window constraints</h3>
-<p>Booleans decide <i>who</i> crosses. Integers decide <i>where</i>. Each crossing gets an integer position <code>t</code> along the trunk, limited to a window (the stretch where both lanes exist and have finished their earlier crossings). Crossings that compete for the same lanes must be at least a lane pitch apart. That is the <code>AddNoOverlap</code> constraint on optional intervals in <code>whole_solve.py</code>.</p>
+<h3>1b &nbsp; Where along <code>u</code>: time-window constraints</h3>
+<p>Booleans decide <i>who</i> crosses. Integers decide <i>where</i>. Each crossing gets an integer position <code>t</code> in <code>u</code> (on a grid of a fifth of a lane pitch), limited to a window: the stretch where both lanes exist, clear of a pair's end connector, and for two lanes on the same ring short of the earlier one's berth. A lane's crossings along it must be at least a lane pitch apart (less for a lane sweeping steeply across the others). That is the <code>AddNoOverlap</code> constraint on optional intervals in <code>whole_solve.py</code>. Layer changes are positions in <code>u</code> too, with rooms of their own:</p>
+<ul>
+ <li>a change keeps a via's room from its own lane's crossings, and a single lane's change keeps a change's room from both its ends (a pair's, its <b>dive room</b>);</li>
+ <li>no change in a band along the source's facing side, where the teeth stand and the lanes have not spread yet (on two layers, no crossing there either; a lane allowed to change at its own tooth is not held by it);</li>
+ <li>a lane leaving the surface may change layer right at its stub's end only where a via there is measured clear of every other net's copper on every layer;</li>
+ <li>two neighbouring lanes' changes are staggered along <code>u</code>, so their vias clear the via-to-via rule;</li>
+ <li>no change where the lane's reference passes within a via's reach of another part's pad (the <b>built-in via cuts</b>, on the rings too).</li>
+</ul>
+<p>Inside its window, nothing in the objective prices where a crossing or a change stands: every place costs the same once the vias are minimal. So CP-SAT tends to leave them where its search first put them, often at the window's start, just past the teeth, and the geometry and the audits then judge whether there is room there.</p>
 <div class="card">
   <p style="margin-top:0">Drag the blue bars. Green rails are the allowed windows. The bottom lane is the trunk, where overlaps show up red. <b>Solve</b> tries the orderings of the four crossings and places each as early as its window allows. Raise the pitch until no ordering fits: that is what "infeasible" means, and it is the situation that becomes a <b>cut</b> in section 3.</p>
   <svg id="nov" viewBox="0 0 760 250"></svg>
@@ -193,7 +232,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 </div>
 
 <h3>1c &nbsp; What "best" means: a lexicographic objective</h3>
-<p>The objective is <code>W_OVER&middot;(#nets over two vias) + W_V&middot;(total vias) + (history congestion)</code>. The weights are chosen so that each term dominates the next. Fewer vias always beats less congestion, and congestion only breaks ties between plans with equal vias. The congestion term is PathFinder-style history: places where earlier audits found trouble get a price, so the solver steers around them.</p>
+<p>The objective is one sum, in vias: <code>W_V&middot;(vias + 5&middot;(each via a net carries past two) + (each run on a plane's layer)) + (history congestion)</code>. A net with three vias on the board costs eight, so the solve spreads changes across nets, but this is a price, not a cap. A run on an inner layer that carries a power or ground pour costs one via more, so a lane takes a plane's layer only where it saves a via. The weights are chosen so that each term dominates the next. Fewer vias always beats less congestion, and congestion only breaks ties between plans with equal vias. The congestion term is PathFinder-style history: places where earlier audits found trouble get a price, so the solver steers around them. Last of all, between plans of equal cost, each run's layer is chosen again by the plane it would split (a ground plane's dearer than a power plane's), so a plan and its mirror on the inner layers always come out the same way.</p>
 <div class="card">
   <div class="row">
     <div style="min-width:280px"><b>Plan X</b>: <b id="wXv">12</b> vias &nbsp;&middot;&nbsp; congestion <input type="range" id="wXc" min="0" max="900000" value="600000" step="1000" style="width:180px"> <span class="stat" id="wXcv"></span></div>
@@ -203,17 +242,27 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
   <div class="log">W_V = 1,000,000 per via. Slide the congestion all the way up: X still wins as long as congestion stays under one via's weight. The tie-break never buys an extra via.</div>
 </div>
 
+<h3 id="layers">1d &nbsp; More than two layers (<code>route_layers.py</code>, <code>relayer.py</code>)</h3>
+<p><code>ROUTE_LAYERS</code> names the layers the lanes may run on: F.Cu and B.Cu, then any inner layers (<code>F.Cu,B.Cu,In1.Cu,In2.Cu</code>), planes' layers included. On two layers a lane's layer is one bit, flipped by each change. On more, each <b>run</b> between two changes is an integer, its layer, and a change goes to any other layer. Two crossing lanes must be on different layers, which now leaves the solve a choice of which two.</p>
+<ul>
+ <li><b>Via ends.</b> An end whose stub carries a via (a dog-bone, or a via in its pad) can leave on any layer its run from the via to the array's edge fits on, and the solve chooses which. Another net's copper within the rule of the run bans a layer, and two runs within the rule of each other must end on different layers. Before the geometry, the <b>relayer</b> moves each such run onto the layer the solve chose.</li>
+ <li><b>Passive regions.</b> Decoupling caps and other small parts with pads on some layers only, close together, make a region. A lane passing near one pays two vias on each of the region's layers, so the solve puts it on a free layer, and the lanes it keeps there take at most half the room the layer has.</li>
+ <li><b>Part gates.</b> A part whose pads stand on one face is a gate on that layer: the lanes the solve puts on that layer beside it must fit the width left there.</li>
+ <li><b>Cuts on a layer</b>: a lane found against a part, a track of an earlier bus, or a keep-out area on one layer is held off that layer there from the next solve on (<a href="#sec-loop">section 3</a>).</li>
+</ul>
+
 <!-- ======================= 2. LP ======================= -->
 <h2 id="sec-lp">2 &nbsp; HiGHS: the continuous geometry (<code>whole_geo.py</code>)</h2>
-<p>CP-SAT has fixed the <b>topology</b>: the order of lanes at every column, where each pair crosses, and each lane's layer, so where along its route each via sits. What is still unknown is <b>real numbers</b>: how far off the centreline each lane sits at each column (one column every 4 router grid steps). That question is a linear program.</p>
+<p>CP-SAT has fixed the <b>topology</b>: the order of lanes at every column, where each pair crosses, and each lane's layer, so where along its route each via sits. What is still unknown is <b>real numbers</b>: how far off its frame's spine each lane sits at each column (one column every 4 router grid steps, along the trunk and along both rings). That question is a linear program, one for the whole bus.</p>
 <p>The unknown is one number per (lane, column): its sideways offset <code>o[lane][col]</code>. The rows are:</p>
 <ul>
 <li><b>Pitch</b> (hard): neighbours on the same layer are at least <code>P_MIN</code> apart, plus half a pair's pitch for diff pairs. The real code adds tangent cuts of <code>sqrt(1+k&sup2;)</code> so slope is priced correctly.</li>
-<li><b>Static copper</b> (hard): a lane passes each pad box or island on one side, with clearance. The <code>split</code> below is that choice.</li>
-<li><b>Via rooms, board edge, 45&deg; turn limit, slope cap</b> (hard).</li>
-<li><b>Length, bends, and pitch short of comfortable</b> (soft): the price of sideways moves, kinks, and squeezing lanes closer than two lane pitches.</li>
+<li><b>Static copper</b> (hard): a lane passes each part (an <b>island</b>) on one side, with clearance, each column measured where its own offset line meets the part's pads. The <code>split</code> below is that choice. Other nets' vias in the field round the arrays (an earlier bus's) are islands too, round discs at the router's ring, and the gap between two of them holds only the lanes that fit it as the board measures it.</li>
+<li><b>Via rooms, board edge, 45&deg; turn limit a column, slope cap</b> (hard). A pair runs straight for the pair router's straight run either side of each dive.</li>
+<li><b>Length, bends, and pitch short of comfortable</b> (soft): the price of sideways moves, kinks, and squeezing lanes closer than the comfortable pitch (a track more than the bar), four times as steeply below halfway to the bar.</li>
+<li><b>Trunk to ring</b>: a ring lane's trunk piece ends on its ring's side of the ring's start, and its ring piece starts at the same offset. Which side of a part a lane passes is decided once on the board, not once per frame, so the trunk and a ring never send one lane round a part on opposite sides.</li>
 </ul>
-<p>Every "hard" row is really <b>elastic</b>: it carries a slack variable priced at <code>W_HARD=10&#8308;</code>. So the LP is always feasible, and if the plan cannot be drawn, the LP does not fail. It <i>pays</i>, and the rows it paid on are reported. Those become cuts for CP-SAT.</p>
+<p>Every "hard" row is really <b>elastic</b>: it carries a slack variable priced at <code>W_HARD=10&#8308;</code>. So the LP is always feasible, and if the plan cannot be drawn, the LP does not fail. It <i>pays</i>, and the rows it paid on are reported. Those become cuts for CP-SAT. The LP runs twice: the second pass holds each lane to one side of every island near it, and solves the many tangent rows lazily (only those near binding, then any its answer breaks, until it breaks none).</p>
 <div class="callout"><b>Why every either-or choice is made before the LP.</b> A lane can pass a pad box below it or above it, and those are two separate pieces of space: between a position below the box and one above it lies the box itself. An LP cannot say "below <i>or</i> above". Every row is a straight wall that says "stay on this side of this line", so an LP's region is always <b>convex</b>: one piece, with no dents. That is what makes its answer trustworthy. In one piece, a lane whose forces balance is at the best answer overall. With both sides of a box allowed, a lane could settle against the wrong side with every force balanced, and never see the better answer on the far side. So CP-SAT fixes the order and the crossings, and <code>static_sides</code> fixes each lane's side of each island (the <code>split</code> below), before the LP runs. The dual page draws it: <a href="dual/#sec-convex">why the region must be convex</a>.</div>
 
 <div class="card">
@@ -262,11 +311,16 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
   <div class="legend"><span><i style="background:#d9483b"></i>simplex path (corners)</span><span><i style="background:#0f8a7a"></i>interior point path (centre outward)</span><span>&#9733; = the true optimum</span><span>the numbered walls are the LP's rows</span></div>
   <div class="callout" style="margin-bottom:0"><b>Why this matters here.</b> Press <b>Tie</b>, then run both methods to the end. When the cost slope lines up with a side of the polygon, <i>every point on that side is equally good</i>. Simplex stops at whichever end it reaches first. Interior point stops in the <i>middle</i> of the side. Which answer you get can change with the platform's floating-point rounding, but the plan must be identical on every machine. So <code>detmath.lp_tie_break</code> adds a tiny distinct cost to every column, making the optimum a single corner. <code>detmath.lp_round</code> then snaps the answer. Now tick the tie-break box and run again: both methods land on the same corner.</div>
 </div>
-<p style="font-size:14px;color:var(--mut)"><code>whole_geo.lp_by_dual</code> has one further trick: it solves the <b>dual</b> LP. This LP has many more rows than columns, so its dual has a row per column and every slack is a plain inequality. HiGHS's interior point runs it about 6&times; faster (K51 pass 2: 31 s instead of 188 s). The lane offsets come back in the same answer: HiGHS returns a multiplier for every balance equation of the dual, and those multipliers are the offsets. If the interior point doesn't converge (it once ran 2329 iterations on zynq K18), it falls back to dual simplex, which lands on the same point. What that dual <i>is</i>: its prices are the forces that hold each lane where it is, and a rule that pushes must be touching, which is how the forces place the lanes. See <a href="dual/">Shadow prices as forces</a>.</p>
+<p style="font-size:14px;color:var(--mut)"><code>whole_geo.lp_by_dual</code> has one further trick: it solves the <b>dual</b> LP. This LP has many more rows than columns, so its dual has a row per column and every slack is a plain inequality. HiGHS's interior point runs it about 6&times; faster (on a 51-net bench's second pass: 31 s instead of 188 s). The lane offsets come back in the same answer: HiGHS returns a multiplier for every balance equation of the dual, and those multipliers are the offsets. The interior point is capped at 500 iterations (it once ran 2329 on an 18-net bench); past that the dual simplex solves it, and lands on the same point. What that dual <i>is</i>: its prices are the forces that hold each lane where it is, and a rule that pushes must be touching, which is how the forces place the lanes. See <a href="dual/">Shadow prices as forces</a>.</p>
 
 <!-- ======================= 3. LOOP ======================= -->
 <h2 id="sec-loop">3 &nbsp; The two solvers negotiate</h2>
-<p>CP-SAT proves a plan is optimal in vias, but it knows nothing about millimetres. The LP knows the millimetres but can't change topology. When the LP has to pay on a hard row, it says which lane and which place. That becomes a <b>cut</b> (a boolean disjunction) added to the CP-SAT model, and CP-SAT solves again. Audits after the polish and snap do the same and also feed the congestion history.</p>
+<p>CP-SAT proves a plan is optimal in vias, but it knows nothing about millimetres. The LP knows the millimetres but can't change topology. When the LP has to pay on a hard row, it says which lane and which place. That becomes a <b>cut</b> (a boolean disjunction) added to the CP-SAT model, and CP-SAT solves again. Audits after the polish and snap do the same and also feed the congestion history. The loop (<code>whole_route.py</code>) runs up to 6 rounds.</p>
+<ul>
+ <li><b>What comes back.</b> From the geometry: an island a lane could not be kept off, a change it could not give its room, a pair's dive it could not lay straight. From the polish: <b>side flips</b>, a lane sent round the other side of a part (back to the geometry, not the solve). From the audits: every finding's place, as <b>history</b>, so a round with no cut still solves again. A lane found against a part on one layer gets a <b>layer cut</b>: held on another layer across that part. Each cut is held to the stretch of the lane's own laid route that met what cut it.</li>
+ <li><b>Soft and firm.</b> A cut is soft, priced at three vias, so a plan breaks it only when holding it would cost more. A cut from another net's track (an earlier bus) or a keep-out area is <b>firm</b>, a hundred vias, because a lane planned across another net's track is a lane that cannot be laid. A firm track cut holds for every lane whose path passes that place, not just the one found there.</li>
+ <li><b>When it stops.</b> <b>Not converging</b>: two rounds in a row that do not beat the best so far (a round with new side flips to try is not counted). <b>Ends crowded</b>: a finding at the ends that stands two rounds running, which only the fanout can move (<a href="#audit">4c</a>).</li>
+</ul>
 <div class="card">
   <div class="row"><button id="lpStepPrev">&larr; back</button><button id="lpStepNext" class="primary">next &rarr;</button><span class="stat" id="stepLbl"></span></div>
   <svg id="loop" viewBox="0 0 800 250"></svg>
@@ -278,7 +332,14 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 <p>The solvers give a plan that is correct on paper. The remaining stages make it something the router can lay, and check it against the router's own rules before a single track is routed.</p>
 
 <h3 id="polish">4a &nbsp; Polish: meet the audit's numbers exactly (<code>whole_polish.py</code>)</h3>
-<p>The geometry LP measures in its own curved frames and linearises slopes, so its lanes come out a few micrometres short of the audit's bars in dozens of places. The polish works on the lanes' real board polylines. Every near-violation becomes a linear constraint on small vertex moves, a small LP finds the least movement that meets them all, and it repeats (re-linearised) until the audit's measures hold. The toy below uses a simple push in place of that LP, but shows the same behaviour: <b>tiny targeted moves, a few rounds, ends pinned</b>.</p>
+<p>The geometry LP measures in its own frames and linearises slopes, so its lanes come out a few micrometres short of the audit's bars in dozens of places. The polish works on the lanes' real board polylines. Every near-violation becomes a linear constraint on small vertex moves, a small LP finds the least movement that meets them all, and it repeats (re-linearised) until the audit's measures hold. Each bar is the snap's plus a grid step, so every gap the snap later splits holds a grid row. The toy below uses a simple push in place of that LP, but shows the same behaviour: <b>tiny targeted moves, a few rounds, ends pinned</b>.</p>
+<ul>
+ <li><b>No rule broken unseen.</b> A rule is in the LP while it stands within twice the round's move limit of its bar, since two vertices each moving the limit close a gap by twice as much.</li>
+ <li><b>Every round has an answer.</b> A turn already past 90 degrees that cannot be straightened is opened as far as the round allows and the rest paid, so a round never stops dead.</li>
+ <li><b>The best state is kept</b>: the one with the fewest short rules and shape faults any round reached, not the last round's.</li>
+ <li><b>Out of a pad.</b> A lane inside a pad has no nearest edge to be pushed off, so it is pushed out across its own line on the side with less of the way out, its neighbours moving ahead of it. A via inside a pad goes out along its lane or across it.</li>
+ <li><b>Flips.</b> A lane that cannot be held on its side of a part is flipped to the other side, and the geometry runs again before anything is snapped.</li>
+</ul>
 <div class="card">
   <p style="margin-top:0">Two lanes and a round pad. Red rings mark vertices that are closer than the bar (the lane-to-lane pitch, or the clearance to the pad). The LP's shortfall is exaggerated here so you can see it. Press <b>One polish round</b> repeatedly, or <b>Run to done</b>.</p>
   <svg id="pSvg" viewBox="0 0 760 270"></svg>
@@ -290,6 +351,11 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 
 <h3 id="snap">4b &nbsp; Snap: land the line on the router's grid (<code>whole_snap.py</code>)</h3>
 <p>The router draws only on its grid, in 0&deg;, 45&deg; and 90&deg; segments. The snap takes each lane's smooth line and finds an <b>octilinear path on grid points</b> in a band around it, one lane at a time, with hard clearance to everything already placed. The cost is length + bends + distance from the smooth line. Because the polish left every lane a grid step of room, the snap of one lane never steals the room the next needs.</p>
+<ul>
+ <li><b>The pairs go first, alone</b>, moving as the pair router does: 45-degree turns, a straight run after each, a via only on a straight run. Each pair's end is two short legs from its pads to a <b>pose</b> on the grid where the pair router takes over. A pair whose legs must swap sides (P on one side at its tooth, the other at its berth) swaps them at its first dive with a <b>crossover</b>. The pairs are then <b>held</b> while the polish fits the singles round them.</li>
+ <li><b>Then the singles</b>, each keeping a share of every gap for the lanes not yet placed, so the lanes laid first cannot take the room the later ones need. Two sweeps then lay every lane again against the others' real copper.</li>
+ <li>A lane the snap cannot lay is named with where its search got stuck, and the loop sends that place to the solve. Both searches run in the router's Rust core.</li>
+</ul>
 <div class="card">
   <p style="margin-top:0">The dashed grey line is the smooth plan and the pale strip is the allowed band. The coloured path is the snapped result. <b>Click any grid point</b> to add or remove an obstacle (already-placed copper) and watch the path go around it. The sliders are the cost terms.</p>
   <svg id="nSvg" viewBox="0 0 860 420" style="touch-action:none"></svg>
@@ -298,10 +364,11 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
   <div class="log" id="nLog"></div>
 </div>
 
-<h3 id="audit">4c &nbsp; Audit, gate and feedback (<code>whole_audit.py</code>, <code>whole_gate.py</code>, <code>whole_feedback.py</code>)</h3>
-<p>The audit checks the plan against the <b>router's own rules</b>: pitch, dive room, clearance to static copper, shape, and that every lane's band joins its tooth to its berth. The gate turns it into a pass or fail, and writes every finding's position. Where the finding is decides who can fix it:</p>
+<h3 id="audit">4c &nbsp; Audit, gate and feedback (<code>whole_audit.py</code>, <code>whole_gate.py</code>, <code>whole_lint.py</code>, <code>whole_feedback.py</code>)</h3>
+<p>The plan is installed in the whole route's own lanes exactly as the router will get it, and the audit runs every one of the router's own checks on it: pitch, dive room, clearance to static copper as KiCad draws the pads, a pair's end connectors and crossover as exact copper, shape, and that every lane's band joins its tooth to its berth. A shortfall of a quarter of the router's grid step or less is a near miss, not a finding: the grid snap moves a lane that near off its bar. The <b>gate</b> passes a plan only when every lane is laid and every check is clean, with <b>nothing waived</b>, and writes every finding's position. The <b>lint</b> checks what the snap promises: grid points, 0/45/90 pieces, a via at every layer change. Where a finding is decides who can fix it:</p>
 <ul><li><b>Between the arrays</b>: the solve's problem. The place becomes <b>history</b> (a price on the next solve) and a <b>cut</b>.</li>
 <li><b>At the ends</b> (beside or in front of an array): the solve cannot move it, because it comes from where the teeth and berths stand. <code>whole_feedback</code> names the pair of ends not to choose together again, and the <b>fanout</b> re-chooses. If the same finding stands in two rounds, the loop stops instead of paying for another solve.</li></ul>
+<p>Feedback reaches the fanout by four channels: <b>crowded ends</b> from the audits; the nets an unproved plan left <b>over two vias</b>; a fanout that was <b>refused</b> (a pair it split); and, after a round is laid, every net it <b>left open</b>, named at the end where it fails. A named end is priced by place (in full where the lane stands on its layer, half on the other layer, fading over 0.76 mm around it), and its price doubles each later round it is named again. A fanout that lays the same ends again has its feedback raised and runs again.</p>
 <div class="card">
   <p style="margin-top:0">Two lanes run from a source array (left) to a destination array (right). Move the <b>pinch</b> to squeeze the gap between them, then <b>Run audit</b>. Try it once in the middle and once near an end. Then use the two fix buttons and audit again.</p>
   <svg id="aSvg" viewBox="0 0 800 250"></svg>
@@ -312,7 +379,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 </div>
 
 <h3 id="route">4d &nbsp; Route all lanes, each in its band (<code>route_lanes.py</code>)</h3>
-<p>Finally the router lays every lane from the audited plan (<code>--plan</code>): pairs first, then the singles, each <b>confined to its own band</b> around the plan and routed against every earlier lane's copper. Then <code>check_connected</code> and <code>check_drc</code> grade the board (a lane reported "routed" is not proof its net connects). The plan is what makes the order unimportant: it already decided which lanes pass which side of an obstacle.</p>
+<p>Finally the production router lays every lane from the audited plan (<code>--plan</code>): pairs first, then the singles, each in the berths' order round the destination, each <b>confined to its own band</b> around the plan and routed against every earlier lane's copper. A pair's end connectors and crossover are laid as planned and the pair router runs between them. A pair refused in its band is tried in a wider one, and free of the plan only last, after every lane has had its band. Then <code>check_connected</code> and <code>check_drc</code> grade the board (a lane reported "routed" is not proof its net connects). The plan is what makes the order unimportant: it already decided which lanes pass which side of an obstacle.</p>
 <div class="card">
   <p style="margin-top:0">Four lanes must get past a block. Each is routed in turn as a shortest path that keeps clear of what is already laid. With <b>follow the plan's bands</b> off, the router is on its own: whether all four fit depends on the <b>order</b>. Turn it on and every order works.</p>
   <svg id="rSvg" viewBox="0 0 880 340"></svg>
@@ -321,26 +388,35 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
   <div class="log" id="rLog"></div>
 </div>
 
+<h3 id="rounds">4e &nbsp; Rounds, and the board handed on (<code>whole_route.py</code>, <code>route_bus.py</code>)</h3>
+<p>A run hands back the best board it laid, and lays something whenever a plan for some of the lanes exists:</p>
+<ul>
+ <li><b>A loop that does not pass is laid all the same</b>, from the plan it held (its snapped plan, else its best smooth plan snapped with no gate). A lane that cannot be laid stays open. If that lay is not clean, the round lays one other loop round's plan too (the fewest findings first) and keeps the better: DRC first, then open nets, vias and copper.</li>
+ <li><b>The rounds stop at the first clean lay.</b> A round whose plan lays connected and DRC-clean ends the run, whether or not its loop passed or its solve was proved. A later round could only move the ends its audits named, which the lay already went round.</li>
+ <li>Otherwise a round that leaves nets open feeds the next fanout (<a href="#audit">4c</a>), up to the round limit. Every round is graded, and the best (fewest open nets, then fewest vias) is the run's board. When no round laid anything, a <b>last resort</b> plans only part of the lanes, the ones the rounds named left out.</li>
+</ul>
+<p><b>On a real board</b> the bus step (<code>route_bus.py</code>) wraps this. It finds the buses between pairs of ball arrays (or takes them from <code>--bus SRC:DEST[:MODE[:LAYERS]]</code>, each with its own fanout mode, <code>joint</code>, <code>escape</code> or <code>plain</code>, and its own routing layers), strips the bus's old copper, fans out, turns the board into the flow frame, runs the whole route and turns the copper back. It then grades the board where it is written: every bus net connected, no DRC violation on a bus net, the whole board no worse than it came. The board's length and skew rules are named but not counted, because the bus is laid untuned. A net left open, or named in a violation, goes back as it came, for the rest of the routing chain. The nets handed on are protected in the board's project and their tracks and vias <b>locked</b>, so the later routing steps route round them and never rip them up. Several buses are routed in turn, each on the board the one before handed on.</p>
+
 <h2 id="summary">5 &nbsp; Side by side</h2>
 <table>
 <tr><th></th><th>CP-SAT <span class="tag">whole_solve.py</span></th><th>HiGHS LP <span class="tag">whole_geo.py</span></th></tr>
-<tr><td><b>Question</b></td><td>Which pairs cross, at which position along the route, and on which layer does each lane sit at each crossing? How many vias are unavoidable?</td><td>Given that order and those layers, what sideways offset does each lane have at each column?</td></tr>
-<tr><td><b>Unknowns</b></td><td>Booleans (layer, order, change active), small integers (crossing position, up to 3 changes per lane)</td><td>Real offsets (tens of thousands of columns of them), plus elastic slacks</td></tr>
+<tr><td><b>Question</b></td><td>Which pairs cross, at which position along the route (<code>u</code>), and on which layer does each lane sit at each crossing? How many vias are unavoidable?</td><td>Given that order and those layers, what sideways offset does each lane have at each column of the trunk and the rings?</td></tr>
+<tr><td><b>Unknowns</b></td><td>Booleans (which lane above, change active), small integers (crossing position, up to 3 changes per lane, and on more than two layers each run's layer)</td><td>Real offsets (tens of thousands of columns of them), plus elastic slacks</td></tr>
 <tr><td><b>Structure</b></td><td>Combinatorial. Search + propagation + clause learning + LP bounds, in parallel sub-solvers, deterministic.</td><td>Convex: one piece, because CP-SAT and <code>static_sides</code> have made every either-or choice. Simplex or interior point on a sparse system (often dual), with a tie-break for a unique optimum.</td></tr>
-<tr><td><b>Objective</b></td><td>Lexicographic: nets over two vias, total vias, history congestion.</td><td>Length + bends + squeeze below comfortable pitch, plus 10&#8308;&times; anything hard it had to break.</td></tr>
-<tr><td><b>Guarantee</b></td><td>Proves the via minimum. If it cannot, there is no plan and the chain stops (exit 2).</td><td>Global optimum of its LP, always feasible. Whatever it pays on hard rows is reported.</td></tr>
-<tr><td><b>Failure feedback</b></td><td>Receives cuts (LP could not draw this) and history (audit found this place hot).</td><td>Produces cuts, and flips a static side when the polish found no room.</td></tr>
-<tr><td><b>Scale</b></td><td>K51 proved in 22-37 s. Cost tracks the number of crossings.</td><td>One LP per geometry pass; seconds to tens of seconds.</td></tr>
+<tr><td><b>Objective</b></td><td>One sum in vias: vias, five more for each via a net carries past two, one more for each run on a plane's layer; then history congestion; then the planes, as a tie-break.</td><td>Length + bends + squeeze below comfortable pitch, plus 10&#8308;&times; anything hard it had to break.</td></tr>
+<tr><td><b>Guarantee</b></td><td>Proves the via minimum where it can. A round's first solve keeps the best plan it found even unproved, so a round never ends with nothing; a model with no plan names the crowded lanes instead.</td><td>Global optimum of its LP, always feasible. Whatever it pays on hard rows is reported.</td></tr>
+<tr><td><b>Failure feedback</b></td><td>Receives cuts (soft, or firm for another net's track or a keep-out), layer cuts, and history (audit found this place hot).</td><td>Produces cuts, and flips a static side when the polish found no room.</td></tr>
+<tr><td><b>Scale</b></td><td>Cost tracks the number of crossings: about 20 crossings proved in 2 s, 135 in 20 s, 280 in about 4 minutes; one bus of 317 crossings was kept unproved after 518 s.</td><td>One LP per geometry pass; seconds to tens of seconds.</td></tr>
 </table>
 
 <h3>Where else these solvers appear (older braid chain and instruments)</h3>
 <ul>
 <li><b>HiGHS MILP</b>: <code>schedule.exact_pages</code> assigns each net to a page (binary <code>x[i,p]</code>, with <code>x[i,p]+x[j,p] &le; 1</code> for inverted pairs, minimising swimmers, then page vias). <code>joint_floor.py</code> and <code>synth_bus.cap_floor</code> put a binary layer at each crossing (<code>y_a+y_b=1</code>) and count layer changes. That is the same puzzle as 1a, and an infeasible model there means an odd parity cycle. <code>braid._prime_highs_threads</code> pins it to one thread for determinism.</li>
-<li><b>CP-SAT</b>: <code>pages_first.py</code> picks each net's destination move, source move and page in one model (a "swimmer" is priced at 100 vias), and <code>synth_bus.cap_sat_feasible</code> / <code>escape_move_floor</code> check feasibility. <code>whole_ends.py</code> uses it on one worker to rank end states exactly. <code>solve_memo.py</code> caches a solve by hashing the model text plus parameters, and replays a hit by fixing every variable to its stored value. That works because the solve is deterministic.</li>
+<li><b>CP-SAT</b>: <code>pages_first.py</code> picks each net's destination move, source move and page in one model (a "swimmer" is priced at 100 vias), and <code>synth_bus.cap_sat_feasible</code> / <code>escape_move_floor</code> check feasibility. <code>whole_ends.py</code> uses it on one worker to rank end states exactly, and to choose the joint ends on an escape fanout. <code>joint_escape.py</code> plans a whole array's escapes, straps and plane drops in one model. <code>solve_memo.py</code> caches a solve by hashing the model text plus parameters, and replays a hit by fixing every variable to its stored value. That works because the solve is deterministic.</li>
 </ul>
 
 <footer>
-Source: <a href="https://github.com/drandyhaas/KiCadRoutingTools/tree/bus622-take5/awx"><code>awx/</code> on the <code>bus622-take5</code> branch</a> (<code>whole_solve.py</code>, <code>whole_geo.py</code>, <code>whole_chain.sh</code>, <code>whole_loop.sh</code>). The interactive toys are simplified re-implementations, not the real solvers.
+Source: <a href="https://github.com/drandyhaas/KiCadRoutingTools/tree/bus622-take5/awx"><code>awx/</code> on the <code>bus622-take5</code> branch</a> (<code>route_bus.py</code>, <code>whole_route.py</code>, <code>whole_ends.py</code>, <code>whole_frame.py</code>, <code>whole_solve.py</code>, <code>whole_geo.py</code>, <code>whole_polish.py</code>, <code>whole_snap.py</code>, <code>route_lanes.py</code>; its <code>README.md</code> has every detail). The interactive toys are simplified re-implementations, not the real solvers.
 &nbsp;&middot;&nbsp; <a href="../">KiCadRoutingTools home</a> &nbsp;&middot;&nbsp; <a href="https://github.com/drandyhaas/KiCadRoutingTools">GitHub</a>
 </footer>
 </main>
@@ -359,35 +435,36 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 (function(){
   const svg=$('#pipe');
   const st=[
-   {t:['Ends +','fanout'],f:'fanout_from_plan.py',c:'#8a94a8',d:'Chooses each net\'s <b>tooth</b> (escape at the source BGA) and <b>berth</b> (escape at the destination) with the whole route\'s ends model. <code>whole_ends</code> ranks end states exactly with CP-SAT on one worker. Crowded ends found later come back here as <code>FEEDBACK</code>, and the fanout re-chooses <i>incrementally</i>.'},
-   {t:['CP-SAT','solve'],f:'whole_solve.py',c:'#6a3fc4',d:'<b>The discrete plan.</b> One model decides every crossing, its position along the trunk, every layer change, and the ring assignment. Minimises vias with a proof. Takes in cuts from the LP and audits, plus history congestion. No proved plan means exit 2.'},
-   {t:['HiGHS LP','geometry'],f:'whole_geo.py',c:'#0f8a7a',d:'<b>The continuous geometry.</b> Takes the fixed order and layers and finds each lane\'s sideways offset at each column with one joint LP (trunk + both rings). Elastic hard rows: what it has to pay is written as cuts for the solve. Run as the dual through HiGHS IPM.'},
-   {t:['Polish','xy per round'],f:'whole_polish.py',c:'#8a94a8',d:'Re-runs the LP each round on the measured data. When a lane has no room on its side of an island, it is flipped to the other side and sent back to geometry.'},
-   {t:['Snap','to grid'],f:'whole_snap.py',c:'#8a94a8',d:'Lands the planned lines on the router\'s own grid, so what is audited is what the router can draw.'},
-   {t:['Audit','gate / lint'],f:'whole_gate.py',c:'#c07a00',d:'Checks the plan against the router\'s own rules. "Hot" places become <b>history</b> for the next solve, and unfixable ones become <b>cuts</b>. Crowded ends (exit 4) go through <code>whole_feedback</code> back to the fanout.'},
-   {t:['Route','all lanes'],f:'route_lanes.py',c:'#2e9d4c',d:'Routes every lane at once from the audited plan (<code>--plan</code>), then <code>check_connected</code> and <code>check_drc</code> grade the board.'}];
-  const W=118,GAP=24,X0=8,Y0=70,H=76;
+   {t:['Ends +','fanout'],f:'fanout_from_plan.py',c:'#8a94a8',d:'Chooses each net\'s <b>tooth</b> (escape at the source BGA) and <b>berth</b> (escape at the destination) from the fanout\'s escape menus with the whole route\'s ends model, then lays them and judges what it laid. On the escape fanout CP-SAT makes the first choice (the joint ends) and every choice is put to the solve\'s check. <code>whole_ends</code> also picks the <b>cut</b> on the destination\'s far side. Crowded ends and open nets found later come back here as feedback, and the fanout re-chooses <i>incrementally</i>.'},
+   {t:['Frame','trunk + rings'],f:'whole_frame.py',c:'#8a94a8',d:'<b>One road per lane.</b> A straight trunk from the source\'s pad box through the destination\'s, and a ring round each side of the destination, meeting at the cut. Both arrays\' outlines unrolled into two orders, whose disagreements are the crossings. Each lane\'s route is one coordinate, <code>u</code>.'},
+   {t:['CP-SAT','solve'],f:'whole_solve.py',c:'#6a3fc4',d:'<b>The discrete plan.</b> One model decides every crossing, its position in <code>u</code>, every layer change and, on more than two layers, every run\'s layer. Minimises vias with a proof where it can; a round\'s first solve keeps an unproved plan rather than none. Takes in cuts from the LP and audits, plus history congestion.'},
+   {t:['HiGHS LP','geometry'],f:'whole_geo.py',c:'#0f8a7a',d:'<b>The continuous geometry.</b> First the relayer moves each via end\'s run onto the layer the solve chose. Then the LP takes the fixed order and layers and finds each lane\'s sideways offset at each column with one joint LP (trunk + both rings). Elastic hard rows: what it has to pay is written as cuts for the solve. Run as the dual through HiGHS IPM.'},
+   {t:['Polish','xy per round'],f:'whole_polish.py',c:'#8a94a8',d:'Meets the audit\'s measures in board xy with small vertex moves, an LP per round, keeping the best state any round reached. When a lane has no room on its side of an island, it is flipped to the other side and sent back to the geometry.'},
+   {t:['Snap','to grid'],f:'whole_snap.py',c:'#8a94a8',d:'Lands the planned lines on the router\'s own grid, the pairs first as the pair router moves, then the singles, so what is audited is what the router can draw.'},
+   {t:['Audit','gate / lint'],f:'whole_gate.py',c:'#c07a00',d:'Checks the plan against the router\'s own rules, nothing waived. "Hot" places become <b>history</b> for the next solve, and unfixable ones become <b>cuts</b>. Crowded ends (exit 4) go through <code>whole_feedback</code> back to the fanout.'},
+   {t:['Route','all lanes'],f:'route_lanes.py',c:'#2e9d4c',d:'Routes every lane from the audited plan (<code>--plan</code>), each in its band, then <code>check_connected</code> and <code>check_drc</code> grade the board. A loop that does not pass is laid from the plan it held; the best round is handed on (4e).'}];
+  const W=106,GAP=17,X0=8,Y0=70,H=76;
   const bx=st.map((s,i)=>X0+i*(W+GAP));
   const defs=S('defs',{},svg);
   const mk=S('marker',{id:'ah',viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);S('path',{d:'M0 0L10 5L0 10z',fill:'#8a94a8'},mk);
   const mk2=S('marker',{id:'ah2',viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);S('path',{d:'M0 0L10 5L0 10z',fill:'#c07a00'},mk2);
-  for(let i=0;i<6;i++)S('line',{x1:bx[i]+W,y1:Y0+H/2,x2:bx[i+1],y2:Y0+H/2,stroke:'#8a94a8','stroke-width':2,'marker-end':'url(#ah)'},svg);
+  for(let i=0;i<st.length-1;i++)S('line',{x1:bx[i]+W,y1:Y0+H/2,x2:bx[i+1],y2:Y0+H/2,stroke:'#8a94a8','stroke-width':2,'marker-end':'url(#ah)'},svg);
   const cx=i=>bx[i]+W/2;
   const fb=(a,b,depth,lab,lx)=>{S('path',{d:`M${cx(a)} ${Y0+H} C ${cx(a)} ${Y0+H+depth}, ${cx(b)} ${Y0+H+depth}, ${cx(b)} ${Y0+H+4}`,fill:'none',stroke:'#c07a00','stroke-width':2,'stroke-dasharray':'6 4','marker-end':'url(#ah2)'},svg);T(svg,lx,Y0+H+depth*0.75+12,lab,{'font-size':12,fill:'#8a5a00','text-anchor':'middle'})};
-  fb(2,1,58,'cuts: "this can\'t be drawn"',cx(1)+70);
-  fb(5,1,110,'cuts + history congestion from audits',cx(3));
-  fb(5,0,160,'crowded ends (exit 4) -> whole_feedback -> fanout again',cx(2)-20);
+  fb(3,2,58,'cuts: "this can\'t be drawn"',cx(2)+62);
+  fb(6,2,110,'cuts + history congestion from audits',cx(4));
+  fb(6,0,160,'crowded ends, open nets -> whole_feedback -> fanout again',cx(3)-10);
   const boxes=st.map((s,i)=>{
     const g=S('g',{style:'cursor:pointer'},svg);
-    const r=S('rect',{x:bx[i],y:Y0,width:W,height:H,rx:10,fill:'#fff',stroke:s.c,'stroke-width':i==1||i==2?3:1.5},g);
-    T(g,cx(i),Y0+30,s.t[0],{'text-anchor':'middle','font-weight':700,'font-size':i==1||i==2?15:13.5,fill:s.c});
+    const r=S('rect',{x:bx[i],y:Y0,width:W,height:H,rx:10,fill:'#fff',stroke:s.c,'stroke-width':i==2||i==3?3:1.5},g);
+    T(g,cx(i),Y0+30,s.t[0],{'text-anchor':'middle','font-weight':700,'font-size':i==2||i==3?15:13.5,fill:s.c});
     T(g,cx(i),Y0+48,s.t[1],{'text-anchor':'middle','font-size':12,fill:'#5b6577'});
     T(g,cx(i),Y0+66,s.f,{'text-anchor':'middle','font-size':10,fill:'#8a94a8'});
     g.addEventListener('click',()=>{stop();sel(i)});return{g,r,s}});
   const tok=S('circle',{r:9,fill:'#e3a008',stroke:'#fff','stroke-width':2,cx:cx(0),cy:Y0+H/2,opacity:0},svg);
-  T(svg,500,26,'plan -> geometry -> polish -> snap -> audit -> route, with two feedback loops back to the discrete solver',{'text-anchor':'middle','font-size':13,fill:'#5b6577'});
+  T(svg,500,26,'ends -> frame -> plan -> geometry -> polish -> snap -> audit -> route, with feedback to the solve and to the fanout',{'text-anchor':'middle','font-size':13,fill:'#5b6577'});
   let cur=-1,timer=null,pos=0;
-  const DEMO=['#ends','#cpsat','#sec-lp','#polish','#snap','#audit','#route'];
+  const DEMO=['#ends','#frame','#cpsat','#sec-lp','#polish','#snap','#audit','#route'];
   function sel(i){cur=i;boxes.forEach((b,k)=>{b.r.setAttribute('fill',k===i?'#f1ecfb':'#fff')});
     $('#pipeDetail').innerHTML=`<div class="callout"><b>${st[i].t.join(' ')}</b> <span class="tag">${st[i].f}</span><br>${st[i].d}<br><a href="${DEMO[i]}">Jump to the demo &darr;</a></div>`}
   function stop(){if(timer){clearInterval(timer);timer=null;$('#pipePlay').textContent='Play the flow';tok.setAttribute('opacity',0)}}
@@ -396,13 +473,13 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
     $('#pipePlay').textContent='Stop';tok.setAttribute('opacity',1);pos=0;
     let tt=0;
     timer=setInterval(()=>{
-      tt+=0.022;const i=Math.floor(tt)%7,f=tt%1;
-      const x=cx(i)+(i<6?f*(W+GAP):0);
+      tt+=0.022;const n=st.length,i=Math.floor(tt)%n,f=tt%1;
+      const x=cx(i)+(i<n-1?f*(W+GAP):0);
       tok.setAttribute('cx',x);
       if(f<0.05)sel(i);
-      $('#pipeStat').textContent='stage '+(i+1)+' of 7';
+      $('#pipeStat').textContent='stage '+(i+1)+' of '+n;
     },30)};
-  sel(1);
+  sel(2);
 })();
 
 /* ================= 1a. braid puzzle + branch&bound ================= */
@@ -871,7 +948,7 @@ function simplex(cost,rows){
    {lab:'2 LP tries to draw it',t:'The LP places the lanes. C\'s via needs a <b>room</b> around it and A, B have to spread to cross, but the corridor is too narrow. The LP does not fail. It <b>pays</b> on the elastic "via room" row (0.06 mm short) and reports which lane, which row, which place.'},
    {lab:'3 the cut',t:'The shortfall becomes a <b>cut</b>, a boolean disjunction added to the CP-SAT model: <code>NOT (A×B crossing near C\'s dive)</code>, i.e. move the crossing, or move the dive, or give C its via elsewhere. History congestion at that place is raised too.'},
    {lab:'4 CP-SAT re-solves',t:'Same objective, same proof of optimality, now under the cut. The proved minimum is still <b>2 vias</b>: C dives later, at s=8.4 mm, where the corridor is wide. No extra vias were needed. Had the cut cost one, the plan would have paid one more via.'},
-   {lab:'5 LP is content',t:'The LP finds a drawing that pays on no hard row. The plan continues to the polish (LP per round), then the snap to the router\'s grid, then the audit. If the audit finds a still-hot place, the loop goes around again (up to 6 geometry rounds, 3 fanout rounds).'}];
+   {lab:'5 LP is content',t:'The LP finds a drawing that pays on no hard row. The plan continues to the polish (LP per round), then the snap to the router\'s grid, then the audit. If the audit finds a still-hot place, the loop goes around again (up to 6 loop rounds within a fanout round, and up to 3 fanout rounds).'}];
   const XA=40,XB=760;
   function lane(y0,y1,x0,x1,col,w=5){S('line',{x1:x0,y1:y0,x2:x1,y2:y1,stroke:col,'stroke-width':w,'stroke-linecap':'round'},svg)}
   function draw(){
@@ -957,6 +1034,140 @@ function simplex(cost,rows){
   $('#eId').onclick=()=>{bp=[0,1,2,3,4];draw()};
   $('#eLay').onclick=()=>{seed++;const keep=bp;init();bp=keep;draw()};
   init();bp=[3,0,4,1,2];draw();
+})();
+/* ================= 0c. the frame: trunk, rings, both arrays unrolled ================= */
+(function(){
+  const svg=$('#fSvg');
+  // the destination's pad box, the source's, the arrival line H0, the rings' first offset and pitch; 10 px = 1 mm
+  const X0=560,Y0=150,X1=700,Y1=290,SX0=60,SX1=200,SY0=130,SY1=310,H0X=520,D0=16,PIT=11,PER=560,SPER=640,SC=10,TS=SX1+10;
+  const cols=['#d9483b','#2f6fd0','#0f8a7a','#c07a00','#8a3fc4','#d4589a','#5b8c1a','#1d7fa6','#7a5230'];
+  // each lane's berth as an arc clockwise from the destination's north-west corner (north face 0-140, far face
+  // 140-280, south face 280-420, facing face 420-560), and its tooth as an arc clockwise from the SOURCE's north-west
+  // corner (north face 0-140, facing face 140-320, south face 320-460, far face 460-640)
+  const BER=[250,320,210,170,40,100,520,470,380],TOO=[590,50,100,180,210,240,270,380,510];
+  const L=BER.map((a,i)=>({n:'ABCDEFGHI'[i],a,s:TOO[i],c:cols[i]}));
+  const bxy=a=>a<140?[X0+a,Y0]:a<280?[X1,Y0+a-140]:a<420?[X1-(a-280),Y1]:[X0,Y1-(a-420)];
+  const txy=a=>a<140?[SX0+a,SY0]:a<320?[SX1,SY0+a-140]:a<460?[SX1-(a-320),SY1]:[SX0,SY1-(a-460)];
+  const face=a=>a<140?'N':a<280?'E':a<420?'S':'W';
+  const sface=a=>a<140?'N':a<320?'E':a<460?'S':'W';
+  const FN={N:'north',E:'far',S:'south',W:'facing'},SFN={N:'north',E:'facing',S:'south',W:'far'};
+  const gaps=(arcs,lo,hi)=>{const pts=[lo,...arcs.filter(a=>a>=lo&&a<hi).sort((p,q)=>p-q),hi],o=[];for(let i=0;i<pts.length-1;i++)o.push({c:(pts[i]+pts[i+1])/2,w:pts[i+1]-pts[i]});return o};
+  const cand=gaps(BER,0,420).map(g=>g.c),scand=gaps(TOO,460,640).map(g=>g.c);
+  let cut=0,scut=0,sel='D';
+  const ringOf=(a,c)=>a>=420?'W':(a<c?'N':'S');
+  // the source side: a facing-face tooth starts on the trunk; a side face's runs along its face; a far-face tooth goes
+  // round the corner on its side of the source's cut on a lead-in (not counted in u)
+  const sideOf=(t,cs)=>{const f=sface(t);return f==='E'?'T':f==='W'?(t>cs?'N':'S'):f};
+  const skey=(t,cs)=>(t-cs+SPER)%SPER;            // the source unrolled from its cut, clockwise: north first
+  function start(l,cs,d){const [tx,ty]=txy(l.s),sd=sideOf(l.s,cs),f=sface(l.s),k=d*(2-Math.SQRT2);
+    if(sd==='T')return{lead:null,run:[[tx,ty]],ex:tx};
+    const y=sd==='N'?SY0-d:SY1+d;
+    if(f!=='W')return{lead:null,run:[[tx,ty],[tx,y],[TS,y]],ex:tx};
+    const lead=sd==='N'?[[tx,ty],[SX0-d,ty],[SX0-d,SY0-d+k],[SX0-d+k,SY0-d],[SX0,SY0-d]]:[[tx,ty],[SX0-d,ty],[SX0-d,SY1+d-k],[SX0-d+k,SY1+d],[SX0,SY1+d]];
+    return{lead,run:[[SX0,y],[TS,y]],ex:SX0}}
+  // a lane's road from H0: round its ring at offset d to the point across from its berth, then into the berth
+  function road(a,d,c_){const [bx,by]=bxy(a),f=face(a),r=ringOf(a,c_),k=d*(2-Math.SQRT2);
+    if(r==='W')return[[H0X,by],[X0,by]];
+    if(r==='N'){const p=[[H0X,Y0-d]];
+      if(f==='N')return p.concat([[bx,Y0-d],[bx,by]]);
+      p.push([X1+d-k,Y0-d],[X1+d,Y0-d+k]);
+      if(f==='E')return p.concat([[X1+d,by],[bx,by]]);
+      p.push([X1+d,Y1+d-k],[X1+d-k,Y1+d]);return p.concat([[bx,Y1+d],[bx,by]])}
+    const p=[[H0X,Y1+d]];
+    if(f==='S')return p.concat([[bx,Y1+d],[bx,by]]);
+    p.push([X1+d-k,Y1+d],[X1+d,Y1+d-k]);
+    if(f==='E')return p.concat([[X1+d,by],[bx,by]]);
+    p.push([X1+d,Y0-d+k],[X1+d-k,Y0-d]);return p.concat([[bx,Y0-d],[bx,by]])}
+  const len=p=>{let s=0;for(let i=1;i<p.length;i++)s+=Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]);return s};
+  function plan(c_,cs){
+    // the source's stacks: on each side the lane launched first (outermost) the furthest out
+    const sN=L.filter(l=>sideOf(l.s,cs)==='N').sort((p,q)=>skey(p.s,cs)-skey(q.s,cs)),sS=L.filter(l=>sideOf(l.s,cs)==='S').sort((p,q)=>skey(p.s,cs)-skey(q.s,cs));
+    const sd={};sN.forEach((l,i)=>sd[l.n]=D0+(sN.length-1-i)*PIT);sS.forEach((l,i)=>sd[l.n]=D0+i*PIT);
+    const N=L.filter(l=>ringOf(l.a,c_)==='N').sort((p,q)=>p.a-q.a),S_=L.filter(l=>ringOf(l.a,c_)==='S').sort((p,q)=>q.a-p.a);
+    const d={};N.forEach((l,k)=>d[l.n]=D0+k*PIT);S_.forEach((l,k)=>d[l.n]=D0+k*PIT);
+    const out={};
+    for(const l of L){const st=start(l,cs,sd[l.n]||0),r=road(l.a,d[l.n]||0,c_),rg=ringOf(l.a,c_);
+      const trunk=st.run.concat([r[0]]),path=st.run.concat(r),all=(st.lead||[]).concat(path);
+      out[l.n]={st,trunk,path,rg,uT:(H0X-st.ex)/SC,uR:rg==='W'?(X0-H0X)/SC:len(road(l.a,D0,c_).slice(0,-1))/SC,cu:len(all)/SC}}
+    const lau=L.slice().sort((p,q)=>skey(p.s,cs)-skey(q.s,cs));
+    // north to south across the trunk at H0: the destination's outline unrolled from its cut, counter-clockwise
+    const ord=L.slice().sort((p,q)=>((c_-p.a+PER)%PER)-((c_-q.a+PER)%PER));
+    let x=0;for(let i=0;i<L.length;i++)for(let j=i+1;j<L.length;j++){const A=lau[i],B=lau[j];if(ord.indexOf(A)>ord.indexOf(B))x++}
+    return{out,lau,ord,x,ride:L.reduce((s,l)=>s+out[l.n].cu,0),nN:N.length,nS:S_.length,sN:sN.length,sS:sS.length}}
+  const pl=(p,at)=>S('polyline',Object.assign({points:p.map(q=>q.join(',')).join(' '),fill:'none','stroke-linejoin':'round','stroke-linecap':'round'},at),svg);
+  function yAt(p,x){for(let i=1;i<p.length;i++){const [a,b]=[p[i-1],p[i]];if(Math.abs(b[0]-a[0])<1e-9)continue;
+      const t=(x-a[0])/(b[0]-a[0]);if(t>=-1e-9&&t<=1+1e-9)return a[1]+t*(b[1]-a[1])}return p[p.length-1][1]}
+  function draw(){
+    svg.innerHTML='';const P=plan(cut,scut);
+    // the two arrays
+    S('rect',{x:SX0,y:SY0,width:SX1-SX0,height:SY1-SY0,rx:6,fill:'#eef1f8',stroke:'#a9b0be'},svg);T(svg,(SX0+SX1)/2,(SY0+SY1)/2+4,'source',{'text-anchor':'middle',fill:'#5b6577'});
+    S('rect',{x:X0,y:Y0,width:X1-X0,height:Y1-Y0,rx:6,fill:'#eef1f8',stroke:'#a9b0be'},svg);T(svg,(X0+X1)/2,(Y0+Y1)/2+4,'destination',{'text-anchor':'middle',fill:'#5b6577'});
+    T(svg,X0+6,(Y0+Y1)/2+40,'facing',{fill:'#a9b0be','font-size':11});T(svg,X1-6,(Y0+Y1)/2+40,'far',{fill:'#a9b0be','font-size':11,'text-anchor':'end'});
+    T(svg,SX0+6,SY1-8,'far',{fill:'#a9b0be','font-size':11});T(svg,SX1-6,SY1-8,'facing',{fill:'#a9b0be','font-size':11,'text-anchor':'end'});
+    // the trunk and H0
+    S('line',{x1:(SX0+SX1)/2,y1:(SY0+SY1)/2,x2:(X0+X1)/2,y2:(Y0+Y1)/2,stroke:'#cfd5e0','stroke-width':14,'stroke-linecap':'round',opacity:.55},svg);
+    T(svg,330,(SY0+SY1)/2+30,'trunk',{fill:'#8a94a8','font-size':12});
+    S('line',{x1:H0X,y1:48,x2:H0X,y2:388,stroke:'#8a94a8','stroke-dasharray':'5 4'},svg);T(svg,H0X,42,'H0',{'text-anchor':'middle',fill:'#5b6577','font-size':12,'font-weight':700});
+    // the crossings on the trunk: where two lanes' straight runs to their places at H0 meet
+    const seg=l=>P.out[l.n].trunk.slice(-2);
+    for(let i=0;i<L.length;i++)for(let j=i+1;j<L.length;j++){const [a,b]=seg(L[i]),[c,e]=seg(L[j]);
+      const den=(b[0]-a[0])*(e[1]-c[1])-(b[1]-a[1])*(e[0]-c[0]);if(Math.abs(den)<1e-9)continue;
+      const t=((c[0]-a[0])*(e[1]-c[1])-(c[1]-a[1])*(e[0]-c[0]))/den;if(t<=0||t>=1)continue;
+      S('circle',{cx:a[0]+t*(b[0]-a[0]),cy:a[1]+t*(b[1]-a[1]),r:5,fill:'#fff',stroke:'#1d2330','stroke-width':1.5},svg)}
+    // the lanes: a lead-in dashed
+    for(const l of L){const o=P.out[l.n],on=l.n===sel,at={stroke:l.c,'stroke-width':on?6:3,opacity:sel&&!on?.5:.95,style:'cursor:pointer'};
+      const g=pl(o.path,at);g.addEventListener('click',()=>{sel=l.n;draw()});
+      if(o.st.lead){const h=pl(o.st.lead,Object.assign({},at,{'stroke-dasharray':on?'9 6':'6 5'}));h.addEventListener('click',()=>{sel=l.n;draw()})}}
+    // teeth and berths
+    for(const l of L){const [tx,ty]=txy(l.s),f=sface(l.s);S('circle',{cx:tx,cy:ty,r:5,fill:l.c},svg);
+      const dx=f==='E'?-12:f==='W'?12:0,dy=f==='N'?18:f==='S'?-9:4;
+      T(svg,tx+dx,ty+dy,l.n,{'text-anchor':f==='E'?'end':f==='W'?'start':'middle','font-weight':700,fill:l.c,'font-size':12});
+      const [bx,by]=bxy(l.a);S('rect',{x:bx-5,y:by-5,width:10,height:10,fill:l.c,stroke:'#fff'},svg)}
+    // the selected lane's u: where it starts, at H0, at its berth
+    if(sel){const o=P.out[sel],p=o.trunk;
+      const lab=(x,y,s,anc)=>{const t=T(svg,x,y,s,{'font-size':11,'font-weight':700,fill:'#1d2330','text-anchor':anc||'middle'});t.setAttribute('paint-order','stroke');t.setAttribute('stroke','#fff');t.setAttribute('stroke-width',4)};
+      for(let x=o.st.ex;x<=H0X+1e-9;x+=20){const y=yAt(p,x);S('line',{x1:x,y1:y-5,x2:x,y2:y+5,stroke:'#1d2330','stroke-width':1.5},svg)}
+      lab(o.st.ex+16,yAt(p,o.st.ex)-9,'u = 0','start');lab(H0X-6,p[p.length-1][1]-9,'u = '+o.uT.toFixed(0),'end');
+      const q=o.path[o.path.length-1];lab(q[0]+(q[0]>=X1?44:0),q[1]+(q[1]>=Y1?-12:(q[0]>=X1?4:-10)),'u = '+(o.uT+o.uR).toFixed(1))}
+    // the two cuts and the places each may stand
+    const diamond=(x,y)=>S('path',{d:`M${x} ${y-10}L${x+10} ${y}L${x} ${y+10}L${x-10} ${y}Z`,fill:'#e3a008',stroke:'#1d2330','stroke-width':1.5},svg);
+    const dot=(x,y,fn)=>{const g=S('circle',{cx:x,cy:y,r:6,fill:'#c3c9d6',stroke:'#fff','stroke-width':1.5,style:'cursor:pointer'},svg);g.addEventListener('click',fn)};
+    for(const c of cand){const [x,y]=bxy(c);
+      if(c===cut){diamond(x,y);T(svg,x+(face(c)==='E'?16:0),y+(face(c)==='N'?-14:face(c)==='S'?24:4),'cut',{'font-weight':700,fill:'#8a5a00','text-anchor':face(c)==='E'?'start':'middle'})}
+      else dot(x,y,()=>{cut=c;draw()})}
+    for(const c of scand){const [x,y]=txy(c);
+      if(c===scut){diamond(x,y);T(svg,x-16,y+4,'cut',{'font-weight':700,fill:'#8a5a00','text-anchor':'end'})}
+      else dot(x,y,()=>{scut=c;draw()})}
+    // the two orders, unrolled
+    const Yt=420,Yb=476,cx=k=>130+k*80;
+    T(svg,20,Yt+4,'teeth',{fill:'#5b6577','font-size':12});T(svg,20,Yb+4,'berths',{fill:'#5b6577','font-size':12});
+    T(svg,20,Yt+18,'from its cut',{fill:'#a9b0be','font-size':10});T(svg,20,Yb+18,'from its cut',{fill:'#a9b0be','font-size':10});
+    for(const l of L){S('line',{x1:cx(P.lau.indexOf(l)),y1:Yt+9,x2:cx(P.ord.indexOf(l)),y2:Yb-9,stroke:l.c,'stroke-width':l.n===sel?4:2.5},svg)}
+    const chip=(x,y,l)=>{const g=S('g',{style:'cursor:pointer'},svg);S('rect',{x:x-13,y:y-10,width:26,height:20,rx:5,fill:l.c,stroke:l.n===sel?'#1d2330':'none','stroke-width':2},g);
+      T(g,x,y+5,l.n,{'text-anchor':'middle',fill:'#fff','font-weight':700,'font-size':12});g.addEventListener('click',()=>{sel=l.n;draw()})};
+    P.lau.forEach((l,k)=>chip(cx(k),Yt,l));P.ord.forEach((l,k)=>chip(cx(k),Yb,l));
+    const grp=(a,b,s,y,ty)=>{if(b<a)return;S('line',{x1:cx(a)-14,y1:y,x2:cx(b)+14,y2:y,stroke:'#8a94a8'},svg);T(svg,(cx(a)+cx(b))/2,ty,s,{'text-anchor':'middle',fill:'#5b6577','font-size':11})};
+    grp(0,P.sN-1,'north side',Yt-15,Yt-20);grp(P.sN,L.length-P.sS-1,'facing face',Yt-15,Yt-20);grp(L.length-P.sS,L.length-1,'south side',Yt-15,Yt-20);
+    grp(0,P.nN-1,'north ring',Yb+15,Yb+27);grp(P.nN,L.length-P.nS-1,'trunk',Yb+15,Yb+27);grp(L.length-P.nS,L.length-1,'south ring',Yb+15,Yb+27);
+    // the numbers
+    $('#fX').textContent=P.x;$('#fR').textContent=P.ride.toFixed(0);$('#fN').textContent=P.nN;$('#fW').textContent=L.length-P.nN-P.nS;$('#fS').textContent=P.nS;
+    const by=L.filter(l=>l.a<420).sort((p,q)=>p.a-q.a),lo=by.filter(l=>l.a<cut).pop(),hi=by.find(l=>l.a>cut);
+    const fw=L.filter(l=>sface(l.s)==='W').sort((p,q)=>p.s-q.s),slo=fw.filter(l=>l.s<scut).pop(),shi=fw.find(l=>l.s>scut);
+    let m=`The destination's cut stands on its <b>${FN[face(cut)]}</b> side, between ${lo?'berth '+lo.n:'the north-west corner'} and ${hi?'berth '+hi.n:'the south-west corner'}; the source's on its far face, between ${slo?'tooth '+slo.n:'the south-west corner'} and ${shi?'tooth '+shi.n:'the north-west corner'}. ${P.x} crossing${P.x===1?'':'s'}, ${P.ride.toFixed(0)} mm of copper in all.`;
+    if(sel){const o=P.out[sel],l=L.find(z=>z.n===sel),f=sface(l.s),side=sideOf(l.s,scut);
+      const how=f==='E'?'its tooth faces the destination, so it starts on the trunk':f==='W'?`its tooth is on the source's far face, so a lead-in (dashed) takes it round the source's ${side==='N'?'north':'south'} corner, and <code>u</code> starts where the lead-in ends`:`its tooth is on the source's ${SFN[f]} face, and <code>u</code> counts its run along that face too`;
+      const lname=o.rg==='W'?'it ends on the trunk':`then ${o.uR.toFixed(1)} mm round the ${o.rg==='N'?'north':'south'} ring`;
+      m+=`<br>Lane <b>${sel}</b>: ${how}. <code>u</code> runs ${o.uT.toFixed(0)} mm along the trunk to H0, ${lname}`+(o.rg==='W'?`, ${o.uR.toFixed(0)} mm on to its berth`:'')+`. Its copper, sideways moves included, is ${o.cu.toFixed(1)} mm: <code>u</code> counts only the way along.`}
+    $('#fLog').innerHTML=m}
+  const both=key=>{let b=null,bk=null;for(const c of cand)for(const cs of scand){const k=key(plan(c,cs));if(bk===null||k[0]<bk[0]-1e-9||(Math.abs(k[0]-bk[0])<1e-9&&k[1]<bk[1])){b=[c,cs];bk=k}}return b};
+  // the code's own cuts: the destination's at its far side's widest gap (the ends model may choose another), the
+  // source's at the gap between its far-face teeth with the fewest crossings, the widest on a tie
+  const far=()=>{let b=null;for(const g of gaps(BER,140,280))if(!b||g.w>b.w)b=g;return b.c};
+  const srcFor=c=>{let b=null,bx=0;for(const g of gaps(TOO,460,640)){const x=plan(c,g.c).x;if(!b||x<bx||(x===bx&&g.w>b.w)){b=g;bx=x}}return b.c};
+  $('#fFar').onclick=()=>{cut=far();scut=srcFor(cut);draw()};
+  $('#fFew').onclick=()=>{[cut,scut]=both(P=>[P.x,P.ride]);draw()};
+  $('#fShort').onclick=()=>{[cut,scut]=both(P=>[P.ride,P.x]);draw()};
+  cut=far();scut=srcFor(cut);draw();
 })();
 
 /* ================= 4a. polish ================= */
@@ -1086,7 +1297,7 @@ function simplex(cost,rows){
     $('#aGate').innerHTML='gate: <b style="color:#c0392b">FAIL</b> ('+fs.length+' finding'+(fs.length>1?'s':'')+')';
     let m='';
     for(const f of fs)m+=`<div>&bull; <b>pitch</b> short by ${f.short.toFixed(2)} mm at ${f.end?`the ${f.end} array's ends`:'s = '+f.x.toFixed(0)+' (between the arrays)'} &rarr; `+(f.end?'<b style="color:#8a5a00">whole_feedback: avoid this pair of ends; the fanout re-chooses</b>':'<b style="color:#4a2a9a">history congestion here + a cut for the solve</b>')+'</div>';
-    if(ends.length&&prev===sig)m+='<div style="margin-top:6px"><b style="color:#c0392b">The same finding at the ends stands in both rounds.</b> The solve had its round and did not move it, so <code>whole_loop</code> stops here: only the fanout can.</div>';
+    if(ends.length&&prev===sig)m+='<div style="margin-top:6px"><b style="color:#c0392b">The same finding at the ends stands in both rounds.</b> The solve had its round and did not move it, so the loop stops here (ENDS CROWDED): only the fanout can.</div>';
     $('#aLog').innerHTML=m;prev=sig}
   const setp=()=>{pos=+$('#aPos').value;dep=+$('#aDep').value/100;prev=null;$('#aGate').textContent='gate: not run';$('#aLog').textContent='';draw()};
   $('#aPos').oninput=setp;$('#aDep').oninput=setp;$('#aRun').onclick=audit;
@@ -1155,7 +1366,7 @@ function simplex(cost,rows){
 (function(){
   const N=5,M=7,names='ABCDE',cols=['#d9483b','#2f6fd0','#0f8a7a','#c07a00','#8a3fc4'];
   const INST=[32,61,80,56,71];                       // seeds whose plain local search gets stuck a via above the best
-  const svg=$('#kSvg'),X0=110,X1=560,Yl=i=>34+i*52,Ys=j=>26+j*44;
+  const svg=$('#kSvg'),X0=110,X1=560,Yl=i=>50+i*52,Ys=j=>42+j*44;
   let ii=0,sl,SL,bp,start0,K,moves,kicks,fails,sel_=null,timer=null,optShown=null,ALL=null;
   function cross(o){const cur=[...Array(N).keys()],out=[];let ch=true;while(ch){ch=false;for(let i=0;i<N-1;i++)if(o[cur[i]]>o[cur[i+1]]){out.push({a:cur[i],b:cur[i+1]});[cur[i],cur[i+1]]=[cur[i+1],cur[i]];ch=true}}return out}
   function minVias(cr,el){let best=1e9;const last=sl.slice();

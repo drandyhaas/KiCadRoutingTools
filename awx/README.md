@@ -555,8 +555,13 @@ python3 route_bus.py tmp/zynq/planes.kicad_pcb tmp/zynq/bus.kicad_pcb --src U1 -
 Its last line is the grade:
 
 ```
-BUS U1->U2 K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=0|1 secs=.. | on the board: ...
+BUS U1->U2 K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=0|1 secs=.. | on the board: ... walled=.. secs=..
 ```
+
+`walled=` counts the arrays' other balls the step walled in (#1348): reachable
+on the board as it came, and from nowhere once the locked lanes are laid, at
+the fab ladder's finest rung -- each one's net ships open. They are named in
+the log and in the summary's `walled`.
 
 It exits 0 when every bus net it hands on is connected and clean (those it put
 back are in `refused`), and 1 when it hands on none. A bus net it does not hand
@@ -2035,9 +2040,8 @@ channels first, and the other escapes leave round it.
    summary, exit codes by outcome); the GUI calling the same function on a
    worker thread; the wiring CLAUDE.md asks for (plan executor action,
    `reset_params_to_defaults`, settings persistence, `manifest_to_plan`,
-   `test_cli_postpass_coverage`, a parity gate); ortools optional in
-   `deps_check`; the `lane_search` and `pair_search` crate changes' release
-   binaries.
+   `test_cli_postpass_coverage`, a parity gate); the `lane_search` and
+   `pair_search` crate changes' release binaries.
 10. **The gate.** The full chain with and without the step on the corpus's
     array-pair DDR boards (allwinner_h3_ddr3, zynq_ad9364, orangecrab, keks,
     ulx5m_gatemate, sechzig): unrouted plus broken nets and real DRC not
@@ -2046,6 +2050,12 @@ channels first, and the other escapes leave round it.
 
 **Later, once the basics route real boards:**
 
+- **A walled ball kept a way out, not only named.** The step names the
+  arrays' other balls it walls in (`walled_grade`, #1348): each a stub to the
+  array's face that the lanes laid after it close round. The whole route
+  could count each as an open net in a round's grade and hold, the next
+  round, a stand-in via at its stub's end for the fanout and the lanes, as
+  `tie_stand_ins` holds a tie via's site.
 - **Length and time matching inside the step:** group spreads and pair skews
   in the judge, room for meanders in the geometry, the production matching
   on the step's own copper. The room as the geometry's own: each lane's
