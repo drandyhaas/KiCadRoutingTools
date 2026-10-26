@@ -1065,7 +1065,8 @@ never infers what the board should do: the spec says so, and the audit
 measures the copper. Each finding gives `measured`, `limit`, `units`,
 `where`, `items` and `limit_from` (the spec, the board's own files, or
 `fab_tiers`), and `fix`: the step that fixes it, such as a `route.py` or
-`route_diff.py` command for the net, the track width or via count that
+`route_diff.py` command on the audited board that re-routes the net
+(`--force-reroute`, the net named as a literal pattern), the track width or via count that
 carries the current, or the spec entry to correct. `plan-pcb-placement`'s
 `grade.py` passes a spec file as `--audit-spec FILE`.
 
@@ -1121,9 +1122,12 @@ layer that is not one of the via's own ends, so a via's steps add up to its
 whole barrel, or the board thickness
 shared out by layer order when the stackup does not give it). A pour is its
 fill as `plane_fill_model` predicts it, cut into blocks of about 0.2 mm
-joined at one sheet resistance per square; a pad feeds it over its whole
-area, thermal spokes are not modelled, and overlapping pours of the net on
-one layer are one sheet. When the current runs only through pour copper,
+joined at one sheet resistance per square (one node per piece of fill in a
+block, so a block does not bridge a slot); a pad feeds it over its whole
+area, a track lying in its own net's fill is not counted again, thermal
+spokes are not modelled, and overlapping pours of the net on one layer are
+one sheet. Without scipy a network of more than 2000 unknowns is not judged,
+and the reason asks for scipy. When the current runs only through pour copper,
 `current.capacity` is not judged. `decoupling.path` walks a pour block to
 block with diagonals, so a path across one reads at most about 8 % long.
 Every pad of a named source or load conducts, so a part whose pad number

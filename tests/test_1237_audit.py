@@ -66,6 +66,13 @@ Synthetic boards whose answers are computed independently:
    (`fix`); each tool and flag a fix names exists in that tool's --help; a
    capacity fix's width carries the current, or no track up to 20 mm does and
    the fix is a pour.
+14. The review of sections 12-13: a capacity fix, run as printed on the
+   audited board, re-routes the net and its output passes; a fix names a
+   bracketed net as a literal pattern; a track over its own pour is not
+   counted twice; without scipy a network over the dense cap is not judged
+   (asking for scipy) and a small one reads as with scipy; decoupling builds
+   one graph per net; coarse blocks do not bridge a slot; a track ending
+   just short of the pour joins it.
 
     python3 tests/test_1237_audit.py
 """
@@ -541,6 +548,109 @@ def fix_cases():
           caps and all(ok), str([f['fix'] for f in caps][:2]))
 
 
+def second_pour_review_cases():
+    import re
+    import shlex
+    import fnmatch
+    # (a) a capacity fix, run as printed, fixes the board
+    thin = board(pad('J1', 100, 100, 3, '/A') + pad('U1', 110, 100, 3, '/A')
+                 + seg(100, 100, 110, 100, 3, w=0.2), name='thin')
+    cur = {'currents': {'/A': {'amps': 3, 'source': 'J1.1', 'loads': ['U1.1']}}}
+    rc, doc, _o = run(thin, cur)
+    fix = get(doc, 'current.capacity', '/A')['findings'][0]['fix']
+    cmd = shlex.split(re.search(r'(py_router/\S+\.py .*)$', fix).group(1))
+    from run_utils import tool as tool_path
+    r = subprocess.run([sys.executable, tool_path(os.path.basename(cmd[0]))] + cmd[1:],
+                       cwd=WORK, capture_output=True, text=True)
+    out = thin[:-len('.kicad_pcb')] + '_routed.kicad_pcb'
+    rc2, doc2, _o = run(out, cur) if os.path.isfile(out) else (None, None, '')
+    check('14. a capacity fix, run as printed, re-routes the net and passes',
+          r.returncode == 0 and doc2 is not None
+          and get(doc2, 'current.capacity', '/A')['status'] == 'passed',
+          fix + ' | ' + r.stdout[-300:])
+    # (b) a bracketed net is named literally
+    f = audit_mod._FIXES['net.min_width']('/LED[0]', {'limit': 0.4})
+    pat = shlex.split(re.search(r'--power-nets (\S+)', f).group(1))[0]
+    check('14. a fix names a bracketed net as a literal pattern',
+          fnmatch.fnmatchcase('/LED[0]', pat) and not fnmatch.fnmatchcase('/LED0', pat), f)
+    # (c) a track over its own pour
+    ends = pad('J1', 100.5, 100, 3, '/A', size='1 4') + pad('U1', 119.5, 100, 3, '/A', size='1 4')
+    spec = {'currents': {'/A': {'amps': 1, 'source': 'J1.1', 'loads': ['U1.1'],
+                                'max_drop_mv': 1000}}}
+    strip = RHO_OHM_MM * 18 / (4 * T_CU) * 1e3
+    rc, doc, _o = run(board(ends + zone(3, '/A', 100, 98, 120, 102)
+                            + seg(100.5, 100, 119.5, 100, 3, w=4), name='both'), spec)
+    d = get(doc, 'current.drop', '/A')
+    check(f'14. a track over its own pour is not counted twice ({strip:.3f} mV)',
+          abs(d['measured']['U1.1'] - strip) < 0.01 * strip, str(d))
+    # (d) without scipy
+    block = ("import sys; sys.modules['scipy'] = None; "
+             "import os, runpy; sys.argv = sys.argv[1:]; "
+             "sys.path.insert(0, os.path.dirname(sys.argv[0])); "
+             "runpy.run_path(sys.argv[0], run_name='__main__')")
+
+    def run_noscipy(path, sp):
+        js = os.path.join(WORK, 'ns.json')
+        if os.path.exists(js):
+            os.remove(js)
+        try:
+            r = subprocess.run([sys.executable, '-c', block, TOOL, path, '--json', js,
+                                '--spec', spec_file(sp, 'ns')], capture_output=True, text=True,
+                               timeout=300)
+        except subprocess.TimeoutExpired:
+            return 'timed out after 300 s'
+        return json.load(open(js)) if r.returncode in (0, 4) else r.stdout + r.stderr
+    big = board(pad('J1', 90.5, 100, 3, '/A', size='1 4') + pad('U1', 129.5, 100, 3, '/A', size='1 4')
+                + zone(3, '/A', 90, 85, 130, 115), name='bigpour')
+    doc = run_noscipy(big, spec)
+    c = get(doc, 'current.drop', '/A') if isinstance(doc, dict) else None
+    check('14. without scipy a pour over the dense cap is not judged, asking for scipy',
+          c is not None and c['status'] == 'not_judged' and 'scipy' in c['reason'], str(c or doc)[-300:])
+    two = board(pad('J1', 100, 100, 3, '/A') + pad('U1', 110, 100, 3, '/A')
+                + seg(100, 100, 110, 100, 3), name='twopad')
+    want = RHO_OHM_MM * 10 / (0.5 * T_CU) * 1e3
+    doc = run_noscipy(two, spec)
+    c = get(doc, 'current.drop', '/A') if isinstance(doc, dict) else None
+    check(f'14. without scipy a small network reads as with it ({want:.3f} mV)',
+          c is not None and abs(c['measured']['U1.1'] - want) < 0.01, str(c or doc)[-300:])
+    # (e) one graph per net
+    calls = []
+    real = audit_mod._path_graph
+    audit_mod._path_graph = lambda pcb, nid: calls.append(nid) or real(pcb, nid)
+    try:
+        pcb = parse_kicad_pcb(board(pad('C1', 100, 100, 3, '/A') + pad('U1', 110, 100, 3, '/A')
+                                    + pad('U1', 110, 102, 3, '/A', num='2')
+                                    + zone(3, '/A', 98, 98, 112, 104), name='twopin'))
+        audit_mod.decoupling_checks(pcb, {'decoupling': {'C1': {'ic': 'U1', 'pins': ['1', '2'],
+                                                                'max_distance_mm': 20}}})
+    finally:
+        audit_mod._path_graph = real
+    check('14. decoupling builds one graph per net, not per pin', calls == [3], str(calls))
+    # (f) coarse blocks do not bridge a slot of one fill component
+    slot = board(ends + zone(3, '/A', 100, 98, 120, 102) + seg(110, 97, 110, 101.6, 4, w=0.1),
+                 name='slot')
+    pcb = parse_kicad_pcb(slot)
+    keep = dc_network.POUR_MAX_NODES
+    dc_network.POUR_MAX_NODES = 150                 # forces ~0.75 mm blocks
+    try:
+        pads = pcb.pads_by_net[3]
+        net = dc_network.build(pcb, 3, {t: [p for p in pads if p.component_ref == t[:2]]
+                                        for t in ('J1.1', 'U1.1')})
+        pot, _c, _u = dc_network.Solver(net, net.terminal_node['J1.1']).solve(
+            {net.terminal_node['U1.1']: -1.0})
+        got = -pot[net.terminal_node['U1.1']] * 1e3
+    finally:
+        dc_network.POUR_MAX_NODES = keep
+    check(f'14. coarse blocks do not bridge a slot ({got:.3f} mV, plain strip {strip:.3f})',
+          got > 1.5 * strip, net.assumptions[-1])
+    # (g) a track ending just short of the pour's edge joins it
+    near = board(pad('J1', 95, 100, 3, '/A') + pad('U1', 119.5, 100, 3, '/A', size='1 4')
+                 + seg(95, 100, 99.94, 100, 3) + zone(3, '/A', 100, 98, 120, 102), name='near')
+    rc, doc, _o = run(near, spec)
+    check('14. a track ending just short of the pour joins it',
+          get(doc, 'current.drop', '/A')['status'] == 'passed', str(get(doc, 'current.drop', '/A')))
+
+
 def plain_board():
     return os.path.join(WORK, 'plain.kicad_pcb')
 T_CU = 0.035
@@ -732,6 +842,7 @@ def main():
     second_fix_review_cases()
     full_review_cases()
     pour_cases()
+    second_pour_review_cases()
     fix_cases()
 
     print(f"\n{'ALL PASS' if not FAILS else '%d FAIL' % len(FAILS)}")

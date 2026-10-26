@@ -18,7 +18,8 @@ merged into one node, and so is every pad of one named terminal.
 
 A pour is in the network as `plane_fill_model` predicts its fill: the fill
 raster is cut into square blocks of about POUR_CELL_MM (one node per block
-and fill component, so separate islands never merge), and two neighbouring
+and piece of fill connected inside it, so separate islands never merge and a
+block straddling a slot does not bridge it), and two neighbouring
 blocks of one component are joined by
 
     pour edge       (rho / t_layer) * k / n
@@ -26,9 +27,11 @@ blocks of one component are joined by
 where k is the block's side in raster cells and n the raster cell pairs of
 that component across the shared side (a full block: one square of sheet
 resistance). Every via, pad and track node of the net on the pour's layer
-joins the block under it. The fill's own approximations carry over: thermal
-spokes are not modelled (a pad joins the pour solidly), and copper narrower
-than a block inside one component conducts across the block.
+joins the block under it, and a track piece lying wholly in the fill is left
+out (the fill already counts it). The fill's own approximations carry over: thermal
+spokes are not modelled (a pad joins the pour solidly), and each piece of a
+block is one node (without scipy, a block is one node per fill component, so a
+slot narrower than a block can be bridged).
 
 `solve` injects currents at nodes, holds one node at 0 V, and returns every
 node's potential and every edge's current. scipy's sparse solver is used when
@@ -108,17 +111,16 @@ def pour_edges(pcb, net_id: int, nodes, offset: int, metric: str = 'ohm',
             mask &= held < 0
         if not mask.any():
             continue
-        nbj = (ny + k - 1) // k
         ii, jj = np.nonzero(mask)
-        code = ((ii // k) * nbj + (jj // k)).astype(np.int64) * (int(labels.max()) + 1) \
-            + labels[ii, jj]
-        uniq, inv = np.unique(code, return_inverse=True)
         coarse = np.full(labels.shape, -1, dtype=np.int64)
-        coarse[ii, jj] = inv
-        n = len(uniq)
-        lab = uniq % (int(labels.max()) + 1)
-        blk = uniq // (int(labels.max()) + 1)
-        bi, bj = blk // nbj, blk % nbj
+        coarse[ii, jj] = _block_pieces(mask, ii, jj, k, labels)
+        n = int(coarse.max()) + 1
+        bi = np.zeros(n, dtype=np.int64)
+        bj = np.zeros(n, dtype=np.int64)
+        lab = np.zeros(n, dtype=np.int64)
+        bi[coarse[ii, jj]] = ii // k
+        bj[coarse[ii, jj]] = jj // k
+        lab[coarse[ii, jj]] = labels[ii, jj]
         side = k * m.cell
         sheet = rho_ohm_mm / _copper_mm(pcb, layer)
 
@@ -177,17 +179,50 @@ def pour_edges(pcb, net_id: int, nodes, offset: int, metric: str = 'ohm',
             i, j = int((x - m.x0) / m.cell), int((y - m.y0) / m.cell)
             if not (0 <= i < nx and 0 <= j < ny):
                 continue
-            win = coarse[max(0, i - reach):i + reach + 1, max(0, j - reach):j + reach + 1]
-            hit = win[win >= 0]
-            if hit.size:
-                c = coarse[i, j] if coarse[i, j] >= 0 else int(hit.min())
-                joins.append((gid, nxt + int(c), 0.0, None, None, None))
+            i0, j0 = max(0, i - reach), max(0, j - reach)
+            win = coarse[i0:i + reach + 1, j0:j + reach + 1]
+            wi, wj = np.nonzero(win >= 0)
+            if wi.size:
+                # the fill cell nearest the node (raster order breaks a tie)
+                d2 = (cxs[i0 + wi] - x) ** 2 + (cys[j0 + wj] - y) ** 2
+                c = int(win[wi[int(np.argmin(d2))], wj[int(np.argmin(d2))]])
+                joins.append((gid, nxt + c, 0.0, None, None, None))
         built.append((layer, m, coarse, nxt))
         nxt += n
     notes.append('pours as plane_fill_model predicts their fill, in blocks of '
                   '%s mm; thermal spokes are not modelled'
                   % '/'.join('%g' % v for v in sorted(sizes)))
     return edges, joins, notes
+
+
+def _block_pieces(mask, ii, jj, k, labels):
+    """The node id of each fill cell (ii, jj): one node per block of k x k
+    cells and per piece of fill that is connected INSIDE that block, so a
+    block straddling a slot of one fill component is two nodes, not a bridge.
+    Without scipy, one node per block and fill component."""
+    import numpy as np
+    try:
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+    except ImportError:
+        nbj = (mask.shape[1] + k - 1) // k
+        code = ((ii // k) * nbj + (jj // k)).astype(np.int64) * (int(labels.max()) + 1) \
+            + labels[ii, jj]
+        return np.unique(code, return_inverse=True)[1]
+    idx = np.full(mask.shape, -1, dtype=np.int64)
+    idx[ii, jj] = np.arange(len(ii))
+    rows, cols = [], []
+    same_i = (np.arange(mask.shape[0] - 1) // k) == (np.arange(1, mask.shape[0]) // k)
+    same_j = (np.arange(mask.shape[1] - 1) // k) == (np.arange(1, mask.shape[1]) // k)
+    for a, b, same in ((idx[:-1, :], idx[1:, :], same_i[:, None]),
+                       (idx[:, :-1], idx[:, 1:], same_j[None, :])):
+        ok = (a >= 0) & (b >= 0) & same
+        rows.append(a[ok])
+        cols.append(b[ok])
+    rows, cols = np.concatenate(rows), np.concatenate(cols)
+    g = coo_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)),
+                   shape=(len(ii), len(ii)))
+    return connected_components(g, directed=False)[1].astype(np.int64)
 
 
 def _pad_cells(pad, cxs, cys, coarse):
@@ -207,6 +242,22 @@ def _pad_cells(pad, cxs, cys, coarse):
     inside = (np.abs(dx * ca + dy * sa) <= hx) & (np.abs(-dx * sa + dy * ca) <= hy)
     sub = coarse[i[0]:i[-1] + 1, j[0]:j[-1] + 1][inside]
     return sub[sub >= 0]
+
+
+def pour_covers(pcb, net_id: int):
+    """covered(layer, x, y): does the net's predicted fill on `layer` hold
+    the point? The fill already counts the net's own tracks on that layer, so
+    a track piece lying in it is that copper a second time."""
+    from plane_fill_model import get_fill_models
+    by_layer = get_fill_models(pcb, net_id)
+
+    def covered(layer, x, y):
+        for m in by_layer.get(layer, ()):
+            i, j = int((x - m.x0) / m.cell), int((y - m.y0) / m.cell)
+            if 0 <= i < m.nx and 0 <= j < m.ny and m.labels[i, j] > 0:
+                return True
+        return False
+    return covered
 
 
 def pour_layers(pcb, net_id: int) -> List[str]:
@@ -300,6 +351,18 @@ def build(pcb, net_id: int, terminals: Dict[str, list],
     hubs = {h: p for p in pads for h in (pad_nodes.get(id(p)) or [])}
     pour_raw, pour_joins, pour_notes = pour_edges(pcb, net_id, nodes, len(nodes),
                                                   pad_hubs=hubs)
+    if pour_notes:
+        # a track piece lying wholly in its own net's fill is copper the pour
+        # already carries: keep its ends (they join the pour), drop its resistor
+        covered = pour_covers(pcb, net_id)
+
+        def inside(n1, n2):
+            (x1, y1, layer), (x2, y2, _l) = nodes[n1], nodes[n2]
+            steps = max(1, int(math.hypot(x2 - x1, y2 - y1) / 0.04))
+            return all(covered(layer, x1 + (x2 - x1) * t / steps, y1 + (y2 - y1) * t / steps)
+                       for t in range(steps + 1))
+        raw = [r for r in raw if not (r[3] == 'seg' and r[4].layer in poured
+                                      and inside(r[0], r[1]))]
     raw += pour_raw + pour_joins
 
     parent = {}
@@ -368,11 +431,17 @@ def build(pcb, net_id: int, terminals: Dict[str, list],
     return net
 
 
+#: Without scipy the matrix is dense: at most this many unknowns, inverted
+#: once (about 30 MB); a bigger network is not solved (Solver.unavailable).
+DENSE_MAX_NODES = 2000
+
+
 class Solver:
     """`net` with `ground` held at 0 V, its conductance matrix factored once,
     so each set of injections costs one back-substitution (#1237: a list of
-    loads is one solve per load). scipy's sparse LU when it imports, numpy's
-    dense solve otherwise."""
+    loads is one solve per load). scipy's sparse LU when it imports; without
+    scipy a dense inverse up to DENSE_MAX_NODES unknowns, and above that
+    `unavailable` says why and `solve` must not be called."""
 
     def __init__(self, net: Network, ground: int):
         import numpy as np
@@ -397,6 +466,7 @@ class Solver:
         g = 1.0 / np.array([e.ohm for e in net.edges], dtype=float) if net.edges else np.zeros(0)
         self.g = g
         self._solve = None
+        self.unavailable = None
         if not live:
             return
         pa, pb = self.pos[self.ea], self.pos[self.eb]
@@ -413,9 +483,16 @@ class Solver:
             from scipy.sparse.linalg import factorized
             self._solve = factorized(csc_matrix((vals, (rows, cols)), shape=(size, size)))
         except ImportError:
+            if size > DENSE_MAX_NODES:
+                self.unavailable = (
+                    f'scipy is not installed, and the network has {size} unknowns '
+                    f'(the dense fallback takes {DENSE_MAX_NODES}): install scipy '
+                    f'(pip install scipy) to judge it')
+                return
             m = np.zeros((size, size))
             np.add.at(m, (rows, cols), vals)
-            self._solve = lambda rhs, _m=m: np.linalg.solve(_m, rhs)
+            inv = np.linalg.inv(m)
+            self._solve = lambda rhs, _inv=inv: _inv @ rhs
 
     def solve(self, injections: Dict[int, float]):
         """(potential, currents, unreachable): `potential` a float array (nan

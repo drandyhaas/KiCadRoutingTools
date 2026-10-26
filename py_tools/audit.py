@@ -70,8 +70,8 @@ Checks that need no spec always run: check_weird's advisory categories
 A check reports "passed", "failed" (with findings) or "not_judged" (with the
 reason it could not be judged, never a pass). Every failure is reported, and
 each failed finding names the step that fixes it in `fix` (a router command
-with this net's flags, a computed width or via count, or the spec entry to
-correct). A
+on this board that re-routes the net with --force-reroute, a computed width
+or via count, or the spec entry to correct). A
 name the spec gives that the board does not have (a net, a pad, a part) is a
 failed finding about the spec, never not_judged; not_judged is for copper the
 board does not have yet (an unrouted net, a load not joined to its source).
@@ -230,9 +230,30 @@ def load_spec(path: Optional[str]) -> dict:
 # ---------------------------------------------------------------------------
 
 def _q(net):
-    """A net name as a shell word."""
+    """A net name as a shell word naming exactly that net for a router's
+    pattern flags: glob characters bracketed and a leading '!' escaped, as
+    board_score's _glob_literal does."""
+    import re
     import shlex
-    return shlex.quote(str(net))
+    lit = re.sub(r'([*?\[])', r'[\1]', str(net))
+    return shlex.quote('\\' + lit if lit.startswith('!') else lit)
+
+
+#: Stands for the audited board in a fix until audit() names it.
+_BOARD = '<BOARD>'
+
+
+def _reroute(nets, *flags):
+    """route.py re-routing `nets` from scratch (an already-routed net is
+    skipped without --force-reroute)."""
+    names = ' '.join(_q(n) for n in nets)
+    return ' '.join(['py_router/route.py', _BOARD, '--nets', names, '--force-reroute', *flags])
+
+
+def _reroute_pair(nets, *flags):
+    names = ' '.join(_q(n) for n in nets)
+    return ' '.join(['py_router/route_diff.py', _BOARD, '--nets', names, '--force-reroute',
+                     *flags])
 
 
 #: The step that fixes a failed finding, by check id: f(subject, finding).
@@ -240,41 +261,36 @@ def _q(net):
 #: spec error) keeps it.
 _FIXES = {
     'weird.off_angle_corner': lambda s, f: (
-        f"re-route {f['items'][0]}: py_router/route.py --nets {_q(f['items'][0])} "
-        f"--rip-existing-nets {_q(f['items'][0])}"),
+        f"re-route {f['items'][0]}: {_reroute(f['items'][:1])}"),
     'weird.short_fragment': lambda s, f: _FIXES['weird.off_angle_corner'](s, f),
     'weird.off_centre_via_end': lambda s, f: _FIXES['weird.off_angle_corner'](s, f),
     'via.mask_contact': lambda s, f: (
         f"move the via of {f['items'][0]} out of pad {f['items'][1]}'s mask opening, "
-        f"or re-route it: py_router/route.py --nets {_q(f['items'][0])} "
-        f"--rip-existing-nets {_q(f['items'][0])}"),
+        f"or re-route it: {_reroute(f['items'][:1])}"),
     'via.mask_web': lambda s, f: (
         f"move the via of {f['items'][0]} {f['limit']} mm or more from pad "
-        f"{f['items'][1]}'s mask opening, or re-route it: py_router/route.py --nets "
-        f"{_q(f['items'][0])} --rip-existing-nets {_q(f['items'][0])}"),
+        f"{f['items'][1]}'s mask opening, or re-route it: {_reroute(f['items'][:1])}"),
     'pair.impedance': lambda s, f: (
-        f"re-route the pair at its impedance: py_router/route_diff.py --nets "
-        f"{' '.join(_q(n) for n in f['items'])} --impedance {sum(f['limit']) / 2:g}"),
+        f"re-route the pair at its impedance: "
+        f"{_reroute_pair(f['items'], '--impedance', '%g' % (sum(f['limit']) / 2))}"),
     'pair.skew': lambda s, f: (
-        f"length-match the pair: py_router/route_diff.py --nets "
-        f"{' '.join(_q(n) for n in f['items'])} --diff-pair-intra-match"),
+        f"length-match the pair: {_reroute_pair(f['items'], '--diff-pair-intra-match')}"),
     'pair.uncoupled': lambda s, f: (
-        f"re-route the pair coupled: py_router/route_diff.py --nets "
-        f"{' '.join(_q(n) for n in f['items'])}"),
+        f"re-route the pair coupled: {_reroute_pair(f['items'])}"),
     'pair.reference': lambda s, f: (
         f"route {f['items'][0]} over unbroken copper of its reference pour on "
         f"{f.get('ref_layer') or 'the reference layer'}, or move what splits the pour there"),
     'length.match': lambda s, f: (
-        f"length-match the group: py_router/route.py --nets "
-        f"{' '.join(_q(n) for n in f['items'])} --length-match-group "
-        f"{' '.join(_q(n) for n in f['items'])} --length-match-tolerance {f['limit']:g}"),
+        f"length-match the group: " + _reroute(
+            f['items'], '--length-match-group', ' '.join(_q(n) for n in f['items']),
+            '--length-match-tolerance', '%g' % f['limit'])),
     'net.min_width': lambda s, f: (
-        f"re-route {s} at its width: py_router/route.py --nets {_q(s)} "
-        f"--rip-existing-nets {_q(s)} --power-nets {_q(s)} --power-nets-widths {f['limit']:g}"),
+        f"re-route {s} at its width: "
+        f"{_reroute([s], '--power-nets', _q(s), '--power-nets-widths', '%g' % f['limit'])}"),
     'current.drop': lambda s, f: (
-        f"lower the path's resistance: widen {s} (py_router/route.py --power-nets {_q(s)} "
-        f"--power-nets-widths W), or carry it on a pour (py_router/route_planes.py "
-        f"--nets {_q(s)} --plane-layers LAYER)"),
+        f"lower the path's resistance: widen {s} "
+        f"({_reroute([s], '--power-nets', _q(s), '--power-nets-widths', 'W')}), or carry it "
+        f"on a pour (py_router/route_planes.py {_BOARD} --nets {_q(s)} --plane-layers LAYER)"),
     'decoupling.path': lambda s, f: (
         f"move {s} closer to {f['items'][1]} and re-route {f['items'][2]}"
         if f.get('units') == 'mm' else
@@ -760,6 +776,10 @@ def current_checks(pcb, spec, board_thickness_mm=None):
         peak = np.zeros(len(net.edges))  # each edge's worst |current|
         drops, unreachable = {}, set()
         solver = dc_network.Solver(net, ground) if ground is not None else None
+        if solver is not None and solver.unavailable:
+            out += [_check(cid, name, reason=solver.unavailable,
+                           assumptions=net.assumptions) for cid in wanted]
+            continue
         for sc in scenarios:
             inj = {}
             for ld, a in sc.items():
@@ -802,11 +822,11 @@ def current_checks(pcb, spec, board_thickness_mm=None):
                         items=[name],
                         limit_from=f'spec: currents.{name}.amps, max_rise_c; '
                                    f'IPC-2152 form (plane_resistance)',
-                        fix=(f'widen {name} to {need:.3f} mm or more: py_router/route.py '
-                             f'--nets {_q(name)} --rip-existing-nets {_q(name)} '
-                             f'--power-nets {_q(name)} --power-nets-widths {need:.3f}'
+                        fix=(f'widen {name} to {need:.3f} mm or more: ' + _reroute(
+                                [name], '--power-nets', _q(name), '--power-nets-widths',
+                                '%.3f' % need)
                              if need else f'carry {name} on a pour: py_router/route_planes.py '
-                                          f'--nets {_q(name)} --plane-layers LAYER')))
+                                          f'{_BOARD} --nets {_q(name)} --plane-layers LAYER')))
             else:
                 rating = calculate_max_current_ipc2152(
                     math.pi * (o.drill or 0.0), plating / (OZ_TO_METERS * 1e3), rise)
@@ -819,9 +839,8 @@ def current_checks(pcb, spec, board_thickness_mm=None):
                         limit_from=f'spec: currents.{name}.amps, max_rise_c, via_plating_mm; '
                                    f'IPC-2152 form (plane_resistance)',
                         fix=(f'carry it on {math.ceil(i_a / rating)} vias of drill '
-                             f'{o.drill:.3f} mm in parallel, or a larger drill '
-                             f'(py_router/route.py --via-drill)' if rating > 0 else
-                             'give the via a drill (py_router/route.py --via-drill)')))
+                             f'{o.drill:.3f} mm in parallel, or re-route {name} with a '
+                             f'larger drill: ' + _reroute([name], '--via-drill', 'D'))))
         note = sorted(unreachable)
         reason = f'load(s) {note} not joined to the source by copper' if note else None
         common = {'assumptions': net.assumptions}
@@ -847,29 +866,40 @@ def current_checks(pcb, spec, board_thickness_mm=None):
 # Decoupling
 # ---------------------------------------------------------------------------
 
-def _shortest_path(pcb, net_id, pads_a, pads_b):
-    """(length mm, via count) of the shortest copper path from any of `pads_a`
-    to any of `pads_b` (one net): tracks, via barrels, and the net's pours
-    walked block to block (`dc_network.pour_edges`, diagonals included). None
-    when no copper joins them. A via counts once however many layer steps of
-    its barrel the path walks."""
+def _path_graph(pcb, net_id):
+    """(adjacency, pad_nodes) of one net's copper for path length: tracks,
+    via barrels and the net's pours walked block to block
+    (`dc_network.pour_edges`, diagonals included), with every pad of the net
+    attached. None when the net has no copper. Built once per net and
+    walked once per pin (`_shortest_path`)."""
     from net_queries import _net_track_graph
     from dc_network import pour_edges, pour_layers
+    pads = list(pcb.pads_by_net.get(net_id, ()) or ())
     edges, nodes = [], []
-    graph = _net_track_graph(pcb, net_id, list(pads_a) + list(pads_b), edges=edges,
+    graph = _net_track_graph(pcb, net_id, pads, edges=edges,
                              hub_layers=pour_layers(pcb, net_id), nodes=nodes)
     if graph is None:
         return None
     _adj, pad_nodes = graph
-    pad_hubs = {h: p for p in list(pads_a) + list(pads_b) for h in (pad_nodes.get(id(p)) or [])}
+    pad_hubs = {h: p for p in pads for h in (pad_nodes.get(id(p)) or [])}
     extra, joins, _notes = pour_edges(pcb, net_id, nodes, len(nodes), metric='mm',
                                       pad_hubs=pad_hubs)
-    edges += extra + joins
     adj = {}
-    for n1, n2, w, kind, obj, _span in edges:
+    for n1, n2, w, kind, obj, _span in edges + extra + joins:
         tag = id(obj) if kind == 'via' else None
         adj.setdefault(n1, []).append((n2, w, kind, tag))
         adj.setdefault(n2, []).append((n1, w, kind, tag))
+    return adj, pad_nodes
+
+
+def _shortest_path(graph, pads_a, pads_b):
+    """(length mm, via count) of the shortest path over `_path_graph`'s
+    `graph` from any of `pads_a` to any of `pads_b`, or None when no copper
+    joins them. A via counts once however many layer steps of its barrel the
+    path walks."""
+    if graph is None:
+        return None
+    adj, pad_nodes = graph
     starts = [h for p in pads_a for h in (pad_nodes.get(id(p)) or [])]
     goals = {h for p in pads_b for h in (pad_nodes.get(id(p)) or [])}
     # state = (node, the via whose barrel the path is in, or None)
@@ -899,6 +929,7 @@ def _shortest_path(pcb, net_id, pads_a, pads_b):
 
 def decoupling_checks(pcb, spec):
     out = []
+    graphs = {}                         # net id -> _path_graph, shared by every pin
     for cap, entry in spec.get('decoupling', {}).items():
         fp = pcb.footprints.get(cap)
         ic = entry['ic']
@@ -922,7 +953,9 @@ def decoupling_checks(pcb, spec):
                     f'{cap} has no pad on the net of {ic}.{pin} ({ic_pads[0].net_name})',
                     [cap, f'{ic}.{pin}'], f'spec: decoupling.{cap}'))
                 continue
-            got = _shortest_path(pcb, net_id, cap_pads, ic_pads)
+            if net_id not in graphs:
+                graphs[net_id] = _path_graph(pcb, net_id)
+            got = _shortest_path(graphs[net_id], cap_pads, ic_pads)
             if got is None:
                 problems.append(f'{cap} and {ic}.{pin} are not joined by copper')
                 continue
@@ -1024,6 +1057,11 @@ def audit(board_path, spec, baseline_path=None):
     checks += width_checks(pcb, spec, board_path)
     checks += current_checks(pcb, spec, board_thickness_mm(board_path))
     checks += decoupling_checks(pcb, spec)
+    import shlex
+    for c in checks:
+        for f in c.get('findings', ()):
+            if 'fix' in f:
+                f['fix'] = f['fix'].replace(_BOARD, shlex.quote(board_path))
     summary = {s: sum(1 for c in checks if c['status'] == s)
                for s in ('passed', 'failed', 'not_judged')}
     return {'board': os.path.abspath(board_path), 'summary': summary, 'checks': checks}
