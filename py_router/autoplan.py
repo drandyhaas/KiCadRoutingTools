@@ -165,11 +165,11 @@ def pad_shape(fp):
     left once each exposed pad (a pad over 3x the median area) and anything
     inside one (its sub-pads) is set aside.
 
-    grid: >= 3 distinct columns and rows, at least one pad off the bounding
-    edges, and the columns and rows each on a lattice of their own pitch: the
-    commonest spacing between neighbouring pads of one row (x) or one column
-    (y). The part's pitch is the finer of the two; depth is rows from the
-    edge to the centre.
+    grid: >= 3 rows and >= 3 columns of 3 or more pads, at least one pad off
+    the bounding edges, and the columns and rows each on a lattice of their
+    own pitch: the commonest spacing between neighbouring pads of one row (x)
+    or one column (y), the two within 2x of each other. The part's pitch is
+    the finer of the two; depth is rows from the edge to the centre.
     perimeter: every pad on one of the four bounding edges, at least two on
     each side away from its corners. The pitch is the median spacing between neighbours along a side.
     Anything else -- two rows (a connector, a DFN, a transformer), one row, a
@@ -184,21 +184,33 @@ def pad_shape(fp):
     def under(p, q):
         r = max(q.size_x, q.size_y) / 2
         return abs(p.local_x - q.local_x) <= r and abs(p.local_y - q.local_y) <= r
-    pts = sorted({(round(p.local_x, 3), round(p.local_y, 3)) for p in pads
-                  if p not in big and not any(under(p, q) for q in big)})
+    kept = [p for p in pads if p not in big and not any(under(p, q) for q in big)]
+    tol = 0.02
+
+    def snap(vals):
+        # Library coordinates jitter by a micron or two (IMX283: -9.001 and
+        # -9.0 are one column); within tol, a value joins the one before it.
+        out = {}
+        for v in sorted(vals):
+            prev = out[max(out)] if out else None
+            out[v] = prev if prev is not None and v - prev <= tol else v
+        return out
+    sx = snap({p.local_x for p in kept})
+    sy = snap({p.local_y for p in kept})
+    pts = sorted({(sx[p.local_x], sy[p.local_y]) for p in kept})
     if len(pts) < 6:
         return None
     xs = sorted({x for x, _ in pts})
     ys = sorted({y for _, y in pts})
     x0, x1, y0, y1 = xs[0], xs[-1], ys[0], ys[-1]
-    tol = 0.02
 
     def steps(vals):
         v = sorted(vals)
         return [b - a for a, b in zip(v, v[1:])]
 
     def on_lattice(vals, pitch):
-        return all(abs(d / pitch - round(d / pitch)) < 0.1 for d in steps(vals))
+        return all(round(d / pitch) >= 1 and abs(d / pitch - round(d / pitch)) < 0.1
+                   for d in steps(vals))
 
     interior = [(x, y) for x, y in pts
                 if x0 + tol < x < x1 - tol and y0 + tol < y < y1 - tol]
@@ -210,9 +222,15 @@ def pad_shape(fp):
             cols.setdefault(x, []).append(y)
         # Each axis has its own pitch (LPDDR packages: 0.8 x 0.65 mm); the
         # finer one is the part's escape pitch.
+        if (sum(len(r) >= 3 for r in rows.values()) < 3
+                or sum(len(c) >= 3 for c in cols.values()) < 3):
+            return None
         px = _mode([d for r in rows.values() for d in steps(r)])
         py = _mode([d for c in cols.values() for d in steps(c)])
-        if px and py and on_lattice(xs, px) and on_lattice(ys, py):
+        # Two parallel pad rows a module's width apart (a compute module's
+        # board-to-board connectors) also sit on a lattice, just not a square one.
+        if (px and py and max(px, py) <= 2 * min(px, py)
+                and on_lattice(xs, px) and on_lattice(ys, py)):
             return ('grid', min(px, py), min(len(xs), len(ys)) // 2)
         return None
     # A side counts only the pads strictly between the two perpendicular

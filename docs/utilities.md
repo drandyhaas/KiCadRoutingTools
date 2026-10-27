@@ -2205,8 +2205,9 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
 2. **Planes first**: GND and the dominant rail on the first two inner layers
    on 4+ layer boards, GND on B.Cu on 2-layer boards.
 3. **Fanout**: the part's shape is read from its pads, in its own frame,
-   exposed pads set aside. A grid array (rows and columns each on a regular
-   lattice, with interior pads) gets `bga_fanout.py` when it is more than two
+   exposed pads set aside. A grid array (at least three rows and three
+   columns of three or more pads, each axis on a regular lattice, the two
+   pitches within 2x of each other, with interior pads) gets `bga_fanout.py` when it is more than two
    rows deep or at 0.5 mm or finer; a four-sided perimeter package gets
    `qfn_fanout.py` at 0.5 mm or finer, or above 40 pads at 0.8 mm or finer.
    The pitch is measured along a pad row (each axis of a grid separately; the

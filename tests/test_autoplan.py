@@ -128,6 +128,16 @@ def test_fanout_parts():
         'U7': _fp('Package_DIP:PLCC-44_THT-Socket', _grid(11, 11, 2.54, 2.54, drill=0.9)),
         'U8': _fp('lib:scatter', [_pad(0, 0), _pad(0.37, 1.1), _pad(1.9, 0.2), _pad(2.6, 2.2),
                                   _pad(0.9, 3.1), _pad(3.3, 0.8), _pad(1.4, 1.7)]),
+        'U9': _fp('lib:DDR3_FBGA-96', [p for p in _grid(9, 16, 0.8, 0.8) if not 2.0 < p.local_x < 4.4]),
+        'U13': _fp('lib:IMX283', [_pad(x + (0.001 if y > 3 else 0), y, 0.9, 0.9)
+                                  for x in (0, 1.5, 3.0, 4.5, 6.0, 7.5) for y in (0, 1.5, 3.0, 4.5, 6.0, 7.5)]),
+        'U10': _fp('lib:Raspberry-Pi-4-Compute-Module',
+                   [_pad(x, i * 0.4, 0.7, 0.2) for x in (-2.0, 1.08, 31.92, 35.0) for i in range(50)]),
+        'U11': _fp('lib:UDFN-10_1.0x2.5mm_P0.5mm',
+                   [_pad(x, i * 0.5, 0.25, 0.62) for x in (-0.388, 0.388) for i in (0, 1, 3, 4)]
+                   + [_pad(-0.35, 1.0, 0.45, 0.7), _pad(0.412, 1.0, 0.45, 0.57)]),
+        'U12': _fp('lib:GSG-LXES1TBCC2', [_pad(0, 0, 0.5, 1.1)]
+                   + [_pad(x, y, 0.9, 0.3) for x in (-0.5, 0, 0.5) for y in (-0.95, 0.95)]),
     }
     got = {r: (t, p) for r, t, p in AP.fanout_parts(SimpleNamespace(footprints=parts))}
     expect(got.get('U1') == ('qfn', 0.5), f"QFN with an exposed pad: perimeter at 0.5 ({got.get('U1')})")
@@ -135,10 +145,15 @@ def test_fanout_parts():
     expect(got.get('U3') == ('bga', 0.65), f"0.8 x 0.65 grid: each axis on its own lattice, pitch 0.65 ({got.get('U3')})")
     expect(got.get('U4') == ('bga', 1.0), f"16 x 16 grid at 1.0, depth 8 ({got.get('U4')})")
     expect('U6' not in got, "LQFP-32 at 0.8 with 32 pads: a perimeter, under the >40-pad bar")
+    expect(got.get('U9') == ('bga', 0.8), f"DDR3 ball map with its empty middle columns ({got.get('U9')})")
+    expect(got.get('U13') == ('bga', 1.5), f"a column jittered by 1 um is one column ({got.get('U13')})")
     for r, why in (('U5', 'a two-row DFN'), ('J1', 'a connector by name, whatever its pads'),
                    ('J2', 'an M.2 socket'), ('J3', 'two rows, whatever its name'),
                    ('T1', 'magnetics by name'), ('RN1', "a resistor array's corner pads are not sides"),
-                   ('U7', 'a through-hole socket'), ('U8', 'pads that form no shape')):
+                   ('U7', 'a through-hole socket'), ('U8', 'pads that form no shape'),
+                   ('U10', "a compute module's two connectors: 0.4 one way, 3.08 the other"),
+                   ('U11', 'two rows with an offset centre pad are not four columns'),
+                   ('U12', 'two rows and a centre pad are not a 3 x 3 grid')):
         expect(r not in got, f"{r} not fanned out: {why}")
 
 
