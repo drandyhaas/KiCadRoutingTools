@@ -13,23 +13,33 @@ congestion before the router starts:
   1. design rules  the board's Default class clearance as a ceiling, the fab
                    track floor, the working via (fine via for fine-pitch
                    escapes), all from list_nets.read_design_rules
-  2. planes        GND on In1.Cu and the dominant rail on In2.Cu on 4+ layer
-                   boards, GND on B.Cu on 2-layer boards; poured first
+  2. planes        on 4+ layer boards the fewest inner layers that put a
+                   plane next to every signal layer (In1+In2 on 4 layers,
+                   In1+In4 on 6, In1+In3+In6 on 8): GND, then the dominant
+                   rail, then GND again; GND on B.Cu on 2-layer boards;
+                   poured first, and signals kept off the inner planes
+                   until the route step's later passes
   3. fanout        every grid array with interior depth or fine pitch
                    (bga_fanout) and every fine-pitch four-sided perimeter
-                   package (qfn_fanout), read from the pads and their pitch
+                   package (qfn_fanout), and every dense mezzanine (a
+                   CM4/CM5's 200+ pads at 0.4 mm, qfn_fanout under the
+                   pads), read from the pads and their pitch
                    along a row -- never a connector, socket or magnetics --
                    plane nets excluded; a part that drops escapes is retried
                    at the fab clearance with the fine via, then with the
                    dogbone (BGA) or under-pad (QFN) method, keeping the
                    attempt that escaped most
   4. decaps        place_fanout_clearance once, after the fanouts
-  5. diff pairs    name-detected pairs routed first with route_diff
+  5. diff pairs    name-detected pairs routed first with route_diff; a pair
+                   net it leaves in a DRC violation is ripped and routed
+                   again single-ended
   6. route         route.py over every net with the poured nets and rails as
-                   power nets, layer costs that keep signals off the planes,
-                   a finer grid around fine-pitch parts and deeper rip-up on
-                   congested boards; up to two further passes on the result
-                   while nets are left open, shipping the best pass
+                   power nets, a first pass that keeps signals off the planes,
+                   a finer grid around fine-pitch parts, deeper rip-up on
+                   congested boards, and leave to rip the stubs of any pair
+                   route_diff could not couple; up to two further passes on the result
+                   while nets are left open, which may cross the planes at
+                   PLANE_FALLBACK_COST, shipping the best pass
 
 --finish runs step 6 alone on a board another chain has already prepared and
 routed (an agent's chain, say): the poured planes are read from the board's
@@ -83,6 +93,8 @@ TOOLS = {
 GRID_FINE_PITCH = 0.5        # a part at or under this pitch routes on 0.05
 CONGESTED_NETS = 150         # skill: CONGESTED = fine BGA or > 150 nets
 RAIL_WIDTH = 0.3
+PLANE_LAYER_COST = -1.0      # inner planes stay solid; a positive price lets signals cross
+PLANE_FALLBACK_COST = 3.0    # a later pass's price on a solid plane, the route step's in the plan skill
 ROUTE_PASSES = 3             # the first pass plus up to two on its result
 
 
@@ -147,6 +159,8 @@ def _selects_exactly(pattern, name, names):
 #: Footprint-name fragments of parts that are never escape-routed: connectors,
 #: sockets and headers (pins reached in place) and magnetics. Matched against
 #: the upper-cased library:footprint name.
+MEZZANINE_PADS = 200         # the plan skill's dense mezzanine (CM4/CM5): 200+ pads,
+MEZZANINE_PITCH = 0.4        # in rows at 0.4 mm, escaped under the pads
 NOT_FANOUT_NAMES = ('CONN', 'SOCKET', 'HEADER', 'PINHEADER', 'BUS_M.2', 'M.2_',
                     'USB', 'RJ45', 'HDMI', 'SFP', 'TRANSFORMER', 'TRANS_', 'XFMR',
                     'MAGJACK', 'MAGNETIC')
@@ -163,22 +177,27 @@ def pad_shape(fp):
     """('grid', pitch, depth), ('perimeter', pitch, None) or None for FP's pads.
 
     Read in the footprint's own frame (local_x/local_y), from the copper pads
-    left once each marker (a net-less pad unlike the commonest pad, such as a
-    BGA's corner outline pads off the ball lattice), each exposed pad (a pad
-    over 3x the median area) and anything inside one (its sub-pads) is set
-    aside. An unused ball or pin is net-less too, but keeps the common size.
+    (a paste-only aperture is not one; a pin drawn as several pads is its
+    largest) left once each marker (a net-less pad unlike the commonest pad,
+    such as a BGA's corner outline pads off the ball lattice), each exposed
+    pad (a pad over 3x the median area) and anything inside one (its sub-pads)
+    is set aside. An unused ball or pin is net-less too, but keeps the common
+    size.
 
-    grid: >= 3 rows and >= 3 columns of 3 or more pads, at least one pad off
-    the bounding edges, and the columns and rows each on a lattice of their
+    grid: no exposed pad, >= 3 rows and >= 3 columns of 3 or more pads, at
+    least one pad off the bounding edges, and the columns and rows each on a lattice of their
     own pitch: the commonest spacing between neighbouring pads of one row (x)
     or one column (y), the two within 2x of each other. The part's pitch is
     the finer of the two; depth is rows from the edge to the centre.
-    perimeter: every pad on one of the four bounding edges, at least two on
-    each side away from its corners. The pitch is the median spacing between neighbours along a side.
+    perimeter (when not a grid): at least two pads on each of the four
+    bounding edges away from its corners, and every other pad within 1.5
+    pitches of an edge -- a second staggered ring (aQFN) or corner pads set
+    in. The pitch is the median spacing between neighbours along a side.
     Anything else -- two rows (a connector, a DFN, a transformer), one row, a
     scatter -- is neither."""
     from collections import Counter
-    pads = [p for p in fp.pads if p.pad_type != 'np_thru_hole']
+    pads = [p for p in fp.pads if p.pad_type != 'np_thru_hole'
+            and any(l.endswith('.Cu') for l in p.layers)]
     dims = lambda p: tuple(sorted((round(p.size_x, 3), round(p.size_y, 3))))
     if pads:
         common = Counter(map(dims, pads)).most_common(1)[0][0]
@@ -188,11 +207,37 @@ def pad_shape(fp):
     area = sorted(p.size_x * p.size_y for p in pads)
     med = area[len(area) // 2]
     big = [p for p in pads if p.size_x * p.size_y > 3 * med]
+    # Pad sizes are in board space; local_x/local_y in the footprint's frame.
+    turned = round(fp.rotation / 90) % 2 == 1
+
+    def copper(p):
+        return {l for l in p.layers if l.endswith('.Cu')}
 
     def under(p, q):
-        r = max(q.size_x, q.size_y) / 2
-        return abs(p.local_x - q.local_x) <= r and abs(p.local_y - q.local_y) <= r
+        hx, hy = (q.size_y, q.size_x) if turned else (q.size_x, q.size_y)
+        shared = '*.Cu' in copper(p) | copper(q) or copper(p) & copper(q)
+        return (shared and abs(p.local_x - q.local_x) <= hx / 2
+                and abs(p.local_y - q.local_y) <= hy / 2)
     kept = [p for p in pads if p not in big and not any(under(p, q) for q in big)]
+    # One land per pin: a pin drawn as two overlapping pads is one pad, and
+    # an exposed pad's fingers out to the edge (which carry its number) are
+    # one pad, not a side. The number alone is no test: libraries number the
+    # exposed pad like a pin (orangecrab's RGY-24 calls it 12).
+    largest = {}
+    for p in kept:
+        if p.pad_number and (p.pad_number not in largest or
+                             p.size_x * p.size_y > largest[p.pad_number].size_x * largest[p.pad_number].size_y):
+            largest[p.pad_number] = p
+    kept = [p for p in kept if not p.pad_number or largest[p.pad_number] is p]
+    if len(kept) < 6:
+        return None
+    # The exposed pad is a big pad in the middle of the part; big pads at its
+    # corners (a sensor's mounting lands) are not one.
+    kx = [p.local_x for p in kept]
+    ky = [p.local_y for p in kept]
+    cx, cy = (min(kx) + max(kx)) / 2, (min(ky) + max(ky)) / 2
+    exposed = any(abs(q.local_x - cx) <= (max(kx) - min(kx)) / 4
+                  and abs(q.local_y - cy) <= (max(ky) - min(ky)) / 4 for q in big)
     tol = 0.02
 
     def snap(vals):
@@ -222,17 +267,17 @@ def pad_shape(fp):
 
     interior = [(x, y) for x, y in pts
                 if x0 + tol < x < x1 - tol and y0 + tol < y < y1 - tol]
-    if len(xs) >= 3 and len(ys) >= 3 and interior:
-        rows = {}
-        cols = {}
-        for x, y in pts:
-            rows.setdefault(y, []).append(x)
-            cols.setdefault(x, []).append(y)
+    rows = {}
+    cols = {}
+    for x, y in pts:
+        rows.setdefault(y, []).append(x)
+        cols.setdefault(x, []).append(y)
+    # An exposed pad makes it a QFN, however many rings of pads surround it.
+    if (len(xs) >= 3 and len(ys) >= 3 and interior and not exposed
+            and sum(len(r) >= 3 for r in rows.values()) >= 3
+            and sum(len(c) >= 3 for c in cols.values()) >= 3):
         # Each axis has its own pitch (LPDDR packages: 0.8 x 0.65 mm); the
         # finer one is the part's escape pitch.
-        if (sum(len(r) >= 3 for r in rows.values()) < 3
-                or sum(len(c) >= 3 for c in cols.values()) < 3):
-            return None
         px = _mode([d for r in rows.values() for d in steps(r)])
         py = _mode([d for c in cols.values() for d in steps(c)])
         # Two parallel pad rows a module's width apart (a compute module's
@@ -240,7 +285,6 @@ def pad_shape(fp):
         if (px and py and max(px, py) <= 2 * min(px, py)
                 and on_lattice(xs, px) and on_lattice(ys, py)):
             return ('grid', min(px, py), min(len(xs), len(ys)) // 2)
-        return None
     # A side counts only the pads strictly between the two perpendicular
     # edges: a two-row part's end pads sit on a corner, not on a side.
     mid_x = lambda x: x0 + tol < x < x1 - tol
@@ -249,18 +293,43 @@ def pad_shape(fp):
              'r': [y for x, y in pts if abs(x - x1) <= tol and mid_y(y)],
              't': [x for x, y in pts if abs(y - y0) <= tol and mid_x(x)],
              'b': [x for x, y in pts if abs(y - y1) <= tol and mid_x(x)]}
-    on_edge = sum(1 for x, y in pts if abs(x - x0) <= tol or abs(x - x1) <= tol
-                  or abs(y - y0) <= tol or abs(y - y1) <= tol)
-    if on_edge != len(pts) or any(len(v) < 2 for v in sides.values()):
+    if any(len(v) < 2 for v in sides.values()):
         return None
     d = sorted(s for v in sides.values() for s in steps(v) if s > 1e-3)
-    return ('perimeter', round(d[len(d) // 2], 3), None) if d else None
+    if not d:
+        return None
+    pitch = d[len(d) // 2]
+    depth = max(min(x - x0, x1 - x, y - y0, y1 - y) for x, y in pts)
+    return ('perimeter', round(pitch, 3), None) if depth <= 1.5 * pitch + tol else None
+
+
+def mezzanine_pitch(fp):
+    """The pitch of FP when it is a dense board-to-board mezzanine -- at least
+    MEZZANINE_PADS surface pads on at most four lines of one axis (two
+    connectors of two rows), each line at MEZZANINE_PITCH or finer -- else
+    None. Read in the footprint's own frame."""
+    pads = [p for p in fp.pads if p.pad_type != 'np_thru_hole'
+            and any(l.endswith('.Cu') for l in p.layers)]
+    if len(pads) < MEZZANINE_PADS or any((p.drill or 0) > 0 for p in pads):
+        return None
+    for across, along in (('local_x', 'local_y'), ('local_y', 'local_x')):
+        lines = {}
+        for p in pads:
+            lines.setdefault(round(getattr(p, across), 2), []).append(getattr(p, along))
+        if len(lines) > 4:
+            continue
+        steps = sorted(b - a for v in lines.values()
+                       for a, b in zip(sorted(v), sorted(v)[1:]))
+        if steps and steps[len(steps) // 2] <= MEZZANINE_PITCH + 1e-3:
+            return round(steps[len(steps) // 2], 3)
+    return None
 
 
 def fanout_parts(pcb):
     """[(ref, tool, pitch)] for the parts the skill fans out (Step 3): a grid
-    array (bga_fanout) or a four-sided perimeter package (qfn_fanout), read
-    from the pads themselves -- never a connector or magnetics by name."""
+    array (bga_fanout), a four-sided perimeter package (qfn_fanout) or a dense
+    mezzanine ('mezz', qfn_fanout under the pads), read from the pads
+    themselves -- never a connector or magnetics by name."""
     out = []
     for ref, fp in pcb.footprints.items():
         name = (fp.footprint_name or '').upper()
@@ -272,6 +341,9 @@ def fanout_parts(pcb):
             continue
         shape = pad_shape(fp)
         if shape is None:
+            pitch = mezzanine_pitch(fp)
+            if pitch:
+                out.append((ref, 'mezz', pitch))
             continue
         kind, pitch, depth = shape
         if kind == 'grid':
@@ -282,7 +354,20 @@ def fanout_parts(pcb):
     return sorted(out)
 
 
-def analyze(board, finish=False):
+def plane_layers(n):
+    """Indices of the fewest inner layers of an N-layer stack such that
+    every other layer is next to one: each signal layer then has a reference
+    plane. The first such set in order, so the same stack always gets the
+    same planes."""
+    from itertools import combinations
+    for k in range(1, n - 1):
+        for combo in combinations(range(1, n - 1), k):
+            if all(i in combo or i - 1 in combo or i + 1 in combo for i in range(n)):
+                return list(combo)
+    return list(range(1, n - 1))
+
+
+def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     from kicad_parser import parse_kicad_pcb, pour_zones
     from list_nets import (read_design_rules, effective_floors,
                            find_power_nets, find_differential_pairs,
@@ -300,24 +385,39 @@ def analyze(board, finish=False):
     via, drill = _num(eff['working_via_diameter']), _num(eff['working_via_drill'])
     fine_via, fine_drill = _num(eff['fine_via_diameter']), _num(eff['fine_via_drill'])
 
-    # Name-matched grounds and supplies only: find_power_nets' pad-count
-    # candidates include keyboard matrix rows and unconnected pins.
+    pairs = []
+    for pr in find_differential_pairs(pcb) or []:
+        p, n = (pr[0], pr[1]) if isinstance(pr, (tuple, list)) else (pr.p, pr.n)
+        pairs += [getattr(p, 'name', p), getattr(n, 'name', n)]
+
+    # Name-matched grounds and supplies, not find_power_nets' pad-count
+    # candidates: those include keyboard matrix rows and unconnected pins.
     gnd, vcc, _cand = find_power_nets(pcb)
+    # A rail no pattern names (V+, /CM5_3V3, /M2_3v3) still carries power
+    # pins of two or more parts; power pins of one part are that part's own
+    # supply tap, an enable or a connector's misdeclared pins, and a diff
+    # pair is a pair whatever its pins say.
+    named = {n for n, _ in gnd + vcc} | set(pairs)
+    vcc = vcc + [(n.name, len(n.pads)) for n in pcb.nets.values()
+                 if n.name and n.name not in named
+                 and len({p.component_ref for p in n.pads
+                          if p.pintype in ('power_in', 'power_out')}) >= 2]
     real = lambda t: t[1] >= 3 and not t[0].lower().startswith('unconnected-')
     gnd = sorted(filter(real, gnd), key=lambda t: -t[1])
     rails = sorted(filter(real, vcc), key=lambda t: -t[1])
     planes = []                         # [(net, layer)]
     if gnd:
         if n_layers >= 4:
-            planes.append((gnd[0][0], layers[1]))
-            if rails and rails[0][1] >= 10:
-                planes.append((rails[0][0], layers[2]))
+            nets = [gnd[0][0]] * len(plane_layers(n_layers))
+            if rails and rails[0][1] >= 10 and len(nets) > 1:
+                nets[1] = rails[0][0]
+            planes = [(n, layers[i]) for n, i in zip(nets, plane_layers(n_layers))]
         else:
             planes.append((gnd[0][0], layers[-1]))
     # route_planes takes EXACT names: a name argparse cannot carry stays a
     # power net (passed as a pattern) instead of a plane.
     planes = [(n, l) for n, l in planes if _exact_ok(n)]
-    plane_nets = [n for n, _ in planes]
+    plane_nets = list(dict.fromkeys(n for n, _ in planes))
     power_nets = plane_nets + [n for n, _ in rails if n not in plane_nets]
     power_nets += [n for n, _ in gnd[1:] if n not in power_nets]
 
@@ -334,18 +434,13 @@ def analyze(board, finish=False):
     if n_layers == 2:
         layer_costs = [1.0, 1.5]
     else:
-        layer_costs = [3.0 if l in solid else 1.0 for l in layers]
+        layer_costs = [plane_cost if l in solid else 1.0 for l in layers]
 
     parts = fanout_parts(pcb)
     fine = any(p <= GRID_FINE_PITCH for _, _, p in parts)
     grid = 0.05 if fine else 0.1
     n_nets = sum(1 for n in pcb.nets.values() if n.name and len(n.pads) >= 2)
     congested = n_nets > CONGESTED_NETS or any(t == 'bga' and p <= 0.8 for _, t, p in parts)
-
-    pairs = []
-    for pr in find_differential_pairs(pcb) or []:
-        p, n = (pr[0], pr[1]) if isinstance(pr, (tuple, list)) else (pr.p, pr.n)
-        pairs += [getattr(p, 'name', p), getattr(n, 'name', n)]
 
     # Every net the chain names by pattern, with the pattern that selects it
     # alone on this board. A net no pattern isolates is left out of the
@@ -439,6 +534,15 @@ class Chain:
                   flush=True)
             return None
         open_nets = json.loads(m.group(1))
+        d = self.check_drc(board)
+        if d is None:
+            return None
+        return {'open': len(open_nets), 'open_nets': open_nets, 'drc': int(d['violations'])}
+
+    def check_drc(self, board):
+        """check_drc's JSON report for BOARD at the board's recorded floors
+        (else the chain's clearance), the chain's input as baseline; None when
+        it could not grade."""
         fd, jpath = tempfile.mkstemp(suffix='.json', dir=self.work)
         os.close(fd)
         argv = [sys.executable, '-X', 'utf8', os.path.join(HERE, 'check_drc.py'),
@@ -450,13 +554,26 @@ class Chain:
         subprocess.run(argv, capture_output=True, text=True, env=_child_env())
         try:
             with open(jpath) as fh:
-                drc = int(json.load(fh)['violations'])
-        except (OSError, ValueError, KeyError):
+                d = json.load(fh)
+            int(d['violations'])
+            return d
+        except (OSError, ValueError, KeyError, TypeError):
             print(f"  grade: check_drc failed on {os.path.basename(board)}", flush=True)
             return None
         finally:
             os.remove(jpath)
-        return {'open': len(open_nets), 'open_nets': open_nets, 'drc': drc}
+
+    def drc_nets(self, board):
+        """The nets named in BOARD's DRC violations that involve a track or
+        via -- copper a routing step lays -- or None when ungraded. An item
+        check_drc accepts (a protected via in a pad) is no violation."""
+        d = self.check_drc(board)
+        if d is None:
+            return None
+        return {n for it in d.get('items') or []
+                if not it.get('accepted')
+                and any(k in it.get('type', '') for k in ('segment', 'via', 'track'))
+                for n in (it.get('net1'), it.get('net2')) if n}
 
     def run(self, kind, args, tag):
         """Run one tool from the current board to a fresh output; returns
@@ -525,7 +642,7 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
         tw = str(a['track'])
         if tool == 'bga':
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
-                    '--nets', '*', *excl, '--layers', *L,
+                    '--nets', '*', *excl, '--layers', *L, '--layer-costs', *costs,
                     '--track-width', tw, '--grid-step', str(a['grid'])]
             ladder = [
                 base + ['--clearance', str(a['clearance']),
@@ -548,9 +665,12 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
                         '--via-size', str(a['fine_via']), '--via-drill', str(a['fine_drill']),
                         '--allow-via-in-pad'],
             ]
+            if tool == 'mezz':
+                ladder = ladder[2:]
         best = None                    # (escaped, out)
         for i, args in enumerate(ladder):
-            out, s, _ = ch.run(tool, args, f'fanout_{ref}' + (f'_r{i}' if i else ''))
+            out, s, _ = ch.run('bga' if tool == 'bga' else 'qfn', args,
+                               f'fanout_{ref}' + (f'_r{i}' if i else ''))
             if not out:
                 continue
             escaped = int((s or {}).get('escaped', 0))
@@ -569,7 +689,9 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
         ch.accept(out)
 
     # 5. diff pairs first
+    rip, reroute = [], []
     if a['pair_nets']:
+        before = ch.drc_nets(ch.cur)
         out, s, _ = ch.run('diff', [
             '{IN}', '{OUT}', '--nets', *[a['globs'][n] for n in a['pair_nets']],
             '--track-width', str(max(0.1, a['track'])),
@@ -579,8 +701,17 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
             '--layers', *L, '--layer-costs', *costs,
             '--grid-step', str(a['grid'])], 'diffpairs')
         ch.accept(out)
+        # A pair it could not couple is left to the route step, with whatever
+        # stubs it laid; those stubs block the partner unless they may be ripped.
+        if out:
+            rip = [a['globs'][n] for n in (s or {}).get('single_ended_followup_nets') or []
+                   if n in a['globs']]
+            # A pair net the step left in a DRC violation is laid again, single-ended.
+            after = ch.drc_nets(out)
+            if None not in (before, after):
+                reroute = sorted((after - before) & set(a['pair_nets']))
 
-    return route_passes(ch, a, L, costs, effort_factor)
+    return route_passes(ch, a, L, costs, effort_factor, rip=rip, reroute=reroute)
 
 
 def _improves(g, best):
@@ -589,22 +720,29 @@ def _improves(g, best):
             and (g['open'], g['drc']) != (best['open'], best['drc']))
 
 
-def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False):
+def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), reroute=()):
     """6. route every net; up to two more passes while nets are open, each
     pass improves on the best board so far, and the effort stays within
-    budget. Returns (chain, best board or None, its grade or None)."""
-    args = ['{IN}', '{OUT}', '--nets', '*', '--no-bga-zones',
+    budget. Only the first pass keeps signals off the solid planes; the later
+    ones may cross them at PLANE_FALLBACK_COST, so a plane carries only what
+    could not route without it. The REROUTE nets are first ripped and routed
+    again on their own. Returns (chain, best board or None,
+    its grade or None)."""
+    def route_args(costs):
+        return base + ['--layers', *L, '--layer-costs', *costs]
+    base = ['{IN}', '{OUT}', '--nets', '*', '--no-bga-zones',
             '--clearance-ceiling', str(a['clearance']),
             '--track-width', str(a['track']),
             '--via-size', str(a['via']), '--via-drill', str(a['drill']),
-            '--layers', *L, '--layer-costs', *costs,
             '--grid-step', str(a['grid'])]
     if a['power_nets']:
-        args += ['--power-nets', *[a['globs'][n] for n in a['power_nets']],
+        base += ['--power-nets', *[a['globs'][n] for n in a['power_nets']],
                  '--power-nets-widths',
                  *[str(RAIL_WIDTH)] * len(a['power_nets'])]
     if a['congested']:
-        args += ['--max-ripup', '5']
+        base += ['--max-ripup', '5']
+    if rip:
+        base += ['--rip-existing-nets', *rip]
     best = None                        # (grade, board)
     if finish:
         g = ch.grade(ch.cur)
@@ -616,6 +754,14 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False):
         print(f"  input: {g['open']} open, {g['drc']} DRC", flush=True)
         if g['open'] == 0:
             return ch, ch.cur, g
+    if reroute:
+        # A net whose new route lays no copper gets its old copper back, and
+        # the passes below route whatever is left open.
+        out, _, _ = ch.run('route', ['{IN}', '{OUT}', '--nets', *[a['globs'][n] for n in reroute],
+                                     '--force-reroute', *base[4:], '--layers', *L,
+                                     '--layer-costs', *costs], 'reroute_pairs')
+        ch.accept(out)
+    crossing = [str(PLANE_FALLBACK_COST) if float(c) < 0 else c for c in costs]
     first = spent = None
     for i in range(ROUTE_PASSES):
         if i:
@@ -628,7 +774,8 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False):
                       f"spent, the last pass took {ch.last_iterations}, budget "
                       f"{effort_factor:g} x {first}", flush=True)
                 break
-        out, _, _ = ch.run('route', args, 'route' + (f'_p{i + 1}' if i else ''))
+        out, _, _ = ch.run('route', route_args(crossing if i else costs),
+                           'route' + (f'_p{i + 1}' if i else ''))
         if ch.last_iterations is not None:
             spent = (spent or 0) + ch.last_iterations
             if first is None:
@@ -661,6 +808,13 @@ def _effort_factor(text):
     return v
 
 
+def _plane_layer_cost(text):
+    v = float(text)
+    if not math.isfinite(v) or v == 0:
+        raise argparse.ArgumentTypeError(f'must be a finite nonzero number, not {text}')
+    return v
+
+
 def _ship(src, dst):
     """Copy board SRC and its siblings to DST, removing any sibling DST has
     that SRC does not, so the shipped set is exactly SRC's."""
@@ -689,9 +843,17 @@ def main():
                          'again, stay within this many times the first '
                          'pass\'s (default 2). A forecast, not a cap: a pass '
                          'that starts runs to its end')
+    ap.add_argument('--plane-layer-cost', type=_plane_layer_cost, default=PLANE_LAYER_COST,
+                    help='the --layer-costs entry of every inner plane layer in the '
+                         'fanout, diff pair and first route steps. Negative (default -1) '
+                         'keeps signals off the planes, so each stays a solid '
+                         'reference, and only the later route passes may cross them '
+                         'at 3.0; a positive price lets every step cross them '
+                         '(the skill\'s route step uses 3.0), trading reference '
+                         'integrity for routability')
     args = ap.parse_args()
 
-    a = analyze(args.input_file, finish=args.finish)
+    a = analyze(args.input_file, finish=args.finish, plane_cost=args.plane_layer_cost)
     print("AUTOPLAN_ANALYSIS: " + json.dumps(a, sort_keys=True), flush=True)
     if args.dry_run:
         return 0

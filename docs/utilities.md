@@ -2202,29 +2202,50 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
 1. **Design rules**: the board's Default class clearance as the
    `--clearance-ceiling`, the fab track floor, the working via, and the fine
    via for fine-pitch escapes (`list_nets.read_design_rules`).
-2. **Planes first**: GND and the dominant rail on the first two inner layers
-   on 4+ layer boards, GND on B.Cu on 2-layer boards.
-3. **Fanout**: the part's shape is read from its pads, in its own frame,
-   exposed pads and markers (net-less pads unlike the part's commonest pad,
-   such as a BGA's corner outline pads) set aside. A grid array (at least three rows and three
-   columns of three or more pads, each axis on a regular lattice, the two
-   pitches within 2x of each other, with interior pads) gets `bga_fanout.py` when it is more than two
-   rows deep or at 0.5 mm or finer; a four-sided perimeter package gets
+2. **Planes first**: on 4+ layer boards, the fewest inner layers that put a
+   plane next to every signal layer, so each signal layer has a reference:
+   In1+In2 on 4 layers, In1+In4 on 6, In1+In3+In6 on 8
+   (`autoplan.plane_layers`). The first is GND, the second the dominant rail
+   (when one reaches 10 pads), any others GND again. Signals are kept off
+   them until the route step's later passes (`--plane-layer-cost`). GND on B.Cu on 2-layer
+   boards, where the pour is an outer layer the signals share. Rails are the nets
+   `list_nets.find_power_nets` names, and nets carrying power pins
+   (`power_in`/`power_out`) of two or more parts that are not a diff pair.
+3. **Fanout**: the part's shape is read from its copper pads, in its own
+   frame, one land per pin, with each exposed pad set aside together with the
+   pads under it, and each marker (a net-less pad unlike the part's commonest
+   pad, such as a BGA's corner outline pads). A grid array (no exposed pad, at least three
+   rows and three columns of three or more pads, each axis on a regular
+   lattice, the two pitches within 2x of each other, with interior pads) gets
+   `bga_fanout.py` when it is more than two rows deep or at 0.5 mm or finer;
+   a four-sided perimeter package (pads on all four edges, any others within
+   1.5 pitches of an edge: an aQFN's second ring, corner pads set in) gets
    `qfn_fanout.py` at 0.5 mm or finer, or above 40 pads at 0.8 mm or finer.
+   A dense board-to-board mezzanine (a CM4/CM5's: 200 or more surface pads on
+   at most four lines, 0.4 mm along them) gets `qfn_fanout.py` with the
+   under-pad method and via-in-pad, as the plan-pcb-routing skill does.
    The pitch is measured along a pad row (each axis of a grid separately; the
    finer one counts). A two-row part (DFN, a connector), a part whose pads
-   form neither shape, a through-hole part other than a PGA, and any
+   form neither shape (a mezzanine aside), a through-hole part other than a PGA, and any
    connector, socket, header or magnetics by footprint name
    (`autoplan.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
    A part that drops escapes is retried at the fab clearance with the fine
    via, then with the dogbone (BGA) or under-pad (QFN) method, keeping the
    attempt that escaped most.
+   BGA escapes take the same layer costs as the route step.
 4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts.
-5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`.
+5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`. A
+   pair net the step leaves in a track or via DRC violation (by `check_drc`,
+   against the board before the step) is ripped and routed again on its own with
+   `route.py --force-reroute`, single-ended; a net that route lays no copper
+   for keeps its pair copper.
 6. **Route**: `route.py` over every net, with the poured nets and rails as
-   power nets, layer costs that keep signals off the planes, a finer grid
-   around fine-pitch parts and deeper rip-up on congested boards; then up to
-   two further passes on the result.
+   power nets, a finer grid around fine-pitch parts and deeper rip-up on
+   congested boards; the members of any pair `route_diff.py` could not couple
+   are rippable, so the stubs it left do not block their partners. The first
+   pass keeps signals off the planes; up to two further passes on the result
+   may cross them at 3.0 (`autoplan.PLANE_FALLBACK_COST`), so a plane carries
+   only what could not route without it.
 
 A step that fails is skipped and the chain continues from the last good board.
 
@@ -2255,6 +2276,14 @@ Options:
                      end. Iterations are the JSON_SUMMARY total_iterations the
                      router reproduces exactly, so the same board always gets
                      the same passes; a pass that reports none starts no other.
+  --plane-layer-cost C  The --layer-costs entry of every inner plane layer in
+                     the fanout, diff pair and first route steps. Negative
+                     (default -1) keeps signals off the planes, so each stays
+                     a solid reference for the layers next to it, and only the
+                     later route passes may cross them, at 3.0; a positive
+                     price lets every step cross them (the plan-pcb-routing
+                     skill's route step uses 3.0), trading reference integrity
+                     for routability.
 ```
 
 The chain, each step's arguments, return code, iterations and grade are

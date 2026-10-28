@@ -78,13 +78,14 @@ def test_glob():
            "'!D[0]' beside ' D[0]' cannot be isolated, and that is detected")
 
 
-def _pad(x, y, w=0.25, h=0.8, drill=0.0, net_id=1):
-    return SimpleNamespace(local_x=x, local_y=y, size_x=w, size_y=h, drill=drill,
-                           pad_type='thru_hole' if drill else 'smd', net_id=net_id)
+def _pad(x, y, w=0.25, h=0.8, drill=0.0, layers=None, num='', net_id=1):
+    return SimpleNamespace(local_x=x, local_y=y, size_x=w, size_y=h, drill=drill, pad_number=num,
+                           pad_type='thru_hole' if drill else 'smd', net_id=net_id,
+                           layers=layers or (['*.Cu'] if drill else ['F.Cu']))
 
 
-def _fp(name, pads):
-    return SimpleNamespace(footprint_name=name, pads=pads)
+def _fp(name, pads, rotation=0.0):
+    return SimpleNamespace(footprint_name=name, pads=pads, rotation=rotation)
 
 
 def _qfn(n_side, pitch, ep=True):
@@ -129,8 +130,48 @@ def test_fanout_parts():
         'U8': _fp('lib:scatter', [_pad(0, 0), _pad(0.37, 1.1), _pad(1.9, 0.2), _pad(2.6, 2.2),
                                   _pad(0.9, 3.1), _pad(3.3, 0.8), _pad(1.4, 1.7)]),
         'U9': _fp('lib:DDR3_FBGA-96', [p for p in _grid(9, 16, 0.8, 0.8) if not 2.0 < p.local_x < 4.4]),
+        'U14': _fp('lib:AQFN-73_7x7mm_P0.5mm',
+                   [_pad(x, y, 0.25, 0.25) for i in range(12)
+                    for x, y in ((-2.75 + i * 0.5, -3.25), (-2.75 + i * 0.5, 3.25),
+                                 (-3.25, -2.75 + i * 0.5), (3.25, -2.75 + i * 0.5))]
+                   + [_pad(x, y, 0.25, 0.25) for i in range(10)
+                      for x, y in ((-2.25 + i * 0.5, -2.75), (-2.25 + i * 0.5, 2.75),
+                                   (-2.75, -2.25 + i * 0.5), (2.75, -2.25 + i * 0.5))]
+                   + [_pad(0, 0, 4.0, 4.0)]),
+        'U15': _fp('lib:WFQFN-20', [_pad(o, e, 0.3, 0.9) for o in (-0.75, -0.25, 0.25, 0.75) for e in (-1.55, 1.55)]
+                   + [_pad(e, o, 0.9, 0.3) for o in (-0.75, -0.25, 0.25, 0.75) for e in (-1.55, 1.55)]
+                   + [_pad(x, y, 0.35, 0.35) for x in (-1.25, 1.25) for y in (-1.25, 1.25)]
+                   + [_pad(0, 0, 1.8, 1.8)]),
+        'U16': _fp('lib:QFN-20-1EP_3x3mm_P0.4mm_ThermalVias',
+                   [_pad(o, e, 0.2, 0.7) for o in (-0.8, -0.4, 0, 0.4, 0.8) for e in (-1.45, 1.45)]
+                   + [_pad(e, o, 0.7, 0.2) for o in (-0.8, -0.4, 0, 0.4, 0.8) for e in (-1.45, 1.45)]
+                   + [_pad(0, 0, 1.5, 1.5)]
+                   + [_pad(x, y, 0.6, 0.6, layers=['F.Paste']) for x in (-0.41, 0.41) for y in (-0.41, 0.41)]),
         'U13': _fp('lib:IMX283', [_pad(x + (0.001 if y > 3 else 0), y, 0.9, 0.9)
-                                  for x in (0, 1.5, 3.0, 4.5, 6.0, 7.5) for y in (0, 1.5, 3.0, 4.5, 6.0, 7.5)]),
+                                  for x in (0, 1.5, 3.0, 4.5, 6.0, 7.5) for y in (0, 1.5, 3.0, 4.5, 6.0, 7.5)]
+                   + [_pad(x, y, 2.4, 2.4) for x in (-1.5, 9.0) for y in (-1.5, 9.0)]),
+        # 5 x 7 mm VQFN turned 90 degrees: its 5.7 x 3.7 exposed pad is 3.7
+        # wide in the footprint's own frame, clear of the side pads at 2.4.
+        'U17': _fp('lib:VQFN-40_5x7mm', [_pad(e, -2.75 + i * 0.5, 0.6, 0.25) for i in range(12) for e in (-2.4, 2.4)]
+                   + [_pad(-1.75 + i * 0.5, e, 0.25, 0.6) for i in range(8) for e in (-3.4, 3.4)]
+                   + [_pad(0, 0, 5.7, 3.7, num='41')], rotation=90.0),
+        'U18': _fp('lib:QFN-20_BottomPad', [_pad(o, e, 0.2, 0.7) for o in (-0.8, -0.4, 0, 0.4, 0.8) for e in (-1.45, 1.45)]
+                   + [_pad(e, o, 0.7, 0.2) for o in (-0.8, -0.4, 0, 0.4, 0.8) for e in (-1.45, 1.45)]
+                   + [_pad(0, 0, 1.5, 1.5), _pad(0, 0, 4.0, 4.0, layers=['B.Cu'])]),
+        'U19': _fp('lib:S-PWSON-N10', [_pad(e, -1.0 + i * 0.5, 0.85, 0.28, num=str(i + 1))
+                                       for i in range(5) for e in (-1.475, 1.475)]
+                   + [_pad(0, 0, 1.7, 2.15, num='11')]
+                   + [_pad(-0.6 + i * 0.4, e, 0.23, 0.6, num='11') for i in range(4) for e in (-1.425, 1.425)]),
+        # Texas RGY-24 as orangecrab's library draws it: the exposed pad is
+        # numbered 12, like a real pin.
+        'U21': _fp('lib:Texas_RGY_R-PVQFN-N24', [_pad(e, -2.25 + i * 0.5, 0.96, 0.28, num=str(i + (2 if e < 0 else 13)))
+                                                for i in range(10) for e in (-1.795, 1.795)]
+                   + [_pad(x, e, 0.28, 0.97, num=n) for x, e, n in ((-0.75, 2.795, '1'), (0.75, 2.795, '24'),
+                                                                      (-0.75, -2.795, '12'), (0.75, -2.795, '13'))]
+                   + [_pad(0, 0, 2.05, 3.1, num='12')]),
+        'U20': _fp('lib:SON-10_doubled_lands',
+                   [_pad(e * k, -1.0 + i * 0.5, w, 0.28, num=f"{i}{'LR'[e > 0]}")
+                    for i in range(5) for e in (-1, 1) for k, w in ((1.76, 0.28), (1.475, 0.85))]),
         'U10': _fp('lib:Raspberry-Pi-4-Compute-Module',
                    [_pad(x, i * 0.4, 0.7, 0.2) for x in (-2.0, 1.08, 31.92, 35.0) for i in range(50)]),
         'U11': _fp('lib:UDFN-10_1.0x2.5mm_P0.5mm',
@@ -138,7 +179,7 @@ def test_fanout_parts():
                    + [_pad(-0.35, 1.0, 0.45, 0.7), _pad(0.412, 1.0, 0.45, 0.57)]),
         'U12': _fp('lib:GSG-LXES1TBCC2', [_pad(0, 0, 0.5, 1.1)]
                    + [_pad(x, y, 0.9, 0.3) for x in (-0.5, 0, 0.5) for y in (-0.95, 0.95)]),
-        'U14': _fp('lib:BGA-381_pitch0.8mm',
+        'U22': _fp('lib:BGA-381_pitch0.8mm',
                    [_pad(x * 0.8, y * 0.8, 0.4, 0.4, net_id=(x + y) % 3)
                     for x in range(-9, 10) for y in range(-9, 10)]
                    + [_pad(sx * 8.5, sy * 8.0, 0.127, 0.508, net_id=0)
@@ -154,15 +195,23 @@ def test_fanout_parts():
     expect('U6' not in got, "LQFP-32 at 0.8 with 32 pads: a perimeter, under the >40-pad bar")
     expect(got.get('U9') == ('bga', 0.8), f"DDR3 ball map with its empty middle columns ({got.get('U9')})")
     expect(got.get('U13') == ('bga', 1.5), f"a column jittered by 1 um is one column ({got.get('U13')})")
-    expect(got.get('U14') == ('bga', 0.8), f"net-less corner markers off the ball lattice are set aside, "
-                                           f"net-less balls kept ({got.get('U14')})")
+    expect(got.get('U22') == ('bga', 0.8), f"net-less corner markers off the ball lattice are set aside, "
+                                           f"net-less balls kept ({got.get('U22')})")
+    expect(got.get('U14') == ('qfn', 0.5), f"aQFN: a second staggered ring is a perimeter ({got.get('U14')})")
+    expect(got.get('U15') == ('qfn', 0.5), f"corner pads set in from the sides ({got.get('U15')})")
+    expect(got.get('U16') == ('qfn', 0.4), f"paste-only apertures are not pads ({got.get('U16')})")
+    expect(got.get('U17') == ('qfn', 0.5), f"an exposed pad measured in the footprint's frame ({got.get('U17')})")
+    expect(got.get('U18') == ('qfn', 0.4), f"a B.Cu pad does not swallow F.Cu pads ({got.get('U18')})")
+    expect(got.get('U21') == ('qfn', 0.5), f"an exposed pad numbered like a pin leaves that pin a pin ({got.get('U21')})")
+    expect(got.get('U10') == ('mezz', 0.4), f"a compute module's two connectors: a mezzanine at 0.4 ({got.get('U10')})")
     for r, why in (('U5', 'a two-row DFN'), ('J1', 'a connector by name, whatever its pads'),
                    ('J2', 'an M.2 socket'), ('J3', 'two rows, whatever its name'),
                    ('T1', 'magnetics by name'), ('RN1', "a resistor array's corner pads are not sides"),
                    ('U7', 'a through-hole socket'), ('U8', 'pads that form no shape'),
-                   ('U10', "a compute module's two connectors: 0.4 one way, 3.08 the other"),
                    ('U11', 'two rows with an offset centre pad are not four columns'),
-                   ('U12', 'two rows and a centre pad are not a 3 x 3 grid')):
+                   ('U12', 'two rows and a centre pad are not a 3 x 3 grid'),
+                   ('U19', "an exposed pad's fingers at the package edge are not sides"),
+                   ('U20', 'a two-row part whose pins are each drawn as two lands')):
         expect(r not in got, f"{r} not fanned out: {why}")
 
 
@@ -179,14 +228,23 @@ def test_analyze():
 
     b = AP.analyze(os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb'))
     L = b['layers']
-    expect([l for _, l in b['planes']] == L[1:3],
-           f"orangecrab: planes on the first two inner layers ({b['planes']})")
-    expect(b['layer_costs'][1:3] == [3.0, 3.0] and b['layer_costs'][0] == 1.0,
-           f"orangecrab: plane layers priced up ({b['layer_costs']})")
+    expect(len(L) == 6 and [l for _, l in b['planes']] == [L[1], L[4]],
+           f"orangecrab: 6 layers, planes on In1 and In4, next to every signal layer ({b['planes']})")
+    expect(b['planes'][0][0] == 'GND' and b['planes'][1][0] != 'GND',
+           f"orangecrab: GND, then the dominant rail ({b['planes']})")
+    expect(b['layer_costs'] == [1.0, -1.0, 1.0, 1.0, -1.0, 1.0],
+           f"orangecrab: signals kept off the planes ({b['layer_costs']})")
+    b3 = AP.analyze(os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb'), plane_cost=3.0)
+    expect(b3['layer_costs'] == [1.0, 3.0, 1.0, 1.0, 3.0, 1.0],
+           f"orangecrab: a positive plane cost prices the planes instead ({b3['layer_costs']})")
     tools = {r: t for r, t, _ in b['parts']}
     expect(tools.get('U1') == 'bga' and 'qfn' in tools.values(),
            f"orangecrab: BGAs and fine-pitch QFNs fanned out ({tools})")
     expect(b['grid'] == 0.05 and b['congested'], "orangecrab: fine grid, congested")
+
+    c = AP.analyze(os.path.join(ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb'))
+    expect({'/IO_Banks/VIOA', '/IO_Banks/VIOB'} <= set(c['power_nets']),
+           f"glasgow: IO bank supplies no pattern names are rails by their power pins ({c['power_nets']})")
 
 
 class ScriptedChain:
@@ -265,6 +323,20 @@ def test_passes():
            "a fully connected input runs no pass")
     expect(_passes([(G(2), 100)], finish=True, input_grade=None) == (0, None, None),
            "an input that cannot be graded runs no pass")
+
+
+def test_plane_layers():
+    print("plane_layers")
+    for n, want in ((2, []), (4, [1, 2]), (6, [1, 4]), (8, [1, 3, 6]), (10, [1, 2, 5, 8])):
+        got = AP.plane_layers(n)
+        expect(got == want, f"{n} layers: planes at {want} ({got})")
+        expect(n < 4 or all(i in got or i - 1 in got or i + 1 in got for i in range(n)),
+               f"{n} layers: every layer is a plane or next to one")
+    for bad in ('nan', '0'):
+        check([sys.executable, '-X', 'utf8', SCRIPT, BOARD, os.devnull + '.kicad_pcb',
+               '--plane-layer-cost', bad], refuse='must be a finite nonzero number', code=2,
+              allow=('error: argument',))
+        expect(True, f"--plane-layer-cost {bad} refused for its reason")
 
 
 def test_effort_factor():
@@ -346,6 +418,7 @@ def main():
     test_fanout_parts()
     test_analyze()
     test_passes()
+    test_plane_layers()
     test_effort_factor()
     test_run()
     if FAILS:
