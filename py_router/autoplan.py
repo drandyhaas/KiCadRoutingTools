@@ -21,7 +21,8 @@ congestion before the router starts:
                    along a row -- never a connector, socket or magnetics --
                    plane nets excluded; a part that drops escapes is retried
                    at the fab clearance with the fine via, then with the
-                   under-pad method, keeping the attempt that escaped most
+                   dogbone (BGA) or under-pad (QFN) method, keeping the
+                   attempt that escaped most
   4. decaps        place_fanout_clearance once, after the fanouts
   5. diff pairs    name-detected pairs routed first with route_diff
   6. route         route.py over every net with the poured nets and rails as
@@ -162,8 +163,10 @@ def pad_shape(fp):
     """('grid', pitch, depth), ('perimeter', pitch, None) or None for FP's pads.
 
     Read in the footprint's own frame (local_x/local_y), from the copper pads
-    left once each exposed pad (a pad over 3x the median area) and anything
-    inside one (its sub-pads) is set aside.
+    left once each marker (a net-less pad unlike the commonest pad, such as a
+    BGA's corner outline pads off the ball lattice), each exposed pad (a pad
+    over 3x the median area) and anything inside one (its sub-pads) is set
+    aside. An unused ball or pin is net-less too, but keeps the common size.
 
     grid: >= 3 rows and >= 3 columns of 3 or more pads, at least one pad off
     the bounding edges, and the columns and rows each on a lattice of their
@@ -174,7 +177,12 @@ def pad_shape(fp):
     each side away from its corners. The pitch is the median spacing between neighbours along a side.
     Anything else -- two rows (a connector, a DFN, a transformer), one row, a
     scatter -- is neither."""
+    from collections import Counter
     pads = [p for p in fp.pads if p.pad_type != 'np_thru_hole']
+    dims = lambda p: tuple(sorted((round(p.size_x, 3), round(p.size_y, 3))))
+    if pads:
+        common = Counter(map(dims, pads)).most_common(1)[0][0]
+        pads = [p for p in pads if p.net_id or dims(p) == common]
     if len(pads) < 6:
         return None
     area = sorted(p.size_x * p.size_y for p in pads)
@@ -514,7 +522,7 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
     for ref, tool, pitch in a['parts']:
         fine = pitch <= 0.65
         v, d = (a['fine_via'], a['fine_drill']) if fine else (a['via'], a['drill'])
-        tw = str(min(0.15, a['track']) if pitch > 0.5 else a['track'])
+        tw = str(a['track'])
         if tool == 'bga':
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
                     '--nets', '*', *excl, '--layers', *L,

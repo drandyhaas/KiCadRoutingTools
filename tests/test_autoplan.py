@@ -78,9 +78,9 @@ def test_glob():
            "'!D[0]' beside ' D[0]' cannot be isolated, and that is detected")
 
 
-def _pad(x, y, w=0.25, h=0.8, drill=0.0):
+def _pad(x, y, w=0.25, h=0.8, drill=0.0, net_id=1):
     return SimpleNamespace(local_x=x, local_y=y, size_x=w, size_y=h, drill=drill,
-                           pad_type='thru_hole' if drill else 'smd')
+                           pad_type='thru_hole' if drill else 'smd', net_id=net_id)
 
 
 def _fp(name, pads):
@@ -138,6 +138,13 @@ def test_fanout_parts():
                    + [_pad(-0.35, 1.0, 0.45, 0.7), _pad(0.412, 1.0, 0.45, 0.57)]),
         'U12': _fp('lib:GSG-LXES1TBCC2', [_pad(0, 0, 0.5, 1.1)]
                    + [_pad(x, y, 0.9, 0.3) for x in (-0.5, 0, 0.5) for y in (-0.95, 0.95)]),
+        'U14': _fp('lib:BGA-381_pitch0.8mm',
+                   [_pad(x * 0.8, y * 0.8, 0.4, 0.4, net_id=(x + y) % 3)
+                    for x in range(-9, 10) for y in range(-9, 10)]
+                   + [_pad(sx * 8.5, sy * 8.0, 0.127, 0.508, net_id=0)
+                      for sx in (-1, 1) for sy in (-1, 1)]
+                   + [_pad(sx * 8.0, sy * 8.5, 0.508, 0.127, net_id=0)
+                      for sx in (-1, 1) for sy in (-1, 1)]),
     }
     got = {r: (t, p) for r, t, p in AP.fanout_parts(SimpleNamespace(footprints=parts))}
     expect(got.get('U1') == ('qfn', 0.5), f"QFN with an exposed pad: perimeter at 0.5 ({got.get('U1')})")
@@ -147,6 +154,8 @@ def test_fanout_parts():
     expect('U6' not in got, "LQFP-32 at 0.8 with 32 pads: a perimeter, under the >40-pad bar")
     expect(got.get('U9') == ('bga', 0.8), f"DDR3 ball map with its empty middle columns ({got.get('U9')})")
     expect(got.get('U13') == ('bga', 1.5), f"a column jittered by 1 um is one column ({got.get('U13')})")
+    expect(got.get('U14') == ('bga', 0.8), f"net-less corner markers off the ball lattice are set aside, "
+                                           f"net-less balls kept ({got.get('U14')})")
     for r, why in (('U5', 'a two-row DFN'), ('J1', 'a connector by name, whatever its pads'),
                    ('J2', 'an M.2 socket'), ('J3', 'two rows, whatever its name'),
                    ('T1', 'magnetics by name'), ('RN1', "a resistor array's corner pads are not sides"),

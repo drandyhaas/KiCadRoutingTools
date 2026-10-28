@@ -2205,7 +2205,8 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
 2. **Planes first**: GND and the dominant rail on the first two inner layers
    on 4+ layer boards, GND on B.Cu on 2-layer boards.
 3. **Fanout**: the part's shape is read from its pads, in its own frame,
-   exposed pads set aside. A grid array (at least three rows and three
+   exposed pads and markers (net-less pads unlike the part's commonest pad,
+   such as a BGA's corner outline pads) set aside. A grid array (at least three rows and three
    columns of three or more pads, each axis on a regular lattice, the two
    pitches within 2x of each other, with interior pads) gets `bga_fanout.py` when it is more than two
    rows deep or at 0.5 mm or finer; a four-sided perimeter package gets
@@ -2216,7 +2217,8 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    connector, socket, header or magnetics by footprint name
    (`autoplan.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
    A part that drops escapes is retried at the fab clearance with the fine
-   via, then with the under-pad method, keeping the attempt that escaped most.
+   via, then with the dogbone (BGA) or under-pad (QFN) method, keeping the
+   attempt that escaped most.
 4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts.
 5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`.
 6. **Route**: `route.py` over every net, with the poured nets and rails as
@@ -2236,7 +2238,7 @@ a tie keeps the earlier board.
 ### Usage
 
 ```bash
-python py_router/autoplan.py input.kicad_pcb output.kicad_pcb [OPTIONS]
+python3 py_router/autoplan.py input.kicad_pcb output.kicad_pcb [OPTIONS]
 
 Options:
   --dry-run          Print the analysis (AUTOPLAN_ANALYSIS) and exit
@@ -2274,10 +2276,10 @@ isolates is left out of the power, exclusion and pair lists, and named.
 
 ```bash
 # Route an unrouted board end to end, no agent
-python py_router/autoplan.py board.kicad_pcb board_routed.kicad_pcb
+python3 py_router/autoplan.py board.kicad_pcb board_routed.kicad_pcb
 
 # Close what an agent's chain left open, as its last step
-python py_router/autoplan.py step9_route.kicad_pcb board_finished.kicad_pcb --finish
+python3 py_router/autoplan.py step9_route.kicad_pcb board_finished.kicad_pcb --finish
 ```
 
 ## Build Script (`build_router.py`)
