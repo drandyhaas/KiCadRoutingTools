@@ -76,13 +76,22 @@ def test_own_pad_footprint_copper_not_named_for_its_own_net():
     cfg = GridRouteConfig(layers=['F.Cu', 'B.Cu'], grid_step=0.1,
                           track_width=0.2, clearance=0.2)
     gx, gy = GridCoord(cfg.grid_step).to_grid(5.1, 5.2)
+    from blocking_analysis import analyze_static_blockers
     for net, named in ((1, False), (4, True)):
         pcb = make_pcb(nets={1: make_net(1, 'ME'), 4: make_net(4, 'OTHER')},
                        segments=[bridge], footprints={'NT9': fp},
                        pads_by_net={1: [pad]})
+        # The octolinear post-passes leave the foreign-segment cache None;
+        # the diagnostic must not depend on it.
+        pcb._foreign_seg_arr_cache = None
         out = ser._identify_blocking_obstacles([(gx, gy, 0)], pcb, cfg,
                                                current_net_id=net)
         assert (0 in out) is named, (net, out)
+        # The `Static blockers: ... pre-existing tracks:` line, same rule.
+        static = analyze_static_blockers([(gx, gy, 0)], pcb, cfg,
+                                         nets_to_route={net},
+                                         stalled_net_id=net)
+        assert bool(static['tracks']) is named, (net, static)
     print("  PASS: own-pad footprint copper named for foreign nets only")
 
 

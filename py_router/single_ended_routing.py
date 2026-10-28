@@ -1243,8 +1243,15 @@ def _identify_blocking_obstacles(
     else:
         # #908: footprint copper the obstacle map lifts for a net is not a
         # blocker of that net; naming it sends the reader after copper the
-        # router already ignores. {row: nets the row is lifted for}.
-        own_pad = _cached_own_pad_nets(pcb_data)
+        # router already ignores. {row: nets the row is lifted for}. Called
+        # directly, not through _cached_own_pad_nets: that memo keys on
+        # _foreign_seg_arr_cache, which the octolinear post-passes set to
+        # None, and this memo already caches the answer per copper epoch.
+        try:
+            from check_drc import graphic_own_pad_nets
+            own_pad = graphic_own_pad_nets(pcb_data)
+        except Exception:
+            own_pad = {}
         seg_rows = []
         seg_lifts = {}
         for seg in pcb_data.segments:
