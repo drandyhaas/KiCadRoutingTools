@@ -1239,15 +1239,23 @@ def _identify_blocking_obstacles(
              config.via_size)
     _gmemo = getattr(pcb_data, '_blockid_geom_memo', None)
     if _gmemo is not None and _gmemo[0] == _gkey:
-        segs_all, vias_all, pads_all = _gmemo[1], _gmemo[2], _gmemo[3]
+        segs_all, vias_all, pads_all, seg_lifts = _gmemo[1:5]
     else:
+        # #908: footprint copper the obstacle map lifts for a net is not a
+        # blocker of that net; naming it sends the reader after copper the
+        # router already ignores. {row: nets the row is lifted for}.
+        own_pad = _cached_own_pad_nets(pcb_data)
         seg_rows = []
+        seg_lifts = {}
         for seg in pcb_data.segments:
             li = layer_map.get(seg.layer)
             if li is None:
                 continue
             gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
             gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+            lift = own_pad.get(id(seg))
+            if lift:
+                seg_lifts[len(seg_rows)] = lift
             seg_rows.append((gx1, gy1, gx2, gy2, li, seg.net_id))
         segs_all = (np.asarray(seg_rows, dtype=np.int64) if seg_rows
                     else np.empty((0, 6), dtype=np.int64))
@@ -1282,10 +1290,17 @@ def _identify_blocking_obstacles(
                     pad_rows.append((gx, gy, ex_x, ex_y, pad.net_id, mask))
         pads_all = (np.asarray(pad_rows, dtype=np.int64) if pad_rows
                     else np.empty((0, 6), dtype=np.int64))
-        pcb_data._blockid_geom_memo = (_gkey, segs_all, vias_all, pads_all)
+        pcb_data._blockid_geom_memo = (_gkey, segs_all, vias_all, pads_all,
+                                       seg_lifts)
 
-    segs = segs_all[segs_all[:, 5] != current_net_id] if len(segs_all) \
-        else segs_all
+    if len(segs_all):
+        keep = segs_all[:, 5] != current_net_id
+        for row, lift in seg_lifts.items():
+            if current_net_id in lift:
+                keep[row] = False
+        segs = segs_all[keep]
+    else:
+        segs = segs_all
     vias = vias_all[vias_all[:, 2] != current_net_id] if len(vias_all) \
         else vias_all
     pads = pads_all[pads_all[:, 4] != current_net_id] if len(pads_all) \
