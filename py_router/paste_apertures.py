@@ -459,17 +459,34 @@ def _pad_overlaps(ap: PasteAperture, pad) -> bool:
     overlap for a stroked shape.
     """
     from check_drc import _pad_perimeter_points, point_to_pad_distance
-    if aperture_distance(pad.global_x, pad.global_y, ap) <= 1e-9:
+    # A point can be in the opening only inside its bounds, and within `reach`
+    # of the pad only inside the pad's bounds grown by it: both are supersets
+    # (`_ring_bounds`, `_pad_bounds`), so testing them first changes no
+    # answer and skips the exact distance for nearly every sample. Without it
+    # a mounting hole's paste-only pad -- a custom polygon of ~1000 edges --
+    # cost 38 s per footprint (32.7 M point-segment distances), once per
+    # route step's every board load.
+    ab = ap.bounds
+    if _in_bounds(pad.global_x, pad.global_y, ab) and \
+            aperture_distance(pad.global_x, pad.global_y, ap) <= 1e-9:
         return True
     n = max(8, int(max(pad.size_x, pad.size_y) / 0.05) + 1)
     for (px, py) in _pad_perimeter_points(pad, n):
-        if aperture_distance(px, py, ap) <= 1e-9:
+        if _in_bounds(px, py, ab) and aperture_distance(px, py, ap) <= 1e-9:
             return True
     reach = ap.width / 2.0 if ap.shape_pad is None else 0.0
+    pb = _pad_copper_bounds(pad)
     for (vx, vy) in _boundary_samples(ap):
-        if point_to_pad_distance(vx, vy, pad) <= reach + 1e-9:
+        if _in_bounds(vx, vy, pb, reach) and \
+                point_to_pad_distance(vx, vy, pad) <= reach + 1e-9:
             return True
     return False
+
+
+def _in_bounds(x, y, b, grow=0.0) -> bool:
+    """Is (x, y) inside the bounds `b` grown by `grow` (and a hair)?"""
+    g = grow + 1e-6
+    return b[0] - g <= x <= b[2] + g and b[1] - g <= y <= b[3] + g
 
 
 def _pad_copper_bounds(pad):
