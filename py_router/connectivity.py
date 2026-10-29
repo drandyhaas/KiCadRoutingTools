@@ -429,8 +429,12 @@ _CLUSTER_MEMO_CAP = 4096
 def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
     """Union-find clustering of (x, y, layer) points by endpoint coincidence.
 
-    Two points join when |dx| < tol and |dy| < tol on the SAME layer (pass a
-    shared sentinel layer for layer-agnostic clustering). O(n) via spatial
+    Two points join when their DISTANCE is below tol on the SAME layer (pass
+    a shared sentinel layer for layer-agnostic clustering). A distance, not
+    an |dx|, |dy| box: check_drc measures a soft joint's gap with hypot, and a
+    box reaching tol * sqrt(2) along a diagonal clustered ends that check_drc
+    then flagged, so a cleanup pass deleted a short diagonal connector as a
+    self-loop and left the gap it had closed (#1513). O(n) via spatial
     hashing. Returns a list of cluster root indices, one per input point --
     the ONE shared implementation behind every coincidence consumer (#320).
 
@@ -459,6 +463,7 @@ def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
             parent[ra] = rb
 
     inv = 1.0 / tol
+    tol_sq = tol * tol
     buckets: Dict[Tuple[int, int], List[int]] = {}
     for i, (x, y, _layer) in enumerate(points):
         buckets.setdefault((int(x * inv), int(y * inv)), []).append(i)
@@ -470,7 +475,7 @@ def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
                     if j <= i:
                         continue
                     ox, oy, olayer = points[j]
-                    if olayer == layer and abs(x - ox) < tol and abs(y - oy) < tol:
+                    if olayer == layer and (x - ox) ** 2 + (y - oy) ** 2 < tol_sq:
                         union(i, j)
     roots = [find(i) for i in range(n)]
     _CLUSTER_MEMO[_key] = tuple(roots)
