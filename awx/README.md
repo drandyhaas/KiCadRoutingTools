@@ -121,7 +121,7 @@ right, the human, much of its copper length-matching meanders.*
 ### Running it
 
 One rung, end to end -- the fanout on our own ends, the solve, the loop, the
-route and the checks, with up to `ROUNDS` fanout rounds (default 2;
+route and the checks, with up to `ROUNDS` fanout rounds (default 4;
 `--feedback-rounds F` makes up to F of them after each draw feedback rounds,
 [below](#the-rounds-and-never-nothing-whole_routepy)):
 
@@ -632,9 +632,14 @@ box. Then one CP-SAT solve (`joint_escape.escape_field`) plans, round the
 bus's teeth, every other ball's escape, strap or bare dog-bone and every plane
 ball's drop. The earlier bus's routed copper stays as it stands.
 The ends are chosen on the bus's own field: the board as it was before that
-earlier step. That field is fanned out as the step fans a board
+earlier step, with the earlier buses' locked copper -- their routed lanes,
+which nothing moves. That field is fanned out as the step fans a board
 of the bus alone, and its ladder (the nets, their order and the K cut) comes
-with it. So each round's teeth and berths are the ones the bus alone takes.
+with it. So each round's teeth and berths are the ones the bus alone takes,
+clear of the lanes already there. Chosen on the earlier board alone, an SDI
+bus's teeth ran into a DDR3 bus's locked lanes on the inner layers: over four
+seeds 5 nets were left open against 7, and the first clean seed was the second
+against the fourth.
 
 The solve may move a via end's run onto another layer wherever no other copper
 comes within the rule of it (`relayer.clashes`). The joint plan keeps every
@@ -1868,7 +1873,7 @@ for some of the lanes exists:
   then open nets, vias, copper): on the zynq LVDS bus the held round laid 10,
   3, 2 and 2 nets open where the loop's best round laid 6, 0, 2 and 2;
 - a round that lays nothing, or leaves nets open, is followed by **round 1
-  again under the next seed**, up to `ROUNDS` (default 2): every solve of a
+  again under the next seed**, up to `ROUNDS` (default 4): every solve of a
   round -- the
   joint ends and their checks, the escape plans, the round's solve and the
   loop's re-solves -- searches under the step's seed plus the round less one
@@ -1877,7 +1882,10 @@ for some of the lanes exists:
   before. On an escape bus, rounds that fed the next fanout what they found
   cleaned 1 of 9 rounds left open and made 4 worse, where another draw of the
   same board laid clean in 5 of 12; over four boards the step left 2 nets
-  open against 4, in 42 minutes against 74;
+  open against 4, in 42 minutes against 74. Four draws rather than two (with
+  a shared array's ends field [above](#a-shared-array)): over the five boards'
+  eight buses, 2 nets open against 6, in 27% more time -- a bus clean in its
+  first round takes no longer;
 - with `--feedback-rounds F` (default 0), up to F of those rounds after each
   draw that leaves nets open are **feedback rounds** under its seed instead:
   the fanout is fed the round before's findings

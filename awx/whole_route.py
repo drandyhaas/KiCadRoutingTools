@@ -11,7 +11,7 @@ The chain (whole_chain.sh): the fanout choosing every net's tooth and berth with
 graded (check_connected, check_drc). A round that leaves nets open is followed by round 1 AGAIN under the next seed
 (cp_seed: every solve of the round searches under the step's seed plus the round less one) -- from the same board, the
 cap step again, nothing carried from the round before: another draw, not a repair of this one -- up to ROUNDS rounds
-(default 2), the first laid clean ending them. With --feedback-rounds F (default 0), up to F of them after each draw
+(default 4), the first laid clean ending them. With --feedback-rounds F (default 0), up to F of them after each draw
 are FEEDBACK ROUNDS under its seed instead: the ends the round before's audits found crowded, its lanes over two vias
 and its open nets (whole_feedback) go back to the fanout (FEEDBACK=), which chooses again INCREMENTALLY from that
 round's board. BASE (default fb_t2q_pairs.kicad_pcb) is the bench, DEST (default DU1) its destination part, both from
@@ -1429,7 +1429,7 @@ def place_held(board, out, held):
     return out
 
 
-def chain(K, o, R=2, base=None, dest=None, settings=None, F=0):
+def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     """whole_chain.sh K OUTDIR ROUNDS: the exit code, the grade the last line printed. The bench and its destination
     are `base` and `dest` when given (route_bus.py), else BASE and DEST from the environment; `settings` go over the
     environment for every stage (route_bus.py's caches off). `R` rounds at most, of them up to `F` feedback rounds
@@ -1923,7 +1923,7 @@ def main():
     ap.add_argument('first', metavar='K|SOLVE', help="the rung on the bench's ladder, or with --loop the solve JSON")
     ap.add_argument('outdir', metavar='OUTDIR')
     ap.add_argument('rounds', metavar='ROUNDS', nargs='?', type=int,
-                    help="the fanout rounds (default 2), or with --loop the loop's rounds (default 6)")
+                    help="the fanout rounds (default 4), or with --loop the loop's rounds (default 6)")
     ap.add_argument('--feedback-rounds', type=int, default=0, metavar='F',
                     help="after each draw that leaves nets open, up to F rounds under its seed fed its findings "
                          "(default 0: every round a draw)")
@@ -1945,7 +1945,7 @@ def main():
     INPROC = a.inproc
     if a.loop:
         sys.exit(loop(a.first, os.path.abspath(a.outdir), a.rounds or 6, dict(os.environ), Log()))
-    sys.exit(chain(a.first, a.outdir, a.rounds or 2, F=a.feedback_rounds)[0])
+    sys.exit(chain(a.first, a.outdir, a.rounds or 4, F=a.feedback_rounds)[0])
 
 
 if __name__ == '__main__':

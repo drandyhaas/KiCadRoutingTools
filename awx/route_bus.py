@@ -16,10 +16,11 @@ both parts the whole route does not admit, with why. --find names them and stops
 order instead, each with its own fanout (MODE: joint, escape or plain) and routing layers (LAYERS, ROUTE_LAYERS) --
 a bus to a row part among them (its pads escape straight out of their rows: escape_moves.row_part); an escape bus on
 an array an earlier bus was routed through plans that array whole with it, its ends on the board as it was before
-(route_buses: ESCAPE_JOINT, ESCAPE_JOINT_ENDS). A plain bus from such an array keeps the escapes that bus's step
-laid it there, a joint one when named (SOURCE_SHARED, keeps_source_escapes). DEST may name several parts,
-SRC:U4+U3: ONE SOURCE, SEVERAL ENDS, the buses to them one plain bus planned and laid whole -- the whole route's trunk
-runs to the first, and each other's lanes leave it on a branch (whole_frame), crossing the others on the trunk alone.
+with the earlier buses' locked copper (route_buses: ESCAPE_JOINT, ESCAPE_JOINT_ENDS). A plain bus from such an
+array keeps the escapes that bus's step laid it there, a joint one when named (SOURCE_SHARED, keeps_source_escapes).
+DEST may name several parts, SRC:U4+U3: ONE SOURCE, SEVERAL ENDS, the buses to them one plain bus planned and laid
+whole -- the whole route's trunk runs to the first, and each other's lanes leave it on a branch (whole_frame),
+crossing the others on the trunk alone.
 
 route_bus() takes a board as the chain hands it on and writes it back with the bus laid, in the board's own frame,
 at the chain's sizes (resolve_rules: the routing CLIs' flags, an omitted one resolved as route.py resolves it):
@@ -147,7 +148,7 @@ def resolve_rules(board, clearance=None, clearance_ceiling=None, track_width=Non
     return dataclasses.replace(r, source='the chain\'s sizes, resolved as route.py resolves its own')
 
 
-def route_bus(board, out, src, dest, k=None, rounds=2, inproc=False, log=print, json_out=None, joint_fanout=False,
+def route_bus(board, out, src, dest, k=None, rounds=4, inproc=False, log=print, json_out=None, joint_fanout=False,
               escape=False, settings=None, feedback_rounds=0, **sizes):
     """Route the bus between `src` and `dest` on `board`, writing `out`, at the chain's sizes (`sizes`: SIZE_ARGS,
     resolve_rules). Returns (exit code, grade line). The run's rules are installed for the step and supplied to
@@ -185,7 +186,7 @@ def parse_bus(spec):
     return parts[0], parts[1], mode, layers
 
 
-def route_buses(board, out, buses=None, k=None, rounds=2, inproc=False, log=print, json_out=None,
+def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=print, json_out=None,
                 joint_fanout=False, escape=False, feedback_rounds=0, **sizes):
     """Every bus on `board` routed in turn, each on the board the one before handed on, `out` the last: `buses` as
     [(src, dest)] or [(src, dest, mode, layers)] (parse_bus: MODE joint, escape or plain, None for `joint_fanout` /
@@ -196,9 +197,10 @@ def route_buses(board, out, buses=None, k=None, rounds=2, inproc=False, log=prin
 
     A SHARED ARRAY: an escape bus on an array an earlier bus was handed on through has that array planned whole with
     it each round (ESCAPE_JOINT), its ends chosen on the board as it was before the first such earlier bus
-    (ESCAPE_JOINT_ENDS) -- the zynq's U1: the DDR3 bus (joint), then the AD9364's LVDS (escape) round it. A plain bus
-    from such an array keeps the escapes the earlier step's plan laid its balls there, a joint one when the environment
-    names its source (SOURCE_SHARED: keeps_source_escapes) -- the zynq's USB bus from U1 to its QFN"""
+    (ESCAPE_JOINT_ENDS), with the earlier buses' locked copper -- the zynq's U1: the DDR3 bus (joint), then the
+    AD9364's LVDS (escape) round it. A plain bus from such an array keeps the escapes the earlier step's plan laid its
+    balls there, a joint one when the environment names its source (SOURCE_SHARED: keeps_source_escapes) -- the zynq's
+    USB bus from U1 to its QFN"""
     from kicad_parser import parse_kicad_pcb
     from copy_board import copy_board
     from flow_frame import dest_refs as _ff_dest_refs
@@ -458,6 +460,28 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                 pe_ = parse_kicad_pcb(ends_board)
             txt_e, _n = mb.strip_pair_copper(open(ends_board, encoding='utf-8').read(), pe_, names)
             txt_e = unpull(txt_e, pull_pads)[0]
+            # ...and the earlier buses' LOCKED copper on it as it stands: their routed lanes, which nothing here moves,
+            # so the teeth the ends choose there clear them (chosen on the board before them alone, an SDI bus's teeth
+            # ran into a DDR3 bus's locked lanes on the inner layers: over four seeds 5 nets open against 7, the first
+            # clean seed the second against the fourth). The copper of nets routed before that board is on it already
+            # (the same uuid)
+            have_ = set(re.findall(r'\(uuid "([^"]+)"\)', txt_e))
+            keep_ = []
+
+            def _grab(block):
+                m_ = re.search(r'\(net "([^"]+)"\)', block)
+                u_ = re.search(r'\(uuid "([^"]+)"\)', block)
+                if '(locked yes)' in block and m_ and short(m_.group(1)) in prot_ and \
+                        not (u_ and u_.group(1) in have_):
+                    keep_.append(block)
+                return False
+            btxt_ = open(base, encoding='utf-8').read()
+            mb.walk_blocks(btxt_, 'segment', _grab)
+            mb.walk_blocks(btxt_, 'via', _grab)
+            i_ = txt_e.rstrip().rfind(')')
+            txt_e = txt_e[:i_] + ''.join('\t' + b_ + '\n' for b_ in keep_) + txt_e[i_:]
+            log(f'  the ends field: the board before the earlier buses, with their {len(keep_)} locked track(s) and '
+                f'via(s)')
             base_e = os.path.join(work, 'ends_base.kicad_pcb')
             with open(base_e, 'w', encoding='utf-8') as f_:
                 f_.write(txt_e)
@@ -1613,8 +1637,8 @@ def main():
                          'plain one keeps the escapes that bus\'s step laid it there (SOURCE_SHARED=0: none; '
                          '=REF,..: a plain or joint bus from those sources)')
     ap.add_argument('--k', type=int, help="the ladder's first K nets (default: the whole ladder)")
-    ap.add_argument('--rounds', type=int, default=2,
-                    help='the whole route\'s rounds at most, each a draw under the next seed (default 2)')
+    ap.add_argument('--rounds', type=int, default=4,
+                    help='the whole route\'s rounds at most, each a draw under the next seed (default 4)')
     ap.add_argument('--feedback-rounds', type=int, default=0, metavar='F',
                     help='after each draw that leaves nets open, up to F of the rounds under its seed, the fanout '
                          'fed what the round before found (its crowded ends, its lanes over two vias, its open nets) '

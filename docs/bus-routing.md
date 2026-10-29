@@ -133,7 +133,7 @@ python3 -X utf8 awx/route_bus.py board.kicad_pcb board_bus.kicad_pcb \
 
 Each bus is routed in **rounds**, and a round is one whole attempt: choose every net's ends and fan out, solve every crossing and layer change (CP-SAT), then a **loop** that turns the plan into geometry, snaps it to the router's grid, audits it and solves again with what the audit found, and finally lays the copper. The first round laid connected and DRC-clean ends the step; otherwise the best round is kept (the fewest nets open, then the fewest vias).
 
-- **`--rounds R`** (default 2): rounds at most. Every solve of a round runs under one CP-SAT seed, so the same board and seed give the same plan.
+- **`--rounds R`** (default 4): rounds at most. Every solve of a round runs under one CP-SAT seed, so the same board and seed give the same plan.
 - **A round that leaves nets open is a new draw by default**: round 1 again from the same board under the next seed (`BUS_SEED`, else 1, plus the draws before it), nothing carried from the round before.
 - **`--feedback-rounds F`** (default 0): after each draw that leaves nets open, up to F of the rounds keep that draw's seed and are fed what it found -- its crowded ends, its lanes over two vias, its open nets -- the fanout choosing again from that round's board. Findings with nothing new start the next draw instead. They count within `--rounds`.
 - **On an escape bus** the ends are put to the solve before they are laid, up to five times, each refusal teaching the next choice; after five, the last choice is laid.
