@@ -645,6 +645,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
         return False
 
     dangles = defaultdict(list)  # (net_id, layer) -> [(x, y, width, graphic)]
+    seg_of = {}                  # id -> the segment a dangle hangs on
     for s in pcb_data.segments:
         if scope_net_ids is not None and s.net_id not in scope_net_ids:
             continue
@@ -655,8 +656,35 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 continue
             if at_anchor(s.net_id, x, y, s.layer, s.width):
                 continue
+            seg_of[id(s)] = s
             dangles[(s.net_id, s.layer)].append(
                 (x, y, s.width, getattr(s, 'graphic', False), id(s)))
+
+    def inside_flank(oids, x1, y1, x2, y2, w):
+        """Does the bridge lie wholly inside one flanking track's copper?
+
+        A route landing MID-SPAN on a stub short of its free end leaves the
+        two ends a soft joint (connectivity.strict_joint_roots keeps such a
+        landing flagged on purpose), and the bridge between them runs along
+        the stub's own centreline. A capsule is convex, so a bridge whose two
+        ends sit within (flank width - w)/2 of the flank's centreline adds no
+        copper at all: no clearance it could break, and refusing it -- as
+        clears() did whenever the stub itself was already short of the gate's
+        clearance -- drops the repair and keeps the violation (#617's
+        argument, which holds exactly here; #1515). Track flanks only: a
+        graphic's width does not describe its copper."""
+        for oid in oids:
+            f = seg_of.get(oid)
+            if f is None or getattr(f, 'graphic', False):
+                continue
+            r = (f.width - w) / 2.0 + 1e-4
+            if r < 0:
+                continue
+            if (_pt_seg_dist(x1, y1, f.start_x, f.start_y, f.end_x, f.end_y) <= r
+                    and _pt_seg_dist(x2, y2, f.start_x, f.start_y,
+                                     f.end_x, f.end_y) <= r):
+                return True
+        return False
 
     def clears(nid, x1, y1, x2, y2, layer, w):
         d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer,
@@ -694,7 +722,8 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 cap = (wi + wj) / 2.0
                 if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
                     w = min(wi, wj)
-                    if not clears(net_id, xi, yi, xj, yj, layer, w):
+                    if not (inside_flank((oi, oj), xi, yi, xj, yj, w)
+                            or clears(net_id, xi, yi, xj, yj, layer, w)):
                         continue
                     new_conns.append(Segment(start_x=xi, start_y=yi, end_x=xj,
                                              end_y=yj, width=w, layer=layer, net_id=net_id))
