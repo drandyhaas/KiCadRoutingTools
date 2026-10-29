@@ -834,20 +834,9 @@ HiGHS for the geometry's LP -- and how they negotiate have a page of their
 own, with interactive demos:
 **[CP-SAT and HiGHS in the whole route](https://drandyhaas.github.io/KiCadRoutingTools/solvers/)**.
 
-```mermaid
-flowchart LR
-    E["ends + fanout<br/>whole_ends, fanout_from_plan"] --> S["solve<br/>whole_solve (CP-SAT)"]
-    S --> G["geometry<br/>whole_geo (LP)"]
-    G --> P["polish<br/>whole_polish"]
-    P -- "side flips" --> G
-    P --> N["snap: pairs first, then singles<br/>whole_snap"]
-    N --> A{"audit, gate, lint"}
-    A -- "pass" --> R["route<br/>route_lanes --plan"]
-    A -- "cuts + history" --> S
-    A -- "ends crowded (exit 4): the plan it held" --> R
-    R -- "nets left open" --> F["round 1 again,<br/>the next seed"]
-    F --> E
-```
+![The bus step: rounds, seeds and the loop](img/bus_rounds.png)
+
+*Drawn from `docs/diagrams/bus_rounds_detail.mmd` by `docs/diagrams/render_mermaid.py`.*
 
 | stage | decides | how |
 |---|---|---|
@@ -859,7 +848,7 @@ flowchart LR
 | [**snap**](#the-snap-whole_snappy) | octilinear paths on the router's grid, the pairs first | a grid search per lane |
 | [**audit, gate, lint**](#the-audit-the-gate-and-the-lint) | whether the router can lay it | every `plan_audit` check, nothing waived |
 | [**loop**](#the-loop-whole_routepy---loop) | what to try next | findings back to the solve as cuts and history |
-| [**rounds**](#the-rounds-and-never-nothing-whole_routepy) | the next draw, and what the run hands back | a round left with nets open: round 1 again under the next seed, from the same board; the best round's board; never nothing while a plan for some lanes can be laid |
+| [**rounds**](#the-rounds-and-never-nothing-whole_routepy) | the next draw, and what the run hands back | a round left with nets open: round 1 again under the next seed, from the same board (or, `--feedback-rounds`, a round under the same seed fed what it found); the best round's board; never nothing while a plan for some lanes can be laid |
 | [**route**](#the-route-route_lanespy---plan) | the copper | the production router, each lane in its band |
 
 #### The ends (`whole_ends.py`)
@@ -1737,6 +1726,10 @@ only the fanout can move.
 - **Findings become history:** every audit's findings go to the solve with
   the cuts (`whole_gate --hot`: each finding's place and the lanes it names),
   so a round the geometry has no cut for still solves again.
+- **Cuts and history are the round's own.** Every re-solve of a round's
+  loop holds them all, and no other round sees them: a draw starts with
+  none, and a feedback round hands the fanout its round's findings, not its
+  cuts.
 - **Cuts that leave no plan** (together they can ask more than any plan
   gives) are kept as soft costs for that solve and the rounds after, with the
   history (`whole_solve SOFT_CUTS`), and that re-solve keeps a plan it cannot
@@ -2170,7 +2163,7 @@ With nothing supplied, as on the benches:
 | `escape_plan.py`, `dogbone_arrays.py` | the escape fanout (`route_bus --escape`): both arrays dog-boned, and each round's ends chosen among the escapes that field has (ball lines, sidesteps, streets) and laid as they are (`tests/test_622_escape_plan.py`); no lane laid whose runs come within the rule of a kept lane's or of its own other leg's (`clear_lanes`: `tests/test_622_escape_clear_lanes.py`); on a shared array, a lane the ends gave no end that the joint field escaped held to the tooth its plan chose and given a berth with the others held (`free_ends`); a joint field that leaves a lane no way to its chosen end laid without it when it ends at least as many lanes as the dog-boned field (`without_lanes`, `lanes_ended`: `tests/test_622_escape_clear_lanes.py`) |
 | `joint_escape.py`, `conflict_groups.py` | the joint fanout (`route_bus --joint-fanout`): an array's other balls planned together in one CP-SAT solve and laid by the under-pad engine's joint escape (a drop at a finer rung's via: `tests/test_622_drop_fine_via.py`; nothing in a laid pair's pocket: `test_622_pair_teeth.py`; no escape between two laid lanes that close round it: `test_622_lane_walls.py`); the escapes' conflicts as cliques and bicliques (`tests/test_622_conflict_groups.py`); a shared array planned whole round an escape bus's teeth (`route_bus --escape`, `ESCAPE_JOINT`: `escape_field`); a later round's pieces carried onto its board once (`carry`: `tests/test_622_joint_rounds.py`) |
 | `whole_route.py`, `modal_whole.py` | one rung end to end -- fanout, solve, loop, route, checks, rounds under the next seed -- graded in one line (`WHOLE K=..`); the loop's layer cuts from the audit and the snap (`tests/test_622_layer_cuts.py`); a lane its fanout gave no end, or ran and did not lay, left out of the round, open (`with_ends`: `tests/test_622_whole_route_no_ends.py`); the ladder in the cloud, one container per rung |
-| `cp_seed.py` | the bus step's seed: every CP-SAT solve of a round under one seed (`BUS_SEED`, else CP-SAT's default), the next round under the next -- a round is one draw, the same board and seed the same plan |
+| `cp_seed.py` | the bus step's seed: every CP-SAT solve of a round under one seed (`BUS_SEED`, else CP-SAT's default), the next draw under the next and a feedback round under its draw's -- the same board and seed the same plan |
 | `whole_ends.py`, `ends_kernel.py`, `whole_frame.py`, `whole_feedback.py` | the choice of ends (the fanout's `PLAN_JUDGE=ends`; every plane ball kept a way down: `tests/test_622_walled_balls.py`; its estimate scored in Rust, `ENDS_KERNEL=check` both ways); the frame of a bench (a part on a ring's stack: `tests/test_622_ring_room.py`); what goes back to the fanout (`tests/test_622_ends_fixes.py`, `test_622_exit_front.py`, `test_622_feedback_rounds.py`; an item for a lane the round's ends have no option for keys nothing: `fb_tables`) |
 | `ends_nudge.py`, `ends_reescape.py` | a crowded end repaired on the round's fanout bench (`whole_route.repair_ends`): a lane's via or tooth, or another net's via, nudged the smallest step clear of a finding; a ball escaped again from its menu, its first stretch clear of every other net's copper, laid alone by `source_realize.realize` |
 | `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py` | the crossing and layer solve, the geometry LP (a part seen from several frames: `tests/test_622_part_frames.py`; islands made of pads: `tests/test_622_pad_islands.py`), the polish, the snap onto the router's grid |

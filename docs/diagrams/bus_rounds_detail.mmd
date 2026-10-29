@@ -1,0 +1,49 @@
+flowchart TD
+    START(["route_bus, one bus: up to --rounds route rounds (default 2)"])
+    KIND{"this round"}
+    subgraph ROUND["a route round"]
+        E["ends + fanout<br/>whole_ends, fanout_from_plan"]
+        CHK{"escape bus:<br/>the solve's check,<br/>5 at most"}
+        FO["the ends laid by the fanout<br/>(the cap step on a joint bus)"]
+        S["the round's solve: whole_solve (CP-SAT)<br/>an unproved plan kept; escape bus: relaxed if none"]
+        subgraph LOOP["the loop: LOOP_ROUNDS (6) at most"]
+            G["geometry<br/>whole_geo (LP)"]
+            P["polish<br/>whole_polish"]
+            N["snap: pairs first, then singles<br/>whole_snap"]
+            A{"audit, gate, lint"}
+            RS["re-solve,<br/>the cuts firm"]
+            REP["repair_ends,<br/>the loop again"]
+        end
+        L["lay: route_lanes --plan<br/>the passing plan, else the plan it held<br/>(LAY_TRY: another loop round's too)"]
+        GR{"graded"}
+    end
+    STOP(["done"])
+    NEXT{"a feedback round left<br/>for this draw?"}
+    FB(["next round: a FEEDBACK ROUND<br/>the same seed, fed findings.json,<br/>from this round's board<br/>(back to the top)"])
+    DR(["next round: the next DRAW<br/>the next seed, the step's board,<br/>nothing carried<br/>(back to the top)"])
+    BEST(["no rounds left: the best round<br/>(fewest open, then vias);<br/>nothing laid: the LAST RESORT,<br/>partial plans"])
+    START --> KIND
+    KIND -- "a draw: seed BUS_SEED (else 1) + draw - 1" --> E
+    KIND -- "a feedback round" --> E
+    E -- "escape bus" --> CHK
+    CHK -- "refused: learn and choose again<br/>(those lanes not on those ends again,<br/>a lane with no room for a change on one layer,<br/>a crossing held apart)" --> E
+    CHK -- "a plan, or the 5th refusal stands" --> FO
+    E -- "plain or joint bus" --> FO
+    FO --> S
+    S --> G
+    G --> P
+    P -- "side flips" --> G
+    P --> N
+    N --> A
+    A -- "findings: cuts + history<br/>(this round's alone)" --> RS
+    RS --> G
+    A -- "ends crowded twice<br/>(exit 4)" --> REP
+    REP --> G
+    A -- "pass" --> L
+    A -- "not converging, crowded again,<br/>out of loop rounds" --> L
+    L --> GR
+    GR -- "connected and clean" --> STOP
+    GR -- "nets open: lanes named<br/>(feedback.json, for the last resort)" --> NEXT
+    NEXT -- "yes" --> FB
+    NEXT -- "no, rounds left" --> DR
+    NEXT -- "no rounds left" --> BEST

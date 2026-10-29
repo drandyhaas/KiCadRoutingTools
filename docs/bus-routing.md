@@ -128,3 +128,20 @@ python3 -X utf8 awx/route_bus.py board.kicad_pcb board_bus.kicad_pcb \
 - **What it hands on.** The output is graded before it is handed on: the bus nets connected, no DRC violation on a bus net, and the board no worse than it came. When it passes, the output is the routed board, with its routed nets recorded as protected (#521) so `route.py`'s rips and the plane finalize leave them alone, and any net it left open is left to `route.py`. Otherwise the output is the board as it came and `route.py` routes the whole bus. The summary (`--json-out`, default `<OUT stem>.bus/summary.json`) names the nets routed and refused, and why. Exit code 0 means the bus was handed on routed and clean, 1 that the output is the input board, 2 a usage error.
 - Every ball of a bus array must leave the step served (escaped, dropped to its plane or strapped): `route.py` cannot reach a bare ball in a ball field, and a fanout run after the bus step finds the field already full. The skill's Step 1a says how to count them.
 - The step has no GUI action, and `tests/stress/manifest_to_plan.py` skips it, so a chain with a bus step replays from its `.sh` manifest only. `python3 awx/route_bus.py --help` lists every option.
+
+### Rounds, seeds and the loop
+
+Each bus is routed in **rounds**, and a round is one whole attempt: choose every net's ends and fan out, solve every crossing and layer change (CP-SAT), then a **loop** that turns the plan into geometry, snaps it to the router's grid, audits it and solves again with what the audit found, and finally lays the copper. The first round laid connected and DRC-clean ends the step; otherwise the best round is kept (the fewest nets open, then the fewest vias).
+
+- **`--rounds R`** (default 2): rounds at most. Every solve of a round runs under one CP-SAT seed, so the same board and seed give the same plan.
+- **A round that leaves nets open is a new draw by default**: round 1 again from the same board under the next seed (`BUS_SEED`, else 1, plus the draws before it), nothing carried from the round before.
+- **`--feedback-rounds F`** (default 0): after each draw that leaves nets open, up to F of the rounds keep that draw's seed and are fed what it found -- its crowded ends, its lanes over two vias, its open nets -- the fanout choosing again from that round's board. Findings with nothing new start the next draw instead. They count within `--rounds`.
+- **On an escape bus** the ends are put to the solve before they are laid, up to five times, each refusal teaching the next choice; after five, the last choice is laid.
+- **The loop** (six rounds at most, `LOOP_ROUNDS`) sends its findings back to the solve as cuts and history. They stay within the round: no later round sees them.
+- When no round lays anything, a **last resort** lays a partial plan, leaving out the lanes the rounds named.
+
+![Rounds, seeds and the loop](bus-rounds.png)
+
+*Drawn from `diagrams/bus_rounds.mmd` by `diagrams/render_mermaid.py`.*
+
+`awx/README.md` ("How it works") has every stage in detail.
