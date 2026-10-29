@@ -21,7 +21,6 @@ exactly as before; the rotation wrapper still applies after it.
 """
 from __future__ import annotations
 
-import copy
 from typing import Callable, Dict, Tuple
 
 from kicad_parser import PCBData, Footprint, _global_to_local
@@ -92,7 +91,8 @@ def to_front_frame(pcb_data: PCBData, ref: str, axis: float = None
     def m(x, y):
         return (x, 2.0 * CY - y)
 
-    rp = copy.deepcopy(pcb_data)
+    from .rotate_frame import frame_copy
+    rp = frame_copy(pcb_data)
     # the turned copy says so: a memo keyed on the board FILE (path,
     # mtime, size) would otherwise hand the turned board the real one's
     # model -- measured: the braid's obstacle memo gave the turned
