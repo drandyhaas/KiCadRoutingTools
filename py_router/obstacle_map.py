@@ -2568,6 +2568,26 @@ def block_via_cells_near_npth_floors(obstacles: GridObstacleMap,
                                     _clr, grid_step)
 
 
+def via_floor_npth_holes(pcb_data: PCBData, routed_net_ids) -> list:
+    """The ``npth_holes`` a via map hands :func:`block_via_cells_near_npth_floors`:
+    every NPTH hole of every net (a drill does not care whose net it is), plus
+    #441's ring-uncovered plated holes FOREIGN to ``routed_net_ids`` -- the
+    population ``add_drill_hole_obstacles`` collects for the signal map, so
+    the plane maps that place vias (``plane_region_connector``'s base map and
+    ``plane_obstacle_builder``'s via map, #1514) hold the same holes."""
+    holes = []
+    for _nid, _pads in pcb_data.pads_by_net.items():
+        for _pad in _pads:
+            if _pad.drill <= 0:
+                continue
+            if not _pad_has_copper(_pad):
+                holes.extend(pad_drill_circles(_pad))
+            elif (max(_pad.size_x, _pad.size_y) < _pad.drill
+                  and _nid not in routed_net_ids):
+                holes.extend(pad_drill_circles(_pad))
+    return holes
+
+
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig,
                                 extra_clearance: float = 0.0, _shapes=None):

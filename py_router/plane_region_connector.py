@@ -26,7 +26,7 @@ from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
                           _batch_cells_one_layer, _batch_vias,
                           block_track_cells_near_drills, resolve_hole_clearance,
                           block_track_cells_near_override_pad_holes, _pad_has_copper,
-                          block_via_cells_near_npth_floors)
+                          block_via_cells_near_npth_floors, via_floor_npth_holes)
 from plane_obstacle_builder import (
     _precompute_circle_offsets,
     _batch_block_circles_via, _batch_block_circles_cell
@@ -3721,18 +3721,9 @@ def build_base_obstacles(
     # every NPTH hole of every net, plus #441's ring-uncovered plated holes
     # foreign to the nets this map routes -- the same population
     # add_drill_hole_obstacles hands it.
-    _via_npth = []
-    for _nid, _pads in pcb_data.pads_by_net.items():
-        for _pad in _pads:
-            if _pad.drill <= 0:
-                continue
-            if not _pad_has_copper(_pad):
-                _via_npth.extend(pad_drill_circles(_pad))
-            elif (max(_pad.size_x, _pad.size_y) < _pad.drill
-                  and _nid not in exclude_net_ids):
-                _via_npth.extend(pad_drill_circles(_pad))
     block_via_cells_near_npth_floors(
-        obstacles, pcb_data, _via_npth, config.via_size, config.via_drill,
+        obstacles, pcb_data, via_floor_npth_holes(pcb_data, exclude_net_ids),
+        config.via_size, config.via_drill,
         config.clearance, hole_to_hole_clearance,
         resolve_hole_clearance(pcb_data, config), config.grid_step)
 

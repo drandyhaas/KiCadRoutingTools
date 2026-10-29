@@ -582,6 +582,7 @@ class SharedViaMaps:
     def _key(config: GridRouteConfig, same_net_pad_clearance: float) -> Tuple:
         return (config.grid_step, config.clearance, config.via_size,
                 config.via_drill, config.hole_to_hole_clearance,
+                config.hole_clearance,  # #1514: the via map's NPTH floor
                 config.board_edge_clearance, same_net_pad_clearance)
 
     def get(self, config: GridRouteConfig, same_net_pad_clearance: float = -1.0):

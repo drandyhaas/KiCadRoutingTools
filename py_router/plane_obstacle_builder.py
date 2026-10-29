@@ -421,6 +421,8 @@ def build_via_obstacle_map(
     - Tracks on all layers (except target net)
     - Board edge clearance
     - Through-hole pad drills (hole-to-hole clearance)
+    - Via copper off NPTH holes at the declared copper-to-hole floor and any
+      NPTH pad clearance override (#1038/#505, held here since #1514)
 
     Args:
         same_net_pad_clearance: If >= 0, also block target-net pads as via obstacles
@@ -1077,7 +1079,20 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 
 def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                     config: GridRouteConfig, exclude_net_id: int):
-    """Block via placement near existing drill holes."""
+    """Block via placement near existing drill holes: the hole-to-hole DRILL
+    minimum around every drill, then the via-COPPER arms around no-copper holes
+    (#1038 declared copper-to-hole floor, #505 NPTH pad override) that the
+    signal map and ``plane_region_connector``'s map stamp through the same
+    helper. Without them the via map behind plane taps and the net-rescue
+    bare-ball escape admitted a via whose drill cleared an NPTH at h2h while
+    its annulus sat inside the board's declared floor (#1514)."""
+    from obstacle_map import (block_via_cells_near_npth_floors,
+                              resolve_hole_clearance, via_floor_npth_holes)
+    block_via_cells_near_npth_floors(
+        obstacles, pcb_data, via_floor_npth_holes(pcb_data, {exclude_net_id}),
+        config.via_size, config.via_drill, config.clearance,
+        config.hole_to_hole_clearance, resolve_hole_clearance(pcb_data, config),
+        config.grid_step)
     if config.hole_to_hole_clearance <= 0:
         return
 
