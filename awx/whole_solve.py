@@ -401,9 +401,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     # against 4-8% without). Escape ends are checked against this solve before they are laid (whole_ends.solve_check:
     # a candidate's, FRONT given; the plan sidecar's 'escape' for the round's), so a lane's layer near the arrays is
     # the ends' to choose. Other ends were never chosen for it: a short lane, its crossings packed near the faces, has
-    # no window left for a change
+    # no window left for a change. (Relax 3, the round's last re-solve, lifts it alone: main)
     FACE_ZONE = 3 * VNEED + PITCH
-    if front is not None or SIDE.get('escape'):
+    if (front is not None or SIDE.get('escape')) and relax != 3:
         VIN0 = {n: max(v_, FACE_ZONE) for n, v_ in VIN0.items()}
         VIN1 = {n: max(v_, FACE_ZONE) for n, v_ in VIN1.items()}
     # ...a CROSSED pair's (pairs.opposite_hands: its legs swap once, at its first dive, a crossover) by the crossover's
@@ -639,7 +639,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         hi = min(end[a] - max(LEGROOM, RIN1[a]), end[b] - max(LEGROOM, RIN1[b])) if same(a, b) else \
             min(tend[a] - (max(MARG, RIN1[a]) if a not in bname else MARG), tend[b] - (max(MARG, RIN1[b]) if b not in bname else MARG))
         n_empty += hi < lo + G
-        if relax >= 2:
+        if relax == 2:
             # (WIDE, the re-solve of a model with no plan and windows held open: EVERY crossing's window the whole
             # trunk, from the first lane's entry to the last's end, so the braid's order along each lane can be kept
             # whatever the ends' places -- an end far past the others' stretch left two crossings' windows in the
@@ -860,7 +860,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     zq = QU(2 * _pairs.turn_straight_steps(ctx.cfg) * ctx.cfg.grid_step + _pairs.pitch(TRK))
     n_zz = 0
     for n in M:
-        if n not in prs or relax:
+        if n not in prs or relax in (1, 2):
             continue
         ks = [k for k in t if n in k]
         way = {k: (1 if li[n] > li[k[1] if k[0] == n else k[0]] else -1) for k in ks}
@@ -2428,14 +2428,19 @@ def main():
     if J is None:
         # THE RELAXED RE-SOLVES (with the escape fanout, FANOUT_ESCAPE; a round's own solve, SOLVE_UNPROVED, which
         # never ends with nothing): a model with NO plan is solved again without the rules the geometry can pay for --
-        # a pair's zigzag room (relax 1) -- then with every crossing's window the whole trunk too (relax 2). Each named
-        # in the log; the first plan is the round's, where it would have laid nothing (the zynq LVDS bus's 47 nets on
+        # a pair's zigzag room (relax 1) -- then with every crossing's window the whole trunk too (relax 2) -- then
+        # strict again but for the face zone (relax 3): escape ends whose every exact check was refused stand as the
+        # last one left them, and the zone those checks held them to may be what leaves no plan (an LVDS bus's ends,
+        # its short lanes' change windows a fifth of a millimetre or less inside the zone: no plan at relax 1 or 2, a
+        # strict plan in 2 s with the zone off, laid clean). Each named
+        # in the log; the first plan is the round's, where it would have laid nothing (an LVDS bus's 47 nets on
         # escapes: a zigzag and the braid's order on two pairs; a synth bus on a 4 mm gap: degenerate windows). NEVER the
         # layers via-end runs and a pair's tips are held apart on (VSEP, tip_between): relaxed, the relayer laid runs onto
         # one another's layer -- 79 contacts -- and an open lane is better than a short
         relax_on = awx_settings.get('FANOUT_ESCAPE') == '1'
         if relax_on and awx_settings.get('SOLVE_UNPROVED') == '1' and STATUS.get('plan') is False:
-            for rlx, what in ((1, 'no pair zigzag room'), (2, 'and every crossing window the whole trunk')):
+            for rlx, what in ((1, 'no pair zigzag room'), (2, 'and every crossing window the whole trunk'),
+                              (3, 'the face zone off, the rest strict')):
                 print(f'   no plan -- solved again, relaxed ({rlx}): {what}')
                 ctx, _cs = whole_ctx.plan()
                 J = solve(ctx, awx_settings.req('DEST'), files('CUTS'), files('HIST'), None,

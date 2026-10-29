@@ -1268,7 +1268,8 @@ once, proved optimal in its vias.
   are checked against the solve before they are laid, so where a lane
   changes layer near the arrays is theirs to choose; other ends were never
   chosen for it, and a short lane with its crossings packed near the faces
-  would have no window left for a change.
+  would have no window left for a change. (The round's last relaxed re-solve
+  lifts the zone alone: below.)
 
 **Layer changes.**
 
@@ -1363,9 +1364,14 @@ once, proved optimal in its vias.
   plan leaves over two go back to the ends.
 - **Relaxed, still a plan** (the escape fanout, `route_bus --escape`): a
   round's first solve with no plan is solved again without a pair's zigzag
-  room, then with every crossing's window the whole trunk, and the first plan
-  is the round's. The layers two via ends' runs are held apart on are never
-  relaxed: the relayer would lay those runs onto one another.
+  room, then with every crossing's window the whole trunk, then strict but
+  for the **face zone**, and the first plan is the round's. The last is for
+  ends whose every exact check was refused: they stand as the last check left
+  them, and the zone the checks held them to can be what leaves no plan -- a
+  short lane's change windows a fifth of a millimetre or less inside it. On
+  one LVDS draw neither of the first two had a plan, the third had one in
+  2 s, laid with no net open. The layers two via ends' runs are held apart
+  on are never relaxed: the relayer would lay those runs onto one another.
 - **No plan, and why** (`SOLVE_CROWD`, a round's first solve): a model with
   no plan at all, relaxed too where it is, is solved again as its **crowd
   diagnosis** -- each lane free to break what its crossings need (their
@@ -1588,6 +1594,12 @@ and the snap lays the singles.
   third leaned 0.07 mm onto the site (the LVDS bus's first 32 nets: TX_D1 on
   In1 by CTRL_OUT4's dive, and CTRL_OUT4 had no path; held it off, that round
   lays every lane).
+- **Its dives off the singles' lines, while it can:** a pair's via sites keep
+  every single's planned line and via its share, as its legs pay to; only a
+  pair with no dive clear of them is laid again without. A dive set across a
+  single's row leaves that single no way past it, where legs beside the row
+  cost it a jog: on an LVDS escape bus, one draw left three nets open that
+  way, and fewer with the dives held off.
 - **Keeping to its line:** a slanted line is laid as a staircase on the two
   router headings either side (`pairs.stair_spread`); beyond that and a grid
   step it pays `W_KEEP` per mm of length per mm. The plan leaves room for the

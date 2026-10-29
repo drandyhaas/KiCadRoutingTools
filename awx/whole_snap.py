@@ -713,6 +713,11 @@ def build(n, neck=False):
     # SDQ3's line and left it a channel only its exact slanted line fits
     snap_('placed vias')
     unplaced = [m for m in M if m != n and m not in res['lanes'] and (m in prs or not PAIRS_ONLY) and m not in UNSHARED]
+    # ...and where the pairs are laid before the singles, a pair's VIA SITES keep the singles' planned lines too, while
+    # it can (SINGLES_ROOM): a dive set into a single's row leaves that single no way past it, where the pair's legs
+    # beside the row only cost it a jog
+    unplaced_v = unplaced + ([m for m in M if m != n and m not in res['lanes'] and m not in prs]
+                             if PAIRS_ONLY and SINGLES_ROOM[0] else [])
     for m in unplaced:
         Pm, Lm = LANE[m]['pts'], LANE[m]['lays']
         for (p_, q_), L in zip(zip(Pm, Pm[1:]), Lm):
@@ -748,7 +753,7 @@ def build(n, neck=False):
         for (m, tx_, ty_) in PDIVE:
             if m != n:
                 mark(vb, (tx_, ty_, tx_, ty_), 2 * VR + CL + g / 2, pt_d(tx_, ty_), ox, oy)
-        for m in unplaced:
+        for m in unplaced_v:
             Pm = LANE[m]['pts']
             for p_, q_ in zip(Pm, Pm[1:]):
                 share(vb, (RING_PAIR if m in prs else RING) + boff, seg_d(p_, q_), box(p_, q_), ox, oy)
@@ -775,7 +780,7 @@ def build(n, neck=False):
             for (vx_, vy_) in v_['vias']:
                 mark(pb, (vx_, vy_, vx_, vy_), R_VIA + math.hypot(vx_ - round(vx_ / g) * g, vy_ - round(vy_ / g) * g),
                      pt_d(vx_, vy_), ox, oy)
-        for m in unplaced:
+        for m in unplaced_v:
             Pm = LANE[m]['pts']
             for p_, q_ in zip(Pm, Pm[1:]):
                 share(pb, R_LINE + hw[m] + g / 2 * OFFG[m], seg_d(p_, q_), box(p_, q_), ox, oy)
@@ -1480,18 +1485,35 @@ def place(n, out):
 
 ROUTED = {}
 UNSHARED = set()     # lanes not laid whose shares build() leaves out: in a sweep, the other failed lanes
+SINGLES_ROOM = [True]    # a pair laid before the singles keeps its via sites off their planned lines (route_memo)
 
 
 STUCK_AT = {}        # a lane that could not be laid: where its search got farthest (route; 'last' the latest search's)
 
 
 def route_memo(n, strict=True, wide=False):
+    """_route_memo(n, strict, wide); a pair laid before the singles is tried first with its via sites off the singles'
+    planned lines, and only where no dive clears them, without -- a pair that dives into a single's row has closed that
+    single before it is laid (a pair's dive set across a single's line at the source's face left it no way past)"""
+    if not (n in prs and PAIRS_ONLY):
+        return _route_memo(n, strict, wide)
+    out = _route_memo(n, strict, wide)
+    if out[0] is not None:
+        return out
+    SINGLES_ROOM[0] = False
+    try:
+        return _route_memo(n, strict, wide)
+    finally:
+        SINGLES_ROOM[0] = True
+
+
+def _route_memo(n, strict=True, wide=False):
     """route(n, strict, wide), asked again on the same board, answered as before: a lane's route reads only the lanes
     placed (res['lanes'], in the order they were laid) and what never changes -- so a sweep that finds a lane's board as
     it left it (SCK after SDQS0 and SDQS1 are laid again exactly where they were) does not search it again. A lane not
     laid leaves where its search got stuck in STUCK_AT"""
     # (a pair searches pose to pose: strict is a single's)
-    key = (n, strict or n in prs, wide, json.dumps(res['lanes']), tuple(sorted(UNSHARED)))
+    key = (n, strict or n in prs, wide, json.dumps(res['lanes']), tuple(sorted(UNSHARED)), SINGLES_ROOM[0])
     if (awx_settings.get('SNAP_XROOM_PAIRS') or '0') in ('2', '3'):
         key += (tuple(sorted(failed)),)     # (those crossover sides leave the failed lanes out: they read them too)
     if key not in ROUTED:
