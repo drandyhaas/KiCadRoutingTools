@@ -4279,24 +4279,32 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # #1293: a diff pair's P against its own N is graded at the .kicad_dru
     # coupled-pair rule (AB.isCoupledDiffPair()) wherever that rule is the one
     # KiCad applies -- resolved per item types, since a rule may scope itself
-    # with A.Type == 'track', and at KiCad's value (no fab floor). One dict
-    # test per pair on any other board.
+    # with A.Type == 'track', and at KiCad's value (no fab floor). #1542: the
+    # same holds for KiCad's implicit "netclass '<class>' (diff pair)" rule, a
+    # class whose diff_pair_gap is below its clearance (no .kicad_dru needed).
+    # One dict test per pair on any other board.
     _coupled_dr, _coupled_nets = None, frozenset()
-    if pcb_file and os.path.isfile(os.path.splitext(pcb_file)[0] + '.kicad_dru'):
+    _stem = os.path.splitext(pcb_file)[0] if pcb_file else ''
+    if _stem and (os.path.isfile(_stem + '.kicad_dru')
+                  or os.path.isfile(_stem + '.kicad_pro')):
         try:
             from design_rules import DesignRules, match_dp_suffix
             _cdr = DesignRules.from_project(pcb_data, pcb_file,
                                             copper_layers=_board_copper)
-            if _cdr.has_coupled_rules():
+            if _cdr.has_coupled_rules() or _cdr.has_pair_gap_classes():
                 _by_name = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
                 _coupled_nets = frozenset(
                     nid for nm, nid in _by_name.items()
                     if match_dp_suffix(nm)[0] and match_dp_suffix(nm)[1] in _by_name)
                 _coupled_dr = _cdr
-                if not quiet:
+                if not quiet and _cdr.has_coupled_rules():
                     print("Coupled-pair clearance rules (.kicad_dru, #1293): "
                           + ", ".join(sorted(r.name for r in _cdr.rules
                                              if r.coupled and not r.unsupported)))
+                if not quiet and _cdr.has_pair_gap_classes():
+                    print("Net-class diff-pair gaps below the class clearance "
+                          "grade a pair's P against its N at the gap (KiCad's "
+                          "\"(diff pair)\" rule, #1542)")
         except Exception as _e:                                  # noqa: BLE001
             if not quiet:
                 print(f"  .kicad_dru: coupled-pair rules not read ({_e})")

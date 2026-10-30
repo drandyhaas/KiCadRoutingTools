@@ -17,7 +17,12 @@ verified against the 9.0 and master sources on 2026-09-03:
                                                  (SetMin); track_width / via /
                                                  drill / diff_pair_* are SetOpt
                                                  -- the size KiCad DRAWS, never
-                                                 a floor
+                                                 a floor -- except that a class
+                                                 diff_pair_gap below the class
+                                                 clearance is ALSO the clearance
+                                                 between a pair's P and N
+                                                 ("(diff pair)" rule, #1542;
+                                                 pair_gap_clearance)
          + [.kicad_dru rules, file order]        each matching rule overwrites
                                                  the fields it sets
     3  zone local clearance: max(result, zone clearance)
@@ -1218,6 +1223,7 @@ class DesignRules:
             source = 'board minimum'
 
         # 2b. net-class implicit rules.
+        implicit_rule = None
         if kind == 'clearance':
             vals = [self.class_value(x.net_id, 'clearance') for x in (a, b) if x is not None]
             vals = [v for v in vals if v is not None]
@@ -1226,6 +1232,10 @@ class DesignRules:
                 cur['min'] = v
                 names = sorted({self.effective_class(x.net_id) for x in (a, b) if x is not None})
                 source = 'netclass ' + '/'.join(names)
+            dp = self.pair_gap_clearance(a, b)
+            if dp is not None:
+                cur['min'], implicit_rule = dp
+                source = implicit_rule
         elif kind in NETCLASS_OPT_KEYS:
             v = self.class_value(a.net_id, NETCLASS_OPT_KEYS[kind])
             # KiCad's "netclass (diff pair)" implicit rule, conditioned on
@@ -1274,6 +1284,7 @@ class DesignRules:
                         source = 'zone clearance'
                         min_from_rule = False
                         min_rule = None
+                        implicit_rule = None
 
         # 4. the ONLY post-loop board floors KiCad applies -- and MEASURED on
         # KiCad 10.0.0 (tests/oracle/constraint_agreement.py rows
@@ -1286,11 +1297,66 @@ class DesignRules:
                 cur['min'] = board_min_clr
                 source = 'board minimum'
 
+        if min_rule is not None:
+            rule_name, rule_coupled = min_rule.name, bool(min_rule.coupled)
+        elif implicit_rule is not None:
+            # the class "(diff pair)" rule still sets the value (floored at
+            # the board minimum, as KiCad floors it): no custom rule or zone
+            # clearance replaced it
+            rule_name, rule_coupled = implicit_rule, True
+        else:
+            rule_name, rule_coupled = None, False
         c = Constraint(kind, min=cur['min'], opt=cur['opt'], max=cur['max'],
                        source=source, kicad_min=cur['min'],
-                       min_rule=min_rule.name if min_rule is not None else None,
-                       min_rule_coupled=bool(min_rule is not None and min_rule.coupled))
+                       min_rule=rule_name, min_rule_coupled=rule_coupled)
         return self._fab(kind, c)
+
+    def pair_gap_clearance(self, a: Optional[RuleItem], b: Optional[RuleItem]
+                           ) -> Optional[Tuple[float, str]]:
+        """KiCad's implicit "netclass '<class>' (diff pair)" clearance rule
+        (#1542): (the class diff_pair_gap, the rule's name) when ``a`` and
+        ``b`` are the two nets of one pair (MatchDpSuffix on the names) and
+        the class of either has ``0 < diff_pair_gap < clearance``, else None.
+
+        KiCad adds it per net class as ``A.NetClass == '<class>' &&
+        AB.isCoupledDiffPair()`` with the gap as the clearance minimum, after
+        the class clearance rules and before every custom rule, for every item
+        kind. Measured on kicad-cli 10.0.6: a pair class at clearance 0.25 with
+        gap 0.15 grades 0.15 copper clean, at gap 0.20 it reports
+        "netclass 'HS' (diff pair) clearance 0.2000 mm", a class that sets no
+        gap of its own takes Default's (``class_value``), and the board
+        minimum clearance still floors it (step 4). Where both classes carry
+        one, the wider is taken."""
+        if a is None or b is None or not a.net_name or not b.net_name:
+            return None
+        if a.net_id == b.net_id or not _is_coupled(a, b, None):
+            return None
+        best = None
+        for x in (a, b):
+            gap = self.class_value(x.net_id, 'diff_pair_gap')
+            clr = self.class_value(x.net_id, 'clearance')
+            if gap is None or clr is None or gap >= clr - 1e-9:
+                continue
+            if best is None or gap > best[0]:
+                best = (gap, f"netclass '{self.effective_class(x.net_id)}' (diff pair)")
+        return best
+
+    def has_pair_gap_classes(self) -> bool:
+        """A net class (aggregate, as ``class_value`` reads it) whose
+        diff_pair_gap is below its clearance: KiCad's implicit "(diff pair)"
+        rule (#1542) can then bind some pair's P against its N."""
+        h = self._cache.get('_has_pair_gap_classes')
+        if h is None:
+            nids = set(self.memberships) | {0}
+            h = False
+            for nid in nids:
+                gap = self.class_value(nid, 'diff_pair_gap')
+                clr = self.class_value(nid, 'clearance')
+                if gap is not None and clr is not None and gap < clr - 1e-9:
+                    h = True
+                    break
+            self._cache['_has_pair_gap_classes'] = h
+        return h
 
     def _fab(self, kind: str, c: Constraint) -> Constraint:
         """5. this tool's fab-profile floor, raise-only and disclosed."""
@@ -1326,7 +1392,7 @@ class DesignRules:
         its own value. ``types`` are the two items' KiCad types (a rule may
         scope itself with ``A.Type == 'track'``). ``min`` carries the fab
         floor, ``kicad_min`` what KiCad accepts."""
-        if not self.has_coupled_rules():
+        if not (self.has_coupled_rules() or self.has_pair_gap_classes()):
             return None
         a = self.item_for_net(p_net_id, types[0], layer)
         b = self.item_for_net(n_net_id, types[1], layer)

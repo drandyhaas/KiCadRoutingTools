@@ -64,8 +64,8 @@ def _track_rule(other_only=False):
             '(constraint clearance (min 0.3mm)))\n')
 
 
-def _pro(gap=0.25, hs=False):
-    cls = {"clearance": 0.25, "track_width": 0.2, "diff_pair_gap": gap,
+def _pro(gap=0.25, hs=False, clr=0.25):
+    cls = {"clearance": clr, "track_width": 0.2, "diff_pair_gap": gap,
            "diff_pair_width": 0.2, "via_diameter": 0.6, "via_drill": 0.3}
     ns = {"classes": [dict(cls, name="Default")]}
     if hs:
@@ -197,15 +197,18 @@ def test_per_pair_floor_survives_a_class_gap():
 
 
 def test_per_pair_floor_keeps_the_clearance():
-    """#441 on the per-pair path: a net-class gap of 0.15 under a 0.25
-    clearance, no rules file. The class gap replaced the call's floored one
-    and the pair was built inside clearance; the #318 neck then cleared it by
-    narrowing P and N, to different widths. Now the gap is floored and both
-    members keep their width exactly: a run at the rule is not necked."""
+    """#441 on the per-pair path: a net-class gap of 0.15 under a run
+    clearance of 0.25, no rules file. The class gap replaced the call's
+    floored one and the pair was built inside clearance; the #318 neck then
+    cleared it by narrowing P and N, to different widths. Now the gap is
+    floored and both members keep their width exactly: a run at the rule is
+    not necked. The class's own clearance is 0.15 here, so its gap is not
+    below it and KiCad's "(diff pair)" rule (#1542) does not apply."""
     from routing_defaults import TRACK_WIDTH
     widths = {}
-    log, ok, bad, viols = _route(None, pro=_pro(gap=0.15),
-                                 diff_pair_gap_from_class=True, widths=widths)
+    log, ok, bad, viols = _route(None, pro=_pro(gap=0.15, clr=0.15),
+                                 diff_pair_gap_from_class=True, widths=widths,
+                                 clearance=0.25)
     floored = _lines(log, '#441: DP')
     assert len(floored) == 2 and all('0.15 mm raised to clearance 0.25'
                                      in ln for ln in floored), floored

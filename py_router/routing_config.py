@@ -431,12 +431,15 @@ class GridRouteConfig:
     # for shipping (cleanup_pipeline, the seam re-asks, the plane-fragility
     # field). Read by the engines from here so both fronts see one value.
     quick: int = 0
-    # #1293: the P<->N clearance of each diff pair a .kicad_dru coupled-pair
-    # rule (AB.isCoupledDiffPair()) sets, keyed frozenset({P, N}) ->
+    # #1293: the P<->N clearance of each diff pair a rule binding the pair
+    # sets -- a .kicad_dru coupled-pair rule (AB.isCoupledDiffPair()), the
+    # class's implicit "(diff pair)" rule (#1542) or a class-scoped rule
+    # (#1526) -- keyed frozenset({P, N}) ->
     # {'track': {layer: mm}, 'layer': {layer: mm}, 'stack': mm or None}, the
     # pair_clearance kinds. A layer is listed only where that rule is what
     # KiCad grades the pair at. Engine-computed (route_diff); no CLI flag and
-    # no GUI control -- the rules file is the source. Empty = inert.
+    # no GUI control -- the project and rules files are the source. Empty =
+    # inert.
     coupled_pair_clearances: Dict[FrozenSet[int], dict] = field(default_factory=dict)
 
     def net_via(self, net_id: int) -> Tuple[float, float]:
@@ -639,6 +642,20 @@ class GridRouteConfig:
                 clr = b
         return clr
 
+    def coupled_pair_value(self, net_a: int, net_b: int, kind: str,
+                           layer: Optional[str] = None) -> Optional[float]:
+        """The clearance a rule binding a diff pair's P against its own N sets
+        (`coupled_pair_clearances`: #1293, #1526, #1542) for ``kind`` --
+        'track', 'layer' (track vs track or via), 'pad' (track vs pad) or
+        'stack' -- on ``layer``; None where no such rule governs."""
+        if not self.coupled_pair_clearances or net_a == net_b:
+            return None
+        cp = self.coupled_pair_clearances.get(frozenset((net_a, net_b)))
+        if cp is None:
+            return None
+        return (cp.get('stack') if kind == 'stack'
+                else (cp.get(kind) or {}).get(layer))
+
     def pair_clearance(self, net_a: int, net_b: int,
                        layer: Optional[str] = None, *, kind: str = 'layer',
                        base: Optional[float] = None, types=None) -> float:
@@ -662,20 +679,16 @@ class GridRouteConfig:
         * 'stack' -- via vs via, which meet on every layer: the max over the
           stack (check_drc's `_stack_cl`). `layer` is ignored.
 
-        A diff pair's P against its own N, where a coupled-pair rule sets it
-        (`coupled_pair_clearances`, #1293), is that rule's value: KiCad's
-        last matching rule replaces the classes and the base.
+        A diff pair's P against its own N, where a rule binding the pair sets
+        it (`coupled_pair_clearances`: #1293, #1526, #1542), is that rule's
+        value: it replaces the classes and the base, as in KiCad.
 
         With no class map, no layer rule and no track rule it returns `base`
         unchanged, so a site that swaps its flat term for this call is
         byte-identical on such a board."""
-        if self.coupled_pair_clearances and net_a != net_b:
-            cp = self.coupled_pair_clearances.get(frozenset((net_a, net_b)))
-            if cp is not None:
-                v = (cp.get('stack') if kind == 'stack'
-                     else (cp.get(kind) or {}).get(layer))
-                if v is not None:
-                    return v
+        v = self.coupled_pair_value(net_a, net_b, kind, layer)
+        if v is not None:
+            return v
         clr = self._class_pair_clearance(net_a, net_b, base)
         if kind not in ('layer', 'track', 'stack'):
             raise ValueError(f"pair_clearance kind {kind!r}: expected "
@@ -734,7 +747,8 @@ class GridRouteConfig:
                     v = mv
         for cp in (self.coupled_pair_clearances or {}).values():
             for mv in ([cp.get('stack')] + list((cp.get('track') or {}).values())
-                       + list((cp.get('layer') or {}).values())):
+                       + list((cp.get('layer') or {}).values())
+                       + list((cp.get('pad') or {}).values())):
                 if mv is not None and mv > v:
                     v = mv
         if self.scoped_clearance is not None:

@@ -62,8 +62,12 @@ def _route(d, cls):
     board, proj = _fixture()
     proj = json.loads(json.dumps(proj))
     for c in proj['net_settings']['classes']:
-        c.update(track_width=TRACK, diff_pair_width=TRACK, diff_pair_gap=GAP,
-                 clearance=BASE if c['name'] == 'Default' else cls)
+        clr = BASE if c['name'] == 'Default' else cls
+        # A class gap below its clearance would be KiCad's "(diff pair)" rule
+        # (#1542), which grades P against N at the gap; this test is about the
+        # class clearance, so no class gap sits below it.
+        c.update(track_width=TRACK, diff_pair_width=TRACK,
+                 diff_pair_gap=max(GAP, clr), clearance=clr)
     src, out = os.path.join(d, 'b.kicad_pcb'), os.path.join(d, 'out.kicad_pcb')
     with open(src, 'w') as f:
         f.write(board)
