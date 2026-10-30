@@ -102,7 +102,7 @@ board alone gives.
       "edge": "east",                        // north|south|east|west|"unknown"
       "along_edge": "center",                // "center" | {"from":f, "to":f} | "unknown"
       "along_edge_tolerance_mm": 0.5,        // REQUIRED with "center"
-      "overhang_mm": { "min": 0.0, "max": 0.65 },
+      "overhang_mm": { "min": 0.0, "max": 0.65 },   // past the edge; never negative (#1532)
       "mating_face": "+y",                   // +x|-x|+y|-y in the footprint's own frame, or "unknown":
                                              // the side it opens on, for a body that names none
       "mount_mode": "edge_mount",            // compiled -- see below

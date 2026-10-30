@@ -740,6 +740,11 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
                 raise BriefError(f"{where}.overhang_mm: expected "
                                  f"{{'min': .., 'max': ..}}, got {oh!r}")
             fp._reject_unknown(oh, _OVERHANG_KEYS, f"{where}.overhang_mm")
+            # #1532: the intent loader's own refusal, raised as the brief's
+            try:
+                fp.check_overhang_band(oh, f"{where}.overhang_mm")
+            except fp.IntentError as exc:
+                raise BriefError(str(exc)) from None
         if c.get('along_edge') == 'center' \
                 and c.get('along_edge_tolerance_mm') is None:
             raise BriefError(

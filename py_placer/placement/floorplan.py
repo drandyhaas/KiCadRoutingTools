@@ -991,6 +991,28 @@ def _number(value, where: str, lo=None, hi=None) -> float:
     return v
 
 
+def check_overhang_band(band: Dict, where: str) -> None:
+    """Refuse an `overhang_mm` bound that no pose can meet (#1532).
+
+    The band is how far the part reaches PAST its edge, and the reading never
+    goes below zero (`connector_geometry`: a body inside the board reads 0
+    overhang), so a negative `min` or `max` -- a socket set back from the
+    edge, written as `{min: -0.5, max: -0.1}` -- failed the grade on every
+    edge and left the seat no room, while it loaded clean. A setback is
+    `max_setback_mm`. Shared by the intent loader and the design brief."""
+    for key in ('min', 'max'):
+        if band.get(key) is None:
+            continue
+        v = _number(band[key], f"{where}.{key}")
+        if v < 0:
+            raise IntentError(
+                f"{where}.{key}: {v:g} -- an overhang band is how far the "
+                f"part reaches PAST its edge, and a body inside the board "
+                f"reads 0, so no pose can meet a negative bound. For a part "
+                f"set back from its edge, declare `max_setback_mm` (the most "
+                f"it may sit inside) and an overhang `max` of 0")
+
+
 def _proximity_claims(raw: Dict) -> List[Dict]:
     """Validate `proximity[]` (#902), AT LOAD.
 
@@ -1992,6 +2014,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                                   f"{{'min': .., 'max': ..}}")
             _reject_unknown(oh, _OVERHANG_KEYS,
                             f"edge_connectors[{i}] ({c['ref']}).overhang_mm")
+            check_overhang_band(
+                oh, f"edge_connectors[{i}] ({c['ref']}).overhang_mm")
         _along_edge_claim(c, i)
         if c.get('side') is not None and c['side'] not in ('F', 'B'):
             raise IntentError(

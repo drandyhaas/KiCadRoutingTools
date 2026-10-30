@@ -669,7 +669,16 @@ convex Fab outline (SilkS when the part draws nothing on Fab, or when its Fab
 drawing is a marking such as a pin-1 dot -- the same
 `body.fab_cannot_be_body` decision the facing grade reads) and a rectangular
 Edge.Cuts outline. A zero `min` is therefore nonbinding and a positive `min`
-is a real conjunct. The graded number is summed over every side the body
+is a real conjunct.
+
+**The band is never negative (#1532).** It is how far the part reaches
+PAST its edge, and a body inside the board reads 0, so a negative `min` or
+`max` is refused when the intent (or a brief's `interfaces[].overhang_mm`)
+loads, by name, rather than failing every edge at grade time. A part set back
+from its edge declares `max_setback_mm`, the most it may sit inside while it
+does not overhang, with an overhang `max` of 0 to forbid any overhang. A
+minimum setback (a part that must stay at least some distance inside) has no
+key. The graded number is summed over every side the body
 crosses, so a corner part counts both sides; for a body that crosses only its
 declared edge, it is exactly that edge's overhang.
 
