@@ -486,6 +486,17 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
         own_half = max(own_half, v.size / 2.0)
     margin = own_half + (config.max_pair_clearance(base=clearance)
                          if pairwise else clearance)
+    # A restored via is also held off a foreign via's DRILL at the
+    # hole-to-hole floor, which is net-blind and, between two fab-tier vias,
+    # wider than their copper clearance; the box reaches that too (a foreign
+    # via's own box already grows by its size, which covers its drill). A
+    # pair of vias the step was HANDED stood on the input board, so it is
+    # never the reason to refuse (#980's rule, applied to the drills).
+    h2h = (getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0) if config else 0.0
+    _inp_all = getattr(pcb_data, '_input_copper', None)
+    inp_all = _inp_all[0] if _inp_all else frozenset()
+    if h2h > 0 and vias:
+        margin = max(margin, max(v.drill for v in vias) / 2.0 + h2h)
     minx, maxx = min(xs) - margin, max(xs) + margin
     miny, maxy = min(ys) - margin, max(ys) + margin
 
@@ -541,6 +552,9 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
         vr = vv.size / 2.0
         for v in o_vias:
             thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
+            if h2h > 0 and vv.drill > 0 and v.drill > 0 \
+                    and not (id(vv) in inp_all and id(v) in inp_all):
+                thr = max(thr, vv.drill / 2.0 + v.drill / 2.0 + h2h)
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
                 _hit('via', v)
                 if first_only:
