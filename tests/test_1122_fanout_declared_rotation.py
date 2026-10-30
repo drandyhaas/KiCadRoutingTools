@@ -14,10 +14,11 @@ pass would be dropped in exactly that run. The claims are therefore resolved
 once and passed beside the intent (`declared_rotations`), and the end-to-end
 arm below is chosen so that the run KEPT is the ungated one.
 
-Fixture: test_1067's U30 crop at --clearance 0.1 with a 0.6 / 2.0 mm budget
+Fixture: test_1067's U30 crop at --clearance 0.1 with a 1.0 / 2.0 mm budget
 (TIGHT) and that test's 2.0 mm decap limits, measured on this tree: with no
-block the ungated run is kept and C24 270 -> 180, C33 180 -> 0 and C63 0 -> 180
-are all turned. Declaring C24 at 270 keeps the ungated run, holds C24, and
+block the ungated run is kept and C24 270 -> 90, C33 180 -> 0 and C63 0 -> 180
+are all turned. (0.6 / 2.0 and C24 -> 180 until #1520 priced the pads' round
+corners, which reorders the descent.) Declaring C24 at 270 keeps the ungated run, holds C24, and
 leaves C33 and C63 turning -- so "held" is the declaration's doing.
 
 Run: python3 -X utf8 tests/test_1122_fanout_declared_rotation.py [case ...]
@@ -43,7 +44,7 @@ FIX = os.path.join(ROOT, 'tests', 'fixtures', '1067', 'u30_crop.kicad_pcb')
 CLI = os.path.join(ROOT, 'py_placer', 'place_fanout_clearance.py')
 ENGINE = os.path.join(ROOT, 'py_placer', 'placement', 'fanout_clearance.py')
 COPY = os.path.join(ROOT, 'py_router', 'copy_board.py')
-TIGHT = ['--clearance', '0.1', '--max-displacement', '0.6',
+TIGHT = ['--clearance', '0.1', '--max-displacement', '1.0',
          '--max-displacement-cap', '2.0']
 
 
@@ -91,7 +92,7 @@ def test_the_fixture_turns_caps():
     the ungated run."""
     with tempfile.TemporaryDirectory() as td:
         s, turned, _o, _p = _run(td, [], 'none')
-    assert turned.get('C24') == (270.0, 180.0), turned
+    assert turned.get('C24') == (270.0, 90.0), turned
     assert s['decap']['compared']['kept'] == 'ungated', s['decap']['compared']
     # A run whose intent declares no rotation prints what it printed before.
     assert 'declared_rotations' not in s, s.get('declared_rotations')
@@ -164,19 +165,19 @@ def test_a_declared_cap_is_not_turned_in_the_run_that_ships():
 def test_a_candidate_set_turns_only_within_it():
     with tempfile.TemporaryDirectory() as td:
         s24, t24, o24, _p = _run(td, [{'name': 'a', 'refs': ['C24'],
-                                       'rotation_candidates': [270.0, 90.0]}],
+                                       'rotation_candidates': [270.0, 180.0]}],
                                  'set24')
         _s, t33, _o, _p = _run(td, [{'name': 'b', 'refs': ['C33'],
                                      'rotation_candidates': [180.0, 0.0]}],
                                'set33')
-    # Without a claim C24 goes to 180; with {270, 90} it may only reach 90.
-    assert t24.get('C24') == (270.0, 90.0), t24
+    # Without a claim C24 goes to 90; with {270, 180} it ends inside the set.
+    assert t24.get('C24', (270.0, 270.0))[1] in (270.0, 180.0), t24
     # A set is disclosed as a set, in the line and the JSON (M8, M10).
-    assert 'C24 within [270.0, 90.0]' in o24, o24[-1500:]
-    assert s24['declared_rotations'] == {'C24': [270.0, 90.0]}, s24
+    assert 'C24 within [270.0, 180.0]' in o24, o24[-1500:]
+    assert s24['declared_rotations'] == {'C24': [270.0, 180.0]}, s24
     # A turn the set admits is still made.
     assert t33.get('C33') == (180.0, 0.0), t33
-    print("  C24 {270, 90} -> %r; C33 {180, 0} -> %r"
+    print("  C24 {270, 180} -> %r; C33 {180, 0} -> %r"
           % (t24.get('C24'), t33.get('C33')))
 
 
@@ -262,17 +263,45 @@ def test_an_off_lattice_member_is_named_not_offered():
           % (turned.get('C24'),))
 
 
-def test_the_escalation_guard_decides_an_outcome():
-    """#1122's verifier measured the guard (a cap whose declaration leaves
-    no other angle is not armed to turn) flip which cap the crop leaves
-    grazing: C63 declared at 0 resolves every graze WITH it, and leaves C63
-    grazing without it. Pinned so the guard has a witness."""
+def test_the_escalation_guard_saves_a_round():
+    """The guard (a cap whose declaration leaves no other angle is not armed
+    to turn; its budget grows instead) has a witness: C63 declared at 0 is
+    stuck at the seed's budget, and each arm of the run escalates it in one
+    round fewer than arming a turn it cannot make would take. (#1122's
+    verifier first witnessed it as an outcome flip at a 0.6 / 2.0 budget;
+    #1520's round-cornered pads reorder the descent, and on this crop the
+    flip is gone at every budget measured, so the round is what is pinned.)"""
+    import io
+    import contextlib
+    import re
+    from kicad_parser import parse_kicad_pcb
+    from placement import floorplan as fp
+    from placement.fanout_clearance import repair_fanout_clearance
+    seen = []
+
+    def cb(_i, _n, msg):
+        m = re.match(r'Cap optimize pass (\d+): ', msg)
+        if m:
+            seen.append(int(m.group(1)))
     with tempfile.TemporaryDirectory() as td:
-        s, _t, _o, _p = _run(td, [{'name': 'a', 'refs': ['C63'],
-                                   'rotation': 0.0}], 'c63')
-    assert s['unresolved'] == [], s['unresolved']
-    assert s['decap']['compared']['kept'] == 'ungated', s['decap']['compared']
-    print("  C63 declared 0: every graze resolved, ungated run kept")
+        ip = _intent(td, [{'name': 'a', 'refs': ['C63'], 'rotation': 0.0}],
+                     'c63')
+        b = _board(td)
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = repair_fanout_clearance(
+                parse_kicad_pcb(b), b, clearance=0.1, max_displacement=1.0,
+                max_displacement_cap=2.0, intent=fp.load_intent(ip),
+                progress_callback=cb)
+    arms, cur = [], 0
+    for p in seen:            # the pass number restarts with the second arm
+        if p < cur:
+            arms.append(cur)
+        cur = p
+    arms.append(cur)
+    assert r['unresolved'] == ['C63'], r['unresolved']
+    assert arms == [6, 6], arms
+    print("  C63 declared 0: each arm stuck after %r passes, not one more"
+          % (arms,))
 
 
 def test_an_unresolved_rotation_block_is_said():
@@ -329,7 +358,7 @@ TESTS = [
     test_a_declaration_on_a_part_that_is_not_a_cap_changes_nothing,
     test_a_contradiction_writes_and_records_nothing,
     test_an_off_lattice_member_is_named_not_offered,
-    test_the_escalation_guard_decides_an_outcome,
+    test_the_escalation_guard_saves_a_round,
     test_an_unresolved_rotation_block_is_said,
     test_a_partly_resolved_block_is_not_said_to_hold_nothing,
 ]

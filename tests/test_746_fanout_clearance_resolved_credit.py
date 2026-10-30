@@ -219,8 +219,14 @@ REAL_BOARD = os.path.join(_ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
 # the old one was not: every resolution it reports is attributed to the nudge.
 REAL_RESOLVED = ['C19', 'C44', 'C45']
 REAL_VIA_RESOLVED = ['C19', 'C44', 'C45']       # and now the ONLY credits
-REAL_LINE = ('Moved 0 cap(s); resolved 3/14 initial violations '
-             '(3 freed by via-nudge); 11 unresolved.')
+#
+# RE-PINNED AT #1520: the pass prices a round-cornered pad as check_drc grades
+# it, not as its box. C67's seed graze lay only on its pads' box corners
+# (check_drc measures it clear), so 14 initial violators are 13; and one of
+# the nine relocated barrels (an L2 via off C7's corner arc) was relocated for
+# that same phantom, so nine are eight.
+REAL_LINE = ('Moved 0 cap(s); resolved 3/13 initial violations '
+             '(3 freed by via-nudge); 10 unresolved.')
 REAL_LINE_BEFORE = 'Moved 18 cap(s); resolved 1/14 initial violations; 10 unresolved.'
 
 
@@ -722,15 +728,15 @@ class TestOnARealTrackedBoard(unittest.TestCase):
         # ON THE BRANCH: `via_clear_fallback=False` is not decoration -- with
         # the fallback ON this board reports 0 unresolved, the nudger is never
         # called, and every assertion below would be about nothing.
-        self.assertEqual(len(self.res['via_moves']), 9)
-        self.assertEqual(len(self.res['new_segments']), 17)
+        self.assertEqual(len(self.res['via_moves']), 8)
+        self.assertEqual(len(self.res['new_segments']), 15)
         self.assertEqual(len(self.res['placements']), 0)
 
     def test_three_real_caps_were_freed_by_the_nudge_and_credited_nowhere(self):
         self.assertEqual(_summary(self.out), REAL_LINE)
         self.assertEqual(self.res['resolved'], REAL_RESOLVED)
         self.assertEqual(self.res['via_resolved'], REAL_VIA_RESOLVED)
-        self.assertEqual(len(self.res['unresolved']), 11)
+        self.assertEqual(len(self.res['unresolved']), 10)
     # MUTATION: drop the `resolved` half of the refresh -> the line reverts to
     # REAL_LINE_BEFORE ("resolved 1/14"), losing C19, C44 and C45.
 

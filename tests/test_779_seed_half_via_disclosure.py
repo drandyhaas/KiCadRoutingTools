@@ -105,7 +105,7 @@ BOARD = os.path.join(_ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
 # the one tracked configuration that relocates barrels
 BOXED = dict(clearance=CLEAR, max_displacement=0.0, max_passes=1,
              via_clear_fallback=False)
-N_MOVES = 9
+N_MOVES = 8      # 9 until #1520: one relocation was for a box-corner phantom
 
 
 def _real():
