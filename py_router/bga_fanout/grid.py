@@ -117,6 +117,23 @@ def analyze_bga_grid(footprint: Footprint) -> Optional[BGAGrid]:
     )
 
 
+def ball_row_gap(footprint: Footprint, grid: BGAGrid) -> float:
+    """Copper-to-copper gap between two adjacent balls of the array, the
+    narrower of the two axes: what a track laid down a channel on the
+    BALLS' OWN layer must fit, with its clearance to the ball on either side
+    (#1518). The balls' dominant size is used -- the one nearly every ball
+    has -- so one odd pad does not speak for the whole array."""
+    def dominant(values):
+        counts = defaultdict(int)
+        for v in values:
+            counts[round(v, 4)] += 1
+        return max(counts, key=lambda k: (counts[k], k)) if counts else 0.0
+    balls = [p for p in footprint.pads if p.pad_type != 'np_thru_hole']
+    size_x = dominant(p.size_x for p in balls)
+    size_y = dominant(p.size_y for p in balls)
+    return min(grid.pitch_x - size_x, grid.pitch_y - size_y)
+
+
 
 def staggered_lattice_diagnosis(footprint, grid) -> Optional[str]:
     """Is this footprint a STAGGERED lattice rather than a ball grid? (#500)
