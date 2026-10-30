@@ -42,6 +42,23 @@ def endpoint_on_pad(pad, x: float, y: float, tol: float) -> bool:
     return abs(dx) <= pad.size_x / 2.0 and abs(dy) <= pad.size_y / 2.0
 
 
+def movable_passive(fp, pcb_data, copper_pads) -> bool:
+    """True for a part place_fanout_clearance moves off the fanout's vias:
+    an unlocked part of at most two copper pads with a movable-passive
+    prefix.
+
+    A part named in `pcb_data._fanout_immovable_refs` (bga_fanout's
+    `--immovable-refs`) is held like a locked one: a chain that ran the
+    clearance step and was left with a part it could not clear re-fans with
+    that part named, so the fanout keeps its vias and escapes off the part's
+    pads and drops the balls it cannot escape instead (#1521)."""
+    return (not getattr(fp, 'locked', False)
+            and fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
+            and len(copper_pads) <= 2
+            and fp.reference not in (getattr(pcb_data, '_fanout_immovable_refs', None)
+                                     or ()))
+
+
 def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
     """Copper pads of foreign footprints that NO later pipeline step will move:
     locked footprints, and any part place_fanout_clearance won't relocate
@@ -64,11 +81,7 @@ def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
                        if any(str(l).endswith('.Cu') for l in p.layers)]
         if not copper_pads:
             continue
-        movable = (not all_immovable
-                   and not getattr(fp, 'locked', False)
-                   and fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
-                   and len(copper_pads) <= 2)
-        if movable:
+        if not all_immovable and movable_passive(fp, pcb_data, copper_pads):
             continue
         out.extend(copper_pads)
     return out

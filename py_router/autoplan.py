@@ -31,7 +31,12 @@ congestion before the router starts:
                    with the fine via (BGA), then with the dogbone (BGA) or
                    under-pad (QFN) method, keeping the attempt that escaped
                    most
-  4. decaps        place_fanout_clearance once, after the fanouts
+  4. decaps        place_fanout_clearance once, after the fanouts; a part it
+                   leaves shorted to a BGA's fanout copper is held in a re-fan
+                   of that BGA (bga_fanout --immovable-refs, the BGA's whole
+                   ladder, every later fanout replayed at its accepted rung),
+                   then place_fanout_clearance again, keeping the board with
+                   fewer shorts, then fewer dropped escapes
   5. diff pairs    name-detected pairs routed first with route_diff; a pair
                    net it leaves in a DRC violation is ripped and routed
                    again single-ended
@@ -637,6 +642,7 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
     # 3. fanout, each part, with a retry ladder keeping the best escape
     excl = [f"!{a['globs'][n]}" for n in a['plane_nets'] if n in a['globs']]
     fanned = False
+    fans = []
     for ref, tool, pitch in a['parts']:
         fine = pitch <= 0.65
         v, d = (a['fine_via'], a['fine_drill']) if fine else (a['via'], a['drill'])
@@ -670,26 +676,22 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
             ]
             if tool == 'mezz':
                 ladder = ladder[1:]
-        best = None                    # (escaped, out)
-        for i, args in enumerate(ladder):
-            out, s, _ = ch.run('bga' if tool == 'bga' else 'qfn', args,
-                               f'fanout_{ref}' + (f'_r{i}' if i else ''))
-            if not out:
-                continue
-            escaped = int((s or {}).get('escaped', 0))
-            if best is None or escaped > best[0]:
-                best = (escaped, out)
-            if s is not None and int(s.get('failed', 0) or 0) == 0:
-                break
-        if best and best[0] > 0:
-            ch.accept(best[1])
+        fan = {'ref': ref, 'tool': tool, 'ladder': ladder, 'input': ch.cur}
+        best = fan_ladder(ch, fan)
+        fan['best'] = best if best and best['escaped'] > 0 else None
+        fans.append(fan)
+        if fan['best']:
+            ch.accept(best['out'])
             fanned = True
 
-    # 4. decaps, once, after the fanouts
+    # 4. decaps, once, after the fanouts -- and again after a re-fan that
+    # holds the parts it left shorted
     if fanned:
-        out, _, _ = ch.run('decap', ['{IN}', '{OUT}', '--clearance',
-                                     str(a['clearance'])], 'decap')
+        decap = ['{IN}', '{OUT}', '--clearance', str(a['clearance'])]
+        out, _, _ = ch.run('decap', decap, 'decap')
         ch.accept(out)
+        if out:
+            refan(ch, fans, decap)
 
     # 5. diff pairs first
     rip, reroute = [], []
@@ -715,6 +717,133 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
                 reroute = sorted((after - before) & set(a['pair_nets']))
 
     return route_passes(ch, a, L, costs, effort_factor, rip=rip, reroute=reroute)
+
+
+def fan_ladder(ch, fan, rungs=None, hold=(), tag=''):
+    """Run FAN's fanout ladder (or the RUNGS of it named) until a rung escapes
+    every ball; returns the rung that escaped most as {'escaped', 'failed',
+    'out', 'rung'}, or None when no rung produced a board. HOLD names the
+    parts the fanout keeps off as if locked (bga_fanout --immovable-refs)."""
+    ref = fan['ref']
+    best = None
+    for i in (range(len(fan['ladder'])) if rungs is None else rungs):
+        args = fan['ladder'][i] + (['--immovable-refs', *hold] if hold else [])
+        out, s, _ = ch.run('bga' if fan['tool'] == 'bga' else 'qfn', args,
+                           f'fanout_{ref}' + (f'_r{i}' if i else '') + tag)
+        if not out:
+            continue
+        escaped = int((s or {}).get('escaped', 0))
+        failed = int((s or {}).get('failed', 0) or 0)
+        if best is None or escaped > best['escaped']:
+            best = {'escaped': escaped, 'failed': failed, 'out': out, 'rung': i}
+        if s is not None and failed == 0:
+            break
+    return best
+
+
+COPPER_PAIRS = ('pad-pad', 'pad-segment', 'pad-via', 'segment-segment',
+                'segment-crossing', 'via-segment', 'via-via')
+
+
+def _shorts(d):
+    """check_drc report D's shorts: the items it does not accept that put
+    copper of two nets in contact (a hole, edge or size item is not copper
+    meeting copper, whatever its overlap)."""
+    return [it for it in d.get('items') or []
+            if it.get('short') and not it.get('accepted')
+            and it.get('type') in COPPER_PAIRS]
+
+
+def held_parts(board, d, fans):
+    """{BGA ref: [part refs]}: the parts BOARD's check_drc report D still
+    shorts to a fanned BGA's copper, where the fanout laid its copper on the
+    part because the clearance step moves such a part (an unlocked 2-pad
+    C/R/FB, bga_fanout's movable passive) and that step could not.
+
+    A short is the BGA's when the copper's net is on one of its balls (its
+    escapes and plane drops alike); of two such BGAs, the one with a ball of
+    that net nearest the copper."""
+    from kicad_parser import parse_kicad_pcb
+    from bga_fanout.geometry import movable_passive
+    bgas = [f['ref'] for f in fans if f['tool'] == 'bga' and f['best']]
+    items = [it for it in _shorts(d)
+             if it.get('type') in ('pad-via', 'pad-segment') and it.get('pad_ref')]
+    if not bgas or not items:
+        return {}
+    pcb = parse_kicad_pcb(board)
+    balls = {}                          # net name -> [(BGA ref, x, y)]
+    for ref in bgas:
+        fp = pcb.footprints.get(ref)
+        for p in (fp.pads if fp else ()):
+            if p.net_name:
+                balls.setdefault(p.net_name, []).append((ref, p.global_x, p.global_y))
+    held = {}
+    for it in items:
+        part = it['pad_ref'].rsplit('.', 1)[0]
+        fp = pcb.footprints.get(part)
+        if fp is None or part in bgas:
+            continue
+        copper = [p for p in fp.pads if any(str(l).endswith('.Cu') for l in p.layers)]
+        if not movable_passive(fp, pcb, copper):
+            continue
+        at = it.get('via_loc') or it.get('seg_loc') or it.get('pad_loc')
+        x = sum(at[0::2]) / len(at[0::2])
+        y = sum(at[1::2]) / len(at[1::2])
+        near = min(balls.get(it.get('net2'), ()), default=None,
+                   key=lambda b: math.hypot(b[1] - x, b[2] - y))
+        if near:
+            held.setdefault(near[0], set()).add(part)
+    return {ref: sorted(parts) for ref, parts in held.items()}
+
+
+def refan(ch, fans, decap):
+    """The clearance step moves a part off the fanout's copper, so a fanout
+    lays vias and escapes on such parts. A part it could not clear is still
+    shorted to that copper, so the BGA is fanned out again from the board it
+    started on, holding those parts (dropping a ball it cannot escape, which
+    the route step routes from the bare ball), every later fanout replayed
+    with the rung it was accepted at, and the clearance step run again. The
+    board with fewer shorts, then fewer dropped escapes, is kept."""
+    d = ch.check_drc(ch.cur)
+    if d is None:
+        return
+    held = held_parts(ch.cur, d, fans)
+    if not held:
+        return
+    before = (len(_shorts(d)), sum(f['best']['failed'] for f in fans if f['best']))
+    print(f"  decap left {before[0]} short(s); re-fanning "
+          + '; '.join(f"{r} holding {' '.join(p)}" for r, p in held.items()), flush=True)
+    first = min(i for i, f in enumerate(fans) if f['ref'] in held)
+    kept, ch.cur = ch.cur, fans[first]['input']
+    failed = sum(f['best']['failed'] for f in fans[:first] if f['best'])
+    for f in fans[first:]:
+        if not f['best']:
+            continue
+        if f['ref'] in held:
+            best = fan_ladder(ch, f, hold=held[f['ref']], tag='_held')
+        else:
+            best = fan_ladder(ch, f, rungs=[f['best']['rung']], tag='_refan')
+        if not best or best['escaped'] == 0:
+            ch.cur = kept
+            return
+        ch.accept(best['out'])
+        failed += best['failed']
+    out, _, _ = ch.run('decap', decap, 'decap_refan')
+    d2 = ch.check_drc(out) if out else None
+    after = None if d2 is None else (len(_shorts(d2)), failed)
+    ch.steps.append({'tool': 'refan', 'tag': 'refan', 'held': held,
+                     'before': {'shorts': before[0], 'dropped': before[1]},
+                     'after': after and {'shorts': after[0], 'dropped': after[1]},
+                     'kept': bool(after and after < before)})
+    if after and after < before:
+        ch.accept(out)
+        print(f"  re-fan kept: {after[0]} short(s), {after[1]} dropped escape(s) "
+              f"(was {before[0]}, {before[1]})", flush=True)
+    else:
+        ch.cur = kept
+        print(f"  re-fan not kept: "
+              + (f"{after[0]} short(s), {after[1]} dropped escape(s)" if after else 'ungraded')
+              + f" (was {before[0]}, {before[1]})", flush=True)
 
 
 def _improves(g, best):

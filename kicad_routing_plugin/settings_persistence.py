@@ -206,6 +206,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_escape_method': dialog.fanout_tab.bga_options.get_escape_method(),
         'fanout_bga_plane_drop': dialog.fanout_tab.bga_options.plane_drop.GetValue(),
         'fanout_bga_plane_net_layers': dialog.fanout_tab.bga_options.plane_net_layers_ctrl.GetValue(),
+        'fanout_bga_immovable_refs': dialog.fanout_tab.bga_options.immovable_refs.GetValue(),  # #1521
         'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
         'fanout_bga_cap_capture_radius': dialog.fanout_tab.bga_options.cap_capture_radius.GetValue(),
         'fanout_bga_cap_near_margin': dialog.fanout_tab.bga_options.cap_near_margin.GetValue(),
@@ -701,6 +702,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.set_escape_method(settings['fanout_bga_escape_method'])
     if 'fanout_bga_plane_drop' in settings:
         dialog.fanout_tab.bga_options.plane_drop.SetValue(bool(settings['fanout_bga_plane_drop']))
+    if 'fanout_bga_immovable_refs' in settings:   # #1521
+        dialog.fanout_tab.bga_options.immovable_refs.SetValue(
+            str(settings['fanout_bga_immovable_refs'] or ''))
     if 'fanout_bga_plane_net_layers' in settings:
         dialog.fanout_tab.bga_options.plane_net_layers_ctrl.SetValue(
             str(settings['fanout_bga_plane_net_layers']))

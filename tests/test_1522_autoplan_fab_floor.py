@@ -69,6 +69,9 @@ class RecordingChain:
     def drc_nets(self, board):
         return set()
 
+    def check_drc(self, board):
+        return {'violations': 0, 'items': []}
+
 
 def _values(args, flag):
     return [args[i + 1] for i, x in enumerate(args) if x == flag]

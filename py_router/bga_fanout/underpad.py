@@ -1315,7 +1315,7 @@ def generate_underpad_escape(footprint: Footprint,
     # afterwards, so they must not hard-block escapes -- but a wide cap between
     # two escape legs cannot be moved anywhere (ulx3s C19: 1.4mm pad vs a
     # 1.6mm comb gap), so routes should graze them only when boxed in.
-    from bga_fanout.geometry import MOVABLE_PASSIVE_PREFIXES
+    from bga_fanout.geometry import movable_passive
     soft_pads = []   # the movable passives' copper pads, for a via's exact test
     for fp in pcb_data.footprints.values():
         if fp.reference == footprint.reference:
@@ -1324,9 +1324,7 @@ def generate_underpad_escape(footprint: Footprint,
                        if any(str(l).endswith('.Cu') for l in p.layers)]
         if not copper_pads:
             continue
-        if (getattr(fp, 'locked', False)
-                or not fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
-                or len(copper_pads) > 2):
+        if not movable_passive(fp, pcb_data, copper_pads):
             continue  # immovable: already a HARD obstacle above
         for p in copper_pads:
             if not (bounds[0] - _pad_margin <= p.global_x <= bounds[2] + _pad_margin

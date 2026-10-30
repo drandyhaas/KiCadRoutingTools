@@ -561,7 +561,10 @@ TOOL_FLAG_PARAMS = {
 # as in the CLI, where an empty list is falsy -- so it is not an
 # optional-list flag with a True for bare.
 TOOL_LIST_FLAGS = {
-    'bga_fanout.py': {'--diff-pairs': 'diff_pair_patterns_ctrl'},
+    'bga_fanout.py': {'--diff-pairs': 'diff_pair_patterns_ctrl',
+                      # #1521: the parts held immovable -> the BGA panel's
+                      # Hold parts field, space-joined.
+                      '--immovable-refs': 'immovable_refs'},
 }
 
 # Per-tool flags taking an OPTIONAL list (argparse nargs='*'). route.py and

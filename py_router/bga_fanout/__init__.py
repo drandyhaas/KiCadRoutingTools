@@ -4911,7 +4911,12 @@ def generate_bga_fanout(footprint: Footprint,
                         # `clearance`. Capped at `clearance_ceiling`
                         # (--clearance-ceiling) as route.py caps it.
                         net_clearances: Optional[Dict[int, float]] = None,
-                        clearance_ceiling: Optional[float] = None
+                        clearance_ceiling: Optional[float] = None,
+                        # references of movable passives the fanout must clear
+                        # like locked parts (#1521): a chain whose clearance
+                        # step could not move a part off this fanout's vias
+                        # re-fans with it named. None: none held.
+                        immovable_refs: Optional[List[str]] = None
                         ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """BGA fanout: the signal escape engines plus the plane-ball drop pass.
 
@@ -4979,6 +4984,13 @@ def generate_bga_fanout(footprint: Footprint,
         from startup_checks import StartupCheckError
         if isinstance(_e, StartupCheckError):
             raise
+
+    # Every call states its own held set, so a board object the GUI fans
+    # out again does not carry the last call's.
+    pcb_data._fanout_immovable_refs = frozenset(immovable_refs or ())
+    if immovable_refs:
+        print(f"  Holding {len(pcb_data._fanout_immovable_refs)} part(s) immovable: "
+              f"{', '.join(sorted(pcb_data._fanout_immovable_refs))}")
 
     # #581: resolve once in the wrapper so the core and the plane-drop pass
     # share the same value (the core's own auto-read then no-ops).
@@ -5301,6 +5313,12 @@ def main():
                              "OWN layer is declared get a synthetic-fill reach "
                              "prediction; balls the future pour will reach skip "
                              "their drop via entirely (fanout-time pour-direct).")
+    parser.add_argument('--immovable-refs', nargs='+', default=None, metavar='REF',
+                        help='Parts to keep the fanout off as if they were locked (#1521). '
+                             'The fanout may lay vias and escapes on an unlocked 2-pad C/R/FB '
+                             'part, which place_fanout_clearance.py then moves; name a part '
+                             'that step could not clear and the fanout keeps its copper off '
+                             'the part, dropping a ball it cannot escape instead.')
     parser.add_argument('--plane-drop', choices=['auto', 'off'], default='auto',
                         help='Drop a via for every plane-net ball after the signal escape '
                              '(#424): dog-bone gap via where free, else via-in-pad, so the '
@@ -5439,6 +5457,7 @@ def main():
         grid_step=args.grid_step,
         layer_costs=args.layer_costs,
         plane_drop=args.plane_drop,
+        immovable_refs=args.immovable_refs,
         plane_net_layers=(
             {spec.split(':', 1)[0]: spec.split(':', 1)[1].split(',')
              for spec in args.plane_net_layers}

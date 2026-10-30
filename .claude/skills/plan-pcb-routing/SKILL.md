@@ -1756,6 +1756,17 @@ long treated as interchangeable. Once-after-all is the default because it cannot
 compound and costs one step instead of N.
 Verify with `check_drc.py board_step1c.kicad_pcb -c 0.1` (PAD-VIA count drops).
 
+**If a cap/resistor is still SHORTED to a BGA's fanout copper after this step**
+(`check_drc --json`: an unaccepted `short: true` `pad-via` / `pad-segment` item on
+a 2-pad C/R/FB part, the via or track a net of that BGA's balls), re-fan that BGA
+from the board it was fanned on, holding those parts: add `--immovable-refs <REF ...>`
+to its fanout command (and walk its retry ladder again: holding parts can drop
+balls a rung escaped before, and `--escape-method dogbone` may escape them), replay
+every later fanout unchanged, and run this step again. The fanout then keeps its
+vias and escapes off the held parts and drops a ball it cannot escape instead
+(the route step routes it from the bare ball). Keep the board with fewer shorts,
+then fewer dropped escapes. `autoplan.py` runs this loop itself (#1521).
+
 ### Step 2a: Differential Pairs (only if any were detected)
 The most constrained routes claim their channels first. Add `--impedance <ohms>`
 for controlled interfaces (USB/Ethernet/LVDS/balanced RF, from

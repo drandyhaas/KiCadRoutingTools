@@ -143,6 +143,8 @@ LIST_FLAGS = {
     '--layer-costs': 'layer_costs',
     # bga_fanout's coupled-pair patterns: the BGA panel's Coupled pairs field.
     '--diff-pairs': 'diff_pair_patterns_ctrl',
+    # bga_fanout's held parts (#1521): the BGA panel's Hold parts field.
+    '--immovable-refs': 'immovable_refs',
 }
 # Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
 # --track-width, but its GUI home is the diff tab's diff_pair_width control (not
