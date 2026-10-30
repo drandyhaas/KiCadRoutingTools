@@ -224,7 +224,7 @@ def test_analyze():
     expect(a['plane_nets'][0] in a['power_nets'], "plane net is a power net")
     expect(all(n in a['globs'] for n in a['power_nets'] + a['pair_nets']),
            "every net the chain names has a verified pattern")
-    expect(a['clearance'] >= a['fab_clearance'] > 0, "clearance at or above the fab floor")
+    expect(a['clearance'] > 0, "a clearance floor")
 
     b = AP.analyze(os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb'))
     L = b['layers']

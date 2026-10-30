@@ -10,9 +10,11 @@ footprints, net names, layer count and the board's own design rules -- and
 runs the chain, so routing without an agent gets the steps that remove most
 congestion before the router starts:
 
-  1. design rules  the board's Default class clearance as a ceiling, the fab
-                   track floor, the working via (fine via for fine-pitch
-                   escapes), all from list_nets.read_design_rules
+  1. design rules  the fab clearance floor for every step (a net class above
+                   it is aspirational, so the route step caps every class
+                   at it), the fab track floor, the working via (fine via
+                   for fine-pitch escapes), all from
+                   list_nets.read_design_rules
   2. planes        on 4+ layer boards the fewest inner layers that put a
                    plane next to every signal layer (In1+In2 on 4 layers,
                    In1+In4 on 6, In1+In3+In6 on 8): GND, then the dominant
@@ -26,9 +28,9 @@ congestion before the router starts:
                    pads), read from the pads and their pitch
                    along a row -- never a connector, socket or magnetics --
                    plane nets excluded; a part that drops escapes is retried
-                   at the fab clearance with the fine via, then with the
-                   dogbone (BGA) or under-pad (QFN) method, keeping the
-                   attempt that escaped most
+                   with the fine via (BGA), then with the dogbone (BGA) or
+                   under-pad (QFN) method, keeping the attempt that escaped
+                   most
   4. decaps        place_fanout_clearance once, after the fanouts
   5. diff pairs    name-detected pairs routed first with route_diff; a pair
                    net it leaves in a DRC violation is ripped and routed
@@ -370,8 +372,7 @@ def plane_layers(n):
 def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     from kicad_parser import parse_kicad_pcb, pour_zones
     from list_nets import (read_design_rules, effective_floors,
-                           find_power_nets, find_differential_pairs,
-                           board_default_netclass_clearance)
+                           find_power_nets, find_differential_pairs)
 
     pcb = parse_kicad_pcb(board)
     layers = list(pcb.board_info.copper_layers)
@@ -379,8 +380,9 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     rules = read_design_rules(board)
     eff = effective_floors(rules.get('constraints') or {}, n_layers)
 
-    clearance = board_default_netclass_clearance(board) or eff['drc_clearance']
-    clearance = _num(max(clearance, eff['drc_clearance']))
+    # A finished board meets the fab floor everywhere; a declared net class
+    # above it is aspirational, so every step routes at the floor (#1522).
+    clearance = _num(eff['drc_clearance'])
     track = _num(max(eff['fab_track_width'], 0.1))
     via, drill = _num(eff['working_via_diameter']), _num(eff['working_via_drill'])
     fine_via, fine_drill = _num(eff['fine_via_diameter']), _num(eff['fine_via_drill'])
@@ -461,8 +463,7 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
              if pairs[i] in globs and pairs[i + 1] in globs]
 
     return dict(layers=layers, clearance=clearance, track=track, via=via,
-                drill=drill, fine_via=fine_via, fine_drill=fine_drill,
-                fab_clearance=_num(eff['drc_clearance']), planes=planes,
+                drill=drill, fine_via=fine_via, fine_drill=fine_drill, planes=planes,
                 plane_nets=plane_nets, power_nets=power_nets,
                 layer_costs=layer_costs, parts=parts, grid=grid,
                 congested=congested, n_nets=n_nets, pair_nets=pairs,
@@ -643,30 +644,26 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
         if tool == 'bga':
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
                     '--nets', '*', *excl, '--layers', *L, '--layer-costs', *costs,
-                    '--track-width', tw, '--grid-step', str(a['grid'])]
-            ladder = [
-                base + ['--clearance', str(a['clearance']),
-                        '--via-size', str(v), '--via-drill', str(d)],
-                base + ['--clearance', str(a['fab_clearance']),
-                        '--via-size', str(a['fine_via']), '--via-drill', str(a['fine_drill'])],
-                base + ['--clearance', str(a['fab_clearance']),
-                        '--via-size', str(a['fine_via']), '--via-drill', str(a['fine_drill']),
-                        '--escape-method', 'dogbone'],
-            ]
+                    '--track-width', tw, '--grid-step', str(a['grid']),
+                    '--clearance', str(a['clearance'])]
+            # The working via, then the fine via (one rung when they are the
+            # same via), then the fine via with dogbone escapes.
+            vias = dict.fromkeys([(v, d), (a['fine_via'], a['fine_drill'])])
+            ladder = [base + ['--via-size', str(sv), '--via-drill', str(sd)]
+                      for sv, sd in vias]
+            ladder.append(ladder[-1] + ['--escape-method', 'dogbone'])
         else:
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
                     '--nets', '*', *excl, '--width', tw,
-                    '--grid-step', str(a['grid'])]
+                    '--grid-step', str(a['grid']), '--clearance', str(a['clearance'])]
             ladder = [
-                base + ['--clearance', str(a['clearance'])],
-                base + ['--clearance', str(a['fab_clearance'])],
-                base + ['--clearance', str(a['fab_clearance']),
-                        '--escape-method', 'underpad',
+                base,
+                base + ['--escape-method', 'underpad',
                         '--via-size', str(a['fine_via']), '--via-drill', str(a['fine_drill']),
                         '--allow-via-in-pad'],
             ]
             if tool == 'mezz':
-                ladder = ladder[2:]
+                ladder = ladder[1:]
         best = None                    # (escaped, out)
         for i, args in enumerate(ladder):
             out, s, _ = ch.run('bga' if tool == 'bga' else 'qfn', args,

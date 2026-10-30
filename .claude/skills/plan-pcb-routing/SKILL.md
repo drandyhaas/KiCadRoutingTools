@@ -1822,17 +1822,28 @@ python3 -X utf8 py_router/route.py board_step1c.kicad_pcb board_step2.kicad_pcb 
     --no-bga-zones \
     --max-ripup 5 \
     --power-nets GND VCC <other PWR...> --power-nets-widths 0.3 0.4 <W...> \
-    --layers <ALL copper layers> --layer-costs <1.0 signals / 3.0 solid planes / 1.5 split-or-highway> \
+    --layers <ALL copper layers> --layer-costs <1.0 signals / -1 solid INNER planes / 3.0 a solid outer pour / 1.5 split-or-highway> \
     2>&1 | tee /tmp/step2_routing.txt
 
 The `--layer-costs` line is NOT optional when Step 1 poured any solid plane:
 without it signals cross the pours at cost 1.0 and shred them (measured: split
 power pours at 0–2% connected under a BGA on a chain that omitted it). Order
-matches `--layers`; **3.0 on solid-plane layers**, 1.0–1.5 on split/route+pour
-and highway layers, 1.0 on F/B. On dense boards use the measured-optimal
-pricing from Step 2c instead (GND plane 6.0, rail pours 2.5, bus highway FREE).
+matches `--layers`; **-1 on solid INNER plane layers in this first pass**,
+3.0 on a solid outer pour, 1.0–1.5 on split/route+pour and highway layers,
+1.0 on F/B. On dense boards use the measured-optimal pricing from Step 2c
+instead (GND plane 6.0, rail pours 2.5, bus highway FREE).
 
-**Two prices, deliberately, and this is the one to start from.** 3.0 is #185's
+**Signals keep off poured inner planes on this first pass (#1522).** A
+negative cost forbids track copper on the layer (the pour stays an obstacle
+and through-vias still span it), so every solid inner plane stays a whole
+reference. The rule is a soft one across the chain: a later pass over the
+nets this one leaves open (Step 2d) may cross the planes, at a positive
+price: 3.0, or Step 2c's 6.0 on a GND plane. A plane then carries only what
+could not route without it, which is the rule `autoplan.py` follows.
+
+**Two prices, deliberately, and this is the one to start from.** (On a solid
+INNER plane either is the price a later pass crosses it at; the first pass
+forbids it, above.) 3.0 is #185's
 screened value and what this general chain passes; Step 5a-tuned and Step 2c
 measure 6.0 and are the recipe to switch to when their gate selects them.
 Neither is "the" number: what both say is that the solid-plane layers must be
@@ -1895,7 +1906,8 @@ since been reverted (item 2).
    boards -- a dense-corpus finding; on 2-layer through-hole bus boards
    2000-4000 starved nothing and the defaults left nets open (Step 8).
 3. **Layer pricing** (order matches `--layers`): GND solid-plane layer
-   **6.0**; rail/split pour layers **2.5**; F/B and free routing layers
+   **6.0** (on an INNER plane, the later passes' price: the first pass
+   forbids it, Step 2); rail/split pour layers **2.5**; F/B and free routing layers
    **1.0**; and leave the board's **bus-highway layer at 1.0 even if it
    carries pours** — the inner layer adjacent to the largest BGA that its
    widest bus needs (orangecrab: In2, the RAM highway; pricing it cost
@@ -1948,7 +1960,9 @@ that step) rather than reassembled from the ladders above -- Step 2 is built
 from several conditional blocks, and a flag that differs between passes makes
 iteration N incomparable to N-1, which is the one thing this loop depends on.
 There is no environment variable to carry unless Step 2c told you to set one;
-if it did, carry those too.
+if it did, carry those too. **The one change is in `--layer-costs`**: each
+solid inner plane's `-1` becomes its positive price (Step 2), since these
+passes route what the first left open and may cross the planes.
 
 Two iterations are near-free (measured: the tuned corpus run with 2
 iterations baked in cost +1.5% total time) and historically descend
@@ -2428,14 +2442,17 @@ idea which inner layers are about to become planes and freely routes signals
 across them. Once you've decided the plane→layer map (via
 `/recommend-plane-mappings` or the `route_planes` call you're about to make),
 pass `--layer-costs` to the **signal** `route.py` step (and the later reconnect
-passes) that makes each plane-reserved layer expensive, so signals prefer the
-signal layers and leave the inner layers clean for the pour:
+passes) that keeps signals off each plane-reserved inner layer -- forbidden
+on the first pass, expensive on the later ones (Step 2, #1522) -- so signals
+take the signal layers and leave the inner layers clean for the pour:
 ```bash
-# GND plane on In1.Cu, power plane on In2.Cu -> penalize In1/In2 for signals:
-py_router/route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
+# GND plane on In1.Cu, power plane on In2.Cu -> keep signals off In1/In2:
+py_router/route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 -1 -1 1.0    # first pass
+py_router/route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0  # a later pass, for the nets left open
 ```
 - **~3× is #185's sweet spot on boards where F/B alone can carry the signals**,
-  and the value the Step 2 chain above passes. Step 5a-tuned and Step 2c
+  and the price the Step 2 chain's later passes cross a solid inner plane at
+  (its first pass forbids it). Step 5a-tuned and Step 2c
   measured **6.0** for the recipes THEY select; both live in this file on
   purpose, scoped to their own cases. #185's figures are why the floor is
   not 1.0:
@@ -2801,7 +2818,7 @@ decided by signal type in Step 4c, never as a spreading knob.
 5. **Size power nets with the analyze-power-nets skill (Step 4)** - Run it on every board before the plan writes `--power-nets-widths`: it finds power nets by what they connect, not by name, and recommends each one's width
 6. **Consider the find-high-speed-nets skill** - For accurate GND return via distance recommendations based on actual component datasheet speeds and rise times, run `/find-high-speed-nets` before planning. The lightweight inline analysis (Step 4) uses net name patterns only.
 7. **Stub layer switching is on by default** - The router automatically moves stubs to eliminate vias when beneficial; disable with `--no-stub-layer-swap`
-8. **Default layer costs** - 2-layer boards default to F.Cu=1.0, B.Cu=3.0 to prefer top layer; 4+ layer boards use 1.0 for all. On **dense** 2-layer boards this 3× back-side penalty can over-bias routing onto F.Cu (top channel exhausted, B.Cu empty, excess vias, stranded pads); if completion is low or the layer balance is badly skewed, **retry with more balanced `--layer-costs` (e.g. `1.0 1.5`, down toward `1.0 1.0`)** — see "Dense 2-layer boards: rebalance layer costs" under Diagnose and Retry (issue #178). On **4+ layer** boards the all-1.0 default is plane-blind: **derive `--layer-costs` from the plane→layer map and penalize the plane-reserved inner layers (~3×)** so signals stay on F.Cu/B.Cu and the planes stay whole — see "Multi-Layer Boards (4+ layers)" (issue #185).
+8. **Default layer costs** - 2-layer boards default to F.Cu=1.0, B.Cu=3.0 to prefer top layer; 4+ layer boards use 1.0 for all. On **dense** 2-layer boards this 3× back-side penalty can over-bias routing onto F.Cu (top channel exhausted, B.Cu empty, excess vias, stranded pads); if completion is low or the layer balance is badly skewed, **retry with more balanced `--layer-costs` (e.g. `1.0 1.5`, down toward `1.0 1.0`)** — see "Dense 2-layer boards: rebalance layer costs" under Diagnose and Retry (issue #178). On **4+ layer** boards the all-1.0 default is plane-blind: **derive `--layer-costs` from the plane→layer map and keep signals off the plane-reserved inner layers (forbidden, `-1`, on the first route pass; ~3× on the later passes, #1522)** so signals stay on F.Cu/B.Cu and the planes stay whole — see "Multi-Layer Boards (4+ layers)" (issue #185).
 9. **Schematic sync is disabled by default** - After routing with swaps, offer to re-run with `--schematic-dir` if the user wants to update their schematic
 10. **Rip-up and reroute is automatic** - When a route fails, the router automatically rips up blocking nets and retries (up to `--max-ripup` blockers)
 11. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
