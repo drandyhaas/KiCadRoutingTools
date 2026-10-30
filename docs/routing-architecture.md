@@ -174,7 +174,9 @@ happens on both fronts.
     the nets still incomplete, against the finished board.
 12. **Late passes on the board it ships:** the audit of every ball a fanout
     promised to serve by fill contact (#678), soft-joint bridges, the strict
-    redundant-copper collapse (#1063), dangling-via and orphan sweeps,
+    redundant-copper collapse (#1063), the dead-end sweep of the nets step
+    8's cleanup kept as unfinished and a later pass finished (#1525),
+    dangling-via and orphan sweeps,
     via-in-pad protection (#962), the power-width report, a final re-grade,
     and the improvement gate (#600).
 
