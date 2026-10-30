@@ -1262,22 +1262,24 @@ def anneal(model, movable: List[str], *, moves: int = 11000,
             kind = a.rng.choices(kinds, wts)[0]
             new = a.propose(kind, reach)
             stats[kind][0] += 1
-            if not new:
-                continue
-            if kind == 'turn' and a.alike.issuperset(new) and all(new[r] == a.pose(r) for r in new):
-                # a turn of a part every turn leaves the same changes
-                # nothing: kept, as the rule keeps a zero change, unpriced
-                kept, dc, do = True, 0.0, 0.0
-            else:
-                kept, dc, do = a.trial(new, T)
-            if kept:
-                stats[kind][1] += 1
-                v['cur'] += dc
-                v['ov'] = max(0.0, v['ov'] + do)
-                if v['ov'] < CLEAN and v['cur'] < v['best'][0] - 1e-9:
-                    v['best'] = (v['cur'], {r: a.pose(r) for r in a.mov})
-            v['window'][0] += 1
-            v['window'][1] += int(kept)
+            if new:
+                if kind == 'turn' and a.alike.issuperset(new) \
+                        and all(new[r] == a.pose(r) for r in new):
+                    # a turn of a part every turn leaves the same changes
+                    # nothing: kept, as the rule keeps a zero change, unpriced
+                    kept, dc, do = True, 0.0, 0.0
+                else:
+                    kept, dc, do = a.trial(new, T)
+                if kept:
+                    stats[kind][1] += 1
+                    v['cur'] += dc
+                    v['ov'] = max(0.0, v['ov'] + do)
+                    if v['ov'] < CLEAN and v['cur'] < v['best'][0] - 1e-9:
+                        v['best'] = (v['cur'], {r: a.pose(r) for r in a.mov})
+                v['window'][0] += 1
+                v['window'][1] += int(kept)
+            # a move that proposed nothing still ends its tenth (#1541):
+            # the progress line, and the estimate with it, never skips one
             if log and moves >= 10 and (k + 1) % (moves // 10) == 0:
                 log(f"move {k + 1:6d}: T {T:7.3f} lam {a.lam:7.1f} reach {reach:5.2f} "
                     f"cost {v['cur']:7.1f} overlap {v['ov']:6.2f} mm2 best {v['best'][0]:7.1f} "

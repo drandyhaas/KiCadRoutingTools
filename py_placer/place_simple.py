@@ -615,7 +615,10 @@ def _many_seeds(ap, a):
         for p in (out, js):
             if p and os.path.dirname(p):
                 os.makedirs(os.path.dirname(p), exist_ok=True)
-        cmd = ([sys.executable, '-X', 'utf8', os.path.abspath(__file__), a.board, out]
+        # -u (#1541): the seed's stdout is its s<S>.log, block-buffered
+        # otherwise, so the anneal's progress and estimate lines would reach
+        # the file only when 8 kB had piled up or the seed exited
+        cmd = ([sys.executable, '-u', '-X', 'utf8', os.path.abspath(__file__), a.board, out]
                + passed + ['--seed', str(s), '--plan-checked']
                + (['--json', js] if js else []))
         runs.append((s, out, cmd))
