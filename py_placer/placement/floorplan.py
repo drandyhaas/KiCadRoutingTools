@@ -4731,8 +4731,10 @@ def zone_parts(state, pcb_data, pcb_file: str):
     every other part is `state`'s own. A state that already estimates (the
     placer's) is returned as it is.
 
-    Zones only: the zone rules, the plan check's zone sums and the emitter's
-    zone extents ask it. The legality budget, the outline and the edge rules
+    Zones only: the zone rules, the plan check's zone sums, the emitter's
+    zone extents and the anchors a declared pose compiles to
+    (`reconcile.anchor_blocks`, #1530) ask it. The legality budget, the
+    outline and the edge rules
     keep reading the state, so a courtyard-less connector flush with the
     edge is not newly an off-board part. The estimated parts are built once
     per state and follow its poses."""

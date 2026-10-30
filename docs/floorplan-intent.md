@@ -1534,9 +1534,11 @@ consequences are disclosed rather than hidden:
 - **a part with no courtyard is modelled by its estimated courtyard**, the one
   `place_simple` seats it on (its .Fab body, else silk, else pads, united with
   its pads; `body.estimated_courtyards`, #1300). The zone rules, the
-  `--plan-only` zone sums and the emitter's zone extents read the same
-  estimate (`floorplan.zone_parts`, #1466), so they measure the part the
-  placer moves. A drawn courtyard replaces the estimate.
+  `--plan-only` zone sums, the emitter's zone extents and the `fixed:<ref>` /
+  `mech:<ref>` anchors compiled from a declared pose read the same estimate
+  (`floorplan.zone_parts`, #1466, #1530), so they measure the part the placer
+  moves, and a part at its own declared pose grades clean against its anchor.
+  A drawn courtyard replaces the estimate.
 
 ### `oob_area` cannot be budgeted, and says so
 

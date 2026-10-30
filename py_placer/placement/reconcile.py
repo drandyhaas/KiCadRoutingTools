@@ -581,7 +581,9 @@ def anchor_blocks(pcb, board_path: str, mechanical: Dict, *,
     label a zone of its own as one.
 
     The zone is the GRADER's own rect for the part at its declared pose --
-    `_Part.rect`, which is what `rule_zone_containment` tests -- unioned with
+    `_Part.rect` on the zone basis (`floorplan.zone_parts`: the estimated
+    courtyard for a part that draws none), which is what
+    `rule_zone_containment` tests -- unioned with
     the exactly rotated rect (the grader falls back to its 0-degree bounds
     off the 90-degree lattice), rounded outward; over every rotation the part
     may take when the declaration gives none. So a part sitting at its
@@ -606,15 +608,20 @@ def anchor_blocks(pcb, board_path: str, mechanical: Dict, *,
     passes `fixed:` and the entry's own basis, so a brief-declared pose is
     graded by exactly this geometry and never by a second copy of it.
     """
+    from .floorplan import zone_parts
     from .legality import rotate_local_bounds
     blocks, skipped = [], {}
     if state is None:
         import pose_score
         state = pose_score.make_state(pcb, board_path)
-    # `state.parts` holds the `_Part` objects -- the ones whose `.rect(x, y,
-    # rot)` the grader's own rects come from -- not the frozen-pose records
-    # `graded_parts()` returns.
-    parts = state.parts
+    # The `_Part` objects -- the ones whose `.rect(x, y, rot)` the grader's
+    # own rects come from -- not the frozen-pose records `graded_parts()`
+    # returns. On the ZONE basis (`floorplan.zone_parts`), which is what
+    # `rule_zone_containment` grades the anchor on (#1530): a part that
+    # draws no courtyard is measured on its estimated courtyard there, so an
+    # anchor built on its pad box was smaller than the part it held, and the
+    # part failed it at exactly its declared pose.
+    parts = zone_parts(state, pcb, board_path)
     for ref, p in sorted((mechanical.get('poses') or {}).items()):
         fp = pcb.footprints.get(ref)
         if fp is None:
