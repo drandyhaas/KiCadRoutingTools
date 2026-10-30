@@ -3084,6 +3084,11 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     # base clearance when the config carries no net-clearance map.
     _oc = getattr(config, 'obstacle_clearance', None)
     _lc = getattr(config, 'layer_clearance', None)
+    _cpv = getattr(config, 'coupled_pair_value', None)
+
+    def _pair_value(net_a, net_b, kind, layer):
+        return _cpv(net_a, net_b, kind, layer) if _cpv is not None else None
+
     def _obs_clr(net_id, layer=None):
         v = _oc(net_id) if _oc is not None else clearance
         # #498: the pair copper meets every foreign obstacle ON the seg's layer,
@@ -3108,6 +3113,12 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
             if pad_net == seg.net_id:
                 continue  # the connector legitimately lands on its own-net pad
             pclr = _obs_clr(pad_net, seg.layer)
+            if pad_net in own:
+                # the partner's pad: at a rule binding P against N where one
+                # does (#1293 / #1526 / #1542), as check_drc grades it
+                _cv = _pair_value(seg.net_id, pad_net, 'pad', seg.layer)
+                if _cv is not None:
+                    pclr = _cv
             for pad in pads:
                 # per-pad override (#326) REPLACES the pair value (KiCad, measured)
                 pc = config.pad_override_clearance(pclr, pad)
@@ -3127,6 +3138,10 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
             if not via_on_layer(via, seg.layer):
                 continue  # a blind/micro via has no copper on this layer
             vclr = _obs_clr(via.net_id, seg.layer)
+            if via.net_id in own:
+                _cv = _pair_value(seg.net_id, via.net_id, 'layer', seg.layer)
+                if _cv is not None:
+                    vclr = _cv
             vm = vclr + seg.width / 2 + via.size / 2
             if (via.x < sxmin - vm or via.x > sxmax + vm or
                     via.y < symin - vm or via.y > symax + vm):

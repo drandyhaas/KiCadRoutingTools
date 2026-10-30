@@ -740,6 +740,10 @@ Use the printed flags as-is:
   **Never set `--diff-pair-gap` below the same command's `--clearance`** — KiCad
   grades the pair's P↔N coupling as a plain clearance violation, so `route_diff`
   floors the gap up to clearance (#441). Set the two equal (both at the fab floor).
+  The exceptions are the board's own: a class whose `diff_pair_gap` is below its
+  clearance (KiCad's implicit "(diff pair)" rule, #1542), a `.kicad_dru`
+  coupled-pair rule (#1293) or a class-scoped rule binding the pair (#1526) sets
+  P↔N lower, and `route_diff` builds the pair at that value on its own.
 
 **Verification (DRC/connectivity) grades at the manufacturing floor**, not the
 inflated net-class clearance — that is the same rule the human original passes, so
