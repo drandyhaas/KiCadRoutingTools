@@ -357,6 +357,27 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
     mech_src = (f"{mech.get('path')} (sha256 {mech.get('sha256')})"
                 if mech else None)
     rows: List[Dict[str, object]] = []
+    # #1533: on a PILE no unlocked part's pose is a claim (#1103, #1353,
+    # #1508), so the board value an edge or pose row reads off it is staging
+    # noise -- withheld, and said once (the `pile` report row below). A
+    # KiCad-locked part's pose IS a decision and keeps its value. Assessed
+    # only when a row would read a board value.
+    pile: List[object] = []
+    withheld: List[str] = []
+
+    def _board_withheld(ref) -> bool:
+        if not pile:
+            try:
+                from .placement_state import assess_placement
+                st = assess_placement(pcb, board_path)
+            except Exception:                               # noqa: BLE001
+                st = None
+            pile.append(st if st is not None and st.pile else None)
+        fp = pcb.footprints.get(ref)
+        if pile[0] is None or getattr(fp, 'locked', False):
+            return False
+        withheld.append(ref)
+        return True
 
     def _row(ref, field, values, same, why=''):
         kind = _kind(values, same)
@@ -399,9 +420,10 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
                 'authority': (brief_auth if brief_edges.get(ref) == ie
                               else 'hypothesis'),
                 'source': intent_source}
-        values['board'] = {'value': _edge_of(geo.seat_rect(ref, entry),
-                                             bounds, geo, ref),
-                           'authority': 'inferred', 'source': board_path}
+        if not _board_withheld(ref):
+            values['board'] = {'value': _edge_of(geo.seat_rect(ref, entry),
+                                                 bounds, geo, ref),
+                               'authority': 'inferred', 'source': board_path}
         _row(ref, 'edge', values, lambda a, b: a == b,
              'the edge each channel puts this part on, read off the rect the '
              'edge-connector rule reads (`edge_seat_rect`)')
@@ -425,9 +447,10 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
         board_auth = 'hypothesis' if locked else 'inferred'
         values = {
             'mechanical': {'value': (p['x'], p['y'], p['rot']),
-                           'authority': mech_auth, 'source': mech_src},
-            'board': {'value': cur, 'authority': board_auth,
-                      'source': board_path}}
+                           'authority': mech_auth, 'source': mech_src}}
+        if not _board_withheld(ref):
+            values['board'] = {'value': cur, 'authority': board_auth,
+                               'source': board_path}
         if ref in brief_poses:
             values['brief'] = {'value': fixed_pose_tuple(brief_poses[ref]),
                                'authority': brief_auth,
@@ -539,6 +562,18 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
             r['why'] = (f"{r['why']} -- the mechanical value lost "
                         f"{r['ref']}'s contradiction elsewhere, so it wins "
                         f"nothing here")
+    if withheld:
+        # #1533: said once, in every caller (the printed rows and the
+        # emitted `context.reconciliation`); a `report`, so no ledger row
+        refs = sorted(set(withheld))
+        reasons = '; '.join(list(getattr(pile[0], 'reasons', ()) or ())[:2])
+        rows.append({
+            'id': 'board:pile', 'ref': None, 'field': 'pile', 'values': {},
+            'kind': 'report', 'winner': None, 'withheld': refs,
+            'why': (f"the board is a pile ({reasons}): staging poses are not "
+                    f"claims -- the board's edge/pose value withheld for "
+                    f"{', '.join(refs)} (unlocked; a KiCad-locked part keeps "
+                    f"its own)")})
     return rows
 
 
@@ -560,6 +595,9 @@ def format_rows(rows) -> List[str]:
     lines = []
     for r in rows:
         if r['kind'] in ('agree', 'single'):
+            continue
+        if r.get('field') == 'pile':
+            lines.append(f"  PILE {r['why']}")
             continue
         vals = '; '.join(
             f"{ch} {v['value']!r} [{v['authority']}]"

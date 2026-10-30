@@ -1895,7 +1895,11 @@ declared face, which a flippable part then never leaves), and no
 `context.pose_claims_withheld` says what was withheld and why, and lists the
 staged parts off the board. A KiCad-locked part's pose is a decision and
 keeps its claims, and a design brief or `mechanical.json` still merges after
-this.
+this. The reconciliation (`reconcile.reconcile`, in `--plan-only`, the grade
+and `context.reconciliation`) applies the same rule (#1533): it reads no
+`board` edge or pose value off an unlocked part on a pile, so a staging pose
+makes no DRIFT row, and one `pile` report row (printed as `PILE ...`) names
+the parts whose board value it withheld.
 
 An edge part whose STRONG mating face points at another edge than the one it
 sits nearest -- the opposite edge (seated reversed) or one at right angles
