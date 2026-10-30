@@ -2283,9 +2283,11 @@ net names, layer count and the board's own design rules -- without an agent.
 It makes the same kinds of choices the plan-pcb-routing skill asks an agent
 to make, and runs each step as its own process in `<output>.autoplan/`:
 
-1. **Design rules**: the board's Default class clearance as the
-   `--clearance-ceiling`, the fab track floor, the working via, and the fine
-   via for fine-pitch escapes (`list_nets.read_design_rules`).
+1. **Design rules**: the fab clearance floor for every step, as the route
+   steps' `--clearance-ceiling` (a finished board meets the fab floor; a net
+   class declared above it is aspirational, as in the plan-pcb-routing
+   skill's chains), the fab track floor, the working via, and the fine via
+   for fine-pitch escapes (`list_nets.read_design_rules`).
 2. **Planes first**: on 4+ layer boards, the fewest inner layers that put a
    plane next to every signal layer, so each signal layer has a reference:
    In1+In2 on 4 layers, In1+In4 on 6, In1+In3+In6 on 8
@@ -2313,9 +2315,9 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    form neither shape (a mezzanine aside), a through-hole part other than a PGA, and any
    connector, socket, header or magnetics by footprint name
    (`autoplan.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
-   A part that drops escapes is retried at the fab clearance with the fine
-   via, then with the dogbone (BGA) or under-pad (QFN) method, keeping the
-   attempt that escaped most.
+   A part that drops escapes is retried with the fine via (BGA), then with
+   the dogbone (BGA) or under-pad (QFN) method, keeping the attempt that
+   escaped most.
    BGA escapes take the same layer costs as the route step.
 4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts.
 5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`. A
