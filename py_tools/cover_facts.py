@@ -2,7 +2,7 @@
 """What a board says about the bodies its connectors carry: the facts a
 `covers[]` row is declared from (#1443). Facts only -- no decision.
 
-    cover_facts.py BOARD.kicad_pcb [--refs J3,J8] [--json OUT.json]
+    cover_facts.py BOARD.kicad_pcb [--refs J3 J8] [--json OUT.json]
 
 A card in a socket (an M.2 card), a module on stacking connectors or a shield
 on headers stands over the board, and parts may go under it only where they
@@ -27,7 +27,10 @@ frame (the footprint's local axes; axis 0 = local +x, 90 = local +y, as a
 
 The candidates are the connectors (a J, P, X or CN designator, 10 pads or
 more) and every part whose models raise a body past its own outline;
-`--refs` names them instead.
+`--refs` names them instead (space- or comma-separated, and a repeated
+`--refs` adds to the list). A reference the board does not have is refused
+by name (exit 2), never dropped: a report short of one connector reads as
+complete (#1538).
 
 On a PILE (`assess_placement(...).pile`, the predicate board_context and
 board_brief use) the poses are staging, so the two facts read off two poses
@@ -38,7 +41,7 @@ placed board).
 A model's underside is the model's, not the card's: a generic card model
 draws one card type. Weigh it against the datasheets.
 
-Exit 0, 2 on an unreadable board.
+Exit 0, 2 on an unreadable board or a `--refs` the board does not have.
 """
 #: #937 registry: which door(s) show this tool, and whether it changes
 #: the board. Read by krt_registry.py -- by AST, never imported.
@@ -65,6 +68,27 @@ OFF_AXIS_MM = 15.0
 STANDOFF_HOLE_MM = 2.0
 #: a connector with fewer pads than this carries no card or module
 CONNECTOR_PADS = 10
+
+
+class MissingRefs(ValueError):
+    """References the board does not have were asked for (#1538)."""
+
+    def __init__(self, missing):
+        self.missing = list(missing)
+        super().__init__(f"the board has no {', '.join(self.missing)}")
+
+
+def split_refs(values):
+    """One list of references from `--refs` values, each space- or
+    comma-separated (#1538): `--refs J1,J2`, `--refs J1 J2`, `--refs "J1 J2"`
+    and `--refs J1 --refs J2` all name J1 and J2. Order kept, repeats
+    dropped; None when nothing was given."""
+    out = []
+    for v in values or ():
+        for r in re.split(r'[,\s]+', v or ''):
+            if r and r not in out:
+                out.append(r)
+    return out or None
 
 
 def _raster(entry):
@@ -119,7 +143,10 @@ def facts(pcb, board, refs=None):
     rasters = raw.get('covers') or {}
     geo = board_bodies(pcb, board)
     if refs:
-        cands = [r for r in refs if r in fps]
+        missing = [r for r in refs if r not in fps]
+        if missing:
+            raise MissingRefs(missing)
+        cands = list(refs)
     else:
         cands = sorted(r for r, f in fps.items()
                        if f.pads and (_prefix(r) in CONN_PREFIX_MED
@@ -272,8 +299,10 @@ def _print(doc):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('board')
-    ap.add_argument('--refs', help='comma-separated connectors to report (default: every '
-                                   'connector and every part whose models raise a body)')
+    ap.add_argument('--refs', nargs='+', action='extend', metavar='REF',
+                    help='connectors to report, space- or comma-separated; repeatable '
+                         '(default: every connector and every part whose models raise '
+                         'a body). A reference the board does not have exits 2.')
     ap.add_argument('--json', metavar='OUT', help='write the facts as JSON here too')
     a = ap.parse_args(argv)
     from kicad_parser import parse_kicad_pcb
@@ -283,8 +312,11 @@ def main(argv=None):
     except Exception as ex:                                  # noqa: BLE001
         print(f"cover_facts: cannot read {a.board}: {ex}", file=sys.stderr)
         return 2
-    refs = [r.strip() for r in a.refs.split(',') if r.strip()] if a.refs else None
-    doc = facts(pcb, a.board, refs)
+    try:
+        doc = facts(pcb, a.board, split_refs(a.refs))
+    except MissingRefs as ex:
+        print(f"cover_facts: error: --refs: {ex}", file=sys.stderr)
+        return 2
     _print(doc)
     if a.json:
         with open(a.json, 'w', encoding='utf-8') as f:

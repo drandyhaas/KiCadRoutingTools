@@ -1324,11 +1324,16 @@ connector's own frame:
 - the parts inside the raised extent now, with their heights where known.
 
 ```bash
-python3 -X utf8 py_tools/cover_facts.py board.kicad_pcb --refs J3 --json facts.json
+python3 -X utf8 py_tools/cover_facts.py board.kicad_pcb --refs J3 J8 --json facts.json
 ```
 
+`--refs` takes references space- or comma-separated, and a repeated
+`--refs` adds to the list. A reference the board does not have is named and
+refused (exit 2), never dropped, since a report short of one connector reads
+as complete.
+
 Facts only; the skill's §3.4b turns them and the datasheets into a row.
-Exit 0, or 2 for an unreadable board.
+Exit 0, or 2 for an unreadable board or a `--refs` the board does not have.
 
 ## Run Ledger (`converge.py`)
 
