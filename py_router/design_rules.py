@@ -107,8 +107,11 @@ SIZE_KINDS = frozenset({
 # consumed". WIDER than what is read today: the resolver's callers ask only
 # for track_width / via_diameter / hole_size (draw_size, floor), copper
 # clearance reaches the router only through kicad_dru's layer- and
-# track-scoped subsets, and `disallow` through net_keepouts. A rule built only on the other kinds listed here is
-# reported neither "NOT honoured" nor "not consumed".
+# track-scoped subsets, and `disallow` through net_keepouts (a rule area's
+# keep-out, or a track ban's forbidden layers -- whatever of a `disallow`
+# rule no step honours is named by `Rule.router_unhonoured`, #1527). A rule
+# built only on the other kinds listed here is reported neither "NOT
+# honoured" nor "not consumed".
 CONSUMED_KINDS = CLEARANCE_KINDS | SIZE_KINDS | {'disallow', 'via_count'}
 # Kinds no routing step honours but a grader does: check_drc grades every
 # `length` window (kicad_dru.read_board_length_rules, #1313) and every
@@ -120,6 +123,29 @@ GRADED_ONLY_KINDS = frozenset({'length', 'skew', 'diff_pair_uncoupled'})
 # declaring one is reported NOT honoured -- in route.py's
 # `design_rules.unsupported_rules` -- rather than passing as consumed.
 ROUTER_UNHONOURED_KINDS = frozenset({'annular_width'})
+# `disallow` item tokens (#1527). The router lays tracks and THROUGH vias
+# only, so a rule forbidding only blind, buried or micro vias asks nothing of
+# it. A track ban is honoured by the steps that derive it (route.py and
+# route_diff.py, `net_keepouts.derive_layer_bans`: the bound nets' forbidden
+# layers); every other token is not honoured by any routing step and is
+# reported NOT honoured -- check_drc grades the track and via ones.
+DISALLOW_NOT_LAID = frozenset({'micro_via', 'blind_via', 'buried_via'})
+DISALLOW_GRADED = frozenset({'track', 'via', 'through_via'}) | DISALLOW_NOT_LAID
+
+
+def disallow_router_reason(tokens, honoured_tokens=frozenset()) -> Optional[str]:
+    """Why a routing step does not honour a scope-evaluable `disallow` rule
+    forbidding ``tokens`` (None when it asks nothing more of the router than
+    ``honoured_tokens`` covers)."""
+    left = sorted(set(tokens) - DISALLOW_NOT_LAID - set(honoured_tokens))
+    if not left:
+        return None
+    graded = [t for t in left if t in DISALLOW_GRADED]
+    return (f"disallow {', '.join(left)}: this step does not keep the bound "
+            f"nets' {', '.join(left)} off"
+            + ("; route.py and route_diff.py keep a net's tracks off the "
+               "layers the rule forbids" if 'track' in left else '')
+            + (f"; check_drc grades {', '.join(graded)}" if graded else ''))
 
 # Spellings a caller may use for a kind.
 KIND_ALIASES = {
@@ -238,6 +264,12 @@ class Rule:
     # set by net_keepouts.derive_area_keepouts when the router honours the
     # rule as a net-filtered keep-out: what it honours, for the report
     honoured: Optional[str] = None
+    # #1527: a `disallow` rule the resolver EVALUATES (its condition parses,
+    # no rule area) but the routing step does not honour, and why --
+    # `unsupported()` lists it while `unsupported` stays None, so check_drc's
+    # resolve('disallow') still grades it. net_keepouts.derive_layer_bans
+    # rewrites it for the track bans route.py / route_diff.py honour.
+    router_unhonoured: Optional[str] = None
     # the condition ANDs in AB.isCoupledDiffPair() (#1293): the rule binds a
     # diff pair's P against its own N
     coupled: bool = False
@@ -407,6 +439,11 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                 rule.unsupported = f"layer clause {lc!r} (non-copper)"
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
+        if 'disallow' in rule.constraints and rule.unsupported is None:
+            # #1527: evaluable, so nothing of it is "consumed" until a step
+            # honours it -- it used to pass silently as consumed
+            rule.router_unhonoured = disallow_router_reason(
+                rule.constraints['disallow'].get('disallow', ()))
         rules.append(rule)
     return rules, notes
 
@@ -478,11 +515,36 @@ def _tokens(src: str):
     return out
 
 
+_NUMERIC_OPS = ('<', '>', '<=', '>=', '+', '-', '*', '/')
+
+
 class _Parser:
-    def __init__(self, src: str, areas: bool = False):
+    def __init__(self, src: str, areas: bool = False, unknown: bool = False):
         self.toks = _tokens(src)
         self.i = 0
         self.areas = areas
+        # parse_condition_maybe: a construct outside the modelled subset
+        # becomes an ('unknown',) leaf instead of raising
+        self.unknown = unknown
+
+    def _unmodelled(self, why: str):
+        if self.unknown:
+            return ('unknown',)
+        raise Unsupported(why)
+
+    def _skip_args(self):
+        """Consume a call's argument list up to its closing ')' (the '(' is
+        already taken)."""
+        depth = 1
+        while depth:
+            k, v = self.peek()
+            if k is None:
+                raise Unsupported("unclosed argument list")
+            self.i += 1
+            if (k, v) == ('op', '('):
+                depth += 1
+            elif (k, v) == ('op', ')'):
+                depth -= 1
 
     def peek(self):
         return self.toks[self.i] if self.i < len(self.toks) else (None, None)
@@ -534,9 +596,16 @@ class _Parser:
         if k == 'op' and v in ('==', '!='):
             self.take()
             rhs = self.term()
+            if 'unknown' in (lhs[0], rhs[0]):
+                return ('unknown',)
             return ('cmp', v, lhs, rhs)
-        if k == 'op' and v in ('<', '>', '<=', '>=', '+', '-', '*', '/'):
-            raise Unsupported(f"numeric comparison/arithmetic ({v})")
+        if k == 'op' and v in _NUMERIC_OPS:
+            if not self.unknown:
+                raise Unsupported(f"numeric comparison/arithmetic ({v})")
+            while self.peek()[0] == 'op' and self.peek()[1] in _NUMERIC_OPS + ('==', '!='):
+                self.take()
+                self.term()
+            return ('unknown',)
         return lhs
 
     def term(self):
@@ -546,17 +615,20 @@ class _Parser:
             return ('lit', v[1:-1])
         if k == 'num':
             self.take()
-            raise Unsupported("numeric literal outside a supported comparison")
+            return self._unmodelled("numeric literal outside a supported comparison")
         if k == 'name':
             self.take()
             if '.' not in v:
                 if v == 'L':
                     return ('L',)
-                raise Unsupported(f"bare identifier {v!r}")
+                return self._unmodelled(f"bare identifier {v!r}")
             item, name = v.split('.', 1)
             item_u = item.upper()
             if item_u not in ('A', 'B', 'AB'):
-                raise Unsupported(f"item {item!r}")
+                if self.unknown and self.peek() == ('op', '('):
+                    self.take()
+                    self._skip_args()
+                return self._unmodelled(f"item {item!r}")
             lname = name.lower()
             if self.peek() == ('op', '('):
                 self.take()
@@ -568,6 +640,9 @@ class _Parser:
                         self.take()
                     elif ak == 'comma':
                         self.take()
+                    elif self.unknown:
+                        self._skip_args()
+                        return ('unknown',)
                     else:
                         raise Unsupported(f"argument {av!r} to {name}()")
                 self.take('op', ')')
@@ -578,16 +653,16 @@ class _Parser:
                         raise Unsupported(f"{name}() with {len(args)} arguments")
                     return ('area', item_u, lname, args[0])
                 if lname in _KNOWN_UNSUPPORTED_FUNCS or lname not in _SUPPORTED_FUNCS:
-                    raise Unsupported(f"predicate {name}() not modelled")
+                    return self._unmodelled(f"predicate {name}() not modelled")
                 if lname == 'indiffpair' and (item_u == 'AB' or len(args) != 1
                                               or not args[0]):
                     # KiCad reports "Missing diff-pair name argument" and the
                     # term is false; AB has no single net to test.
-                    raise Unsupported(f"{item}.{name}() needs one diff-pair "
-                                      f"name pattern on A or B")
+                    return self._unmodelled(f"{item}.{name}() needs one diff-pair "
+                                            f"name pattern on A or B")
                 return ('call', item_u, lname, tuple(args))
             if lname not in _SUPPORTED_PROPS:
-                raise Unsupported(f"property {name} not modelled")
+                return self._unmodelled(f"property {name} not modelled")
             return ('prop', item_u, lname)
         raise Unsupported(f"unexpected token {v!r}")
 
@@ -610,6 +685,69 @@ def parse_condition(src: str, areas: bool = False):
         raise Unsupported("AB.isCoupledDiffPair() is modelled only as a "
                           "term ANDed into the condition, or its negation")
     return node
+
+
+def parse_condition_maybe(src: Optional[str]):
+    """AST for ANY rule condition, for a three-valued reading (`_eval3`):
+    the constructs `parse_condition` refuses (insideCourtyard(), getField(),
+    numeric comparisons, ...) become ('unknown',) leaves, and a condition
+    that does not even tokenize is ('unknown',) as a whole. None for an
+    unconditioned rule."""
+    if src is None:
+        return None
+    try:
+        return _Parser(src, unknown=True).parse()
+    except Unsupported:
+        return ('unknown',)
+
+
+def _eval3(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
+           ctx=None) -> Optional[bool]:
+    """Kleene's three-valued `_eval`: True, False, or None when an unknown
+    leaf decides the answer (it may hold for some items and not others)."""
+    op = node[0]
+    if op == 'unknown':
+        return None
+    if op in ('and', 'or'):
+        l, r = (_eval3(node[1], a, b, layer, ctx), _eval3(node[2], a, b, layer, ctx))
+        if op == 'and':
+            return False if False in (l, r) else (True if l and r else None)
+        return True if True in (l, r) else (False if l is False and r is False else None)
+    if op == 'not':
+        v = _eval3(node[1], a, b, layer, ctx)
+        return None if v is None else not v
+    try:
+        return bool(_eval(node, a, b, layer, ctx))
+    except Unsupported:
+        return None
+
+
+def rule_may_match(rule: 'Rule', ast, a: RuleItem, b: Optional[RuleItem],
+                   layer: Optional[str], copper_layers: Sequence[str],
+                   ctx=None) -> Optional[bool]:
+    """`_rule_matches` in three values over a `parse_condition_maybe` AST:
+    True when the rule binds the pair, False when it cannot, None when an
+    unmodelled term decides it (or the pair's layer is not known and the rule
+    names layers). Commutative, as KiCad's EvaluateFor is."""
+    lay = rule.layers_for(copper_layers)
+    unsure = False
+    if lay is not None:
+        if layer is None:
+            if not lay:
+                return False
+            unsure = True
+        elif layer not in lay:
+            return False
+    if ast is None:
+        return None if unsure else True
+    best = False
+    for x, y in ((a, b), (b, a)) if b is not None else ((a, b),):
+        v = _eval3(ast, x, y, layer, ctx)
+        if v is True:
+            return None if unsure else True
+        if v is None:
+            best = None
+    return best
 
 
 def _contains_coupled(node) -> bool:
@@ -717,6 +855,16 @@ def _in_diff_pair(it: 'RuleItem', pattern: str, ctx) -> bool:
     return base.endswith('_') and _wx_matches(pattern, base[:base.rfind('_')])
 
 
+class _Undefined:
+    """A property the item does not have (KiCad's VT_UNDEFINED value)."""
+
+    def __repr__(self):
+        return 'UNDEFINED'
+
+
+_UNDEFINED = _Undefined()
+
+
 def _norm_type(t: Optional[str]) -> str:
     return (t or '').lower().replace('-', '_').replace(' ', '_')
 
@@ -746,10 +894,14 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
         _, cop, lhs, rhs = node
         lv = _value(lhs, a, b, layer, ctx)
         rv = _value(rhs, a, b, layer, ctx)
+        if lv is _UNDEFINED or rv is _UNDEFINED:
+            # KiCad's VALUE::EqualTo and NotEqualTo are BOTH false when either
+            # side is undefined (a property the item does not have)
+            return False
         if lhs[0] == 'prop' and rhs[0] == 'prop' and lhs[2] == 'net' and rhs[2] == 'net':
             eq = (lv == rv)
         elif isinstance(lv, str) and isinstance(rv, str):
-            eq = _cmp_strings(lhs, lv, rv)
+            eq = _cmp_strings(lhs, lv, rv, rhs)
         else:
             eq = (lv == rv)
         return eq if cop == '==' else not eq
@@ -760,7 +912,7 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
         return it is not None and node[3] in it.areas
     if op == 'prop':
         v = _value(node, a, b, layer)
-        return bool(v)
+        return v is not _UNDEFINED and bool(v)
     if op == 'lit':
         return bool(node[1])
     if op == 'L':
@@ -768,10 +920,13 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
     raise Unsupported(f"node {op}")
 
 
-def _cmp_strings(lhs_node, lv: str, rv: str) -> bool:
+def _cmp_strings(lhs_node, lv: str, rv: str, rhs_node=None) -> bool:
     prop = lhs_node[2] if lhs_node[0] == 'prop' else None
     if prop in ('type', 'pad_type', 'via_type'):
         return _norm_type(lv) == _norm_type(rv)
+    if prop == 'netname':
+        return netname_matches(lv, rv, wildcard=rhs_node is not None
+                               and rhs_node[0] == 'lit')
     if prop == 'netclass':
         # NetClass == 'X' is true for any class the net is a member of (its
         # aggregate class included); this is the lenient reading and agrees
@@ -781,6 +936,17 @@ def _cmp_strings(lhs_node, lv: str, rv: str) -> bool:
         # KiCad accepts wildcards in layer names ('*.Cu').
         return fnmatch.fnmatchcase(lv, rv) if any(ch in rv for ch in '*?[') else lv == rv
     return lv == rv
+
+
+def netname_matches(name: str, pattern: str, wildcard: bool = True) -> bool:
+    """KiCad's string ``==`` for ``A.NetName == 'pattern'``: case-insensitive,
+    and a literal carrying '*' or '?' is a wildcard (VALUE::EqualTo:
+    WildCompareString / IsSameAs(.., false)). Measured on kicad-cli 10.0.6:
+    ``A.NetName == '/clk'`` binds /CLK, ``A.NetName == '/CLK*'`` binds
+    /CLK-, /CLK_N and /CLK+."""
+    if wildcard and any(ch in pattern for ch in '*?'):
+        return _wx_matches(pattern.lower(), name.lower())
+    return name.lower() == pattern.lower()
 
 
 def _item(which: str, a: RuleItem, b: Optional[RuleItem]) -> Optional[RuleItem]:
@@ -814,6 +980,13 @@ def _value(node, a, b, layer, ctx=None):
         if name == 'type':
             return it.type
         if name == 'layer':
+            if it.type == 'via':
+                # PCB_VIA masks the Layer property (it has Layer Top/Bottom
+                # instead), so KiCad reads A.Layer of a via as undefined:
+                # measured on kicad-cli 10.0.6, a `disallow via` rule on
+                # `A.Layer != 'F.Cu'` and one on `A.Layer == 'F.Cu'` both
+                # flag no via
+                return _UNDEFINED
             if layer:
                 return layer
             return next(iter(it.layers)) if len(it.layers) == 1 else ''
@@ -1451,6 +1624,10 @@ class DesignRules:
                if r.unsupported and not r.honoured]
         named = {n for n, _w in out}
         for r in self.rules:
+            if r.router_unhonoured and not r.unsupported:
+                out.append((r.name, r.router_unhonoured))
+                named.add(r.name)
+        for r in self.rules:
             kinds = sorted(k for k in r.constraints if k in ROUTER_UNHONOURED_KINDS)
             if kinds and r.name not in named and not r.honoured:
                 out.append((r.name, f"{', '.join(kinds)}: no routing step sizes "
@@ -1501,7 +1678,7 @@ class DesignRules:
                                 for k, v in sorted(r.constraints.items())},
                 'layer': r.layer_clause, 'condition': r.condition_src,
                 'severity': r.severity, 'unsupported': r.unsupported,
-                'honoured': r.honoured,
+                'honoured': r.honoured, 'router_unhonoured': r.router_unhonoured,
                 'unconsumed': list(r.unconsumed_kinds),
             } for r in self.rules],
             'fab_floor': dict(sorted(self.fab_floor.items())),
@@ -1634,8 +1811,10 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
     # raises into the engine either.
     if net_keepouts and pcb_data is not None:
         try:
-            from net_keepouts import derive_area_keepouts
-            rules.net_keepouts = derive_area_keepouts(rules, pcb_data)
+            from net_keepouts import derive_area_keepouts, derive_layer_bans
+            # #1527: and the track bans of the rules scoped without an area
+            rules.net_keepouts = (derive_area_keepouts(rules, pcb_data)
+                                  + derive_layer_bans(rules, pcb_data))
         except Exception as e:                                 # noqa: BLE001
             rules.net_keepouts = []
             rules.notes.append(f"net-filtered keep-outs not derived ({e})")
@@ -1644,7 +1823,8 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
     except Exception:                                          # noqa: BLE001
         pass
     key = (os.path.abspath(rules.source) if rules.source else '',
-           tuple((r.name, r.unsupported, r.honoured) for r in rules.rules))
+           tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
+                 for r in rules.rules))
     if key not in _ANNOUNCED:
         _ANNOUNCED.add(key)
         for line in rules.report_lines():

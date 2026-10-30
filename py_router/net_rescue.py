@@ -1330,11 +1330,15 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     for s in pcb_data.segments)
                 if not _bare:
                     continue
-                if not escape_has_routable_layer(_pad, config):
+                # the net's own view: a .kicad_dru track ban forbids it
+                # layers the run routes for others (#1527)
+                from net_keepouts import config_for_nets
+                if not escape_has_routable_layer(
+                        _pad, config_for_nets(pcb_data, (net_id,), config)):
                     print(f"    bare-ball escape: {_pad.component_ref}."
                           f"{_pad.pad_number} skipped (no routable layer "
                           f"for its via to reach besides the pad's own; "
-                          f"the rest are outside --layers)")
+                          f"the rest are outside --layers or banned to the net)")
                     continue
                 _cu = [l for l in _pad.layers if l.endswith('.Cu')]
                 try:

@@ -348,8 +348,8 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
         if layers is None:
             if not has_layer_clause and condition and _condition_is_scoped(condition):
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
-                             f"net class / item type -- handled by the scoped "
-                             f"channel (#1491)")
+                             f"net class / item type / net name -- handled by the "
+                             f"scoped channel (#1491)")
                 continue
             notes.append(f"rule '{name}': clearance {clearance_mm}mm has a "
                          f"non-layer scope (netclass/area/... condition) -- "
@@ -964,10 +964,12 @@ def install_track_clearances(config, track_clearances, input_file,
 # track channel's one shape. They are evaluated by `design_rules`' own
 # condition engine (commutative, last match wins, the rule REPLACING the class
 # value -- KiCad's precedence), on the subset that reads only the two items'
-# classes and types: NetClass / hasNetclass / hasExactNetclass, Type,
-# Pad_Type, Via_Type, joined by && || !. A rule with a layer clause, a layer,
-# area, name, diff-pair or coupled term stays out (layer and coupled rules
-# have their own channels; the rest is #865).
+# classes, types and net names: NetClass / hasNetclass / hasExactNetclass,
+# Type, Pad_Type, Via_Type, NetName (#1528: `A.NetName == '/GND' && B.NetClass
+# == 'HS'`, compared as KiCad compares it -- case-insensitive, a '*'/'?'
+# literal a wildcard), joined by && || !. A rule with a layer clause, a layer,
+# area, diff-pair or coupled term stays out (layer and coupled rules have their
+# own channels; the rest is #865).
 #
 # The grader reads it PAIR-EXACT (`ScopedClearanceRules.pair_value`). The
 # router's obstacle map is shared across a call's routed set, so it prices
@@ -978,7 +980,20 @@ def install_track_clearances(config, track_clearances, input_file,
 # #1491 proposes, or the others needing no more. When another routed net holds
 # a relaxing rule's stamp up, the run says so (`report`).
 
-_SCOPED_PROPS = frozenset({'netclass', 'type', 'pad_type', 'via_type'})
+_SCOPED_PROPS = frozenset({'netclass', 'type', 'pad_type', 'via_type', 'netname'})
+
+
+def _netname_literals(node, out: set) -> set:
+    """Every literal a parsed condition compares a NetName against."""
+    if isinstance(node, tuple) and node:
+        if node[0] == 'cmp':
+            sides = (node[2], node[3])
+            if any(s[0] == 'prop' and s[2] == 'netname' for s in sides):
+                out.update(s[1] for s in sides if s[0] == 'lit')
+        else:
+            for c in node[1:]:
+                _netname_literals(c, out)
+    return out
 _SCOPED_FUNCS = frozenset({'hasnetclass', 'hasexactnetclass'})
 
 
@@ -1044,6 +1059,14 @@ class ScopedClearanceRules:
         self.layer_orders = dict(layer_orders or {})
         self._memo: Dict[tuple, Optional[Tuple[float, str, int]]] = {}
         self._after: Dict[tuple, tuple] = {}
+        # #1528: the NetName literals the rules compare against. A net's
+        # signature carries the ones its name matches, so the nets no rule
+        # names still share one memo entry per class.
+        lits: set = set()
+        for r in self.rules:
+            _netname_literals(r.condition, lits)
+        self._name_lits = tuple(sorted(lits))
+        self._name_sig: Dict[int, tuple] = {}
 
     @classmethod
     def for_board(cls, pcb_data, board_path: Optional[str] = None,
@@ -1077,7 +1100,18 @@ class ScopedClearanceRules:
 
     def _sig(self, net_id: int):
         nid = int(net_id or 0)
-        return (self.dr.memberships.get(nid, frozenset()), self.dr.effective_class(nid))
+        names = ()
+        if self._name_lits:
+            names = self._name_sig.get(nid)
+            if names is None:
+                from design_rules import netname_matches
+                name = self.dr.net_names.get(nid, '')
+                names = self._name_sig[nid] = tuple(
+                    (lit, netname_matches(name, lit), netname_matches(name, lit, False))
+                    for lit in self._name_lits
+                    if netname_matches(name, lit) or netname_matches(name, lit, False))
+        return (self.dr.memberships.get(nid, frozenset()), self.dr.effective_class(nid),
+                names)
 
     def pair_value(self, net_a: int, type_a: str, net_b: int, type_b: str,
                    pad_type_a: Optional[str] = None, pad_type_b: Optional[str] = None

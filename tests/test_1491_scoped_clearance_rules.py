@@ -60,16 +60,19 @@ def selection(td):
         '(rule "onl" (constraint clearance (min 0.4mm)) (condition "A.onLayer(\'F.Cu\')"))',
         '(rule "cpl" (constraint clearance (min 0.1mm)) '
         "(condition \"A.NetClass == 'CSI' && AB.isCoupledDiffPair()\"))",
-        '(rule "nm" (constraint clearance (min 0.4mm)) (condition "A.NetName == \'A\'"))'])
+        '(rule "nm" (constraint clearance (min 0.4mm)) (condition "A.NetName == \'c\'"))'])
     b = os.path.join(td, 'sel.kicad_pcb')
     write_board(b, classes=[{'name': 'CSI', 'clearance': 0.2, 'priority': 0}],
                 patterns=[('A', 'CSI'), ('B', 'CSI')], dru=dru)
     sc = ScopedClearanceRules.for_board(pcb_data_for(b), b)
-    check('the class-pair and the Type rules, and no other',
-          sc is not None and sorted(sc.names) == ['csi gap', 'hs pad'],
+    check('the class-pair, the Type and (#1528) the NetName rules, and no other',
+          sc is not None and sorted(sc.names) == ['csi gap', 'hs pad', 'nm'],
           f'{sc and sc.names}')
     got = sc.pair_value(1, 'track', 2, 'track')
     check('A/B commutative: CSI track vs CSI track -> 0.3', got and got[0] == 0.3, f'{got}')
+    got = sc.pair_value(1, 'track', 3, 'track')
+    check("#1528: NetName binds net C as KiCad compares it (case-insensitive), "
+          "commutative -> 0.4", got and got[0] == 0.4 and got[1] == 'nm', f'{got}')
 
 
 def _config(pcb, routed, ncl):

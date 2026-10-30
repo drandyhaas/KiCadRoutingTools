@@ -233,13 +233,20 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
     return stub
 
 
-def forbidden_destination(config, dest_layer: str) -> bool:
+def forbidden_destination(config, dest_layer: str, pcb_data=None,
+                          net_ids=()) -> bool:
     """True when `dest_layer` is in config.layers at FORBIDDEN (negative)
     cost -- an unrequested copper layer a --layers subset run appends as an
-    obstacle. No stub may be moved onto one. Candidate lists draw from
-    config.routable_layers(), but several swaps take their destination from
-    the OTHER endpoint's current layer, which can itself be forbidden; the
-    validators refuse such a destination for every caller."""
+    obstacle -- or a .kicad_dru track ban forbids it to one of `net_ids`
+    (#1527, `net_keepouts.banned_layers`). No stub may be moved onto one.
+    Candidate lists draw from config.routable_layers(), but several swaps
+    take their destination from the OTHER endpoint's current layer, which can
+    itself be forbidden; the validators refuse such a destination for every
+    caller."""
+    if pcb_data is not None and net_ids:
+        from net_keepouts import banned_layers
+        if dest_layer in banned_layers(pcb_data, net_ids):
+            return True
     routable = getattr(config, 'routable_layers', None)
     if routable is None or dest_layer not in (getattr(config, 'layers', None) or ()):
         return False
@@ -1266,8 +1273,9 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
         if getattr(stub, 'locked', False):
             return False, "stub carries KiCad-locked copper (#1261)"
 
-    if forbidden_destination(config, dest_layer):
-        return False, f"{dest_layer} is a forbidden layer (negative cost)"
+    if forbidden_destination(config, dest_layer, pcb_data,
+                             (stub_p.net_id, stub_n.net_id)):
+        return False, f"{dest_layer} is a forbidden layer (negative cost or a .kicad_dru track ban)"
 
     # #581: an active (> 0) same-net pad via clearance forbids pad-centre vias.
     if getattr(config, 'same_net_pad_clearance', -1.0) > 0:
@@ -1606,8 +1614,8 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
     if getattr(stub, 'locked', False):
         return False, "stub carries KiCad-locked copper (#1261)"
 
-    if forbidden_destination(config, dest_layer):
-        return False, f"{dest_layer} is a forbidden layer (negative cost)"
+    if forbidden_destination(config, dest_layer, pcb_data, (stub.net_id,)):
+        return False, f"{dest_layer} is a forbidden layer (negative cost or a .kicad_dru track ban)"
 
     # #581: an active (> 0) same-net pad via clearance forbids the pad-centre
     # via this switch would drill -- decline the swap instead.

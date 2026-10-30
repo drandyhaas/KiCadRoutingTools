@@ -776,9 +776,16 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     # bind is ungraded, whatever `undersized` says about the rest.
     _unsz = sorted(set(re.findall(r"NOT GRADED \(size\): rule '([^']*)'", out)))
     _size_extra = {'ungraded_rules': _unsz} if _unsz else {}
-    # #1490: and the .kicad_dru clearance rules it does not model.
-    _uncl = sorted(set(re.findall(r"NOT GRADED \(clearance\): rule '([^']*)'", out)))
+    # #1490: and the .kicad_dru clearance rules it does not model; #1527: and
+    # the `disallow` rules (or tokens) it does not grade.
+    _uncl = sorted(set(re.findall(r"NOT GRADED \((?:clearance|disallow)\): rule '([^']*)'",
+                                  out)))
     _clr_extra = {'ungraded_rules': _uncl} if _uncl else {}
+    # #1528: of `count`, the violations such a rule may make legal -- graded
+    # at the class value, which KiCad may not report.
+    _unv = re.search(r'UNVERIFIED \(clearance\): (\d+) violation', out)
+    if _unv:
+        _clr_extra['unverified'] = int(_unv.group(1))
     if 'NO DRC VIOLATIONS FOUND' in out:
         return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out),
                  'graphic_grazes_unverified': _unverified_grazes(out), **_clr_extra,
