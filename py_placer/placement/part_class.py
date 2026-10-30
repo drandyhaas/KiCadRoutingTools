@@ -112,6 +112,61 @@ RECEPTACLE_PINS = {'CC1', 'CC2', 'SBU1', 'SBU2', 'SHIELD'}
 IC_PACKAGE_FP = ('qfn', 'dfn', 'sot', 'soic', 'ssop', 'tssop', 'vssop',
                  'msop', 'qfp', 'bga', 'csp', 'wlp', 'lga', 'to-', 'sod',
                  'dip-', 'pga')
+#: The SON family (USON, WSON, VSON, X2SON, S-PVSON-N8, ...), read as a word
+#: with its pin count: a bare `son` substring is too short to test (#1534).
+IC_PACKAGE_RE = re.compile(r'(?<![a-z])(?:x2|[a-z]{0,3})son-?[a-z]?\d')
+
+#: #1534: stems in EDGE_RECEPTACLE_FP / CONNECTOR_FP that name the INTERFACE
+#: a part serves, not that a plug enters it. Parts named for what they do
+#: carry them too: a USB ESD array by its part number (`USBLC6-2P6`), a USB
+#: common-mode choke (`0603USB`), LEDs, cellular and GNSS modules
+#: (`SIMCom_SIM800C`, `SIM28ML`), an eSIM. On a name alone they make no part
+#: a receptacle or a connector; beside connector evidence
+#: (`_connector_evidence`) they do.
+INTERFACE_FP = ('usb', 'sim')
+#: A word of the footprint name that says the part is a connector.
+CONNECTOR_EVIDENCE_RE = re.compile(
+    r'connector|(?<![a-z])conn(?![a-z])|receptacle|socket|jack|plug|holder'
+    r'|card|cartridge')
+#: An INTERFACE_FP stem standing as a WORD of the footprint item -- the way
+#: a connector is named for its interface (`USB-MICRO-B-...`, `USB_C_...`,
+#: `KON-SIM-01`, a SIM connector) -- rather than fused into a part number
+#: (`USBLC6-2P6`, `0603USB`, `SIM800C`, `SIM28ML`). Read on the item, which
+#: both fronts carry (the pcbnew front has no library name).
+INTERFACE_WORD_RE = re.compile(r'(?<![a-z0-9])(?:%s)(?![a-z0-9])'
+                               % '|'.join(INTERFACE_FP))
+
+
+def _is_ic_package(name: str) -> bool:
+    """Does the (lower-case) footprint name say chip package?"""
+    return (any(k in name for k in IC_PACKAGE_FP)
+            or IC_PACKAGE_RE.search(name) is not None)
+
+
+def _receptacle_pins(pins) -> set:
+    """The receptacle pin functions among `pins` (upper case), each read
+    whole and before KiCad's `_<suffix>` (#1534): a symbol with stacked pins
+    names them `CC1_A5`, `CC2_B5`, `SHIELD_SH`."""
+    return {r for p in pins for r in {p, p.split('_', 1)[0]}
+            if r in RECEPTACLE_PINS}
+
+
+def _connector_evidence(name: str, pref: str, recep_pins) -> Optional[str]:
+    """Why a part whose name carries an INTERFACE_FP stem is a connector,
+    or None: receptacle pins, a connector reference prefix, a reference that
+    names the interface (`USB1`), a connector word in the name, or the stem
+    standing as a word of the item (`INTERFACE_WORD_RE`)."""
+    if recep_pins:
+        return 'receptacle pin functions'
+    if pref in CONN_PREFIX_MED:
+        return f'connector reference prefix {pref!r}'
+    if any(k in pref.lower() for k in INTERFACE_FP):
+        return f'reference prefix {pref!r} names the interface'
+    if CONNECTOR_EVIDENCE_RE.search(name):
+        return 'a connector word in the footprint name'
+    if INTERFACE_WORD_RE.search(name.rsplit(':', 1)[-1]):
+        return 'the interface named as a word of the footprint item'
+    return None
 
 # Connector families the substring tables above miss, read as WORDS of the
 # footprint ITEM (`lib:item` -> item). The item, because the pcbnew front
@@ -169,7 +224,7 @@ def _item_connector_class(item: str, pref: str) -> Optional[str]:
     families above; `item` is the lower-case footprint item."""
     # IC packages never; `sod` (SOD-123) also spells SO-DIMM, whose sockets
     # and card edges are connectors.
-    if any(k in item.replace('sodimm', '') for k in IC_PACKAGE_FP):
+    if _is_ic_package(item.replace('sodimm', '')):
         return None
     conn = pref in CONN_PREFIX_MED or bool(CONNECTOR_WORD_RE.search(item))
     edge_mount = bool(RF_EDGE_MOUNT_RE.search(item))
@@ -254,11 +309,17 @@ def classify_part(fp, ref: str) -> PartClass:
         return PartClass('testpoint', 'medium', ('footprint name/prefix',))
 
     pins = {str(getattr(p, 'pinfunction', '') or '').upper() for p in pads}
-    recep_pins = pins & RECEPTACLE_PINS
-    is_ic_pkg = any(k in name for k in IC_PACKAGE_FP)
+    recep_pins = _receptacle_pins(pins)
+    is_ic_pkg = _is_ic_package(name)
     item_cls = ('edge_receptacle' if is_card_fingers(fp) else
                 _item_connector_class(name.rsplit(':', 1)[-1], pref))
-    fp_recep = (((any(k in name for k in EDGE_RECEPTACLE_FP)
+    # #1534: an INTERFACE stem (`usb`, `sim`) counts only beside connector
+    # evidence; every other receptacle stem names a connector by itself
+    iface = any(k in name for k in INTERFACE_FP)
+    iface_ok = iface and _connector_evidence(name, pref, recep_pins) is not None
+    fp_recep = (((any(k in name for k in EDGE_RECEPTACLE_FP
+                      if k not in INTERFACE_FP)
+                  or iface_ok
                   or EDGE_RECEPTACLE_WORDS.search(name) is not None)
                  and not is_ic_pkg)
                 or item_cls == 'edge_receptacle')
@@ -297,7 +358,8 @@ def classify_part(fp, ref: str) -> PartClass:
     # graded at ADVISORY severity: a mid-board pose is a flag for the
     # boundary review, never an error, and pose_plausible makes no claim
     # for it.
-    if (any(k in name for k in CONNECTOR_FP) and not is_ic_pkg) \
+    if ((any(k in name for k in CONNECTOR_FP if k not in INTERFACE_FP)
+         or iface_ok) and not is_ic_pkg) \
             or item_cls == 'connector_affinity':
         return PartClass('connector_affinity', 'low',
                          ('connector-family footprint name; no edge claim',))

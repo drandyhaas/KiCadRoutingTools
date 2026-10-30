@@ -1915,6 +1915,21 @@ which is written at 4, so a zone never rounds past its own envelope. An
 overhanging edge member is not clamped out of its block's zone: the zone side
 on its edge is open (above).
 
+`part_class` reads a part as an edge receptacle from its footprint name, its
+pin functions and its reference, never its pose. A name that only says which
+INTERFACE a part serves (`usb`, `sim`) counts only beside connector evidence
+(#1534): a connector reference (`J`, `P`, `X`, `CN`) or one naming the
+interface (`USB1`), a connector word in the name (`connector`, `receptacle`,
+`socket`, `jack`, `holder`, `card`, ...), the stem standing as a word of the
+item (`USB-MICRO-B-...`, a SIM connector's `KON-SIM-01`) rather than fused into
+a part number (`USBLC6-2P6`, `0603USB`, `SIM800C`), or receptacle pins. So a
+USB ESD array, a common-mode choke or a cellular module named by its part
+number is no edge part. Receptacle pins (`CC1`, `CC2`, `SBU1`, `SBU2`,
+`SHIELD`) are read before a symbol's `_<suffix>` (`CC1_A5` is `CC1`), and a
+SON package (`USON`, `WSON`, ...) is an IC package like a QFN, whatever its
+pins. A connector named only by its part number and carrying no such pins
+still needs its `class` declared.
+
 With `--declare-classes`, connector-family parts that claim no edge (headers,
 JST, terminal blocks; `part_class` calls them `connector_affinity`) are also
 recorded, with `"class": "connector_affinity"` and **no `edge`** (naming one
