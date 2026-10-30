@@ -1727,6 +1727,19 @@ def _graphic_pair_is_same_net(seg_a, seg_b, net_a, net_b):
     return False
 
 
+def pad_corner_radius(pad) -> float:
+    """The corner radius of a pad's copper as every pad check here grades it:
+    half the short side for a circle or oval (a stadium), `roundrect_rratio`
+    times the short side for a roundrect, 0 for every other shape. The one
+    source of that number, so a caller pricing a pad elsewhere (the decap
+    step's clearance gate, #1520) measures the shape this module measures."""
+    if pad.shape in ('circle', 'oval'):
+        return min(pad.size_x, pad.size_y) / 2
+    if pad.shape == 'roundrect':
+        return pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    return 0.0
+
+
 def point_to_pad_distance(px: float, py: float, pad: Pad) -> float:
     """Edge-to-edge distance from a point to a pad's copper (0 if inside the
     copper). Handles custom-polygon pads, rounded/rect/circle/oval shapes, and
@@ -1736,12 +1749,7 @@ def point_to_pad_distance(px: float, py: float, pad: Pad) -> float:
     if pad_polys:
         return _point_to_polys_distance(px, py, pad_polys)
 
-    if pad.shape in ('circle', 'oval'):
-        corner_radius = min(pad.size_x, pad.size_y) / 2
-    elif pad.shape == 'roundrect':
-        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
-    else:
-        corner_radius = 0.0
+    corner_radius = pad_corner_radius(pad)
 
     x, y = px, py
     if pad.rect_rotation:
@@ -1776,13 +1784,7 @@ def _pad_perimeter_points(pad: Pad, n_per_side: int = 8) -> List[Tuple[float, fl
 
     hx, hy = pad.size_x / 2, pad.size_y / 2
     cx, cy = pad.global_x, pad.global_y
-    if pad.shape in ('circle', 'oval'):
-        r = min(hx, hy)
-    elif pad.shape == 'roundrect':
-        r = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
-    else:
-        r = 0.0
-    r = min(r, hx, hy)
+    r = min(pad_corner_radius(pad), hx, hy)
     ix, iy = hx - r, hy - r  # half-extents of the straight (un-rounded) sections
     local = []
     edges = [((-ix, -hy), (ix, -hy)), ((hx, -iy), (hx, iy)),
@@ -1817,13 +1819,7 @@ def _pad_copper_core(pad: Pad):
     if pad_polys:
         return [list(p) for p in pad_polys if p], 0.0
     hx, hy = pad.size_x / 2, pad.size_y / 2
-    if pad.shape in ('circle', 'oval'):
-        r = min(hx, hy)
-    elif pad.shape == 'roundrect':
-        r = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
-    else:
-        r = 0.0
-    r = min(r, hx, hy)
+    r = min(pad_corner_radius(pad), hx, hy)
     ix, iy = hx - r, hy - r
     local = ((-ix, -iy), (ix, -iy), (ix, iy), (-ix, iy))
     cx, cy = pad.global_x, pad.global_y
@@ -1977,12 +1973,7 @@ def _pad_dist_d2_proxy(xs, ys, pad):
                 crossing = cond & (xs[:, None] < xint)
             inside |= (np.count_nonzero(crossing, axis=1) & 1).astype(bool)
         return np.where(inside, 0.0, d2)
-    if pad.shape in ('circle', 'oval'):
-        corner_radius = min(pad.size_x, pad.size_y) / 2
-    elif pad.shape == 'roundrect':
-        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
-    else:
-        corner_radius = 0.0
+    corner_radius = pad_corner_radius(pad)
     x, y = xs, ys
     if pad.rect_rotation:
         rad = math.radians(pad.rect_rotation)
@@ -2163,12 +2154,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
         return False, 0.0, None
 
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
-    if pad.shape in ('circle', 'oval'):
-        corner_radius = min(pad.size_x, pad.size_y) / 2
-    elif pad.shape == 'roundrect':
-        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
-    else:
-        corner_radius = 0.0
+    corner_radius = pad_corner_radius(pad)
 
     # Calculate distance from segment to rectangular pad (with optional rounded
     # corners). For diagonal pads, rotate the segment into the pad's local frame

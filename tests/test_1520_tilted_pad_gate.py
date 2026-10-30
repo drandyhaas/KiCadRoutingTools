@@ -14,9 +14,8 @@ turned pad's.
 
 The truth here is independent of `_Cap`: `legality.footprint_at_pose` turns
 the REAL pads (the parser's size_x/size_y/rect_rotation transform), and
-check_drc measures them. The pads are graded as plain rectangles
-(`shape='rect'`) so the comparison isolates the tilt from corner rounding,
-which `_Cap` does not model on any pad.
+check_drc measures them as they are -- round corners included, which `_Cap`
+models too (`tests/test_1520_round_corner_gate.py` isolates that half).
 
 Runs in-process in a few seconds; nothing shells out.
 """
@@ -42,11 +41,10 @@ if _TESTS not in sys.path:
     sys.path.insert(0, _TESTS)
 
 from kicad_parser import parse_kicad_pcb
-from check_drc import point_to_pad_distance
-from routing_utils import into_pad_frame_point
+from check_drc import point_to_pad_distance, segment_pad_gap
 from synth import make_seg, make_via
 from placement.legality import footprint_at_pose, pad_rect
-from placement.fanout_clearance import _Repair, _seg_to_rect_dist
+from placement.fanout_clearance import _Repair
 
 # Declares no netclass, no .kicad_dru and no pad override: the clearance model
 # is inert, so a via's keep-out is its radius + CLEAR and nothing else moves.
@@ -64,14 +62,8 @@ def _copper(fp):
 
 def _real_pads(fp_seed, pose):
     """The cap's copper pads at `pose`, turned by the parser's own transform,
-    graded as sharp rectangles."""
-    out = []
-    for p in _copper(footprint_at_pose(fp_seed, pose)):
-        q = copy.copy(p)
-        q.shape = 'rect'
-        q.polygons = None
-        out.append(q)
-    return out
+    graded as the shapes they are."""
+    return [copy.copy(p) for p in _copper(footprint_at_pose(fp_seed, pose))]
 
 
 def _rig(vias=(), segs=()):
@@ -254,23 +246,19 @@ class TestTrackShortfallIsMeasuredOnTheRealPad(unittest.TestCase):
             for s, n in zip(segs, nets):
                 want = 0.0
                 for p in pads:
-                    # the real pad's frame, then the module's exact segment-
-                    # to-box distance (check_drc's samples the segment, so it
-                    # differs in the 5th decimal)
-                    ax, ay = into_pad_frame_point(s.start_x, s.start_y, p)
-                    bx, by = into_pad_frame_point(s.end_x, s.end_y, p)
-                    hx, hy = p.size_x / 2.0, p.size_y / 2.0
-                    d = _seg_to_rect_dist(
-                        ax, ay, bx, by, (p.global_x - hx, p.global_y - hy,
-                                         p.global_x + hx, p.global_y + hy))
+                    # check_drc's EXACT centreline-to-copper gap (its graded
+                    # pad-segment pass samples the segment, so it differs in
+                    # the 5th decimal)
+                    d = segment_pad_gap(s.start_x, s.start_y, s.end_x,
+                                        s.end_y, p)
                     want += max(0.0, s.width / 2.0 + CLEAR - d)
                 self.assertAlmostEqual(got.get(n, 0.0), want, places=6,
                                        msg='rot %g net %d' % (rot, n))
 
 
 class TestAnOrthogonalPartIsUnchanged(unittest.TestCase):
-    """The un-turned cap's pads are axis-aligned, and are still priced by
-    their box exactly as before."""
+    """The un-turned cap's pads are axis-aligned, and are priced at what
+    check_drc measures on them at every quarter turn."""
 
     def test_untilted_cap(self):
         pcb = parse_kicad_pcb(BOARD)
@@ -285,13 +273,11 @@ class TestAnOrthogonalPartIsUnchanged(unittest.TestCase):
         st.cap_vias = {k: st.vias for k in st.caps}
         for rot in (0.0, 90.0, 180.0, 270.0):
             got = st._via_shortfalls(CAP, cap, cap.x, cap.y, rot)
-            want = 0.0
-            for r in cap.pad_rects(cap.x, cap.y, rot):
-                v = vias[0]
-                dx = max(r[0] - v.x, v.x - r[2], 0.0)
-                dy = max(r[1] - v.y, v.y - r[3], 0.0)
-                want += max(0.0, VIA / 2.0 + CLEAR - math.hypot(dx, dy))
-            self.assertAlmostEqual(got.get(FOREIGN, 0.0), want, places=12)
+            v = vias[0]
+            want = sum(max(0.0, VIA / 2.0 + CLEAR
+                           - point_to_pad_distance(v.x, v.y, p))
+                       for p in _real_pads(fp, (cap.x, cap.y, rot)))
+            self.assertAlmostEqual(got.get(FOREIGN, 0.0), want, places=9)
 
 
 class TestPadToPadGapOnFrames(unittest.TestCase):
@@ -301,7 +287,7 @@ class TestPadToPadGapOnFrames(unittest.TestCase):
 
     @staticmethod
     def _outline(fr, n=200):
-        cx, cy, hx, hy, c, s = fr
+        cx, cy, hx, hy, c, s = fr[:6]
         pts = []
         for (ax, ay), (bx, by) in (((-hx, -hy), (hx, -hy)), ((hx, -hy), (hx, hy)),
                                    ((hx, hy), (-hx, hy)), ((-hx, hy), (-hx, -hy))):
@@ -318,8 +304,8 @@ class TestPadToPadGapOnFrames(unittest.TestCase):
                  ((0.0, 0.0, 0.3, 0.2, 20.0), (0.55, 0.3, 0.2, 0.1, 0.0)),
                  ((0.0, 0.0, 0.3, 0.2, 110.0), (0.2, 0.1, 0.2, 0.2, 15.0))]
         for a, b in cases:
-            fa = _tilt_frame(*a) or (a[0], a[1], a[2], a[3], 1.0, 0.0)
-            fb = _tilt_frame(*b) or (b[0], b[1], b[2], b[3], 1.0, 0.0)
+            fa = _tilt_frame(*a) or (a[0], a[1], a[2], a[3], 1.0, 0.0, 0.0)
+            fb = _tilt_frame(*b) or (b[0], b[1], b[2], b[3], 1.0, 0.0, 0.0)
             ra = (a[0] - a[2], a[1] - a[3], a[0] + a[2], a[1] + a[3])
             rb = (b[0] - b[2], b[1] - b[3], b[0] + b[2], b[1] + b[3])
             got = _pad_gap(ra, _tilt_frame(*a), rb, _tilt_frame(*b))

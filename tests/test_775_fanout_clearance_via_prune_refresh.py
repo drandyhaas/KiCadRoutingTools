@@ -346,7 +346,8 @@ class TestTheRefreshSeesTheMOVEDBarrel(unittest.TestCase):
         cls.res, cls.st, cls.out = _real(**BOXED)
 
     def test_the_run_relocated_barrels(self):
-        self.assertEqual(len(self.res['via_moves']), 9,
+        # 9 until #1520: one relocation was for a box-corner phantom
+        self.assertEqual(len(self.res['via_moves']), 8,
                          'the real-board rig stopped relocating barrels, so '
                          'every arm here is vacuous')
 

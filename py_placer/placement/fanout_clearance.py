@@ -539,7 +539,8 @@ def _pad_pair_shortfall(pads_a, pads_b, clearance, effs=None,
     none of them takes.
 
     `frames_a` / `frames_b` (#1520) are the parts' `pad_frames`, aligned with
-    the rects; a tilted pad is measured on its frame (`_pad_gap`)."""
+    the rects; a tilted or round-cornered pad is measured on its frame
+    (`_pad_gap`) when the boxes say the pair is inside the keep-out."""
     pen = 0.0
     for ia, (ax0, ay0, ax1, ay1, anet) in enumerate(pads_a):
         row = None if effs is None else effs[ia]
@@ -547,11 +548,13 @@ def _pad_pair_shortfall(pads_a, pads_b, clearance, effs=None,
         for ib, (bx0, by0, bx1, by1, bnet) in enumerate(pads_b):
             if anet == bnet:
                 continue
-            fb = None if frames_b is None else frames_b[ib]
-            gap = (_rect_gap((ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1))
-                   if fa is None and fb is None else
-                   _pad_gap((ax0, ay0, ax1, ay1), fa, (bx0, by0, bx1, by1), fb))
+            gap = _rect_gap((ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1))
             clr = clearance if row is None else row[ib]
+            if gap < clr - EPS:
+                fb = None if frames_b is None else frames_b[ib]
+                if fa is not None or fb is not None:
+                    gap = _pad_gap((ax0, ay0, ax1, ay1), fa,
+                                   (bx0, by0, bx1, by1), fb)
             if gap < clr - EPS:
                 pen += (clr - gap)
     return pen
@@ -593,26 +596,53 @@ def _seg_to_rect_dist(x1, y1, x2, y2, rect):
     return best
 
 
-# --- tilted pads (#1520) ------------------------------------------------------
-# A pad on a non-orthogonal angle is a ROTATED rectangle. Its axis-aligned box
-# (`pad_copper_box`) over-states it by a different amount in every direction,
-# so a no-worse gate that compares a box-priced seed with a box-priced
-# candidate compares two different errors: a tilted 0402 whose real seed graze
-# on a via was 0.085 mm priced 0.215 (the via centre fell in the box's empty
-# corner), and a turn that put the pad's real face on the via at 0.215 passed
-# as "no worse". Such a pad carries a FRAME, (cx, cy, hx, hy, c, s): its
-# centre, its half sizes in its own frame and the cos/sin of its tilt -- the
-# convention of check_drc's `_into_pad_frame`, R(-tilt) into the pad. Every
-# distance to it is measured in that frame, and so exactly. A pad on an
-# orthogonal angle carries None and keeps the box, which is then exact.
+# --- pad shapes: tilt (#1520) and rounded corners -----------------------------
+# A pad on a non-orthogonal angle is a ROTATED rectangle, and a roundrect,
+# circle or oval pad has ROUND corners. Its axis-aligned box
+# (`pad_copper_box`) over-states either by a different amount in every
+# direction, so a no-worse gate that compares a box-priced seed with a
+# box-priced candidate compares two different errors: a tilted 0402 whose
+# real seed graze on a via was 0.085 mm priced 0.215 (the via centre fell in
+# the box's empty corner), and a turn that put the pad's real face on the via
+# at 0.215 passed as "no worse". A roundrect pad's corner does the same on an
+# orthogonal part: a via off the corner arc priced 0.227 that check_drc
+# measures at 0.277 when the part moves to face it.
+#
+# Such a pad carries a FRAME, (cx, cy, hx, hy, c, s, r): its centre, its half
+# sizes in its own frame, the cos/sin of its tilt -- the convention of
+# check_drc's `_into_pad_frame`, R(-tilt) into the pad -- and its corner
+# radius, `check_drc.pad_corner_radius`. The copper is check_drc's
+# `_pad_copper_core`: the inner rectangle (hx - r, hy - r) grown by r, so every
+# distance to the pad is the distance to that inner rectangle, in the frame,
+# less r -- exactly what check_drc measures. A sharp pad on an orthogonal angle
+# carries None and keeps the box, which is then exact.
 
-def _tilt_frame(cx, cy, hx, hy, tilt_deg):
-    """The FRAME of a pad of half sizes (hx, hy) tilted `tilt_deg`, or None
-    when the tilt is a multiple of 90 degrees (its box is then exact)."""
+def _tilt_frame(cx, cy, hx, hy, tilt_deg, r=0.0):
+    """The FRAME of a pad of half sizes (hx, hy) tilted `tilt_deg` with corner
+    radius `r`, or None when its box is exact: a multiple of 90 degrees and
+    sharp corners. An orthogonal round-cornered pad's frame is axis-aligned
+    (c = 1, s = 0) with its half sizes in the board frame."""
     if abs((tilt_deg + 45.0) % 90.0 - 45.0) <= 1e-6:
-        return None
+        if r <= 0.0:
+            return None
+        if abs((tilt_deg + 45.0) % 180.0 - 135.0) <= 1e-6:
+            hx, hy = hy, hx   # a quarter turn: the sides swap
+        return (cx, cy, hx, hy, 1.0, 0.0, r)
     t = math.radians(tilt_deg)
-    return (cx, cy, hx, hy, math.cos(t), math.sin(t))
+    return (cx, cy, hx, hy, math.cos(t), math.sin(t), r)
+
+
+def _pad_frame(p):
+    """A board pad's FRAME (`_tilt_frame`), or None when its box is exact. A
+    custom pad whose copper is a box to one side of it (Pad.copper_box) is
+    that box: None."""
+    if getattr(p, 'copper_box', None) is not None:
+        return None
+    from check_drc import pad_corner_radius
+    hx, hy = p.size_x / 2.0, p.size_y / 2.0
+    return _tilt_frame(p.global_x, p.global_y, hx, hy,
+                       getattr(p, 'rect_rotation', 0.0) or 0.0,
+                       min(pad_corner_radius(p), hx, hy))
 
 
 def _into_frame(px, py, fr):
@@ -621,11 +651,18 @@ def _into_frame(px, py, fr):
 
 
 def _pad_point_dist(px, py, rect, fr):
-    """Distance from a point to a pad: its box `rect`, or its FRAME `fr`."""
+    """Distance from a point to a pad: its box `rect`, or its FRAME `fr`
+    (the inner rectangle's distance less the corner radius, 0 inside).
+    The gate's hottest call, so both branches are written out in full."""
     if fr is None:
-        return _point_to_rect_dist(px, py, rect)
-    x, y = _into_frame(px, py, fr)
-    return math.hypot(max(abs(x) - fr[2], 0.0), max(abs(y) - fr[3], 0.0))
+        return math.hypot(max(rect[0] - px, px - rect[2], 0.0),
+                          max(rect[1] - py, py - rect[3], 0.0))
+    dx, dy = px - fr[0], py - fr[1]
+    c, s, r = fr[4], fr[5], fr[6]
+    ex = abs(dx * c + dy * s) - fr[2] + r
+    ey = abs(dy * c - dx * s) - fr[3] + r
+    d = math.hypot(ex if ex > 0.0 else 0.0, ey if ey > 0.0 else 0.0)
+    return d - r if d > r else 0.0
 
 
 def _pad_seg_dist(x1, y1, x2, y2, rect, fr):
@@ -634,15 +671,21 @@ def _pad_seg_dist(x1, y1, x2, y2, rect, fr):
         return _seg_to_rect_dist(x1, y1, x2, y2, rect)
     ax, ay = _into_frame(x1, y1, fr)
     bx, by = _into_frame(x2, y2, fr)
-    return _seg_to_rect_dist(ax, ay, bx, by, (-fr[2], -fr[3], fr[2], fr[3]))
+    r = fr[6]
+    ix, iy = fr[2] - r, fr[3] - r
+    d = _seg_to_rect_dist(ax, ay, bx, by, (-ix, -iy, ix, iy))
+    return d - r if d > r else 0.0
 
 
 def _pad_corners_axes(rect, fr):
+    """The corners of a pad's INNER rectangle (the box itself for None) and
+    its two axes."""
     if fr is None:
         x0, y0, x1, y1 = rect[:4]
         return ([(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
                 ((1.0, 0.0), (0.0, 1.0)))
-    cx, cy, hx, hy, c, s = fr
+    cx, cy, hx, hy, c, s, r = fr
+    hx, hy = hx - r, hy - r
     pts = [(cx + lx * c - ly * s, cy + lx * s + ly * c)
            for lx, ly in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))]
     return pts, ((c, s), (-s, c))
@@ -652,9 +695,21 @@ def _pad_gap(ra, fa, rb, fb):
     """`rect_gap` between two pads, each a box or a FRAME: the distance
     between them when apart, else minus the smallest overlap over the
     separating axes -- which is what `rect_gap` returns for two boxes, and
-    exactly `rect_gap` when neither pad is tilted."""
+    exactly `rect_gap` when neither pad is tilted or rounded. A round-cornered
+    pad is its inner rectangle grown by its radius, so the gap is the inner
+    rectangles' less both radii."""
     if fa is None and fb is None:
         return _rect_gap(ra[:4], rb[:4])
+    rad = (0.0 if fa is None else fa[6]) + (0.0 if fb is None else fb[6])
+    if (fa is None or fa[5] == 0.0) and (fb is None or fb[5] == 0.0):
+        # both axis-aligned: the inner boxes' rect_gap
+        if fa is not None:
+            cx, cy, hx, hy, _c, _s, r = fa
+            ra = (cx - hx + r, cy - hy + r, cx + hx - r, cy + hy - r)
+        if fb is not None:
+            cx, cy, hx, hy, _c, _s, r = fb
+            rb = (cx - hx + r, cy - hy + r, cx + hx - r, cy + hy - r)
+        return _rect_gap(ra[:4], rb[:4]) - rad
     pa, axa = _pad_corners_axes(ra, fa)
     pb, axb = _pad_corners_axes(rb, fb)
     overlap = float('inf')
@@ -667,14 +722,14 @@ def _pad_gap(ra, fa, rb, fb):
             break
         overlap = min(overlap, o)
     if overlap is not None:
-        return -overlap
+        return -overlap - rad
     best = float('inf')
     for p, q in ((pa, pb), (pb, pa)):
         for x, y in p:
             for k in range(4):
                 (x1, y1), (x2, y2) = q[k], q[(k + 1) % 4]
                 best = min(best, _point_to_seg_dist(x, y, x1, y1, x2, y2))
-    return best
+    return best - rad
 
 
 def _frames_of(cap, x, y, rot):
@@ -784,9 +839,10 @@ class _Cap:
     Pad offsets and board-resolved half-sizes are captured at the seed
     placement; an additional 90-degree rotation rotates the offsets and swaps
     the half-extents, which is exact for axis-aligned pads (the normal case
-    for decoupling caps). A pad on a non-orthogonal angle also keeps its own
-    rectangle (`pad_geom`), so any turn re-derives its box and every distance
-    to it is measured on its FRAME (`pad_frames`, #1520).
+    for decoupling caps). Every pad also keeps its own shape (`pad_geom`), so
+    any turn re-derives its box, and every distance to a pad on a
+    non-orthogonal angle or with round corners is measured on its FRAME
+    (`pad_frames`, #1520) -- the shape check_drc grades.
     """
 
     #: Read by quench's `tether_terms_for` through `TetherGateView` (#1067).
@@ -842,11 +898,12 @@ class _Cap:
         # so a caller passing a model and nothing else still resolves layers.
         _cu = list(board_copper if board_copper is not None
                    else (getattr(model, 'board_copper', None) or ()))
-        from check_drc import pad_copper_layers
+        from check_drc import pad_copper_layers, pad_corner_radius
         self.pad_layers = []
-        # #1520: each pad's own rectangle, index-aligned with self.pads --
-        # (half_x, half_y, tilt) in the board frame at the seed, the parser's
-        # size_x/size_y and rect_rotation. A turn of the part by `delta` tilts
+        # #1520: each pad's own shape, index-aligned with self.pads --
+        # (half_x, half_y, tilt, corner radius) in the board frame at the
+        # seed: the parser's size_x/size_y and rect_rotation, and the radius
+        # check_drc grades its corners at. A turn of the part by `delta` tilts
         # the pad to `tilt - delta` (_pad_cache_for). None for a custom pad
         # whose copper is a box to one side of it (Pad.copper_box): its box is
         # all this pass knows of it, and it turns as a box.
@@ -856,10 +913,11 @@ class _Cap:
                 continue  # paste/mask-only aperture, not copper
             cx, cy, half_x, half_y = pad_copper_box(p)
             self.pads.append((cx - fp.x, cy - fp.y, half_x, half_y, p.net_id))
+            _hx, _hy = p.size_x / 2.0, p.size_y / 2.0
             self.pad_geom.append(
                 None if getattr(p, 'copper_box', None) is not None else
-                (p.size_x / 2.0, p.size_y / 2.0,
-                 getattr(p, 'rect_rotation', 0.0) or 0.0))
+                (_hx, _hy, getattr(p, 'rect_rotation', 0.0) or 0.0,
+                 min(pad_corner_radius(p), _hx, _hy)))
             # The GEOMETRY filter above stays loose on purpose (see the
             # comment), but a FLOOR must not: PadClearanceModel.pad_floor
             # reads local_clearance unconditionally, and an np_thru_hole
@@ -894,8 +952,8 @@ class _Cap:
         self._rect_cache: Dict[float, Tuple[float, float, float, float]] = {}
         self._pad_cache: Dict[float, list] = {}
         self._pad_bbox_cache: Dict[float, Tuple[float, float, float, float]] = {}
-        # #1520: per angle, each pad's (half_x, half_y, cos, sin) in its own
-        # frame, or None when no pad is tilted at that angle
+        # #1520: per angle, each pad's (half_x, half_y, cos, sin, radius) in
+        # its own frame, or None when every pad's box is exact at that angle
         self._frame_cache: Dict[float, Optional[list]] = {}
         # One-slot POSE memos: cost() and the shortfall helpers each rebuild
         # the same translated geometry for the same candidate 4-6 times in a
@@ -904,6 +962,8 @@ class _Cap:
         self._pr_out: list = []
         self._rc_key = None
         self._rc_out: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._pf_key = None
+        self._pf_out: Optional[list] = None
 
     def rect(self, x=None, y=None, rot=None):
         x = self.x if x is None else x
@@ -948,10 +1008,8 @@ class _Cap:
                 oy = off_x * s + off_y * c
                 g = None if geom is None else geom[i]
                 if g is not None:
-                    tilt = g[2] - delta
-                    fr = _tilt_frame(0.0, 0.0, g[0], g[1], tilt)
-                    frames.append(None if fr is None else
-                                  (g[0], g[1], fr[4], fr[5]))
+                    fr = _tilt_frame(0.0, 0.0, g[0], g[1], g[2] - delta, g[3])
+                    frames.append(None if fr is None else fr[2:])
                 else:
                     frames.append(None)
                 if on_lattice:
@@ -994,18 +1052,21 @@ class _Cap:
 
     def pad_frames(self, x=None, y=None, rot=None):
         """#1520: each pad's FRAME at a pose, index-aligned with pad_rects --
-        None for a pad whose box is exact (no tilt at this angle) -- or None
-        outright when no pad is tilted there, which is every orthogonal part
-        and so the common case."""
+        None for a pad whose box is exact (no tilt at this angle, sharp
+        corners) -- or None outright when every pad's box is exact there."""
         x = self.x if x is None else x
         y = self.y if y is None else y
         rot = self.rot if rot is None else rot
+        pose = (x, y, rot)
+        if pose == getattr(self, '_pf_key', None):
+            return self._pf_out
         key, cache = self._pad_cache_for(rot)
         fr = self._frame_cache.get(key)
-        if fr is None:
-            return None
-        return [None if f is None else (x + o[0], y + o[1]) + f
-                for f, o in zip(fr, cache)]
+        out = (None if fr is None else
+               [None if f is None else (x + o[0], y + o[1]) + f
+                for f, o in zip(fr, cache)])
+        self._pf_key, self._pf_out = pose, out
+        return out
 
     def stays_beneath(self, x, y, rot) -> bool:
         """the pose keeps the part's pads beneath its BGA's package (beneath), or it is beneath none"""
@@ -1495,8 +1556,11 @@ class _Repair:
                         grow = max(0.0, max(self.npth_floor, lc) - clearance)
                         for hx, hy, hd in pad_drill_circles(p):
                             hr = hd / 2.0 + grow
-                            self.foreign_pads.append(
-                                (hx - hr, hy - hr, hx + hr, hy + hr, -1, None))
+                            _t = (hx - hr, hy - hr, hx + hr, hy + hr, -1, None)
+                            self.foreign_pads.append(_t)
+                            # #1520: the hole is a circle, not its box
+                            self._fp_frame_by_id[id(_t)] = (
+                                hx, hy, hr, hr, 1.0, 0.0, hr)
                             self.foreign_pad_floors.append(None)
                             self.foreign_pad_mf.append(0.0)
                     continue
@@ -1507,14 +1571,11 @@ class _Repair:
                     'B' if any(str(l).startswith('B') for l in copper) else 'F')
                 _t = (*pad_rect(p), p.net_id, pside)
                 self.foreign_pads.append(_t)
-                if getattr(p, 'copper_box', None) is None:
-                    # #1520: a tilted pad is measured on its own rectangle,
-                    # keyed by the tuple's id like the floors below
-                    _fr = _tilt_frame(p.global_x, p.global_y, p.size_x / 2.0,
-                                      p.size_y / 2.0,
-                                      getattr(p, 'rect_rotation', 0.0) or 0.0)
-                    if _fr is not None:
-                        self._fp_frame_by_id[id(_t)] = _fr
+                # #1520: a tilted or round-cornered pad is measured on its
+                # own shape, keyed by the tuple's id like the floors below
+                _fr = _pad_frame(p)
+                if _fr is not None:
+                    self._fp_frame_by_id[id(_t)] = _fr
                 _fl = None if self._floors is None else self._floors.pad_floor(p)
                 self.foreign_pad_floors.append(_fl)
                 self.foreign_pad_mf.append(
@@ -3073,6 +3134,23 @@ class _Repair:
         accept gate uses."""
         return sum(self._seg_shortfalls(ref, cap, x, y, rot).values())
 
+    def _foreign_frames(self, ref, fpads):
+        """#1520: the FRAMES of `fpads` (the cap's foreign pads), index-aligned,
+        or None when every one of them is an exact box. Memoised per cap on
+        the list's identity and length, since a test may inject a list."""
+        ffr = self._fp_frame_by_id
+        if not ffr:
+            return None
+        memo = self.__dict__.setdefault('_fpf_memo', {})
+        hit = memo.get(ref)
+        if hit is not None and hit[0] is fpads and hit[1] == len(fpads):
+            return hit[2]
+        fpf = [ffr.get(id(t)) for t in fpads]
+        if not any(f is not None for f in fpf):
+            fpf = None
+        memo[ref] = (fpads, len(fpads), fpf)
+        return fpf
+
     def _pad_shortfalls(self, ref, cap, x, y, rot):
         """PER-FOREIGN-NET component-pad clearance shortfall (#235), keyed by the
         foreign pad's net_id (#441 per-net, mirroring _seg_shortfalls): how far
@@ -3083,14 +3161,11 @@ class _Repair:
         by_net: Dict[int, float] = {}
         fpads = self.cap_foreign_pads[ref]
         effs = self._pad_effs(ref, cap)
-        # #1520: a tilted pad on EITHER side is measured on its frame
+        # #1520: a tilted or round-cornered pad on EITHER side is measured on
+        # its frame -- only for a pair whose BOXES are inside the keep-out,
+        # since a pad lies within its box and so is never nearer than it
         frames = _frames_of(cap, x, y, rot)
-        ffr = self._fp_frame_by_id
-        fpf = None
-        if ffr:
-            fpf = [ffr.get(id(t)) for t in fpads]
-            if not any(f is not None for f in fpf):
-                fpf = None
+        fpf = self._foreign_frames(ref, fpads)
         if effs is None:
             for i, (bx0, by0, bx1, by1, net) in enumerate(
                     cap.pad_rects(x, y, rot)):
@@ -3100,11 +3175,12 @@ class _Repair:
                         continue
                     if pside is not None and pside != cap.side:
                         continue  # SMD pad on the other side
-                    fb = None if fpf is None else fpf[j]
-                    gap = (_rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
-                           if fa is None and fb is None else
-                           _pad_gap((bx0, by0, bx1, by1), fa,
-                                    (px0, py0, px1, py1), fb))
+                    gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
+                    if gap < self.clearance - EPS:
+                        fb = None if fpf is None else fpf[j]
+                        if fa is not None or fb is not None:
+                            gap = _pad_gap((bx0, by0, bx1, by1), fa,
+                                           (px0, py0, px1, py1), fb)
                     if gap < self.clearance - EPS:
                         by_net[pnet] = by_net.get(pnet, 0.0) + (self.clearance - gap)
             return by_net
@@ -3117,11 +3193,12 @@ class _Repair:
                 if pside is not None and pside != cap.side:
                     continue  # SMD pad on the other side
                 eff = row[j]
-                fb = None if fpf is None else fpf[j]
-                gap = (_rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
-                       if fa is None and fb is None else
-                       _pad_gap((bx0, by0, bx1, by1), fa,
-                                (px0, py0, px1, py1), fb))
+                gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
+                if gap < eff - EPS:
+                    fb = None if fpf is None else fpf[j]
+                    if fa is not None or fb is not None:
+                        gap = _pad_gap((bx0, by0, bx1, by1), fa,
+                                       (px0, py0, px1, py1), fb)
                 if gap < eff - EPS:
                     by_net[pnet] = by_net.get(pnet, 0.0) + (eff - gap)
         return by_net
@@ -3760,7 +3837,10 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
             # by (sqrt(2)-1)*half along the board axes -- 0.14mm on glasgow's
             # 45-degree R9. Converting the clearance term and leaving the shape
             # would be exactly the half-conversion this change is about.
+            # (#1520: and, like them, a tilted or round-cornered pad is
+            # measured on its FRAME, the shape check_drc grades.)
             rect = pad_rect(p)
+            frame = _pad_frame(p)
             # Graded at the pair's REAL requirement, like everything else.
             # `keepout` is the prune over-reach, so re-form the pair's keep-out
             # from the via's radius. A locked fiducial's keep-clear override is
@@ -3784,7 +3864,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                 _rec = _radii.get(id(t))
                 ko = (keepout if _rec is None
                       else _rec[1] + st.via_required(pfl, vnet))
-                if _point_to_rect_dist(vx, vy, rect) < ko - EPS:
+                if _pad_point_dist(vx, vy, rect, frame) < ko - EPS:
                     locked_hits.append((ref, p.pad_number, vx, vy))
     if locked_hits:
         print(f"WARNING: {len(locked_hits)} foreign via(s) inside LOCKED parts' pad "

@@ -451,13 +451,15 @@ class TestTheInertPath(unittest.TestCase):
 
     def test_the_inert_boards_recorded_result_is_the_NEW_one(self):
         """Six of rp2350's eight caps were violators purely on phantom. Only
-        C18 (0.0106mm on-layer) and C23 (0.0036mm) have anything real; C18 is
-        resolved and C23 is the one cap that legitimately remains unresolved."""
+        C18 (0.0106mm on-layer) and C23 (0.0036mm) had anything left, and that
+        was on their roundrect pads' box CORNERS: check_drc measures both
+        clear, and since #1520 so does the pass. So nothing grazes and nothing
+        moves."""
         r = repair_fanout_clearance(parse_kicad_pcb(INERT), INERT,
                                     clearance=CLEAR)
-        self.assertEqual(len(r['placements']), 1)
-        self.assertEqual(sorted(r['unresolved']), ['C23'])
-        self.assertEqual(sorted(r['resolved']), ['C18'])
+        self.assertEqual(len(r['placements']), 0)
+        self.assertEqual(sorted(r['unresolved']), [])
+        self.assertEqual(sorted(r['resolved']), [])
         self.assertEqual(r['required'], [], 'an inert board discloses nothing')
     # MUTATION: `_seg_shares` -> `return True`, or reverting the
     # unconditional pad_layers, or the `_cap_pad_layers` anchor -> the 7-ref
