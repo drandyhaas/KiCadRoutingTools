@@ -536,6 +536,18 @@ class PendingVias:
         if s > self._max_size:
             self._max_size = s
 
+    def discard(self, x, y, net_id):
+        """Forget the via recorded at exactly (x, y) on `net_id`: a route
+        that needs a via in two balls (a neighbour link off the top layer)
+        and is refused the second gives back the first. `_max_*` stay as
+        they are, for the reason `tighten` gives."""
+        for i, row in enumerate(self._rows):
+            if row[0] == x and row[1] == y and row[4] == net_id:
+                del self._rows[i]
+                del self._xs[i]
+                return True
+        return False
+
     def verdict(self, x, y, size, drill, net_id, bulges=False, tol=1e-6,
                 track_width=0.0):
         """How a candidate at (x, y) relates to what this call already placed.

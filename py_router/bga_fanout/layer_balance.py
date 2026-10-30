@@ -6,7 +6,7 @@ Distributes routes evenly across available layers after initial assignment.
 from __future__ import annotations
 
 from typing import List, Dict, Set, Tuple
-from bga_fanout.types import FanoutRoute
+from bga_fanout.types import FanoutRoute, route_uid
 from bga_fanout.collision import check_segment_collision
 from bga_fanout.constants import MAX_REBALANCE_ITERATIONS, MAX_EDGE_PAIR_ITERATIONS
 
@@ -85,53 +85,22 @@ def _check_conflicts_on_layer(
     return False
 
 
-def _move_connected_tracks(
-    seed_positions: List[Tuple[float, float]],
-    net_ids: Set[int],
-    old_layer: str,
-    new_layer: str,
-    tracks: List[Dict],
-) -> None:
-    """Walk connected tracks from seed positions and move them to new_layer.
+def _move_route_tracks(moved: List[FanoutRoute], new_layer: str,
+                       tracks: List[Dict]) -> None:
+    """Move exactly these routes' tracks to new_layer, matched by route_uid
+    (#508 finding 6), as their routes' layer has just moved.
 
-    Uses flood-fill approach: start from pad positions, find connected tracks,
-    add their other endpoints to the frontier, repeat until no more found.
+    This used to flood-fill the net's copper from the routes' pads, which
+    walks on into any same-net escape that touches it -- a neighbour link
+    ends on its anchor's ball -- and moved that copper while its route kept
+    the old layer. manage_vias places vias from the ROUTE's layer, so a link
+    whose track had been carried off the top layer shipped with no via in
+    its ball: copper connected to nothing, counted as escaped.
     """
-    def round_pos(pos):
-        return (round(pos[0], 2), round(pos[1], 2))
-
-    frontier = set(round_pos(p) for p in seed_positions)
-    visited_positions = set()
-    tracks_to_move = []
-
-    while frontier:
-        current_pos = frontier.pop()
-        if current_pos in visited_positions:
-            continue
-        visited_positions.add(current_pos)
-
-        # Find all tracks on old_layer that connect to current_pos
-        for track in tracks:
-            if track.get('net_id') not in net_ids:
-                continue
-            if track['layer'] != old_layer:
-                continue
-
-            ts = round_pos(track['start'])
-            te = round_pos(track['end'])
-
-            if ts == current_pos:
-                if track not in tracks_to_move:
-                    tracks_to_move.append(track)
-                frontier.add(te)
-            elif te == current_pos:
-                if track not in tracks_to_move:
-                    tracks_to_move.append(track)
-                frontier.add(ts)
-
-    # Move all found tracks
-    for track in tracks_to_move:
-        track['layer'] = new_layer
+    uids = {route_uid(r) for r in moved}
+    for track in tracks:
+        if track.get('route_uid') in uids:
+            track['layer'] = new_layer
 
 
 def rebalance_layers(
@@ -283,11 +252,9 @@ def rebalance_layers(
                                              routes, tracks, existing_tracks, min_spacing):
                     continue
 
-                old_layer = pair_routes[0].layer
                 for r in pair_routes:
                     r.layer = try_layer
-                seed_positions = [r.pad_pos for r in pair_routes]
-                _move_connected_tracks(seed_positions, all_net_ids, old_layer, try_layer, tracks)
+                _move_route_tracks(pair_routes, try_layer, tracks)
                 moved_one = True
                 target_layer_idx = (target_layer_idx + 1) % len(all_layers)
                 break
@@ -359,11 +326,9 @@ def rebalance_layers(
 
                     if not _check_conflicts_on_layer(pair_routes, all_route_segs, all_net_ids, try_layer,
                                                      routes, tracks, existing_tracks, min_spacing):
-                        old_layer = pair_routes[0].layer
                         for r in pair_routes:
                             r.layer = try_layer
-                        seed_positions = [r.pad_pos for r in pair_routes]
-                        _move_connected_tracks(seed_positions, all_net_ids, old_layer, try_layer, tracks)
+                        _move_route_tracks(pair_routes, try_layer, tracks)
                         moved_one = True
                         break
 

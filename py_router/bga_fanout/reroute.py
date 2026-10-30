@@ -1474,6 +1474,11 @@ def repair_pad_crossings(routes: List[FanoutRoute], tracks: List[Dict],
                     obstacles, cfg, layer_map, foreign_pads)
                 if result:
                     new_route, new_layer = result
+                    # The replacement is a NEW route with its own uid, so the
+                    # rebuild below cannot find the old route's copper: take
+                    # it off first, or it ships beside the new escape with no
+                    # via behind it (manage_vias reads the new route's layer)
+                    _remove_route_tracks(tracks, route)
                     routes[routes.index(route)] = new_route
                     route = new_route
                     _rebuild_track_for_route(tracks, route, track_width)
@@ -1494,6 +1499,7 @@ def repair_pad_crossings(routes: List[FanoutRoute], tracks: List[Dict],
                     obstacles, cfg, layer_map, foreign_pads)
                 if result:
                     new_route, new_layer, _ = result
+                    _remove_route_tracks(tracks, route)    # as for step 2
                     routes[routes.index(route)] = new_route
                     route = new_route
                     _rebuild_track_for_route(tracks, route, track_width)

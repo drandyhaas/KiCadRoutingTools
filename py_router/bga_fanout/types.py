@@ -64,6 +64,9 @@ class FanoutRoute:
     pair_id: Optional[str] = None  # Differential pair base name if part of a pair
     is_p: bool = True  # True for P, False for N in differential pair
     neighbor_connection: bool = False  # True if this connects directly to adjacent same-net pad
+    # The ball a neighbour link ends on (its exit_pos). Off the top layer the
+    # link reaches that ball through a via there, which manage_vias places.
+    neighbor_pad: Optional['Pad'] = None
 
     @property
     def net_id(self) -> int:
