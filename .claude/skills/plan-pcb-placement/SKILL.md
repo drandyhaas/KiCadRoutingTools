@@ -1055,7 +1055,10 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
      crowded board. Take the seed with the fewest illegal parts (in the
      other two cases, the first seed `judge.json` names: fewest floorplan
      errors, then cheapest) and repair it by hand: `place_pose.py <seed> <seed> set REF
-     --near X Y` (it snaps to the nearest legal pose; `rotate`, `face` for
+     --near X Y` (it snaps to the nearest pose within `--radius` that
+     grades legal; a part aimed at its own pose on its own courtyard pair
+     tries every pose in reach, and a stderr `note:` says when none cleared
+     it -- then raise `--radius`; `rotate`, `face` for
      the rest), until `check_assembly` says buildable and `check_floorplan
      --intent` reports 0 errors. Then judge it on its own:
      `judge_seeds.py wk/<run>/judge.json --seeds S --chain ...`.

@@ -1724,12 +1724,24 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             # worse than ITS answer too, not only no worse than the input:
             # from an input off the board, "no worse than the input" admits
             # pad copper still past the outline.
+            #
+            # An OWN-PAIR snap (#1506) -- the request itself passed, and the
+            # snap runs only because the part is in a gating pair there --
+            # has no budget (#1536): the fallback writes the part at the
+            # request, so stopping at `--snap-tries` wrote it unmoved on a
+            # pair a pose 0.79 mm away clears. Every candidate within
+            # `--radius` is walked, nearest first, until one passes.
+            own_only = bool(mine) and not bad and not (strict and not is_clean(after))
+            budget = None if own_only else snap_tries
+            summary['snap_census']['budget'] = (
+                'every candidate within --radius (an own-pair snap, #1536)'
+                if own_only else '--snap-tries %d per rung' % snap_tries)
             chosen = None
             graded = set()
 
             def _walk(cands, floor=None):
                 for cp in [p for p in cands
-                           if _pose_key(p) not in graded][:snap_tries]:
+                           if _pose_key(p) not in graded][:budget]:
                     graded.add(_pose_key(cp))
                     trial, pcb_c, g, b = _grade_pose(cp)
                     ok = not b and (not strict or is_clean(g))
@@ -1823,6 +1835,25 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                               declared_keepouts, cy_waivers,
                               declared_heights=decl_h, intent_keepouts=ko_grade)
                 bad = worsened(before, after)
+                if own_only and not bad:
+                    # #1536: the fallback writes the part at the request, so
+                    # its note says what the snap looked at -- every
+                    # candidate it re-graded, what refused them, and any it
+                    # did not reach -- as the refusal path does (#1209).
+                    sc = summary['snap_census']
+                    note = ("--snap/--near found no pose clearing %s's own "
+                            "pair(s) at the requested pose (%s); written there, "
+                            "no worse than the board."
+                            % (ref, '; '.join(
+                                '%s %s' % (k, ', '.join('/'.join(str(x) for x in pr)
+                                                        for pr in v))
+                                for k, v in mine.items()))
+                            + _snap_census_sentence(sc))
+                    if not sc.get('untried') and not sc.get('nearest_beyond_radius'):
+                        note += (" Every pose within --radius %g mm was re-graded: "
+                                 "a larger --radius looks further."
+                                 % (sc.get('radius_mm') or 0.0))
+                    summary['snap_note'] = note
 
         # A `face` op's rotation is PREDICTED (FACE_CYCLE) and then MEASURED on
         # the board that was actually written, because the prediction is a

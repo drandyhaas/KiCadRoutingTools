@@ -567,8 +567,10 @@ itself: it also runs when the moved part is in a gating pair at the requested
 pose -- a courtyard overlap the project grades as an error, a pad conflict,
 one it already had included -- and takes the nearest pose where the part is
 in no such pair (`pose_ops.own_pairs`, #1506). Another part's damage never
-refuses a candidate; when none clears the part, it is written as asked and
-said so. The text report prints the courtyard error pairs before and after.
+refuses a candidate. Such an own-pair snap has no `--snap-tries` budget
+(#1536): it re-grades every pose within `--radius`, nearest first, until one
+clears the part; when none does, it is written as asked, and the note
+(`snap_note`) says how many poses it re-graded and what refused them. The text report prints the courtyard error pairs before and after.
 `--strict-legal` refuses unless the result is clean; `--force` writes anyway
 and records `forced`. A KiCad `(locked yes)` refuses a direct move — name the
 ref in `unlock` in the same call if you mean it; `--force` deliberately does

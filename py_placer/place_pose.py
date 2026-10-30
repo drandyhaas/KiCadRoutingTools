@@ -289,8 +289,13 @@ def _verb_parsers(sub=None):
     q.add_argument('--near', nargs=2, type=float, metavar=('X', 'Y'),
                    help='the same coordinates read as APPROXIMATE: implies '
                         '--snap, so the engine seats the part at the nearest '
-                        'legal pose to the point you aimed at. One pose op '
-                        'per call: with a second one it is refused (exit 2)')
+                        'pose within --radius its re-grade passes. A refused '
+                        'request tries --snap-tries poses per rung; a part '
+                        'already in a gating pair of its own at the request '
+                        'tries every pose within --radius, and when none '
+                        'clears it, it is written as asked with a note '
+                        '(#1536). One pose op per call: with a second one it '
+                        'is refused (exit 2)')
     q.add_argument('--rot', type=float, default=None,
                    help='absolute rotation in degrees; omitted, the part '
                         'keeps the rotation it has')
@@ -797,14 +802,9 @@ def _report(summary):
               % (len(cb or ()), len(ca or ())))
         for pr in (ca or [])[:5]:
             print("  %s" % '/'.join(str(x) for x in pr))
-    own = summary.get('snap_own_pairs')
-    if own and not summary.get('snapped'):
-        print("note: --snap/--near found no pose clearing %s's own pair(s) at the "
-              "requested pose (%s); written there, no worse than the board"
-              % (next(iter(summary.get('ops') or [{}])).get('ref', 'the part'),
-                 '; '.join('%s %s' % (k, ', '.join('/'.join(str(x) for x in pr)
-                                                     for pr in v))
-                           for k, v in own.items())), file=sys.stderr)
+    # #1536: the engine's own note, with what the snap re-graded and refused
+    if summary.get('snap_note') and not summary.get('snapped'):
+        print("note: %s" % summary['snap_note'], file=sys.stderr)
     # #1266: a pad on another part's footprint graphic copper (a SOT-89 tab).
     print("pads on another part's graphic copper (touching, any net): "
           "%s -> %s; short of clearance: %s -> %s"
