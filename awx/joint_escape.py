@@ -113,6 +113,10 @@ SUBSOLVERS = ['default_lp', 'quick_restart']
 # which the LP worker holds whole -- zynq U1 on four layers, 994 against 767 MB for the plan at a cost 0.5% higher (322
 # of 60,500: a via), U5 538 against 454 MB at 2.7% (665: two vias)
 SUBSOLVERS_RUNS = ['quick_restart']
+# ...and beside either, with JOINT_SOLVE_BOUND=1 (opt-in, to be judged: the README's TODO), the BOUND-RAISING workers the
+# whole solve's probe runs: taking their turns in the same threads' batches, they raise the bound, and a plan the bound
+# meets is proved and its search done
+SUBSOLVERS_BOUND = ['max_lp', 'core', 'objective_lb_search'] if awx_settings.get('JOINT_SOLVE_BOUND') == '1' else []
 HOLD_TOL = 0.05            # mm: (`hold`) an escape's exit this close to the held tooth's is that tooth
 # (escape_to / hold) another ball served by its DOG-BONE ALONE -- a stub and a via at a gap, no run out of the array,
 # the router's to take on, as the escape fanout leaves every ball not its bus's -- where no escape of its fits round the
@@ -1199,7 +1203,8 @@ def _solved_key(mdl, ref, keys, served, items, bus_s, oth_s, drop_s, bm, rank, w
     h.update(repr((ref, [(k, k in served, items[k][0] in bus_s, items[k][0] in oth_s, items[k][0] in drop_s,
                           rank.get(k), wt.get(k), cvals[k], [x.Index() for x in v[k]]) for k in keys],
                    legs, [u.Index() for u in site_used], C_VIA, P1_DET, rls, batches or SOLVE_BATCHES,
-                   workers or SOLVE_WORKERS, SUBSOLVERS, SUBSOLVERS_RUNS, SOLVE_BATCHES_STARTED)).encode())
+                   workers or SOLVE_WORKERS, SUBSOLVERS, SUBSOLVERS_RUNS, SUBSOLVERS_BOUND,
+                   SOLVE_BATCHES_STARTED)).encode())
     return h.hexdigest()
 
 
@@ -1955,7 +1960,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
         s_.parameters.max_num_deterministic_batches = batches or (SOLVE_BATCHES_STARTED if started else SOLVE_BATCHES)
         s_.parameters.share_glue_clauses = False
         s_.parameters.share_binary_clauses = False
-        s_.parameters.subsolvers.extend(SUBSOLVERS_RUNS if rls else SUBSOLVERS)
+        s_.parameters.subsolvers.extend((SUBSOLVERS_RUNS if rls else SUBSOLVERS) + SUBSOLVERS_BOUND)
         if time_limit:
             s_.parameters.max_time_in_seconds = time_limit
         st = s_.Solve(mdl)

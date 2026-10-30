@@ -2366,15 +2366,13 @@ channels first, and the other escapes leave round it.
   same holds for the zynq's USB and Ethernet buses, which split VCC_1V8 between
   U1 and the PHYs. Pricing a cut through a pour other than the layer's
   largest, or keeping that pour's region whole, would protect it.
-- **A faster first solve.** On the two-end bus the first solve takes 182 s:
-  the probe's 32 s find no plan, and the plan-finders, from nothing, stop at
-  their 100 batches on 46 vias against a bound of 40. From the 46-via plan the
-  bound-raising workers find given 100 batches (`WHOLE_SOLVE_PROBE=100`,
-  160 s) they prove 40 in 111 s. A cheaper first plan would leave the search
-  the rest.
-- **A second round only where it can gain.** On the two-end bus the second
-  fanout round chooses new ends for the two nets the first left open and
-  routes the whole bus again on them, 300 s for 8 open.
+- **A faster first solve.** A bus's first solve has no plan to start from,
+  and it is still the solve's longest. On a 46-lane DDR bus on four layers
+  it took 435 to 546 s over three seeds (six routes running at once): the
+  bound-raising probe's 10 batches, then the plan-finders' whole 100 from
+  the probe's plan, stopped unproved at a cost of 69, 69 and 59 vias against
+  bounds of 44, 65 and 16. A cheaper first plan, or a
+  stronger bound, would leave the search the rest.
 - **A layer left for the nets that cross the bus,** if item 8 finds many
   failing.
 - **Feedback from `route.py`:** failures that name bus copper as the blocker
@@ -2424,11 +2422,13 @@ channels first, and the other escapes leave round it.
     lays 2.
 
 - **The zynq's LVDS bus (U1 to U5) on four layers.** With `route_bus
-  --escape` (see [the bus step](#the-bus-step-on-a-real-board)) the whole
-  route lays its first 32 and 40 nets clean and leaves 2 of the whole bus's
-  47 open. The lanes left open are pairs that leave U1 on the surface for a
-  dog-boned ball of U5 and must change layer just past U1's east face, and
-  singles crowded past that face and U1's south-east corner. The human runs
+  --escape` (see [the bus step](#the-bus-step-on-a-real-board)) at the
+  default four rounds, the bus now closes on each of three seeds, but round 1
+  alone leaves a pair open on one seed and a single on another, and each
+  round more costs 8 to 11 minutes. The lanes left open, when this item was
+  written, were pairs that leave U1 on the surface for a dog-boned ball of
+  U5 and must change layer just past U1's east face, and singles crowded
+  past that face and U1's south-east corner. The human runs
   every net from a dog-bone via at each array on one
   layer end to end, each layer's nets a family that crosses nothing on it and
   rings U5 to enter it from every side -- on B.Cu nested bundles round U5's
@@ -2499,12 +2499,12 @@ channels first, and the other escapes leave round it.
     for the bus's own arrays, the kinds the feedback chose as its preferences.
 - **The loop's immediate stop on crowded ends.** A loop round whose audit
   finds a pitch or a static clearance at the ends stops the loop at once
-  (`whole_feedback --now`), and the round lays the plan its loop held,
-  however early that round. To try: the loop's own rounds first, stopping only
-  when the same findings stand two rounds running (`LOOP_NOW=0`).
-- **Robustness across seeds.** Every result here is one run of searches
-  whose ties CP-SAT breaks by its seed; `JOINT_SEED=N` seeds the joint ends'
-  search. To try: a change judged on several seeds of each ladder rung.
+  (`whole_feedback --now`). The round then repairs those ends where it can --
+  a lane's own via or stub nudged off, its ball escaped again
+  (`repair_ends`) -- and runs the loop once more; a pair's own end, and the
+  berths but for another net's via, are left to the next round. To try: the
+  loop's own rounds first, stopping only when the same findings stand two
+  rounds running (`LOOP_NOW=0`).
 - **Corners made robust.** Where two arrays stand a few millimetres apart and
   the lanes use two faces of one and every face of the other, nearly the whole
   route is corners: lanes from two faces merge at the source's corner, the
@@ -2557,9 +2557,12 @@ channels first, and the other escapes leave round it.
   apart, one to a ball line, so each face holds two to three times fewer
   lanes per layer. To try: exits between the ball lines, several to a street.
 - **Rounds that keep what connected.** Each round plans and lays every lane
-  again, and a lane laid in one round fails in the next for reasons far from
-  it. To try: the copper of every lane that connected kept as it lies, and
-  only the open ones planned and laid again round it.
+  again -- a round after the first is round 1 under the next seed -- so a bus
+  that ends with a net open pays for every round in full (6 to 11 minutes
+  each for the buses of a four-layer board), and a lane laid in one round
+  fails in the next for reasons far from it. To try: the copper of every
+  lane that connected kept as it lies, and only the open ones planned and
+  laid again round it.
 - **One bar per rule in every stage.** The stages measure one rule with
   different numbers: the audit's pitch tolerance sits below the snap's share
   bar off the grid, a pair's dive is held a little short of the static
@@ -2581,11 +2584,6 @@ channels first, and the other escapes leave round it.
   try: each read off the board -- the layers a plane leaves free, the arrays
   `find_buses` names, tolerances as fractions of the pitch -- each judged on
   both ladders and the synthetic buses.
-- **The solve's second search only when it pays.** After the main search
-  the solve searches again for fewer changes. That improves a proved plan,
-  but after a plan found without proof it spends its whole budget. To try:
-  the second search only after a proof, or with a budget scaled to the gap
-  left.
 - **Via ends on two layers.** On more than two routing layers a lane ending
   at a via (a dog-bone, or a via in its pad) takes whichever layer the solve
   gives it there, and the via is dropped where the lane leaves on the ball's
@@ -2748,7 +2746,14 @@ channels first, and the other escapes leave round it.
     keep its barrels off a pair's planned line); `SNAP_PAIR_OWN_VIAS=1`: a
     pair's body kept off its own nets' vias; `SNAP_DEBUG=LANE` (or `*`): the
     map round where a lane's snap stopped, each cell marked by the stage that
-    blocked it.
+    blocked it;
+  - the fanout plan -- `JOINT_SOLVE_BOUND=1`: phase 2's cost search with the
+    bound-raising workers (`max_lp`, `core`, `objective_lb_search`) beside
+    its plan-finders, taking turns in the same two threads' batches. A plan
+    the bound meets is proved and its search stops early; on others the
+    plan-finders get fewer turns. To judge by the routed bus over seeds (the
+    open nets of each round, round 1's first), against the fanout's time and
+    memory.
 - **A review's open findings:**
   - an island's room is measured alone (its neighbours' pads aside);
   - a lane paid across another lane's end, stub or stub via is never fed
@@ -2770,9 +2775,16 @@ channels first, and the other escapes leave round it.
 - **Units.** `rules.py`'s margins on `via_need`, `lane_min` and `end_keep`,
   the braid's planning distances the whole route starts from, and the snap's
   `W_DEV` are millimetres where they should be the rules' units.
-- **Speed.** Half a K51 loop is the geometry's LP in HiGHS: one elastic
-  column per pitch rule, not one per tangent cut, would shrink it. A pair's
-  grid search is still Python.
+- **Speed.** On a four-layer board's three buses in one step (four rounds
+  at most each) the step's time is the fanout's (about two fifths, most of
+  it CP-SAT), the solve's (a quarter), the geometry's (a fifth), then the
+  snap's and the polish's. Of the geometry's, the LP in HiGHS is about
+  70% -- its first, full pass 40%, the lazy second 30% -- and one elastic
+  column per pitch rule, not one per tangent cut, would shrink it
+  (`GEO_SHARED_SLACK=1`, among the probes above); the islands' sides are
+  another fifth, most of it the Python of each island's reach. Of the
+  snap's, a third is the Python search it runs again after a lane's native
+  search fails, to name what stopped it.
 - **Memory.** The pairs' search states are packed integers, but their cost
   and predecessor sit in dicts; flat arrays would keep every stage under
   1 GB at K51. `braid.py` pins HiGHS at import, which loads `scipy.optimize`
