@@ -10,7 +10,8 @@ and a part illegal in every seed is WARNED once with its reasons
 (`illegal_every_seed`).
 
 The case: a one-member zone drawn inside a locked part's body, so the member
-can never be inside it and every seed leaves it outside.
+can never be both inside it and clear of that part: every seed leaves it
+illegal, outside the zone or on the locked part, and names which.
 
     python3 tests/test_1540_illegal_reason.py
 """
@@ -66,19 +67,24 @@ def main():
                                   '--json', os.path.join(td, 's{seed}.json')],
                             refuse='judge seeds none', code=4)
         out = r.stdout
-        why = "outside the zone of block 'walled' by"
+        # the zone escape is priced as an area (#1540), so the anneal may hold
+        # the member in its zone on top of the wall instead: either is named
+        whys = ("outside the zone of block 'walled' by", f'courtyard vs {WALL}')
+
+        def named(text):
+            return any(w in (text or '') for w in whys)
         print('1. each seed names the part and why')
         for s in (0, 1):
             rep = json.load(open(run_utils.evidence(os.path.join(td, f's{s}.json'))))
-            ok(f'seed {s}: {MEMBER} illegal, with its zone and distance',
+            ok(f'seed {s}: {MEMBER} illegal, with the check it fails',
                rep.get('illegal') == [MEMBER]
-               and why in (rep.get('illegal_why') or {}).get(MEMBER, ''), rep.get('illegal_why'))
+               and named((rep.get('illegal_why') or {}).get(MEMBER)), rep.get('illegal_why'))
             log = open(run_utils.evidence(os.path.join(td, f's{s}.log'))).read()
             ok(f'seed {s}: its log warns with the reason, not "no legal pose found"',
-               f'WARNING: {MEMBER} is left illegal: {why}' in log
+               any(f'WARNING: {MEMBER} is left illegal: {w}' in log for w in whys)
                and 'no legal pose found' not in log, log[-600:])
         ok('the parent seed lines carry the reason',
-           out.count(f'illegal: {MEMBER} ({why}') == 2, out[-900:])
+           sum(out.count(f'illegal: {MEMBER} ({w}') for w in whys) == 2, out[-900:])
 
         print('2. a part illegal in every seed is said once, with its reasons')
         ok('one WARNING names it', out.count(f'WARNING: {MEMBER} is illegal in every seed') == 1,
@@ -86,7 +92,7 @@ def main():
         judge = json.load(open(run_utils.evidence(os.path.join(td, 'judge.json'))))
         every = (judge.get('illegal_every_seed') or {}).get(MEMBER) or {}
         ok('judge.json: illegal_every_seed carries each seed\'s reason',
-           sorted(every) == ['0', '1'] and all(why in (w or '') for w in every.values()),
+           sorted(every) == ['0', '1'] and all(named(w) for w in every.values()),
            judge.get('illegal_every_seed'))
         ok('judge.json: illegal_why per seed, illegal still the seed list',
            judge.get('illegal') == [0, 1]

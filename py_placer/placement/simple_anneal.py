@@ -553,13 +553,21 @@ class Annealer:
     def _intent(self, r):
         """How far `r` breaks the intent's claims on it -- keep-outs and
         exclusive zones (mm2 inside), containment zones (mm outside) --
-        each term past its own threshold."""
+        each term past its own threshold.
+
+        A containment zone's mm is priced as an AREA, times the courtyard's
+        half-perimeter, the way `_outside` prices a part off the board (#1540):
+        in plain mm a member's pull home lost to the mm2 of overlap it would
+        cost to get back in, so a zone member stayed outside its zone."""
         spec = self.st.intent_spec_for(r)
         if not spec:
             return 0.0
         p = self.st.parts[r]
         vals = self.st.intent_terms(r, p.grade_rects(p.x, p.y, p.rot))
-        return sum(max(0.0, v - t.threshold) for v, t in zip(vals, spec))
+        c = p.rect()
+        k = (c[2] - c[0]) + (c[3] - c[1])
+        return sum(max(0.0, v - t.threshold) * (k if t.rule == 'zone_containment' else 1.0)
+                   for v, t in zip(vals, spec))
 
     def overlap(self, refs=None) -> float:
         """Overlap (mm2) of every pair with a part in `refs` (all pairs when
