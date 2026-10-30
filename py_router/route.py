@@ -99,7 +99,7 @@ from routing_common import (
 )
 import routing_defaults as defaults
 from keep_away import keep_away_entries   # #1146
-from pcb_modification import bump_copper_epoch
+from pcb_modification import bump_copper_epoch, merge_close_route_vias
 import re
 from terminal_colors import RED, RESET, YELLOW
 from routing_constants import DEFAULT_4_LAYER_STACK, POWER_NET_EXCLUSION_PATTERNS
@@ -5194,6 +5194,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     for _s in all_swap_segments:
         _segs_by_net.setdefault(_s.net_id, []).append(_s)
 
+    # ---- CLOSE SAME-NET VIAS: FOLD (#1543) ----------------------------------
+    # Same-net vias are not obstacles to each other, so a route can land two
+    # of its own vias a grid cell apart (overlapping drills). Fold each such
+    # pair onto one via, bridging every layer's track to it, on the write
+    # model, the results and the board alike; whatever cannot be folded is
+    # named by the #1414 census below. Both fronts: this is the engine.
+    if not _ckpt_stop:
+        _n1543, _nets1543 = merge_close_route_vias(
+            results, _segs_by_net, _vias_by_net, pcb_data, config)
+        if _n1543:
+            total_vias = sum(len(r.get('new_vias', [])) for r in results)
+            from obstacle_cache import refresh_net_obstacles  # #806
+            refresh_net_obstacles(state.working_obstacles,
+                                  state.net_obstacles_cache, pcb_data, config,
+                                  sorted(_nets1543))
+
     # ---- STACKED-COPPER SURFACING (run-7 E3) -------------------------------
     # The dedup above drops the attributable duplicates; census what is STILL
     # stacked on the write model (duplicate same-net segments, coincident
@@ -5219,9 +5235,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"  {RED}... and {len(stacked_copper_findings) - 8} more{RESET}")
 
     # ---- CLOSE SAME-NET VIAS (#1414) ----------------------------------------
-    # A leg whose guarded re-route (#230) cannot connect ships its flawed path
-    # with two own vias under the drill hole-to-hole floor. Name every such
-    # pair this run laid; check_drc grades it as VIA-DRILL-HOLE.
+    # A pair of this run's vias under the drill hole-to-hole floor that the
+    # fold above could not join onto one via (no bridge clears, or the kept
+    # via does not span the dropped one's layers). Name every such pair;
+    # check_drc grades it as VIA-DRILL-HOLE.
     close_via_findings = []
     try:
         from check_weird import close_same_net_via_pairs
@@ -5237,8 +5254,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if close_via_findings:
         print(f"\n{RED}WARNING: {len(close_via_findings)} same-net via pair(s) "
               f"closer than the {config.hole_to_hole_clearance} mm drill "
-              f"hole-to-hole floor (the guarded re-route could not connect; "
-              f"check_drc grades VIA-DRILL-HOLE):{RESET}")
+              f"hole-to-hole floor that no fold onto one via could join "
+              f"(check_drc grades VIA-DRILL-HOLE):{RESET}")
         for _f in close_via_findings[:8]:
             print(f"  {RED}{_f['net']}: ({_f['via_a'][0]}, {_f['via_a'][1]}) "
                   f"and ({_f['via_b'][0]}, {_f['via_b'][1]}), drills "

@@ -7520,6 +7520,236 @@ def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
     return merged
 
 
+def merge_close_route_vias(results, segs_by_net, vias_by_net, pcb_data, config,
+                           verbose: bool = True):
+    """Fold a same-net via pair under the drill hole-to-hole floor onto ONE
+    via, with every layer's copper still joined to it (#1543).
+
+    Same-net vias are not obstacles to each other, so a route can land two
+    of its net's vias a grid cell apart: two legs of one net that each change
+    layer there, or a path that changes layer, steps one cell and changes
+    layer again (F.Cu -> via -> one cell of In1.Cu -> via -> B.Cu) when the
+    guarded re-route (#230) finds nothing spaced. KiCad and check_drc grade
+    the overlapping drills as a hole-to-hole violation.
+
+    For a pair (keep, drop) where `drop` is a via THIS RUN laid
+    (``results[*]['new_vias']``) and `keep` covers its layer span:
+      * a layer whose only copper at `drop` is a hop from `keep` loses the
+        hop (the kept barrel already joins that layer);
+      * every other layer with a track ending at `drop` gets a BRIDGE from
+        `keep` to `drop` on that layer (an existing hop on it is the bridge).
+    `drop` is then removed. The tracks themselves never move.
+
+    A bridge is copper no foreign copper may graze. When the two via discs
+    overlap enough that a stadium of the track's width fits inside their
+    union (half-width <= sqrt(r^2 - (d/2)^2) for the smaller radius r and
+    centre distance d) the bridge is a subset of the copper the dropped via
+    already had on that layer, so it clears whatever that via cleared;
+    otherwise it is drawn at the track's width only where it clears every
+    other net and the board edge, else at the widest width that fits inside
+    the union, down to the board's minimum track width. A pair no bridge can
+    join is left in place for the #1414 census to name.
+
+    Only this run's copper changes: `drop` must be a new via and every track
+    ending at it a new, mutable track, so the writer (which re-emits the run's
+    copper and keeps the input file's text) and the GUI apply the change as
+    is, and no via is re-placed (its protection spec is untouched). Each merge
+    is kept only when the net's connectivity, re-graded with its zones, is
+    no worse.
+
+    `segs_by_net` / `vias_by_net` are the per-net WRITE model (what the file
+    will carry); they, the results and `pcb_data` are updated in lockstep.
+    Returns (vias merged away, set of net ids changed).
+    """
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    if h2h <= 0:
+        return 0, set()
+    via_owner = {}
+    for r in results:
+        for v in r.get('new_vias') or []:
+            via_owner.setdefault(id(v), r)
+    if not via_owner:
+        return 0, set()
+    seg_owner = {}
+    for r in results:
+        for s in r.get('new_segments') or []:
+            seg_owner.setdefault(id(s), r)
+
+    from check_connected import check_net_connectivity
+    from geometry_utils import via_copper_layers
+    EPS = 1e-4
+    cu = list(getattr(getattr(pcb_data, 'board_info', None),
+                      'copper_layers', None) or getattr(config, 'layers', None)
+              or ['F.Cu', 'B.Cu'])
+    zones_by_net = {}
+    for z in getattr(pcb_data, 'zones', None) or []:
+        zones_by_net.setdefault(z.net_id, []).append(z)
+    nc = getattr(config, 'net_clearances', None) or None
+    bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
+    _edge = []
+
+    def edge_ok(x1, y1, x2, y2, w, clr):
+        if not _edge:
+            from check_drc import board_edge_geometry
+            _edge.append(board_edge_geometry(getattr(pcb_data, 'board_info', None)))
+        rings, outer, cutouts = _edge[0]
+        if not rings:
+            return True
+        from check_drc import _point_on_board, _segment_to_rings_distance
+        return (_point_on_board(x1, y1, outer, cutouts)
+                and _point_on_board(x2, y2, outer, cutouts)
+                and _segment_to_rings_distance(x1, y1, x2, y2, rings)
+                >= w / 2 + max(clr, bec) - 1e-6)
+
+    _min_w = []
+
+    def min_width():
+        if not _min_w:
+            _min_w.append(_board_min_track_width(pcb_data, None, config))
+        return _min_w[0]
+
+    def at(x, y, p):
+        return abs(x - p.x) < EPS and abs(y - p.y) < EPS
+
+    def ends_at(s, p):
+        return at(s.start_x, s.start_y, p) or at(s.end_x, s.end_y, p)
+
+    def grade(nid):
+        return check_net_connectivity(
+            nid, segs_by_net.get(nid, []), vias_by_net.get(nid, []),
+            pcb_data.pads_by_net.get(nid, []), zones_by_net.get(nid, []),
+            tolerance=0.02)
+
+    def worse(before, after):
+        return ((before.get('connected') and not after.get('connected'))
+                or len(after.get('disconnected_pads') or [])
+                > len(before.get('disconnected_pads') or [])
+                or (after.get('num_components') or 1)
+                > (before.get('num_components') or 1))
+
+    def plan(nid, keep, drop):
+        """(hops to remove, bridges to add) folding `drop` onto `keep`, or
+        None when this run cannot make that change safely."""
+        if id(drop) not in via_owner or is_immutable_copper(drop):
+            return None
+        if not set(via_copper_layers(drop, cu)) <= set(via_copper_layers(keep, cu)):
+            return None
+        touching = [s for s in segs_by_net.get(nid, []) if ends_at(s, drop)]
+        if any(id(s) not in seg_owner or is_immutable_copper(s)
+               or getattr(s, 'graphic', False) for s in touching):
+            return None
+        d = math.hypot(keep.x - drop.x, keep.y - drop.y)
+        hops = [s for s in touching if d >= EPS and ends_at(s, keep)]
+        hop_ids = {id(s) for s in hops}
+        by_layer = {}
+        for s in touching:
+            if id(s) not in hop_ids:
+                by_layer.setdefault(s.layer, []).append(s)
+        remove, bridges = [], []
+        for s in hops:
+            if s.layer not in by_layer:
+                remove.append(s)        # the kept barrel joins this layer
+        if d < EPS:
+            return remove, bridges      # the tracks already end on `keep`
+        r = min(keep.size, drop.size) / 2.0
+        waist = 2.0 * math.sqrt(max(0.0, r * r - (d / 2.0) ** 2))
+        for layer, segs in by_layer.items():
+            if any(h.layer == layer for h in hops):
+                continue                # the hop on this layer is the bridge
+            w = max(s.width for s in segs)
+            if w > waist + 1e-9:
+                clr = (config.layer_clearance(layer, config.obstacle_clearance(nid))
+                       if hasattr(config, 'layer_clearance')
+                       else config.clearance)
+                if not (_connector_clear(keep.x, keep.y, drop.x, drop.y, w,
+                                         layer, nid, pcb_data, clr,
+                                         net_clearances=nc)
+                        and edge_ok(keep.x, keep.y, drop.x, drop.y, w, clr)):
+                    w = math.floor(waist * 1e4) / 1e4
+                    if w < min_width() - 1e-9:
+                        return None
+            bridges.append(Segment(start_x=keep.x, start_y=keep.y,
+                                   end_x=drop.x, end_y=drop.y, width=w,
+                                   layer=layer, net_id=nid))
+        return remove, bridges
+
+    def try_fold(nid, a, b):
+        """Fold one of the pair onto the other: the fold needing fewer
+        bridges first, each kept only if the net grades no worse."""
+        options = [p for p in ((b, a, plan(nid, b, a)), (a, b, plan(nid, a, b)))
+                   if p[2] is not None]
+        options.sort(key=lambda p: len(p[2][1]))
+        vs = vias_by_net[nid]
+        net_segs = segs_by_net.setdefault(nid, [])
+        for keep, drop, (remove, bridges) in options:
+            before = grade(nid)
+            gone = {id(s) for s in remove}
+            saved_segs, saved_vs = list(net_segs), list(vs)
+            net_segs[:] = [s for s in net_segs if id(s) not in gone] + bridges
+            vs[:] = [v for v in vs if v is not drop]
+            if worse(before, grade(nid)):
+                net_segs[:], vs[:] = saved_segs, saved_vs
+                continue
+            owner = via_owner.pop(id(drop))
+            owner['new_vias'] = [v for v in owner['new_vias'] if v is not drop]
+            for s in remove:
+                o = seg_owner.pop(id(s))
+                o['new_segments'] = [x for x in o['new_segments'] if x is not s]
+            if bridges:
+                owner['new_segments'] = list(owner.get('new_segments') or []) + bridges
+                for s in bridges:
+                    seg_owner[id(s)] = owner
+            pcb_data.vias = [v for v in pcb_data.vias if v is not drop]
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if id(s) not in gone] + bridges
+            return True
+        return False
+
+    merged = 0
+    changed = set()
+    for nid in sorted(vias_by_net):
+        vs = vias_by_net[nid]
+        if not any(id(v) in via_owner for v in vs):
+            continue
+        tried = set()
+        folded = True
+        while folded:               # a fold changes the set: scan again
+            folded = False
+            # Bucket the net's vias at the widest pair floor, so each new
+            # via meets only its neighbours (a stitched net has thousands).
+            cell = max((v.drill or 0.0) for v in vs) + h2h
+            grid = {}
+            for v in vs:
+                grid.setdefault((math.floor(v.x / cell), math.floor(v.y / cell)),
+                                []).append(v)
+            for a in [v for v in vs if id(v) in via_owner]:
+                ka, kb = math.floor(a.x / cell), math.floor(a.y / cell)
+                for b in [w for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                          for w in grid.get((ka + dx, kb + dy), ())]:
+                    key = frozenset((id(a), id(b)))
+                    if b is a or key in tried:
+                        continue
+                    if math.hypot(a.x - b.x, a.y - b.y) - (a.drill or 0.0) / 2 \
+                            - (b.drill or 0.0) / 2 >= h2h - 1e-6:
+                        continue
+                    tried.add(key)
+                    if try_fold(nid, a, b):
+                        merged += 1
+                        changed.add(nid)
+                        folded = True
+                        break
+                if folded:
+                    break
+    if merged:
+        bump_copper_epoch(pcb_data)
+        if verbose:
+            print(f"Close same-net vias (#1543): folded {merged} via(s) onto a "
+                  f"same-net via under the {h2h} mm drill hole-to-hole floor, "
+                  f"on {len(changed)} net(s); every layer's copper bridged "
+                  f"to the kept via")
+    return merged, changed
+
+
 def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
                                scope_net_ids=None, clearance: float = 0.1,
                                max_shift: float = 0.025,

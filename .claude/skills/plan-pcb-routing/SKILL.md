@@ -2874,7 +2874,7 @@ contain structured data including:
 - `open_single`: Nets that KEPT a result whose copper still leaves pads disconnected (non-multipoint only). A run is clean only when `failed_single` AND `open_single` are both empty — a board can ship open copper with `failed_single: []`
 - `terminal_restores`: `{net: outcome}` for rip victims restored at terminal failure — `full` is the only success; `full_open`/`stub` ship broken
 - `stacked_copper`: Same-net duplicate copper KiCad's DRC never flags (disclosure only, not a routing failure). It is taken before the plane finalize; the end-of-run dedup (#162, the `Stacked copper (#162, end of run)` line) then removes the exact same-span copies the run ships, the widest kept, so `check_weird` on the output is the reading of what shipped
-- `close_same_net_vias` (#1414): same-net via pairs this run laid with drills closer than `--hole-to-hole-clearance` (the guarded re-route could not connect, so the unspaced path shipped); check_drc grades them `VIA-DRILL-HOLE`
+- `close_same_net_vias` (#1414): same-net via pairs this run laid with drills closer than `--hole-to-hole-clearance` that the route step could not fold onto one via (#1543: no bridge clears, or the kept via does not span the other's layers); check_drc grades them `VIA-DRILL-HOLE`
 - `different_net_crossings` (#1375): different-net tracks crossing on one layer among the copper this run laid -- a short that `failed 0` does not cover; check_drc grades `SEGMENT-CROSSING`
 - `failed_multipoint`: List of nets with unconnected pads (includes pad coordinates)
 - `blockers`: Per still-failed net, which routed nets wall it off (`blocked_by` with cell counts; #409)
