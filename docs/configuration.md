@@ -285,6 +285,24 @@ finalize's taps and joins, or already in the input) is printed and reported as
 `net_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (`[]` =
 clean; absent when the board has no such rule).
 
+**Track bans.** A `disallow track` rule scoped without a rule area -- the usual
+way to keep a class on some layers, e.g.
+`(rule "hs_layers" (constraint disallow track) (condition "A.NetClass == 'HS' && A.Layer != 'F.Cu'"))`
+or the same with a `(layer B.Cu)` clause -- is honoured by route.py and
+route_diff.py the same way (no flag): each net it binds (its condition
+evaluated per net and copper layer) routes with those layers FORBIDDEN, so it
+lays no track there while through vias may still span them, which is what
+KiCad grades (`items_not_allowed` per track, never per via). The console says
+`.kicad_dru rule 'hs_layers': honoured as forbidden layers: N of M net(s) route
+no track on B.Cu`, stub layer switches refuse those layers for those nets, and
+the shipped-board audit above counts any bound-net track left on one. A net
+that cannot reach its pads within its allowed layers fails, as it would by
+hand. A `disallow via` (or `through_via`) rule is not honoured by any routing
+step and is listed NOT honoured in `design_rules.unsupported_rules`, as is any
+other token (`pad`, `zone`, `hole`, ...); a `micro_via`, `blind_via` or
+`buried_via` ban asks nothing of the router, which lays through vias only.
+check_drc grades every track and via token (`items-not-allowed`).
+
 **Disclosure.** Every descent is recorded and reported three ways: the
 `JSON_SUMMARY` block `design_rules` (policy, tier, the board floors read, every
 narrowing with net / kind / requested / delivered / site, the fab-tier escalation

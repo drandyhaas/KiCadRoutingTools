@@ -2192,11 +2192,14 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     """Route a single net on `obstacles`; see `_route_net_with_obstacles_impl`.
 
     Net-filtered keep-outs binding this net are stamped for the
-    duration of the route and removed afterwards (`net_keepouts.stamp`)."""
-    from net_keepouts import stamp as _nk_stamp
+    duration of the route and removed afterwards (`net_keepouts.stamp`), and
+    the layers a track ban forbids it are forbidden layers of the route
+    (`net_keepouts.config_for_nets`, #1527)."""
+    from net_keepouts import stamp as _nk_stamp, config_for_nets
     with _nk_stamp(obstacles, pcb_data, (net_id,), config):
-        return _route_net_with_obstacles_impl(pcb_data, net_id, config, obstacles,
-                                              *args, **kwargs)
+        return _route_net_with_obstacles_impl(
+            pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
+            obstacles, *args, **kwargs)
 
 
 def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -4614,11 +4617,14 @@ def route_multipoint_main(pcb_data: PCBData, net_id: int, config: GridRouteConfi
     """Phase 1 of multi-point routing; see `_route_multipoint_main_impl`.
 
     Net-filtered keep-outs binding this net are stamped for the
-    duration of the route and removed afterwards (`net_keepouts.stamp`)."""
-    from net_keepouts import stamp as _nk_stamp
+    duration of the route and removed afterwards (`net_keepouts.stamp`), and
+    the layers a track ban forbids it are forbidden layers of the route
+    (`net_keepouts.config_for_nets`, #1527)."""
+    from net_keepouts import stamp as _nk_stamp, config_for_nets
     with _nk_stamp(obstacles, pcb_data, (net_id,), config):
-        return _route_multipoint_main_impl(pcb_data, net_id, config, obstacles,
-                                           *args, **kwargs)
+        return _route_multipoint_main_impl(
+            pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
+            obstacles, *args, **kwargs)
 
 
 def _route_multipoint_main_impl(
@@ -5466,7 +5472,7 @@ def route_multipoint_taps(
                                          main_result)
     result = None
     # Net-filtered keep-outs binding this net, removed on every exit.
-    from net_keepouts import stamp as _nk_stamp
+    from net_keepouts import stamp as _nk_stamp, config_for_nets
     try:
         with _nk_stamp(obstacles, pcb_data, (net_id,), config):
             # The scoped copy is taken AFTER the lift and the keep-outs: the
@@ -5474,7 +5480,8 @@ def route_multipoint_taps(
             # be lifted a second time.
             work = obstacles if free_vias is not None else obstacles.clone()
             result = _route_multipoint_taps_impl(
-                pcb_data, net_id, config, work, main_result,
+                pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
+                work, main_result,
                 global_offset, global_total, global_failed, ring_cells, ring_rungs)
             return result
     finally:

@@ -4822,13 +4822,15 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     if not getattr(pcb_data, '_net_keepouts', None):
         return _route_diff_pair_with_obstacles_impl(pcb_data, diff_pair, config, obstacles,
                                                     *args, **kwargs)
-    from net_keepouts import stamp as _nk_stamp, centerline_config
+    from net_keepouts import stamp as _nk_stamp, centerline_config, config_for_nets
     pair = (diff_pair.p_net_id, diff_pair.n_net_id)
     base = args[0] if args else kwargs.get('base_obstacles')
     with _nk_stamp(obstacles, pcb_data, pair, centerline_config(config)), \
             _nk_stamp(None if base is obstacles else base, pcb_data, pair, config):
-        return _route_diff_pair_with_obstacles_impl(pcb_data, diff_pair, config, obstacles,
-                                                    *args, **kwargs)
+        # #1527: a track ban binding either member forbids its layers to the pair
+        return _route_diff_pair_with_obstacles_impl(
+            pcb_data, diff_pair, config_for_nets(pcb_data, pair, config), obstacles,
+            *args, **kwargs)
 
 
 def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairNet,

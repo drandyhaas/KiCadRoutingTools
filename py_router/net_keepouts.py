@@ -233,6 +233,97 @@ def derive_area_keepouts(rules, pcb_data) -> List[dict]:
     return regions
 
 
+def derive_layer_bans(rules, pcb_data) -> List[dict]:
+    """The track bans the board's scope-evaluable `disallow` rules define
+    (#1527): `(rule "hs_layers" (constraint disallow track) (condition
+    "A.NetClass == 'HS' && A.Layer != 'F.Cu'"))` keeps the HS class's tracks
+    off every layer but F.Cu. Such a rule names no rule area, so it is not a
+    keep-out region: what it binds is a set of (net, layer) pairs, and the
+    router honours it by routing each bound net with those layers FORBIDDEN
+    (`config_for_nets`: the Rust router's negative layer cost -- no track on
+    the layer, through vias may still span it), exactly as KiCad grades it
+    (items_not_allowed per track, never per via).
+
+    The bound pairs come from the resolver's own evaluator, per net and
+    copper layer, for a track item on that layer (`_rule_matches`: the
+    rule's layer clause and its condition). Returns one region dict per
+    (rule, bound layers, bound nets) in the `derive_area_keepouts` shape --
+    `layer_ban` True, no polygon -- so `audit` grades the shipped copper
+    against it like any region. Sets each rule's `honoured` to what it
+    honours and leaves `router_unhonoured` naming only what it does not (a
+    `via` token: no step keeps a net's vias off)."""
+    from design_rules import _rule_matches, disallow_router_reason
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None)
+                  or rules.copper_layers or [])
+    nets = {nid: n.name for nid, n in pcb_data.nets.items() if nid and n.name}
+    names = frozenset(nets.values())
+    out: List[dict] = []
+    for rule in rules.rules:
+        if rule.unsupported or 'disallow' not in rule.constraints:
+            continue
+        tokens = set(rule.constraints['disallow'].get('disallow', ()))
+        if 'track' not in tokens:
+            continue
+        by_layers: Dict[FrozenSet[str], set] = {}
+        ctx = ('disallow', names)
+        for nid, net in nets.items():
+            banned = frozenset(
+                l for l in copper
+                if _rule_matches(rule, rules.item_for_net(nid, 'track', l), None,
+                                 l, copper, ctx))
+            if banned:
+                by_layers.setdefault(banned, set()).add(net)
+        n_nets = 0
+        for lays, nset in sorted(by_layers.items(), key=lambda g: sorted(g[0])):
+            n_nets += len(nset)
+            # no rule area: the "region" is the rule's layers, board-wide
+            out.append({'name': f"{rule.name} (forbidden layers)", 'rule': rule.name,
+                        'polygon': None, 'holes': [], 'layers': set(lays),
+                        'tracks_allowed': False, 'vias_allowed': True,
+                        'nets': frozenset(nset), 'layer_ban': True})
+        layers_hit = sorted({l for lays in by_layers for l in lays},
+                            key=lambda l: copper.index(l) if l in copper else 0)
+        rule.honoured = (f"honoured as forbidden layers: {n_nets} of {len(nets)} "
+                         f"net(s) route no track on "
+                         f"{', '.join(layers_hit) or 'any layer'}")
+        rule.router_unhonoured = disallow_router_reason(tokens, {'track'})
+    return out
+
+
+def config_for_nets(pcb_data, net_ids: Iterable[int], config):
+    """`config` for routing `net_ids` under the board's track bans
+    (`derive_layer_bans`): a shallow copy whose `layer_costs` FORBID every
+    layer a ban binding any of the nets names, or `config` itself when none
+    binds them (every board without such a rule: one getattr)."""
+    banned = banned_layers(pcb_data, net_ids)
+    if not banned:
+        return config
+    layers = list(getattr(config, 'layers', None) or ())
+    if not any(l in banned for l in layers):
+        return config
+    import copy
+    from routing_constants import FORBIDDEN_LAYER_COST
+    costs = list(getattr(config, 'layer_costs', None) or [])
+    costs += [1.0] * (len(layers) - len(costs))
+    cfg = copy.copy(config)
+    cfg.layer_costs = [FORBIDDEN_LAYER_COST if l in banned else c
+                       for l, c in zip(layers, costs)]
+    return cfg
+
+
+def banned_layers(pcb_data, net_ids: Iterable[int]) -> FrozenSet[str]:
+    """The copper layers the board's track bans forbid any of `net_ids`."""
+    kos = getattr(pcb_data, '_net_keepouts', None)
+    if not kos:
+        return frozenset()
+    names = [getattr(pcb_data.nets.get(nid), 'name', '') for nid in set(net_ids) if nid]
+    out = set()
+    for ko in kos:
+        if ko.get('layer_ban') and any(n and binds(ko, n) for n in names):
+            out |= ko['layers']
+    return frozenset(out)
+
+
 def binds(ko: dict, net_name: str) -> bool:
     """True when keep-out `ko` forbids its items to net `net_name`."""
     return net_name in ko.get('nets', ())
@@ -269,11 +360,12 @@ class _Recorder:
 
 
 def _binding(pcb_data, net_ids: Iterable[int]) -> Tuple[int, ...]:
-    """Indices of the keep-outs that bind any of `net_ids`."""
+    """Indices of the keep-out REGIONS that bind any of `net_ids` (a layer
+    ban is no region: `config_for_nets` honours it)."""
     kos = getattr(pcb_data, '_net_keepouts', None) or []
     names = [getattr(pcb_data.nets.get(nid), 'name', '') for nid in set(net_ids) if nid]
     return tuple(i for i, ko in enumerate(kos)
-                 if any(n and binds(ko, n) for n in names))
+                 if not ko.get('layer_ban') and any(n and binds(ko, n) for n in names))
 
 
 def _stamper(pcb_data, idx: Tuple[int, ...]):
@@ -388,9 +480,16 @@ def stamping(net_ids_of, maps_of, centerline: bool = False):
             pcb_data = args[0] if args else kwargs.get('pcb_data')
             if not getattr(pcb_data, '_net_keepouts', None):
                 return run.__wrapped__(*args, **kwargs)
-            a = sig.bind(*args, **kwargs).arguments
+            bound = sig.bind(*args, **kwargs)
+            a = bound.arguments
             nets, seen = tuple(net_ids_of(a)), []
             cfg = centerline_config(a['config']) if centerline else a['config']
+            # #1527: the nets' track bans, as forbidden layers of the
+            # config the body routes with
+            routed = config_for_nets(pcb_data, nets, a['config'])
+            if routed is not a['config']:
+                a['config'] = routed
+                args, kwargs = bound.args, bound.kwargs
             with contextlib.ExitStack() as stack:
                 for m in maps_of(a):
                     if m is not None and not any(m is s for s in seen):
@@ -418,31 +517,31 @@ def _via_layers(via, copper: List[str]) -> List[str]:
     return copper[i:j + 1]
 
 
-def audit(pcb_data, segments, vias,
-          keepouts: Optional[List[dict]] = None) -> Optional[List[dict]]:
-    """The copper of `segments` / `vias` that a net-filtered keep-out forbids
-    and that INTERSECTS its region (the polygon minus its holes) -- what
-    KiCad's DRC reports as items_not_allowed for the rule. One row per
-    (region, net): {'region', 'net', 'tracks', 'vias'}, sorted; [] when the
-    copper is clean, None when the run has no net-filtered keep-out.
-
-    It reads only geometry, so it sees copper from every path, including the
-    ones stamp() does not reach (the plane finalize's taps and joins, post-route
-    meanders) and copper the input already had inside a region.
-
-    `pcb_data` supplies the net names and copper layers of the copper given,
-    and the keep-outs unless `keepouts` names them (a re-parsed output board
-    carries none of its own)."""
+def audit_items(pcb_data, segments, vias, keepouts):
+    """Every item of `segments` / `vias` a net-filtered keep-out forbids and
+    that INTERSECTS its region (the polygon minus its holes), or -- a track
+    ban (#1527) -- that lies on one of its layers: `(keep-out, 'track' |
+    'via', item)`, in keep-out order. `audit` counts them per (region, net);
+    check_drc grades each one as KiCad's items_not_allowed."""
     from geometry_utils import segment_to_segment_distance
     from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
-    kos = keepouts if keepouts is not None else getattr(pcb_data, '_net_keepouts', None)
-    if not kos:
-        return None
     names = {nid: n.name for nid, n in pcb_data.nets.items() if nid and n.name}
     copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
     eps = 1e-6
-    rows: Dict[Tuple[str, str], List[int]] = {}
-    for ko in kos:
+
+    def bound(ko, nid):
+        name = names.get(nid)
+        return bool(name) and binds(ko, name)
+
+    for ko in keepouts:
+        if ko.get('layer_ban'):
+            # a track ban covers the board: every bound-net track on one of
+            # its layers is an item KiCad does not allow
+            for s in segments:
+                if (not getattr(s, 'graphic', False) and s.layer in ko['layers']
+                        and bound(ko, s.net_id)):
+                    yield ko, 'track', s
+            continue
         ring = ko['polygon']
         rings = [ring] + [h for h in (ko.get('holes') or []) if len(h) >= 3]
         edges = [e for rg in rings for e in zip(rg, rg[1:] + rg[:1])]
@@ -467,27 +566,44 @@ def audit(pcb_data, segments, vias,
             return any(segment_to_segment_distance(xa, ya, xb, yb, a[0], a[1], b[0], b[1])
                        < r - eps for a, b in edges)
 
-        def row(nid):
-            name = names.get(nid)
-            if not name or not binds(ko, name):
-                return None
-            return rows.setdefault((ko['name'], name), [0, 0])
-
         if not ko.get('tracks_allowed', True):
             for s in segments:
                 if getattr(s, 'graphic', False) or not _on_layer(ko['layers'], s.layer):
                     continue
-                r = row(s.net_id)
-                if r is not None and hit(s.start_x, s.start_y, s.end_x, s.end_y,
-                                         s.width / 2):
-                    r[0] += 1
+                if bound(ko, s.net_id) and hit(s.start_x, s.start_y, s.end_x, s.end_y,
+                                               s.width / 2):
+                    yield ko, 'track', s
         if not ko.get('vias_allowed', True):
             for v in vias:
                 if not any(_on_layer(ko['layers'], l) for l in _via_layers(v, copper)):
                     continue
-                r = row(v.net_id)
-                if r is not None and (inside(v.x, v.y) or near(v.x, v.y, v.size / 2)):
-                    r[1] += 1
+                if bound(ko, v.net_id) and (inside(v.x, v.y) or near(v.x, v.y, v.size / 2)):
+                    yield ko, 'via', v
+
+
+def audit(pcb_data, segments, vias,
+          keepouts: Optional[List[dict]] = None) -> Optional[List[dict]]:
+    """The copper of `segments` / `vias` that a net-filtered keep-out forbids
+    and that INTERSECTS its region (the polygon minus its holes) -- what
+    KiCad's DRC reports as items_not_allowed for the rule (`audit_items`).
+    One row per (region, net): {'region', 'net', 'tracks', 'vias'}, sorted;
+    [] when the copper is clean, None when the run has no net-filtered
+    keep-out.
+
+    It reads only geometry, so it sees copper from every path, including the
+    ones stamp() does not reach (the plane finalize's taps and joins, post-route
+    meanders) and copper the input already had inside a region.
+
+    `pcb_data` supplies the net names and copper layers of the copper given,
+    and the keep-outs unless `keepouts` names them (a re-parsed output board
+    carries none of its own)."""
+    kos = keepouts if keepouts is not None else getattr(pcb_data, '_net_keepouts', None)
+    if not kos:
+        return None
+    rows: Dict[Tuple[str, str], List[int]] = {}
+    for ko, kind, item in audit_items(pcb_data, segments, vias, kos):
+        r = rows.setdefault((ko['name'], pcb_data.nets[item.net_id].name), [0, 0])
+        r[0 if kind == 'track' else 1] += 1
     return [{'region': k[0], 'net': k[1], 'tracks': t, 'vias': n}
             for k, (t, n) in sorted(rows.items()) if t or n]
 

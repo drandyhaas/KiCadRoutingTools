@@ -5414,7 +5414,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     # Net-filtered keep-outs (net_keepouts.py) bind only some nets; the route
     # detoured around them for those nets, so a shortcut must not undo it.
     for _ko in (getattr(pcb_data, '_net_keepouts', None) or []):
-        if _ko.get('tracks_allowed', True):
+        # a track ban (#1527) has no region: a shortcut keeps its layer
+        if _ko.get('tracks_allowed', True) or _ko.get('layer_ban'):
             continue
         _poly = _ko['polygon']
         _keepout_areas.append(([_poly] + [h for h in (_ko.get('holes') or []) if len(h) >= 3],

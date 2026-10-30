@@ -611,13 +611,14 @@ def _grade(a, doc):
                   'enforces it')
             continue
         if _name == 'drc.dru_rules':
-            # #1490: a .kicad_dru clearance rule check_drc does not model.
+            # #1490: a .kicad_dru clearance rule check_drc does not model;
+            # #1527: or a `disallow` rule (token) it does not grade.
             reasons.append(
-                '.kicad_dru clearance rule(s) nothing grades: '
+                '.kicad_dru clearance or disallow rule(s) nothing grades: '
                 + ', '.join(repr(r) for r in
                             (_comps.get('drc') or {}).get('ungraded_rules', ()))
-                + ' -- the copper they bind is graded at the class or layer '
-                  'value here and KiCad still enforces them')
+                + ' -- the copper they bind is not graded at the rule here and '
+                  'KiCad still enforces them')
             continue
         _c = _comps.get(_name)
         if isinstance(_c, dict) and _c.get('declared'):

@@ -296,7 +296,7 @@ def _validate_single_ended_swap(
     if getattr(stub, 'locked', False):
         return False    # #1261: KiCad-locked copper never moves
     from stub_layer_switching import forbidden_destination
-    if forbidden_destination(config, dest_layer):
+    if forbidden_destination(config, dest_layer, pcb_data, (stub.net_id,)):
         return False
 
     if exclude_net_ids is None:
