@@ -423,4 +423,8 @@ step and `check_drc` grade at it.
 6. **Track Generation** - Create 45° stubs, channel segments, and exit jogs
 7. **Collision Resolution** - Reassign layers or reroute to resolve conflicts
 8. **Layer Rebalancing** - Even out route distribution across layers
-9. **Via Management** - Add vias for SMD pads on non-top layers
+9. **Via Management** - Add vias for SMD pads on non-top layers. A neighbour
+   link off the top layer gets a via in BOTH balls it joins, since the layer
+   passes move it and its anchor ball's route independently; a link refused
+   either via is dropped, and dropping an escape takes off only the vias no
+   kept escape still reaches its ball through

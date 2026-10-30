@@ -542,6 +542,7 @@ def connect_adjacent_same_net_pads(
                 route2.channel = None  # No channel needed
                 route2.is_edge = True  # Treat as edge (direct connection)
                 route2.neighbor_connection = True  # Mark as neighbor connection
+                route2.neighbor_pad = route1.pad
                 # Use same layer as route1 for the connection
                 route2.layer = route1.layer
 
@@ -549,6 +550,16 @@ def connect_adjacent_same_net_pads(
                 connected += 1
 
     return connected
+
+
+def link_via_site(route: FanoutRoute, top_layer: str):
+    """(pad, position) of the ball a neighbour link ENDS on, when the link
+    needs a via there: it runs off the top layer, where that ball's copper
+    is only reachable through a via. None for every other route."""
+    if route.layer == top_layer or not getattr(route, 'neighbor_connection', False) \
+            or getattr(route, 'neighbor_pad', None) is None:
+        return None
+    return route.neighbor_pad, route.exit_pos
 
 
 def create_single_ended_route(
@@ -1015,16 +1026,181 @@ def manage_vias(
     # Check distance threshold: via is "at pad" if within via radius + small tolerance
     via_proximity_threshold = via_size / 2 + 0.1
 
+    def _via_at(route, site_pad, pad_x, pad_y):
+        """Give `route` a via in the ball `site_pad` at (pad_x, pad_y): the
+        dict this call added, True when the ball needs none (a drilled ball,
+        a board via already there, a twin this call committed), or None when
+        no via can go there."""
+        nonlocal clamped_count, floor_pads, escalated_count, _twin_shared
+        # Through-hole pads (drill > 0) already connect all layers
+        if site_pad.drill > 0 or find_nearby_via(
+                pad_x, pad_y, route.net_id, via_proximity_threshold):
+            return True
+        # Size the via to fit its pad up front (#202) so it never bulges
+        # past the pad edge into a neighbouring different-net trace.
+        v_size, v_drill, status, rung = clamp_via_to_pad(
+            via_size, via_drill, site_pad, floors)
+        if status == 'clamped':
+            clamped_count += 1
+        elif status == 'floor':
+            floor_pads += 1
+        if rung > 0:
+            escalated_count += 1
+        if not via_clears_pad_rects(pad_x, pad_y, v_size / 2.0,
+                                    clearance, immovable_pads):
+            # No via can go here: an immovable foreign pad (locked
+            # part / connector / test point) overlaps the through
+            # via's ring on some layer (#253, ottercast J2 connector,
+            # orangecrab TP20 test pad). Fail this escape honestly --
+            # the main router can still route the net from the bare
+            # ball on the pad's own layer.
+            return None
+        # #370 B4: drill hole-to-hole (net-independent) and foreign
+        # tracks -- fail the escape honestly like the #253 case above
+        # rather than ship a via check_drc / the fab would flag.
+        if via_in_pad_conflict(pad_x, pad_y, v_size, v_drill,
+                               route.net_id) is not None:
+            return None
+        # #620: the pair test the input-board guards above cannot do.
+        # Placed AFTER them so the board keeps its present precedence
+        # -- this only decides among sites THIS call is creating.
+        _bulges = status == 'floor'
+        # A committed via is this ball's only when it REACHES the
+        # track this route starts at the pad centre. Testing the
+        # candidate's pad RECTANGLE instead let a large pad swallow a
+        # smaller overlapping same-net pad's via and strand the
+        # loser's route (#854) -- see `via_anchors_route`.
+        _v, _detail = _pending.verdict(pad_x, pad_y, v_size, v_drill,
+                                       route.net_id, _bulges,
+                                       track_width=track_width)
+        if _v == 'twin':
+            # Two routes, one physical hole. Both keep their tracks and
+            # both anchor to the via already committed here, because
+            # 'twin' means that via REACHES this route's track start
+            # (#854), and the downstream ball-anchor test
+            # (`ball_has_copper`) asks the same question of the same
+            # via. Today's code appends a second identical dict and the
+            # writer, which does not dedupe, emits both as stacked
+            # copper.
+            #
+            # The SURVIVOR must be the tighter pad's clamp. Which via
+            # survived used to be whichever route arrived first, so two
+            # coincident same-net pads of 0.25 and 0.60 kept a 0.45 via
+            # bulging past the 0.25 pad -- the #202 violation
+            # `clamp_via_to_pad` exists to prevent, re-created by the
+            # merge. Tighten instead.
+            #
+            # BUT TIGHTENING CAN BREAK THE REACH THAT JUSTIFIED THE
+            # MERGE, and only since #854: `verdict` decided 'twin' from
+            # the COMMITTED via's size, and `tighten` then replaces it
+            # with min(that, this route's clamp) -- a smaller barrel
+            # reaches less far. Under the old pad-BOX rule this could
+            # not happen, because a box test does not depend on via
+            # size, so the interaction is new. A pre-push review found
+            # it before any board did (no corpus twin is far enough
+            # from its pad for the shrink to matter -- every one sits
+            # at distance 0). Re-check after the shrink and fall
+            # through to the normal path, where this route gets its own
+            # via. Skipping the tighten instead would ship the #202
+            # bulge; refusing the merge is the honest half.
+            _tx, _ty, _ts, _td = _detail
+            if not via_anchors_route(_tx, _ty, min(_ts, v_size),
+                                     (pad_x, pad_y), track_width):
+                _v = 'clear'
+            else:
+                if _pending.tighten(_tx, _ty, v_size, v_drill):
+                    for _v_dict in vias_to_add:
+                        if (_v_dict['x'] == _tx and _v_dict['y'] == _ty
+                                and _v_dict['net_id'] == route.net_id):
+                            _v_dict['size'] = min(_v_dict['size'],
+                                                  v_size)
+                            _v_dict['drill'] = min(_v_dict['drill'],
+                                                   v_drill)
+                            break
+                _twin_shared += 1
+                return True
+        if _v == 'conflict':
+            # A refusal here drops the escape -- there is no re-sweep
+            # -- so descend the fab ladder's drill floors first. The
+            # twin branch above cannot re-fire for a thinner drill, so
+            # 'clear' is the right predicate.
+            _thin = thin_drill_to_clear(
+                v_drill, floors, rung,
+                lambda cand: _pending.verdict(
+                    pad_x, pad_y, v_size, cand, route.net_id,
+                    _bulges, track_width=track_width)[0] == 'clear')
+            if _thin is None:
+                _pending_refused.append(
+                    (route.pad.net_name or f"net{route.net_id}",
+                     _detail[0]))
+                return None
+            _thinned.append((v_drill, _thin))
+            v_drill = _thin
+        if would_overlap_existing_via(pad_x, pad_y, v_size):
+            # #620, second half: this used to be `if not ...: append`,
+            # so a refusal here dropped the VIA and kept the route --
+            # its inner-layer track shipped anyway, connected to
+            # nothing, while the ball still counted as escaped. The
+            # sibling guard two lines up does the opposite, and the
+            # #508 comment at this function's call site says why: the
+            # old code "left the sibling routes in `routes` -- still
+            # counted escaped, shipping via-in-pad balls with no
+            # track". This is the same defect with the halves swapped.
+            #
+            # THE REFUSAL SET IS UNCHANGED -- only the bookkeeping is.
+            # `would_overlap_existing_via` stays net-BLIND (a same-net
+            # via inside the pad is already handled by the
+            # `existing_via` branch above); making it foreign-only
+            # would change WHICH sites get a via, which is not this
+            # issue.
+            #
+            # Measured on orangecrab_ext_pll U3 at defaults, the one
+            # in-repo board that reaches this branch: it fires 11
+            # times over the retry passes (4 distinct nets, every
+            # blocker foreign), and the output board is UNCHANGED --
+            # each stranded route was removed by a later filter
+            # anyway, and its net already reported unescaped. So this
+            # ships as a coherence fix with no measured board effect,
+            # said plainly rather than dressed up.
+            return None
+        placed = {
+            'x': pad_x,
+            'y': pad_y,
+            'size': v_size,
+            'drill': v_drill,
+            'layers': ['F.Cu', 'B.Cu'],
+            'net_id': route.net_id
+        }
+        vias_to_add.append(placed)
+        _pending.add(pad_x, pad_y, v_size, v_drill, route.net_id,
+                     _bulges)
+        return placed
+
+    # A neighbour link (connect_adjacent_same_net_pads) runs ball to ball on
+    # its own layer, so off the top layer it reaches EACH ball through a via:
+    # its own, and one in the ball it ends on. That second via used to come
+    # only from the anchor ball's own route, while that route was off the top
+    # layer too -- but the layer passes (assignment, collision resolution,
+    # rebalancing, the pad-aware repair) move the two routes independently,
+    # and a link left on an inner layer under an anchor moved to the top
+    # shipped a stub from its own via to a ball with none, connected to
+    # nothing, while its ball counted as escaped. The link places that via
+    # itself; it is the anchor route's own when that one needs it too.
+    _link_sites = set()
+    for route in routes:
+        _ls = link_via_site(route, top_layer)
+        if _ls is not None:
+            _link_sites.add((route.net_id, _ls[1]))
+
     for route in routes:
         pad_x, pad_y = route.pad_pos
-        existing_via = find_nearby_via(pad_x, pad_y, route.net_id, via_proximity_threshold)
-
-        # Through-hole pads (drill > 0) already connect all layers, no via needed
-        is_through_hole = route.pad.drill > 0
 
         if route.layer == top_layer:
-            # Routing on top layer - no via needed at pad
-            if existing_via:
+            # Routing on top layer - no via needed at pad, unless a link
+            # still reaches this ball through it
+            existing_via = find_nearby_via(pad_x, pad_y, route.net_id,
+                                           via_proximity_threshold)
+            if existing_via and (route.net_id, route.pad_pos) not in _link_sites:
                 vias_to_remove.append({
                     'x': existing_via.x,
                     'y': existing_via.y,
@@ -1032,150 +1208,24 @@ def manage_vias(
                     # DIFFERENT net's via coincidentally at this position
                     'net_id': existing_via.net_id
                 })
-        else:
-            # Routing on inner/bottom layer - via needed only for SMD pads
-            if not is_through_hole and not existing_via:
-                # Size the via to fit its pad up front (#202) so it never bulges
-                # past the pad edge into a neighbouring different-net trace.
-                v_size, v_drill, status, rung = clamp_via_to_pad(
-                    via_size, via_drill, route.pad, floors)
-                if status == 'clamped':
-                    clamped_count += 1
-                elif status == 'floor':
-                    floor_pads += 1
-                if rung > 0:
-                    escalated_count += 1
-                if not via_clears_pad_rects(pad_x, pad_y, v_size / 2.0,
-                                            clearance, immovable_pads):
-                    # No via can go here: an immovable foreign pad (locked
-                    # part / connector / test point) overlaps the through
-                    # via's ring on some layer (#253, ottercast J2 connector,
-                    # orangecrab TP20 test pad). Fail this escape honestly --
-                    # the main router can still route the net from the bare
-                    # ball on the pad's own layer.
-                    via_blocked_routes.append(route)
-                    continue
-                # #370 B4: drill hole-to-hole (net-independent) and foreign
-                # tracks -- fail the escape honestly like the #253 case above
-                # rather than ship a via check_drc / the fab would flag.
-                if via_in_pad_conflict(pad_x, pad_y, v_size, v_drill,
-                                       route.net_id) is not None:
-                    via_blocked_routes.append(route)
-                    continue
-                # #620: the pair test the input-board guards above cannot do.
-                # Placed AFTER them so the board keeps its present precedence
-                # -- this only decides among sites THIS call is creating.
-                _bulges = status == 'floor'
-                # A committed via is this ball's only when it REACHES the
-                # track this route starts at the pad centre. Testing the
-                # candidate's pad RECTANGLE instead let a large pad swallow a
-                # smaller overlapping same-net pad's via and strand the
-                # loser's route (#854) -- see `via_anchors_route`.
-                _v, _detail = _pending.verdict(pad_x, pad_y, v_size, v_drill,
-                                               route.net_id, _bulges,
-                                               track_width=track_width)
-                if _v == 'twin':
-                    # Two routes, one physical hole. Both keep their tracks and
-                    # both anchor to the via already committed here, because
-                    # 'twin' means that via REACHES this route's track start
-                    # (#854), and the downstream ball-anchor test
-                    # (`ball_has_copper`) asks the same question of the same
-                    # via. Today's code appends a second identical dict and the
-                    # writer, which does not dedupe, emits both as stacked
-                    # copper.
-                    #
-                    # The SURVIVOR must be the tighter pad's clamp. Which via
-                    # survived used to be whichever route arrived first, so two
-                    # coincident same-net pads of 0.25 and 0.60 kept a 0.45 via
-                    # bulging past the 0.25 pad -- the #202 violation
-                    # `clamp_via_to_pad` exists to prevent, re-created by the
-                    # merge. Tighten instead.
-                    #
-                    # BUT TIGHTENING CAN BREAK THE REACH THAT JUSTIFIED THE
-                    # MERGE, and only since #854: `verdict` decided 'twin' from
-                    # the COMMITTED via's size, and `tighten` then replaces it
-                    # with min(that, this route's clamp) -- a smaller barrel
-                    # reaches less far. Under the old pad-BOX rule this could
-                    # not happen, because a box test does not depend on via
-                    # size, so the interaction is new. A pre-push review found
-                    # it before any board did (no corpus twin is far enough
-                    # from its pad for the shrink to matter -- every one sits
-                    # at distance 0). Re-check after the shrink and fall
-                    # through to the normal path, where this route gets its own
-                    # via. Skipping the tighten instead would ship the #202
-                    # bulge; refusing the merge is the honest half.
-                    _tx, _ty, _ts, _td = _detail
-                    if not via_anchors_route(_tx, _ty, min(_ts, v_size),
-                                             (pad_x, pad_y), track_width):
-                        _v = 'clear'
-                    else:
-                        if _pending.tighten(_tx, _ty, v_size, v_drill):
-                            for _v_dict in vias_to_add:
-                                if (_v_dict['x'] == _tx and _v_dict['y'] == _ty
-                                        and _v_dict['net_id'] == route.net_id):
-                                    _v_dict['size'] = min(_v_dict['size'],
-                                                          v_size)
-                                    _v_dict['drill'] = min(_v_dict['drill'],
-                                                           v_drill)
-                                    break
-                        _twin_shared += 1
-                        continue
-                if _v == 'conflict':
-                    # A refusal here drops the escape -- there is no re-sweep
-                    # -- so descend the fab ladder's drill floors first. The
-                    # twin branch above cannot re-fire for a thinner drill, so
-                    # 'clear' is the right predicate.
-                    _thin = thin_drill_to_clear(
-                        v_drill, floors, rung,
-                        lambda cand: _pending.verdict(
-                            pad_x, pad_y, v_size, cand, route.net_id,
-                            _bulges, track_width=track_width)[0] == 'clear')
-                    if _thin is None:
-                        via_blocked_routes.append(route)
-                        _pending_refused.append(
-                            (route.pad.net_name or f"net{route.net_id}",
-                             _detail[0]))
-                        continue
-                    _thinned.append((v_drill, _thin))
-                    v_drill = _thin
-                if would_overlap_existing_via(pad_x, pad_y, v_size):
-                    # #620, second half: this used to be `if not ...: append`,
-                    # so a refusal here dropped the VIA and kept the route --
-                    # its inner-layer track shipped anyway, connected to
-                    # nothing, while the ball still counted as escaped. The
-                    # sibling guard two lines up does the opposite, and the
-                    # #508 comment at this function's call site says why: the
-                    # old code "left the sibling routes in `routes` -- still
-                    # counted escaped, shipping via-in-pad balls with no
-                    # track". This is the same defect with the halves swapped.
-                    #
-                    # THE REFUSAL SET IS UNCHANGED -- only the bookkeeping is.
-                    # `would_overlap_existing_via` stays net-BLIND (a same-net
-                    # via inside the pad is already handled by the
-                    # `existing_via` branch above); making it foreign-only
-                    # would change WHICH sites get a via, which is not this
-                    # issue.
-                    #
-                    # Measured on orangecrab_ext_pll U3 at defaults, the one
-                    # in-repo board that reaches this branch: it fires 11
-                    # times over the retry passes (4 distinct nets, every
-                    # blocker foreign), and the output board is UNCHANGED --
-                    # each stranded route was removed by a later filter
-                    # anyway, and its net already reported unescaped. So this
-                    # ships as a coherence fix with no measured board effect,
-                    # said plainly rather than dressed up.
-                    via_blocked_routes.append(route)
-                    continue
-                vias_to_add.append({
-                    'x': pad_x,
-                    'y': pad_y,
-                    'size': v_size,
-                    'drill': v_drill,
-                    'layers': ['F.Cu', 'B.Cu'],
-                    'net_id': route.net_id
-                })
-                _pending.add(pad_x, pad_y, v_size, v_drill, route.net_id,
-                             _bulges)
+            continue
+        # Routing on inner/bottom layer - a via in each ball it reaches. All
+        # or none: a route refused one site gives back the via it placed.
+        sites = [(route.pad, route.pad_pos)]
+        _ls = link_via_site(route, top_layer)
+        if _ls is not None:
+            sites.append(_ls)
+        placed = []
+        for site_pad, (sx, sy) in sites:
+            got = _via_at(route, site_pad, sx, sy)
+            if got is None:
+                for d in placed:
+                    vias_to_add[:] = [v for v in vias_to_add if v is not d]
+                    _pending.discard(d['x'], d['y'], d['net_id'])
+                via_blocked_routes.append(route)
+                break
+            if isinstance(got, dict):
+                placed.append(got)
 
     if vias_to_add:
         print(f"  Adding {len(vias_to_add)} vias at pads on non-top layers")
@@ -4322,19 +4372,40 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # clear the pad; if even the minimum escape grazes, drop the ball and warn.
     from bga_fanout.reroute import _remove_route_tracks
 
+    def _via_users(x, y, net_id):
+        """The routes whose copper reaches a ball through the via at (x, y)
+        (manage_vias): the ball's own route off the top layer, and every
+        neighbour link off the top layer that ends on that ball."""
+        def _at(pos):
+            return abs(pos[0] - x) < 1e-6 and abs(pos[1] - y) < 1e-6
+        out = []
+        for r in best_routes:
+            if r.net_id != net_id:
+                continue
+            _ls = link_via_site(r, layers[0])
+            if (r.layer != layers[0] and _at(r.pad_pos)) or (
+                    _ls is not None and _at(_ls[1])):
+                out.append(r)
+        return out
+
     def _drop_escape(r):
-        """Take ONE ball's escape off the board: its route's tracks, its
-        via-in-pad (manage_vias puts it at the route's pad) and the route
-        (#508 finding 6). These drops used to go by NET, so one ball took
-        every escape of a multi-ball rail with it while the rail's routes
-        stayed in best_routes as escaped."""
+        """Take ONE ball's escape off the board: its route's tracks, the
+        route, and its vias-in-pad (manage_vias puts one at the route's pad,
+        and a neighbour link one more in the ball it ends on) that no
+        surviving route still reaches its ball through (#508 finding 6).
+        These drops used to go by NET, so one ball took every escape of a
+        multi-ball rail with it while the rail's routes stayed in best_routes
+        as escaped."""
         _remove_route_tracks(tracks, r)
-        vias_to_add[:] = [v for v in vias_to_add
-                          if not (v['net_id'] == r.net_id
-                                  and abs(v['x'] - r.pad_pos[0]) < 1e-6
-                                  and abs(v['y'] - r.pad_pos[1]) < 1e-6)]
         if r in best_routes:
             best_routes.remove(r)
+        _ls = link_via_site(r, layers[0])
+        for (x, y) in [r.pad_pos] + ([_ls[1]] if _ls is not None else []):
+            if not _via_users(x, y, r.net_id):
+                vias_to_add[:] = [v for v in vias_to_add
+                                  if not (v['net_id'] == r.net_id
+                                          and abs(v['x'] - x) < 1e-6
+                                          and abs(v['y'] - y) < 1e-6)]
 
     esc_net_name = {r.net_id: r.pad.net_name for r in best_routes if r.pad.net_name}
     _esc_routes: List = []
@@ -4385,14 +4456,12 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # Drop THAT ball's escape -- its via and its route's tracks -- and the
         # route with it (#508 finding 6). This used to drop by NET: one ball's
         # via took every escape of a multi-ball rail with it, while the rail's
-        # routes stayed in best_routes as escaped. A via sits at its route's
-        # pad (manage_vias), which is how it finds its route.
+        # routes stayed in best_routes as escaped. Every route that reaches
+        # its ball through the via goes with it: a via-less route off the top
+        # layer is copper connected to nothing.
         _dropped = {id(v) for v in via_drop}
         for via in via_drop:
-            r = next((r for r in best_routes if r.net_id == via['net_id']
-                      and abs(r.pad_pos[0] - via['x']) < 1e-6
-                      and abs(r.pad_pos[1] - via['y']) < 1e-6), None)
-            if r is not None:
+            for r in _via_users(via['x'], via['y'], via['net_id']):
                 _drop_escape(r)
             nm = via_net_name.get(via['net_id'])
             if nm and nm not in failed_nets:
