@@ -657,10 +657,15 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
                     '--nets', '*', *excl, '--width', tw,
                     '--grid-step', str(a['grid'])]
+            # The ceiling too, as on the route steps: qfn_fanout honours and
+            # keeps the net classes without one (#1529).
             ladder = [
-                base + ['--clearance', str(a['clearance'])],
-                base + ['--clearance', str(a['fab_clearance'])],
+                base + ['--clearance', str(a['clearance']),
+                        '--clearance-ceiling', str(a['clearance'])],
                 base + ['--clearance', str(a['fab_clearance']),
+                        '--clearance-ceiling', str(a['fab_clearance'])],
+                base + ['--clearance', str(a['fab_clearance']),
+                        '--clearance-ceiling', str(a['fab_clearance']),
                         '--escape-method', 'underpad',
                         '--via-size', str(a['fine_via']), '--via-drill', str(a['fine_drill']),
                         '--allow-via-in-pad'],

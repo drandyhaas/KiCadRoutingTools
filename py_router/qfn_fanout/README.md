@@ -134,6 +134,24 @@ lowers is recorded and announced by the writeback's descent record (#1160), so
 the next step says so. A run in which nothing escalates writes the run
 clearance, as before. `drc_grazes` is graded at that written floor.
 
+### Net classes: spaced pairwise, and kept (#1529)
+
+The run clearance is the Default class. Every other class is read from the
+board's `.kicad_pro` (the GUI reads the live board's), as `route.py` reads it,
+and every pair the escape tests -- a stub or via against foreign copper, a pad,
+another fanned net's copper, a neighbouring chip's reserved escape room, this
+run's own stubs -- is priced at KiCad's `max(clearance, class A, class B)`,
+which a `.kicad_dru` rule on the layer replaces. A stub escalates (#1328) no
+lower than its own class. The run prints `Netclass clearances for N net(s)
+...` when the board has any.
+
+The writeback then treats the classes as `route.py` does: kept when
+`--clearance-ceiling` is omitted, each capped at `min(class, ceiling)` when it
+is given. A class is never lowered to the clearance the escape ran at, so a
+class whose nets the part does not touch keeps its value. `drc_grazes` is
+graded at the written project's classes too. (`bga_fanout.py` still escapes at
+the one clearance and clamps every class to it.)
+
 ### Under-pad (via-drop) escape — `--escape-method underpad` (issue #164)
 
 The default `stub` fan spreads each pad laterally at 45°, so on a **crowded
