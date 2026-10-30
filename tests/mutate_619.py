@@ -49,14 +49,14 @@ ROWS = [
     # count to zero, and only a control that asserts a NON-blocker stays
     # non-blocking can tell "correct" from "refuses everything".
     ('over-strict-floor-x5', 'q',
-     "                        < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:",
-     "                        < 5.0 * (v.size / 2 + track_width / 2 + _stub_clr):",
+     "                        < v.size / 2 + track_width / 2 + _spc(net_id, v.net_id) - 1e-6:",
+     "                        < 5.0 * (v.size / 2 + track_width / 2 + _spc(net_id, v.net_id)):",
      (T_619,), 'KILLED'),
     ('via-floor-uses-drill-not-size', 'q',
      "                if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \\\n"
-     "                        < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:",
+     "                        < v.size / 2 + track_width / 2 + _spc(net_id, v.net_id) - 1e-6:",
      "                if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \\\n"
-     "                        < v.drill / 2 + track_width / 2 + _stub_clr - 1e-6:",
+     "                        < v.drill / 2 + track_width / 2 + _spc(net_id, v.net_id) - 1e-6:",
      (T_619,), 'KILLED'),
 
     # ---- the guards ------------------------------------------------------
@@ -117,8 +117,8 @@ ROWS = [
 
     # ---- the pad half's exclusions ---------------------------------------
     ('pad-half-ignores-local-clearance', 'q',
-     "                _eff = max(_stub_clr, getattr(p, 'local_clearance', 0.0) or 0.0)\n",
-     "                _eff = _stub_clr\n",
+     "                _eff = max(_pcl, getattr(p, 'local_clearance', 0.0) or 0.0)\n",
+     "                _eff = _pcl\n",
      (T_619,), 'KILLED'),
     # The waiver defect an adversarial review found: check_drc requires BOTH
     # the membership test and the LOCALITY test (check_drc.py:2442-2445), and
@@ -127,7 +127,7 @@ ROWS = [
     # as a hole rather than left as an untested claim.
     ('pad-half-waives-the-WHOLE-tie-partner', 'q',
      "                if id(p) in _tie and _tie_span_waived(pcb_data, seg, net_id,\n"
-     "                                                     p, _stub_clr):\n",
+     "                                                     p, _pcl):\n",
      "                if id(p) in _tie:\n",
      (T_619,), 'SURVIVED  (no tracked board declares net_tie_pad_groups; this '
                'is a real test hole, not a covered case)'),
