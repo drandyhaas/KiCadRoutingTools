@@ -157,10 +157,14 @@ KEY_SETS = {
     # #1443: one declared cover, every number the author's, and its standoffs.
     '_COVER_KEYS': {'connector', 'side', 'axis_deg', 'width_mm', 'underside_mm',
                     'length_mm', 'offset_mm', 'standoffs', 'removable', 'source',
-                    'top_mm', 'insertion', 'context'} | FREE,
+                    'top_mm', 'insertion', 'context',
+                    # #1537: the body's own mounting-hole sites.
+                    'holes'} | FREE,
     # #1504: a corner standoff's offset, and the path a card goes in by.
     '_COVER_STANDOFF_KEYS': {'ref', 'length_mm', 'rot', 'off_mm'},
     '_COVER_INSERTION_KEYS': {'angle_deg', 'travel_mm'},
+    # #1537: one hole site, placed as a standoff is, from the body's drawing.
+    '_COVER_HOLE_KEYS': {'length_mm', 'off_mm', 'diameter_mm'} | FREE,
     '_HEIGHT_KEYS': {'ref', 'height_mm', 'underside_mm', 'under_cover', 'source',
                      'context'} | FREE,
     '_EDGE_CONNECTOR_KEYS': {
@@ -281,6 +285,7 @@ def test_the_key_sets_are_exactly_what_is_documented():
         '_COVER_KEYS': 'covers[]',
         '_COVER_STANDOFF_KEYS': 'covers[].standoffs[]',
         '_COVER_INSERTION_KEYS': 'covers[].insertion',
+        '_COVER_HOLE_KEYS': 'covers[].holes[]',
         '_HEIGHT_KEYS': 'heights[]',
     }
     checked = 0
@@ -421,6 +426,8 @@ def test_an_intent_using_every_known_key_loads():
                     'underside_mm': 2.5, 'length_mm': 44, 'offset_mm': 0.0,
                     'standoffs': [{'ref': 'MH2', 'length_mm': 42, 'rot': 0, 'off_mm': 0.0}],
                     'top_mm': 3.5, 'insertion': {'angle_deg': 25, 'travel_mm': 2},
+                    'holes': [{'length_mm': 40, 'off_mm': 8.0, 'diameter_mm': 2.7,
+                               'why': 'w', 'note': 'n'}],
                     'removable': True, 'source': 's', 'why': 'w', 'note': 'n', 'context': {'why': 'w'}}],
         'heights': [{'ref': 'U9', 'height_mm': 0.8, 'underside_mm': 2.0, 'source': 's',
                      'under_cover': True, 'why': 'w', 'note': 'n', 'context': {'why': 'w'}}],
@@ -452,7 +459,7 @@ def test_an_intent_using_every_known_key_loads():
         seen |= set(r)
     seen |= set(raw['dispositions'])
     seen |= set(raw['covers'][0]) | set(raw['covers'][0]['standoffs'][0])
-    seen |= set(raw['covers'][0]['insertion'])
+    seen |= set(raw['covers'][0]['insertion']) | set(raw['covers'][0]['holes'][0])
     seen |= set(raw['heights'][0])
     for k in raw['keepouts']:
         seen |= set(k)

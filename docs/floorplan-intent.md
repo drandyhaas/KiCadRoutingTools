@@ -160,8 +160,9 @@ suspect, suspect_reason, why
 | `rails[]` | `nets` (net-name globs, as `--nets` takes them), `why` (or `note` / `reason`), `context` (see "`rails[]`" below; needs `min_reader` 18) |
 | `replicate[]` | `from` (a sheet instance: its name or path, as `place_pose replicate --from` takes it), `to` (a list of them), or instead `channels` (copies inside one sheet: two or more lists of refs, the first the source, matched index for index; needs `min_reader` 19), `anchor`, `allow_net_mismatch` (`REF.PAD` entries), `only` or `skip` (refs; not both), `search_mm`, `tolerance_mm`, `why` (or `note` / `reason`), `context`, `source` (see "`replicate[]`" below; needs `min_reader` 11) |
 | `templates[]` | `anchor` (the chip), `members` (each `ref`, `at` [dx, dy] mm and `rot`, a quarter turn, in the chip's own frame; `pads` and `note` as the fit wrote them), `tolerance_mm`, `kind` (`switching stage` or `rf front end`), `ground_return_mm`, `source`, `why` (or `note` / `reason`), `context`, and the fit-written `fitted` (see "`templates[]`" below; needs `min_reader` 13, and 14 with `kind` or `ground_return_mm`) |
-| `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `standoffs`, `removable`, `source`, `top_mm`, `insertion` (these two need `min_reader` 21), `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
+| `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `standoffs`, `holes` (needs `min_reader` 22), `removable`, `source`, `top_mm`, `insertion` (these two need `min_reader` 21), `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
 | `covers[].standoffs[]` | `ref`, `length_mm`, `rot`, `off_mm` (needs `min_reader` 21) |
+| `covers[].holes[]` | `length_mm`, `off_mm`, `diameter_mm`, `why` (or `note` / `reason`) (needs `min_reader` 22) |
 | `covers[].insertion` | `angle_deg`, `travel_mm` (needs `min_reader` 21) |
 | `heights[]` | `ref`, `height_mm`, `underside_mm`, `under_cover` (needs `min_reader` 20), `source`, `why` (or `note` / `reason`), `context` (needs `min_reader` 15) |
 | `arrays[]` | `name`, `members` (an ORDERED list of literal refs, at least two), `serves` (a ref, or `"unknown"`), `order` (`"pin"`, `"declared"` or `"unknown"`), `rotation` (degrees, `"shared"` or `"unknown"`), `pitch_mm` (`"auto"` or mm), `axis` (`"auto"`, `"x"` or `"y"`), `allow_mixed`, `why` (or `note` / `reason`), `context`, and the compiler-written `source` (see "Arrays" below; needs `min_reader` 7) |
@@ -280,7 +281,7 @@ claim").
 intent file at once — far too blunt for "this build learned a new field".
 
 So field-level compatibility is a second number. `READER_VERSION` (currently
-`19`) is what this build can act on, and an intent sets `min_reader` when a
+`22`) is what this build can act on, and an intent sets `min_reader` when a
 claim must not be silently ignored:
 
 ```jsonc
@@ -332,6 +333,7 @@ Each `min_reader` level and the keys it covers:
 | 19 | `replicate[].channels` |
 | 20 | `heights[].under_cover` |
 | 21 | `covers[].top_mm`, `covers[].insertion`, `covers[].standoffs[].off_mm` |
+| 22 | `covers[].holes[]` |
 
 The emitter and the design-brief compiler stamp the level their output needs.
 
@@ -1405,7 +1407,7 @@ check refuses are dropped, and seed `k` seats the connector at legal pose
 none legal it refuses before placing, naming the cover. A part may not be
 both a cover's and a template's.
 
-**Mounting a body (#1504).** Three more keys say what a module's or card's
+**Mounting a body (#1504).** Four more keys say what a module's or card's
 drawing gives, and one rule grades whether it can go on:
 
 - `standoffs[].off_mm`: a standoff's offset to the left of the body's
@@ -1428,13 +1430,29 @@ drawing gives, and one rule grades whether it can go on:
   wholly over its highest (`top_mm` needed for the latter): a fixed one is
   a refused pair, a removable one only orders the two (this card goes in
   first, `heights.insertion_order`).
+- `holes[]` (#1537, `min_reader` 22): the body's own mounting holes,
+  `{length_mm, off_mm?, diameter_mm}`, placed as a standoff is (`length_mm`
+  along the axis, `off_mm` to the left of the centre line), from the
+  module's or card's drawing -- declared, never derived. A hole is a SITE,
+  not a part, so it needs nothing on the board yet (a standoff row needs its
+  `ref`). `mountable` lists per site what stands within its screw-head ring
+  (`mounting_holes.reach`: the drill's radius plus 0.4 x the drill, the
+  ring `check_mounting_holes.py` uses), on either face since the screw
+  passes through the board: the standoff fitted there (a mounting hole on
+  the board within 0.3 mm of the site, whose own pads and nets are not in
+  its way), the parts whose occupancy reaches into the ring, the pads, and
+  the tracks and vias of another net. A site with anything in it makes the
+  cover NOT mountable and is named in the finding; a clear site with no
+  standoff yet is reported (`standoff: null`), not judged, and so is a site
+  past the outline. Report only: `place_simple` does not price the sites.
 
 The `mountable` rule (WARN unless `severity` promotes it, armed by any
 `covers[]`) reads `floorplan.mount_report` per cover: each standoff on the
 board and at its place, how far the body reaches past the outline (reported,
 not judged: a module may overhang by design), the parts under it with the
-least room, every pair the heights refuse with it, and the order the paths
-ask; two bodies that each block the other's way in cannot both be mounted.
+least room, every pair the heights refuse with it, what stands at each of
+its hole sites, and the order the paths ask; two bodies that each block the
+other's way in cannot both be mounted.
 "Under it" and its room are read on the shape the verdict judges
 (`heights.Heights.under_declared`): a part with a 3D model and a known
 height by its model's cells inside the body (its room is the underside less

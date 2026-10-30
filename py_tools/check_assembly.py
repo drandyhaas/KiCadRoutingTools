@@ -389,13 +389,25 @@ def main():
             print(f"  mountable (#1504): {m['connector']} "
                   f"{'YES' if m['mountable'] else 'NO'}"
                   f"{' (removable)' if m['removable'] else ''}: "
-                  f"{len(m['standoffs'])} standoff(s), body {m['body_past_outline_mm']:g}mm "
+                  f"{len(m['standoffs'])} standoff(s), "
+                  + (f"{len(m['holes'])} hole site(s), " if m.get('holes') else '')
+                  + f"body {m['body_past_outline_mm']:g}mm "
                   f"past the outline, {m['under']} part(s) under it"
                   + (f", least room {lr['room_mm']:g}mm ({lr['ref']})" if lr else '')
                   + (f"; goes in before {', '.join(m['before'])}" if m['before'] else '')
                   + (f"; after {', '.join(m['after'])}" if m['after'] else ''))
             for w in m['why'][:6]:
                 print(f"      {w}")
+            # #1537: each of the body's own hole sites, the free ones too
+            for s in m.get('holes') or ():
+                print(f"      hole {s['index'] + 1} at ({s['at'][0]:.2f}, {s['at'][1]:.2f}), "
+                      f"{s['diameter_mm']:g}mm, ring {s['reach_mm']:.2f}mm: "
+                      + (f"standoff {s['standoff']}" if s['standoff'] else 'no standoff')
+                      + (', site clear' if s['fits'] else
+                         f", {len(s['parts'])} part(s), {len(s['pads'])} pad(s), "
+                         f"{len(s['copper'])} track/via(s) in the ring")
+                      + (f", {s['past_outline_mm']:g}mm past the outline"
+                         if s['past_outline_mm'] > 0 else ''))
     if base_pile:
         print(f"  baseline {args.baseline} is a pile: its overlaps are staging, "
               f"not a baseline (#1103), so every advisory pair counts as new")

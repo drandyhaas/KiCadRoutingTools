@@ -10,7 +10,9 @@ This leaf module is the one definition of both questions:
   * ``mounting_holes(pcb)`` -- which footprints are mounting holes, and
     which Edge.Cuts circles inside the outline are (#1502);
   * ``hole_copper(pcb)`` -- the other-net tracks and vias inside each hole's
-    screw-head ring (``check_mounting_holes.py`` reports it);
+    screw-head ring (``check_mounting_holes.py`` reports it); the same
+    question at any site is ``copper_near``, and ``pads_near`` asks it of
+    pads (a declared cover's own hole sites, #1537);
   * ``keepout_polygon(hole)`` -- that ring as a polygon, which
     ``add_rule_area.py --mounting-holes`` writes as a copper keep-out the
     router and the plane steps already honour like any rule area.
@@ -194,36 +196,73 @@ def _seg_dist(px, py, ax, ay, bx, by) -> float:
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
+def reach(drill: float, ring: Optional[float] = None) -> float:
+    """How far from a hole's centre its screw-head ring reaches, mm."""
+    return drill / 2.0 + (ring if ring is not None else RING_PER_DRILL * drill)
+
+
+def copper_near(pcb, x: float, y: float, drill: float, ring: Optional[float] = None,
+                nets=frozenset()) -> List[dict]:
+    """The tracks and vias of a net not in ``nets`` whose copper comes within
+    the screw-head ring of a ``drill`` hole at (x, y), nearest first: each
+    ``{kind, layer, net, gap}``, ``gap`` the copper-to-hole-edge distance in
+    mm (negative: into the drill)."""
+    names = {nid: n.name for nid, n in pcb.nets.items()}
+    far = reach(drill, ring)
+    hits = []
+    for s in pcb.segments:
+        if getattr(s, 'graphic', False) or s.net_id in nets:
+            continue
+        d = _seg_dist(x, y, s.start_x, s.start_y, s.end_x, s.end_y)
+        if d - s.width / 2.0 < far:
+            hits.append({'kind': 'track', 'layer': s.layer,
+                         'net': names.get(s.net_id, str(s.net_id)),
+                         'gap': d - s.width / 2.0 - drill / 2.0})
+    for v in pcb.vias:
+        if v.net_id in nets:
+            continue
+        d = math.hypot(v.x - x, v.y - y)
+        if d - v.size / 2.0 < far:
+            hits.append({'kind': 'via', 'layer': '*',
+                         'net': names.get(v.net_id, str(v.net_id)),
+                         'gap': d - v.size / 2.0 - drill / 2.0})
+    hits.sort(key=lambda h: h['gap'])
+    return hits
+
+
+def pads_near(pcb, x: float, y: float, drill: float, ring: Optional[float] = None,
+              skip_refs=()) -> List[dict]:
+    """The pads, of footprints not in ``skip_refs``, whose copper (or, for an
+    NPTH, its opening) comes within the screw-head ring of a ``drill`` hole at
+    (x, y), nearest first: each ``{ref, pad, net, gap}``, ``gap`` as
+    ``copper_near``'s. Every face: the screw passes through the board, and its
+    head, nut or standoff sits on both."""
+    from routing_utils import point_to_pad_rect_dist
+    far = reach(drill, ring)
+    hits = []
+    for key, fp in (pcb.footprints or {}).items():
+        if key in skip_refs:
+            continue
+        for p in fp.pads or ():
+            if p.shape == 'circle':
+                d = max(0.0, math.hypot(p.global_x - x, p.global_y - y)
+                        - max(p.size_x or 0.0, p.size_y or 0.0) / 2.0)
+            else:
+                d = point_to_pad_rect_dist(x, y, p)
+            if d < far:
+                hits.append({'ref': key, 'pad': str(p.pad_number or ''),
+                             'net': p.net_name or '', 'gap': d - drill / 2.0})
+    hits.sort(key=lambda h: (h['gap'], h['ref'], h['pad']))
+    return hits
+
+
 def hole_copper(pcb, ring: Optional[float] = None
                 ) -> List[Tuple[MountingHole, List[dict]]]:
     """``[(hole, hits)]`` for every mounting hole, ``hits`` being the tracks
     and vias of another net whose copper comes within the screw-head ring of
-    the hole's edge, nearest first. Each hit is ``{kind, layer, net, gap}``,
-    ``gap`` being the copper-to-hole-edge distance in mm."""
-    names = {nid: n.name for nid, n in pcb.nets.items()}
-    out = []
-    for hole in mounting_holes(pcb):
-        reach = hole.drill / 2.0 + hole.ring(ring)
-        hits = []
-        for s in pcb.segments:
-            if getattr(s, 'graphic', False) or s.net_id in hole.nets:
-                continue
-            d = _seg_dist(hole.x, hole.y, s.start_x, s.start_y, s.end_x, s.end_y)
-            if d - s.width / 2.0 < reach:
-                hits.append({'kind': 'track', 'layer': s.layer,
-                             'net': names.get(s.net_id, str(s.net_id)),
-                             'gap': d - s.width / 2.0 - hole.drill / 2.0})
-        for v in pcb.vias:
-            if v.net_id in hole.nets:
-                continue
-            d = math.hypot(v.x - hole.x, v.y - hole.y)
-            if d - v.size / 2.0 < reach:
-                hits.append({'kind': 'via', 'layer': '*',
-                             'net': names.get(v.net_id, str(v.net_id)),
-                             'gap': d - v.size / 2.0 - hole.drill / 2.0})
-        hits.sort(key=lambda h: h['gap'])
-        out.append((hole, hits))
-    return out
+    the hole's edge, nearest first (``copper_near``)."""
+    return [(hole, copper_near(pcb, hole.x, hole.y, hole.drill, hole.ring(ring), hole.nets))
+            for hole in mounting_holes(pcb)]
 
 
 def keepout_polygon(hole: MountingHole, ring: Optional[float] = None,

@@ -542,8 +542,11 @@ under a card, and a tall part can be placed there.
    figures). From the same drawings give `top_mm` (the body's own top, so a
    card under a module is judged against it) and, for a card that goes in
    at an angle (SO-DIMM, M.2), `insertion` (`angle_deg`, and `travel_mm`
-   when it slides in before it turns down). The emitted intent then carries
-   it with `min_reader` 15 (21 with any of these three). **`removable`, case by case:** true when the body comes
+   when it slides in before it turns down). A module screwed down through
+   its own holes, with no standoff on the board yet, gives `holes` (each
+   `length_mm`, `off_mm` and `diameter_mm`, from its drawing) so
+   `mountable` checks what stands at each hole site. The emitted intent then carries
+   it with `min_reader` 15 (21 with any of these three, 22 with `holes`). **`removable`, case by case:** true when the body comes
    off in service -- a card in its socket, a module on a connector it can be
    pulled from -- so a test point under it can still be probed with it out;
    false when it stays (soldered, glued, a fixed shield or one the enclosure
@@ -552,7 +555,8 @@ under a card, and a tall part can be placed there.
    or `mountable` warning. A `cover` warning names a standoff not where the
    row puts it: fix the row, or move the standoff. A `mountable` warning
    names why a body cannot go on (a standoff off the board, a part too tall
-   under it, another body in its way); check_assembly prints the same per
+   under it, another body in its way, a part, pad or track at one of its
+   hole sites); check_assembly prints the same per
    cover, with the order the cards go in.
 
 `place_simple` then holds each standoff at its length from the connector.

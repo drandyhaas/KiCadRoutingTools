@@ -1475,6 +1475,8 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
            or any(st.get('off_mm') is not None for st in c.get('standoffs') or ())
            for c in fragment.get('covers') or ()):
         need_reader = max(need_reader, fp.MOUNT_READER)
+    if any(c.get('holes') for c in fragment.get('covers') or ()):
+        need_reader = max(need_reader, fp.HOLES_READER)
     if need_reader:
         fragment['min_reader'] = need_reader
 

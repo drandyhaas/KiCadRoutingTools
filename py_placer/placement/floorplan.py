@@ -228,7 +228,11 @@ EDGE_BAND_SANITY_MM = 5.0
 #: and `covers[].standoffs[].off_mm` (a standoff off the centre line), and
 #: the `mountable` rule that grades them. They change what the placer and
 #: the grade admit; an older build refuses the keys by name.
-READER_VERSION = 21
+#: 22 (#1537): `covers[].holes[]` -- the body's own mounting holes, from its
+#: drawing, where no standoff is on the board yet. `mountable` names what
+#: stands in each hole's screw-head ring and is NO when one is blocked; an
+#: older build refuses the key by name.
+READER_VERSION = 22
 #: The reader version that first reads `templates[]`.
 TEMPLATES_READER = 13
 #: The reader version that first reads a template row's `kind` and
@@ -250,6 +254,8 @@ UNDER_COVER_READER = 20
 #: The reader version that first reads `covers[].top_mm`, `.insertion` and
 #: `.standoffs[].off_mm` (#1504).
 MOUNT_READER = 21
+#: The reader version that first reads `covers[].holes[]` (#1537).
+HOLES_READER = 22
 #: #1475. The keep-outs a block's `fence_mm` compiles to are named
 #: `fence:<block>:<N|S|W|E>`; an intent may not name its own keep-out so.
 FENCE_KEEPOUT_PREFIX = 'fence:'
@@ -400,11 +406,15 @@ _KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'max_height_mm',
 #: `{angle_deg, travel_mm?}`, the card going in at that angle and turning
 #: down about the connector (the path the parts past its far end and the
 #: bodies over it must clear); a standoff's `off_mm`, its offset to the left
-#: of the body's centre line (a module screwed down at two corners).
+#: of the body's centre line (a module screwed down at two corners). #1537:
+#: `holes`, the body's own mounting holes `{length_mm, off_mm?, diameter_mm}`
+#: placed as a standoff is, from its drawing -- a site, not a part, so it
+#: needs nothing on the board.
 _COVER_KEYS = {'connector', 'side', 'axis_deg', 'width_mm', 'underside_mm',
-               'length_mm', 'offset_mm', 'standoffs', 'removable', 'source',
+               'length_mm', 'offset_mm', 'standoffs', 'holes', 'removable', 'source',
                'top_mm', 'insertion', 'context'} | _FREE_TEXT_KEYS
 _COVER_STANDOFF_KEYS = {'ref', 'length_mm', 'rot', 'off_mm'}
+_COVER_HOLE_KEYS = {'length_mm', 'off_mm', 'diameter_mm'} | _FREE_TEXT_KEYS
 _COVER_INSERTION_KEYS = {'angle_deg', 'travel_mm'}
 #: #1443. One `heights[]` row: a part's `height_mm` (its top above its face)
 #: and/or `underside_mm` (the room under its body, across its occupancy),
@@ -1433,7 +1443,10 @@ def _cover_claims(raw: Dict) -> List[Dict]:
             r = s.get('ref')
             if not isinstance(r, str) or not r.strip() or r == con:
                 raise IntentError(f"{w}.ref: expected a reference other than the "
-                                  f"connector, got {r!r}")
+                                  f"connector, got {r!r}"
+                                  + (" -- a hole site with no part on the board is "
+                                     "`holes[]` {length_mm, off_mm, diameter_mm}"
+                                     if r is None else ''))
             if r in owner:
                 raise IntentError(f"{w}.ref: {r} is already {owner[r]}")
             owner[r] = w
@@ -1449,6 +1462,33 @@ def _cover_claims(raw: Dict) -> List[Dict]:
                 st['off_mm'] = _number(s['off_mm'], f"{w}.off_mm")
             clean.append(st)
         row['standoffs'] = clean
+        hs = c.get('holes') or []
+        if not isinstance(hs, list):
+            raise IntentError(f"{where}.holes: expected a list of "
+                              f"{{length_mm, off_mm, diameter_mm}}")
+        holes = []
+        for j, hl in enumerate(hs):
+            w = f"{where}.holes[{j}]"
+            if not isinstance(hl, dict):
+                raise IntentError(f"{w}: expected an object with `length_mm` and "
+                                  f"`diameter_mm`")
+            _reject_unknown(hl, _COVER_HOLE_KEYS, w)
+            for k in ('length_mm', 'diameter_mm'):
+                if k not in hl:
+                    raise IntentError(f"{w}: needs `{k}` -- a hole site is declared from "
+                                      f"the body's drawing, never derived")
+            d = _number(hl['diameter_mm'], f"{w}.diameter_mm", lo=0.0)
+            if d <= 0:
+                raise IntentError(f"{w}.diameter_mm: expected > 0")
+            hole = {'length_mm': _number(hl['length_mm'], f"{w}.length_mm", lo=0.0),
+                    'off_mm': _number(hl.get('off_mm', 0.0), f"{w}.off_mm"),
+                    'diameter_mm': d}
+            txt = free_text(hl)
+            if txt:
+                hole['why'] = txt
+            holes.append(hole)
+        if holes:
+            row['holes'] = holes
         if not clean and row.get('length_mm') is None:
             raise IntentError(f"{where}: needs `length_mm` or a standoff -- nothing "
                               f"says how far the body reaches")
@@ -7855,9 +7895,11 @@ def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, objec
     refuse with it (a part under it too tall or of unknown height, a part
     its insertion path cannot clear, another body it meets), and the order
     its insertion path asks (`heights.insertion_order`: this body in before
-    a removable one over its way in). `mountable` is False when a standoff
-    is missing, off its place or off the board, a pair is refused, or two
-    bodies each block the other's way in; None when the cover is not
+    a removable one over its way in), and since #1537 what stands at each
+    of its own hole sites (`holes[]`, `_hole_sites`). `mountable` is False
+    when a standoff is missing, off its place or off the board, a hole site
+    has a part, pad or other-net copper in its screw-head ring, a pair is
+    refused, or two bodies each block the other's way in; None when the cover is not
     resolved on this board. Facts for `rule_mountable` and check_assembly;
     the body's overhang past the outline is reported, not judged (a module
     may overhang by design)."""
@@ -7907,6 +7949,8 @@ def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, objec
             if off > legality.EPS:
                 why.append(f"standoff {s['ref']} is {off:.2f}mm past the outline")
         row['standoffs'] = sts
+        if c.get('holes'):
+            row['holes'] = _hole_sites(c, pose, pcb, geo, poses, sides, gate, why)
         under, blocked = [], []
         skip = {s['ref'] for s in c['standoffs']} | {con}
         if occ_c is not None:
@@ -7940,6 +7984,70 @@ def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, objec
         row['mountable'] = not why
         rows.append(row)
     return rows
+
+
+def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, object]]:
+    """#1537: each of a cover's own mounting holes (`holes[]`), where the row
+    puts it -- `length_mm` along the axis, `off_mm` to the left of the centre
+    line, as a standoff -- and what stands within its screw-head ring
+    (`mounting_holes.reach`, the ring check_mounting_holes uses): the
+    standoff there (a mounting hole on the board within
+    `COVER_STANDOFF_TOLERANCE_MM` of the site; its own pads and nets are its
+    own), the parts whose occupancy reaches into the ring and the pads and
+    other-net copper inside it, on either face (the screw passes through the
+    board). A site with anything in it appends to `why`; a free site with no
+    standoff yet is reported (`standoff` None), not judged, and so is a site
+    past the outline, as the body's own overhang is."""
+    import mounting_holes as mh
+    from .heights import standoff_at, to_board, to_local
+    mounts = mh.mounting_holes(pcb)
+    out = []
+    for k, hl in enumerate(c['holes']):
+        x, y = to_board((*standoff_at(c, hl),) * 2, pose)[:2]
+        d = hl['diameter_mm']
+        far = mh.reach(d)
+        st = min((m for m in mounts if math.hypot(m.x - x, m.y - y)
+                  <= COVER_STANDOFF_TOLERANCE_MM + legality.EPS),
+                 key=lambda m: math.hypot(m.x - x, m.y - y), default=None)
+        own = {st.ref} if st is not None else set()
+        parts = []
+        for r, g in sorted(geo.items()):
+            occ = getattr(g, 'occupancy_local', None)
+            fpr = (pcb.footprints or {}).get(r)
+            if r in own or occ is None or fpr is None or not fpr.pads:
+                continue
+            lx, ly = to_local((x, y, x, y), poses[r])[:2]
+            gap = math.hypot(max(occ[0] - lx, 0.0, lx - occ[2]),
+                             max(occ[1] - ly, 0.0, ly - occ[3]))
+            if gap < far:
+                parts.append({'ref': r, 'side': sides[r], 'gap_mm': round(gap - d / 2.0, 3)})
+        parts.sort(key=lambda p: (p['gap_mm'], p['ref']))
+        pads = [{'ref': p['ref'], 'pad': p['pad'], 'net': p['net'],
+                 'gap_mm': round(p['gap'], 3)}
+                for p in mh.pads_near(pcb, x, y, d, skip_refs=own)]
+        copper = [{'kind': h['kind'], 'layer': h['layer'], 'net': h['net'],
+                   'gap_mm': round(h['gap'], 3)}
+                  for h in mh.copper_near(pcb, x, y, d, nets=st.nets if st else frozenset())]
+        site = {'index': k, 'at': [round(x, 3), round(y, 3)], 'length_mm': hl['length_mm'],
+                'off_mm': hl['off_mm'], 'diameter_mm': d, 'reach_mm': round(far, 3),
+                'standoff': st.ref if st is not None else None,
+                'past_outline_mm': round(gate.rect_outside_amount((x - d / 2, y - d / 2,
+                                                                   x + d / 2, y + d / 2)), 3),
+                'parts': parts, 'pads': pads, 'copper': copper}
+        site['fits'] = not (parts or pads or copper)
+        out.append(site)
+        if not site['fits']:
+            what = ([p['ref'] for p in parts]
+                    + [f"pad {p['ref']}.{p['pad']}" for p in pads if p['ref'] not in
+                       {q['ref'] for q in parts}]
+                    + [f"{h['kind']} {h['net']}" for h in copper])
+            why.append(f"hole {k + 1} ({hl['length_mm']:g}mm along, {hl['off_mm']:+g}mm off): "
+                       + (f"standoff {st.ref} there, but " if st is not None
+                          else 'no standoff fits: ')
+                       + f"{', '.join(what[:6])}" + (f" +{len(what) - 6} more" if len(what) > 6
+                                                    else '')
+                       + f" within {far:.2f}mm of the site")
+    return out
 
 
 def rule_mountable(ctx) -> Iterator[Violation]:

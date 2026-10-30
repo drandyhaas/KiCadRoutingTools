@@ -57,7 +57,7 @@ already grade, and that `place_simple` reads wherever it reads the intent
 | `mount_mode`, `cable_entry`, `cable_envelope_mm`, `product.user_top_side` | compiled by `connector_consequences` into `max_setback_mm`, `side` and cable `keepouts[]` -- see [below](#connector-declarations-compile-to-clauses) | `context.basis`, `context.compiled_from` |
 | `assembly.body_edge_mm` | `assembly.body_edge_mm`, merged into the emitted `assembly` block; `why` and `requirement` move into `assembly.context.body_edge_mm`. Graded by check_assembly's `body_edge_band`, not by a floorplan rule (see [below](#assemblybody_edge_mm-the-assemblers-edge-rule)) | `context.basis`: `declared`, `min_reader` 9 |
 | `keep_away` | `keep_away[]`, one intent row per rule, in its canonical spelling; `why` and `requirement` move into `context`. Graded by `keep_away`, and read by the routing engines too (see [below](#keep_away-two-net-groups-apart)) | `source: "brief"`, `context.keep_away_note`, `min_reader` 10 |
-| `covers[]`, `heights[]` | `covers[]` / `heights[]`, one intent row per brief row, validated by the intent's own loader; the row's `source` (its datasheet) is kept. Graded by the `cover` rule, check_assembly's `height` pairs and the placer (see [below](#covers-and-heights-what-stands-over-the-board)) | `context.brief_row`, `context.from: "brief"`, `min_reader` 15 (20 with a `heights[].under_cover`, 21 with a cover's `top_mm`, `insertion` or a standoff's `off_mm`) |
+| `covers[]`, `heights[]` | `covers[]` / `heights[]`, one intent row per brief row, validated by the intent's own loader; the row's `source` (its datasheet) is kept. Graded by the `cover` rule, check_assembly's `height` pairs and the placer (see [below](#covers-and-heights-what-stands-over-the-board)) | `context.brief_row`, `context.from: "brief"`, `min_reader` 15 (20 with a `heights[].under_cover`, 21 with a cover's `top_mm`, `insertion` or a standoff's `off_mm`, 22 with a cover's `holes`) |
 | `cans[]` | per listed face, a `blocks[]` row (`can:<name>:<face>`, the `in` parts, tolerance 0) and a `keepouts[]` row over the zone allowing the can's own parts; on the can's face, a `heights[]` underside for a drawn can or a `fence_mm` and a `max_height_mm` keep-out for one not drawn yet (see [below](#cans-a-shield-can-as-one-row)) | `context.derived_from: "cans[<name>]"`, `min_reader` 16 |
 | `product`, `unknown[]` | `context` | — |
 
@@ -572,7 +572,10 @@ cover_facts.py` prints what the board does know. They live in the brief
 because a cover worked out once has to survive every later emit: the brief
 travels with the board, and each `--emit-intent` compiles its rows in again.
 `removable` says whether the body comes off in service, which decides
-whether a test point may stand under it.
+whether a test point may stand under it. A module screwed down through its
+own holes declares them as `holes[]` (`{length_mm, off_mm, diameter_mm}`,
+from its drawing) even before any standoff is on the board, and
+check_assembly's `mountable` row names what stands at each hole site.
 
 ## `cans[]`: a shield can as one row
 
