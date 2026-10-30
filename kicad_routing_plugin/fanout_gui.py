@@ -1109,6 +1109,24 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         options_sizer.Add(pnl_row, 0,
                           wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # #1521: bga_fanout --immovable-refs. Named after the engine param so
+        # the plan executor's generic loop fills it; empty = None.
+        hold_row = wx.BoxSizer(wx.HORIZONTAL)
+        hold_row.Add(wx.StaticText(self, label="Hold parts:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.immovable_refs = wx.TextCtrl(self, value="")
+        self.immovable_refs.SetToolTip(
+            "References (space separated, e.g. 'C12 R4') of parts the fanout "
+            "keeps its vias and escapes off, as if they were locked. By "
+            "default it may lay copper on an unlocked 2-pad C/R/FB part, "
+            "which the cap placement pass then moves; name a part that pass "
+            "could not clear and re-run the fanout, which then drops a ball "
+            "it cannot escape instead. Empty = none (matches the CLI "
+            "--immovable-refs).")
+        hold_row.Add(self.immovable_refs, 1)
+        options_sizer.Add(hold_row, 0,
+                          wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
         self.optimize_caps.SetValue(False)
         self.optimize_caps.SetToolTip(
@@ -1304,6 +1322,8 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             # (space separated), parsed at the call site like the CLI main.
             'plane_net_layers': self.plane_net_layers_ctrl.GetValue().split()
                                 or None,
+            # #1521: parts held immovable, [] -> None when empty.
+            'immovable_refs': self.immovable_refs.GetValue().split() or None,
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
@@ -1953,6 +1973,7 @@ class FanoutTab(wx.Panel):
             # #424 plane-ball drops -- checkbox bool -> engine token, same
             # default (on/'auto') as the CLI's --plane-drop.
             plane_drop=('auto' if config.get('plane_drop', True) else 'off'),
+            immovable_refs=config.get('immovable_refs'),        # #1521
             # Same NET:LAYER[,...] spec parse as bga_fanout's main()
             # (review parity finding 5: this kwarg was CLI-only).
             plane_net_layers=(

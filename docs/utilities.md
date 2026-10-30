@@ -2111,6 +2111,12 @@ Options:
                       (#360/#424). Per-net counts land in
                       JSON_SUMMARY.plane_drop; KICAD_FANOUT_PLANE_DROP=0/1
                       overrides the flag (the recorded-manifest A/B switch)
+  --immovable-refs REF [REF ...]
+                      Parts the fanout keeps its vias and escapes off, as if
+                      they were locked. By default it may lay copper on an
+                      unlocked 2-pad C/R/FB part, which place_fanout_clearance
+                      then moves; name a part that step could not clear and the
+                      fanout drops a ball it cannot escape instead (#1521)
   --add-teardrops     Add teardrop settings to all pads and vias in the output
   --fab-tier {standard,advanced,auto}  JLC fab capability floor (default: auto)
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
@@ -2323,7 +2329,15 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    the dogbone (BGA) or under-pad (QFN) method, keeping the attempt that
    escaped most.
    BGA escapes take the same layer costs as the route step.
-4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts.
+4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts. A 2-pad
+   C/R/FB part it leaves shorted to a BGA's fanout copper (a `short: true`
+   pad-via or pad-segment item of `check_drc`, the copper on a net of that
+   BGA's balls) is held in a re-fan of that BGA from the board it was fanned
+   on (`bga_fanout.py --immovable-refs`, its whole retry ladder), every later
+   fanout replayed at the rung it was accepted at, and
+   `place_fanout_clearance.py` runs again. The board with fewer shorts, then
+   fewer dropped escapes, is kept; a dropped ball is routed from the bare ball
+   by the route step (#1521).
 5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`. A
    pair net the step leaves in a track or via DRC violation (by `check_drc`,
    against the board before the step) is ripped and routed again on its own with

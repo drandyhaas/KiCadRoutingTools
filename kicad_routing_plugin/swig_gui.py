@@ -2784,6 +2784,7 @@ class RoutingDialog(wx.Dialog):
                     ('allow_via_in_pad', False),
                     ('plane_drop', True),    # #424 drops: default ON
                     ('plane_net_layers_ctrl', ''),   # future-pour decl, empty
+                    ('immovable_refs', ''),          # #1521: none held
                     # bga_fanout --diff-pairs / --diff-pair-gap: no coupling,
                     # the CLI's default gap.
                     ('diff_pair_patterns_ctrl', ''),
