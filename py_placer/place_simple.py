@@ -507,6 +507,51 @@ def _fp_text(fp):
     return f"{e} floorplan error(s) ({', '.join(fp.get('rules') or ())})" if e else ''
 
 
+def illegal_reason(st, model, r):
+    """Why part `r` is illegal where it stands (#1540): the first check that
+    fails, in the order `ok` asks them -- its edge seat, the seat predicate
+    (`seeder.pose_ok`: the outline, a keep-out, an exclusive zone, then
+    `candidate_valid`'s neighbours), then the intent's claims on it, with the
+    distance or the area past each claim's own threshold. A part only
+    "no legal pose found" for used to be all a log said, while it was, say,
+    15 mm outside its block's zone."""
+    from placement.legality import BOARD_TOL
+    from placement.simple import legal
+    p = st.parts[r]
+    pose = (p.x, p.y, p.rot)
+    rects = p.grade_rects(*pose)
+    if r in model.edge_seats:
+        from placement.edge_seat import legal_on_edge
+        if not legal_on_edge(st, r, pose):
+            return 'no legal seat on its declared edge'
+    elif not legal(st, r, *pose):
+        if st.edge_gate.rect_outside_amount(rects[0]) > BOARD_TOL:
+            return 'its courtyard is off the board'
+        ko = st.keepout_blockers(r, rects)
+        if ko:
+            return 'inside keep-out ' + ', '.join(repr(k) for k in ko)
+        ex = st.exclusive_blockers(r, rects)
+        if ex:
+            return 'inside the exclusive zone of block(s) ' + ', '.join(repr(z) for z in ex)
+        veto = st.candidate_veto(r, *pose)
+        if veto is not None:
+            return '%s%s' % (veto[0], f' vs {veto[1]}' if veto[1] else '')
+        return 'its pad or drawn copper reaches past the outline'
+    spec = st.intent_spec_for(r)
+    out = []
+    for v, t in zip(st.intent_terms(r, rects) if spec else (), spec or ()):
+        if v <= t.threshold:
+            continue
+        if t.rule == 'zone_containment':
+            out.append(f"outside the zone of block {t.name!r} by {v:.2f} mm "
+                       f"(tolerance {t.threshold:g} mm)")
+        elif t.rule == 'zone_exclusive':
+            out.append(f"{v:.2f} mm2 inside the exclusive zone of block {t.name!r}")
+        else:
+            out.append(f"inside keep-out {t.name!r}")
+    return '; '.join(out) or 'no legal pose'
+
+
 def plan_refusal(board, intent_path, groups_doc):
     """#1468: `floorplan.plan_check` once per run, before any seed is
     placed -- in the parent of a `--seeds` run, never per seed. Its WARNs
@@ -659,6 +704,7 @@ def _many_seeds(ap, a):
             summaries[s] = summary
             fin = summary['final']
             ill = summary.get('illegal') or []
+            why = summary.get('illegal_why') or {}
             start = summary.get('start')
             fpt = ', '.join(t for t in (_fp_text(summary.get('floorplan')),
                                         _asm_text(summary.get('assembly')),
@@ -668,7 +714,8 @@ def _many_seeds(ap, a):
             print(f"  seed {s}{f' ({start})' if start in ('clustered', 'anchored') else ''}: "
                   f"cost {fin['cost']:.1f}, {summary['moves']} moves in "
                   f"{summary['seconds']['anneal']} s"
-                  + (f", no legal pose for {', '.join(ill)}" if ill else '')
+                  + (", illegal: " + ', '.join(f"{r} ({why[r]})" if r in why else r
+                                                for r in ill) if ill else '')
                   + (f", {fpt}" if fpt else '') + f" -> {out}")
         else:
             print(f"  seed {s}: exit {rc}, no summary (see {os.path.splitext(out)[0]}.log)")
@@ -707,11 +754,27 @@ def judge_order(reports):
     return sorted((s for s, r in reports.items() if not r.get('illegal')), key=rank)
 
 
+def _illegal_every_seed(seeds, summaries):
+    """`{ref: {seed: reason}}`: the parts every seed that reported left
+    illegal (#1540), each with its reason per seed. Empty when a seed
+    reported none of them, or fewer than two seeds reported."""
+    done = [s for s in seeds if s in summaries]
+    if len(done) < 2:
+        return {}
+    common = set(summaries[done[0]].get('illegal') or ())
+    for s in done[1:]:
+        common &= set(summaries[s].get('illegal') or ())
+    return {r: {str(s): (summaries[s].get('illegal_why') or {}).get(r) for s in done}
+            for r in sorted(common)}
+
+
 def _name_judged(a, seeds, summaries):
     """A run of several seeds' last step: the `--judge` legal seeds to judge
     (`judge_order`), printed and written to `judge.json` beside the seeds'
     boards (`judge` in judging order; `scattered`, `clustered`, `anchored` and
-    `illegal` list the seeds by start and verdict, `refused` and
+    `illegal` list the seeds by start and verdict, `illegal_why` each illegal
+    seed's parts with the check each fails and `illegal_every_seed` the parts
+    illegal in every seed, WARNED once (#1540), `refused` and
     `oversubscribed` the intent's own faults, the same in every seed and
     each WARNED once, `fold` the parts that follow a claim into their
     partner's group and the groups that emptied, likewise said once,
@@ -726,6 +789,13 @@ def _name_judged(a, seeds, summaries):
            'clustered': [s for s in seeds if summaries.get(s, {}).get('start') == 'clustered'],
            'anchored': [s for s in seeds if summaries.get(s, {}).get('start') == 'anchored'],
            'illegal': [s for s in seeds if summaries.get(s, {}).get('illegal')],
+           # #1540: each illegal seed's parts and why, keyed by seed
+           'illegal_why': {str(s): summaries[s].get('illegal_why')
+                           or {r: None for r in summaries[s]['illegal']}
+                           for s in seeds if summaries.get(s, {}).get('illegal')},
+           # ...and the parts illegal in EVERY seed that reported, said once:
+           # the same part in every seed is a finding about the run, not a seed
+           'illegal_every_seed': _illegal_every_seed(seeds, summaries),
            # the declared poses refused, the same in every seed: the
            # intent's to fix, not a seed's
            'refused': next((summaries[s]['refused'] for s in seeds
@@ -789,6 +859,9 @@ def _name_judged(a, seeds, summaries):
     for r, why in sorted(doc['refused'].items()):
         print(f"  WARNING: {r}'s declared pose is not legal, in every seed: "
               f"{'; '.join(why)}")
+    for r, per in sorted(doc['illegal_every_seed'].items()):
+        print(f"  WARNING: {r} is illegal in every seed: "
+              + '; '.join(f"seed {s}: {w or 'no reason recorded'}" for s, w in per.items()))
     from placement.edge_seat import crowding_text
     for rec in doc['oversubscribed']:
         print(f"  WARNING: {crowding_text(rec)}")
@@ -1313,7 +1386,8 @@ def main(argv=None):
                                   for r in movable}, res)
             if set(illegal) <= too_big:
                 break
-            print(f"  NOTE: run {k + 1} left no legal pose for {', '.join(illegal)}"
+            print(f"  NOTE: run {k + 1} left illegal: "
+                  + ', '.join(f"{r} ({illegal_reason(st, mdl, r)})" for r in illegal)
                   + ("; annealing again from a fresh start" if k < RESTARTS else ""))
         return kept, k
     fallback = []           # parts seated on what the board draws instead (#1300)
@@ -1449,6 +1523,8 @@ def main(argv=None):
                          if o != r and P.sides & q.sides), default=(None, None))
         tight[r] = {'gap_mm': None if gap is None else round(gap, 4), 'neighbour': near}
     illegal = [r for r in illegal if r not in tight]
+    # #1540: why each is illegal, by the first check it fails
+    illegal_why = {r: illegal_reason(state, model, r) for r in illegal}
     print(f"place_simple: annealed {res['moves']} moves in {t2 - t1:.1f} s "
           f"({len(passes)} anneal(s), {sum(p['moves'] for p in passes)} moves in all"
           + (f", {', '.join(f'{n} {lab}' for lab, n in _pass_counts(passes))}"
@@ -1461,8 +1537,8 @@ def main(argv=None):
         print(f"  NOTE: {r} has no legal pose at the board clearance "
               f"({state.clearance:g} mm); seated {t['gap_mm']:g} mm from {t['neighbour']}, "
               f"legal down to {TIGHT_CLEARANCE_MM:g} mm because nothing else seats it")
-    if illegal:
-        print(f"  WARNING: no legal pose found for: {', '.join(illegal)}")
+    for r in illegal:
+        print(f"  WARNING: {r} is left illegal: {illegal_why[r]}")
     if mended is not None:
         for m in mended['moved']:
             print(f"  NOTE: decap {m['ref']} ({m['rail']}) moved {m['mm']:.2f} mm to "
@@ -1543,7 +1619,8 @@ def main(argv=None):
                         else 'scattered'), 'runs': k + 1,
               'declared': sorted(f['reference'] for f in flips),
               'reseated': res['reseated'], 'repaired': bool(res.get('repaired')),
-              'illegal': illegal, 'tight': tight, 'refused': refused, 'estimate_fallback': fallback,
+              'illegal': illegal, 'illegal_why': illegal_why,
+              'tight': tight, 'refused': refused, 'estimate_fallback': fallback,
               'oversubscribed': model.edge_oversubscribed, 'claim_arity': model.claim_arity,
               'floorplan': fp, 'assembly': asm, 'bga_field': bga_field,
               'decap_residual': resid, 'decap_repair': mended,
@@ -1557,7 +1634,8 @@ def main(argv=None):
     if a.json:
         json.dump(report, open(a.json, 'w', encoding='utf-8'), indent=1)
     print('JSON_SUMMARY: ' + json.dumps({k: report[k] for k in
-                                          ('final', 'moves', 'seed', 'start', 'reseated', 'illegal', 'tight',
+                                          ('final', 'moves', 'seed', 'start', 'reseated', 'illegal',
+                                           'illegal_why', 'tight',
                                            'refused', 'oversubscribed', 'claim_arity', 'floorplan',
                                            'assembly', 'bga_field', 'template_off', 'decap_residual', 'hints_saturated', 'estimate_fallback', 'faces', 'fold', 'links', 'moves_total', 'seconds')}))
     return 4 if illegal or refused or model.edge_oversubscribed else 0

@@ -375,6 +375,10 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
   A run that leaves a part with no legal pose is annealed again from a fresh
   start, up to two more times (the last one shoves its remaining overlaps
   apart where they stand); the run with the fewest illegal parts is kept.
+  Each part left illegal is named with the check it fails (`illegal_why`:
+  the part it overlaps, the keep-out it is in, how far outside its block's
+  zone), and a `{seed}` run WARNs once about a part illegal in every seed
+  (`illegal_every_seed` in `judge.json`).
 - **Deterministic.** The same board, inputs and `--seed` give the same
   placement. Seeds differ more than most input changes, so place several and
   judge them by routing.

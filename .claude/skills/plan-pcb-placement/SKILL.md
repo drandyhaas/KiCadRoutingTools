@@ -1004,7 +1004,9 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   widen a band -- and place again. Exit 2 if any failed outright.
 - A run that leaves a part with no legal pose anneals again from a fresh
   start, up to two more times (`runs` in the `--json` report). Exit 4 names
-  parts still left illegal; exit 2 a face or pose the inputs contradict.
+  parts still left illegal, each with the check it fails (`illegal_why`:
+  the part it overlaps, the keep-out it is in, or how far outside its
+  block's zone it is); exit 2 a face or pose the inputs contradict.
   Read the `cost` line: `hints` and `groups` say which group or hint the
   result could not satisfy.
 - **Check and LOOK** at each judged seed:
@@ -1024,7 +1026,9 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   on whether the cause is the same in every seed (below):
   - **`judge.json` names no seed** (`judge` empty; `judge_seeds.py` refuses
     it, exit 2): every seed left a part illegal (`illegal` in judge.json and
-    each `s<S>.json`) or failed outright (exit 2, its `s<S>.log`). A
+    each `s<S>.json`, with the reason per part in `illegal_why`; a part
+    illegal in every seed is WARNED once and listed in judge.json's
+    `illegal_every_seed`) or failed outright (exit 2, its `s<S>.log`). A
     declared pose that is not legal no longer empties it, nor does an edge
     declared more connectors than it holds: they are listed under `refused`
     and `oversubscribed`, and the seeds are still judged (fix the intent, as
@@ -1050,7 +1054,12 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
      placement can meet (a decap pin limit on a rail with one cap far from
      the pin). Change that input -- move or unlock the fixed part
      (`place_pose`), correct the declared pose or the intent row -- and
-     place again (§3.6, the default seeds).
+     place again (§3.6, the default seeds). One exception: a member left
+     OUTSIDE its block's zone in every seed (`illegal_why` says by how
+     much) when the zone has room for it (the input board grades it inside)
+     is the anneal's miss, not the input's: repair the best seed as in case
+     2, aiming it inside the zone (`place_pose --intent`), or declare its
+     pose in `fixed_poses[]`.
   2. **A different part or pair in each seed** is the anneal's miss on a
      crowded board. Take the seed with the fewest illegal parts (in the
      other two cases, the first seed `judge.json` names: fewest floorplan
