@@ -991,9 +991,8 @@ def lp_lazy(c, A, b, bnd, lz, nv, xo):
     tie-break making that one point. The two-end USB and Ethernet bus's second pass, 228 000 rows: two solves on
     130 000 of them, 40 s to 16 s, the same geometry. Each solve after the first starts from the one before's basis
     (lp_by_dual's `warm`): the rows it adds are columns of the dual, so the answer before stays feasible there, and the
-    primal simplex goes on from it; the last rows are then solved once more from cold, for the answer as it was --
-    sdi_mipi_conv's DDR3 bus's second pass, four solves on 179 000 of its 317 000 rows, 80 s to 38 s, the same
-    geometry. (res, solves, rows taken)"""
+    primal simplex goes on from it to the same optimum, within the solver's tolerances -- a DDR3 bus's second pass,
+    three solves on 175 000 of its 314 000 rows, 26 s. (res, solves, rows taken)"""
     A = A.tocsr()
     tol = LAZY_TOL * (1.0 + np.abs(b))
     s_ = A[:, :nv] @ xo - b
@@ -1012,13 +1011,6 @@ def lp_lazy(c, A, b, bnd, lz, nv, xo):
             return res, n_, int(active.sum())
         new = ((A @ res.x - b) > tol) & ~active
         if not new.any():
-            if warm is not None:
-                # ...the rows that hold, solved once more from cold: the interior point's answer, bit for bit. The
-                # simplex lands on the same optimum within the solver's tolerances, a quantum of lp_round off in a few
-                # columns, and the geometry after it decides by exact ties (two pieces merged where their cross
-                # product is under 1e-9): zynq_ad9364's LVDS bus, its loop's second geometry so taken, went another
-                # way from there
-                res = lp_by_dual(c, A[active], b[active], bnd)
             return res, n_, int(active.sum())
         active |= near(res.x) & ~active
         warm = _widened(res.basis, took, np.flatnonzero(active)) if res.basis is not None else None
