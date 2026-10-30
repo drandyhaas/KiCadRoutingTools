@@ -106,17 +106,22 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
 #: that forbids it (`rule_area_item_pairs`).
 #: #1443: `[a, b]`, a part under a cover the intent declares, where it does
 #: not fit (`height_pairs`; only with an intent that declares one).
+#: #1535: `[ref, keep-out]`, a part inside one of the intent's `keepouts[]`
+#: (check_floorplan's `keepout` rule; only with an intent that declares one
+#: at ERROR severity), with its depth in `intent_keepout_amount`.
 PAIR_KEYS = ('pad_conflict_pairs', 'hole_conflict_pairs',
              'graphic_pad_conflict_pairs', 'graphic_pad_stack_pairs',
              'pad_stack_pairs', 'own_pad_short_pairs',
-             'courtyard_error_pairs', 'rule_area_item_pairs', 'height_pairs')
+             'courtyard_error_pairs', 'rule_area_item_pairs', 'height_pairs',
+             'intent_keepout_pairs')
 
 MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall',
                   'oob_keepout_copper_amount',
                   'oob_graphic_copper_amount',
                   'mating_keepout_amount',
                   'graphic_pad_shortfall',
-                  'pad_stack_area')
+                  'pad_stack_area',
+                  'intent_keepout_amount')
 
 #: What `legal` does and does NOT cover, published with every summary (#962
 #: follow-up item 4). A partial claim must read as partial.
@@ -137,7 +142,11 @@ LEGAL_SCOPE = ('pad-pad clearance', 'hole-hole clearance', 'pad copper vs the '
                "courtyards_overlap an error (#1385)",
                "pads and courtyards inside a rule area, board-level or "
                "footprint-owned, whose (pads not_allowed) / (footprints "
-               "not_allowed) forbids them (KiCad's items_not_allowed; #1451)")
+               "not_allowed) forbids them (KiCad's items_not_allowed; #1451)",
+               "with --intent, a part inside one of the intent's keepouts[] "
+               "(fence keep-outs compiled from blocks[].fence_mm and cans[] "
+               "included), as check_floorplan's keepout rule grades it, when "
+               "that rule is at ERROR severity (#1535)")
 LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     '(disclosed as graphic_edge_shortfall_refs, not gated)',
                     'footprint copper the parser does not model: pad-less '
@@ -590,7 +599,7 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
 
 def grade(pcb_data, board_path: str, clearance: float,
           board_edge_clearance=None, declared_keepouts=(), waivers=((), ()),
-          declared_heights=None) -> Dict:
+          declared_heights=None, intent_keepouts=None) -> Dict:
     """`grade_pad_legality` at this board's own poses -- never a re-derivation.
 
     `pcb_file` is passed so `PadClearanceModel` can read the netclasses, the
@@ -606,6 +615,9 @@ def grade(pcb_data, board_path: str, clearance: float,
     #1064: plus `pad_stack_census`, check_assembly's own pad_intersection
     channel, because `grade_pad_legality` skips a same-net pad pair before it
     measures anything and so never sees two parts' pads stacked on one net.
+    `intent_keepouts` (#1535) is `intent_keepout_gate`'s answer: the intent's
+    `keepouts[]` that check_floorplan's `keepout` rule gates, measured here as
+    that rule measures them.
     """
     from placement.legality import grade_pad_legality, pad_stack_census
     g = grade_pad_legality(pcb_data, clearance, pcb_file=board_path,
@@ -617,7 +629,52 @@ def grade(pcb_data, board_path: str, clearance: float,
     if declared_heights:
         g['height_pairs'] = height_pairs(pcb_data, board_path, waivers,
                                          declared_heights)
+    if intent_keepouts:
+        from placement.floorplan import keepout_findings
+        found = keepout_findings(pcb_data, board_path, intent_keepouts['keepouts'],
+                                 height_of=intent_keepouts['height_of'],
+                                 containers=intent_keepouts['containers'])
+        g['intent_keepout_refs'] = found
+        g['intent_keepout_pairs'] = sorted([f['ref'], f['keepout']] for f in found)
+        g['intent_keepout_amount'] = round(sum(f['area_mm2'] for f in found), 4)
     return g
+
+
+def intent_keepout_gate(intent, pcb_data, board_path: str) -> Optional[Dict]:
+    """The intent's `keepouts[]` this verb gates a move on (#1535), or None.
+
+    check_floorplan's `keepout` rule grades every part against them, and a
+    `set` or a `--near` snap used to land a part inside one with exit 0:
+    only the zones (#998) and the `mating:` regions (#1098, graded by
+    `grade_pad_legality` with the declared entry replacing the derived one)
+    reached this verb. The fence keep-outs `blocks[].fence_mm` and `cans[]`
+    compile to are in `intent.keepouts` already.
+
+    Gated only at ERROR severity, as `zone_check` gates zones: an author who
+    demoted `keepout` said the keep-outs are advisory. The part heights
+    (when a keep-out has a `max_height_mm`) and the containers are read once
+    here, from the input board -- both are properties of the part, not of
+    its pose -- so a snap re-grades each candidate without re-measuring."""
+    if intent is None:
+        return None
+    from placement import floorplan as _fp
+    from placement import legality as _lg
+    ks = tuple(k for k in (getattr(intent, 'keepouts', None) or ())
+               if not str(k.get('name', '')).startswith(_fp.MATING_PREFIX))
+    if not ks:
+        return None
+    severity = intent.severity_of('keepout')
+    height_of = None
+    if any(k.get('max_height_mm') is not None for k in ks):
+        from placement import heights as _h
+        with contextlib.redirect_stdout(io.StringIO()):
+            height_of = _h.for_board(pcb_data, board_path,
+                                     intent.height_declarations()).height
+    return {'keepouts': ks, 'severity': severity,
+            'gated': severity == _fp.ERROR,
+            'height_of': height_of,
+            'containers': frozenset(_lg.container_refs(pcb_data,
+                                                       pcb_file=board_path))}
 
 
 def height_pairs(pcb_data, board_path: str, waivers=((), ()),
@@ -821,6 +878,10 @@ def _legality_row(before: Dict, after: Dict) -> Dict:
     if 'height_pairs' in after:
         row['height_pairs_before'] = before.get('height_pairs')
         row['height_pairs_after'] = after.get('height_pairs')
+    # #1535: parts inside one of the intent's keepouts[].
+    if 'intent_keepout_pairs' in after:
+        row['intent_keepout_pairs_before'] = before.get('intent_keepout_pairs')
+        row['intent_keepout_pairs_after'] = after.get('intent_keepout_pairs')
     return row
 
 
@@ -829,7 +890,8 @@ def _legality_row(before: Dict, after: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 def _ranker_state(pcb, board_path: str, ref: str, at, *, clearance: float,
-                  board_edge_clearance: float, declared_heights=None):
+                  board_edge_clearance: float, declared_heights=None,
+                  keepouts=None):
     """The ranker's state for `ref`, judged from the INPUT board.
 
     `pcb` / `board_path` are the board the caller's re-grade compares
@@ -846,11 +908,16 @@ def _ranker_state(pcb, board_path: str, ref: str, at, *, clearance: float,
     to the input pose too (`QuenchState.incumbent_at`), before the move, so
     that branch admits only poses less off the board than the INPUT, not
     than the request.
+
+    `keepouts` is the intent's `keepouts[]` (#1535), which the seat gate
+    prices as it does in the seeder, so the ranked rung does not offer a
+    pose inside one.
     """
     import pose_score
     st = pose_score.make_state(pcb, board_path, clearance=clearance,
                                board_edge_clearance=board_edge_clearance,
-                               declared_heights=declared_heights)
+                               declared_heights=declared_heights,
+                               keepouts=keepouts)
     part = st.parts.get(ref) if (at is not None
                                  and hasattr(st, 'parts')) else None
     if part is not None:
@@ -910,7 +977,7 @@ def _pose_key(p: Dict) -> Tuple[float, float, float]:
 def nearest_legal(board_path: str, ref: str, *, clearance: float,
                   board_edge_clearance: float, radius: float, step: float,
                   rotations=None, limit: int = 12, pcb_data=None, at=None,
-                  declared_heights=None):
+                  declared_heights=None, keepouts=None):
     """The ranked legal poses for `ref` on the board at `board_path`.
 
     `pose_score.rank_poses`, unchanged: this only resolves the knobs from the
@@ -931,7 +998,7 @@ def nearest_legal(board_path: str, ref: str, *, clearance: float,
     pcb = pcb_data if pcb_data is not None else parse_kicad_pcb(board_path)
     st = _ranker_state(pcb, board_path, ref, at, clearance=clearance,
                        board_edge_clearance=board_edge_clearance,
-                       declared_heights=declared_heights)
+                       declared_heights=declared_heights, keepouts=keepouts)
     kw = {} if rotations is None else {'rotations': tuple(rotations)}
     on_board, ranked, diag = _rank(pcb, board_path, ref, st, radius=radius,
                                    step=step, limit=limit + 1, **kw)
@@ -949,7 +1016,8 @@ def nearest_legal(board_path: str, ref: str, *, clearance: float,
 
 def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
                     board_edge_clearance: float, radius: float, step: float,
-                    pcb_data=None, at=None, declared_heights=None):
+                    pcb_data=None, at=None, declared_heights=None,
+                    keepouts=None):
     """Poses to TRY for a snap, nearest-first, from TWO rungs. (list, census)
 
     `board_path` / `pcb_data` are the INPUT board -- the one the caller's
@@ -990,7 +1058,7 @@ def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
     request = None if at is None else (float(at[0]), float(at[1]), rot)
     st = _ranker_state(pcb, board_path, ref, request, clearance=clearance,
                        board_edge_clearance=board_edge_clearance,
-                       declared_heights=declared_heights)
+                       declared_heights=declared_heights, keepouts=keepouts)
     # "The knobs veto even staying put" (run-7 S4) is a fact about the part's
     # pose on the INPUT board, where the re-grade is no-worse by definition:
     # a veto THERE means the ranker's gates are stricter than the board. The
@@ -1137,7 +1205,8 @@ def search_replicate(board_path: str, pcb, cand: str, before: Dict,
                      placements: Sequence[Dict], targets: Sequence[Dict], *,
                      clearance: float, board_edge_clearance, declared_keepouts,
                      strict: bool, guarded, waivers=((), ()),
-                     declared_heights=None) -> Tuple[Optional[List[Dict]], List[Dict]]:
+                     declared_heights=None, intent_keepouts=None
+                     ) -> Tuple[Optional[List[Dict]], List[Dict]]:
     """`replicate --search MM` (#1211): fit each searched target's copy
     nearest its default offset. `(placements, census)`; `placements` is None
     when some target found no accepted offset.
@@ -1179,7 +1248,8 @@ def search_replicate(board_path: str, pcb, cand: str, before: Dict,
                 base = grade(_without(parse_kicad_pcb(board_path), later),
                              board_path, clearance, board_edge_clearance,
                              declared_keepouts, waivers,
-                             declared_heights=declared_heights)
+                             declared_heights=declared_heights,
+                             intent_keepouts=intent_keepouts)
         else:
             base = before
         lattice = search_offsets(t['radius'], t['step'])
@@ -1216,7 +1286,8 @@ def search_replicate(board_path: str, pcb, cand: str, before: Dict,
                 copy_siblings(board_path, cand)
                 g = grade(_without(parse_kicad_pcb(cand), later), cand,
                           clearance, board_edge_clearance, declared_keepouts,
-                          waivers, declared_heights=declared_heights)
+                          waivers, declared_heights=declared_heights,
+                          intent_keepouts=intent_keepouts)
             b = worsened(base, g)
             if not b and (not strict or is_clean(g)):
                 found = shifted
@@ -1343,6 +1414,10 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
     # ...and its declared covers and part heights (#1443), which every grade
     # and the ranker judge parts under a cover by.
     decl_h = intent.height_declarations() if intent is not None else None
+    # ...and its ordinary keep-outs (#1535), check_floorplan's `keepout`
+    # rule, gated (`ko_grade`) when that rule is at ERROR severity.
+    ko_gate = intent_keepout_gate(intent, pcb, board_path)
+    ko_grade = ko_gate if ko_gate and ko_gate['gated'] else None
 
     # A KiCad lock is a DECISION someone recorded in the file -- the seeder
     # stamps the intent's must_lock refs there, and run 25 stamped its rotation
@@ -1425,7 +1500,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
 
     before = grade(pcb, board_path, clearance, board_edge_clearance,
                    declared_keepouts, cy_waivers,
-                   declared_heights=decl_h)
+                   declared_heights=decl_h, intent_keepouts=ko_grade)
     stage = tempfile.TemporaryDirectory(prefix='place_pose_')
     try:
         cand = os.path.join(stage.name, 'candidate.kicad_pcb')
@@ -1447,7 +1522,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         cand_pcb = parse_kicad_pcb(cand)
         after = grade(cand_pcb, cand, clearance, board_edge_clearance,
                       declared_keepouts, cy_waivers,
-                   declared_heights=decl_h)
+                      declared_heights=decl_h, intent_keepouts=ko_grade)
         bad = worsened(before, after)
         snap_ran = False
         search_finding = None
@@ -1475,7 +1550,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 board_path, pcb, cand, before, placements, search_targets,
                 clearance=clearance, board_edge_clearance=board_edge_clearance,
                 declared_keepouts=declared_keepouts, strict=strict,
-                guarded=guarded, waivers=cy_waivers, declared_heights=decl_h)
+                guarded=guarded, waivers=cy_waivers, declared_heights=decl_h,
+                intent_keepouts=ko_grade)
             for t, c in zip(search_targets, census):
                 t['report']['search'] = c
             for t in search_targets[len(census):]:
@@ -1504,7 +1580,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 cand_pcb = parse_kicad_pcb(cand)
                 after = grade(cand_pcb, cand, clearance, board_edge_clearance,
                               declared_keepouts, cy_waivers,
-                   declared_heights=decl_h)
+                              declared_heights=decl_h, intent_keepouts=ko_grade)
                 bad = worsened(before, after)
             else:
                 miss = census[-1]
@@ -1575,7 +1651,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                     board_edge_clearance=board_edge_clearance,
                     radius=snap_radius, step=snap_step, pcb_data=pcb,
                     at=(placements[0]['new_x'], placements[0]['new_y']),
-                    declared_heights=decl_h)
+                    declared_heights=decl_h, keepouts=declared_keepouts)
             except PoseRefusal as exc:
                 # The refusal rides in the SAME summary every other refusal
                 # here carries -- ops, knobs and lock intent included -- so a
@@ -1609,7 +1685,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 pcb_c = parse_kicad_pcb(cand)
                 g = grade(pcb_c, cand, clearance, board_edge_clearance,
                           declared_keepouts, cy_waivers,
-                   declared_heights=decl_h)
+                          declared_heights=decl_h, intent_keepouts=ko_grade)
                 b = worsened(before, g)
                 if b or (strict and not is_clean(g)):
                     for k, pairs in regrade_refusal(before, g, b,
@@ -1745,7 +1821,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 cand_pcb = parse_kicad_pcb(cand)
                 after = grade(cand_pcb, cand, clearance, board_edge_clearance,
                               declared_keepouts, cy_waivers,
-                   declared_heights=decl_h)
+                              declared_heights=decl_h, intent_keepouts=ko_grade)
                 bad = worsened(before, after)
 
         # A `face` op's rotation is PREDICTED (FACE_CYCLE) and then MEASURED on
@@ -1881,6 +1957,22 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 'refs': [], 'rows': [], 'worse': [],
                 'skipped': 'no op in this call moves a part, so no zone '
                            'can get worse'}
+        if ko_gate is not None:
+            # #1535: which keep-outs this call graded, and whether they gate.
+            # A demoted `keepout` rule is reported for the moved parts, never
+            # refused, as a WARN zone row is.
+            kc = {'keepouts': [k.get('name') for k in ko_gate['keepouts']],
+                  'severity': ko_gate['severity'], 'gated': ko_gate['gated']}
+            if not ko_gate['gated'] and placements:
+                from placement.floorplan import keepout_findings
+                moved_refs = {p_['reference'] for p_ in placements}
+                kc['inside_after'] = [
+                    f for f in keepout_findings(
+                        cand_pcb, cand, ko_gate['keepouts'],
+                        height_of=ko_gate['height_of'],
+                        containers=ko_gate['containers'])
+                    if f['ref'] in moved_refs]
+            summary['keepout_check'] = kc
         if intent is not None and placements:
             zc = zone_check(intent, pcb, board_path, cand_pcb, cand,
                             [p_['reference'] for p_ in placements],
@@ -1916,7 +2008,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                         pcb_data=pcb,
                         at=(placements[0]['new_x'], placements[0]['new_y'],
                             placements[0]['new_rotation']),
-                        declared_heights=decl_h)
+                        declared_heights=decl_h, keepouts=declared_keepouts)
                     summary['nearest_legal'] = poses[0] if poses else None
                     summary['nearest_legal_basis'] = (
                         'pose_score.rank_poses / QuenchState.candidate_valid '
@@ -2182,6 +2274,10 @@ def _refusal_reason(bad, strict, before, after, summary) -> str:
                        "a shared side, whatever the nets (check_assembly's "
                        "pad_intersection, never waivable); check_assembly "
                        "grades a board with one NOT BUILDABLE.")
+        if any(k.startswith('intent_keepout_') for k in bad):
+            reason += (" An intent_keepout pair is a part inside one of the "
+                       "intent's keepouts[] (part/keep-out), which "
+                       "check_floorplan's keepout rule fails.")
     else:
         reason = ("--strict-legal was asked for and the board is not clean at "
                   "this pose (%s)" % ', '.join(

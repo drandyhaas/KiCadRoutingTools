@@ -3416,6 +3416,25 @@ def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
     rect."""
     ks = (mating_keepouts(pcb_data, pcb_file, declared)
           if keepouts is None else tuple(keepouts))
+    return keepout_findings(pcb_data, pcb_file, ks)
+
+
+def keepout_findings(pcb_data, pcb_file: Optional[str], keepouts, *,
+                     height_of=None, containers=()) -> List[Dict]:
+    """`[{ref, keepout, side, area_mm2}]`: the parts inside `keepouts` at the
+    file's poses, on the placement state's rects (see
+    `mating_keepout_findings`), resolved by `keepouts_for_ref` and measured
+    by `keepout_hit`. `area_mm2` is a rect keep-out's overlap area, and 1.0
+    for a circle -- `keepout_hit`'s marker, not a measurement.
+
+    `height_of(ref)` (#1443), when given, is a part's known height, so a
+    keep-out with a `max_height_mm` admits a part no taller; without it such
+    a keep-out binds every part, as an unknown height does. `containers`
+    (#1475) are measured on their pad copper, never their frame rect, as
+    `rule_keepout` grades them. With both, this is `rule_keepout`'s verdict
+    without building the grade's placement state (#1535: `place_pose`
+    re-grades every snap candidate with it)."""
+    ks = tuple(keepouts or ())
     if not ks:
         return []
     from .parser import courtyard_for_side, extract_courtyard_sides
@@ -3446,8 +3465,15 @@ def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
                 tht = legality.offset_far(legality.rotate_far(tl, rot),
                                           fp.x, fp.y)
         sides = legality.sides_occupied(side, has_tht)
-        for k in keepouts_for_ref(ks, ref, sides):
-            a = keepout_hit(k, (rect, tht))
+        rects = (rect, tht)
+        if ref in containers:
+            rects = []
+            for q in legality.pads_at_pose(fp, (fp.x, fp.y, rot)):
+                cx, cy, hx, hy = legality.pad_copper_box(q)
+                rects.append((cx - hx, cy - hy, cx + hx, cy + hy))
+        for k in keepouts_for_ref(ks, ref, sides,
+                                  height_of(ref) if height_of is not None else None):
+            a = keepout_hit(k, rects)
             if a:
                 out.append({'ref': ref, 'keepout': k['name'],
                             'side': side, 'area_mm2': round(a, 4)})

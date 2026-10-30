@@ -68,6 +68,12 @@ finding) is refused at exit 4 with nothing written, and `JSON_SUMMARY.
 zone_check` names the block, the zone and the overrun. Relative, like the
 legality verdict, so a move that brings a part from the pile toward its zone
 is never refused for not arriving. `--force` writes anyway and says so.
+The intent's `keepouts[]` (#1535) are graded the same way, as check_floorplan's
+`keepout` rule measures them: a pose that puts a moved part inside one it was
+not in is refused at exit 4 (`intent_keepout_pairs`), a `--near` snap ranks and
+re-grades its candidates against them, and `JSON_SUMMARY.keepout_check` names
+the keep-outs graded; with the rule demoted to warn they are reported, not
+refused.
 
 There is no `--allow-unplaced`: this tool has no unplaced gate, because placing
 the parts of a pile one decision at a time is what it is for. An unplaced board
@@ -225,8 +231,9 @@ def build_parser(with_verbs=True):
     p.add_argument('--intent', default=None, metavar='PATH',
                    help="a floorplan intent: refuse a pose that leaves a "
                         "moved part further outside its block's zone (an "
-                        "ERROR zone_containment) than it was; --force "
-                        "writes anyway (#959)")
+                        "ERROR zone_containment) than it was, or inside one "
+                        "of its keepouts[] it was not in (an ERROR keepout, "
+                        "#1535); --force writes anyway (#959)")
     p.add_argument('--allow-routed', action='store_true',
                    help="Run even when the board already carries copper. Off "
                         "by default: placement moves FOOTPRINTS and not "

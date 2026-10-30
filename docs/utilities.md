@@ -582,7 +582,13 @@ finding, refuses at exit 4, and nothing is written; with the rule demoted to
 warn the pose is written and the row reported. `JSON_SUMMARY.zone_check` names the block, the
 zone and the overrun before and after. The check is relative, like the legality
 verdict: a move from the pile toward its zone is never refused for not
-arriving. `--force` writes anyway and says so. A call that only locks or
+arriving. `--force` writes anyway and says so. The intent's `keepouts[]`
+(fence keep-outs included) are graded the same way, as check_floorplan's
+`keepout` rule measures them: a pose that puts a moved part inside one it was
+not in, or deeper inside a rect one, refuses at exit 4
+(`intent_keepout_pairs`), a `--near` snap's ranker and re-grade avoid them, and
+`JSON_SUMMARY.keepout_check` names the keep-outs graded; with the rule demoted
+to warn the moved parts inside one are reported (`inside_after`), not refused. A call that only locks or
 unlocks moves nothing and records `zone_check.skipped`. With a plan in hand,
 pass it.
 

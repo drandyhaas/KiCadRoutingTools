@@ -2105,10 +2105,19 @@ class QuenchState:
         part-vs-DECLARED-GEOMETRY, never part-vs-part, so nothing another part
         does can change them. That is also why they are the right gate for the
         swap phase, where `candidate_valid` is not.
+
+        The pose is `incumbent_at[ref]` when a caller pinned it (#1259), as
+        for `_incumbent_violation` (#1535): `place_pose` ranks round a
+        requested pose but judges the part against its pose on the INPUT
+        board, so a request inside a keep-out must not license every other
+        pose inside it.
         """
         v = self._inc_intent.get(ref)
         if v is None:
-            v = self.intent_terms(ref, self.parts[ref].grade_rects())
+            at = self.incumbent_at.get(ref)
+            v = self.intent_terms(ref, self.parts[ref].grade_rects()
+                                  if at is None else
+                                  self.parts[ref].grade_rects(*at))
             self._inc_intent[ref] = v
         return v
 

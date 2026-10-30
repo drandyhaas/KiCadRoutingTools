@@ -35,9 +35,12 @@ it:
    of the intent is graded only; "Which rules the placer can see" below has
    the table.
 2. **`place_pose --intent` refuses a pose that walks a part out of its
-   zone.** A pose that leaves a moved part further outside its block's zone
-   than it was is refused at exit 4, and `place_pose replicate --intent` (no
-   `--from` / `--to`) applies the intent's `replicate[]` rows.
+   zone, or into a keep-out.** A pose that leaves a moved part further
+   outside its block's zone than it was, or inside one of `keepouts[]` it was
+   not in (fence keep-outs included), is refused at exit 4; a `--near` snap
+   ranks and re-grades its candidates against the keep-outs too. `place_pose
+   replicate --intent` (no `--from` / `--to`) applies the intent's
+   `replicate[]` rows.
 3. **`place_fanout_clearance --intent` holds its decap limits** and the
    rotations it declares for caps.
 
@@ -827,7 +830,9 @@ It is compiled at load into four keep-outs round `zone` -- named
 `fence:<block>:N`, `:S`, `:W` and `:E`, the north and south ones spanning the
 corners -- on the block's `side` (both faces when it names none), with no
 `allow`. So every reader of `keepouts` sees one declaration: the grade's
-`keepout` rule, `place_simple`'s seat and anneal, and check_assembly. Members
+`keepout` rule, `place_simple`'s seat and anneal, and `place_pose --intent`.
+(check_assembly reads only the `mating:` keep-outs, a buildability fact;
+the rest are the floorplan grade's.) Members
 are kept out of the band too: a member the zone's `tolerance_mm` lets stray
 past the zone is still refused there. `fence_mm` needs a `zone`, and an
 intent may not name its own keep-out `fence:...` (refused at load). Holding
@@ -928,7 +933,7 @@ status from this list:
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
 | `assembly_side` | a part sits on a face the board's declared assembly policy does not populate. **warn** by default: no placement tool reads the policy, and a part changes face only by a face declaration (`place_simple` applies `blocks[].side` and the rest before it places), so an error would be a red mark until someone declares the faces | `legality.assembly_census`, body face — the pad-bearing population, so a zero-pad graphic on the back is not a part (a part whose only pads are paste/mask apertures is zero-pad too) |
 | `zone_exclusive` | a non-member intrudes on a reserved zone. A container (an enclosure or pin frame other parts sit inside, `legality.container_kinds`) is no stranger: its rect is a frame, not a body, here as in the courtyard channel. A locked or fixed-pose stranger already inside is also named before placing (`plan_fixed_in_exclusive_zone`) | `rect_overlap_area`, **courtyard only** — a through-hole stranger's leads may cross a reserved zone, unlike a keep-out's. **Priced and enforced** — `place_simple`'s anneal charges a stranger's courtyard area inside the zone, and its final legality check (`seeder.pose_ok`, through `QuenchState.exclusive_clear`) refuses a stranger's pose inside it and moves the part to the nearest legal pose |
-| `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Priced and enforced, not only graded** — `place_simple`'s anneal charges the area inside a keep-out, and its final legality check (`seeder.pose_ok`) refuses such a pose, both through the same `keepout_hit` this rule calls |
+| `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Priced and enforced, not only graded** — `place_simple`'s anneal charges the area inside a keep-out, and its final legality check (`seeder.pose_ok`) refuses such a pose, both through the same `keepout_hit` this rule calls; `place_pose --intent` refuses a pose that puts a moved part inside one it was not in, or deeper in a rect one (`intent_keepout_pairs`, relative like its zone check), and its snap ranker prices them |
 | `edge_connector` | overhang outside `[min,max]`; the wrong edge; a graded receptacle whose mating face points away from its declared edge (**error** on a strong face, **warn** on a weak one); on the body path, pad copper past the OUTLINE (castellated pads excepted); a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | the band: the drawn body's overhang past the outline, summed over the sides it crosses (`body_outside_mm`, `connector_geometry`), else `BoardOutlineGate.rect_outside_amount`; the seat: `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_populations` (`near`) |
 | `decap_ungraded` | a cap in scope lies BEYOND the tether search radius, so `decap_distance` never measured it against the declared limit — a claim about COVERAGE, not compliance. **warn** by default. **ERROR, per cap, for a cap in `decaps.within_radius_refs`**: one the `--decaps-from` reference keeps inside the radius, so leaving it beyond strands a decoupler. An explicit `severity.decap_ungraded` wins either way | `groups.decap_populations` (`beyond`) |
