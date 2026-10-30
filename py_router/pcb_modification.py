@@ -3521,7 +3521,6 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
             segs_by_net[s.net_id].append(s)
 
     from check_connected import check_net_connectivity
-    from check_drc import point_to_pad_distance
 
     n_trimmed = 0
     originals_to_strip: List[Segment] = []
@@ -3579,8 +3578,10 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                 # (max-half-dim), which both over- and under-credits (a stub
                 # ending on a rect pad's corner read as dangling, and a stub
                 # merely NEAR an elongated pad read as anchored). The free
-                # end touching real pad copper is never a dangle.
-                if any(point_to_pad_distance(fx, fy, p) <= s.width / 2
+                # end touching real pad copper ON ITS OWN LAYER is never a
+                # dangle; a pad on another layer under it anchors nothing
+                # (#1524), so this asks the one layer-scoped predicate.
+                if any(endpoint_reaches_pad(fx, fy, s.width / 2, (s.layer,), p)
                        for p in pads_n):
                     continue
                 # A free end inside a same-net zone outline may be carried by
@@ -4384,20 +4385,35 @@ def make_model_fill_anchor(pcb_data, net_id, fallback=None):
     track_dangling (no actual fill under them). Model false-positives
     (~1%) only KEEP ends (safe); false-negatives (~0.1%) trim a stub the
     real pour anchors, which is harmless same-net copper next to the pour
-    and still connectivity-gated. Falls back to `fallback` (or True) when
-    no model is available."""
+    and still connectivity-gated.
+
+    Fill exists only inside an outline of one of the net's zones on the
+    queried layer, so an endpoint anywhere else is never anchored (#1525: a
+    GND stub on B.Cu read as anchored by a pour on In1.Cu alone). `fallback`
+    -- "fill COULD exist here", which knows nothing of zones -- is consulted
+    only inside such an outline whose model could not be built. Always
+    returns an anchor, never None: _safe_prune_net reads None as "use the
+    zone-credit validator", which is just as blind to the zone's layer."""
+    from check_connected import point_in_polygon
     try:
         from plane_fill_model import get_fill_models
         models = get_fill_models(pcb_data, net_id)
     except Exception:
         models = {}
-    if not models:
-        return fallback
+    outlines = {}
+    for z in (getattr(pcb_data, 'zones', None) or []):
+        if z.net_id == net_id and z.polygon:
+            outlines.setdefault(z.layer, []).append(z.polygon)
+
+    def _in_outline(x, y, layer):
+        return any(point_in_polygon(x, y, poly)
+                   for poly in outlines.get(layer, ()))
 
     def _anchor(x, y, layer):
         ms = models.get(layer)
         if not ms:
-            return fallback(x, y, layer) if fallback else False
+            return bool(fallback and _in_outline(x, y, layer)
+                        and fallback(x, y, layer))
         for m in ms:
             c = m.query_component(x, y, size=0.05)
             if c is not None and c > 0:
