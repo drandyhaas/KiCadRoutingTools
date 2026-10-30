@@ -131,7 +131,7 @@ def _per_net_cost_sources(track_proximity_cache, net_ids, sibs=()):
     cut it) and their own track-proximity entry (a multipoint net's Phase 3
     taps were pushed off its own main route).
 
-    The merge memo is keyed on this dict's identity, so a view equal to the
+    The merge memo (SUM mode) is keyed on this dict's identity, so a view equal to the
     one handed out last time for the same drop (same keys, same arrays) is
     THAT object again: a fresh dict per prepare would never hit the memo, and
     each miss would pin another stacked copy of every source. The same dict
