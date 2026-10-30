@@ -338,6 +338,65 @@ for kind_, Ls_, _net, d_, lab_ in STATIC:
             ISL_PADS[(_GI.get(lab_[4:], lab_), L_)].append(d_)
 
 
+# gather looks at every lane segment at once: segments and static objects binned by cell on each layer, as sorted keys
+def _ckey(ly, cx, cy):
+    """one int64 key per (layer, cell x, cell y)"""
+    return (ly << 42) | ((cx + (1 << 20)) << 21) | (cy + (1 << 20))
+
+
+def _cell_boxes(x0, x1, y0, y1):
+    """each box of cells x0..x1 by y0..y1 (inclusive) as its cells: (the box's index, cx, cy) per cell"""
+    nx_, ny_ = x1 - x0 + 1, y1 - y0 + 1
+    cnt = nx_ * ny_
+    k = np.arange(int(cnt.sum())) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+    nyr = np.repeat(ny_, cnt)
+    return np.repeat(np.arange(len(x0)), cnt), np.repeat(x0, cnt) + k // nyr, np.repeat(y0, cnt) + k % nyr
+
+
+def _join(ly, x0, x1, y0, y1, keys, ids):
+    """(query, item) for each item binned (keys sorted, ids theirs) in a cell of a query's box on its layer ly -- an item
+    once per cell the two share"""
+    q, cx, cy = _cell_boxes(x0, x1, y0, y1)
+    kq = _ckey(ly[q], cx, cy)
+    lo = np.searchsorted(keys, kq, 'left')
+    cnt = np.searchsorted(keys, kq, 'right') - lo
+    pos = np.arange(int(cnt.sum())) - np.repeat(np.cumsum(cnt) - cnt, cnt) + np.repeat(lo, cnt)
+    return np.repeat(q, cnt), ids[pos]
+
+
+_LC = {L: k for k, L in enumerate(sorted(RL | {L for ln in LANES.values() for L in ln['L']}))}
+# each static object on each of its layers, binned by its box grown by its reach in static_seg's first look (a via's
+# ring, a stub's half width, a pad's corner buffer) and the widest cut a lane asks there: (x0, y0, x1, y1, reach)
+_SBOX = np.zeros((len(STATIC), 5))
+_SNET = np.array([net for _k, _L, net, _d, _l in STATIC], np.int64)
+_sk, _so = [], []
+_GROW = max(hw.values(), default=0.0) + NEED_ST + MARGIN + 1e-6
+for k_, (kind_, Ls_, _net, d_, _lab) in enumerate(STATIC):
+    if kind_ == 'circ':
+        _SBOX[k_] = (d_[0], d_[1], d_[0], d_[1], d_[3] if len(d_) > 3 else d_[2])
+    elif kind_ == 'seg':
+        _SBOX[k_] = (min(d_[0], d_[2]), min(d_[1], d_[3]), max(d_[0], d_[2]), max(d_[1], d_[3]), d_[4])
+    else:
+        _SBOX[k_] = (d_[0] - d_[2], d_[1] - d_[3], d_[0] + d_[2], d_[1] + d_[3], _pairs.corner_buffer(cfg.grid_step))
+    g_ = _SBOX[k_, 4] + _GROW
+    c0_ = np.floor((_SBOX[k_, :2] - g_) / SCELL).astype(np.int64)
+    c1_ = np.floor((_SBOX[k_, 2:4] + g_) / SCELL).astype(np.int64)
+    for L_ in sorted(Ls_):
+        if L_ in _LC:
+            _sk.append((_LC[L_], c0_[0], c1_[0], c0_[1], c1_[1])); _so.append(k_)
+if _sk:
+    _sk = np.array(_sk, np.int64)
+    _o, _cx, _cy = _cell_boxes(_sk[:, 1], _sk[:, 2], _sk[:, 3], _sk[:, 4])
+    _kk = _ckey(_sk[_o, 0], _cx, _cy)
+    _oo = np.argsort(_kk, kind='stable')
+    _SKEY, _SOBJ = _kk[_oo], np.array(_so, np.int64)[_o][_oo]
+else:
+    _SKEY, _SOBJ = np.zeros(0, np.int64), np.zeros(0, np.int64)
+_OWNA = np.full((len(LANES), max((len(v) for v in OWN.values()), default=1)), -1, np.int64)
+for l_, n in enumerate(LANES):
+    _OWNA[l_, :len(OWN[n])] = sorted(OWN[n])
+
+
 def way_out(P, nv, L, lab, need):
     """how far P moves along the unit vector nv to stand `need` off every pad of pad `lab`'s island on layer L (their
     boxes grown by it): past one pad's, on to the next it then stands in"""
@@ -542,6 +601,27 @@ def seg_seg(p0, p1, q0, q1):
     return float(np.linalg.norm(p0 + d1 * s - q0 - d2 * t)), s, t
 
 
+def seg_seg_rows(p0, p1, q0, q1):
+    """seg_seg for each row of p0, p1, q0, q1 at once: its branches and its arithmetic, so its floats (a 2-vector's
+    dot and norm add its two products as written)"""
+    d1, d2, r = p1 - p0, q1 - q0, p0 - q0
+    dot = lambda u, v: u[:, 0] * v[:, 0] + u[:, 1] * v[:, 1]
+    a, e, f, c, b = dot(d1, d1), dot(d2, d2), dot(d2, r), dot(d1, r), dot(d1, d2)
+    unit = lambda x: np.where(1.0 < x, 1.0, np.where(x < 0.0, 0.0, x))        # min(max(x, 0.0), 1.0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        den = a * e - b * b
+        s = np.where(den > 1e-14, unit((b * f - c * e) / den), 0.0)
+        t = (b * s + f) / e
+        lo, hi = t < 0, t > 1
+        s, t = np.where(lo, unit(-c / a), np.where(hi, unit((b - c) / a), s)), np.where(lo, 0.0, np.where(hi, 1.0, t))
+        pe, pa = e < 1e-14, a < 1e-14                                         # q a point, p a point
+        s, t = np.where(pe, unit(-c / a), s), np.where(pe, 0.0, t)
+        s, t = np.where(pa, 0.0, s), np.where(pa, unit(f / e), t)
+        s, t = np.where(pa & pe, 0.0, s), np.where(pa & pe, 0.0, t)
+    w = p0 + d1 * s[:, None] - q0 - d2 * t[:, None]
+    return np.where(pa & pe, np.sqrt(dot(r, r)), np.sqrt(dot(w, w))), s, t
+
+
 def barrels(n, i):
     """a via vertex's barrels: itself, or a pair's two across its arriving direction -- as (vertex, offset vector)"""
     X = LANES[n]['X']
@@ -586,97 +666,110 @@ def gather():
     """every rule within MARGIN of its bar, linearised: (terms [(lane, vertex, coefficient-vector)], rhs, kind, label,
     current value) meaning sum coef . dX >= rhs"""
     rows = []
-    segs = collections.defaultdict(list)       # grid cell -> (lane, i) segments i..i+1
     CELL = SCELL
-    for n, ln in LANES.items():
-        X = ln['X']
-        for i in range(len(X) - 1):
-            if i in ln['NC']:
-                continue
-            lo, hi = np.minimum(X[i], X[i + 1]), np.maximum(X[i], X[i + 1])
-            for cx in range(int(math.floor(lo[0] / CELL)), int(math.floor(hi[0] / CELL)) + 1):
-                for cy in range(int(math.floor(lo[1] / CELL)), int(math.floor(hi[1] / CELL)) + 1):
-                    segs[(cx, cy)].append((n, i))
+    # the lanes' segments (but the NC ones: no copper), each lane's in order and the lanes in LANES's, as arrays -- each
+    # binned by its bounding box, as one table of (layer, cell) keys
+    nm = list(LANES)
+    rank_ = {n: k for k, n in enumerate(sorted(nm))}
+    SL, SI, MT, SD, P0, P1 = [], [], [], [], [], []
+    for l_, (n, ln) in enumerate(LANES.items()):
+        ii = [i for i in range(len(ln['X']) - 1) if i not in ln['NC']]
+        SL += [l_] * len(ii); SI += ii
+        P0.append(ln['X'][ii]); P1.append(ln['X'][[i + 1 for i in ii]])
+        MT += [mitre(n, i) for i in ii]
+        # a pair's staircase off its line (pairs.stair_dev), per segment the more of its two ends': the bar from it of
+        # a single with a pair either side (SAND), which the snap cannot move off either
+        if n in prs:
+            d_ = _pairs.stair_dev(cfg, ln['X'].tolist())
+            SD += [max(d_[i], d_[i + 1]) for i in ii]
+        else:
+            SD += [0.0] * len(ii)
+    SL, SI, MT, SD = np.array(SL, np.int64), np.array(SI, np.int64), np.array(MT, float), np.array(SD, float)
+    K = len(SL)
+    P0, P1 = (np.concatenate(P0), np.concatenate(P1)) if K else (np.zeros((0, 2)), np.zeros((0, 2)))
+    LY = np.array([_LC[LANES[nm[l_]]['L'][i]] for l_, i in zip(SL.tolist(), SI.tolist())], np.int64)
+    PR = np.array([n in prs for n in nm], bool)[SL]
+    RK = np.array([rank_[n] for n in nm], np.int64)[SL]
+    NK = np.empty(K, np.int64)                       # each segment's place in (lane name, index) order
+    NK[np.lexsort((SI, RK))] = np.arange(K)
+    LO, HI = np.minimum(P0, P1), np.maximum(P0, P1)
+    C0, C1 = np.floor(LO / CELL).astype(np.int64), np.floor(HI / CELL).astype(np.int64)
+    own_, cx_, cy_ = _cell_boxes(C0[:, 0], C1[:, 0], C0[:, 1], C1[:, 1])
+    key_ = _ckey(LY[own_], cx_, cy_)
+    o_ = np.argsort(key_, kind='stable')
+    RKEY, RID = key_[o_], own_[o_]
 
     near_memo = {}                  # (the cells a query spans -> its answer: neighbouring segments span the same cells)
 
     def near_segs(P, r):
+        """(lane, i) of every segment in a cell within r of P, on any layer, in (lane, i) order: the LP's row order"""
         key = (int(math.floor((P[0] - r) / CELL)), int(math.floor((P[0] + r) / CELL)),
                int(math.floor((P[1] - r) / CELL)), int(math.floor((P[1] + r) / CELL)))
         got = near_memo.get(key)
         if got is None:
-            out = set()
-            for cx in range(key[0], key[1] + 1):
-                for cy in range(key[2], key[3] + 1):
-                    out.update(segs.get((cx, cy), ()))
-            got = near_memo[key] = sorted(out)          # the LP's row order: a set's would follow the hash seed
+            k_ = np.flatnonzero((C0[:, 0] <= key[1]) & (C1[:, 0] >= key[0]) & (C0[:, 1] <= key[3]) & (C1[:, 1] >= key[2]))
+            k_ = k_[np.argsort(NK[k_])]
+            got = near_memo[key] = [(nm[l_], i) for l_, i in zip(SL[k_].tolist(), SI[k_].tolist())]
         return got
 
-    seen = set()
-    # each segment's bounding box and its mitre, once: a pair of segments whose boxes stand further apart than its bar
-    # (and the margin) is further apart still, and needs no closer look
-    BOX = {n: [(min(X_[i][0], X_[i + 1][0]), min(X_[i][1], X_[i + 1][1]), max(X_[i][0], X_[i + 1][0]),
-                max(X_[i][1], X_[i + 1][1])) for i in range(len(X_) - 1)] for n, X_ in ((n, ln['X'].tolist()) for n, ln in LANES.items())}
-    MIT = {n: [mitre(n, i) for i in range(len(ln['X']) - 1)] for n, ln in LANES.items()}
-    # a pair's staircase off its line (pairs.stair_dev), per segment the more of its two ends': the bar from it of a
-    # single with a pair either side (SAND), which the snap cannot move off either
-    STD = {}
-    for n, ln in LANES.items():
-        if n in prs:
-            d_ = _pairs.stair_dev(cfg, ln['X'].tolist())
-            STD[n] = [max(d_[i], d_[i + 1]) for i in range(len(d_) - 1)]
-    sand_memo = {}
+    def near_pairs(q, r, P=None):
+        """(query, segment) for every segment in a cell within r[k] of P[k] (each query segment q[k]'s midpoint by
+        default) on q[k]'s own layer -- a segment once per cell it shares"""
+        P = (P0[q] + P1[q]) / 2 if P is None else P
+        a_, b_ = _join(LY[q], np.floor((P[:, 0] - r) / CELL).astype(np.int64), np.floor((P[:, 0] + r) / CELL).astype(np.int64),
+                       np.floor((P[:, 1] - r) / CELL).astype(np.int64), np.floor((P[:, 1] + r) / CELL).astype(np.int64),
+                       RKEY, RID)
+        return q[a_], b_
 
-    def sand(n, i):
-        """a single's segment i: a pair's segment within its reach on either side of it, on its layer"""
-        if (n, i) not in sand_memo:
-            X_, L_ = LANES[n]['X'], LANES[n]['L'][i]
-            P0, d0 = X_[i], X_[i + 1] - X_[i]
-            reach = BLOCK + 2 * (HALF_SNAP + g2) + STAIR_MAX + SAND_M
-            sides = set()
-            for (m, j) in near_segs((X_[i] + X_[i + 1]) / 2, np.linalg.norm(d0) / 2 + reach):
-                if m not in prs or LANES[m]['L'][j] != L_:
-                    continue
-                Y_ = LANES[m]['X']
-                dd, s, t = seg_seg(X_[i], X_[i + 1], Y_[j], Y_[j + 1])
-                if dd > reach:
-                    continue
-                w_ = Y_[j] + (Y_[j + 1] - Y_[j]) * t - (P0 + d0 * s)
-                cr = d0[0] * w_[1] - d0[1] * w_[0]
-                if abs(cr) > 1e-12:
-                    sides.add(cr > 0)
-            sand_memo[(n, i)] = len(sides) == 2
-        return sand_memo[(n, i)]
-    # pitch: same-layer lane segments
-    for n, ln in LANES.items():
-        X, Ls = ln['X'], ln['L']
-        for i in range(len(X) - 1):
-            if i in ln['NC']:
-                continue
-            mid = (X[i] + X[i + 1]) / 2
-            r = np.linalg.norm(X[i + 1] - X[i]) / 2 + BLOCK + 2 * (HALF_SNAP + g2) + STAIR_MAX + MARGIN
-            ax0, ay0, ax1, ay1 = BOX[n][i]
-            for (m, j) in near_segs(mid, r):
-                if m <= n or LANES[m]['L'][j] != Ls[i]:
-                    continue
-                need = BLOCK + MIT[n][i] + MIT[m][j] + (STD[n][i] if m not in prs and n in STD and sand(m, j) else 0.0) \
-                    + (STD[m][j] if n not in prs and m in STD and sand(n, i) else 0.0)
-                bx0, by0, bx1, by1 = BOX[m][j]
-                gx, gy = max(0.0, bx0 - ax1, ax0 - bx1), max(0.0, by0 - ay1, ay0 - by1)
-                if gx * gx + gy * gy > (need + MARGIN + 1e-9) * (need + MARGIN + 1e-9):
-                    continue
-                Y = LANES[m]['X']
-                d, s, t = seg_seg(X[i], X[i + 1], Y[j], Y[j + 1])
-                if d >= need + MARGIN or d < 1e-9:
-                    continue
-                P, Q = X[i] + (X[i + 1] - X[i]) * s, Y[j] + (Y[j + 1] - Y[j]) * t
-                nv = (P - Q) / d
-                key = ('p', n, i, m, j)
-                if key in seen:
-                    continue
-                seen.add(key)
-                rows.append(([(n, i, nv * (1 - s)), (n, i + 1, nv * s), (m, j, -nv * (1 - t)), (m, j + 1, -nv * t)],
-                             need + EPS - d, 'pitch', f'{n}/{m} {Ls[i][0]}', d - need))
+    def sand(q):
+        """for each of the singles' segments q: a pair's segment within its reach on either side of it, on its layer"""
+        reach = BLOCK + 2 * (HALF_SNAP + g2) + STAIR_MAX + SAND_M
+        d0 = P1[q] - P0[q]
+        a_, b_ = near_pairs(q, np.sqrt(d0[:, 0] * d0[:, 0] + d0[:, 1] * d0[:, 1]) / 2 + reach)
+        a_, b_ = a_[PR[b_]], b_[PR[b_]]
+        dd, s, t = seg_seg_rows(P0[a_], P1[a_], P0[b_], P1[b_])
+        d0 = P1[a_] - P0[a_]
+        w_ = P0[b_] + (P1[b_] - P0[b_]) * t[:, None] - (P0[a_] + d0 * s[:, None])
+        cr = d0[:, 0] * w_[:, 1] - d0[:, 1] * w_[:, 0]
+        at = dd <= reach
+        left, right = np.zeros(K, bool), np.zeros(K, bool)
+        left[a_[at & (cr > 1e-12)]] = True
+        right[a_[at & (cr < -1e-12)]] = True
+        return left & right
+    # pitch: same-layer lane segments -- every pair of segments in a cell near the first's (the second's lane later by
+    # name), first by a bar that takes every sand (an upper bound), then by its own
+    D_ = P1 - P0
+    a, b = near_pairs(np.arange(K), np.sqrt(D_[:, 0] * D_[:, 0] + D_[:, 1] * D_[:, 1]) / 2 + BLOCK + 2 * (HALF_SNAP + g2)
+                      + STAIR_MAX + MARGIN)
+    u_ = np.unique((a * K + b)[RK[b] > RK[a]])
+    a, b = u_ // K, u_ % K
+    o_ = np.lexsort((NK[b], a))
+    a, b = a[o_], b[o_]
+    sa_, sb_ = PR[a] & ~PR[b], ~PR[a] & PR[b]            # (a pair's bar from a single within the pair's staircase)
+
+    def boxed(need):
+        gx = np.maximum(np.maximum(0.0, LO[b, 0] - HI[a, 0]), LO[a, 0] - HI[b, 0])
+        gy = np.maximum(np.maximum(0.0, LO[b, 1] - HI[a, 1]), LO[a, 1] - HI[b, 1])
+        return ~(gx * gx + gy * gy > (need + MARGIN + 1e-9) * (need + MARGIN + 1e-9))
+    k_ = boxed(BLOCK + MT[a] + MT[b] + np.where(sa_, SD[a], 0.0) + np.where(sb_, SD[b], 0.0))
+    a, b, sa_, sb_ = a[k_], b[k_], sa_[k_], sb_[k_]
+    SA = np.zeros(K, bool)
+    q_ = np.unique(np.concatenate([b[sa_], a[sb_]]))
+    SA[q_] = sand(q_)[q_] if len(q_) else False
+    need = BLOCK + MT[a] + MT[b] + np.where(sa_ & SA[b], SD[a], 0.0) + np.where(sb_ & SA[a], SD[b], 0.0)
+    k_ = boxed(need)
+    a, b, need = a[k_], b[k_], need[k_]
+    d, s, t = seg_seg_rows(P0[a], P1[a], P0[b], P1[b])
+    k_ = ~((d >= need + MARGIN) | (d < 1e-9))
+    a, b, need, d, s, t = a[k_], b[k_], need[k_], d[k_], s[k_], t[k_]
+    P, Q = P0[a] + (P1[a] - P0[a]) * s[:, None], P0[b] + (P1[b] - P0[b]) * t[:, None]
+    nv = (P - Q) / d[:, None]
+    c0_, c1_, c2_, c3_ = nv * (1 - s)[:, None], nv * s[:, None], -nv * (1 - t)[:, None], -nv * t[:, None]
+    for k, (la, i, lb, j, rhs, cur) in enumerate(zip(SL[a].tolist(), SI[a].tolist(), SL[b].tolist(), SI[b].tolist(),
+                                                     (need + EPS - d).tolist(), (d - need).tolist())):
+        n, m = nm[la], nm[lb]
+        rows.append(([(n, i, c0_[k]), (n, i + 1, c1_[k]), (m, j, c2_[k]), (m, j + 1, c3_[k])],
+                     rhs, 'pitch', f'{n}/{m} {LANES[n]["L"][i][0]}', cur))
     # vias: each barrel vs other lanes' segments (either layer), other lanes' barrels, static of other nets
     VIAS = [(n, i) for n in LANES for i in via_idx(n) if i not in LANES[n]['XV']]
     for (n, i) in VIAS:
@@ -794,14 +887,25 @@ def gather():
         X = LANES[n]['X']
         s = arclen(X)
         for end, nrm in enumerate(ways):
+            at = np.flatnonzero(s[:-1] < W_SCALE if end == 0 else s[-1] - s[1:] < W_SCALE).tolist()
             for u in nrm:
-                for i in range(len(X) - 1):
-                    if (s[i] < W_SCALE) if end == 0 else (s[-1] - s[i + 1] < W_SCALE):
-                        val = float((X[i + 1] - X[i]) @ u)
-                        if val < MARGIN:
-                            rows.append(([(n, i + 1, u), (n, i, -u)], EPS - val, 'stub join', f'{n}{"<>"[end]}', val))
-    # static: each lane SEGMENT vs other nets' copper on its layer, at the exact nearest points
-    for n, ln in LANES.items():
+                for i in at:
+                    val = float((X[i + 1] - X[i]) @ u)
+                    if val < MARGIN:
+                        rows.append(([(n, i + 1, u), (n, i, -u)], EPS - val, 'stub join', f'{n}{"<>"[end]}', val))
+    # static: each lane SEGMENT vs other nets' copper on its layer, at the exact nearest points -- a segment no object
+    # stands within static_seg's cut of (its box grown by the object's reach, as static_seg's own first look) left out
+    a, o_ = _join(LY, C0[:, 0], C1[:, 0], C0[:, 1], C1[:, 1], _SKEY, _SOBJ)
+    gx = np.maximum(np.maximum(0.0, _SBOX[o_, 0] - _SBOX[o_, 4] - HI[a, 0]), LO[a, 0] - _SBOX[o_, 2] - _SBOX[o_, 4])
+    gy = np.maximum(np.maximum(0.0, _SBOX[o_, 1] - _SBOX[o_, 4] - HI[a, 1]), LO[a, 1] - _SBOX[o_, 3] - _SBOX[o_, 4])
+    cut_ = NEED_ST + np.array([hw[n] for n in nm], float)[SL[a]] + MARGIN + 1e-6
+    k_ = (gx * gx + gy * gy <= cut_ * cut_) & ~(_SNET[o_][:, None] == _OWNA[SL[a]]).any(axis=1)
+    near_ = np.zeros(K, bool)
+    near_[a[k_]] = True
+    at_ = collections.defaultdict(list)
+    for l_, i in zip(SL[near_].tolist(), SI[near_].tolist()):
+        at_[l_].append(i)
+    for l_, (n, ln) in enumerate(LANES.items()):
         X, Ls = ln['X'], ln['L']
         # (a pair not yet laid: its centreline's first and last stretch, from its tips' midpoint onto its pose, is its
         # END CONNECTOR, no copper -- its legs converge there from the tips, either side of what stands between them,
@@ -812,9 +916,7 @@ def gather():
         if n in prs and n not in HELD and not geo['lanes'][n].get('ends'):
             s_ = arclen(X)
             cu = (_pairs.end_connector(cfg, ctx.pair_ends[n][0]), s_[-1] - _pairs.end_connector(cfg, ctx.pair_ends[n][1]))
-        for i in range(len(X) - 1):
-            if i in ln['NC']:
-                continue
+        for i in at_.get(l_, ()):
             t0, t1 = 0.0, 1.0
             if cu is not None:
                 if s_[i + 1] <= cu[0] + 1e-9 or s_[i] >= cu[1] - 1e-9:
@@ -873,101 +975,109 @@ def measure(rows):
 # ------------------------------------------------------------------ one LP round
 def solve_round(rows, trust):
     active = [r for r in rows if r[0]]
-    movable = set()
-    for terms, *_ in active:
-        for (n, i, _c) in terms:
-            if not fixed(n, i):
-                movable.add((n, i))
+    # the lanes' vertices numbered in one run (LANES's order): each vertex's lane VL, its index there VI; every term
+    # of an active row as (row, vertex, coefficient)
+    nm = list(LANES)
+    lane_ = {n: l_ for l_, n in enumerate(nm)}
+    LN = np.array([len(LANES[n]['X']) for n in nm], np.int64)
+    OFF = np.concatenate([[0], np.cumsum(LN)])
+    VL = np.repeat(np.arange(len(nm)), LN)
+    VI = np.arange(int(OFF[-1])) - OFF[VL]
+    FIX = np.concatenate([LANES[n]['H'] for n in nm])           # fixed: held, or an end
+    FIX[OFF[:-1]] = True
+    FIX[OFF[1:] - 1] = True
+    tr, tv, tc = [], [], []
+    for r_, (terms, *_x) in enumerate(active):
+        for (n, i, cvec) in terms:
+            tr.append(r_); tv.append(OFF[lane_[n]] + i); tc.append((float(cvec[0]), float(cvec[1])))
+    tr, tv, tc = np.array(tr, np.int64), np.array(tv, np.int64), np.array(tc, float).reshape(-1, 2)
+    m0 = np.unique(tv[~FIX[tv]])
     # neighbours move too (a lane shifts as a stretch, not a spike); vias' neighbours so its legs follow
-    for (n, i) in list(movable):
-        for di in (-2, -1, 1, 2):
-            j = i + di
-            if 0 < j < len(LANES[n]['X']) - 1 and not fixed(n, j):     # a held vertex stays held
-                movable.add((n, j))
-    idx = {v: k for k, v in enumerate(sorted(movable))}
-    nv = len(idx)
+    mv = [m0]
+    for di in (-2, -1, 1, 2):
+        j = m0[(0 < VI[m0] + di) & (VI[m0] + di < LN[VL[m0]] - 1)] + di
+        mv.append(j[~FIX[j]])                                   # a held vertex stays held
+    mv = np.unique(np.concatenate(mv))
+    rk_ = {n: r for r, n in enumerate(sorted(nm))}
+    mv = mv[np.lexsort((VI[mv], np.array([rk_[n] for n in nm], np.int64)[VL[mv]]))]     # sorted by (lane, index)
+    nv, nA = len(mv), len(active)
     if not nv:
         return None
-    # variables: dx, dy per vertex (2 nv), |dx|,|dy| aux (2 nv), smooth aux (2 nv per interior), slack per row
-    cols = 2 * nv
-    cost = [0.0] * cols
-    b = []
-    bounds = [(-trust, trust)] * (2 * nv)
-
-    def newv(c, lo=0.0, hi=None):
-        nonlocal cols
-        cost.append(c); bounds.append((lo, hi)); cols += 1
-        return cols - 1
-    rowsA = []
-    for (n, i), k in idx.items():
-        for ax in (0, 1):
-            a = newv(1.0)                                   # |d| >= +-d
-            rowsA.append(({2 * k + ax: 1.0, a: -1.0}, 0.0)); rowsA.append(({2 * k + ax: -1.0, a: -1.0}, 0.0))
+    KOF = np.full(int(OFF[-1]), -1, np.int64)                   # each vertex's variable (-1: none)
+    KOF[mv] = np.arange(nv)
     W_SM = 2.0
     W_FOLD = 1e3                # a fold left unopened, per mm^2 of d1.d2 (a rule's slack: 1e4 per mm)
-    for (n, i), k in idx.items():
-        kp, kn = idx.get((n, i - 1)), idx.get((n, i + 1))
-        for ax in (0, 1):
-            terms = {2 * k + ax: 1.0}
-            for kk in (kp, kn):
-                if kk is not None:
-                    terms[2 * kk + ax] = terms.get(2 * kk + ax, 0.0) - 0.5
-            a = newv(W_SM)
-            rowsA.append(({**terms, a: -1.0}, 0.0))
-            rowsA.append(({**{c: -v for c, v in terms.items()}, a: -1.0}, 0.0))
-    slack_of = []
-    for terms, rhs, kind, lab, cur in active:
-        coef = collections.defaultdict(float)
-        for (n, i, cvec) in terms:
-            k = idx.get((n, i))
-            if k is None:
-                continue
-            coef[2 * k] += float(cvec[0]); coef[2 * k + 1] += float(cvec[1])
-        sl = newv(1e4)
-        slack_of.append((sl, kind, lab))
-        # sum coef.d + slack >= rhs   ->   -sum coef.d - slack <= -rhs
-        rowsA.append(({**{c: -v for c, v in coef.items()}, sl: -1.0}, -rhs))
-    # shape: a moved vertex keeps its turn under 90 degrees at the lane's own scale (d1 . d2 >= 0, linearised, the
-    # directions taken W_SCALE back and ahead) -- a per-vertex limit let a fold through in two steps
-    S_ = {n: arclen(LANES[n]['X']) for n in {n for (n, _i) in idx}}
-    for (n, i), k in idx.items():
-        X = LANES[n]['X']
-        if fixed(n, i):
-            continue
-        jb, jf = scale_window(S_[n], i)
-        d1, d2 = X[i] - X[jb], X[jf] - X[i]
-        kp, kn = idx.get((n, jb)), idx.get((n, jf))
-        # (d1 + D_i - D_b) . (d2 + D_f - D_i) >= 0  ~  d1.d2 + d2.(D_i - D_b) + d1.(D_f - D_i) >= 0
-        coef = collections.defaultdict(float)
-        for ax in (0, 1):
-            coef[2 * k + ax] += d2[ax] - d1[ax]
-            if kp is not None:
-                coef[2 * kp + ax] -= d2[ax]
-            if kn is not None:
-                coef[2 * kn + ax] += d1[ax]
-        # (a turn already past 90 degrees -- a fold drop_faults could not straighten, at a held vertex, a via or an end
-        # -- is opened as far as the round's trust lets it, the rest paid: asked to open at once, a round that could
-        # not had no answer at all and moved nothing -- sdi_mipi_conv's DDR3 bus's first polish, 452 short before and
-        # after, and 5 of 23 recorded polishes stopped so. A turn under 90 degrees stays under, unpaid)
-        dd_ = float(d1 @ d2)
-        rowsA.append(({**{c: -v for c, v in coef.items()}, **({newv(W_FOLD): -1.0} if dd_ < 0 else {})}, dd_))
-    from scipy.sparse import coo_matrix
+    # variables: dx, dy per vertex (2 nv), |dx|,|dy| aux (2 nv), smooth aux (2 nv), a slack per row, then the folds';
+    # the rows' entries in the order a row lists them, the rows in order
+    k2, ax = 2 * np.arange(nv), np.array([0, 1])
+    kd = (k2[:, None] + ax)[:, :, None, None]                   # (vertex, axis): its column of d
+    ab = np.array([0, 1])[None, None, :, None]                  # a pair of rows: + and -
     ri, ci, vv = [], [], []
-    for r_, (terms, rhs) in enumerate(rowsA):
-        for c, v in terms.items():
-            ri.append(r_); ci.append(c); vv.append(v)
-        b.append(rhs)
-    Aub = coo_matrix((vv, (ri, ci)), shape=(len(rowsA), cols)).tocsr()
+
+    def entries(R, C, V, ok=True):
+        R, C, V, ok = np.broadcast_arrays(R, C, V, ok)
+        ok = ok.ravel()
+        ri.append(R.ravel()[ok]); ci.append(C.ravel()[ok]); vv.append(V.ravel()[ok].astype(float))
+    # |d| >= +-d: {d: +-1, aux: -1}
+    e2 = np.array([0, 1])[None, None, None, :]
+    entries(2 * kd + ab + 0 * e2, np.where(e2 == 0, kd, 2 * nv + kd), np.where(e2 == 0, np.where(ab == 0, 1.0, -1.0), -1.0))
+    # smooth: {d: 1, its neighbours' d: -0.5, aux: -1} and its negation (aux -1); a movable vertex has both neighbours
+    kp, kn = KOF[mv - 1], KOF[mv + 1]
+    e4 = np.arange(4)[None, None, None, :]
+    C = np.stack([k2[:, None] + ax, 2 * kp[:, None] + ax, 2 * kn[:, None] + ax, 4 * nv + k2[:, None] + ax], -1)[:, :, None, :]
+    V = np.where(e4 == 3, -1.0, np.where(e4 == 0, 1.0, 0.0 - 0.5) * np.where(ab == 0, 1.0, -1.0))
+    ok = np.stack([np.ones(nv, bool), kp >= 0, kn >= 0, np.ones(nv, bool)], -1)[:, None, None, :]
+    entries(4 * nv + 2 * kd + ab + 0 * e4, C, V, ok)
+    # each active row: sum coef.d + slack >= rhs   ->   -sum coef.d - slack <= -rhs
+    tk = KOF[tv]
+    tm = tk >= 0
+    R_ = np.concatenate([np.repeat(tr[tm], 2), np.arange(nA)])
+    o_ = np.argsort(R_, kind='stable')                         # (a row's terms, then its slack)
+    entries(8 * nv + R_[o_], np.concatenate([np.stack([2 * tk[tm], 2 * tk[tm] + 1], -1).ravel(), 6 * nv + np.arange(nA)])[o_],
+            np.concatenate([(-(0.0 + tc[tm])).ravel(), np.full(nA, -1.0)])[o_])
+    # shape: a moved vertex keeps its turn under 90 degrees at the lane's own scale (d1 . d2 >= 0, linearised, the
+    # directions taken W_SCALE back and ahead: scale_window) -- a per-vertex limit let a fold through in two steps
+    jb, jf = np.empty(nv, np.int64), np.empty(nv, np.int64)
+    for l_ in np.unique(VL[mv]).tolist():
+        q_ = np.flatnonzero(VL[mv] == l_)
+        s = arclen(LANES[nm[l_]]['X'])
+        i_ = VI[mv[q_]]
+        jb[q_] = OFF[l_] + np.maximum(0, np.minimum(np.searchsorted(s, s[i_] - W_SCALE, side='right') - 1, i_ - 1))
+        jf[q_] = OFF[l_] + np.minimum(len(s) - 1, np.maximum(np.searchsorted(s, s[i_] + W_SCALE, side='left'), i_ + 1))
+    XA = np.concatenate([LANES[n]['X'] for n in nm])
+    d1, d2 = XA[mv] - XA[jb], XA[jf] - XA[mv]
+    kb, kf = KOF[jb], KOF[jf]
+    # (d1 + D_i - D_b) . (d2 + D_f - D_i) >= 0  ~  d1.d2 + d2.(D_i - D_b) + d1.(D_f - D_i) >= 0
+    dd_ = d1[:, 0] * d2[:, 0] + d1[:, 1] * d2[:, 1]
+    # (a turn already past 90 degrees -- a fold drop_faults could not straighten, at a held vertex, a via or an end
+    # -- is opened as far as the round's trust lets it, the rest paid: asked to open at once, a round that could
+    # not had no answer at all and moved nothing -- a DDR3 bus's first polish, 452 short before and after, and 5 of
+    # 23 recorded polishes stopped so. A turn under 90 degrees stays under, unpaid)
+    fold = dd_ < 0
+    nf = int(fold.sum())
+    C = np.stack([k2[:, None] + ax, 2 * kb[:, None] + ax, 2 * kf[:, None] + ax], -1).reshape(nv, 6)
+    V = np.stack([-(0.0 + (d2 - d1)), -(0.0 - d2), -(0.0 + d1)], -1).reshape(nv, 6)
+    ok = np.stack([np.ones((nv, 2), bool), np.repeat((kb >= 0)[:, None], 2, 1), np.repeat((kf >= 0)[:, None], 2, 1)], -1)
+    entries(8 * nv + nA + np.arange(nv)[:, None], np.concatenate([C, (6 * nv + nA + np.cumsum(fold) - 1)[:, None]], 1),
+            np.concatenate([V, np.full((nv, 1), -1.0)], 1), np.concatenate([ok.reshape(nv, 6), fold[:, None]], 1))
+    cols = 6 * nv + nA + nf
+    cost = np.concatenate([np.zeros(2 * nv), np.ones(2 * nv), np.full(2 * nv, W_SM), np.full(nA, 1e4), np.full(nf, W_FOLD)])
+    bounds = np.concatenate([np.tile([-trust, trust], (2 * nv, 1)), np.tile([0.0, np.inf], (cols - 2 * nv, 1))])
+    b = np.concatenate([np.zeros(8 * nv), [-r[1] for r in active], dd_])
+    from scipy.sparse import coo_matrix
+    Aub = coo_matrix((np.concatenate(vv), (np.concatenate(ri), np.concatenate(ci))), shape=(len(b), cols)).tocsr()
     # one optimum, not a face, and without the solver's last bits: the same polish on every run (detmath)
-    res = linprog(np.array(cost) + detmath.lp_tie_break(len(cost)), A_ub=Aub, b_ub=np.array(b), bounds=bounds, method='highs')
+    res = linprog(cost + detmath.lp_tie_break(len(cost)), A_ub=Aub, b_ub=b, bounds=bounds, method='highs')
     if res.status != 0:
         log(f'  LP status {res.status}: {res.message}')
         return None
     x = detmath.lp_round(res.x)
-    for (n, i), k in idx.items():
-        LANES[n]['X'][i] += np.array([x[2 * k], x[2 * k + 1]])
-    paid = [(float(x[sl]), kind, lab) for sl, kind, lab in slack_of if x[sl] > 1e-5]
-    return nv, len(active), paid
+    for l_ in np.unique(VL[mv]).tolist():
+        q_ = np.flatnonzero(VL[mv] == l_)
+        LANES[nm[l_]]['X'][VI[mv[q_]]] += np.stack([x[2 * q_], x[2 * q_ + 1]], -1)
+    sx = x[6 * nv:6 * nv + nA]
+    paid = [(float(sx[r_]), active[r_][2], active[r_][3]) for r_ in np.flatnonzero(sx > 1e-5).tolist()]
+    return nv, nA, paid
 
 
 DIVE_U = {}          # (lane, via vertex) -> the heading its dive is laid on (pair_approaches: joined to an end run)
