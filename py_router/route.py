@@ -2013,6 +2013,134 @@ def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
         print(f"  (late orphan sweep skipped: {_e})")
 
 
+def _late_finished_dead_end_sweep1525(pcb_data, output_file, return_results,
+                                      results_data, write_model,
+                                      input_signature, protected_names,
+                                      keep_input_copper):
+    """The dead-end sweep for nets the in-run cleanup protected as UNFINISHED
+    (#473) and a later pass finished (#1525). Returns the names of those nets
+    found complete on the board this run ships (the orphan sweep after it
+    stops protecting them too).
+
+    run_post_route_cleanup keeps an unfinished net's dead ends: they are the
+    landing sites a later pass welds to. But the graze prune before it is not
+    scoped that way and may cut such a net's link in two, and the plane
+    finalize and the reconciliation that then finish the net leave both
+    halves where they are, since no later pass sweeps dead ends. A GND rescue
+    link cut so on B.Cu, with the net finished afterwards by the pour on
+    In1.Cu, shipped its two halves as KiCad track_dangling.
+
+    A net complete on the shipped board (check_net_connectivity, fill
+    credited) has no landing site left to keep, so its dead ends go now, by
+    the same sweep_dead_ends the cleanup runs: each removal gated on the
+    net's connectivity, fill-anchored ends kept. A net still unfinished keeps
+    its copper, as before.
+
+    Same plumbing as _late_strict_collapse1063: the written file on the CLI,
+    the write model on the GUI (a CopperView, so the fill models are built
+    from the copper that ships). Input copper is told from the run's by VALUE
+    (input_signature), and --keep-input-copper makes it read-only.
+    """
+    from collections import Counter
+    from improvement_gate import copper_item_key
+    from pcb_modification import sweep_dead_ends
+    from check_connected import check_net_connectivity, make_real_fill_validator
+    if not protected_names:
+        return set()
+    try:
+        rd = None
+        if return_results:
+            if write_model is None:
+                return set()
+            from plane_fill_model import CopperView
+            rd = results_data if results_data is not None else {}
+            segs_by_net, vias_by_net = write_model(rd)
+            board = CopperView(
+                pcb_data, [x for _l in segs_by_net.values() for x in _l],
+                [x for _l in vias_by_net.values() for x in _l])
+        elif output_file and os.path.isfile(output_file):
+            from kicad_parser import parse_kicad_pcb as _pk1525
+            board = _pk1525(output_file)
+        else:
+            return set()
+        name_of = {nid: n.name for nid, n in board.nets.items()}
+        targets = {nid for nid, nm in name_of.items() if nm in protected_names}
+        finished = set()
+        for nid in sorted(targets):
+            pads = board.pads_by_net.get(nid, [])
+            if not pads:
+                continue
+            zones = [z for z in (getattr(board, 'zones', None) or [])
+                     if z.net_id == nid]
+            r = check_net_connectivity(
+                nid, [s for s in board.segments if s.net_id == nid],
+                [v for v in board.vias if v.net_id == nid], pads, zones,
+                zone_credit_validator=(make_real_fill_validator(board, nid)
+                                       if zones else None),
+                pcb_data=board)
+            if r.get('connected') and not r.get('disconnected_pads'):
+                finished.add(nid)
+        if not finished:
+            return set()
+        left = {n: Counter(c) for n, c in (input_signature or {}).items()}
+        owned_segs, owned_vias = [], []
+        for item in list(board.segments) + list(board.vias):
+            c = left.get(name_of.get(item.net_id))
+            k = copper_item_key(item)
+            if c and c[k] > 0:
+                c[k] -= 1                   # input copper
+            elif hasattr(item, 'start_x'):
+                owned_segs.append(item)
+            else:
+                owned_vias.append(item)
+        before_s, before_v = list(board.segments), list(board.vias)
+        sweep_dead_ends([{'new_segments': owned_segs, 'new_vias': owned_vias}],
+                        board, finished, keep_input_copper=keep_input_copper)
+        kept_s = {id(s) for s in board.segments}
+        kept_v = {id(v) for v in board.vias}
+        removed = [s for s in before_s if id(s) not in kept_s]
+        dropped = [v for v in before_v if id(v) not in kept_v]
+        done = {name_of[n] for n in finished}
+        if not (removed or dropped):
+            return done
+        if return_results:
+            gone = {id(x) for x in removed + dropped}
+            for r in rd.get('results') or []:
+                for key in ('new_segments', 'new_vias'):
+                    if r.get(key):
+                        r[key] = [x for x in r[key] if id(x) not in gone]
+            for key in ('all_swap_segments', 'all_swap_vias'):
+                if rd.get(key):
+                    rd[key] = [x for x in rd[key] if id(x) not in gone]
+            owned = {id(x) for x in owned_segs + owned_vias}
+            rd.setdefault('segments_to_remove', []).extend(
+                s for s in removed if id(s) not in owned)
+            rd.setdefault('vias_to_remove', []).extend(
+                v for v in dropped if id(v) not in owned)
+            pcb_data.segments = [s for s in pcb_data.segments if id(s) not in gone]
+            pcb_data.vias = [v for v in pcb_data.vias if id(v) not in gone]
+            bump_copper_epoch(pcb_data)
+            n_s, n_v = len(removed), len(dropped)
+        else:
+            n_s, n_v = _strip_written_copper(output_file, removed, dropped,
+                                             name_of)
+            if (n_s, n_v) != (len(removed), len(dropped)):
+                print(f"  WARNING: finished-net dead-end sweep (#1525): chose "
+                      f"{len(removed)} segment(s) and {len(dropped)} via(s), "
+                      f"found {n_s} and {n_v} in the written file")
+        _nets = len({x.net_id for x in removed + dropped})
+        print(f"  Dead-end sweep (#1525, end of run): trimmed {n_s} dead-end "
+              f"segment(s)"
+              + (f" and {n_v} unsupported via(s)" if n_v else "")
+              + f" on {_nets} net(s) the in-run cleanup kept as unfinished "
+              f"and a later pass finished")
+        return done
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  (end-of-run finished-net dead-end sweep skipped: "
+              f"{type(_e).__name__}: {_e})")
+        return set()
+
+
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
@@ -8441,6 +8569,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # finalize, the oracle legs, the reconciliation laps, the #678 weld) and
     # before the sweep, the #962 via stamp and the #1069 re-grade, so all of
     # them read the collapsed board. Outermost run only, both fronts.
+    _finished1525 = set()
     if final_reconcile and not skip_routing and not _ckpt_stop and quick < 2:
         # #1217: split the tracks KiCad-dangling joints land on FIRST, so the
         # collapse grades each piece: a host's stretch past its joint can be
@@ -8456,6 +8585,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _gui_write_model, _input_sig1069,
             {pcb_data.nets[_n].name for _n in sweep_scope_ids
              if _n in pcb_data.nets},
+            keep_input_copper)
+        # #1525: the dead ends of the nets the in-run cleanup kept as
+        # unfinished (#473) and a later pass finished. After the collapse
+        # (as the in-run sweep runs after it), before the via sweep, which
+        # a removed dead end can hand a freed via.
+        _finished1525 = _late_finished_dead_end_sweep1525(
+            pcb_data, output_file, return_results, locals().get('results_data'),
+            _gui_write_model, _input_sig1069,
+            {pcb_data.nets[_n].name for _n in _protect_unfinished
+             if _n in pcb_data.nets and _n in sweep_scope_ids},
             keep_input_copper)
         # #1166: after the collapse, which can itself free a via.
         _late_dangling_via_sweep1166(
@@ -8486,7 +8625,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if quick < 2:
         _late_orphan_sweep659(
             pcb_data, output_file, return_results,
-            locals().get('results_data'), _protect_unfinished,
+            locals().get('results_data'),
+            # #1525: a protected net the run then finished keeps nothing.
+            {_n for _n in _protect_unfinished
+             if _n not in pcb_data.nets
+             or pcb_data.nets[_n].name not in _finished1525},
             keep_input_copper, skip_routing)
 
     # #962: declare Type VII on every via this run put in a pad or a paste
