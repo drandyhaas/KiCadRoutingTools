@@ -953,9 +953,12 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
     else:
         # Rectangular board - simple bounding box band, vectorized.
+        # Measured from the EXACT edge, not the grid-rounded one (#1519).
         gx_flat, gy_flat = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
-        mask = ((gx_flat < gmin_x + via_expand) | (gx_flat > gmax_x - via_expand) |
-                (gy_flat < gmin_y + via_expand) | (gy_flat > gmax_y - via_expand))
+        lo_x, hi_x = coord.edge_band_limits(min_x, max_x, via_edge_clearance, True)
+        lo_y, hi_y = coord.edge_band_limits(min_y, max_y, via_edge_clearance, True)
+        mask = ((gx_flat <= lo_x) | (gx_flat >= hi_x) |
+                (gy_flat <= lo_y) | (gy_flat >= hi_y))
         if mask.any():
             obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[mask], gy_flat[mask]]))
 
@@ -1036,22 +1039,27 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # outline's. The cached mask is shared, so it is never edited in place.
         parent = getattr(pcb_data.board_info, 'parent_board_bounds', None)
         if parent:
+            lo_x, hi_x = coord.edge_band_limits(min_x, max_x, track_edge_clearance, True)
+            lo_y, hi_y = coord.edge_band_limits(min_y, max_y, track_edge_clearance, True)
             fence = np.zeros_like(cell_mask)
             if min_x > parent[0]:
-                fence |= gx_flat < gmin_x + track_expand
+                fence |= gx_flat <= lo_x
             if min_y > parent[1]:
-                fence |= gy_flat < gmin_y + track_expand
+                fence |= gy_flat <= lo_y
             if max_x < parent[2]:
-                fence |= gx_flat > gmax_x - track_expand
+                fence |= gx_flat >= hi_x
             if max_y < parent[3]:
-                fence |= gy_flat > gmax_y - track_expand
+                fence |= gy_flat >= hi_y
             cell_mask = cell_mask | fence
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, cell_mask, [layer_idx])
     else:
         # Rectangular board - simple bounding box band, vectorized.
+        # Measured from the EXACT edge, not the grid-rounded one (#1519).
         gx_flat, gy_flat = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
-        mask = ((gx_flat < gmin_x + track_expand) | (gx_flat > gmax_x - track_expand) |
-                (gy_flat < gmin_y + track_expand) | (gy_flat > gmax_y - track_expand))
+        lo_x, hi_x = coord.edge_band_limits(min_x, max_x, track_edge_clearance, True)
+        lo_y, hi_y = coord.edge_band_limits(min_y, max_y, track_edge_clearance, True)
+        mask = ((gx_flat <= lo_x) | (gx_flat >= hi_x) |
+                (gy_flat <= lo_y) | (gy_flat >= hi_y))
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, mask, [layer_idx])
 
     # Block tracks inside board cutouts

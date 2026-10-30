@@ -1158,3 +1158,47 @@ class GridCoord:
     def to_grid_dist_safe(self, dist_mm: float) -> int:
         """Convert a distance in mm to grid units, rounding up for safety."""
         return math.ceil(dist_mm * self.inv_step)
+
+    def edge_band_limits(self, lo_mm: float, hi_mm: float, reach_mm: float,
+                         strict: bool) -> Tuple[int, int]:
+        """Cell limits of a straight edge keep-out along ONE axis (#1519).
+
+        ``lo_mm``/``hi_mm`` are the two edges (a rectangle's min and max on
+        this axis) and ``reach_mm`` the keep-out reach from each. Returns
+        ``(lo, hi)``: a cell ``g`` is in the band iff ``g <= lo`` or
+        ``g >= hi``. The band is measured from the EXACT edge, so an edge
+        between grid lines blocks every cell whose centre lies within the
+        reach. ``strict`` picks the tie rule: True blocks a cell nearer than
+        the reach (the band of ``to_grid_dist_safe``), False also blocks a
+        cell exactly at it (the band of ``to_grid_dist``). On an on-grid edge
+        the result is exactly ``to_grid(edge) -/+ expand``, the band the
+        rectangle was stamped with before -- including that expand's own
+        float rounding -- so only an off-grid edge changes.
+        """
+        r = reach_mm * self.inv_step
+        if strict:
+            k = self.to_grid_dist_safe(reach_mm)     # cells: dist < reach
+            b = k - r                                # in [0, 1)
+        else:
+            k = self.to_grid_dist(reach_mm)          # cells: dist <= reach
+            b = r - k                                # in [0, 1)
+
+        def _split(edge_mm):
+            e = edge_mm * self.inv_step
+            n = round(e)
+            if abs(e - n) < 1e-6:                    # on the grid
+                return n, 0.0
+            n = math.floor(e)
+            return n, e - n
+
+        lo_n, lo_a = _split(lo_mm)
+        hi_n, hi_a = _split(hi_mm)
+        if strict:
+            # g - lo_e < r  and  hi_e - g < r, with r = k - b
+            lo = lo_n + k + math.ceil(lo_a - b) - 1
+            hi = hi_n - k + math.floor(hi_a + b) + 1
+        else:
+            # g - lo_e <= r  and  hi_e - g <= r, with r = k + b
+            lo = lo_n + k + math.floor(lo_a + b)
+            hi = hi_n - k + math.ceil(hi_a - b)
+        return lo, hi
