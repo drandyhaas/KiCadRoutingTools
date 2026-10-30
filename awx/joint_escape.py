@@ -38,6 +38,7 @@ import collections
 import contextlib
 import dataclasses
 import gc
+import hashlib
 import heapq
 import io
 import itertools
@@ -228,14 +229,38 @@ def _sizes(pcb, foot):
                 r_home=max(pad_r + tw / 2 + cl, te.VIA_SIZE / 2 + tw / 2 + cl))
 
 
-def _hit(P, Q, same, sz):
+_BOX_EPS = 1e-9         # (_hit's box tests: a box this much farther than a bar apart is past it, whatever the rounding)
+
+
+def _piece_geo(P, geo=None):
+    """an option's copper `P` (a Piece) as _hit reads it: its legs by layer, each with its box, and the box of them all
+    -- kept in `geo` {id: (piece, its geometry)} when given (the piece held there, so no id is met again for another)"""
+    if geo is not None:
+        g = geo.get(id(P))
+        if g is not None and g[0] is P:
+            return g[1]
+    by_l = {}
+    for (a, b, L) in P.legs:
+        by_l.setdefault(L, []).append((a, b, min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])))
+    xs = [q for (a, b, _L) in P.legs for q in (a[0], b[0])]
+    ys = [q for (a, b, _L) in P.legs for q in (a[1], b[1])]
+    g = (by_l, (min(xs), min(ys), max(xs), max(ys)) if xs else None)
+    if geo is not None:
+        geo[id(P)] = (P, g)
+    return g
+
+
+def _hit(P, Q, same, sz, geo=None):
     """can two options' copper not both be laid, each item at its own size? Two nets': any two legs on one layer
     closer than track + clearance, a via that close to a leg of the other's plus its radius (every layer), two vias
     closer than their radii + clearance or their drills than their radii + hole-to-hole. One net's, as the engine's
     raster sees it (it carries no nets): a leg's centreline OUTSIDE its own balls' disks that close to the other's
     copper, and drills at hole-to-hole. Two of one net's vias at one point and size are ONE via (two plane balls
     dropped at one gap site share its barrel, as the human's ground balls round a via do), and each one's leg reaches
-    it inside the via's own keep (the engine's raster exempts the via's disk for the stub that ends there)."""
+    it inside the via's own keep (the engine's raster exempts the via's disk for the stub that ends there).
+    The distances are measured only between items whose boxes come within the bar of each other (_BOX_EPS past it):
+    two items farther apart on either axis are farther apart than the bar, so the answer is the one measuring every
+    pair gives. `geo`: _piece_geo's store, for a caller asking of the same pieces many times"""
     tw2, cl = sz['tw'] / 2, sz['cl']
     shared = []
     for (c, r, dr) in P.vias:
@@ -246,24 +271,57 @@ def _hit(P, Q, same, sz):
                 continue
             if dd < dr + dr2 + sz['h2h'] - 1e-6 or (not same and dd < r + r2 + cl - 1e-6):
                 return True
+    gP, gQ = _piece_geo(P, geo), _piece_geo(Q, geo)
+    ds = sz['d_seg'] - 1e-6
+    dsx = ds + _BOX_EPS
     if not same:
-        for (a, b, L) in P.legs:
-            for (u, v, L2) in Q.legs:
-                if L == L2 and _seg_seg(a, b, u, v) < sz['d_seg'] - 1e-6:
-                    return True
-        return any(_pt_seg(c, u, v) < r + tw2 + cl - 1e-6 for (c, r, _d) in P.vias for (u, v, _L) in Q.legs) or \
-            any(_pt_seg(c, a, b) < r + tw2 + cl - 1e-6 for (c, r, _d) in Q.vias for (a, b, _L) in P.legs)
+        for L, lp in gP[0].items():
+            lq = gQ[0].get(L)
+            if not lq:
+                continue
+            for (a, b, x0, y0, x1, y1) in lp:
+                for (u, v, X0, Y0, X1, Y1) in lq:
+                    if X0 - x1 > dsx or x0 - X1 > dsx or Y0 - y1 > dsx or y0 - Y1 > dsx:
+                        continue
+                    if _seg_seg(a, b, u, v) < ds:
+                        return True
+        for (vs, g) in ((P.vias, gQ), (Q.vias, gP)):
+            if not vs or g[1] is None:
+                continue
+            bx0, by0, bx1, by1 = g[1]
+            for (c, r, _d) in vs:
+                bar = r + tw2 + cl - 1e-6
+                m = bar + _BOX_EPS
+                if c[0] < bx0 - m or c[0] > bx1 + m or c[1] < by0 - m or c[1] > by1 + m:
+                    continue
+                for lst in g[0].values():
+                    for (u, v, X0, Y0, X1, Y1) in lst:
+                        if c[0] < X0 - m or c[0] > X1 + m or c[1] < Y0 - m or c[1] > Y1 + m:
+                            continue
+                        if _pt_seg(c, u, v) < bar:
+                            return True
+        return False
     rh = sz['r_home']
-    for X, Y in ((P, Q), (Q, P)):
+    for X, Y, gY in ((P, Q, gQ), (Q, P, gP)):
+        yvias = [(c, r + tw2 + cl - 1e-6) for (c, r, _d) in Y.vias]
         for (a, b, L) in X.legs:
+            # (only the other's items within the bar of this leg's box can be within it of a point along the leg)
+            x0, y0, x1, y1 = min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])
+            near_l = [(u, v) for (u, v, X0, Y0, X1, Y1) in gY[0].get(L, ())
+                      if not (X0 - x1 > dsx or x0 - X1 > dsx or Y0 - y1 > dsx or y0 - Y1 > dsx)]
+            near_v = [(c, k) for (c, k) in yvias
+                      if not (c[0] < x0 - k - _BOX_EPS or c[0] > x1 + k + _BOX_EPS
+                              or c[1] < y0 - k - _BOX_EPS or c[1] > y1 + k + _BOX_EPS)]
+            if not near_l and not near_v:
+                continue
             n = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.02))
             for i in range(n + 1):
                 t = (a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n)
                 if any(math.hypot(t[0] - o[0], t[1] - o[1]) < rh for o in X.balls) or \
                         any(math.hypot(t[0] - c[0], t[1] - c[1]) < k for c, k in shared):
                     continue
-                if any(L == L2 and _pt_seg(t, u, v) < sz['d_seg'] - 1e-6 for (u, v, L2) in Y.legs) or \
-                        any(math.hypot(t[0] - c[0], t[1] - c[1]) < r + tw2 + cl - 1e-6 for (c, r, _d) in Y.vias):
+                if any(_pt_seg(t, u, v) < ds for (u, v) in near_l) or \
+                        any(math.hypot(t[0] - c[0], t[1] - c[1]) < k for (c, k) in near_v):
                     return True
     return False
 
@@ -1076,6 +1134,10 @@ def _opt_sig(kind, o, pc):
             tuple((r_(s[0]), round(s[1], 4), round(s[2], 4)) for s in pc.vias))
 
 
+_GEO = {}            # a plan's geometry pairs by the digest of its options (plan_array), the GEO_KEEP latest
+GEO_KEEP = 4
+
+
 def _solved(skey):
     """the answer kept for the model `skey` -- waited for where it is being solved; None where it is not known, or its
     solve failed (the plan then solves it itself)"""
@@ -1259,16 +1321,28 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     t_lane = time.time() - t1
     t1 = time.time()
     # a strap or a drop against every other ball's option: geometry at the laid sizes, the candidates found through a
-    # 1 mm cell index of the options' boxes (a climb's box spans the array; the all-pairs loop was 10^7 box tests)
+    # 1 mm cell index of the options' boxes (a climb's box spans the array; the all-pairs loop was 10^7 box tests).
+    # The pairs are a function of the options' copper, their nets and the sizes alone: a plan of the same array on the
+    # same menus -- each source-realize trial's, each berth plan's -- takes them from the last such plan (_GEO)
+    gk_ = hashlib.blake2b(digest_size=20)
+    gk_.update(repr((SHARE_TOL, sz['tw'], sz['cl'], sz['h2h'], sz['d_seg'], sz['r_home'], sz['grow'])).encode())
+    for k in sorted(opts):
+        gk_.update(repr((k, items[k][0], [(kind_, pc_.legs, pc_.vias, pc_.balls) for kind_, _o, pc_ in opts[k]])).encode())
+    gk_ = gk_.hexdigest()
+    known = _GEO.get(gk_)
     index = collections.defaultdict(list)
     boxes = {}
+    geo = {}                         # (_hit's view of each option's copper, made once)
     for k in sorted(opts):
         for i, (_kind, _o, pc) in enumerate(opts[k]):
             bx = boxes[(k, i)] = _box(pc, sz['grow'])
+            if known is not None:
+                continue
             for cx in range(int(math.floor(bx[0])), int(math.floor(bx[2])) + 1):
                 for cy in range(int(math.floor(bx[1])), int(math.floor(bx[3])) + 1):
                     index[(cx, cy)].append((k, i))
-    for k in sorted(opts):
+    n0_ = len(pairs)
+    for k in (sorted(opts) if known is None else ()):
         for i, (kind, _o, pc) in enumerate(opts[k]):
             if kind == 'escape':
                 continue
@@ -1283,8 +1357,15 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                         bx2 = boxes[(k2, j)]
                         if bx[0] > bx2[2] or bx2[0] > bx[2] or bx[1] > bx2[3] or bx2[1] > bx[3]:
                             continue
-                        if _hit(pc, opts[k2][j][2], items[k][0] == items[k2][0], sz):
+                        if _hit(pc, opts[k2][j][2], items[k][0] == items[k2][0], sz, geo):
                             pairs.append((k, i, k2, j))
+    del geo
+    if known is None:
+        _GEO[gk_] = pairs[n0_:]
+        while len(_GEO) > GEO_KEEP:
+            _GEO.pop(next(iter(_GEO)))
+    else:
+        pairs += known
     if exit_rays:
         pairs += exit_ray_conflicts(opts, {k: items[k][0] for k in items}, bus_s, sz['vr'])
     t_geo = time.time() - t1
@@ -1732,7 +1813,34 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
         if time_limit:
             s1.parameters.max_time_in_seconds = time_limit
         held_keys, hint_vals, st1, tier_rep, left_out = [], None, None, [], set()
-        for tname, tier in tiers:
+        # THE START ANSWERS PHASE 1: where the array's last plan names an option for every ball served (`start`), its
+        # options replace phase 1's answer whole in phase 2's start below -- all phase 1 then decides is which balls are
+        # held served, and where the start serves every one of them (laid out whole, every ball served, as phase 2's
+        # start is laid out), it answers each tier's question yes: every tier held, none let go. The tiers' solves are
+        # then not asked (12-20 s a plan); they would answer the same
+        if start and not time_limit and served and all(k in start for k in served):
+            m2 = mdl.Clone()
+            for _tn, tier in tiers:
+                for k in tier:
+                    m2.Add(m2.GetBoolVarFromProtoIndex(served[k].Index()) == 1)
+            m2.ClearHints()
+            for key in keys:
+                for i, var in enumerate(v[key]):
+                    m2.AddHint(m2.GetBoolVarFromProtoIndex(var.Index()), int(i == start[key]))
+            sq = cp_model.CpSolver()
+            sq.parameters.num_workers = 1
+            sq.parameters.fix_variables_to_their_hinted_value = True
+            sq.parameters.stop_after_first_solution = True
+            sq.parameters.max_deterministic_time = START_WORK
+            if sq.Solve(m2) in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                for tname, tier in tiers:
+                    if tier:
+                        tier_rep.append((tname, len(tier), 'OPTIMAL'))
+                        held_keys += list(tier)
+                st1 = cp_model.OPTIMAL
+                hint_vals = {var.Index(): int(i == start[key]) for key in keys for i, var in enumerate(v[key])}
+            del m2
+        for tname, tier in (tiers if st1 is None else ()):
             if not tier:
                 continue
             while True:

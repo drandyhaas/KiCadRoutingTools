@@ -428,6 +428,17 @@ it does not, it solves its own. Each model is built, and each plan made from
 its answer, on the fanout's own thread. zynq7020_som's first-round fanout went
 from 271 s to 190 s, its copper the same.
 
+**What a plan of the same array finds again.** A plan's geometry pairs (the
+two options whose copper cannot both be laid) depend on the options' copper,
+their nets and the sizes alone, so a plan of the same array on the same
+menus -- each source-realize trial's, each berth plan's -- takes them from
+the last such plan (`joint_escape._GEO`, the four latest). A plan started
+from the array's last plan, where that start serves every ball the plan
+holds served, skips phase 1's tier solves: the start, checked feasible with
+every tier held, is their answer. Five boards' buses came out as before, and
+their first-round fanouts took 9% less time, 38% where one array is planned
+again many times.
+
 **The destination's berths, held where the ends chose them.** The joint plan
 of the destination array that places the bus's berths (`joint_berths`) is
 solved twice: preferring the ends model's berths, and with every one of them

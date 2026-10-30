@@ -893,6 +893,29 @@ def unthreadable(fp, track=None, clear=None):
     return float(d.min()) < track + 2 * clear
 
 
+def _source_stamp(pcb):
+    """(path, mtime, size) of the board file `pcb` was read from, as it stood when first asked of this board -- None
+    when it has none on disk. Read ONCE per board: build_obstacles is asked thousands of times a fanout (6,329 on one
+    plan), and a stat and an existence test each time were 5 s of it. The board in memory is the file as it was read,
+    so the stamp it was first given names it as long as it lives; a board read again after the file is rewritten is
+    another object, with a stamp of its own"""
+    src = getattr(pcb, 'source_path', None)
+    if not src:
+        return None
+    got = getattr(pcb, '_obs_stamp', None)
+    if got is not None and got[0] == src:
+        return got[1]
+    stamp = None
+    if os.path.exists(src):
+        st_ = os.stat(src)
+        stamp = (os.path.abspath(src), st_.st_mtime_ns, st_.st_size)
+    try:
+        pcb._obs_stamp = (src, stamp)
+    except AttributeError:
+        pass
+    return stamp
+
+
 def build_obstacles(pcb, nid, kids, layer, margin=None, skip_refs=frozenset()):
     """A static-copper model for one net on one layer: every foreign
     pad as KiCad draws it (a rect or an oval as capsules, _build_obstacles;
@@ -915,12 +938,10 @@ def build_obstacles(pcb, nid, kids, layer, margin=None, skip_refs=frozenset()):
     # vias and segments. Same items, same order: bit-identical answers.
     kids = frozenset(kids)
     base_kids = kids if (nid in kids and len(kids) > 1) else kids - {nid}
-    src = getattr(pcb, 'source_path', None)
+    stamp = _source_stamp(pcb)
     bkey = dkey = None
-    if src and os.path.exists(src):
-        st_ = os.stat(src)
-        bkey = (os.path.abspath(src), st_.st_mtime_ns, st_.st_size,
-                base_kids, layer, len(pcb.segments), len(pcb.vias),
+    if stamp is not None:
+        bkey = stamp + (base_kids, layer, len(pcb.segments), len(pcb.vias),
                 getattr(pcb, 'frame_axis', None),   # the board turned over, or rotated,
                 getattr(pcb, 'frame_rotation', None),   # is another board
                 margin, frozenset(skip_refs))
