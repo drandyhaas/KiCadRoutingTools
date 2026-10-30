@@ -998,6 +998,47 @@ def _fab_track_floor(pcb_data) -> float:
 NECK_GRAZE_TOL = 1e-6
 
 
+def _terminal_board_edge_dist(pcb_data, net_id, s, term_pts):
+    """Distance from terminal segment `s`'s centreline to the board edge, for
+    the terminal neck (#1519); ``inf`` when it does not apply.
+
+    The endpoint region a route lands on is obstacle-exempt, so a terminal on
+    a fanout stub end that lies inside the board-edge band of the route's
+    WIDER track arrives at full width, short of the edge clearance. It does
+    not apply to a terminal on the net's own pad: such a pad's copper is
+    exempt from the band by design (#441) and the track it lands adds no new
+    edge copper. Measured against the real Edge.Cuts rings, or the board's
+    rectangle when it has none -- the REAL board's, on a local window, whose
+    own bounds are not an edge.
+    """
+    from check_drc import (board_edge_geometry, _segment_to_rings_distance,
+                           _point_on_board, point_to_pad_distance)
+    bi = getattr(pcb_data, 'board_info', None)
+    if bi is None:
+        return float('inf')
+    own_pads = (getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id, ())
+    for tx, ty in term_pts:
+        if not ((abs(s.start_x - tx) < 1e-6 and abs(s.start_y - ty) < 1e-6) or
+                (abs(s.end_x - tx) < 1e-6 and abs(s.end_y - ty) < 1e-6)):
+            continue
+        for p in own_pads:
+            if ((s.layer in p.layers or '*.Cu' in p.layers)
+                    and getattr(p, 'pad_type', '') != 'np_thru_hole'
+                    and point_to_pad_distance(tx, ty, p) <= 1e-6):
+                return float('inf')
+    rings, outer, cutouts = board_edge_geometry(bi)
+    if not rings:
+        bb = getattr(bi, 'parent_board_bounds', None) or getattr(bi, 'board_bounds', None)
+        if not bb:
+            return float('inf')
+        x0, y0, x1, y1 = bb
+        rings = outer = [[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
+    for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+        if not _point_on_board(x, y, outer, cutouts):
+            return 0.0
+    return _segment_to_rings_distance(s.start_x, s.start_y, s.end_x, s.end_y, rings)
+
+
 def _hard_terminal_why(entry):
     """What a `_neck_terminal_grazes` hard entry is, for the refusal message.
 
@@ -1010,7 +1051,8 @@ def _hard_terminal_why(entry):
         return (f"terminal copper on {s.layer} would OVERLAP a foreign track/via "
                 f"(edge dist {d_raw:.3f}mm < floor half-width)", "a short")
     return (f"terminal copper on {s.layer} is {short_by * 1000:.1f}um inside a "
-            f"foreign object's clearance and --escalation off forbids necking it",
+            f"foreign object's or the board edge's clearance and --escalation "
+            f"off forbids necking it",
             "a clearance violation")
 
 
@@ -1023,7 +1065,9 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     full-width terminal can sit sub-clearance to NEIGHBOURING foreign copper -- a pad
     (#157, e.g. tigard Net-(R7-Pad2) grazing the VREG pad by 8um) OR another net's
     track/via (#212: a +1V2 terminal into a cap pad grazing a wide +3V3 trace by
-    ~15um). Narrowing the offending terminal segment restores clearance without
+    ~15um) -- OR the board edge, when the terminal is a fanout stub end inside
+    the wider route's edge band (#1519; see `_terminal_board_edge_dist`).
+    Narrowing the offending terminal segment restores clearance without
     moving the centreline, so connectivity is preserved; a graze the floor width
     still can't clear is left for the DRC report. Only segments touching a terminal
     point are considered (the A* body keep-outs already enforce clearance mid-route).
@@ -1054,6 +1098,10 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     nc = getattr(config, 'net_clearances', None) or None
     own = (config.obstacle_clearance(net_id)
            if hasattr(config, 'obstacle_clearance') else config.clearance)
+    # The edge clearance the board-edge band is stamped at
+    # (obstacle_map.add_board_edge_obstacles).
+    edge_clr = (config.board_edge_clearance
+                if getattr(config, 'board_edge_clearance', 0) > 0 else config.clearance)
     def touches(s):
         for tx, ty in term_pts:
             if (abs(s.start_x - tx) < 1e-6 and abs(s.start_y - ty) < 1e-6) or \
@@ -1083,13 +1131,18 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
         _sense_d = terminal_sense_dist(pcb_data, net_id, s.start_x, s.start_y,
                                        s.end_x, s.end_y, s.layer, s.width / 2.0)
         d = min(d, _sense_d)
+        # #1519: the board edge is a neighbour too. Its room is the gap past
+        # the edge clearance, folded in beside the foreign room below.
+        d_edge = _terminal_board_edge_dist(pcb_data, net_id, s, term_pts)
+        edge_room = d_edge - edge_clr
         # #1159: a graze is an edge gap BELOW the rule. Copper exactly at the
         # rule is legal (the writer emits 1 nm coordinates, so 1 nm is the
         # only tolerance the test needs); the 1e-4 margin belongs to the neck
         # TARGET, once a real graze exists, and never to the trigger.
-        short_by = own_l - (d - s.width / 2.0)
+        short_by = max(own_l - (d - s.width / 2.0), s.width / 2.0 - edge_room)
         if short_by > NECK_GRAZE_TOL:
-            allowed_half = d - own_l - 1e-4  # 1e-4: stay just inside the rule
+            # 1e-4: stay just inside the rule
+            allowed_half = min(d - own_l, edge_room) - 1e-4
             # Hard test BEFORE necking, on the RAW track/via distance: a
             # centreline within floor/2 of a foreign copper EDGE overlaps it
             # at any emittable width -- a physical short, not a graze.

@@ -661,16 +661,12 @@ def _fence_window(obstacles, window, cfg):
     from routing_config import GridCoord
 
     coord = GridCoord(cfg.grid_step)
-    min_x, min_y, max_x, max_y = bi.board_bounds
     edge_clearance = (cfg.board_edge_clearance if cfg.board_edge_clearance > 0
                       else cfg.clearance)
-    track_expand = coord.to_grid_dist(edge_clearance + cfg.track_width / 2)
-    via_expand = coord.to_grid_dist_safe(edge_clearance + cfg.via_size / 2)
-    gmin_x, gmin_y = coord.to_grid(min_x, min_y)
-    gmax_x, gmax_y = coord.to_grid(max_x, max_y)
     _add_rectangular_edge_obstacles(obstacles, coord, len(cfg.layers),
-                                    gmin_x, gmin_y, gmax_x, gmax_y,
-                                    track_expand, via_expand)
+                                    bi.board_bounds,
+                                    edge_clearance + cfg.track_width / 2,
+                                    edge_clearance + cfg.via_size / 2)
 
 
 def seed_rows(points, cfg, window):

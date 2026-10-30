@@ -1407,8 +1407,8 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     else:
         # Use simple rectangular blocking
         _add_rectangular_edge_obstacles(obstacles, coord, num_layers,
-                                         gmin_x, gmin_y, gmax_x, gmax_y,
-                                         track_expand, via_expand,
+                                         board_bounds,
+                                         track_edge_clearance, via_edge_clearance,
                                          layer_exempt=layer_exempt)
 
     # Block areas inside board cutouts (e.g., connector/switch openings)
@@ -1645,9 +1645,15 @@ def _add_edge_contour_obstacles(obstacles: GridObstacleMap, contour: List[Tuple[
 
 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
-                                     gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
-                                     track_expand: int, via_expand: int, layer_exempt=None):
+                                     bounds, track_edge_clearance: float,
+                                     via_edge_clearance: float, layer_exempt=None):
     """Add obstacles for simple rectangular board outline.
+
+    ``bounds`` is the rectangle in mm and the two clearances are the keep-out
+    reaches in mm. Each band is measured from the EXACT edge
+    (``GridCoord.edge_band_limits``), never from the edge rounded to the grid:
+    an edge between grid lines that rounded OUTWARD let a track centre sit on
+    the first cell inside it, up to half a cell short of the clearance (#1519).
 
     The via keep-out band (via_expand) reaches FURTHER inboard than the track
     band (track_expand) because a via is wider than a track. Each edge sweep must
@@ -1660,8 +1666,20 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
     an in-band pad's own copper cells landable on its own layer.
     """
     _le = layer_exempt or {}
+    min_x, min_y, max_x, max_y = bounds
+    gmin_x, gmin_y = coord.to_grid(min_x, min_y)
+    gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+    track_expand = coord.to_grid_dist(track_edge_clearance)
+    via_expand = coord.to_grid_dist_safe(via_edge_clearance)
     edge_expand = max(track_expand, via_expand)
     grid_margin = edge_expand + 5
+    # Band limits per axis: a cell is in the band iff g <= lo or g >= hi.
+    # The track band also blocks a cell exactly at its reach, the via band
+    # does not -- the tie rules the two bands have always had.
+    t_lo_x, t_hi_x = coord.edge_band_limits(min_x, max_x, track_edge_clearance, False)
+    t_lo_y, t_hi_y = coord.edge_band_limits(min_y, max_y, track_edge_clearance, False)
+    v_lo_x, v_hi_x = coord.edge_band_limits(min_x, max_x, via_edge_clearance, True)
+    v_lo_y, v_hi_y = coord.edge_band_limits(min_y, max_y, via_edge_clearance, True)
 
     # Sweep item 8 (#625 follow-up): the four edge sweeps called
     # add_static_blocked_cell/add_static_blocked_via once PER CELL per layer
@@ -1703,22 +1721,22 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
 
     # Left edge (full height, so it also covers the via band at both left
     # corners); right edge (full height); top/bottom middle spans.
-    _sweep(gmin_x - grid_margin, gmin_x + edge_expand,
+    _sweep(gmin_x - grid_margin, max(t_lo_x, v_lo_x),
            gmin_y - grid_margin, gmax_y + grid_margin,
-           lambda gx: gx <= gmin_x + track_expand,
-           lambda gx: gx < gmin_x + via_expand, True)
-    _sweep(gmax_x - edge_expand, gmax_x + grid_margin,
+           lambda gx: gx <= t_lo_x,
+           lambda gx: gx <= v_lo_x, True)
+    _sweep(min(t_hi_x, v_hi_x), gmax_x + grid_margin,
            gmin_y - grid_margin, gmax_y + grid_margin,
-           lambda gx: gx >= gmax_x - track_expand,
-           lambda gx: gx > gmax_x - via_expand, True)
-    _sweep(gmin_x + track_expand + 1, gmax_x - track_expand - 1,
-           gmin_y - grid_margin, gmin_y + edge_expand,
-           lambda gy: gy <= gmin_y + track_expand,
-           lambda gy: gy < gmin_y + via_expand, False)
-    _sweep(gmin_x + track_expand + 1, gmax_x - track_expand - 1,
-           gmax_y - edge_expand, gmax_y + grid_margin,
-           lambda gy: gy >= gmax_y - track_expand,
-           lambda gy: gy > gmax_y - via_expand, False)
+           lambda gx: gx >= t_hi_x,
+           lambda gx: gx >= v_hi_x, True)
+    _sweep(t_lo_x + 1, t_hi_x - 1,
+           gmin_y - grid_margin, max(t_lo_y, v_lo_y),
+           lambda gy: gy <= t_lo_y,
+           lambda gy: gy <= v_lo_y, False)
+    _sweep(t_lo_x + 1, t_hi_x - 1,
+           min(t_hi_y, v_hi_y), gmax_y + grid_margin,
+           lambda gy: gy >= t_hi_y,
+           lambda gy: gy >= v_hi_y, False)
 
 
 def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
