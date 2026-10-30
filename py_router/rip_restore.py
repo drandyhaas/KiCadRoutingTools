@@ -116,11 +116,23 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
                 owners.add(v.net_id)
                 if not collect:
                     return owners
+    # A via pair is graded on its DRILLS too: the hole-to-hole floor is
+    # independent of copper and of net, and between two fab-tier vias
+    # (0.25-0.3/0.15) it is the binding measure -- a restored 0.3/0.15 via
+    # cleared a foreign 0.25/0.15 via-in-pad by copper and sat 0.156 mm
+    # inside a 0.5 hole-to-hole floor. A pair of vias the step was HANDED
+    # stood on the input board, so it is never the reason to refuse (#980).
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    _inp = getattr(pcb_data, '_input_copper', None)
+    inp_ids = _inp[0] if _inp else frozenset()
     for cv in vias:
         for v in board_vias:
             if v.net_id in own_ids or v.net_id in owners:
                 continue
             need = cv.size / 2 + v.size / 2 + _pair_clr(cv.net_id, v.net_id)
+            if h2h > 0 and cv.drill > 0 and v.drill > 0 \
+                    and not (id(cv) in inp_ids and id(v) in inp_ids):
+                need = max(need, cv.drill / 2 + v.drill / 2 + h2h)
             if math.hypot(cv.x - v.x, cv.y - v.y) < need:
                 owners.add(v.net_id)
                 if not collect:
