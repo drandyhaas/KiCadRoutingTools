@@ -4074,11 +4074,13 @@ class _Ctx:
                 # #961: "exempt" is decided on the band's OWN currency, the
                 # one `rule_edge_connector` grades -- the drawn body where it
                 # can be measured, the courtyard at zero margin where it
-                # cannot (#1301). `amt` still decides whether the census
-                # counted the part at all.
+                # cannot (#1301), on the part placement seats (#1531,
+                # `band_courtyard_rect`). `amt` still decides whether the
+                # census counted the part at all.
                 _cy, _cy_others = courtyard_overhang_past(
                     geometry_for(self, self.pcb, self.pcb_file),
-                    part.rect, c.get('edge'), skip_rings=own)
+                    band_courtyard_rect(self, ref, part), c.get('edge'),
+                    skip_rings=own)
                 band, _basis, _body = _band_amount(
                     self, ref, c.get('edge'), _cy)
                 # #1403: the band reads the declared edge alone, so the
@@ -4724,22 +4726,29 @@ def open_zone_rect(zone_rect, open_sides):
 
 
 def zone_parts(state, pcb_data, pcb_file: str):
-    """`{ref: part}`: `state.parts` on the basis a ZONE measures a part on
-    (#1466). A part that draws no courtyard is the part place_simple seats --
-    on its ESTIMATED courtyard, from the map the placer's own state reads
-    (`body.courtyard_sides_with_estimates`) -- at the pose `state` gives it;
-    every other part is `state`'s own. A state that already estimates (the
-    placer's) is returned as it is.
+    """`{ref: part}`: `state.parts` on the basis place_simple SEATS a part on
+    (#1466). A part that draws no courtyard is measured on its ESTIMATED
+    courtyard, from the map the placer's own state reads
+    (`body.courtyard_sides_with_estimates`), at the pose `state` gives it;
+    every other part is `state`'s own. A state that already estimates every
+    such part (the placer's) is returned as it is; one that skipped some
+    (`QuenchState.estimate_skip`, place_simple's #1300 fallback, which seats
+    them on their pad box for legality) gets the estimate for those.
 
-    Zones only: the zone rules, the plan check's zone sums, the emitter's
-    zone extents and the anchors a declared pose compiles to
-    (`reconcile.anchor_blocks`, #1530) ask it. The legality budget, the
-    outline and the edge rules
-    keep reading the state, so a courtyard-less connector flush with the
-    edge is not newly an off-board part. The estimated parts are built once
-    per state and follow its poses."""
+    The rules a placement is SEATED against ask it, so the seat and the
+    grade read one part: the zone rules, the plan check's zone sums, the
+    emitter's zone extents, the anchors a declared pose compiles to
+    (`reconcile.anchor_blocks`, #1530) and an edge connector's overhang
+    BAND where no body is measured -- its grade, its seat, the census
+    exemption and the emitter's observed band (`band_courtyard_rect`,
+    #1531). The legality budget, the outline and the edge rule's other
+    conjuncts (which edge, how far set back, where along it) keep reading
+    the state -- what KiCad judges -- so a courtyard-less connector flush
+    with the edge is not newly an off-board part. The estimated parts are
+    built once per state and follow its poses."""
     parts = getattr(state, 'parts', None) or {}
-    if getattr(state, 'courtyard_estimates', None):
+    have = getattr(state, 'courtyard_estimates', None)
+    if have and not getattr(state, 'estimate_skip', None):
         return parts
     cache = getattr(state, '_zone_parts', None)
     if cache is None:
@@ -4754,7 +4763,7 @@ def zone_parts(state, pcb_data, pcb_file: str):
             sides, est = {}, {}
         fps = getattr(pcb_data, 'footprints', None) or {}
         for ref in est:
-            if ref in parts and ref in fps:
+            if ref in parts and ref in fps and ref not in (have or ()):
                 cache[ref] = _Part(ref, fps[ref], sides,
                                    getattr(parts[ref], 'locked', False))
         try:
@@ -5734,8 +5743,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # clearance), which every routing step's DRC writeback rewrites, so
         # one pose graded differently placed and routed (daplink: 3 errors
         # after routing, nothing moved).
-        amount, _cy_others = courtyard_overhang_past(
-            geometry_for(ctx, ctx.pcb, ctx.pcb_file), part.rect, c.get('edge'))
+        _geo = geometry_for(ctx, ctx.pcb, ctx.pcb_file)
+        amount, _ = courtyard_overhang_past(_geo, part.rect, c.get('edge'))
         lim = c.get('overhang_mm') or {}
         lo = float(lim.get('min', 0.0))
         hi = lim.get('max')
@@ -5744,12 +5753,19 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # it replaces -- at zero margin, wherever that body can be measured.
         # Graded at a margin, the courtyard let esp_prog's USB1, 0.15 mm
         # INSIDE its edge, read 0.10 and satisfy a band `check_drc
-        # --check-pad-edge` failed. Where no body can be read `band` IS
-        # `amount`, and `overhang_basis` says which it was. `amount` keeps its
-        # other job: the setback conjunct's no-overhang gate below, which
-        # reads the courtyard on either basis.
+        # --check-pad-edge` failed. Where no body can be read the band is the
+        # courtyard's overhang on the basis place_simple SEATS the part on
+        # (#1531, `band_courtyard_rect`): for a part that draws no courtyard,
+        # its estimated one. Read on its pad box, a positive minimum asked
+        # the pads to leave the board, and the edge seat put the estimate
+        # exactly where this rule then read 0.00. `overhang_basis` says which
+        # reading it was. `amount` keeps its other job: the setback
+        # conjunct's no-overhang gate below, which reads the courtyard on
+        # either basis.
+        _band_cy, _cy_others = courtyard_overhang_past(
+            _geo, band_courtyard_rect(ctx, ref, part), c.get('edge'))
         band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),
-                                                  amount)
+                                                  _band_cy)
         # #1403: the band above is ONE distance past the declared edge. What
         # the part does past a DIFFERENT edge is graded on its own: more than
         # the band's maximum is an error (the sum used to bound it); anything
@@ -6005,6 +6021,16 @@ def _facing_tail(f) -> str:
     return (f"; facing {f['facing']} [{f['basis']}, "
             f"{'strong' if f['strong'] else 'weak'}] "
             f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}")
+
+
+def band_courtyard_rect(ctx, ref, part):
+    """The courtyard rect a declared `overhang_mm` band reads when the drawn
+    body cannot be measured (#1531): the part on the basis place_simple
+    seats it on (`zone_parts`) -- for a part that draws no courtyard, its
+    estimated one, which `edge_seat._Probe.band_rect` reads too. `part` is
+    the context's own record, the answer for every other part."""
+    zp = _ctx_zone_parts(ctx).get(ref)
+    return zp.rect if zp is not None else part.rect
 
 
 def _band_amount(ctx, ref, edge, courtyard_amount):
@@ -11062,13 +11088,25 @@ def emit_intent(pcb_data, pcb_file: str, *,
                                     f'sits fully on-board')
         return None
 
+    # #1531: an observed BAND reads the courtyard `rule_edge_connector`
+    # grades a band on (`band_courtyard_rect`: the estimated one for a part
+    # that draws none), so an emitted band still grades the board it was
+    # read off clean. Whether a part is AT an edge, and which, stay on the
+    # board's own courtyard, as the rule's other conjuncts read it.
+    if _zp is None:
+        _zp = zone_parts(state, pcb_data, pcb_file)
+    erect = {r: (_zp[r].rect()
+                 if _zp.get(r) is not None
+                 and _zp[r] is not state.parts.get(r) else parts[r].rect)
+             for r in parts}
+
     def _band_cap(ref: str) -> float:
         """The largest overhang that can still be READ as a declared band.
 
         An overhang wider than the part itself puts the part entirely off the
         outline, which no spec expresses; below that, `EDGE_BAND_SANITY_MM`
         keeps a small part's legitimate band from being called damage."""
-        rect = parts[ref].rect
+        rect = erect[ref]
         try:
             extent = max(abs(rect[2] - rect[0]), abs(rect[3] - rect[1]))
         except Exception:                                       # noqa: BLE001
@@ -11087,7 +11125,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
     for ref in sorted(parts):
         near = _at_edge_gate.rect_outside_amount(parts[ref].rect)
         # the overhang the grade reads its band on, at zero margin (#1301)
-        amt = courtyard_overhang(_overhang_geo, parts[ref].rect)
+        amt = courtyard_overhang(_overhang_geo, erect[ref])
         if _pile and ref not in _pile_locked:
             if near > legality.EPS:
                 _pose_withheld.append(ref)

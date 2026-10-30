@@ -185,6 +185,7 @@ class _Probe:
 
     def __init__(self, state, pcb, pcb_file, bodies, outline):
         from .connector_geometry import geometry_for
+        from .floorplan import zone_parts
         from .legality import BoardOutlineGate
         self.state, self.pcb, self.bodies = state, pcb, bodies
         self.geo = geometry_for(state, pcb, pcb_file)
@@ -193,6 +194,18 @@ class _Probe:
                                        state.board_edge_clearance + COPPER_SLACK_MM)
         #: each part's mating face in its own frame ('' for none)
         self.faces: Dict[str, str] = {}
+        #: #1531: the parts this state seats on a basis the band is not
+        #: graded on -- the #1300 fallback's pad box -- on the band's
+        #: (`floorplan.zone_parts`, the estimate); empty on any other state
+        self._band_parts = {r: p for r, p in zone_parts(state, pcb, pcb_file).items()
+                            if p is not state.parts.get(r)}
+
+    def band_rect(self, ref, pose):
+        """`ref`'s courtyard at `pose` as `rule_edge_connector` reads its
+        BAND (`floorplan.zone_parts`): the state's own, except for a part
+        the fallback seats on its pad box, read on its estimate."""
+        part = self._band_parts.get(ref) or self.state.parts[ref]
+        return part.rect(*pose)
 
     def band(self, ref, edge, pose) -> float:
         return self.band_read(ref, edge, pose)[0]
@@ -203,7 +216,7 @@ class _Probe:
         from .connector_geometry import band_amount, courtyard_overhang_past
         # #1301: the courtyard at ZERO margin, as the grade reads it
         legacy, cy_others = courtyard_overhang_past(
-            self.geo, self.state.parts[ref].rect(*pose), edge)
+            self.geo, self.band_rect(ref, pose), edge)
         amount, basis, row = band_amount(self.geo, ref, edge, legacy, 0.0, pose=pose)
         # The grade reads the DECLARED edge alone and reports another edge's
         # overhang on its own (#1403). The seat holds the stricter rule and

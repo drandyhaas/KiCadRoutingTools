@@ -673,9 +673,17 @@ is a real conjunct. The graded number is summed over every side the body
 crosses, so a corner part counts both sides; for a body that crosses only its
 declared edge, it is exactly that edge's overhang.
 
-When no body can be measured, the band is graded on the courtyard (or, with
-none, the pad box) instead, also at zero margin (basis
-`legacy_occupancy@margin=0`, #1301 below). Unmeasurable cases include a
+When no body can be measured, the band is graded on the courtyard instead,
+also at zero margin (basis `legacy_occupancy@margin=0`, #1301 below). A part
+that draws no courtyard is read on the ESTIMATED courtyard `place_simple`
+seats it on (its .Fab body, else silk, else pads, united with its pads;
+`floorplan.band_courtyard_rect`, #1531), never on its pad box: on the pad
+box a positive `min` asks the pads to leave the board, so the seat met a
+band the grade then failed. The seat reads the same estimate in the #1300
+fallback that seats such a part on its pad box for legality, and the
+emitter's observed band is read on it too. Which edge the part is on, its
+setback and its position along the edge keep reading the board's own
+courtyard (the pad box for such a part). Unmeasurable cases include a
 courtyard-only part, an arc in the Fab drawing, a non-rectangular outline, an
 entry with no `edge`, and a
 drawn envelope that does not enclose the centroid of its own pads (a pin-1

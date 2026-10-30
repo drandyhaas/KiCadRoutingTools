@@ -1215,6 +1215,11 @@ class QuenchState:
         self._drawn_courtyards = extract_courtyard_sides(pcb_file)
         courtyards = self._drawn_courtyards
         self.courtyard_estimates: Dict[str, object] = {}
+        #: the refs this state seats on what the board draws although they
+        #: have an estimate (place_simple's #1300 fallback): `floorplan.
+        #: zone_parts` still measures them on the estimate (#1531)
+        self.estimate_skip = (frozenset(estimate_skip) if estimate_courtyards
+                              else frozenset())
         if estimate_courtyards:
             from placement.body import courtyard_sides_with_estimates
             courtyards, self.courtyard_estimates = (
