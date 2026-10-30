@@ -2671,24 +2671,30 @@ channels first, and the other escapes leave round it.
   CP-SAT model choosing every lane's tooth and berth with it as its
   objective -- the fanout's conflicts as forbidden pairs, the congestion's
   square piecewise linear -- could prove the best ends under it.
-- **The exact route's vias for a fixed crossing order, by matching.** With
-  the order of the crossings fixed and the ends' layers given, the fewest
-  changes is a minimum T-join on the planar dual of the wiring diagram. T is
-  the faces with an odd number of flips round them: each crossing on a
-  face's boundary is one, its two lanes being on opposite layers there; a
-  face at the ends adds the end layers; every triangle is odd. Each change is
-  a dual edge, across a lane between two of its crossings. The vias are then
-  domain walls pairing the frustrated faces -- the problem of decoding a
-  surface code -- and a minimum-weight matching (PyMatching, Blossom) solves
-  it exactly, in integers, in milliseconds, the same on every machine.
-  `exact_route` instead asks CP-SAT the whole question within a deterministic
-  work limit, whose proofs cost each machine its own time. To try: a local search over the
-  crossing order by braid moves (a triangle's three crossings taken in the
-  other order), each order scored by the matching, its best given to CP-SAT
-  as a hint, or standing in where the work limit is hit; and the matching's
-  count as a check on a solve's plan. The matching does not see the price on
-  a net's vias past two (`W_OVER`), which couples one lane's changes, nor via
-  room, which couples neighbours; a pair is one lane whose changes count two.
+- **The exact route's vias for a fixed crossing order, by matching (two
+  layers).** On two layers, with the order of the crossings fixed and the
+  ends' layers given, the fewest changes is a minimum T-join on the planar
+  dual of the wiring diagram. T is the faces with an odd number of flips
+  round them: each crossing on a face's boundary is one, its two lanes being
+  on opposite layers there; a face at the ends adds the end layers; every
+  triangle is odd. Each change is a dual edge, across a lane between two of
+  its crossings. The vias are then domain walls pairing the frustrated faces
+  -- the problem of decoding a surface code -- and a minimum-weight matching
+  (PyMatching, Blossom) solves it exactly, in integers, in milliseconds, the
+  same on every machine. On more layers two crossing lanes need only be on
+  different layers, not opposite ones -- a colouring, which no matching
+  answers exactly -- so there the matching gives a two-layer plan: a hint,
+  its count of changes a bound from above. `exact_route` and
+  `exact_route_nl` instead ask CP-SAT the whole question within a
+  deterministic work limit, whose proofs cost each machine its own time. To
+  try: a local search over the crossing order by braid moves (a triangle's
+  three crossings taken in the other order), each order scored by the
+  matching, its best given to CP-SAT as a hint, or standing in where the
+  work limit is hit; and the matching's count as a check on a solve's plan.
+  The matching does not see the price on a net's vias past two (`W_OVER`),
+  which couples one lane's changes, nor a lane's cap on its changes
+  (`EXACT_KMAX`), nor via room, which couples neighbours; a pair is one lane
+  whose changes count two.
 - **DDR bit swaps as variables.** A DDR controller usually lets the DQ bits
   within a byte lane be swapped, and often whole byte lanes, each byte's
   strobe pair and mask going with it. The rules are the controller's own
@@ -2779,12 +2785,10 @@ channels first, and the other escapes leave round it.
   at most each) the step's time is the fanout's (about two fifths, most of
   it CP-SAT), the solve's (a quarter), the geometry's (a fifth), then the
   snap's and the polish's. Of the geometry's, the LP in HiGHS is about
-  70% -- its first, full pass 40%, the lazy second 30% -- and one elastic
-  column per pitch rule, not one per tangent cut, would shrink it
-  (`GEO_SHARED_SLACK=1`, among the probes above); the islands' sides are
-  another fifth, most of it the Python of each island's reach. Of the
-  snap's, a third is the Python search it runs again after a lane's native
-  search fails, to name what stopped it.
+  70% -- its first, full pass 40%, the lazy second 30% -- and the islands'
+  sides are another fifth, most of it the Python of each island's reach. Of
+  the snap's, a third is the Python search it runs again after a lane's
+  native search fails, to name what stopped it.
 - **Memory.** The pairs' search states are packed integers, but their cost
   and predecessor sit in dicts; flat arrays would keep every stage under
   1 GB at K51. `braid.py` pins HiGHS at import, which loads `scipy.optimize`
