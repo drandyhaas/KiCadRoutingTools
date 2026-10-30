@@ -120,6 +120,27 @@ def _dedup_max(out: np.ndarray) -> np.ndarray:
     return out[keep]
 
 
+def _nets_with_shared_cells(states) -> set:
+    """Pour nets two of whose islands on one layer can emit the same cell --
+    overlapping zones of one net. Only their rows need `_dedup_max`: a state
+    emits only cells of its `mask`, which never grows past its `orig` (a
+    refresh only carves), so islands whose `orig` rasters are disjoint never
+    emit one cell twice."""
+    out = set()
+    for i, a in enumerate(states):
+        for b in states[i + 1:]:
+            if a.net_id != b.net_id or a.li != b.li or a.net_id in out:
+                continue
+            x0, x1 = max(a.gx0, b.gx0), min(a.gx0 + a.W, b.gx0 + b.W)
+            y0, y1 = max(a.gy0, b.gy0), min(a.gy0 + a.H, b.gy0 + b.H)
+            if x0 >= x1 or y0 >= y1:
+                continue
+            if (a.orig[y0 - a.gy0:y1 - a.gy0, x0 - a.gx0:x1 - a.gx0]
+                    & b.orig[y0 - b.gy0:y1 - b.gy0, x0 - b.gx0:x1 - b.gx0]).any():
+                out.add(a.net_id)
+    return out
+
+
 def _publish_by_net(cache, rows_by_net, published=()):
     """Write each pour net's deduped rows under its own key, and drop the
     keys in `published` that this publish no longer carries. Returns the
@@ -257,6 +278,7 @@ class FragilityField:
         self.refreshes = 0
         self.refresh_s = 0.0
         self._published = {fragility_cache_key(st.net_id) for st in states}
+        self._shared = _nets_with_shared_cells(states)
 
     @classmethod
     def _disc(cls, r: int) -> np.ndarray:
@@ -355,7 +377,7 @@ class FragilityField:
         if not boxes and not allv:
             return
         pad_mm = self.carve_r_mm + self.depth * self.coord.grid_step
-        changed = False
+        changed = set()
         for st in self.states:
             bb = [np.inf, np.inf, -np.inf, -np.inf]
             if st.li in boxes:
@@ -382,18 +404,37 @@ class FragilityField:
             st.dist[wj0:wj1, wi0:wi1] = dist[wj0 - cj0:wj1 - cj0,
                                              wi0 - ci0:wi1 - ci0]
             self._regen_rows(st)
-            changed = True
+            changed.add(st.net_id)
         if changed:
-            self.publish()
+            self.publish(changed)
             self.refreshes += 1
         self.refresh_s += _time.perf_counter() - t0
 
-    def publish(self):
+    def publish(self, nets=None):
+        """Write the rows of the pour nets in `nets` (every pour net when
+        None) under their keys, dropping a key whose net emits nothing now.
+        A refresh republishes only the nets it re-eroded: the others' rows
+        are unchanged, and re-sorting a board-sized pour's ~10^6 rows after
+        every commit, rip and restore was the largest cost of a route step
+        on boards with planes."""
+        if nets is None:
+            nets = {st.net_id for st in self.states}
         by_net: Dict[int, list] = {}
         for st in self.states:
-            if st.rows is not None:
+            if st.net_id in nets and st.rows is not None:
                 by_net.setdefault(st.net_id, []).append(st.rows)
-        self._published = _publish_by_net(self.cache, by_net, self._published)
+        for net_id in nets:
+            key = fragility_cache_key(net_id)
+            rows = by_net.get(net_id)
+            if not rows:
+                self.cache.pop(key, None)
+                self._published.discard(key)
+                continue
+            if net_id in self._shared:
+                self.cache[key] = _dedup_max(np.vstack(rows))
+            else:
+                self.cache[key] = rows[0] if len(rows) == 1 else np.vstack(rows)
+            self._published.add(key)
 
 
 def carve_in_memory_copper(config, pcb_data) -> None:
