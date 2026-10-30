@@ -90,6 +90,26 @@ def hs_copper(board):
             sum(1 for v in pcb.vias if v.net_id in hs))
 
 
+def dangling_hs_vias(board):
+    """HS vias whose net's copper reaches them on at most one layer -- an
+    escape via laid toward the banned layer, which nothing can use."""
+    from kicad_parser import parse_kicad_pcb
+    from pcb_modification import _via_support_layers
+    pcb = parse_kicad_pcb(board)
+    out = 0
+    for v in pcb.vias:
+        name = pcb.nets[v.net_id].name if v.net_id in pcb.nets else ''
+        if not any(fnmatch.fnmatchcase(name or '', p) for p in PATS):
+            continue
+        segs = [s for s in pcb.segments if s.net_id == v.net_id]
+        pads = pcb.pads_by_net.get(v.net_id, [])
+        zones = [z for z in (getattr(pcb, 'zones', None) or []) if z.net_id == v.net_id]
+        if len(_via_support_layers(v, segs, pads, zones,
+                                   pcb.board_info.copper_layers)) <= 1:
+            out += 1
+    return out
+
+
 def score(board):
     """board_score's document (it exits 4 whenever something blocks or is
     ungraded, so the document, not the exit code, is the evidence)."""
@@ -176,6 +196,8 @@ def main():
                                   ruled_out], accept=True)
         n_ruled, _ = hs_copper(run_utils.evidence(ruled_out, 'routed board'))
         check('with the rule no HS track lies on B.Cu', n_ruled == 0, f'{n_ruled}')
+        check('no HS via joins nothing across layers (KiCad: via_dangling)',
+              dangling_hs_vias(ruled_out) == 0, f'{dangling_hs_vias(ruled_out)}')
         check('the console says the rule is honoured',
               "rule 'hs_layers': honoured as forbidden layers" in r.stdout, r.stdout[-400:])
         check('...and lists it nowhere as NOT honoured',
