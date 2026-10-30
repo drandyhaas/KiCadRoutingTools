@@ -149,8 +149,8 @@ The writeback then treats the classes as `route.py` does: kept when
 `--clearance-ceiling` is omitted, each capped at `min(class, ceiling)` when it
 is given. A class is never lowered to the clearance the escape ran at, so a
 class whose nets the part does not touch keeps its value. `drc_grazes` is
-graded at the written project's classes too. (`bga_fanout.py` still escapes at
-the one clearance and clamps every class to it.)
+graded at the written project's classes too. (`bga_fanout.py` does the same;
+see its README.)
 
 ### Under-pad (via-drop) escape — `--escape-method underpad` (issue #164)
 

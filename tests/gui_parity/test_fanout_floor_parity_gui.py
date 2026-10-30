@@ -7,8 +7,9 @@
 does NOT self-skip without it: exit 2)
 
 THE GAP. The CLI fanouts finish with `fix_project_for_output(clearance,
-track_width, via size and drill when the step may write via floors, every
-non-Default class clamped)` -- no hole-to-hole, no edge clearance beyond the
+track_width, via size and drill when the step may write via floors, the
+non-Default classes kept -- or capped at --clearance-ceiling, #1529)` -- no
+hole-to-hole, no edge clearance beyond the
 fab pin, and the copper-to-hole floor lowered to the clearance with the rest.
 The fanout tab finished with `update_live_drc_floors` over its own set: the
 config's hole-to-hole and edge clearance, never the copper-to-hole floor, and
@@ -53,6 +54,7 @@ MM = 1e6
 #: wrote and the CLI fanouts never pass.
 CFG = {'fix_drc_settings': True, 'clearance': 0.15, 'track_width': 0.15,
        'via_size': 0.3, 'via_drill': 0.2, 'clearance_ceiling': None,
+       'class_ceiling': None,
        'hole_to_hole_clearance': 0.3, 'board_edge_clearance': 0.4}
 RULES = ('min_clearance', 'min_track_width', 'min_connection', 'min_via_diameter',
          'min_through_hole_diameter', 'min_via_annular_width',
@@ -70,7 +72,9 @@ def cli_kwargs(kind, tracks, vias):
     return {'clearance': CFG['clearance'], 'track_width': CFG['track_width'],
             'via_diameter': CFG['via_size'] if via else None,
             'via_drill': CFG['via_drill'] if via else None,
-            'clamp_nondefault_netclasses': True}
+            # #1529: the classes kept without a ceiling, capped with one
+            'clamp_nondefault_netclasses': CFG['class_ceiling'] is not None,
+            'class_ceiling': CFG['class_ceiling']}
 
 
 def _reexec_into_kicad():
@@ -254,7 +258,7 @@ def main():
     # clearance at all, so the tab wrote no clearance where qfn_fanout does.
     import ast
     need = {'clearance', 'track_width', 'via_size', 'via_drill',
-            'fix_drc_settings', 'same_net_pad_clearance'}
+            'fix_drc_settings', 'same_net_pad_clearance', 'class_ceiling'}
     tree = ast.parse(open(os.path.join(REPO, 'kicad_routing_plugin',
                                        'fanout_gui.py'), encoding='utf-8').read())
     lacking = []

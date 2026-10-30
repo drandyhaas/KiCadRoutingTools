@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
 
-from bga_fanout.types import FanoutRoute, Channel
+from bga_fanout.types import FanoutRoute, Channel, top_layer_barred
 from bga_fanout.collision import check_segment_collision, tracks_match_identifier
 
 
@@ -158,7 +158,7 @@ def assign_layers_smart(routes: List[FanoutRoute],
             # - Diff pairs should NOT use F.Cu (first layer) to avoid clearance violations
             # - If no_inner_top_layer is set, ALL inner routes avoid F.Cu
             # - Single-ended signals can use any layer (unless no_inner_top_layer)
-            if route.pair_id or no_inner_top_layer:
+            if route.pair_id or top_layer_barred(no_inner_top_layer, route.net_id):
                 candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
             else:
                 candidate_layers = available_layers
@@ -310,7 +310,8 @@ def try_reassign_layer(identifier: str, routes: List[FanoutRoute], tracks: List[
     # Diff pairs should NOT use F.Cu (first layer) to avoid clearance violations with pads.
     # If no_inner_top_layer is set, single-ended signals also avoid F.Cu.
     is_diff_pair = not identifier.startswith('net_')
-    if is_diff_pair or no_inner_top_layer:
+    if is_diff_pair or top_layer_barred(
+            no_inner_top_layer, None if is_diff_pair else int(identifier[4:])):
         candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
     else:
         candidate_layers = available_layers

@@ -2116,11 +2116,17 @@ Options:
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
   --escalation {off,board,fab}, --clearance-ceiling MM, --strict-sizes
                       As on the routing CLIs (see [Fab Tier Options](configuration.md#fab-tier-options));
-                      the ceiling caps this tool's one --clearance
+                      the ceiling caps --clearance and every net class
   --no-fix-drc-settings, --relax-drc-severities, --keep-thermal, --enable-used-layers
                       The post-run DRC-settings writeback, as on the routing CLIs
                       (see [DRC Settings Fixer](#drc-settings-fixer-fix_kicad_drc_settingspy))
 ```
+
+`--clearance` sets the Default net class for the run; every other class is
+read from the board's `.kicad_pro`, as `route.py` reads it, and the escape is
+spaced at KiCad's pairwise `max(clearance, class A, class B)` (#1529). The
+output project keeps the classes, or caps each at `min(class, ceiling)` under
+`--clearance-ceiling` -- in a chain pass the ceiling, as on the route steps.
 
 Escape stub ends are snapped to the `--grid-step` grid, and the decorative
 end-jog is validated against the full obstacle map (foreign pads + tracks +

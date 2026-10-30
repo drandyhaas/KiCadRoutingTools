@@ -645,7 +645,10 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
                     '--nets', '*', *excl, '--layers', *L, '--layer-costs', *costs,
                     '--track-width', tw, '--grid-step', str(a['grid']),
-                    '--clearance', str(a['clearance'])]
+                    '--clearance', str(a['clearance']),
+                    # the ceiling too, as on the route steps: bga_fanout honours
+                    # and keeps the net classes without one (#1529)
+                    '--clearance-ceiling', str(a['clearance'])]
             # The working via, then the fine via (one rung when they are the
             # same via), then the fine via with dogbone escapes.
             vias = dict.fromkeys([(v, d), (a['fine_via'], a['fine_drill'])])

@@ -859,7 +859,7 @@ def engine_lays_run(B, nm, move, end, others=None):
                 pcb.footprints[ref], pcb, net_filter=list(group), layers=list(LAYERS),
                 track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
                 exit_margin=0.5, escape_method='underpad', plane_drop='off',
-                escape_dir_hints=hints)
+                escape_dir_hints=hints, net_clearances={})   # class-blind, as the plan (#1529)
     finally:
         for o, (segs, vias) in removed.items():
             pcb.segments.extend(segs)

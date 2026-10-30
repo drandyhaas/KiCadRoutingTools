@@ -2241,15 +2241,13 @@ def fanout_fix_kwargs(kind, tracks, vias, *, clearance, track_width,
     for the live board. What they write, from :func:`fanout_written_floors`
     (#1195): the routed clearance (which also sets the copper-to-hole floor),
     the track width, the via size and drill only when the step may write via
-    floors, and the non-Default classes:
-
-    * ``'qfn'`` (#1529): its escape is spaced at KiCad's pairwise
-      max(clearance, class A, class B), so the classes are written as
-      route.py writes them -- kept when ``clearance_ceiling`` is None, else
-      each clamped to min(class, ceiling) -- and a class whose nets the step
-      never touched is never lowered to the step's clearance;
-    * ``'bga'``: every class clamped to the clearance (#439), because its
-      escapes are still spaced at that one clearance whatever the class.
+    floors, and the non-Default classes (#1529): both escapes are spaced at
+    KiCad's pairwise max(clearance, class A, class B), so the classes are
+    written as route.py writes them -- kept when ``clearance_ceiling`` is
+    None, else each clamped to min(class, ceiling) -- and a class whose nets
+    the step never touched is never lowered to the step's clearance. (Both
+    used to clamp every class to the clearance, #439, which hid copper laid
+    below a class by lowering the class.)
 
     NO hole-to-hole and no edge clearance: the CLI fanouts pass neither, so
     the edge floor is the fab copper-to-edge pin alone. The tab used to write
@@ -2258,14 +2256,11 @@ def fanout_fix_kwargs(kind, tracks, vias, *, clearance, track_width,
     floors, via_floors = fanout_written_floors(kind, tracks, vias)
     if not floors:
         return None
-    kw = {"clearance": clearance, "track_width": track_width,
-          "via_diameter": via_size if via_floors else None,
-          "via_drill": via_drill if via_floors else None,
-          "clamp_nondefault_netclasses": True}
-    if kind == 'qfn':
-        kw["clamp_nondefault_netclasses"] = clearance_ceiling is not None
-        kw["class_ceiling"] = clearance_ceiling
-    return kw
+    return {"clearance": clearance, "track_width": track_width,
+            "via_diameter": via_size if via_floors else None,
+            "via_drill": via_drill if via_floors else None,
+            "clamp_nondefault_netclasses": clearance_ceiling is not None,
+            "class_ceiling": clearance_ceiling}
 
 
 def plane_fix_kwargs(tracks, vias, *, clearance, hole_to_hole, track_width,

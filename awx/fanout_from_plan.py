@@ -2277,7 +2277,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
                 pcb.footprints[r_], pcb, net_filter=tg_, layers=route_layers.stacked(pcb.board_info.copper_layers),
                 track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
                 exit_margin=0.5, escape_method='underpad', plane_drop='off',
-                escape_dir_hints=hints)
+                escape_dir_hints=hints, net_clearances={})   # class-blind, as the plan (#1529)
         for acc_, add_ in zip((tracks, vias_add, vias_rm, failed), got_):
             acc_ += list(add_)
     if tracks:

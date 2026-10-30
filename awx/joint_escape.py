@@ -1845,7 +1845,8 @@ def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane
         pcb.footprints[ref], pcb, net_filter=list(bus) + list(others),
         layers=list(pcb.board_info.copper_layers), track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR,
         via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method='jointescape',
-        plane_drop=plane_drop, escape_dir_hints=hints, bus=spec, **extra)
+        plane_drop=plane_drop, escape_dir_hints=hints, bus=spec,
+        net_clearances={}, **extra)   # the joint plan is laid at FAN_CLEAR, class-blind (#1529)
     tracks, vias_add, gated = keep_pair_gates(pcb, ref, hints, tracks, vias_add)
     if gated:
         print(f'  joint escape of {ref}: left out, an escape through a planned pair\'s gate: '

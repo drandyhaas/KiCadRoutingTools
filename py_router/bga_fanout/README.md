@@ -139,6 +139,49 @@ pitch with 0.35 mm balls leaves 0.15 mm), the channel engine keeps inner balls
 off the top layer on its own, as `--no-inner-top-layer` does, and says so; edge
 balls exit outward across no gap and keep it (#1518).
 
+## Net classes: spaced pairwise, and kept (#1529)
+
+`--clearance` is the Default class for the run. Every other net class is read
+from the board's `.kicad_pro` (the GUI reads the live board's), as `route.py`
+reads it, capped at `--clearance-ceiling` when one is given, and every pair of
+the escape is spaced at KiCad's `max(clearance, class A, class B)`, which a
+`.kicad_dru` rule on the layer replaces. The run prints `Netclass clearances
+for N net(s) ...` when the board has any.
+
+The escape engines space a run at one clearance, so the pair is priced from
+both sides:
+
+- **the obstacle's class** in the engines: the channel engine's obstacle map
+  stamps a foreign track or via at its class and its pad map holds a pad at
+  its class, and its foreign-pad trim keeps each escape at the pair's class;
+  the under-pad engine stamps the part's own balls, the board's tracks, vias
+  and pads, and its exact via/stub checks at the obstacle's class;
+- **the escaping ball's class** after the escape (`class_clearance.py`): every
+  pair of this run's copper is graded at its class with check_drc's own
+  primitives. The escape of each ball whose copper sets a pair below its class
+  (or that sits below a class of copper already on the board) is taken off,
+  and those balls -- with any ball of a wider class the escape left bare --
+  are escaped again with their class as the run clearance (the under-pad
+  engine, against everything kept), lowest class first. What still falls short
+  is taken off and reported unescaped. The run says so: `Net classes (#1529):
+  N pair(s) ... re-escaping M ball(s) at their class`.
+
+The #1518 top-layer gap test reads the class too: a ball whose own class
+cannot fit the gap between the balls keeps its escape off the top layer, the
+others keep it. No rescue rung lowers a classed ball's clearance below its
+class. Plane drops are laid one class at a time, lowest first, each at its
+class. A diff pair's P against its own N is spaced at `--diff-pair-gap` and
+not re-graded here (`drc_grazes` still reports it).
+
+The writeback treats the classes as `route.py` does: kept without
+`--clearance-ceiling`, each capped at `min(class, ceiling)` with it -- so a
+class whose nets the part does not touch keeps its value. It used to lower
+every class to the run clearance (#439), which hid copper laid below a class.
+`drc_grazes` is graded at the written project's classes. In a chain pass
+`--clearance-ceiling <floor>`, as on the route steps: under a ceiling at the
+run clearance every class is at it and the escape is the one-clearance escape
+it always was.
+
 ## Plane-ball drops (#424)
 
 With any escape method, after the signal escape completes every SMD ball on a

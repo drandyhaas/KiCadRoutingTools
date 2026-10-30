@@ -2186,7 +2186,7 @@ def _strap_unescaped_extras(footprint: Footprint, pcb_data: PCBData,
 
 
 def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
-                            tracks, vias_to_add, failed_nets):
+                            tracks, vias_to_add, failed_nets, clearance_floor=0.0):
     """Retry balls the under-pad escape DROPPED, at the FAB FLOOR (#505).
 
     One rung, the tightest. Walking the whole ladder costs a full escape
@@ -2214,6 +2214,9 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
     standard->advanced escalation the via clamp and the plane taps already do);
     the routed floor is what the .kicad_pro writeback records, so the board is
     graded at what actually shipped.
+
+    `clearance_floor` (#1529): a class re-escape's class -- the ladder's
+    clearance never goes below it, because KiCad grades the net there.
     """
     from bga_fanout.underpad import generate_underpad_escape
     from kicad_parser import Segment as _Seg, Via as _Via
@@ -2229,7 +2232,7 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
     for f in escalation_rungs(ncu):
         tw = min(tw0, f['track_width'])
         vs, vd = min(vs0, f['via_diameter']), min(vd0, f['via_drill'])
-        cl = min(cl0, f['clearance'])
+        cl = max(min(cl0, f['clearance']), clearance_floor)
         if (tw, vs, vd, cl) != (tw0, vs0, vd0, cl0) and (tw, vs, vd, cl) not in rungs:
             rungs.append((tw, vs, vd, cl))
     # Only the TIGHTEST rung (the fab floor). Walking the whole ladder costs a
@@ -2539,7 +2542,8 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
 
 
 def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
-                         tracks, vias_to_add, failed_nets, max_victims=4):
+                         tracks, vias_to_add, failed_nets, max_victims=4,
+                         clearance_floor=0.0):
     """Rip-swap rescue (#652 directive 2). A terminally dropped ball at the
     fab floor is usually boxed in by a NEIGHBOUR's committed escape via, not
     by fixed board copper (orangecrab U3 RAM_LDM: the 0.25mm via floor on a
@@ -2566,6 +2570,7 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
     vs = min(up_kw['via_size'], floor['via_diameter']) if floor else up_kw['via_size']
     vd = min(up_kw['via_drill'], floor['via_drill']) if floor else up_kw['via_drill']
     cl = min(up_kw['clearance'], floor['clearance']) if floor else up_kw['clearance']
+    cl = max(cl, clearance_floor)       # #1529: never below a re-escape's class
 
     dp_nets = set()
     for _pr in (up_kw.get('diff_pairs') or {}).values():
@@ -2842,7 +2847,17 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         # the minutes a large array takes. None = silent.
                         progress_callback=None,
                         cancel_check=None,
-                        bus=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        bus=None,
+                        # #1529: {net_id: class clearance}, resolved and capped
+                        # by generate_bga_fanout. Inert when no class stands
+                        # above `clearance`.
+                        net_clearances: Optional[Dict[int, float]] = None,
+                        # #1529: a class re-escape's own class -- no rescue
+                        # rung goes below it. 0: the fab ladder as before.
+                        _clearance_floor: float = 0.0,
+                        # #1529: this call's escape is the one the class
+                        # check grades (set by that check; never by a caller).
+                        _class_checked: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -3103,9 +3118,28 @@ def _generate_bga_fanout_core(footprint: Footprint,
             hole_to_hole_clearance=hole_to_hole_clearance,
             cancel_check=cancel_check,
             progress_callback=progress_callback,
-            bus=_bus_rot)
+            bus=_bus_rot,
+            net_clearances=net_clearances,
+            _clearance_floor=_clearance_floor,
+            _class_checked=_class_checked)
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
+
+    # #1529: net classes. The escape engines space a run at ONE clearance;
+    # KiCad grades each pair at max(clearance, class A, class B). The
+    # engines price the obstacle's class themselves (the obstacle maps, the
+    # pad map, the under-pad registries); the ESCAPING ball's class is priced
+    # here: the escape runs as before, every pair of its copper is graded at
+    # the pair's class, and a ball whose escape falls short is re-escaped
+    # with its class as the run clearance (bga_fanout.class_clearance). Here,
+    # in the part's own frame, so the re-escape's ball keys are this frame's.
+    if (net_clearances and not _class_checked and _pad_filter is None
+            and not _single_pass
+            and any(c > clearance + 1e-9 for c in net_clearances.values())):
+        from bga_fanout.class_clearance import class_reescape
+        _args = dict(_entry_args, _class_checked=True, clearance=clearance)
+        return class_reescape(_generate_bga_fanout_core, _args,
+                              _generate_bga_fanout_core(**_args))
 
     # #472 direct-route deferral (KICAD_FANOUT_DIRECT=1): balls whose nearest
     # target is surface-reachable get NO stub -- the stub carpet is itself the
@@ -3223,7 +3257,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 hole_to_hole_clearance=hole_to_hole_clearance,
                 cancel_check=cancel_check,
                 progress_callback=progress_callback,
-                bus=bus)
+                bus=bus, net_clearances=net_clearances,
+                _clearance_floor=_clearance_floor)
             # Coverage gate (issue #367): the legacy single pass runs FIRST.
             # When it escapes every ball there is nothing for prioritization
             # to improve -- reshuffling the escape competition only butterflies
@@ -3626,6 +3661,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             progress_callback=progress_callback,
             cancel_check=cancel_check,
             joint=(escape_method == 'jointescape'),
+            # #1529: obstacles of a wider net class held at it
+            net_clearances=net_clearances,
             **_bus_engine_args(bus, pcb_data),
         )
         tracks, vias_to_add, failed_nets = generate_underpad_escape(
@@ -3641,13 +3678,15 @@ def _generate_bga_fanout_core(footprint: Footprint,
         if failed_nets and not _single_pass:
             tracks, vias_to_add, failed_nets = _underpad_shrink_rescue(
                 footprint, pcb_data, grid, layers, _up_kw,
-                tracks, vias_to_add, failed_nets)
+                tracks, vias_to_add, failed_nets,
+                clearance_floor=_clearance_floor)
         # #652 directive 2: whatever the floor could not fit alongside the
         # committed escapes, try again with the nearest neighbour evicted.
         if failed_nets and not _single_pass and env_knobs.FANOUT_RIP_RESCUE:
             tracks, vias_to_add, failed_nets = _underpad_rip_rescue(
                 footprint, pcb_data, grid, layers, _up_kw,
-                tracks, vias_to_add, failed_nets)
+                tracks, vias_to_add, failed_nets,
+                clearance_floor=_clearance_floor)
         # #652 directive 1: the last rung is the SURFACE. A ball the via
         # floor cannot serve at this pitch (a 0.25mm via on a 0.5mm pitch
         # busts the half-pitch budget by 3um, closing every via site AND
@@ -3836,6 +3875,21 @@ def _generate_bga_fanout_core(footprint: Footprint,
     from kicad_dru import install_layer_clearances
     install_layer_clearances(obstacle_cfg, None, None, pcb_data)  # #498
     obstacle_layer_map = build_layer_map(obstacle_cfg.layers)
+    # #1529: the net classes. The pad map holds a pad of a wider class at it,
+    # and the obstacle map stamps a foreign track or via at max(clearance,
+    # its class) -- the fanned nets left out of the map's floor, where they
+    # would over-block every escape. The escaping ball's own class is the
+    # class check's (class_clearance.class_reescape).
+    _nc = {int(n): float(c) for n, c in (net_clearances or {}).items()}
+    obstacle_cfg.set_net_clearances(_nc, ())
+    _nc_foreign = {n: c for n, c in _nc.items() if n not in fanned_net_ids}
+
+    def _pair_cl(net_a, net_b, layer=None):
+        """KiCad's pair clearance between two nets' copper on `layer` (#1529):
+        max(clearance, class A, class B), a .kicad_dru rule replacing it."""
+        if not _nc:
+            return clearance
+        return obstacle_cfg.pair_clearance(net_a, net_b, layer, base=clearance)
 
     # #1518: an inner ball's escape on the top layer -- the balls' own layer
     # -- runs down a channel BETWEEN two rows of balls, so the track and its
@@ -3854,6 +3908,21 @@ def _generate_bga_fanout_core(footprint: Footprint,
             print(f"  Inner balls stay off {layers[0]}: the gap between its "
                   f"balls ({_gap:.3f}mm) cannot hold a {track_width:.3f}mm "
                   f"track at clearance {_top_cl:.3f} (needs {_need:.3f}mm)")
+        elif _nc and (obstacle_cfg.layer_clearances or {}).get(layers[0]) is None:
+            # #1529: the same test at the pair clearance a ball's own class
+            # sets -- that ball's escape stays off the top layer when its class
+            # cannot fit the gap, the others keep it. (A .kicad_dru rule on the
+            # top layer replaces the classes there, so it is not read then.)
+            _off = frozenset(n for n in fanned_net_ids
+                             if track_width + 2.0 * max(_top_cl, _nc.get(n, 0.0))
+                             > _gap + 1e-6)
+            if _off:
+                no_inner_top_layer = _off
+                _cls = max(_nc[n] for n in _off)
+                print(f"  Inner balls of {len(_off)} net(s) in a wider net class stay "
+                      f"off {layers[0]}: the gap between its balls ({_gap:.3f}mm) "
+                      f"cannot hold a {track_width:.3f}mm track at their class "
+                      f"(up to {_cls:.3f}mm, needs {track_width + 2 * _cls:.3f}mm)")
     print(f"  Building pad-aware obstacle map ({len(fanned_net_ids)} fanned nets excluded)...")
     _prog("building obstacle map...")
     # Pad copper is measured exactly, not stamped (reroute.PadFreeMap): the
@@ -3864,6 +3933,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
         pcb_data, obstacle_cfg,
         nets_to_route=list(fanned_net_ids),
         extra_clearance=track_width / 2,
+        net_clearances=_nc_foreign,                    # #1529
         stamp_pads=False,
     ), pcb_data, set(fanned_net_ids), obstacle_cfg)
 
@@ -4271,7 +4341,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
     n_escfix, esc_dropped = clear_escapes_of_foreign_pads(
         best_routes, tracks, grid, track_width, clearance,
         foreign_pads, obstacle_layer_map, esc_net_name,
-        dropped_routes=_esc_routes)
+        dropped_routes=_esc_routes,
+        pair_clearance=_pair_cl if _nc else None)       # #1529
     if n_escfix:
         print(f"  Pad-clearance: cleared {n_escfix} escape(s) grazing a foreign "
               f"pad by jog-trim/shorten (issue #123)")
@@ -4306,7 +4377,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             d = point_to_segment_distance(via['x'], via['y'],
                                           t['start'][0], t['start'][1],
                                           t['end'][0], t['end'][1])
-            if d < vr + clearance + t['width'] / 2 - via_clear_tol:
+            if d < vr + _pair_cl(via['net_id'], t['net_id'], t['layer']) \
+                    + t['width'] / 2 - via_clear_tol:
                 via_drop.append(via)
                 break
     if via_drop:
@@ -4357,7 +4429,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 same_net_pad_clearance=same_net_pad_clearance,
                 hole_to_hole_clearance=hole_to_hole_clearance,
                 progress_callback=progress_callback,
-                cancel_check=cancel_check)
+                cancel_check=cancel_check,
+                net_clearances=net_clearances,
+                _clearance_floor=_clearance_floor,
+                _class_checked=_class_checked)
 
         label = 'Under-pad'
         print(f"\n  Channel escape dropped {len(failed_nets)} ball(s) "
@@ -4499,7 +4574,9 @@ def generate_plane_drops(footprint: Footprint,
                          verbose: bool = True,
                          plane_net_layers: Optional[Dict[str, List[str]]] = None,
                          no_via_in_pad: bool = False,
-                         hole_to_hole_clearance: Optional[float] = None
+                         hole_to_hole_clearance: Optional[float] = None,
+                         net_clearances: Optional[Dict[int, float]] = None,
+                         net_ok=None
                          ) -> Tuple[List[Dict], List[Dict], Dict]:
     """Drop a via for every plane-net ball of `footprint` (#424 D2).
 
@@ -4517,6 +4594,10 @@ def generate_plane_drops(footprint: Footprint,
     Returns (tracks, vias_to_add, report). Existing same-net connections are
     respected (idempotent re-runs); failures are reported, never fatal -- the
     plane step's tap search remains the fallback.
+
+    #1529: `net_clearances` holds every obstacle of a wider net class at it,
+    and `net_ok(net_id)` (None: all) admits only the drop nets of one class,
+    so the caller can lay each class at its own clearance.
     """
     fp_pads = [p for p in footprint.pads if p.net_id]
     counts = Counter(p.net_name for p in fp_pads)
@@ -4532,6 +4613,8 @@ def generate_plane_drops(footprint: Footprint,
                 drop_ids.add(p.net_id)
         elif counts[p.net_name] >= plane_min_pads:
             drop_ids.add(p.net_id)
+    if net_ok is not None:
+        drop_ids = {n for n in drop_ids if net_ok(n)}
     if not drop_ids:
         return [], [], {}
     try:
@@ -4561,14 +4644,16 @@ def generate_plane_drops(footprint: Footprint,
         grid_step=grid_step, only_pad_keys=frozenset(),
         plane_drop_nets=drop_ids, plane_drop_report=rep, verbose=verbose,
         plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad,
-        hole_to_hole_clearance=hole_to_hole_clearance)
+        hole_to_hole_clearance=hole_to_hole_clearance,
+        net_clearances=net_clearances)
     return d_tracks, d_vias, rep
 
 
 def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                      layers, track_width, clearance, via_size, via_drill,
                      grid_step, plane_net_layers=None, no_via_in_pad=False,
-                     hole_to_hole_clearance=None):
+                     hole_to_hole_clearance=None, net_clearances=None,
+                     net_ok=None):
     """Plane-ball drops against the board PLUS this call's fresh copper.
 
     The signal escape's tracks/vias are only result dicts at this point, so
@@ -4629,7 +4714,8 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 _lay_f, track_width, clearance, via_size, via_drill,
                 grid_step, plane_net_layers=_pnl_f,
                 no_via_in_pad=no_via_in_pad,
-                hole_to_hole_clearance=hole_to_hole_clearance)
+                hole_to_hole_clearance=hole_to_hole_clearance,
+                net_clearances=net_clearances, net_ok=net_ok)
             flip_results(d_tracks, d_vias, [], back)
             return d_tracks, d_vias, rep
         from bga_fanout.rotate_frame import (needs_frame,
@@ -4643,7 +4729,8 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 via_size=via_size, via_drill=via_drill,
                 net_filter=net_filter, grid_step=grid_step,
                 plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad,
-                hole_to_hole_clearance=hole_to_hole_clearance)
+                hole_to_hole_clearance=hole_to_hole_clearance,
+                net_clearances=net_clearances, net_ok=net_ok)
             back_transform_results(d_tracks, d_vias, [], back)
             return d_tracks, d_vias, rep
         return generate_plane_drops(
@@ -4652,7 +4739,8 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
             via_size=via_size, via_drill=via_drill,
             net_filter=net_filter, grid_step=grid_step,
             plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad,
-            hole_to_hole_clearance=hole_to_hole_clearance)
+            hole_to_hole_clearance=hole_to_hole_clearance,
+            net_clearances=net_clearances, net_ok=net_ok)
     finally:
         del pcb_data.segments[n_seg0:]
         del pcb_data.vias[n_via0:]
@@ -4758,6 +4846,16 @@ def dropped_ball_neighbourhood(footprint, pcb_data, failed_nets, tracks, vias,
     return out
 
 
+def _resolve_classes(pcb_data, net_clearances, ceiling):
+    """#1529: qfn_fanout's resolver (route.py's map, capped at the ceiling),
+    its line printed. Returns {net_id: class clearance}."""
+    from qfn_fanout import resolve_class_clearances
+    nc, lines = resolve_class_clearances(pcb_data, net_clearances, ceiling)
+    for line in lines:
+        print(f"  {line}")
+    return nc
+
+
 def generate_bga_fanout(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
@@ -4805,7 +4903,16 @@ def generate_bga_fanout(footprint: Footprint,
                         # names] -- escaped first in every phase and never evicted by a rescue}. The joint
                         # escape engine only (escape_method='jointescape').
                         # None: as before.
-                        bus=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        bus=None,
+                        # #1529: {net_id: class clearance} for every net in a
+                        # NON-Default class (route.py's map). None reads the
+                        # board's .kicad_pro (pcb_data.source_path); the GUI
+                        # passes the live board's; {} prices every pair at
+                        # `clearance`. Capped at `clearance_ceiling`
+                        # (--clearance-ceiling) as route.py caps it.
+                        net_clearances: Optional[Dict[int, float]] = None,
+                        clearance_ceiling: Optional[float] = None
+                        ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """BGA fanout: the signal escape engines plus the plane-ball drop pass.
 
     See _generate_bga_fanout_core for the escape-engine parameters. After the
@@ -4826,7 +4933,18 @@ def generate_bga_fanout(footprint: Footprint,
     failed_nets. Passing None (the default, and what the CLI passes) is fully
     inert. Its only caller is the GUI's Cancel button / the plan executor's
     Stop.
+
+    Net classes (#1529): every pair the escape and the drops lay is spaced at
+    KiCad's max(clearance, class A, class B), read as route.py reads it
+    (`net_clearances`, `clearance_ceiling`): the engines hold an obstacle at
+    its class, and a ball whose escape falls short of its own class is
+    re-escaped at it (bga_fanout.class_clearance). Plane drops are laid one
+    class at a time, lowest first, each at its class.
     """
+    # #1529: the classes first, so the probe below dumps the map the engine
+    # runs at on both fronts (the CLI's is read from the file here, the GUI
+    # hands its live board's).
+    net_clearances = _resolve_classes(pcb_data, net_clearances, clearance_ceiling)
     # Config-parity probe (#493). The plane engines have dumped their kwargs
     # since #362; fanout did not, which is why a GUI/CLI escape divergence here
     # had to be chased by eye. Same contract: only active under
@@ -4927,7 +5045,7 @@ def generate_bga_fanout(footprint: Footprint,
         _single_pass=_single_pass,
         same_net_pad_clearance=same_net_pad_clearance,
         hole_to_hole_clearance=hole_to_hole_clearance,
-        bus=bus)
+        bus=bus, net_clearances=net_clearances)
 
     # #621 partial ledger, computed ONLY when a cancel actually fired (so an
     # ordinary run does not even build the sets). A candidate ball that carries
@@ -4981,50 +5099,81 @@ def generate_bga_fanout(footprint: Footprint,
         if progress_callback:
             progress_callback(
                 0, 0, f"BGA fanout {_ref}: dropping plane balls to vias...")
-        d_tracks, d_vias, rep = _plane_drop_pass(
-            footprint, pcb_data, tracks, vias_to_add, net_filter,
-            layers, track_width, clearance, via_size, via_drill, grid_step,
-            plane_net_layers=plane_net_layers,
-            no_via_in_pad=(same_net_pad_clearance is not None
-                           and same_net_pad_clearance > 0),
-            hole_to_hole_clearance=hole_to_hole_clearance)
-        # A drop that failed at the call's via is retried ONCE at the fab-floor
-        # rung the signal rescues escalate to (the same ladder, the same
-        # disclosure): a rescue's re-run reserves the plane balls at ITS shrunk
-        # via, and the rescued tracks then take tap room the nominal drop via
-        # needed (zynq_ad9364 U1 fanned on F/B: 21 balls undropped, every one
-        # served at the floor).
-        if rep.get('failed'):
-            _ncu = len(pcb_data.board_info.copper_layers or []) or 4
-            _now = (track_width, via_size, via_drill, clearance)
-            _fl = sorted({(min(track_width, f['track_width']), min(via_size, f['via_diameter']),
-                           min(via_drill, f['via_drill']), min(clearance, f['clearance']))
-                          for f in escalation_rungs(_ncu)} - {_now})
-            if _fl:
-                _tw, _vs, _vd, _cl = _fl[0]
-                d2_tracks, d2_vias, rep2 = _plane_drop_pass(
-                    footprint, pcb_data, tracks + d_tracks, vias_to_add + d_vias, net_filter,
-                    layers, _tw, _cl, _vs, _vd, grid_step,
-                    plane_net_layers=plane_net_layers,
-                    no_via_in_pad=(same_net_pad_clearance is not None
-                                   and same_net_pad_clearance > 0),
-                    hole_to_hole_clearance=hole_to_hole_clearance)
-                print(f"  Plane drops at the fab floor (track {_tw:.4f} / via {_vs:.2f} / "
-                      f"clearance {_cl:.4f}): {len(d2_vias)} more drop via(s), "
-                      f"{rep2.get('failed', 0)} of {rep['failed']} still failed")
-                if d2_tracks or d2_vias:
-                    d_tracks = d_tracks + d2_tracks
-                    d_vias = d_vias + d2_vias
-                    warn_fab_escalation('plane drop')
-                    for _k in ('gap_vias', 'pad_vias', 'track_connects', 'pour_tracks'):
-                        rep[_k] = rep.get(_k, 0) + rep2.get(_k, 0)
-                    rep['failed'] = rep2.get('failed', 0)
-                    for _n, _r2 in (rep2.get('nets') or {}).items():
-                        _r = (rep.get('nets') or {}).get(_n)
-                        if _r is not None:
-                            _r['gap'] = _r.get('gap', 0) + _r2.get('gap', 0)
-                            _r['in_pad'] = _r.get('in_pad', 0) + _r2.get('in_pad', 0)
-                            _r['failed'] = _r2.get('failed', 0)
+
+        def _drops_at(cl_run, net_ok, cl_floor, have_t, have_v):
+            """One drop pass at clearance `cl_run` over the drop nets
+            `net_ok` admits (None: all), against the copper laid so far, with
+            its fab-floor retry -- whose clearance stops at `cl_floor`."""
+            d_tracks, d_vias, rep = _plane_drop_pass(
+                footprint, pcb_data, have_t, have_v, net_filter,
+                layers, track_width, cl_run, via_size, via_drill, grid_step,
+                plane_net_layers=plane_net_layers,
+                no_via_in_pad=(same_net_pad_clearance is not None
+                               and same_net_pad_clearance > 0),
+                hole_to_hole_clearance=hole_to_hole_clearance,
+                net_clearances=net_clearances, net_ok=net_ok)
+            # A drop that failed at the call's via is retried ONCE at the fab-floor
+            # rung the signal rescues escalate to (the same ladder, the same
+            # disclosure): a rescue's re-run reserves the plane balls at ITS shrunk
+            # via, and the rescued tracks then take tap room the nominal drop via
+            # needed (zynq_ad9364 U1 fanned on F/B: 21 balls undropped, every one
+            # served at the floor).
+            if rep.get('failed'):
+                _ncu = len(pcb_data.board_info.copper_layers or []) or 4
+                _now = (track_width, via_size, via_drill, cl_run)
+                _fl = sorted({(min(track_width, f['track_width']), min(via_size, f['via_diameter']),
+                               min(via_drill, f['via_drill']),
+                               max(min(cl_run, f['clearance']), cl_floor))
+                              for f in escalation_rungs(_ncu)} - {_now})
+                if _fl:
+                    _tw, _vs, _vd, _cl = _fl[0]
+                    d2_tracks, d2_vias, rep2 = _plane_drop_pass(
+                        footprint, pcb_data, have_t + d_tracks, have_v + d_vias, net_filter,
+                        layers, _tw, _cl, _vs, _vd, grid_step,
+                        plane_net_layers=plane_net_layers,
+                        no_via_in_pad=(same_net_pad_clearance is not None
+                                       and same_net_pad_clearance > 0),
+                        hole_to_hole_clearance=hole_to_hole_clearance,
+                        net_clearances=net_clearances, net_ok=net_ok)
+                    print(f"  Plane drops at the fab floor (track {_tw:.4f} / via {_vs:.2f} / "
+                          f"clearance {_cl:.4f}): {len(d2_vias)} more drop via(s), "
+                          f"{rep2.get('failed', 0)} of {rep['failed']} still failed")
+                    if d2_tracks or d2_vias:
+                        d_tracks = d_tracks + d2_tracks
+                        d_vias = d_vias + d2_vias
+                        warn_fab_escalation('plane drop')
+                        for _k in ('gap_vias', 'pad_vias', 'track_connects', 'pour_tracks'):
+                            rep[_k] = rep.get(_k, 0) + rep2.get(_k, 0)
+                        rep['failed'] = rep2.get('failed', 0)
+                        for _n, _r2 in (rep2.get('nets') or {}).items():
+                            _r = (rep.get('nets') or {}).get(_n)
+                            if _r is not None:
+                                _r['gap'] = _r.get('gap', 0) + _r2.get('gap', 0)
+                                _r['in_pad'] = _r.get('in_pad', 0) + _r2.get('in_pad', 0)
+                                _r['failed'] = _r2.get('failed', 0)
+            return d_tracks, d_vias, rep
+
+        # #1529: one pass per net class, lowest first, each at its class and
+        # against the copper laid before it -- a drop's via is priced at its
+        # own class as well as at its neighbours'. One pass (as before) when
+        # no class stands above the run clearance.
+        _hot = {n: round(c, 6) for n, c in (net_clearances or {}).items()
+                if c > clearance + 1e-9}
+        _groups = [(clearance, None if not _hot else (lambda n: n not in _hot), 0.0)]
+        for _c in sorted(set(_hot.values())):
+            _groups.append((_c, (lambda n, _c=_c: _hot.get(n) == _c), _c))
+        d_tracks, d_vias, rep = [], [], {}
+        for _cl_run, _ok, _cl_floor in _groups:
+            g_t, g_v, g_rep = _drops_at(_cl_run, _ok, _cl_floor,
+                                        tracks + d_tracks, vias_to_add + d_vias)
+            d_tracks, d_vias = d_tracks + g_t, d_vias + g_v
+            for _k, _v in g_rep.items():
+                if isinstance(_v, dict):
+                    rep.setdefault(_k, {}).update(_v)
+                elif isinstance(_v, (int, float)) and not isinstance(_v, bool):
+                    rep[_k] = rep.get(_k, 0) + _v
+                else:
+                    rep[_k] = _v
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
@@ -5293,7 +5442,10 @@ def main():
         plane_net_layers=(
             {spec.split(':', 1)[0]: spec.split(':', 1)[1].split(',')
              for spec in args.plane_net_layers}
-            if args.plane_net_layers else None)
+            if args.plane_net_layers else None),
+        # #1529: the board's classes (read from pcb_data.source_path), capped
+        # at the ceiling when one was given, as route.py's map is.
+        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
     )
 
     if tracks:
@@ -5351,21 +5503,7 @@ def main():
               f"smaller --clearance helps when that copper is a clearance away; "
               f"when the count does not move, the lever is a layer, a "
               f"neighbour's escape or the placement (#1217).")
-    # DRC the written output at the routed clearance so downstream tooling can
-    # detect sub-clearance grazes the escape left behind even when every ball
-    # escaped (failed==0): via-over-track / via-over-pad (#130). The planner uses
-    # this to retry the fanout with a smaller via / thinner track toward the fab
-    # floor, so only the rows THIS step's copper takes part in count
-    # (check_drc.fanout_drc_grazes). Best-effort: a DRC hiccup must never fail
-    # the fanout.
-    drc_grazes = {}
     out_path = getattr(args, 'output', None)
-    if out_path:
-        try:
-            from check_drc import fanout_drc_grazes
-            drc_grazes = fanout_drc_grazes(out_path, args.clearance, input_copper)
-        except Exception as _e:
-            drc_grazes = {'error': str(_e)}
 
     # Establish this fanout's clearance floor in the output .kicad_pro so the next
     # pipeline step (route.py etc.) and check_drc grade at the clearance the
@@ -5380,15 +5518,19 @@ def main():
             from fix_kicad_drc_settings import (fix_project_for_output,
                                                 fanout_fix_kwargs)
             # The one fanout writeback decision, which the GUI fanout tab
-            # applies to the live board (#439: fanout escapes route to
-            # --clearance, so the classes are always clamped to it).
+            # applies to the live board. #1529: the escape is spaced at the
+            # net classes, so they are kept -- or capped at
+            # --clearance-ceiling when one was given -- as route.py's
+            # writeback does.
             fix_project_for_output(
                 out_path, input_pcb=args.pcb,
                 **fanout_fix_kwargs('bga', None, None,
                                     clearance=eff_clearance,
                                     track_width=args.track_width,
                                     via_size=getattr(args, 'via_size', None),
-                                    via_drill=getattr(args, 'via_drill', None)))
+                                    via_drill=getattr(args, 'via_drill', None),
+                                    clearance_ceiling=getattr(args, 'clearance_ceiling',
+                                                              None)))
         except Exception as _e:
             print(f"  (skipped DRC-settings fix: {_e})")
         # #581: record an ACTIVE same-net pad via clearance so later chain
@@ -5416,6 +5558,22 @@ def main():
                                      consume_pour_served_pads())
         except Exception as _e:
             print(f"  (skipped pour-served ball record: {_e})")
+    # DRC the written output at the routed clearance so downstream tooling can
+    # detect sub-clearance grazes the escape left behind even when every ball
+    # escaped (failed==0): via-over-track / via-over-pad (#130). The planner uses
+    # this to retry the fanout with a smaller via / thinner track toward the fab
+    # floor, so only the rows THIS step's copper takes part in count
+    # (check_drc.fanout_drc_grazes). After the writeback, so it reads the net
+    # classes the output project is written with (#1529), as check_drc does.
+    # Best-effort: a DRC hiccup must never fail the fanout.
+    drc_grazes = {}
+    if out_path:
+        try:
+            from check_drc import fanout_drc_grazes
+            drc_grazes = fanout_drc_grazes(out_path, args.clearance, input_copper,
+                                           net_classes=True)
+        except Exception as _e:
+            drc_grazes = {'error': str(_e)}
     summary = {
         'component': args.component,
         'requested': requested,
@@ -5426,9 +5584,10 @@ def main():
         'clearance': args.clearance,
         'track_width': args.track_width,
         'layers': list(args.layers) if args.layers else None,
-        # grazes graded at --clearance, scoped to the copper this step laid
-        # ('scope'): 'total' is every such row, the via_*/pad_* keys are the
-        # fanout-relevant #130 classes.
+        # grazes graded at --clearance and the written project's net classes
+        # (#1529), scoped to the copper this step laid ('scope'): 'total' is
+        # every such row, the via_*/pad_* keys are the fanout-relevant #130
+        # classes.
         'drc_grazes': drc_grazes,
         # Smallest copper clearance any step actually routed at; downstream steps
         # and check_drc grade the board at this floor.
