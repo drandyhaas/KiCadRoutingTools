@@ -95,7 +95,7 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--force-escape-direction` | Only use primary direction | False |
 | `--rebalance-escape` | Rebalance escape directions | False |
 | `--check-for-previous` | Skip existing fanouts | False |
-| `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
+| `--no-inner-top-layer` | Prevent inner pads from using F.Cu (automatic when the ball gap cannot hold the track at clearance, #1518) | False |
 | `--escape-method` | `auto`, `channel`, `underpad` (dense arrays) or `dogbone` (gap vias); see [Escape methods](#escape-methods) | auto |
 | `--plane-drop` | `auto` = drop a via for every excluded plane-net ball after the signal escape (#424); `off` disables. `KICAD_FANOUT_PLANE_DROP=0/1` overrides either | auto |
 | `--plane-net-layers` | The future plane plan, `NET:LAYER[,LAYER...]` per plane net (e.g. `GND:In1.Cu,In4.Cu P3.3V:In2.Cu`): a ball the declared pour will reach on its own layer gets no drop via (see [Plane-ball drops](#plane-ball-drops-424)) | none |
@@ -131,6 +131,13 @@ clean** (pair with `--via-drill 0.25` to keep a 0.1 mm annular ring). When hande
 infeasible params, `bga_fanout` prints a `WARNING: escape via ... busts the
 half-pitch budget` with the recommended maximum. The `plan-pcb-routing` skill
 computes this automatically.
+
+On the **top layer** (the balls' own layer) the channel runs between two rows of
+balls instead of vias, so it needs `ball gap ≥ track_width + 2·clearance`, where
+the ball gap is the pitch minus the ball size. When it does not hold (0.5 mm
+pitch with 0.35 mm balls leaves 0.15 mm), the channel engine keeps inner balls
+off the top layer on its own, as `--no-inner-top-layer` does, and says so; edge
+balls exit outward across no gap and keep it (#1518).
 
 ## Plane-ball drops (#424)
 

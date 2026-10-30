@@ -2066,7 +2066,8 @@ Options:
                       secondary edge but far from the primary edge are reassigned to the
                       secondary direction for more even distribution
   --check-for-previous  Skip pads that already have fanouts (also avoids occupied channels)
-  --no-inner-top-layer  Prevent inner pads from using F.Cu
+  --no-inner-top-layer  Prevent inner pads from using F.Cu (automatic when the gap
+                      between balls cannot hold the track at clearance, #1518)
   --same-net-pad-clearance MM  > 0 forbids via-in-pad entirely (under-pad escapes
                       and plane drops run dog-bone; a ball with no legal off-pad
                       via site fails visibly) and is recorded in the sibling

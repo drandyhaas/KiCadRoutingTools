@@ -41,6 +41,7 @@ from bga_fanout.layer_balance import rebalance_layers
 from bga_fanout.layer_assignment import assign_layers_smart
 from bga_fanout.grid import (
     analyze_bga_grid,
+    ball_row_gap,
     staggered_lattice_diagnosis,
     calculate_channels,
     is_edge_pad,
@@ -3835,6 +3836,24 @@ def _generate_bga_fanout_core(footprint: Footprint,
     from kicad_dru import install_layer_clearances
     install_layer_clearances(obstacle_cfg, None, None, pcb_data)  # #498
     obstacle_layer_map = build_layer_map(obstacle_cfg.layers)
+
+    # #1518: an inner ball's escape on the top layer -- the balls' own layer
+    # -- runs down a channel BETWEEN two rows of balls, so the track and its
+    # clearance to the ball on either side must fit the copper gap between
+    # them. Where they cannot (0.5 mm pitch, 0.35 mm balls: a 0.15 mm gap
+    # against 0.1 + 2 x 0.09) every such escape is a clearance violation
+    # against its own package, so inner balls escape on the other layers
+    # (through their via), exactly as --no-inner-top-layer asks. Edge balls
+    # exit outward and cross no gap, so they keep the top layer.
+    if not no_inner_top_layer and len(layers) > 1:
+        _gap = ball_row_gap(footprint, grid)
+        _top_cl = obstacle_cfg.layer_clearance(layers[0], clearance)
+        _need = track_width + 2.0 * _top_cl
+        if _gap < _need - 1e-6:
+            no_inner_top_layer = True
+            print(f"  Inner balls stay off {layers[0]}: the gap between its "
+                  f"balls ({_gap:.3f}mm) cannot hold a {track_width:.3f}mm "
+                  f"track at clearance {_top_cl:.3f} (needs {_need:.3f}mm)")
     print(f"  Building pad-aware obstacle map ({len(fanned_net_ids)} fanned nets excluded)...")
     _prog("building obstacle map...")
     # Pad copper is measured exactly, not stamped (reroute.PadFreeMap): the
@@ -3869,8 +3888,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # collision resolver's candidates, the pad-aware trigger and its repairs.
     # The per-route checks skip pads on the route's own net, so a stub still
     # starts on its own ball. The clearance-margin escape trim keeps the
-    # foreign list: on a fine pitch a channel track sits within clearance of
-    # its own package's balls by design, which is not a short.
+    # foreign list: a channel track clears its own package's balls by
+    # construction (the top-layer gap test above, #1518).
     short_pads = foreign_pads + [
         p for p in footprint.pads
         if p.drill > 0 or any(l in copper_layer_set for l in (p.layers or []))
@@ -5104,7 +5123,8 @@ def main():
                              'fanned out. Also avoids occupied channel positions.')
     parser.add_argument('--no-inner-top-layer', action='store_true',
                         help='Prevent inner pads from using F.Cu (top layer). '
-                             'Use when there is not enough clearance on top layer for inner routes.')
+                             'Automatic when the gap between balls cannot hold the track at '
+                             'clearance (#1518).')
     parser.add_argument('--same-net-pad-clearance', type=float, default=None,
                         help='#581: > 0 forbids via-in-pad entirely (under-pad escapes and '
                              'plane drops run dog-bone; balls with no legal off-pad via site '

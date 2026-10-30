@@ -1028,7 +1028,9 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         options_sizer.Add(self.check_previous, 0, wx.ALL, 5)
 
         self.no_inner_top = wx.CheckBox(self, label="No inner pads on top layer")
-        self.no_inner_top.SetToolTip("Prevent inner pads from using F.Cu")
+        self.no_inner_top.SetToolTip("Prevent inner pads from using F.Cu. Automatic "
+                                     "when the gap between balls cannot hold the "
+                                     "track at clearance (#1518)")
         options_sizer.Add(self.no_inner_top, 0, wx.LEFT | wx.BOTTOM, 5)
 
         esc_method_row = wx.BoxSizer(wx.HORIZONTAL)
