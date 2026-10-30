@@ -2818,7 +2818,8 @@ def validate_intent(intent: Intent) -> List[Violation]:
             if a.side and b.side and a.side != b.side:
                 continue
             area = legality.rect_overlap_area(a.rect, b.rect)
-            if area > legality.EPS:
+            if area > legality.EPS and not _overlap_closed_by_keepout(
+                    intent, a, b):
                 ex = [z.name for z in (a, b) if z.exclusive]
                 out.append(Violation(
                     rule='intent_zone_overlap',
@@ -2842,6 +2843,34 @@ def validate_intent(intent: Intent) -> List[Violation]:
                               'other_block': b.name},
                     expected={'overlap_area_mm2': 0.0}))
     return out
+
+
+def _overlap_closed_by_keepout(intent: Intent, a: Zone, b: Zone) -> bool:
+    """Is the area two blocks share already closed to one block's members by
+    a keep-out (#1475)? Then a member of only one of them may stand there,
+    as with an `exclusive` zone, and `intent_zone_overlap`'s "a member of
+    either may be placed there" would be false. A shield can is the case: its
+    keep-out over its own zone shuts out the members of the sheet block it
+    stands in. Decided only for literal members -- a `group` or a pattern
+    names parts the intent alone cannot list -- and only by keep-outs that
+    bind a part whatever its height."""
+    from .heights import is_glob
+    ov = (max(a.rect[0], b.rect[0]), max(a.rect[1], b.rect[1]),
+          min(a.rect[2], b.rect[2]), min(a.rect[3], b.rect[3]))
+    sides = {a.side or b.side} if (a.side or b.side) else {'F', 'B'}
+    closing = [k for k in intent.keepouts
+               if k.get('rect') is not None and k.get('max_height_mm') is None
+               and sides <= set(k.get('sides') or ('F', 'B'))
+               and _rect_contains(k['rect'], ov)]
+    if not closing:
+        return False
+    for z in (a, b):
+        if z.group or not z.refs or any(is_glob(r) for r in z.refs):
+            continue
+        if all(any(keepouts_for_ref([k], r, sides) for k in closing)
+               for r in z.refs):
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -5646,10 +5675,21 @@ def rule_keepout(ctx) -> Iterator[Violation]:
                 name = k['name']
                 shape = (_fmt_rect(k['rect']) if k.get('rect') is not None
                          else f"circle {k['circle']}")
+                # #1475: a height-limited keep-out binds a part by its height,
+                # so say which height (or that none is known) and the limit
+                tall = ''
+                if k.get('max_height_mm') is not None:
+                    h = hts.height(ref) if hts is not None else None
+                    tall = (f": it admits parts no taller than "
+                            f"{k['max_height_mm']:g}mm, and {ref} "
+                            + (f"is {h:g}mm" if h is not None and
+                               len(part.sides) == 1 else
+                               "stands on both faces" if h is not None else
+                               "has no known height"))
                 yield Violation(
                     rule='keepout', severity=ctx.sev('keepout'), ref=ref,
                     message=(f"{ref} ({part.side}) is inside keep-out "
-                             f"{name!r} {shape}"),
+                             f"{name!r} {shape}{tall}"),
                     measured={'keepout': name, 'side': part.side,
                               'sides_occupied': sorted(part.sides)},
                     expected={'allow': list(k.get('allow') or ())})

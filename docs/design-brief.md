@@ -58,6 +58,7 @@ already grade, and that `place_simple` reads wherever it reads the intent
 | `assembly.body_edge_mm` | `assembly.body_edge_mm`, merged into the emitted `assembly` block; `why` and `requirement` move into `assembly.context.body_edge_mm`. Graded by check_assembly's `body_edge_band`, not by a floorplan rule (see [below](#assemblybody_edge_mm-the-assemblers-edge-rule)) | `context.basis`: `declared`, `min_reader` 9 |
 | `keep_away` | `keep_away[]`, one intent row per rule, in its canonical spelling; `why` and `requirement` move into `context`. Graded by `keep_away`, and read by the routing engines too (see [below](#keep_away-two-net-groups-apart)) | `source: "brief"`, `context.keep_away_note`, `min_reader` 10 |
 | `covers[]`, `heights[]` | `covers[]` / `heights[]`, one intent row per brief row, validated by the intent's own loader; the row's `source` (its datasheet) is kept. Graded by the `cover` rule, check_assembly's `height` pairs and the placer (see [below](#covers-and-heights-what-stands-over-the-board)) | `context.brief_row`, `context.from: "brief"`, `min_reader` 15 (20 with a `heights[].under_cover`, 21 with a cover's `top_mm`, `insertion` or a standoff's `off_mm`) |
+| `cans[]` | per listed face, a `blocks[]` row (`can:<name>:<face>`, the `in` parts, tolerance 0) and a `keepouts[]` row over the zone allowing the can's own parts; on the can's face, a `heights[]` underside for a drawn can or a `fence_mm` and a `max_height_mm` keep-out for one not drawn yet (see [below](#cans-a-shield-can-as-one-row)) | `context.derived_from: "cans[<name>]"`, `min_reader` 16 |
 | `product`, `unknown[]` | `context` | — |
 
 ### The compiler declares nothing that nothing grades
@@ -572,6 +573,68 @@ because a cover worked out once has to survive every later emit: the brief
 travels with the board, and each `--emit-intent` compiles its rows in again.
 `removable` says whether the body comes off in service, which decides
 whether a test point may stand under it.
+
+## `cans[]`: a shield can as one row
+
+```jsonc
+"cans": [{ "name": "RF", "ref": "J10", "zone": [206.6, 164.1, 237.4, 194.9],
+           "side": "F", "interior_height_mm": 2.5,
+           "source": "the can's datasheet: 2.5 mm inside the lid",
+           "members": { "F": { "in": ["U18", "C72"], "either": ["C96", "R75"] } } }]
+```
+
+A shield can is a zone some parts must be inside, every other part must stay
+out of, and nothing taller than its lid may stand in. Written by hand that is
+a block per face, a keep-out per face and a height row, all saying the same
+zone in board coordinates; a `cans[]` row says it once and compiles to them:
+
+| compiled to | for | reads |
+|---|---|---|
+| `blocks[]` `can:<name>:<face>` | each listed face with `in` parts | the `in` parts held to `zone`, `tolerance_mm` 0 (no member reaches under the wall); not exclusive |
+| `keepouts[]` `can:<name>:<face>` | each listed face | `zone` on that face, `allow` = every face's `in` and `either` plus the can's own `ref` (a through-hole member's leads are on both faces, and a drawn can stands over its own zone) |
+| `heights[]` `{ref, underside_mm}` | the can's face, drawn (`ref`) | `interior_height_mm` of room under the can, judged as any declared cover |
+| `fence_mm` on the face's block, and `keepouts[]` `can:<name>:height` | the can's face, not drawn yet (`wall_mm`) | the band the wall will take, and `max_height_mm` = `interior_height_mm` less the 0.5 mm cover margin, so a one-sided part passes the same height test before the can is drawn and after (see below for the parts that do not) |
+
+`in` parts are pulled into the zone; `either` parts may stand inside or
+out; every part not listed is out. Members are literal references, never
+patterns. A face not listed claims nothing: list `B` only when the can's
+footprint area on the other face is kept for its own parts too.
+Two cans whose zones overlap on a face both list are refused: each can's
+keep-out would shut out the other's parts.
+`interior_height_mm` and `source` are required -- a part is admitted under a
+can only by a declared height, never a guessed one -- and `zone` is required
+with or without `ref`: it is not read off the drawn can. A member whose
+height is unknown, or too tall, is refused under it, and the keep-out
+finding says which (`it admits parts no taller than 2mm, and C1 is 2.01mm`);
+for an `in` member under a can not drawn yet, `place_simple`'s plan check
+refuses the run before placing anything.
+
+Two kinds of part are judged differently before the can is drawn and after.
+A through-hole member is refused under a can not drawn yet whatever its
+height (`R20 stands on both faces`: the height keep-out does not know its
+other face), while a drawn can admits it by height. A part reached from
+above (a test point, a connector, a switch) is admitted under a can not
+drawn yet by its height, and a drawn can refuses it.
+
+A drawn can's checks need the board, so `compile_with_consequences` makes
+them and reports one row per can. Its room is **withheld** when the can is
+not on the declared face, when the zone reaches past the can's outline (its
+body and pads: room is given only under the can), when that outline cannot
+be read, or when its drawn courtyard covers the zone: KiCad
+flags every part inside a courtyard as a courtyard overlap, so room under it
+would pass a board KiCad's DRC fails. The courtyard is read as drawn: KiCad's
+RF_Shielding footprints draw it as a ring (an outer and an inner outline),
+which leaves the inside open, and a can drawn that way has its room. A can
+that is not locked is named, because its zone is in board coordinates and does not
+follow a can a placer moves.
+
+Openings in the wall (a dashed fence, an in and an out, a single mouse-hole)
+are not declared: a drawn can's pads are the wall the router routes round.
+What a track crossing the wall costs is not priced.
+
+On `--emit-intent` a part a can claims leaves the block the emitter inferred
+for its sheet (the block keeps its zone for its other parts, and drops its
+`group`, which would add them back); each one is reported as a contradiction.
 
 ## Deferred, and named rather than silently absent
 

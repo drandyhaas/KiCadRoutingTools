@@ -202,7 +202,8 @@ Validate routed boards against the *real* spec, with the right checker — most
   (which every other sibling-copy site now imports), and **compiled** into the
   existing intent by `check_floorplan --emit-intent` rather than being a second
   constraint system -- every clause lands in an intent key the grade reads (`edge_connectors`,
-  `keepouts`, `proximity`, `arrays`, `fixed_poses`, `keep_away`, `assembly`), and the placement CLIs receive
+  `keepouts`, `proximity`, `arrays`, `fixed_poses`, `keep_away`, `assembly`, `covers`, `heights`, and
+  `blocks` from a `cans[]` row), and the placement CLIs receive
   it through the `--intent` they already take rather than through a flag of
   their own. (Unlike `.kicad_dru`, which EVERY routing step reads, the brief is
   read by those tools and reaches the rest as a compiled intent -- with ONE

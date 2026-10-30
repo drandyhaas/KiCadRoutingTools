@@ -589,6 +589,14 @@ in the vocabulary of `docs/floorplan-intent.md`:
   sheet the board derives (`render_placement.py --list-groups` lists them),
   not a group of `groups.json`, and a groups-file name there resolves to
   nothing (`block_unresolved`).
+- **A shield can:** declare it once in the design brief's `cans[]`
+  (`docs/design-brief.md`, "`cans[]`"): its `zone`, face,
+  `interior_height_mm` from the can's datasheet with its `source`, the can's
+  `ref` when it is drawn (else `wall_mm`), and per face the parts `in` it and
+  those that may be `either` side. `--emit-intent` compiles it into the
+  block, keep-outs and height below on every emit, so it is not lost when
+  you emit again. The bullets below are the hand-written rows it compiles
+  to; write them by hand only for a region that is not a can.
 - **A shield can's wall:** `fence_mm` on that block keeps a band that wide
   round its `zone` clear of every part, members too, for the wall (the
   can's outline less its interior; `min_reader` 16).
