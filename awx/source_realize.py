@@ -475,7 +475,8 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
     far = _je.far_face(pcb, sref, dref) if dref and dref in pcb.footprints else None
     import route_layers
     hints, rep = _je.plan_array(pcb, sref, full, a['others'], jspec['layers'], far=far, prefer=prefer,
-                                drops=a['drops'], log=log, hands=hands, vias_only=route_layers.escape_vias('src'))
+                                drops=a['drops'], log=log, hands=hands, vias_only=route_layers.escape_vias('src'),
+                                exit_rays=True)
     at_names = {(round(src_pad[nm].global_x, 3), round(src_pad[nm].global_y, 3)) for nm in names}
     hints = {at: h for at, h in hints.items() if at in at_names}
     unplanned = sorted(nm for nm in names

@@ -1224,8 +1224,9 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     along a gap or the ball's own line, up to `climb` pitches (None: the whole array), before it leaves -- and the
     STREET dog-bones (a via in an empty band of the array, `street` sites along a lane; the whole route's 2). The
     escapes' conflicts are the whole route's own (pages_first._conflicts as its ends take them: strict, an F exit
-    stacked over a B one allowed). `exit_rays` (the DESTINATION's joint plan, fanout_from_plan): a plane ball's drop
-    is held out of the bus's berths' ways out (exit_ray_conflicts), each gap site offering a finer via too.
+    stacked over a B one allowed). `exit_rays` (the whole route's joint plans: the source realize's and the
+    destination's, fanout_from_plan): a plane ball's drop is held out of the bus's teeth's and berths' ways out
+    (exit_ray_conflicts), each gap site offering a finer via too.
 
     `escape_to` (the other array's ref): the bus's menus are the ESCAPE FIELD's (escape_field_moves: escape_plan's
     escapes from every site a ball could take -- a gap point, its pad, none), so its dog-bones are chosen with every

@@ -366,14 +366,18 @@ A plane ball goes down to its plane as the human's do, sharing vias:
   its net's pour fills -- on a split layer, inside its own island; a ball with
   none of its plane under it or its gaps is left to the route step. A via off
   the array stays clear of the straight continuation of the bus's laid lanes,
-  and one beyond a face they leave by pays more than a via in the pad. At the
-  destination, whose berths are planned in the same solve as its drops, a
-  drop's via is held out of the way out of every berth it might take (its
-  exit's straight continuation, at the lane's bar), and each gap site offers
-  a finer via as well. On the zynq's U5 an RFGND via 0.14 mm past the west
-  face stood between RX_FRAME's two berths, and two flanked EN_AGC's, each
-  2.5 um short of the bar; the snap found no way out for either. On the LVDS
-  bus's first 32 nets the best round went from 3 nets open to 1.
+  and one beyond a face they leave by pays more than a via in the pad. At
+  both arrays, whose teeth and berths are planned in the same solve as their
+  drops, a drop's via is held out of the way out of every escape it might
+  take (its exit's straight continuation, at the lane's bar), and each gap
+  site offers a finer via as well. At an LVDS bus's destination an RF ground
+  via 0.14 mm past the face stood between one net's two berths, and two
+  flanked another's, each 2.5 um short of the bar; the snap found no way out
+  for either. On that bus's first 32 nets the best round went from 3 nets
+  open to 1. At an LPDDR4 bus's source a ground ball dropped into two teeth's
+  ways out, which every later plan refuses, and one of the two lanes ran
+  under the ball, so it shipped with no way down; held out of them at the
+  source too, the lane leaves the ball room and the route step connects it.
 - **A drop's via measured as the router stamps it:** by its ring about the
   grid point it rounds to (`pairs.svia_reach`), as the whole route's audit
   measures it, in the joint escape's lane tests and the ends model's ways
