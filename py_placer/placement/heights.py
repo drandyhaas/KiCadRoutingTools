@@ -283,12 +283,20 @@ class Cover:
             pts, hv = body
             if not len(pts):
                 return 0.0
-            inside = ((pts[:, 0] >= r[0]) & (pts[:, 0] <= r[2]) & (pts[:, 1] >= r[1])
-                      & (pts[:, 1] <= r[3]) & (hv + MARGIN_MM > under))
+            inside = cells_in_rect(pts, r) & (hv + MARGIN_MM > under)
             return int(inside.sum()) * CELL_MM * CELL_MM
         w = min(box[2], r[2]) - max(box[0], r[0])
         h = min(box[3], r[3]) - max(box[1], r[1])
         return w * h if w > 0 and h > 0 else 0.0
+
+
+def cells_in_rect(pts, r):
+    """Which of a body's cell centres `pts` (n, 2) lie in the local rect `r`:
+    the one test of a model being under a declared body, shared by the
+    verdict (`Cover.declared_area`) and the report (`Heights.under_declared`,
+    #1539)."""
+    return ((pts[:, 0] >= r[0]) & (pts[:, 0] <= r[2]) & (pts[:, 1] >= r[1])
+            & (pts[:, 1] <= r[3]))
 
 
 def to_local(box, pose):
@@ -433,6 +441,44 @@ class Heights:
             return None
         cleared, over, ins = v
         return over + (0.0 if cleared else ins)
+
+    def under_declared(self, a, pose_a, b, pose_b, occ_b) -> Optional[dict]:
+        """Part `b` under `a`'s DECLARED body (`covers[]`), judged on the shape
+        and height `verdict` judges it by (#1539), or None when it is not
+        under it: its model's cells inside the body's rect where it has a
+        model and a known height, else its occupancy box `occ_b` (local)
+        overlapping the rect -- never a box test for a part the verdict judges
+        cell by cell, or a part whose body stays beside the cover would be
+        reported under it with negative room while the verdict passes it.
+        `{'height_mm', 'room_mm', 'on'}`: on a model, the tallest of its cells
+        inside and the declared underside less that; on its occupancy, the
+        height it is judged by (`room_mm` None when unknown, and `reached`
+        True for a part reached from above, which nothing may cover). None
+        too for a part the body does not judge (a standoff, a pad-less
+        footprint)."""
+        cov = self.covers.get(a)
+        decl = getattr(cov, 'decl', None)
+        if decl is None or b in decl[2]:
+            return None
+        r, under = decl[0], decl[1]
+        box = to_local(to_board(occ_b, pose_b), pose_a)
+        if not (box[0] < r[2] and r[0] < box[2] and box[1] < r[3] and r[1] < box[3]):
+            return None
+        top = self.height(b) if b in decl[3] else self.under_height(b)
+        if b in self.bodies and top is not None and math.isfinite(top):
+            pts, hv = self._body_in(b, pose_b, pose_a)
+            inside = cells_in_rect(pts, r) if len(pts) else None
+            if inside is None or not inside.any():
+                return None
+            tall = float(hv[inside].max())
+            return {'height_mm': round(tall, 3), 'room_mm': round(under - tall, 3),
+                    'on': 'model'}
+        out = {'height_mm': self.height(b), 'on': 'occupancy',
+               'room_mm': (round(under - top, 3) if top is not None and math.isfinite(top)
+                           else None)}
+        if top is not None and not math.isfinite(top):
+            out['reached'] = True
+        return out
 
     def _body_in(self, ref, pose, frame):
         """`ref`'s body at `pose`, cell by cell, in the local frame of a part

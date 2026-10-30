@@ -7850,7 +7850,8 @@ def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, objec
     """#1504: whether each declared cover's body can be MOUNTED where its
     connector stands, one row per `covers[]` row: its standoffs (on the
     board, and where the row puts them), how far its body reaches past the
-    outline, the parts under it with the least room, every pair the heights
+    outline, the parts under it with the least room (judged on the shape the
+    verdict judges, `Heights.under_declared`, #1539), every pair the heights
     refuse with it (a part under it too tall or of unknown height, a part
     its insertion path cannot clear, another body it meets), and the order
     its insertion path asks (`heights.insertion_order`: this body in before
@@ -7917,13 +7918,12 @@ def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, objec
                            inside=False)
                 if v:
                     blocked.append({'ref': r, 'area_mm2': round(v, 3)})
-                b = to_board(occ, poses[r])
-                if (b[0] < body[2] and body[0] < b[2] and b[1] < body[3]
-                        and body[1] < b[3]):
-                    top = h.height(r)
-                    under.append({'ref': r, 'height_mm': top,
-                                  'room_mm': (None if top is None else
-                                              round(c['underside_mm'] - top, 3))})
+                # #1539: under it, and its room, on the shape and height the
+                # verdict above judges it by (its model's cells where it has
+                # one), never its occupancy box against its whole height
+                u = h.under_declared(con, pose, r, poses[r], occ)
+                if u is not None:
+                    under.append({'ref': r, **u})
         known = [u for u in under if u['room_mm'] is not None]
         row['under'] = len(under)
         row['least_room'] = min(known, key=lambda u: u['room_mm']) if known else None

@@ -1435,6 +1435,12 @@ board and at its place, how far the body reaches past the outline (reported,
 not judged: a module may overhang by design), the parts under it with the
 least room, every pair the heights refuse with it, and the order the paths
 ask; two bodies that each block the other's way in cannot both be mounted.
+"Under it" and its room are read on the shape the verdict judges
+(`heights.Heights.under_declared`): a part with a 3D model and a known
+height by its model's cells inside the body (its room is the underside less
+the tallest of them, `on: model`), any other part by its occupancy box and
+its height (`on: occupancy`). A courtyard that reaches under the body while
+the part's model stays beside it is not under it.
 check_assembly prints the same rows (`mountable (#1504): J1 YES ...`) and
 carries them in its JSON, report-only. `place_pose --intent` judges a hand move
 the same way: a move that newly puts a part under a declared body where it
