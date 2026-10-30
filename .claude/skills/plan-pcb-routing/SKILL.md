@@ -537,7 +537,9 @@ a power/GND via dropped there later shares the via). See "Step 1b" below for
 the command. It's cheap, only touches caps near a BGA, and is a no-op when
 nothing collides — but run it ONCE after ALL fanouts are done, before signal
 routing, never once per BGA: two passes compound the displacement (see Step 1c
-for the measurement).
+for the measurement). A cap it leaves in DRC with a BGA's fanout copper is not
+left for a manual nudge: re-fan that BGA with the cap held, as `autoplan.py`
+does (Step 1c, #1521).
 
 Report to user:
 - List of components that may need fanout
@@ -1384,7 +1386,8 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    collisions (#130) before routing. The pass is board-global (it reads every
    via and every BGA), so one late run sees everything; running it per-BGA
    compounds cap displacement and changes what later fanouts route around.
-   See Step 1c.
+   A cap it leaves in DRC with a BGA's fanout copper: re-fan that BGA with
+   `--immovable-refs <REF>` and run the pass again (#1521). See Step 1c.
 2. **Differential Pairs** - The most constrained routes claim their channels before
    anything else can block them (if present). Add `--impedance <ohms>` for the
    controlled ones (USB/Ethernet/LVDS/balanced-RF; from `/find-high-speed-nets`).
@@ -1723,7 +1726,8 @@ It prints `Moved N cap(s); resolved R/V initial violations; K unresolved`, plus
 cap. **resolved** means "was grazing at the seed and is clean now", counted at
 the END of the pass, so it credits both the cap move and the via-nudge (#746).
 Any **unresolved** caps are still grazing foreign copper — a via, a track, or a
-component pad — and are not auto-fixed; note them for a manual nudge. A
+component pad. This pass cannot move them further; where the copper is a BGA's
+fanout, re-fan that BGA with them held (below). A
 `Re-grazed by this pass's own connector copper:` line names the subset that
 was **clean before the via-nudge and is grazing after it** — copper this pass
 drew, not copper the board arrived with. Those caps are in the unresolved list
@@ -1756,16 +1760,21 @@ long treated as interchangeable. Once-after-all is the default because it cannot
 compound and costs one step instead of N.
 Verify with `check_drc.py board_step1c.kicad_pcb -c 0.1` (PAD-VIA count drops).
 
-**If a cap/resistor is still SHORTED to a BGA's fanout copper after this step**
-(`check_drc --json`: an unaccepted `short: true` `pad-via` / `pad-segment` item on
-a 2-pad C/R/FB part, the via or track a net of that BGA's balls), re-fan that BGA
-from the board it was fanned on, holding those parts: add `--immovable-refs <REF ...>`
-to its fanout command (and walk its retry ladder again: holding parts can drop
-balls a rung escaped before, and `--escape-method dogbone` may escape them), replay
-every later fanout unchanged, and run this step again. The fanout then keeps its
-vias and escapes off the held parts and drops a ball it cannot escape instead
-(the route step routes it from the bare ball). Keep the board with fewer shorts,
-then fewer dropped escapes. `autoplan.py` runs this loop itself (#1521).
+**If this step leaves a cap/resistor in DRC with a BGA's fanout copper, try
+re-fanning that BGA with the part held** -- the loop `autoplan.py` runs itself
+(#1521). Read `check_drc --json` on this step's output: an unaccepted `pad-via` /
+`pad-segment` item on a 2-pad C/R/FB part, against a via or track of a net of
+that BGA's balls. A `short: true` item always qualifies; a graze below the
+clearance does too. Re-fan that BGA from the board it was fanned on, holding
+those parts: add `--immovable-refs <REF ...>` to its fanout command (and walk its
+retry ladder again: holding parts can drop balls a rung escaped before, and
+`--escape-method dogbone` may escape them), replay every later fanout unchanged,
+and run this step again. The fanout then keeps its vias and escapes off the held
+parts and drops a ball it cannot escape instead (the route step routes it from
+the bare ball). Grade both boards with `check_drc` and keep the one with fewer
+shorts, then fewer DRC items on those parts, then fewer dropped escapes; say
+which you kept and why. One round: do not repeat the loop for a part that only
+got stuck after the re-fan.
 
 ### Step 2a: Differential Pairs (only if any were detected)
 The most constrained routes claim their channels first. Add `--impedance <ohms>`
