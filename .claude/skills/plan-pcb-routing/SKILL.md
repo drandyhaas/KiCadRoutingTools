@@ -2567,9 +2567,11 @@ fine-pitch edge where the surface fan has no room, add `--escape-method underpad
 `--allow-via-in-pad` so the via can sit on its own pad and stagger inward — see
 "Crowded fine-pitch QFN edge" above.
 
-**Clearance (#1328).** Omitted, `--clearance` is the board's Default net-class
-clearance, as on `route.py`; in a chain pass `--clearance-ceiling <floor>` and it
-caps that, never lowering a class the part does not need lowered. A pad whose
+**Clearance (#1328, #1529).** Omitted, `--clearance` is the board's Default
+net-class clearance, as on `route.py`, and the other net classes are honoured
+pairwise and kept; in a chain pass `--clearance-ceiling <floor>` and it caps
+the run clearance and every class at `min(class, floor)`, exactly as the route
+step's ceiling does. A pad whose
 straight escape cannot clear at it is retried at lower clearances (under the
 default `--escalation fab`; `off` drops it instead) and keeps the first that
 clears: the run prints `Clearance escalation (#1328): N stub(s) ...`, the

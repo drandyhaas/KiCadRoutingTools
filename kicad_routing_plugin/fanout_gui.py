@@ -113,6 +113,29 @@ def _get_net_classes_from_board():
         return {}, ['Default']
 
 
+def live_net_clearances(pcb_data):
+    """{net_id: class clearance} for every net of ``pcb_data`` in a NON-Default
+    class of the LIVE board -- the twin of list_nets.net_clearance_map_by_id,
+    which reads the file. The QFN fanout prices its escape at these (#1529):
+    mid-plan the file's project is the original, and the live board carries
+    whatever an earlier step wrote back."""
+    from .swig_gui import _get_netclass_parameters
+    net_to_class, class_names = _get_net_classes_from_board()
+    clr = {}
+    for cname in class_names:
+        if cname == 'Default':
+            continue
+        params = _get_netclass_parameters(cname) or {}
+        if isinstance(params.get('clearance'), (int, float)):
+            clr[cname] = float(params['clearance'])
+    out = {}
+    for nid, net in pcb_data.nets.items():
+        cname = net_to_class.get(net.name, 'Default')
+        if cname in clr:
+            out[nid] = clr[cname]
+    return out
+
+
 #: #1067: how `_optimize_decoupling_caps` says it refused to run, which
 #: `run_cap_optimization` reads to skip the post-pass a run would owe.
 CAP_NOT_RUN = "Cap optimization NOT run"
@@ -2073,6 +2096,10 @@ class FanoutTab(wx.Panel):
             # #1318: the route tab's power nets (qfn_fanout.py --power-nets).
             power_nets=shared.get('power_nets'),
             power_nets_widths=shared.get('power_nets_widths'),
+            # #1529: the live board's net classes, capped at the Clearance
+            # ceiling (qfn_fanout.py reads the file's, under --clearance-ceiling).
+            net_clearances=live_net_clearances(self.pcb_data),
+            clearance_ceiling=shared.get('clearance_ceiling'),
             # See the BGA path: safe from the worker via ui_thread_status.
             # Only the counted x/N lines reach the status feed -- the
             # uncounted phase chatter (gridding, staging, ...) is log-only.
@@ -2091,6 +2118,9 @@ class FanoutTab(wx.Panel):
                 'clearance': clearance,
                 'via_size': via_size,
                 'via_drill': via_drill,
+                # #1529: the classes are written back as the escape priced
+                # them -- kept, or capped at this ceiling when it is set.
+                'clearance_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -2259,7 +2289,8 @@ class FanoutTab(wx.Panel):
         # decision both fronts read (fix_kicad_drc_settings.fanout_fix_kwargs):
         # #1195 -- a QFN run with no copper writes none, one with no via leaves
         # the via and hole floors alone -- and the routed clearance (which also
-        # sets the copper-to-hole floor), every class clamped to it, no
+        # sets the copper-to-hole floor), the classes (a BGA run clamps them to
+        # it; a QFN run keeps them, or caps them at the ceiling, #1529), no
         # hole-to-hole and no edge setting beyond the fab pin. This tab used to
         # write its own set: hole-to-hole and edge from the config, never the
         # copper-to-hole floor, classes only under the ceiling.
@@ -2270,7 +2301,9 @@ class FanoutTab(wx.Panel):
             fanout_kind, tracks, vias,
             clearance=_cl.effective(_fclr) if _fclr is not None else None,
             track_width=_fcfg.get('track_width'),
-            via_size=_fcfg.get('via_size'), via_drill=_fcfg.get('via_drill'))
+            via_size=_fcfg.get('via_size'), via_drill=_fcfg.get('via_drill'),
+            # #1529: read for a QFN run only (its classes kept or capped)
+            clearance_ceiling=_fcfg.get('clearance_ceiling'))
         # #693: gated on the shared "Fix DRC settings after routing" checkbox.
         # This tab is the one whose shared params did not even CARRY the flag,
         # so the gate and the flag were added together -- see the

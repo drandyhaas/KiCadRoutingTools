@@ -1316,11 +1316,11 @@ def apply_clearance_ceiling(args, tool=''):
     failed plane drops and 3 of 85 GND balls pour-served, against 19 grazes, 0
     dropped and 85/85 with the same number spelled ``--clearance``.
 
-    These fronts route to ONE scalar, so the ceiling's "cap every net class"
-    reading collapses to ``min(requested, ceiling)`` -- tighten-only, exactly
-    as it is for the Default class on the routing mains. The WRITEBACK half
-    already matched: both fronts pass ``clamp_nondefault_netclasses=True``
-    unconditionally, so only the run clearance was missing.
+    The run clearance is ``min(requested, ceiling)`` -- tighten-only, exactly
+    as it is for the Default class on the routing mains. The classes:
+    bga_fanout routes to that ONE scalar and clamps every class to it;
+    qfn_fanout prices each class at ``min(class, ceiling)`` and writes it
+    there, as route.py does (#1529, ``fanout_fix_kwargs``).
 
     Call it AFTER ``parse_args`` and BEFORE anything reads ``args.clearance``
     (on bga_fanout that means before ``enforce_fab_floors``, which would
@@ -1332,15 +1332,22 @@ def apply_clearance_ceiling(args, tool=''):
         return None
     label = f"{tool}: " if tool else ""
     cur = getattr(args, 'clearance', None)
+    # #1529: qfn_fanout spaces its escape at the classes and writes each at
+    # min(class, ceiling), as route.py does; bga_fanout still clamps them all
+    # to the clearance it escaped at.
+    classes = ("each net class is capped at min(class, ceiling) in the run and "
+               "the output project" if tool == 'qfn_fanout' else None)
     if cur is None or ceiling < cur:
         args.clearance = ceiling
         print(f"  {label}--clearance-ceiling {ceiling}: clearance capped at it "
-              f"for this run (was {cur}); the output project's classes are "
-              f"clamped down to it (#439).")
+              f"for this run (was {cur}); "
+              + (f"{classes}." if classes else
+                 "the output project's classes are clamped down to it (#439)."))
     else:
         print(f"  {label}--clearance-ceiling {ceiling}: no cap applied -- "
-              f"--clearance {cur} is already at or below it; the output "
-              f"project's classes are still clamped to the routed floor.")
+              f"--clearance {cur} is already at or below it; "
+              + (f"{classes}." if classes else
+                 "the output project's classes are still clamped to the routed floor."))
     return ceiling
 
 

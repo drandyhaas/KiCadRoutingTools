@@ -4030,12 +4030,17 @@ def _row_on_copper(row, segs, seg_geoms, vias):
     return False
 
 
-def fanout_drc_grazes(out_path, clearance, input_copper):
+def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False):
     """A fanout step's `drc_grazes` (JSON_SUMMARY): the clearance rows of its
     WRITTEN board that copper THIS step laid takes part in, graded at
     `clearance`. `input_copper` is `copper_keys` of the board the step was
     given, so whatever the output has beyond it -- escapes, vias, plane drops,
     any post-pass's rewrite -- is the step's own.
+
+    `net_classes` also grades each pair at the written project's net classes
+    (KiCad's max(clearance, class A, class B)), read as check_drc's own main
+    reads them (#1529): qfn_fanout spaces its escape at the classes and keeps
+    them, so a grade without them reported 0 on copper KiCad flagged.
 
     The fanouts used to count every violation on the output board, so each
     step re-reported every earlier step's grazes: on eis the U4 QFN fanout at
@@ -4050,11 +4055,17 @@ def fanout_drc_grazes(out_path, clearance, input_copper):
     new_segs = segs - input_copper[0]
     new_vias = vias - input_copper[1]
     new_geoms = {k[1:] for k in new_segs}
+    net_clearances = None
+    if net_classes:
+        from list_nets import net_clearance_map
+        net_clearances = net_clearance_map(
+            out_path, [n.name for n in pcb.nets.values()]) or None
     with contextlib.redirect_stdout(io.StringIO()):   # keep JSON_SUMMARY clean
         # check_sizes=False: graded at --clearance (#130); the #176 fab-width
         # floor is a separate concern and would change `total`'s meaning.
         rows = run_drc(out_path, clearance=clearance, quiet=True, max_print=0,
-                       check_sizes=False, pcb_data=pcb)
+                       check_sizes=False, pcb_data=pcb,
+                       net_clearances=net_clearances)
     # #962: via-in-paste rows (and their accepted protected/inherited twins)
     # are a fab-protection finding, not a clearance graze; a fanout's own
     # stamped via-in-pad would otherwise inflate `total`. #995: an accepted

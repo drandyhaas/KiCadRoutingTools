@@ -77,7 +77,10 @@ class PadFreeMap:
         self._x0, self._y0, self._x1, self._y1 = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
         lcs = [getattr(p, 'local_clearance', 0.0) or 0.0 for p in self._pads]
         rules = list((getattr(cfg, 'layer_clearances', None) or {}).values())
-        self._reach = max([cfg.clearance] + lcs + rules)
+        # #1529: a pad of a net in a wider class is held at that class
+        # (cfg.net_clearances, empty unless the caller installed classes).
+        self._classes = dict(getattr(cfg, 'net_clearances', None) or {})
+        self._reach = max([cfg.clearance] + lcs + rules + list(self._classes.values()))
 
     def pads_clear(self, x1, y1, x2, y2, layer):
         """Every stamped pad on `layer` clears the segment at cfg.track_width."""
@@ -92,11 +95,20 @@ class PadFreeMap:
         near = ((self._x1 >= min(x1, x2) - r) & (self._x0 <= max(x1, x2) + r)
                 & (self._y1 >= min(y1, y2) - r) & (self._y0 <= max(y1, y2) + r))
         base = cfg.layer_clearance(layer, cfg.clearance)
+        # KiCad's pair max(clearance, the pad's class) -- the routed side's
+        # class is already in cfg.clearance -- which a rule on `layer`
+        # replaces, as it replaces cfg.clearance there.
+        ruled = (getattr(cfg, 'layer_clearances', None) or {}).get(layer) is not None
+        classed = bool(self._classes) and not ruled
         for i in np.nonzero(near)[0]:
             p = self._pads[int(i)]
             if layer not in expand_pad_layers(p.layers, [layer]):
                 continue
-            need = max(cfg.clearance, cfg.pad_override_clearance(base, p))
+            pc, pb = cfg.clearance, base
+            c = self._classes.get(p.net_id) if classed else None
+            if c is not None and c > pc:
+                pc, pb = c, c
+            need = max(pc, cfg.pad_override_clearance(pb, p))
             if segment_pad_gap(x1, y1, x2, y2, p) - hw < need - 1e-9:
                 return False
         return True

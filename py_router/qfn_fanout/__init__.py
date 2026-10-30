@@ -127,6 +127,49 @@ def resolve_qfn_clearance(explicit, default_class, ceiling=None):
     return value, lines
 
 
+def resolve_class_clearances(pcb_data, net_clearances=None, ceiling=None):
+    """The NON-Default net-class clearances a QFN escape is spaced at (#1529),
+    and the line that says so.
+
+    ``net_clearances`` is ``{net_id: class clearance}`` as route.py's map
+    (``list_nets.net_clearance_map_by_id``: a net in no class but Default has
+    no entry and takes the run clearance). None reads it from the board's
+    sibling ``.kicad_pro`` (``pcb_data.source_path``), as ``batch_route`` does
+    for a caller that passes none; the GUI passes the live board's classes.
+    ``ceiling`` (``--clearance-ceiling``, the GUI's Clearance ceiling) caps
+    every class at ``min(class, ceiling)``, route.py's reading.
+
+    Each foreign item is then priced at KiCad's pairwise
+    ``max(run clearance, class A, class B)`` (``GridRouteConfig.
+    pair_clearance``), so the fanout's copper meets the classes the
+    writeback keeps (``fix_kicad_drc_settings.fanout_fix_kwargs``). An empty
+    map is inert: every pair at the run clearance, as before.
+
+    Returns ``({net_id: clearance}, lines)``."""
+    if net_clearances is None:
+        net_clearances = {}
+        path = getattr(pcb_data, 'source_path', '') or ''
+        if path and os.path.isfile(path):
+            try:
+                from list_nets import net_clearance_map_by_id
+                net_clearances = net_clearance_map_by_id(
+                    path, {nid: n.name for nid, n in pcb_data.nets.items()})
+            except Exception as e:                           # noqa: BLE001
+                return {}, [f"Warning: could not read the net-class clearances "
+                            f"({e}); escaping at the run clearance."]
+    nc = {int(nid): float(c) for nid, c in (net_clearances or {}).items()
+          if c is not None}
+    if not nc:
+        return {}, []
+    if ceiling is not None:
+        nc = {nid: min(c, float(ceiling)) for nid, c in nc.items()}
+    vals = sorted({round(v, 4) for v in nc.values()})
+    mode = (f"capped at --clearance-ceiling {float(ceiling):g}"
+            if ceiling is not None else "honoured in full (no --clearance-ceiling)")
+    return nc, [f"Netclass clearances for {len(nc)} net(s), {mode} (mm: {vals}); "
+                f"stubs spaced at KiCad's pairwise max(A, B)."]
+
+
 def qfn_clearance_ladder(clearance, copper_layer_count):
     """The clearances BELOW ``clearance`` a stub may escalate to, descending
     (#1328) -- empty when no descent is allowed.
@@ -487,7 +530,7 @@ def _board_edge_model(pcb_data, clearance, board_edge_clearance):
 
 def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
                         via_size, via_drill, clearance, track_width,
-                        hole_to_hole, adds_via=True):
+                        hole_to_hole, adds_via=True, pair_clearance=None):
     """Does a candidate via (and its stub) collide with THIS RUN's own output?
 
     D10. The underpad escape's `via_clears` tested a candidate against the
@@ -558,12 +601,14 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
     POSITION_TOLERANCE emits no track at all (the commit loop skips it), so it
     conflicts with nothing.
 
+    ``pair_clearance(net_a, net_b)``, when given, prices each pair at its
+    two nets' classes (#1529); else every pair is ``clearance``.
+
     Returns True when the candidate must be REJECTED.
     """
     from geometry_utils import segment_to_segment_distance
     from obstacle_map import point_to_segment_distance
 
-    via_half = via_size / 2 + clearance - 1e-6
     track_half = track_width / 2
     if not adds_via and (px is None
                          or math.hypot(px - vx, py - vy) <= POSITION_TOLERANCE):
@@ -572,6 +617,9 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
         qx, qy, qn = entry[0], entry[1], entry[2]
         qpx = entry[3] if len(entry) > 3 else None
         qpy = entry[4] if len(entry) > 4 else None
+        cl = (pair_clearance(net_id, qn) if pair_clearance is not None
+              and qn != net_id else clearance)
+        via_half = via_size / 2 + cl - 1e-6
         # Via-to-via. Same-net floor was via_size*0.5 -- BELOW drill
         # hole-to-hole for standard vias (#479 audit gap 2); both are via_drill.
         # The drill floor holds for a DIFFERENT-net pair too: KiCad grades
@@ -581,7 +629,7 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
         # Skipped for a REUSE: no drill and no via copper is added, so there is
         # no new pair for this run to space.
         if adds_via:
-            floor = max(via_size + clearance if qn != net_id
+            floor = max(via_size + cl if qn != net_id
                         else via_size * 0.5, via_drill + hole_to_hole)
             if math.hypot(vx - qx, vy - qy) < floor - 1e-6:
                 return True
@@ -608,7 +656,7 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
             return True
         if has_stub and segment_to_segment_distance(
                 px, py, vx, vy, qpx, qpy, qx, qy) \
-                < track_width + clearance - 1e-6:
+                < track_width + cl - 1e-6:
             return True
     return False
 
@@ -616,7 +664,7 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
 def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                          track_width, clearance, via_size, via_drill, grid_step,
                          allow_via_in_pad=False, board_edge_clearance=0.0,
-                         progress_callback=None):
+                         progress_callback=None, net_clearances=None):
     """Via-drop escape (issue #164): instead of a surface 45-degree fan, run a
     short stub from each pad to a through-via just past the pad edge and let
     signal routing pick the net up on an inner/back layer. This escapes a
@@ -648,7 +696,11 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
 
     Interior ('center') pads form their own by_side group on net-scoped runs
     (issue #410); each uses its own long-axis escape direction from analyze_pad
-    -- nothing here assumes a group shares an edge axis."""
+    -- nothing here assumes a group shares an edge axis.
+
+    ``net_clearances`` (``{net_id: class clearance}``, #1529) prices every
+    pair the via and its stub make at KiCad's max(clearance, class A,
+    class B), as the surface fan does; empty or None is the one clearance."""
     from obstacle_map import (build_base_obstacle_map, build_layer_map,
                               point_to_segment_distance)
     from geometry_utils import segment_to_segment_distance
@@ -682,16 +734,50 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
 
     from kicad_dru import install_layer_clearances
     install_layer_clearances(cfg, None, None, pcb_data)  # #498
+    # #1529: the net classes. `_pc(a, b)` is a pair the VIA makes (it spans
+    # the stack, so the class pair before any layer rule, as `clearance`
+    # was); `_spc(a, b)` one the STUB makes on its mount layer, where a
+    # .kicad_dru rule replaces it (`_stub_clr` below). Both are the one
+    # clearance on a board with no non-Default class.
+    _nc = {int(n): float(c) for n, c in (net_clearances or {}).items()}
+    cfg.set_net_clearances(_nc, ())
+    _nc_foreign = {n: c for n, c in _nc.items() if n not in fanned_nets}
+
+    def _pc(net_a, net_b):
+        return cfg.pair_clearance(net_a, net_b, base=clearance) if _nc else clearance
     layer_map = build_layer_map(cfg.layers)
     _prog(0, 0, "building obstacle map...")
     # Pad copper is measured exactly, not stamped (bga_fanout.reroute.
     # PadFreeMap): the stamps carry the track half-width twice and refused
     # pad -> via stubs that clear the pad (mikoto_nrf52840, beside C2.2).
     from bga_fanout.reroute import PadFreeMap
-    obstacles = PadFreeMap(build_base_obstacle_map(
-        pcb_data, cfg, nets_to_route=list(fanned_nets),
-        extra_clearance=track_width / 2, stamp_pads=False),
-        pcb_data, set(fanned_nets), cfg)
+    # #1529: one map per routing side of the stub's pairs -- its own class
+    # raises it (unless the mount layer's rule replaces it) -- each stamping
+    # a foreign obstacle at max(that, the obstacle's class).
+    _stub_ruled = (getattr(cfg, 'layer_clearances', None) or {}).get(
+        footprint.layer) is not None
+    _maps = {}
+
+    def _obstacles_for(net_id):
+        f = clearance
+        c = _nc.get(net_id) if (_nc and not _stub_ruled) else None
+        if c is not None and c > f:
+            f = c
+        hit = _maps.get(f)
+        if hit is None:
+            if f == clearance:
+                _c = cfg
+            else:
+                _c = GridRouteConfig(layers=list(cfg.layers), track_width=track_width,
+                                     clearance=f)
+                install_layer_clearances(_c, None, None, pcb_data)  # #498
+                _c.set_net_clearances(_nc, ())
+            hit = _maps[f] = (PadFreeMap(build_base_obstacle_map(
+                pcb_data, _c, nets_to_route=list(fanned_nets),
+                extra_clearance=track_width / 2, net_clearances=_nc_foreign,
+                stamp_pads=False), pcb_data, set(fanned_nets), _c), _c)
+        return hit
+    _obstacles_for(None)
     # #845: the obstacle plane for the STUB, which is emitted on the pad's own
     # mount layer (:766 and :777, deliberately -- putting it on an inner/back
     # escape layer would float it above the pad, #195). This used to resolve
@@ -789,6 +875,12 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # layer rule), and inert on the default path, where --layer IS the mount
     # layer.
     _stub_clr = cfg.layer_clearance(footprint.layer, clearance)
+
+    def _spc(net_a, net_b):
+        """#1529: `_stub_clr` for the stub of `net_a` against `net_b`."""
+        if not _nc:
+            return _stub_clr
+        return cfg.pair_clearance(net_a, net_b, footprint.layer, base=clearance)
     # A SET of halves, so an A/B arm can be 'via', 'via,seg', 'off' or 'all'.
     # 'off' wins over everything (an explicit ablation is never partial), and
     # an empty or unrecognised value is 'all' -- a typo must not silently
@@ -912,7 +1004,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
             if fn == net_id:
                 continue                        # same-net copper is no obstacle
-            if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + clearance - 1e-6:
+            if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + _pc(net_id, fn) - 1e-6:
                 return False
         for hx, hy, hd in _drilled_pad_holes:
             # Net-independent drill floor vs every drilled pad (slot-exact).
@@ -924,18 +1016,20 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # Rotation-exact rectangle clearance (the disc test over-rejected an
             # elongated neighbour pad a pitch away). The via is through-all-layers,
             # so an SMD pad on any single layer still conflicts.
-            if _seg_hits_pad(vx, vy, vx, vy, pad, margin=via_size / 2 + clearance - 1e-6):
+            if _seg_hits_pad(vx, vy, vx, vy, pad,
+                             margin=via_size / 2 + _pc(net_id, pad.net_id) - 1e-6):
                 return False
         for sx0, sy0, sx1, sy1, sw, sn in foreign_tracks:
             if sn == net_id:
                 continue
             if point_to_segment_distance(vx, vy, sx0, sy0, sx1, sy1) \
-                    < via_size / 2 + sw / 2 + clearance - 1e-6:
+                    < via_size / 2 + sw / 2 + _pc(net_id, sn) - 1e-6:
                 return False
         return not run_output_conflict(
             vx, vy, net_id, placed, px, py,
             via_size=via_size, via_drill=via_drill, clearance=clearance,
-            track_width=track_width, hole_to_hole=_h2h)
+            track_width=track_width, hole_to_hole=_h2h,
+            pair_clearance=_pc if _nc else None)
 
     def stub_clears_erased(px, py, vx, vy, net_id):
         """#619: is the pad->via stub clear of the copper `nets_to_route` erased?
@@ -974,7 +1068,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 if v.net_id == net_id:
                     continue                # own-net copper is no obstacle
                 if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \
-                        < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:
+                        < v.size / 2 + track_width / 2 + _spc(net_id, v.net_id) - 1e-6:
                     return False
         if _gate_seg:
             # Segments, unlike vias, really ARE single-layer objects, so this
@@ -989,7 +1083,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 if segment_to_segment_distance(px, py, vx, vy,
                                                s.start_x, s.start_y,
                                                s.end_x, s.end_y) \
-                        < s.width / 2 + track_width / 2 + _stub_clr - 1e-6:
+                        < s.width / 2 + track_width / 2 + _spc(net_id, s.net_id) - 1e-6:
                     return False
         if _gate_pad and _erased_pads:
             # CALL the grader; do not mirror it. An earlier revision of this
@@ -1026,12 +1120,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 # -- so skipping the partner pad outright would wave through a
                 # real short 2-3mm away, which is exactly the geometry the
                 # ladder produces. `id(p) in _tie` alone is NOT the rule.
+                _pcl = _spc(net_id, p.net_id)
                 if id(p) in _tie and _tie_span_waived(pcb_data, seg, net_id,
-                                                     p, _stub_clr):
+                                                     p, _pcl):
                     continue
                 # local_clearance is per-PAD and RAISES the floor, exactly as
                 # check_drc's `_pad_pair_cl = max(local_clearance, pair)`.
-                _eff = max(_stub_clr, getattr(p, 'local_clearance', 0.0) or 0.0)
+                _eff = max(_pcl, getattr(p, 'local_clearance', 0.0) or 0.0)
                 if check_pad_segment_overlap(p, seg, _eff, _board_cu)[0]:
                     return False
         return True
@@ -1059,6 +1154,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     def place_pin(pi, mode, placed):
         ex, ey = pi.escape_direction
         px, py = pi.pad.global_x, pi.pad.global_y
+        _om, _ocfg = _obstacles_for(pi.pad.net_id)          # #1529
         # #479 audit gap 2 (reuse): an existing same-net via within stub
         # reach makes a new drill pointless (and often sub-h2h illegal).
         # Bridge to it instead; the commit loop skips the via emission.
@@ -1098,18 +1194,19 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # map, and #619 is pure geometry on the mount layer that must run
             # regardless.
             if (stub_layer_idx is None or
-                    obstacles.line_clear(px, py, _rvx, _rvy, stub_layer, cfg)) \
+                    _om.line_clear(px, py, _rvx, _rvy, stub_layer, _ocfg)) \
                     and stub_clears_erased(px, py, _rvx, _rvy, pi.pad.net_id) \
                     and not run_output_conflict(
                         _rvx, _rvy, pi.pad.net_id, placed, px, py,
                         via_size=via_size, via_drill=via_drill,
                         clearance=clearance, track_width=track_width,
-                        hole_to_hole=_h2h, adds_via=False):
+                        hole_to_hole=_h2h, adds_via=False,
+                        pair_clearance=_pc if _nc else None):
                 return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
             stub_ok = (stub_layer_idx is None or
-                       obstacles.line_clear(px, py, vx, vy, stub_layer, cfg))
+                       _om.line_clear(px, py, vx, vy, stub_layer, _ocfg))
             if stub_ok \
                     and stub_clears_erased(px, py, vx, vy, pi.pad.net_id) \
                     and via_clears(vx, vy, pi.pad.net_id, placed, px, py):
@@ -1454,7 +1551,7 @@ def _stub_legs(stub):
 
 
 def _widen_power_stub_legs(stubs, power_w, track_width, clearance, seg_grazes,
-                           hits_reserve):
+                           hits_reserve, pair_clearance=None):
     """#1318: per-leg widths ``{id(stub): (w0, w1, w2)}`` for the stubs of
     power nets.
 
@@ -1469,7 +1566,10 @@ def _widen_power_stub_legs(stubs, power_w, track_width, clearance, seg_grazes,
     laid so far, at their own widths (stubs are never checked against each
     other at `track_width`: they are spaced by construction, and a wider
     one is not). Otherwise it stays at `track_width` -- narrow only where the
-    power width does not fit, as route.py's pad-entry zone is."""
+    power width does not fit, as route.py's pad-entry zone is.
+
+    ``pair_clearance(net_a, net_b)``, when given, is the clearance between
+    two stubs' nets (their classes, #1529); else every pair is `clearance`."""
     from geometry_utils import segment_to_segment_distance
     cur = {id(s): [track_width] * 3 for s in stubs}
     legs = {id(s): _stub_legs(s) for s in stubs}
@@ -1489,10 +1589,12 @@ def _widen_power_stub_legs(stubs, power_w, track_width, clearance, seg_grazes,
             for other in stubs:
                 if other.net_id == stub.net_id or other.layer != stub.layer:
                     continue
+                _cl = (pair_clearance(stub.net_id, other.net_id)
+                       if pair_clearance is not None else clearance)
                 for ko, oa, ob in legs[id(other)]:
                     if segment_to_segment_distance(a[0], a[1], b[0], b[1],
                                                    oa[0], oa[1], ob[0], ob[1]) \
-                            < w / 2 + cur[id(other)][ko] / 2 + clearance - 1e-9:
+                            < w / 2 + cur[id(other)][ko] / 2 + _cl - 1e-9:
                         ok = False
                         break
                 if not ok:
@@ -1527,6 +1629,10 @@ def generate_qfn_fanout(footprint: Footprint,
                         # power net's stub is laid at its width where it fits.
                         power_nets: Optional[List[str]] = None,
                         power_nets_widths: Optional[List[float]] = None,
+                        # #1529: {net_id: class clearance} (None = the
+                        # board's .kicad_pro), capped at clearance_ceiling.
+                        net_clearances: Optional[Dict[int, float]] = None,
+                        clearance_ceiling: Optional[float] = None,
                         ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
@@ -1553,6 +1659,12 @@ def generate_qfn_fanout(footprint: Footprint,
             everything the stub test checks plus the run's other stubs, and
             at track_width where it does not (#1318: route.py keeps input
             copper, so a stub laid narrow shipped narrow).
+        net_clearances / clearance_ceiling: the net classes, read as route.py
+            reads them (:func:`resolve_class_clearances`). Every pair the
+            escape tests -- stub or via against foreign copper, a pad, another
+            fanned net's copper, a neighbouring chip's reserved escape, this
+            run's own stubs -- is priced at KiCad's max(clearance, class A,
+            class B), and no stub escalates below its own class (#1529).
 
     Returns:
         (tracks, vias, failed_nets) - tracks are the segments, vias is empty.
@@ -1618,6 +1730,14 @@ def generate_qfn_fanout(footprint: Footprint,
         print(f"  .kicad_dru: escape-layer clearance {layer} "
               f"{clearance} -> {_lcl_498[layer]} (#498)")
         clearance = _lcl_498[layer]
+
+    # #1529: the net classes, priced pairwise below. Escaping every pair at the
+    # one run clearance (the Default class) put 0.2-class stubs 0.14-0.19 mm
+    # apart, which the writeback then hid by lowering every class to it.
+    _nc, _nc_lines = resolve_class_clearances(pcb_data, net_clearances,
+                                              clearance_ceiling)
+    for _l in _nc_lines:
+        print(f"  {_l}")
 
     # Fab-floor clamp (issue #223): an escape stub thinner than the board's
     # minimum manufacturable track width is un-routable at the stated fab class
@@ -1750,7 +1870,8 @@ def generate_qfn_fanout(footprint: Footprint,
                                         track_width, cl, via_size, via_drill, grid_step,
                                         allow_via_in_pad=allow_via_in_pad,
                                         board_edge_clearance=board_edge_clearance,
-                                        progress_callback=progress_callback)
+                                        progress_callback=progress_callback,
+                                        net_clearances=_nc)
         res = _drop_run(clearance)
         res_pads = list(LAST_UNDERPAD_REPORT.get('dropped_pads', ()))
         # #1328: the underpad escape escalates as the surface stub does. Its
@@ -1864,12 +1985,38 @@ def generate_qfn_fanout(footprint: Footprint,
                                track_width=track_width, clearance=clearance)
     from kicad_dru import install_layer_clearances
     install_layer_clearances(_obs_cfg, None, None, pcb_data)  # #498
+    _obs_cfg.set_net_clearances(_nc, ())                      # #1529
     _obs_layer_map = build_layer_map(_obs_cfg.layers)
     _fanned_net_ids = [p.net_id for p in footprint.pads if p.net_id]
+    # #1529: the map stamps each FOREIGN obstacle at max(floor, its class);
+    # the floor is the stub's own pair side (`_stub_floor`), one map per
+    # value. The fanned nets are not stamped, so their classes stay out of
+    # the map's floor, where they would over-block every other stub.
+    _fanned_set = set(_fanned_net_ids)
+    _nc_foreign = {n: c for n, c in _nc.items() if n not in _fanned_set}
+
+    def _pair(cl, net_a, net_b):
+        """#1529: the clearance between this run's copper of `net_a` and
+        copper of `net_b` on the escape layer, from the run's clearance `cl`:
+        KiCad's max(cl, class A, class B), which a .kicad_dru rule on that
+        layer replaces (GridRouteConfig.pair_clearance). `cl` itself on a
+        board with no non-Default class."""
+        if not _nc:
+            return cl
+        return _obs_cfg.pair_clearance(net_a, net_b, layer, base=cl)
+
+    def _stub_floor(cl, net_id):
+        """The routing side of every pair a stub of `net_id` makes at `cl`:
+        its own class raises it, unless the escape layer's rule replaces it."""
+        if not _nc or _lcl_498.get(layer) is not None:
+            return cl
+        c = _nc.get(net_id)
+        return c if c is not None and c > cl else cl
     if progress_callback:
         progress_callback(0, 0, "QFN fanout: building obstacle map...")
     _obstacles = build_base_obstacle_map(pcb_data, _obs_cfg, nets_to_route=_fanned_net_ids,
                                          extra_clearance=track_width / 2,
+                                         net_clearances=_nc_foreign,
                                          progress_callback=progress_callback,
                                          stamp_pads=False)
     _obs_layer_idx = _obs_layer_map.get(layer)
@@ -1902,8 +2049,9 @@ def generate_qfn_fanout(footprint: Footprint,
             pcb_data, list(power_nets), list(power_nets_widths or ())).items()}
     _w_max = max([track_width] + list(_power_w.values()))
     _pad_reach = _w_max / 2 + max(
-        [clearance, _base_cl] + [getattr(p, 'local_clearance', 0.0) or 0.0
-                                 for pl in pcb_data.pads_by_net.values() for p in pl])
+        [clearance, _base_cl] + list(_nc.values())
+        + [getattr(p, 'local_clearance', 0.0) or 0.0
+           for pl in pcb_data.pads_by_net.values() for p in pl])
     _sxs = [pt[0] for s in stubs for pt in (s.pad_pos, s.corner_pos, s.stub_end)]
     _sys = [pt[1] for s in stubs for pt in (s.pad_pos, s.corner_pos, s.stub_end)]
     if _sxs:
@@ -1938,7 +2086,6 @@ def generate_qfn_fanout(footprint: Footprint,
     # usb_sniffer /T_USB_CLK x /T_USB_NXT). Only copper present BEFORE this
     # fanout is in pcb_data, so this never blocks the part's own new stubs.
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
-    _fanned_set = set(_fanned_net_ids)
     _fanned_existing_segs = [s for s in pcb_data.segments if s.net_id in _fanned_set]
     _fanned_existing_vias = [v for v in pcb_data.vias if v.net_id in _fanned_set]
 
@@ -1966,18 +2113,20 @@ def generate_qfn_fanout(footprint: Footprint,
     _rung_maps = {(clearance, round(track_width, 6)): (_obstacles, _obs_cfg)}
     _rung_edges = {clearance: (_edge_clear, _edge_rings, _edge_outer, _edge_cutouts)}
 
-    def _map_at(cl, width=track_width):
-        """The stub map at rung `cl` for a track `width`: stamped for that
-        track and clearance, with the same pad-free build and guard as the
-        base map."""
-        key = (cl, round(width, 6))
+    def _map_at(cl, width=track_width, net_id=None):
+        """The stub map at rung `cl` for a track `width` of `net_id`: stamped
+        for that track and the stub's side of the pair (`_stub_floor`, #1529),
+        with the same pad-free build and guard as the base map."""
+        f = _stub_floor(cl, net_id)
+        key = (f, round(width, 6))
         hit = _rung_maps.get(key)
         if hit is None:
             _cfg = GridRouteConfig(layers=list(_obs_cfg.layers), track_width=width,
-                                   clearance=cl)
+                                   clearance=f)
             install_layer_clearances(_cfg, None, None, pcb_data)  # #498
             hit = (build_base_obstacle_map(pcb_data, _cfg, nets_to_route=_fanned_net_ids,
                                            extra_clearance=track_width / 2,
+                                           net_clearances=_nc_foreign,
                                            stamp_pads=False), _cfg)
             _rung_maps[key] = hit
         return hit
@@ -2004,7 +2153,7 @@ def generate_qfn_fanout(footprint: Footprint,
             return True
         # Foreign tracks / vias via the shared obstacle map (issue #149 part 2).
         if _obs_layer_idx is not None:
-            _om, _oc = _map_at(cl, width)
+            _om, _oc = _map_at(cl, width, net_id)
             if not check_line_clearance(_om, p1[0], p1[1], p2[0], p2[1],
                                         _obs_layer_idx, _oc):
                 return True
@@ -2017,13 +2166,14 @@ def generate_qfn_fanout(footprint: Footprint,
         # diagonal fan's need at a neighbour pad's corner by up to
         # margin*(sqrt2-1), enough to collapse fans check_drc grades clean
         # (uhk_trackball U1). NPTH copper-less pads are the map's holes.
+        # #1529: every pair below at the two nets' classes too (`_pair`).
         for pad in foreign_pads:
             if pad.net_id == net_id or _pad_has_no_copper(pad):
                 continue
             if layer not in expand_pad_layers(pad.layers, [layer]):
                 continue
             if _segment_pad_gap(p1[0], p1[1], p2[0], p2[1], pad) - width / 2 \
-                    < _pad_need(pad, cl) - 1e-9:
+                    < _pad_need(pad, _pair(cl, net_id, pad.net_id)) - 1e-9:
                 return True
         # Existing copper of the part's other fanned nets (issue #257).
         for s in _fanned_existing_segs:
@@ -2032,13 +2182,13 @@ def generate_qfn_fanout(footprint: Footprint,
             if segment_to_segment_distance(
                     p1[0], p1[1], p2[0], p2[1],
                     s.start_x, s.start_y, s.end_x, s.end_y) \
-                    < s.width / 2 + width / 2 + cl - 1e-6:
+                    < s.width / 2 + width / 2 + _pair(cl, net_id, s.net_id) - 1e-6:
                 return True
         for v in _fanned_existing_vias:
             if v.net_id == net_id:
                 continue
             if point_to_segment_distance(v.x, v.y, p1[0], p1[1], p2[0], p2[1]) \
-                    < v.size / 2 + width / 2 + cl - 1e-6:
+                    < v.size / 2 + width / 2 + _pair(cl, net_id, v.net_id) - 1e-6:
                 return True
         return False
 
@@ -2048,7 +2198,7 @@ def generate_qfn_fanout(footprint: Footprint,
                 continue
             if segment_to_segment_distance(p1[0], p1[1], p2[0], p2[1],
                                            a[0], a[1], b[0], b[1]) \
-                    < width / 2 + track_width / 2 + cl - 1e-6:
+                    < width / 2 + track_width / 2 + _pair(cl, net_id, rn) - 1e-6:
                 return True
         return False
 
@@ -2069,13 +2219,13 @@ def generate_qfn_fanout(footprint: Footprint,
     _tip_spacing = track_width + extension - 1e-6
 
     def _hits_own_stubs(p1, p2, net_id, cl):
-        lim = track_width + cl - 1e-6
         for s in stubs:
             if s.net_id == net_id:
                 continue
             a, b = s.pad_pos, s.corner_pos
             if segment_to_segment_distance(
-                    p1[0], p1[1], p2[0], p2[1], a[0], a[1], b[0], b[1]) < lim:
+                    p1[0], p1[1], p2[0], p2[1], a[0], a[1], b[0], b[1]) \
+                    < track_width + _pair(cl, net_id, s.net_id) - 1e-6:
                 return True
             if math.hypot(p2[0] - b[0], p2[1] - b[1]) < _tip_spacing:
                 return True
@@ -2084,7 +2234,8 @@ def generate_qfn_fanout(footprint: Footprint,
                 continue
             if segment_to_segment_distance(
                     p1[0], p1[1], p2[0], p2[1], s.corner_pos[0], s.corner_pos[1],
-                    s.stub_end[0], s.stub_end[1]) < lim:
+                    s.stub_end[0], s.stub_end[1]) \
+                    < track_width + _pair(cl, net_id, s.net_id) - 1e-6:
                 return True
             if math.hypot(p2[0] - s.stub_end[0], p2[1] - s.stub_end[1]) < _tip_spacing:
                 return True
@@ -2117,7 +2268,11 @@ def generate_qfn_fanout(footprint: Footprint,
         # escalation rung below it: the first clearance it clears at is the
         # stub's, and its fan is shortened at that same clearance.
         stub_cl = None
-        for cl in [clearance] + _esc_ladder:
+        # #1529: never below the stub's own class (route.py's rule_floors):
+        # KiCad grades its net there whatever the Default class is lowered to.
+        _own_cls = _nc.get(nid) if _nc else None
+        for cl in [clearance] + [r for r in _esc_ladder
+                                 if _own_cls is None or r >= _own_cls - 1e-9]:
             if not _seg_grazes(stub.pad_pos, stub.corner_pos, nid, cl):
                 stub_cl = cl
                 break
@@ -2215,7 +2370,8 @@ def generate_qfn_fanout(footprint: Footprint,
     # #1318: a power net's stub at its power width, leg by leg, where it fits.
     _leg_w = _widen_power_stub_legs(
         stubs, _power_w, track_width, clearance, _seg_grazes,
-        _hits_neighbour_reserve) if _power_w else {}
+        _hits_neighbour_reserve,
+        pair_clearance=lambda a, b: _pair(clearance, a, b)) if _power_w else {}
 
     # Generate tracks - two segments per stub
     tracks = []
@@ -2554,6 +2710,9 @@ def main():
         same_net_pad_clearance=args.same_net_pad_clearance,  # #581
         power_nets=args.power_nets or None,                  # #1318
         power_nets_widths=args.power_nets_widths or None,
+        # #1529: the board's classes (read from pcb_data.source_path), capped
+        # at the ceiling when one was given, as route.py's map is.
+        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
     )
 
     if tracks or vias:
@@ -2585,8 +2744,8 @@ def main():
     # Mirrors bga_fanout (#130/#122). Best-effort: a DRC hiccup must never fail the
     # fanout. drc_grazes is graded at the clearance the output project is written
     # with: the run clearance, or the lowest rung an escalated stub took (#1328),
-    # and counts only the rows THIS step's copper takes part in
-    # (check_drc.fanout_drc_grazes).
+    # and that project's net classes (#1529), and counts only the rows THIS
+    # step's copper takes part in (check_drc.fanout_drc_grazes).
     import json as _json
     import clearance_ledger as _ledger
     eff_clearance = _ledger.effective(args.clearance)
@@ -2611,14 +2770,7 @@ def main():
     # concluded one way or the other. The partial-ledger arithmetic lives in the
     # engine for the GUI, which does have a cancel.
     requested = escaped + len(unescaped)
-    drc_grazes = {}
     out_path = getattr(args, 'output', None)
-    if out_path:
-        try:
-            from check_drc import fanout_drc_grazes
-            drc_grazes = fanout_drc_grazes(out_path, eff_clearance, input_copper)
-        except Exception as _e:
-            drc_grazes = {'error': str(_e)}
 
     # Establish this fanout's clearance floor in the output .kicad_pro so the next
     # pipeline step and check_drc grade at the clearance the fanout used -- only
@@ -2631,12 +2783,14 @@ def main():
     # fanout tab applies to the live board. #1195: None when this run drew no
     # copper; the via floors only when it drew a via (stub mode never does, and
     # its --via-size/--via-drill defaults lowered the declared via and hole
-    # floors on every run). #439: fanout escapes route to --clearance, so the
-    # classes are always clamped to it.
+    # floors on every run). #1529: the escape is spaced at the net classes,
+    # so they are kept -- or capped at --clearance-ceiling when one was
+    # given -- as route.py's writeback does.
     _fix_kw = fanout_fix_kwargs('qfn', tracks, vias, clearance=eff_clearance,
                                 track_width=args.width,
                                 via_size=getattr(args, 'via_size', None),
-                                via_drill=getattr(args, 'via_drill', None))
+                                via_drill=getattr(args, 'via_drill', None),
+                                clearance_ceiling=getattr(args, 'clearance_ceiling', None))
     if out_path and os.path.isfile(out_path) and _fix_kw is None:
         # #1195: a run that changed no copper writes no floors -- the board
         # went through unchanged, so its project does too (with every other
@@ -2670,6 +2824,16 @@ def main():
                     pro_path_for_board(out_path), args.same_net_pad_clearance)
         except Exception as _e:
             print(f"  (skipped same-net pad clearance record: {_e})")
+    # After the writeback, so the grade reads the project as written: its
+    # Default floor and (#1529) its net classes, as check_drc does.
+    drc_grazes = {}
+    if out_path:
+        try:
+            from check_drc import fanout_drc_grazes
+            drc_grazes = fanout_drc_grazes(out_path, eff_clearance, input_copper,
+                                           net_classes=True)
+        except Exception as _e:
+            drc_grazes = {'error': str(_e)}
     summary = {
         'component': args.component,
         'requested': requested,
@@ -2685,9 +2849,10 @@ def main():
         'via_size': args.via_size,
         'via_drill': args.via_drill,
         'layer': layer,
-        # grazes graded at --clearance, scoped to the copper this step laid
-        # ('scope'): 'total' is every such row, the segment_segment/via_*/pad_*
-        # keys are the fanout-relevant classes.
+        # grazes graded at the written floor and the written project's net
+        # classes (#1529), scoped to the copper this step laid ('scope'):
+        # 'total' is every such row, the segment_segment/via_*/pad_* keys are
+        # the fanout-relevant classes.
         'drc_grazes': drc_grazes,
         # Smallest copper clearance any step actually routed at; downstream steps
         # and check_drc grade the board at this floor.
