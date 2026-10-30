@@ -7849,7 +7849,8 @@ def rule_mountable(ctx) -> Iterator[Violation]:
                 expected={'mountable': True})
 
 
-def template_keepout_findings(intent, parts, anchor_pose=None) -> List[Dict]:
+def template_keepout_findings(intent, parts, anchor_pose=None,
+                               height=None) -> List[Dict]:
     """The intent's keep-outs against its datasheet templates (#1387): a
     keep-out that binds a template MEMBER but not the template's anchor makes
     the template pose forbidden wherever the anchor stands under it, and the
@@ -7861,7 +7862,9 @@ def template_keepout_findings(intent, parts, anchor_pose=None) -> List[Dict]:
     `parts` maps each ref to an object with `sides`, `ensure_rotation` and
     `grade_rects` (a `quench.QuenchState`'s parts). `anchor_pose(ref)` gives
     the anchor's `(x, y, rot)` where it is known (a placement, a locked or
-    declared pose), else None. Returns `[{'index', 'anchor', 'ref', 'keepout',
+    declared pose), else None. `height(ref)` gives a part's known height
+    (else None): a height-limited keep-out admits a part no taller than its
+    limit (#1443), and binds it here only as `keepouts_for_ref` binds it. Returns `[{'index', 'anchor', 'ref', 'keepout',
     'forced', 'at'}]`: `forced` where the member's template pose for that
     anchor pose lies inside the keep-out (`at` is the pose); else the keep-out
     admits the anchor but not the member, so some anchor poses are refused
@@ -7874,13 +7877,15 @@ def template_keepout_findings(intent, parts, anchor_pose=None) -> List[Dict]:
         if A is None or not intent.keepouts:
             continue
         free = {k['name'] for k in intent.keepouts} - {
-            k['name'] for k in keepouts_for_ref(intent.keepouts, a, A.sides)}
+            k['name'] for k in keepouts_for_ref(
+                intent.keepouts, a, A.sides, height(a) if height else None)}
         apose = anchor_pose(a) if anchor_pose is not None else None
         for m in decl['members']:
             P = parts.get(m['ref'])
             if P is None:
                 continue
-            for k in keepouts_for_ref(intent.keepouts, m['ref'], P.sides):
+            for k in keepouts_for_ref(intent.keepouts, m['ref'], P.sides,
+                                      height(m['ref']) if height else None):
                 if apose is not None:
                     pose = member_target(apose, m)
                     P.ensure_rotation(pose[2])
@@ -10188,7 +10193,9 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             p = state.parts[ref]
             return (p.x, p.y, p.rot)
         return None
-    for f in template_keepout_findings(intent, state.parts, _anchor_pose):
+    _th = (_ctx_heights(ctx).height if any(
+        k.get('max_height_mm') is not None for k in intent.keepouts) else None)
+    for f in template_keepout_findings(intent, state.parts, _anchor_pose, _th):
         out.append(Violation(
             rule='plan_template_keepout',
             severity=intent.severity_of('plan_template_keepout', WARN),

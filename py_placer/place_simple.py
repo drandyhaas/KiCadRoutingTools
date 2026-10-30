@@ -1487,7 +1487,8 @@ def main(argv=None):
     # a keep-out that binds a template member but not its chip forbids the
     # template pose where the chip stands (#1387)
     tk = [f for f in floorplan.template_keepout_findings(
-        intent, state.parts, lambda r: (state.parts[r].x, state.parts[r].y, state.parts[r].rot))
+        intent, state.parts, lambda r: (state.parts[r].x, state.parts[r].y, state.parts[r].rot),
+        state.heights.height)
         if f['forced']]
     for f in tk:
         print(f"  WARNING: {floorplan.template_keepout_text(f)}")
