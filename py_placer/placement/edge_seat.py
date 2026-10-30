@@ -36,7 +36,8 @@ The seat is read with the grade's own measurements (`rule_edge_connector`):
   locked switch rather than pushing through it.
 
 Its legality is a declared pose's (`seeder._fixed_pose_check`): its courtyard
-may cross the outline when every pad and hole stays on the board, and
+may cross the outline when every pad and hole, and the copper the footprint
+draws (#962: a tab, an antenna), stay on the board, and
 courtyards may abut -- two seated parts keep SEAT_GAP_MM, and `pack` pushes
 the parts on one edge apart along it after the anneal.
 

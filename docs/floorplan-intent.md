@@ -419,7 +419,12 @@ A `mechanical` entry sitting AT its declared pose, on its declared face, whose
 courtyard the census counts off the outline while every pad and its footprint
 graphic copper are on the board at zero margin, leaves
 `legality_budget`'s `oob_count` and `oob_amount` the way a declared edge
-connector inside its overhang band does. `oob_count_exempt` counts
+connector inside its overhang band does -- which, too, stays counted while
+its footprint graphic copper is past the outline (#962, #1531): an overhang
+licenses the courtyard, never copper, in the grade and in every seat
+(`seeder.graphic_copper_past`, the census's own measure at the pose: a
+declared pose whose courtyard leaves the outline, the edge seat and the
+search). `oob_count_exempt` counts
 both kinds; a `legality` finding's `measured` carries the reduced amount
 beside `oob_amount_raw`. Off its pose, on the other face, or with pad or
 graphic copper past the outline, it stays counted. A `declared` entry is never

@@ -73,8 +73,7 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # #962: and the copper the footprint draws (a tab, an antenna), for the
     # parts whose drawn copper reaches past the courtyard by more than the
     # margin -- the same cached compare, then the grade's own measure.
-    if (_graphic_copper_overhang(state, ref) > state.edge_gate.margin
-            and _graphic_copper_off_board(state, ref, x, y, rot) > 1e-6):
+    if graphic_copper_past(state, ref, x, y, rot) > 1e-6:
         return False
     # BOTH rects, because `rule_keepout` grades both: a through-hole part's
     # leads pass through a keep-out even when its body sits on the far side,
@@ -270,6 +269,32 @@ def _graphic_copper_off_board(state, ref: str, x: float, y: float,
         if sg is not None:
             worst = max(worst, ov)
     return worst
+
+
+def graphic_copper_past(state, ref: str, x: float, y: float,
+                        rot: float) -> float:
+    """How far `ref`'s graphic copper reaches past the outline at `(x, y,
+    rot)` (`_graphic_copper_off_board`, the census's own measure), for every
+    seat path that asks: `pose_ok`, a declared pose (`_fixed_pose_check`,
+    the edge seat's legality) and the search (`QuenchState.
+    _graphic_copper_past`).
+
+    `_graphic_copper_overhang`'s cached bound skips the measurement only
+    where it proves something: copper reaching no further than the margin
+    past a courtyard that lies inside the margin-gated outline is on the
+    board. A courtyard PAST the outline -- an edge part's overhang, which a
+    declared pose may have, or a part coming home from off the board --
+    proves nothing, so its copper is measured. Read without that guard, an
+    edge seat put a part's F.Cu tab 1.955 mm off the board whenever its
+    estimated courtyard enclosed the tab (#962, #1531). A part that draws
+    no copper answers 0.0 off one cached lookup, as before."""
+    if not _graphic_copper_shapes(state, ref):
+        return 0.0
+    if _graphic_copper_overhang(state, ref) <= state.edge_gate.margin:
+        r = state.parts[ref].grade_rect(x, y, rot)
+        if state.edge_gate.rect_outside_amount(r) <= 1e-9:
+            return 0.0
+    return _graphic_copper_off_board(state, ref, x, y, rot)
 
 
 def _materialise_rotation(part, rot: float) -> float:
@@ -626,8 +651,9 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
     * `'contained'`: inside the outline, and nothing above fails.
     * `'overhang'`: the courtyard leaves the outline -- a connector or a
       mounting part may overhang by design, which is stage 1's exemption --
-      accepted only when every pad's copper is on the board at zero margin
-      and every drill hole (NPTH included) too, and a part with neither is
+      accepted only when every pad's copper is on the board at zero margin,
+      every drill hole (NPTH included) too, and the copper the footprint
+      draws (#962, `graphic_copper_past`), and a part with no pad or hole is
       judged by its courtyard at zero margin (the pad test is vacuous for a
       part with no copper).
 
@@ -785,6 +811,11 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
         if holes_out:
             reasons.append(f"{holes_out} of {n_holes} drill hole(s) past "
                            f"the outline")
+        # #962: and the copper the footprint DRAWS (a tab, an antenna): the
+        # overhang licenses the courtyard, never copper
+        goff = graphic_copper_past(state, ref, x, y, rot)
+        if goff > 1e-6:
+            reasons.append(f"graphic copper {goff:.3f}mm past the outline")
         return (None if reasons else 'overhang'), reasons, conflicts
     # #1257: a CONTAINED courtyard proves nothing about a pad that reaches
     # past it, so such a part's copper is asked too, by check_assembly's gate
@@ -795,10 +826,9 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
         off = _pad_copper_off_board(state, ref, x, y, rot)
         if off > 1e-6:
             reasons.append(f"pad copper {off:.3f}mm past the outline")
-    if _graphic_copper_overhang(state, ref) > state.edge_gate.margin:
-        off = _graphic_copper_off_board(state, ref, x, y, rot)
-        if off > 1e-6:
-            reasons.append(f"graphic copper {off:.3f}mm past the outline")
+    off = graphic_copper_past(state, ref, x, y, rot)
+    if off > 1e-6:
+        reasons.append(f"graphic copper {off:.3f}mm past the outline")
     return (None if reasons else 'contained'), reasons, conflicts
 
 

@@ -4186,6 +4186,12 @@ class _Ctx:
                 copper_ok = (not _body.get('body_measured')
                              or (_copper_outside_mm(self, ref) <= legality.EPS
                                  and not _unmodellable_pads(self, ref)))
+                # #962: nor does the band license the copper a footprint
+                # DRAWS (a tab, an antenna) past the outline, read off the
+                # census the edge seat's own measure agrees with
+                # (`seeder.graphic_copper_past`), as a datum's is below
+                if amt > legality.EPS and ref in self._graphic_copper_off_board():
+                    copper_ok = False
                 if (amt > legality.EPS and copper_ok
                         and lo - legality.EPS <= band <= hi + legality.EPS):
                     out[ref] = float(band)

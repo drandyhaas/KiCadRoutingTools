@@ -2879,12 +2879,11 @@ class QuenchState:
         far it reaches past the outline at the pose by the grade's measure,
         for a part whose drawn copper reaches past its courtyard by more than
         `edge_gate.margin`; 0.0 for every other part, after one cached
-        compare. Through the seeder's own two functions
-        (`_graphic_copper_overhang`, `_graphic_copper_off_board`)."""
-        sd = _seeder()
-        if sd._graphic_copper_overhang(self, ref) <= self.edge_gate.margin:
-            return 0.0
-        return sd._graphic_copper_off_board(self, ref, x, y, rot)
+        compare -- taken only where the courtyard at the pose is inside the
+        margin-gated outline, so a part coming home from off the board is
+        measured. Through the seeder's own `graphic_copper_past`, which every
+        seat path reads."""
+        return _seeder().graphic_copper_past(self, ref, x, y, rot)
 
     def _edges_near(self, ref) -> list:
         """Cached: the Edge.Cuts edges this part can touch -- every edge for
