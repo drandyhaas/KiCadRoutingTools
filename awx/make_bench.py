@@ -156,7 +156,7 @@ def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_m
         layers=list(layers) if layers else route_layers.stacked(pcb.board_info.copper_layers),
         track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE,
         via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method=escape_method,
-        plane_drop='off', **extra)
+        plane_drop='off', net_clearances={}, **extra)   # class-blind, as the plan (#1529)
     if tracks:
         add_tracks_and_vias_to_pcb(
             board, out, tracks, vias_add, vias_rm,

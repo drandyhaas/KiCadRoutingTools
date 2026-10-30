@@ -167,7 +167,7 @@ def resolve_class_clearances(pcb_data, net_clearances=None, ceiling=None):
     mode = (f"capped at --clearance-ceiling {float(ceiling):g}"
             if ceiling is not None else "honoured in full (no --clearance-ceiling)")
     return nc, [f"Netclass clearances for {len(nc)} net(s), {mode} (mm: {vals}); "
-                f"stubs spaced at KiCad's pairwise max(A, B)."]
+                f"escape copper spaced at KiCad's pairwise max(A, B)."]
 
 
 def qfn_clearance_ladder(clearance, copper_layer_count):

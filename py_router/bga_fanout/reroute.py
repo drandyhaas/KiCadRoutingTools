@@ -12,6 +12,7 @@ from kicad_parser import PCBData, Footprint
 from bga_fanout.types import (
     create_track,
     route_uid,
+    top_layer_barred,
     Channel,
     BGAGrid,
     FanoutRoute,
@@ -220,11 +221,13 @@ def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16, margin: float = 0.0) -> bool:
 
 def segments_clear_of_foreign_pads(segments: List[Dict], layer: str, net_id: int,
                                    foreign_pads, layer_map: Dict[str, int],
-                                   margin: float = 0.0) -> bool:
+                                   margin: float = 0.0, margin_fn=None) -> bool:
     """True if no segment (on `layer`) crosses a foreign pad on another net.
 
     margin (clearance + track half-width) turns the raw crossing test into a
     clearance test; default 0.0 preserves the true-short semantics.
+    `margin_fn(pad)`, when given, is that margin per pad (#1529: the pair's
+    net-class clearance).
     """
     if not foreign_pads:
         return True
@@ -237,7 +240,8 @@ def segments_clear_of_foreign_pads(segments: List[Dict], layer: str, net_id: int
             th = pad.drill > 0
             if not th and layer not in (pad.layers or []):
                 continue
-            if _seg_hits_pad(x1, y1, x2, y2, pad, margin=margin):
+            if _seg_hits_pad(x1, y1, x2, y2, pad,
+                             margin=margin_fn(pad) if margin_fn else margin):
                 return False
     return True
 
@@ -291,7 +295,7 @@ def route_segments(route: 'FanoutRoute') -> List[Dict]:
 
 def _route_jog_clears_pads(route: 'FanoutRoute', obstacles, cfg,
                            layer_map: Dict[str, int], foreign_pads,
-                           margin: float = 0.0) -> bool:
+                           margin: float = 0.0, margin_fn=None) -> bool:
     """True if dropping the exit jog tail makes the route pad-clear.
 
     The 45 jog past the BGA exit is decorative (it does not affect
@@ -307,7 +311,8 @@ def _route_jog_clears_pads(route: 'FanoutRoute', obstacles, cfg,
     try:
         segs = route_segments(route)
         clear = segments_clear_of_foreign_pads(segs, route.layer, route.net_id,
-                                               foreign_pads, layer_map, margin=margin)
+                                               foreign_pads, layer_map, margin=margin,
+                                               margin_fn=margin_fn)
     finally:
         if not clear:
             route.jog_end, route.jog_extension = saved_end, saved_ext
@@ -318,7 +323,8 @@ def clear_escapes_of_foreign_pads(routes: List['FanoutRoute'], tracks: List[Dict
                                   grid: 'BGAGrid', track_width: float, clearance: float,
                                   foreign_pads, layer_map: Dict[str, int],
                                   net_names: Dict[int, str] = None,
-                                  dropped_routes: Optional[List] = None):
+                                  dropped_routes: Optional[List] = None,
+                                  pair_clearance=None):
     """Make axial escapes clear breakout-region foreign pads without rerouting.
 
     The pad-aware repair triggers only on true crossings (deliberately, to keep
@@ -338,6 +344,9 @@ def clear_escapes_of_foreign_pads(routes: List['FanoutRoute'], tracks: List[Dict
     dropping one leg is left to the caller's diff-pair handling. The dropped
     ROUTES are appended to `dropped_routes` when given: a name is not a route
     on a multi-ball net.
+
+    `pair_clearance(net_a, net_b, layer)`, when given (#1529), is the
+    clearance a route keeps from each pad: its pair's net classes.
     """
     if not foreign_pads:
         return 0, []
@@ -348,11 +357,17 @@ def clear_escapes_of_foreign_pads(routes: List['FanoutRoute'], tracks: List[Dict
     dropped: List[str] = []
 
     for route in routes:
-        if route_clear_of_foreign_pads(route, foreign_pads, layer_map, margin=margin):
+        mfn = None
+        if pair_clearance is not None:
+            def mfn(pad, _r=route):
+                return track_width / 2 + pair_clearance(_r.net_id, pad.net_id, _r.layer)
+        if route_clear_of_foreign_pads(route, foreign_pads, layer_map, margin=margin,
+                                       margin_fn=mfn):
             continue  # already clear at full clearance
 
         # Step 1: jog trim.
-        if _route_jog_clears_pads(route, None, None, layer_map, foreign_pads, margin=margin):
+        if _route_jog_clears_pads(route, None, None, layer_map, foreign_pads, margin=margin,
+                                  margin_fn=mfn):
             _rebuild_track_for_route(tracks, route, track_width)
             n_fixed += 1
             continue
@@ -387,7 +402,8 @@ def clear_escapes_of_foreign_pads(routes: List['FanoutRoute'], tracks: List[Dict
                 route.exit_pos = new_pt
                 if route.is_edge:
                     route.stub_end = new_pt
-                if route_clear_of_foreign_pads(route, foreign_pads, layer_map, margin=margin):
+                if route_clear_of_foreign_pads(route, foreign_pads, layer_map, margin=margin,
+                                               margin_fn=mfn):
                     _rebuild_track_for_route(tracks, route, track_width)
                     n_fixed += 1
                     fixed = True
@@ -409,7 +425,7 @@ def clear_escapes_of_foreign_pads(routes: List['FanoutRoute'], tracks: List[Dict
 
 def route_clear_of_foreign_pads(route: 'FanoutRoute',
                                 foreign_pads, layer_map: Dict[str, int],
-                                margin: float = 0.0) -> bool:
+                                margin: float = 0.0, margin_fn=None) -> bool:
     """Geometric guard: True if no route segment crosses a foreign pad.
 
     `foreign_pads` is a precomputed list of pads belonging to OTHER components
@@ -432,7 +448,8 @@ def route_clear_of_foreign_pads(route: 'FanoutRoute',
             th = pad.drill > 0
             if not th and layer not in (pad.layers or []):
                 continue
-            if _seg_hits_pad(x1, y1, x2, y2, pad, margin=margin):
+            if _seg_hits_pad(x1, y1, x2, y2, pad,
+                             margin=margin_fn(pad) if margin_fn else margin):
                 return False
     return True
 
@@ -483,7 +500,7 @@ def try_reroute_single_ended(route: 'FanoutRoute',
     ]
 
     # If no_inner_top_layer is set, exclude F.Cu for inner routes
-    if no_inner_top_layer:
+    if top_layer_barred(no_inner_top_layer, route.net_id):
         candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
     else:
         candidate_layers = available_layers
@@ -678,7 +695,7 @@ def try_jogged_route(route: 'FanoutRoute',
     ]
 
     # If no_inner_top_layer is set, exclude F.Cu for inner routes
-    if no_inner_top_layer:
+    if top_layer_barred(no_inner_top_layer, route.net_id):
         candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
     else:
         candidate_layers = available_layers
@@ -1320,9 +1337,13 @@ def repair_pad_crossings(routes: List[FanoutRoute], tracks: List[Dict],
     repaired = 0
     failed_nets: List[str] = []
 
-    candidate_layers = available_layers
-    if no_inner_top_layer and len(available_layers) > 1:
-        candidate_layers = available_layers[1:]
+    def _candidates(*net_ids):
+        """The layers a route of these nets may move to: off the top layer
+        when --no-inner-top-layer (or its #1529 per-class set) bars it."""
+        if len(available_layers) > 1 and any(
+                top_layer_barred(no_inner_top_layer, n) for n in net_ids):
+            return available_layers[1:]
+        return available_layers
 
     # Group bad routes; handle each diff pair once (both legs together).
     # TRIGGER on a true short (raw pad-overlap) only, matching the DRC/checker
@@ -1378,7 +1399,7 @@ def repair_pad_crossings(routes: List[FanoutRoute], tracks: List[Dict],
 
             moved = False
             for strict in (True, False):
-                for layer in candidate_layers:
+                for layer in _candidates(*(leg.net_id for leg in legs)):
                     if layer == orig_layer:
                         continue
                     if _pair_layer_ok(layer, strict):
@@ -1418,7 +1439,7 @@ def repair_pad_crossings(routes: List[FanoutRoute], tracks: List[Dict],
         #    one that just removes the true pad short + is collision-free.
         orig_layer = route.layer
         for strict in (True, False):
-            for layer in candidate_layers:
+            for layer in _candidates(net_id):
                 if layer == orig_layer:
                     continue
                 segs = route_segments(route)

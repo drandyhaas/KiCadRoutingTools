@@ -75,17 +75,20 @@ def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
 
 
 def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
-                         pads) -> bool:
+                         pads, net_clearances=None) -> bool:
     """True if a through via at (x, y) clears every pad in `pads` (rect model,
     rect_rotation-aware) by `clearance` edge-to-edge. Vias span all copper
     layers, so the pads' own layers are irrelevant. The previous axis-aligned
     bbox under-covered a ROTATED pad's protruding corners, passing via sites
-    whose ring grazed the real copper."""
+    whose ring grazed the real copper. `net_clearances` ({net_id: class
+    clearance}, #1529) holds a pad of a wider class at that class."""
     from routing_utils import point_to_pad_rect_dist
     for p in pads:
         # A pad's clearance override above `clearance` is the pair clearance
-        # KiCad grades the via against (#1317); raise-only.
-        c = max(clearance, getattr(p, 'local_clearance', 0.0) or 0.0)
+        # KiCad grades the via against (#1317); raise-only. So is its net's
+        # class (#1529).
+        c = max(clearance, getattr(p, 'local_clearance', 0.0) or 0.0,
+                net_clearances.get(p.net_id, 0.0) if net_clearances else 0.0)
         # Custom-shape pads: measure to the REAL polygon copper, not the
         # symmetric bbox rect, which for an off-centre outline (meander antenna,
         # comb pad) reports a false graze metres from any copper (#232 class).

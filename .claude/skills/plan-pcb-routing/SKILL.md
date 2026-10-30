@@ -422,6 +422,13 @@ Worked example (a 256-ball 0.8 mm-pitch BGA, clearance 0.1, fab floor track 0.1 
 `bga_fanout.py` also warns `WARNING: escape via ... busts the half-pitch budget`
 when handed infeasible params, but choose feasible ones here so it never fires.
 
+**Clearance (#1529).** In a chain pass `bga_fanout.py` the floor as
+`--clearance-ceiling <floor>` (with `--clearance <floor>`), as on the route
+steps. A bare `--clearance` sets only the Default class: the other net classes
+are honoured pairwise and KEPT in the output project, so a ball whose net sits
+in a wider class is escaped at that class (and dropped where it cannot fit),
+and a retry at a smaller bare `--clearance` does not move it.
+
 **Always check the fanout escaped all requested balls.** `bga_fanout.py` ends with
 `JSON_SUMMARY: {"component", "requested", "escaped", "failed", "unescaped_nets", ...}`.
 A dropped ball is **removed from the output** and later fails signal routing as "no
@@ -680,7 +687,9 @@ Use the printed flags as-is:
   end too close to a neighbour's (its `endpoint pairs too close` WARNING) -- as
   `flagged_escaped_nets`, not as failures. **After every fanout, parse it;
   if `failed > 0` (escaped < requested), re-run the fanout with `--clearance` at
-  the manufacturing floor** (never below it — the floor is the rule the human
+  the manufacturing floor**, and `--clearance-ceiling` at it too: both fanouts
+  keep and honour the other net classes otherwise, so a bare `--clearance` does
+  not lower the class a dropped ball sits in (#1529) (never below it — the floor is the rule the human
   board passes DRC against, so tightening board-wide is manufacturable and needs
   no rule-area settings). If still short, also try the smaller **fine-pitch escape
   via** (below) and/or a narrower `--track-width` toward the floor. Do not proceed
@@ -688,7 +697,8 @@ Use the printed flags as-is:
   output and will fail later as "no rippable blockers".
 - **Also check `drc_grazes` (even when `failed == 0`).** The summary's
   `drc_grazes` (graded at the floor the fanout writes back: its `--clearance`, or
-  for `qfn_fanout` the lowest rung a pad escalated to, #1328) reports sub-clearance grazes the
+  for `qfn_fanout` the lowest rung a pad escalated to, #1328, and the net
+  classes the output project is written with, #1529) reports sub-clearance grazes the
   escape left in the output: `via_segment` / `pad_via` are the #130 classes (an
   escape via too close to a foreign track or pad), `segment_segment` is the #179
   class (two escape **stubs** grazing — typically the 45° fans of two adjacent pads
@@ -1684,7 +1694,8 @@ like this one the default already is both; then re-run with
 common case (an 0.8 mm-pitch BGA can't fit a track between balls at 0.2 mm). If still
 short, add the fine-pitch escape via and/or a smaller `--track-width`. Only proceed
 to Step 2 once `failed == 0` (or the remaining `unescaped_nets` are understood and
-accepted).
+accepted). In a chain spell that floor `--clearance-ceiling` (#1529): a bare
+`--clearance` does not lower a net class the dropped balls sit in.
 
 ### Step 1c: Optimize Decoupling-Cap Placement (run ONCE after ALL fanouts — issue #130)
 Nudges decoupling caps near the BGA off the foreign-net fanout vias (the

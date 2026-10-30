@@ -116,7 +116,7 @@ def _get_net_classes_from_board():
 def live_net_clearances(pcb_data):
     """{net_id: class clearance} for every net of ``pcb_data`` in a NON-Default
     class of the LIVE board -- the twin of list_nets.net_clearance_map_by_id,
-    which reads the file. The QFN fanout prices its escape at these (#1529):
+    which reads the file. Both fanouts price their escape at these (#1529):
     mid-plan the file's project is the original, and the live board carries
     whatever an earlier step wrote back."""
     from .swig_gui import _get_netclass_parameters
@@ -1964,6 +1964,10 @@ class FanoutTab(wx.Panel):
             # Shared Basic-tab per-layer costs (issue #288), same values the
             # route/diff tabs use; None when the control is empty/invalid.
             layer_costs=shared.get('layer_costs') or None,
+            # #1529: the live board's net classes, capped at the Clearance
+            # ceiling (bga_fanout.py reads the file's, under --clearance-ceiling).
+            net_clearances=live_net_clearances(self.pcb_data),
+            clearance_ceiling=shared.get('clearance_ceiling'),
             # Per-ball progress into the status line. Safe from the worker:
             # ui_thread_status marshals off-thread callers with CallAfter.
             # Only the counted x/N lines reach the status feed -- the
@@ -2011,6 +2015,10 @@ class FanoutTab(wx.Panel):
                                                shared.get('clamp_netclasses', False)),
                 'clearance_ceiling': shared.get('placement_clearance_ceiling',
                                                 shared.get('clearance_ceiling')),
+                # #1529: the ROUTING Clearance ceiling the classes are written
+                # back at (kept without one), as bga_fanout.py's
+                # --clearance-ceiling -- not the placement ceiling above.
+                'class_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -2121,6 +2129,7 @@ class FanoutTab(wx.Panel):
                 # #1529: the classes are written back as the escape priced
                 # them -- kept, or capped at this ceiling when it is set.
                 'clearance_ceiling': shared.get('clearance_ceiling'),
+                'class_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -2289,8 +2298,8 @@ class FanoutTab(wx.Panel):
         # decision both fronts read (fix_kicad_drc_settings.fanout_fix_kwargs):
         # #1195 -- a QFN run with no copper writes none, one with no via leaves
         # the via and hole floors alone -- and the routed clearance (which also
-        # sets the copper-to-hole floor), the classes (a BGA run clamps them to
-        # it; a QFN run keeps them, or caps them at the ceiling, #1529), no
+        # sets the copper-to-hole floor), the classes (kept, or capped at the
+        # routing Clearance ceiling, #1529), no
         # hole-to-hole and no edge setting beyond the fab pin. This tab used to
         # write its own set: hole-to-hole and edge from the config, never the
         # copper-to-hole floor, classes only under the ceiling.
@@ -2302,8 +2311,8 @@ class FanoutTab(wx.Panel):
             clearance=_cl.effective(_fclr) if _fclr is not None else None,
             track_width=_fcfg.get('track_width'),
             via_size=_fcfg.get('via_size'), via_drill=_fcfg.get('via_drill'),
-            # #1529: read for a QFN run only (its classes kept or capped)
-            clearance_ceiling=_fcfg.get('clearance_ceiling'))
+            # #1529: the classes kept, or capped at the routing ceiling
+            clearance_ceiling=_fcfg.get('class_ceiling'))
         # #693: gated on the shared "Fix DRC settings after routing" checkbox.
         # This tab is the one whose shared params did not even CARRY the flag,
         # so the gate and the flag were added together -- see the

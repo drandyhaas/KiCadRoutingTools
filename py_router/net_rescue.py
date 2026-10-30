@@ -1389,7 +1389,11 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                     # #1070: THIS run's drill floor, not
                                     # the board's min_hole_to_hole.
                                     hole_to_hole_clearance=(
-                                        config.hole_to_hole_clearance))
+                                        config.hole_to_hole_clearance),
+                                    # #1529: the route step's own class
+                                    # map (ceiling-capped), not the file's.
+                                    net_clearances=dict(
+                                        config.net_clearances or {}))
                             finally:
                                 pcb_data._fanout_all_foreign_immovable = \
                                     False
@@ -1430,7 +1434,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                         config, 'layer_costs', None),
                                     plane_drop='off',
                                     hole_to_hole_clearance=(
-                                        config.hole_to_hole_clearance))
+                                        config.hole_to_hole_clearance),
+                                    net_clearances=dict(
+                                        config.net_clearances or {}))
                             except Exception:
                                 _ft, _fv = [], []
                             if _ft or _fv:
