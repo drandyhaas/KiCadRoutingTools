@@ -14,7 +14,8 @@ board it ships (the written file on the CLI, the write model on the GUI):
 the widest copy of a same-net, same-layer, same-span group stays.
 
   1. remove_segments_from_content(match_width=True) takes the copy of the
-     named width, not the first block of the span;
+     named width, not the first block of the span, and removes nothing when
+     no block has that width (the default strip falls back to the first);
   2. CLI: a 0.127 copy under a 0.3 track and a byte-identical twin both go;
      the 0.3 track and one twin stay, and the count says so;
   3. --keep-input-copper: an input copy stays; a locked group is left alone;
@@ -82,7 +83,14 @@ def match_width(tmp):
     left = re.findall(r'\(segment \(start 5 15\) \(end 15 15\) \(width ([\d.]+)\)', out)
     check('the 0.127 block goes, the 0.3 block stays', n == 1 and left == ['0.3'],
           f'removed {n}, left {left}')
-    out, n = remove_segments_from_content(txt, thin)
+    # The default strip prefers the named width too (#1556); what match_width
+    # adds is the REFUSAL when no block of the span has it.
+    from dataclasses import replace
+    odd = [replace(s, width=0.2) for s in thin]
+    out, n = remove_segments_from_content(txt, odd, match_width=True)
+    check('a width on no block: match_width removes nothing', n == 0,
+          f'removed {n}')
+    out, n = remove_segments_from_content(txt, odd)
     left = re.findall(r'\(segment \(start 5 15\) \(end 15 15\) \(width ([\d.]+)\)', out)
     check('control: without it the first block of the span goes (the 0.3)',
           n == 1 and left == ['0.127'], f'left {left}')
