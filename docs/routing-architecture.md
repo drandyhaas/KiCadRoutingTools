@@ -171,7 +171,8 @@ happens on both fronts.
     nothing else to route (#1112). `KICAD_PLANE_FINALIZE=0` is the kill
     switch.
 11. **Final reconciliation.** Up to three laps that re-run `batch_route` on
-    the nets still incomplete, against the finished board.
+    the nets still incomplete, against the finished board. A net a lap rips
+    and leaves open is a target of the next lap (#1554).
 12. **Late passes on the board it ships:** the audit of every ball a fanout
     promised to serve by fill contact (#678), soft-joint bridges, the strict
     redundant-copper collapse (#1063), the dead-end sweep of the nets step

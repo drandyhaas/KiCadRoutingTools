@@ -2415,6 +2415,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # never leave a previous invocation's hints for the caller to harvest.
     batch_route._forced_link_hints = {}
     batch_route._forced_link_landed = []
+    # #1554 lap-victim channel, cleared at ENTRY for the same reason.
+    batch_route._victims_left_open = []
     # Per-run reset of the failure-hint rationale latch: each run reprints the
     # full explanations once, rather than inheriting "already said that" from a
     # previous board in the same (GUI) process.
@@ -8162,12 +8164,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             from routing_common import dominant_net_widths as _dnw5
             _orig_w5 = _dnw5(_s for _lst in _orig_seg_by_net.values()
                              for _s in _lst)
-            _pn5 = list(_rk.get('power_nets') or [])
-            _pw5 = list(_rk.get('power_nets_widths') or [])
-            if len(_pn5) == len(_pw5):
+
+            def _preserve_widths5(_ids):
+                _pn5 = list(_rk.get('power_nets') or [])
+                _pw5 = list(_rk.get('power_nets_widths') or [])
+                if len(_pn5) != len(_pw5):
+                    return
                 from net_queries import matches_net_filter as _mnf5
                 _tw5 = _rk.get('track_width') or config.track_width
-                for _nid5 in _rec_ids:
+                for _nid5 in sorted(_ids):
                     _w5 = _orig_w5.get(_nid5, 0.0)
                     _nm5 = (pcb_data.nets[_nid5].name
                             if _nid5 in pcb_data.nets else None)
@@ -8183,6 +8188,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 if _pn5:
                     _rk['power_nets'] = _pn5
                     _rk['power_nets_widths'] = _pw5
+            _preserve_widths5(_rec_ids)
+
+            def _enrol_lap_victims1554():
+                """#1554: a lap rips pre-existing nets with full authority,
+                and a victim it leaves open has no later pass to retry it --
+                the lap IS the reconciliation its outcome line promises. Enrol
+                the lap's open victims as targets of the next lap, which
+                routes them with the same authority on the updated board.
+                Returns True when a victim was enrolled (worth one more
+                lap); the lap cap still bounds the loop."""
+                _new = [n for n in (getattr(batch_route, '_victims_left_open',
+                                            None) or [])
+                        if n not in _rec_names]
+                if not _new:
+                    return False
+                _rec_names.extend(_new)
+                print(f"  Reconciliation lap left {len(_new)} rip victim(s) "
+                      f"open ({', '.join(_new)}) -- enrolling them for one "
+                      f"more lap (#1554)")
+                _preserve_widths5({nid for nid, net in pcb_data.nets.items()
+                                   if net.name in set(_new)})
+                return True
             if return_results:
                 # Bounded PROGRESS-LOOP -- GUI leg (2026-08-06): SAME laps
                 # as the CLI branch below, entirely in-memory (no temp
@@ -8299,7 +8326,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _cap_moves_in_run666('reconciliation lap')
                     # #572: same lap-authority rule as the CLI leg below.
                     _granted572 = bool(_lrfail) and _harvest_lap_authority572()
-                    if not (_lrfail and (_lrok or _granted572)):
+                    # #1554: same lap-victim rule as the CLI leg below.
+                    _victims1554 = _lap10 < 2 and _enrol_lap_victims1554()
+                    if not ((_lrfail and (_lrok or _granted572))
+                            or _victims1554):
                         break
                     print(f"  Reconciliation progress-loop: lap "
                           f"{_lap10 + 1} recovered {_lrok} with "
@@ -8328,7 +8358,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # even without recoveries -- lap N failed against a
                     # named pre-existing wall this authority now opens.
                     _granted572 = bool(_lrfail) and _harvest_lap_authority572()
-                    if not (_lrfail and (_lrok or _granted572)):
+                    # #1554: a victim the lap ripped and left open is
+                    # retried by the next lap, before the board ships.
+                    _victims1554 = _lap10 < 2 and _enrol_lap_victims1554()
+                    if not ((_lrfail and (_lrok or _granted572))
+                            or _victims1554):
                         break
                     print(f"  Reconciliation progress-loop: lap "
                           f"{_lap10 + 1} recovered {_lrok} with {_lrfail} "
@@ -9135,6 +9169,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     except Exception:
         batch_route._forced_link_hints = {}
         batch_route._forced_link_landed = []
+    # #1554 lap-victim channel: the pre-existing nets this run ripped and left
+    # open. Its outcome line says "reconciliation retries it", and for a main
+    # pass the reconciliation does -- but a reconciliation LAP is the last
+    # pass, so its own victims are handed back for the caller's next lap.
+    batch_route._victims_left_open = list(_victim_retry_names)
 
     # #666 scoped cap move, GUI front: hand the applier every move this run
     # applied -- the main pass's and every in-memory sub-run's, which share

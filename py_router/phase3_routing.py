@@ -1698,8 +1698,13 @@ def _reroute_phase3_ripped_nets(
                 ripped_route_via_positions=state.ripped_route_via_positions
             )
 
-        # Check if this was originally a multi-point net (from saved_result)
-        was_multipoint = saved_result and saved_result.get('mst_edges') and len(saved_result.get('mst_edges', [])) > 1
+        # Multi-point by the board, as the reroute queue decides it: 3+
+        # terminals left after the rip. The saved result cannot say -- a
+        # PRE-EXISTING victim's registration (copper from an earlier step)
+        # carries no mst_edges, so a 3-pad victim used to re-route as a
+        # 2-terminal net with no taps and ship a pad open (#1554).
+        multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
+        was_multipoint = bool(multipoint_pads)
 
         # Ripped bus members reroute with their corridor here too
         from bus_detection import bus_attraction_context
@@ -1708,13 +1713,8 @@ def _reroute_phase3_ripped_nets(
             getattr(state, 'bus_corridors', None))
         if was_multipoint:
             # Use multipoint routing for multi-point nets
-            multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
-            if multipoint_pads:
-                result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
-                                               attraction_path=_attr, state=state)
-            else:
-                result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
-                                                  attraction_path=_attr, reverse_direction=_rev)
+            result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
+                                           attraction_path=_attr, state=state)
         else:
             # Route the main path for simple nets
             result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
