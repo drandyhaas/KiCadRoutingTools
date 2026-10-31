@@ -3266,9 +3266,12 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # from the edge, sub-fab). Demand the normal edge clearance, RELAXED to
     # the pad's own copper-to-outline distance when the pad itself overhangs
     # the band -- the via then never adds edge exposure beyond what the
-    # placed (edge-exempt) pad already establishes.
-    _edge_eff = (config.board_edge_clearance if config.board_edge_clearance > 0
-                 else config.clearance)
+    # placed (edge-exempt) pad already establishes. The relaxation is the
+    # IN-PAD arm's only (#1547): an off-pad escape via and its stub are new
+    # copper away from the pad, and keep the full edge clearance.
+    _edge_full = (config.board_edge_clearance if config.board_edge_clearance > 0
+                  else config.clearance)
+    _edge_eff = _edge_full
     try:
         from check_drc import (board_edge_geometry, _point_to_rings_distance,
                                _pad_perimeter_points)
@@ -3336,7 +3339,8 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
             tap_res = tap_pad_with_escalation(
                 pad_obj, pad_layer, net_id, pcb_data,
                 replace(config, via_size=vd, via_drill=dr,
-                        board_edge_clearance=_edge_eff),
+                        board_edge_clearance=(_edge_eff if _radius == 0
+                                              else _edge_full)),
                 max_search_radius=_radius, via_size=vd, via_drill=dr,
                 extra_vias=inflight_vias, extra_segments=inflight_segments,
                 try_default=False, fine_for_all=True,
