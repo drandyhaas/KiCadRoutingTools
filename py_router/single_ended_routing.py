@@ -1036,6 +1036,35 @@ def _terminal_board_edge_dist(pcb_data, net_id, s, term_pts):
     return _segment_to_rings_distance(s.start_x, s.start_y, s.end_x, s.end_y, rings)
 
 
+def _joined_track_width(pcb_data, net_id, s, term_pts, segments):
+    """Width of the net's own existing track that terminal segment `s` welds
+    to, for the terminal neck's floor (#1546); ``inf`` when `s` welds to no
+    such track (a pad, a via, a fresh route).
+
+    Per terminal point `s` ends on: the widest own-net track on `s.layer`
+    ending there (the copper already at that point). Over several such points
+    the narrowest, since the neck sets one width for the whole segment.
+    `segments` (the route being laid) are not existing copper.
+    """
+    fresh = {id(x) for x in segments}
+    best = float('inf')
+    for tx, ty in term_pts:
+        if not ((abs(s.start_x - tx) < 1e-6 and abs(s.start_y - ty) < 1e-6) or
+                (abs(s.end_x - tx) < 1e-6 and abs(s.end_y - ty) < 1e-6)):
+            continue
+        here = 0.0
+        for o in getattr(pcb_data, 'segments', ()):
+            if (o.net_id != net_id or o.layer != s.layer or id(o) in fresh
+                    or getattr(o, 'graphic', False)):
+                continue
+            if ((abs(o.start_x - tx) < 1e-6 and abs(o.start_y - ty) < 1e-6) or
+                    (abs(o.end_x - tx) < 1e-6 and abs(o.end_y - ty) < 1e-6)):
+                here = max(here, o.width)
+        if here > 0.0:
+            best = min(best, here)
+    return best
+
+
 def _hard_terminal_why(entry):
     """What a `_neck_terminal_grazes` hard entry is, for the refusal message.
 
@@ -1140,16 +1169,22 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
         if short_by > NECK_GRAZE_TOL:
             # 1e-4: stay just inside the rule
             allowed_half = min(d - own_l, edge_room) - 1e-4
+            # #1546: a terminal welded to the net's own track (a fanout or
+            # diff-pair stub end) may neck to that track's width: copper that
+            # wide already ends there, so a terminal no wider adds nothing at
+            # the junction, where the graze sits.
+            s_floor = min(floor, _joined_track_width(pcb_data, net_id, s,
+                                                     term_pts, segments))
             # Hard test BEFORE necking, on the RAW track/via distance: a
             # centreline within floor/2 of a foreign copper EDGE overlaps it
             # at any emittable width -- a physical short, not a graze.
             d_raw = min(_seg_foreign_seg_dist(pcb_data, net_id, s.start_x,
                                               s.start_y, s.end_x, s.end_y, s.layer),
                         _sense_d)
-            if d_raw < floor / 2.0 - 1e-6:
+            if d_raw < s_floor / 2.0 - 1e-6:
                 hard.append((s, d_raw, None))
                 continue
-            new_w = max(floor, 2.0 * allowed_half)
+            new_w = max(s_floor, 2.0 * allowed_half)
             if new_w < s.width - 1e-9:
                 # --escalation off: a graze that only a narrower terminal can
                 # clear is a refusal, not narrower copper. It joins the hard
@@ -2344,6 +2379,12 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
             sources = sources + _pl_src
             targets = targets + _pl_tgt
 
+    # #1546: a stub tip's blocked grid snap launches from a free corner.
+    sources = _clear_launch_rows(sources, obstacles, coord, pcb_data, net_id,
+                                 bounds)
+    targets = _clear_launch_rows(targets, obstacles, coord, pcb_data, net_id,
+                                 bounds)
+
     # Endpoint stub-proximity exemption (soft-knobs C5): a target that sits
     # beside ANOTHER net's stub paid full stub cost on the final approach
     # cells; exempt a one-track disk around each endpoint, mirroring the
@@ -3225,9 +3266,12 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # from the edge, sub-fab). Demand the normal edge clearance, RELAXED to
     # the pad's own copper-to-outline distance when the pad itself overhangs
     # the band -- the via then never adds edge exposure beyond what the
-    # placed (edge-exempt) pad already establishes.
-    _edge_eff = (config.board_edge_clearance if config.board_edge_clearance > 0
-                 else config.clearance)
+    # placed (edge-exempt) pad already establishes. The relaxation is the
+    # IN-PAD arm's only (#1547): an off-pad escape via and its stub are new
+    # copper away from the pad, and keep the full edge clearance.
+    _edge_full = (config.board_edge_clearance if config.board_edge_clearance > 0
+                  else config.clearance)
+    _edge_eff = _edge_full
     try:
         from check_drc import (board_edge_geometry, _point_to_rings_distance,
                                _pad_perimeter_points)
@@ -3295,7 +3339,8 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
             tap_res = tap_pad_with_escalation(
                 pad_obj, pad_layer, net_id, pcb_data,
                 replace(config, via_size=vd, via_drill=dr,
-                        board_edge_clearance=_edge_eff),
+                        board_edge_clearance=(_edge_eff if _radius == 0
+                                              else _edge_full)),
                 max_search_radius=_radius, via_size=vd, via_drill=dr,
                 extra_vias=inflight_vias, extra_segments=inflight_segments,
                 try_default=False, fine_for_all=True,
@@ -4822,6 +4867,9 @@ def _route_multipoint_main_impl(
     pad_components, _isl_copper, _segs_by_comp, _vias_by_comp = \
         get_terminal_component_info(pcb_data, net_id, pad_info)
     _island_cells = {}
+    # Launch cells are read against the map's own blocking (#1546); every
+    # attempt below marks its overrides afresh.
+    obstacles.clear_source_target_cells()
     for _cid, _segs in _segs_by_comp.items():
         # #545 F9: the island's vias come from the connectivity graph's
         # own membership (vias_by_component), not a rounded-endpoint-key
@@ -4832,8 +4880,9 @@ def _route_multipoint_main_impl(
         # islands' cells existed only on one layer, so the route paid a
         # fresh via to reach copper the island already spans.
         _vs = _vias_by_comp.get(_cid, [])
-        _pts = get_all_segment_tap_points(_segs, coord, layer_names,
-                                          vias=_vs)
+        _pts = _clear_launch_rows(
+            get_all_segment_tap_points(_segs, coord, layer_names, vias=_vs),
+            obstacles, coord, pcb_data, net_id)
         # Keyed by cell, valued by the OWNER float point of that cell --
         # the conversion below welds the route to the owner of the cell
         # the router actually launched from (Phase 3's tap_point_map
@@ -5416,6 +5465,68 @@ def _terminal_row(rows, cell, layer_names, coord):
     return first
 
 
+def _clear_launch_rows(rows, obstacles, coord, pcb_data, net_id, bounds=None):
+    """Move each launch row whose cell another net's clearance blocks onto
+    the nearest FREE grid point of the square around its owner point (#1546).
+
+    A row ``(gx, gy, layer_idx, x, y)`` launches a route from the grid point
+    of cell (gx, gy), welded to the owner point (x, y) by a connector. Its
+    cell is the NEAREST grid point, which for an off-grid owner -- a stub's
+    tip, a sample of an any-angle segment -- can lie toward foreign copper:
+    the cell is then blocked, the A* enters it only through the endpoint
+    override, and the connector and the first leg land closer to that copper
+    than the owner sat (a diff-pair stub continued 0.07 mm from its
+    partner). The other corners of the owner's grid square are as close a
+    weld; the nearest one the map leaves free is taken. A row with no free
+    corner, one already on its grid point, and one whose owner lies on the
+    net's own pad (whose terminal the neck and the pad-entry checks own) are
+    kept. A corner another row already launches from drops the row: that
+    launch is kept with its own owner. Order is kept. With `bounds` (a
+    route's grid window) a corner outside it is not a candidate.
+
+    Query the map with no endpoint overrides on it: an overridden cell reads
+    free, and its row is then kept as it was.
+    """
+    if not rows:
+        return rows
+    own_pads = None
+    taken = {(r[0], r[1], r[2]) for r in rows}
+    step = coord.grid_step
+    out = []
+    for r in rows:
+        gx, gy, li, ox, oy = r[0], r[1], r[2], r[3], r[4]
+        if (on_grid_point(ox, oy, gx, gy, coord)
+                or not obstacles.is_blocked(gx, gy, li)):
+            out.append(r)
+            continue
+        if own_pads is None:
+            from check_drc import point_to_pad_distance
+            own_pads = [p for p in (getattr(pcb_data, 'pads_by_net', None)
+                                    or {}).get(net_id, ())
+                        if getattr(p, 'pad_type', '') != 'np_thru_hole']
+        if any(point_to_pad_distance(ox, oy, p) <= 1e-6 for p in own_pads):
+            out.append(r)
+            continue
+        x0, y0 = math.floor(ox / step), math.floor(oy / step)
+        corners = sorted(((cx, cy) for cx in (x0, x0 + 1) for cy in (y0, y0 + 1)
+                          if (cx, cy) != (gx, gy)),
+                         key=lambda c: (math.hypot(c[0] * step - ox,
+                                                   c[1] * step - oy), c))
+        for cx, cy in corners:
+            if bounds is not None and not (bounds[0] <= cx <= bounds[2]
+                                           and bounds[1] <= cy <= bounds[3]):
+                continue
+            if obstacles.is_blocked(cx, cy, li):
+                continue
+            if (cx, cy, li) not in taken:
+                taken.add((cx, cy, li))
+                out.append((cx, cy, li, ox, oy) + tuple(r[5:]))
+            break
+        else:
+            out.append(r)
+    return out
+
+
 def get_all_segment_tap_points(
     segments: List[Segment],
     coord: GridCoord,
@@ -5788,9 +5899,14 @@ def _route_multipoint_taps_impl(
     _p3_comps, _p3_copper, _p3_segs_by_comp, _p3_vias_by_comp = \
         get_terminal_component_info(pcb_data, net_id, pad_info)
     _p3_island_cells: Dict[int, Dict] = {}
+    # Launch cells against the map's own blocking (#1546); each edge below
+    # marks its overrides afresh.
+    obstacles.clear_source_target_cells()
     for _cid, _segs in _p3_segs_by_comp.items():
-        _pts = get_all_segment_tap_points(_segs, coord, layer_names,
-                                          vias=_p3_vias_by_comp.get(_cid, []))
+        _pts = _clear_launch_rows(
+            get_all_segment_tap_points(_segs, coord, layer_names,
+                                       vias=_p3_vias_by_comp.get(_cid, [])),
+            obstacles, coord, pcb_data, net_id)
         # Keyed by cell, valued by the OWNER float point (Phase 3's
         # tap_point_map / end-weld contract: weld to the owner of the cell
         # the router actually used, never to a distant anchor).
@@ -5939,8 +6055,11 @@ def _route_multipoint_taps_impl(
         # Get ALL points along existing segments and vias as potential tap sources
         # The router will find the shortest path from ANY of these points
         # Vias are included on ALL layers since they connect all copper layers
-        all_tap_points = get_all_segment_tap_points(
-            all_segments, coord, layer_names, vias=all_vias)
+        obstacles.clear_source_target_cells()
+        all_tap_points = _clear_launch_rows(
+            get_all_segment_tap_points(all_segments, coord, layer_names,
+                                       vias=all_vias),
+            obstacles, coord, pcb_data, net_id)
 
         # Always include the designated source pad position as a potential source
         # This is critical for zone-connected pads that have no segments to them yet

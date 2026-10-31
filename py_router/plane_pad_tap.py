@@ -290,6 +290,17 @@ def _polygon_overlaps_window(points, min_x, min_y, max_x, max_y) -> bool:
 _TAP_INDEX_CELL = 8.0  # mm bucket size
 
 
+def _filled_ring_bbox(seg):
+    """The bounding box of the FILLED shape `seg` traces (`graphic_ring`,
+    #1181), or None for any other segment."""
+    ring = getattr(seg, 'graphic_ring', None)
+    if not ring or len(ring) < 3:
+        return None
+    xs = [p[0] for p in ring]
+    ys = [p[1] for p in ring]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 def _cells_for_bbox(min_x, min_y, max_x, max_y):
     cell = _TAP_INDEX_CELL
     cx0, cy0 = int(math.floor(min_x / cell)), int(math.floor(min_y / cell))
@@ -305,8 +316,15 @@ def _build_tap_spatial_index(pcb_data: PCBData):
     pad_b: Dict[Tuple[int, int], list] = {}
     for s in pcb_data.segments:
         r = s.width / 2
-        for k in _cells_for_bbox(min(s.start_x, s.end_x) - r, min(s.start_y, s.end_y) - r,
-                                 max(s.start_x, s.end_x) + r, max(s.start_y, s.end_y) + r):
+        bb = (min(s.start_x, s.end_x) - r, min(s.start_y, s.end_y) - r,
+              max(s.start_x, s.end_x) + r, max(s.start_y, s.end_y) + r)
+        ring_bb = _filled_ring_bbox(s)
+        if ring_bb is not None:
+            # #1545: a filled shape's edge is found by every window its
+            # interior reaches (see make_local_window).
+            bb = (min(bb[0], ring_bb[0]), min(bb[1], ring_bb[1]),
+                  max(bb[2], ring_bb[2]), max(bb[3], ring_bb[3]))
+        for k in _cells_for_bbox(*bb):
             seg_b.setdefault(k, []).append(s)
     for v in pcb_data.vias:
         r = v.size
@@ -402,8 +420,24 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
     local = copy.copy(pcb_data)
     local.vias = [v for v in _query_bucket(via_b, wmin_x, wmin_y, wmax_x, wmax_y)
                   if in_window(v.x, v.y, v.size)]
+    # A FILLED shape the window reaches comes whole (#1545): its interior is
+    # copper (#1181), and the obstacle builders find a shape by its perimeter
+    # segments, which can all lie outside a window inside the shape.
+    _ring_hit: Dict[tuple, bool] = {}
+
+    def _keep(s):
+        if _segment_overlaps_window(s, wmin_x, wmin_y, wmax_x, wmax_y):
+            return True
+        ring = getattr(s, 'graphic_ring', None)
+        if not ring or len(ring) < 3:
+            return False
+        hit = _ring_hit.get(ring)
+        if hit is None:
+            hit = _ring_hit[ring] = _polygon_overlaps_window(
+                ring, wmin_x, wmin_y, wmax_x, wmax_y)
+        return hit
     local.segments = [s for s in _query_bucket(seg_b, wmin_x, wmin_y, wmax_x, wmax_y)
-                      if _segment_overlaps_window(s, wmin_x, wmin_y, wmax_x, wmax_y)]
+                      if _keep(s)]
     pads_by_net: Dict[int, List[Pad]] = {}
     for nid, p in _query_bucket(pad_b, wmin_x, wmin_y, wmax_x, wmax_y):
         if in_window(p.global_x, p.global_y, max(p.size_x, p.size_y)):

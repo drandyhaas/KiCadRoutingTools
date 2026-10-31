@@ -405,6 +405,40 @@ def identify_target_pads(
     return target_pads
 
 
+def _foreign_filled_graphic_interiors(pcb_data: PCBData, coord: GridCoord,
+                                      exclude_net_id: int):
+    """``[(layer, gx, gy)]``: the interior cells of every FILLED copper
+    graphic foreign to ``exclude_net_id`` (#1545), as the routing map stamps
+    them (#1181, `obstacle_map.build_base_obstacle_map`).
+
+    The perimeter is stamped with the other segments; the interior was free
+    to these maps, so a tap or last-resort via landed wholly inside a filled
+    graphic of another net. A shape is the net's own copper when it carries
+    that net, or when its owner's own pads lift it for that net
+    (`check_drc.filled_graphic_lift_nets`).
+    """
+    from check_drc import (filled_graphic_shapes, filled_graphic_lift_nets,
+                           graphic_own_pad_nets)
+    from obstacle_map import filled_graphic_interior_cells
+    shapes = filled_graphic_shapes(pcb_data)
+    if not shapes:
+        return []
+    fps = getattr(pcb_data, 'footprints', None) or {}
+    own = (graphic_own_pad_nets(pcb_data)
+           if any(sh.owner_ref for sh in shapes) else {})
+    clip = getattr(pcb_data.board_info, 'board_bounds', None)
+    out = []
+    for sh in shapes:
+        if sh.net_id and sh.net_id == exclude_net_id:
+            continue
+        if own and exclude_net_id in filled_graphic_lift_nets(sh, own, fps):
+            continue
+        gx, gy = filled_graphic_interior_cells(pcb_data, coord, sh, clip)
+        if len(gx):
+            out.append((sh.layer, gx, gy))
+    return out
+
+
 def build_via_obstacle_map(
     pcb_data: PCBData,
     config: GridRouteConfig,
@@ -527,6 +561,14 @@ def build_via_obstacle_map(
                  else _seg_via_arrs[0])
         obstacles.add_blocked_via_spans_batch(
             np.ascontiguousarray(_vall.astype(np.int32)))
+    # #1545: a filled graphic's interior; a via spans the stack, so a shape
+    # on any copper layer blocks it.
+    from obstacle_map import filled_graphic_interior_spans
+    for _layer, _gx, _gy in _foreign_filled_graphic_interiors(
+            pcb_data, coord, exclude_net_id):
+        if _layer.endswith('.Cu'):
+            obstacles.add_blocked_via_spans_batch(
+                filled_graphic_interior_spans(_gx, _gy))
     if verbose:
         print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
 
@@ -1320,6 +1362,13 @@ def build_routing_obstacle_map(
         _rows[:, :3] = _call
         _rows[:, 3] = layer_idx
         obstacles.add_blocked_cell_spans_batch(np.ascontiguousarray(_rows))
+    # #1545: a filled graphic's interior on this layer.
+    from obstacle_map import filled_graphic_interior_spans
+    for _layer, _gx, _gy in _foreign_filled_graphic_interiors(
+            pcb_data, coord, exclude_net_id):
+        if _layer == route_layer:
+            obstacles.add_blocked_cell_spans_batch(
+                filled_graphic_interior_spans(_gx, _gy, layer_idx))
     if verbose:
         print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
 
