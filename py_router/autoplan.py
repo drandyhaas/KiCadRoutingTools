@@ -741,17 +741,12 @@ def fan_ladder(ch, fan, rungs=None, hold=(), tag=''):
     return best
 
 
-COPPER_PAIRS = ('pad-pad', 'pad-segment', 'pad-via', 'segment-segment',
-                'segment-crossing', 'via-segment', 'via-via')
-
-
 def _shorts(d):
     """check_drc report D's shorts: the items it does not accept that put
-    copper of two nets in contact (a hole, edge or size item is not copper
-    meeting copper, whatever its overlap)."""
+    copper of two nets in contact (check_drc sets `short` on copper pairs
+    only, never on a hole, edge or size item, #1558)."""
     return [it for it in d.get('items') or []
-            if it.get('short') and not it.get('accepted')
-            and it.get('type') in COPPER_PAIRS]
+            if it.get('short') and not it.get('accepted')]
 
 
 def held_parts(board, d, fans):

@@ -116,6 +116,8 @@ Options:
   --json FILE               Also write the result as JSON: the graded floors with their
                             source (graded_at), the violation and accepted counts,
                             by_type, contacts_by_type, via_in_paste, keepout and every item.
+                            An item's `short` is true only for copper of two nets in
+                            contact, never for a drill, hole or edge item.
                             Complete regardless of --max-print
   --render DIR              Write one cropped PNG per spatial cluster of violations
                             (drawn by route_render)
@@ -2116,7 +2118,10 @@ Options:
                       they were locked. By default it may lay copper on an
                       unlocked 2-pad C/R/FB part, which place_fanout_clearance
                       then moves; name a part that step could not clear and the
-                      fanout drops a ball it cannot escape instead (#1521)
+                      fanout drops a ball it cannot escape instead (#1521).
+                      JSON_SUMMARY.drc_grazes counts the grazes left on parts
+                      that step moves as deferred_to_decap (the parts in
+                      deferred_parts), included in its total (#1560)
   --add-teardrops     Add teardrop settings to all pads and vias in the output
   --fab-tier {standard,advanced,auto}  JLC fab capability floor (default: auto)
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier

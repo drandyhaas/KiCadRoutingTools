@@ -707,7 +707,11 @@ Use the printed flags as-is:
   of a tight-pitch diff pair, e.g. 0.4 mm-pitch QFN, clipping at the wrist),
   `total` is all of them. Every class counts only violations that copper THIS
   fanout laid takes part in (`scope`): an earlier step's grazes are not this
-  step's to fix, and a re-run of this fanout cannot clear them. A *successful*
+  step's to fix, and a re-run of this fanout cannot clear them. For
+  `bga_fanout`, `deferred_to_decap` counts the rows of `total` on a part
+  `place_fanout_clearance.py` (Step 1c) moves (`deferred_parts`): the fanout
+  lays copper on such parts on purpose and that step clears them, so leave
+  those to it and judge a re-run by the rest. A *successful*
   fanout (every ball/pad escaped) can still leave many of these — they're not
   caught by `failed`. **If any
   `drc_grazes` class > 0 and there is headroom above the fab floor, re-run the

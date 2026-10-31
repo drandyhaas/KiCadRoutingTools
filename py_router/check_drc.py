@@ -2812,6 +2812,19 @@ def footprint_graphic_outline_census(pcb_data) -> dict:
 VIA_IN_PASTE_ACCEPTED = ('protected-via-in-paste', 'inherited-via-in-paste',
                          'undeclarable-via-in-paste')
 
+#: #1558: the item types that set copper of two DIFFERENT nets against each
+#: other, the only ones a JSON item's `short` can be true on. A drill-spacing
+#: item measures drill to drill (the two barrels' copper is its own via-via or
+#: pad-via item), a hole item copper to a drill wall, an edge item copper to
+#: the outline, and a *-same-net item has one net.
+SHORT_TYPES = frozenset(('pad-pad', 'pad-segment', 'pad-via', 'via-via',
+                         'via-segment', 'segment-segment',
+                         'segment-segment-track-rule', 'segment-crossing'))
+
+#: #1558: drill-to-drill items, graded at the hole-to-hole floor.
+DRILL_SPACING_TYPES = frozenset(('via-drill-hole', 'pad-drill-via-drill',
+                                 'pad-drill-via-drill-same-net'))
+
 
 #: #1388: a rule that binds no net grades nothing, and "N rule(s)" read as
 #: graded and clean.
@@ -4269,12 +4282,20 @@ def _row_on_copper(row, segs, seg_geoms, vias):
     return False
 
 
-def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False):
+def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False,
+                      deferred_refs=None):
     """A fanout step's `drc_grazes` (JSON_SUMMARY): the clearance rows of its
     WRITTEN board that copper THIS step laid takes part in, graded at
     `clearance`. `input_copper` is `copper_keys` of the board the step was
     given, so whatever the output has beyond it -- escapes, vias, plane drops,
     any post-pass's rewrite -- is the step's own.
+
+    `deferred_refs` (#1560): the parts the clearance step that follows moves
+    off fanout copper. Of `total`, the rows on a pad of one of them are
+    `deferred_to_decap` (and those parts `deferred_parts`): bga_fanout lays
+    copper on such a part on purpose and leaves it to that step, so they are
+    told apart from a graze nothing later clears. Counted in `total` as
+    before.
 
     `net_classes` also grades each pair at the written project's net classes
     (KiCad's max(clearance, class A, class B)), read as check_drc's own main
@@ -4315,7 +4336,7 @@ def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False):
     by = {}
     for r in rows:
         by[r['type']] = by.get(r['type'], 0) + 1
-    return {
+    out = {
         'scope': 'copper this step laid',
         'pad_via': by.get('pad-via', 0),
         'via_segment': by.get('via-segment', 0),
@@ -4323,6 +4344,12 @@ def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False):
         'segment_segment': by.get('segment-segment', 0),
         'total': len(rows),
     }
+    if deferred_refs is not None:
+        parts = [str(r.get('pad_ref') or '').rsplit('.', 1)[0] for r in rows]
+        parts = [p for p in parts if p in deferred_refs]
+        out['deferred_to_decap'] = len(parts)
+        out['deferred_parts'] = sorted(set(parts))
+    return out
 
 
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
@@ -7047,14 +7074,27 @@ if __name__ == "__main__":
         _real = [v for v in violations if not v.get('accepted')]
 
         def _clearance_for(v):
-            """The clearance THIS violation was graded against.
+            """The spacing THIS violation was graded against.
 
             Per-net clearances mean the graded floor is not one number, so a
-            violation carrying its own `required_mm` wins; otherwise the run's
-            clearance applies. Same relation the pad-pad `[SHORT]` tag uses.
+            violation carrying its own `required_mm` wins. A drill or hole
+            item without one was graded at its own floor (#1558: reading a
+            drill pair 0.34 mm apart against the copper clearance called it
+            touching); anything else at the run's clearance. Same relation
+            the pad-pad `[SHORT]` tag uses.
             """
             r = v.get('required_mm')
-            return r if isinstance(r, (int, float)) else args.clearance
+            if isinstance(r, (int, float)):
+                return r
+            t = v.get('type')
+            if t in DRILL_SPACING_TYPES:
+                return args.hole_to_hole_clearance
+            if t == 'track-hole':
+                return max(args.clearance or 0.0,
+                           defaults.NPTH_TO_TRACK_CLEARANCE, args.hole_clearance)
+            if t == 'via-hole':
+                return max(args.clearance or 0.0, args.hole_clearance)
+            return args.clearance
 
         _doc = {
             'schema': 1,
@@ -7146,8 +7186,11 @@ if __name__ == "__main__":
                 violations=sum(1 for v in _real if v.get('type') == 'keepout'),
                 inherited=sum(1 for v in violations
                               if v.get('accepted') == 'inherited-keepout')),
+            # `short`: copper of two nets in contact (SHORT_TYPES), never a
+            # drill, hole or edge item whatever its overlap (#1558).
             'items': [dict(item,
-                           short=(isinstance(item.get('overlap_mm'), (int, float))
+                           short=(item.get('type') in SHORT_TYPES
+                                  and isinstance(item.get('overlap_mm'), (int, float))
                                   and item['overlap_mm'] >= _clearance_for(item)))
                       for item in violations],
         }

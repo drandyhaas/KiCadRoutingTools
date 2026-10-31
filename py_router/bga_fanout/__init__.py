@@ -5656,10 +5656,20 @@ def main():
     # Best-effort: a DRC hiccup must never fail the fanout.
     drc_grazes = {}
     if out_path:
+        # #1560: the escapes and vias are laid on the unlocked 2-pad C/R/FB
+        # parts place_fanout_clearance moves off them (movable_passive), so
+        # the grazes on the parts that step moves are disclosed apart from
+        # the rest (geometry.decap_deferred_refs).
+        deferred = None
+        try:
+            from bga_fanout.geometry import decap_deferred_refs
+            deferred = decap_deferred_refs(pcb_data, out_path, args.immovable_refs)
+        except Exception as _e:
+            print(f"  (skipped deferred-to-decap split of drc_grazes: {_e})")
         try:
             from check_drc import fanout_drc_grazes
             drc_grazes = fanout_drc_grazes(out_path, args.clearance, input_copper,
-                                           net_classes=True)
+                                           net_classes=True, deferred_refs=deferred)
         except Exception as _e:
             drc_grazes = {'error': str(_e)}
     summary = {
