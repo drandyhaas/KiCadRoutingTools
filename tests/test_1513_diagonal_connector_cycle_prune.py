@@ -17,8 +17,11 @@ Pinned here:
      an axis-aligned 0.019 mm one are still one;
   2. the prune keeps the diagonal connector and drops the stacked duplicate
      instead, so the surviving copper meets at shared vertices end to end;
-  3. control: inside the warning band (0.0184 mm) the connector is still
-     pruned, as #320 defines it.
+  3. control: below the soft-joint floor (SOFT_JOINT_MIN_GAP, 0.0085 mm)
+     the connector is still pruned as coincident, as #320 defines it. Inside
+     the warning band (0.0184 mm) it is kept: the soft-joint restore counts
+     the stacked duplicate once (#1550), so it sees the gap the removal
+     would leave, as it does on a chain laid once.
 
     python3 tests/test_1513_diagonal_connector_cycle_prune.py
 """
@@ -100,11 +103,17 @@ def main():
     check(ends.get(B) == 2 and ends.get(C) == 2,
           'the kept chain meets at shared vertices at both connector ends')
 
-    print('3. control: inside the warning band the connector is still pruned')
-    d = 0.013
+    print('3. control: below the soft-joint floor the connector is still '
+          'pruned')
+    d = 0.006
     removed, _kept, (B, C) = prune(board, d)
     check((B, C) in removed,
           f'a {math.hypot(d, d):.4f} mm connector is pruned as coincident')
+    d = 0.013
+    removed, _kept, (B, C) = prune(board, d)
+    check((B, C) not in removed,
+          f'a {math.hypot(d, d):.4f} mm connector (warning band) is kept: '
+          f'its removal would leave a soft joint')
 
     if FAILS:
         print(f'\nFAILED ({len(FAILS)})')

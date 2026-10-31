@@ -109,7 +109,7 @@ from check_connected import (matches_any_pattern, check_net_connectivity,
 from check_drc import point_to_pad_distance
 from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad, strict_joint_roots,
                           endpoint_reaches_via, lands_on_interior,
-                          via_copper_layers)
+                          span_endpoint_degree, via_copper_layers)
 from routing_constants import SOFT_JOINT_MIN_GAP
 from pcb_modification import (_point_anchored, _prune_net_cycles, _pt_seg_dist,
                               _restore_soft_joint_bridges,
@@ -197,16 +197,16 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
     def rk(x, y):
         return (round(x, 3), round(y, 3))
 
-    ep_count = defaultdict(int)
-    for s in net_segs:
-        ep_count[(s.layer, rk(s.start_x, s.start_y))] += 1
-        ep_count[(s.layer, rk(s.end_x, s.end_y))] += 1
+    ep_count = span_endpoint_degree(net_segs)  # stacked copies once (#1550)
 
     dangles = defaultdict(list)  # layer -> [(x, y, width)]
+    seen_end = set()   # a stacked copy's end is the same free end (#1550)
     for s in net_segs:
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
-            if ep_count[(s.layer, rk(x, y))] != 1:
+            ek = (s.layer, rk(x, y))
+            if ep_count.get(ek) != 1 or ek in seen_end:
                 continue  # shared vertex = clean joint
+            seen_end.add(ek)
             if at_anchor(x, y, s.layer, s.width):
             # A soft joint is a PAIR. Dropping a copper-layer GRAPHIC as a
             # candidate drops the TRACK end paired with it, and nothing

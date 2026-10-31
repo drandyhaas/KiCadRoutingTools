@@ -214,6 +214,35 @@ def lands_on_interior(t: float, seg_len_sq: float,
     return t * length > band and (1.0 - t) * length > band
 
 
+def span_endpoint_degree(segs, group=lambda s: s.layer) -> Dict:
+    """How many DISTINCT spans meet at each segment end: {(group(s), (x, y)
+    rounded to 1 um): count}, the endpoint degree the soft-joint detectors
+    read to tell a free end (degree 1) from a shared vertex.
+
+    A span is a segment's (group, unordered rounded ends), counted once
+    however many same-net copies are stacked on it (#1550). Two pad taps
+    laid along one corridor stack every segment of it twice, and counted
+    per COPY the end of a cut stacked run reads degree 2 -- a shared vertex
+    -- so a removal that left two such ends touching by their caps alone
+    created a soft joint no detector saw. The copies conduct as one track,
+    and the end-of-run dedup (#162) ships one, so the degree is the span's.
+    """
+    from collections import defaultdict
+    deg = defaultdict(int)
+    seen = set()
+    for s in segs:
+        a = (round(s.start_x, 3), round(s.start_y, 3))
+        b = (round(s.end_x, 3), round(s.end_y, 3))
+        g = group(s)
+        span = (g, a, b) if a <= b else (g, b, a)
+        if span in seen:
+            continue
+        seen.add(span)
+        deg[(g, a)] += 1
+        deg[(g, b)] += 1
+    return deg
+
+
 def endpoint_reaches_pad(x, y, radius, layers, pad, unflashed_hole_only=False) -> set:
     """Which of `layers` a disc of copper -- centre (x, y), radius `radius` --
     both SHARES with `pad`'s copper and physically OVERLAPS. Empty set = no
@@ -1160,6 +1189,38 @@ def drop_off_board_pads(pcb_data: PCBData, pads: List[Pad]) -> List[Pad]:
     if off_board is None:
         return pads
     return [p for p in pads if not off_board(p.global_x, p.global_y)]
+
+
+def make_off_board_link_end_test(pcb_data: PCBData):
+    """Return f(net_id, x, y) -> True when a reported unconnected-link end is
+    OFF the board (#1544), or None when the board has no outline to test.
+
+    KiCad's connectivity knows nothing of the outline, so its unconnected
+    links -- kicad-cli's and the exact-fill source's alike -- include links
+    to and between the pads drop_off_board_pads (#291) takes out of every
+    routing endpoint set. An end is off the board when the point itself is
+    clearly outside the outline (make_off_board_test), or when it lies on a
+    pad of its net that drop_off_board_pads drops: a nearest-approach anchor
+    sits on the pad's copper, which can reach nearer the edge than the pad
+    centre the #291 test reads. Copper drawn to such an end can only end
+    outside the outline."""
+    from check_drc import make_off_board_test
+    from check_connected import _point_in_pad
+    off_board = make_off_board_test(pcb_data.board_info)
+    if off_board is None:
+        return None
+    off_pads = {}
+    for nid, pads in pcb_data.pads_by_net.items():
+        dropped = [p for p in pads if off_board(p.global_x, p.global_y)]
+        if dropped:
+            off_pads[nid] = dropped
+
+    def test(net_id: int, x: float, y: float) -> bool:
+        if off_board(x, y):
+            return True
+        return any(_point_in_pad(x, y, p, margin=0.05)
+                   for p in off_pads.get(net_id, ()))
+    return test
 
 
 def routable(items) -> list:

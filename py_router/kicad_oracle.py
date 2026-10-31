@@ -2170,6 +2170,10 @@ def oracle_reconnect(board_file: str, net_names, config,
     # net on EVERY run -- with rip authority. Record their keys and filter
     # them out of remaining_links.
     exempt_keys = set()
+    # #1544: links with an end OUTSIDE the outline, exempt the same way (the
+    # test is built once, on the first parse: pads and outline never move here)
+    off_board_links = 0
+    _off_board_end = None
 
     def _link_key(l):
         """The same (net, rounded endpoints) key `attempted` uses."""
@@ -2327,18 +2331,46 @@ def oracle_reconnect(board_file: str, net_names, config,
             break
         ours = [l for l in links if l[0] in names]
         remaining = len(ours)
+        if ours:
+            pcb_data = parse_kicad_pcb(board_file)
+            name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
+            _install_net_maps(pcb_data)
+            # #1544: KiCad's links know nothing of the outline, so they
+            # include links to and between the pads #291 drops from every
+            # routing endpoint set; copper drawn to one ships off the board.
+            # Exempt them as the cross-board links are: still counted in
+            # `remaining` (the net IS open), never welded, and kept out of
+            # remaining_links, so no custody or #572 forced edge routes them.
+            if _off_board_end is None:
+                from connectivity import make_off_board_link_end_test
+                _off_board_end = (make_off_board_link_end_test(pcb_data)
+                                  or False)
+            if _off_board_end:
+                _on_board = []
+                for l in ours:
+                    _lnid = name_to_id.get(l[0])
+                    if _lnid is not None and (
+                            _off_board_end(_lnid, l[1][0], l[1][1])
+                            or _off_board_end(_lnid, l[2][0], l[2][1])):
+                        if _link_key(l) not in exempt_keys:
+                            exempt_keys.add(_link_key(l))
+                            off_board_links += 1
+                        continue
+                    _on_board.append(l)
+                if len(_on_board) < len(ours):
+                    print(f"  KiCad-oracle recheck round {rnd + 1}: "
+                          f"{len(ours) - len(_on_board)} link(s) end OUTSIDE "
+                          f"the board outline -- exempt, no copper is drawn "
+                          f"to an off-board pad (#291)")
+                ours = _on_board
         if not ours:
-            if rnd == 0:
+            if rnd == 0 and not remaining:
                 print("  KiCad-oracle recheck: KiCad reports all processed "
                       "nets complete")
             break
         rounds += 1
         print(f"  KiCad-oracle recheck round {rnd + 1}: KiCad reports "
               f"{len(ours)} missing link(s) on processed nets")
-
-        pcb_data = parse_kicad_pcb(board_file)
-        name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
-        _install_net_maps(pcb_data)
         routing_layers = pcb_data.board_info.copper_layers
         layer_map = {name: i for i, name in enumerate(routing_layers)}
 
@@ -3689,8 +3721,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                   f"item(s) whose net the caller's board does not carry -- "
                   f"dropped from the result, not shipped on a guessed net")
 
-    if rounds and remaining > 0:
-        _xb = f" ({cross_board} cross-board exempt)" if cross_board else ""
+    if remaining > 0 and (rounds or off_board_links):
+        _xb = ", ".join(
+            ([f"{cross_board} cross-board exempt"] if cross_board else [])
+            + ([f"{off_board_links} off-board exempt"]
+               if off_board_links else []))
+        _xb = f" ({_xb})" if _xb else ""
         print(f"  KiCad-oracle recheck: {remaining} link(s) still "
               f"unconnected per KiCad after {rounds} round(s){_xb}")
     return {'available': True,
@@ -3718,6 +3754,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                                  and id(l) not in _debris_resolved
                                  and _link_key(l) not in exempt_keys]),
             'cross_board': cross_board,
+            'off_board': off_board_links,
             'new_segments': emitted_segments, 'new_vias': emitted_vias,
             # #508 finding 15: stranded-fragment copper deleted from the
             # file/pcb_data; a live-board caller must delete it too.
