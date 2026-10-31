@@ -263,7 +263,12 @@ bus laid, in the board's own frame:
   `TEST/ENABLE` are two lanes): `coherent_nets.net_keys`, and every pattern
   the step hands a checker or the fanout engine selects that net alone;
 - the source array is fanned out for them, and the board is turned into the
-  flow frame;
+  flow frame (`flow_frame.turn_for_ends`): the quarter turn that points the
+  centroid of the bus's balls at that of its far pads along +x, unless it
+  leaves the two parts' own pad boxes more beside each other than ahead --
+  the bus's balls off to one side of a large source -- when the boxes' turn
+  is taken, the frame the ends are planned in (a bench turned by the balls
+  alone was refused there, and the bus laid nothing);
 - the whole route runs on the ladder's nets (`--k K` for its first K). A
   pair's two legs stand in one river of the ladder, side by side, so no
   checkpoint runs a leg alone as a single (the zynq LVDS bus had RX_D3_N in

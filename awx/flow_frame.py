@@ -96,6 +96,25 @@ def quarter_of(pcb, dest, names):
     return best, cx, cy
 
 
+def turn_for_ends(pcb, src, dest, names):
+    """(k, cx, cy): quarter_of's turn, unless it leaves the arrays' own pad boxes -- the source's centre to the trunk's
+    destination's, the frame the ends plan in (whole_ends) -- more beside each other than ahead; then the boxes' turn.
+    The bus's balls off to one side of a large source can point their centroid a quarter off the arrays' line, and the
+    ends refuse that bench (whole_ctx's guard reads the boxes the same way for a partial run)"""
+    k, cx, cy = quarter_of(pcb, dest, names)
+    boxes = []
+    for ref in (src, dest_refs(dest)[0]):
+        ps = pcb.footprints[ref].pads
+        boxes.append((min(p.global_x for p in ps), min(p.global_y for p in ps),
+                      max(p.global_x for p in ps), max(p.global_y for p in ps)))
+    (s0, s1, s2, s3), (d0, d1, d2, d3) = boxes
+    bx, by = (d0 + d2 - s0 - s2) / 2, (d1 + d3 - s1 - s3) / 2
+    tx, ty = _q(bx, by, k)
+    if tx > 0 and abs(ty) <= tx:
+        return k, cx, cy
+    return max(range(4), key=lambda k_: (round(_q(bx, by, k_)[0], 6), -k_)), cx, cy
+
+
 def turn_text(txt, k, cx, cy):
     """The board file turned by k quarter turns about (cx, cy).
 

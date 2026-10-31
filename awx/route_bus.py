@@ -547,7 +547,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
 
     # 3. the flow frame
     with contextlib.redirect_stdout(sys.stderr):
-        q, cx, cy = ff.quarter_of(parse_kicad_pcb(fanned), dest, set(nets))
+        q, cx, cy = ff.turn_for_ends(parse_kicad_pcb(fanned), src, dest, set(nets))
     frame = os.path.join(work, 'frame.kicad_pcb')
     bad = ff.turn_file(fanned, frame, q, cx, cy)
     if bad:
@@ -1485,8 +1485,11 @@ def attach_pulls(path, held, refs, log=print):
         txt3, _miss = repull(txt, attached)
         with open(path, 'w', encoding='utf-8') as f:
             f.write(txt3)
+        # (the tracks' nets by the names of the board they were planned on: a name-net board's ids are the order its
+        # nets first appear, and the board written has fewer pads put back than that one)
         with contextlib.redirect_stdout(sys.stderr):
-            add_tracks_and_vias_to_pcb(path, path, tracks, [])
+            add_tracks_and_vias_to_pcb(path, path, tracks, [],
+                                       net_id_to_name={i_: n_.name for i_, n_ in pcb.nets.items()})
     log(f'  pulls in the fanout: {len(attached)} pull pad(s) joined to their lanes'
         + (f' ({", ".join(lens)})' if attached else '')
         + (f'; left to the rest of the chain: {"; ".join(why)}' if why else ''))
