@@ -2360,9 +2360,10 @@ def segment_to_npth_slots_distance(slot_caps, x1, y1, x2, y2):
     return best
 
 
-def board_edge_geometry(board_info) -> Tuple[List[List[Tuple[float, float]]],
-                                             Optional[List[Tuple[float, float]]],
-                                             List[List[Tuple[float, float]]]]:
+def board_edge_geometry(board_info, rect_ring: bool = False
+                        ) -> Tuple[List[List[Tuple[float, float]]],
+                                   Optional[List[Tuple[float, float]]],
+                                   List[List[Tuple[float, float]]]]:
     """Return (edge_rings, outer_outline, cutouts) for the real Edge.Cuts.
 
     edge_rings is the flat list of closed vertex rings (outer outline + each
@@ -2370,12 +2371,26 @@ def board_edge_geometry(board_info) -> Tuple[List[List[Tuple[float, float]]],
     separately for the on-board (inside-outline, outside-cutouts) test. Any ring
     is returned only if it has >=3 vertices; an empty edge_rings means the parser
     found no usable outline and the caller should fall back to the bbox checks.
+
+    A plain rectangle parses with NO outer ring (extract_board_contours keeps
+    only its bounds), so a caller that tests ``if rings:`` and has no bbox
+    branch of its own measures no board edge at all on such a board -- an
+    oracle strap was widened 0.07 mm into a 0.5 mm edge rule that way.
+    ``rect_ring=True`` returns that rectangle as the outer ring instead: the
+    real board's bounds (``parent_board_bounds`` on a local window, whose own
+    bounds are no edge), else ``board_bounds``.
     """
     outlines = [o for o in (getattr(board_info, 'board_outlines', None) or [])
                 if len(o) >= 3]
     if not outlines:
         outline = getattr(board_info, 'board_outline', None) or []
         outlines = [outline] if len(outline) >= 3 else []
+    if not outlines and rect_ring:
+        bb = (getattr(board_info, 'parent_board_bounds', None)
+              or getattr(board_info, 'board_bounds', None))
+        if bb:
+            x0, y0, x1, y1 = bb
+            outlines = [[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
     cutouts = [c for c in (getattr(board_info, 'board_cutouts', None) or []) if len(c) >= 3]
     # `outer` is a LIST of outer rings (multi-outline boards, issue #304:
     # split keyboards carry several disjoint outlines in one file);

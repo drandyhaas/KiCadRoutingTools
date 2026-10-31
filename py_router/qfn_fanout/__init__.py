@@ -520,11 +520,7 @@ def _board_edge_model(pcb_data, clearance, board_edge_clearance):
     usable outline AND no bounds (then no edge test is possible)."""
     from check_drc import board_edge_geometry
     edge_clear = board_edge_clearance if board_edge_clearance > 0 else clearance
-    rings, outer, cutouts = board_edge_geometry(pcb_data.board_info)
-    if not rings and pcb_data.board_info.board_bounds:
-        bx0, by0, bx1, by1 = pcb_data.board_info.board_bounds
-        outer = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
-        rings, cutouts = [outer], []
+    rings, outer, cutouts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
     return edge_clear, rings, outer, cutouts
 
 

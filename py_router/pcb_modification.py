@@ -1156,7 +1156,7 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
     from check_drc import (board_edge_geometry, _point_on_board,
                            _segment_to_rings_distance)
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(
-        getattr(pcb_data, 'board_info', None))
+        getattr(pcb_data, 'board_info', None), rect_ring=True)
 
     # Same-net copper grouped for fast lookup.
     segs_by_net_layer = {}
@@ -1523,12 +1523,9 @@ def compute_castellated_landing_retract(pcb, board_edge_clearance: float,
             if getattr(p, 'castellated', False) and abs(getattr(p, 'rect_rotation', 0.0)) < 1e-6]
     if not pads:
         return CastellationRetractDelta([])
-    rings, _outer, _cutouts = board_edge_geometry(pcb.board_info)
+    rings, _outer, _cutouts = board_edge_geometry(pcb.board_info, rect_ring=True)
     if not rings:
-        b = getattr(pcb.board_info, 'board_bounds', None)
-        if not b:
-            return CastellationRetractDelta([])
-        rings = [[(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]]
+        return CastellationRetractDelta([])
 
     by_net: Dict[int, list] = {}
     for p in pads:
@@ -7608,7 +7605,8 @@ def merge_close_route_vias(results, segs_by_net, vias_by_net, pcb_data, config,
     def edge_ok(x1, y1, x2, y2, w, clr):
         if not _edge:
             from check_drc import board_edge_geometry
-            _edge.append(board_edge_geometry(getattr(pcb_data, 'board_info', None)))
+            _edge.append(board_edge_geometry(getattr(pcb_data, 'board_info', None),
+                                             rect_ring=True))
         rings, outer, cutouts = _edge[0]
         if not rings:
             return True

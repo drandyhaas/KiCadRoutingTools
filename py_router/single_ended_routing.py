@@ -1026,13 +1026,9 @@ def _terminal_board_edge_dist(pcb_data, net_id, s, term_pts):
                     and getattr(p, 'pad_type', '') != 'np_thru_hole'
                     and point_to_pad_distance(tx, ty, p) <= 1e-6):
                 return float('inf')
-    rings, outer, cutouts = board_edge_geometry(bi)
+    rings, outer, cutouts = board_edge_geometry(bi, rect_ring=True)
     if not rings:
-        bb = getattr(bi, 'parent_board_bounds', None) or getattr(bi, 'board_bounds', None)
-        if not bb:
-            return float('inf')
-        x0, y0, x1, y1 = bb
-        rings = outer = [[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
+        return float('inf')
     for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
         if not _point_on_board(x, y, outer, cutouts):
             return 0.0

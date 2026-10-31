@@ -3277,7 +3277,9 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
     if not legs:
         return True
 
-    rings, _outer, _cuts = board_edge_geometry(pcb_data.board_info)
+    # rect_ring: a plain rectangle has no outline ring, and without one this
+    # gate measured no edge at all (an oracle strap widened into the edge band)
+    rings, _outer, _cuts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
     edge_clr = board_edge_clearance
     if edge_clr is None:
         edge_clr = getattr(config, 'board_edge_clearance', 0.0) or 0.0
