@@ -4217,7 +4217,11 @@ class PadClearanceModel:
                                 '%g -> %g (%d net%s)'
                                 % (_v, ceiling, _c, '' if _c == 1 else 's')
                                 for _v, _c in sorted(_capped.items()))))
-                    by_name = {n: min(v, ceiling) for n, v in by_name.items()}
+                    # #1561: and name every class it lowers more than 2x
+                    from fab_tiers import cap_net_clearances
+                    by_name = cap_net_clearances(
+                        by_name, ceiling, net_names={n: n for n in by_name},
+                        board_path=path)
                 # Same admission rule as check_drc: a class at or below the
                 # board-wide floor cannot raise anything, so it never enters.
                 net_floor = {nid: by_name[n.name]

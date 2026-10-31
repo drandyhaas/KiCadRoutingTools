@@ -250,6 +250,10 @@ Examples:
             # intent declares none prints what it printed before.
             **({'declared_rotations': result['declared_rotations']}
                if result.get('declared_rotations') else {}),
+            # #1561: the classes the ceiling lowered more than 2x
+            **({'design_rules': {'ceiling_lowered_classes':
+                                 __import__('fab_tiers').ceiling_lowered_classes()}}
+               if __import__('fab_tiers').ceiling_lowered_classes() else {}),
             'decap': result.get('decap')}, sort_keys=True, default=str))
 
     def _write_drc_floors():

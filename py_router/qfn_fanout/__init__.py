@@ -162,7 +162,11 @@ def resolve_class_clearances(pcb_data, net_clearances=None, ceiling=None):
     if not nc:
         return {}, []
     if ceiling is not None:
-        nc = {nid: min(c, float(ceiling)) for nid, c in nc.items()}
+        from fab_tiers import cap_net_clearances
+        nc = cap_net_clearances(
+            nc, float(ceiling),
+            net_names={nid: n.name for nid, n in pcb_data.nets.items()},
+            board_path=getattr(pcb_data, 'source_path', '') or None)
     vals = sorted({round(v, 4) for v in nc.values()})
     mode = (f"capped at --clearance-ceiling {float(ceiling):g}"
             if ceiling is not None else "honoured in full (no --clearance-ceiling)")
