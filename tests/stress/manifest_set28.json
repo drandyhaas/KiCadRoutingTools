@@ -406,5 +406,29 @@
     "license": "see repo",
     "short_name": "yardstickone",
     "note": "GSG YARD Stick One: sub-GHz RF. Contributed by Infinionist for the placement A/B corpus (KRT discussion #118, comment 19183384); SHA-pinned to the commit they ran, licence as the source repo states. 4 layers, 83 footprints, 59 routable nets (counts from the kicad-cli-upgraded copy where the source is pre-KiCad-6)."
+  },
+  {
+    "set": "set28",
+    "repo": "nihil-space/blackwing-cm5-payload-v1",
+    "path": "design/kicad10/blackwing-cm5-payload-v1.kicad_pcb",
+    "branch": "main",
+    "file": "blackwing_cm5_payload.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/nihil-space/blackwing-cm5-payload-v1/8cc3fa80b080d3659280ef7478174e8421262536/design/kicad10/blackwing-cm5-payload-v1.kicad_pcb",
+    "github_url": "https://github.com/nihil-space/blackwing-cm5-payload-v1/blob/8cc3fa80b080d3659280ef7478174e8421262536/design/kicad10/blackwing-cm5-payload-v1.kicad_pcb",
+    "archive_url": "",
+    "archive_member": "",
+    "size_kb": 3406,
+    "layers_est": 6,
+    "footprints": 130,
+    "routable_nets": 116,
+    "max_pads": 102,
+    "kicad_version": 20260206,
+    "has_kicad_pro": true,
+    "tier": "hard",
+    "packages": "BGA,FPGA/SoC,high-speed",
+    "lane": "andy_request",
+    "license": "see repo",
+    "short_name": "blackwing_cm5_payload",
+    "note": "Blackwing CM5 Payload Module v1r2 (nihil-space/blackwing-cm5-payload-v1, design/kicad10, CERN-OHL-S-2.0): a Raspberry Pi CM5 carrier for the Blackwing Sparrow CubeSat platform. KiCad 10, SIX copper layers, 130 footprints, 116 routable nets; the routed source has 1387 segments, 652 vias and 55 zones. CM5 mezzanine connectors, M.2, CSI FPC, USB, Ethernet; the .kicad_pro carries impedance netclasses (90/100/120 ohm differential, 50 ohm single-ended); no .kicad_dru. Partial lineage with piecol's CM5_MINIMA boards (set14 cm5_minima2, set11 cm5_minima1): 9 of ~7000 schematic-path/footprint uuids shared, dedupe best 0.111 -- a distinct board that started from that design."
   }
 ]

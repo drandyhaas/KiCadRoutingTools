@@ -50,6 +50,16 @@ pocketbeagle: KiCad 5) predate the format validate_candidate admits and
 ship no .kicad_pro; prep_set2's pcbnew load normalises them, and they
 were validated on a kicad-cli-upgraded copy.
 
+blackwing_cm5_payload (nihil-space/blackwing-cm5-payload-v1, design/kicad10)
+joined 2026-10-31 at Andy's request: the Blackwing CM5 Payload Module, a
+Raspberry Pi CM5 carrier for a CubeSat platform -- KiCad 10, 6 copper
+layers, 130 footprints, 116 routable nets, impedance netclasses in its
+.kicad_pro (90/100/120 ohm differential, 50 ohm single-ended), no
+.kicad_dru. validate_candidate PASS (tier hard); dedupe best 0.111 (set14's
+cm5_minima2) against 490 corpus boards. It shares 9 of ~7000 schematic-path
+and footprint uuids with piecol's CM5_MINIMA boards (set14 cm5_minima2,
+set11 cm5_minima1): a distinct board that started from that design.
+
 Downloads each board and its sibling project files -- the .kicad_pro (DRC floor,
 #441) and the .kicad_dru (per-layer clearance rules, #498) --
 into $STRESS_DIR/sources/github_set28/. After fetching, run `bash prep_set28.sh`

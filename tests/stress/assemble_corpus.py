@@ -81,7 +81,17 @@ SET_BLURB = {
         "Five (timiq_rf, vesc_bldc4: KiCad 4; prusa_buddy_mini, prusa_cw1_controller,\n"
         "pocketbeagle: KiCad 5) predate the format validate_candidate admits and\n"
         "ship no .kicad_pro; prep_set2's pcbnew load normalises them, and they\n"
-        "were validated on a kicad-cli-upgraded copy."
+        "were validated on a kicad-cli-upgraded copy.\n"
+        "\n"
+        "blackwing_cm5_payload (nihil-space/blackwing-cm5-payload-v1, design/kicad10)\n"
+        "joined 2026-10-31 at Andy's request: the Blackwing CM5 Payload Module, a\n"
+        "Raspberry Pi CM5 carrier for a CubeSat platform -- KiCad 10, 6 copper\n"
+        "layers, 130 footprints, 116 routable nets, impedance netclasses in its\n"
+        ".kicad_pro (90/100/120 ohm differential, 50 ohm single-ended), no\n"
+        ".kicad_dru. validate_candidate PASS (tier hard); dedupe best 0.111 (set14's\n"
+        "cm5_minima2) against 490 corpus boards. It shares 9 of ~7000 schematic-path\n"
+        "and footprint uuids with piecol's CM5_MINIMA boards (set14 cm5_minima2,\n"
+        "set11 cm5_minima1): a distinct board that started from that design."
     ),
     "set3monster": (
         "set3monster is the \"extreme / intractable\" monster batch: boards whose\n"
