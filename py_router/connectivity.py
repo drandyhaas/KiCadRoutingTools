@@ -1171,6 +1171,37 @@ def routable(items) -> list:
     return [x for x in items if not getattr(x, 'sense', '')]
 
 
+def segment_end_rows(seg, coord, layer_idx) -> List[Tuple]:
+    """A segment's endpoint rows ``(gx, gy, layer_idx, x, y)``, one per grid
+    cell: both ends when they snap to different cells; else the START, unless
+    only the END lies exactly on the shared cell's grid point (#1556).
+
+    The row's original point is where a route launching from that cell welds,
+    by a connector from the grid point. A fanout stub ends in a short
+    grid-snap connector from its off-grid tip to the grid point; keeping its
+    START offered only the off-grid tip, so every route from the stub re-laid
+    that connector at its own width on top of the existing one -- a same-span
+    twin that a later strip could take both copies of. An end exactly on the
+    grid point needs no connector at all.
+    """
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+    if (gx1, gy1) != (gx2, gy2):
+        return [(gx1, gy1, layer_idx, seg.start_x, seg.start_y),
+                (gx2, gy2, layer_idx, seg.end_x, seg.end_y)]
+    if (on_grid_point(seg.end_x, seg.end_y, gx1, gy1, coord)
+            and not on_grid_point(seg.start_x, seg.start_y, gx1, gy1, coord)):
+        return [(gx1, gy1, layer_idx, seg.end_x, seg.end_y)]
+    return [(gx1, gy1, layer_idx, seg.start_x, seg.start_y)]
+
+
+def on_grid_point(x, y, gx, gy, coord, tol: float = 1e-6) -> bool:
+    """Whether (x, y) IS cell (gx, gy)'s grid point (to 1 nm, KiCad's
+    resolution): a weld there needs no connector."""
+    fx, fy = coord.to_float(gx, gy)
+    return abs(x - fx) <= tol and abs(y - fy) <= tol
+
+
 def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
                                    config: GridRouteConfig,
                                    anchor_a: Tuple[float, float],
@@ -1227,11 +1258,8 @@ def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        _add(seg.start_x, seg.start_y, layer_idx, gx1, gy1)
-        if (gx1, gy1) != (gx2, gy2):
-            _add(seg.end_x, seg.end_y, layer_idx, gx2, gy2)
+        for gx, gy, _li, x, y in segment_end_rows(seg, coord, layer_idx):
+            _add(x, y, layer_idx, gx, gy)
     for pad in routable(drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, []))):
         gx, gy = coord.to_grid(pad.global_x, pad.global_y)
         for layer in expand_pad_layers(pad.layers, config.layers):
@@ -1438,34 +1466,21 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                     for seg in _segs_fb:
                         layer_idx = layer_map.get(seg.layer)
                         if layer_idx is not None:
-                            gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                            gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                            _side.append((gx1, gy1, layer_idx,
-                                          seg.start_x, seg.start_y))
-                            if (gx1, gy1) != (gx2, gy2):
-                                _side.append((gx2, gy2, layer_idx,
-                                              seg.end_x, seg.end_y))
+                            _side.extend(segment_end_rows(seg, coord,
+                                                          layer_idx))
             else:
                 # For single-ended: use all segment endpoints
                 sources = []
                 for seg in source_segs:
                     layer_idx = layer_map.get(seg.layer)
                     if layer_idx is not None:
-                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                        sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                        if (gx1, gy1) != (gx2, gy2):
-                            sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+                        sources.extend(segment_end_rows(seg, coord, layer_idx))
 
                 targets = []
                 for seg in target_segs:
                     layer_idx = layer_map.get(seg.layer)
                     if layer_idx is not None:
-                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                        targets.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                        if (gx1, gy1) != (gx2, gy2):
-                            targets.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+                        targets.extend(segment_end_rows(seg, coord, layer_idx))
 
                 # Each group's VIAS are route terminals on every routing layer
                 # (PR #534): a via spans the stack, and Case 2 below has
@@ -1555,11 +1570,8 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                     for seg in seg_group:
                         layer_idx = layer_map.get(seg.layer)
                         if layer_idx is not None:
-                            gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                            gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                            sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                            if (gx1, gy1) != (gx2, gy2):
-                                sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+                            sources.extend(segment_end_rows(seg, coord,
+                                                            layer_idx))
 
                 targets = []
                 for pad in unconnected_pads:

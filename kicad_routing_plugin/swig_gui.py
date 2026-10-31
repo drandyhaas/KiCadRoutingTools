@@ -4111,25 +4111,36 @@ class RoutingDialog(wx.Dialog):
         tracks_removed = 0
         segs_to_remove = results_data.get('segments_to_remove') or []
         if segs_to_remove:
-            remove_keys = set()
-            for s in segs_to_remove:
-                a = (round(s.start_x, POSITION_DECIMALS), round(s.start_y, POSITION_DECIMALS))
-                b = (round(s.end_x, POSITION_DECIMALS), round(s.end_y, POSITION_DECIMALS))
-                remove_keys.add((frozenset((a, b)), s.layer, s.net_id))
-            for track in list(board.GetTracks()):
-                if track.Type() != pcbnew.PCB_TRACE_T:
-                    continue  # skip vias / arcs
+            # Counted and width-preferring, as the CLI writer's strip
+            # (kicad_writer.match_stack_members, #1556): a set of span keys
+            # removed EVERY member of a same-span stack, the keeper too.
+            from kicad_writer import match_stack_members
+
+            def _span(a, b, layer, net):
+                return (frozenset((a, b)), layer, net)
+            targets = [(_span((round(s.start_x, POSITION_DECIMALS),
+                               round(s.start_y, POSITION_DECIMALS)),
+                              (round(s.end_x, POSITION_DECIMALS),
+                               round(s.end_y, POSITION_DECIMALS)),
+                              s.layer, s.net_id), s.width)
+                       for s in segs_to_remove]
+            tracks = [t for t in board.GetTracks()
+                      if t.Type() == pcbnew.PCB_TRACE_T]  # not vias / arcs
+            items = []
+            for track in tracks:
                 a = (round(pcbnew.ToMM(track.GetStart().x), POSITION_DECIMALS),
                      round(pcbnew.ToMM(track.GetStart().y), POSITION_DECIMALS))
                 b = (round(pcbnew.ToMM(track.GetEnd().x), POSITION_DECIMALS),
                      round(pcbnew.ToMM(track.GetEnd().y), POSITION_DECIMALS))
                 # Canonical layer name, as s.layer is: a renamed layer's
                 # display name matched no key and left ripped copper (#1056).
-                key = (frozenset((a, b)), id_to_name.get(track.GetLayer()),
-                       track.GetNetCode())
-                if key in remove_keys:
-                    board.RemoveNative(track)
-                    tracks_removed += 1
+                items.append((_span(a, b, id_to_name.get(track.GetLayer()),
+                                    track.GetNetCode()),
+                              pcbnew.ToMM(track.GetWidth())))
+            gone, _unmatched = match_stack_members(targets, items)
+            for i in sorted(gone):
+                board.RemoveNative(tracks[i])
+                tracks_removed += 1
 
         # Remove stale input VIAS of ripped/re-routed nets (#284), mirroring the
         # CLI writer's remove_vias_from_content -- previously the GUI only

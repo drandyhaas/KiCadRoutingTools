@@ -25,6 +25,7 @@ from connectivity import (
     get_multipoint_net_pads,
     get_copper_connected_terminal_groups,
     compute_component_mst_edges,
+    on_grid_point,
 )
 from obstacle_map import get_same_net_through_hole_positions, same_net_partial_via_spans
 from bresenham_utils import walk_line
@@ -2548,17 +2549,12 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     path_start = path[0]
     path_end = path[-1]
 
-    start_original = None
-    for s in sources:
-        if s[0] == path_start[0] and s[1] == path_start[1] and s[2] == path_start[2]:
-            start_original = (s[3], s[4], layer_names[s[2]])
-            break
-
-    end_original = None
-    for t in targets:
-        if t[0] == path_end[0] and t[1] == path_end[1] and t[2] == path_end[2]:
-            end_original = (t[3], t[4], layer_names[t[2]])
-            break
+    # Several rows can share the cell the path starts or ends on (a stub tip
+    # and the end of the segment before it, both snapping to one grid cell):
+    # weld to the row ON the cell's grid point when there is one
+    # (`_terminal_row`, #1556).
+    start_original = _terminal_row(sources, path_start, layer_names, coord)
+    end_original = _terminal_row(targets, path_end, layer_names, coord)
 
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
@@ -5395,6 +5391,31 @@ def _route_multipoint_main_impl(
     }
 
 
+def _terminal_row(rows, cell, layer_names, coord):
+    """``(orig_x, orig_y, layer)`` of the endpoint row a path end on ``cell``
+    welds to, or None: the row lying exactly on the cell's grid point when
+    there is one, else the first row on the cell.
+
+    Every row on a cell is copper of the terminal the router reached, so any
+    of them is a legal weld -- but `_path_to_segments_vias` lays a connector
+    from the grid point to the row's original point. Taking the first row in
+    board order welded a route launching from a fanout stub to the off-grid
+    end of the segment BEFORE the stub's own grid-snap connector (both snap
+    to one cell), re-laying that connector at the route's width on top of the
+    existing one (#1556: a 0.0762 and a 0.1 twin over one 23 um span). The
+    row on the grid point is the stub tip itself, which needs no connector.
+    """
+    gx, gy, li = cell[0], cell[1], cell[2]
+    first = None
+    for r in rows:
+        if r[0] == gx and r[1] == gy and r[2] == li:
+            if on_grid_point(r[3], r[4], gx, gy, coord):
+                return (r[3], r[4], layer_names[li])
+            if first is None:
+                first = (r[3], r[4], layer_names[li])
+    return first
+
+
 def get_all_segment_tap_points(
     segments: List[Segment],
     coord: GridCoord,
@@ -5415,6 +5436,19 @@ def get_all_segment_tap_points(
     tap_points = {}  # (gx, gy, layer_idx) -> (orig_x, orig_y)
     layer_map = build_layer_map(layer_names)
 
+    def _offer(key, x, y):
+        # First sample to reach a cell owns it -- unless a later one lies
+        # exactly on the cell's grid point and the owner does not: the route
+        # welds to the owner by a connector from the grid point, so a stub's
+        # own grid-snap tip must win over the off-grid end before it, or the
+        # tap re-lays that stub's connector on top of it (#1556).
+        old = tap_points.get(key)
+        if old is not None and not (
+                on_grid_point(x, y, key[0], key[1], coord)
+                and not on_grid_point(old[0], old[1], key[0], key[1], coord)):
+            return
+        tap_points[key] = (x, y)
+
     for seg in segments:
         layer_idx = layer_map.get(seg.layer, 0)
 
@@ -5426,9 +5460,7 @@ def get_all_segment_tap_points(
         if length < 0.001:
             # Point segment
             gx, gy = coord.to_grid(seg.start_x, seg.start_y)
-            key = (gx, gy, layer_idx)
-            if key not in tap_points:
-                tap_points[key] = (seg.start_x, seg.start_y)
+            _offer((gx, gy, layer_idx), seg.start_x, seg.start_y)
         else:
             # #1291: an axial or 45-degree segment between grid points is
             # sampled once per cell it crosses, each sample on its cell's grid
@@ -5454,18 +5486,14 @@ def get_all_segment_tap_points(
                 x = seg.start_x + t * dx
                 y = seg.start_y + t * dy
                 gx, gy = coord.to_grid(x, y)
-                key = (gx, gy, layer_idx)
-                if key not in tap_points:
-                    tap_points[key] = (x, y)
+                _offer((gx, gy, layer_idx), x, y)
 
     # Add vias on ALL layers (vias connect all copper layers)
     if vias:
         for via in vias:
             gx, gy = coord.to_grid(via.x, via.y)
             for layer_idx in range(len(layer_names)):
-                key = (gx, gy, layer_idx)
-                if key not in tap_points:
-                    tap_points[key] = (via.x, via.y)
+                _offer((gx, gy, layer_idx), via.x, via.y)
 
     # Return sorted list for deterministic iteration
     return sorted([(gx, gy, layer_idx, ox, oy)
