@@ -117,6 +117,13 @@ _CONN_TOTAL = re.compile(r'^FOUND (\d+) ISSUES', re.M)
 _CONN_UNROUTED = re.compile(r'^\s+Unrouted nets \((\d+)\):', re.M)
 _CONN_BROKEN = re.compile(r'^\s+Connectivity issues \((\d+)\):', re.M)
 _CONN_COMPONENTS = re.compile(r'^\s+Disconnected components: (\d+)', re.M)
+# check_connected's per-net lines, matched up to their fixed suffix because a
+# net name may contain spaces (#1553): `    NAME (N pads)`, `  NAME (net N):`
+# and `      (x, y) on LAYER [REF]`.
+_CONN_UNROUTED_NET = re.compile(r'^ {4}(\S.*) \((\d+) pads\)[ \t\r]*$', re.M)
+_CONN_BROKEN_NET = re.compile(r'^ {2}(\S.*) \(net \d+\):[ \t\r]*$', re.M)
+_CONN_STRANDED_PAD = re.compile(
+    r'^\s+\(([-\d.]+),\s*([-\d.]+)\) on (.+?)(?:\s+\[([^\]]*)\])?\s*$')
 
 
 def krt_dir() -> str:
@@ -301,10 +308,14 @@ def score_connectivity(root: str, board: str) -> dict:
     # Net names, so the ledger can say WHICH nets failed and a later round can
     # tell "the same nets every time" (parameters) from "different nets"
     # (congestion) -- the Step 9 classification needs this distinction.
-    unrouted_pads = {n: int(c) for n, c in
-                     re.findall(r'^\s{4}(\S+) \((\d+) pads\)', out, re.M)}
+    # A net name is everything up to check_connected's own SUFFIX, never `\S+`:
+    # a hierarchical net carries its sheet path, and KiCad allows a space in a
+    # sheet name (#1553). `\S+` dropped such an unrouted net's name (the count,
+    # read off the header, stayed), and missed a broken net's header, so its
+    # stranded pads were filed under the net printed before it.
+    unrouted_pads = {n: int(c) for n, c in _CONN_UNROUTED_NET.findall(out)}
     unrouted_names = list(unrouted_pads)
-    broken_names = re.findall(r'^\s{2}(\S+) \(net \d+\):', out, re.M)
+    broken_names = _CONN_BROKEN_NET.findall(out)
     nets = unrouted_names + broken_names
 
     # PER-NET DETAIL FOR `broken`, because a COUNT IS NOT A WORK LIST. `unrouted`
@@ -322,15 +333,14 @@ def score_connectivity(root: str, board: str) -> dict:
     # and the ref is what lets the caller tell it apart.
     detail, cur = {}, None
     for line in out.splitlines():
-        if (mm := re.match(r'^\s{2}(\S+) \(net \d+\):\s*$', line)):
+        if (mm := _CONN_BROKEN_NET.match(line)):
             cur = mm.group(1)
             detail[cur] = {'components': None, 'joins_needed': None,
                            'stranded_pads': []}
         elif cur and (mc := re.match(r'^\s+Disconnected components:\s*(\d+)', line)):
             detail[cur]['components'] = int(mc.group(1))
             detail[cur]['joins_needed'] = max(0, int(mc.group(1)) - 1)
-        elif cur and (mp := re.match(
-                r'^\s+\(([-\d.]+),\s*([-\d.]+)\) on (\S+)(?:\s+\[(\S+)\])?', line)):
+        elif cur and (mp := _CONN_STRANDED_PAD.match(line)):
             detail[cur]['stranded_pads'].append(
                 {'x': float(mp.group(1)), 'y': float(mp.group(2)),
                  'layer': mp.group(3), 'ref': mp.group(4)})
