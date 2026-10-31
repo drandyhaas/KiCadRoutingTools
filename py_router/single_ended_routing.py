@@ -4927,49 +4927,6 @@ def _route_multipoint_main_impl(
     from connectivity import get_terminal_component_info
     pad_components, _isl_copper, _segs_by_comp, _vias_by_comp = \
         get_terminal_component_info(pcb_data, net_id, pad_info)
-    _island_cells = {}
-    # Launch cells are read against the map's own blocking (#1546); every
-    # attempt below marks its overrides afresh.
-    obstacles.clear_source_target_cells()
-    for _cid, _segs in _segs_by_comp.items():
-        # #545 F9: the island's vias come from the connectivity graph's
-        # own membership (vias_by_component), not a rounded-endpoint-key
-        # equality match -- which missed a via 5um across a 0.01-rounding
-        # bucket boundary (the COINCIDENCE_TOL soft-joint class the
-        # checker grades connected) and every via T-tapped into a
-        # segment's MIDDLE (stitching vias, prior tap junctions). Those
-        # islands' cells existed only on one layer, so the route paid a
-        # fresh via to reach copper the island already spans.
-        _vs = _vias_by_comp.get(_cid, [])
-        _pts = _clear_launch_rows(
-            get_all_segment_tap_points(_segs, coord, layer_names, vias=_vs),
-            obstacles, coord, pcb_data, net_id)
-        # Keyed by cell, valued by the OWNER float point of that cell --
-        # the conversion below welds the route to the owner of the cell
-        # the router actually launched from (Phase 3's tap_point_map
-        # contract). Discarding the owners and welding to the terminal
-        # anchor drew a 1.5mm any-angle slash from the anchor to a route
-        # that started elsewhere on the island (SDC0_CMD, busstop7).
-        _island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
-                               for p in _pts}
-
-    # POUR AS LAUNCH SURFACE, ladder v3: shared per-region builder
-    # (_pour_launch_region_cells); Phase 3 merges the same cells into ITS
-    # map -- v2 fed only this phase-1 map, so the straggler edges Phase 3
-    # routes never saw fill targets.
-    _pl_cells = _pour_launch_region_cells(
-        pcb_data, net_id, pad_info, pad_components, layer_names, coord,
-        _island_cells, config)
-    _pl_added = 0
-    for _cid, _cmap in _pl_cells.items():
-        _cells = _island_cells.setdefault(_cid, {})
-        for _k, _v in _cmap.items():
-            if _k not in _cells:
-                _cells[_k] = _v
-                _pl_added += 1
-    if _pl_added:
-        print(f"  POUR-LAUNCH v3: +{_pl_added} region-laddered target(s) "
-              f"across {len(_pl_cells)} component(s) (phase 1)")
     num_components = len(set(pad_components.values()))
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
@@ -5035,6 +4992,51 @@ def _route_multipoint_main_impl(
             # return now really means one fragment per outline.
             'strict_fragments': num_components,
         }
+
+    # Launch sets are built only for a net with edges left to route.
+    _island_cells = {}
+    # Launch cells are read against the map's own blocking (#1546); every
+    # attempt below marks its overrides afresh.
+    obstacles.clear_source_target_cells()
+    for _cid, _segs in _segs_by_comp.items():
+        # #545 F9: the island's vias come from the connectivity graph's
+        # own membership (vias_by_component), not a rounded-endpoint-key
+        # equality match -- which missed a via 5um across a 0.01-rounding
+        # bucket boundary (the COINCIDENCE_TOL soft-joint class the
+        # checker grades connected) and every via T-tapped into a
+        # segment's MIDDLE (stitching vias, prior tap junctions). Those
+        # islands' cells existed only on one layer, so the route paid a
+        # fresh via to reach copper the island already spans.
+        _vs = _vias_by_comp.get(_cid, [])
+        _pts = _clear_launch_rows(
+            get_all_segment_tap_points(_segs, coord, layer_names, vias=_vs),
+            obstacles, coord, pcb_data, net_id)
+        # Keyed by cell, valued by the OWNER float point of that cell --
+        # the conversion below welds the route to the owner of the cell
+        # the router actually launched from (Phase 3's tap_point_map
+        # contract). Discarding the owners and welding to the terminal
+        # anchor drew a 1.5mm any-angle slash from the anchor to a route
+        # that started elsewhere on the island (SDC0_CMD, busstop7).
+        _island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
+                               for p in _pts}
+
+    # POUR AS LAUNCH SURFACE, ladder v3: shared per-region builder
+    # (_pour_launch_region_cells); Phase 3 merges the same cells into ITS
+    # map -- v2 fed only this phase-1 map, so the straggler edges Phase 3
+    # routes never saw fill targets.
+    _pl_cells = _pour_launch_region_cells(
+        pcb_data, net_id, pad_info, pad_components, layer_names, coord,
+        _island_cells, config)
+    _pl_added = 0
+    for _cid, _cmap in _pl_cells.items():
+        _cells = _island_cells.setdefault(_cid, {})
+        for _k, _v in _cmap.items():
+            if _k not in _cells:
+                _cells[_k] = _v
+                _pl_added += 1
+    if _pl_added:
+        print(f"  POUR-LAUNCH v3: +{_pl_added} region-laddered target(s) "
+              f"across {len(_pl_cells)} component(s) (phase 1)")
 
     # Sort MST edges by length (longest first), then let the corridor /
     # dense-first overrides pick which edge Phase 1 actually routes now
