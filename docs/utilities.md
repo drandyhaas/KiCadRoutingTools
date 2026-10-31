@@ -2118,7 +2118,10 @@ Options:
                       they were locked. By default it may lay copper on an
                       unlocked 2-pad C/R/FB part, which place_fanout_clearance
                       then moves; name a part that step could not clear and the
-                      fanout drops a ball it cannot escape instead (#1521)
+                      fanout drops a ball it cannot escape instead (#1521).
+                      JSON_SUMMARY.drc_grazes counts the grazes left on parts
+                      that step moves as deferred_to_decap (the parts in
+                      deferred_parts), included in its total (#1560)
   --add-teardrops     Add teardrop settings to all pads and vias in the output
   --fab-tier {standard,advanced,auto}  JLC fab capability floor (default: auto)
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier

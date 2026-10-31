@@ -59,6 +59,20 @@ def movable_passive(fp, pcb_data, copper_pads) -> bool:
                                      or ()))
 
 
+def decap_deferred_refs(pcb_data, board_path, held=()) -> set:
+    """The parts a graze of this fanout's copper is left to the clearance step
+    on (#1560): the ones place_fanout_clearance moves, by its own rule at its
+    defaults (placement.fanout_clearance.movable_cap_refs), less the parts
+    `held` with --immovable-refs -- a part that step could not clear, which
+    the fanout keeps off, so a graze on it is the fanout's own."""
+    import contextlib
+    import io
+    import _placer_path  # noqa: F401  (placement lives in py_placer/)
+    from placement.fanout_clearance import movable_cap_refs
+    with contextlib.redirect_stdout(io.StringIO()):
+        return set(movable_cap_refs(pcb_data, board_path)) - set(held or ())
+
+
 def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
     """Copper pads of foreign footprints that NO later pipeline step will move:
     locked footprints, and any part place_fanout_clearance won't relocate

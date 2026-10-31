@@ -4282,12 +4282,20 @@ def _row_on_copper(row, segs, seg_geoms, vias):
     return False
 
 
-def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False):
+def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False,
+                      deferred_refs=None):
     """A fanout step's `drc_grazes` (JSON_SUMMARY): the clearance rows of its
     WRITTEN board that copper THIS step laid takes part in, graded at
     `clearance`. `input_copper` is `copper_keys` of the board the step was
     given, so whatever the output has beyond it -- escapes, vias, plane drops,
     any post-pass's rewrite -- is the step's own.
+
+    `deferred_refs` (#1560): the parts the clearance step that follows moves
+    off fanout copper. Of `total`, the rows on a pad of one of them are
+    `deferred_to_decap` (and those parts `deferred_parts`): bga_fanout lays
+    copper on such a part on purpose and leaves it to that step, so they are
+    told apart from a graze nothing later clears. Counted in `total` as
+    before.
 
     `net_classes` also grades each pair at the written project's net classes
     (KiCad's max(clearance, class A, class B)), read as check_drc's own main
@@ -4328,7 +4336,7 @@ def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False):
     by = {}
     for r in rows:
         by[r['type']] = by.get(r['type'], 0) + 1
-    return {
+    out = {
         'scope': 'copper this step laid',
         'pad_via': by.get('pad-via', 0),
         'via_segment': by.get('via-segment', 0),
@@ -4336,6 +4344,12 @@ def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False):
         'segment_segment': by.get('segment-segment', 0),
         'total': len(rows),
     }
+    if deferred_refs is not None:
+        parts = [str(r.get('pad_ref') or '').rsplit('.', 1)[0] for r in rows]
+        parts = [p for p in parts if p in deferred_refs]
+        out['deferred_to_decap'] = len(parts)
+        out['deferred_parts'] = sorted(set(parts))
+    return out
 
 
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
