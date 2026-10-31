@@ -251,9 +251,14 @@ def test_grade_full_mode_on_a_pile_is_not_done_and_records_its_spec():
         pile = os.path.join(td, 'pile.kicad_pcb')
         run_utils.check(PY + [os.path.join(SCRIPTS, 'make_unplaced.py'), ESP, pile],
                         accept=True)
+        audit_spec = os.path.join(td, 'audit_spec.json')
+        with open(audit_spec, 'w', encoding='utf-8') as fh:
+            # a group naming nets not on the board: a judged (failed) check
+            json.dump({'length_groups': {'G': {'nets': ['/NOT_A_NET', '/NOR_THIS']}}}, fh)
         r = run_utils.check(PY + [os.path.join(SCRIPTS, 'grade.py'), pile,
                                   '--baseline', ESP, '--mode', 'full',
                                   '--spec', 'min-via-diameter=0.6',
+                                  '--audit-spec', audit_spec,
                                   '--out-dir', td], code=4, refuse='"done": false')
         doc = json.loads(r.stdout.splitlines()[0])
         assert doc['done'] is False, doc
@@ -264,7 +269,10 @@ def test_grade_full_mode_on_a_pile_is_not_done_and_records_its_spec():
         assert isinstance(full.get('hpwl'), (int, float)), sorted(full)
         assert isinstance(full.get('crossings'), int), sorted(full)
         # the declared spec reached the graders, and is on the record
-        assert full['spec'] == [['--min-via-diameter', '0.6']], full['spec']
+        assert full['spec'] == [['--min-via-diameter', '0.6'],
+                                ['--spec', audit_spec]], full['spec']
+        # #1237: --audit-spec reached board_score as its --spec
+        assert (full.get('blocking_by') or {}).get('audit') == 1, full.get('blocking_by')
         # #1183: check_assembly graded with the input as --baseline, so its
         # courtyard gate was ARMED, and the record says so
         assert full['assembly_gating_basis'] == 'moved-vs-baseline', \
@@ -277,6 +285,9 @@ def test_grade_full_mode_on_a_pile_is_not_done_and_records_its_spec():
                               '--baseline', ESP, '--spec', 'no-equals-sign'],
                         refuse='expected NAME=VALUE', code=2,
                         allow=('usage:',))
+        run_utils.check(PY + [os.path.join(SCRIPTS, 'grade.py'), pile,
+                              '--baseline', ESP, '--spec', 'spec=x.json'],
+                        refuse='--audit-spec', code=2, allow=('usage:',))
     print("  PASS: a pile is not DONE in full mode; its spec and gating basis are on the record")
 
 

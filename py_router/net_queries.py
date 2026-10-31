@@ -1332,15 +1332,28 @@ def net_match_pad_to_die(pcb_data: PCBData, net_id: int,
 
 
 def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
-                     tolerance: float = 0.02):
+                     tolerance: float = 0.02, weight=None, edges=None,
+                     hub_layers=None, nodes=None):
     """(adjacency, pad_nodes) over ONE net's track copper, with `pads` attached.
 
     The weighted graph `pin_pair_path_length` walks (see its docstring for the
     joining rules); `pad_nodes` maps id(pad) to the pad's per-layer hub nodes.
     None when the net has no segments at all.
+
+    By default an edge weighs its length. `weight(kind, obj, length, span)`
+    replaces that for the copper edges ('seg' with a Segment and the piece's
+    length, span None; 'via' with a Via, the barrel step's length and the
+    step's (layer, layer) span); joins inside a pad or a via stay 0. `edges`,
+    a list, receives every edge as (n1, n2, weight, kind, obj, span), kind
+    None for those joins (#1237's DC network, dc_network.py).
+
+    `hub_layers` (pour layers, for the DC network): every via and pad gets a
+    hub node on each of these layers it spans, joined or not, and the net
+    needs no segment to have a graph. `nodes`, a list, receives every node's
+    (x, y, layer) by node id.
     """
     segments = [s for s in pcb_data.segments if s.net_id == net_id]
-    if not segments:
+    if not segments and not hub_layers:
         return None
 
     # Point interning: endpoints within `tolerance` are ONE node (the same
@@ -1365,11 +1378,15 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
 
     adjacency: Dict[int, List[Tuple[int, float]]] = {}
 
-    def add_edge(n1, n2, w: float):
+    def add_edge(n1, n2, w: float, kind=None, obj=None, span=None):
         if n1 == n2:
             return
+        if kind is not None and weight is not None:
+            w = weight(kind, obj, w, span)
         adjacency.setdefault(n1, []).append((n2, w))
         adjacency.setdefault(n2, []).append((n1, w))
+        if edges is not None:
+            edges.append((n1, n2, w, kind, obj, span))
 
     copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
     from kicad_parser import pad_is_plated_through
@@ -1441,7 +1458,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                 continue
             n1 = key(s.start_x + ux * t1, s.start_y + uy * t1, s.layer)
             n2 = key(s.start_x + ux * t2, s.start_y + uy * t2, s.layer)
-            add_edge(n1, n2, t2 - t1)
+            add_edge(n1, n2, t2 - t1, 'seg', s)
 
     # Attach each disc: one synthetic node per layer it spans, joined at no cost
     # to every segment node inside its copper on that layer. A via's barrel then
@@ -1488,7 +1505,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                 if hit(nx, ny):
                     add_edge(hub, node, 0.0)
                     joined = True
-            if joined or kind == 'pad' \
+            if joined or kind == 'pad' or layer in (hub_layers or ()) \
                     or layer in via_contact_layers.get(id(obj), ()):
                 layer_nodes[layer] = hub
 
@@ -1499,13 +1516,13 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             per_step = barrel / max(1, len(dlayers) - 1)
             for l1, l2 in zip(dlayers, dlayers[1:]):
                 if l1 in layer_nodes and l2 in layer_nodes:
-                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step)
+                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step, 'via', obj, (l1, l2))
                 elif l1 in layer_nodes or l2 in layer_nodes:
                     # An intermediate layer with no copper of this net still has
                     # to be walked THROUGH -- keep the chain intact.
                     for l in (l1, l2):
                         layer_nodes.setdefault(l, _new_node(cx, cy, l))
-                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step)
+                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step, 'via', obj, (l1, l2))
         else:
             hubs = list(layer_nodes.values())
             if pad_is_plated_through(obj) and len(hubs) > 1:
@@ -1520,6 +1537,8 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             if layer in vh and layer in ph:
                 add_edge(vh[layer], ph[layer], 0.0)
 
+    if nodes is not None:
+        nodes.extend(_node_xy)
     return adjacency, pad_nodes
 
 

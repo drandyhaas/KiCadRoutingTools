@@ -3,12 +3,14 @@
 
     python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py BOARD \
         --baseline INPUT.kicad_pcb [--intent INTENT.json] [--mode full|place] \
-        [--label NAME] [--out-dir DIR] [--spec NAME=VALUE ...]
+        [--label NAME] [--out-dir DIR] [--spec NAME=VALUE ...] \
+        [--audit-spec SPEC.json]
 
 Runs the graders the skill's verifier runs, at the board's own .kicad_pro
 floor, and writes `<out-dir>/grade_<label>.json` with the headline numbers
 and each tool's exit code. `--spec` passes a spec flag the board declares
-(e.g. `net-min-widths=widths.json`) to board_score and check_complete.
+(e.g. `net-min-widths=widths.json`) to board_score and check_complete;
+`--audit-spec` passes audit.py's spec file to both as their `--spec` (#1237).
 Grade every arm of a comparison with this same script at the same commit,
 or the numbers do not compare.
 
@@ -177,13 +179,22 @@ def main(argv=None):
                     help='a spec flag the board declares, without its leading '
                          'dashes, passed to board_score and check_complete; '
                          'repeatable, e.g. --spec net-min-widths=widths.json')
+    ap.add_argument('--audit-spec', default=None, metavar='SPEC.json',
+                    help="audit.py's spec file (#1237), passed to board_score and "
+                         'check_complete as their --spec')
     a = ap.parse_args(argv)
     spec = []
     for s in a.spec:
         name, sep, value = s.partition('=')
         if not sep or not name.strip():
             ap.error(f'--spec {s!r}: expected NAME=VALUE')
+        if name.strip().lstrip('-') == 'spec':
+            ap.error(f'--spec {s!r}: the audit spec file is --audit-spec FILE')
         spec.append(('--' + name.strip().lstrip('-'), value))
+    if a.audit_spec:
+        if not os.path.isfile(a.audit_spec):
+            ap.error(f'--audit-spec {a.audit_spec}: no such file')
+        spec.append(('--spec', os.path.abspath(a.audit_spec)))
     out, dst = grade(a.board, a.baseline, a.intent, a.mode, a.label, a.out_dir,
                      spec)
     keys = ('done', 'blocking', 'unrouted', 'broken', 'drc', 'vias',

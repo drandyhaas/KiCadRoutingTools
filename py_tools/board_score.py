@@ -28,7 +28,8 @@ disconnected net with a lower via count::
 
     score = (blocking, quality)
     blocking = (unrouted + broken + drc + undersized + floorplan
-               + assembly + impedance + length + net_widths + diff_pairs)
+               + assembly + impedance + length + net_widths + diff_pairs
+               + audit)
     quality  = (vias, copper_mm, segments)      # only compared once blocking == 0
 
 `blocking` must reach 0 before a board is deliverable. `quality` orders the
@@ -1245,6 +1246,47 @@ def score_length(board: str, groups_file: str) -> dict:
 
 
 
+def score_audit(root: str, board: str, spec_file: str, tmp: str,
+                baseline=None) -> dict:
+    """audit.py --spec (#1237): every judged check of the spec. `count` is the
+    number of FAILED spec checks; a check it could not judge is listed in
+    `not_judged`, not counted, as the other components treat what they
+    cannot see. The spec-free checks audit.py always runs (check_weird's
+    advisory categories, check_via_mask) are listed in `spec_free_failed` and
+    never counted: they are reported, not blocking. Without --spec, or when
+    audit.py judged no spec check at all (an empty spec, or every check not
+    judged), the component is ungraded."""
+    if not spec_file:
+        return skipped('no --spec given; the spec audit is ungraded')
+    if not os.path.isfile(spec_file):
+        return skipped(f'spec file not found: {spec_file}')
+    out_json = os.path.join(tmp, 'audit.json')
+    args = [board, '--spec', spec_file, '--json', out_json]
+    if baseline:
+        args += ['--baseline', baseline]
+    rc, out = run_tool(root, 'audit.py', *args)
+    if rc not in (0, 4) or not os.path.isfile(out_json):
+        return {'ran': True, 'count': None,
+                'reason': f'audit.py exited {rc}: {out.strip()[-200:]}'}
+    with open(out_json, encoding='utf-8') as fh:
+        rep = json.load(fh)
+    from audit import SPEC_FREE_IDS
+    spec_checks = [c for c in rep['checks'] if c['id'] not in SPEC_FREE_IDS]
+    failed = [c for c in spec_checks if c['status'] == 'failed']
+    if not any(c['status'] in ('passed', 'failed') for c in spec_checks):
+        out = skipped('the spec audit judged no spec check (an empty spec, or '
+                      'every check not judged)')
+        out['not_judged'] = [f"{c['id']} {c.get('subject', '')}: {c.get('reason')}".strip()
+                             for c in spec_checks]
+        return out
+    return {'ran': True, 'count': len(failed), 'summary': rep['summary'],
+            'failed': [f"{c['id']} {c.get('subject', '')}".strip() for c in failed],
+            'spec_free_failed': [c['id'] for c in rep['checks'] if c['status'] == 'failed'
+                                 and c['id'] in SPEC_FREE_IDS],
+            'not_judged': [f"{c['id']} {c.get('subject', '')}: {c.get('reason')}".strip()
+                           for c in rep['checks'] if c['status'] == 'not_judged']}
+
+
 def _pad_neck_zone_mm() -> float:
     """Length of the router's pad-entry zone: the stretch of a power route at
     each pad end that may run at the pad's own width (#1318)."""
@@ -1658,6 +1700,10 @@ def build_parser():
                         'anything that is not an existing file leaves length '
                         'matching UNGRADED (ran: false) and the board scoring '
                         'exit 0, which reads as a pass')
+    p.add_argument('--spec', metavar='JSON',
+                   help='audit.py spec FILE (#1237): enables the audit '
+                        'component, whose count is the spec checks that '
+                        'FAILED. Omitted = the audit is ungraded')
     p.add_argument('--json', metavar='PATH',
                    help='write the full score here. The stdout SCORE_JSON= '
                         'line caps each components.assembly list (pairs, '
@@ -1722,6 +1768,8 @@ def main():
         imped = score_impedance(root, args.board, _imp_nets, tmp)
         length = score_length(args.board, args.length_groups)
         net_widths = score_net_widths(args.board, args.net_min_widths)
+        audit = score_audit(root, args.board, args.spec, tmp,
+                            baseline=args.baseline)
 
     # Both connectivity components carry their work list, not just their count --
     # see score_connectivity. `unrouted` needs names; `broken` needs names, piece
@@ -1751,7 +1799,7 @@ def main():
              'drc': drc, 'undersized': undersized, 'floorplan': floorplan,
              'assembly': assembly,
              'impedance': imped, 'length': length, 'net_widths': net_widths,
-             'diff_pairs': diff_pairs}
+             'diff_pairs': diff_pairs, 'audit': audit}
 
     # Track-rule-governed pairs are ADVISORY: their gate is the repo's own
     # registered-floor checker (check_dru), not this scalar. They live beside

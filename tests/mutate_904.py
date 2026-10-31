@@ -52,7 +52,7 @@ CONVERGE_ROWS = [
     # the defect itself: `spec` mapped to nothing, so a PASS on it could
     # contradict no number in its own row
     ('spec-mapping-deleted',
-     "    'spec': ('impedance', 'floorplan', 'length', 'net_widths'),\n",
+     "    'spec': ('impedance', 'floorplan', 'length', 'net_widths', 'audit'),\n",
      ''),
     # the lens that literally grades check_floorplan
     ('intent-mapping-deleted',

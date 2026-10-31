@@ -761,6 +761,9 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   first `(thickness ...)` of a layer block yourself
 - `pcb.board_info.pad_to_paste_clearance` / `_ratio` - the board's paste
   margin, the last term of a pad's paste-margin resolution (#962)
+- `pcb.board_info.pad_to_mask_clearance` - the board's solder-mask expansion,
+  the last term of `mask_apertures.resolve_mask_margin` (pad, footprint, board;
+  `Pad.mask_margin` / `Footprint.mask_margin` hold the overrides, #1232)
 - `pcb.board_info.via_protection_setup` - the board's via protection policy,
   all five tokens, from either setup form; an undeclared token takes KiCad's
   factory value. What a via is FABRICATED with is
