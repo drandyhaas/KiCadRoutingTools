@@ -214,6 +214,35 @@ def lands_on_interior(t: float, seg_len_sq: float,
     return t * length > band and (1.0 - t) * length > band
 
 
+def span_endpoint_degree(segs, group=lambda s: s.layer) -> Dict:
+    """How many DISTINCT spans meet at each segment end: {(group(s), (x, y)
+    rounded to 1 um): count}, the endpoint degree the soft-joint detectors
+    read to tell a free end (degree 1) from a shared vertex.
+
+    A span is a segment's (group, unordered rounded ends), counted once
+    however many same-net copies are stacked on it (#1550). Two pad taps
+    laid along one corridor stack every segment of it twice, and counted
+    per COPY the end of a cut stacked run reads degree 2 -- a shared vertex
+    -- so a removal that left two such ends touching by their caps alone
+    created a soft joint no detector saw. The copies conduct as one track,
+    and the end-of-run dedup (#162) ships one, so the degree is the span's.
+    """
+    from collections import defaultdict
+    deg = defaultdict(int)
+    seen = set()
+    for s in segs:
+        a = (round(s.start_x, 3), round(s.start_y, 3))
+        b = (round(s.end_x, 3), round(s.end_y, 3))
+        g = group(s)
+        span = (g, a, b) if a <= b else (g, b, a)
+        if span in seen:
+            continue
+        seen.add(span)
+        deg[(g, a)] += 1
+        deg[(g, b)] += 1
+    return deg
+
+
 def endpoint_reaches_pad(x, y, radius, layers, pad, unflashed_hole_only=False) -> set:
     """Which of `layers` a disc of copper -- centre (x, y), radius `radius` --
     both SHARES with `pad`'s copper and physically OVERLAPS. Empty set = no

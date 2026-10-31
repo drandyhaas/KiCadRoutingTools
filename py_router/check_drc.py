@@ -67,7 +67,7 @@ from routing_constants import SOFT_JOINT_MIN_GAP as _SOFT_JOINT_MIN_GAP
 
 # The one endpoint-coincidence radius (same value everywhere: 0.02mm / 20um).
 from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
-                          strict_joint_roots,
+                          strict_joint_roots, span_endpoint_degree,
                           endpoint_reaches_via)
 
 
@@ -4990,12 +4990,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     from collections import defaultdict as _dd
     def _rk(x, y):
         return (round(x, 3), round(y, 3))
-    _ep_count = _dd(int)
-    for s in pcb_data.segments:
-        if matching_net_ids is not None and s.net_id not in matching_net_ids:
-            continue
-        _ep_count[(s.net_id, s.layer, _rk(s.start_x, s.start_y))] += 1
-        _ep_count[(s.net_id, s.layer, _rk(s.end_x, s.end_y))] += 1
+    # Stacked same-net copies of one span count once (#1550): the copies
+    # conduct as one track, so their shared end is as free as a lone one's.
+    _ep_count = {(g[0], g[1], p): n for (g, p), n in span_endpoint_degree(
+        [s for s in pcb_data.segments
+         if matching_net_ids is None or s.net_id in matching_net_ids],
+        group=lambda s: (s.net_id, s.layer)).items()}
     _vias_by_net = _dd(list)
     for v in pcb_data.vias:
         _vias_by_net[v.net_id].append(v)
@@ -5018,12 +5018,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 return True
         return False
     _dangles = _dd(list)  # (net_id, layer) -> [(x, y, width)]
+    _seen_end = set()   # a stacked copy's end is the same free end (#1550)
     for s in pcb_data.segments:
         if matching_net_ids is not None and s.net_id not in matching_net_ids:
             continue
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
-            if _ep_count[(s.net_id, s.layer, _rk(x, y))] != 1:
+            _ek = (s.net_id, s.layer, _rk(x, y))
+            if _ep_count.get(_ek) != 1 or _ek in _seen_end:
                 continue  # shared vertex = clean joint
+            _seen_end.add(_ek)
             if _at_anchor(s.net_id, x, y, s.layer, s.width):
                 continue  # terminates on a via / own pad = legitimate
             # A soft joint is a PAIR: a graphic is carried as a flag so

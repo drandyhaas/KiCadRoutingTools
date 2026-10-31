@@ -212,7 +212,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
 from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
-                          endpoint_reaches_via, lands_on_interior)
+                          endpoint_reaches_via, lands_on_interior,
+                          span_endpoint_degree)
 _STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
@@ -1668,10 +1669,7 @@ def _soft_joint_pairs(segs, vias, pads):
                 return True
         return False
 
-    deg = defaultdict(int)
-    for s in segs:
-        deg[(s.layer, _rk3(s.start_x, s.start_y))] += 1
-        deg[(s.layer, _rk3(s.end_x, s.end_y))] += 1
+    deg = span_endpoint_degree(segs)   # stacked copies count once (#1550)
     dangles = defaultdict(list)  # layer -> [(key, x, y, width, is_graphic)]
     seen = set()
     for s in segs:
