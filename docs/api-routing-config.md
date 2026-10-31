@@ -740,6 +740,17 @@ Two more rules bind P against its own N and take the same path:
   clearance (the `diff_pair_gap` minimum), which an explicit clearance rule does not
   lower, so such a pair's gap is floored at that minimum too.
 
+Under any of these rules the hybrid escape's single-ended pieces keep the rule as the
+coupled middle does: a terminal leg (`_route_hybrid_leg`) stamps the partner's copper
+at the rule rather than at the partner's class clearance, so a leg can reach its own
+middle end laid at the rule's gap; where legs or a #444 seam re-ask run alongside the
+partner at a grid pitch above the routed gap, `pull_to_pair_gap` lays them at the gap
+(a 0.1 mm gap is not a grid pitch on a 0.1 mm grid, and such copper read uncoupled);
+and a layer combination whose coupled middle crossed its own partner's pad is retried
+with that end's launch a step further in (`LAUNCH_RETRIES_PARTNER_PAD`), because the
+narrower pair's launch swath can clear between its own two pads. With no such rule all
+three are inert.
+
 The negated form is KiCad's **"keep pairs apart"** rule (#1295), e.g. `A.NetClass ==
 '100Ohm-diff' && !AB.isCoupledDiffPair() && A.Type == 'Track' && B.Type == 'Track'`: a
 class member's track keeps the rule's clearance from every other track except its own

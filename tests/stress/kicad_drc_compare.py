@@ -804,6 +804,16 @@ def _staged_copy(board: str, clearance: float):
     # still enforced everywhere a pad has not declared otherwise.
     pad_floor = _smallest_pad_override(board)
     mc_target = clearance if pad_floor is None else min(clearance, pad_floor)
+    # #1542: the board minimum also FLOORS KiCad's implicit per-class
+    # "netclass '<class>' (diff pair)" rule, which grades a pair's P against
+    # its N at the class diff_pair_gap where that is below the class
+    # clearance. Staging the minimum above that gap grades every coupled run
+    # laid at it as a clearance item (measured: 109 P/N items at a 0.1 class
+    # gap on a board whose own project, min_clearance 0.0, reports none).
+    for c in cfg.get("net_settings", {}).get("classes", []) or []:
+        gap = _f(c.get("diff_pair_gap"), None)
+        if gap and 0 < gap < _f(c.get("clearance"), 0.0) and gap < mc_target:
+            mc_target = gap
     rules["min_clearance"] = min(
         _f(rules.get("min_clearance"), mc_target) or mc_target, mc_target)
     # Hole floor (#327): equalize min_hole_clearance to the routed copper
