@@ -1237,7 +1237,8 @@ class PlanesTab(wx.Panel):
                         gnd_via_distance,
                         gnd_config,
                         obstacles,
-                        coord
+                        coord,
+                        net_clearances=_plane_net_clearances
                     )
 
                     # Add to new vias list

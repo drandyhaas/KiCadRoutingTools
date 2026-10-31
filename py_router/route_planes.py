@@ -4774,7 +4774,8 @@ Examples:
             args.gnd_via_distance,
             gnd_config,
             obstacles,
-            coord
+            coord,
+            net_clearances=gnd_net_clearances
         )
 
         if gnd_vias:

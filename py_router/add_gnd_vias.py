@@ -22,7 +22,8 @@ def add_gnd_vias_to_existing_board(
     gnd_via_distance: float,
     config: GridRouteConfig,
     obstacles: GridObstacleMap,
-    coord: GridCoord
+    coord: GridCoord,
+    net_clearances: Dict[int, float] = None
 ) -> List[Via]:
     """
     Add GND vias near existing signal vias in a PCB that don't already have a nearby GND via.
@@ -36,6 +37,8 @@ def add_gnd_vias_to_existing_board(
         config: Routing config with via size, drill, clearance, layers
         obstacles: Obstacle map built from the board
         coord: Grid coordinate converter
+        net_clearances: The net-class map (net_id -> mm) the obstacle map was
+            built with, so the exact check prices each pair as the map did
 
     Returns:
         List of new GND Via objects to add
@@ -200,7 +203,83 @@ def add_gnd_vias_to_existing_board(
         ddy = py - (_cap_p1y + t * _cap_dy)
         return ddx * ddx + ddy * ddy
 
-    def is_via_position_clear(x_mm: float, y_mm: float, sig_via_x: float, sig_via_y: float) -> tuple:
+    # The grid check below decides on CELLS: a track is stamped as the cells
+    # whose centres lie within its keep-out, and the via as a disc of cells,
+    # so the edge of each is quantised to the grid and a via can sit up to
+    # half a cell into a track or pad the cells call clear (0.006-0.015 mm
+    # grazes at a 0.1 grid, on tracks as narrow as the fab floor). A site the
+    # grid accepts is therefore measured once more, exactly: the via's ring
+    # against every foreign track and pad, at the clearance check_drc grades
+    # the pair at. A through via meets every copper layer.
+    _seg_rows = [s for s in pcb_data.segments if s.layer.endswith('.Cu')]
+    _seg_ax = np.array([s.start_x for s in _seg_rows], dtype=np.float64)
+    _seg_ay = np.array([s.start_y for s in _seg_rows], dtype=np.float64)
+    _seg_bx = np.array([s.end_x for s in _seg_rows], dtype=np.float64)
+    _seg_by = np.array([s.end_y for s in _seg_rows], dtype=np.float64)
+    _seg_hw = np.array([max(s.width, 0.0) / 2.0 for s in _seg_rows], dtype=np.float64)
+    _seg_net = np.array([s.net_id for s in _seg_rows], dtype=np.int64)
+    _seg_dx = _seg_bx - _seg_ax
+    _seg_dy = _seg_by - _seg_ay
+    _seg_l2 = _seg_dx * _seg_dx + _seg_dy * _seg_dy
+    _nc = net_clearances or {}
+    _seg_clr_by_net: Dict[int, np.ndarray] = {}
+
+    def _pair_base(own_net, other_net):
+        # the pair's net classes (#434/#439), as the grid map priced them;
+        # pair_clearance then applies the .kicad_dru layer rule (#498)
+        return max(config.clearance, _nc.get(own_net, 0.0), _nc.get(other_net, 0.0))
+
+    def _seg_clr(own_net):
+        arr = _seg_clr_by_net.get(own_net)
+        if arr is None:
+            arr = np.array([config.pair_clearance(own_net, s.net_id, s.layer,
+                                                  base=_pair_base(own_net, s.net_id))
+                            for s in _seg_rows], dtype=np.float64)
+            _seg_clr_by_net[own_net] = arr
+        return arr
+
+    _cu_pads = [p for _fp in pcb_data.footprints.values() for p in _fp.pads
+                if p.pad_type != 'np_thru_hole'
+                and any(l.endswith('.Cu') for l in (p.layers or []))]
+    _pad_cx = np.array([p.global_x for p in _cu_pads], dtype=np.float64)
+    _pad_cy = np.array([p.global_y for p in _cu_pads], dtype=np.float64)
+    _pad_rad = np.array([math.hypot(p.size_x, p.size_y) / 2.0 for p in _cu_pads],
+                        dtype=np.float64)
+
+    def _exact_copper_clear(x_mm, y_mm, own_net):
+        vr = config.via_size / 2.0
+        if len(_seg_rows):
+            with np.errstate(divide='ignore', invalid='ignore'):
+                t = np.clip(((x_mm - _seg_ax) * _seg_dx + (y_mm - _seg_ay) * _seg_dy)
+                            / _seg_l2, 0.0, 1.0)
+            t = np.where(_seg_l2 > 0, t, 0.0)
+            d = np.hypot(x_mm - (_seg_ax + t * _seg_dx), y_mm - (_seg_ay + t * _seg_dy))
+            # a cheap upper bound first, then each foreign net's own pair value
+            near = (_seg_net != own_net) & (d < vr + _seg_hw + _max_clr)
+            if near.any():
+                bad = near & (d < vr + _seg_hw + _seg_clr(own_net) - 1e-6)
+                if bad.any():
+                    i = int(np.nonzero(bad)[0][0])
+                    return (False, f"track_graze({_seg_rows[i].layer})")
+        if len(_cu_pads):
+            from check_drc import point_to_pad_distance
+            reach = vr + _max_clr + _pad_rad
+            for i in np.nonzero(np.hypot(x_mm - _pad_cx, y_mm - _pad_cy) < reach)[0]:
+                p = _cu_pads[i]
+                if p.net_id == own_net:
+                    continue
+                clr = config.pad_pair_clearance(p, own_net, base=_pair_base(own_net, p.net_id))
+                if point_to_pad_distance(x_mm, y_mm, p) < vr + clr - 1e-6:
+                    return (False, f"pad_graze({p.component_ref}.{p.pad_number})")
+        return (True, "clear")
+
+    _max_clr = max(config.max_pair_clearance(),
+                   max(_nc.values()) if _nc else 0.0,
+                   max((getattr(p, 'local_clearance', 0.0) or 0.0) for p in _cu_pads)
+                   if _cu_pads else 0.0)
+
+    def is_via_position_clear(x_mm: float, y_mm: float, sig_via_x: float, sig_via_y: float,
+                              own_net: int = gnd_net_id) -> tuple:
         """Check if a via can be placed at the given position.
 
         Returns: (is_clear, reason) where reason explains why it's blocked if not clear.
@@ -267,7 +346,7 @@ def add_gnd_vias_to_existing_board(
             if dist < via_via_min_dist:
                 return (False, f"too_close_to_batch_gnd_via({dist:.2f}mm)")
 
-        return (True, "clear")
+        return _exact_copper_clear(x_mm, y_mm, own_net)
 
     # Try many angles for better coverage (every 15 degrees = 24 directions)
     angles_deg = list(range(0, 360, 15))
@@ -315,7 +394,8 @@ def add_gnd_vias_to_existing_board(
                 gnd_y = round((sy + distance * math.sin(angle_rad))
                               / config.grid_step) * config.grid_step
 
-                is_clear, reason = is_via_position_clear(gnd_x, gnd_y, sx, sy)
+                is_clear, reason = is_via_position_clear(gnd_x, gnd_y, sx, sy,
+                                                          via_gnd_net_id)
                 if is_clear:
                     # Found a valid position at closest possible distance
                     best_pos = (gnd_x, gnd_y)

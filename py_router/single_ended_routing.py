@@ -4181,6 +4181,54 @@ def _track_forbidden_layers(config, layer_names):
                      if name in config.layers and name not in routable)
 
 
+def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
+    """Whether a fill launch cell's TERMINAL copper clears foreign copper.
+
+    A launch cell becomes a source/target override for the A* (it may start
+    or end in a cell another net's clearance blocks), and the converter draws
+    the sub-cell bridge from the cell's grid point to the weld point. No
+    keep-out the map stamps applies to that copper, and the terminal neck can
+    only narrow it, so a graze the fab floor still leaves ships. A pad has to
+    be reached wherever it sits; a launch cell is one choice among the many
+    cells of its region. So a cell is offered only when its terminal copper
+    -- the grid point and the bridge to the weld point, at the floor width the
+    neck can narrow it to -- clears every foreign pad, track and via at the
+    pair clearance the neck grades. A fill cell is not enough on its own: the
+    fill model is a raster at the zone clearance, so a weld point at its rim
+    puts half a track width past it.
+
+    Returns ok(fx, fy, layer_idx) -> bool, memoised per weld point. A layer
+    the config forbids track on draws no bridge (#1292), so it always passes.
+    """
+    floor = config.track_floor(net_id, None, _fab_track_floor(pcb_data)) \
+        if hasattr(config, 'track_floor') else _fab_track_floor(pcb_data)
+    nc = getattr(config, 'net_clearances', None) or None
+    own = (config.obstacle_clearance(net_id)
+           if hasattr(config, 'obstacle_clearance') else config.clearance)
+    memo = {}
+
+    def ok(fx, fy, li):
+        if li in forbid:
+            return True
+        key = (round(fx, 6), round(fy, 6), li)
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        layer = layer_names[li]
+        gx, gy = coord.to_float(*coord.to_grid(fx, fy))
+        own_l = (config.layer_clearance(layer, own)
+                 if hasattr(config, 'layer_clearance') else own)
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, gx, gy, fx, fy, layer,
+                                      base_clearance=own_l, net_clearances=nc,
+                                      config=config),
+                _seg_foreign_seg_dist(pcb_data, net_id, gx, gy, fx, fy, layer,
+                                      net_clearances=nc, base_clearance=own_l,
+                                      exact=True))
+        memo[key] = res = own_l - (d - floor / 2.0) <= NECK_GRAZE_TOL
+        return res
+    return ok
+
+
 def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
                               layer_names, coord, island_cells, config):
     """#544/#562 POUR-LAUNCH ladder v3: per-REGION fill launch cells.
@@ -4231,13 +4279,20 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     from obstacle_map import track_edge_point_test
     _edge_ok = track_edge_point_test(pcb_data, config)
     _edge_need = round(_edge_ok.need, 6) if _edge_ok else None
+    # ...and its terminal copper clears foreign copper (_launch_weld_test).
+    _weld_clear = _launch_weld_test(pcb_data, net_id, config, coord,
+                                    layer_names, _forbid)
     _mk = (net_id, id(pad_components), len(pad_info), _forbid, _edge_need)
     _memo = getattr(pcb_data, '_pour_launch_memo', None)
     # The memo HOLDS pad_components (id() alone is unsafe: a freed dict's id
     # can be reused by a different grouping -- the memo's strong ref pins it).
     if (_memo is not None and _memo[0] == _mk
             and _memo[1] is pad_components):
-        return _memo[2]
+        # Copper other nets laid since (Phase 3 runs after every main
+        # route) can crowd a cell the memo kept: test each one again.
+        return {_c: {_k: _v for _k, _v in _cm.items()
+                     if _weld_clear(_v[0], _v[1], _k[2])}
+                for _c, _cm in _memo[2].items()}
     try:
         from plane_fill_model import get_zone_model
         from plane_fragility import _erode_depth
@@ -4317,12 +4372,14 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
                                     (_d2 ** 0.5 + _FRAG_MM * _frag,
                                      _fx, _fy, _li))
                         # A rung counts once a candidate's weld clears the
-                        # edge; tested best-first, only as far as needed.
+                        # edge and foreign copper; tested best-first, only
+                        # as far as needed.
                         _found.sort()
                         _kept = list(itertools.islice(
                             (_c for _c in _found
-                             if _c[3] in _forbid or _edge_ok is None
-                             or _edge_ok(_c[1], _c[2])), _NBEST))
+                             if (_c[3] in _forbid or _edge_ok is None
+                                 or _edge_ok(_c[1], _c[2]))
+                             and _weld_clear(_c[1], _c[2], _c[3])), _NBEST))
                         if _kept:
                             break
                     for _sc, _fx, _fy, _fl in _kept:
@@ -4401,9 +4458,13 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
     # (see _pour_launch_region_cells).
     from obstacle_map import track_edge_point_test
     _edge_ok = track_edge_point_test(pcb_data, config)
+    # ...and its terminal copper clears foreign copper (_launch_weld_test).
+    _clear_ok = _launch_weld_test(pcb_data, net_id, config, coord,
+                                  layer_names, _forbid)
 
     def _weld_ok(c):
-        return c[3] in _forbid or _edge_ok is None or _edge_ok(c[1], c[2])
+        return ((c[3] in _forbid or _edge_ok is None or _edge_ok(c[1], c[2]))
+                and _clear_ok(c[1], c[2], c[3]))
 
     def _probe_size(fx, fy):
         for _p in _net_pads:
