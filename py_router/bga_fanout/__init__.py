@@ -79,7 +79,7 @@ from bga_fanout.diff_pair import find_differential_pairs
 _direct_route_nets: Set[str] = set()
 from bga_fanout.tracks import (
     detect_collisions,
-    convert_segments_to_tracks,
+    board_copper_tracks,
     generate_tracks_from_routes,
 )
 
@@ -4015,6 +4015,22 @@ def _generate_bga_fanout_core(footprint: Footprint,
         if p.drill > 0 or any(l in copper_layer_set for l in (p.layers or []))
     ]
 
+    # The copper already on the board, as obstacles for every collision check
+    # (#1551). It used to enter them only with check_for_previous -- an
+    # unrelated "skip balls already fanned" option -- and its vias never did,
+    # so on a board that already carried copper by the array (a second fanout,
+    # a few balls left bare by an earlier step, a fanout after a bus step) the
+    # escapes were validated against each other only: a channel track was laid
+    # through another net's escape and the step printed "No collisions". Only
+    # the copper an escape can reach is read, so the checks stay as cheap as
+    # the board around the array.
+    _reach = exit_margin + 2.0 * max(grid.pitch_x, grid.pitch_y) \
+        + via_size + track_width + 2.0 * clearance
+    _board_bounds = (grid.min_x - _reach, grid.min_y - _reach,
+                     grid.max_x + _reach, grid.max_y + _reach)
+    _board_tracks = board_copper_tracks(pcb_data, layers, track_width,
+                                        _board_bounds)
+
     # Build routes - process differential pairs together
     def _run_pass(force_secondary_pairs):
         """Run one full route-build + collision-resolution pass.
@@ -4158,8 +4174,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
         if neighbor_connections > 0:
             print(f"  Connected {neighbor_connections} adjacent same-net pads directly")
 
-        # Convert existing PCB segments to track format for collision checking
-        existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []
+        # The board's copper near the array, for every collision check (#1551)
+        existing_tracks = _board_tracks
 
         # Reassign on-channel pads to adjacent channels when too many share the same channel
         reassigned_count = reassign_on_channel_pads(routes, channels, grid, len(layers), exit_margin, footprint)
@@ -4323,7 +4339,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 if not route_clear_of_foreign_pads(r, short_pads, obstacle_layer_map))
     if n_bad > 0:
         print(f"  Pad-aware check: {n_bad} route(s) cross a foreign pad; repairing...")
-        existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []
+        existing_tracks = _board_tracks
         net_id_to_name_all = {r.net_id: r.pad.net_name for r in best_routes if r.pad.net_name}
         pad_repaired, pad_failed = repair_pad_crossings(
             best_routes, tracks, layers, track_width, clearance, diff_pair_gap,
