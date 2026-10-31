@@ -116,6 +116,8 @@ Options:
   --json FILE               Also write the result as JSON: the graded floors with their
                             source (graded_at), the violation and accepted counts,
                             by_type, contacts_by_type, via_in_paste, keepout and every item.
+                            An item's `short` is true only for copper of two nets in
+                            contact, never for a drill, hole or edge item.
                             Complete regardless of --max-print
   --render DIR              Write one cropped PNG per spatial cluster of violations
                             (drawn by route_render)
