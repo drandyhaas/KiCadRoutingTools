@@ -1162,6 +1162,38 @@ def drop_off_board_pads(pcb_data: PCBData, pads: List[Pad]) -> List[Pad]:
     return [p for p in pads if not off_board(p.global_x, p.global_y)]
 
 
+def make_off_board_link_end_test(pcb_data: PCBData):
+    """Return f(net_id, x, y) -> True when a reported unconnected-link end is
+    OFF the board (#1544), or None when the board has no outline to test.
+
+    KiCad's connectivity knows nothing of the outline, so its unconnected
+    links -- kicad-cli's and the exact-fill source's alike -- include links
+    to and between the pads drop_off_board_pads (#291) takes out of every
+    routing endpoint set. An end is off the board when the point itself is
+    clearly outside the outline (make_off_board_test), or when it lies on a
+    pad of its net that drop_off_board_pads drops: a nearest-approach anchor
+    sits on the pad's copper, which can reach nearer the edge than the pad
+    centre the #291 test reads. Copper drawn to such an end can only end
+    outside the outline."""
+    from check_drc import make_off_board_test
+    from check_connected import _point_in_pad
+    off_board = make_off_board_test(pcb_data.board_info)
+    if off_board is None:
+        return None
+    off_pads = {}
+    for nid, pads in pcb_data.pads_by_net.items():
+        dropped = [p for p in pads if off_board(p.global_x, p.global_y)]
+        if dropped:
+            off_pads[nid] = dropped
+
+    def test(net_id: int, x: float, y: float) -> bool:
+        if off_board(x, y):
+            return True
+        return any(_point_in_pad(x, y, p, margin=0.05)
+                   for p in off_pads.get(net_id, ()))
+    return test
+
+
 def routable(items) -> list:
     """`items` (a net's segments, vias or pads) without the protected Kelvin
     sense copper and sense pads (#1279, sense_branch.py): a net's new copper
