@@ -6606,7 +6606,10 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         directly away from the offender. Terminal joints have slack: their
         endpoint sits inside an adjoining stub's copper body, so a tiny slide
         keeps the copper-overlap join; the connectivity gate proves it. A
-        vertex carrying a via never moves (layer-stack alignment).
+        vertex carrying a via never moves (layer-stack alignment), nor one
+        whose cap lies wholly inside another same-net track (#1548): that
+        track's copper still grazes there, so the slide clears nothing and
+        only takes a soft joint out of close_soft_joints' in-flank reach.
       * BOW (closest approach mid-segment): split at the approach and offset a
         short middle section perpendicular, away from the offender.
 
@@ -6827,6 +6830,25 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                         return  # a vertex move rewrites every incident segment;
                                 # read-only input copper (and KiCad-locked
                                 # copper, #1261) pins this joint in place
+                    # #1548: a vertex whose cap lies wholly inside ANOTHER
+                    # same-net track on the layer (a route landing mid-span on
+                    # a stub) sits in that track's copper, which grazes the
+                    # offender at least as closely -- so sliding this end
+                    # alone clears nothing. What it does do is take the
+                    # end off the track's centreline: when the end is a soft
+                    # joint with the track's free end, close_soft_joints'
+                    # in-flank bridge no longer applies and its clearance
+                    # gate refuses the bridge through this same graze, so the
+                    # joint ships as a SEGMENT-ENDPOINT-GAP.
+                    r_end = max(g.width for g in incident) / 2.0
+                    _inc = {id(g) for g in incident}
+                    for g in net_segs:
+                        if (id(g) not in _inc and g.layer == s.layer
+                                and not getattr(g, 'graphic', False)
+                                and _pt_seg_dist(px, py, g.start_x, g.start_y,
+                                                 g.end_x, g.end_y)
+                                <= g.width / 2.0 - r_end + 1e-4):
+                            return
                     for m in (1.0, 1.8, 3.0):
                         d = (shortfall + MARGIN) * m
                         if d > max_shift:
