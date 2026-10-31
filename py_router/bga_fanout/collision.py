@@ -73,6 +73,16 @@ def check_segment_collision(seg1_start: Tuple[float, float], seg1_end: Tuple[flo
     return False
 
 
+def spacing_to(other: Dict, min_spacing: float) -> float:
+    """The centreline spacing a track of this run keeps from `other`.
+
+    `min_spacing` (track_width + clearance) is sized for two of this run's
+    tracks; the board's own copper (`tracks.board_copper_tracks`) carries
+    `spacing_extra`, the half-width a via or a track of another width differs
+    by (#1551)."""
+    return min_spacing + other.get('spacing_extra', 0.0)
+
+
 def _track_bbox_arrays(tracks: List[Dict]):
     """Axis-aligned bounding box (xmin/xmax/ymin/ymax) of every track, as arrays."""
     n = len(tracks)
@@ -123,6 +133,7 @@ def find_colliding_pairs(tracks: List[Dict], min_spacing: float) -> Set[str]:
     nets = np.array([t['net_id'] for t in tracks])
     existing = np.array([bool(t.get('is_existing')) for t in tracks])
     pair_codes = _encode_pair_ids(tracks)
+    extra = np.array([t.get('spacing_extra', 0.0) for t in tracks])  # #1551
 
     # Collisions only happen within a layer; bucket first so the O(m^2) pair
     # enumeration is per-layer rather than over the whole board.
@@ -144,8 +155,9 @@ def find_colliding_pairs(tracks: List[Dict], min_spacing: float) -> Set[str]:
         same_pair = (pair_codes[a] >= 0) & (pair_codes[a] == pair_codes[b])
         mask &= ~same_pair
         # Clearance-inflated bbox overlap (necessary condition for a collision).
-        mask &= (xmax[a] >= xmin[b] - min_spacing) & (xmax[b] >= xmin[a] - min_spacing)
-        mask &= (ymax[a] >= ymin[b] - min_spacing) & (ymax[b] >= ymin[a] - min_spacing)
+        sp = min_spacing + extra[a] + extra[b]
+        mask &= (xmax[a] >= xmin[b] - sp) & (xmax[b] >= xmin[a] - sp)
+        mask &= (ymax[a] >= ymin[b] - sp) & (ymax[b] >= ymin[a] - sp)
 
         sel = np.nonzero(mask)[0]
         for i, j in zip(a[sel].tolist(), b[sel].tolist()):
@@ -153,7 +165,7 @@ def find_colliding_pairs(tracks: List[Dict], min_spacing: float) -> Set[str]:
             t2 = tracks[j]
             if check_segment_collision(t1['start'], t1['end'],
                                         t2['start'], t2['end'],
-                                        min_spacing):
+                                        spacing_to(t2, spacing_to(t1, min_spacing))):
                 # Use pair_id if available, otherwise use net_id as identifier
                 if t1.get('pair_id'):
                     colliding_pairs.add(t1['pair_id'])

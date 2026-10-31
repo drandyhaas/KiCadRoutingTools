@@ -9,7 +9,8 @@ from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
 
 from bga_fanout.types import FanoutRoute, Channel, top_layer_barred
-from bga_fanout.collision import check_segment_collision, tracks_match_identifier
+from bga_fanout.collision import (check_segment_collision, spacing_to,
+                                  tracks_match_identifier)
 
 
 def segments_overlap_on_channel(route1: FanoutRoute, route2: FanoutRoute,
@@ -245,7 +246,7 @@ def assign_layers_smart(routes: List[FanoutRoute],
                         for seg_start, seg_end in route_segs:
                             if check_segment_collision(seg_start, seg_end,
                                                        existing['start'], existing['end'],
-                                                       min_spacing):
+                                                       spacing_to(existing, min_spacing)):
                                 conflict = True
                                 break
                         if conflict:
@@ -346,9 +347,11 @@ def try_reassign_layer(identifier: str, routes: List[FanoutRoute], tracks: List[
             for ot in all_other_tracks:
                 if ot['layer'] != candidate_layer:
                     continue
+                if ot.get('is_existing') and ot.get('net_id') == pt['net_id']:
+                    continue                 # the net's own copper (#1551)
                 if check_segment_collision(pt['start'], pt['end'],
                                             ot['start'], ot['end'],
-                                            min_spacing):
+                                            spacing_to(ot, min_spacing)):
                     has_collision = True
                     break
             if has_collision:

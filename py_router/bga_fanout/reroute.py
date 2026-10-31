@@ -19,6 +19,7 @@ from bga_fanout.types import (
 )
 from bga_fanout.collision import (
     check_segment_collision,
+    spacing_to,
     find_colliding_pairs,
     find_collision_partners,
 )
@@ -520,7 +521,7 @@ def try_reroute_single_ended(route: 'FanoutRoute',
                     continue
                 if check_segment_collision(seg['start'], seg['end'],
                                             other['start'], other['end'],
-                                            min_spacing):
+                                            spacing_to(other, min_spacing)):
                     has_collision = True
                     break
             if has_collision:
@@ -715,7 +716,7 @@ def try_jogged_route(route: 'FanoutRoute',
                     continue
                 if check_segment_collision(seg['start'], seg['end'],
                                            other['start'], other['end'],
-                                           min_spacing):
+                                           spacing_to(other, min_spacing)):
                     has_collision = True
                     break
             if has_collision:
@@ -1243,11 +1244,12 @@ def _route_collides(route: 'FanoutRoute', tracks: List[Dict],
             if route.pair_id is not None and o.get('pair_id') == route.pair_id:
                 continue
             (cx, cy), (dx, dy) = o['start'], o['end']
-            if max(cx, dx) < lo_x or min(cx, dx) > hi_x \
-                    or max(cy, dy) < lo_y or min(cy, dy) > hi_y:
+            ex = o.get('spacing_extra', 0.0)        # #1551
+            if max(cx, dx) < lo_x - ex or min(cx, dx) > hi_x + ex \
+                    or max(cy, dy) < lo_y - ex or min(cy, dy) > hi_y + ex:
                 continue
             if check_segment_collision(t['start'], t['end'], o['start'], o['end'],
-                                       min_spacing):
+                                       spacing_to(o, min_spacing)):
                 return True
     return False
 
@@ -1300,7 +1302,8 @@ def _tracks_collision_free(segments: List[Dict], layer: str, net_id: int,
             if pair_id and other.get('pair_id') == pair_id:
                 continue
             if check_segment_collision(seg['start'], seg['end'],
-                                       other['start'], other['end'], min_spacing):
+                                       other['start'], other['end'],
+                                       spacing_to(other, min_spacing)):
                 return False
     return True
 

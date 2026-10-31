@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import List, Dict, Set, Tuple
 from bga_fanout.types import FanoutRoute, route_uid
-from bga_fanout.collision import check_segment_collision
+from bga_fanout.collision import check_segment_collision, spacing_to
 from bga_fanout.constants import MAX_REBALANCE_ITERATIONS, MAX_EDGE_PAIR_ITERATIONS
 
 
@@ -64,10 +64,12 @@ def _check_conflicts_on_layer(
     # Check against existing tracks on target layer
     existing_on_layer = [e for e in existing_tracks if e['layer'] == target_layer]
     for existing in existing_on_layer:
+        if existing.get('net_id') in all_net_ids:
+            continue  # the nets' own copper (#1551)
         for seg_start, seg_end in all_route_segs:
             if check_segment_collision(seg_start, seg_end,
                                        existing['start'], existing['end'],
-                                       min_spacing):
+                                       spacing_to(existing, min_spacing)):
                 return True
 
     # Check against new tracks already on target layer (from other nets)
