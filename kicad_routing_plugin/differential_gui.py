@@ -1004,8 +1004,11 @@ class DifferentialTab(wx.Panel):
                     net_clearances[net.net_id] = class_clearance_cache.get(
                         cname, _diff_clearance)
                 if config.get('clamp_netclasses', False):
-                    net_clearances = {nid: min(clr, _diff_clearance)
-                                      for nid, clr in net_clearances.items()}
+                    from fab_tiers import cap_net_clearances  # #1561 discloses
+                    net_clearances = cap_net_clearances(
+                        net_clearances, _diff_clearance,
+                        net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
+                        class_of=all_net_to_class)
             except Exception as e:
                 print(f"Warning: Could not get net class clearances: {e}")
                 net_clearances = None

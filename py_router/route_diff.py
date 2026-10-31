@@ -762,8 +762,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 # --clearance-ceiling) passes an explicit uncapped map, so this internal
                 # fallback always caps.
                 if clearance_ceiling is not None:
-                    net_clearances = {nid: min(clr, clearance_ceiling)
-                                      for nid, clr in net_clearances.items()}
+                    from fab_tiers import cap_net_clearances
+                    net_clearances = cap_net_clearances(
+                        net_clearances, clearance_ceiling,
+                        net_names={nid: n.name for nid, n in pcb_data.nets.items()},
+                        board_path=input_file)
                     print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
                           f"capped at the ceiling {clearance_ceiling}mm (#439; cross-class "
                           f"max(A,B) respected).")
@@ -3336,8 +3339,11 @@ Examples:
         # min(class, ceiling) (stock classes are aspirational). Without it the
         # classes are honored in full.
         if _net_clearances_map and args._clamp_netclasses:
-            _net_clearances_map = {nid: min(clr, args._clearance_ceiling)
-                                   for nid, clr in _net_clearances_map.items()}
+            from fab_tiers import cap_net_clearances
+            _net_clearances_map = cap_net_clearances(
+                _net_clearances_map, args._clearance_ceiling,
+                net_names={_nid: _net.name for _nid, _net in pcb_data.nets.items()},
+                board_path=args.input_file)
         if _net_clearances_map:
             _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})
             _mode = (f"capped at --clearance-ceiling {args._clearance_ceiling}"

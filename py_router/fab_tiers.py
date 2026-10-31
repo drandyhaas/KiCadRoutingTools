@@ -193,7 +193,7 @@ _ESCALATION = DEFAULT_ESCALATION
 _BOARD_FLOORS = {}
 
 # The per-run LEDGER: what went below a requested size, where, and by how much.
-_LEDGER = {'narrowed': [], 'fab_tier': []}
+_LEDGER = {'narrowed': [], 'fab_tier': [], 'ceiling_lowered': {}}
 
 
 def set_default_fab_tier(tier, overrides=None):
@@ -910,8 +910,116 @@ def check_param_floors(copper_layer_count, tier=None, overrides=None, **params):
 def reset_ledger():
     _LEDGER['narrowed'] = []
     _LEDGER['fab_tier'] = []
+    _LEDGER['ceiling_lowered'] = {}
     _escalation_warned.clear()
     _escalation_lever_said.clear()
+
+
+#: `--clearance-ceiling` lowering a net class to under 1/this of its declared
+#: clearance is named on the console and in JSON_SUMMARY.design_rules (#1561)
+CEILING_LOWER_RATIO = 2.0
+
+
+def _class_names_for(net_ids, net_names, board_path):
+    """{net_id: the NON-Default class that set its clearance, or 'Default'
+    for a net in no other class} read off the board's project (list_nets'
+    shared membership resolver); {} when there is no readable project."""
+    if not board_path or not net_names:
+        return {}
+    try:
+        from list_nets import read_design_rules, net_class_memberships
+        dr = read_design_rules(board_path)
+        classes = dr.get('classes') or {}
+        mem = net_class_memberships(board_path, {n: net_names.get(n) for n in net_ids
+                                                 if net_names.get(n)},
+                                    design_rules=dr)
+    except Exception:                                            # noqa: BLE001
+        return {}
+    out = {nid: 'Default' for nid in net_ids if net_names.get(nid)}
+    for nid, cand in mem.items():
+        best = None
+        for cn in cand:
+            if cn == 'Default':
+                continue
+            v = (classes.get(cn) or {}).get('clearance')
+            if isinstance(v, (int, float)) and (best is None or v > best[0]):
+                best = (float(v), cn)
+        if best is not None:
+            out[nid] = best[1]
+    return out
+
+
+def cap_net_clearances(net_clearances, ceiling, *, net_names=None, class_of=None,
+                       board_path=None, tool=''):
+    """``{net_id: min(class clearance, ceiling)}`` -- what `--clearance-ceiling`
+    (the GUI's Clearance ceiling box) does to the net-class map, the #530
+    contract -- and DISCLOSE it (#1561): every class the cap lowers by more
+    than ``CEILING_LOWER_RATIO`` is named once per run on the console and in
+    ``escalation_summary()['ceiling_lowered_classes']`` (JSON_SUMMARY
+    ``design_rules``): the class, its clearance, the capped value and the nets
+    it covers. Disclosure only: the map is capped exactly as before.
+
+    ``net_names`` is {net_id: name}; the class of each net is ``class_of``
+    ({net_id or net name: class}) when given (a front that read the classes
+    off the live board), else read from ``board_path``'s project. A net whose
+    class cannot be named is grouped by its clearance."""
+    if not net_clearances or ceiling is None:
+        return net_clearances
+    capped = {nid: min(c, ceiling) for nid, c in net_clearances.items()}
+    low = [nid for nid, c in net_clearances.items()
+           if ceiling > 0 and c / ceiling > CEILING_LOWER_RATIO + 1e-9]
+    if not low:
+        return capped
+    names = dict(net_names or {})
+    cls = {}
+    if class_of:
+        for nid in low:
+            c = class_of.get(nid)
+            if c is None and names.get(nid) is not None:
+                c = class_of.get(names[nid])
+            if c is not None:
+                cls[nid] = c
+    missing = [nid for nid in low if nid not in cls]
+    if missing:
+        cls.update(_class_names_for(missing, names, board_path))
+    groups = {}
+    for nid in low:
+        if cls.get(nid) == 'Default':
+            # the Default class IS the run's clearance, which the caller
+            # asked for; the disclosure names the classes it did not name
+            continue
+        key = (cls.get(nid), round(float(net_clearances[nid]), 6))
+        groups.setdefault(key, []).append(names.get(nid) or str(nid))
+    label = f"{tool}: " if tool else ""
+    for (cname, value), nets in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+        key = (cname, value, round(float(ceiling), 6))
+        row = _LEDGER['ceiling_lowered'].get(key)
+        if row is None:
+            row = _LEDGER['ceiling_lowered'][key] = {
+                'class': cname, 'clearance': value, 'capped': round(float(ceiling), 6),
+                'ratio': round(value / ceiling, 3), 'nets': []}
+            fresh = True
+        else:
+            fresh = False
+        row['nets'] = sorted(set(row['nets']) | set(nets))
+        row['net_count'] = len(row['nets'])
+        if fresh:
+            who = ", ".join(row['nets'][:6]) + (
+                f" (+{len(row['nets']) - 6} more)" if len(row['nets']) > 6 else "")
+            what = f"NET CLASS {cname}" if cname else f"A NET CLASS AT {value:g} mm"
+            print(f"  {label}WARNING: --clearance-ceiling {ceiling:g} LOWERS {what} "
+                  f"{value / ceiling:.1f}x -- {value:g} -> {ceiling:g} mm on "
+                  f"{len(row['nets'])} net(s): {who}. It routes at {ceiling:g} and "
+                  f"the output project grades it there; a clearance that must "
+                  f"hold belongs in a .kicad_dru rule, which the ceiling never "
+                  f"lowers (#1561)")
+    return capped
+
+
+def ceiling_lowered_classes():
+    """This run's `cap_net_clearances` disclosures, one row per class."""
+    return [dict(r) for _k, r in sorted(_LEDGER['ceiling_lowered'].items(),
+                                        key=lambda kv: (str(kv[0][0]), kv[0][1]))]
 
 
 def note_narrowing(net_id, kind, requested, delivered, site, count=1, net_name=None):
@@ -1021,6 +1129,8 @@ def escalation_summary():
         # consumer counting fab_tier_escalations needs this to know whether the
         # run left the board's declared envelope -- see escalation_target.
         'fab_tier_target': escalation_target(),
+        **({'ceiling_lowered_classes': ceiling_lowered_classes()}
+           if _LEDGER['ceiling_lowered'] else {}),
     }
 
 
@@ -1062,7 +1172,8 @@ def narrowed_summary():
     ``design_rules`` block the non-route CLIs add only when there is something
     in it, so a run that narrowed nothing prints what it always printed."""
     s = escalation_summary()
-    return s if (s['count'] or s['fab_tier_escalations']) else None
+    return (s if (s['count'] or s['fab_tier_escalations']
+                  or s.get('ceiling_lowered_classes')) else None)
 
 
 def finish_design_rules(args, rc=0, *, print_line=True):

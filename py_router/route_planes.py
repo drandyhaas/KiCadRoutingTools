@@ -3605,8 +3605,11 @@ def create_plane(
         # (the --net-clearances file, or the GUI's own class map, already
         # capped there) is used as given, as batch_route does.
         if net_clearances and clamp_netclasses and clearance_ceiling is not None:
-            net_clearances = {nid: min(c, clearance_ceiling)
-                              for nid, c in net_clearances.items()}
+            from fab_tiers import cap_net_clearances
+            net_clearances = cap_net_clearances(
+                net_clearances, clearance_ceiling,
+                net_names={nid: n.name for nid, n in pcb_data.nets.items()},
+                board_path=input_file)
     # The plane nets of this call set the floor foreign obstacles are priced
     # from, as in repair_planes and batch_route (#1290).
     if net_clearances:
@@ -4760,8 +4763,11 @@ Examples:
                                   args.input_file,
                                   {nid: n.name for nid, n in pcb_data.nets.items()}))
         if _nc_by_name is None and gnd_net_clearances and args._clamp_netclasses:
-            gnd_net_clearances = {nid: min(c, args._clearance_ceiling)
-                                  for nid, c in gnd_net_clearances.items()}
+            from fab_tiers import cap_net_clearances
+            gnd_net_clearances = cap_net_clearances(
+                gnd_net_clearances, args._clearance_ceiling,
+                net_names={nid: n.name for nid, n in pcb_data.nets.items()},
+                board_path=args.input_file)
 
         # Build obstacle map
         obstacles = build_base_obstacle_map(pcb_data, gnd_config, [],

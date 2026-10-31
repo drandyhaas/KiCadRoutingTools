@@ -1037,8 +1037,11 @@ class PlanesTab(wx.Panel):
                 _plane_net_clearances[net.net_id] = class_clearance_cache.get(
                     cname, _plane_clearance)
             if _plane_clamp:
-                _plane_net_clearances = {nid: min(clr, _plane_clearance)
-                                         for nid, clr in _plane_net_clearances.items()}
+                from fab_tiers import cap_net_clearances  # #1561 discloses
+                _plane_net_clearances = cap_net_clearances(
+                    _plane_net_clearances, _plane_clearance,
+                    net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
+                    class_of=all_net_to_class)
         except Exception as e:
             print(f"Warning: Could not get net class clearances: {e}")
             _plane_net_clearances = None

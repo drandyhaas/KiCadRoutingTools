@@ -1173,8 +1173,11 @@ def repair_planes(
         # as given, as batch_route and create_plane do. The map propagates to
         # the reconnect sub-runs below (they reuse it).
         if net_clearances and clamp_netclasses and clearance_ceiling is not None:
-            net_clearances = {nid: min(c, clearance_ceiling)
-                              for nid, c in net_clearances.items()}
+            from fab_tiers import cap_net_clearances
+            net_clearances = cap_net_clearances(
+                net_clearances, clearance_ceiling,
+                net_names={nid: n.name for nid, n in pcb_data.nets.items()},
+                board_path=input_file)
     # The plane nets this call repairs set the floor every foreign obstacle is
     # priced from, as batch_route's routed nets do: obstacle_clearance() is
     # max(floor, the OBSTACLE's class), so without it a Power_Bulk (0.25) GND
