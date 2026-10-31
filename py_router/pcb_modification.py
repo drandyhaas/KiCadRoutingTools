@@ -4953,7 +4953,8 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
                              keep_input_copper: bool = False,
                              net_clearances=None,
-                             board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Segment]]:
+                             board_edge_clearance: float = 0.0,
+                             config=None) -> Tuple[int, int, List[Segment]]:
     """Re-bend a foreign-pad-grazing octolinear jog so it clears the pad (issue #224).
 
     The complement to prune_grazing_segments: when a grazing segment is LOAD-BEARING
@@ -5054,12 +5055,16 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         # omitting them here let a re-bend that fixed a pad graze land within
         # clearance of (or onto) a foreign via (#254 neo6502 /GPIO1 vs /GPIO2).
         eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
+        # `config`: the scoped .kicad_dru rules (#1491) a bend must hold (#1561)
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff, net_clearances=net_clearances),
+                                      base_clearance=eff, net_clearances=net_clearances,
+                                      config=config),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff),
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      config=config),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff))
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      config=config))
         # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
         # copper terms above never see a copper-less hole, so a re-bend could
         # land the jog across a mounting hole.
@@ -5485,14 +5490,19 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = pair_base(net_id, layer)
+        # `config`: the class/type-scoped .kicad_dru rules (#1491) the router
+        # held, which a shortcut must not hand back (#1561)
         pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                   base_clearance=eff, net_clearances=net_clearances)
+                                   base_clearance=eff, net_clearances=net_clearances,
+                                   config=config)
         d = min(pd,
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff,
-                                      track_clearances=_trk_clr),  # dru track rules
+                                      track_clearances=_trk_clr,  # dru track rules
+                                      config=config),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff))
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      config=config))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
                                     base_clearance=npth_clr)  # #1038, per-hole #760
         ok = (d >= eff + w / 2.0 - 1e-4 and
@@ -5508,7 +5518,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                 del pcb_data._foreign_pad_arr_cache
             pd_fresh = _seg_foreign_pad_dist(
                 pcb_data, net_id, x1, y1, x2, y2, layer,
-                base_clearance=eff, net_clearances=net_clearances)
+                base_clearance=eff, net_clearances=net_clearances, config=config)
             if _saved is not None:
                 pcb_data._foreign_pad_arr_cache = _saved
             if abs(pd_fresh - pd) > 1e-6:
@@ -6713,12 +6723,16 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
+        # `config`: the scoped .kicad_dru rules (#1491) a shift must hold (#1561)
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff, net_clearances=net_clearances),
+                                      base_clearance=eff, net_clearances=net_clearances,
+                                      config=config),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff),
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      config=config),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff))
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      config=config))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
                                     base_clearance=npth_clr)  # #760
         return (d >= eff + w / 2.0 - 1e-4 and
@@ -6962,7 +6976,8 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                        # edge-to-edge clearance from SAME-net SMD pads (the
                        # sub-grid move must not trade a foreign graze for a
                        # same-net pad one).
-                       same_net_pad_clearance: float = -1.0) -> Tuple[int, int, List[Tuple]]:
+                       same_net_pad_clearance: float = -1.0,
+                       config=None) -> Tuple[int, int, List[Tuple]]:
     """Sub-grid nudge for a VIA that grazes foreign copper or a drill (#280).
 
     Two vias snapped to the routing grid can land a few µm inside clearance
@@ -7021,11 +7036,18 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             return clearance
         return max(clearance, net_clearances.get(nid, clearance))
 
-    def pair_clr(own, foreign_nid):
+    _scoped = getattr(config, 'scoped_clearance', None) if config is not None else None
+
+    def pair_clr(own, foreign_nid, own_nid=None, ftype=None, pad_type=None):
         # #436: KiCad's pairwise requirement max(own floor, foreign class).
-        if not net_clearances:
-            return own
-        return max(own, net_clearances.get(foreign_nid, clearance))
+        v = own if not net_clearances else max(own, net_clearances.get(foreign_nid, clearance))
+        if _scoped is not None and own_nid is not None:
+            # #1491/#1561: a class/type-scoped .kicad_dru rule binding the
+            # moving via against this item replaces the class value
+            got = _scoped.sc.pair_value(own_nid, 'via', foreign_nid, ftype, None, pad_type)
+            if got is not None:
+                v = max(got[0], _scoped.fab_floor)
+        return v
 
     def worse(before, after):
         return ((before.get('connected') and not after.get('connected')) or
@@ -7221,12 +7243,13 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         # max(own floor, that net's class), not the flat routing clearance.
         for s in near_segs:
             d, t = _pt_seg_dist_t(x, y, s)
-            consider(d - (r + s.width / 2.0 + pair_clr(own, s.net_id)),
+            consider(d - (r + s.width / 2.0 + pair_clr(own, s.net_id, v.net_id, 'track')),
                      s.start_x + t * (s.end_x - s.start_x),
                      s.start_y + t * (s.end_y - s.start_y))
         for o in near_vias:
             d = math.hypot(x - o.x, y - o.y)
-            consider(d - (r + o.size / 2.0 + pair_clr(own, o.net_id)), o.x, o.y)
+            consider(d - (r + o.size / 2.0 + pair_clr(own, o.net_id, v.net_id, 'via')),
+                     o.x, o.y)
         for p in near_pads:
             if getattr(p, 'source', None) is not None:     # #962 paste opening
                 from paste_apertures import aperture_distance as _apd
@@ -7239,7 +7262,8 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             if p.net_id == v.net_id:
                 _need = same_net_pad_clearance  # #581 (only gathered when > 0)
             else:
-                _need = max(pair_clr(own, p.net_id),
+                _need = max(pair_clr(own, p.net_id, v.net_id, 'pad',
+                                     getattr(p, 'pad_type', None) or 'smd'),
                             getattr(p, 'local_clearance', 0.0) or 0.0)
             consider(g - (r + _need), tp[0], tp[1])
         if vd > 0:

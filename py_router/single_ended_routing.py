@@ -246,7 +246,7 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
 
 
 def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
-                         net_clearances=None):
+                         net_clearances=None, config=None, own_type='track'):
     """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
     The pad is modelled as a rounded rect (accurate for circle/oval/roundrect,
     exact rect at corner_r=0), so a round BGA ball is not over-approximated by its
@@ -264,7 +264,9 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
     pad's netclass EXCESS over `base_clearance` into the effective distance the
     same way local_clearance is (whichever is larger wins), so a caller check
     `dist >= base_clearance + w/2` enforces KiCad's pairwise max(base, classF)
-    against a pad in a wider (e.g. controlled-impedance) class. Inert when None."""
+    against a pad in a wider (e.g. controlled-impedance) class. Inert when None.
+
+    `config` / `own_type` (#1491): as `_seg_foreign_pad_dist`."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance,
@@ -295,6 +297,8 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
             fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
                              for f in nids[near]], dtype=float)
             excess = np.maximum(excess, fcls)
+        excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
+                                         plc, excess, base_clearance, own_type)
         d = d - excess
     return min(float(np.min(d)), best_custom)
 
@@ -320,21 +324,25 @@ def _foreign_pad_types(pcb_data, layer):
     return got
 
 
-def _scoped_pad_excess(config, net_id, nids, types, base_clearance, layer=None):
-    """#1491: per foreign pad, the scoped rule's requirement for the moving
-    net's track against it, minus `base_clearance` (negative where the rule
-    relaxes), or NaN where no scoped rule binds the pair -- or where a layer
-    rule later in the file replaces it on `layer`, whose value
-    `base_clearance` already is."""
+def _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer=None,
+                   pad_types=None, own_type='track'):
+    """#1491: per foreign item of `foreign_type` ('track', 'via' or 'pad',
+    with `pad_types` per row for pads), the scoped rule's requirement for the
+    moving net's `own_type` item against it, minus `base_clearance` (negative
+    where the rule relaxes), or NaN where no scoped rule binds the pair -- or
+    where a layer rule later in the file replaces it on `layer`, whose value
+    `base_clearance` already is. All NaN without a scoped channel."""
     s = getattr(config, 'scoped_clearance', None)
     out = np.full(len(nids), np.nan)
     if s is None:
         return out
     lmap = getattr(config, 'layer_clearances', None) or {}
-    for i, (nid, pt) in enumerate(zip(nids, types)):
-        if int(nid) == int(net_id):
+    own = int(net_id or 0)
+    for i, nid in enumerate(nids):
+        if int(nid) == own:
             continue
-        got = s.sc.pair_value(int(net_id), 'track', int(nid), 'pad', None, pt)
+        pt = pad_types[i] if pad_types is not None else None
+        got = s.sc.pair_value(own, own_type, int(nid), foreign_type, None, pt)
         if got is None:
             continue
         if layer is not None and layer in s.sc.layer_rules_after(lmap, got[2]):
@@ -343,8 +351,39 @@ def _scoped_pad_excess(config, net_id, nids, types, base_clearance, layer=None):
     return out
 
 
+def _fold_scoped_excess(excess, scoped):
+    """#1491/#1561: where a scoped rule binds (`scoped` not NaN) its value
+    REPLACES the class term in `excess` (None = no class term); elsewhere
+    `excess` stands. Returns `excess` unchanged when nothing binds."""
+    bound = ~np.isnan(scoped)
+    if not bound.any():
+        return excess
+    base = excess if excess is not None else np.zeros(len(scoped))
+    return np.where(bound, scoped, base)
+
+
+def _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids, plc,
+                            excess, base_clearance, own_type='track'):
+    """#1491: a class/type-scoped rule REPLACES the class term in `excess` for
+    the foreign pads (`near` rows of the pad arrays) it binds; a pad's own
+    override still outranks it. `excess` unchanged without a scoped channel
+    or a binding rule."""
+    if config is None or getattr(config, 'scoped_clearance', None) is None:
+        return excess
+    types = np.asarray(_foreign_pad_types(pcb_data, layer), dtype=object)[near]
+    sx_ = _scoped_excess(config, net_id, nids[near], 'pad', base_clearance, layer,
+                         pad_types=types, own_type=own_type)
+    bound = ~np.isnan(sx_)
+    if not bound.any():
+        return excess
+    # KiCad: a pad override returns before any rule is read
+    scoped_x = np.where(plc[near] > 0, plc[near] - base_clearance, np.nan_to_num(sx_))
+    return np.where(bound, scoped_x, excess)
+
+
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                          base_clearance=None, net_clearances=None, config=None):
+                          base_clearance=None, net_clearances=None, config=None,
+                          own_type='track'):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
@@ -353,7 +392,10 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     `base_clearance` (#326 B6): see _pt_foreign_pad_dist -- subtracts each pad's
     local-clearance excess so unchanged caller thresholds honor overrides.
     `net_clearances` (#436): see _pt_foreign_pad_dist -- also folds each foreign
-    pad's netclass excess so cross-class pad grazes are enforced."""
+    pad's netclass excess so cross-class pad grazes are enforced.
+    `config` (#1491): its class/type-scoped .kicad_dru rules replace the class
+    term for the pads they bind against the moving net's `own_type` item
+    ('track', or 'via' for a via probed as a zero-length segment)."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
@@ -381,18 +423,8 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
             fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
                              for f in nids[near]], dtype=float)
             excess = np.maximum(excess, fcls)
-        if config is not None and getattr(config, 'scoped_clearance', None) is not None:
-            # #1491: a class/type-scoped rule REPLACES the class term for the
-            # pads it binds (a pad's own override still outranks it)
-            types = np.asarray(_foreign_pad_types(pcb_data, layer), dtype=object)[near]
-            sx_ = _scoped_pad_excess(config, net_id, nids[near], types, base_clearance,
-                                     layer)
-            bound = ~np.isnan(sx_)
-            if bound.any():
-                # KiCad: a pad override returns before any rule is read
-                scoped_x = np.where(plc[near] > 0, plc[near] - base_clearance,
-                                    np.nan_to_num(sx_))
-                excess = np.where(bound, scoped_x, excess)
+        excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
+                                         plc, excess, base_clearance, own_type)
     # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
     # rotated by R(-rot); identity for axis-aligned pads): shrink the
     # half-extents by the corner radius, take the outside distance to that
@@ -564,7 +596,8 @@ def _foreign_seg_bboxes(pcb_data, layer, validated=False):
 
 def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           net_clearances=None, base_clearance=0.0,
-                          track_clearances=None, exact=None):
+                          track_clearances=None, exact=None, config=None,
+                          own_type='track'):
     """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
     via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
     the terminal centreline to the foreign copper EDGE (point-to-segment distance to
@@ -588,7 +621,13 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     `exact`: True takes the exact segment-to-segment distance, else the
     sampled sweep (the default). A caller
     whose verdict ADMITS copper the routing map refused passes True (#1318):
-    the sweep can read up to half a sample step long."""
+    the sweep can read up to half a sample step long.
+
+    `config` (#1491, #1561): its class/type-scoped .kicad_dru rules replace
+    the class term for the foreign tracks they bind against the moving net's
+    `own_type` item ('track', or 'via' for a via probed as a zero-length
+    segment). A pass that MOVES copper must pass it, or it can lay copper
+    inside a rule the router held (a 0.6 mm HV-to-HV rule smoothed to 0.2)."""
     nid, fax, fay, fbx, fby, fhw = _foreign_seg_arrays(pcb_data, layer)
     if nid.size == 0:
         return 1e9
@@ -620,6 +659,17 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                max(_nc.get(int(f), base_clearance),
                                    _tc.get(int(f), 0.0)) - base_clearance)
                            for f in fnid], dtype=float)
+    if config is not None and getattr(config, 'scoped_clearance', None) is not None:
+        # #1491/#1561: a class/type-scoped rule REPLACES the class term for
+        # the foreign tracks it binds; a track rule (#735) still raises it.
+        fnid = nid[near]
+        sx_ = _scoped_excess(config, net_id, fnid, 'track', base_clearance, layer,
+                             own_type=own_type)
+        if track_clearances:
+            sx_ = np.where(np.isnan(sx_), sx_, np.maximum(
+                sx_, np.array([track_clearances.get(int(f), -math.inf)
+                               for f in fnid], dtype=float) - base_clearance))
+        excess = _fold_scoped_excess(excess, sx_)
     if exact:
         # The exact segment-to-segment distance (2026-09-11): the minimum
         # between two segments is attained at an endpoint of one of them
@@ -688,12 +738,14 @@ def _foreign_via_arrays(pcb_data):
 
 
 def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                          net_clearances=None, base_clearance=0.0):
+                          net_clearances=None, base_clearance=0.0, config=None,
+                          own_type='track'):
     """Min edge distance from a segment to any OTHER-net VIA (body), exact point-to-
     segment minus via radius. The via analogue of _seg_foreign_pad_dist; a negative
     result (centreline inside the via) is returned as-is. #436: `net_clearances`
     subtracts each foreign via's netclass excess over `base_clearance` (see
-    _seg_foreign_seg_dist)."""
+    _seg_foreign_seg_dist), and `config` / `own_type` fold its scoped rules
+    the same way (#1491, #1561)."""
     nids, cx, cy, rad = _foreign_via_arrays(pcb_data)
     if cx.size == 0:
         return 1e9
@@ -711,10 +763,15 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     else:
         tt = np.clip(((fcx - x1) * dx + (fcy - y1) * dy) / l2, 0.0, 1.0)
         d = np.hypot(fcx - (x1 + tt * dx), fcy - (y1 + tt * dy)) - fr
+    excess = None
     if net_clearances:
         fnid = nids[near]
         excess = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
                            for f in fnid], dtype=float)
+    if config is not None and getattr(config, 'scoped_clearance', None) is not None:
+        excess = _fold_scoped_excess(excess, _scoped_excess(
+            config, net_id, nids[near], 'via', base_clearance, layer, own_type=own_type))
+    if excess is not None:
         d = d - excess
     return float(np.min(d))
 
@@ -901,18 +958,21 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
             need = vs / 2.0 + _base - eps
             if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer,
                                      net_clearances=_lncl,
-                                     base_clearance=_base) < need:
+                                     base_clearance=_base,
+                                     config=config, own_type='via') < need:
                 ok = False
                 break
             if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer,
                                     base_clearance=_base,
-                                    net_clearances=_lncl) < need:
+                                    net_clearances=_lncl,
+                                    config=config, own_type='via') < need:
                 ok = False
                 break
         if ok and _seg_foreign_via_dist(
                 pcb_data, net_id, x, y, x, y,
                 layers[0] if layers else 'F.Cu', net_clearances=_ncl,
-                base_clearance=_stack) < vs / 2.0 + _stack - eps:
+                base_clearance=_stack, config=config,
+                own_type='via') < vs / 2.0 + _stack - eps:
             ok = False
         # #671: _seg_foreign_via_dist is FOREIGN-only, and copper clearance
         # should be -- two same-net barrels may touch. The DRILL hole-to-hole
@@ -1121,7 +1181,8 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
                                       base_clearance=own_l, net_clearances=nc,
                                       config=config),
                 _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
-                                      net_clearances=nc, base_clearance=own_l))
+                                      net_clearances=nc, base_clearance=own_l,
+                                      config=config))
         # #1279: the net's own protected sense copper is foreign here too,
         # except where the terminal lies on the branch's join pad.
         from sense_branch import terminal_sense_dist
@@ -1217,11 +1278,11 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     margin = _base + config.get_net_track_width(net_id, ol) / 2.0
     if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol,
                             base_clearance=_base,
-                            net_clearances=_ncl) >= margin:
+                            net_clearances=_ncl, config=config) >= margin:
         return False  # grid cell already clear -> nothing to fix
     if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol,
                             base_clearance=_base,
-                            net_clearances=_ncl) < margin:
+                            net_clearances=_ncl, config=config) < margin:
         return False  # exact endpoint also too close (placement) -> can't fix here
     nx, ny = pts[neighbor_idx]
     # Only relocate the endpoint of a SHORT terminal segment. simplify_path (caller,
@@ -1234,7 +1295,7 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
         return False  # long terminal segment -> keep grid end + short stub
     if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol,
                              base_clearance=_base,
-                             net_clearances=_ncl) < margin - 1e-6:
+                             net_clearances=_ncl, config=config) < margin - 1e-6:
         return False  # merged terminal segment would graze -> keep grid + stub
     pts[term_idx] = (ox, oy)
     return True
@@ -4219,7 +4280,7 @@ def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
                                       config=config),
                 _seg_foreign_seg_dist(pcb_data, net_id, gx, gy, fx, fy, layer,
                                       net_clearances=nc, base_clearance=own_l,
-                                      exact=True))
+                                      exact=True, config=config))
         memo[key] = res = own_l - (d - floor / 2.0) <= NECK_GRAZE_TOL
         return res
     return ok
@@ -7056,7 +7117,7 @@ def _neck_zone_exact_fits(seg, pcb_data, net_id: int, config) -> bool:
     d = _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                               net_clearances=nc, base_clearance=base,
                               track_clearances=getattr(config, 'track_clearances', None) or None,
-                              exact=True)
+                              exact=True, config=config)
     if d - hw < base - NECK_GRAZE_TOL:
         return False
 

@@ -351,7 +351,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             keep_input_copper=keep_input_copper,
-            net_clearances=_nc, board_edge_clearance=_bec)
+            net_clearances=_nc, board_edge_clearance=_bec,
+            config=config)  # #1561: scoped .kicad_dru rules
         counts['octolinear_nudged'] = _nz_segs
         _trace('octolinear')
         strip.extend(_nz_strip)
@@ -393,7 +394,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             max_shift=config.grid_step,
             net_clearances=_nc, board_edge_clearance=_bec,
             same_net_pad_clearance=getattr(config, 'same_net_pad_clearance',
-                                           -1.0))  # #581
+                                           -1.0),  # #581
+            config=config)  # #1561: scoped .kicad_dru rules
         counts['vias_nudged'] = _vn_moved
         _trace('via_nudge')
         if _vn_moved:
