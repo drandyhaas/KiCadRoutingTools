@@ -3630,7 +3630,11 @@ def oracle_reconnect(board_file: str, net_names, config,
             if _content2 is None:
                 with open(board_file, 'r', encoding='utf-8') as f:
                     _content2 = f.read()
-            _nm_map = {_lnid: _lnet} if v10 else None
+                # The dialect of the file this sweep edits, read off that
+                # file (#1549): the rounds loop's `v10` is bound only in a
+                # round that RAN, so the round-0 exit died on it here.
+                _name_nets2 = board_uses_name_nets(_content2)
+            _nm_map = {_lnid: _lnet} if _name_nets2 else None
             _content2, _n1 = remove_segments_from_content(
                 _content2, _dsegs, net_id_to_name=_nm_map)
             if _dvias:
