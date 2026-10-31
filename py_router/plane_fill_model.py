@@ -337,16 +337,22 @@ class ZoneFillModel:
         # Foreign copper on this layer + every via/through barrel. `guard` is
         # rebound per object to the pairwise clearance and restored after each
         # loop (the closure reads the CURRENT binding).
-        for v in pcb_data.vias:
-            if v.net_id != net_id:
-                guard = max(guard_base, _nc.get(v.net_id, 0.0))
-                _stamp_disc(v.x, v.y, v.size / 2.0)
+        f_vias, f_segs = _foreign_copper(pcb_data, net_id, layer)
+        for v in f_vias:
+            guard = max(guard_base, _nc.get(v.net_id, 0.0))
+            _stamp_disc(v.x, v.y, v.size / 2.0)
         guard = guard_base
-        for s in pcb_data.segments:
-            if s.net_id != net_id and s.layer == layer:
-                guard = max(guard_base, _nc.get(s.net_id, 0.0))
-                _stamp_seg(s)
+        for s in f_segs:
+            guard = max(guard_base, _nc.get(s.net_id, 0.0))
+            _stamp_seg(s)
         guard = guard_base
+        # The copper this model was stamped from, so a cached model can tell
+        # whether the board's copper has moved on since (_model_is_current).
+        # The objects are HELD, not just their ids: a freed object's id can be
+        # reused by a new one, which would read as "still stamped".
+        self._stamped = f_vias + f_segs
+        self._stamped_ids = frozenset(map(id, self._stamped))
+        self._copper_key = _copper_key(pcb_data)
         from kicad_parser import pad_joins_zone
         for plist in pcb_data.pads_by_net.values():
             for p in plist:
@@ -768,11 +774,64 @@ def set_board_net_clearances(pcb_data, net_clearances):
     _MODELS_BY_ZONE_ID.clear()
 
 
-def get_fill_models(pcb_data, net_id):
-    """Cached ZoneFillModels for a net's zones, keyed on the PCBData object.
-    Returns {} when the net has no zones. Cache is invalidated implicitly by
-    board reparse (new PCBData object); callers that mutate copper mid-run
-    and need fresh models should delete the attr."""
+def _foreign_copper(pcb_data, net_id, layer):
+    """The copper a model of `net_id`'s zone on `layer` is carved by: every
+    foreign via (a barrel crosses every layer) and the foreign tracks on
+    `layer`. Returns (vias, segments) as lists."""
+    return ([v for v in pcb_data.vias if v.net_id != net_id],
+            [s for s in pcb_data.segments
+             if s.net_id != net_id and s.layer == layer])
+
+
+def _copper_key(pcb_data):
+    """A cheap stamp of the board's copper state: the two copper lists (held,
+    and compared by identity, so a replaced list never reads as the same one),
+    their lengths, and the copper epoch every commit and rip bumps
+    (pcb_modification.bump_copper_epoch)."""
+    segs, vias = pcb_data.segments, pcb_data.vias
+    return (segs, len(segs), vias, len(vias),
+            getattr(pcb_data, '_copper_epoch', 0))
+
+
+def _same_key(a, b):
+    return (a is not None and a[0] is b[0] and a[2] is b[2]
+            and a[1] == b[1] and a[3] == b[3] and a[4] == b[4])
+
+
+def _model_is_current(pcb_data, zone, m):
+    """Whether cached model `m` still describes `zone`'s fill on the board as
+    it is NOW.
+
+    A route step builds a plane net's model the first time anything asks
+    (often before a single net has routed) and then lays copper for every
+    other net. A model stamped from the input's copper predicts fill under
+    and beside those fresh tracks: pour launches are offered from it and pads
+    it reaches read as plane-connected, while KiCad pours around the tracks.
+
+    Two tiers, so the common case stays O(1): an unchanged copper key means
+    nothing was committed or ripped since the build. A changed key (the zone
+    net's OWN commits bump it too, and those never carve its fill) compares
+    the foreign copper the model would be stamped from now with what it was
+    stamped from. A model handed KiCad's own fill (IslandFillModel) or one
+    that could not be built carries no stamp and is kept as it is."""
+    stamped = getattr(m, '_stamped_ids', None)
+    if stamped is None:
+        return True
+    key = _copper_key(pcb_data)
+    if _same_key(m._copper_key, key):
+        return True
+    vias, segs = _foreign_copper(pcb_data, zone.net_id, zone.layer)
+    if (len(vias) + len(segs) == len(stamped)
+            and stamped.issuperset(map(id, vias))
+            and stamped.issuperset(map(id, segs))):
+        m._copper_key = key
+        return True
+    return False
+
+
+def _cached_model(pcb_data, zone):
+    """(model, built) for `zone` from `pcb_data`'s cache, (re)built when the
+    cached one is missing or no longer matches the board's copper."""
     cache = getattr(pcb_data, _CACHE_ATTR, None)
     if cache is None:
         cache = {}
@@ -780,15 +839,31 @@ def get_fill_models(pcb_data, net_id):
             setattr(pcb_data, _CACHE_ATTR, cache)
         except Exception:
             pass
+    key = (zone.net_id, zone.layer, id(zone))
+    m = cache.get(key)
+    if m is not None and _model_is_current(pcb_data, zone, m):
+        return m, False
+    m = ZoneFillModel(pcb_data, zone)
+    cache[key] = m
+    # A zone already published for the zone-object lookup gets the fresh
+    # model there too, whichever reader rebuilt it.
+    if (id(zone) in _MODELS_BY_ZONE_ID
+            and not getattr(pcb_data, '_isolated_fill', False)):
+        _MODELS_BY_ZONE_ID[id(zone)] = m
+    return m, True
+
+
+def get_fill_models(pcb_data, net_id):
+    """Cached ZoneFillModels for a net's zones, keyed on the PCBData object.
+    Returns {} when the net has no zones. A cached model is rebuilt when the
+    board's foreign copper has changed since it was stamped
+    (_model_is_current), so a reader mid-run sees the fill of the copper the
+    run has laid so far."""
     out = {}
     zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
              if z.net_id == net_id and z.polygon]
     for z in zones:
-        key = (net_id, z.layer, id(z))
-        m = cache.get(key)
-        if m is None:
-            m = ZoneFillModel(pcb_data, z)
-            cache[key] = m
+        m, _ = _cached_model(pcb_data, z)
         if m.ok:
             out.setdefault(z.layer, []).append(m)
     return out
@@ -819,18 +894,8 @@ class CopperView:
 
 def get_zone_model(pcb_data, zone):
     """Cached ZoneFillModel for ONE zone object (see get_fill_models)."""
-    cache = getattr(pcb_data, _CACHE_ATTR, None)
-    if cache is None:
-        cache = {}
-        try:
-            setattr(pcb_data, _CACHE_ATTR, cache)
-        except Exception:
-            pass
-    key = (zone.net_id, zone.layer, id(zone))
-    m = cache.get(key)
-    if m is None:
-        m = ZoneFillModel(pcb_data, zone)
-        cache[key] = m
+    m, built = _cached_model(pcb_data, zone)
+    if built:
         if not getattr(pcb_data, '_isolated_fill', False):
             if len(_MODELS_BY_ZONE_ID) > 64:
                 _MODELS_BY_ZONE_ID.clear()

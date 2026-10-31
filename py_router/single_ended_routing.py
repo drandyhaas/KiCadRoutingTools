@@ -4283,22 +4283,35 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     _weld_clear = _launch_weld_test(pcb_data, net_id, config, coord,
                                     layer_names, _forbid)
     _mk = (net_id, id(pad_components), len(pad_info), _forbid, _edge_need)
-    _memo = getattr(pcb_data, '_pour_launch_memo', None)
-    # The memo HOLDS pad_components (id() alone is unsafe: a freed dict's id
-    # can be reused by a different grouping -- the memo's strong ref pins it).
-    if (_memo is not None and _memo[0] == _mk
-            and _memo[1] is pad_components):
-        # Copper other nets laid since (Phase 3 runs after every main
-        # route) can crowd a cell the memo kept: test each one again.
-        return {_c: {_k: _v for _k, _v in _cm.items()
-                     if _weld_clear(_v[0], _v[1], _k[2])}
-                for _c, _cm in _memo[2].items()}
     try:
         from plane_fill_model import get_zone_model
         from plane_fragility import _erode_depth
         import numpy as _np
     except Exception:
         return {}
+    try:
+        _zones = [z for z in (pcb_data.zones or []) if z.net_id == net_id
+                  and z.layer in layer_names]
+        _models = [get_zone_model(pcb_data, _z) for _z in _zones]
+    except Exception as _e:
+        print(f"  POUR-LAUNCH unavailable ({_e})")
+        return {}
+    _memo = getattr(pcb_data, '_pour_launch_memo', None)
+    # The memo HOLDS pad_components (id() alone is unsafe: a freed dict's id
+    # can be reused by a different grouping -- the memo's strong ref pins it)
+    # and the fill models its cells came from: copper other nets laid since
+    # rebuilds a model (plane_fill_model._model_is_current), and cells read
+    # off the old fill would launch from where KiCad no longer pours.
+    if (_memo is not None and _memo[0] == _mk
+            and _memo[1] is pad_components
+            and len(_memo[3]) == len(_models)
+            and all(_a is _b for _a, _b in zip(_memo[3], _models))):
+        # A model that did not change can still have had copper laid beside
+        # a cell the memo kept (its own net's, or a foreign track outside the
+        # zone's layer): test each one again.
+        return {_c: {_k: _v for _k, _v in _cm.items()
+                     if _weld_clear(_v[0], _v[1], _k[2])}
+                for _c, _cm in _memo[2].items()}
     _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm
     _NBEST = 12
     try:
@@ -4309,10 +4322,7 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     out = {}
     _bare_kept = 0
     try:
-        _zones = [z for z in (pcb_data.zones or []) if z.net_id == net_id
-                  and z.layer in layer_names]
-        for _z in _zones:
-            _m = get_zone_model(pcb_data, _z)
+        for _z, _m in zip(_zones, _models):
             if _m is None:
                 continue
             _li = layer_names.index(_z.layer)
@@ -4395,7 +4405,7 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     if _bare_kept:
         print(f"  POUR-LAUNCH: {_bare_kept} bare fill region(s) kept by the "
               f"zone island policy are not yet nodes (deferred)")
-    pcb_data._pour_launch_memo = (_mk, pad_components, out)
+    pcb_data._pour_launch_memo = (_mk, pad_components, out, _models)
     return out
 
 
