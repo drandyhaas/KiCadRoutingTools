@@ -2780,7 +2780,18 @@ def generate_underpad_escape(footprint: Footprint,
                 if mv.get('path'):
                     ok = _dogbone_path_valid(p, tuple(mv['site']), mv['path'])
                 if ok is None:
-                    ok = _dogbone_site_valid(p, tuple(mv['site']))
+                    # a site on the array's boundary line is refused where the
+                    # via is the escape's own exit (no tooth), not where the
+                    # planned run leaves it for an exit a pitch or more away --
+                    # back through the array to another face: the tooth is
+                    # there, and the plan proved the site. Refused, the via
+                    # went to the engine's own gap, between another bus's
+                    # pair lanes, and the run was lost
+                    _ex = mv.get('exit')
+                    ok = _dogbone_site_valid(
+                        p, tuple(mv['site']),
+                        edge_ok=_ex is not None and math.hypot(
+                            _ex[0] - mv['site'][0], _ex[1] - mv['site'][1]) > pitch)
                 if ok is not None:
                     _reserve_dogbone(p, ok[0], ok[1])
                 else:
