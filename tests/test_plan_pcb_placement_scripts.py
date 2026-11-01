@@ -199,7 +199,8 @@ def test_make_unplaced_reads_kicad6_lock_and_text_spellings():
     from kicad_parser import iter_footprint_blocks, parse_kicad_pcb
     run_utils.evidence(ESP)
     with open(ESP, encoding='utf-8', newline='') as fh:
-        text = fh.read()
+        # A checkout may be CRLF (core.autocrlf); the anchors are LF.
+        text = fh.read().replace('\r\n', '\n')
     for start, end, fp_text, _raw, key in iter_footprint_blocks(text):
         if key == 'USB1':
             new = re.sub(r'^(\(footprint\s+"[^"]*")', r'\1 locked', fp_text,

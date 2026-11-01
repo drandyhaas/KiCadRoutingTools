@@ -57,7 +57,8 @@ def run(*argv):
 
 def board_text(extra=WINDOW, pose=POSE_ON):
     with open(BOARD, encoding='utf-8', newline='') as fh:
-        text = fh.read()
+        # A checkout may be CRLF (core.autocrlf); the anchors are LF.
+        text = fh.read().replace('\r\n', '\n')
     assert text.count(ANCHOR) == 1, 'control: the anchor line is not unique'
     assert text.count(POSE_ON) == 1, "control: U1's pose line is not unique"
     return text.replace(ANCHOR, ANCHOR + extra).replace(POSE_ON, pose)

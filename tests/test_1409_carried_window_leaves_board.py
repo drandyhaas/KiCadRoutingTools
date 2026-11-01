@@ -44,7 +44,8 @@ def run(*argv):
 
 def windowed(td):
     with open(BOARD, encoding='utf-8', newline='') as fh:
-        text = fh.read()
+        # A checkout may be CRLF (core.autocrlf); the anchors are LF.
+        text = fh.read().replace('\r\n', '\n')
     key = '\t\t(tags "CMS SSOP SMD")\n'
     assert text.count(key) == 1, 'control: the anchor line is not unique'
     path = os.path.join(td, 'win.kicad_pcb')
