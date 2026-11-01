@@ -18,10 +18,13 @@ Checks (tracked esp_prog):
   4. route.py routes Net-(R3-Pad2) through a 3 x 2 mm box without the area
      (non-vacuity) and around it with the area, still routed.
   5. Once the area is added to that free route, check_drc reports its copper
-     inside the area, and (with kicad-cli present) KiCad reports the same count
-     as items_not_allowed under a custom rule naming the area -- the area is
-     real to KiCad. kicad-cli 10.0.0 does not enforce a rule area's own
-     keep-out, so the named rule is what it can grade.
+     inside the area, and (with kicad-cli present, found as the tools find it)
+     KiCad reports the same tracks as items_not_allowed under a custom rule
+     naming the area -- the area is real to KiCad. kicad-cli 10.0.0 does not
+     enforce a rule area's own keep-out, so the named rule is what it can
+     grade; 10.0.3 and 10.0.7 enforce it as well, which reports each track
+     once per rule, so the leg counts TRACKS per rule, never rows, and the
+     area's own report must be those same tracks or nothing.
 
     python3 tests/test_1200_add_rule_area.py
 """
@@ -40,13 +43,14 @@ sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 sys.path.insert(0, TESTS_DIR)
 
 from copy_board import copy_board                              # noqa: E402
+from kicad_oracle import find_kicad_cli, kicad_cli_version     # noqa: E402
 from kicad_parser import parse_kicad_pcb                       # noqa: E402
 import run_utils                                               # noqa: E402
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb')
 NET = 'Net-(R3-Pad2)'
 BOX = (132.0, 99.0, 135.0, 101.0)
-KICAD_CLI = '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli'
+RULE = 'ko_by_name'
 failures = []
 
 
@@ -66,6 +70,31 @@ def tool(*argv):
     return subprocess.run([sys.executable, '-X', 'utf8', 'py_router/add_rule_area.py']
                           + [str(a) for a in argv], cwd=ROOT, capture_output=True,
                           text=True, encoding='utf-8', errors='replace')
+
+
+def keepout_tracks(rows):
+    """(tracks the rule naming the area reports, tracks its own keep-out
+    reports) in KiCad's items_not_allowed rows. The track is a row's first
+    item, and its uuid names it once however many rules report it: 10.0.3
+    and 10.0.7 report each track under both, 10.0.0 under the rule alone."""
+    def tracks(by_rule):
+        return {json.dumps(v['items'][0].get('uuid') or v['items'][0],
+                           sort_keys=True)
+                for v in rows if v.get('type') == 'items_not_allowed'
+                and v.get('items')
+                and (f"'{RULE}'" in v.get('description', '')) == by_rule}
+    return tracks(True), tracks(False)
+
+
+def kicad_agrees(rows, n_ours):
+    """The two checks of KiCad's report against check_drc's n_ours tracks:
+    the named rule reports exactly that many, and the area's own keep-out
+    reports those same tracks or none (a KiCad that does not enforce it)."""
+    named, own = keepout_tracks(rows)
+    n_rows = sum(1 for v in rows if v.get('type') == 'items_not_allowed')
+    return (len(named) == n_ours and n_ours > 0, own in (set(), named),
+            f'{len(named)} track(s) by the rule, {len(own)} by the area, '
+            f'in {n_rows} items_not_allowed row(s); check_drc {n_ours}')
 
 
 def in_box(x, y):
@@ -178,23 +207,50 @@ def main():
         n_ours = r.stdout.count("in keep-out rule area 'KO'")
         check('check_drc reports the free route inside the area', n_ours >= 1,
               str(n_ours))
-        if os.path.isfile(KICAD_CLI):
+        # The count, on both shapes of report (#1591), with no KiCad needed:
+        # 10.0.0 reports each track under the named rule alone, 10.0.3 and
+        # 10.0.7 under the area's own keep-out too -- one row per rule.
+        def row(uuid, by_rule):
+            return {'type': 'items_not_allowed', 'items': [{'uuid': uuid}],
+                    'description': 'Items not allowed'
+                                   + (f" (rule '{RULE}')" if by_rule else '')}
+        enforced = [row(u, r) for u in 'abc' for r in (False, True)]
+        for label, rows, want in (
+                ('a 10.0.0 report (rule rows only)',
+                 [row(u, True) for u in 'abc'],
+                 (True, True)),
+                ('a 10.0.7 report (each track twice)', enforced, (True, True)),
+                ('a report a track short', enforced[:-2], (False, True)),
+                ('a report whose area names another track', enforced + [row('d', False)],
+                 (True, False)),
+                ('an empty report', [], (False, True))):
+            got = kicad_agrees(rows, 3)
+            check(f'the KiCad count reads {label} right',
+                  got[:2] == want, got[2])
+        kicad_cli = find_kicad_cli(warn=False)
+        if kicad_cli:
             # kicad-cli 10.0.0 does not enforce a rule area's own keep-out (a
             # track across one, written by pcbnew itself, reports nothing), but
             # it does enforce a custom rule naming the area -- which still
             # proves KiCad reads the area's name and outline as written.
+            # 10.0.3 and 10.0.7 enforce the area too, so there each track is
+            # one row per rule (#1591): count tracks, per rule, never rows.
             with open(os.path.splitext(fpk)[0] + '.kicad_dru', 'w') as f:
-                f.write('(version 1)\n(rule ko_by_name\n'
+                f.write(f'(version 1)\n(rule {RULE}\n'
                         '  (constraint disallow track via)\n'
                         '  (condition "A.intersectsArea(\'KO\')"))\n')
             rep = os.path.join(tmp, 'drc.json')
-            subprocess.run([KICAD_CLI, 'pcb', 'drc', '--format', 'json',
+            subprocess.run([kicad_cli, 'pcb', 'drc', '--format', 'json',
                             '--severity-all', '-o', rep, fpk], capture_output=True)
             run_utils.evidence(rep, 'the KiCad DRC report')
-            n = sum(1 for v in json.load(open(rep)).get('violations', [])
-                    if v.get('type') == 'items_not_allowed')
-            check('KiCad reports the same copper inside the area as not allowed',
-                  n == n_ours, f'kicad {n}, check_drc {n_ours}')
+            with open(rep, encoding='utf-8') as f:
+                rows = json.load(f).get('violations', [])
+            ok_named, ok_own, detail = kicad_agrees(rows, n_ours)
+            ver = f'kicad-cli {kicad_cli_version(kicad_cli) or "?"}'
+            check('KiCad reports the same copper inside the area under the rule '
+                  'naming it', ok_named, f'{ver}: {detail}')
+            check("the area's own keep-out reports those same tracks, or none",
+                  ok_own, f'{ver}: {detail}')
         else:
             print('  [skip] kicad-cli not present: KiCad cross-check not run')
     finally:

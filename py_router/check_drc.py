@@ -3693,7 +3693,8 @@ def _keepout_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
     it is the input's own copper, not the run's.
 
     check_drc's own class: kicad-cli 10.0.0 reported no `items_not_allowed`
-    for a track through a tracks-not-allowed rule area when we measured it, so
+    for a track through a tracks-not-allowed rule area when we measured it
+    (10.0.3 and 10.0.7 report one row per track inside, #1591), so
     kicad_drc_compare keeps these on a labelled channel of their own."""
     rows = keepout_census(pcb_data, routing_layers, tol=tol,
                           net_ids=matching_net_ids)
