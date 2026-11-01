@@ -1477,6 +1477,12 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         need_reader = max(need_reader, fp.MOUNT_READER)
     if any(c.get('holes') for c in fragment.get('covers') or ()):
         need_reader = max(need_reader, fp.HOLES_READER)
+    # #1589: a body that starts off the origin, or a site behind it
+    if any(c.get('start_mm') is not None
+           or any(float(s['length_mm']) < 0
+                  for s in list(c.get('standoffs') or ()) + list(c.get('holes') or ()))
+           for c in fragment.get('covers') or ()):
+        need_reader = max(need_reader, fp.BEHIND_READER)
     if need_reader:
         fragment['min_reader'] = need_reader
 

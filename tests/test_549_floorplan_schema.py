@@ -159,7 +159,9 @@ KEY_SETS = {
                     'length_mm', 'offset_mm', 'standoffs', 'removable', 'source',
                     'top_mm', 'insertion', 'context',
                     # #1537: the body's own mounting-hole sites.
-                    'holes'} | FREE,
+                    'holes',
+                    # #1589: where the body begins, behind the origin too.
+                    'start_mm'} | FREE,
     # #1504: a corner standoff's offset, and the path a card goes in by.
     '_COVER_STANDOFF_KEYS': {'ref', 'length_mm', 'rot', 'off_mm'},
     '_COVER_INSERTION_KEYS': {'angle_deg', 'travel_mm'},
@@ -424,6 +426,7 @@ def test_an_intent_using_every_known_key_loads():
         # #1443. A declared cover, every key on one row, and part heights.
         'covers': [{'connector': 'J3', 'side': 'F', 'axis_deg': 90, 'width_mm': 22,
                     'underside_mm': 2.5, 'length_mm': 44, 'offset_mm': 0.0,
+                    'start_mm': -2.0,
                     'standoffs': [{'ref': 'MH2', 'length_mm': 42, 'rot': 0, 'off_mm': 0.0}],
                     'top_mm': 3.5, 'insertion': {'angle_deg': 25, 'travel_mm': 2},
                     'holes': [{'length_mm': 40, 'off_mm': 8.0, 'diameter_mm': 2.7,

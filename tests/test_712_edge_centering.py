@@ -443,8 +443,9 @@ def test_the_loader_refuses_every_malformed_along_edge_claim():
     # under a cover by its declared height. 21 since #1504: a cover's
     # `top_mm`, its `insertion` path and a standoff's `off_mm`, graded by
     # `mountable`. 22 since #1537: a cover's own `holes[]`, the sites
-    # `mountable` names what stands at.
-    assert fp.READER_VERSION == 22, (
+    # `mountable` names what stands at. 23 since #1589: a cover's
+    # `start_mm` and a hole or standoff behind the connector's origin.
+    assert fp.READER_VERSION == 23, (
         f"{fp.READER_VERSION}: the field vocabulary grew. Re-state this "
         f"literal and say which field arrived, the way #712, #837, #902, "
         f"#893, #959 and #1051 did")

@@ -547,18 +547,16 @@ def _axis(row):
 
 
 def cover_rect(row) -> Tuple[float, float, float, float]:
-    """A `covers[]` row's body, in its connector's LOCAL frame: from the
-    connector's origin along `axis_deg` (0 = local +x, 90 = local +y) to
-    `length_mm`, else to its farthest standoff's `length_mm`, `width_mm`
-    wide about a centre line `offset_mm` to the axis's left (local +y for an
-    axis of 0)."""
+    """A `covers[]` row's body, in its connector's LOCAL frame: from
+    `start_mm` along `axis_deg` (0 = local +x, 90 = local +y; default the
+    connector's origin, negative behind it, #1589) to `length_mm`, else to
+    its farthest standoff's `length_mm`, `width_mm` wide about a centre line
+    `offset_mm` to the axis's left (local +y for an axis of 0)."""
     (ux, uy), (vx, vy) = _axis(row)
-    length = row.get('length_mm')
-    if length is None:
-        length = max(float(s['length_mm']) for s in row['standoffs'])
+    length = cover_length(row)
     off, half = float(row.get('offset_mm') or 0.0), float(row['width_mm']) / 2.0
     xs, ys = [], []
-    for t in (0.0, float(length)):
+    for t in (float(row.get('start_mm') or 0.0), length):
         for w in (off - half, off + half):
             xs.append(t * ux + w * vx)
             ys.append(t * uy + w * vy)
@@ -567,8 +565,9 @@ def cover_rect(row) -> Tuple[float, float, float, float]:
 
 def standoff_at(row, standoff) -> Tuple[float, float]:
     """Where a `covers[]` row puts one of its standoffs, connector's local
-    frame: `length_mm` along the axis, `off_mm` (default 0, #1504) to the
-    left of the centre line."""
+    frame: `length_mm` along the axis (signed: negative behind the origin,
+    #1589), `off_mm` (default 0, #1504) to the left of the centre line. A
+    `holes[]` site is placed the same way."""
     (ux, uy), (vx, vy) = _axis(row)
     t = float(standoff['length_mm'])
     w = float(row.get('offset_mm') or 0.0) + float(standoff.get('off_mm') or 0.0)
@@ -576,7 +575,10 @@ def standoff_at(row, standoff) -> Tuple[float, float]:
 
 
 def cover_length(row) -> float:
-    """How far a `covers[]` row's body reaches along its axis."""
+    """How far a `covers[]` row's body reaches along its axis: its far end.
+    The insertion path (`_sweep`) turns about the connector's origin and
+    reads the body from there out, so a `start_mm` behind the origin is the
+    body's (`cover_rect`) and not the path's."""
     return float(row['length_mm'] if row.get('length_mm') is not None
                  else max(s['length_mm'] for s in row['standoffs']))
 

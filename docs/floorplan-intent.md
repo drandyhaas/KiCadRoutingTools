@@ -160,9 +160,9 @@ suspect, suspect_reason, why
 | `rails[]` | `nets` (net-name globs, as `--nets` takes them), `why` (or `note` / `reason`), `context` (see "`rails[]`" below; needs `min_reader` 18) |
 | `replicate[]` | `from` (a sheet instance: its name or path, as `place_pose replicate --from` takes it), `to` (a list of them), or instead `channels` (copies inside one sheet: two or more lists of refs, the first the source, matched index for index; needs `min_reader` 19), `anchor`, `allow_net_mismatch` (`REF.PAD` entries), `only` or `skip` (refs; not both), `search_mm`, `tolerance_mm`, `why` (or `note` / `reason`), `context`, `source` (see "`replicate[]`" below; needs `min_reader` 11) |
 | `templates[]` | `anchor` (the chip), `members` (each `ref`, `at` [dx, dy] mm and `rot`, a quarter turn, in the chip's own frame; `pads` and `note` as the fit wrote them), `tolerance_mm`, `kind` (`switching stage` or `rf front end`), `ground_return_mm`, `source`, `why` (or `note` / `reason`), `context`, and the fit-written `fitted` (see "`templates[]`" below; needs `min_reader` 13, and 14 with `kind` or `ground_return_mm`) |
-| `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `standoffs`, `holes` (needs `min_reader` 22), `removable`, `source`, `top_mm`, `insertion` (these two need `min_reader` 21), `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
-| `covers[].standoffs[]` | `ref`, `length_mm`, `rot`, `off_mm` (needs `min_reader` 21) |
-| `covers[].holes[]` | `length_mm`, `off_mm`, `diameter_mm`, `why` (or `note` / `reason`) (needs `min_reader` 22) |
+| `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `start_mm` (where the body begins along the axis, signed; needs `min_reader` 23), `standoffs`, `holes` (needs `min_reader` 22), `removable`, `source`, `top_mm`, `insertion` (these two need `min_reader` 21), `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
+| `covers[].standoffs[]` | `ref`, `length_mm` (signed; behind the connector's origin needs `min_reader` 23), `rot`, `off_mm` (needs `min_reader` 21) |
+| `covers[].holes[]` | `length_mm` (signed, as a standoff's), `off_mm`, `diameter_mm`, `why` (or `note` / `reason`) (needs `min_reader` 22) |
 | `covers[].insertion` | `angle_deg`, `travel_mm` (needs `min_reader` 21) |
 | `heights[]` | `ref`, `height_mm`, `underside_mm`, `under_cover` (needs `min_reader` 20), `source`, `why` (or `note` / `reason`), `context` (needs `min_reader` 15) |
 | `arrays[]` | `name`, `members` (an ORDERED list of literal refs, at least two), `serves` (a ref, or `"unknown"`), `order` (`"pin"`, `"declared"` or `"unknown"`), `rotation` (degrees, `"shared"` or `"unknown"`), `pitch_mm` (`"auto"` or mm), `axis` (`"auto"`, `"x"` or `"y"`), `allow_mixed`, `why` (or `note` / `reason`), `context`, and the compiler-written `source` (see "Arrays" below; needs `min_reader` 7) |
@@ -281,7 +281,7 @@ claim").
 intent file at once — far too blunt for "this build learned a new field".
 
 So field-level compatibility is a second number. `READER_VERSION` (currently
-`22`) is what this build can act on, and an intent sets `min_reader` when a
+`23`) is what this build can act on, and an intent sets `min_reader` when a
 claim must not be silently ignored:
 
 ```jsonc
@@ -334,6 +334,7 @@ Each `min_reader` level and the keys it covers:
 | 20 | `heights[].under_cover` |
 | 21 | `covers[].top_mm`, `covers[].insertion`, `covers[].standoffs[].off_mm` |
 | 22 | `covers[].holes[]` |
+| 23 | `covers[].start_mm`, a `covers[].holes[]` or `covers[].standoffs[]` `length_mm` below 0 |
 
 The emitter and the design-brief compiler stamp the level their output needs.
 
@@ -1375,11 +1376,16 @@ it now); the skill's "Covers" step says how an agent gets from those facts
 and the datasheets to a row.
 
 The body is a rectangle in the connector's own frame (its footprint's local
-axes): from the connector's origin along `axis_deg` (0 = local +x, 90 =
-local +y) to `length_mm`, else to its farthest standoff, `width_mm` wide
-about a centre line `offset_mm` to the axis's left (default 0), with its
-lowest point `underside_mm` over the connector's face. It moves and turns
-with the connector.
+axes): along `axis_deg` (0 = local +x, 90 = local +y) from `start_mm`
+(default 0, the connector's origin) to `length_mm`, else to its farthest
+standoff, `width_mm` wide about a centre line `offset_mm` to the axis's left
+(default 0), with its lowest point `underside_mm` over the connector's face.
+It moves and turns with the connector. `start_mm` is signed (#1589,
+`min_reader` 23): a module whose board reaches behind its connector's origin
+(an SO-DIMM module round its socket's contact row) says `"start_mm": -3.5`,
+and the parts under that strip are judged as under the rest. The body must
+end past where it starts. An insertion path (below) turns about the origin
+and reads the body from there out.
 
 Under it (`placement.heights`, the rule #1443 judges a part's model by):
 
@@ -1400,7 +1406,8 @@ A declared body wins over a model's on the area it declares (a card model's
 underside is that model's card type, and a generic model draws one). The
 seat gate and the anneal price it, and check_assembly gates it as a
 `height` pair (`HEIGHT-BLOCKING`; with `--baseline`, the pairs a move made).
-Each standoff is held `length_mm` along the axis from the connector:
+Each standoff is held `length_mm` along the axis from the connector (signed:
+below 0 it stands behind the origin, #1589, `min_reader` 23):
 `place_simple` seats and carries it as a template member anchored on the
 connector, and the `cover` rule reports one off its place, at WARN unless
 `severity` says otherwise. A standoff that cannot move -- locked in the
@@ -1450,6 +1457,15 @@ drawing gives, and one rule grades whether it can go on:
   cover NOT mountable and is named in the finding; a clear site with no
   standoff yet is reported (`standoff: null`), not judged, and so is a site
   past the outline. Report only: `place_simple` does not price the sites.
+  A site may sit behind the connector's origin (`length_mm` below 0, #1589,
+  `min_reader` 23), so a module with holes on both sides of its connector
+  declares all of them in one row. The cover's own connector is reported at
+  a site, not judged: the site is drawn in that connector's frame, so no
+  placement moves one against the other, and the module's drawing puts its
+  holes where its own socket lets them be. A site its body or pads reach
+  carries `connector` (`{ref, gap_mm, pads}`, check_assembly prints `its
+  connector J1 reaches the ring`); a site that lands on its own connector is
+  a declaration to read again.
 
 The `mountable` rule (WARN unless `severity` promotes it, armed by any
 `covers[]`) reads `floorplan.mount_report` per cover: each standoff on the
