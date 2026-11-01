@@ -1150,6 +1150,85 @@ def _hard_terminal_why(entry):
             "a clearance violation")
 
 
+def _touches_terminal(s, term_pts):
+    """Whether segment `s` ends on one of `term_pts`."""
+    for tx, ty in term_pts:
+        if (abs(s.start_x - tx) < 1e-6 and abs(s.start_y - ty) < 1e-6) or \
+           (abs(s.end_x - tx) < 1e-6 and abs(s.end_y - ty) < 1e-6):
+            return True
+    return False
+
+
+def _terminal_room(s, term_pts, pcb_data, net_id, config):
+    """The room terminal segment `s` has, for `_neck_terminal_grazes` and the
+    forced-link graze test: ``(own_l, d, edge_room, sense_d)``.
+
+    `own_l` is the moving net's clearance on `s.layer`; `d` the nearest
+    foreign EDGE on that layer -- pad or track/via, whichever is closer, the
+    net's own protected sense copper included; `edge_room` the gap past the
+    board-edge clearance; `sense_d` the sense-copper distance alone (its RAW
+    distance joins the short test). A graze is ``max(own_l - (d - w/2),
+    w/2 - edge_room) > 0``."""
+    # #436: measure against the moving net's own class floor, folding each
+    # foreign object's class excess, so a terminal grazing a wider
+    # (controlled-impedance) neighbour is held to the pairwise
+    # max(classOwn, classForeign), not the flat global clearance. Inert on an
+    # all-Default board.
+    nc = getattr(config, 'net_clearances', None) or None
+    own = (config.obstacle_clearance(net_id)
+           if hasattr(config, 'obstacle_clearance') else config.clearance)
+    # The edge clearance the board-edge band is stamped at
+    # (obstacle_map.add_board_edge_obstacles).
+    edge_clr = (config.board_edge_clearance
+                if getattr(config, 'board_edge_clearance', 0) > 0 else config.clearance)
+    # Pad distances are override-adjusted (#326): a pad's local/footprint
+    # clearance above the base is subtracted, so a neck lands on the pad's
+    # OWN required clearance.
+    # #498: a .kicad_dru layer rule replaces the pair clearance on s.layer.
+    own_l = (config.layer_clearance(s.layer, own)
+             if hasattr(config, 'layer_clearance') else own)
+    d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
+                                  base_clearance=own_l, net_clearances=nc,
+                                  config=config),
+            _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
+                                  net_clearances=nc, base_clearance=own_l,
+                                  config=config))
+    # #1279: the net's own protected sense copper is foreign here too,
+    # except where the terminal lies on the branch's join pad.
+    from sense_branch import terminal_sense_dist
+    sense_d = terminal_sense_dist(pcb_data, net_id, s.start_x, s.start_y,
+                                  s.end_x, s.end_y, s.layer, s.width / 2.0)
+    d = min(d, sense_d)
+    # #1519: the board edge is a neighbour too. Its room is the gap past
+    # the edge clearance, folded in beside the foreign room.
+    d_edge = _terminal_board_edge_dist(pcb_data, net_id, s, term_pts)
+    return own_l, d, d_edge - edge_clr, sense_d
+
+
+def terminal_graze(segments, term_pts, pcb_data, net_id, config):
+    """The worst clearance graze a route's terminal copper still has, AFTER
+    its neck: ``(short_by mm, segment)``, or None when every terminal segment
+    keeps its rule.
+
+    `_neck_terminal_grazes` leaves a graze its floor width cannot clear for
+    the DRC report, which is right for copper whose ends are the net's own
+    pads. A forced oracle link (#572) is different: its anchors are KiCad's
+    nearest approach between two islands, its terminal cells are obstacle-
+    exempt, and the clearance it lands inside belongs to copper that may have
+    been laid AFTER the fill the oracle read -- so this is what decides
+    whether such a link may ship (`route_oracle_links`)."""
+    worst = None
+    for s in segments:
+        if not _touches_terminal(s, term_pts):
+            continue
+        own_l, d, edge_room, _sd = _terminal_room(s, term_pts, pcb_data,
+                                                  net_id, config)
+        short_by = max(own_l - (d - s.width / 2.0), s.width / 2.0 - edge_room)
+        if short_by > NECK_GRAZE_TOL and (worst is None or short_by > worst[0]):
+            worst = (short_by, s)
+    return worst
+
+
 def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None):
     """Neck a TERMINAL-connection segment that grazes foreign copper, down to `floor`.
 
@@ -1185,51 +1264,13 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
         # #530: the fab floor raised to this net's own rule / board minimum.
         floor = config.track_floor(net_id, None, _fab_track_floor(pcb_data)) \
             if hasattr(config, 'track_floor') else _fab_track_floor(pcb_data)
-    # #436: neck against the moving net's own class floor, folding each foreign
-    # object's class excess, so a terminal grazing a wider (controlled-impedance)
-    # neighbour necks to the pairwise max(classOwn, classForeign), not the flat
-    # global clearance. Inert on an all-Default board.
-    nc = getattr(config, 'net_clearances', None) or None
-    own = (config.obstacle_clearance(net_id)
-           if hasattr(config, 'obstacle_clearance') else config.clearance)
-    # The edge clearance the board-edge band is stamped at
-    # (obstacle_map.add_board_edge_obstacles).
-    edge_clr = (config.board_edge_clearance
-                if getattr(config, 'board_edge_clearance', 0) > 0 else config.clearance)
-    def touches(s):
-        for tx, ty in term_pts:
-            if (abs(s.start_x - tx) < 1e-6 and abs(s.start_y - ty) < 1e-6) or \
-               (abs(s.end_x - tx) < 1e-6 and abs(s.end_y - ty) < 1e-6):
-                return True
-        return False
     necked = 0
     hard = []
     for s in segments:
-        if not touches(s):
+        if not _touches_terminal(s, term_pts):
             continue
-        # Nearest foreign EDGE on this layer -- pad or track/via, whichever is
-        # closer. Pad distances are override-adjusted (#326): a pad's local/
-        # footprint clearance above the base is subtracted, so the allowed_half
-        # below necks to the pad's OWN required clearance.
-        # #498: a .kicad_dru layer rule replaces the pair clearance on s.layer.
-        own_l = (config.layer_clearance(s.layer, own)
-                 if hasattr(config, 'layer_clearance') else own)
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
-                                      base_clearance=own_l, net_clearances=nc,
-                                      config=config),
-                _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
-                                      net_clearances=nc, base_clearance=own_l,
-                                      config=config))
-        # #1279: the net's own protected sense copper is foreign here too,
-        # except where the terminal lies on the branch's join pad.
-        from sense_branch import terminal_sense_dist
-        _sense_d = terminal_sense_dist(pcb_data, net_id, s.start_x, s.start_y,
-                                       s.end_x, s.end_y, s.layer, s.width / 2.0)
-        d = min(d, _sense_d)
-        # #1519: the board edge is a neighbour too. Its room is the gap past
-        # the edge clearance, folded in beside the foreign room below.
-        d_edge = _terminal_board_edge_dist(pcb_data, net_id, s, term_pts)
-        edge_room = d_edge - edge_clr
+        own_l, d, edge_room, _sense_d = _terminal_room(s, term_pts, pcb_data,
+                                                       net_id, config)
         # #1159: a graze is an edge gap BELOW the rule. Copper exactly at the
         # rule is legal (the writer emits 1 nm coordinates, so 1 nm is the
         # only tolerance the test needs); the 1e-4 margin belongs to the neck
@@ -2228,6 +2269,78 @@ def step_link_end_into_fill(pcb_data: PCBData, net_id: int, end, other,
     return end
 
 
+def _forced_link_graze(result, a, b, pcb_data, net_id, config, coord):
+    """`terminal_graze` of one routed forced link: its terminals are the
+    path's two grid ends and the link's two anchors. None for a failed or
+    copper-less result."""
+    if not result or result.get('failed') or not result.get('new_segments'):
+        return None
+    path = result.get('path') or []
+    term_pts = [a, b] + [coord.to_float(p[0], p[1]) for p in path[:1] + path[-1:]]
+    return terminal_graze(result['new_segments'], term_pts, pcb_data, net_id,
+                          config)
+
+
+#: How far from a forced link's anchor (mm) `island_launch_rows` looks for
+#: free cells of the anchor's own island.
+ISLAND_LAUNCH_REACH = 1.0
+
+
+def island_launch_rows(pcb_data: PCBData, net_id: int, end, other,
+                       layer: str, layer_index: int, config: GridRouteConfig,
+                       obstacles: GridObstacleMap,
+                       reach: float = ISLAND_LAUNCH_REACH):
+    """Launch rows for a forced-link end (#572) on fill, off its anchor: every
+    grid point within `reach` of the end that lies on the SAME fill island
+    and whose cell the map leaves free, nearest first.
+
+    The anchor pair is the two islands' nearest approach, which is where the
+    foreign copper that cut them apart stands closest: a link between the
+    anchors themselves can only be laid through obstacle-exempt cells. From
+    these rows the search starts and ends on cells a track may occupy, so
+    the copper it lays keeps its clearance or no route is found. The island
+    is the first one met walking from the end away from the other end (the
+    anchor sits on its edge, where the model may read no fill). [] when the
+    end is on the net's own pad, via or track, or no such cell exists: that
+    side then keeps its anchor row."""
+    from plane_fill_model import get_fill_models
+    x, y = end
+    models = get_fill_models(pcb_data, net_id).get(layer, [])
+    if not models or _on_own_copper(pcb_data, net_id, x, y, layer):
+        return []
+    dx, dy = x - other[0], y - other[1]
+    d = math.hypot(dx, dy)
+    ux, uy = (dx / d, dy / d) if d > 1e-6 else (0.0, 0.0)
+    island = None
+    t = 0.0
+    while island is None and t <= config.track_width + config.grid_step:
+        px, py = x + ux * t, y + uy * t
+        for m in models:
+            c = m.query_component(px, py) or 0
+            if c > 0:
+                island = (m, c)
+                break
+        t += config.grid_step / 4.0
+    if island is None:
+        return []
+    model, comp = island
+    coord = GridCoord(config.grid_step)
+    r = int(math.ceil(reach / config.grid_step))
+    cx, cy = coord.to_grid(x, y)
+    rows = []
+    for gx in range(cx - r, cx + r + 1):
+        for gy in range(cy - r, cy + r + 1):
+            px, py = coord.to_float(gx, gy)
+            dist = math.hypot(px - x, py - y)
+            if dist > reach or obstacles.is_blocked(gx, gy, layer_index):
+                continue
+            if (model.query_component(px, py) or 0) != comp:
+                continue
+            rows.append((dist, gx, gy, px, py))
+    rows.sort()
+    return [(gx, gy, layer_index, px, py) for _d, gx, gy, px, py in rows]
+
+
 def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                        obstacles: GridObstacleMap, links,
                        attraction_path=None) -> Optional[dict]:
@@ -2286,11 +2399,67 @@ def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         gbx, gby = coord.to_grid(bx, by)
         print(f"    forced oracle link: ({ax:.3f},{ay:.3f})"
               f"[{'/'.join(las)}] <-> ({bx:.3f},{by:.3f})[{'/'.join(lbs)}]")
+        rows_a = [(gax, gay, layer_idx[l], ax, ay) for l in las]
+        rows_b = [(gbx, gby, layer_idx[l], bx, by) for l in lbs]
         result = route_net_with_obstacles(
             pcb_data, net_id, config, obstacles,
             attraction_path=attraction_path,
-            sources_override=[(gax, gay, layer_idx[l], ax, ay) for l in las],
-            targets_override=[(gbx, gby, layer_idx[l], bx, by) for l in lbs])
+            sources_override=rows_a, targets_override=rows_b)
+        # The anchors' cells are obstacle-exempt, so the copper between them
+        # can land inside the clearance of foreign copper beside the gap --
+        # copper that may postdate the fill the oracle read. A graze the
+        # terminal neck cannot clear relaunches the link from free cells of
+        # each end's own island (SHIFT); with no clear route from there the
+        # link is DECLINED -- failed, as a link that cannot route is.
+        graze = _forced_link_graze(result, (ax, ay), (bx, by), pcb_data,
+                                   net_id, config, coord)
+        if graze:
+            short_by, gseg = graze
+            print(f"    forced link copper on {gseg.layer} lands "
+                  f"{short_by * 1000:.1f}um inside a foreign object's "
+                  f"clearance -- relaunching from free cells of each end's "
+                  f"own island")
+            uncommit_dropped_result(pcb_data, result)
+            isl_a = (island_launch_rows(pcb_data, net_id, (ax, ay), (bx, by),
+                                        las[0], layer_idx[las[0]], config,
+                                        obstacles) if len(las) == 1 else [])
+            isl_b = (island_launch_rows(pcb_data, net_id, (bx, by), (ax, ay),
+                                        lbs[0], layer_idx[lbs[0]], config,
+                                        obstacles) if len(lbs) == 1 else [])
+            print(f"    island launch cells within {ISLAND_LAUNCH_REACH} mm: "
+                  f"{len(isl_a)} / {len(isl_b)}")
+            if isl_a or isl_b:
+                result = route_net_with_obstacles(
+                    pcb_data, net_id, config, obstacles,
+                    attraction_path=attraction_path,
+                    sources_override=isl_a or rows_a,
+                    targets_override=isl_b or rows_b)
+                graze = _forced_link_graze(result, (ax, ay), (bx, by),
+                                           pcb_data, net_id, config, coord)
+                if graze:
+                    print(f"    relaunched copper on {graze[1].layer} is "
+                          f"{graze[0] * 1000:.1f}um inside a foreign "
+                          f"object's clearance too")
+                    uncommit_dropped_result(pcb_data, result)
+            else:
+                result = None
+            if result and not result.get('failed') and not graze:
+                print(f"    forced link relaunched clear: "
+                      f"{len(result.get('new_segments') or [])} "
+                      f"segment(s), {len(result.get('new_vias') or [])} "
+                      f"via(s)")
+            else:
+                print(f"    forced link DECLINED: no route between the two "
+                      f"islands keeps its clearance (the anchors' copper was "
+                      f"{short_by * 1000:.1f}um inside) -- the link stays "
+                      f"open")
+                # A relaunch that found no route keeps its search frontier
+                # for the rip ladder; a grazing one is refused outright.
+                if not result or graze:
+                    result = {'failed': True,
+                              'iterations': (result or {}).get('iterations', 0),
+                              'blocked_cells_forward': [],
+                              'blocked_cells_backward': []}
         if not result or result.get('failed'):
             if merged and merged.get('new_segments'):
                 print(f"    ({len(merged['new_segments'])} segment(s) from "
