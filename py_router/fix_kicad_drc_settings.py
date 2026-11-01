@@ -1306,16 +1306,53 @@ def scan_board_minima(pcb_path: str):
                 hole.append(pad.drill)
     if hole:
         out["min_through_hole_diameter"] = min(hole)
-    # #530: the smallest pad / footprint clearance OVERRIDE on copper pads.
-    # KiCad floors an override at rules.min_clearance (measured, KiCad 10), so
-    # a project whose min_clearance sits ABOVE an override the router honoured
-    # flags the copper routed at it. The writeback caps min_clearance here.
+    ovr = pad_clearance_override_minimum(pcb)
+    if ovr is not None:
+        out["min_pad_clearance_override"] = ovr
+    return out
+
+
+def pad_clearance_override_minimum(pcb):
+    """#530: the smallest pad / footprint clearance OVERRIDE on the board's
+    copper pads, or None. KiCad floors an override at rules.min_clearance
+    (measured, KiCad 10), so a project whose min_clearance sits ABOVE an
+    override the router honoured flags the copper routed at it. The writeback
+    caps min_clearance here (:func:`scan_board_minima`'s
+    ``min_pad_clearance_override``)."""
     ovr = [pad.local_clearance for fp in pcb.footprints.values() for pad in fp.pads
            if (getattr(pad, "local_clearance", 0) or 0) > 0
            and getattr(pad, "pad_type", "") != "np_thru_hole"
            and any(str(l).endswith(".Cu") for l in (getattr(pad, "layers", None) or []))]
-    if ovr:
-        out["min_pad_clearance_override"] = min(ovr)
+    return min(ovr) if ovr else None
+
+
+def copper_minima(segments=(), vias=()):
+    """:func:`scan_board_minima`'s size keys over the given copper only --
+    track segments and vias, parsed or the engine's dicts (``width``;
+    ``size`` / ``drill``): ``min_track_width``, ``min_via_diameter``,
+    ``min_via_drill``, ``min_via_annular_width`` and
+    ``min_through_hole_diameter`` (the via drills). The floors of the copper a
+    step laid or moved, for a writeback that must not follow copper the step
+    never touched (#1578: place_fanout_clearance, which moves caps and at
+    most nudges a via)."""
+    def _get(o, k):
+        return o.get(k) if isinstance(o, dict) else getattr(o, k, None)
+    out = {}
+    widths = [_get(s, 'width') for s in segments or ()
+              if not _get(s, 'graphic') and (_get(s, 'width') or 0) > 0]
+    if widths:
+        out["min_track_width"] = min(widths)
+    vs = [(_get(v, 'size') or 0.0, _get(v, 'drill') or 0.0) for v in vias or ()]
+    sizes = [s for s, _d in vs if s]
+    drills = [d for _s, d in vs if d]
+    if sizes:
+        out["min_via_diameter"] = min(sizes)
+    if drills:
+        out["min_via_drill"] = min(drills)
+        out["min_through_hole_diameter"] = min(drills)
+    rings = [(s - d) / 2.0 for s, d in vs if s and d and s > d]
+    if rings:
+        out["min_via_annular_width"] = min(rings)
     return out
 
 

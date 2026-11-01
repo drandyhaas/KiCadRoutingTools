@@ -2846,7 +2846,11 @@ class FanoutTab(wx.Panel):
             # owes no writeback and no refill -- as the CLI's exit 2 writes
             # nothing.
             _refused = bool(summary) and summary.startswith(CAP_NOT_RUN)
-            if cfg.get('clearance_ceiling') is not None and not _refused:
+            # #1578: gated on "Fix DRC settings after routing" (#693), as
+            # place_fanout_clearance.py's writeback is on its
+            # --no-fix-drc-settings: unticked, the classes stay as declared.
+            if cfg.get('clearance_ceiling') is not None and not _refused \
+                    and cfg.get('fix_drc_settings', True):
                 try:
                     from fix_kicad_drc_settings import (
                         clamp_nondefault_netclasses_on_board)

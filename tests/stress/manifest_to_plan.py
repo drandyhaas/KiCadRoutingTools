@@ -913,7 +913,11 @@ CAP_FLAG_PARAMS = {
 #   --lock              nargs='+' extra locked refs; the GUI has no control.
 #   --verbose           console verbosity, not a routing parameter.
 CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False),  # inverted sense
-                  '--beneath-only': ('cap_beneath_only', True)}
+                  '--beneath-only': ('cap_beneath_only', True),
+                  # #1578: the shared "Fix DRC settings after routing" box,
+                  # which gates the cap step's writeback as the flag does
+                  # the CLI's (INVERTED_BOOL_FLAGS' route-step spelling).
+                  '--no-fix-drc-settings': ('fix_drc_check', False)}
 
 
 def cap_optimization_step(argv, cwd=None):

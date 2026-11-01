@@ -138,6 +138,16 @@ Examples:
                         help="Max repair passes (default: 30)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print each accepted move")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not write the output's .kicad_pro DRC settings: "
+                             "the input's project (and its other siblings) is "
+                             "carried through as it was, the --clearance "
+                             "ceiling included (#1578), as every routing CLI "
+                             "and the GUI's 'Fix DRC settings after routing' "
+                             "box do. By default the ceiling, when given, is "
+                             "written, and a via this pass nudged writes its "
+                             "own floors; a run that moved no copper writes no "
+                             "size floor.")
     from placement.cli_gates import add_intent_arg, load_intent_or_exit
     add_intent_arg(parser, summary=(
         "Its decap limits -- decaps.max_distance_mm and "
@@ -314,9 +324,34 @@ Examples:
 
         No edge_clearance is passed: --board-edge-clearance here is a placement
         margin, not a routing-enforced floor, and must not tighten the rule.
+
+        * the SIZE floors (track, via, drill, ring, hole) -- those of the copper
+          this pass laid or moved, and no other (#1578): a nudged via (#313) and
+          its connector segments. They used to be the whole board's smallest
+          objects, so a run that moved NOTHING and left the board byte-identical
+          lowered routed_output's min_via_annular_width 0.13 -> 0.05 and
+          min_via_diameter 0.35 -> 0.3 for vias the input already carried, and
+          KiCad's 199 annular_width / 199 via_diameter errors on that copper
+          went to 0. A cap move lays no copper, so it writes none; #1195's rule
+          for qfn_fanout. The custody half above -- the project carried, the
+          severities, `fab_floor_origin` -- is untouched.
+
+        `--no-fix-drc-settings` writes none of it: the input's siblings are
+        carried through as they were (#1578), as a routing CLI's are.
         """
+        if args.no_fix_drc_settings:
+            try:
+                from fix_kicad_drc_settings import seed_project_for_output
+                seed_project_for_output(args.output_file, args.input_file)
+            except Exception as e:                             # noqa: BLE001
+                print(f"  (could not carry the project through: {e})")
+            print("  DRC settings: not written (--no-fix-drc-settings); the "
+                  "input's project is carried through as it was")
+            return
         try:
-            from fix_kicad_drc_settings import fix_project_for_output
+            from fix_kicad_drc_settings import (fix_project_for_output,
+                                                copper_minima,
+                                                pad_clearance_override_minimum)
             from list_nets import board_constraint
             from placement.fanout_clearance import resolve_pair_clearance
             from placement.legality import resolve_npth_floor
@@ -345,9 +380,18 @@ Examples:
                     _hc = resolve_npth_floor(pcb_data, args.input_file)
                 except Exception:                              # noqa: BLE001
                     _hc = None
+            # #1578: the size floors of the copper this pass laid or moved
+            # only, and the #530 pad-override cap on the clearance family.
+            _minima = copper_minima(
+                result.get('new_segments') or (),
+                [vd for _ox, _oy, vd in (result.get('via_moves') or ())])
+            _ovr = pad_clearance_override_minimum(pcb_data)
+            if _ovr is not None:
+                _minima['min_pad_clearance_override'] = _ovr
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
                 clearance=_target,
+                minima=_minima,
                 hole_clearance=_hc,
                 clamp_nondefault_netclasses=args.clearance is not None)
         except Exception as e:

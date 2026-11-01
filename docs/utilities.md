@@ -2304,6 +2304,14 @@ still replay.
   rotations (`blocks[].rotation`, `rotation_candidates`) are held too. The run
   prints the decap grade before and after. Without `--intent` a cap can move
   past a decap limit silently.
+- **The project.** Written on every exit, a run that moved nothing included
+  (#769): the input's `.kicad_pro` carried over, the `--clearance` ceiling
+  when given, and the size floors (track, via, drill, ring) of the copper the
+  pass laid or moved -- a via it nudged and its connector segments -- and of
+  nothing else (#1578). A cap move lays no copper, so a run that only moved
+  caps writes no size floor. `--no-fix-drc-settings` writes none of it and
+  carries the input's project through as it was, as on a routing step; in
+  the GUI the "Fix DRC settings after routing" box is the same switch.
 
 Exit 0 written (unresolved caps are reported, not failed); 2 unreadable input,
 or two intent blocks declaring one part at different angles.
@@ -3055,7 +3063,7 @@ step** (issue #160), pinning the floors to the clearances/sizes they just routed
 with, so the written project is DRC-consistent by default. If the output is a new
 file with no project yet, they copy the input board's `.kicad_pro` (or seed a
 complete one when the input has none). Pass `--no-fix-drc-settings` to skip it
-(every one of them but `place_fanout_clearance.py`, which always writes; route.py's
+(every one of them, `place_fanout_clearance.py` too since #1578; route.py's
 mid-run copy of it, the #650 in-run floor sync, is skipped with it, #1285), or
 `--relax-drc-severities` to ALSO lower the non-routing severities (off by
 default, #856; `--keep-thermal` is accepted as a deprecated no-op). Every routing step

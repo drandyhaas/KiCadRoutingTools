@@ -1474,7 +1474,7 @@ def check_cap_flags():
             '--max-passes', '7', '--cap-prefix', 'C',
             '--grid-step', '0.05', '--clearance', '0.1',
             '--default-via-size', '0.42', '--no-rotate',
-            '--intent', 'x.intent.json']
+            '--intent', 'x.intent.json', '--no-fix-drc-settings']
     step = m2p.cap_optimization_step(argv)
     if step.get('action') != 'optimize_caps':
         return [('(step)', f"action is {step.get('action')!r}")]
@@ -1496,7 +1496,8 @@ def check_cap_flags():
             ('--clearance', 'clearance', 0.1),
             ('--default-via-size', 'cap_default_via_size', 0.42),
             ('--intent', 'cap_intent_path', 'x.intent.json'),
-            ('--no-rotate', 'cap_allow_rotation', False)):
+            ('--no-rotate', 'cap_allow_rotation', False),
+            ('--no-fix-drc-settings', 'fix_drc_check', False)):
         if params.get(key) != want:
             bad.append((flag, f"-> {key}={params.get(key)!r}, expected {want!r}"))
     # #742 CHANGE DETECTOR, same shape as the --board-edge-clearance one below.
@@ -1526,7 +1527,8 @@ def check_cap_flags():
     bare = m2p.cap_optimization_step(
         ['python3', 'py_placer/place_fanout_clearance.py', 'in.kicad_pcb'])
     for _k in ('cap_board_edge_clearance', 'board_edge_clearance',
-               'cap_default_via_size', 'via_size', 'cap_intent_path'):
+               'cap_default_via_size', 'via_size', 'cap_intent_path',
+               'fix_drc_check'):
         if _k in (bare.get('params') or {}):
             bad.append(('(omitted)',
                         f'an unset flag was materialised into the plan as {_k}'))
