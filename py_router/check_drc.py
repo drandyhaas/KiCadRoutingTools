@@ -2821,6 +2821,11 @@ SHORT_TYPES = frozenset(('pad-pad', 'pad-segment', 'pad-via', 'via-via',
                          'via-segment', 'segment-segment',
                          'segment-segment-track-rule', 'segment-crossing'))
 
+#: #1563: the SHORT_TYPES that are copper in contact BY DEFINITION, so they
+#: carry no `overlap_mm` to grade: two tracks of different nets crossing on
+#: one layer. Their JSON `short` is true without one.
+CONTACT_TYPES = frozenset(('segment-crossing',))
+
 #: #1558: drill-to-drill items, graded at the hole-to-hole floor.
 DRILL_SPACING_TYPES = frozenset(('via-drill-hole', 'pad-drill-via-drill',
                                  'pad-drill-via-drill-same-net'))
@@ -6557,7 +6562,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 # pad-pad short counts, because every differing contact was
                 # pad-segment. Only a per-type contact figure separates them,
                 # and the JSON already carries it as `contacts_by_type`.
-                _nc = sum(1 for v in vlist
+                _nc = len(vlist) if vtype in CONTACT_TYPES else sum(
+                          1 for v in vlist
                           if isinstance(v.get('overlap_mm'), (int, float))
                           and v['overlap_mm'] >= (
                               v['required_mm']
@@ -7176,8 +7182,9 @@ if __name__ == "__main__":
             # Only a PER-TYPE contact count does it.
             'contacts_by_type': dict(_c.Counter(
                 v.get('type') for v in _real
-                if isinstance(v.get('overlap_mm'), (int, float))
-                and v['overlap_mm'] >= _clearance_for(v))),
+                if v.get('type') in CONTACT_TYPES
+                or (isinstance(v.get('overlap_mm'), (int, float))
+                    and v['overlap_mm'] >= _clearance_for(v)))),
             # #962: every via in a paste opening, by class, so a reader of the
             # JSON sees the ACCEPTED ones too (they are not in by_type)
             'via_in_paste': dict(
@@ -7190,11 +7197,13 @@ if __name__ == "__main__":
                 inherited=sum(1 for v in violations
                               if v.get('accepted') == 'inherited-keepout')),
             # `short`: copper of two nets in contact (SHORT_TYPES), never a
-            # drill, hole or edge item whatever its overlap (#1558).
+            # drill, hole or edge item whatever its overlap (#1558). A
+            # crossing has no overlap to grade: it is contact (#1563).
             'items': [dict(item,
-                           short=(item.get('type') in SHORT_TYPES
-                                  and isinstance(item.get('overlap_mm'), (int, float))
-                                  and item['overlap_mm'] >= _clearance_for(item)))
+                           short=(item.get('type') in CONTACT_TYPES
+                                  or (item.get('type') in SHORT_TYPES
+                                      and isinstance(item.get('overlap_mm'), (int, float))
+                                      and item['overlap_mm'] >= _clearance_for(item))))
                       for item in violations],
         }
         with open(args.json, 'w', encoding='utf-8') as _fh:
