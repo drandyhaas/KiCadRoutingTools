@@ -222,6 +222,12 @@ Under `board`, a descent stops at the board's own `rules.min_*` (Board Setup >
 Constraints); a minimum the board leaves unset (KiCad writes 0) falls back to the
 fab tier floor for that key, except `min_clearance`, which falls back to the
 Default class (#1160). Non-Default nets never descend below their own class.
+The annular ring (`min_via_annular_width`) bounds the via rather than a key of
+its own: a rung's diameter is raised to its drill plus that ring each side, as
+the working via is sized (#1349), so no descended via rings below it (#1579;
+on a board declaring ring 0.12, via 0.25 and hole 0.15 the 0.30/0.15 and
+0.25/0.15 rungs both become 0.39/0.15). Where every rung is then larger than
+the request, a via-in-pad that cannot fit its pad keeps the requested via.
 Whether KiCad then accepts the copper depends on the DRC-settings writeback:
 
 - **With it** (the default), a clearance descent below the Default class lowers

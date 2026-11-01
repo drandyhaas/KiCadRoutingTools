@@ -1306,16 +1306,53 @@ def scan_board_minima(pcb_path: str):
                 hole.append(pad.drill)
     if hole:
         out["min_through_hole_diameter"] = min(hole)
-    # #530: the smallest pad / footprint clearance OVERRIDE on copper pads.
-    # KiCad floors an override at rules.min_clearance (measured, KiCad 10), so
-    # a project whose min_clearance sits ABOVE an override the router honoured
-    # flags the copper routed at it. The writeback caps min_clearance here.
+    ovr = pad_clearance_override_minimum(pcb)
+    if ovr is not None:
+        out["min_pad_clearance_override"] = ovr
+    return out
+
+
+def pad_clearance_override_minimum(pcb):
+    """#530: the smallest pad / footprint clearance OVERRIDE on the board's
+    copper pads, or None. KiCad floors an override at rules.min_clearance
+    (measured, KiCad 10), so a project whose min_clearance sits ABOVE an
+    override the router honoured flags the copper routed at it. The writeback
+    caps min_clearance here (:func:`scan_board_minima`'s
+    ``min_pad_clearance_override``)."""
     ovr = [pad.local_clearance for fp in pcb.footprints.values() for pad in fp.pads
            if (getattr(pad, "local_clearance", 0) or 0) > 0
            and getattr(pad, "pad_type", "") != "np_thru_hole"
            and any(str(l).endswith(".Cu") for l in (getattr(pad, "layers", None) or []))]
-    if ovr:
-        out["min_pad_clearance_override"] = min(ovr)
+    return min(ovr) if ovr else None
+
+
+def copper_minima(segments=(), vias=()):
+    """:func:`scan_board_minima`'s size keys over the given copper only --
+    track segments and vias, parsed or the engine's dicts (``width``;
+    ``size`` / ``drill``): ``min_track_width``, ``min_via_diameter``,
+    ``min_via_drill``, ``min_via_annular_width`` and
+    ``min_through_hole_diameter`` (the via drills). The floors of the copper a
+    step laid or moved, for a writeback that must not follow copper the step
+    never touched (#1578: place_fanout_clearance, which moves caps and at
+    most nudges a via)."""
+    def _get(o, k):
+        return o.get(k) if isinstance(o, dict) else getattr(o, k, None)
+    out = {}
+    widths = [_get(s, 'width') for s in segments or ()
+              if not _get(s, 'graphic') and (_get(s, 'width') or 0) > 0]
+    if widths:
+        out["min_track_width"] = min(widths)
+    vs = [(_get(v, 'size') or 0.0, _get(v, 'drill') or 0.0) for v in vias or ()]
+    sizes = [s for s, _d in vs if s]
+    drills = [d for _s, d in vs if d]
+    if sizes:
+        out["min_via_diameter"] = min(sizes)
+    if drills:
+        out["min_via_drill"] = min(drills)
+        out["min_through_hole_diameter"] = min(drills)
+    rings = [(s - d) / 2.0 for s, d in vs if s and d and s > d]
+    if rings:
+        out["min_via_annular_width"] = min(rings)
     return out
 
 
@@ -2278,8 +2315,9 @@ def plane_fix_kwargs(tracks, vias, *, clearance, hole_to_hole, track_width,
     route_planes' main passes these to :func:`fix_project_for_output` for the
     file and the Planes tab to ``compute_targets`` / ``update_live_drc_floors``
     for the live board, so the two fronts write the same floors. ``tracks`` and
-    ``vias`` count what the step ADDED (:func:`drawn_copper` on the CLI, the
-    tab's applied lists in the GUI):
+    ``vias`` count what the step ADDED (:func:`drawn_copper_items` on the CLI,
+    the tab's applied lists in the GUI), less its soft-joint bridges
+    (:func:`plane_floor_segments`, #1577):
 
     * the via floors (diameter, drill) and hole-to-hole only when it placed a
       via, and the track floor only when it laid a track. A bare pour passed
@@ -2289,6 +2327,8 @@ def plane_fix_kwargs(tracks, vias, *, clearance, hole_to_hole, track_width,
     * the copper-to-hole floor only when it laid either (``copper_holes``): a
       pour keeps the board's hole clearance itself (its fill and KiCad's refill
       knock out at it), so daplink's pour lowering it 0.25 -> 0.2 bought nothing;
+      and then the floor it held, lowered only to what that copper needs
+      (:func:`step_hole_clearance`, #1577), not the copper clearance;
     * the copper clearance always: a KiCad refill regrows the pour at
       max(zone clearance, net class), so a pour laid below its class keeps its
       corridors only if the floor drops with it (route_planes'
@@ -2305,44 +2345,76 @@ def plane_fix_kwargs(tracks, vias, *, clearance, hole_to_hole, track_width,
             "copper_holes": drew}
 
 
-def drawn_copper_items(input_pcb, output_pcb):
+def _seg_key(sx, sy, ex, ey, layer, net_id, width):
+    p, q = ((round(sx, 4), round(sy, 4)), (round(ex, 4), round(ey, 4)))
+    return (min(p, q), max(p, q), layer, net_id, round(width, 4))
+
+
+def _segment_key(s):
+    """:func:`_seg_key` of a parsed Segment or an engine segment dict
+    (``start`` / ``end`` / ``layer`` / ``net_id`` / ``width``)."""
+    if isinstance(s, dict):
+        (sx, sy), (ex, ey) = s['start'], s['end']
+        return _seg_key(sx, sy, ex, ey, s['layer'], s['net_id'], s['width'])
+    return _seg_key(s.start_x, s.start_y, s.end_x, s.end_y, s.layer, s.net_id,
+                    s.width)
+
+
+def drawn_copper_items(input_pcb, output_pcb, exclude=()):
     """``(output PCBData, [segments], [vias])``: the track segments and vias
     ``output_pcb`` carries that ``input_pcb`` does not, matched by position,
     layer and net (graphic copper is not a track) -- what a file-writing step
-    drew. ``(None, None, None)`` when either board cannot be read."""
+    drew. ``(None, None, None)`` when either board cannot be read.
+
+    ``exclude``: segments (parsed, or the engine's dicts) the step wrote that
+    are NOT its own copper for floor purposes -- the plane step's soft-joint
+    bridges (#1577), which join copper the board already carried."""
     try:
         from kicad_parser import parse_kicad_pcb
         a, b = parse_kicad_pcb(input_pcb), parse_kicad_pcb(output_pcb)
     except Exception:                                           # noqa: BLE001
         return None, None, None
 
-    def _seg(s):
-        p, q = ((round(s.start_x, 4), round(s.start_y, 4)),
-                (round(s.end_x, 4), round(s.end_y, 4)))
-        return (min(p, q), max(p, q), s.layer, s.net_id, round(s.width, 4))
-
     def _via(v):
         return (round(v.x, 4), round(v.y, 4), v.net_id, round(v.size, 4),
                 round(v.drill, 4))
 
-    old_s = {_seg(s) for s in a.segments if not getattr(s, 'graphic', False)}
+    old_s = {_segment_key(s) for s in a.segments if not getattr(s, 'graphic', False)}
+    old_s.update(_segment_key(s) for s in exclude or ())
     old_v = {_via(v) for v in a.vias}
     segs = [s for s in b.segments
-            if not getattr(s, 'graphic', False) and _seg(s) not in old_s]
+            if not getattr(s, 'graphic', False) and _segment_key(s) not in old_s]
     vias = [v for v in b.vias if _via(v) not in old_v]
     return b, segs, vias
 
 
-def drawn_copper(input_pcb, output_pcb):
+def drawn_copper(input_pcb, output_pcb, exclude=()):
     """``(tracks, vias)``: how many track segments and vias ``output_pcb``
     carries that ``input_pcb`` does not (:func:`drawn_copper_items`). What a
     file-writing step drew, for :func:`plane_fix_kwargs`. ``(None, None)``
     when either board cannot be read -- the caller then keeps the sizes it
     would have written."""
-    _b, segs, vias = drawn_copper_items(input_pcb, output_pcb)
+    _b, segs, vias = drawn_copper_items(input_pcb, output_pcb, exclude)
     if segs is None:
         return None, None
     return len(segs), len(vias)
+
+
+def plane_floor_segments(segments):
+    """The plane step's segments that are its own copper for floor purposes:
+    every one but a soft-joint bridge (``soft_joint``, #1577). A bridge
+    (``pcb_modification.close_soft_joints``) firms a joint between copper the
+    board already carried, inside or between that copper -- where it sits near
+    a foreign hole, so does the copper it joins, and a floor lowered for it
+    would excuse that copper too (#617's argument for the bridge's own gate).
+    orangecrab_ext_pll's pour closed 14 such joints and nothing else, and the
+    writeback took them for drawn copper and lowered the copper-to-hole floor
+    0.2 -> 0.16. route_planes' main drops them from the file count by the
+    engine's list (``consume_soft_joint_bridges``); the Planes tab filters its
+    applied dicts with this."""
+    return [s for s in segments or ()
+            if not (s.get('soft_joint') if isinstance(s, dict)
+                    else getattr(s, 'soft_joint', False))]
 
 
 def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
@@ -2595,11 +2667,13 @@ def held_hole_clearance(held, clearance, step_min=None):
     return round(max(float(clearance), v), 6)
 
 
-def step_hole_clearance(input_pcb, output_pcb, clearance, verbose=True, ledger=True):
+def step_hole_clearance(input_pcb, output_pcb, clearance, verbose=True, ledger=True,
+                        drawn=None):
     """:func:`held_hole_clearance` for a file-writing step: the hole floor the
     step held (``obstacle_map.declared_hole_clearance`` of its INPUT, the
     value its engine resolved), lowered to what the copper it drew
-    (:func:`drawn_copper_items`) needs. None when the board declares no hole
+    (:func:`drawn_copper_items`, or ``drawn`` -- that function's triple, when
+    the caller already has it) needs. None when the board declares no hole
     clearance or a board cannot be read -- the writer then falls back to the
     copper clearance, as before."""
     try:
@@ -2609,7 +2683,8 @@ def step_hole_clearance(input_pcb, output_pcb, clearance, verbose=True, ledger=T
         return None
     if not held or held <= 0 or clearance is None or held <= clearance:
         return None
-    out, segs, vias = drawn_copper_items(input_pcb, output_pcb)
+    out, segs, vias = (drawn if drawn is not None
+                       else drawn_copper_items(input_pcb, output_pcb))
     if out is None:
         return None
     try:

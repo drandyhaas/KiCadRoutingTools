@@ -2191,11 +2191,16 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
         if nb:
             for br in bridge_results:
                 for bs in br.get('new_segments', []):
-                    all_new_segments.append({
-                        'start': (bs.start_x, bs.start_y),
-                        'end': (bs.end_x, bs.end_y),
-                        'width': bs.width, 'layer': bs.layer,
-                        'net_id': bs.net_id, 'from_restore': True})
+                    # soft_joint (#1577): copper the board already carried,
+                    # joined -- not the step's own for its DRC floors
+                    # (fix_kicad_drc_settings.plane_floor_segments)
+                    _br = {'start': (bs.start_x, bs.start_y),
+                           'end': (bs.end_x, bs.end_y),
+                           'width': bs.width, 'layer': bs.layer,
+                           'net_id': bs.net_id, 'from_restore': True,
+                           'soft_joint': True}
+                    all_new_segments.append(_br)
+                    _LAST_SOFT_JOINT_BRIDGES.append(_br)
             print(f"  Closed {nb} soft joint(s) in plane/restored copper")
     except Exception as e:
         print(f"  (soft-joint close skipped: {e})")
@@ -3112,6 +3117,19 @@ def consume_zone_replacements() -> list:
     return out
 
 
+#: The soft-joint bridges the last create_plane() wrote (#1577): main()
+#: leaves them out of the copper its DRC-floor writeback counts as drawn
+#: (fix_kicad_drc_settings.plane_floor_segments). Taken like the pad tally.
+_LAST_SOFT_JOINT_BRIDGES: list = []
+
+
+def consume_soft_joint_bridges() -> list:
+    """Take (and clear) the last pour's soft-joint bridge dicts."""
+    global _LAST_SOFT_JOINT_BRIDGES
+    out, _LAST_SOFT_JOINT_BRIDGES = list(_LAST_SOFT_JOINT_BRIDGES), []
+    return out
+
+
 def _note_zone_replacements(replaced_pours_by_target, zone_data, layer_nets,
                             board_edge_clearance) -> None:
     """Print, and record for JSON_SUMMARY, what replacing each existing pour
@@ -3323,6 +3341,7 @@ def create_plane(
     # (engine-side, so the Planes tab's log shows it too).
     _LAST_SENSE_BRANCHES.clear()
     _LAST_ZONE_REPLACEMENTS.clear()   # #1329: filled once the new pours exist
+    _LAST_SOFT_JOINT_BRIDGES.clear()  # #1577: filled by the finalize
     from sense_branch import report as _sense_report
     _sense_report(pcb_data)
 
@@ -4857,21 +4876,40 @@ Examples:
                       f"grading at this floor")
             from fix_kicad_drc_settings import (fix_project_for_output, drc_fix_kwargs,
                                                 read_project_edge_clearance,
-                                                drawn_copper, plane_fix_kwargs)
+                                                drawn_copper_items, plane_fix_kwargs,
+                                                step_hole_clearance)
             # #1319: only the floors of copper this step drew -- the Planes
             # tab makes the same decision from the copper it applied. Counted
-            # off the files, so the GND return vias above are included.
-            _n_tracks, _n_vias = drawn_copper(args.input_file, args.output_file)
-            if _n_tracks is None:
+            # off the files, so the GND return vias above are included; the
+            # soft-joint bridges, which join copper the input already
+            # carried, are not (#1577, plane_floor_segments).
+            _bridges = consume_soft_joint_bridges()
+            _drawn = drawn_copper_items(args.input_file, args.output_file,
+                                        exclude=_bridges)
+            if _drawn[1] is None:
                 _n_tracks = _n_vias = 1     # unreadable: write as before
+            else:
+                _n_tracks, _n_vias = len(_drawn[1]), len(_drawn[2])
             _plane_kw = plane_fix_kwargs(
                 _n_tracks, _n_vias, clearance=eff_clearance,
                 hole_to_hole=args.hole_to_hole_clearance,
                 track_width=args.track_width, via_size=args.via_size,
                 via_drill=args.via_drill)
-            if not (_n_tracks or _n_vias):
-                print("  Bare pour (no track or via drawn): writing the copper "
-                      "clearance only -- no size or copper-to-hole floor (#1319)")
+            # #1577: the copper-to-hole floor this step HELD, lowered only to
+            # what its own copper needs, as route.py (#1493) and route_diff
+            # (#1369) write it; a lowering is a design_rules ledger row, so
+            # --strict-sizes sees it. A bare pour writes none (#1319).
+            _hole_clr = None
+            if _n_tracks or _n_vias:
+                _hole_clr = step_hole_clearance(
+                    args.input_file, args.output_file, eff_clearance,
+                    drawn=_drawn if _drawn[1] is not None else None)
+            else:
+                _also = (f"; its {len(_bridges)} soft-joint bridge(s) join "
+                         f"copper the board already carried" if _bridges else "")
+                print("  Bare pour (no track or via drawn" + _also + "): writing "
+                      "the copper clearance only -- no size or copper-to-hole "
+                      "floor (#1319)")
             # #338: record the PROJECT's copper-to-edge rule, never this
             # tool's --board-edge-clearance -- that is the plane-zone INSET
             # (default 0.5), not an enforced DRC floor; writing it into a
@@ -4885,6 +4923,7 @@ Examples:
                 track_width=_plane_kw['track_width'],
                 via_diameter=_plane_kw['via_diameter'],
                 via_drill=_plane_kw['via_drill'],
+                hole_clearance=_hole_clr,
                 copper_holes=_plane_kw['copper_holes'],
                 **drc_fix_kwargs(args))
         except Exception as e:

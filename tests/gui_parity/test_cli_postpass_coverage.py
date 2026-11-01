@@ -123,10 +123,12 @@ REGISTRY = {
     'fanout_fix_kwargs': ['_apply_fanout_results'],
     # #1319: the same rule for a pour -- no size or copper-to-hole floor for
     # copper the step did not draw. route_planes' main counts its copper off
-    # the files (drawn_copper); the Planes tab's apply decides with the same
-    # function from the copper it applied.
+    # the files (drawn_copper_items, which also feeds its #1577 copper-to-hole
+    # census, less the soft-joint bridges); the Planes tab's apply decides
+    # with the same function from the copper it applied, less the same
+    # bridges (plane_floor_segments).
     'plane_fix_kwargs': ['_apply_results_to_board_body'],
-    'drawn_copper': ['plane_fix_kwargs'],
+    'drawn_copper_items': ['plane_floor_segments'],
     # #1369: route_diff writes the copper-to-hole floor it HELD, lowered only
     # to what the copper it drew needs (off the files on the CLI). The
     # Differential tab decides with the same two cores (step_copper_to_hole,

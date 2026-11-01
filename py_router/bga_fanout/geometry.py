@@ -269,6 +269,16 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
 
     # Even the deepest rung's via bulges past this pad: hold it at that floor.
     deepest = len(floors) - 1
+    from fab_tiers import get_escalation_policy
+    if get_escalation_policy()[0] == 'board' \
+            and floors[deepest]['via_diameter'] > via_size + 1e-9:
+        # #1579: no rung is SMALLER than the request -- under --escalation
+        # board the board's annular ring can raise every rung's via above it
+        # (ring 0.12 round a 0.15 drill is a 0.39 via; the request is 0.3) --
+        # so there is no descent to take. Keep the request, which bulges, as
+        # the no-ladder branch above does; a rung's larger via would bulge
+        # further. --escalation fab is left as it was.
+        return via_size, via_drill, 'floor', 0
     note_narrowing(getattr(pad, 'net_id', None), 'via_diameter', via_size,
                    floors[deepest]['via_diameter'], 'via-in-pad clamp (floor)')
     return floors[deepest]['via_diameter'], floors[deepest]['via_drill'], 'floor', deepest

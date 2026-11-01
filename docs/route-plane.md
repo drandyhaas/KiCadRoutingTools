@@ -565,9 +565,15 @@ The `.kicad_pro` writeback follows the copper the step drew (#1319). A pour
 that placed no via writes no via, drill or hole-to-hole floor. One that laid
 no track writes no track floor. One that drew neither (the line `Bare pour (no
 track or via drawn)`) writes no copper-to-hole floor either. It writes only
-the copper clearance, which the pour's KiCad refill needs. The Planes tab
-makes the same decision (`fix_kicad_drc_settings.plane_fix_kwargs`) from the
-copper it applied.
+the copper clearance, which the pour's KiCad refill needs. The soft-joint
+bridges the finalize lays (`Closed N soft joint(s)`) join copper the board
+already carried, so they are not copper the step drew (#1577). A pour that
+did draw copper writes the copper-to-hole floor it held -- the board's own
+`min_hole_clearance` -- lowered only to what that copper needs, as `route.py`
+does (`step_hole_clearance`), and a floor written under the board's own is a
+`hole_clearance` row in `JSON_SUMMARY.design_rules` (`--strict-sizes` exits
+3). The Planes tab makes the same decisions (`fix_kicad_drc_settings.
+plane_fix_kwargs`, `plane_floor_segments`) from the copper it applied.
 
 ## Post-Processing
 

@@ -939,6 +939,22 @@ def held_hole_clearance_live(pcb_data, board, results_data, clearance):
         return None
 
 
+def held_hole_clearance_dicts(pcb_data, board, tracks, vias, clearance):
+    """:func:`held_hole_clearance_live` for a tab whose copper is the
+    engine's track and via DICTS (the fanout tab, #1568; the Planes tab,
+    #1577) rather than routing results."""
+    from kicad_parser import Segment, Via
+    segs = [Segment(start_x=t['start'][0], start_y=t['start'][1],
+                    end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
+                    layer=t['layer'], net_id=t['net_id']) for t in tracks]
+    new_vias = [Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                    layers=list(v.get('layers') or ['F.Cu', 'B.Cu']),
+                    net_id=v['net_id']) for v in vias]
+    return held_hole_clearance_live(
+        pcb_data, board,
+        {'results': [{'new_segments': segs, 'new_vias': new_vias}]}, clearance)
+
+
 def update_live_drc_floors(board, *, clearance=None, track_width=None,
                            via_size=None, via_drill=None,
                            hole_to_hole=None, edge_clearance=None,
