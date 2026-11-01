@@ -587,7 +587,7 @@ The plane generation code is organized into several modules:
 | `route_planes.py` | Main CLI and orchestration - loads PCB, pours each net's zone, places thermal arrays and stitching, splits shared layers, and writes output |
 | `plane_io.py` | I/O utilities - zone extraction, PCB file reading/writing, net ID resolution |
 | `plane_obstacle_builder.py` | Obstacle map construction - builds grid-based maps for via placement and routing; pad classification |
-| `plane_fill_model.py` | Zone fill model with KiCad's filler semantics (clearance, minimum width, island removal); gates stitching sites and fanout pour-direct |
+| `plane_fill_model.py` | Zone fill model with KiCad's filler semantics (clearance, minimum width, island removal, clipped to the board outline and kept `max(zone clearance, min_copper_edge_clearance)` from every Edge.Cuts item); gates stitching sites and fanout pour-direct |
 | `plane_lattice.py` | The plane's web through a BGA via lattice: the pour clearance that still threads it |
 | `plane_write_reconcile.py` | Keeps the write list and `pcb_data` in step when a pass removes copper (#508) |
 | `add_gnd_vias.py` | GND return via placement (`--add-gnd-vias`) |
