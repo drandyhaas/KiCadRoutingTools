@@ -12,6 +12,16 @@ classifies every discrepancy:
   * MATCHED        -- same net pair within 0.5 mm: agreement.
   * KICAD-ONLY     -- check_drc false negative (the dangerous direction;
                       e.g. the butterstick shorting_items under-classification).
+                      Graded at the SAME classes on both sides (#1594), so
+                      it names an item check_drc's model missed.
+  * WITHIN-MARGIN  -- a KiCad clearance item whose shortfall (its own
+                      `clearance X mm; actual Y mm`) is inside check_drc's
+                      5% grading margin, where KiCad's tolerance is an
+                      absolute 500 nm (#1594): accepted by check_drc's
+                      documented tolerance, not missed. Counted apart
+                      (`kicad_within_margin`), never in KICAD-ONLY or the
+                      verdict; `check_drc --clearance-margin-mm 0.0005`
+                      grades those pairs as KiCad does.
   * CHECKDRC-ONLY  -- check_drc phantom (over-report) OR a class KiCad cannot
                       see (KiCad 10 net-unifies touching copper, so it is
                       structurally blind to overlaps it merged into one net).
@@ -194,6 +204,32 @@ def unclassified_error_types(data):
 
 MATCH_RADIUS_MM = 0.5
 
+#: The fractional tolerance the check_drc side grades at (run_drc's default,
+#: and the CLI's): what WITHIN-MARGIN measures a KiCad item's shortfall
+#: against (#1594).
+CD_CLEARANCE_MARGIN = 0.05
+_KICAD_SHORTFALL_RE = re.compile(
+    r"(\d+(?:\.\d+)?) mm; actual (-?\d+(?:\.\d+)?) mm")
+
+
+def split_within_margin(kicad_items, margin=CD_CLEARANCE_MARGIN):
+    """(missed, within_margin): the KiCad items whose own reported shortfall
+    (`clearance X mm; actual Y mm`) is no more than `margin` of the required
+    value go to `within_margin` -- check_drc's tolerance accepts them by
+    design, where KiCad's is an absolute 500 nm (#1594). An item without the
+    two numbers (a short, a hole collision) stays `missed`."""
+    missed, within = [], []
+    for v in kicad_items:
+        m = _KICAD_SHORTFALL_RE.search(v.get("desc") or "")
+        if m:
+            req, act = float(m.group(1)), float(m.group(2))
+            short = req - act
+            if req > 0 and 0 < short <= req * margin:
+                within.append(dict(v, required_mm=req, actual_mm=act))
+                continue
+        missed.append(v)
+    return missed, within
+
 
 def run_kicad_drc(board: str):
     """Run kicad-cli DRC, return (violations, error) with items filtered to
@@ -339,7 +375,7 @@ def _graphic_owners(descriptions):
                          if (m := _GRAPHIC_OWNER_RE.match(d or ""))}))
 
 
-def run_check_drc(board: str, clearance: float = None, netclasses: bool = False,
+def run_check_drc(board: str, clearance: float = None, netclasses: bool = True,
                   baseline: str = None):
     """Run check_drc.run_drc, return counted violations (post warning-split)
     as {type, nets:frozenset, pos:(x,y)}.
@@ -347,12 +383,18 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = False,
     Parity with the kicad-cli side (#326/#338): pad/footprint local-clearance
     overrides are graded unconditionally (they live in the .kicad_pcb, which
     staging never touches); the board's min_copper_edge_clearance is always
-    honored (staging leaves it alone); per-NETCLASS clearances only when
-    `netclasses` is set -- the staged copy clamps every class down to the
-    routed clearance, so grading the original class values here would be
-    stricter than what kicad-cli sees."""
+    honored (staging leaves it alone); and the NET CLASSES are graded as the
+    staged copy has KiCad grade them (#1594): `clearance` for the Default
+    class (which _staged_copy equalizes to it) and every non-Default class at
+    its own value, a pair at max(A, B) -- the check_drc CLI's own reading.
+    The staged copy does not clamp a non-Default class (only
+    `--clearance-ceiling` does, in the project itself, since #530), so
+    grading the board at one clearance listed every pair a stricter class
+    breaks as KICAD-ONLY. `netclasses=False` keeps the single-clearance
+    grade for a caller that asks for it."""
     from check_drc import run_drc
     kw = {"clearance": clearance} if clearance else {}
+    kw["clearance_margin"] = CD_CLEARANCE_MARGIN
     # _staged_copy forces copper_edge_clearance severity to "error" on the
     # kicad-cli side (#441: authored-"ignore" boards must not hide router copper
     # run to the milled edge). Mirror that here or every edge item on an
@@ -744,11 +786,11 @@ def _staged_copy(board: str, clearance: float):
     the Default-class equalization below is a no-op on routed output (the recorded
     Default class already IS the floor) -- it only bites a stock/project-less board.
 
-    NON-Default classes are left untouched because the #439 writeback already
-    CLAMPED them to the routed floor in the .kicad_pro (clamp_nondefault_netclasses,
-    default True), so KiCad reads back the routed values directly and grades each
-    cross-class pair at its true max(A,B). (Pre-#439 this relied on PR392's
-    "router respects non-Default classes"; post-#439 the writeback does the clamping.)
+    NON-Default classes are left untouched: KiCad grades each at its own value
+    and a cross-class pair at max(A, B). Since #530 the writeback clamps them
+    only under --clearance-ceiling, so a board routed without one ships its
+    classes as authored -- which is why run_check_drc grades the check_drc side
+    at the same classes (#1594) rather than at one clearance.
 
     This function still does the useful, board-derived work: skip the slow silk DRC
     provider, stage the #406 min-connection web check, and pin an ABSENT edge rule to
@@ -1076,7 +1118,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # #962: the unrouted input doubles as check_drc's --baseline, so a
     # footprint-graphic graze a PART MOVE created is graded (not accepted) and
     # cannot consume KiCad's matching finding below.
-    cd = run_check_drc(board, clearance, netclasses=not bool(clearance),
+    cd = run_check_drc(board, clearance, netclasses=True,
                        baseline=baseline if baseline and os.path.exists(baseline) else None)
     # check_drc 'accepted' edge items (track covered by an edge-exempt pad): not
     # check_drc failures -- split them out of the counted list, and use them to drop
@@ -1119,7 +1161,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     cd_pre = cd_own_pads_pre
     if baseline and os.path.exists(baseline):
         try:
-            cd_base = run_check_drc(baseline, clearance, netclasses=not bool(clearance))
+            cd_base = run_check_drc(baseline, clearance, netclasses=True)
         except Exception:  # noqa: BLE001 -- best-effort, tolerate a bad input
             cd_base = None
         cd_base = [c for c in (cd_base or []) if c["type"] not in CD_VIA_PASTE_TYPES
@@ -1170,12 +1212,17 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # Part B: collapse the board-edge anchor double-count (same edge violation
     # anchored differently by each engine). One-sided edge divergence survives.
     edge_reconciled, kicad_only, cd_only = reconcile_edge_family(kicad_only, cd_only)
+    # #1594: a KiCad item inside check_drc's own grading margin was accepted
+    # by that tolerance, not missed -- named apart, out of the verdict.
+    kicad_only, kicad_in_margin = split_within_margin(kicad_only)
     n_matched = len(matched) + edge_reconciled
     # NET-PAIR agreement: the engines report at different granularities
     # (check_drc: one violation per offending segment; kicad: grouped item
     # pairs), so the honest consistency metric is the SET of net pairs each
     # engine implicates. Instance-level diffs then refine within agreed pairs.
-    kpairs = {v["nets"] for v in kicad if len(v["nets"]) == 2}
+    kpairs = {v["nets"] for v in kicad if len(v["nets"]) == 2
+              and not any(v["nets"] == w["nets"] and v["pos"] == w["pos"]
+                          for w in kicad_in_margin)}
     cpairs = {v["nets"] for v in cd if len(v["nets"]) == 2}
     pk_only, pc_only = kpairs - cpairs, cpairs - kpairs
     verdict = ("CONSISTENT" if not kicad_only and not cd_only else
@@ -1207,6 +1254,9 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             "checkdrc_own_copper": len(cd_own),
             "matched": n_matched, "kicad_only": len(kicad_only),
             "checkdrc_only": len(cd_only),
+            # #1594: KiCad items inside check_drc's 5% margin (not missed)
+            "kicad_within_margin": len(kicad_in_margin),
+            "kicad_within_margin_items": kicad_in_margin,
             "pairs_both": len(kpairs & cpairs),
             "pairs_kicad_only": len(pk_only), "pairs_checkdrc_only": len(pc_only),
             "verdict": verdict,
@@ -1240,6 +1290,7 @@ _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "kicad_intentional_edge", "checkdrc_intentional_edge",
                  "kicad_own_copper", "checkdrc_own_copper",
                  "matched", "kicad_only", "checkdrc_only",
+                 "kicad_within_margin",
                  "pairs_kicad_only", "pairs_checkdrc_only",
                  "kicad_connection_width", "connection_width_min",
                  "kicad_starved_thermal", "kicad_track_dangling",
@@ -1283,7 +1334,9 @@ def compare_board(board: str, label: str = None, clearance: float = None,
                 + (f" (+{_td_pre} pre-existing, subtracted)" if _td_pre
                    else ""))
     print(f"{label}: kicad={data['kicad']}{pre_note} check_drc={data['check_drc']}{cd_pre_note} "
-          f"matched={data['matched']} kicad_only={data['kicad_only']} checkdrc_only={data['checkdrc_only']}{ie_note} | "
+          f"matched={data['matched']} kicad_only={data['kicad_only']} checkdrc_only={data['checkdrc_only']}"
+          + (f" within_margin={data['kicad_within_margin']}" if data.get('kicad_within_margin') else "")
+          + f"{ie_note} | "
           f"net-pairs: both={data['pairs_both']} kicad_only={data['pairs_kicad_only']} "
           f"checkdrc_only={data['pairs_checkdrc_only']} |{cw_note}  {data['verdict']}")
     if data.get("kicad_unclassified"):
@@ -1293,6 +1346,11 @@ def compare_board(board: str, label: str = None, clearance: float = None,
                           sorted(data["kicad_unclassified"].items())))
     for kv in data["kicad_only_items"]:
         print(f"    KICAD-ONLY  {kv['type']:16s} {sorted(kv['nets'])} @ {kv['pos']}  {kv.get('desc','')[:60]}")
+    for kv in data.get("kicad_within_margin_items", []):
+        print(f"    WITHIN-MARGIN {kv['type']:14s} {sorted(kv['nets'])} @ {kv['pos']}  "
+              f"short by {kv['required_mm'] - kv['actual_mm']:.4f} of "
+              f"{kv['required_mm']:.4f} mm (inside check_drc's "
+              f"{CD_CLEARANCE_MARGIN:.0%} margin; KiCad's is 500 nm)")
     for cv in data["checkdrc_only_items"]:
         print(f"    CHECKDRC-ONLY {cv['type']:16s} {sorted(cv['nets'])} @ {cv['pos']}")
     for wv in data.get("connection_width_items", []):

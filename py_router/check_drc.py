@@ -39,9 +39,27 @@ from net_queries import expand_pad_layers
 # geometry, and many orders above the residue it exists to absorb.
 FP_EPS_MM = 1e-9
 
+# #1594: KiCad's own clearance tolerance is ABSOLUTE -- 500 nm on every pair
+# (net_queries.KICAD_DRC_EPSILON_MM) -- so no fraction equals it on a board
+# with two classes (5% is 25 um at a 0.5 mm class and 10 um at 0.2 mm). An
+# absolute margin (`--clearance-margin-mm`, run_drc's `clearance_margin_mm`)
+# replaces the fraction for every clearance grade of one run; at
+# KICAD_DRC_EPSILON_MM one setting grades as KiCad does on every class. The
+# 5% fractional default stays for what it is documented to do. A CONTEXT
+# variable, set for the duration of one run_drc call: a run in another thread
+# (kicad_drc_compare grades boards under a ThreadPoolExecutor) never sees it.
+import contextvars
+from net_queries import KICAD_DRC_EPSILON_MM
+
+_ABS_MARGIN_MM = contextvars.ContextVar('check_drc_abs_margin_mm', default=None)
+
 
 def _grade_tol(clearance: float, clearance_margin: float) -> float:
-    """The fractional grading tolerance, floored above float residue."""
+    """The grading tolerance, floored above float residue: the run's absolute
+    margin when one is set (#1594), else the fraction of the clearance."""
+    a = _ABS_MARGIN_MM.get()
+    if a is not None:
+        return max(a, FP_EPS_MM)
     return max(clearance * clearance_margin, FP_EPS_MM)
 
 import routing_defaults as defaults
@@ -4409,7 +4427,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             net_clearances: Optional[Dict[str, float]] = None,
             respect_edge_severity: bool = True,
             pcb_data: Optional[PCBData] = None,
-            baseline=None):
+            baseline=None,
+            clearance_margin_mm: Optional[float] = None):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -4443,7 +4462,22 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             boards whose sibling .kicad_pro sets copper_edge_clearance severity to
             'ignore' -- matching the KiCad oracle, which runs no board-edge check
             there (#427). Pass False to force the check regardless of the setting.
+        clearance_margin_mm: An ABSOLUTE tolerance in mm for every clearance
+            grade of this run (pairs, copper-to-hole, hole-to-hole, board edge),
+            replacing ``clearance_margin``'s fraction (#1594).
+            ``KICAD_DRC_EPSILON_MM`` (0.0005) grades as KiCad does on every
+            class. None (default) = the fraction.
     """
+    if clearance_margin_mm is not None:
+        # Set for this call (and the run_drc calls it makes) only, then
+        # restored; the inner call inherits it.
+        _kw = dict(locals())        # the parameters: nothing else is bound yet
+        _kw.pop('clearance_margin_mm')
+        _tok = _ABS_MARGIN_MM.set(float(clearance_margin_mm))
+        try:
+            return run_drc(**_kw)
+        finally:
+            _ABS_MARGIN_MM.reset(_tok)
     # Board-edge clearance: the explicit/board value when set, else the fab
     # copper-to-edge floor (0.20, #439 -- the routers pin the edge up to it, so a
     # project-less final's copper is >=0.20 from the edge) or the copper clearance,
@@ -4937,7 +4971,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if _trule is not None:
                     _base = _pair_cl(net1, net2, layer=seg1.layer,
                                      types=(('track', None), ('track', None)))
-                    _rule_only = (_eff - overlap) >= _base * (1 - clearance_margin)
+                    _rule_only = (_eff - overlap) >= _base - _grade_tol(_base, clearance_margin)
                 _v = {
                     'type': ('segment-segment-track-rule' if _rule_only
                              else 'segment-segment'),
@@ -5554,7 +5588,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # compute the center distance to every via j>i at once; the violation test
         # (overlap = drill_i/2 + drill_j/2 + clearance - dist > tolerance) and the
         # reported overlap mirror check_via_drill_overlap exactly. The default
-        # clearance_margin there is 0.05, so tolerance = clearance * 0.05.
+        # clearance_margin there is 0.05, so tolerance = clearance * 0.05 (or
+        # the run's absolute margin, #1594).
         all_vias = list(pcb_data.vias)
         nv = len(all_vias)
         if nv >= 2:
@@ -5565,7 +5600,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 vmatch = None
             else:
                 vmatch = np.array([v.net_id in matching_via_nets for v in all_vias], dtype=bool)
-            tolerance = hole_to_hole_clearance * 0.05
+            tolerance = _grade_tol(hole_to_hole_clearance, 0.05)
             for i in range(nv - 1):
                 required = vdrill[i] / 2 + vdrill[i + 1:] / 2 + hole_to_hole_clearance
                 actual = np.sqrt((vx[i] - vx[i + 1:]) ** 2 + (vy[i] - vy[i + 1:]) ** 2)
@@ -5626,7 +5661,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 pmatch = None
             else:
                 pmatch = np.array([pn in matching_pad_nets for pn in th_pad_nets], dtype=bool)
-            tolerance = hole_to_hole_clearance * 0.05
+            tolerance = _grade_tol(hole_to_hole_clearance, 0.05)
             for via in all_vias:
                 via_matches = matching_via_nets is None or via.net_id in matching_via_nets
                 required = prad + via.drill / 2 + hole_to_hole_clearance
@@ -6855,8 +6890,18 @@ if __name__ == "__main__":
                              f'(0 = auto: the project\'s min_hole_clearance, else '
                              f'the {defaults.NPTH_TO_TRACK_CLEARANCE} fab floor). '
                              f'Raises the floor, never lowers it.')
-    parser.add_argument('--clearance-margin', type=float, default=0.05,
-                        help='Fraction of clearance to use as tolerance (default: 0.05 = 5%%). Violations smaller than clearance*margin are ignored.')
+    _margin = parser.add_mutually_exclusive_group()
+    _margin.add_argument('--clearance-margin', type=float, default=0.05,
+                         help='Fraction of clearance to use as tolerance (default: 0.05 = 5%%). Violations smaller than clearance*margin are ignored.')
+    _margin.add_argument('--clearance-margin-mm', type=float, default=None,
+                         metavar='MM',
+                         help=f'An ABSOLUTE tolerance in mm for every clearance '
+                              f'grade, instead of --clearance-margin\'s fraction '
+                              f'(#1594). KiCad\'s own is {KICAD_DRC_EPSILON_MM:g} '
+                              f'(500 nm) on every pair, so '
+                              f'--clearance-margin-mm {KICAD_DRC_EPSILON_MM:g} '
+                              f'grades as KiCad does on every net class, which '
+                              f'no single fraction can.')
     parser.add_argument('--nets', '-n', nargs='+', action='extend', default=None,
                         help='Optional net name patterns to focus on (fnmatch wildcards supported, e.g., "*lvds*")')
     parser.add_argument('--debug-lines', '-d', action='store_true',
@@ -6912,6 +6957,9 @@ if __name__ == "__main__":
     # same code as "violations found" (pre-push review).
     if args.baseline and not os.path.isfile(args.baseline):
         parser.error('--baseline: no such board file: %s' % args.baseline)
+    if args.clearance_margin_mm is not None and not args.clearance_margin_mm >= 0:
+        parser.error('--clearance-margin-mm: must be a non-negative number of mm '
+                     '(got %s)' % args.clearance_margin_mm)
     set_default_fab_tier(*fab_tier_from_args(args))
 
     # Grade at the clearance the board was actually routed to. When -c is not
@@ -7098,6 +7146,17 @@ if __name__ == "__main__":
               f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to "
               f"NPTH holes only. Via drills and ordinary plated holes are "
               f"not graded against it, unlike KiCad's hole_clearance)")
+    if not args.quiet:
+        # #1594: say which tolerance the clearance grades use, always.
+        if args.clearance_margin_mm is not None:
+            print(f"Clearance tolerance: {args.clearance_margin_mm:g} mm on every "
+                  f"pair (--clearance-margin-mm; KiCad's own is "
+                  f"{KICAD_DRC_EPSILON_MM:g})")
+        else:
+            print(f"Clearance tolerance: {100 * args.clearance_margin:g}% of each "
+                  f"pair's clearance (--clearance-margin {args.clearance_margin:g}; "
+                  f"KiCad's own is an absolute {KICAD_DRC_EPSILON_MM:g} mm, "
+                  f"--clearance-margin-mm)")
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
@@ -7110,7 +7169,8 @@ if __name__ == "__main__":
                          size_margin=args.size_margin,
                          check_pad_edge=args.check_pad_edge,
                          net_clearances=net_clearances,
-                         baseline=args.baseline)
+                         baseline=args.baseline,
+                         clearance_margin_mm=args.clearance_margin_mm)
     if args.render and any(not v.get('accepted') for v in violations):
         render_violation_panels(args.pcb, violations, args.render)
     if args.json:
@@ -7154,6 +7214,9 @@ if __name__ == "__main__":
             'graded_at': {
                 'clearance': args.clearance,
                 'clearance_margin': args.clearance_margin,
+                # #1594: an absolute tolerance replaced the fraction above
+                # for every clearance grade when this is set
+                'clearance_margin_mm': args.clearance_margin_mm,
                 'hole_to_hole_clearance': args.hole_to_hole_clearance,
                 # #1038: copper-to-hole, as graded (the NPTH track arm uses
                 # max(clearance, NPTH fab floor, this)), and where it came

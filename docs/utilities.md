@@ -98,6 +98,10 @@ Options:
                             Violations smaller than clearance*margin are ignored — filters
                             grid-quantization noise (~8 µm artifacts); raise to e.g. 0.1 to
                             suppress more borderline grazes
+  --clearance-margin-mm MM  An ABSOLUTE tolerance in mm for every clearance grade, instead
+                            of the fraction (#1594; the two flags refuse each other).
+                            0.0005 is KiCad's own (500 nm on every pair) and grades as
+                            KiCad does on every net class
   --nets, -n PATTERN [...]  Only check nets matching these fnmatch patterns
   --debug-lines, -d    Write debug lines on User.7 showing violation locations
   --quiet, -q          Print only a summary line unless there are violations
@@ -191,6 +195,8 @@ Checks 11–12 are on by default; pass `--no-size-checks` to skip them, or overr
 ### Clearance Margin
 
 The DRC checker uses a 5% clearance margin by default to ignore tiny geometric artifacts from corner handling. For example, with a 0.1mm clearance, violations smaller than 0.005mm are ignored.
+
+The margin is a fraction of each pair's own clearance, so it scales with the class: 10 µm at 0.2 mm, 25 µm at 0.5 mm. KiCad's tolerance is an absolute 500 nm on every pair (`net_queries.KICAD_DRC_EPSILON_MM`), so on a board with two classes no fraction reproduces KiCad's grade. `--clearance-margin-mm 0.0005` does (#1594): it replaces the fraction for every clearance grade of the run (pairs, copper-to-hole, hole-to-hole, board edge), and `run_drc(..., clearance_margin_mm=)` is the same in-process. The console line `Clearance tolerance: ...` and the `--json` `graded_at.clearance_margin` / `clearance_margin_mm` say which one a run used. `board_score` keeps `drc` at the 5% default and discloses the count at KiCad's tolerance beside it (`drc.at_kicad_tolerance`).
 
 ### Debug Visualization
 
@@ -1063,7 +1069,11 @@ with `<list>_count` / `<list>_truncated`), a `BLOCKING=` summary and
 disclosure lines (`ADVISORY`, `UNGRADED`, ...); `--json` writes everything.
 DRC pairs that exist only because a `.kicad_dru` track rule raised the pair
 clearance, and vias in paste openings without `--baseline`, are advisory and
-outside `blocking`. Exit 0 graded with blocking 0; 4 graded with blockers;
+outside `blocking`. `drc` grades at check_drc's default 5% clearance margin;
+the same grade at KiCad's own 500 nm tolerance (`check_drc
+--clearance-margin-mm 0.0005`, run beside it) is disclosed as
+`drc.at_kicad_tolerance` and on a `DRC AT KICAD'S TOLERANCE` line, never in
+`blocking` (#1594). Exit 0 graded with blocking 0; 4 graded with blockers;
 3 board state (missing or unreadable board); 2 bad arguments; 1 crash.
 
 ## Completion Check (`check_complete.py`)
