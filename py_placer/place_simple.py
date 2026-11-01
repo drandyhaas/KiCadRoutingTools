@@ -1551,6 +1551,21 @@ def main(argv=None):
     for r in resid:
         print(f"  WARNING: {decap_repair.residual_text(r)}"
               + (decap_repair.stuck_text(r) if mended is not None else ''))
+    # each claim still past its limit, named as the decaps are (#1600). A
+    # claim is priced, not held, and one the toolchain derives (a crystal at
+    # its IC's pins, a load cap at its crystal) is graded WARN, which the
+    # judge does not rank: say so here, where the seed is read
+    authored = {(str(c.get('ref')), str(c.get('near')))
+                for c in base.get('proximity') or () if not floorplan.derived_claim(c)}
+    claims_left = model.broken_claims()
+    for b in claims_left:
+        b['derived'] = (b['ref'], b['near']) not in authored
+        print(f"  WARNING: claim {b['ref']} near {b['near']}: {b['ref']} pad {b['pad']} is "
+              f"{b['gap_mm']:.2f} mm from {b['near']}, past its "
+              + (f"derived {b['max_mm']:g} mm limit; check_floorplan grades a derived "
+                 f"claim a WARN whatever `severity.proximity` says, so the judge ranks "
+                 f"the seed no lower for it" if b['derived'] else
+                 f"{b['max_mm']:g} mm limit"))
     if drift:
         print("  template drift (worst pad, mm): " + ', '.join(
             f"{d['ref']} {d['worst_mm']:.2f}" for d in drift))
@@ -1623,7 +1638,7 @@ def main(argv=None):
               'tight': tight, 'refused': refused, 'estimate_fallback': fallback,
               'oversubscribed': model.edge_oversubscribed, 'claim_arity': model.claim_arity,
               'floorplan': fp, 'assembly': asm, 'bga_field': bga_field,
-              'decap_residual': resid, 'decap_repair': mended,
+              'decap_residual': resid, 'decap_repair': mended, 'claims_left': claims_left,
               'unseated': model.edge_unseated, 'notes': notes, 'fold': model.fold,
               'links': links,
               'groups': model.groups, 'stats': res['stats'], 'templates': drift,
@@ -1637,7 +1652,7 @@ def main(argv=None):
                                           ('final', 'moves', 'seed', 'start', 'reseated', 'illegal',
                                            'illegal_why', 'tight',
                                            'refused', 'oversubscribed', 'claim_arity', 'floorplan',
-                                           'assembly', 'bga_field', 'template_off', 'decap_residual', 'hints_saturated', 'estimate_fallback', 'faces', 'fold', 'links', 'moves_total', 'seconds')}))
+                                           'assembly', 'bga_field', 'template_off', 'decap_residual', 'claims_left', 'hints_saturated', 'estimate_fallback', 'faces', 'fold', 'links', 'moves_total', 'seconds')}))
     return 4 if illegal or refused or model.edge_oversubscribed else 0
 
 

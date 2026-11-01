@@ -488,7 +488,9 @@ python3 -X utf8 py_tools/check_groups.py board.kicad_pcb --groups groups.json --
   and why, no row yet), and a WARN for a template member in another group
   than its chip's. As a HINT, each chip the board's pins and nets suggest
   that no group names or records `none`:
-  - `emc_roles` reads a switching converter;
+  - `emc_roles` reads a switching converter, or a switching-converter
+    candidate (a pin-less part an inductor shares a net with; never a part
+    it calls a connector), and the hint says which;
   - a pin's net carries an inductor and at most four other parts;
   - a cap sits across two of its pins, one named a bootstrap or flying-cap
     pin;

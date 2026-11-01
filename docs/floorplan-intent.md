@@ -160,9 +160,9 @@ suspect, suspect_reason, why
 | `rails[]` | `nets` (net-name globs, as `--nets` takes them), `why` (or `note` / `reason`), `context` (see "`rails[]`" below; needs `min_reader` 18) |
 | `replicate[]` | `from` (a sheet instance: its name or path, as `place_pose replicate --from` takes it), `to` (a list of them), or instead `channels` (copies inside one sheet: two or more lists of refs, the first the source, matched index for index; needs `min_reader` 19), `anchor`, `allow_net_mismatch` (`REF.PAD` entries), `only` or `skip` (refs; not both), `search_mm`, `tolerance_mm`, `why` (or `note` / `reason`), `context`, `source` (see "`replicate[]`" below; needs `min_reader` 11) |
 | `templates[]` | `anchor` (the chip), `members` (each `ref`, `at` [dx, dy] mm and `rot`, a quarter turn, in the chip's own frame; `pads` and `note` as the fit wrote them), `tolerance_mm`, `kind` (`switching stage` or `rf front end`), `ground_return_mm`, `source`, `why` (or `note` / `reason`), `context`, and the fit-written `fitted` (see "`templates[]`" below; needs `min_reader` 13, and 14 with `kind` or `ground_return_mm`) |
-| `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `standoffs`, `holes` (needs `min_reader` 22), `removable`, `source`, `top_mm`, `insertion` (these two need `min_reader` 21), `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
-| `covers[].standoffs[]` | `ref`, `length_mm`, `rot`, `off_mm` (needs `min_reader` 21) |
-| `covers[].holes[]` | `length_mm`, `off_mm`, `diameter_mm`, `why` (or `note` / `reason`) (needs `min_reader` 22) |
+| `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `start_mm` (where the body begins along the axis, signed; needs `min_reader` 23), `standoffs`, `holes` (needs `min_reader` 22), `removable`, `source`, `top_mm`, `insertion` (these two need `min_reader` 21), `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
+| `covers[].standoffs[]` | `ref`, `length_mm` (signed; behind the connector's origin needs `min_reader` 23), `rot`, `off_mm` (needs `min_reader` 21) |
+| `covers[].holes[]` | `length_mm` (signed, as a standoff's), `off_mm`, `diameter_mm`, `why` (or `note` / `reason`) (needs `min_reader` 22) |
 | `covers[].insertion` | `angle_deg`, `travel_mm` (needs `min_reader` 21) |
 | `heights[]` | `ref`, `height_mm`, `underside_mm`, `under_cover` (needs `min_reader` 20), `source`, `why` (or `note` / `reason`), `context` (needs `min_reader` 15) |
 | `arrays[]` | `name`, `members` (an ORDERED list of literal refs, at least two), `serves` (a ref, or `"unknown"`), `order` (`"pin"`, `"declared"` or `"unknown"`), `rotation` (degrees, `"shared"` or `"unknown"`), `pitch_mm` (`"auto"` or mm), `axis` (`"auto"`, `"x"` or `"y"`), `allow_mixed`, `why` (or `note` / `reason`), `context`, and the compiler-written `source` (see "Arrays" below; needs `min_reader` 7) |
@@ -281,7 +281,7 @@ claim").
 intent file at once — far too blunt for "this build learned a new field".
 
 So field-level compatibility is a second number. `READER_VERSION` (currently
-`22`) is what this build can act on, and an intent sets `min_reader` when a
+`23`) is what this build can act on, and an intent sets `min_reader` when a
 claim must not be silently ignored:
 
 ```jsonc
@@ -334,6 +334,7 @@ Each `min_reader` level and the keys it covers:
 | 20 | `heights[].under_cover` |
 | 21 | `covers[].top_mm`, `covers[].insertion`, `covers[].standoffs[].off_mm` |
 | 22 | `covers[].holes[]` |
+| 23 | `covers[].start_mm`, a `covers[].holes[]` or `covers[].standoffs[]` `length_mm` below 0 |
 
 The emitter and the design-brief compiler stamp the level their output needs.
 
@@ -993,7 +994,7 @@ reading.
 | `keepout` | yes | **priced and enforced**: the area inside a keep-out is in the anneal's overlap term, and the legality check refuses such a pose | — |
 | `zone_side` | yes | **applied before placing**: a member on the other face is flipped at its pose (the writer's flip) | — |
 | `fixed_poses[]` (anchor `fixed:<ref>`) | yes, as `zone_containment` on the anchor | **seated and held**: written at the declared pose before placing, and fixed for the whole anneal | — |
-| `proximity` | yes | **priced**: each claimed pad's distance to its partner's nearest pad on its net (pad centres) is a term of the objective, and each mm a claimed pad is past `max_mm`, pad edge to pad edge as the grade measures it, costs `--claim-limit-weight` (default 10). A claimed part's `jump` move aims at its partner's pads, a move of the partner carries the parts holding their claim on it, and a claimed part joins its partner's group -- a claimed `anchor` takes its whole group along, and a group so emptied is dropped with its own `near` / `apart` / `edge` hints, which `check_groups` WARNs and `place_simple` reports (`fold`, #1467). The crystal claims -- each passive crystal at its IC's oscillator pins (through a series resistor where a leg has one) and its load caps at the crystal (`placement/crystals.py`, `max_mm` 8.1 and 2.2, derived defaults) -- are written into `proximity[]` by `--emit-intent` with `context.source` `placement.crystals`; `place_simple` derives the same rows itself for an intent that lacks them, and a pair the intent already claims keeps the intent's row | the term reads pads on shared nets whatever the `basis`, so a claim whose parts share no net is not priced. A crystal row is graded at **warn** whatever `severity.proximity` says, and `place_fanout_clearance --intent` does not hold it: its limit is the human corpus's 75th percentile, which one human board in four exceeds. Copy the row without that `source` to make it an error-graded claim of your own (reader 12) |
+| `proximity` | yes | **priced**: each claimed pad's distance to its partner's nearest pad on its net (pad centres) is a term of the objective, and each mm a claimed pad is past `max_mm`, pad edge to pad edge as the grade measures it, costs `--claim-limit-weight` (default 10). A claimed part's `jump` move aims at its partner's pads, a move of the partner carries the parts holding their claim on it, and a claimed part joins its partner's group -- a claimed `anchor` takes its whole group along, and a group so emptied is dropped with its own `near` / `apart` / `edge` hints, which `check_groups` WARNs and `place_simple` reports (`fold`, #1467). The crystal claims -- each passive crystal at its IC's oscillator pins (through a series resistor where a leg has one) and its load caps at the crystal (`placement/crystals.py`, `max_mm` 8.1 and 2.2, derived defaults) -- are written into `proximity[]` by `--emit-intent` with `context.source` `placement.crystals`; `place_simple` derives the same rows itself for an intent that lacks them, and a pair the intent already claims keeps the intent's row | the term reads pads on shared nets whatever the `basis`, so a claim whose parts share no net is not priced. A crystal row is graded at **warn** whatever `severity.proximity` says, and `place_fanout_clearance --intent` does not hold it: its limit is the human corpus's 75th percentile, which one human board in four exceeds. Copy the row without that `source` to make it an error-graded claim of your own (reader 12). Its finding says `past the derived ... limit`, and when the intent sets `severity.proximity` check_floorplan prints a `note:` that the severity does not reach the derived rows (#1600). A claim is priced, not held, so `place_simple` names each one it leaves past its limit (`WARNING: claim Y1 near U3: ...`, `claims_left` in its `--json`) |
 | `edge_connector` | yes | **seated**: an unlocked edge part (connector, receptacle, switch or test pad, by the entry's declared `class`, else the part's inferred one, as the grade reads it) declared on an edge is held there, its mating face (`mating_face` where the body names none) pointing out and flush with the low end of its `overhang_mm` band, and only slides along it, within its `along_edge_band` / `center_on_edge` when it declares one; its `side` is applied before placing | a part that is not an edge part by class (a cap or a jumper by the edge) is emitted with its observed overhang as a band and no edge, so it is placed like any other part; a row an author DECLARES on an edge is seated whatever its class (the grade reads every row's edge), with a NOTE when the class is not an edge part. Lock a connector at its edge pose in the file, or declare that pose in `fixed_poses[]`, when the position along the edge is fixed |
 | `must_lock` | yes | — | it is a claim about the FILE; no pose satisfies or violates it. `place_simple` holds the parts the file locks |
 | `assembly_side` | yes | — | no move carries a side; a part changes face only by a declaration (the `zone_side` row). **warn** by default so it cannot become a permanent red mark |
@@ -1375,11 +1376,16 @@ it now); the skill's "Covers" step says how an agent gets from those facts
 and the datasheets to a row.
 
 The body is a rectangle in the connector's own frame (its footprint's local
-axes): from the connector's origin along `axis_deg` (0 = local +x, 90 =
-local +y) to `length_mm`, else to its farthest standoff, `width_mm` wide
-about a centre line `offset_mm` to the axis's left (default 0), with its
-lowest point `underside_mm` over the connector's face. It moves and turns
-with the connector.
+axes): along `axis_deg` (0 = local +x, 90 = local +y) from `start_mm`
+(default 0, the connector's origin) to `length_mm`, else to its farthest
+standoff, `width_mm` wide about a centre line `offset_mm` to the axis's left
+(default 0), with its lowest point `underside_mm` over the connector's face.
+It moves and turns with the connector. `start_mm` is signed (#1589,
+`min_reader` 23): a module whose board reaches behind its connector's origin
+(an SO-DIMM module round its socket's contact row) says `"start_mm": -3.5`,
+and the parts under that strip are judged as under the rest. The body must
+end past where it starts. An insertion path (below) turns about the origin
+and reads the body from there out.
 
 Under it (`placement.heights`, the rule #1443 judges a part's model by):
 
@@ -1400,7 +1406,8 @@ A declared body wins over a model's on the area it declares (a card model's
 underside is that model's card type, and a generic model draws one). The
 seat gate and the anneal price it, and check_assembly gates it as a
 `height` pair (`HEIGHT-BLOCKING`; with `--baseline`, the pairs a move made).
-Each standoff is held `length_mm` along the axis from the connector:
+Each standoff is held `length_mm` along the axis from the connector (signed:
+below 0 it stands behind the origin, #1589, `min_reader` 23):
 `place_simple` seats and carries it as a template member anchored on the
 connector, and the `cover` rule reports one off its place, at WARN unless
 `severity` says otherwise. A standoff that cannot move -- locked in the
@@ -1450,6 +1457,15 @@ drawing gives, and one rule grades whether it can go on:
   cover NOT mountable and is named in the finding; a clear site with no
   standoff yet is reported (`standoff: null`), not judged, and so is a site
   past the outline. Report only: `place_simple` does not price the sites.
+  A site may sit behind the connector's origin (`length_mm` below 0, #1589,
+  `min_reader` 23), so a module with holes on both sides of its connector
+  declares all of them in one row. The cover's own connector is reported at
+  a site, not judged: the site is drawn in that connector's frame, so no
+  placement moves one against the other, and the module's drawing puts its
+  holes where its own socket lets them be. A site its body or pads reach
+  carries `connector` (`{ref, gap_mm, pads}`, check_assembly prints `its
+  connector J1 reaches the ring`); a site that lands on its own connector is
+  a declaration to read again.
 
 The `mountable` rule (WARN unless `severity` promotes it, armed by any
 `covers[]`) reads `floorplan.mount_report` per cover: each standoff on the
@@ -1958,10 +1974,15 @@ interface (`USB1`), a connector word in the name (`connector`, `receptacle`,
 item (`USB-MICRO-B-...`, a SIM connector's `KON-SIM-01`) rather than fused into
 a part number (`USBLC6-2P6`, `0603USB`, `SIM800C`), or receptacle pins. So a
 USB ESD array, a common-mode choke or a cellular module named by its part
-number is no edge part. Receptacle pins (`CC1`, `CC2`, `SBU1`, `SBU2`,
-`SHIELD`) are read before a symbol's `_<suffix>` (`CC1_A5` is `CC1`), and a
-SON package (`USON`, `WSON`, ...) is an IC package like a QFN, whatever its
-pins. A connector named only by its part number and carrying no such pins
+number is no edge part. On a part with a chip's reference (`U`, `IC`), the
+stem as a word counts only where the item spells a connector (#1587): a USB
+connector type beside it (`USB_C`, `USB-A`, `USB_Micro-B`, `MICRO-USB`) or a
+SIM socket (`KON-SIM-01`, `Nano_SIM`), so a chip named for the interface it
+serves (`USB-ESD-6`) is no edge receptacle. Receptacle pins (`CC1`, `CC2`,
+`SBU1`, `SBU2`, `SHIELD`) are read before a symbol's `_<suffix>` (`CC1_A5` is
+`CC1`), and a SON package (`USON`, `WSON`, ...) or an eSIM's machine form
+factor (`MFF2`) is an IC package like a QFN, whatever its pins. A connector
+named only by its part number and carrying no such pins
 still needs its `class` declared.
 
 With `--declare-classes`, connector-family parts that claim no edge (headers,

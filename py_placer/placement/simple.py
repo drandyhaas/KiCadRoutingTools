@@ -800,6 +800,30 @@ class Model:
         from .legality import EPS
         return sum(1 for c in self.claims if self._clo.get(id(c), 0.0) > EPS)
 
+    def broken_claims(self):
+        """The claims `claims_broken` counts, named (#1600): `{'index', 'ref',
+        'near', 'max_mm', 'pad', 'gap_mm'}` each, `pad` the subject pad
+        furthest past the limit and `gap_mm` its edge gap to the nearest
+        partner pad on its net, as `claim_over` measures it."""
+        from .legality import EPS, rect_gap
+        out = []
+        for i, c in enumerate(self.claims):
+            m = self._cmax.get(id(c))
+            if m is None or self._clo.get(id(c), 0.0) <= EPS:
+                continue
+            subj, part, legs = c
+            worst = None
+            for spad, ppads in legs:
+                P = [q for p in ppads for q in self._pad_rects(part, p)]
+                for a in (self._pad_rects(subj, spad) if P else ()):
+                    g = min(rect_gap(a, b) for b in P)
+                    if worst is None or g > worst[0]:
+                        worst = (g, spad)
+            if worst is not None:
+                out.append({'index': i, 'ref': subj, 'near': part, 'max_mm': m,
+                            'pad': worst[1], 'gap_mm': round(worst[0], 3)})
+        return out
+
     def claim_tethered(self, ref, pose):
         """The parts whose claim on `ref` a move of `ref` alone to `pose` would
         put further past its limit: a crystal at the IC whose pins it claims,

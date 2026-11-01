@@ -1017,7 +1017,10 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   `python3 -X utf8 py_tools/check_assembly.py <placed> --baseline wk/<run>/fixed.kicad_pcb`
   (read `buildable`),
   `python3 -X utf8 py_tools/check_floorplan.py <placed> --intent wk/<run>/intent.json`
-  (0 errors; the seed's `floorplan` line already counts them) and
+  (0 errors, and read every `proximity` warning; a crystal or load cap past
+  twice its limit is a defect to fix before judging, whatever the judge's
+  rank. The seed's `floorplan` line already counts the errors, and its log
+  names each claim still past its limit, `WARNING: claim ...`) and
   `python3 -X utf8 py_tools/render_placement.py <placed> -o <placed>.png`.
   Check the render against `references/placement-lessons.md`: the power
   stage between its entry and its loads, a regulator's caps tight around it,

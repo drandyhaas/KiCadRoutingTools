@@ -407,7 +407,11 @@ def main():
                          f", {len(s['parts'])} part(s), {len(s['pads'])} pad(s), "
                          f"{len(s['copper'])} track/via(s) in the ring")
                       + (f", {s['past_outline_mm']:g}mm past the outline"
-                         if s['past_outline_mm'] > 0 else ''))
+                         if s['past_outline_mm'] > 0 else '')
+                      # #1589: its own connector, drawn in the same frame
+                      + (f"; its connector {s['connector']['ref']} reaches the ring "
+                         f"({s['connector']['gap_mm']:g}mm), not judged"
+                         if s.get('connector') else ''))
     if base_pile:
         print(f"  baseline {args.baseline} is a pile: its overlaps are staging, "
               f"not a baseline (#1103), so every advisory pair counts as new")

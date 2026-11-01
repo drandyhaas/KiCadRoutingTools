@@ -232,7 +232,13 @@ EDGE_BAND_SANITY_MM = 5.0
 #: drawing, where no standoff is on the board yet. `mountable` names what
 #: stands in each hole's screw-head ring and is NO when one is blocked; an
 #: older build refuses the key by name.
-READER_VERSION = 22
+#: 23 (#1589): `covers[].start_mm` -- where the body begins along its axis,
+#: signed, so a module reaching behind its connector's origin has that strip
+#: judged -- and a SIGNED `length_mm` on `covers[].holes[]` and
+#: `.standoffs[]`, a site behind the origin. Each changes what the grade and
+#: the placer admit; an older build refuses `start_mm` by name and a
+#: negative length by its bound.
+READER_VERSION = 23
 #: The reader version that first reads `templates[]`.
 TEMPLATES_READER = 13
 #: The reader version that first reads a template row's `kind` and
@@ -256,6 +262,9 @@ UNDER_COVER_READER = 20
 MOUNT_READER = 21
 #: The reader version that first reads `covers[].holes[]` (#1537).
 HOLES_READER = 22
+#: The reader version that first reads `covers[].start_mm` and a hole or
+#: standoff behind the connector's origin (#1589).
+BEHIND_READER = 23
 #: #1475. The keep-outs a block's `fence_mm` compiles to are named
 #: `fence:<block>:<N|S|W|E>`; an intent may not name its own keep-out so.
 FENCE_KEEPOUT_PREFIX = 'fence:'
@@ -409,10 +418,12 @@ _KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'max_height_mm',
 #: of the body's centre line (a module screwed down at two corners). #1537:
 #: `holes`, the body's own mounting holes `{length_mm, off_mm?, diameter_mm}`
 #: placed as a standoff is, from its drawing -- a site, not a part, so it
-#: needs nothing on the board.
+#: needs nothing on the board. #1589: `start_mm`, where the body begins along
+#: the axis (signed; default the origin), and a hole's or standoff's
+#: `length_mm` signed, a site behind the origin.
 _COVER_KEYS = {'connector', 'side', 'axis_deg', 'width_mm', 'underside_mm',
-               'length_mm', 'offset_mm', 'standoffs', 'holes', 'removable', 'source',
-               'top_mm', 'insertion', 'context'} | _FREE_TEXT_KEYS
+               'length_mm', 'offset_mm', 'start_mm', 'standoffs', 'holes', 'removable',
+               'source', 'top_mm', 'insertion', 'context'} | _FREE_TEXT_KEYS
 _COVER_STANDOFF_KEYS = {'ref', 'length_mm', 'rot', 'off_mm'}
 _COVER_HOLE_KEYS = {'length_mm', 'off_mm', 'diameter_mm'} | _FREE_TEXT_KEYS
 _COVER_INSERTION_KEYS = {'angle_deg', 'travel_mm'}
@@ -495,6 +506,21 @@ DERIVED_CLAIM_SOURCE = 'placement.crystals'
 def derived_claim(claim) -> bool:
     """A proximity row the toolchain derived, not one an author declared."""
     return (claim.get('context') or {}).get('source') == DERIVED_CLAIM_SOURCE
+
+
+def derived_severity_note(intent) -> Optional[str]:
+    """#1600: what an intent that sets `severity.proximity` is told when it
+    also carries derived rows, which stay at WARN whatever it says (by
+    design, above) -- or None. A disclosure, not a change of severity: the
+    author who set `error` otherwise reads a clean exit as a held claim."""
+    sev = (getattr(intent, 'severity', None) or {}).get('proximity')
+    n = sum(1 for c in getattr(intent, 'proximity', None) or () if derived_claim(c))
+    if sev is None or not n:
+        return None
+    return (f"severity.proximity is {sev!r}, but it does not reach the {n} derived "
+            f"proximity row(s) (context.source {DERIVED_CLAIM_SOURCE}): a derived "
+            f"claim is graded warn whatever severity.proximity says. Drop a row's "
+            f"context.source to make it the intent's own claim, graded {sev}")
 #: #1253. One declared keep-away: `rule` is ONE rule in route.py's own
 #: syntax (`AGGRESSOR:VICTIM:GAP`, `class=` terms), parsed by the router's
 #: `keep_away.parse_keep_away_rules`, so the grade and the router read the
@@ -1427,7 +1453,9 @@ def _cover_claims(raw: Dict) -> List[Dict]:
         if row['width_mm'] <= 0:
             raise IntentError(f"{where}.width_mm: expected > 0")
         row['underside_mm'] = _number(c['underside_mm'], f"{where}.underside_mm", lo=0.0)
-        for k in ('length_mm', 'offset_mm'):
+        # `start_mm` (#1589): signed, where the body begins along the axis
+        # (negative behind the connector's origin); absent, the origin
+        for k in ('length_mm', 'offset_mm', 'start_mm'):
             if c.get(k) is not None:
                 row[k] = _number(c[k], f"{where}.{k}", lo=0.0 if k == 'length_mm' else None)
         row['source'] = _source(c, where)
@@ -1453,7 +1481,8 @@ def _cover_claims(raw: Dict) -> List[Dict]:
             if 'length_mm' not in s:
                 raise IntentError(f"{w}: needs `length_mm`, its distance along the "
                                   f"axis from the connector's origin")
-            ln = _number(s['length_mm'], f"{w}.length_mm", lo=0.0)
+            # signed (#1589): a standoff behind the connector's origin
+            ln = _number(s['length_mm'], f"{w}.length_mm")
             rot = _number(s.get('rot', 0.0), f"{w}.rot")
             if abs(rot / 90.0 - round(rot / 90.0)) > 1e-6:
                 raise IntentError(f"{w}.rot: a quarter turn, got {rot!r}")
@@ -1480,7 +1509,8 @@ def _cover_claims(raw: Dict) -> List[Dict]:
             d = _number(hl['diameter_mm'], f"{w}.diameter_mm", lo=0.0)
             if d <= 0:
                 raise IntentError(f"{w}.diameter_mm: expected > 0")
-            hole = {'length_mm': _number(hl['length_mm'], f"{w}.length_mm", lo=0.0),
+            # signed (#1589): a module's holes on both sides of its connector
+            hole = {'length_mm': _number(hl['length_mm'], f"{w}.length_mm"),
                     'off_mm': _number(hl.get('off_mm', 0.0), f"{w}.off_mm"),
                     'diameter_mm': d}
             txt = free_text(hl)
@@ -1492,8 +1522,18 @@ def _cover_claims(raw: Dict) -> List[Dict]:
         if not clean and row.get('length_mm') is None:
             raise IntentError(f"{where}: needs `length_mm` or a standoff -- nothing "
                               f"says how far the body reaches")
-        if row.get('length_mm') is None and max(s['length_mm'] for s in clean) <= 0:
-            raise IntentError(f"{where}: its body reaches nowhere (every length is 0)")
+        if row.get('length_mm') is None or row.get('start_mm') is not None:
+            far = (row['length_mm'] if row.get('length_mm') is not None
+                   else max(s['length_mm'] for s in clean))
+            near = row.get('start_mm') or 0.0
+            if far <= near:
+                raise IntentError(
+                    f"{where}: its body reaches nowhere -- it ends {far:g}mm along the "
+                    f"axis (" + ('`length_mm`' if row.get('length_mm') is not None
+                                 else 'its farthest standoff')
+                    + f") and starts at {near:g}mm"
+                    + (" (`start_mm`)" if row.get('start_mm') is not None else
+                       " (the connector's origin; `start_mm` says where it starts)"))
         if c.get('top_mm') is not None:
             row['top_mm'] = _number(c['top_mm'], f"{where}.top_mm", lo=0.0)
             if row['top_mm'] <= row['underside_mm']:
@@ -7410,8 +7450,10 @@ def rule_proximity(ctx) -> Iterator[Violation]:
                 message=(f"{ref} pad {pad.pad_number} is {gap:.2f}mm from "
                          f"{near} pad {partner.pad_number}"
                          + (f" on {net}" if how == 'net' and net else '')
-                         + f", past the declared {limit:.2f}mm proximity "
-                           f"limit"),
+                         # #1600: a row the toolchain derived is no
+                         # author's declaration, and says so
+                         + f", past the {'derived' if derived_claim(claim) else 'declared'} "
+                           f"{limit:.2f}mm proximity limit"),
                 measured={'gap_mm': round(gap, 4), 'near': near,
                           'pad': pad.pad_number,
                           'near_pad': partner.pad_number,
@@ -7876,7 +7918,8 @@ def rule_cover(ctx) -> Iterator[Violation]:
         ctx.cover_measured.append({
             'index': i, 'connector': con, 'state': 'measured', 'passes': not off,
             'width_mm': c['width_mm'], 'underside_mm': c['underside_mm'],
-            'length_mm': length, 'source': c['source'], 'standoffs': rows})
+            'length_mm': length, 'start_mm': c.get('start_mm', 0.0),
+            'source': c['source'], 'standoffs': rows})
         if not off:
             continue
         w = max(off, key=lambda x: x['miss_mm'])
@@ -8003,10 +8046,18 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
     other-net copper inside it, on either face (the screw passes through the
     board). A site with anything in it appends to `why`; a free site with no
     standoff yet is reported (`standoff` None), not judged, and so is a site
-    past the outline, as the body's own overhang is."""
+    past the outline, as the body's own overhang is.
+
+    The cover's own connector is reported at a site, not judged (#1589):
+    the site is drawn in that connector's frame, so no placement moves one
+    against the other, and the module's drawing puts its holes where its
+    own socket lets them be. A site its body or pads reach carries
+    `connector` (`{ref, gap_mm, pads}`), else None -- a row whose site lands
+    on its own connector is the declaration to read again."""
     import mounting_holes as mh
     from .heights import standoff_at, to_board, to_local
     mounts = mh.mounting_holes(pcb)
+    con = c['connector']
     out = []
     for k, hl in enumerate(c['holes']):
         x, y = to_board((*standoff_at(c, hl),) * 2, pose)[:2]
@@ -8016,7 +8067,7 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
                   <= COVER_STANDOFF_TOLERANCE_MM + legality.EPS),
                  key=lambda m: math.hypot(m.x - x, m.y - y), default=None)
         own = {st.ref} if st is not None else set()
-        parts = []
+        parts, con_gap = [], None
         for r, g in sorted(geo.items()):
             occ = getattr(g, 'occupancy_local', None)
             fpr = (pcb.footprints or {}).get(r)
@@ -8026,20 +8077,30 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
             gap = math.hypot(max(occ[0] - lx, 0.0, lx - occ[2]),
                              max(occ[1] - ly, 0.0, ly - occ[3]))
             if gap < far:
+                if r == con:
+                    con_gap = round(gap - d / 2.0, 3)
+                    continue
                 parts.append({'ref': r, 'side': sides[r], 'gap_mm': round(gap - d / 2.0, 3)})
         parts.sort(key=lambda p: (p['gap_mm'], p['ref']))
-        pads = [{'ref': p['ref'], 'pad': p['pad'], 'net': p['net'],
-                 'gap_mm': round(p['gap'], 3)}
-                for p in mh.pads_near(pcb, x, y, d, skip_refs=own)]
+        pads, con_pads = [], []
+        for p in mh.pads_near(pcb, x, y, d, skip_refs=own):
+            (con_pads if p['ref'] == con else pads).append(
+                {'ref': p['ref'], 'pad': p['pad'], 'net': p['net'],
+                 'gap_mm': round(p['gap'], 3)})
         copper = [{'kind': h['kind'], 'layer': h['layer'], 'net': h['net'],
                    'gap_mm': round(h['gap'], 3)}
                   for h in mh.copper_near(pcb, x, y, d, nets=st.nets if st else frozenset())]
+        reach_con = None
+        if con_gap is not None or con_pads:
+            gaps = [g for g in [con_gap] + [p['gap_mm'] for p in con_pads] if g is not None]
+            reach_con = {'ref': con, 'gap_mm': min(gaps),
+                         'pads': [p['pad'] for p in con_pads]}
         site = {'index': k, 'at': [round(x, 3), round(y, 3)], 'length_mm': hl['length_mm'],
                 'off_mm': hl['off_mm'], 'diameter_mm': d, 'reach_mm': round(far, 3),
                 'standoff': st.ref if st is not None else None,
                 'past_outline_mm': round(gate.rect_outside_amount((x - d / 2, y - d / 2,
                                                                    x + d / 2, y + d / 2)), 3),
-                'parts': parts, 'pads': pads, 'copper': copper}
+                'parts': parts, 'pads': pads, 'copper': copper, 'connector': reach_con}
         site['fits'] = not (parts or pads or copper)
         out.append(site)
         if not site['fits']:
@@ -12072,6 +12133,9 @@ def format_text(r: GradeResult) -> str:
         for v in r.violations:
             tag = 'ERROR' if v.severity == ERROR else 'warn '
             lines.append(f"    [{tag}] {v.rule}: {v.message}")
+    note = derived_severity_note(r.intent)
+    if note:
+        lines.append(f"  note: {note}")
     # #1064: printed, never a rule -- a floorplan PASS says nothing about
     # whether two parts' pads sit on each other, and check_assembly calls
     # that NOT BUILDABLE whatever the nets.
@@ -12142,8 +12206,10 @@ def format_text(r: GradeResult) -> str:
                          f"{m['reason']}")
             continue
         lines.append(f"  covers[{m['index']}] {m['connector']}: body "
-                     f"{m['width_mm']:g} x {m['length_mm']:g}mm, underside "
-                     f"{m['underside_mm']:g}mm ({m['source']})"
+                     + (f"{m['width_mm']:g} wide, {m['start_mm']:+g} to "
+                        f"{m['length_mm']:g}mm along its axis" if m.get('start_mm') else
+                        f"{m['width_mm']:g} x {m['length_mm']:g}mm")
+                     + f", underside {m['underside_mm']:g}mm ({m['source']})"
                      + ''.join(f"; {s['ref']} {s['along_mm']:.2f}mm along "
                                f"(declared {s['declared_mm']:g}), "
                                f"{s['off_line_mm']:+.2f}mm off the line"
