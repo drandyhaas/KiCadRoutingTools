@@ -12,16 +12,11 @@ classifies every discrepancy:
   * MATCHED        -- same net pair within 0.5 mm: agreement.
   * KICAD-ONLY     -- check_drc false negative (the dangerous direction;
                       e.g. the butterstick shorting_items under-classification).
-                      Graded at the SAME classes on both sides (#1594), so
-                      it names an item check_drc's model missed.
-  * WITHIN-MARGIN  -- a KiCad clearance item whose shortfall (its own
-                      `clearance X mm; actual Y mm`) is inside check_drc's
-                      5% grading margin, where KiCad's tolerance is an
-                      absolute 500 nm (#1594): accepted by check_drc's
-                      documented tolerance, not missed. Counted apart
-                      (`kicad_within_margin`), never in KICAD-ONLY or the
-                      verdict; `check_drc --clearance-margin-mm 0.0005`
-                      grades those pairs as KiCad does.
+                      Graded at the SAME classes on both sides (#1594). A
+                      KiCad item short by less than check_drc's 5% margin
+                      also lands here (KiCad's tolerance is an absolute
+                      500 nm): a real KiCad error, which
+                      `check_drc --clearance-margin-mm 0.0005` reports too.
   * CHECKDRC-ONLY  -- check_drc phantom (over-report) OR a class KiCad cannot
                       see (KiCad 10 net-unifies touching copper, so it is
                       structurally blind to overlaps it merged into one net).
@@ -205,32 +200,6 @@ def unclassified_error_types(data):
 
 MATCH_RADIUS_MM = 0.5
 
-#: The fractional tolerance the check_drc side grades at (run_drc's default,
-#: and the CLI's): what WITHIN-MARGIN measures a KiCad item's shortfall
-#: against (#1594).
-CD_CLEARANCE_MARGIN = 0.05
-_KICAD_SHORTFALL_RE = re.compile(
-    r"(\d+(?:\.\d+)?) mm; actual (-?\d+(?:\.\d+)?) mm")
-
-
-def split_within_margin(kicad_items, margin=CD_CLEARANCE_MARGIN):
-    """(missed, within_margin): the KiCad items whose own reported shortfall
-    (`clearance X mm; actual Y mm`) is no more than `margin` of the required
-    value go to `within_margin` -- check_drc's tolerance accepts them by
-    design, where KiCad's is an absolute 500 nm (#1594). An item without the
-    two numbers (a short, a hole collision) stays `missed`."""
-    missed, within = [], []
-    for v in kicad_items:
-        m = _KICAD_SHORTFALL_RE.search(v.get("desc") or "")
-        if m:
-            req, act = float(m.group(1)), float(m.group(2))
-            short = req - act
-            if req > 0 and 0 < short <= req * margin:
-                within.append(dict(v, required_mm=req, actual_mm=act))
-                continue
-        missed.append(v)
-    return missed, within
-
 
 def run_kicad_drc(board: str):
     """Run kicad-cli DRC, return (violations, error) with items filtered to
@@ -395,7 +364,6 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = True,
     grade for a caller that asks for it."""
     from check_drc import run_drc
     kw = {"clearance": clearance} if clearance else {}
-    kw["clearance_margin"] = CD_CLEARANCE_MARGIN
     # _staged_copy forces copper_edge_clearance severity to "error" on the
     # kicad-cli side (#441: authored-"ignore" boards must not hide router copper
     # run to the milled edge). Mirror that here or every edge item on an
@@ -1213,17 +1181,12 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # Part B: collapse the board-edge anchor double-count (same edge violation
     # anchored differently by each engine). One-sided edge divergence survives.
     edge_reconciled, kicad_only, cd_only = reconcile_edge_family(kicad_only, cd_only)
-    # #1594: a KiCad item inside check_drc's own grading margin was accepted
-    # by that tolerance, not missed -- named apart, out of the verdict.
-    kicad_only, kicad_in_margin = split_within_margin(kicad_only)
     n_matched = len(matched) + edge_reconciled
     # NET-PAIR agreement: the engines report at different granularities
     # (check_drc: one violation per offending segment; kicad: grouped item
     # pairs), so the honest consistency metric is the SET of net pairs each
     # engine implicates. Instance-level diffs then refine within agreed pairs.
-    kpairs = {v["nets"] for v in kicad if len(v["nets"]) == 2
-              and not any(v["nets"] == w["nets"] and v["pos"] == w["pos"]
-                          for w in kicad_in_margin)}
+    kpairs = {v["nets"] for v in kicad if len(v["nets"]) == 2}
     cpairs = {v["nets"] for v in cd if len(v["nets"]) == 2}
     pk_only, pc_only = kpairs - cpairs, cpairs - kpairs
     verdict = ("CONSISTENT" if not kicad_only and not cd_only else
@@ -1255,9 +1218,6 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             "checkdrc_own_copper": len(cd_own),
             "matched": n_matched, "kicad_only": len(kicad_only),
             "checkdrc_only": len(cd_only),
-            # #1594: KiCad items inside check_drc's 5% margin (not missed)
-            "kicad_within_margin": len(kicad_in_margin),
-            "kicad_within_margin_items": kicad_in_margin,
             "pairs_both": len(kpairs & cpairs),
             "pairs_kicad_only": len(pk_only), "pairs_checkdrc_only": len(pc_only),
             "verdict": verdict,
@@ -1292,7 +1252,6 @@ _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "kicad_intentional_edge", "checkdrc_intentional_edge",
                  "kicad_own_copper", "checkdrc_own_copper",
                  "matched", "kicad_only", "checkdrc_only",
-                 "kicad_within_margin",
                  "pairs_kicad_only", "pairs_checkdrc_only",
                  "kicad_connection_width", "connection_width_min",
                  "kicad_starved_thermal", "kicad_track_dangling",
@@ -1336,9 +1295,7 @@ def compare_board(board: str, label: str = None, clearance: float = None,
                 + (f" (+{_td_pre} pre-existing, subtracted)" if _td_pre
                    else ""))
     print(f"{label}: kicad={data['kicad']}{pre_note} check_drc={data['check_drc']}{cd_pre_note} "
-          f"matched={data['matched']} kicad_only={data['kicad_only']} checkdrc_only={data['checkdrc_only']}"
-          + (f" within_margin={data['kicad_within_margin']}" if data.get('kicad_within_margin') else "")
-          + f"{ie_note} | "
+          f"matched={data['matched']} kicad_only={data['kicad_only']} checkdrc_only={data['checkdrc_only']}{ie_note} | "
           f"net-pairs: both={data['pairs_both']} kicad_only={data['pairs_kicad_only']} "
           f"checkdrc_only={data['pairs_checkdrc_only']} |{cw_note}  {data['verdict']}")
     if data.get("kicad_unclassified"):
@@ -1348,11 +1305,6 @@ def compare_board(board: str, label: str = None, clearance: float = None,
                           sorted(data["kicad_unclassified"].items())))
     for kv in data["kicad_only_items"]:
         print(f"    KICAD-ONLY  {kv['type']:16s} {sorted(kv['nets'])} @ {kv['pos']}  {kv.get('desc','')[:60]}")
-    for kv in data.get("kicad_within_margin_items", []):
-        print(f"    WITHIN-MARGIN {kv['type']:14s} {sorted(kv['nets'])} @ {kv['pos']}  "
-              f"short by {kv['required_mm'] - kv['actual_mm']:.4f} of "
-              f"{kv['required_mm']:.4f} mm (inside check_drc's "
-              f"{CD_CLEARANCE_MARGIN:.0%} margin; KiCad's is 500 nm)")
     for cv in data["checkdrc_only_items"]:
         print(f"    CHECKDRC-ONLY {cv['type']:16s} {sorted(cv['nets'])} @ {cv['pos']}")
     for wv in data.get("connection_width_items", []):

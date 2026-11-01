@@ -177,7 +177,7 @@ def _tool_path(root: str, tool: str) -> str:
 TOOL_SECONDS: dict = {}
 
 
-def run_tool(root: str, tool: str, *args, label: str = None) -> tuple:
+def run_tool(root: str, tool: str, *args) -> tuple:
     """(returncode, combined output). -X utf8 for the Ω/µ the tools print.
 
     KRT_NO_BANNER: the child instruments self-echo CMD/EXIT (run-4 B1) --
@@ -190,8 +190,7 @@ def run_tool(root: str, tool: str, *args, label: str = None) -> tuple:
     t0 = _time.monotonic()
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                        encoding='utf-8', errors='replace', env=env)
-    _k = label or tool
-    TOOL_SECONDS[_k] = TOOL_SECONDS.get(_k, 0.0) + (_time.monotonic() - t0)
+    TOOL_SECONDS[tool] = TOOL_SECONDS.get(tool, 0.0) + (_time.monotonic() - t0)
     return p.returncode, p.stdout
 
 
@@ -757,9 +756,7 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     """(drc, undersized, rule_pairs) -- physical clearance violations,
     sub-floor copper, and .kicad_dru track-rule-governed pairs (advisory).
 
-    Both come from ONE check_drc run, split on the violation type (a second,
-    run beside it at KiCad's own tolerance, fills only the disclosed
-    `drc.at_kicad_tolerance`, #1594). Omitting
+    Both come from ONE check_drc run, split on the violation type. Omitting
     --clearance is the norm and not an oversight: check_drc then reads the
     sibling .kicad_pro Default class, which is the floor the board was actually
     routed to. Passing a guessed round number manufactures phantom violations
@@ -784,20 +781,7 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     args += ['--max-print', '0']
     if baseline:
         args += ['--baseline', baseline]
-    # #1594: the same grade at KiCad's own tolerance, run beside this one and
-    # DISCLOSED in `at_kicad_tolerance` -- the unfiltered count the routing
-    # skill says to quote beside the filtered one, with no separate run.
-    import threading
-    _kt = {}
-    _kth = threading.Thread(
-        target=lambda: _kt.update(drc_at_kicad_tolerance(root, board, clearance,
-                                                         baseline)),
-        daemon=True)
-    _kth.start()
     rc, out = run_tool(root, 'check_drc.py', *args)
-    _kth.join()
-    _kicad_tol = dict(_kt) or {'ran': False, 'count': None,
-                               'reason': 'the pass did not report'}
     # #1390: .kicad_dru size rules check_drc could not model. The copper they
     # bind is ungraded, whatever `undersized` says about the rest.
     _unsz = sorted(set(re.findall(r"NOT GRADED \(size\): rule '([^']*)'", out)))
@@ -814,7 +798,6 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
         _clr_extra['unverified'] = int(_unv.group(1))
     if 'NO DRC VIOLATIONS FOUND' in out:
         return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out),
-                 'at_kicad_tolerance': _kicad_tol,
                  'graphic_grazes_unverified': _unverified_grazes(out), **_clr_extra,
                  'via_in_paste': {'ran': True, 'count': 0, 'by_type': {},
                                   'undeclarable': _undeclarable_vias(out)}},
@@ -849,10 +832,11 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     rule = {t: n for t, n in by_type.items() if t in RULE_PAIR_TYPES}
     vip = {t: n for t, n in by_type.items() if t in VIA_PASTE_TYPES}
     pairs = {t: n for t, n in by_type.items() if t in PAIR_RULE_TYPES}
-    clear = _clearance_types(by_type)
+    clear = {t: n for t, n in by_type.items()
+             if t not in SIZE_TYPES and t not in RULE_PAIR_TYPES
+             and t not in VIA_PASTE_TYPES and t not in PAIR_RULE_TYPES}
     return ({'ran': True, 'count': sum(clear.values()), 'by_type': clear,
              'graded_at': _graded_at(out), **_clr_extra,
-             'at_kicad_tolerance': _kicad_tol,
              'graphic_grazes_unverified': _unverified_grazes(out),
              'pair_rules': pairs,
              'via_in_paste': {'ran': True, 'count': sum(vip.values()), 'by_type': vip,
@@ -860,56 +844,6 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
             {'ran': True, 'count': sum(size.values()), 'by_type': size,
              **_size_extra},
             {'ran': True, 'count': sum(rule.values()), 'by_type': rule})
-
-
-def _clearance_types(by_type: dict) -> dict:
-    """The per-type counts `drc` counts: everything but the size, track-rule,
-    via-in-paste and pair-rule types, which have components of their own."""
-    return {t: n for t, n in by_type.items()
-            if t not in SIZE_TYPES and t not in RULE_PAIR_TYPES
-            and t not in VIA_PASTE_TYPES and t not in PAIR_RULE_TYPES}
-
-
-def drc_at_kicad_tolerance(root: str, board: str, clearance=None,
-                           baseline=None) -> dict:
-    """The `drc` count graded at KiCad's own clearance tolerance (#1594).
-
-    check_drc's default tolerance is 5% of each pair's clearance -- 25 um on a
-    0.5 mm class -- while KiCad's is an absolute 500 nm
-    (``KICAD_DRC_EPSILON_MM``), so a pair KiCad reports as an error can pass
-    `drc`. This is the same check_drc grade (same clearance, classes and
-    baseline; no size checks, which no clearance tolerance moves) at
-    ``--clearance-margin-mm KICAD_DRC_EPSILON_MM``. DISCLOSED beside `drc`,
-    never in `blocking`: the 5% default stays what `drc` means. -> ``{'ran':
-    True, 'count': N, 'by_type': {...}, 'tolerance_mm': mm}``, or ``ran``
-    False with a reason (``count`` None, never 0)."""
-    try:
-        from net_queries import KICAD_DRC_EPSILON_MM as tol
-    except Exception:                                        # noqa: BLE001
-        tol = 0.0005
-    args = [board]
-    if clearance is not None:
-        args += ['-c', str(clearance)]
-    args += ['--no-size-checks', '--max-print', '0',
-             '--clearance-margin-mm', str(tol)]
-    if baseline:
-        args += ['--baseline', baseline]
-    try:
-        rc, out = run_tool(root, 'check_drc.py', *args,
-                           label='check_drc.py@kicad_tolerance')
-    except Exception as exc:                                 # noqa: BLE001
-        return {'ran': False, 'count': None, 'tolerance_mm': tol,
-                'reason': f'{type(exc).__name__}: {exc}'}
-    if 'NO DRC VIOLATIONS FOUND' in out:
-        return {'ran': True, 'count': 0, 'by_type': {}, 'tolerance_mm': tol}
-    m = _DRC_TOTAL.search(out)
-    by_type = {t.lower(): int(n) for t, n in _DRC_TYPE.findall(out)}
-    if not m or (int(m.group(1)) > 0 and not by_type):
-        return {'ran': False, 'count': None, 'tolerance_mm': tol,
-                'reason': f'check_drc.py produced no readable summary (rc={rc})'}
-    clear = _clearance_types(by_type)
-    return {'ran': True, 'count': sum(clear.values()), 'by_type': clear,
-            'tolerance_mm': tol}
 
 
 def _undeclarable_vias(out: str) -> int:
@@ -1901,13 +1835,6 @@ def main():
     _adv_bits = ' '.join(f'{k}={v}' for k, v in score['advisory'].items() if v)
     if _adv_bits:
         print(f"ADVISORY (floor-governed, not blocking): {_adv_bits}")
-    # #1594: `drc` at KiCad's own 500 nm tolerance, beside the 5% `drc`.
-    _kt = (score['components'].get('drc') or {}).get('at_kicad_tolerance')
-    if _kt:
-        print("DRC AT KICAD'S TOLERANCE (disclosed, not blocking): "
-              + (f"{_kt['count']} at {_kt.get('tolerance_mm'):g} mm vs drc="
-                 f"{score['blocking_by'].get('drc')} at check_drc's 5% margin"
-                 if _kt.get('ran') else f"not graded ({_kt.get('reason')})"))
     # #1303: what each pair's copper delivers, whether or not a rule grades it.
     _dp = score['components'].get('diff_pairs') or {}
     if _dp.get('pairs'):

@@ -4,8 +4,7 @@
 check_drc's tolerance was only fractional (`--clearance-margin`, default 5% of
 each pair's clearance), while KiCad's is an absolute 500 nm on every pair, so
 on a board with two classes no setting matched KiCad: 5% is 25 um at 0.5 mm
-and 10 um at 0.2 mm. board_score inherited the 5% with no way to see past it,
-and kicad_drc_compare graded its check_drc side at ONE clearance while KiCad
+and 10 um at 0.2 mm. kicad_drc_compare graded its check_drc side at ONE clearance while KiCad
 graded every class, so it listed pairs check_drc's own CLI reports as
 KICAD-ONLY.
 
@@ -16,11 +15,9 @@ Default 0.2 mm) by a known number of nanometres:
      (short by more than 500 nm), on both classes; the 5% default is
      unchanged; the two flags refuse each other; a negative value is refused.
   2. run_drc's `clearance_margin_mm` holds for that call only.
-  3. board_score keeps `drc` (and `blocking`) at the 5% default and discloses
-     the count at KiCad's tolerance in `drc.at_kicad_tolerance`.
-  4. kicad_drc_compare's check_drc side grades the classes KiCad grades, and
-     a KiCad item inside check_drc's 5% margin is WITHIN-MARGIN, not
-     KICAD-ONLY (with kicad-cli: the board compares CONSISTENT).
+  3. kicad_drc_compare's check_drc side grades the classes KiCad grades (with
+     kicad-cli: the pairs past check_drc's 5% margin match, and only the ones
+     inside it are KICAD-ONLY).
 
     python3 tests/test_1594_absolute_clearance_margin.py
 """
@@ -157,52 +154,23 @@ def main():
         check('the margin is restored after the call', _ABS_MARGIN_MM.get() is None,
               str(_ABS_MARGIN_MM.get()))
 
-        print('3. board_score')
-        js = os.path.join(tmp, 'score.json')
-        subprocess.run([sys.executable, '-X', 'utf8',
-                        os.path.join(ROOT, 'py_tools', 'board_score.py'), board,
-                        '--json', js], capture_output=True, text=True,
-                       encoding='utf-8', errors='replace', cwd=ROOT, timeout=900)
-        sc = json.load(open(evidence(js, 'board_score --json')))
-        drc = sc['components']['drc']
-        kt = drc.get('at_kicad_tolerance') or {}
-        check('drc and blocking keep the 5% grade',
-              drc.get('count') == 2 and sc['blocking_by']['drc'] == 2
-              and sc['blocking'] == 2, f"drc {drc.get('count')} blocking {sc['blocking']}")
-        check("the count at KiCad's tolerance is disclosed beside it",
-              kt.get('ran') and kt.get('count') == 8
-              and kt.get('tolerance_mm') == 0.0005, str(kt))
-
-        print('4. kicad_drc_compare')
+        print('3. kicad_drc_compare')
         import kicad_drc_compare as K
         cd = K.run_check_drc(board, 0.2)
         cd_nets = sorted({sorted(v['nets'])[0][:-2] for v in cd})
         check("its check_drc side grades the classes KiCad grades",
               cd_nets == AT_5PCT, str(cd_nets))
-        items = [{'type': 'clearance', 'nets': frozenset(), 'pos': (0, 0),
-                  'desc': f"Clearance violation (netclass 'HV' clearance 0.5000 mm; "
-                          f"actual {a:.4f} mm)"} for a in (0.4994, 0.4760, 0.4740)]
-        items.append({'type': 'shorting_items', 'nets': frozenset(), 'pos': (0, 0),
-                      'desc': 'Items shorting two nets'})
-        missed, within = K.split_within_margin(items)
-        check("a KiCad item inside check_drc's 5% is within the margin; past it, "
-              "or a short, it is missed",
-              [round(w['actual_mm'], 4) for w in within] == [0.4994, 0.476]
-              and len(missed) == 2, f'{len(missed)} missed / {len(within)} within')
         from kicad_oracle import find_kicad_cli
         cli = find_kicad_cli(warn=False)
         if cli:
             K.KICAD_CLI = cli
             data = K.compare_board_data(board)
-            check('with kicad-cli: 8 KiCad items, 2 matched, 6 within the margin, '
-                  'no KICAD-ONLY: CONSISTENT',
-                  data and data.get('kicad') == 8 and data.get('matched') == 2
-                  and data.get('kicad_only') == 0
-                  and data.get('kicad_within_margin') == 6
-                  and data.get('verdict') == 'CONSISTENT',
+            check('with kicad-cli: 8 KiCad items, the 2 past the 5% margin matched, '
+                  'the 6 inside it KICAD-ONLY (no class pair lost to one clearance)',
+                  data and data.get('kicad') == 8 and data.get('check_drc') == 2
+                  and data.get('matched') == 2 and data.get('kicad_only') == 6,
                   str({k: (data or {}).get(k) for k in
-                       ('kicad', 'check_drc', 'matched', 'kicad_only',
-                        'kicad_within_margin', 'verdict')}))
+                       ('kicad', 'check_drc', 'matched', 'kicad_only', 'verdict')}))
         else:
             print('  [skip] kicad-cli not installed: the real comparison')
     finally:

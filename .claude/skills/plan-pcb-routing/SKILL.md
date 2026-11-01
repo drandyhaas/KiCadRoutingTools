@@ -791,8 +791,7 @@ class-driven violations, it will not; change the class, or use
 `--clearance-margin` (default 0.05) to filter grid-quantisation noise — and when
 you use it, quote the unfiltered count beside the filtered one. The count KiCad
 reports is `--clearance-margin-mm 0.0005` (KiCad's own 500 nm on every class;
-a fraction matches it on one class only); `board_score` discloses it as
-`drc.at_kicad_tolerance` beside `drc` (#1594).
+a fraction matches it on one class only, #1594).
 
 Only fall back to tool defaults when neither net classes nor Constraints are found
 (`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
