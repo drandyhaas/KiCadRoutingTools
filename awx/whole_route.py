@@ -1025,14 +1025,16 @@ def relayed(d, bench, J, env, say, name='fo_layers'):
     solve chose for them (relay_ends), `env` pointed at it (BENCH: the geometry, the polish, the snap, the audits and
     the lay read its copper) and at the fanout's own bench (BENCH0: every RE-SOLVE of the loop is the round's solve
     again, its via ends free -- the same model, so the round's proof floors it and its plan warms it, and a re-solve may
-    choose an end's layer anew; loop relays its plan in turn). `bench` itself when none moves. Held on the relayed bench
-    instead (VIA_ENDS 0), a re-solve was another model: no floor, no warm start, every lane a tooth via, and the first
-    solve's end layers stood for the whole loop"""
+    choose an end's layer anew; loop relays its plan in turn). `bench` itself when none moves, BENCH0 set all the same.
+    Held on the relayed bench instead (VIA_ENDS 0), a re-solve was another model: no floor, no warm start, every lane a
+    tooth via, and the first solve's end layers stood for the whole loop"""
     if J.get('layers'):
         b2 = relay_ends(d, bench, J, say, name=name)
-        if b2 != bench:
-            env.update(BENCH=b2, BENCH0=bench)
-            return b2
+        # (BENCH0 the fanout's bench even where nothing moved: the loop's re-solves choose the via ends' layers anew and
+        # it relays each one's plan from BENCH0 -- unset, a re-solve that moved an end was laid on stubs still on the
+        # layers before, its tooth or berth closed on the plan's: an FFC bus's two corner pairs TOOTH-OUT every round)
+        env.update(BENCH=b2, BENCH0=bench)
+        return b2
     return bench
 
 
