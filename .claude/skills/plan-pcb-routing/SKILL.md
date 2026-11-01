@@ -838,8 +838,10 @@ Pass the resulting allowlist, e.g. `--polarity-swap-nets '/fpga/IO_*'` (use `'*'
 every pair classifies swappable). Applied swaps are listed in `polarity_swapped_pairs` —
 when they happen, the schematic sync step below applies (see "Schematic Synchronization
 After Swaps"). Pairs that *wanted* a swap but were denied are listed in
-`polarity_swap_denied_pairs` — surface these to the user (they either routed via the
-opposite-side flip or failed honestly and may need a manual pin swap in the schematic).
+`polarity_swap_denied_pairs` — surface these to the user (they routed via the
+opposite-side flip, or via the hybrid escape with uncoupled terminal legs, or failed honestly
+and may need a manual pin swap in the schematic). The log's `Polarity mismatch not resolved
+by any coupled candidate:` block names each candidate tried and why it failed.
 
 **Far-apart terminal pads → single-ended follow-up (issue #121).** A "diff pair"
 sometimes has pads that aren't a coupled connection — e.g. a P and an N test point

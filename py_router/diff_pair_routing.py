@@ -2981,6 +2981,29 @@ def _routed_length(result: dict) -> float:
                for s in result.get('new_segments', []))
 
 
+def _ladder_failure_text(result, pcb_data=None) -> str:
+    """Why one polarity-resolution candidate (#142) failed, from its route
+    result, for the ladder's verdict line (#1576): the rejection the
+    candidate printed above it, in a few words."""
+    if not result:
+        return 'no usable endpoints'
+    if result.get('intra_pair_short'):
+        gap = result.get('intra_pair_gap')
+        return 'intra-pair clearance' + (f' (P and N {gap:.4f}mm apart)'
+                                         if gap is not None else '')
+    if result.get('pn_crossing'):
+        return 'P/N tracks cross'
+    if result.get('connector_graze'):
+        nid = result.get('graze_net_id')
+        net = (getattr(pcb_data, 'nets', None) or {}).get(nid) if nid is not None else None
+        return f"grazes foreign copper{f' (net {net.name})' if net is not None else ''}"
+    if result.get('needs_fanout'):
+        return 'no escape for the pair (needs a coupled fanout)'
+    if result.get('probe_blocked'):
+        return 'no escape path'
+    return 'no route found'
+
+
 def _pn_tracks_cross(new_segments, p_net_id: int, n_net_id: int) -> bool:
     """Check whether any P segment crosses (or touches) any N segment on the
     same layer. Used to validate flipped-polarity retry routes, which can wrap
@@ -5557,6 +5580,9 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
             # while a false positive keeps the shorter no-swap route (issue #142).
             spent_iterations = total_iterations
             candidates = []
+            # (candidate, why it did not make it) for each one that ran or
+            # could not, in ladder order: the verdict line below (#1576)
+            not_made = []
 
             if diff_pair.polarity_swap_allowed:
                 # No-swap candidate: the natural geometry, valid when its P/N
@@ -5567,10 +5593,12 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                     forced_source_dir=forced_source_dir,
                     forced_target_dir=forced_target_dir,
                     swap_allowed_ends=swap_allowed_ends, force_no_swap=True)
-                if (no_swap and not no_swap.get('failed')
-                        and not no_swap.get('probe_blocked')
-                        and not _pn_tracks_cross_full(no_swap.get('new_segments', []),
-                                                      pcb_data, p_net_id, n_net_id)):
+                if not no_swap or no_swap.get('failed') or no_swap.get('probe_blocked'):
+                    not_made.append(('no swap', _ladder_failure_text(no_swap, pcb_data)))
+                elif _pn_tracks_cross_full(no_swap.get('new_segments', []),
+                                           pcb_data, p_net_id, n_net_id):
+                    not_made.append(('no swap', 'P/N tracks cross'))
+                else:
                     spent_iterations += no_swap.get('iterations', 0)
                     candidates.append(('no swap', no_swap))
 
@@ -5585,12 +5613,22 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                 if swap_result and not swap_result.get('failed') and not swap_result.get('probe_blocked'):
                     spent_iterations += swap_result.get('iterations', 0)
                     candidates.append(('pad swap', swap_result))
+                else:
+                    not_made.append(('pad swap', _ladder_failure_text(swap_result, pcb_data)))
+            elif not diff_pair.polarity_swap_allowed:
+                not_made.append(('pad swap', 'not allowed for this pair (--polarity-swap-nets)'))
+            else:
+                not_made.append(('pad swap', f'not possible at the {swap_end} end '
+                                             f'(a routed leg is attached there)'))
 
+            fixed_ends = []
             for flip_kwargs, end_name, synth_key in (
                     ({'flip_source': True}, 'source', 'source_dir_synthesized'),
                     ({'flip_target': True}, 'target', 'target_dir_synthesized')):
                 if not route_data.get(synth_key):
+                    fixed_ends.append(end_name)
                     continue
+                flip_name = f'flipped {end_name}'
                 print(f"  Polarity mismatch - trying {end_name} connectors out the opposite side")
                 retry = route_diff_pair_with_obstacles(
                     pcb_data, diff_pair, config, obstacles, base_obstacles,
@@ -5599,19 +5637,31 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                     forced_target_dir=forced_target_dir,
                     swap_allowed_ends=(), **flip_kwargs)
                 if not retry:
+                    not_made.append((flip_name, _ladder_failure_text(retry, pcb_data)))
                     continue
                 spent_iterations += retry.get('iterations', 0)
                 if retry.get('failed') or retry.get('probe_blocked'):
+                    not_made.append((flip_name, _ladder_failure_text(retry, pcb_data)))
                     continue
                 if retry.get('polarity_swap_needed') and not retry.get('polarity_fixed'):
                     print(f"  Flipped {end_name} route still has mismatched polarity - rejecting")
+                    not_made.append((flip_name, 'polarity still mismatched'))
                     continue
                 # The flipped route can wrap around to reach the far side; verify
                 # the offset P/N tracks did not end up crossing anywhere
                 if _pn_tracks_cross(retry.get('new_segments', []), p_net_id, n_net_id):
                     print(f"  Flipped {end_name} route crosses itself - rejecting")
+                    not_made.append((flip_name, 'P/N tracks cross'))
                     continue
-                candidates.append((f'flipped {end_name}', retry))
+                candidates.append((flip_name, retry))
+            # Only a bare-pad end, whose escape direction was synthesized, can
+            # flip; a stub end or a chain's forced direction is fixed.
+            if len(fixed_ends) == 2:
+                not_made.append(('no opposite-side option',
+                                 'neither end can flip (only a bare-pad end can)'))
+            else:
+                not_made.extend((f'flipped {e}', 'not possible (only a bare-pad end can flip)')
+                                for e in fixed_ends)
 
             if candidates:
                 best_name, best = min(candidates, key=lambda c: _routed_length(c[1]))
@@ -5624,9 +5674,12 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                     best['polarity_swap_denied'] = True
                 return best
 
-            print(f"  WARNING: Polarity mismatch cannot be resolved (pad swap "
-                  f"{'failed' if swap_allowed else 'not allowed'}, no opposite-side "
-                  f"connector option) - skipping diff pair")
+            # Every candidate failed: say which ran and why each did not make
+            # it, rather than a cause the lines above contradict (#1576). The
+            # caller words what happens next (the hybrid escape).
+            print("  WARNING: Polarity mismatch not resolved by any coupled candidate:")
+            for name, why in not_made:
+                print(f"    {name}: {why}")
             return {
                 'failed': True,
                 'polarity_skip': True,

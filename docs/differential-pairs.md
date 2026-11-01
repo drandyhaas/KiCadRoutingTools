@@ -404,9 +404,27 @@ ends have stubs - the swap is committed directly without re-routing.)
 
 For a pair NOT matching `--polarity-swap-nets` (or with the flag absent
 entirely - the default), pad swaps never
-happen: only the flip resolution is tried, and if no flip produces a clean
-route the pair is **skipped** with a warning (no crossing tracks are ever
-written).
+happen: only the flip resolution is tried.
+
+When no candidate produces a clean route (no crossing tracks are ever
+written), the coupled route gives up and the log names every candidate with
+the reason it failed, then what runs next -- the hybrid escape (a coupled
+middle with single-ended terminal legs, which resolve polarity at the pads),
+and if that fails too, the single-ended follow-up:
+
+```
+  WARNING: Polarity mismatch not resolved by any coupled candidate:
+    no swap: intra-pair clearance (P and N 0.0376mm apart)
+    pad swap: intra-pair clearance (P and N 0.0376mm apart)
+    flipped source: intra-pair clearance (P and N 0.0758mm apart)
+    flipped target: no escape path
+  COUPLED ROUTE FAILED - polarity mismatch, and no candidate routed clean; trying the hybrid escape
+```
+
+A pair whose swap the policy denies reads `pad swap: not allowed for this pair
+(--polarity-swap-nets)` there, and its last line says so; such a pair is listed in
+`JSON_SUMMARY.polarity_swap_denied_pairs`. `no opposite-side option` is printed
+only when neither end can flip.
 
 ## Via Placement
 
