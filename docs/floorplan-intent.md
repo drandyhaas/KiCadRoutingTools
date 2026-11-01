@@ -1958,10 +1958,15 @@ interface (`USB1`), a connector word in the name (`connector`, `receptacle`,
 item (`USB-MICRO-B-...`, a SIM connector's `KON-SIM-01`) rather than fused into
 a part number (`USBLC6-2P6`, `0603USB`, `SIM800C`), or receptacle pins. So a
 USB ESD array, a common-mode choke or a cellular module named by its part
-number is no edge part. Receptacle pins (`CC1`, `CC2`, `SBU1`, `SBU2`,
-`SHIELD`) are read before a symbol's `_<suffix>` (`CC1_A5` is `CC1`), and a
-SON package (`USON`, `WSON`, ...) is an IC package like a QFN, whatever its
-pins. A connector named only by its part number and carrying no such pins
+number is no edge part. On a part with a chip's reference (`U`, `IC`), the
+stem as a word counts only where the item spells a connector (#1587): a USB
+connector type beside it (`USB_C`, `USB-A`, `USB_Micro-B`, `MICRO-USB`) or a
+SIM socket (`KON-SIM-01`, `Nano_SIM`), so a chip named for the interface it
+serves (`USB-ESD-6`) is no edge receptacle. Receptacle pins (`CC1`, `CC2`,
+`SBU1`, `SBU2`, `SHIELD`) are read before a symbol's `_<suffix>` (`CC1_A5` is
+`CC1`), and a SON package (`USON`, `WSON`, ...) or an eSIM's machine form
+factor (`MFF2`) is an IC package like a QFN, whatever its pins. A connector
+named only by its part number and carrying no such pins
 still needs its `class` declared.
 
 With `--declare-classes`, connector-family parts that claim no edge (headers,

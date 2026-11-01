@@ -114,7 +114,10 @@ IC_PACKAGE_FP = ('qfn', 'dfn', 'sot', 'soic', 'ssop', 'tssop', 'vssop',
                  'dip-', 'pga')
 #: The SON family (USON, WSON, VSON, X2SON, S-PVSON-N8, ...), read as a word
 #: with its pin count: a bare `son` substring is too short to test (#1534).
-IC_PACKAGE_RE = re.compile(r'(?<![a-z])(?:x2|[a-z]{0,3})son-?[a-z]?\d')
+#: And the ETSI machine form factors an eSIM is soldered in (`MFF2`, a DFN-8),
+#: whatever the item calls the chip (`SIM_MFF2-8`, #1587).
+IC_PACKAGE_RE = re.compile(r'(?<![a-z])(?:x2|[a-z]{0,3})son-?[a-z]?\d'
+                           r'|(?<![a-z])mff-?\d')
 
 #: #1534: stems in EDGE_RECEPTACLE_FP / CONNECTOR_FP that name the INTERFACE
 #: a part serves, not that a plug enters it. Parts named for what they do
@@ -135,6 +138,20 @@ CONNECTOR_EVIDENCE_RE = re.compile(
 #: both fronts carry (the pcbnew front has no library name).
 INTERFACE_WORD_RE = re.compile(r'(?<![a-z0-9])(?:%s)(?![a-z0-9])'
                                % '|'.join(INTERFACE_FP))
+#: Designators a CHIP carries (#1587). Beside one, the stem standing as a word
+#: of the item names what the chip serves (`USB-ESD-6`, `USB_Switch`,
+#: `SIM_MFF2-8`), so the word says connector only where the item spells one
+#: (`INTERFACE_CONNECTOR_RE`).
+CHIP_PREFIX = ('U', 'IC')
+#: The interface spelled the way a connector is named: a USB connector type
+#: beside the stem (`USB_C`, `USB-A`, `USB_Micro-B`, `USB-MICRO-B`,
+#: `USB_Mini-B`, `USB-TYPE-C`, `MICRO-USB`; every item of KiCad's
+#: `Connector_USB` library) or a SIM socket (`KON-SIM-01`, IQRF's SIM-format
+#: connector; `microSIM`, `Nano_SIM`).
+INTERFACE_CONNECTOR_RE = re.compile(
+    r'(?<![a-z0-9])usb[-_ ]?(?:[abc]|micro|mini|type-?[abc])(?![a-z])'
+    r'|(?<![a-z0-9])(?:micro|mini)[-_ ]?usb(?![a-z0-9])'
+    r'|(?<![a-z0-9])(?:kon|micro|mini|nano)[-_ ]?sim(?![a-z0-9])')
 
 
 def _is_ic_package(name: str) -> bool:
@@ -155,7 +172,9 @@ def _connector_evidence(name: str, pref: str, recep_pins) -> Optional[str]:
     """Why a part whose name carries an INTERFACE_FP stem is a connector,
     or None: receptacle pins, a connector reference prefix, a reference that
     names the interface (`USB1`), a connector word in the name, or the stem
-    standing as a word of the item (`INTERFACE_WORD_RE`)."""
+    standing as a word of the item (`INTERFACE_WORD_RE`) -- which, on a
+    part with a chip's designator (`CHIP_PREFIX`), counts only where the
+    item spells a connector (`INTERFACE_CONNECTOR_RE`, #1587)."""
     if recep_pins:
         return 'receptacle pin functions'
     if pref in CONN_PREFIX_MED:
@@ -164,8 +183,12 @@ def _connector_evidence(name: str, pref: str, recep_pins) -> Optional[str]:
         return f'reference prefix {pref!r} names the interface'
     if CONNECTOR_EVIDENCE_RE.search(name):
         return 'a connector word in the footprint name'
-    if INTERFACE_WORD_RE.search(name.rsplit(':', 1)[-1]):
-        return 'the interface named as a word of the footprint item'
+    item = name.rsplit(':', 1)[-1]
+    if INTERFACE_WORD_RE.search(item):
+        if pref not in CHIP_PREFIX:
+            return 'the interface named as a word of the footprint item'
+        if INTERFACE_CONNECTOR_RE.search(item):
+            return 'the interface spelled as a connector in the footprint item'
     return None
 
 # Connector families the substring tables above miss, read as WORDS of the
