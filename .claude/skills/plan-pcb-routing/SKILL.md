@@ -2008,12 +2008,36 @@ passes route what the first left open and may cross the planes.
 Two iterations are near-free (measured: the tuned corpus run with 2
 iterations baked in cost +1.5% total time) and historically descend
 frontier boards 25→15 over 3–5 passes — so bake two passes into every
-plan, dense or not. The near-free property DEPENDS on the Step 5a-tuned
+plan, dense or not, each behind the stop test below. The near-free property DEPENDS on the Step 5a-tuned
 density gate: connected nets gate-skip, but each pass still re-oracles
 every pour, so big carve-free outer floods on a small board turn "free"
 iterations into 100 s+ passes (one measured 428 s chain; 88 s with
-the same iterations after the flood was removed). Then two endgame
-signatures:
+the same iterations after the flood was removed).
+
+**The stop test: lap only when a lap can change something (#1597).** A lap
+re-routes the nets the step before it left open, with the same flags, so:
+
+1. **Before the first lap, run `check_reachability` on the failed pads**: the
+   pads of each net in `failed_single` and `open_single` (for a multipoint
+   net, the unconnected pads `failed_multipoint` lists), e.g.
+   `python3 -X utf8 py_tools/check_reachability.py board_step2.kicad_pcb --pad U1.1`.
+   It sets the routing aside and grades the placement. **Do not lap for a pad
+   it calls CAGED** (exit 1): the cage is pads, parts, rule areas or locked
+   copper, which neither a lap nor `--rip-existing-nets` moves (a rip lifts
+   tracks and vias; the pads stay). Take that net to **A boxed-in net**
+   (after Diagnose and Retry) and to placement. When every failed pad is
+   CAGED, run no lap. Measured on a test board: a pad ringed by four signal
+   pins came out of two laps and the rip route.py's Hint named with the same
+   failed set and the same copper, while a pad reachable only over the
+   priced planes (PASSABLE) was routed by the first lap.
+2. **Run the second lap only if the first changed something**: its failed
+   set (`failed_single` + `open_single`) or its copper (segment and via
+   counts) differs from the step before it. A lap that changed neither
+   starts the next one from the same board with the same flags.
+
+The `<board>_plan.sh` (Step 9) carries the laps that passed this test.
+
+Then two endgame signatures:
 
 - **A net walled by its own protected diff partner** (`no rippable
   blockers` naming the partner): the #521 override — name BOTH members
