@@ -3569,6 +3569,13 @@ Read-only, no model in the loop. It evaluates **seventeen** rules of this
 skill that a recorded chain can answer, and REFUSES BY NAME, citing the
 SECTION here each rule comes from so you can argue with it at its source.
 
+The same command proves a **judging chain** -- the `{in}`/`{out}` file
+plan-pcb-placement 3.7 writes for `judge_seeds.py`, which carries these
+commands with each board named by placeholder rather than by path. A file
+whose commands name a placeholder is read as a chain, as judge_seeds reads
+it: every rule applies with `{in}`/`{out}` as the boards, R01 (the `cd`
+line) is not asked, and a chain judge_seeds would refuse is exit 3 (#1592).
+
 **Run `--list` BEFORE you author the plan**, not after it is refused — it
 prints all seventeen in a few lines. The five that bite most often are: the
 chain ends on `route.py`, verification is commented rather than executable,

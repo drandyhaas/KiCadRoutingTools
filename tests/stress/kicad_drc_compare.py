@@ -128,8 +128,9 @@ CD_VIA_PASTE_TYPES = {"via-in-paste"}
 # Copper in a keep-out rule area (check_drc `keepout`): check_drc-only by
 # construction -- kicad-cli 10.0.0 reported no `items_not_allowed` for a track
 # through a tracks-not-allowed rule area in our measurement, even on a board
-# pcbnew built itself. Its own labelled channel, `keepout`, off the copper
-# match; any `items_not_allowed` KiCad does report is counted beside it.
+# pcbnew built itself; 10.0.3 and 10.0.7 report one row per track inside
+# (#1591). Its own labelled channel, `keepout`, off the copper match, on every
+# release; the `items_not_allowed` KiCad does report is counted beside it.
 CD_KEEPOUT_TYPES = {"keepout"}
 KICAD_KEEPOUT_TYPE = "items_not_allowed"
 # #1313: a .kicad_dru length window. KiCad's twin (`length_out_of_range`) is
@@ -1228,7 +1229,8 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             "courtyard": courtyard,
             # #962 D6: check_drc-only by construction (KiCad has no check)
             "via_in_paste": via_in_paste,
-            # check_drc-only by construction (kicad-cli 10.0.0 reported none)
+            # check_drc-only by construction (kicad-cli 10.0.0 reported
+            # none; 10.0.3+ one row per track, counted beside it -- #1591)
             "keepout": keepout,
             # #1390: KiCad error types no channel grades, never dropped
             "kicad_unclassified": unclassified,
@@ -1315,7 +1317,8 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     if ko and any(ko.get(k) for k in ("check_drc", "inherited", "kicad")):
         print(f"    KEEPOUT     check_drc={ko['check_drc']} "
               f"inherited={ko['inherited']} kicad_items_not_allowed={ko['kicad']} "
-              f"(check_drc's own class: kicad-cli 10.0.0 reported none)")
+              f"(check_drc's own class: kicad-cli 10.0.0 reported none, "
+              f"10.0.3+ one row per track)")
     court = data.get("courtyard")
     if court is not None:
         if "error" in court:

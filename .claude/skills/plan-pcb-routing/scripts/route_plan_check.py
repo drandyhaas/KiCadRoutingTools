@@ -3,11 +3,26 @@
 
     python3 -X utf8 route_plan_check.py <board>_plan.sh
     python3 -X utf8 route_plan_check.py <run dir> --board board.kicad_pcb
+    python3 -X utf8 route_plan_check.py wk/<run>/judge_chain.txt --board board.kicad_pcb
     python3 -X utf8 route_plan_check.py <plan> --list
 
 Exit: 0 checked and clean, 1 crash, 2 usage, 3 the plan could not be read,
 4 a rule failed. Deliberately the fail-closed dialect `board_score.py` uses --
 1 is a CRASH, never a finding, so a traceback can never read as a verdict.
+
+TWO FORMATS, ONE SET OF RULES (#1592)
+-------------------------------------
+A `<board>_plan.sh` names its boards by path and begins with `cd <repo>`. A
+JUDGING CHAIN -- the file `py_placer/judge_seeds.py` runs, which
+plan-pcb-placement 3.7 has the agent write -- names them by placeholder
+(`{in}` the board a step reads, `{out}` the one it writes) and is run from
+the repo root with no shell. A file whose commands name a judge_seeds
+placeholder is read as a chain, exactly as judge_seeds reads it
+(`read_chain`), and every rule applies with `{in}`/`{out}` as its boards --
+a step with `{out}` is one that writes a board -- except R01: judge_seeds
+asks a chain for no `cd`. A chain judge_seeds would refuse (no `{in}`, no
+`{out}`, an unknown placeholder, a shell builtin such as that `cd`) is exit
+3, for judge_seeds' own reason.
 
 WHY A CHECKER AND NOT A DRIVER
 -------------------------------
@@ -131,7 +146,12 @@ def is_check(argv):
     return bool(t and t.startswith('check_'))
 
 
-def boards_in(argv):
+def boards_in(argv, chain=False):
+    """The board tokens: `.kicad_pcb` paths, or in a judging chain the
+    tokens naming `{in}` / `{out}` (#1592)."""
+    if chain:
+        from judge_seeds import placeholders
+        return [a for a in argv if placeholders(a) & {'in', 'out'}]
     return [a for a in argv if a.endswith('.kicad_pcb')]
 
 
@@ -140,12 +160,13 @@ def boards_in(argv):
 class Plan:
     """Everything a rule may read: the raw text, and the recorded commands."""
 
-    def __init__(self, path, text, cmds, board=None):
+    def __init__(self, path, text, cmds, board=None, chain=False):
         self.path = path
         self.text = text
         self.lines = text.splitlines()
         self.cmds = cmds                      # [(cwd, argv)], file order
         self.board = board                    # PCBData, or None
+        self.chain = chain                    # a judge_seeds chain ({in}/{out})
 
     @property
     def argvs(self):
@@ -160,7 +181,13 @@ class Plan:
 
     @property
     def mutating(self):
-        """Commands that write a board: not a check, and naming a board."""
+        """Commands that write a board: not a check, and naming a board --
+        in a chain, naming `{out}`, since judge_seeds reads a step without
+        one as writing no board."""
+        if self.chain:
+            from judge_seeds import placeholders
+            return [a for a in self.argvs if not is_check(a) and tool_of(a)
+                    and any('out' in placeholders(t) for t in a)]
         return [a for a in self.argvs if not is_check(a) and boards_in(a)
                 and tool_of(a)]
 
@@ -357,7 +384,7 @@ def r_cp_carries_the_project(p):
     for argv in p.argvs:
         if not argv or argv[0] != 'cp':
             continue
-        pcbs = boards_in(argv)
+        pcbs = boards_in(argv, p.chain)
         if not pcbs:
             continue
         stem = os.path.basename(pcbs[-1])[:-len('.kicad_pcb')]
@@ -661,24 +688,56 @@ RULES = (
 )
 
 
+#: Rules a judging chain is not asked, and why (#1592).
+NOT_ASKED_OF_A_CHAIN = {
+    'R01': 'not asked of a judging chain: judge_seeds runs every step from '
+           'the repo root',
+}
+
+
+def read_chain_commands(manifest, text):
+    """[(None, argv)] for a judging chain, read as judge_seeds reads it, or
+    None when the file is not one (no command line names a judge_seeds
+    placeholder). A chain judge_seeds would refuse raises ValueError with
+    its reason, which main() reports as exit 3."""
+    import shlex
+    from judge_seeds import chain_problems, is_chain, read_chain
+    if not is_chain([ln for ln in text.splitlines()
+                     if ln.strip() and not ln.lstrip().startswith('#')]):
+        return None
+    steps = read_chain(manifest)
+    bad = chain_problems(steps)
+    if bad:
+        raise ValueError('the chain cannot judge a seed (judge_seeds would '
+                         'refuse it): ' + '; '.join(bad))
+    return [(None, shlex.split(s)) for s in steps]
+
+
 def check(path, board_path=None):
-    """(failures, skipped) -- failures is [(id, what, cite, [reasons])]."""
+    """(plan, failures, skipped) -- failures is [(id, what, cite, [reasons])],
+    skipped [(id, what, cite, why)]."""
     sys.path.insert(0, os.path.join(ROOT, 'py_router'))
     from make_plan import plan_commands, resolve_manifest
     manifest = resolve_manifest(path)
     with open(manifest, encoding='utf-8', errors='replace') as fh:
         text = fh.read()
-    cmds = plan_commands(path)
+    cmds = read_chain_commands(manifest, text)
+    chain = cmds is not None
+    if not chain:
+        cmds = plan_commands(path)
     board = None
     if board_path:
         from kicad_parser import parse_kicad_pcb
         board = parse_kicad_pcb(board_path)
-    plan = Plan(manifest, text, cmds, board)
+    plan = Plan(manifest, text, cmds, board, chain=chain)
 
     failures, skipped = [], []
     for rid, what, cite, fn in RULES:
         if board is None and 'needs --board' in what:
-            skipped.append((rid, what, cite))
+            skipped.append((rid, what, cite, 'pass --board to check it'))
+            continue
+        if chain and rid in NOT_ASKED_OF_A_CHAIN:
+            skipped.append((rid, what, cite, NOT_ASKED_OF_A_CHAIN[rid]))
             continue
         reasons = fn(plan)
         if reasons:
@@ -726,12 +785,16 @@ def main(argv=None):
         shown = os.path.relpath(plan.path)
     except ValueError:      # another Windows drive: no relative path exists
         shown = plan.path
-    print(f'{shown}: {len(plan.cmds)} recorded '
+    print(f'{shown}: '
+          + ('a judging chain ({in}/{out}, the judge_seeds format): '
+             if plan.chain else '')
+          + f'{len(plan.cmds)} {"" if plan.chain else "recorded "}'
           f'command(s), {len(plan.mutating)} of them board-mutating')
     for rid, what, cite, _fn in RULES:
         hit = next((f for f in failures if f[0] == rid), None)
-        if (rid, what, cite) in [(s[0], s[1], s[2]) for s in skipped]:
-            print(f'  SKIP  {rid}  {what}  -- pass --board to check it')
+        skip = next((s for s in skipped if s[0] == rid), None)
+        if skip:
+            print(f'  SKIP  {rid}  {what}  -- {skip[3]}')
         elif hit:
             print(f'  FAIL  {rid}  {what}   [SKILL.md, {cite}]')
             for reason in hit[3]:

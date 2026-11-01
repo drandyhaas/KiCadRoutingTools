@@ -178,7 +178,7 @@ The DRC checker validates:
 
 17. **`.kicad_dru` length windows** (`length-out-of-range`, #1313) - Every `(constraint length (min ..) (max ..))` rule in the sibling `.kicad_dru`, read by `kicad_dru.read_board_length_rules`. The rule binding a net is KiCad's (the last matching rule in file order), and the net is measured the way KiCad's length DRC measures it (`net_queries.net_match_length`, mode `total`: track and via-barrel copper plus every pad's pad-to-die length); outside the window it is a violation, KiCad's `length_out_of_range`. Honoured conditions: none (every net), or `||`-joined `A.NetClass == 'X'`, `A.NetName == 'X'` and `A.hasNetclass('X')` terms (KiCad's case-insensitive `*`/`?` wildcards; class by membership). A console line counts the nets graded and out of range, names the nets **not measured** (pads not joined by track copper -- not routed yet, which connectivity already counts), and names every rule whose condition is not modelled with the nets it may bind, as **NOT GRADED** (KiCad still grades them). The net is measured as the installed kicad-cli's release measures it (`net_queries.length_measure_release`, #1432): KiCad's length DRC changed within the 10.0 series by up to about one via barrel per via (which layers a via joins and how much of an inner layer it is charged, where runs are cut at via and pad outlines, which tracks merge into a run), and each change is gated on the release that made it, from 10.0.0 to 10.0.7 (the table is in [the API](api-net-analysis.md)). A newer kicad-cli is measured as 10.0.7, an older one as 10.0.0, and with no kicad-cli the measure is 10.0.7's. The printed length equals that release's `length_out_of_range` actual at its four decimals on every net of three routed boards and a one-net-per-change fixture, for 10.0.0, 10.0.2, 10.0.4, 10.0.5, 10.0.6 and 10.0.7 (`tests/test_1432_kicad_release_length.py`). A console line names the release measured as, and the installed kicad-cli when it is outside the modelled range. The one deliberate difference: KiCad also grades a net that is not routed yet, by whatever copper it has, where this check reports it not measured.
 18. **`.kicad_dru` diff-pair rules** (`skew-out-of-range`, `diff-pair-uncoupled`, #1303) - Every `(constraint skew ..)` and `(constraint diff_pair_uncoupled (max ..))` rule, read through the same channel as check 17 (`read_board_length_rules(kinds=...)`; `A.inDiffPair('X')` is honoured too, with KiCad's case-sensitive match on the pair's base name). **Skew**: the nets a rule binds form one group, and each net is graded by how much shorter it is than the group's longest (`net_match_length`, mode `total`); with `(within_diff_pairs)` each pair (KiCad's `+`/`-`, `P`/`N` suffix pairing) is its own group. **Uncoupled**: for each pair, `max(P, N track length) - coupled length`, where the coupled length is KiCad's (`net_queries.diff_pair_coupling`: parallel facing spans on one layer with nothing between them, under the pair's binding `diff_pair_gap` window). These are KiCad's `skew_out_of_range` and `diff_pair_uncoupled_length_too_long`; on a 4-layer route and a fixture of ten cases (straight, diagonal, offset, split layers, wide gap, a track or a via between P and N) the actuals matched kicad-cli 10.0.0 to 0.1 µm. The lengths a skew is taken from are measured as check 17 measures them, as the installed kicad-cli's release does (#1432); the skew subtracts float mm where KiCad subtracts integer nm, so it can differ from KiCad's in the fourth decimal. Unjoined members, unmodelled conditions and time-domain (`ps`) bounds are reported as in check 16. `board_score` counts these rows in its `diff_pairs` component, not in `drc`.
-19. **Copper in a keep-out rule area** (`keepout`) - Every rule area (`(zone ... (keepout ...))`, board-level and footprint-owned alike, as `PCBData.board_info.keepouts` reads them) is graded against the copper it forbids: with `(tracks not_allowed)`, a track on one of the area's copper layers (`*.Cu` and `F&B.Cu` expanded; no layer list = every copper layer) whose copper -- the centreline grown by half its width -- reaches into the area, outline minus holes; with `(vias not_allowed)`, a via whose copper disk reaches into it and that has copper on one of the area's layers (a blind or buried via off them is not a hit). A reach of no more than the clearance margin (see below) is not graded. Each row names the area, the net, the layer and a point inside, with how far the copper reaches past the area's edge and how much centreline lies inside. With `--baseline BOARD`, the same item the baseline already had in the same-named area is accepted `inherited-keepout`. Not graded: pads and footprints (an area's `(pads ...)` / `(footprints ...)` flags are not read), zone fill (a pour fills around a keep-out by construction), and footprint graphic copper. kicad-cli 10.0.0 reported no `items_not_allowed` for a track through a tracks-not-allowed rule area when we measured it, so this is check_drc's own class; `kicad_drc_compare` keeps it on a `keepout` channel of its own, and `board_score` counts it in `drc` (blocking). A console line and the `--json` `keepout` block count the violations and the inherited rows.
+19. **Copper in a keep-out rule area** (`keepout`) - Every rule area (`(zone ... (keepout ...))`, board-level and footprint-owned alike, as `PCBData.board_info.keepouts` reads them) is graded against the copper it forbids: with `(tracks not_allowed)`, a track on one of the area's copper layers (`*.Cu` and `F&B.Cu` expanded; no layer list = every copper layer) whose copper -- the centreline grown by half its width -- reaches into the area, outline minus holes; with `(vias not_allowed)`, a via whose copper disk reaches into it and that has copper on one of the area's layers (a blind or buried via off them is not a hit). A reach of no more than the clearance margin (see below) is not graded. Each row names the area, the net, the layer and a point inside, with how far the copper reaches past the area's edge and how much centreline lies inside. With `--baseline BOARD`, the same item the baseline already had in the same-named area is accepted `inherited-keepout`. Not graded: pads and footprints (an area's `(pads ...)` / `(footprints ...)` flags are not read), zone fill (a pour fills around a keep-out by construction), and footprint graphic copper. kicad-cli 10.0.0 reported no `items_not_allowed` for a track through a tracks-not-allowed rule area when we measured it, while 10.0.3 and 10.0.7 report one row per track inside (#1591), so this stays check_drc's own class on every release: `kicad_drc_compare` keeps it on a `keepout` channel of its own, with KiCad's `items_not_allowed` count printed beside it, and `board_score` counts it in `drc` (blocking). A console line and the `--json` `keepout` block count the violations and the inherited rows.
 20. **`.kicad_dru` `disallow` rules** (`items-not-allowed`, #1527) - Every `(constraint disallow track|via|through_via|micro_via|blind_via|buried_via)` rule, graded per track and per via as KiCad's `items_not_allowed`, one row per item naming the last matching rule in file order. A rule whose condition the resolver evaluates (`A.NetClass == 'HS' && A.Layer != 'F.Cu'`, a `(layer ...)` clause, `A.NetName == ...`) binds a track on its own layer and a via on each layer it has copper on; a via's `A.Layer` is undefined, as KiCad reads it, so `A.Layer` comparisons never bind a via. A rule on a named rule area is graded through the router's own net-filtered keep-out (`net_keepouts.derive_area_keepouts` + `audit_items`). What neither reaches -- another token (`pad`, `zone`, `hole`, ...) or a condition outside both models -- is named `NOT GRADED (disallow)`; `board_score` lists it in `drc.ungraded_rules` and `check_complete` reads INCOMPLETE. `board_score` counts the rows in `drc` (blocking).
 
 A `.kicad_dru` clearance rule check_drc does not model (`A.insideCourtyard(...)`, a layer clause beside a name term) is named `NOT GRADED (clearance)` (#1490). The violations it MAY make legal -- the rule relaxes the pair's requirement to a value the gap meets, and its condition, read three-valued with the unmodelled terms unknown, does not rule the pair out -- stay counted but are tagged `unverified_rule` (#1528): a console line `UNVERIFIED (clearance): N violation(s) ...`, the `--json` `unverified` count and `board_score`'s `drc.unverified` say how many of the count KiCad may not report.
@@ -844,7 +844,7 @@ A module's PCB antenna needs one on every layer; the router stamps
 a rule area (`obstacle_map.add_rule_area_keepout_obstacles`), placement grades
 it, and `check_drc.py` reports copper inside it as a `keepout` violation
 (check 19; kicad-cli 10.0.0 reported no `items_not_allowed` for one when we
-measured it).
+measured it, while 10.0.3 and 10.0.7 report one per track inside, #1591).
 
 ```bash
 python3 py_router/add_rule_area.py in.kicad_pcb out.kicad_pcb \
@@ -1205,20 +1205,37 @@ judges on.
 
 ```bash
 python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_chain.txt \
-    --intent wk/run/intent.json [--seeds 3,4] [--confirm close|K] [--jobs 1]
+    --intent wk/run/intent.json [--seeds 3,4] [--confirm close|K | --full] [--jobs 1]
 ```
 
 - Every `route.py` and `route_diff.py` step runs at `--quick 2`, added when
-  the line has no `--quick` of its own (and logged), so the full route's
-  chain can be the file as it stands.
+  the line has no `--quick` of its own (and logged), so one chain file in
+  this format serves both the judging route and the full route (`--full`,
+  `--confirm`): its route steps need no level of their own. The format is
+  this one, the board's plan-pcb-routing chain with its boards named by
+  placeholder -- not plan-pcb-routing's `<board>_plan.sh`, which names them
+  by path and begins with `cd` (the runner refuses it: no step reads `{in}`).
+- `route_plan_check.py` proves a chain before any seed is routed (#1592):
+  `python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py
+  wk/run/judge_chain.txt --board <board>` reads a file whose commands name a
+  placeholder as a chain, as this runner reads it, and grades its rules with
+  `{in}` / `{out}` as the boards (a step with `{out}` writes one); R01, the
+  plan's `cd` line, is not asked of a chain. A chain this runner would refuse
+  is its exit 3, for the runner's reason.
 - A command runs from the current folder (the repo root) with no shell: a
   quoted `'*'` reaches the tool as `*`, and `python3` at the head of a line is
   the runner's own interpreter. A leading `NAME=value` prefix
   (`KICAD_SMOOTH_ROUTE=1 python3 ...`) is that step's environment alone,
-  over the runner's (#1497), as `bash` would read it.
+  over the runner's (#1497), as `bash` would read it. A shell builtin
+  (`cd`, `export`, `set`) is no command here, and a chain carrying one is
+  refused.
 - Per seed: `s<S>_route/` made afresh with the placement copied in
   (`copy_board`, siblings included), every step's output in
-  `s<S>_route/chain.log`, the last board copied to `s<S>_fast.kicad_pcb` and
+  `s<S>_route/chain.log` and its board in `<N>_<script>.kicad_pcb`, the copy
+  and every step, as run, in `s<S>_route/redo_commands.sh` (redo_record's
+  format, which `redo_stress_test.py` replays: a manifest of that route
+  alone, whatever `REDO_MANIFEST` the caller exported, into which the tools
+  still record themselves), the last board copied to `s<S>_fast.kicad_pcb` and
   scored by `quick_score.py` (with `--intent`, and `--baseline` from
   judge.json's `baseline`, the board the seeds were placed from) into
   `s<S>_fast.score.json`,
@@ -1239,12 +1256,18 @@ python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_
   more are close, the NOTE and the confirming run name the seeds it leaves
   out with the `--seeds <the close seeds> --confirm K` that confirms every one
   (#1383, #1473). The re-run routes its seeds at level 2 again first.
+- `--full` routes the seeds at the full level only, with no level-2 pass,
+  into the same `s<S>_full_route/`, `s<S>_full.kicad_pcb` and
+  `s<S>_full.score.json`, and ranks them by that route (`level: "full"` in
+  `JSON_SUMMARY:`). `--seeds S --full` is the documented way to route ONE
+  board by a chain at the full level: per-step boards, `chain.log` and the
+  route's own `redo_commands.sh` in `s<S>_full_route/` (#1592).
 
 Exit 0 every seed scored; 4 a seed's chain wrote no board or its score could
 not be read (named); 2 nothing run: `judge.json` unreadable or naming no
-seed, a seed's placement missing, or a chain that reads no `{in}`, writes no
-`{out}` or names an unknown placeholder (`~{...}`, KiCad's overbar in a net
-name, is not one).
+seed, a seed's placement missing, `--full` with `--confirm`, or a chain that
+reads no `{in}`, writes no `{out}`, names an unknown placeholder (`~{...}`,
+KiCad's overbar in a net name, is not one) or carries a shell builtin.
 
 ## Datasheet Template Fit (`fit_template.py`)
 
