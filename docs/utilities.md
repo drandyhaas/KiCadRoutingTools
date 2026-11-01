@@ -540,7 +540,13 @@ under a rotation that carries the row.
 The verdict is `placement.legality.grade_pad_legality` — the same numbers
 `check_assembly` and `render_placement`'s review sheet print, netclass- and
 `.kicad_dru`-aware — on the candidate board against the same grade on the
-input. A request is refused when it makes a category worse:
+input. A pad pair is priced as `check_drc` grades it, through check_drc's own
+resolver (`PairRuleChannels`, #1575): a `.kicad_dru` clearance rule scoped by
+net class, item type or net name (`A.NetClass == 'HS' && B.Type == 'Pad'`)
+replaces the class value for the pairs it binds, and a diff pair's P against
+its N takes a coupled-pair rule or the class's `diff_pair_gap` (KiCad's
+"(diff pair)" rule); a requirement above the floor names the rule that set
+it (`rule 'pad_escape'`). A request is refused when it makes a category worse:
 
 - the counts (pad conflicts, hole conflicts, pads off-board) **and their
   magnitudes** (`pad_shortfall`, `oob_pad_amount`);
