@@ -570,11 +570,15 @@ points west, not out of the east edge
 - **Strong is an ERROR, weak a WARN.** A face whose offset reaches 2 mm
   fails at the rule's severity; a weaker one at `warn`. KiCad's stock
   library has three receptacles whose pad layout sets a confidently wrong
-  face between 0.9 and 1.4 mm, among 60+ correct USB faces in the same range.
-  Such a wrong weak face is not caught: a jack whose wrong weak face points
-  at the edge opens into the board, and this conjunct reads it as a pass --
-  unless the footprint's marker says otherwise (below). Those three stock
-  jacks draw no marker, so for them it stands.
+  face between 0.9 and 1.4 mm, among 60+ correct USB faces in the same range,
+  and KiCad 10's RJ45_Amphenol_RJHSE5380 reads +y at 0.69 mm where its twin
+  RJHSE538X (the same housing, four LED pads more) reads the right -y.
+  The reading alone does not catch such a wrong weak face: a jack whose wrong
+  weak face points at the edge opens into the board, and this conjunct reads
+  it as a pass -- unless the footprint's marker says otherwise (below), or
+  the entry declares its `mating_face`, which **outranks a weak reading**
+  (#1586, below). Those jacks draw no marker, so for them the declaration is
+  the guard.
 - **The footprint's "PCB Edge" marker confirms or vetoes the face.**
   Many footprints draw a "PCB Edge" / "Board edge" text beside a line where
   the board edge goes. `mating.marker_face_local` reads that LINE (parallel
@@ -591,7 +595,8 @@ points west, not out of the east edge
   plug, a `Vertical` footprint name and a pose near a diagonal; the
   evidence row says so (`facing.disposition: abstained`, with the reason).
 - The evidence row carries `facing` (`{edge, facing, local_face, basis,
-  offset_mm, strong, policy, reason, disposition}`) and the text line ends
+  offset_mm, strong, policy, reason, disposition, declared_face, body_face,
+  body_strong, disagreement}`) and the text line ends
   `; facing west [courtyard+fab+marker, strong] FAIL`. The violation's `measured`
   has no `edge` key: the nearest-edge violation owns that one.
 - The facing conjunct leaves the nearest-edge identity, `edge_seat_rect` and
@@ -613,10 +618,19 @@ footprint's own unrotated frame, its mating face opens on.
 { "ref": "J7", "edge": "south", "mating_face": "+y" }
 ```
 
-It is used only where the body names no face. There it is the face for
-`place_simple`'s edge seat (only the turns that point it at the edge) and for
-the grade, which then grades the entry's facing whatever its class or mount,
-at ERROR.
+It is used where the body names no face **or only a weak one** (#1586: the
+weak tier is where stock jacks read a confidently wrong face, and only the
+author has read the datasheet). There it is the face for `place_simple`'s
+edge seat (only the turns that point it at the edge) and for the grade, which
+then grades the entry's facing whatever its class or mount, at ERROR (basis
+`declared`, or `<body basis>+declared` where the weak reading agrees). A
+STRONG body reading (2 mm or more, or a weak one its "PCB Edge" marker
+confirms) still outranks the declaration. Wherever the declared face and the
+body's reading disagree, whichever wins, `check_floorplan` says so at WARN
+(`J1's mating face: its declared mating_face -y outranks the +y face its
+body reads weakly ...`, or `... overrules the declared mating_face -y: check
+the datasheet ...`), the facing clause adds `(declared -y over the body's
+weak +y)`, and place_simple's seat note carries the same sentence.
 A `Vertical` header names no face either, and for one `mating_face` is the
 side its cable leaves -- a 2xN ribbon off a long side -- so the seat lays it
 with its long side along the edge (tigard's J5 `+x`).

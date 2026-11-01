@@ -4542,10 +4542,14 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
 
     `geom` is the part's `body.BodyGeometry` (None reads as no body);
     `rotation` defaults to the footprint's own, and is what a seat trying a
-    turn passes. Where the body names no face, the entry's declared
-    `mating_face` is the face (basis `declared`, strong), and the entry is
-    graded whatever its class. Returns `{policy, facing, local_face, basis, offset_mm,
-    strong, reason, fails}`. `fails` is True only when the policy grades the
+    turn passes. Where the body names no face, or only a WEAK one (#1586),
+    the entry's declared `mating_face` is the face (basis `declared`, strong;
+    `<body basis>+declared` where the weak reading agrees with it), and the
+    entry is graded whatever its class; a STRONG reading outranks a
+    declaration (`mating.face_with_declaration`). Returns `{policy, facing,
+    local_face, basis, offset_mm, strong, reason, fails, declared_face,
+    body_face, body_strong, disagreement}`, the last naming a declared face
+    the body reads otherwise, whichever won ('' when none). `fails` is True only when the policy grades the
     entry, the face is decisive at that rotation, and it is not the declared
     edge. `strong` (the face's offset reaches `mating.FACE_STRONG_OFFSET_MM`)
     decides the severity: a strong failure is an ERROR, a weak one a WARN --
@@ -4554,18 +4558,26 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
 
     THE predicate the rule calls, so every reader asks one answer for which
     way a part faces. A wrong WEAK face (`placement.mating`) reads as a
-    pass. A footprint's own "PCB Edge" marker
+    pass unless the entry declares the face. A footprint's own "PCB Edge" marker
     (#1245) confirms a face (strong) or vetoes it (an abstention) where it
     draws one, through `mating_face_local`."""
-    from .mating import LocalFace, facing_edge, mating_face_local
+    from .mating import (LocalFace, face_with_declaration, facing_edge,
+                         mating_face_local)
     policy = edge_facing_policy(entry, fp)
     lf = (mating_face_local(fp, geom) if geom is not None
           else LocalFace(None, 0.0, '', 'no body geometry'))
-    if lf.face is None and entry.get('mating_face') in MATING_FACES:
-        # The body names no face; the intent declares one. A declaration is
+    body = lf
+    declared = (entry.get('mating_face')
+                if entry.get('mating_face') in MATING_FACES else None)
+    face, source, disagreement = face_with_declaration(lf, declared)
+    if source == 'declared':
+        # The body names no face, or a weak one; the intent declares one
+        # (#1586: only the author has read the datasheet). A declaration is
         # no weaker than a strong body reading: a wrong turn fails at ERROR.
-        lf = LocalFace(entry['mating_face'], 0.0, 'declared', '', lf.votes,
-                       strong=True, marker=lf.marker)
+        lf = (lf._replace(basis=lf.basis + '+declared', strong=True)
+              if lf.face == face else
+              LocalFace(face, 0.0, 'declared', '', lf.votes, strong=True,
+                        marker=lf.marker))
     rot = (fp.rotation or 0.0) if rotation is None else rotation
     facing = facing_edge(lf.face, rot)
     edge = entry.get('edge')
@@ -4576,7 +4588,9 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
             'basis': lf.basis, 'offset_mm': lf.offset_mm,
             'strong': bool(lf.strong and facing), 'reason': reason,
             'fails': bool(policy == 'graded' and edge and facing
-                          and facing != edge)}
+                          and facing != edge),
+            'declared_face': declared, 'body_face': body.face,
+            'body_strong': bool(body.strong), 'disagreement': disagreement}
 
 
 #: The axis a part slides along when it moves ALONG the named edge: x for a
@@ -5989,14 +6003,38 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             'disposition': ('exempt' if _ef['policy'] != 'graded'
                             else 'no_edge' if not edge
                             else 'abstained' if not _ef['facing']
-                            else 'fail' if _ef['fails'] else 'pass')}
+                            else 'fail' if _ef['fails'] else 'pass'),
+            'declared_face': _ef['declared_face'],
+            'body_face': _ef['body_face'],
+            'body_strong': _ef['body_strong'],
+            'disagreement': _ef['disagreement']}
+        if _ef['disagreement']:
+            # #1586: a declared face the body reads otherwise is SAID,
+            # whichever won -- a weak reading the declaration outranks (KiCad
+            # 10's RJHSE5380 reads its mouth into the board) or a strong one
+            # that overrules the declaration. A WARN: one of the two is wrong,
+            # and only the datasheet says which.
+            yield Violation(
+                rule='edge_connector', severity=WARN, ref=ref,
+                message=f"{ref}'s mating face: {_ef['disagreement']}",
+                measured={'declared_face': _ef['declared_face'],
+                          'body_face': _ef['body_face'],
+                          'body_strong': _ef['body_strong'],
+                          'facing_basis': _ef['basis']},
+                expected={'mating_face': _ef['declared_face']})
         if _ef['fails']:
             yield Violation(
                 rule='edge_connector',
                 severity=(ctx.sev('edge_connector') if _ef['strong']
                           else WARN),
                 ref=ref,
-                message=(f"{ref}'s body leaves its pad row toward the "
+                message=((f"{ref}'s declared mating face "
+                          f"({_ef['local_face']}) points {_ef['facing']} at "
+                          f"this pose, away from its declared {edge} edge -- "
+                          f"its mating face points {_ef['facing']}, not out "
+                          f"of the {edge} edge")
+                         if _ef['basis'] == 'declared' else
+                         f"{ref}'s body leaves its pad row toward the "
                          f"{_ef['facing']} ({_ef['basis']}, "
                          f"{_ef['offset_mm']:.2f}mm), away from its declared "
                          f"{edge} edge -- its mating face points "
@@ -6146,9 +6184,17 @@ def _facing_tail(f) -> str:
     if f['disposition'] == 'no_edge':
         return (f"; facing {f['facing']} (no edge declared: not graded)"
                 if f.get('facing') else '')
+    said = ''
+    if f.get('disagreement') and f.get('declared_face') and f.get('body_face'):
+        # #1586: which of the two faces the clause graded, and over which
+        said = (f" (declared {f['declared_face']} over the body's weak "
+                f"{f['body_face']})" if 'declared' in str(f.get('basis'))
+                else f" (the body's strong {f['body_face']} over the declared "
+                     f"{f['declared_face']})")
     return (f"; facing {f['facing']} [{f['basis']}, "
             f"{'strong' if f['strong'] else 'weak'}] "
-            f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}")
+            f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}"
+            + said)
 
 
 def band_courtyard_rect(ctx, ref, part):

@@ -8,7 +8,8 @@ when it has no mating face).
 The seat is read with the grade's own measurements (`rule_edge_connector`):
 
 * the TURN points its mating face off the board (`mating.mating_face_local`,
-  `mating.facing_edge`). A part with no in-plane face (a vertical header, a
+  `mating.facing_edge`; a declared `mating_face` outranks a weak reading,
+  `mating.face_with_declaration`, #1586). A part with no in-plane face (a vertical header, a
   test pad, a symmetric terminal) may take any quarter turn, each with its
   own seat, and the anneal chooses: designers lay such headers both ways --
   noahfc's five north-edge 1x03 headers stand ACROSS the edge, five abreast
@@ -137,19 +138,21 @@ def rot_key(rot) -> float:
     return round(float(rot) % 360.0, 6) % 360.0
 
 
-def _turns(state, pcb, geometry, entry, edge) -> Tuple[List[float], str]:
-    """The turns `entry`'s part may take on `edge` and its mating face: the
-    turns that point the face at the edge -- the face its body reads, else
-    the one the entry declares (`mating_face`) -- or every quarter turn when
-    it has none in the plane (its own turn first)."""
-    from .mating import facing_edge, mating_face_local
+def _turns(state, pcb, geometry, entry, edge) -> Tuple[List[float], str, str]:
+    """The turns `entry`'s part may take on `edge`, its mating face, and
+    what the declared face and the body's reading disagree on ('' when
+    nothing): the turns that point the face at the edge -- the entry's
+    declared `mating_face` where the body reads none or a weak one, else the
+    face its body reads (`mating.face_with_declaration`, #1586) -- or every
+    quarter turn when it has none in the plane (its own turn first)."""
+    from .mating import face_with_declaration, facing_edge, mating_face_local
     ref = str(entry['ref'])
     lf = mating_face_local(pcb.footprints[ref], geometry.get(ref))
-    face = lf.face or entry.get('mating_face')
+    face, _source, said = face_with_declaration(lf, entry.get('mating_face'))
     if face:
-        return [r for r in ROTS if facing_edge(face, r) == edge], face
+        return [r for r in ROTS if facing_edge(face, r) == edge], face, said
     own = rot_key(state.parts[ref].rot)
-    return [own] + [r for r in ROTS if r != own], ''
+    return [own] + [r for r in ROTS if r != own], '', said
 
 
 def pad_span(state, seat) -> float:
@@ -567,7 +570,7 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
     for c in entries:
         ref, edge = str(c['ref']), c['edge']
         part = state.parts[ref]
-        rots, face = _turns(state, pcb, bodies, c, edge)
+        rots, face, disagree = _turns(state, pcb, bodies, c, edge)
         probe.faces[ref] = face
         if not rots:
             unseated[ref] = (f"its mating face ({face}) points at the {edge} edge at no "
@@ -676,6 +679,7 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
         said[ref] = (f"edge connector {ref} on the {edge} edge"
                      + (f", facing it ({face})" if face else
                         f", no mating face: {len(lines)} turn(s) seat there")
+                     + (f" ({disagree})" if disagree else '')
                      + _deeper_text(edge, {r: d for r, d in deeper.items() if r in lines}))
         notes.append(said[ref])
     # What a part seated on one edge covers wherever it stands is a wall on
