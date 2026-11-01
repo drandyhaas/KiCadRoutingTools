@@ -456,12 +456,38 @@ class ZoneFillModel:
                         free[ii0:ii1, jj0:jj1] &= \
                             (ddx * ddx + ddy * ddy) >= rim * rim
 
+        # Every Edge.Cuts item below is kept at KiCad's edge gap,
+        # max(the zone's clearance, the board's copper-to-edge rule): the
+        # filler knocks each one out at that gap before the min-thickness
+        # opening, so a strip between the edge and a pad that is thinner than
+        # min_thickness pours nothing.
+        guard = max(guard_base, board_edge_rule(pcb_data))
+
+        # Board OUTLINE (#1564): KiCad clips the fill to the board outline,
+        # but the model clipped only to the zone polygon. A plane drawn as
+        # the board's bounding box (route_planes does exactly that) overhangs
+        # every notch of a non-rectangular board, and the model filled the
+        # notches and the edge band: on one keyboard it joined a 106 mm^2
+        # island to the main flood around a stepped edge, over two resistor
+        # pads that KiCad's fill does not pass, so the GND split was never
+        # repaired. A plain rectangle has no outline ring; its bounds are
+        # the ring (rect_ring).
+        from check_drc import board_edge_geometry
+        _outers = board_edge_geometry(pcb_data.board_info, rect_ring=True)[1]
+        if _outers:
+            _on_board = np.zeros((ny, nx), dtype=bool)
+            for _o in _outers:
+                _on_board |= _rings_inside_rows(cxs, cys, [_o])
+            free &= _on_board.T
+            for _o in _outers:
+                _stamp_ring_band(_o)
+
         # Board CUTOUTS (crkbd class, #490): KiCad's filler pulls fill out
         # of Edge.Cuts openings and keeps clearance from their rings, but the
         # model only clipped to the ZONE polygon -- fill was predicted
         # straight through crkbd's 72 key-switch holes, and the fill-aware
         # via preference steered taps onto the phantom. Stamp each cutout as
-        # a keep-out at the zone-clearance guard. NOTE: only safe now that
+        # a keep-out at the edge gap. NOTE: only safe now that
         # the obstacle-map cutout bands are honest (the a4e2ef6 cache-key
         # fix); over broken maps, honest fill = more fragmentation = more
         # repair copper through exactly the unguarded channels.
@@ -483,6 +509,7 @@ class ZoneFillModel:
                     or []):
             if len(_ec) >= 3:
                 _stamp_ring_band(_ec)
+        guard = guard_base
 
         # Outline clip (#556: scanline kernel, bit-identical to the old
         # per-row ray cast -- see _rings_inside_rows), even-odd over the
@@ -742,6 +769,18 @@ def install_kicad_fill(pcb_data, islands):
             cache[(z.net_id, z.layer, id(z))] = m
             out[(name, z.layer)] = len(polys)
     return out
+
+
+def board_edge_rule(pcb_data) -> float:
+    """The copper-to-Edge.Cuts rule KiCad fills this board's zones at: the
+    `min_copper_edge_clearance` of the board file's sibling .kicad_pro, the
+    project KiCad's own refill reads (0.0 with no project or no rule). Both
+    fronts set `source_path` to the board file."""
+    path = getattr(pcb_data, 'source_path', '') or ''
+    if not path:
+        return 0.0
+    from fix_kicad_drc_settings import read_project_edge_clearance
+    return float(read_project_edge_clearance(path) or 0.0)
 
 
 def set_board_net_clearances(pcb_data, net_clearances):
