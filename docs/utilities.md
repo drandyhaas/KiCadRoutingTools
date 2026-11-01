@@ -3067,7 +3067,9 @@ floors only when it placed a via and nothing when it drew nothing (#1195,
 `fanout_fix_kwargs`). A pour (`route_planes.py`, the Planes tab) writes its
 via floors and hole-to-hole only when it placed a via, its track floor only
 when it laid a track, and its copper-to-hole floor only when it drew either
-(#1319, `plane_fix_kwargs`). A bare pour writes the copper clearance alone,
+(#1319, `plane_fix_kwargs`); its soft-joint bridges, which join copper the
+board already carried, are not copper it drew (#1577,
+`plane_floor_segments`). A bare pour writes the copper clearance alone,
 because a KiCad refill regrows the pour at max(zone clearance, net class).
 `route_diff.py` (and the Differential tab) writes the copper-to-hole floor it
 HELD -- the board's own `min_hole_clearance`, which its router keeps NPTH
@@ -3075,9 +3077,10 @@ walls at -- lowered only to the smallest distance from the copper it drew to a
 hole of another net (a P via's drill beside the N track can sit under it), and
 never below its copper clearance (#1369, `step_hole_clearance`). It used to
 write the copper clearance, which the delivered fill then followed. `route.py`
-(#1493) and the fanouts, `bga_fanout.py`, `qfn_fanout.py` and the Fanout tab
-(#1568), write it the same way, and a floor written under the board's own is
-a `hole_clearance` row in `JSON_SUMMARY.design_rules`.
+(#1493), the fanouts, `bga_fanout.py`, `qfn_fanout.py` and the Fanout tab
+(#1568), and the pours, `route_planes.py`, `repair_planes.py` and the Planes
+tab (#1577), write it the same way, and a floor written under the board's own
+is a `hole_clearance` row in `JSON_SUMMARY.design_rules`.
 
 The `#530` cap lowers `rules.min_clearance` to the smallest pad clearance
 override the run honoured (KiCad floors an override there). That number

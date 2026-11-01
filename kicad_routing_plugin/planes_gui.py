@@ -1452,6 +1452,14 @@ class PlanesTab(wx.Panel):
         with redirect_prints_to_log(self.append_log):
             return self._apply_results_to_board_body()
 
+    def _held_hole_clearance(self, board, tracks, vias, clearance):
+        """#1577: :func:`gui_utils.held_hole_clearance_live` for this tab's
+        plane copper (track and via dicts) -- route_planes' main writes the
+        same floor with step_hole_clearance."""
+        from .gui_utils import held_hole_clearance_dicts
+        return held_hole_clearance_dicts(self.pcb_data, board, tracks, vias,
+                                         clearance)
+
     def _apply_results_to_board_body(self):
         import pcbnew
 
@@ -1555,6 +1563,13 @@ class PlanesTab(wx.Panel):
 
         def get_layer_id(layer_name):
             return name_to_id.get(layer_name, pcbnew.F_Cu)
+
+        # The copper this step drew, for its DRC floors (#1319): every via
+        # and track but the soft-joint bridges, which join copper the board
+        # already carried (#1577) -- route_planes' main leaves the same out.
+        from fix_kicad_drc_settings import plane_floor_segments
+        _floor_vias = list(getattr(self, '_new_vias', None) or [])
+        _floor_segs = plane_floor_segments(getattr(self, '_new_segments', None) or [])
 
         # Add vias from create_plane results
         vias_added = 0
@@ -1887,7 +1902,7 @@ class PlanesTab(wx.Panel):
         # main makes the same decision (plane_fix_kwargs) from its files.
         from fix_kicad_drc_settings import plane_fix_kwargs
         _pkw = plane_fix_kwargs(
-            tracks_added, vias_added, clearance=(cfg or {}).get('clearance'),
+            len(_floor_segs), len(_floor_vias), clearance=(cfg or {}).get('clearance'),
             hole_to_hole=(cfg or {}).get('hole_to_hole_clearance'),
             track_width=(cfg or {}).get('track_width'),
             via_size=(cfg or {}).get('via_size'),
@@ -1901,8 +1916,15 @@ class PlanesTab(wx.Panel):
                 import clearance_ledger
                 eff_clearance = clearance_ledger.effective(cfg.get('clearance')) \
                     if cfg.get('clearance') else cfg.get('clearance')
+                # #1577: the copper-to-hole floor the step HELD, lowered only
+                # to what its own copper needs -- route_planes' main writes it
+                # with step_hole_clearance. None for a bare pour (#1319).
+                _hole_clr = (self._held_hole_clearance(board, _floor_segs,
+                                                       _floor_vias, eff_clearance)
+                             if _pkw['copper_holes'] else None)
                 targets = compute_targets(
                     clearance=eff_clearance,
+                    hole_clearance=_hole_clr,
                     hole_to_hole=_pkw['hole_to_hole'],
                     edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=_pkw['track_width'],

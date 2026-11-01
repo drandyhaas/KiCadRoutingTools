@@ -2182,17 +2182,9 @@ class FanoutTab(wx.Panel):
     def _held_hole_clearance(self, board, tracks, vias, clearance):
         """#1568: :func:`gui_utils.held_hole_clearance_live` for this tab's
         fanout copper (track and via dicts)."""
-        from kicad_parser import Segment, Via
-        from .gui_utils import held_hole_clearance_live
-        segs = [Segment(start_x=t['start'][0], start_y=t['start'][1],
-                        end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
-                        layer=t['layer'], net_id=t['net_id']) for t in tracks]
-        new_vias = [Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
-                        layers=list(v.get('layers') or ['F.Cu', 'B.Cu']),
-                        net_id=v['net_id']) for v in vias]
-        return held_hole_clearance_live(
-            self.pcb_data, board,
-            {'results': [{'new_segments': segs, 'new_vias': new_vias}]}, clearance)
+        from .gui_utils import held_hole_clearance_dicts
+        return held_hole_clearance_dicts(self.pcb_data, board, tracks, vias,
+                                         clearance)
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga',
