@@ -3771,6 +3771,17 @@ def _lengthen_net_with_meanders(
     clearance). Returns ``(meandered_segments, new_total_length, bump_count)``;
     ``bump_count == 0`` means no meanders could be fit (segments/length returned
     unchanged) and the caller decides how to report it.
+
+    The first shot sizes the bump count as if every bump reached
+    ``--meander-amplitude``. Foreign copper beside the leg clamps each bump
+    (`get_safe_amplitude_at_point`), so that count can fall short; when the
+    first shot and its rescale miss, the count moves -- up on an undershoot,
+    down when the bumps already sit at their smallest -- each count at the
+    amplitude that shares the gap between its bumps, and the closest count's
+    amplitude is then refined on the measured lengths, never above
+    ``--meander-amplitude``. The result closest to the target is kept, as the
+    group matcher adds bumps and scales (#1583). A leg the first shot and its
+    rescale match is meandered exactly as before.
     """
     # Meander geometry: entry chamfer + 2 risers + 2 top chamfers + exit chamfer.
     # For n bumps: extra ~= n * (2*amplitude - 2.34*chamfer).
@@ -3784,6 +3795,32 @@ def _lengthen_net_with_meanders(
     )
     min_amplitude = 0.1  # Minimum useful amplitude (smaller for small deltas)
     max_amplitude = config.meander_amplitude  # Default 1.0mm
+    tolerance = config.length_match_tolerance
+
+    # One clearance index for every attempt: each apply_meanders_to_route
+    # call would otherwise rebuild the same one from the same board.
+    clearance_index = None
+    if pcb_data is not None:
+        clearance_index = ClearanceIndex()
+        clearance_index.build(pcb_data, config)
+
+    def _meander(bumps, amplitude):
+        """(segments, total length, bumps placed) for `bumps` bumps at
+        `amplitude`, or None when no bump fits."""
+        segs, placed = apply_meanders_to_route(
+            segments,
+            delta,
+            config,
+            pcb_data=pcb_data,
+            net_id=net_id,
+            paired_net_id=paired_net_id,
+            amplitude_override=amplitude,
+            min_bumps=bumps,
+            clearance_index=clearance_index,
+        )
+        if placed == 0:
+            return None
+        return segs, calculate_route_length(segs, vias, pcb_data) + stub_length, placed
 
     # Pick a bump count + initial amplitude that should hit the delta in one
     # shot, then refine by scaling below.
@@ -3792,33 +3829,35 @@ def _lengthen_net_with_meanders(
     initial_amplitude = (delta / num_bumps_needed + 2.34 * chamfer) / 2
     initial_amplitude = max(min_amplitude, min(initial_amplitude, max_amplitude))
 
-    # Pass paired_net_id to use reduced clearance for the coupled partner track,
-    # and min_bumps to get exactly the calculated number of bumps.
-    meandered_segments, bump_count = apply_meanders_to_route(
-        segments,
-        delta,
-        config,
-        pcb_data=pcb_data,
-        net_id=net_id,
-        paired_net_id=paired_net_id,
-        amplitude_override=initial_amplitude,
-        min_bumps=num_bumps_needed
-    )
-
-    if bump_count == 0:
+    # paired_net_id uses reduced clearance for the coupled partner track, and
+    # min_bumps gets exactly the calculated number of bumps.
+    first = _meander(num_bumps_needed, initial_amplitude)
+    if first is None:
         return segments, current_length, 0
+    meandered_segments, new_length, bump_count = first
 
-    new_routed = calculate_route_length(meandered_segments, vias, pcb_data)
-    new_length = new_routed + stub_length
-
-    # Keep track of best result (closest to target)
+    # Keep track of best result (closest to target), with the amplitude
+    # it was asked for
     best_segments = meandered_segments
     best_length = new_length
     best_bump_count = bump_count
+    best_amplitude = initial_amplitude
+
+    def _keep(trial, amplitude):
+        nonlocal best_segments, best_length, best_bump_count, best_amplitude
+        segs, length, placed = trial
+        if abs(length - target_length) < abs(best_length - target_length):
+            best_segments, best_length, best_bump_count = segs, length, placed
+            best_amplitude = amplitude
+            return True
+        return False
+
+    def _matched():
+        return abs(best_length - target_length) <= tolerance
 
     # Scale amplitude to converge on target (keep the closest result).
     for scale_iter in range(5):
-        if abs(new_length - target_length) <= config.length_match_tolerance:
+        if abs(new_length - target_length) <= tolerance:
             break
 
         actual_extra = new_length - current_length
@@ -3831,30 +3870,87 @@ def _lengthen_net_with_meanders(
         if target_amplitude < 0.2:
             break  # Amplitude too small, accept current result
 
-        new_meandered_segments, new_bump_count = apply_meanders_to_route(
-            segments,
-            delta,
-            config,
-            pcb_data=pcb_data,
-            net_id=net_id,
-            min_bumps=bump_count,  # Keep same bump count
-            amplitude_override=target_amplitude,
-            paired_net_id=paired_net_id
-        )
-
-        if new_bump_count == 0:
+        trial = _meander(bump_count, target_amplitude)  # Keep same bump count
+        if trial is None:
             break  # Scaling failed, use best result so far
-
-        new_routed = calculate_route_length(new_meandered_segments, vias, pcb_data)
-        new_length = new_routed + stub_length
-
-        if abs(new_length - target_length) < abs(best_length - target_length):
-            best_segments = new_meandered_segments
-            best_length = new_length
-            best_bump_count = new_bump_count
-            bump_count = new_bump_count
+        new_length = trial[1]
+        if _keep(trial, target_amplitude):
+            bump_count = trial[2]
         else:
             break  # Not improving, stop
+
+    # #1583: the count moves when the first shot missed. The count above
+    # assumed every bump reaches --meander-amplitude; a foreign rail beside
+    # the leg clamps each bump a 0.7x step down, so a pair with room for more
+    # bumps stopped 'meanders-ran-out' at the first count (2.22 mm short
+    # between two rails 1.2 mm off, where amplitude 0.7 matched with 6 bumps).
+    # Each count shares the gap at the amplitude that closes it, which is
+    # lower and so clears the rail sooner, down to the floor a bump bottoms
+    # out at (a 0.1 mm riser between its chamfers, generate_trombone_meander):
+    # `most` bumps share the gap above it.
+    needed = target_length - current_length
+    floor = max(MIN_AMPLITUDE, 2 * chamfer + 0.1)
+    floor_gain = 2 * floor - 2.34 * chamfer
+    most = max(1, int(needed / floor_gain)) if floor_gain > 0 else None
+
+    def _share(count):
+        return max(floor, min(max_amplitude, (needed / count + 2.34 * chamfer) / 2))
+
+    if not _matched() and best_length < target_length - tolerance:
+        # Up: the next count is the one the length each bump measured says
+        # is needed, held at `most`; stop at a count that reaches the target
+        # or at the most bumps the runs hold.
+        count, length = best_bump_count, best_length
+        for _ in range(10):
+            gained = length - current_length
+            want = count + 1
+            if gained > MIN_SEGMENT_LENGTH:
+                want = max(want, int(math.ceil(needed * count / gained)))
+            if most is not None and count < most:
+                want = min(want, most)
+            trial = _meander(want, _share(want))
+            if trial is None:
+                break
+            _keep(trial, _share(want))
+            if _matched() or trial[1] > target_length + tolerance:
+                break
+            if trial[2] < want:
+                break  # the runs hold no more bumps
+            count, length = want, trial[1]
+    elif (not _matched() and most is not None
+          and best_bump_count > most and best_amplitude <= floor + 1e-9):
+        # Down: the bumps already sit at the floor and still overshoot, so
+        # fewer of them share the gap.
+        trial = _meander(most, _share(most))
+        if trial is not None:
+            _keep(trial, _share(most))
+
+    # The closest count's amplitude, refined on the measured lengths: a
+    # secant that starts from each bump's two risers (d length / d amplitude
+    # = 2 per bump), within [floor, --meander-amplitude]. A clamped bump
+    # grows less than that, or not at all.
+    if not _matched():
+        count, amp, length = best_bump_count, best_amplitude, best_length
+        prev = None
+        for _ in range(4):
+            if prev is None:
+                slope = 2.0 * count
+            elif abs(amp - prev[0]) > 1e-9:
+                slope = (length - prev[1]) / (amp - prev[0])
+            else:
+                break
+            if slope <= MIN_SEGMENT_LENGTH:
+                break  # the amplitude is clamped here: changing it gains nothing
+            next_amp = min(max_amplitude, max(floor, amp + (target_length - length) / slope))
+            if abs(next_amp - amp) < 1e-4:
+                break
+            trial = _meander(count, next_amp)
+            if trial is None:
+                break
+            _keep(trial, next_amp)
+            if _matched():
+                break
+            prev, amp, length = (amp, length), next_amp, trial[1]
 
     return best_segments, best_length, best_bump_count
 
@@ -3962,7 +4058,10 @@ def apply_intra_pair_length_matching(
     # board had P 21.31 > N 16.82 -- skew 4.51 -> 5.20 mm. The pair's copper
     # is on the board by now (each route is committed as it is found), so
     # net_signal_length reads what the cleanup will leave of it. The result
-    # sums stay the fallback while a member's pads are not joined.
+    # sums stay the fallback while a member's pads are not joined. It is a
+    # path measure, not KiCad's: where a track ends inside a via off its
+    # centre the shipped skew KiCad grades can differ by up to a via barrel
+    # (net_signal_length's docstring, #1583).
     _board = None
     if pcb_data is not None:
         from net_queries import net_signal_length

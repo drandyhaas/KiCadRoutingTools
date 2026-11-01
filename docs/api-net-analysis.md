@@ -432,7 +432,12 @@ read off a board that still carries the trimmings (#1303): the pad-to-pad path
 of a 2-pad net (`pin_pair_path_length`; a loop collapses to it), the copper of
 a larger net with every dead-end branch trimmed, plus every pad's pad-to-die;
 `None` while the pads are not joined. Intra-pair matching measures its two legs
-with it.
+with it. It is a path measure, not KiCad's (`net_match_length`): a track end
+anywhere inside a via's or pad's copper joins it at no cost, with the via's
+barrel charged, where KiCad joins a via only to tracks ending at its centre
+before 10.0.4 and from 10.0.4 cuts such a run at the via pad and measures it to
+the centre, and cuts runs at pad edges. Where a track ends inside a via off its
+centre the two differ by up to a via barrel on the shipped copper (#1583).
 
 The gap window is the caller's: `check_drc` and `board_score` pass the pair's
 binding `diff_pair_gap` (`design_rules.DesignRules`), as KiCad does;
