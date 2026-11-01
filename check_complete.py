@@ -36,6 +36,13 @@ fails in. Three verdict classes, and only one of them is "done":
                 least as badly is named in the reason instead: the
                 reference's, not this board's)
 
+With --authored-from it also has KiCad grade this copper under the AUTHORED
+project (that board's .kicad_pro and .kicad_dru) and reports the error count
+per type -- class clearance included -- beside the same grade under the
+project the board ships with (`authored_drc`, #1580). That is DISCLOSED next
+to the verdict and never changes it: a chain may lower a class on request,
+and this says how far it went.
+
 UNGRADED components do NOT block DONE -- a board with no spec files has nothing
 to grade them against, and making that fatal would put every corpus board
 permanently in the failing state -- but they are NAMED in the verdict line,
@@ -142,6 +149,74 @@ _FLOOR_OBJECT = {
 _MIN_TOL = 1e-4
 
 
+def _staged_kicad_drc(board, timeout=3600, project_from=None, edit=None,
+                      severity='--severity-all'):
+    """kicad-cli's DRC report of a STAGED copy of ``board`` -> ``(report,
+    None)``, or ``(None, why)`` when kicad-cli is missing or produced no
+    report. Never raises.
+
+    The copy carries the board's siblings (copy_board); ``project_from``
+    replaces its rules with another board's -- that board's ``.kicad_pro``,
+    and its ``.kicad_dru`` or none -- and ``edit(project_dict)`` amends the
+    staged project in place. The fill is graded AS SHIPPED, never refilled
+    (#1370): a delivered fill was poured at whatever value the chain lowered
+    the rules to, and re-pouring it here grades copper nobody ships."""
+    import tempfile
+    from copy_board import copy_board
+    try:
+        from kicad_oracle import find_kicad_cli
+        cli = find_kicad_cli(warn=False)
+    except Exception as exc:                                    # noqa: BLE001
+        return None, f'no kicad-cli lookup: {exc}'
+    if not cli:
+        return None, 'kicad-cli not found (set KICAD_CLI)'
+    tmp = tempfile.mkdtemp(prefix='check_complete_drc.')
+    try:
+        dst = os.path.join(tmp, 'b.kicad_pcb')
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            copy_board(board, dst)
+        pro = os.path.join(tmp, 'b.kicad_pro')
+        if project_from:
+            from fix_kicad_drc_settings import find_project
+            src_pro = find_project(project_from)
+            if not os.path.isfile(src_pro):
+                return None, f'no project beside {project_from}'
+            shutil.copyfile(src_pro, pro)
+            src_dru = src_pro[:-len('.kicad_pro')] + '.kicad_dru'
+            dru = os.path.join(tmp, 'b.kicad_dru')
+            if os.path.isfile(src_dru):
+                shutil.copyfile(src_dru, dru)
+            elif os.path.isfile(dru):
+                os.remove(dru)          # the authored project had no rules file
+        if edit is not None:
+            proj = {}
+            if os.path.isfile(pro):
+                with open(pro, encoding='utf-8') as fh:
+                    proj = json.load(fh)
+            edit(proj)
+            with open(pro, 'w', encoding='utf-8') as fh:
+                json.dump(proj, fh, indent=2)
+        out = os.path.join(tmp, 'drc.json')
+        try:
+            r = subprocess.run([cli, 'pcb', 'drc', '--format', 'json',
+                                '--units', 'mm', severity,
+                                '--output', out, dst],
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, f'kicad-cli timed out after {timeout:g} s'
+        if not os.path.isfile(out) or os.path.getsize(out) == 0:
+            return None, (f'kicad-cli produced no report (rc={r.returncode}: '
+                          f'{(r.stderr or "").strip()[:200]})')
+        with open(out, encoding='utf-8') as fh:
+            return json.load(fh), None
+    except Exception as exc:                                    # noqa: BLE001
+        return None, f'{type(exc).__name__}: {exc}'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def kicad_hole_clearance(board, value, timeout=3600):
     """KiCad's own copper-to-hole grade of ``board`` at ``value`` mm (#1198).
 
@@ -160,49 +235,14 @@ def kicad_hole_clearance(board, value, timeout=3600):
     boards); or ``{'error': why}`` when kicad-cli is missing or
     produced no report. Never raises."""
     import re
-    import tempfile
-    from copy_board import copy_board
-    try:
-        from kicad_oracle import find_kicad_cli
-        cli = find_kicad_cli(warn=False)
-    except Exception as exc:                                    # noqa: BLE001
-        return {'error': f'no kicad-cli lookup: {exc}'}
-    if not cli:
-        return {'error': 'kicad-cli not found (set KICAD_CLI)'}
-    tmp = tempfile.mkdtemp(prefix='check_complete_hole.')
-    try:
-        dst = os.path.join(tmp, 'b.kicad_pcb')
-        import contextlib
-        import io
-        with contextlib.redirect_stdout(io.StringIO()):
-            copy_board(board, dst)
-        pro = os.path.join(tmp, 'b.kicad_pro')
-        proj = {}
-        if os.path.isfile(pro):
-            with open(pro, encoding='utf-8') as fh:
-                proj = json.load(fh)
+
+    def _at_value(proj):
         ds = proj.setdefault('board', {}).setdefault('design_settings', {})
         ds.setdefault('rules', {})['min_hole_clearance'] = float(value)
         ds.setdefault('rule_severities', {})['hole_clearance'] = 'error'
-        with open(pro, 'w', encoding='utf-8') as fh:
-            json.dump(proj, fh, indent=2)
-        out = os.path.join(tmp, 'drc.json')
-        try:
-            r = subprocess.run([cli, 'pcb', 'drc', '--format', 'json',
-                                '--units', 'mm', '--severity-all',
-                                '--output', out, dst],
-                               capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return {'error': f'kicad-cli timed out after {timeout:g} s'}
-        if not os.path.isfile(out) or os.path.getsize(out) == 0:
-            return {'error': f'kicad-cli produced no report (rc={r.returncode}: '
-                             f'{r.stderr.strip()[:200]})'}
-        with open(out, encoding='utf-8') as fh:
-            report = json.load(fh)
-    except Exception as exc:                                    # noqa: BLE001
-        return {'error': f'{type(exc).__name__}: {exc}'}
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    report, err = _staged_kicad_drc(board, timeout=timeout, edit=_at_value)
+    if err:
+        return {'error': err}
     actual = []
     count = 0
     items = []
@@ -225,6 +265,99 @@ def kicad_hole_clearance(board, value, timeout=3600):
                       'actual': float(m.group(1)) if m else None})
     return {'count': count, 'min_actual': min(actual) if actual else None,
             'items': items}
+
+
+def kicad_errors_by_type(board, project_from=None, timeout=3600):
+    """KiCad's DRC ERRORS on ``board``'s copper, per violation type (#1580).
+
+    The staged copy is graded under ``project_from``'s project (its
+    ``.kicad_pro`` and ``.kicad_dru``), or under the board's own when None,
+    on the fill as shipped (:func:`_staged_kicad_drc`), at the severities that
+    project declares (``--severity-error``). Unconnected items are not
+    counted: connectivity does not move with the rules (it is
+    check_connected's question, and board_score's). -> ``{'count': N,
+    'by_type': {type: n}}``, or ``{'error': why}``. Never raises."""
+    report, err = _staged_kicad_drc(board, timeout=timeout,
+                                    project_from=project_from,
+                                    severity='--severity-error')
+    if err:
+        return {'error': err}
+    by_type = {}
+    for v in report.get('violations') or ():
+        if v.get('severity', 'error') != 'error':
+            continue
+        t = str(v.get('type') or '?')
+        by_type[t] = by_type.get(t, 0) + 1
+    return {'count': sum(by_type.values()), 'by_type': by_type}
+
+
+def authored_project_drc(board, authored_from, timeout=3600, grader=None):
+    """How far is this board's copper from the project the user AUTHORED?
+
+    #1580: the fab-floor rows answer per KEY (one smallest object per size
+    floor) and leave out a class clearance the chain lowered on request,
+    because that is a decision rather than a relaxation (#1160). This answers
+    per VIOLATION: KiCad's error count per type with the authored project
+    (``authored_from``'s ``.kicad_pro`` and ``.kicad_dru``) staged beside
+    this copper, class clearance included, next to the same grade under the
+    project the board ships with -- both on the fill as shipped, so what the
+    shipped grade also reports (a fill not re-poured since routing) is plain
+    to see rather than charged to the rules. DISCLOSED, never counted: the
+    verdict does not read it.
+
+    ``grader(board, project_from)`` replaces :func:`kicad_errors_by_type`
+    (tests). -> ``{'ran': True, 'authored': {...}, 'shipped': {...},
+    'by_type': {type: {'authored': n, 'shipped': m}}}``; or ``{'ran': False,
+    'reason': why}`` when the authored grade could not run -- never a 0."""
+    grade = grader or (lambda b, p: kicad_errors_by_type(b, p, timeout=timeout))
+    auth = grade(board, authored_from) or {'error': 'no grade'}
+    if auth.get('error'):
+        return {'ran': False, 'reason': auth['error']}
+    ship = grade(board, None) or {'error': 'no grade'}
+    types = sorted(set(auth.get('by_type') or {})
+                   | set(ship.get('by_type') or {}))
+    out = {'ran': True, 'fill': 'as shipped', 'authored_from': authored_from,
+           'authored': auth, 'shipped': ship,
+           'by_type': {t: {'authored': (auth.get('by_type') or {}).get(t, 0),
+                           'shipped': ((ship.get('by_type') or {}).get(t, 0)
+                                       if not ship.get('error') else None)}
+                       for t in types}}
+    return out
+
+
+def _authored_drc_note(d):
+    """The one-line disclosure of :func:`authored_project_drc`'s result."""
+    if not d.get('ran'):
+        return (f'KiCad DRC under the AUTHORED project: NOT RUN '
+                f'({d.get("reason") or "no reason given"}) -- no count, '
+                f'which is not a count of 0')
+    a, s = d.get('authored') or {}, d.get('shipped') or {}
+    rows = sorted((d.get('by_type') or {}).items(),
+                  key=lambda kv: (-(kv[1].get('authored') or 0), kv[0]))
+    if s.get('error'):
+        ship = f'the project it ships with not graded ({s["error"]})'
+        per = ', '.join(f'{t} {n["authored"]}' for t, n in rows)
+    else:
+        ship = f'{s.get("count")} under the project it ships with'
+        per = ', '.join(f'{t} {n["authored"]} (shipped {n["shipped"]})'
+                        for t, n in rows)
+    return (f'KiCad DRC of this copper, fill as shipped: {a.get("count")} '
+            f'error(s) under the AUTHORED project, {ship}'
+            + (f' -- {per}' if per else ''))
+
+
+def _counted(row, key='violations', paren=False):
+    """A floor row's count as words (``36 vias``, ``5 KiCad violations``),
+    '' when the row carries none. ``paren`` wraps it for a ``was -> is``."""
+    n = row.get(key)
+    if not isinstance(n, int) or isinstance(n, bool):
+        return ''
+    if row.get('measured_by') == 'kicad-cli':
+        words = f'{n} KiCad violation{"" if n == 1 else "s"}'
+    else:
+        noun = _FLOOR_OBJECT.get(row.get('key'), 'object')
+        words = f'{n} {noun}{"" if n == 1 else "s"} below it'
+    return f' ({words})' if paren else words
 
 
 def _unmatched_by_reference(board_items, ref_items):
@@ -280,7 +413,8 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     """
     from fix_kicad_drc_settings import (FAB_FLOOR_KEYS,
                                         FAB_FLOOR_KEYS_MEASURABLE,
-                                        find_project, scan_board_minima)
+                                        count_below_floors, find_project,
+                                        scan_board_minima)
     pro = None
     source = 'authored_from'
     if authored_from:
@@ -329,6 +463,15 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
         ref_min = {}
     grade_holes = hole_grader or (
         lambda b, v: kicad_hole_clearance(b, v, timeout=timeout))
+    # #1580: a relaxed size floor carries a COUNT -- the objects below the
+    # authored value, over the objects its minimum is read off -- on this
+    # board and on the reference, not only the smallest one.
+    _sizes = {k: authored[k] for k in FAB_FLOOR_KEYS_MEASURABLE
+              if isinstance(authored.get(k), (int, float))
+              and not isinstance(authored.get(k), bool) and authored[k] > 0}
+    below = count_below_floors(board, _sizes) if _sizes else {}
+    ref_below = (count_below_floors(authored_from, _sizes)
+                 if (_sizes and authored_from) else {})
     relaxed = []
     unmeasured = []
     vacuous = []
@@ -356,10 +499,12 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
             elif is_ < was - 1e-9:
                 ref = ref_min.get(key)
                 row = {'key': key, 'label': label, 'authored': was,
-                       'on_board': is_}
+                       'on_board': is_, 'measured_by': 'scan_board_minima',
+                       'violations': below.get(key)}
                 if isinstance(ref, (int, float)) and ref < was - 1e-9 \
                         and is_ >= ref - _MIN_TOL:
                     row['reference'] = ref
+                    row['reference_violations'] = ref_below.get(key)
                     reference_too.append(row)
                 else:
                     relaxed.append(row)
@@ -579,6 +724,20 @@ def _grade(a, doc):
                             f'{type(exc).__name__}: {exc}'}
     doc['fab_floors'] = floors
 
+    # ---- 3b. KiCad's own grade under the AUTHORED project (#1580) ----------
+    # Disclosed, not counted: see authored_project_drc. --skip-slow skips it
+    # (two kicad-cli runs) and says so, rather than reporting nothing.
+    if a.authored_from:
+        if a.skip_slow:
+            doc['authored_drc'] = {'ran': False, 'reason': 'skipped (--skip-slow)'}
+        else:
+            try:
+                doc['authored_drc'] = authored_project_drc(
+                    a.board, a.authored_from, timeout=a.timeout)
+            except Exception as exc:                            # noqa: BLE001
+                doc['authored_drc'] = {'ran': False,
+                                       'reason': f'{type(exc).__name__}: {exc}'}
+
     # ---- the verdict -------------------------------------------------------
     reasons = []
     if lyr_err:
@@ -664,6 +823,7 @@ def _grade(a, doc):
                         + (f'{r["on_board"]} on the board'
                            if r.get('on_board') is not None
                            else f'{r.get("declared")} declared')
+                        + _counted(r, paren=True)
                         for r in list(floors.get('relaxed') or ())
                         + list(floors.get('unmeasured') or ()))
         notes.append(f'floors below the recorded fab_floor_origin ({_lo}); '
@@ -683,12 +843,13 @@ def _grade(a, doc):
                        f'NPTH only)')
     if floors.get('relaxed') and not from_origin:
         worst = ', '.join(f'{r["label"]} {r["authored"]} -> {r["on_board"]}'
+                          + _counted(r, paren=True)
                           for r in floors['relaxed'])
         verdict, code_out = 'UNSOUND', UNSOUND
         why = (f'this board carries copper below floors its project once '
                f'declared ({worst}). Every checker grades against the NEW '
                f'value, so a clean report here means the rule moved, not the '
-               f'copper. Confirm the fab supports it before calling it done.')
+               f'copper. Confirm the fab supports it before calling it done')
     elif reasons:
         verdict, code_out = 'INCOMPLETE', INCOMPLETE
         why = '; '.join(reasons)
@@ -696,15 +857,20 @@ def _grade(a, doc):
         verdict, code_out = 'DONE', DONE
         why = 'every component that could be graded is graded and clean'
 
+    # #1580: how far this copper is from the AUTHORED project, per KiCad
+    # violation type and class clearance included -- disclosed next to the
+    # verdict, never counted (a chain may lower a class on request; this says
+    # how far it went).
+    if doc.get('authored_drc'):
+        notes.append(_authored_drc_note(doc['authored_drc']))
     if notes:
         why += '. DISCLOSED, not counted: ' + '; '.join(notes)
     if floors.get('reference_too'):
         def _ref(r):
-            n = (f' over {r["violations"]}' if 'violations' in r else '')
-            rn = (f' over {r["reference_violations"]}'
-                  if 'reference_violations' in r else '')
+            n, rn = _counted(r), _counted(r, 'reference_violations')
             return (f'{r["label"]} {r["authored"]} (this board {r["on_board"]}'
-                    f'{n}, the reference {r["reference"]}{rn})')
+                    f'{", " + n if n else ""}, the reference {r["reference"]}'
+                    f'{", " + rn if rn else ""})')
         why += ('. DECLARED, AND BROKEN BY THE REFERENCE TOO, at least as '
                 'badly (reported, not counted against this board): '
                 + ', '.join(_ref(r) for r in floors['reference_too']))
@@ -736,7 +902,10 @@ def main(argv=None):
     ap.add_argument('board')
     ap.add_argument('--authored-from', default=None,
                     help='the board the chain STARTED from -- its project '
-                         'carries the floors this one should still respect')
+                         'carries the floors this one should still respect. '
+                         'Also has KiCad grade this copper under that '
+                         'project and discloses the error count per type '
+                         '(not counted in the verdict)')
     ap.add_argument('--baseline', default=None, metavar='BOARD',
                     help='the board this one was derived from (the run\'s '
                          'input), handed to board_score: it arms '

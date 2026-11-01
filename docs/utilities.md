@@ -1098,9 +1098,19 @@ the floors this one should still respect); without it the floors are read
 against the project's recorded `fab_floor_origin` (what the board declared
 before the first routing step lowered anything) and copper below them is
 DISCLOSED in the reason, not graded, and `fab_floors` is named unexamined
-when the project records none. The
+when the project records none. A relaxed size floor names its smallest
+object and carries a count (`violations`: the tracks, vias or holes below the
+authored value; `reference_violations` on the reference). The
 copper-to-hole floor is graded by `kicad-cli` on the fill as shipped, and the
 reference excuses only the kinds of pair it also breaks, at least as badly.
+`--authored-from` also has `kicad-cli` grade this copper with the AUTHORED
+project staged beside it (that board's `.kicad_pro` and `.kicad_dru`) and
+again under the project the board ships with, both on the fill as shipped,
+and reports the error count per violation type of each (`authored_drc`,
+#1580) -- class clearance included, which the floor rows leave out when the
+chain lowered a class on request. It is DISCLOSED next to the verdict and
+never changes it; without `kicad-cli` (or under `--skip-slow`) it says NOT RUN
+rather than reporting 0.
 `--baseline` is handed to
 `board_score`. It takes `board_score`'s spec flags (`--clearance`, `--intent`,
 `--impedance-nets`, `--length-groups`, `--net-min-widths`, the size floors),
