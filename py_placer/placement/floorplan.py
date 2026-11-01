@@ -5944,6 +5944,17 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         seat_rect, basis = edge_seat_rect(c, part.rect,
                                           lambda: ctx.body_rect(ref))
         edge = c.get('edge')
+        # #1584: how far inside its declared edge the part stands, on the
+        # basis the setback conjunct below reads it (`seat_rect`), DISCLOSED
+        # on every row -- a row with no class and no `max_setback_mm` arms no
+        # setback, and a header seated 10 mm inside its edge read as a bare
+        # `pass`. A disclosure, never a finding: only an armed setback fails.
+        from .connector_geometry import edge_setback
+        _setback = (edge_setback(ctx.outline_bounds, seat_rect, edge)
+                    if ctx.outline_bounds else None)
+        evidence['setback_mm'] = None if _setback is None else round(_setback, 4)
+        evidence['setback_basis'] = basis
+        evidence['setback_limit_mm'] = None
         if edge and ctx.outline_bounds:
             # Run 27's replay measured the courtyard reading on the same
             # USB1: its pad box is 1.6 mm from the west edge and 1.3 mm from
@@ -6025,6 +6036,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             from .part_class import INTERIOR_AFFINITY_MM
             setback = INTERIOR_AFFINITY_MM
             _sev = WARN
+        if setback is not None:
+            evidence['setback_limit_mm'] = float(setback)
         if setback is not None and amount <= legality.EPS:
             # "No overhang" is the courtyard at ZERO margin (#1301): at the
             # gate's margin a receptacle 0.52 mm inside read as overhanging
@@ -6096,6 +6109,25 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             for key, value in evidence.items():
                 ctx.edge_seating[-1].setdefault(key, value)
         ctx.edge_connector_evidence.append(evidence)
+
+
+def _setback_tail(e) -> str:
+    """The CLI's `; setback ...` clause for one evidence row (#1584, #1585),
+    or '' for a part that reaches its edge: how far inside its declared edge
+    it stands, on the basis the setback conjunct reads (`setback_basis`),
+    the drawn body's own setback beside a courtyard reading, and the limit
+    an armed setback holds it to -- or that none is declared, so a part
+    seated well inside its edge never reads as a bare `pass`."""
+    s = e.get('setback_mm')
+    body = (e.get('body_setback_mm')
+            if e.get('setback_basis') == 'courtyard' else None)
+    if s is None or (s < 0.005 and (body is None or body < 0.005)):
+        return ''
+    lim = e.get('setback_limit_mm')
+    return (f"; setback {s:.2f}mm [{e.get('setback_basis')}"
+            + (f"; body {body:.2f}mm" if body is not None else '')
+            + (f"; limit {lim:.2f}mm" if lim is not None
+               else '; no limit declared') + "]")
 
 
 def _facing_tail(f) -> str:
@@ -12192,7 +12224,7 @@ def format_text(r: GradeResult) -> str:
             lines.append(
                 f"    {e['ref']} {e.get('edge') or '(no edge)'}: overhang "
                 f"{e['overhang_mm']:.4f}mm [{e['overhang_basis']}] "
-                f"{e['overhang_disposition']}; pad copper "
+                f"{e['overhang_disposition']}" + _setback_tail(e) + "; pad copper "
                 + (f"{gap:.4f}mm" if gap is not None else 'unmeasured')
                 + f" vs {cu.get('required_mm')}mm {cu.get('disposition')}"
                 + _facing_tail(e.get('facing')))

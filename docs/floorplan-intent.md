@@ -752,6 +752,16 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
   limit and a disposition;
 - the body's signed position, setback and other-edge overhang, or
   `body_unmeasured_reason`;
+- `setback_mm`, `setback_basis` and `setback_limit_mm` (#1584): how far
+  inside its declared edge the part stands, measured from that edge's line
+  on the basis the setback conjunct reads (the drawn body for an
+  `edge_receptacle` or `edge_mount` entry, else the courtyard), and the
+  limit an armed setback holds it to (`max_setback_mm`, or the class
+  default), `null` when none is. A **disclosure on every row**, a finding
+  only where a limit is armed: the text line adds `; setback 10.00mm
+  [courtyard; no limit declared]` for a part that does not reach its edge
+  (and the body's own setback beside a courtyard reading), so a classless
+  header seated 10 mm inside its edge never reads as a bare `pass`;
 - `pad_copper_edge`: the part's pad-copper edge clearance from
   `grade_pad_edge_clearance`, at the floor `grade_pad_legality` resolves. This
   is the channel `check_drc --check-pad-edge` grades, and it is reported

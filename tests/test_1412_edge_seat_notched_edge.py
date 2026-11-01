@@ -7,7 +7,8 @@ When the midpoint fell inside a notch the depth was the notch's bottom, so the
 part was seated that far inside the straight stretches either side of it (and
 the constraint that refused it there named whatever stood in the way instead
 of the notch). The depth is now read at several places along the span and the
-one with the most room is kept.
+one nearest the edge that has room is kept (#1584: not the one with the most
+room, which a line pushed inboard past the notch nearly always has).
 
 Fixture, built here: a 60 x 40 board whose west edge has an 8 x 6 mm notch over
 its midpoint (y 17..23). A connector with its mating face to the west.

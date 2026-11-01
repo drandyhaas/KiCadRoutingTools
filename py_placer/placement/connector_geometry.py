@@ -546,6 +546,19 @@ def courtyard_overhang_past(geometry, rect, edge, skip_rings=None):
     return float(amount), others
 
 
+def edge_setback(bounds, rect, edge):
+    """How far `rect` stands inside the compass `edge` of `bounds`: its
+    outward side's distance from that side's line, 0.0 when it reaches or
+    crosses it (#1584). The one distance a seat line and the grade's
+    setback disclosure both name; None when the edge or the bounds are
+    unknown."""
+    if edge not in EDGES or not bounds or rect is None:
+        return None
+    inside = {'west': rect[0] - bounds[0], 'east': bounds[2] - rect[2],
+              'north': rect[1] - bounds[1], 'south': bounds[3] - rect[3]}[edge]
+    return max(0.0, float(inside))
+
+
 def band_amount(geometry, ref, edge, legacy_amount, margin, pose=None):
     """`(amount, basis, row)`: the number a declared `overhang_mm` band is
     graded on, and the currency it is in.
