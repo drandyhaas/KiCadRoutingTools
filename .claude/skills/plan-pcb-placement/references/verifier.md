@@ -34,7 +34,7 @@ Trust nothing it told you. Measure it yourself, from the repo root.
    - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD>`: DONE;
    - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD> --authored-from <INPUT BOARD>`: **report it, not gating**, and name any floor it lists. (Without `--authored-from` check_complete reads the floors against the project's recorded `fab_floor_origin` and DISCLOSES copper below them in its reason, without changing the verdict. The Board Setup minimums are the spec: pass `--min-track-width` / `--min-via-diameter` / `--min-via-drill` with them;)
    - `python3 -X utf8 py_router/check_connected.py <BOARD>`: no disconnected pads;
-   - `python3 -X utf8 py_router/check_drc.py <BOARD> --baseline <INPUT BOARD> --clearance-margin 0.1`: no real violations.
+   - `python3 -X utf8 py_router/check_drc.py <BOARD> --baseline <INPUT BOARD>`: no violations. Pass no `--clearance-margin`: at check_drc's default margin this line grades what `board_score`'s `drc` grades, so the `drc` lens below cannot pass a graze the score blocks.
 5. **Declared classes.** Name every `ungraded` component as UNEXAMINED. If the
    board declares a class (diff pairs, impedance, length groups, high-speed
    nets, or widths given in `--net-min-widths`) and its component is

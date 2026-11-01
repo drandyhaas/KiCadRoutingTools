@@ -16,23 +16,126 @@ failed every board the routing skill produced, while the same brief's next
 sentences say those widths are only reported. A width counts as a declared
 class here only when it is given in `--net-min-widths`.
 
-Static: reads the brief, spawns nothing.
+#1595: the brief's check_drc line -- the one its `drc` lens is defined as --
+passed `--clearance-margin 0.1`, and so did the skill's `scripts/grade.py`,
+while board_score runs check_drc at its default margin (0.05). On esp_prog
+with a track 7% inside the clearance the line read NO DRC VIOLATIONS beside
+board_score's `drc 1`, grade.py recorded `check_drc_rc 0` beside `blocking 1`,
+and `converge record --final` refused the drc-lens PASS the brief produced. The
+check below holds the brief's command and grade.py's to the distance-tolerance
+flags board_score's own check_drc call (`score_drc`) passes. What it cannot
+see: a tolerance a CALLER of `score_drc` hands it through an argument.
+
+Static: reads the brief, grade.py and two tools' sources; spawns nothing.
 
     python3 -X utf8 tests/test_verifier_brief_reads_the_score.py
 """
+import ast
 import os
 import re
 import sys
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS_DIR)
-VERIFIER = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement',
-                        'references', 'verifier.md')
+SKILL = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement')
+VERIFIER = os.path.join(SKILL, 'references', 'verifier.md')
+GRADE = os.path.join(SKILL, 'scripts', 'grade.py')
+CHECK_DRC = os.path.join(ROOT, 'py_router', 'check_drc.py')
+BOARD_SCORE = os.path.join(ROOT, 'py_tools', 'board_score.py')
 
 
 def _read(path):
     with open(path, encoding='utf-8') as fh:
         return fh.read()
+
+
+def _tolerance_flags(check_drc_src):
+    """check_drc's options that move, by distance, the line between a
+    violation and none: every option whose name says margin or tolerance."""
+    return set(re.findall(
+        r"""add_argument\(\s*['"](--[\w-]*(?:margin|toleran)[\w-]*)['"]""",
+        check_drc_src))
+
+
+def _dashed(nodes):
+    return {n.value for n in nodes
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and n.value.startswith('--')}
+
+
+def _score_drc_flags(board_score_src):
+    """The --flags board_score's `score_drc` puts on its check_drc command
+    line, or None when it no longer runs check_drc there."""
+    for node in ast.walk(ast.parse(board_score_src)):
+        if isinstance(node, ast.FunctionDef) and node.name == 'score_drc':
+            consts = list(ast.walk(node))
+            if not any(isinstance(n, ast.Constant) and n.value == 'check_drc.py'
+                       for n in consts):
+                return None
+            return _dashed(consts)
+    return None
+
+
+def _grade_check_drc_flags(grade_src):
+    """The --flags of every argv list in grade.py that runs check_drc, or
+    None when there is none."""
+    found = None
+    for node in ast.walk(ast.parse(grade_src)):
+        if isinstance(node, ast.List) and any(
+                isinstance(e, ast.Constant) and e.value == 'py_router/check_drc.py'
+                for e in node.elts):
+            found = (found or set()) | _dashed(node.elts)
+    return found
+
+
+def _brief_check_drc_flags(text):
+    """(commands, their --flags): every backticked command in the brief that
+    runs check_drc.py."""
+    cmds = [c for c in re.findall(r'`([^`\n]*)`', text)
+            if c.lstrip().startswith('python') and 'check_drc.py' in c]
+    return cmds, {f for c in cmds for f in re.findall(r'(--[\w-]+)', c)}
+
+
+def _tolerance_mismatches(tol, score, brief, grade):
+    out = []
+    for where, flags in (('verifier.md', brief), ('grade.py', grade)):
+        if flags & tol != score & tol:
+            out.append(f'{where} runs check_drc with tolerance flag(s) '
+                       f'{sorted(flags & tol)}, board_score.score_drc with '
+                       f'{sorted(score & tol)}')
+    return out
+
+
+def test_the_drc_lens_reads_the_tolerance_the_score_grades_at():
+    tol = _tolerance_flags(_read(CHECK_DRC))
+    assert '--clearance-margin' in tol, \
+        f'check_drc tolerance flags not found where expected: {sorted(tol)}'
+    score = _score_drc_flags(_read(BOARD_SCORE))
+    assert score is not None, 'board_score.score_drc no longer runs check_drc'
+    cmds, brief = _brief_check_drc_flags(_read(VERIFIER))
+    assert cmds, 'verifier.md runs no check_drc command this test can read'
+    grade = _grade_check_drc_flags(_read(GRADE))
+    assert grade is not None, 'grade.py runs no check_drc argv this test can read'
+    bad = _tolerance_mismatches(tol, score, brief, grade)
+    assert not bad, '; '.join(bad)
+    print(f'  PASS: verifier.md ({len(cmds)} command(s)), grade.py and '
+          f'board_score run check_drc at one tolerance '
+          f'({sorted(score & tol) or "check_drc defaults"})')
+
+
+def test_the_tolerance_check_trips_on_the_text_it_replaced():
+    """Negative control: the #1595 command line and argv must trip it."""
+    tol = _tolerance_flags(_read(CHECK_DRC))
+    score = _score_drc_flags(_read(BOARD_SCORE))
+    _, brief = _brief_check_drc_flags(
+        '   - `python3 -X utf8 py_router/check_drc.py <BOARD> --baseline '
+        '<INPUT BOARD> --clearance-margin 0.1`: no real violations.')
+    grade = _grade_check_drc_flags(
+        "rc, log = _run(['py_router/check_drc.py', board, '--baseline', "
+        "baseline,\n                '--clearance-margin', '0.1'])\n")
+    bad = _tolerance_mismatches(tol, score, brief, grade)
+    assert len(bad) == 2, bad
+    print('  PASS: the #1595 command line and argv trip the tolerance check')
 
 
 def _fail_clause_classes(text):
