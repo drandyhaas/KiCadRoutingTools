@@ -721,7 +721,6 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from obstacle_map import (build_base_obstacle_map, build_layer_map,
                               point_to_segment_distance)
     from geometry_utils import segment_to_segment_distance
-    from bga_fanout.reroute import _seg_hits_pad
     from bga_fanout.geometry import clamp_via_to_pad
     from fab_notes import via_overlaps_pad
     from list_nets import fab_floor_min, warn_fab_escalation
@@ -874,9 +873,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # tie partner on a fanned net is absent from the map by accident; without
     # this the pad half would turn that accident into a hard block with no lift.
     from check_drc import (_pad_has_no_copper, pad_copper_layers,
-                           check_pad_segment_overlap,
+                           check_pad_segment_overlap, check_pad_via_overlap,
                            _net_tie_span_waived as _tie_span_waived)
-    from kicad_parser import Segment as _Segment
+    from kicad_parser import Segment as _Segment, Via as _Via
     _board_cu = list(pcb_data.board_info.copper_layers or [])
     _erased_pads = [p for p in foreign_pads
                     if p.net_id in fanned_nets
@@ -998,6 +997,20 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from check_drc import _point_to_rings_distance as _pt_rings_dist
     from check_drc import _point_on_board as _pt_on_board
 
+    # #1568: each pad with the radius about its centre that holds all its
+    # copper (the rectangle's circumradius at any rotation, or the farthest
+    # polygon vertex), so `via_clears` calls the grader only on a pad the
+    # via's keep-out can reach -- a pad whose disc it clears cannot be hit.
+    def _reach(p):
+        polys = getattr(p, 'polygons', None)
+        r = math.hypot(p.size_x, p.size_y) / 2
+        if polys:
+            r = max([r] + [math.hypot(x - p.global_x, y - p.global_y)
+                           for poly in polys for x, y in poly])
+        return r
+    _pad_discs = [(p, p.global_x, p.global_y, _reach(p)) for p in foreign_pads]
+    _via_cu = _board_cu or list(cfg.layers)
+
     def via_clears(vx, vy, net_id, placed, px=None, py=None):
         """Is a via at (vx, vy) legal, given the board AND this run's own output?
 
@@ -1040,15 +1053,25 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # Net-independent drill floor vs every drilled pad (slot-exact).
             if math.hypot(vx - hx, vy - hy) < (via_drill + hd) / 2 + _h2h - 1e-6:
                 return False
-        for pad in foreign_pads:
+        _cand = _Via(x=vx, y=vy, size=via_size, drill=via_drill,
+                     layers=list(_via_cu), net_id=net_id)
+        for pad, gx, gy, reach in _pad_discs:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
                 continue
-            # Rotation-exact rectangle clearance (the disc test over-rejected an
-            # elongated neighbour pad a pitch away). The via is through-all-layers,
-            # so an SMD pad on any single layer still conflicts.
-            if _seg_hits_pad(vx, vy, vx, vy, pad,
-                             margin=via_size / 2 + _pc(net_id, pad.net_id, (
-                                 ('via',), (('pad', pad.pad_type or 'smd'),))) - 1e-6):
+            # #1568: CALL the grader, as the stub half does (#619). A box grown
+            # by the clearance with SQUARE corners (`_seg_hits_pad`) overstates
+            # the keep-out beside a pad corner by up to margin * (sqrt(2) - 1)
+            # and ignores a roundrect's radius, so under a class or rule above
+            # the board clearance it refused vias check_drc grades clean.
+            # Margin 0: refuse anything below the pair clearance, never only
+            # what the grader's tolerance would flag. The via spans the stack,
+            # so an SMD pad on any one layer still conflicts. A pad override
+            # RAISES the floor, as the stub half prices it.
+            _pcl = _pc(net_id, pad.net_id, (('via',), (('pad', pad.pad_type or 'smd'),)))
+            _eff = max(_pcl, getattr(pad, 'local_clearance', 0.0) or 0.0)
+            if math.hypot(vx - gx, vy - gy) - reach >= via_size / 2 + _eff:
+                continue        # the pad's copper lies inside `reach` of its centre
+            if check_pad_via_overlap(pad, _cand, _eff, _via_cu, 0.0)[0]:
                 return False
         for sx0, sy0, sx1, sy1, sw, sn in foreign_tracks:
             if sn == net_id:
@@ -1079,7 +1102,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
 
         Called BEFORE `via_clears`, not after, and that ordering is
         load-bearing rather than cosmetic: `via_clears` scans, per candidate,
-        every board via + every board pad (a 17-sample `_seg_hits_pad` each)
+        every board via + every board pad (a pad-distance test each)
         + every board segment -- ~20k point tests on routed_output U2, where
         `_erased_vias` is 89. Running this first kills a doomed candidate for
         ~0.5% of that cost. Measured on U2: correctly ordered 7.0s against a
