@@ -1318,8 +1318,8 @@ Routing Completes): run them once, here, not again inside the routing.
    - **Watch long jobs.** Never leave a background job unwatched for more than
      20 minutes.
    - **If DONE will not come:** after three consecutive DIFFERENT approaches
-     that each fail to lower `unrouted` + `broken` (then the rest of
-     `blocking`), measured, stop and ship the best board (by `blocking`,
+     that each fail to lower `blocking`, then `joins_needed` (§1),
+     measured, stop and ship the best board (by `blocking`,
      then `joins_needed`, §1) with every remaining blocker itemised with its
      measurement.
    - **Hard cap:** 10 hours of wall clock, unless the user sets another.

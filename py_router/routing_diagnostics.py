@@ -413,6 +413,21 @@ def reset_hint_condenser() -> None:
     _HINT_SENTENCES_SEEN.clear()
 
 
+#: #1597: what the rip the hint below offers can NOT do. `blocked_by` names
+#: the nets whose copper walls the failed pad, but a rip lifts only tracks
+#: and vias: a pad ringed by those nets' PADS stays walled (a test board's
+#: pad caged by four signal pins: two all-nets laps and the named rip each
+#: ended on the same failed set and the same copper). Telling the two apart
+#: is a reachability run, too costly for every failed net here, so the hint
+#: says what stays and names the instrument that grades the placement with
+#: the routing set aside. Fixed text, so condense_hint prints it once a run.
+RIP_LEAVES_PADS_HINT = (
+    " A rip lifts their tracks and vias only; their pads stay. If pads wall "
+    "the failed pad, no rip frees it: check the pad first with "
+    "py_tools/check_reachability.py <board> --pad <REF.PAD>, which sets the "
+    "routing aside -- CAGED there is placement, not copper.")
+
+
 def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
                               routed_net_ids=(), rip_existing_names=None,
                               return_names=False, anchors=None):
@@ -644,7 +659,8 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
             f"rip and re-route them in this run (issue #103) -- the decisive "
             f"blocker may be any of them, so start with the full set (each "
             f"ripped net is re-routed and the run reports honestly if one "
-            f"cannot be), then bisect if you want a minimal rip.{prot_out_txt}"
+            f"cannot be), then bisect if you want a minimal rip."
+            f"{RIP_LEAVES_PADS_HINT}{prot_out_txt}"
             f"{had_txt}{lock_txt}" + prot_txt, names)
 
 

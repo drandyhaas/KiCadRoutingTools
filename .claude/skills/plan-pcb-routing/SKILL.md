@@ -644,7 +644,9 @@ Use the printed flags as-is:
   the gap, or coupled over less than one pitch or 10% of the pair's length; route_diff reads this off the board, not off its own result, and protects
   such a pair only while its members still run alongside within 1 mm
   (`pair_reports[].protected`, #1361), so a retry may rip the rest), or DRC shows an
-  intra-pair / via-via graze — re-run
+  intra-pair / via-via graze — first read its `pair_reports[].failure_reason`:
+  a polarity or graze code has a fix of its own, and `/diagnose-routing-failures`
+  maps every code. For a pair the geometry crowds out, re-run
   the failing pairs with **smaller track width, smaller gap, AND smaller vias**
   (`--via-size`/`--via-drill` toward the fab via floor). A tighter track+gap fits a
   narrower channel, and smaller vias fit a tight pad pitch (measured: lumenpnp
@@ -2010,12 +2012,36 @@ passes route what the first left open and may cross the planes.
 Two iterations are near-free (measured: the tuned corpus run with 2
 iterations baked in cost +1.5% total time) and historically descend
 frontier boards 25→15 over 3–5 passes — so bake two passes into every
-plan, dense or not. The near-free property DEPENDS on the Step 5a-tuned
+plan, dense or not, each behind the stop test below. The near-free property DEPENDS on the Step 5a-tuned
 density gate: connected nets gate-skip, but each pass still re-oracles
 every pour, so big carve-free outer floods on a small board turn "free"
 iterations into 100 s+ passes (one measured 428 s chain; 88 s with
-the same iterations after the flood was removed). Then two endgame
-signatures:
+the same iterations after the flood was removed).
+
+**The stop test: lap only when a lap can change something (#1597).** A lap
+re-routes the nets the step before it left open, with the same flags, so:
+
+1. **Before the first lap, run `check_reachability` on the failed pads**: the
+   pads of each net in `failed_single` and `open_single` (for a multipoint
+   net, the unconnected pads `failed_multipoint` lists), e.g.
+   `python3 -X utf8 py_tools/check_reachability.py board_step2.kicad_pcb --pad U1.1`.
+   It sets the routing aside and grades the placement. **Do not lap for a pad
+   it calls CAGED** (exit 1): the cage is pads, parts, rule areas or locked
+   copper, which neither a lap nor `--rip-existing-nets` moves (a rip lifts
+   tracks and vias; the pads stay). Take that net to **A boxed-in net**
+   (after Diagnose and Retry) and to placement. When every failed pad is
+   CAGED, run no lap. Measured on a test board: a pad ringed by four signal
+   pins came out of two laps and the rip route.py's Hint named with the same
+   failed set and the same copper, while a pad reachable only over the
+   priced planes (PASSABLE) was routed by the first lap.
+2. **Run the second lap only if the first changed something**: its failed
+   set (`failed_single` + `open_single`) or its copper (segment and via
+   counts) differs from the step before it. A lap that changed neither
+   starts the next one from the same board with the same flags.
+
+The `<board>_plan.sh` (Step 9) carries the laps that passed this test.
+
+Then two endgame signatures:
 
 - **A net walled by its own protected diff partner** (`no rippable
   blockers` naming the partner): the #521 override — name BOTH members
@@ -3591,6 +3617,30 @@ It also PRINTS what it cannot decide, with the tool that owns each — nine
 rules need a routed board or a finished run, and an unchecked rule that says
 so is honest where a silently absent one is not. `--list` shows both sets
 without reading a plan.
+
+### Then run it through its last pair step, and read the pairs
+
+The all-nets `route.py` step is the long one (up to an hour on a large
+board), and every `route_diff.py` step runs before it. So run the chain
+**through its last `route_diff.py` step first** and read each pair step's
+`JSON_SUMMARY` (or its `--json-out` file) before you start the all-nets step
+(#1598):
+
+- `failed_diff_pairs`, `single_ended_diff_pairs` and `member_incomplete_pairs`;
+- for each pair they name, `pair_reports[].failure_reason` (with
+  `failure_stage` and `blocking_nets`).
+
+A pair is ready for the all-nets step when it is in `routed_diff_pairs`, or
+in `single_ended_diff_pairs` with `failure_reason` `electrically-short` (too
+short for coupling to buy anything). A `member_incomplete_pairs` entry is
+expected only when the pair's members are in `single_ended_followup_nets` (a
+`partial` pair's peeled far terminals, or an `electrically-short` pair's
+members): the all-nets step closes them, and `check_connected` after it says
+whether it did. **Do not proceed to the all-nets step with any other pair
+failure.** Fix it first, at the cost of a pair step (minutes):
+`/diagnose-routing-failures` ("route_diff runs") maps each `failure_reason` to
+its fix, and a smaller track, gap and via (Step 4) fixes only some of them.
+Then run the rest of the chain.
 
 ### Stop conditions
 
