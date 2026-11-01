@@ -290,6 +290,22 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # printed. Losing it silently reinstates the seal it exists to prevent,
         # indistinguishable from a routing failure.
         _own_pad_nets = graphic_own_pad_nets(pcb_data)
+    # What the own-pad lift may NOT lift on a NET TIE: the via's DRILL off
+    # the bridge. The bridge has no net, and KiCad's net-tie exemption covers
+    # the tied nets' COPPER touching it, not a via's hole: it grades the hole
+    # against the bridge at min_hole_clearance, and one that cuts into it at
+    # any floor -- unless the via sits ON the tied pad (a via in a tie's pad,
+    # drill overlapping the bridge, is accepted). Held at drill/2 + the drawn
+    # half-width + the board's copper-to-hole floor, never lifted. A part
+    # whose copper serves ONE net (a SOT89 tab) is left as it was: that
+    # contact is the accepted #995 own-copper row.
+    _fps_by_ref = getattr(pcb_data, 'footprints', None) or {}
+
+    def _is_tie(ref):
+        fp = _fps_by_ref.get(ref) if ref else None
+        return bool(fp is not None and getattr(fp, 'net_tie_groups', None))
+    _lift_hole_clr = (resolve_hole_clearance(pcb_data, config)
+                      if _own_pad_nets else 0.0)
     _own_pad_rows: Dict[int, list] = {}
     _own_pad_via_rows: Dict[int, list] = {}
     _n_segs = len(pcb_data.segments)
@@ -378,6 +394,17 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 # lifting only the cells did not free the tie pads.
                 for _ln in _lift_nets:
                     _own_pad_via_rows.setdefault(_ln, []).append(vias_arr)
+        if _lift_nets and _is_tie(seg.owner_ref):
+            _dw = getattr(seg, 'drawn_width', None)
+            _hole_arr = segment_blocked_spans(
+                seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                config.via_drill / 2 + (seg_width if _dw is None else _dw) / 2
+                + _lift_hole_clr + extra_clearance, coord.grid_step)
+            if len(_hole_arr):
+                _hole_arr = _drop_own_pad_via_sites(
+                    _hole_arr, pcb_data, seg.owner_ref, _lift_nets, coord)
+            if len(_hole_arr):
+                _seg_via_batch.append(_hole_arr)
 
     # Flush the accumulated segment stamps: one Rust call per layer for the
     # track keep-outs, one for the via keep-outs.
@@ -439,11 +466,16 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 _target.add_blocked_cell_spans_batch(_rows)
                 for _ln in _lift:
                     _own_pad_rows.setdefault(_ln, []).append(_rows)
-            # A via spans the stack, so the interior blocks one on any layer.
+            # A via spans the stack, so the interior blocks one on any layer --
+            # on a net tie for the tied nets too: a drill there cuts the bridge
+            # (see _lift_hole_clr above), so those rows are never lifted.
             _vrows = filled_graphic_interior_spans(_gx, _gy)
-            _target.add_blocked_via_spans_batch(_vrows)
-            for _ln in _lift:
-                _own_pad_via_rows.setdefault(_ln, []).append(_vrows)
+            if _is_tie(_sh.owner_ref):
+                obstacles.add_blocked_via_spans_batch(_vrows)
+            else:
+                _target.add_blocked_via_spans_batch(_vrows)
+                for _ln in _lift:
+                    _own_pad_via_rows.setdefault(_ln, []).append(_vrows)
 
     # Add vias as obstacles (excluding nets we'll route)
     _n_vias = len(pcb_data.vias)
@@ -1008,6 +1040,31 @@ def filled_graphic_interior_cells(pcb_data, coord: GridCoord, shape,
                 mask[(pgy[sel].astype(np.int64) - gy_lo) * nx
                      + (pgx[sel].astype(np.int64) - gx_lo)] = False
     return _box_masked_cells(gx_lo, gy_lo, nx, mask)
+
+
+def _drop_own_pad_via_sites(spans, pcb_data, owner_ref, net_ids,
+                            coord: GridCoord):
+    """``spans`` (#815 form) less the cells ON a pad of ``owner_ref`` of one
+    of ``net_ids`` -- the via in that pad, which a footprint-copper hole
+    keep-out leaves open (KiCad accepts a via on a net tie's pad, drill
+    overlapping the bridge, and grades one beside the pad).
+    Returned as one-cell span rows when anything is dropped."""
+    from check_drc import point_to_pad_distance
+    fp = (getattr(pcb_data, 'footprints', None) or {}).get(owner_ref)
+    pads = [p for p in (fp.pads if fp is not None else ()) if p.net_id in net_ids]
+    if not pads:
+        return spans
+    cells, dropped = [], False
+    for gx, lo, hi in spans.tolist():
+        for gy in range(lo, hi + 1):
+            x, y = coord.to_float(gx, gy)
+            if any(point_to_pad_distance(x, y, p) <= 0.0 for p in pads):
+                dropped = True
+            else:
+                cells.append((gx, gy, gy))
+    if not dropped:
+        return spans
+    return np.array(cells, dtype=np.int32).reshape(-1, 3)
 
 
 def filled_graphic_interior_spans(gx, gy, layer_idx=None):

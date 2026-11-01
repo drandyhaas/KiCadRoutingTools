@@ -2479,6 +2479,26 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
             copper = list(pcb.board_info.copper_layers or [])
         except Exception:                                       # noqa: BLE001
             pad_copper_layers, copper = None, []
+        from check_drc import _point_in_poly as point_in_polygon
+        _fps = getattr(pcb, 'footprints', None) or {}
+
+        def owner_pads(s):
+            fp = _fps.get(getattr(s, 'owner_ref', ''))
+            return fp.pads if fp is not None else ()
+
+        def is_tie(s):
+            fp = _fps.get(getattr(s, 'owner_ref', ''))
+            return bool(fp is not None and getattr(fp, 'net_tie_groups', None))
+        gfx = [s for s in (getattr(pcb, 'segments', None) or ())
+               if getattr(s, 'graphic', False)]
+        gfx_grid = index(gfx, lambda s: (min(s.start_x, s.end_x) - s.width / 2,
+                                         min(s.start_y, s.end_y) - s.width / 2,
+                                         max(s.start_x, s.end_x) + s.width / 2,
+                                         max(s.start_y, s.end_y) + s.width / 2))
+        gfx_own = {}
+        if any(getattr(s, 'owner_ref', '') for s in gfx):
+            from check_drc import graphic_own_pad_nets
+            gfx_own = graphic_own_pad_nets(pcb)
     for v in own_vias:
         r_cu, r_hole = v.size / 2.0, (v.drill or 0.0) / 2.0
         box = (v.x - r_cu - reach, v.y - r_cu - reach,
@@ -2524,6 +2544,30 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
                 continue
             d = point_to_pad_distance(v.x, v.y, p)
             if d - r_cu >= clearance - 1e-6:
+                note(d - r_hole)
+        # Its drill against a footprint's own copper, which has no net, so
+        # KiCad grades the hole against it for every net. A net tie's bridge
+        # the via's net is tied through: KiCad lets the via's copper touch it
+        # and reports the hole alone -- and nothing for a via ON the tied
+        # pad. A one-net part's own copper is the accepted #995 row, not
+        # measured; elsewhere a copper conflict is reported once, as for a
+        # track.
+        for s in near(gfx_grid, *box):
+            if s.net_id == v.net_id and s.net_id or not via_on_layer(v, s.layer):
+                continue
+            own = v.net_id in gfx_own.get(id(s), ())
+            if own and not is_tie(s):
+                continue
+            if own and any(p.net_id == v.net_id and point_to_pad_distance(v.x, v.y, p) <= 0.0
+                           for p in owner_pads(s)):
+                continue
+            dw = s.drawn_width if s.drawn_width is not None else s.width
+            d = point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
+                                          s.end_x, s.end_y) - (dw or 0.0) / 2.0
+            ring = s.graphic_ring if s.graphic_filled else None
+            if ring and point_in_polygon(v.x, v.y, ring):
+                d = -d
+            if d - r_cu >= clearance - 1e-6 or own:
                 note(d - r_hole)
     return None if best[0] is None else round(max(best[0], 0.0), 6)
 
