@@ -2050,16 +2050,27 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         s_.parameters.max_num_deterministic_batches = batches
         s_.parameters.share_glue_clauses = False
         s_.parameters.share_binary_clauses = False
-        stall = {'n': 0, 'plan': False}
+        stall = {'n': 0, 'plan': False, 'search': False, 'due': False}
 
         def _progress(line):
+            # (a stop is held until the search's first '#Model' line, its presolved model out: a hint of EVERY variable
+            # -- the warm start laid out whole -- is reported as a plan BEFORE the presolve, and stopped there, OR-tools
+            # 9.15 postsolves an empty solution and aborts the process: "Check failed: solution->size() ==
+            # postsolve_mapping.size() (0 vs. 787)", a bus's re-solve whose warm start met its bound, every run)
+            if line.startswith('#Model'):
+                stall['search'] = True
+                if stall['due']:
+                    s_.StopSearch()
             if line.startswith('#Bound') or re.match(r'#\d+\s', line):
                 stall['n'] = 0
                 stall['plan'] = stall['plan'] or not line.startswith('#Bound')
                 m_ = re.search(r'best:(\S+)\s+next:\[([^,\]]+)', line)
                 if m_ and float(m_.group(1)) < math.inf and \
                         math.floor(float(m_.group(1)) / W_V) <= math.floor(max(float(m_.group(2)), known_) / W_V):
-                    s_.StopSearch()
+                    if stall['search']:
+                        s_.StopSearch()
+                    else:
+                        stall['due'] = True
             # (not the FALLBACK's: started from the first run's plan, it has one from its first line, and a stall there is
             # the last chance lost -- K51 on the human's fanout on Linux stopped so, unproved, holding the plan it proves
             # optimal when it runs on, and the bench had no plan)
