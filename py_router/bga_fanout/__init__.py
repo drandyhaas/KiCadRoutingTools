@@ -5265,30 +5265,58 @@ def generate_bga_fanout(footprint: Footprint,
                               for f in escalation_rungs(_ncu)} - {_now})
                 if _fl:
                     _tw, _vs, _vd, _cl = _fl[0]
-                    d2_tracks, d2_vias, rep2 = _plane_drop_pass(
-                        footprint, pcb_data, have_t + d_tracks, have_v + d_vias, net_filter,
-                        layers, _tw, _cl, _vs, _vd, grid_step,
-                        plane_net_layers=plane_net_layers,
-                        no_via_in_pad=(same_net_pad_clearance is not None
-                                       and same_net_pad_clearance > 0),
-                        hole_to_hole_clearance=hole_to_hole_clearance,
-                        net_clearances=_drop_nc, net_ok=net_ok)
-                    print(f"  Plane drops at the fab floor (track {_tw:.4f} / via {_vs:.2f} / "
-                          f"clearance {_cl:.4f}): {len(d2_vias)} more drop via(s), "
-                          f"{rep2.get('failed', 0)} of {rep['failed']} still failed")
-                    if d2_tracks or d2_vias:
-                        d_tracks = d_tracks + d2_tracks
-                        d_vias = d_vias + d2_vias
-                        warn_fab_escalation('plane drop')
-                        for _k in ('gap_vias', 'pad_vias', 'track_connects', 'pour_tracks'):
-                            rep[_k] = rep.get(_k, 0) + rep2.get(_k, 0)
-                        rep['failed'] = rep2.get('failed', 0)
-                        for _n, _r2 in (rep2.get('nets') or {}).items():
-                            _r = (rep.get('nets') or {}).get(_n)
-                            if _r is not None:
-                                _r['gap'] = _r.get('gap', 0) + _r2.get('gap', 0)
-                                _r['in_pad'] = _r.get('in_pad', 0) + _r2.get('in_pad', 0)
-                                _r['failed'] = _r2.get('failed', 0)
+                    # #1567: a drop net's retry never goes below its own class
+                    # or scoped/track rule (`_drop_nc`, as far as the run
+                    # clearance -- above it the net's class pass holds it):
+                    # one retry per clearance that leaves among the failed
+                    # nets, lowest first, each against the drops laid before
+                    # it. One retry, as before, when no failed drop net stands
+                    # between the rung and `cl_run`.
+                    def _cl_of(n):
+                        return max(_cl, min(_drop_nc.get(n, 0.0), cl_run))
+                    _id_of = {_nn.name: _ni for _ni, _nn in pcb_data.nets.items()}
+                    _cls = sorted({round(_cl_of(_id_of.get(_nm)), 6)
+                                   for _nm, _r in (rep.get('nets') or {}).items()
+                                   if _r.get('failed')}) or [round(_cl, 6)]
+                    _rungs = ([(_cls[0], net_ok)] if len(_cls) == 1 else
+                              [(_c, (lambda n, _c=_c: (net_ok is None or net_ok(n))
+                                     and round(_cl_of(n), 6) == _c)) for _c in _cls])
+                    _rungs = [(_cl if abs(_c - _cl) < 1e-9 else _c, _ok) for _c, _ok in _rungs]
+                    _failed0 = rep['failed']
+                    _left = 0             # still failed, summed over the retries
+                    for _c, _ok in _rungs:
+                        if (_tw, _vs, _vd, _c) == _now:     # no rung below its floor
+                            _left += sum(_r.get('failed', 0)
+                                         for _nm, _r in (rep.get('nets') or {}).items()
+                                         if _ok is None or _ok(_id_of.get(_nm)))
+                            continue
+                        d2_tracks, d2_vias, rep2 = _plane_drop_pass(
+                            footprint, pcb_data, have_t + d_tracks, have_v + d_vias, net_filter,
+                            layers, _tw, _c, _vs, _vd, grid_step,
+                            plane_net_layers=plane_net_layers,
+                            no_via_in_pad=(same_net_pad_clearance is not None
+                                           and same_net_pad_clearance > 0),
+                            hole_to_hole_clearance=hole_to_hole_clearance,
+                            net_clearances=_drop_nc, net_ok=_ok)
+                        print(f"  Plane drops at the fab floor (track {_tw:.4f} / via {_vs:.2f} / "
+                              f"clearance {_c:.4f}): {len(d2_vias)} more drop via(s), "
+                              f"{rep2.get('failed', 0)} of {_failed0} still failed")
+                        if d2_tracks or d2_vias:
+                            d_tracks = d_tracks + d2_tracks
+                            d_vias = d_vias + d2_vias
+                            warn_fab_escalation('plane drop')
+                            for _k in ('gap_vias', 'pad_vias', 'track_connects', 'pour_tracks'):
+                                rep[_k] = rep.get(_k, 0) + rep2.get(_k, 0)
+                            rep['failed'] = rep2.get('failed', 0)
+                            for _n, _r2 in (rep2.get('nets') or {}).items():
+                                _r = (rep.get('nets') or {}).get(_n)
+                                if _r is not None:
+                                    _r['gap'] = _r.get('gap', 0) + _r2.get('gap', 0)
+                                    _r['in_pad'] = _r.get('in_pad', 0) + _r2.get('in_pad', 0)
+                                    _r['failed'] = _r2.get('failed', 0)
+                        _left += rep2.get('failed', 0)
+                    if len(_rungs) > 1:
+                        rep['failed'] = _left
             return d_tracks, d_vias, rep
 
         # #1529: one pass per net class, lowest first, each at its class and
