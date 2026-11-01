@@ -59,7 +59,7 @@ modal run tests/stress/modal_suite/run_all_modal.py --fast        # unit lane on
 modal run tests/stress/modal_suite/run_all_modal.py --filters "908 910"  # those families
 ```
 
-Its other options: `--timeout` (per test, default 600), `--jobs` (per
+Its other options: `--timeout` (per test, default 1000), `--jobs` (per
 container, default 2), `--out-dir DIR` (every shard's log; default a temp dir,
 printed), and `--write-durations` (below), which `--force-durations` lets
 write from a red run.

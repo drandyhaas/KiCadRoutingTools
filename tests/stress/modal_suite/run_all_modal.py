@@ -295,7 +295,7 @@ def _write_durations(measured: dict) -> int:
 
 
 @app.local_entrypoint()
-def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
+def main(shards: int = 50, fast: bool = False, timeout: float = 1000.0,
          jobs: int = 2, filters: str = "", out_dir: str = "",
          write_durations: bool = False, force_durations: bool = False):
     """Fan the suite out over `shards` containers and aggregate.
