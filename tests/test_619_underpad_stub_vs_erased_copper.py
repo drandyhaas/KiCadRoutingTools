@@ -658,8 +658,12 @@ BOARD_ROWS = [
     (ORANGE, "U7", (2, 0, 4), (3, 0, 4)),
     # (33, 33, 62) before #1342: its 6 escapes and 4 drops on single-pad
     # (NC) nets are no longer fanned at all.
-    (ORANGE, "U3", (28, 28, 57), (1, 14, 11)),   # (27, 27, 58)
-    (RP2350, "U6", (7, 4, 40), (2, 11, 1)),      # (6, 3, 41)
+    # #1568: the candidate via is measured against pads exactly
+    # (check_drc's own test, not a square-cornered box), which adds 3
+    # escapes on orangecrab U3 (was (28, 28, 57)) and 2 on rp2350 U6 (was
+    # (7, 4, 40)), every one graded clean.
+    (ORANGE, "U3", (31, 31, 54), (1, 14, 11)),   # (27, 27, 58)
+    (RP2350, "U6", (9, 6, 38), (2, 11, 1)),      # (6, 3, 41)
     (TIGARD, "U3", (43, 43, 5), (0, 0, 4)),     # pad half only
     (WATCHY, "J3", (12, 12, 7), (0, 0, 9)),     # pad half only
 ]
