@@ -299,6 +299,9 @@ def _tracks_of(bench):
         from kicad_parser import parse_kicad_pcb
         with contextlib.redirect_stdout(io.StringIO()):
             pcb = parse_kicad_pcb(bench)
+        if awx_settings.get('JOINT_FOREIGN'):
+            import joint_lanes
+            joint_lanes.foreign(pcb)        # (the other buses' lanes, copper of their nets: joint_lanes)
         lays = list(route_layers.layers())
         by = collections.defaultdict(list)
         from coherent_nets import namer
@@ -708,6 +711,7 @@ def loop(solve, out, rounds, env, log):
                 return failed(O(f'g{i}.log'))
             if stage([p], 'whole_polish.py', [g, p], O(f'p{i}.log')) != 0:
                 return failed(O(f'p{i}.log'))
+            joint_publish(env, p, f'polish {i}')
             if stage([], 'whole_audit.py', [p], O(f'p{i}.audit')) != 0:
                 return failed(O(f'p{i}.audit'))
             gl = gate(p, O(f'p{i}.audit'))[1]
@@ -834,6 +838,7 @@ def loop(solve, out, rounds, env, log):
         q = O(f'q{i}.json')
         if stage([q], 'whole_polish.py', [pairs, q], O(f'q{i}.log')) != 0:
             return failed(O(f'q{i}.log'))
+        joint_publish(env, q, f'singles round pairs {i}')
         if stage([], 'whole_audit.py', [q], O(f'q{i}.audit')) != 0:
             return failed(O(f'q{i}.audit'))
         gq = gate(q, O(f'q{i}.audit'))[1]
@@ -884,6 +889,7 @@ def loop(solve, out, rounds, env, log):
             return failed(sl)
         for ln in grep(sl, r'^snap:|FAILED'):
             log('  ' + ln)
+        joint_publish(env, plan, 'snap')
         if stage([], 'whole_audit.py', [plan], O('plan.audit')) != 0:
             return failed(O('plan.audit'))
         gs = gate(plan, O('plan.audit'))[1]
@@ -1431,6 +1437,125 @@ def place_held(board, out, held):
     return out
 
 
+JOINT_WAIT = 4 * 3600          # (JOINT_DIR) seconds a bus waits for the round's other buses at most
+
+
+def joint_publish(env, plan, stage_name, board=None, nets=None):
+    """(JOINT_DIR: buses routed at once) this bus's lanes as `plan` has them -- or the laid `board`'s copper of `nets`
+    -- published for the other buses' stages (joint_lanes)"""
+    if not (env.get('JOINT_DIR') and env.get('JOINT_BUS')):
+        return
+    import joint_lanes
+    with awx_settings.given(env):
+        if board:
+            joint_lanes.publish_board(board, nets, stage_name)
+        else:
+            joint_lanes.publish(plan, stage_name)
+
+
+def joint_sync(env, r, solve, say):
+    """(JOINT_DIR, JOINT_BUS, JOINT_PEERS, JOINT_TURN: route_bus's buses off one shared array, each its own whole route
+    in a process of its own) the round's first plan made JOINTLY: this bus's own, just solved, asked for
+    (DIR/rR/BUS.req.json), and the round's joint solve (whole_joint.py) run by the last of the round's buses to ask --
+    a peer not waited for once its whole route has ended (DIR/PEER.finished) or it has asked in a later round -- its
+    plan for this bus written over `solve` (kept as it was where the joint solve has none)"""
+    jd, bus = env['JOINT_DIR'], env['JOINT_BUS']
+    peers = [p_ for p_ in (env.get('JOINT_PEERS') or '').split(',') if p_ and p_ != bus]
+    rd = os.path.join(jd, f'r{r}')
+    os.makedirs(rd, exist_ok=True)
+    if not os.path.isfile(solve) or not os.path.isfile(solve[:-len('.json')] + '.vals.json') or \
+            json.load(open(solve)).get('relaxed'):
+        open(os.path.join(rd, f'{bus}.none'), 'w').close()
+        say(f'  joint: no plan of this bus\'s own model to bring to round {r}\'s joint solve')
+        return None
+    q_, cx_, cy_ = (float(v_) for v_ in env['JOINT_TURN'].split(','))
+    # this bus's own plan LAID OUT -- its geometry and polish, as the loop's first round lays it -- where its lanes go:
+    # the couplings are read off the lanes' real ways (a taut path, drawn on one layer, crossed the array the lanes
+    # go round), and published, the other buses' stages planning round them from here
+    gd = os.path.join(os.path.dirname(os.path.abspath(solve)), 'joint_geo')
+    os.makedirs(gd, exist_ok=True)
+    genv = {**env, 'BRAID_PAIRS': '1', 'BRAID_EXACT_PAGES': '0', 'PLAN_PAGES_SIDERS': '2',
+            'STAGE_CACHE': env.get('STAGE_CACHE') or '1', 'TAUT_MEMO': env.get('TAUT_MEMO') or '1'}
+    g0, p0 = os.path.join(gd, 'g0.json'), os.path.join(gd, 'p0.json')
+    lanes = None
+    # (on the bench its plan is laid on: its via ends relayed onto the plan's layers -- relayed, as the round does)
+    quiet = lambda *a_: None                                     # noqa: E731
+    genv0 = dict(genv)
+    relayed(os.path.dirname(os.path.abspath(solve)), genv0['BENCH'], json.load(open(solve)), genv0, quiet,
+            name='joint_solo_layers')
+    if run(['whole_geo.py', solve, g0], genv0, log_path=os.path.join(gd, 'g0.log'))[0] == 0 and \
+            run(['whole_polish.py', g0, p0], genv0, log_path=os.path.join(gd, 'p0.log'))[0] == 0:
+        joint_publish(genv0, p0, f'round {r} own plan')
+        try:
+            lanes = json.load(open(os.path.join(jd, 'lanes', f'{bus}.json')))
+        except (OSError, ValueError):
+            lanes = None
+    say(f'  joint: this bus\'s own plan laid out for the couplings: '
+        + (f'{len(lanes["pieces"])} pieces' if lanes else 'NOT (its taut paths instead)'))
+    req = {'bus': bus, 'env': {k_: v_ for k_, v_ in env.items() if isinstance(v_, str)}, 'solve': os.path.abspath(solve),
+           'turn': [int(q_), cx_, cy_], 'lanes': lanes}
+    tmp = os.path.join(rd, f'.{bus}.req.json')
+    json.dump(req, open(tmp, 'w'))
+    os.replace(tmp, os.path.join(rd, f'{bus}.req.json'))
+    t0 = time.time()
+
+    def here(p_):
+        return os.path.isfile(os.path.join(rd, f'{p_}.req.json')) or os.path.isfile(os.path.join(rd, f'{p_}.none'))
+
+    def gone(p_):
+        return os.path.isfile(os.path.join(jd, f'{p_}.finished')) or any(
+            os.path.isfile(os.path.join(jd, f'r{k_}', f'{p_}.req.json')) or
+            os.path.isfile(os.path.join(jd, f'r{k_}', f'{p_}.none')) for k_ in range(r + 1, r + 9))
+    while not all(here(p_) or gone(p_) for p_ in peers):
+        if time.time() - t0 > JOINT_WAIT:
+            say(f'  joint: the other buses not there after {JOINT_WAIT} s -- this bus\'s own plan')
+            return None
+        time.sleep(5)
+    with_ = [p_ for p_ in peers if os.path.isfile(os.path.join(rd, f'{p_}.req.json'))]
+    if not with_:
+        say(f'  joint: no other bus in round {r} -- this bus\'s own plan')
+        return None
+    try:
+        fd_ = os.open(os.path.join(rd, 'coord.lock'), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd_)
+        say(f'  joint: round {r}\'s joint solve with {", ".join(with_)} (this bus runs it)')
+        run(['whole_joint.py', jd, str(r)], env, log_path=os.path.join(rd, 'joint.log'), own_process=True)
+        for p_ in [bus] + with_:
+            if not os.path.isfile(os.path.join(rd, f'{p_}.joint.json')):
+                json.dump({'bus': p_, 'joint': False}, open(os.path.join(rd, f'{p_}.joint.json'), 'w'))
+    except FileExistsError:
+        say(f'  joint: round {r}\'s joint solve with {", ".join(with_)} (another bus runs it)')
+    while not os.path.isfile(os.path.join(rd, f'{bus}.joint.json')):
+        if time.time() - t0 > JOINT_WAIT:
+            say('  joint: no joint plan in time -- this bus\'s own plan')
+            return None
+        time.sleep(5)
+    for ln in grep(os.path.join(rd, 'joint.log'), r'couplings|together|joint search|NOT the same'):
+        say('  joint: ' + ln.strip()[:200])
+    jj_ = json.load(open(os.path.join(rd, f'{bus}.joint.json')))
+    ok_, cuts_ = jj_.get('joint'), jj_.get('cuts')
+    say(f'  joint: this bus\'s plan {"the joint solve\'s" if ok_ else "its own (the joint solve gave none)"}'
+        + (f', {len(json.load(open(cuts_))["lcuts"])} coupling(s) held through its loop' if cuts_ else ''))
+    # ...the JOINT plan laid out and published in place of the one this bus solved alone, and every other bus's too
+    # before the loops start: a loop's first audit read the others' plans as solved alone, and found clashes the joint
+    # solve had settled
+    genv1 = dict(genv)
+    if ok_:
+        relayed(os.path.dirname(os.path.abspath(solve)), genv1['BENCH'], json.load(open(solve)), genv1, quiet,
+                name='joint_layers')
+    if ok_ and run(['whole_geo.py', solve, os.path.join(gd, 'g1.json')], genv1,
+                   log_path=os.path.join(gd, 'g1.log'))[0] == 0 and \
+            run(['whole_polish.py', os.path.join(gd, 'g1.json'), os.path.join(gd, 'p1.json')], genv1,
+                log_path=os.path.join(gd, 'p1.log'))[0] == 0:
+        joint_publish(genv1, os.path.join(gd, 'p1.json'), f'round {r} joint plan')
+    open(os.path.join(rd, f'{bus}.laid'), 'w').close()
+    while not all(os.path.isfile(os.path.join(rd, f'{p_}.laid')) or gone(p_) for p_ in with_):
+        if time.time() - t0 > JOINT_WAIT:
+            break
+        time.sleep(5)
+    return cuts_ if ok_ else None
+
+
 def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     """whole_chain.sh K OUTDIR ROUNDS: the exit code, the grade the last line printed. The bench and its destination
     are `base` and `dest` when given (route_bus.py), else BASE and DEST from the environment; `settings` go over the
@@ -1449,6 +1574,10 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     base = env.get('BASE') or 'fb_t2q_pairs.kicad_pcb'
     dest = env.get('DEST') or 'DU1'
     stage_env(env)
+    if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
+        # (buses routed at once off one shared array: every stage reads the other buses' lanes as they publish them --
+        # joint_lanes -- but a round's first solve, solved jointly with them, joint_sync)
+        env['JOINT_FOREIGN'] = 'all'
     nets_out = run(['coherent_nets.py', str(K), f'--board={base}'], env)[1]
     NETS = (nets_out.splitlines() or [''])[-1]
     # (what the rounds named -- their open lanes, the ends their audits found crowded: whole_feedback -- read by the
@@ -1519,6 +1648,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         say(f"  all at once: {sm}")
         if not os.path.isfile(seq):
             return None
+        if not quiet:
+            joint_publish(env, None, f'round {r} laid{tag}', board=seq, nets=nets_all)
         from coherent_nets import net_patterns
         pats = net_patterns(nets_all, keys_)
         # (the checkers by the path the shell gives them, from awx/: their logs echo it; always in a process of
@@ -1767,10 +1898,21 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         crowded_f = os.path.join(d, 'solve.crowded.json')
         if os.path.exists(crowded_f):
             os.remove(crowded_f)
-        run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1'},
+        jfin = {}
+        if env.get('JOINT_DIR'):
+            # (the buses ended now: this solve's and the joint solve's model both read their lanes, and no other's)
+            jfin = {'JOINT_FOREIGN': 'finished', 'JOINT_FINISHED': ','.join(sorted(
+                f_[:-len('.finished')] for f_ in os.listdir(env['JOINT_DIR']) if f_.endswith('.finished')))}
+        run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin},
             log_path=os.path.join(d, 'solve.log'))
         for ln in grep(os.path.join(d, 'solve.log'), r'whole_solve:|workers:|crowded:'):
             say(ln[:200])
+        jcuts = None
+        if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
+            jcuts = joint_sync({**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin}, r, solve, say)
+        # (the joint solve's couplings held through the loop: joint_sync -- the env read at each loop's call, after the
+        # relayer has put the relayed bench in it)
+        lenv = lambda: {**env, 'SEED_CUTS': jcuts} if jcuts else env
         crowded = json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []
         J, proved, rc, res, loopd = {}, False, None, None, os.path.join(d, 'loop')
         if not os.path.isfile(solve):
@@ -1785,7 +1927,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 say(f"  the solve's plan is UNPROVED ({u.get('over')} over two vias against a bound of "
                     f"{u.get('bound_over')}): laid all the same; its nets over two to the ends: {J.get('over_nets')}")
             with open(os.path.join(d, 'loop.log'), 'w') as lf:
-                rc = loop(solve, loopd, loop_rounds(), env, Log(lf))
+                rc = loop(solve, loopd, loop_rounds(), lenv(), Log(lf))
             for ln in grep(os.path.join(d, 'loop.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
                 say(ln[:170])
             say(f"  loop exit {rc} at {secs()} s")
@@ -1798,7 +1940,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 env['BENCH'] = b0_
                 bench = relayed(d, b0_, J, env, say, name='fo_layers_ends')
                 with open(os.path.join(d, 'loop_ends.log'), 'w') as lf:
-                    rc = loop(solve, loopd, loop_rounds(), env, Log(lf))
+                    rc = loop(solve, loopd, loop_rounds(), lenv(), Log(lf))
                 for ln in grep(os.path.join(d, 'loop_ends.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
                     say(ln[:170])
                 say(f"  the loop again on the repaired ends: exit {rc} at {secs()} s")

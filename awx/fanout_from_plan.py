@@ -1726,7 +1726,8 @@ def speculate_others(board, skip):
         return None
     spec = json.load(open(path))
     _pb, held = _joint_held()
-    a = next((a for a in spec['arrays'] if a['ref'] not in skip and not (held and a['ref'] in held)), None)
+    a = next((a for a in spec['arrays'] if a['ref'] not in skip and not a.get('hold')
+              and not (held and a['ref'] in held)), None)
     if a is None:
         return None
     import joint_escape as je
@@ -1766,8 +1767,9 @@ def joint_others(out_path, log=print, skip=()):
     cur = out_path
     for a in spec['arrays']:
         ref = a['ref']
-        if ref in skip:
-            continue                # (laid already, the whole array with the bus: joint_destination)
+        if ref in skip or a.get('hold'):
+            continue                # (laid already, the whole array with the bus: joint_destination; or HELD as it
+            #                         stands, a shared source -- route_bus JOINT_HOLD_SHARED)
         nxt = f'{stem}.joint_{ref}.kicad_pcb'
         if held and ref in held:
             hold_array(prev_board, cur, nxt, a, held[ref], spec['layers'], f'{stem}.', 'held from the previous round',
@@ -1867,7 +1869,7 @@ def joint_hold(board, log=print):
     spec, sizes = json.load(open(path)), json.load(open(side))
     cur = board
     for a in spec['arrays']:
-        if a['ref'] not in sizes:
+        if a['ref'] not in sizes or a.get('hold'):
             continue
         nxt = f'{stem}.hold_{a["ref"]}.kicad_pcb'
         hold_array(cur, cur, nxt, a, sizes[a['ref']], spec['layers'], f'{stem}.hold_',

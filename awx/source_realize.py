@@ -526,7 +526,10 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     n2n = {i: n.name for i, n in pcb.nets.items()}
     free = [nm for nm in dict.fromkeys(free) if nm not in src_choice]
     jspec = _joint_spec()
-    joint_ = jspec is not None and len(route_layers.layers()) > 2
+    joint_ = jspec is not None and len(route_layers.layers()) > 2 and \
+        not any(x.get('hold') for x in jspec['arrays'] if x['ref'] == sref)
+    # (a source HELD as it stands -- route_bus JOINT_HOLD_SHARED, a shared array planned whole for every bus off it --
+    # is re-fanned as a plain bus's: the asked teeth alone, every other ball's copper immovable)
     # THE BUS RE-PLANNED WHOLE (the joint fanout on more routing layers than two): every run net with a tooth at this
     # array is stripped and planned again with the asked ones, each preferring the tooth it has (`kept`). The joint
     # plan holds a pair's two legs together with no other exit between them -- but only among the balls it plans: a

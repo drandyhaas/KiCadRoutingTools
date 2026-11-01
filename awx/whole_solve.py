@@ -259,7 +259,7 @@ def _plane_tie(ctx, m, sv, OBJ, t, chg, YL, M, entry, end, LAYN, KMAX, Q):
 
 
 def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, relax=0, front=None, check=False,
-          core=False, rules=False, lanecore=False):
+          core=False, rules=False, lanecore=False, joint=None):
     """the solve of the bench ctx (whole_ctx.plan()) round the destination part `dest`: the JSON
     whole_geo reads (crossings, changes, each lane's route coordinate), or None when CP-SAT finds no plan or none it
     proves optimal in its vias. `cuts`
@@ -267,7 +267,8 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     solve to warm-start from. `crowd`: the CROWD diagnosis of a model with no plan -- each lane's crossings may break
     their room along it (their spacing, and the stack of crossers at one point) and the layers they need (kept()), the
     plan's only price the lanes that do, so it breaks it on the fewest lanes there can be, named in the JSON's
-    'crowded': the lanes whose crossings the ends leave no room for. Its plan is no plan to lay"""
+    'crowded': the lanes whose crossings the ends leave no room for. Its plan is no plan to lay. `joint` (a namespace
+    with `m`, a shared CpModel): the model built into it and not solved -- a part of a JOINT solve, whole_joint.py"""
     Fr = whole_frame.build(ctx, dest)          # the whole route's own frame (whole_frame.py)
     prs = getattr(ctx, 'pairs', {}) or {}
     M = list(Fr.M)
@@ -652,7 +653,8 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         # (an inverted pair with no room to cross is given a grid step at its window's start: a plan the geometry then
         # pays for -- the frame's rings started at the source on zynq's U1 to U5)
         print(f'   crossing windows EMPTY, held open a grid step: {n_empty} of {len(win)}')
-    m = cp_model.CpModel()
+    m = joint.m if joint is not None else cp_model.CpModel()
+    NV0 = len(m.Proto().variables)
     WLIT = {}
     if check and core:
         # (the check's CORE: each crossing's window held by two assumption literals, so a model with no plan names the
@@ -1964,6 +1966,116 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         # (the diagnosis asks only for the fewest crowded lanes -- a whole via each, so the search stops, proved, as
         # soon as their count is)
         OBJ = W_V * sum(CROWD.values())
+    NV1 = len(m.Proto().variables)
+
+    def _finish(sv, st, proved, solve_secs):
+        """the plan of a solved model (`sv` its values, `st` its status): the JSON whole_geo reads, or None --
+        this solve's own, or (`joint`) the shared model's for this bus"""
+        print(f'whole_solve: {len(t)} crossings ({sum(1 for k in t if same(*k))} same-branch), {nt} triples, K<={KMAX}, '
+              f'mover/stayer (stay {P_STAY}), stagger {STAGGER:.3f}, MARG {MARG}: [{sv.StatusName(st)}] {solve_secs:.0f}s', end=' ')
+        # only a plan PROVED optimal in its vias -- the nets over two and the vias, whole multiples of W_V; the history
+        # terms below one are congestion's tie-break -- goes on to the geometry: one the search could not prove is a plan
+        # whose ends it found hard, and the geometry would be laid on a guess (K35's round 2: best and bound a thousandth
+        # of a via apart, refused for the tie-break alone)
+        # ...except where the caller takes an UNPROVED plan (SOLVE_UNPROVED=1: whole_route's first solve of a round, which
+        # never ends with nothing -- the round lays it, and the nets it leaves over two go back to the ends, which had
+        # counted on keeping them at two: K51's ends promised 0 over two, the search held 1 over and 51 vias against a
+        # bound of 0 and 45, and the round stopped with nothing). It is marked so, and no later solve takes it as a floor
+        STATUS['plan'] = st in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+        keep = not proved and st == cp_model.FEASIBLE and (awx_settings.get('SOLVE_UNPROVED') == '1' or bool(CROWD))
+        if not proved and not keep:
+            print(('(not proved optimal: best ' + f'{sv.ObjectiveValue():.0f}, bound {sv.BestObjectiveBound():.0f} -- no plan)')
+                  if st == cp_model.FEASIBLE else '')
+            return None
+        if keep:
+            print(f'(not proved optimal: best {sv.ObjectiveValue():.0f}, bound {sv.BestObjectiveBound():.0f} -- kept UNPROVED) ',
+                  end='')
+        per = {n: int(sv.Value(tot[n])) for n in M}
+        drp = {n: int(sum(sv.Value(d_) for d_ in DROP[n])) for n in M}
+        ov = [n for n in M if SV[n] - drp[n] + per[n] > VIA_PREF]
+        print(f'vias {sum(per.values())}' + (f' (and {sum(drp.values())} via end(s) dropped)' if any(drp.values()) else '')
+              + f', nets over {VIA_PREF} vias on the board: {len(ov)} {ov}, changes per lane {dict(sorted(collections.Counter(per.values()).items()))}, obj {sv.ObjectiveValue():.0f} bound {sv.BestObjectiveBound():.0f}')
+        # verify: every crossing on two layers, every lane on its berth layer
+        lay = lambda n, u: tl[n] ^ (sum(1 for x, a_ in zip(*chg[n]) if sv.Value(a_) and sv.Value(x) * G < u) & 1)
+        if NL > 2:
+            lay = lambda n, u: sv.Value(YL[n][sum(1 for x, a_ in zip(*chg[n]) if sv.Value(a_) and sv.Value(x) * G < u)])
+        bad = [(a, b) for (a, b), v in t.items() if lay(a, sv.Value(v) * G) == lay(b, sv.Value(v) * G)]
+        badb = [n for n in M if lay(n, 1e9) != dli[n] and (n, 1) not in VEND]
+        print(f'   check: crossings on one layer {len(bad)}, lanes off their berth layer {len(badb)}')
+        J = {'H0': H0, 'Hk': Hk, 'rs': rs, 'cross': {}, 'changes': {}, 'entry': entry, 'end': end, 'tend': tend, 'branch': bname,
+             'final': Fn, 'launch': Ln}
+        for (a, b), v in t.items():
+            J['cross'][f'{a}|{b}'] = {'u': sv.Value(v) * G, 'ring': same(a, b) and sv.Value(v) * G > Hn[a] + 1e-9}
+        for n in M:
+            cs_, act = chg[n]
+            J['changes'][n] = [sv.Value(x) * G for x, a_ in zip(cs_, act) if sv.Value(a_)]
+            if NL > 2:
+                # (more layers than two: each run's layer, one more than its changes -- on two they alternate from its
+                # tooth's)
+                J.setdefault('layers', {})[n] = [LAYN[sv.Value(YL[n][k])] for k in range(len(J['changes'][n]) + 1)]
+        # (the root: this solve's own proof when it has no geometry cuts, else the one it was floored by -- never an
+        # unproved plan's, which proves nothing)
+        J['root'] = root if root is not None else \
+            ({'over': int(sum(sv.Value(over[n]) for n in M)), 'vias': int(sum(per.values()) - sum(drp.values())), 'sig': sig}
+             if not CUTS and not SOFT and NVC0 == 0 and proved else None)
+        J['proved'] = bool(proved)
+        if CROWD:
+            J['crowded'] = [n for n in M if sv.Value(CROWD[n])]
+            print(f"   crowded: {len(J['crowded'])} lane(s) whose crossings break their room -- {', '.join(J['crowded'])}")
+        if REG_ON:
+            if MONO:
+                # (a lane's bit set one way: the plan's own runs at its points say whether it is there)
+                def _on_plan(k_):
+                    n_, qs_, L_ = REG_SAMP[k_]
+                    cs_v = [sv.Value(x_) for x_ in chg[n_][0]]
+                    return any(sv.Value(YL[n_][sum(1 for x_ in cs_v if x_ <= q_)]) == L_ for q_ in qs_)
+                J['regions'] = sorted([k_[0], k_[1], k_[2]] for k_, v_ in REG_ON if _on_plan(k_))
+            else:
+                J['regions'] = sorted([k_[0], k_[1], k_[2]] for k_, v_ in REG_ON if sv.Value(v_))
+            J['region_over'] = [[k_[0], k_[1], int(sv.Value(v_))] for k_, v_ in REG_OVER if sv.Value(v_)]
+            print(f"   passive regions: {len(J['regions'])} of {len(REG_ON)} priced lane(s) on a region's layer"
+                  + (f" -- {', '.join(f'{a_} {b_} {c_}' for a_, b_, c_ in J['regions'][:12])}" if J['regions'] else '')
+                  + (f"; over half the room: {J['region_over']}" if J['region_over'] else ''))
+        if ROOM_OVER:
+            J['room_over'] = [list(k_) + [int(sv.Value(v_))] for k_, v_ in ROOM_OVER if sv.Value(v_)]
+            print(f"   room cuts over: {len(J['room_over'])} of {len(ROOM_OVER)}")
+        if GATE_OVER:
+            J['gate_over'] = [[k_[0], k_[1], k_[2], k_[3], int(sv.Value(v_))] for k_, v_ in GATE_OVER if sv.Value(v_)]
+            print(f"   part gates over: {len(J['gate_over'])} of {len(GATE_OVER)}"
+                  + (f" -- {', '.join(f'{g_[1][:28]} {g_[2]} {g_[0]} s {g_[3]} +{g_[4]}' for g_ in J['gate_over'])}"
+                     if J['gate_over'] else ''))
+        if firm_broken:
+            J['firm_broken'] = [list(s_) for s_, b_ in sorted(firm_broken.items()) if sv.Value(b_)]
+            print(f"   firm cuts broken: {len(J['firm_broken'])} of {len(firm_broken)}"
+                  + (f" -- {', '.join(f'{s_[1]} {s_[0]} {s_[2]}' for s_ in J['firm_broken'])}" if J['firm_broken'] else ''))
+        if soft_broken:
+            J['soft_broken'] = [list(s_) for s_, b_ in sorted(soft_broken.items()) if sv.Value(b_)]
+            print(f"   soft cuts broken: {len(J['soft_broken'])} of {len(soft_broken)}")
+        # each lane over two vias on the board, by how many: an unproved plan's go back to the ends (whole_route)
+        J['over_nets'] = {n: SV[n] - drp[n] + per[n] - VIA_PREF for n in ov}
+        if joint is None and awx_settings.get('JOINT_DIR'):
+            # (JOINT_DIR: this bus's plan, every variable of its model in order, the warm start of the round's joint
+            # solve -- whole_joint.py builds the same model into the shared one)
+            STATUS['vals'] = [int(sv.Value(m.GetIntVarFromProtoIndex(i_))) for i_ in range(NV0, NV1)]
+        if not proved:
+            J['unproved'] = {'best': sv.ObjectiveValue(), 'bound': sv.BestObjectiveBound(),
+                             'over': int(sum(sv.Value(over[n]) for n in M)),
+                             'bound_over': int(math.floor(sv.BestObjectiveBound() / W_OVER))}
+        return J
+
+    if joint is not None:
+        # (JOINT: the model built into the shared one, the solve the caller's -- whole_joint.py: each bus's part,
+        # its objective, its plan's write-out, and what couples its lanes to another bus's)
+        def u_of(n, p):
+            """lane n's route coordinate u at the frame point p: its trunk s, or past its handoff its ring's"""
+            s_ = float(spine.project_pt(p)[0])
+            if n in bname and s_ > Hn[n]:
+                return u_ring(n, float(ring_of[bname[n]].project_pt(p)[0]))
+            return s_
+        import types
+        return types.SimpleNamespace(OBJ=OBJ, finish=_finish, M=M, chg=chg, YL=YL, layer_lits=layer_lits, Q=Q, QU=QU,
+                                     u_of=u_of, entry=entry, end=end, Fr=Fr, prs=prs, ctx=ctx, LAYN=LAYN,
+                                     nv=(NV0, NV1), VNEED=VNEED, VIN0=VIN0, VIN1=VIN1)
     m.Minimize(OBJ)
     if check and not CROWD:
         # (whole_ends.solve_check: has this model a plan at all? Its first plan ends the search -- the verdict alone)
@@ -2341,93 +2453,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     if NL > 2 and (awx_settings.get('SOLVE_PLANE_TIE') or '1') == '1' and st in (cp_model.OPTIMAL, cp_model.FEASIBLE) \
             and not CROWD:
         sv = _plane_tie(ctx, m, sv, OBJ, t, chg, YL, M, entry, end, LAYN, KMAX, Q)
-    print(f'whole_solve: {len(t)} crossings ({sum(1 for k in t if same(*k))} same-branch), {nt} triples, K<={KMAX}, '
-          f'mover/stayer (stay {P_STAY}), stagger {STAGGER:.3f}, MARG {MARG}: [{sv.StatusName(st)}] {solve_secs:.0f}s', end=' ')
-    # only a plan PROVED optimal in its vias -- the nets over two and the vias, whole multiples of W_V; the history
-    # terms below one are congestion's tie-break -- goes on to the geometry: one the search could not prove is a plan
-    # whose ends it found hard, and the geometry would be laid on a guess (K35's round 2: best and bound a thousandth
-    # of a via apart, refused for the tie-break alone)
-    # ...except where the caller takes an UNPROVED plan (SOLVE_UNPROVED=1: whole_route's first solve of a round, which
-    # never ends with nothing -- the round lays it, and the nets it leaves over two go back to the ends, which had
-    # counted on keeping them at two: K51's ends promised 0 over two, the search held 1 over and 51 vias against a
-    # bound of 0 and 45, and the round stopped with nothing). It is marked so, and no later solve takes it as a floor
-    STATUS['plan'] = st in (cp_model.OPTIMAL, cp_model.FEASIBLE)
-    keep = not proved and st == cp_model.FEASIBLE and (awx_settings.get('SOLVE_UNPROVED') == '1' or bool(CROWD))
-    if not proved and not keep:
-        print(('(not proved optimal: best ' + f'{sv.ObjectiveValue():.0f}, bound {sv.BestObjectiveBound():.0f} -- no plan)')
-              if st == cp_model.FEASIBLE else '')
-        return None
-    if keep:
-        print(f'(not proved optimal: best {sv.ObjectiveValue():.0f}, bound {sv.BestObjectiveBound():.0f} -- kept UNPROVED) ',
-              end='')
-    per = {n: int(sv.Value(tot[n])) for n in M}
-    drp = {n: int(sum(sv.Value(d_) for d_ in DROP[n])) for n in M}
-    ov = [n for n in M if SV[n] - drp[n] + per[n] > VIA_PREF]
-    print(f'vias {sum(per.values())}' + (f' (and {sum(drp.values())} via end(s) dropped)' if any(drp.values()) else '')
-          + f', nets over {VIA_PREF} vias on the board: {len(ov)} {ov}, changes per lane {dict(sorted(collections.Counter(per.values()).items()))}, obj {sv.ObjectiveValue():.0f} bound {sv.BestObjectiveBound():.0f}')
-    # verify: every crossing on two layers, every lane on its berth layer
-    lay = lambda n, u: tl[n] ^ (sum(1 for x, a_ in zip(*chg[n]) if sv.Value(a_) and sv.Value(x) * G < u) & 1)
-    if NL > 2:
-        lay = lambda n, u: sv.Value(YL[n][sum(1 for x, a_ in zip(*chg[n]) if sv.Value(a_) and sv.Value(x) * G < u)])
-    bad = [(a, b) for (a, b), v in t.items() if lay(a, sv.Value(v) * G) == lay(b, sv.Value(v) * G)]
-    badb = [n for n in M if lay(n, 1e9) != dli[n] and (n, 1) not in VEND]
-    print(f'   check: crossings on one layer {len(bad)}, lanes off their berth layer {len(badb)}')
-    J = {'H0': H0, 'Hk': Hk, 'rs': rs, 'cross': {}, 'changes': {}, 'entry': entry, 'end': end, 'tend': tend, 'branch': bname,
-         'final': Fn, 'launch': Ln}
-    for (a, b), v in t.items():
-        J['cross'][f'{a}|{b}'] = {'u': sv.Value(v) * G, 'ring': same(a, b) and sv.Value(v) * G > Hn[a] + 1e-9}
-    for n in M:
-        cs_, act = chg[n]
-        J['changes'][n] = [sv.Value(x) * G for x, a_ in zip(cs_, act) if sv.Value(a_)]
-        if NL > 2:
-            # (more layers than two: each run's layer, one more than its changes -- on two they alternate from its
-            # tooth's)
-            J.setdefault('layers', {})[n] = [LAYN[sv.Value(YL[n][k])] for k in range(len(J['changes'][n]) + 1)]
-    # (the root: this solve's own proof when it has no geometry cuts, else the one it was floored by -- never an
-    # unproved plan's, which proves nothing)
-    J['root'] = root if root is not None else \
-        ({'over': int(sum(sv.Value(over[n]) for n in M)), 'vias': int(sum(per.values()) - sum(drp.values())), 'sig': sig}
-         if not CUTS and not SOFT and NVC0 == 0 and proved else None)
-    J['proved'] = bool(proved)
-    if CROWD:
-        J['crowded'] = [n for n in M if sv.Value(CROWD[n])]
-        print(f"   crowded: {len(J['crowded'])} lane(s) whose crossings break their room -- {', '.join(J['crowded'])}")
-    if REG_ON:
-        if MONO:
-            # (a lane's bit set one way: the plan's own runs at its points say whether it is there)
-            def _on_plan(k_):
-                n_, qs_, L_ = REG_SAMP[k_]
-                cs_v = [sv.Value(x_) for x_ in chg[n_][0]]
-                return any(sv.Value(YL[n_][sum(1 for x_ in cs_v if x_ <= q_)]) == L_ for q_ in qs_)
-            J['regions'] = sorted([k_[0], k_[1], k_[2]] for k_, v_ in REG_ON if _on_plan(k_))
-        else:
-            J['regions'] = sorted([k_[0], k_[1], k_[2]] for k_, v_ in REG_ON if sv.Value(v_))
-        J['region_over'] = [[k_[0], k_[1], int(sv.Value(v_))] for k_, v_ in REG_OVER if sv.Value(v_)]
-        print(f"   passive regions: {len(J['regions'])} of {len(REG_ON)} priced lane(s) on a region's layer"
-              + (f" -- {', '.join(f'{a_} {b_} {c_}' for a_, b_, c_ in J['regions'][:12])}" if J['regions'] else '')
-              + (f"; over half the room: {J['region_over']}" if J['region_over'] else ''))
-    if ROOM_OVER:
-        J['room_over'] = [list(k_) + [int(sv.Value(v_))] for k_, v_ in ROOM_OVER if sv.Value(v_)]
-        print(f"   room cuts over: {len(J['room_over'])} of {len(ROOM_OVER)}")
-    if GATE_OVER:
-        J['gate_over'] = [[k_[0], k_[1], k_[2], k_[3], int(sv.Value(v_))] for k_, v_ in GATE_OVER if sv.Value(v_)]
-        print(f"   part gates over: {len(J['gate_over'])} of {len(GATE_OVER)}"
-              + (f" -- {', '.join(f'{g_[1][:28]} {g_[2]} {g_[0]} s {g_[3]} +{g_[4]}' for g_ in J['gate_over'])}"
-                 if J['gate_over'] else ''))
-    if firm_broken:
-        J['firm_broken'] = [list(s_) for s_, b_ in sorted(firm_broken.items()) if sv.Value(b_)]
-        print(f"   firm cuts broken: {len(J['firm_broken'])} of {len(firm_broken)}"
-              + (f" -- {', '.join(f'{s_[1]} {s_[0]} {s_[2]}' for s_ in J['firm_broken'])}" if J['firm_broken'] else ''))
-    if soft_broken:
-        J['soft_broken'] = [list(s_) for s_, b_ in sorted(soft_broken.items()) if sv.Value(b_)]
-        print(f"   soft cuts broken: {len(J['soft_broken'])} of {len(soft_broken)}")
-    # each lane over two vias on the board, by how many: an unproved plan's go back to the ends (whole_route)
-    J['over_nets'] = {n: SV[n] - drp[n] + per[n] - VIA_PREF for n in ov}
-    if not proved:
-        J['unproved'] = {'best': sv.ObjectiveValue(), 'bound': sv.BestObjectiveBound(),
-                         'over': int(sum(sv.Value(over[n]) for n in M)),
-                         'bound_over': int(math.floor(sv.BestObjectiveBound() / W_OVER))}
-    return J
+    return _finish(sv, st, proved, solve_secs)
 
 
 def main():
@@ -2473,6 +2499,8 @@ def main():
         if J is None:
             sys.exit(1)
     json.dump(J, open(out, 'w'), indent=0)
+    if STATUS.get('vals') is not None and out.endswith('.json'):
+        json.dump(STATUS['vals'], open(out[:-len('.json')] + '.vals.json', 'w'))
 
 
 if __name__ == '__main__':
