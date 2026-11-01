@@ -10,7 +10,8 @@ THE GAP. The CLI fanouts finish with `fix_project_for_output(clearance,
 track_width, via size and drill when the step may write via floors, the
 non-Default classes kept -- or capped at --clearance-ceiling, #1529)` -- no
 hole-to-hole, no edge clearance beyond the
-fab pin, and the copper-to-hole floor lowered to the clearance with the rest.
+fab pin, and the copper-to-hole floor the step held, lowered only to what its
+own copper needs (`step_hole_clearance`, #1568).
 The fanout tab finished with `update_live_drc_floors` over its own set: the
 config's hole-to-hole and edge clearance, never the copper-to-hole floor, and
 classes clamped only under the Min-Clearance ceiling. So after the same
@@ -214,6 +215,9 @@ def main():
         kw = cli_kwargs(kind, tracks, vias)
         if kw is not None:
             with contextlib.redirect_stdout(io.StringIO()):
+                # #1568: the hole floor the CLI mains compute off the written
+                # board, against their input
+                kw['hole_clearance'] = F.step_hole_clearance(src, cli, kw['clearance'])
                 F.fix_project_for_output(cli, input_pcb=src, **kw)
         return gui_floors(live), cli_floors(os.path.splitext(cli)[0] + '.kicad_pro')
 

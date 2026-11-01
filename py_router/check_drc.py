@@ -2230,6 +2230,42 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     return False, 0.0
 
 
+def npth_track_clearance(local_clearance: float, clearance: float,
+                         hole_clearance: float) -> float:
+    """The copper-to-hole requirement a TRACK is graded at against an NPTH
+    hole: the JLC "NPTH to Track" fab floor, never below the copper
+    clearance, raised to the board's declared copper-to-hole floor
+    (``hole_clearance``) and to the hole's pad clearance override."""
+    return max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE, hole_clearance or 0.0,
+               local_clearance or 0.0)
+
+
+def npth_via_clearance(local_clearance: float, clearance: float,
+                       hole_clearance: float) -> float:
+    """The copper-to-hole requirement a VIA's copper is graded at against an
+    NPTH hole: KiCad's, not the track fab floor -- the pad's clearance
+    override when it stands above that floor, else max(copper clearance,
+    the board's declared copper-to-hole floor) (#505, #1038)."""
+    npth = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE, hole_clearance or 0.0)
+    lc = local_clearance or 0.0
+    return lc if lc > npth + 1e-9 else max(clearance, hole_clearance or 0.0)
+
+
+def check_via_hole_overlap(x: float, y: float, via_size: float, hole,
+                           clearance: float,
+                           clearance_margin: float = 0.05) -> Tuple[bool, float]:
+    """Is a via's copper at (x, y) closer than ``clearance`` to a drill
+    ``hole`` (``kicad_parser.pad_drill_capsule``: ((x1, y1), (x2, y2), r))?
+
+    Returns (has_violation, overlap_mm)."""
+    (h1x, h1y), (h2x, h2y), hr = hole
+    dist = point_to_segment_distance(x, y, h1x, h1y, h2x, h2y)
+    overlap = (hr + via_size / 2.0 + clearance) - dist
+    if overlap > _grade_tol(clearance, clearance_margin):
+        return True, overlap
+    return False, 0.0
+
+
 def check_via_drill_overlap(via1: Via, via2: Via, hole_to_hole_clearance: float,
                             clearance_margin: float = 0.05) -> Tuple[bool, float]:
     """Check if two via drill holes violate hole-to-hole clearance.
@@ -5659,7 +5695,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 hp1, hp2, hr = pad_drill_capsule(pad)
                 holes.append((hp1, hp2, hr, pad_net,
                               f"{pad.component_ref}.{pad.pad_number}",
-                              max(npth_clr, lc), None))
+                              npth_track_clearance(lc, clearance, hole_clearance),
+                              None))
             elif max(pad.size_x, pad.size_y) < pad.drill:
                 # #441: a PLATED pad whose copper ring does NOT span its drill
                 # (vfo_ctrl's U4 "MH": 0.001mm copper over a 2.5mm drill) leaves
@@ -5783,16 +5820,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # relaxed) is a real rule, unlike the NPTH_TO_TRACK fab floor, so a
             # via is held to it: KiCad's hole_clearance holds via copper off a
             # hole at min_hole_clearance, and route.py's via keep-out prices it.
-            kicad_req = (req_clr if req_clr > npth_clr + 1e-9
-                         else max(clearance, hole_clearance))
+            # (req_clr is max(npth_clr, override), so it stands in for the
+            # override here.)
+            kicad_req = npth_via_clearance(req_clr, clearance, hole_clearance)
             for via in pcb_data.vias:
                 # Own-net copper legitimately lands on the pad (mirrors the
                 # track arm's snet != hnet exemption, #442).
                 if via.net_id == hnet:
                     continue
-                dist = point_to_segment_distance(via.x, via.y, h1x, h1y, h2x, h2y)
-                overlap = (hr + via.size / 2.0 + kicad_req) - dist
-                if overlap <= _grade_tol(kicad_req, clearance_margin):
+                _hit, overlap = check_via_hole_overlap(
+                    via.x, via.y, via.size, ((h1x, h1y), (h2x, h2y), hr),
+                    kicad_req, clearance_margin)
+                if not _hit:
                     continue
                 hole_net = pcb_data.nets.get(hnet, None)
                 via_net = pcb_data.nets.get(via.net_id, None)

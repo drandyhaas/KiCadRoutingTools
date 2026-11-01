@@ -998,18 +998,23 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from check_drc import _point_on_board as _pt_on_board
 
     # #1568: each pad with the radius about its centre that holds all its
-    # copper (the rectangle's circumradius at any rotation, or the farthest
-    # polygon vertex), so `via_clears` calls the grader only on a pad the
-    # via's keep-out can reach -- a pad whose disc it clears cannot be hit.
-    def _reach(p):
-        polys = getattr(p, 'polygons', None)
-        r = math.hypot(p.size_x, p.size_y) / 2
-        if polys:
-            r = max([r] + [math.hypot(x - p.global_x, y - p.global_y)
-                           for poly in polys for x, y in poly])
-        return r
-    _pad_discs = [(p, p.global_x, p.global_y, _reach(p)) for p in foreign_pads]
+    # copper, so `via_clears` calls the grader only on a pad the via's
+    # keep-out can reach -- a pad whose disc it clears cannot be hit. An NPTH
+    # pad carries its drill instead: it has no copper, and its HOLE is what
+    # KiCad and check_drc hold a via's copper off.
+    from bga_fanout.geometry import pad_reach
+    from check_drc import npth_via_clearance, check_via_hole_overlap
+    from kicad_parser import pad_drill_capsule
+    _pad_discs = [(p, p.global_x, p.global_y, pad_reach(p),
+                   (pad_drill_capsule(p) if _pad_has_no_copper(p)
+                    and (p.drill or 0) > 0 else None))
+                  for p in foreign_pads]
     _via_cu = _board_cu or list(cfg.layers)
+    # The board's declared copper-to-hole floor, read as every routing step
+    # reads it (min_hole_clearance, or the fab_floor_origin a writeback
+    # relaxed; 0 when it declares none).
+    from obstacle_map import resolve_hole_clearance
+    _hole_clr = resolve_hole_clearance(pcb_data, cfg)
 
     def via_clears(vx, vy, net_id, placed, px=None, py=None):
         """Is a via at (vx, vy) legal, given the board AND this run's own output?
@@ -1055,8 +1060,22 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
         _cand = _Via(x=vx, y=vy, size=via_size, drill=via_drill,
                      layers=list(_via_cu), net_id=net_id)
-        for pad, gx, gy, reach in _pad_discs:
+        for pad, gx, gy, reach, hole in _pad_discs:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
+                continue
+            if _pad_has_no_copper(pad):
+                # An NPTH hole: the via's copper is held off the hole wall at
+                # check_drc's own requirement (the pad's override above the
+                # NPTH floor, else max(pair clearance, the board's declared
+                # copper-to-hole floor)) -- before, it was tested as a pad
+                # shape at the pair clearance, which a board declaring a
+                # wider hole floor grades. Plated holes and vias are held at
+                # copper clearance, as the route steps hold them (#1217).
+                if hole is not None and check_via_hole_overlap(
+                        vx, vy, via_size, hole, npth_via_clearance(
+                            getattr(pad, 'local_clearance', 0.0) or 0.0,
+                            _pc(net_id, pad.net_id), _hole_clr), 0.0)[0]:
+                    return False
                 continue
             # #1568: CALL the grader, as the stub half does (#619). A box grown
             # by the clearance with SQUARE corners (`_seg_hits_pad`) overstates
@@ -2876,7 +2895,12 @@ def main():
     elif out_path and os.path.isfile(out_path) \
             and not getattr(args, 'no_fix_drc_settings', False):
         try:
-            from fix_kicad_drc_settings import fix_project_for_output
+            from fix_kicad_drc_settings import (fix_project_for_output,
+                                                step_hole_clearance)
+            # #1568: the copper-to-hole floor this step HELD, lowered only to
+            # what its own copper needs (route.py's #1493 writeback)
+            _fix_kw['hole_clearance'] = step_hole_clearance(
+                args.pcb, out_path, _fix_kw['clearance'])
             fix_project_for_output(out_path, input_pcb=args.pcb, **_fix_kw)
         except Exception as _e:
             print(f"  (skipped DRC-settings fix: {_e})")

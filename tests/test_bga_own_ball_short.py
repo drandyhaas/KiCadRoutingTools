@@ -21,13 +21,13 @@ short that shipped to the routed board. Pinned here:
    core makes -- the pad-aware trigger, `resolve_collisions` and
    `repair_pad_crossings` -- is handed the part's own pads (spied, so a core
    that went back to `foreign_pads` fails here, not in a routed board);
-3. `_seg_hits_pad`'s reach test answers exactly as the sampled test without
-   it, on random segments against random (incl. rotated) pads: it only skips
-   pads the samples cannot reach. The own balls lengthen the pad list every
-   check walks, and the reach test is what keeps that free.
+3. `_seg_hits_pad`'s reach test answers exactly as check_drc's exact pad
+   gap (`segment_pad_gap`, #1568) without it, on random segments against
+   random (incl. rotated, round) pads: it only skips pads the segment cannot
+   reach. The own balls lengthen the pad list every check walks, and the
+   reach test is what keeps that free.
 """
 import io
-import math
 import os
 import random
 import sys
@@ -138,22 +138,12 @@ def check_engine(fails):
                          f"NOT handed U9's own pads")
 
 
-def _ref_hits(x1, y1, x2, y2, pad, samples=16, margin=0.0):
-    """_seg_hits_pad's sampled rect test, without the reach test."""
-    eps = 1e-9 if margin <= 0.0 else -1e-9
-    hx = pad.size_x / 2.0 + margin + eps
-    hy = pad.size_y / 2.0 + margin + eps
-    rr = getattr(pad, 'rect_rotation', 0.0)
-    c, s = math.cos(math.radians(rr)), math.sin(math.radians(rr))
-    for t in range(samples + 1):
-        f = t / samples
-        dx = x1 + (x2 - x1) * f - pad.global_x
-        dy = y1 + (y2 - y1) * f - pad.global_y
-        if rr:
-            dx, dy = dx * c + dy * s, -dx * s + dy * c
-        if abs(dx) <= hx and abs(dy) <= hy:
-            return True
-    return False
+def _ref_hits(x1, y1, x2, y2, pad, margin=0.0):
+    """_seg_hits_pad's test, check_drc's exact pad gap, without the reach
+    test."""
+    from check_drc import segment_pad_gap
+    gap = segment_pad_gap(x1, y1, x2, y2, pad)
+    return gap <= 1e-9 if margin <= 0.0 else gap < margin - 1e-9
 
 
 def check_reach(fails):
@@ -162,14 +152,15 @@ def check_reach(fails):
     for _ in range(20000):
         pad = make_pad(1, rng.uniform(-2, 2), rng.uniform(-2, 2),
                        size_x=rng.uniform(0.1, 1.5), size_y=rng.uniform(0.1, 1.5),
-                       rect_rotation=rng.choice((0.0, 0.0, 30.0, -45.0, 17.5)))
+                       rect_rotation=rng.choice((0.0, 0.0, 30.0, -45.0, 17.5)),
+                       shape=rng.choice(('rect', 'rect', 'circle', 'roundrect')))
         x1, y1 = rng.uniform(-3, 3), rng.uniform(-3, 3)
         x2, y2 = x1 + rng.uniform(-2, 2), y1 + rng.uniform(-2, 2)
         m = rng.choice((0.0, 0.0, 0.09, 0.2))
         want = _ref_hits(x1, y1, x2, y2, pad, margin=m)
         hits += want
         if reroute._seg_hits_pad(x1, y1, x2, y2, pad, margin=m) != want:
-            fails.append(f"_seg_hits_pad disagrees with the sampled test: segment "
+            fails.append(f"_seg_hits_pad disagrees with the exact pad gap: segment "
                          f"({x1:.3f},{y1:.3f})-({x2:.3f},{y2:.3f}) margin {m} vs pad "
                          f"at ({pad.global_x:.3f},{pad.global_y:.3f})")
             return
@@ -192,7 +183,7 @@ def main():
     print("PASS: daisho's through-ball jog is refused on F.Cu once the own ball is "
           "listed (and taken on the inner layer); every raw-short check of a real "
           "BGA fanout is handed the part's own pads; the reach test answers as the "
-          "sampled test on 20000 random cases")
+          "exact pad gap on 20000 random cases")
     return 0
 
 
