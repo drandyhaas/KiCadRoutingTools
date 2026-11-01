@@ -3077,14 +3077,25 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
 
     routing_layers = _routing_copper_layers(pcb_data, config)
     clearance = config.clearance
-    # Cross-class aware (#439): the required spacing to a foreign obstacle is KiCad's
-    # max(pair class, foreign class) = config.obstacle_clearance(foreign_net), not the
-    # flat base clearance -- so a foreign WIDER-class pad/via/track is validated at its
-    # real spacing (this gate previously used only config.clearance). Falls back to the
-    # base clearance when the config carries no net-clearance map.
+    # Cross-class aware (#439): the required spacing to a foreign via/track is
+    # config.obstacle_clearance(foreign_net), not the flat base clearance -- so a
+    # foreign WIDER-class via/track is validated at its real spacing (this gate
+    # previously used only config.clearance). Falls back to the base clearance
+    # when the config carries no net-clearance map.
+    # A foreign PAD is priced as check_drc grades this track against it
+    # (#1574): `pad_pair_clearance` -- the two nets' classes, a class/type-
+    # scoped .kicad_dru rule that names the pad (`B.Type == 'Pad'`, #1491)
+    # with the layer rule in file order, then the pad's override. The stamp
+    # value `obstacle_clearance` asks the scoped channel about tracks and
+    # vias only, so it priced a class-to-pad rule at the class value: a pair
+    # at class 0.5 under a 0.2 pad rule was rejected for copper KiCad
+    # accepts, and a 0.4 pad rule over a 0.2 class went unseen.
     _oc = getattr(config, 'obstacle_clearance', None)
     _lc = getattr(config, 'layer_clearance', None)
     _cpv = getattr(config, 'coupled_pair_value', None)
+    # The coarse pad prefilter's radius: every pair value is at most this,
+    # and a pad's override (which replaces it) is added per pad.
+    _pad_reach = config.max_pair_clearance()
 
     def _pair_value(net_a, net_b, kind, layer):
         return _cpv(net_a, net_b, kind, layer) if _cpv is not None else None
@@ -3112,21 +3123,22 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
         for pad_net, pads in pads_by_net.items():
             if pad_net == seg.net_id:
                 continue  # the connector legitimately lands on its own-net pad
-            pclr = _obs_clr(pad_net, seg.layer)
-            if pad_net in own:
-                # the partner's pad: at a rule binding P against N where one
-                # does (#1293 / #1526 / #1542), as check_drc grades it
-                _cv = _pair_value(seg.net_id, pad_net, 'pad', seg.layer)
-                if _cv is not None:
-                    pclr = _cv
+            # the partner's pad: at a rule binding P against N where one
+            # does (#1293 / #1526 / #1542), as check_drc grades it
+            _cv = (_pair_value(seg.net_id, pad_net, 'pad', seg.layer)
+                   if pad_net in own else None)
             for pad in pads:
-                # per-pad override (#326) REPLACES the pair value (KiCad, measured)
-                pc = config.pad_override_clearance(pclr, pad)
-                # Coarse bounding-box reject before the exact rect-distance test.
-                pm = pc + seg.width / 2 + max(pad.size_x, pad.size_y) / 2
+                # Coarse bounding-box reject before pricing the pad and the
+                # exact rect-distance test.
+                pm = (max(_pad_reach, config.pad_override_clearance(0.0, pad))
+                      + seg.width / 2 + max(pad.size_x, pad.size_y) / 2)
                 if (pad.global_x < sxmin - pm or pad.global_x > sxmax + pm or
                         pad.global_y < symin - pm or pad.global_y > symax + pm):
                     continue
+                # per-pad override (#326) REPLACES the pair value (KiCad, measured)
+                pc = (config.pad_override_clearance(_cv, pad) if _cv is not None
+                      else config.pad_pair_clearance(pad, seg.net_id, seg.layer,
+                                                     other_type='track'))
                 hit, overlap, _ = check_pad_segment_overlap(
                     pad, seg, pc, routing_layers, _DRC_CLEARANCE_MARGIN)
                 if hit:

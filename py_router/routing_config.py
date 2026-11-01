@@ -725,13 +725,15 @@ class GridRouteConfig:
 
     def pad_pair_clearance(self, pad, other_net: int,
                            layer: Optional[str] = None, *, other_pad=None,
-                           base: Optional[float] = None) -> float:
+                           base: Optional[float] = None,
+                           other_type: Optional[str] = None) -> float:
         """check_drc's clearance between `pad` and copper of `other_net`
         (`_pad_pair_cl`): `pad_pair_clearance_before_override`, then a pad /
         footprint clearance OVERRIDE, which replaces the value."""
         return self.pad_override_clearance(
             self.pad_pair_clearance_before_override(
-                pad, other_net, layer, other_pad=other_pad, base=base),
+                pad, other_net, layer, other_pad=other_pad, base=base,
+                other_type=other_type),
             pad, other_pad)
 
     def max_pair_clearance(self, base: Optional[float] = None) -> float:
@@ -767,11 +769,17 @@ class GridRouteConfig:
     def pad_pair_clearance_before_override(self, pad, other_net: int,
                                            layer: Optional[str] = None, *,
                                            other_pad=None,
-                                           base: Optional[float] = None
+                                           base: Optional[float] = None,
+                                           other_type: Optional[str] = None
                                            ) -> float:
         """`pad_pair_clearance` short of its last step, the pad / footprint
         override: the pair's classes, then the .kicad_dru rule on `layer` (a
         track) or over the copper the two share (a via, or `other_pad`).
+
+        `other_type` ('track' or 'via') names the copper `other_net` lays
+        when the site knows it, so a class/type-scoped rule for the other
+        type does not price it (#1574: a via-to-pad rule is not a track's);
+        None prices the max over both, as before.
 
         For a site that keeps its own override handling (#1136 converts the
         class and rule term only, so a board that declares neither is
@@ -790,7 +798,9 @@ class GridRouteConfig:
             # in file order (kicad_dru.resolve_pair), as pair_clearance
             _pt = ('pad', getattr(pad, 'pad_type', None) or 'smd')
             _ot = ((('pad', getattr(other_pad, 'pad_type', None) or 'smd'),)
-                   if other_pad is not None else ('track', 'via'))
+                   if other_pad is not None
+                   else (other_type,) if other_type is not None
+                   else ('track', 'via'))
             return self.scoped_clearance.pair(
                 pad_net, other_net, (_pt,), _ot,
                 self._class_pair_clearance(pad_net, other_net, base),

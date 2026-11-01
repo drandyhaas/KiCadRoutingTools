@@ -684,10 +684,13 @@ is graded by `check_drc` at the pair's own value instead, and these methods retu
   over the layer rules (via vs via). Net-0 copper takes the widest track rule. A diff
   pair's P against its own N, on a layer a coupled-pair rule governs
   (`coupled_pair_clearances`, #1293), is that rule's value instead.
-- `pad_pair_clearance(pad, other_net, layer=None, *, other_pad=None, base=None)` — the
+- `pad_pair_clearance(pad, other_net, layer=None, *, other_pad=None, base=None, other_type=None)` — the
   same against a pad: the layer rule on `layer` (a track), else the max over the copper
   layers the two share (a via, or `other_pad`), then the pad / footprint override, which
-  replaces the value (`check_drc`'s `_pad_pair_cl`).
+  replaces the value (`check_drc`'s `_pad_pair_cl`). `other_type` (`'track'` or `'via'`)
+  names the copper `other_net` lays, so a class/type-scoped rule for the other type does
+  not price it; omitted, the value is the max over both. route_diff's connector-graze
+  guard prices every foreign pad this way, with `other_type='track'` (#1574).
   `pad_pair_clearance_before_override(...)` stops short of the override, for a site that
   keeps its own override handling.
 - `max_pair_clearance(base=None)` — an upper bound over every pair: the radius a
