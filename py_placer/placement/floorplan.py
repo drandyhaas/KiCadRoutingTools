@@ -4631,32 +4631,16 @@ def edge_span(gate, bounds, edge: str, outline: Dict, *,
     abstention would discard 13 correct measurements to avoid one wrong one.
     """
     ax = _EDGE_AXIS[edge]
-    perp = 1 - ax
     rings = list(getattr(gate, 'rings', None) or [])
     if rings:
-        target = {'north': bounds[1], 'south': bounds[3],
-                  'west': bounds[0], 'east': bounds[2]}[edge]
-        runs = []
-        for seg in gate.edges():
-            a, b = (seg[0], seg[1]), (seg[2], seg[3])
-            if abs(a[perp] - target) > tol or abs(b[perp] - target) > tol:
-                continue
-            lo, hi = sorted((a[ax], b[ax]))
-            if hi - lo > 1e-9:
-                runs.append([lo, hi])
-        if not runs:
+        from .connector_geometry import edge_runs
+        merged = edge_runs(gate, bounds, edge, tol)
+        if not merged:
             return (None, None,
                     f"no Edge.Cuts segment lies on the {edge} side of this "
                     f"outline ({len(rings)} ring(s), "
                     f"{outline.get('cutouts', 0)} cutout(s)), so that edge has "
                     f"no span to take a fraction of")
-        runs.sort()
-        merged = [runs[0]]
-        for lo, hi in runs[1:]:
-            if lo <= merged[-1][1] + tol:
-                merged[-1][1] = max(merged[-1][1], hi)
-            else:
-                merged.append([lo, hi])
         if len(merged) != 1:
             pieces = ', '.join(f"{m[1] - m[0]:.2f}mm" for m in merged)
             return (None, None,
@@ -5870,8 +5854,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # the pads to leave the board, and the edge seat put the estimate
         # exactly where this rule then read 0.00. `overhang_basis` says which
         # reading it was. `amount` keeps its other job: the setback
-        # conjunct's no-overhang gate below, which reads the courtyard on
-        # either basis.
+        # conjunct's no-overhang gate below, on a courtyard seat basis (on a
+        # body basis that gate reads the body, #1585).
         _band_cy, _cy_others = courtyard_overhang_past(
             _geo, band_courtyard_rect(ctx, ref, part), c.get('edge'))
         band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),
@@ -6076,8 +6060,19 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             _sev = WARN
         if setback is not None:
             evidence['setback_limit_mm'] = float(setback)
-        if setback is not None and amount <= legality.EPS:
-            # "No overhang" is the courtyard at ZERO margin (#1301): at the
+        # #1585: "no overhang" is read on the shape the setback is measured
+        # on. It was always the courtyard, so a receptacle whose courtyard
+        # crosses the edge was never asked its BODY's setback: tigard's USB-C
+        # J1 (courtyard 0.50 mm past its fab body at the mouth), declared
+        # max_setback_mm 0.1, passed with its body 0.40 mm inside.
+        # An entry that declares no edge (the emitter's withheld SUSPECT,
+        # sonde_xilinx's reversed J2) keeps the courtyard gate: its body has
+        # no declared edge to overhang, and the emitted intent must grade
+        # clean on the board it was read off.
+        seat_over = (amount if basis == 'courtyard' or edge not in _EDGE_AXIS
+                     else courtyard_overhang_past(_geo, seat_rect, edge)[0])
+        if setback is not None and seat_over <= legality.EPS:
+            # "No overhang" is read at ZERO margin (#1301): at the
             # gate's margin a receptacle 0.52 mm inside read as overhanging
             # at 0.55 and was never held to its seat, then failed it at 0.2.
             # The SEAT is a question about the part's BODY -- does its
@@ -6238,21 +6233,32 @@ def _copper_outside_mm(ctx, ref):
     courtyard, often the pad box itself) always carried. A band licenses the
     body, never copper, so the body path must still see it. Castellated pads
     straddle the outline by design and are skipped. 0.0 when nothing leaves
-    the board; findings from a sampled (non-rectangular) outline carry no gap
-    and are not counted, which is harmless because the body path only runs on
-    rectangular outlines."""
+    the board. A finding from a sampled (non-rectangular) outline carries no
+    gap: since the body path runs on such outlines where the edge is straight
+    under the body (#1585), those pads are read by their boxes' distance past
+    the outline (`connector_geometry.pad_copper_depth`)."""
     fp = ctx.pcb.footprints.get(ref)
     prefix = ref + '.'
     worst = 0.0
+    sampled = set()
     for f in ctx.connector_copper()['findings']:
-        if not str(f['pad_ref']).startswith(prefix) or f.get('gap_mm') is None:
+        if not str(f['pad_ref']).startswith(prefix):
             continue
         pads = getattr(fp, 'pads', None) or ()
         index = f.get('pad_index')
         if (isinstance(index, int) and index < len(pads)
                 and getattr(pads[index], 'castellated', False)):
             continue
+        if f.get('gap_mm') is None:
+            if isinstance(index, int):
+                sampled.add(index)
+            continue
         worst = max(worst, -float(f['gap_mm']))
+    if sampled and fp is not None:
+        from .connector_geometry import geometry_for, pad_copper_depth
+        worst = max(worst, pad_copper_depth(
+            geometry_for(ctx, ctx.pcb, ctx.pcb_file), ref,
+            (fp.x, fp.y, fp.rotation or 0.0), only=sampled))
     # A pad the edge grader cannot model -- a trapezoid, a custom pad with no
     # parsed primitives -- yields NO finding: it is recorded as unmeasured
     # and skipped, so the loop above reads 0.0 for a pad that may be entirely
@@ -6326,12 +6332,10 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
                                       default=0.0), 4),
             # Past the outline itself, castellated pads excepted: the number
             # the body path's copper conjunct grades (0.0 = on the board).
-            # None when a finding came from the sampled (non-rectangular)
-            # path, which carries no gap -- the amount is unknown, not zero.
-            'outside_mm': (None if any(
-                str(f['pad_ref']).startswith(prefix) and f.get('gap_mm') is None
-                for f in copper['findings'])
-                else round(_copper_outside_mm(ctx, ref), 4)),
+            # A finding from the sampled (non-rectangular) path carries no
+            # gap; its pad is read by its box's distance past the outline
+            # (#1585), as the conjunct grades it.
+            'outside_mm': round(_copper_outside_mm(ctx, ref), 4),
             # False when a pad's shape defeated the edge grader: `outside_mm`
             # is then a best-effort box reading, so a zero says "not shown to
             # be off the board", never "on the board". Such a part is not

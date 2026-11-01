@@ -376,6 +376,24 @@ def _deeper_text(edge, deeper) -> str:
     return "; only an inboard line has room: seated " + '; '.join(each)
 
 
+def _courtyard_seat_text(probe, ref, edge, pose) -> str:
+    """The note's clause for a part the library drew a body for that is
+    seated on its courtyard because the outline under it cannot be read as
+    its edge (#1585): why, and how far inside the edge its body stands. ''
+    when the body is the seat's basis or the part draws none."""
+    from .connector_geometry import edge_setback
+    row = probe.geo.measure(ref, edge, pose)
+    if row.get('body_measured'):
+        return ''
+    body = probe.geo.rect(ref, pose)[0]
+    if body is None:
+        return ''
+    inside = edge_setback(probe.pcb.board_info.board_bounds, body, edge)
+    return (f"; seated on its courtyard, not its drawn body "
+            f"({row.get('body_unmeasured_reason')}): its body stands "
+            f"{inside or 0.0:.2f}mm inside the {edge} edge")
+
+
 def _free_stretches(probe, entry, edge, axis, coord, rot, lo, hi, fixed, tally=None):
     """The stretches of [lo, hi] where `entry`'s part seats at `rot` with
     every conjunct holding (`_Probe.why`): tested every SCAN_STEP_MM and at
@@ -680,7 +698,8 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
                      + (f", facing it ({face})" if face else
                         f", no mating face: {len(lines)} turn(s) seat there")
                      + (f" ({disagree})" if disagree else '')
-                     + _deeper_text(edge, {r: d for r, d in deeper.items() if r in lines}))
+                     + _deeper_text(edge, {r: d for r, d in deeper.items() if r in lines})
+                     + _courtyard_seat_text(probe, ref, edge, (part.x, part.y, part.rot)))
         notes.append(said[ref])
     # What a part seated on one edge covers wherever it stands is a wall on
     # every other edge's line (`_corners`), and then the parts on one edge

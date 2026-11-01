@@ -76,11 +76,14 @@ class TestOneDistance(unittest.TestCase):
                'edge_connectors': [{'ref': 'J2', 'class': 'edge_receptacle',
                                     'edge': 'east', 'overhang_mm': {'min': 0.0, 'max': 6.0}}]}
         pcb = parse_kicad_pcb(BOARD)
-        # J2 as the designer placed it: only the east edge is crossed, by
-        # 1.4624 mm (the summed reading said 4.3872).
+        # J2 as the designer placed it: only the east edge is crossed, its
+        # courtyard by 1.4624 mm (the summed reading said 4.3872). Since
+        # #1585 the band reads J2's drawn (silk) body here, the east edge
+        # being straight under it on this many-sided outline: 1.2324 mm.
         res = floorplan.grade(floorplan.intent_from_dict(doc, source_path='t'), pcb, BOARD)
         ev = [e for e in res.edge_connector_evidence if e['ref'] == 'J2'][0]
-        self.assertAlmostEqual(ev['overhang_mm'], 1.4624, places=3)
+        self.assertEqual(ev['overhang_basis'], 'body:F.SilkS')
+        self.assertAlmostEqual(ev['overhang_mm'], 1.2324, places=3)
         self.assertLess(ev['overhang_mm'], 2.0)
         self.assertEqual(ev['other_edge_overhang_mm'], {})
 
@@ -101,7 +104,8 @@ class TestOneDistance(unittest.TestCase):
                 res = floorplan.grade(floorplan.intent_from_dict(doc, source_path='t'), pcb, out)
                 ev = [e for e in res.edge_connector_evidence if e['ref'] == 'J2'][0]
                 self.assertAlmostEqual(ev['overhang_mm'], 0.0, places=3)
-                self.assertAlmostEqual(ev['other_edge_overhang_mm']['north'], 1.7524, places=3)
+                # the body's (#1585); its courtyard reads 1.7524
+                self.assertAlmostEqual(ev['other_edge_overhang_mm']['north'], 1.5024, places=3)
                 bad = [v for v in res.violations
                        if v.rule == 'edge_connector' and 'overhangs the north edge' in v.message]
                 self.assertEqual(len(bad), errors, [v.message for v in res.violations])
