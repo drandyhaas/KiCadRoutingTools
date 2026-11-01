@@ -1011,13 +1011,27 @@ def _build_obstacles(pcb, kids, layer, margin=None, skip_refs=frozenset()):
             elif p.shape == 'oval' and not tilted:
                 # an oval pad IS a stadium: the capsule of its long axis
                 obs.add_cap(a_, b_, lo + m, nm_, net=p.net_id)
-            elif p.shape in ('rect', 'roundrect') and not tilted and lo <= RECT_EXACT * m:
+            elif p.shape in ('rect', 'roundrect') and not tilted:
                 # a rectangle grown by the margin, exactly: its long axis's capsule (every point of the pad) and a
                 # capsule of the margin along each edge (the corners' rounding) -- exact while half its short side
                 # is within RECT_EXACT margins. The circumscribed disc it replaces refused lanes that clear a
                 # passive's pads (a B lane 0.19 / 0.22 mm from two 0402 pads' edges, 0.15 asked)
-                obs.add_cap(a_, b_, lo + m, nm_, net=p.net_id)
                 x0, y0, x1, y1 = p.global_x - hx, p.global_y - hy, p.global_x + hx, p.global_y + hy
+                if lo <= RECT_EXACT * m:
+                    obs.add_cap(a_, b_, lo + m, nm_, net=p.net_id)
+                else:
+                    # ...and past it, the rectangle's inside as lines along its long side, two margins apart at most
+                    # (each line's capsule of the margin meets the next), with the edges' capsules the rectangle grown
+                    # by the margin, exactly too. The circumscribed disc they replace stood (sqrt 2 - 1) half a side
+                    # past a square pad's faces at their middles: a QFN's exposed pad refused the middle pads of its
+                    # rows their only escape, straight out (escape_moves: a row part)
+                    k_ = max(1, math.ceil(lo / m))
+                    for i_ in range(1, k_):
+                        t_ = -lo + 2 * lo * i_ / k_
+                        if hx >= hy:
+                            obs.add_cap((x0, p.global_y + t_), (x1, p.global_y + t_), m, nm_, net=p.net_id)
+                        else:
+                            obs.add_cap((p.global_x + t_, y0), (p.global_x + t_, y1), m, nm_, net=p.net_id)
                 for e0, e1 in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))):
                     obs.add_cap(e0, e1, m, nm_, net=p.net_id)
             else:
