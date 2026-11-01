@@ -1094,6 +1094,12 @@ class ScopedClearanceRules:
     def names(self) -> List[str]:
         return [r.name for r in self.rules]
 
+    def net_signature(self, net_id: int):
+        """What a net is to these rules: two nets with one signature get the
+        same answer from `pair_value` against any item (its memo key). A
+        caller pricing many pairs keys its own memo on it (#1575)."""
+        return self._sig(net_id)
+
     def _item(self, net_id: int, type: str, pad_type: Optional[str] = None):
         return self.dr.item_for_net(int(net_id or 0), type,
                                     **({'pad_type': pad_type} if pad_type else {}))
@@ -1159,10 +1165,22 @@ class ScopedClearanceRules:
         class value and the whole map; with one, the rule's value (pinned up
         to `floor`) and only the layer rules later in the file. Finish with
         `apply_layer_rules`."""
+        return self.resolve_pair_with_rule(net_a, type_a, net_b, type_b,
+                                           pad_type_a, pad_type_b, class_value,
+                                           layer_map, floor)[:2]
+
+    def resolve_pair_with_rule(self, net_a: int, type_a: str, net_b: int, type_b: str,
+                               pad_type_a: Optional[str], pad_type_b: Optional[str],
+                               class_value: float, layer_map: Dict[str, float],
+                               floor: float = 0.0
+                               ) -> Tuple[float, Dict[str, float], Optional[str]]:
+        """`resolve_pair`, plus the name of the scoped rule that set the
+        value (None when none binds the pair) -- for a grader that names the
+        source of a requirement (check_drc.PairRuleChannels, #1575)."""
         got = self.pair_value(net_a, type_a, net_b, type_b, pad_type_a, pad_type_b)
         if got is None:
-            return class_value, layer_map
-        return max(got[0], floor), self.layer_rules_after(layer_map, got[2])
+            return class_value, layer_map, None
+        return max(got[0], floor), self.layer_rules_after(layer_map, got[2]), got[1]
 
 
 def apply_layer_rules(value: float, layer_map: Dict[str, float], *,

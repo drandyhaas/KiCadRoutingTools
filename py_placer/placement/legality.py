@@ -4048,10 +4048,58 @@ class PadFloor(NamedTuple):
     footprint's, already resolved by the parser) `local_clearance` override,
     and `layers` the copper layers its copper occupies -- carried only when the
     board has .kicad_dru rules to scope, else None.
+
+    #1575: `net`, `kind` ('pad' / 'via' / 'track') and `ptype` (a pad's
+    KiCad pad type) are the item's identity, which a class/type-scoped
+    `.kicad_dru` rule and the rule binding a diff pair's P against its N bind
+    on, and `rkey` a small int naming everything those rules can tell apart
+    about it (`PadClearanceModel._rkey`). Filled only on a board that has
+    such a rule (`PadClearanceModel.channels`); `kind` None prices the item
+    without them, as check_drc prices net-less graphic copper.
     """
     ncl: float
     lc: float
     layers: object = None
+    net: Optional[int] = None
+    kind: Optional[str] = None
+    ptype: Optional[str] = None
+    rkey: object = None
+
+
+def _channel_notes(notes, channels):
+    """The `.kicad_dru` parse notes, saying "handled" only of a rule this
+    model prices (#1575). The parser files a class/type-scoped rule as
+    "handled by the scoped channel" and a coupled-pair rule as "skipped,
+    KiCad will still enforce it" whatever the reader does with them; here
+    each is said as it is for THIS model: a scoped rule its channel did not
+    read is not priced, and a coupled-pair rule its channel reads is. The
+    class's implicit diff-pair rule (#1542) has no parse note, so it gets
+    one when it is priced."""
+    import re
+    scoped = (frozenset(channels.scoped.names)
+              if channels is not None and channels.scoped is not None else frozenset())
+    cdr = (channels.coupled_dr
+           if channels is not None and channels.coupled_nets else None)
+    coupled = (frozenset(r.name for r in cdr.rules if r.coupled and not r.unsupported)
+               if cdr is not None else frozenset())
+    out = []
+    for n in notes:
+        m = re.match(r"\.kicad_dru: rule '(.*?)': clearance ([0-9.eE+-]+)mm ", n)
+        if m and n.endswith('handled by the scoped channel (#1491)') \
+                and m.group(1) not in scoped:
+            n = n.replace('handled by the scoped channel (#1491)',
+                          'NOT priced here (the scoped channel did not read it); '
+                          'KiCad will still enforce it')
+        elif m and m.group(1) in coupled and n.endswith('skipped, KiCad will still enforce it'):
+            n = (".kicad_dru: rule '%s': clearance %smm between a diff pair's P "
+                 "and its N -- handled by the coupled-pair channel (#1293)"
+                 % (m.group(1), m.group(2)))
+        out.append(n)
+    if cdr is not None and cdr.has_pair_gap_classes():
+        out.append("net-class diff-pair gaps below the class clearance price a "
+                   "pair's P against its N at the gap (KiCad's \"(diff pair)\" "
+                   "rule, #1542)")
+    return out
 
 
 class PadClearanceModel:
@@ -4061,13 +4109,25 @@ class PadClearanceModel:
     (`local_clearance` 1.016mm) 0.94mm from a connector pad.
 
     The formula is check_drc's, and deliberately CALLS its code rather than
-    mirroring it (`check_drc.pads_shared_layer_clearance`, `pad_copper_layers`)::
+    mirroring it (`check_drc.pads_shared_layer_clearance`, `pad_copper_layers`,
+    and since #1575 `check_drc.PairRuleChannels.pair`, the resolution its
+    `_pad_pair_cl` grades with)::
 
         base = max(global clearance, netclass(a), netclass(b))
-        eff  = <.kicad_dru layer rules over the SHARED copper layers>   # REPLACES
+        eff  = <the .kicad_dru rule scoped by net class / item type / net
+               name that binds the two items (#1491)>                    # REPLACES
+        eff  = <.kicad_dru layer rules over the SHARED copper layers, those
+               after that rule in the file when one bound>              # REPLACES
+        eff  = <the rule binding a diff pair's P against its N: a coupled
+               rule (#1293) or the class's diff_pair_gap (#1542)>       # REPLACES
         eff  = max(lc_a, lc_b, rules.min_clearance) if either pad has an
                override, else eff                                       # override REPLACES
                                                                         # (KiCad 10, measured)
+
+    The two pair-exact tiers (`channels`) need the items' identity, which
+    `pad_floor` / `item_floor` put in the PadFloor only on a board that has
+    such a rule; a floor without it (`kind` None) skips them, and so does
+    every pair on any other board.
 
     #768: when the caller passes a `ceiling` -- a `--clearance` it will then
     CLAMP the output project's classes down to -- the netclass term alone is
@@ -4083,8 +4143,9 @@ class PadClearanceModel:
 
     `active` is False -- and every consumer then takes its original flat-scalar
     path unchanged -- when the board declares no netclass, no dru rule and no
-    pad override. That is the common case, and the reason this cannot perturb
-    an ordinary board.
+    pad override (nor a class diff_pair_gap below its clearance on a board
+    with a diff pair). That is the common case, and the reason this cannot
+    perturb an ordinary board.
 
     #735: the same `.kicad_dru`'s TRACK-scoped rules are carried too, in
     `track_rules` / `net_classes`, and answered by `track_pair` -- which is a
@@ -4101,12 +4162,14 @@ class PadClearanceModel:
     __slots__ = ('base', 'net_floor', 'layer_rules', 'board_copper',
                  'active', 'notes', 'ceiling', '_pair_cache',
                  'track_rules', 'net_classes', 'board_min_clearance',
-                 'track_partners')
+                 'track_partners', 'channels', 'channel_reach', '_chan_cache',
+                 '_rkeys')
 
     def __init__(self, base: float, net_floor=None, layer_rules=None,
                  board_copper=(), has_overrides: bool = False,
                  ceiling: Optional[float] = None,
-                 track_rules=None, net_classes=None, track_partners=None):
+                 track_rules=None, net_classes=None, track_partners=None,
+                 channels=None):
         self.base = float(base)
         # #768: the --clearance ceiling this model was built under, or None.
         # Recorded rather than re-derived: `net_floor` is already capped by the
@@ -4133,7 +4196,29 @@ class PadClearanceModel:
         self.track_partners = frozenset(track_partners or ())
         # rules.min_clearance: the floor under a pad override (set by for_board).
         self.board_min_clearance = 0.0
-        self.active = bool(self.net_floor or self.layer_rules or has_overrides)
+        # #1575: check_drc's pair-exact channels (the class/type-scoped
+        # .kicad_dru rules and the rule binding a P against its N), or None
+        # on a board where neither can bind a pair. `channel_reach` is the
+        # widest value a rule in them sets: a pair they bind may be RAISED to
+        # it, which the broad phases' `max_floor` has to cover.
+        self.channels = (channels if channels is not None and channels.live
+                         else None)
+        self.channel_reach = 0.0
+        if self.channels is not None:
+            vals = []
+            if self.channels.scoped is not None:
+                vals += [float(r.constraints['clearance']['min'])
+                         for r in self.channels.scoped.rules]
+            if self.channels.coupled_dr is not None:
+                vals += [float(r.constraints['clearance']['min'])
+                         for r in self.channels.coupled_dr.rules
+                         if r.coupled and not r.unsupported
+                         and 'min' in (r.constraints.get('clearance') or {})]
+            self.channel_reach = max(vals, default=0.0)
+        self._chan_cache = {}
+        self._rkeys = {}
+        self.active = bool(self.net_floor or self.layer_rules or has_overrides
+                           or self.channels is not None)
         self.notes = []
         self._pair_cache = {}
 
@@ -4172,6 +4257,7 @@ class PadClearanceModel:
         track_rules = []
         net_classes = {}
         notes = []
+        channels = None
         if path:
             nets = getattr(pcb_data, 'nets', None) or {}
             try:
@@ -4274,6 +4360,23 @@ class PadClearanceModel:
                 track_rules, net_classes = [], {}
                 notes.append('.kicad_dru track rules unread (%s: %s)'
                              % (type(exc).__name__, exc))
+            # #1575: check_drc's own pair-exact channels, built by ITS
+            # constructor and priced through ITS `pair`, so this model grades a
+            # pad pair as `_pad_pair_cl` does rather than at the class value.
+            try:
+                from check_drc import PairRuleChannels
+                channels, _ch_errors = PairRuleChannels.for_board(
+                    pcb_data, path, board_copper)
+                for _k in sorted(_ch_errors):
+                    notes.append('%s clearance rules unread (%s: %s)' % (
+                        {'coupled': 'diff-pair (P against N)',
+                         'scoped': 'class/type-scoped .kicad_dru'}.get(_k, _k),
+                        type(_ch_errors[_k]).__name__, _ch_errors[_k]))
+            except Exception as exc:                            # noqa: BLE001
+                channels = None
+                notes.append('pair-scoped clearance rules unread (%s: %s)'
+                             % (type(exc).__name__, exc))
+            notes[:] = _channel_notes(notes, channels)
         track_partners = ()
         if any(r.except_coupled for r in track_rules):
             from kicad_dru import coupled_net_pairs
@@ -4282,7 +4385,7 @@ class PadClearanceModel:
         model = cls(clearance, net_floor, layer_rules, board_copper,
                     track_rules=track_rules, net_classes=net_classes,
                     has_overrides=has_overrides, ceiling=ceiling,
-                    track_partners=track_partners)
+                    track_partners=track_partners, channels=channels)
         model.notes = notes
         if has_overrides and path:
             try:
@@ -4303,12 +4406,47 @@ class PadClearanceModel:
         override" it means.
         """
         lc = getattr(pad, 'local_clearance', 0.0) or 0.0
-        ncl = self.net_floor.get(getattr(pad, 'net_id', 0) or 0, 0.0)
+        net = getattr(pad, 'net_id', 0) or 0
+        ncl = self.net_floor.get(net, 0.0)
         layers = None
-        if self.layer_rules:
+        ch = self.channels
+        if self.layer_rules or ch is not None:
             from check_drc import pad_copper_layers
             layers = frozenset(pad_copper_layers(pad, self.board_copper))
-        return PadFloor(float(ncl), float(lc), layers)
+        if ch is None:
+            return PadFloor(float(ncl), float(lc), layers)
+        # check_drc's pad type default, `_pad_pair_cl`'s `or 'smd'`
+        ptype = getattr(pad, 'pad_type', None) or 'smd'
+        return PadFloor(float(ncl), float(lc), layers, net, 'pad', ptype,
+                        self._rkey(net, 'pad', ptype, layers))
+
+    def _rkey(self, net: int, kind: str, ptype, layers) -> int:
+        """An int per distinct (what the channels see of the net, its class
+        floor, kind, pad type, layers): two floors with one rkey get one
+        answer from `_channel_pair` against any partner, so the pair memo keys
+        on two ints rather than re-hashing a nested signature per call (the
+        seat gate asks it per pad pair per candidate pose)."""
+        k = (self.channels.net_key(net), float(self.net_floor.get(net, 0.0)),
+             kind, ptype, layers)
+        v = self._rkeys.get(k)
+        if v is None:
+            v = self._rkeys[k] = len(self._rkeys)
+        return v
+
+    def item_floor(self, net_id, kind: str, layers):
+        """The floor standing in for a VIA (`kind` 'via', `layers` the copper
+        it spans) or a TRACK ('track', its one layer) of `net_id`: its net's
+        class floor and no pad override, with the identity the pair-exact
+        channels bind on (#1575). `layers` is kept only where something scopes
+        by layer, as `pad_floor` keeps a pad's."""
+        net = net_id or 0
+        ncl = float(self.net_floor.get(net, 0.0))
+        ch = self.channels
+        keep = layers if (self.layer_rules or ch is not None) else None
+        if ch is None:
+            return PadFloor(ncl, 0.0, keep)
+        return PadFloor(ncl, 0.0, keep, net, kind, None,
+                        self._rkey(net, kind, None, keep))
 
     def max_floor(self, floor) -> float:
         """An UPPER BOUND on what this pad can require of any partner, for the
@@ -4321,6 +4459,9 @@ class PadClearanceModel:
                 r = self.layer_rules.get(l)
                 if r is not None and r > v:
                     v = r
+        # #1575: a scoped or coupled-pair rule may RAISE a pair it binds
+        if floor.kind is not None and self.channel_reach > v:
+            v = self.channel_reach
         return v
 
     # -- the pair -------------------------------------------------------------
@@ -4341,24 +4482,40 @@ class PadClearanceModel:
         The empty source means "the board-wide floor" -- the same test
         check_drc's `_mark_required` applies before disclosing anything.
         """
-        eff = self.base
-        src = ''
-        if fa.ncl > eff:
-            eff, src = fa.ncl, 'netclass'
-        if fb.ncl > eff:
-            eff, src = fb.ncl, 'netclass'
-        if self.layer_rules:
-            key = (fa.layers, fb.layers, eff)
-            cached = self._pair_cache.get(key)
-            if cached is None:
-                from check_drc import pads_shared_layer_clearance
-                cached = pads_shared_layer_clearance(
-                    eff, self.layer_rules, fa.layers or (), fb.layers or ())
-                self._pair_cache[key] = cached
-            if cached != eff:
-                # REPLACE: a rule may raise OR lower, and either way it is the
-                # rule that decided the value.
-                eff, src = cached, 'layer rule'
+        ra = fa.rkey
+        rb = fb.rkey
+        if ra is not None and rb is not None:
+            # #1575: the class step and then check_drc's own resolution (the
+            # scoped rule, the layer rules standing after it, the P/N rule),
+            # memoised on what the answer depends on -- `rkey` names the net's
+            # class floor, what the channels see of the net (its scoped
+            # signature; the net itself only for a diff-pair member), the type
+            # and the layers -- so the seat gate's per-candidate pad pairs are
+            # one two-int lookup. An rkey is set only with `channels`.
+            key = (ra, rb) if fa.net != fb.net else (ra, rb, True)
+            got = self._chan_cache.get(key)
+            if got is None:
+                got = self._chan_cache[key] = self._channel_pair(fa, fb)
+            eff, src = got
+        else:
+            eff = self.base
+            src = ''
+            if fa.ncl > eff:
+                eff, src = fa.ncl, 'netclass'
+            if fb.ncl > eff:
+                eff, src = fb.ncl, 'netclass'
+            if self.layer_rules:
+                key = (fa.layers, fb.layers, eff)
+                cached = self._pair_cache.get(key)
+                if cached is None:
+                    from check_drc import pads_shared_layer_clearance
+                    cached = pads_shared_layer_clearance(
+                        eff, self.layer_rules, fa.layers or (), fb.layers or ())
+                    self._pair_cache[key] = cached
+                if cached != eff:
+                    # REPLACE: a rule may raise OR lower, and either way it is
+                    # the rule that decided the value.
+                    eff, src = cached, 'layer rule'
         # A pad / footprint clearance OVERRIDE REPLACES the class / rule value,
         # floored at rules.min_clearance -- KiCad returns before it looks at
         # either (drc_engine.cpp; measured on KiCad 10.0.0 by
@@ -4375,6 +4532,32 @@ class PadClearanceModel:
             # grader and not the other.
             src = ''
         return eff, src
+
+    def _channel_pair(self, fa, fb):
+        """(value, source) for two floors that carry identity, before a pad
+        override: the class step, then `PairRuleChannels.pair` -- check_drc's
+        own resolution -- asked as check_drc asks it: from the PAD's side (a
+        pad against a via is judged on the pad's copper), and a track on its
+        own layer (`_pad_pair_cl(pad, net, layer=seg.layer, ...)`). #768:
+        under a --clearance ceiling the class's implicit diff-pair value is
+        capped with the class it belongs to."""
+        eff = self.base
+        src = ''
+        if fa.ncl > eff:
+            eff, src = fa.ncl, 'netclass'
+        if fb.ncl > eff:
+            eff, src = fb.ncl, 'netclass'
+        a, b = (fb, fa) if (fa.kind != 'pad' and fb.kind == 'pad') else (fa, fb)
+        layer = None
+        for t in (b, a):
+            if t.kind == 'track' and t.layers and len(t.layers) == 1:
+                (layer,) = t.layers
+                break
+        v, s = self.channels.pair(
+            eff, self.layer_rules, a.net, a.kind, a.ptype, a.layers or (),
+            b.net, b.kind, b.ptype, b.layers or (), layer=layer,
+            class_ceiling=self.ceiling)
+        return (v, s) if s is not None else (eff, src)
 
     # -- the TRACK-vs-track pair (#735) ---------------------------------------
     def track_pair(self, net_a: int, net_b: int, resolved: float):
@@ -6605,12 +6788,14 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
          'required': [[refA, refB, mm, source], ...], 'exact': bool}
 
     `clearance` is the BOARD-WIDE floor, not the whole requirement. Each pair is
-    graded at check_drc's own value -- max over the two nets' net classes, the
-    board's .kicad_dru per-layer rules, and either pad's `local_clearance`
-    override -- resolved by `PadClearanceModel` (#697). Pairs whose requirement
-    exceeds `clearance` are named in `required` with the source that raised
-    them, mirroring check_drc's `required_mm` disclosure; a board that declares
-    none of the three grades exactly as it did before.
+    graded at check_drc's own value -- max over the two nets' net classes, a
+    .kicad_dru rule scoped by class / type / net name and the per-layer rules,
+    the rule binding a diff pair's P against its N (#1575), and either pad's
+    `local_clearance` override -- resolved by `PadClearanceModel` (#697).
+    Pairs whose requirement exceeds `clearance` are named in `required` with
+    the source that raised them (`rule '<name>'` for a rule), mirroring
+    check_drc's `required_mm` disclosure; a board that declares none of them
+    grades exactly as it did before.
 
     `worst` stays a 3-tuple; the disclosure rides the separate `required`
     list.

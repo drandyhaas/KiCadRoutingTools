@@ -1503,9 +1503,10 @@ class QuenchState:
         # pose_of/seed_of read the live _Part records, so the context follows
         # every apply_move with no invalidation; baselines key off SEED poses.
         # #697: the per-pair required clearance (pad overrides, net
-        # classes, .kicad_dru layer rules), resolved from the board's own
-        # siblings exactly as check_drc does. Inert -- and every gate below
-        # then behaves as it did -- on a board that declares none of them.
+        # classes, .kicad_dru layer rules; #1575: class/type-scoped rules and
+        # the rule binding a diff pair's P against its N), resolved from the
+        # board's own siblings exactly as check_drc does. Inert -- and every
+        # gate below then behaves as it did -- on a board that declares none.
         pad_model = legality.PadClearanceModel.for_board(
             pcb_data, clearance, pcb_file)
         pad_model = pad_model if pad_model.active else None

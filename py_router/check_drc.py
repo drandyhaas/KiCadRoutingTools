@@ -117,6 +117,166 @@ def pads_shared_layer_clearance(eff: float, layer_rules, layers_a, layers_b=None
     return max([eff] + vals)
 
 
+class PairRuleChannels:
+    """The two pair-exact clearance channels this grader applies beyond the
+    net-class and per-layer maps, as ONE object that `run_drc` and the
+    placement side's `PadClearanceModel` both build with `for_board` and
+    price through `pair`, so the grader and the placement gate cannot drift
+    (#1575; #697 calls `pad_copper_layers` / `pads_shared_layer_clearance` for
+    the same reason):
+
+    - the `.kicad_dru` clearance rules scoped by net class, item type or net
+      name (#1491, `kicad_dru.ScopedClearanceRules`): the rule binding two
+      items REPLACES their class value, and only a layer rule LATER in the
+      file replaces it in turn (KiCad's last match);
+    - the rule binding a diff pair's P against its own N: a `.kicad_dru`
+      coupled-pair rule (#1293, `AB.isCoupledDiffPair()`) or the net class's
+      implicit "(diff pair)" rule (#1542, `diff_pair_gap` below the class
+      clearance), resolved by `DesignRules.coupled_pair_clearance` per item
+      types and layer, at KiCad's value. It replaces whatever the steps above
+      gave, where it is the rule KiCad applies (#1526: a scoped rule later in
+      the file wins over it there, and the resolver says so).
+
+    A pad / footprint `(clearance ...)` override still replaces all of it,
+    and stays with the caller (`design_rules.override_clearance`), which
+    holds the pads. `live` is False on a board with neither channel."""
+
+    def __init__(self, scoped=None, coupled_dr=None, coupled_nets=()):
+        self.scoped = scoped
+        self.coupled_dr = coupled_dr
+        # the nets whose MatchDpSuffix partner exists on the board
+        self.coupled_nets = frozenset(coupled_nets or ())
+        self._coupled_cache: Dict[tuple, Optional[tuple]] = {}
+        self._custom_names = (frozenset(r.name for r in coupled_dr.rules)
+                              if coupled_dr is not None else frozenset())
+
+    @classmethod
+    def for_board(cls, pcb_data, pcb_file, board_copper):
+        """(channels, {channel: the exception that kept it unread}). The
+        coupled channel is read when the board has a sibling `.kicad_dru` or
+        `.kicad_pro` and something in it can bind a P against its N; the
+        scoped one when the `.kicad_dru` holds such a rule."""
+        errors: Dict[str, Exception] = {}
+        coupled_dr, coupled_nets = None, frozenset()
+        stem = os.path.splitext(pcb_file)[0] if pcb_file else ''
+        if stem and (os.path.isfile(stem + '.kicad_dru')
+                     or os.path.isfile(stem + '.kicad_pro')):
+            try:
+                from design_rules import DesignRules, match_dp_suffix
+                cdr = DesignRules.from_project(pcb_data, pcb_file,
+                                               copper_layers=board_copper)
+                if cdr.has_coupled_rules() or cdr.has_pair_gap_classes():
+                    by_name = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
+                    coupled_nets = frozenset(
+                        nid for nm, nid in by_name.items()
+                        if match_dp_suffix(nm)[0] and match_dp_suffix(nm)[1] in by_name)
+                    coupled_dr = cdr
+            except Exception as e:                               # noqa: BLE001
+                errors['coupled'] = e
+        scoped = None
+        if pcb_file:
+            try:
+                from kicad_dru import ScopedClearanceRules
+                scoped = ScopedClearanceRules.for_board(pcb_data, pcb_file,
+                                                        copper_layers=board_copper)
+            except Exception as e:                               # noqa: BLE001
+                errors['scoped'] = e
+        return cls(scoped, coupled_dr, coupled_nets), errors
+
+    @property
+    def live(self) -> bool:
+        """Can either channel bind any pair on this board?"""
+        return self.scoped is not None or (self.coupled_dr is not None
+                                           and bool(self.coupled_nets))
+
+    def net_key(self, net_id: int):
+        """What a net is to both channels: two pairs of items whose nets have
+        the same keys (and the same types, pad types, layers and class value)
+        get the same answer from `pair`. The scoped signature, and the net
+        itself only when it has a diff-pair partner."""
+        return (None if self.scoped is None else self.scoped.net_signature(net_id),
+                net_id if net_id in self.coupled_nets else None)
+
+    def pair_rules(self, base: float, layer_map, net_a: int, net_b: int,
+                   types=None):
+        """(the pair's value before the layer rules, the layer rules that
+        still replace it, the scoped rule that set the value or None): the
+        class value `base` and every layer rule, or -- where a scoped rule
+        binds the two items (`types` = ((type_a, pad_type_a), (type_b,
+        pad_type_b))) -- that rule's value and only the layer rules after
+        it, by `ScopedClearanceRules.resolve_pair`."""
+        if self.scoped is not None and types is not None and net_a != net_b:
+            (ta, pta), (tb, ptb) = types
+            return self.scoped.resolve_pair_with_rule(net_a, ta, net_b, tb,
+                                                      pta, ptb, base, layer_map)
+        return base, layer_map, None
+
+    def coupled_rule(self, net_a: int, net_b: int, type_a: str, type_b: str,
+                     layers):
+        """(KiCad's clearance, the rule's name, is it the class's implicit
+        "(diff pair)" rule) for a P/N pair of items when a coupled-pair rule
+        sets it on every layer in `layers` (the max over them), else None."""
+        if (self.coupled_dr is None or net_a == net_b or net_a not in self.coupled_nets
+                or net_b not in self.coupled_nets):
+            return None
+        key = (net_a, net_b, type_a, type_b, tuple(layers))
+        if key not in self._coupled_cache:
+            best = None
+            for l in key[4]:
+                c = self.coupled_dr.coupled_pair_clearance(net_a, net_b, l, (type_a, type_b))
+                if c is None:
+                    best = None
+                    break
+                if best is None or c.kicad_min > best.kicad_min:
+                    best = c
+            self._coupled_cache[key] = (
+                None if best is None else
+                (best.kicad_min, best.min_rule, best.min_rule not in self._custom_names))
+        return self._coupled_cache[key]
+
+    def coupled(self, net_a: int, net_b: int, type_a: str, type_b: str, layers):
+        """`coupled_rule`'s clearance alone, or None."""
+        c = self.coupled_rule(net_a, net_b, type_a, type_b, layers)
+        return None if c is None else c[0]
+
+    def pair(self, base: float, layer_map, net_a: int, type_a, pad_type_a,
+             layers_a, net_b: int, type_b, pad_type_b, layers_b,
+             layer: Optional[str] = None, class_ceiling: Optional[float] = None):
+        """(value, source) for two items, before a pad override: the class
+        value `base`, replaced by a binding scoped rule, then by the layer
+        rules standing after it -- on `layer`, else over the two items'
+        shared copper (`layers_b` None: `layers_a`'s own) -- then by the rule
+        binding a P against its N, judged on `layer` or else `layers_a`.
+
+        The source is None where `base` stands, else "rule '<name>'",
+        'layer rule' or "netclass '<class>' (diff pair)". A type of None skips
+        both channels (an item KiCad types otherwise, e.g. graphic copper).
+        `class_ceiling` (#768) caps the implicit diff-pair value, a net class
+        value, at a --clearance the output project's classes are clamped to:
+        the clamped class carries it only below the ceiling."""
+        eff, lm, rule = self.pair_rules(
+            base, layer_map, net_a, net_b,
+            ((type_a, pad_type_a), (type_b, pad_type_b))
+            if type_a is not None and type_b is not None else None)
+        src = None if rule is None else f"rule '{rule}'"
+        if lm:
+            from kicad_dru import apply_layer_rules
+            v = apply_layer_rules(eff, lm, layer=layer,
+                                  pad_layers=((layers_a, layers_b)
+                                              if layer is None else None))
+            if v != eff:
+                eff, src = v, 'layer rule'
+        if type_a is not None and type_b is not None:
+            c = self.coupled_rule(net_a, net_b, type_a, type_b,
+                                  (layer,) if layer is not None else layers_a)
+            if c is not None:
+                v, name, implicit = c
+                if implicit and class_ceiling is not None and v > class_ceiling:
+                    v = class_ceiling
+                eff, src = v, (name if implicit else f"rule '{name}'")
+        return eff, src
+
+
 def _expand_cu(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
     """Memoized expand_pad_layers for the duration of one run_drc call."""
     global _EXPAND_ROUTING
@@ -4569,21 +4729,30 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # layer -> max over the rules, same formula the router stamps with.
         return max([eff] + list(_lcl.values())) if _lcl else eff
 
+    # One pad's copper layers, memoised per pad for this run (pads keep their
+    # layers for the whole check, and the pad passes ask per pair). The entry
+    # holds the pad itself, so its id cannot be reused while the memo lives.
+    _pad_cu_memo: Dict[int, tuple] = {}
+
     def _pad_copper(pad):
-        return pad_copper_layers(pad, _board_copper)
+        v = _pad_cu_memo.get(id(pad))
+        if v is None:
+            v = _pad_cu_memo[id(pad)] = (pad, pad_copper_layers(pad, _board_copper))
+        return v[1]
+
+    def _pair_base(net_a: int, net_b: int) -> float:
+        return clearance if not _ncl_by_id else \
+            max(clearance, _ncl_by_id.get(net_a, 0.0), _ncl_by_id.get(net_b, 0.0))
 
     def _pair_rules(net_a: int, net_b: int, types=None):
         """(the pair's value before the layer rules, the layer rules that
         still replace it): the class value and every layer rule, or -- where
         a class/type-scoped rule binds the pair (#1491) -- that rule's value
         and only the layer rules LATER in the file, KiCad's last match, by the
-        router's own resolver (kicad_dru.ScopedClearanceRules.resolve_pair)."""
-        base = clearance if not _ncl_by_id else \
-            max(clearance, _ncl_by_id.get(net_a, 0.0), _ncl_by_id.get(net_b, 0.0))
-        if _scoped is not None and types is not None and net_a != net_b:
-            (_ta, _pta), (_tb, _ptb) = types
-            return _scoped.resolve_pair(net_a, _ta, net_b, _tb, _pta, _ptb, base, _lcl)
-        return base, _lcl
+        router's own resolver (kicad_dru.ScopedClearanceRules.resolve_pair,
+        through PairRuleChannels.pair_rules)."""
+        return _chan.pair_rules(_pair_base(net_a, net_b), _lcl, net_a, net_b,
+                                types)[:2]
 
     def _pair_cl(net_a: int, net_b: int, layer: str = None, types=None) -> float:
         base, lm = _pair_rules(net_a, net_b, types)
@@ -4604,48 +4773,31 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # same holds for KiCad's implicit "netclass '<class>' (diff pair)" rule, a
     # class whose diff_pair_gap is below its clearance (no .kicad_dru needed).
     # One dict test per pair on any other board.
-    _coupled_dr, _coupled_nets = None, frozenset()
-    _stem = os.path.splitext(pcb_file)[0] if pcb_file else ''
-    if _stem and (os.path.isfile(_stem + '.kicad_dru')
-                  or os.path.isfile(_stem + '.kicad_pro')):
-        try:
-            from design_rules import DesignRules, match_dp_suffix
-            _cdr = DesignRules.from_project(pcb_data, pcb_file,
-                                            copper_layers=_board_copper)
-            if _cdr.has_coupled_rules() or _cdr.has_pair_gap_classes():
-                _by_name = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
-                _coupled_nets = frozenset(
-                    nid for nm, nid in _by_name.items()
-                    if match_dp_suffix(nm)[0] and match_dp_suffix(nm)[1] in _by_name)
-                _coupled_dr = _cdr
-                if not quiet and _cdr.has_coupled_rules():
-                    print("Coupled-pair clearance rules (.kicad_dru, #1293): "
-                          + ", ".join(sorted(r.name for r in _cdr.rules
-                                             if r.coupled and not r.unsupported)))
-                if not quiet and _cdr.has_pair_gap_classes():
-                    print("Net-class diff-pair gaps below the class clearance "
-                          "grade a pair's P against its N at the gap (KiCad's "
-                          "\"(diff pair)\" rule, #1542)")
-        except Exception as _e:                                  # noqa: BLE001
-            if not quiet:
-                print(f"  .kicad_dru: coupled-pair rules not read ({_e})")
     # #1491: the clearance rules scoped by net class or item type, graded
     # PAIR-EXACT through the router's own resolver (kicad_dru.
     # ScopedClearanceRules): the rule that binds a pair of items REPLACES its
     # class value, at KiCad's value (no fab floor); a layer rule replaces it in
     # turn only where it comes later in the file (`_pair_rules`), and a pad
     # override last.
-    _scoped = None
-    if pcb_file:
-        try:
-            from kicad_dru import ScopedClearanceRules
-            _scoped = ScopedClearanceRules.for_board(pcb_data, pcb_file,
-                                                     copper_layers=_board_copper)
-        except Exception as _se:                                 # noqa: BLE001
-            if not quiet:
-                print(f"  .kicad_dru: class/type-scoped clearance rules not read ({_se})")
-            _scoped = None
-        if _scoped is not None and not quiet:
+    # #1575: both channels are ONE object, PairRuleChannels, which placement's
+    # PadClearanceModel builds and prices pad pairs through too.
+    _chan, _chan_errors = PairRuleChannels.for_board(pcb_data, pcb_file, _board_copper)
+    _coupled_dr, _scoped = _chan.coupled_dr, _chan.scoped
+    if not quiet:
+        if 'coupled' in _chan_errors:
+            print(f"  .kicad_dru: coupled-pair rules not read ({_chan_errors['coupled']})")
+        if _coupled_dr is not None and _coupled_dr.has_coupled_rules():
+            print("Coupled-pair clearance rules (.kicad_dru, #1293): "
+                  + ", ".join(sorted(r.name for r in _coupled_dr.rules
+                                     if r.coupled and not r.unsupported)))
+        if _coupled_dr is not None and _coupled_dr.has_pair_gap_classes():
+            print("Net-class diff-pair gaps below the class clearance "
+                  "grade a pair's P against its N at the gap (KiCad's "
+                  "\"(diff pair)\" rule, #1542)")
+        if 'scoped' in _chan_errors:
+            print(f"  .kicad_dru: class/type-scoped clearance rules not read "
+                  f"({_chan_errors['scoped']})")
+        if _scoped is not None:
             print("Class/type-scoped clearance rules (.kicad_dru, #1491): "
                   + ", ".join(f"'{r.name}':{r.constraints['clearance']['min']:g}"
                               for r in _scoped.rules))
@@ -4671,48 +4823,25 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                   + (f", condition {_cond!r}" if _cond else '')
                   + "): its scope is not modelled here -- the copper it binds is "
                     "graded at the class or layer value; KiCad still enforces it")
-    _coupled_cache: dict = {}
-
-    def _coupled_cl(net_a: int, net_b: int, type_a: str, type_b: str, layers):
-        """KiCad's clearance for a P/N pair of items when a coupled-pair rule
-        sets it on every layer in ``layers`` (the max over them), else None."""
-        if (_coupled_dr is None or net_a == net_b or net_a not in _coupled_nets
-                or net_b not in _coupled_nets):
-            return None
-        key = (net_a, net_b, type_a, type_b, tuple(layers))
-        if key not in _coupled_cache:
-            vals = []
-            for l in key[4]:
-                c = _coupled_dr.coupled_pair_clearance(net_a, net_b, l, (type_a, type_b))
-                if c is None:
-                    vals = None
-                    break
-                vals.append(c.kicad_min)
-            _coupled_cache[key] = max(vals) if vals else None
-        return _coupled_cache[key]
+    _coupled_cl = _chan.coupled
+    _chan_layers = bool(_lcl) or _coupled_dr is not None
 
     def _pad_pair_cl(pad, other_net: int, layer: str = None, other_pad=None,
                      other_type: str = None) -> float:
         _ot = (other_type or ('pad' if other_pad is not None else None))
-        eff, lm = _pair_rules(pad.net_id, other_net,
-                              types=((('pad', getattr(pad, 'pad_type', None) or 'smd'),
-                                      (_ot, getattr(other_pad, 'pad_type', None) or 'smd'
-                                       if _ot == 'pad' else None))
-                                     if _ot is not None else None))
         # Pad-vs-via / pad-vs-pad meet on their SHARED copper layers; TH
         # geometry is identical on every layer, so the max over shared layers
         # is the exact requirement (pads_shared_layer_clearance, which
         # placement/legality.py resolves too -- #697). No rules: expand nothing.
-        eff = apply_layer_rules(
-            eff, lm, layer=layer,
-            pad_layers=((_pad_copper(pad),
-                         _pad_copper(other_pad) if other_pad is not None else None)
-                        if layer is None and lm else None))
-        if other_type is not None:
-            _cv = _coupled_cl(pad.net_id, other_net, 'pad', other_type,
-                              (layer,) if layer is not None else _pad_copper(pad))
-            if _cv is not None:
-                eff = _cv
+        _need = layer is None and _chan_layers
+        eff, _src = _chan.pair(
+            _pair_base(pad.net_id, other_net), _lcl,
+            pad.net_id, 'pad', getattr(pad, 'pad_type', None) or 'smd',
+            _pad_copper(pad) if _need else None,
+            other_net, _ot,
+            (getattr(other_pad, 'pad_type', None) or 'smd') if _ot == 'pad' else None,
+            _pad_copper(other_pad) if (_need and other_pad is not None) else None,
+            layer=layer)
         return _override_clr(eff, _board_min_clr, pad, other_pad)
 
     def _mark_required(v: dict, eff: float) -> dict:

@@ -1838,8 +1838,9 @@ class _Repair:
             return None
         f = self._via_floor.get(net_id)
         if f is None:
-            f = PadFloor(self._floors.net_floor.get(net_id or 0, 0.0), 0.0,
-                         self._all_cu if self._floors.layer_rules else None)
+            # #1575: with the via's identity, so a class/type-scoped rule or
+            # a P/N rule binds the pair as check_drc's pad-via grade binds it
+            f = self._floors.item_floor(net_id, 'via', self._all_cu)
             self._via_floor[net_id] = f
         return f
 
@@ -1853,8 +1854,7 @@ class _Repair:
         key = (net_id, layer)
         f = self._seg_floor.get(key)
         if f is None:
-            f = PadFloor(self._floors.net_floor.get(net_id or 0, 0.0), 0.0,
-                         frozenset({layer}) if self._floors.layer_rules else None)
+            f = self._floors.item_floor(net_id, 'track', frozenset({layer}))
             self._seg_floor[key] = f
         return f
 
