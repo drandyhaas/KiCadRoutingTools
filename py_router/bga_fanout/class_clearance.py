@@ -23,7 +23,16 @@ registries); this module prices the ESCAPING ball's:
 Copper is one chain when it touches (an engine starts a via's track anywhere
 on the via's copper), so a ball's escape comes off whole.
 
-A board with no class above the run clearance never reaches here.
+#1565: a .kicad_dru clearance rule scoped by net class or item type (#1491)
+or a track-scoped class rule (#735) is priced the same way, through
+`kicad_dru.PairRuleVerdicts`. Its pairs are graded at whatever clearance they
+were laid at; balls alike to every rule re-escape together at the value a
+rule sets between two of them, and a rule between such groups is held on the
+obstacle side, folded into the class map the re-escape takes
+(`rule_class_map`).
+
+A board with no class above the run clearance and no such rule never reaches
+here.
 """
 from __future__ import annotations
 
@@ -39,17 +48,66 @@ _MARGIN = 0.05
 _CELL = 1.0          # mm, the spatial hash's cell
 
 
-def _pair_config(pcb_data, base, net_clearances):
+def _pair_config(pcb_data, base, net_clearances, routed_net_ids=None):
     """A GridRouteConfig that prices pairs as check_drc does: `base`, the
-    classes, then the board's .kicad_dru layer rules."""
+    classes, then the board's .kicad_dru layer rules -- and (#1565) the
+    verdicts that add its class/type-scoped and track-scoped rules, for a
+    routed set of `routed_net_ids` (the part's nets). Returns (cfg, rules)."""
     from routing_config import GridRouteConfig
-    from kicad_dru import install_layer_clearances
+    from kicad_dru import install_layer_clearances, install_pair_rule_channels
     layers = list(pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu'])
     cfg = GridRouteConfig(layers=layers, clearance=base)
     with contextlib.redirect_stdout(io.StringIO()):
         install_layer_clearances(cfg, None, None, pcb_data)
     cfg.set_net_clearances(dict(net_clearances), ())
-    return cfg
+    return cfg, install_pair_rule_channels(cfg, pcb_data, routed_net_ids)
+
+
+def _part_nets(footprint):
+    return sorted({p.net_id for p in footprint.pads if p.net_id})
+
+
+def _has_dru(pcb_data):
+    import os
+    path = getattr(pcb_data, 'source_path', '') or ''
+    return bool(path) and os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru')
+
+
+def rules_bind(pcb_data, footprint, base):
+    """#1565: does a class/type-scoped or track-scoped .kicad_dru rule bind a
+    net of `footprint`? Such a rule holds whatever clearance the escape was
+    laid at -- the run clearance, or a rescue rung below it -- so its pairs
+    are graded whether or not it stands above `base`. False, at the cost of
+    one file test, on a board with no .kicad_dru."""
+    if not _has_dru(pcb_data):
+        return False
+    nets = _part_nets(footprint)
+    _cfg, rules = _pair_config(pcb_data, base, {}, nets)
+    return rules.live and bool(rules.obstacle_floors(nets, list(pcb_data.nets)))
+
+
+def rule_class_map(pcb_data, base, net_clearances, routed_net_ids, rules=None):
+    """#1565: `net_clearances` with each net raised to the widest scoped or
+    track rule binding its copper against the routed nets' -- the obstacle
+    side of those rules, for an engine that holds each obstacle net at one
+    value, as it holds a class. `net_clearances` itself on a board with no
+    such rule (one file test without a .kicad_dru)."""
+    if rules is None:
+        if not _has_dru(pcb_data):
+            return net_clearances
+        _cfg, rules = _pair_config(pcb_data, base, net_clearances or {}, routed_net_ids)
+    if not rules.live:
+        return net_clearances
+    out = dict(net_clearances or {})
+    for n, v in rules.obstacle_floors(routed_net_ids, list(pcb_data.nets)).items():
+        if v > out.get(n, 0.0):
+            out[n] = v
+    return out
+
+
+def _ruled(rules):
+    """Is a scoped or track rule live (#1565)?"""
+    return rules is not None and rules.live
 
 
 def _seg_obj(t):
@@ -82,17 +140,20 @@ def _bbox(kind, o):
 
 
 def class_violations(pcb_data, tracks, vias, base, net_clearances,
-                     partners=(), fixed=(0, 0), cfg=None):
+                     partners=(), fixed=(0, 0), cfg=None, rules=None):
     """The pairs this call's copper (`tracks`, `vias`: the engines' dicts)
     makes below KiCad's class clearance.
 
     Each pair is priced at `cfg.pair_clearance` (max(base, class A, class B),
-    a .kicad_dru layer rule replacing it on its layer) and graded with
-    check_drc's primitives at that value; only pairs whose value stands above
-    `base` are graded. `partners` ({frozenset({p, n})}) are coupled diff
-    pairs, spaced by the caller's --diff-pair-gap and not graded here.
-    `fixed` = (n_tracks, n_vias): the leading items already kept -- graded as
-    obstacles, never reported against each other.
+    a .kicad_dru layer rule replacing it on its layer) -- through `rules`
+    (#1565), which adds a class/type-scoped rule for the two items' types and
+    a track-scoped rule on a track pair -- and graded with check_drc's
+    primitives at that value; only pairs whose value stands above `base` are
+    graded, and every pair such a rule binds (a rescue rung may lay copper
+    below `base`, and the rule holds there too). `partners` ({frozenset({p,
+    n})}) are coupled diff pairs, spaced by the caller's --diff-pair-gap and
+    not graded here. `fixed` = (n_tracks, n_vias): the leading items already
+    kept -- graded as obstacles, never reported against each other.
 
     Returns [(a, b, need)] where a is ('t', i) or ('v', i) into the lists and
     b is the same for this call's copper or ('board', None) for copper that
@@ -102,12 +163,19 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
                            check_pad_via_overlap, _pad_has_no_copper)
     from geometry_utils import via_on_layer
     hot = {n for n, c in net_clearances.items() if c > base + 1e-9}
-    if not hot or not (tracks or vias):
+    if not (tracks or vias):
         return []
     if cfg is None:
-        cfg = _pair_config(pcb_data, base, net_clearances)
+        cfg, rules = _pair_config(pcb_data, base, net_clearances)
+    elif rules is None:
+        from kicad_dru import PairRuleVerdicts
+        rules = PairRuleVerdicts(cfg, pcb_data)
+    ruled = _ruled(rules)
+    if not hot and not ruled:
+        return []
     board_cu = list(pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu'])
-    reach = max(net_clearances[n] for n in hot) + 0.05
+    reach = max([net_clearances[n] for n in hot]
+                + ([rules.max_value(base)] if ruled else [])) + 0.05
 
     new = ([('t', i, 'seg', _seg_obj(t)) for i, t in enumerate(tracks)]
            + [('v', i, 'via', _via_obj(v)) for i, v in enumerate(vias)])
@@ -151,6 +219,12 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
         tag, i = ref
         return (tag == 't' and i < fixed[0]) or (tag == 'v' and i < fixed[1])
 
+    def graded(need, na, nb, layer=None, kind='layer', types=None):
+        """A pair above `base`, and (#1565) any pair a scoped or track rule
+        binds: a rescue rung may have laid it below `base`."""
+        return need > base + 1e-9 or (ruled and rules.binds(
+            na, nb, layer, kind=kind, types=types))
+
     out = []
     n_new = len(new)
     for a in range(n_new):
@@ -167,7 +241,7 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
             ref_b, kind_b, ob, _bb, nb = items[b]
             if nb == na and na:
                 continue                         # same net
-            if na not in hot and nb not in hot:
+            if not ruled and na not in hot and nb not in hot:
                 continue
             if frozenset((na, nb)) in partners:
                 continue
@@ -178,28 +252,31 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
             if kind_a == 'seg' and kind_b == 'seg':
                 if oa.layer != ob.layer:
                     continue
-                need = cfg.pair_clearance(na, nb, oa.layer, base=base)
-                if need > base + 1e-9:
+                need = rules(na, nb, oa.layer, base=base, kind='track')
+                if graded(need, na, nb, oa.layer, 'track'):
                     hit = check_segment_overlap(oa, ob, need, _MARGIN)[0]
             elif {kind_a, kind_b} == {'seg', 'via'}:
                 sv, vv = (oa, ob) if kind_a == 'seg' else (ob, oa)
                 if not via_on_layer(vv, sv.layer):
                     continue
-                need = cfg.pair_clearance(na, nb, sv.layer, base=base)
-                if need > base + 1e-9:
+                _t = (('track' if kind_a == 'seg' else 'via',),
+                      ('track' if kind_b == 'seg' else 'via',))
+                need = rules(na, nb, sv.layer, base=base, types=_t)
+                if graded(need, na, nb, sv.layer, types=_t):
                     hit = check_via_segment_overlap(vv, sv, need, _MARGIN)[0]
             elif kind_a == 'via' and kind_b == 'via':
-                need = cfg.pair_clearance(na, nb, kind='stack', base=base)
-                if need > base + 1e-9:
+                need = rules(na, nb, base=base, kind='stack')
+                if graded(need, na, nb, kind='stack'):
                     hit = check_via_via_overlap(oa, ob, need, _MARGIN)[0]
             elif kind_b == 'pad':
+                _pt = (('pad', getattr(ob, 'pad_type', None) or 'smd'),)
                 if kind_a == 'seg':
-                    need = cfg.pair_clearance(na, nb, oa.layer, base=base)
-                    if need > base + 1e-9:
+                    need = rules(na, nb, oa.layer, base=base, types=(('track',), _pt))
+                    if graded(need, na, nb, oa.layer, types=(('track',), _pt)):
                         hit = check_pad_segment_overlap(ob, oa, need, board_cu, _MARGIN)[0]
                 else:
-                    need = cfg.pair_clearance(na, nb, kind='stack', base=base)
-                    if need > base + 1e-9:
+                    need = rules(na, nb, base=base, kind='stack', types=(('via',), _pt))
+                    if graded(need, na, nb, kind='stack', types=(('via',), _pt)):
                         hit = check_pad_via_overlap(ob, oa, need, board_cu, _MARGIN)[0]
             if hit:
                 out.append((ref_a, ref_b, need))
@@ -302,7 +379,32 @@ def class_reescape(core, args, result):
     fp, pcb = args['footprint'], args['pcb_data']
     base = float(args['clearance'])
     nc = {int(n): float(c) for n, c in (args.get('net_clearances') or {}).items()}
-    cfg = _pair_config(pcb, base, nc)
+    cfg, rules = _pair_config(pcb, base, nc, _part_nets(fp))
+    # #1565: the scoped and track rules. Balls alike to every rule
+    # (rules.group_key) re-escape together, at the value a rule sets between
+    # two of their nets (`_rule_floor`); a rule between groups is held on the
+    # obstacle side, as a class is (`_group_classes`).
+    ruled = _ruled(rules)
+    _intra: Dict[tuple, float] = {}
+    if ruled:
+        _by_key: Dict[tuple, List[int]] = defaultdict(list)
+        for n in _part_nets(fp):
+            _by_key[rules.group_key(n)].append(n)
+        for k, ns in _by_key.items():
+            _intra[k] = rules.rule_value(ns[0], ns[1]) if len(ns) > 1 else 0.0
+        print(f"  {rules.describe()}")
+
+    def _rule_floor(net_id):
+        return _intra.get(rules.group_key(net_id), 0.0) if ruled else 0.0
+
+    def _group_classes(group_nets):
+        """The class map a group re-escapes with: each net at max(its class,
+        the widest rule binding it against the group's nets)."""
+        if not ruled:
+            return args.get('net_clearances')
+        return rule_class_map(pcb, base, nc, group_nets, rules=rules)
+    what = ("Net classes and .kicad_dru rules (#1529, #1565)" if ruled
+            else "Net classes (#1529)")
     partners = set()
     if args.get('diff_pair_patterns'):
         from bga_fanout.diff_pair import find_differential_pairs
@@ -311,7 +413,7 @@ def class_reescape(core, args, result):
                 partners.add(frozenset((dp.p_pad.net_id, dp.n_pad.net_id)))
 
     def floor_of(net_id):
-        return max(base, nc.get(net_id, base))
+        return max(base, nc.get(net_id, base), _rule_floor(net_id))
 
     def chain_split(tr, vi, viol, keep_from=None):
         """Take off the chains `viol` names; return the kept lists and the
@@ -339,7 +441,8 @@ def class_reescape(core, args, result):
 
     from bga_fanout import ball_has_copper, unserved_nets
     tw = args['track_width']
-    viol = class_violations(pcb, tracks, vias, base, nc, partners, cfg=cfg)
+    viol = class_violations(pcb, tracks, vias, base, nc, partners, cfg=cfg,
+                            rules=rules)
     tracks, vias, balls = chain_split(tracks, vias, viol)
     # ...and a ball of a wider class the escape left bare: the scalar engine
     # could not price its own class, so it is escaped at it too.
@@ -350,20 +453,30 @@ def class_reescape(core, args, result):
             and not ball_has_copper(p, vias, tracks, tw)]
     if not balls and not bare:
         return tracks, vias, vias_rm, failed
-    print(f"  Net classes (#1529): {len(viol)} pair(s) of this escape fell short "
+    print(f"  {what}: {len(viol)} pair(s) of this escape fell short "
           f"of their class clearance at {base:g}mm; re-escaping {len(balls)} "
           f"ball(s) at their class"
           + (f", and {len(bare)} bare ball(s) of a wider class" if bare else ''))
     balls = balls + bare
 
-    groups: Dict[float, List] = defaultdict(list)
+    def descent_floor(net_id, f):
+        """The clearance a ball's rescue rungs stop at: its class above the
+        run clearance, else (#1565) the widest rule binding it."""
+        if f > base + 1e-9:
+            return f
+        return max(args.get('_clearance_floor', 0.0), _rule_floor(net_id))
+
+    groups: Dict[tuple, List] = defaultdict(list)
     for p in balls:
-        groups[round(floor_of(p.net_id), 6)].append(p)
+        f = round(floor_of(p.net_id), 6)
+        groups[(f, round(descent_floor(p.net_id, f), 6),
+                rules.group_key(p.net_id) if ruled else None)].append(p)
     method = 'dogbone' if args.get('escape_method') == 'dogbone' else 'underpad'
     from kicad_parser import Segment as _Seg, Via as _Via
     n_short = 0
-    for f in sorted(groups):
-        keys = {(p.global_x, p.global_y) for p in groups[f]}
+    for gk in sorted(groups, key=lambda k: (k[0], k[1], repr(k[2]))):
+        f, d, _k = gk
+        keys = {(p.global_x, p.global_y) for p in groups[gk]}
         n_seg0, n_via0 = len(pcb.segments), len(pcb.vias)
         try:
             for t in tracks:
@@ -375,13 +488,13 @@ def class_reescape(core, args, result):
                 pcb.vias.append(_Via(
                     x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
                     layers=v.get('layers') or ['F.Cu', 'B.Cu'], net_id=v['net_id']))
-            # a classed ball's rescue rungs stop at its class; a ball at the
-            # run clearance keeps the fab ladder it had
+            # a classed ball's rescue rungs stop at its class, a ruled one's
+            # at its rule; a ball at the run clearance keeps the fab ladder
             kw = dict(args, clearance=f, escape_method=method, _pad_filter=keys,
                       _ignore_prefanned=True, check_for_previous=True,
-                      _clearance_floor=(f if f > base + 1e-9
-                                        else args.get('_clearance_floor', 0.0)),
-                      bus=None, escape_dir_hints=None)
+                      _clearance_floor=d, bus=None, escape_dir_hints=None,
+                      net_clearances=_group_classes(
+                          sorted({p.net_id for p in groups[gk]})))
             t2, v2, _vr2, _f2 = core(**kw)
         finally:
             del pcb.segments[n_seg0:]
@@ -389,7 +502,7 @@ def class_reescape(core, args, result):
         n0 = (len(tracks), len(vias))
         tr_all, vi_all = tracks + list(t2), vias + list(v2)
         viol2 = class_violations(pcb, tr_all, vi_all, base, nc, partners,
-                                 fixed=n0, cfg=cfg)
+                                 fixed=n0, cfg=cfg, rules=rules)
         n_short += len(viol2)
         tracks, vias, _ = chain_split(tr_all, vi_all, viol2, keep_from=n0)
     left = [p for p in balls if not ball_has_copper(p, vias, tracks, tw)]
@@ -398,7 +511,7 @@ def class_reescape(core, args, result):
         if p.net_name and p.net_name not in failed:
             failed.append(p.net_name)
     failed = unserved_nets(fp, pcb, failed, tracks, vias, tw)
-    print(f"  Net classes (#1529): re-escaped {n_ok} of {len(balls)} ball(s) at "
+    print(f"  {what}: re-escaped {n_ok} of {len(balls)} ball(s) at "
           f"their class" + (f"; {len(left)} left unescaped: "
                             + ', '.join(sorted({p.net_name for p in left}))
                             if left else '')
