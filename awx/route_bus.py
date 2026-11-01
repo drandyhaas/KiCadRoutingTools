@@ -351,7 +351,12 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     # right after, each round, every array's other nets and plane balls are planned and laid jointly round the bus
     # copper just laid (fanout_from_plan.joint_others)
     joint_fanout = joint_fanout and not escape          # (the escape fanout lays no joint plan: the field is dog-boned)
-    others = {r: array_others(pcb, r, names) for r in (src, dest)} if joint_fanout else {src: [], dest: []}
+    # (a protected net's copper at an array stands as it is -- an earlier step's routed net, or a later bus's escapes
+    # reserved there: the joint plan plans round it, never again)
+    from protected_nets import read_protected_nets as _rpn, pro_path_for_board as _ppb
+    prot_j = {short(n) for n in _rpn(_ppb(board))}
+    others = {r: [n for n in array_others(pcb, r, names) if short(n) not in prot_j] for r in (src, dest)} \
+        if joint_fanout else {src: [], dest: []}
     joint, spec = {}, None
     escape_env = {}             # (ESCAPE_JOINT: the escape step's joint plan of a shared array -- the --escape block)
     fanned_e = None             # (ESCAPE_JOINT_ENDS: the bus's own field, fanned in the --escape block)
@@ -513,6 +518,27 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             fix_project_for_output(fanned, clearance=te.SPEC_CLEARANCE, track_width=sr.FAN_TRACK,
                                    via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL, verbose=False)
         log(f'  {src} fanned out: {n_t} tracks, {n_v} vias' + (f', refused {failed}' if failed else ''))
+        if joint_fanout and failed:
+            # (a bus ball the engine's comb refused -- boxed by the comb's own stubs and the via sites kept for the
+            # array's other balls -- escaped by the joint plan round the comb, at the run's size: the plan reaches lines
+            # the comb does not (a ball line on a layer below the balls'), so the ball has a tooth and the run takes it)
+            import shutil
+            import joint_escape as je
+            resc = os.path.join(work, 'fanned_refused.kicad_pcb')
+            with contextlib.redirect_stdout(sys.stderr):
+                _rr, reps_ = je.fan_array(fanned, resc, src, list(failed), [], spec['layers'], drops=(),
+                                          far=je.far_face(pcb, src, dest), log=lambda *a: None,
+                                          rungs=[run_rules], exit_rays=True, escape_to=dest)
+            bare_ = {b_.split('#')[0] for b_ in reps_[-1]['bare']}
+            if len(bare_) < len(failed):
+                shutil.copyfile(resc, fanned)
+                fp.copy_pro(resc, fanned)
+                served_ = [short(n) for n in failed if short(n) not in bare_]
+                failed = [n for n in failed if short(n) in bare_]
+                log(f'  {src}: the comb\'s refused ball(s) escaped by the joint plan: {", ".join(served_)}'
+                    + (f'; still refused {failed}' if failed else ''))
+            else:
+                log(f'  {src}: the joint plan has no escape for the comb\'s refused ball(s) either')
     # (a pull pad the fanout joined to its lane, attach_pulls: on its net, none of the net's two ends --
     # coherent_nets.admissible reads BUS_ATTACHED, here and in the whole route's rounds)
     att_s = ','.join(f'{r_}.{n_}' for r_, n_, _t in attached)
