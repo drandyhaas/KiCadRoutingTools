@@ -542,7 +542,9 @@ For each crystal or oscillator it writes one rule that keeps the clock nets
 away from every switch node the pins name: a converter's SW or LX pin, or a
 discrete switch's drain on an inductor net. Where a part's pins carry no
 function, that side is a `candidate` read off the nets: a pin-less buck's
-inductor end, or the one undecoupled output of a pin-less oscillator. The
+inductor end, or the one undecoupled output of a pin-less oscillator. A part
+`emc_roles` calls a connector is never a candidate, so a coax jack with a
+bias-tee inductor on its centre pin proposes no switch node (#1590). The
 gap is 3 mm, a derived default and not a datasheet value. It is twice
 route.py's `--keep-away-free`, so the band reaches past the radius the router
 leaves unpriced around each net's own pins. Each proposal carries

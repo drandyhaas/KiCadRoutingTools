@@ -246,7 +246,13 @@ def _converters(b: _Board, out: List[Dict]) -> None:
     its return (PGND, else GND, else a pad on a ground net). Topology from
     where the inductor's other end goes. A part an inductor shares a net
     with -- the only part on that net a loop forms at -- whose pads carry no
-    pin function at all is `unknown`."""
+    pin function at all is `unknown`.
+
+    A part `_Board.connector` calls a connector is neither (#1590): a coax
+    jack named by its part number has no part class, so `big` keeps it, but
+    the inductor on its centre pin is a bias tee's, not a converter's. It
+    still counts as a part on the net, so the pin-less part beside it is no
+    candidate either."""
     cands: Dict[str, List] = {}
     for L in sorted(b.fps, key=_nkey):
         if not b.inductor(L):
@@ -258,8 +264,9 @@ def _converters(b: _Board, out: List[Dict]) -> None:
             bigs = sorted((r for r in b.net_parts.get(n, ())
                            if r != L and b.big(r)), key=_nkey)
             sw_ics = [r for r in bigs
-                      if any(q.net_id == n and _fn_is(q, _SW_FN)
-                             for q in b.copper[r])]
+                      if not b.connector(r)
+                      and any(q.net_id == n and _fn_is(q, _SW_FN)
+                              for q in b.copper[r])]
             for r in sw_ics:
                 cands.setdefault(r, []).append((L, lp))
             # The pin-less arm: one part on the net, and the net is not
@@ -267,6 +274,7 @@ def _converters(b: _Board, out: List[Dict]) -> None:
             # while an LC filter's output does (ulx3s U8, an ADC whose
             # /analog/ADC3V3 comes through an inductor, is not a candidate).
             if (not sw_ics and len(bigs) == 1
+                    and not b.connector(bigs[0])
                     and not b.has_functions(bigs[0])
                     and not b.decoupled(n)):
                 cands.setdefault(bigs[0], []).append((L, lp))

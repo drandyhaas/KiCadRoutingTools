@@ -239,9 +239,13 @@ def template_hints(doc: Dict, pcb) -> List[str]:
     try:
         from placement.emc_roles import emc_roles
         for r in emc_roles(pcb).get('roles') or []:
-            kind = r.get('role') if r.get('role') != 'unknown' else r.get('candidate')
-            if kind == 'switching converter':
+            if r.get('role') == 'switching converter':
                 why.setdefault(r['part'], []).append('emc_roles reads a switching converter')
+            elif r.get('role') == 'unknown' and r.get('candidate') == 'switching converter':
+                # #1590: a pin-less part is a CANDIDATE, read off an inductor
+                # on its net, and the hint says so
+                why.setdefault(r['part'], []).append(
+                    'emc_roles reads a switching-converter candidate (its pins carry no function)')
     except Exception as ex:      # a hint never stops the check
         why.setdefault('?', []).append(f"emc_roles could not read the board ({type(ex).__name__})")
     on: Dict[int, Set[str]] = {}
