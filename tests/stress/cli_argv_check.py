@@ -401,6 +401,8 @@ REFUSAL_SITES = {
         'if bga_components': ('board', "auto-detects the BGA on the board"),
         'if args.component not in pcb_data.footprints':
             ('board', "the board's footprint references"),
+        'except ValueError from resolve_immovable_refs':
+            ('board', "the board's footprint references (#1562)"),
         'if _stagger_why and (not env_knobs.ALLOW_STAGGERED_BGA)':
             ('board', "the part's pad lattice (#500)"),
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
