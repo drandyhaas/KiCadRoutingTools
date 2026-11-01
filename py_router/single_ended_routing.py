@@ -996,31 +996,39 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     return None
 
 
-def _emit_via_site(pcb_data, gx, gy, x, y):
-    """Where route conversion drills a via the path places at cell (gx, gy):
-    the exact site a #189/#535 unblock validated for that cell, else the cell
-    centre (x, y). The unblock places its via on a 0.05 mm fine pass and the
-    claim it leaves is a grid cell, so the centre can be up to half a cell
-    from the site that was checked: a GND tap edge into U1.4 placed its
-    escape via legally at (147.65, 111.35), dropped it with the edge, and the
-    orphan fallback that changed layer on the cell drilled at (147.6, 111.4),
-    8.5 um inside U1.5's clearance. The track ends stay at the centre, inside
-    the barrel."""
+def _emit_via_site(pcb_data, gx, gy, x, y, net_id):
+    """Where route conversion drills a via net ``net_id``'s path places at
+    cell (gx, gy): the exact site a #189/#535 unblock validated for that cell
+    FOR THIS NET, else the cell centre (x, y). The unblock places its via on a
+    0.05 mm fine pass and the claim it leaves is a grid cell, so the centre
+    can be up to half a cell from the site that was checked: a GND tap edge
+    into U1.4 placed its escape via legally at (147.65, 111.35), dropped it
+    with the edge, and the orphan fallback that changed layer on the cell
+    drilled at (147.6, 111.4), 8.5 um inside U1.5's clearance. The track ends
+    stay at the centre, inside the barrel.
+
+    The registration is the NET's (keyed (net_id, gx, gy)): a site is checked
+    against the copper foreign to the net that placed it, so its own pad may
+    sit inside the clearance another net needs. Read cell-wide, a power net's
+    escape via beside its own BGA ball moved a signal net's later via on the
+    same cell onto that ball, 0.06 mm from it."""
     sites = getattr(pcb_data, '_unblock_via_sites', None)
-    site = sites.get((gx, gy)) if sites is not None else None
+    site = sites.get((net_id, gx, gy)) if sites is not None else None
     return site if site is not None else (x, y)
 
 
 def _emit_via_size(pcb_data, gx, gy, config, net_id=None, x=None, y=None):
     """(size, drill) for a via the route conversion emits at cell (gx, gy). If a #189
-    via-in-pad unblock placed a DRC-legal shrunk via here, return THAT size so the
-    emitted via matches it -- a full config.via_size via at the same cell would graze
-    the neighbouring foreign pad the shrunk via was sized to clear (issue #212).
-    With net_id + mm coords, the registered size is RE-VALIDATED against current
-    copper and shrunk to fit (#339) -- registrations go stale across rip-reroute.
-    Otherwise return the configured via size."""
+    via-in-pad unblock placed a DRC-legal shrunk via here for this net, return THAT
+    size so the emitted via matches it -- a full config.via_size via at the same cell
+    would graze the neighbouring foreign pad the shrunk via was sized to clear (issue
+    #212). Registrations are per net, as _emit_via_site's are: another net's size was
+    never searched by this path, and can be larger than the via it was. With net_id
+    + mm coords, the registered size is RE-VALIDATED against current copper and
+    shrunk to fit (#339) -- registrations go stale across rip-reroute. Otherwise
+    return the configured via size."""
     sizes = getattr(pcb_data, '_unblock_via_sizes', None)
-    rec = sizes.get((gx, gy)) if sizes is not None else None
+    rec = sizes.get((net_id, gx, gy)) if sizes is not None else None
     if rec is None:
         rec = (config.via_size, config.via_drill)
     # Re-validate EVERY emitted via against current copper (#339): the #189
@@ -2696,7 +2704,7 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
             if ((gx1, gy1) not in through_hole_positions
                     and not {layer_names[layer1], layer_names[layer2]}
                     <= partial_spans.get((gx1, gy1), frozenset())):
-                _vx, _vy = _emit_via_site(pcb_data, gx1, gy1, x1, y1)
+                _vx, _vy = _emit_via_site(pcb_data, gx1, gy1, x1, y1, net_id)
                 _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
                                             net_id=net_id, x=_vx, y=_vy)
                 via = Via(
@@ -3169,7 +3177,8 @@ def _power_width_ladder(net_width, layer_width):
 # _register_rung_path_vias, #568/#189) is a DIFFERENT mechanism and stays.
 
 
-def _register_rung_path_vias(pcb_data, obstacles, path, vs, dr, own_rung: int = 0):
+def _register_rung_path_vias(pcb_data, obstacles, path, vs, dr, own_rung: int = 0,
+                             *, net_id):
     """#568: register the small (dia, drill) for the path's via cells where
     the FULL size is blocked -- those transitions exist only by rung-1
     legality, so emission must ship the small rung (#339 re-validates).
@@ -3179,13 +3188,15 @@ def _register_rung_path_vias(pcb_data, obstacles, path, vs, dr, own_rung: int = 
     "Full size" is the via the net ships, judged at ITS rung (#1226): for a
     net at its own #530 via that is `own_rung`, not rung 0 -- the run's via
     is smaller, so a cell legal for it but not for the net's own via was
-    left unregistered and shipped full size after only a rung-1 check."""
+    left unregistered and shipped full size after only a rung-1 check.
+
+    Registered for ``net_id`` only (see _emit_via_site)."""
     sizes = getattr(pcb_data, '_unblock_via_sizes', None)
     if sizes is None:
         sizes = pcb_data._unblock_via_sizes = {}
     for a, b in zip(path, path[1:]):
         if a[2] != b[2] and obstacles.is_via_blocked_rung(a[0], a[1], own_rung):
-            sizes.setdefault((a[0], a[1]), (vs, dr))
+            sizes.setdefault((net_id, a[0], a[1]), (vs, dr))
 
 
 def _rung_search_pair(config, pcb_data):
@@ -3467,11 +3478,13 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
         if sizes is None:
             sizes = {}
             pcb_data._unblock_via_sizes = sizes
-        sizes[(vgx, vgy)] = (v['size'], v['drill'])
+        # Keyed by net: the site was checked against THIS net's foreign
+        # copper only (_emit_via_site).
+        sizes[(net_id, vgx, vgy)] = (v['size'], v['drill'])
         sites = getattr(pcb_data, '_unblock_via_sites', None)
         if sites is None:
             sites = pcb_data._unblock_via_sites = {}
-        sites[(vgx, vgy)] = (v['x'], v['y'])    # _emit_via_site drills here
+        sites[(net_id, vgx, vgy)] = (v['x'], v['y'])    # _emit_via_site drills here
     # Off-pad rung: the tap's pad->via trace is the escape stub -- it ships
     # with the via (both kept or both dropped by the caller's used-via check).
     stub_segments = []
@@ -3713,7 +3726,8 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
                 if not getattr(config, 'plan_probe', False):
                     _register_rung_path_vias(pcb_data, obstacles, _r1[0],
                                              _rp[0], _rp[1],
-                                             own_rung=getattr(config, 'via_rung', 0))
+                                             own_rung=getattr(config, 'via_rung', 0),
+                                             net_id=net_id)
                 return _r1 + ([], [])
 
     # Each placed unblock via holds the retry searches hole-to-hole off its
@@ -6887,7 +6901,7 @@ def _path_to_segments_vias(
             else:
                 # the grid cell, or the site an unblock checked for it
                 vx, vy = _emit_via_site(pcb_data, gx1, gy1,
-                                        *coord.to_float(gx1, gy1))
+                                        *coord.to_float(gx1, gy1), net_id)
                 _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
                                             net_id=net_id, x=vx, y=vy)
                 # #671: ride an existing same-net barrel rather than drilling a

@@ -13,8 +13,8 @@ route_net_with_obstacles leaves endpoint-exempt / allowed-cell /
 unblock-via residue on the map it routes on, which must not leak into the
 run's real maps. (Known benign residue shared with bus corridor probes:
 a boxed-endpoint probe can register small-rung via cells in
-pcb_data._unblock_via_sizes -- a tighten-only statement about board
-geometry that stays correct whether or not the probe path ships.)
+pcb_data._unblock_via_sizes -- a tighten-only statement about the probed
+net's via there that stays correct whether or not the probe path ships.)
 
 The plan's three outputs:
 
