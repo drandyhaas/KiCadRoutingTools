@@ -705,7 +705,9 @@ Use the printed flags as-is:
   escape via too close to a foreign track or pad), `segment_segment` is the #179
   class (two escape **stubs** grazing — typically the 45° fans of two adjacent pads
   of a tight-pitch diff pair, e.g. 0.4 mm-pitch QFN, clipping at the wrist),
-  `total` is all of them. Every class counts only violations that copper THIS
+  `segment_crossing` is two tracks of different nets crossing on one layer (a
+  short no size step clears: report it as a fanout defect), `other` is every
+  remaining row, and `total` is all of them. Every class counts only violations that copper THIS
   fanout laid takes part in (`scope`): an earlier step's grazes are not this
   step's to fix, and a re-run of this fanout cannot clear them. For
   `bga_fanout`, `deferred_to_decap` counts the rows of `total` on a part

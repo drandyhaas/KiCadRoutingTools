@@ -52,6 +52,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from kicad_parser import Footprint, PCBData
 from bga_fanout.types import BGAGrid
 from bga_fanout.geometry import clamp_via_to_pad, endpoint_on_pad
+from geometry_utils import segment_to_segment_distance
 from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
 from routing_defaults import HOLE_TO_HOLE_CLEARANCE
 
@@ -1345,7 +1346,7 @@ def generate_underpad_escape(footprint: Footprint,
                                             p.net_id)
 
     # Issue #393 helpers -------------------------------------------------------
-    def _carve_foreign(anchors, home, net_ids):
+    def _carve_foreign(anchors, home, net_ids, stubs=()):
         """Home cells whose occupancy stamp came from FOREIGN copper.
 
         The home exemption exists so a route can break out of its OWN pad/via
@@ -1355,11 +1356,30 @@ def generate_underpad_escape(footprint: Footprint,
         listed stay blocked despite being in `home`. Same-net stamps are NOT
         carved (crossing own-net copper is not a DRC conflict), so an escape-
         priority extras pass can still exit over its net's pass-1 copper.
+
+        `stubs` (#1566): the dog-bone stub polylines `home` runs along
+        (_home_stubs). A stub's cells are home on EVERY layer, and a
+        lane-walked stub runs gaps away from its ball and its site, so the
+        foreign copper reaching into home is looked for along the stub's
+        segments, not only near the anchor points: a track crossing the
+        middle of a long stub, on an inner layer the stub does not use, was
+        exempt there and the next escape was laid straight across it.
         """
         c_all: set = set()
         c_lay: dict = {}
         if not home:
             return c_all, c_lay
+        stub_segs = [(a, b) for st in stubs for a, b in zip(st, st[1:])]
+        if stub_segs:                    # their bounding box: a cheap reject
+            _sx = [c[0] for sg in stub_segs for c in sg]
+            _sy = [c[1] for sg in stub_segs for c in sg]
+            sbox = (min(_sx), min(_sy), max(_sx), max(_sy))
+
+        def off_stubs(x0, y0, x1_, y1_, reach):
+            """Is the box (x0, y0)-(x1_, y1_) farther than `reach` from
+            every stub segment's box (or are there no stubs)?"""
+            return (not stub_segs or x1_ < sbox[0] - reach or x0 > sbox[2] + reach
+                    or y1_ < sbox[1] - reach or y0 > sbox[3] + reach)
         # Every foreign disk below is kept as its column runs, per layer (None:
         # all layers), and the union is cut to `home` once at the end
         # (cells_in_runs): the disks overlap each other heavily -- adjacent
@@ -1369,8 +1389,11 @@ def generate_underpad_escape(footprint: Footprint,
         runs: dict = {}
 
         def near_pt(x, y, reach):
-            return any((x - ax) ** 2 + (y - ay) ** 2 < reach * reach
-                       for ax, ay in anchors)
+            return (any((x - ax) ** 2 + (y - ay) ** 2 < reach * reach
+                        for ax, ay in anchors)
+                    or (not off_stubs(x, y, x, y, reach)
+                        and any(_pt_seg_dist(x, y, a[0], a[1], b[0], b[1]) < reach
+                                for a, b in stub_segs)))
 
         def add(x, y, r, li):
             col_runs = runs.setdefault(li, {})
@@ -1408,7 +1431,26 @@ def generate_underpad_escape(footprint: Footprint,
                 k0 = max(0, int((t - reach) * n))
                 k1 = min(n, int((t + reach) * n) + 1)
                 idxs.update(range(k0, k1 + 1))
+            # #1566: the samples near a stub segment. Every point of the
+            # segment projects between its two ends' projections, so the
+            # span between them, widened by `reach`, holds every sample
+            # within reach of it (the anchor rule above, for a segment). Asked
+            # after the anchors' samples, which keep their order (the memo).
+            more = set()
+            for (sax, say), (sbx, sby) in stub_segs:
+                if segment_to_segment_distance(x1, y1, x2, y2, sax, say, sbx, sby) \
+                        >= home_r + keep + step:
+                    continue
+                ta, tb = ((((sax - x1) * dx + (say - y1) * dy) / (slen * slen),
+                           ((sbx - x1) * dx + (sby - y1) * dy) / (slen * slen))
+                          if slen > 0 else (0.0, 0.0))
+                k0 = max(0, int((min(ta, tb) - reach) * n))
+                k1 = min(n, int((max(ta, tb) + reach) * n) + 1)
+                more.update(range(k0, k1 + 1))
             for i in idxs:
+                t = i / n
+                add(x1 + dx * t, y1 + dy * t, r_eff, li)
+            for i in sorted(more - idxs):
                 t = i / n
                 add(x1 + dx * t, y1 + dy * t, r_eff, li)
 
@@ -1423,7 +1465,10 @@ def generate_underpad_escape(footprint: Footprint,
                     d2 = (ax - x1) ** 2 + (ay - y1) ** 2
                 if d2 < reach * reach:
                     return True
-            return False
+            if off_stubs(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2), reach):
+                return False
+            return any(segment_to_segment_distance(x1, y1, x2, y2, a[0], a[1], b[0], b[1])
+                       < reach for a, b in stub_segs)
 
         for (x1, y1, x2, y2, half_w, nid, li) in exact_segs:
             keep = half_w + track_width / 2 + clearance + _cx(nid)
@@ -1896,14 +1941,25 @@ def generate_underpad_escape(footprint: Footprint,
         cells = set(occ.disk_cells(p.global_x, p.global_y, max(pad_keep, via_keep)))
         # A dog-bone ball's OWN copper extends to its gap via + stub (#128);
         # foreign stamps inside this lens are re-blocked by _carve_foreign
-        # (callers pass the site as a second carve anchor).
+        # (callers pass the site as a second carve anchor, and the stub as
+        # its `stubs`).
         s = db_site.get(id(p))
         if s is not None:
             cells |= occ.disk_cells(s[0], s[1], via_keep)
-            pts = db_path.get(id(p)) or [(p.global_x, p.global_y), s]
-            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
-                cells |= _stub_cells_seg(ax, ay, bx, by)
+            for pts in _home_stubs(p):
+                for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                    cells |= _stub_cells_seg(ax, ay, bx, by)
         return cells
+
+    def _home_stubs(*pads):
+        """The dog-bone stub polylines home_of(p) runs along, one per pad of
+        `pads` that has a gap site (#1566: _carve_foreign's `stubs`)."""
+        out = []
+        for p in pads:
+            s = db_site.get(id(p))
+            if s is not None:
+                out.append(db_path.get(id(p)) or [(p.global_x, p.global_y), s])
+        return out
 
     def snap_exit_end(pts, li, exempt=None, net_id_for_snap=0):
         """Move an escape's outer free end onto the routing grid (issue #302).
@@ -2227,7 +2283,8 @@ def generate_underpad_escape(footprint: Footprint,
         # partner-vs-partner spacing is the coupled template's own contract.
         carve = _carve_foreign([(pp.global_x, pp.global_y),
                                 (nn.global_x, nn.global_y)],
-                               homes, {pp.net_id, nn.net_id})
+                               homes, {pp.net_id, nn.net_id},
+                               stubs=_home_stubs(pp, nn))
         eff_cache = {}
 
         def eff(L):
@@ -2321,8 +2378,10 @@ def generate_underpad_escape(footprint: Footprint,
         # the partner's own pad/reservation stays exempt (template contract).
         _nets = {pp.net_id, nn.net_id}
         hp, hn = home_of(pp), home_of(nn)
-        cvp = _carve_foreign([(pp.global_x, pp.global_y)], hp, _nets)
-        cvn = _carve_foreign([(nn.global_x, nn.global_y)], hn, _nets)
+        cvp = _carve_foreign([(pp.global_x, pp.global_y)], hp, _nets,
+                             stubs=_home_stubs(pp))
+        cvn = _carve_foreign([(nn.global_x, nn.global_y)], hn, _nets,
+                             stubs=_home_stubs(nn))
         # Same soft keep-out preference as try_coupled (#278): soft-free first.
         for strict in ((True, False) if occ.has_soft else (False,)):
           for sgn in (1.0, -1.0):                # escape direction along the axis
@@ -2864,7 +2923,8 @@ def generate_underpad_escape(footprint: Footprint,
                 _prog(_si + 1, len(_order), f"top-layer escape {p.net_name}")
                 sx, sy = occ.cell(p.global_x, p.global_y)
                 home = home_of(p)
-                carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
+                carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id},
+                                       stubs=_home_stubs(p))
                 _side = _side_of(p)
                 path = None
                 if _side:
@@ -3247,7 +3307,7 @@ def generate_underpad_escape(footprint: Footprint,
                 path = [(sx, sy, home_li), (sx, sy, first)] + [c for c in cells if c[:2] != (sx, sy)]
                 mode = 'via_in_pad'
             carve = _carve_foreign(db_path.get(id(p)) or [(gx, gy)] + ([site] if site else []),
-                                   home, {p.net_id})
+                                   home, {p.net_id}, stubs=_home_stubs(p))
             if os.environ.get('EXACT_LANE_DEBUG'):
                 print(f'    exact-lane {p.net_id} {kind}: LAID {len(lay)} leg(s) {[(a, b, L) for (a, b, L) in lay]}')
             return mode, path, carve
@@ -3282,7 +3342,8 @@ def generate_underpad_escape(footprint: Footprint,
             home = home_of(p)
             site = db_site.get(id(p))
             anchors = [(p.global_x, p.global_y)] + ([site] if site else [])
-            carve = _carve_foreign(db_path.get(id(p)) or anchors, home, {p.net_id})
+            carve = _carve_foreign(db_path.get(id(p)) or anchors, home, {p.net_id},
+                                   stubs=_home_stubs(p))
             goal = goal_cell(mv) if level == 0 else goal_override
             if level == 0 and goal is None:
                 return None, None, None      # the asked gap is not in the window
@@ -3678,7 +3739,7 @@ def generate_underpad_escape(footprint: Footprint,
             home = home_of(p)
             carve = _carve_foreign(db_path.get(id(p))
                                    or [(p.global_x, p.global_y), _site],
-                                   home, {p.net_id})
+                                   home, {p.net_id}, stubs=_home_stubs(p))
             vsx, vsy = occ.cell(*_site)
             path = None
             if getattr(occ, 'pour_soft', None) is not None:
@@ -3709,7 +3770,7 @@ def generate_underpad_escape(footprint: Footprint,
         sx, sy = occ.cell(p.global_x, p.global_y)
         home = home_of(p)
         _anchors = [(p.global_x, p.global_y)] + ([_site] if _site else [])
-        carve = _carve_foreign(_anchors, home, {p.net_id})
+        carve = _carve_foreign(_anchors, home, {p.net_id}, stubs=_home_stubs(p))
         _via_ok = _make_via_ok(p)
 
         _side = _side_of(p)

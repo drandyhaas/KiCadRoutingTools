@@ -4341,14 +4341,17 @@ def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False,
     by = {}
     for r in rows:
         by[r['type']] = by.get(r['type'], 0) + 1
-    out = {
-        'scope': 'copper this step laid',
-        'pad_via': by.get('pad-via', 0),
-        'via_segment': by.get('via-segment', 0),
-        'pad_segment': by.get('pad-segment', 0),
-        'segment_segment': by.get('segment-segment', 0),
-        'total': len(rows),
-    }
+    # #1566: two tracks of different nets crossing on one layer (a short) is
+    # its own key, and `other` holds every row of a type with no key, so the
+    # named keys add up to `total`.
+    named = {'pad_via': 'pad-via', 'via_segment': 'via-segment',
+             'pad_segment': 'pad-segment', 'segment_segment': 'segment-segment',
+             'segment_crossing': 'segment-crossing'}
+    out = {'scope': 'copper this step laid'}
+    for key, typ in named.items():
+        out[key] = by.get(typ, 0)
+    out['other'] = len(rows) - sum(out[k] for k in named)
+    out['total'] = len(rows)
     if deferred_refs is not None:
         parts = [str(r.get('pad_ref') or '').rsplit('.', 1)[0] for r in rows]
         parts = [p for p in parts if p in deferred_refs]
