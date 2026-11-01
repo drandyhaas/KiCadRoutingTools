@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import re
 from typing import List, Tuple, Optional, Dict
 
 from bga_fanout.types import BGAGrid, Channel
@@ -57,6 +58,32 @@ def movable_passive(fp, pcb_data, copper_pads) -> bool:
             and len(copper_pads) <= 2
             and fp.reference not in (getattr(pcb_data, '_fanout_immovable_refs', None)
                                      or ()))
+
+
+def resolve_immovable_refs(pcb_data, refs) -> List[str]:
+    """The references `--immovable-refs` names, checked against the board
+    (#1562).
+
+    Each argument may carry several refs separated by commas or whitespace, so
+    `C17,C31`, `C17, C31` (the form place_fanout_clearance prints its
+    unresolved parts in) and `C17 C31` read alike. A ref that is not a part on
+    the board raises ValueError naming it, as an unknown `--component` is
+    refused: holding a part that does not exist holds nothing, and a typo would
+    otherwise re-fan exactly as before while the log said the part was held.
+    Returns the refs in order, without repeats; [] for none."""
+    out: List[str] = []
+    for arg in refs or ():
+        for ref in re.split(r'[\s,]+', str(arg)):
+            if ref and ref not in out:
+                out.append(ref)
+    known = set(pcb_data.footprints)
+    known.update(fp.reference for fp in pcb_data.footprints.values())
+    unknown = [r for r in out if r not in known]
+    if unknown:
+        raise ValueError(
+            f"--immovable-refs names {len(unknown)} part(s) that are not on "
+            f"the board: {', '.join(unknown)}")
+    return out
 
 
 def decap_deferred_refs(pcb_data, board_path, held=()) -> set:

@@ -52,6 +52,7 @@ from bga_fanout.geometry import (
     calculate_jog_end,
     clamp_via_to_pad,
     immovable_foreign_pads,
+    resolve_immovable_refs,
     via_clears_pad_rects,
     PendingVias,
     thin_drill_to_clear,
@@ -5071,8 +5072,11 @@ def generate_bga_fanout(footprint: Footprint,
             raise
 
     # Every call states its own held set, so a board object the GUI fans
-    # out again does not carry the last call's.
-    pcb_data._fanout_immovable_refs = frozenset(immovable_refs or ())
+    # out again does not carry the last call's. #1562: split on commas too,
+    # and a ref that is not on the board is refused (ValueError), here in the
+    # engine so the GUI's Hold parts field is checked like the CLI flag.
+    immovable_refs = resolve_immovable_refs(pcb_data, immovable_refs)
+    pcb_data._fanout_immovable_refs = frozenset(immovable_refs)
     if immovable_refs:
         print(f"  Holding {len(pcb_data._fanout_immovable_refs)} part(s) immovable: "
               f"{', '.join(sorted(pcb_data._fanout_immovable_refs))}")
@@ -5399,7 +5403,9 @@ def main():
                              "prediction; balls the future pour will reach skip "
                              "their drop via entirely (fanout-time pour-direct).")
     parser.add_argument('--immovable-refs', nargs='+', default=None, metavar='REF',
-                        help='Parts to keep the fanout off as if they were locked (#1521). '
+                        help='Parts to keep the fanout off as if they were locked (#1521), '
+                             'separated by spaces or commas; a ref not on the board is an '
+                             'error (#1562). '
                              'The fanout may lay vias and escapes on an unlocked 2-pad C/R/FB '
                              'part, which place_fanout_clearance.py then moves; name a part '
                              'that step could not clear and the fanout keeps its copper off '
@@ -5484,6 +5490,14 @@ def main():
     if args.component not in pcb_data.footprints:
         print(f"Error: Component {args.component} not found")
         print(f"Available: {list(pcb_data.footprints.keys())[:20]}...")
+        return 1
+
+    # #1562: refused before any work, like an unknown --component above.
+    try:
+        args.immovable_refs = resolve_immovable_refs(
+            pcb_data, args.immovable_refs) or None
+    except ValueError as exc:
+        print(f"Error: {exc}")
         return 1
 
     footprint = pcb_data.footprints[args.component]

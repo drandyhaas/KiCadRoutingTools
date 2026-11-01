@@ -2115,9 +2115,11 @@ Options:
                       overrides the flag (the recorded-manifest A/B switch)
   --immovable-refs REF [REF ...]
                       Parts the fanout keeps its vias and escapes off, as if
-                      they were locked. By default it may lay copper on an
-                      unlocked 2-pad C/R/FB part, which place_fanout_clearance
-                      then moves; name a part that step could not clear and the
+                      they were locked, separated by spaces or commas
+                      (`C17, C31` as place_fanout_clearance prints them); a
+                      ref not on the board is an error, exit 1 (#1562).
+                      By default it may lay copper on an unlocked 2-pad
+                      C/R/FB part, which place_fanout_clearance then moves; name a part that step could not clear and the
                       fanout drops a ball it cannot escape instead (#1521).
                       JSON_SUMMARY.drc_grazes counts the grazes left on parts
                       that step moves as deferred_to_decap (the parts in

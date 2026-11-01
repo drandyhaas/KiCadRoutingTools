@@ -1116,7 +1116,8 @@ class BGAOptionsPanel(wx.ScrolledWindow):
                      wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
         self.immovable_refs = wx.TextCtrl(self, value="")
         self.immovable_refs.SetToolTip(
-            "References (space separated, e.g. 'C12 R4') of parts the fanout "
+            "References (space or comma separated, e.g. 'C12 R4' or "
+            "'C12, R4'; a part not on the board is refused) of parts the fanout "
             "keeps its vias and escapes off, as if they were locked. By "
             "default it may lay copper on an unlocked 2-pad C/R/FB part, "
             "which the cap placement pass then moves; name a part that pass "
@@ -1323,7 +1324,10 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             'plane_net_layers': self.plane_net_layers_ctrl.GetValue().split()
                                 or None,
             # #1521: parts held immovable, [] -> None when empty.
-            'immovable_refs': self.immovable_refs.GetValue().split() or None,
+            # #1562: commas separate too, as the CLI reads them (the engine
+            # checks every ref is on the board).
+            'immovable_refs': self.immovable_refs.GetValue().replace(
+                ',', ' ').split() or None,
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
