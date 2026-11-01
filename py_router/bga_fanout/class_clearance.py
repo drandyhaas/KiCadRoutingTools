@@ -31,8 +31,14 @@ rule sets between two of them, and a rule between such groups is held on the
 obstacle side, folded into the class map the re-escape takes
 (`rule_class_map`).
 
-A board with no class above the run clearance and no such rule never reaches
-here.
+#1567: the fab-floor rescues lay copper below the run clearance, and mark it
+with the clearance it was laid at (`mark_laid`). A pair with such copper is
+graded at a class between that clearance and the run clearance too, and a
+ball of such a class re-escapes with its rescue stopped at its class. Copper
+laid at the run clearance is graded as before.
+
+A board with no class above the lowest clearance a rescue may lay copper at
+(`laid_floor`) and no such rule never reaches here.
 """
 from __future__ import annotations
 
@@ -61,6 +67,34 @@ def _pair_config(pcb_data, base, net_clearances, routed_net_ids=None):
         install_layer_clearances(cfg, None, None, pcb_data)
     cfg.set_net_clearances(dict(net_clearances), ())
     return cfg, install_pair_rule_channels(cfg, pcb_data, routed_net_ids)
+
+
+def laid_floor(pcb_data, clearance, clearance_floor=0.0):
+    """#1567: the lowest clearance an escape run at `clearance` may lay copper
+    at -- the fab-floor rescues' tightest rung (`_underpad_shrink_rescue`,
+    `_underpad_rip_rescue`), stopped at `clearance_floor` -- or `clearance`
+    itself when the policy allows no descent (--escalation off)."""
+    from list_nets import escalation_rungs
+    ncu = len(pcb_data.board_info.copper_layers or []) or 4
+    rungs = [f['clearance'] for f in escalation_rungs(ncu)]
+    if not rungs:
+        return clearance
+    return min(clearance, max(min(clearance, min(rungs)), clearance_floor))
+
+
+#: #1567: the key on an engine track/via dict that a fab-floor rescue laid
+#: below the run clearance: the clearance it was laid at.
+LAID = 'laid_clearance'
+
+
+def mark_laid(items, clearance, nominal):
+    """#1567: mark the engine dicts a rescue laid at `clearance` when that
+    is below the run's `nominal` clearance (unmarked copper was laid at it).
+    Returns `items`."""
+    if clearance < nominal - 1e-9:
+        for d in items:
+            d[LAID] = clearance
+    return items
 
 
 def _part_nets(footprint):
@@ -150,19 +184,29 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
     a track-scoped rule on a track pair -- and graded with check_drc's
     primitives at that value; only pairs whose value stands above `base` are
     graded, and every pair such a rule binds (a rescue rung may lay copper
-    below `base`, and the rule holds there too). `partners` ({frozenset({p,
-    n})}) are coupled diff pairs, spaced by the caller's --diff-pair-gap and
-    not graded here. `fixed` = (n_tracks, n_vias): the leading items already
-    kept -- graded as obstacles, never reported against each other.
+    below `base`, and the rule holds there too). #1567: a pair with copper a
+    rescue laid below `base` (marked `LAID`) is priced from the clearance it
+    was laid at instead, and graded when a class stands above that.
+    `partners` ({frozenset({p, n})}) are coupled diff pairs, spaced by the
+    caller's --diff-pair-gap and not graded here. `fixed` = (n_tracks,
+    n_vias): the leading items already kept -- graded as obstacles, never
+    reported against each other.
 
-    Returns [(a, b, need)] where a is ('t', i) or ('v', i) into the lists and
-    b is the same for this call's copper or ('board', None) for copper that
-    was there before."""
+    Returns [(a, b, need, low)] where a is ('t', i) or ('v', i) into the
+    lists, b is the same for this call's copper or ('board', None) for copper
+    that was there before, and `low` says the pair is graded only for copper
+    laid below `base` (#1567)."""
     from check_drc import (check_segment_overlap, check_via_segment_overlap,
                            check_via_via_overlap, check_pad_segment_overlap,
                            check_pad_via_overlap, _pad_has_no_copper)
     from geometry_utils import via_on_layer
     hot = {n for n, c in net_clearances.items() if c > base + 1e-9}
+    # #1567: the clearance each new item was laid at (a rescue's mark, else
+    # `base`), and the classes at or below `base` such copper went under
+    laid = {('t', i): float(t.get(LAID, base)) for i, t in enumerate(tracks)}
+    laid.update({('v', i): float(v.get(LAID, base)) for i, v in enumerate(vias)})
+    lo = min(laid.values(), default=base)
+    low = {n for n, c in net_clearances.items() if lo + 1e-9 < c <= base + 1e-9}
     if not (tracks or vias):
         return []
     if cfg is None:
@@ -171,10 +215,10 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
         from kicad_dru import PairRuleVerdicts
         rules = PairRuleVerdicts(cfg, pcb_data)
     ruled = _ruled(rules)
-    if not hot and not ruled:
+    if not hot and not low and not ruled:
         return []
     board_cu = list(pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu'])
-    reach = max([net_clearances[n] for n in hot]
+    reach = max([net_clearances[n] for n in hot | low]
                 + ([rules.max_value(base)] if ruled else [])) + 0.05
 
     new = ([('t', i, 'seg', _seg_obj(t)) for i, t in enumerate(tracks)]
@@ -219,11 +263,21 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
         tag, i = ref
         return (tag == 't' and i < fixed[0]) or (tag == 'v' and i < fixed[1])
 
-    def graded(need, na, nb, layer=None, kind='layer', types=None):
-        """A pair above `base`, and (#1565) any pair a scoped or track rule
-        binds: a rescue rung may have laid it below `base`."""
-        return need > base + 1e-9 or (ruled and rules.binds(
-            na, nb, layer, kind=kind, types=types))
+    def verdict(na, nb, at, layer=None, kind='layer', types=None):
+        """(need, low) for a graded pair, else (None, False). A pair above
+        `base`, and (#1565) any pair a scoped or track rule binds: a rescue
+        rung may have laid it below `base`; both priced from `base`. Else
+        (#1567) a pair of a `low` class with copper laid at `at` < `base`,
+        priced from `at` and graded when that value stands above it."""
+        need = rules(na, nb, layer, base=base, kind=kind, types=types)
+        if need > base + 1e-9 or (ruled and rules.binds(
+                na, nb, layer, kind=kind, types=types)):
+            return need, False
+        if at < base - 1e-9 and (na in low or nb in low):
+            need = rules(na, nb, layer, base=at, kind=kind, types=types)
+            if need > at + 1e-9:
+                return need, True
+        return None, False
 
     out = []
     n_new = len(new)
@@ -241,19 +295,21 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
             ref_b, kind_b, ob, _bb, nb = items[b]
             if nb == na and na:
                 continue                         # same net
-            if not ruled and na not in hot and nb not in hot:
+            if (not ruled and na not in hot and nb not in hot
+                    and na not in low and nb not in low):
                 continue
             if frozenset((na, nb)) in partners:
                 continue
             if is_fixed(ref_a) and (ref_b[0] == 'board' or is_fixed(ref_b)):
                 continue
             hit = False
-            need = base
+            need, is_low = None, False
+            at = min(laid[ref_a], laid.get(ref_b, base))
             if kind_a == 'seg' and kind_b == 'seg':
                 if oa.layer != ob.layer:
                     continue
-                need = rules(na, nb, oa.layer, base=base, kind='track')
-                if graded(need, na, nb, oa.layer, 'track'):
+                need, is_low = verdict(na, nb, at, oa.layer, kind='track')
+                if need is not None:
                     hit = check_segment_overlap(oa, ob, need, _MARGIN)[0]
             elif {kind_a, kind_b} == {'seg', 'via'}:
                 sv, vv = (oa, ob) if kind_a == 'seg' else (ob, oa)
@@ -261,25 +317,25 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
                     continue
                 _t = (('track' if kind_a == 'seg' else 'via',),
                       ('track' if kind_b == 'seg' else 'via',))
-                need = rules(na, nb, sv.layer, base=base, types=_t)
-                if graded(need, na, nb, sv.layer, types=_t):
+                need, is_low = verdict(na, nb, at, sv.layer, types=_t)
+                if need is not None:
                     hit = check_via_segment_overlap(vv, sv, need, _MARGIN)[0]
             elif kind_a == 'via' and kind_b == 'via':
-                need = rules(na, nb, base=base, kind='stack')
-                if graded(need, na, nb, kind='stack'):
+                need, is_low = verdict(na, nb, at, kind='stack')
+                if need is not None:
                     hit = check_via_via_overlap(oa, ob, need, _MARGIN)[0]
             elif kind_b == 'pad':
                 _pt = (('pad', getattr(ob, 'pad_type', None) or 'smd'),)
                 if kind_a == 'seg':
-                    need = rules(na, nb, oa.layer, base=base, types=(('track',), _pt))
-                    if graded(need, na, nb, oa.layer, types=(('track',), _pt)):
+                    need, is_low = verdict(na, nb, at, oa.layer, types=(('track',), _pt))
+                    if need is not None:
                         hit = check_pad_segment_overlap(ob, oa, need, board_cu, _MARGIN)[0]
                 else:
-                    need = rules(na, nb, base=base, kind='stack', types=(('via',), _pt))
-                    if graded(need, na, nb, kind='stack', types=(('via',), _pt)):
+                    need, is_low = verdict(na, nb, at, kind='stack', types=(('via',), _pt))
+                    if need is not None:
                         hit = check_pad_via_overlap(ob, oa, need, board_cu, _MARGIN)[0]
             if hit:
-                out.append((ref_a, ref_b, need))
+                out.append((ref_a, ref_b, need, is_low))
     return out
 
 
@@ -354,16 +410,20 @@ def _chains(tracks, vias, pads):
     return of, balls
 
 
-def _drop_refs(violations, floor):
+def _drop_refs(violations, floor, klass):
     """The copper each short pair takes off: the side(s) whose class the
     pair's value is (that class priced the pair, so that ball re-escapes at
-    it), or the new side of a pair against copper already on the board."""
+    it), or the new side of a pair against copper already on the board.
+    `floor(ref)` is the side's floor from the run clearance up; a pair graded
+    for a class at or below the run clearance (#1567) reads `klass(ref)`, the
+    side's own class, since the run clearance would name both sides."""
     drop = set()
-    for a, b, need in violations:
+    for a, b, need, low in violations:
         if b[0] == 'board':
             drop.add(a)
             continue
-        sides = [r for r, f in ((a, floor(a)), (b, floor(b))) if f >= need - 1e-9]
+        f = klass if low else floor
+        sides = [r for r in (a, b) if f(r) >= need - 1e-9]
         drop.update(sides or (a, b))
     return drop
 
@@ -424,9 +484,10 @@ def class_reescape(core, args, result):
         net_of = {('t', i): t['net_id'] for i, t in enumerate(tr)}
         net_of.update({('v', i): v['net_id'] for i, v in enumerate(vi)})
         if keep_from is None:
-            refs = _drop_refs(viol, lambda r: floor_of(net_of[r]))
+            refs = _drop_refs(viol, lambda r: floor_of(net_of[r]),
+                              lambda r: nc.get(net_of[r], 0.0))
         else:
-            refs = {r for a, b, _n in viol for r in (a, b)
+            refs = {r for a, b, _n, _l in viol for r in (a, b)
                     if (r[0] == 't' and r[1] >= keep_from[0])
                     or (r[0] == 'v' and r[1] >= keep_from[1])}
         of, touched = _chains(tr, vi, fp.pads)
@@ -441,6 +502,7 @@ def class_reescape(core, args, result):
 
     from bga_fanout import ball_has_copper, unserved_nets
     tw = args['track_width']
+    lo = min([float(d.get(LAID, base)) for d in tracks + vias], default=base)
     viol = class_violations(pcb, tracks, vias, base, nc, partners, cfg=cfg,
                             rules=rules)
     tracks, vias, balls = chain_split(tracks, vias, viol)
@@ -454,17 +516,21 @@ def class_reescape(core, args, result):
     if not balls and not bare:
         return tracks, vias, vias_rm, failed
     print(f"  {what}: {len(viol)} pair(s) of this escape fell short "
-          f"of their class clearance at {base:g}mm; re-escaping {len(balls)} "
+          f"of their class clearance at {base:g}mm"
+          + (f" (a fab-floor rescue laid copper at {lo:g}mm)" if lo < base - 1e-9 else '')
+          + f"; re-escaping {len(balls)} "
           f"ball(s) at their class"
           + (f", and {len(bare)} bare ball(s) of a wider class" if bare else ''))
     balls = balls + bare
 
     def descent_floor(net_id, f):
         """The clearance a ball's rescue rungs stop at: its class above the
-        run clearance, else (#1565) the widest rule binding it."""
+        run clearance, else (#1565) the widest rule binding it, and (#1567)
+        never below its own class."""
         if f > base + 1e-9:
             return f
-        return max(args.get('_clearance_floor', 0.0), _rule_floor(net_id))
+        return max(args.get('_clearance_floor', 0.0), _rule_floor(net_id),
+                   nc.get(net_id, 0.0))
 
     groups: Dict[tuple, List] = defaultdict(list)
     for p in balls:

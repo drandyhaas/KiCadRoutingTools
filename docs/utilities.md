@@ -2137,7 +2137,10 @@ Options:
 
 `--clearance` sets the Default net class for the run; every other class is
 read from the board's `.kicad_pro`, as `route.py` reads it, and the escape is
-spaced at KiCad's pairwise `max(clearance, class A, class B)` (#1529). The
+spaced at KiCad's pairwise `max(clearance, class A, class B)` (#1529). That
+holds for the copper the fab-floor rescue lays below `--clearance` too: a
+class between the two is graded there, and a ball that cannot meet its class
+is reported unescaped rather than shipped below it (#1567). The
 output project keeps the classes, or caps each at `min(class, ceiling)` under
 `--clearance-ceiling` -- in a chain pass the ceiling, as on the route steps.
 

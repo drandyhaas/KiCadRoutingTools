@@ -2271,6 +2271,7 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
     """
     from bga_fanout.underpad import generate_underpad_escape
     from kicad_parser import Segment as _Seg, Via as _Via
+    from bga_fanout.class_clearance import mark_laid
 
     ncu = (len(pcb_data.board_info.copper_layers)
            if pcb_data.board_info.copper_layers else 4)
@@ -2338,6 +2339,8 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
         finally:
             del pcb_data.segments[n_seg0:]
             del pcb_data.vias[n_via0:]
+        # #1567: copper laid below the run clearance says so, for the class check
+        mark_laid(t2 + v2, cl, cl0)
         _left = [p for p in _bare if not ball_has_copper(p, vias_to_add + v2 + _bv, tracks + t2 + _bt, _twb)]
         rescued = len(_bare) - len(_left)
         # Always report the attempt: a silent no-op rung is indistinguishable
@@ -2609,6 +2612,7 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
     (a pair re-run would fall back single-ended)."""
     from bga_fanout.underpad import generate_underpad_escape
     from kicad_parser import Segment as _Seg, Via as _Via
+    from bga_fanout.class_clearance import mark_laid
 
     ncu = (len(pcb_data.board_info.copper_layers)
            if pcb_data.board_info.copper_layers else 4)
@@ -2620,7 +2624,8 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
     tw = min(up_kw['track_width'], floor['track_width']) if floor else up_kw['track_width']
     vs = min(up_kw['via_size'], floor['via_diameter']) if floor else up_kw['via_size']
     vd = min(up_kw['via_drill'], floor['via_drill']) if floor else up_kw['via_drill']
-    cl = min(up_kw['clearance'], floor['clearance']) if floor else up_kw['clearance']
+    cl0 = up_kw['clearance']
+    cl = min(cl0, floor['clearance']) if floor else cl0
     cl = max(cl, clearance_floor)       # #1529: never below a re-escape's class
 
     dp_nets = set()
@@ -2726,6 +2731,7 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
             finally:
                 del pcb_data.segments[n_seg0:]
                 del pcb_data.vias[n_via0:]
+            mark_laid(t2 + v2, cl, cl0)           # #1567
             if fnet not in f2 and victim not in f2:
                 return {
                     'tracks': t2base + t2, 'vias': v2base + v2,
@@ -2748,6 +2754,8 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                 tw, cl, up_kw.get('exit_margin', 0.5))
             if fnet in f_surf:
                 return None
+            _had = {id(t) for t in t2base}
+            mark_laid([t for t in t_surf if id(t) not in _had], cl, cl0)   # #1567
             n_seg0, n_via0 = len(pcb_data.segments), len(pcb_data.vias)
             try:
                 for t in t_surf:
@@ -2770,6 +2778,7 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
             finally:
                 del pcb_data.segments[n_seg0:]
                 del pcb_data.vias[n_via0:]
+            mark_laid(t3 + v3, cl, cl0)           # #1567
             if victim not in f3:
                 return {
                     'tracks': t_surf + t3, 'vias': v2base + v3,
@@ -2788,6 +2797,8 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                     footprint, pcb_data, t_surf, v2base, [victim],
                     tw, cl, up_kw.get('exit_margin', 0.5))
                 if victim not in f_surf2:
+                    _had = {id(t) for t in t_surf}
+                    mark_laid([t for t in t_surf2 if id(t) not in _had], cl, cl0)   # #1567
                     return {
                         'tracks': t_surf2, 'vias': v2base,
                         'evn': {victim: None},
@@ -3187,10 +3198,15 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # #1565: a class/type-scoped or track-scoped .kicad_dru rule binding a
     # net of the part is priced the same way (rules_bind: a board with no
     # such rule never reaches it).
-    from bga_fanout.class_clearance import rules_bind
+    # #1567: a class counts when it stands above the lowest clearance this
+    # escape may lay copper at (laid_floor: the fab-floor rescue's), not
+    # above the run clearance -- the rescue lays copper below a class
+    # between the two.
+    from bga_fanout.class_clearance import rules_bind, laid_floor
     if (not _class_checked and _pad_filter is None and not _single_pass
             and ((net_clearances
-                  and any(c > clearance + 1e-9 for c in net_clearances.values()))
+                  and max(net_clearances.values())
+                  > laid_floor(pcb_data, clearance, _clearance_floor) + 1e-9)
                  or rules_bind(pcb_data, footprint, clearance))):
         from bga_fanout.class_clearance import class_reescape
         _args = dict(_entry_args, _class_checked=True, clearance=clearance)
