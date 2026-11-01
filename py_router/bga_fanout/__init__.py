@@ -1017,6 +1017,7 @@ def manage_vias(
     clamped_count = 0
     floor_pads = 0
     escalated_count = 0
+    _esc_vias, _floor_vias = [], []    # #1579: what the warnings state
 
     # #620: this run's OWN output, queryable as it grows. Every guard above
     # scans `pcb_data`, and `vias_to_add` was appended to and never read back,
@@ -1049,8 +1050,10 @@ def manage_vias(
             clamped_count += 1
         elif status == 'floor':
             floor_pads += 1
+            _floor_vias.append((v_size, v_drill))
         if rung > 0:
             escalated_count += 1
+            _esc_vias.append((v_size, v_drill))
         if not via_clears_pad_rects(pad_x, pad_y, v_size / 2.0,
                                     clearance, immovable_pads,
                                     hole_clearance=_hole_clr):
@@ -1238,11 +1241,23 @@ def manage_vias(
     if clamped_count:
         print(f"  Clamped {clamped_count} via-in-pad(s) to fit their pad edge (#202)")
     if escalated_count:
-        warn_fab_escalation(f"{escalated_count} via-in-pad(s) (sub-0.45mm pads)")
+        warn_fab_escalation(f"{escalated_count} via-in-pad(s) (sub-0.45mm pads)",
+                            vias=_esc_vias)
     if floor_pads:
-        print(f"  WARNING: {floor_pads} pad(s) smaller than the fab via floor "
-              f"({fab_floor_min(copper)['via_diameter']:.2f}mm dia); via held at the "
-              f"floor and still bulges past the pad edge")
+        # #1579: the via actually HELD -- the deepest fab rung, or the request
+        # itself when no rung is smaller (--escalation off, or a board ring
+        # that raises every rung above it)
+        _floor_dia = fab_floor_min(copper)['via_diameter']
+        _held = min(_floor_vias)[0] if _floor_vias else _floor_dia
+        if abs(_held - _floor_dia) < 1e-9:
+            print(f"  WARNING: {floor_pads} pad(s) smaller than the fab via floor "
+                  f"({_floor_dia:.2f}mm dia); via held at the "
+                  f"floor and still bulges past the pad edge")
+        else:
+            print(f"  WARNING: {floor_pads} pad(s) smaller than the via, and no "
+                  f"via the escalation policy allows is smaller than the "
+                  f"{_held:.2f}mm asked for; via kept at {_held:.2f}mm and still "
+                  f"bulges past the pad edge")
     # #620 disclosure. Separate from the #253/#370 line below because these are
     # this run's own vias meeting each other, which the reader cannot act on in
     # the same way: the levers are the pitch, the drill and the fab tier.

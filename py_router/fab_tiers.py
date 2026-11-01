@@ -110,7 +110,9 @@ FabBucket = collections.namedtuple(
 # bare default run is unchanged; 'advanced' is the JLC tighter/more-costly tier and
 # is also the rung 'auto' escalates to. 'pad_hole_to_hole' and the annular
 # recommended/abs-min split are per the JLC spec; 'annular' is informational (the
-# fan-out via clamp derives its own min annular from the via dia/drill).
+# fan-out via clamp derives its own min annular from the via dia/drill). A BOARD's
+# declared ring is not: under --escalation board it raises each rung's via to
+# hold it round the rung's drill (_apply_board_floors, #1579).
 _FAB_FLOORS = {
     2: {
         'standard': {'clearance': 0.127, 'track_width': 0.127,
@@ -584,20 +586,55 @@ def _tier_rungs(copper_layer_count, tier, overrides):
     return rungs
 
 
+def _via_holding_ring(diameter, drill, ring):
+    """The via diameter that holds an annular ring of ``ring`` mm round
+    ``drill``: ``diameter`` itself when its own ring already does, else
+    ``drill + 2 * ring``, rounded UP to the micron the descent sites round a
+    via to (``round(.., 3)``), so the ring it ships is never a rounding
+    under the floor."""
+    import math
+    need = drill + 2.0 * ring
+    if diameter >= need - 1e-9:
+        return diameter
+    return math.ceil(round(need, 6) * 1000.0 - 1e-6) / 1000.0
+
+
 def _apply_board_floors(rungs, floors=None):
     """'board' policy: no rung may sit below a floor the board declares
     (``floors`` defaults to the process-wide board floors; a caller may pass
     the per-net .kicad_dru floors on top). Raising a rung can make two rungs
-    identical; collapse those."""
+    identical; collapse those.
+
+    The annular ring is a property of the via, not a key a rung can be
+    raised on alone (#1579): each key used to be raised by itself, so on a
+    board declaring ring 0.12 / via 0.25 / hole 0.15 the fine rung read
+    ``annular`` 0.12 beside a 0.3/0.15 via (ring 0.075), the advanced one
+    beside 0.25/0.15 (ring 0.05), and every descent site -- they read the
+    diameter and the drill -- shipped those vias. The rung's diameter is now
+    raised to hold the board's ring round its drill, as list_nets sizes the
+    working via (#1349, ``via_held = drill + 2 * ring``). The ring is the
+    BOARD's: ``floors['annular']``, else, under ``--escalation board``, the
+    process-wide floor (a per-net call raising a drill must keep it too). A
+    tier's own ``annular`` key is informational and never enforced (the
+    standard 0.45/0.20 via rings 0.125 under its 0.20 key), so ``--escalation
+    fab`` -- which passes no ring -- is unchanged."""
     floors = _BOARD_FLOORS if floors is None else floors
     if not floors:
         return rungs
+    ring = floors.get('annular')
+    if ring is None and _ESCALATION == 'board':
+        ring = _BOARD_FLOORS.get('annular')
     out = []
     for r in rungs:
         rr = dict(r)
         for k, v in floors.items():
             if k in rr and v is not None and rr[k] < v:
                 rr[k] = v
+        if ring and rr.get('via_diameter') and rr.get('via_drill'):
+            rr['via_diameter'] = _via_holding_ring(rr['via_diameter'],
+                                                   rr['via_drill'], ring)
+            if rr.get('annular') is not None and rr['annular'] < ring:
+                rr['annular'] = ring
         if not out or rr != out[-1]:
             out.append(rr)
     return out
@@ -1221,12 +1258,29 @@ def escalation_target():
     return 'board_floors' if _ESCALATION == 'board' else 'advanced'
 
 
-def warn_fab_escalation(context):
+def delivered_via_phrase(vias):
+    """``'smallest via delivered 0.39/0.15 mm, ring 0.12 mm'`` for the
+    ``(diameter, drill)`` pairs a descent shipped, or '' for none: the via a
+    warning states (#1579), rather than one the policy is assumed to reach."""
+    pairs = [(float(d), float(h)) for d, h in (vias or ()) if d and h]
+    if not pairs:
+        return ''
+    d, h = min(pairs)
+    return f"smallest via delivered {d:g}/{h:g} mm, ring {round((d - h) / 2.0, 4):g} mm"
+
+
+def warn_fab_escalation(context, vias=None):
     """Emit a one-line warning (deduped per run, per context) that a routing step
     dropped below the standard floor -- to the more-costly advanced floor, or,
     under ``--escalation board``, to the board's own declared minimums (see
     :func:`escalation_target`) -- and count it in the ledger (every call counts,
-    deduped or not)."""
+    deduped or not).
+
+    ``vias``: the ``(diameter, drill)`` pairs the descent delivered, when the
+    caller has them; under ``--escalation board`` the warning states the
+    smallest (#1579). It used to say the policy "never reaches the advanced
+    0.25/0.15 via", which a board declaring a 0.25 via and a 0.15 hole
+    reaches, while qfn_fanout shipped exactly that via under it."""
     if not context:
         return
     _LEDGER['fab_tier'].append(context)
@@ -1237,9 +1291,10 @@ def warn_fab_escalation(context):
         # Bounded by the declaration: do NOT claim the advanced floor, and do
         # not offer --fab-overrides as the lever -- the board already states
         # the limit and the policy is already honouring it.
+        _what = delivered_via_phrase(vias)
         print(f"  WARNING: {context}: dropped below the standard fab floor to "
               f"the BOARD's own declared minimums; --escalation board bounds it "
-              f"there (it never reaches the advanced 0.25/0.15 via). Pass "
+              f"there{f' ({_what})' if _what else ''}. Pass "
               f"--fab-tier standard for a hard floor, or --escalation off to "
               f"forbid the descent entirely")
         return

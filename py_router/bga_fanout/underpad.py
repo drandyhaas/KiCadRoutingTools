@@ -1083,6 +1083,7 @@ def generate_underpad_escape(footprint: Footprint,
     # real (smaller) via -- letting neighbouring escapes route past it. Done
     # per-pad, so on a mixed-pad-size array only the small pads get smaller vias.
     clamp_stats = {'clamped': 0, 'floor': 0, 'escalated': 0}
+    _clamp_vias = {'escalated': [], 'floor': []}   # #1579: what the warnings state
     # #618's policy answer: DISCLOSE. Sites this engine declines to put a
     # via-in-pad on because their hole is inside the hole-to-hole floor --
     # 'sites' for the single-ended centre fallback, 'coupled' for a diff pair.
@@ -1124,8 +1125,10 @@ def generate_underpad_escape(footprint: Footprint,
             clamp_stats['clamped'] += 1
         elif status == 'floor':
             clamp_stats['floor'] += 1
+            _clamp_vias['floor'].append((cs, cd))
         if rung > 0:
             clamp_stats['escalated'] += 1
+            _clamp_vias['escalated'].append((cs, cd))
         return cs, cd, cs / 2 + track_width / 2 + clearance + margin
 
     def vkeep_for_pad(p):
@@ -4176,11 +4179,24 @@ def generate_underpad_escape(footprint: Footprint,
                      else "") + "]")
         if clamp_stats['escalated']:
             warn_fab_escalation(f"under-pad {clamp_stats['escalated']} via-in-pad(s) "
-                                f"(sub-0.45mm pads)")
+                                f"(sub-0.45mm pads)",
+                                vias=_clamp_vias['escalated'])
         if clamp_stats['floor']:
-            print(f"  Under-pad: WARNING {clamp_stats['floor']} pad(s) smaller than "
-                  f"the fab via floor ({fab_floor_min(_copper)['via_diameter']:.2f}mm "
-                  f"dia); via held at the floor and still bulges past the pad edge")
+            # #1579: the via actually HELD -- the deepest fab rung, or the
+            # request itself when no rung is smaller (--escalation off, or a
+            # board ring that raises every rung above it)
+            _floor_dia = fab_floor_min(_copper)['via_diameter']
+            _held = (min(_clamp_vias['floor'])[0] if _clamp_vias['floor']
+                     else _floor_dia)
+            if abs(_held - _floor_dia) < 1e-9:
+                print(f"  Under-pad: WARNING {clamp_stats['floor']} pad(s) smaller than "
+                      f"the fab via floor ({_floor_dia:.2f}mm "
+                      f"dia); via held at the floor and still bulges past the pad edge")
+            else:
+                print(f"  Under-pad: WARNING {clamp_stats['floor']} pad(s) smaller "
+                      f"than the via, and no via the escalation policy allows is "
+                      f"smaller than the {_held:.2f}mm asked for; via kept at "
+                      f"{_held:.2f}mm and still bulges past the pad edge")
         # #618: the hole-to-hole floor's cost, disclosed. Refusing these sites
         # is not new (the floor has been enforced since #756); being able to
         # SEE that the floor is what refused them is. Balls that lose their

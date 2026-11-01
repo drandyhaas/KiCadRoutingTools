@@ -764,6 +764,25 @@ class RoutingDialog(wx.Dialog):
             v = mins.get(src)
             if isinstance(v, (int, float)) and v > 1e-9:
                 out[key] = float(v)
+        # #1579: the annular ring, which every descent now holds round its
+        # drill (fab_tiers._apply_board_floors), read as the CLI reads
+        # min_via_annular_width: the ring the board DECLARES while the
+        # writeback runs, and with it off what KiCad grades the unchanged
+        # project at -- the live value, KiCad's factory one where nothing
+        # declared it (#1287, graded_board_floors).
+        try:
+            import pcbnew
+            from fix_kicad_drc_settings import live_declared_rules
+            _b = pcbnew.GetBoard()
+            if _b is not None:
+                _ring = _b.GetDesignSettings().m_ViasMinAnnularWidth / 1e6
+                _fix = getattr(self, 'fix_drc_check', None)
+                _writeback = bool(_fix.GetValue()) if _fix is not None else True
+                if _ring > 1e-9 and (not _writeback or 'min_via_annular_width' in (
+                        live_declared_rules(_b, ('min_via_annular_width',)) or {})):
+                    out['annular'] = round(float(_ring), 6)
+        except Exception:
+            pass
         if 'clearance' in out:
             # #1369: a min_clearance the writeback capped at a pad clearance
             # override is not a board minimum; the board's records say what
