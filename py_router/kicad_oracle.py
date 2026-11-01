@@ -2346,12 +2346,20 @@ def oracle_reconnect(board_file: str, net_names, config,
                 _off_board_end = (make_off_board_link_end_test(pcb_data)
                                   or False)
             if _off_board_end:
+                # A ZONE end is never off the board: the fill is clipped to
+                # the outline, and kicad-cli anchors a zone end at the zone
+                # outline's first corner, which on a non-rectangular board
+                # can lie outside the outline although every island of the
+                # fill is inside it. Only a pad, track or via end says where
+                # copper would have to be drawn.
+                def _end_off(nid, end):
+                    return (end[3] != 'zone'
+                            and _off_board_end(nid, end[0], end[1]))
                 _on_board = []
                 for l in ours:
                     _lnid = name_to_id.get(l[0])
                     if _lnid is not None and (
-                            _off_board_end(_lnid, l[1][0], l[1][1])
-                            or _off_board_end(_lnid, l[2][0], l[2][1])):
+                            _end_off(_lnid, l[1]) or _end_off(_lnid, l[2])):
                         if _link_key(l) not in exempt_keys:
                             exempt_keys.add(_link_key(l))
                             off_board_links += 1

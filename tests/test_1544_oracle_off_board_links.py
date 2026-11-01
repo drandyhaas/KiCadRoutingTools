@@ -19,7 +19,11 @@ them again. What each case pins:
   in `remaining` (the net IS open), is reported in `off_board`, and is kept
   out of `remaining_links`, so no custody or forced edge routes it; the
   on-board link beside it is routed as before;
-* a round whose only links end off the board routes nothing and says so.
+* a round whose only links end off the board routes nothing and says so;
+* a zone|zone link is never exempt, even when its anchors lie off the board:
+  kicad-cli anchors a zone end at the zone outline's first corner, which on a
+  non-rectangular board can sit outside the outline while the islands it
+  names are inside it.
 
 The link source and the routers are stubbed, so no KiCad is needed.
 
@@ -188,9 +192,23 @@ def test_a_round_of_only_off_board_links_routes_nothing():
     print("  PASS: nothing routed, the net reported open, no custody link")
 
 
+# a zone|zone link anchored at an outline corner outside the board outline
+ZONE = ('A', (-3.0, -3.0, 'F.Cu', 'zone'), (-3.0, -3.0, 'B.Cu', 'zone'))
+
+
+def test_a_zone_end_off_the_outline_is_not_exempt():
+    orc, clustered, log = _run_oracle([ZONE])
+    assert orc.get('off_board') == 0, orc
+    assert 'OUTSIDE the board outline' not in log, log
+    assert orc.get('rounds') == 1, \
+        f"the zone link never reached the link loop: {orc}"
+    print("  PASS: a zone|zone link anchored off the outline is attempted")
+
+
 TESTS = [test_link_end_test,
          test_oracle_never_routes_an_off_board_link,
-         test_a_round_of_only_off_board_links_routes_nothing]
+         test_a_round_of_only_off_board_links_routes_nothing,
+         test_a_zone_end_off_the_outline_is_not_exempt]
 
 
 if __name__ == '__main__':
