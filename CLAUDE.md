@@ -411,7 +411,7 @@ parts to the poses they had before.**
 So, when grading a placement:
 
 - **Lead with the routed outcome** — `board_score`'s `blocking`
-  (`unrouted + broken` first, then the rest), then `joins_needed` (the joins
+  (`unrouted`, `broken` and the rest, as one sum), then `joins_needed` (the joins
   the open nets still need: a missing 17-pad rail is 16, one stranded pad 1,
   where `blocking` counts each as one net), with `quality` (vias, copper_mm,
   segments) as the tie-break after that.

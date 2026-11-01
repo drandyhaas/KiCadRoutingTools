@@ -267,8 +267,8 @@ overlaps, the movable parts in its way pushed aside in turn.
 
 ## Judging seeds by routing
 
-A placement is judged by routing it: blocking nets first (unrouted, then
-broken), then the joins the open nets still need (`joins_needed`: a
+A placement is judged by routing it: blocking nets first, then the joins
+the open nets still need (`joins_needed`: a
 missing 17-pad rail is 16, one stranded pad 1, and the rail-less board has
 fewer vias because the rail is missing), then vias, copper length and
 segment count. The objective's cost,
