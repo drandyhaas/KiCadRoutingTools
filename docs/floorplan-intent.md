@@ -571,11 +571,15 @@ points west, not out of the east edge
 - **Strong is an ERROR, weak a WARN.** A face whose offset reaches 2 mm
   fails at the rule's severity; a weaker one at `warn`. KiCad's stock
   library has three receptacles whose pad layout sets a confidently wrong
-  face between 0.9 and 1.4 mm, among 60+ correct USB faces in the same range.
-  Such a wrong weak face is not caught: a jack whose wrong weak face points
-  at the edge opens into the board, and this conjunct reads it as a pass --
-  unless the footprint's marker says otherwise (below). Those three stock
-  jacks draw no marker, so for them it stands.
+  face between 0.9 and 1.4 mm, among 60+ correct USB faces in the same range,
+  and KiCad 10's RJ45_Amphenol_RJHSE5380 reads +y at 0.69 mm where its twin
+  RJHSE538X (the same housing, four LED pads more) reads the right -y.
+  The reading alone does not catch such a wrong weak face: a jack whose wrong
+  weak face points at the edge opens into the board, and this conjunct reads
+  it as a pass -- unless the footprint's marker says otherwise (below), or
+  the entry declares its `mating_face`, which **outranks a weak reading**
+  (#1586, below). Those jacks draw no marker, so for them the declaration is
+  the guard.
 - **The footprint's "PCB Edge" marker confirms or vetoes the face.**
   Many footprints draw a "PCB Edge" / "Board edge" text beside a line where
   the board edge goes. `mating.marker_face_local` reads that LINE (parallel
@@ -592,7 +596,8 @@ points west, not out of the east edge
   plug, a `Vertical` footprint name and a pose near a diagonal; the
   evidence row says so (`facing.disposition: abstained`, with the reason).
 - The evidence row carries `facing` (`{edge, facing, local_face, basis,
-  offset_mm, strong, policy, reason, disposition}`) and the text line ends
+  offset_mm, strong, policy, reason, disposition, declared_face, body_face,
+  body_strong, disagreement}`) and the text line ends
   `; facing west [courtyard+fab+marker, strong] FAIL`. The violation's `measured`
   has no `edge` key: the nearest-edge violation owns that one.
 - The facing conjunct leaves the nearest-edge identity, `edge_seat_rect` and
@@ -614,10 +619,19 @@ footprint's own unrotated frame, its mating face opens on.
 { "ref": "J7", "edge": "south", "mating_face": "+y" }
 ```
 
-It is used only where the body names no face. There it is the face for
-`place_simple`'s edge seat (only the turns that point it at the edge) and for
-the grade, which then grades the entry's facing whatever its class or mount,
-at ERROR.
+It is used where the body names no face **or only a weak one** (#1586: the
+weak tier is where stock jacks read a confidently wrong face, and only the
+author has read the datasheet). There it is the face for `place_simple`'s
+edge seat (only the turns that point it at the edge) and for the grade, which
+then grades the entry's facing whatever its class or mount, at ERROR (basis
+`declared`, or `<body basis>+declared` where the weak reading agrees). A
+STRONG body reading (2 mm or more, or a weak one its "PCB Edge" marker
+confirms) still outranks the declaration. Wherever the declared face and the
+body's reading disagree, whichever wins, `check_floorplan` says so at WARN
+(`J1's mating face: its declared mating_face -y outranks the +y face its
+body reads weakly ...`, or `... overrules the declared mating_face -y: check
+the datasheet ...`), the facing clause adds `(declared -y over the body's
+weak +y)`, and place_simple's seat note carries the same sentence.
 A `Vertical` header names no face either, and for one `mating_face` is the
 side its cable leaves -- a 2xN ribbon off a long side -- so the seat lays it
 with its long side along the edge (tigard's J5 `+x`).
@@ -678,8 +692,15 @@ the box. It abstains per edge, not per board.
 zero margin**, whenever that body can be measured: a declared `edge`, a closed
 convex Fab outline (SilkS when the part draws nothing on Fab, or when its Fab
 drawing is a marking such as a pin-1 dot -- the same
-`body.fab_cannot_be_body` decision the facing grade reads) and a rectangular
-Edge.Cuts outline. A zero `min` is therefore nonbinding and a positive `min`
+`body.fab_cannot_be_body` decision the facing grade reads) and an outline
+that is the declared edge's straight line under the body: a rectangular
+Edge.Cuts outline, or (#1585), on any other outline the parser rings, one
+straight Edge.Cuts run on that side of the bounds covering the body along
+it (and on any other side it crosses) with the body's part inside the bounds
+wholly on the board. One M3 hole drawn on Edge.Cuts mid-board used to make
+every body on the board unmeasured, so the band and the seat read every
+connector on its courtyard: tigard's USB-C J1 went from body flush to body
+0.50 mm inside. A zero `min` is therefore nonbinding and a positive `min`
 is a real conjunct.
 
 **The band is never negative (#1532).** It is how far the part reaches
@@ -704,14 +725,20 @@ fallback that seats such a part on its pad box for legality, and the
 emitter's observed band is read on it too. Which edge the part is on, its
 setback and its position along the edge keep reading the board's own
 courtyard (the pad box for such a part). Unmeasurable cases include a
-courtyard-only part, an arc in the Fab drawing, a non-rectangular outline, an
-entry with no `edge`, and a
+courtyard-only part, an arc in the Fab drawing, an outline that is not
+straight under the body (a notch, a curve, a cut-out there), an entry with
+no `edge`, and a
 drawn envelope that does not enclose the centroid of its own pads (a pin-1
 marker is not a body). On that path nothing here grades pad copper against the
 outline, so a part whose courtyard does not enclose its pads can carry copper
 past the edge unnamed; `check_drc --check-pad-edge` is the channel that names
 it. The basis says which reading was used, and `_Ctx.oob_exempt` and the
 edge seat (`edge_seat._Probe`) read the band in the same currency as the rule.
+A part the library drew a body for that the seat puts on its courtyard for
+this reason says so in place_simple's note, with how far inside the edge its
+body stands. On the body path on a non-rectangular outline, where the pad
+edge grader samples and reports no gap, a pad's copper past the outline is
+read by its box's distance from the board.
 
 **The band takes no margin (#1301).** The courtyard reading used to be the
 occupancy reading at the gate's margin, `max(clearance, board edge
@@ -726,8 +753,12 @@ edge rides in the evidence row's `other_edge_overhang_mm`, and is an
 never add the board's edge margin to it. A band written in the old currency
 reads the margin too high: daplink's hand-written J2/J3 `{7.0, 7.4}` and P1
 `{1.05, 1.35}` added 0.55, and now read 6.4562 and 0.5000 placed and routed
-alike. The setback conjunct's "no overhang" test reads the courtyard at zero
-margin too. It used to let a receptacle 0.52 mm inside its edge count as
+alike. The setback conjunct's "no overhang" test reads zero margin too, and
+since #1585 it reads the shape the setback is measured on: the drawn body
+for an `edge_receptacle` or `edge_mount` entry (the courtyard otherwise). It
+read the courtyard on either basis, so a receptacle whose courtyard crosses
+the edge was never asked its body's setback: tigard's J1, declared
+`max_setback_mm: 0.1`, passed with its body 0.40 mm inside. It used to let a receptacle 0.52 mm inside its edge count as
 overhanging at a 0.55 margin, skipping its seat tolerance, and then fail it at
 0.2. The pad-copper edge clearance and the `oob_count` census still read the
 board's edge floor. So does the nearest-edge identity: the sides a part
@@ -753,6 +784,16 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
   limit and a disposition;
 - the body's signed position, setback and other-edge overhang, or
   `body_unmeasured_reason`;
+- `setback_mm`, `setback_basis` and `setback_limit_mm` (#1584): how far
+  inside its declared edge the part stands, measured from that edge's line
+  on the basis the setback conjunct reads (the drawn body for an
+  `edge_receptacle` or `edge_mount` entry, else the courtyard), and the
+  limit an armed setback holds it to (`max_setback_mm`, or the class
+  default), `null` when none is. A **disclosure on every row**, a finding
+  only where a limit is armed: the text line adds `; setback 10.00mm
+  [courtyard; no limit declared]` for a part that does not reach its edge
+  (and the body's own setback beside a courtyard reading), so a classless
+  header seated 10 mm inside its edge never reads as a bare `pass`;
 - `pad_copper_edge`: the part's pad-copper edge clearance from
   `grade_pad_edge_clearance`, at the floor `grade_pad_legality` resolves. This
   is the channel `check_drc --check-pad-edge` grades, and it is reported

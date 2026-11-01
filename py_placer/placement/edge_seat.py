@@ -8,7 +8,8 @@ when it has no mating face).
 The seat is read with the grade's own measurements (`rule_edge_connector`):
 
 * the TURN points its mating face off the board (`mating.mating_face_local`,
-  `mating.facing_edge`). A part with no in-plane face (a vertical header, a
+  `mating.facing_edge`; a declared `mating_face` outranks a weak reading,
+  `mating.face_with_declaration`, #1586). A part with no in-plane face (a vertical header, a
   test pad, a symmetric terminal) may take any quarter turn, each with its
   own seat, and the anneal chooses: designers lay such headers both ways --
   noahfc's five north-edge 1x03 headers stand ACROSS the edge, five abreast
@@ -20,7 +21,11 @@ The seat is read with the grade's own measurements (`rule_edge_connector`):
   zero margin, #1301) -- flush, without one, and a hair inside a positive
   minimum -- and no nearer the edge than keeps every pad's copper (the
   pads on a copper layer, not a silk-drawn pin) the board's edge clearance
-  inside the outline where the part stands, not its bounding box (#1325);
+  inside the outline where the part stands, not its bounding box (#1325).
+  That depth is read at several places along the edge (a notch or an
+  Edge.Cuts hole reads deeper where the part would cover it, #1412), and
+  the NEAREST depth with a free stretch is kept, never a deeper one for its
+  room (#1584); a seat only an inboard line can hold says so in its note;
 * ALONG the edge it may go wherever every conjunct the grade puts on it
   holds -- the band (a corner adds the side it crosses), the pad copper's
   edge clearance against the true outline (a rounded corner), the edge the
@@ -104,6 +109,10 @@ NEAR_MM = 3.0
 #: poses from reading as an overlap.
 SEAT_GAP_MM = 0.01
 EPS = 1e-6
+#: A seat line further inside than the nearest depth the seat read by more
+#: than this (mm) is said in the seat's note (#1584): only an inboard line had
+#: room at that turn.
+DEEPER_MM = 0.05
 #: The most parts on one edge and face `_crowding` checks together: it tries
 #: every subset of them. A longer row is left to the anneal and `pack`.
 ROW_MAX = 12
@@ -129,19 +138,21 @@ def rot_key(rot) -> float:
     return round(float(rot) % 360.0, 6) % 360.0
 
 
-def _turns(state, pcb, geometry, entry, edge) -> Tuple[List[float], str]:
-    """The turns `entry`'s part may take on `edge` and its mating face: the
-    turns that point the face at the edge -- the face its body reads, else
-    the one the entry declares (`mating_face`) -- or every quarter turn when
-    it has none in the plane (its own turn first)."""
-    from .mating import facing_edge, mating_face_local
+def _turns(state, pcb, geometry, entry, edge) -> Tuple[List[float], str, str]:
+    """The turns `entry`'s part may take on `edge`, its mating face, and
+    what the declared face and the body's reading disagree on ('' when
+    nothing): the turns that point the face at the edge -- the entry's
+    declared `mating_face` where the body reads none or a weak one, else the
+    face its body reads (`mating.face_with_declaration`, #1586) -- or every
+    quarter turn when it has none in the plane (its own turn first)."""
+    from .mating import face_with_declaration, facing_edge, mating_face_local
     ref = str(entry['ref'])
     lf = mating_face_local(pcb.footprints[ref], geometry.get(ref))
-    face = lf.face or entry.get('mating_face')
+    face, _source, said = face_with_declaration(lf, entry.get('mating_face'))
     if face:
-        return [r for r in ROTS if facing_edge(face, r) == edge], face
+        return [r for r in ROTS if facing_edge(face, r) == edge], face, said
     own = rot_key(state.parts[ref].rot)
-    return [own] + [r for r in ROTS if r != own], ''
+    return [own] + [r for r in ROTS if r != own], '', said
 
 
 def pad_span(state, seat) -> float:
@@ -332,6 +343,55 @@ def _seat_coord(probe, ref, edge, rot, axis, along, target):
         else:
             bad = mid
     return good, floor
+
+
+def _pose_across(axis, along, coord, rot):
+    return (along, coord, rot) if axis == 0 else (coord, along, rot)
+
+
+def _inside_mm(probe, ref, edge, pose) -> Tuple[float, str]:
+    """`(mm, basis)`: how far `ref` stands inside `edge` at `pose`, on the
+    basis its band is read on -- the drawn body where it can be measured,
+    else the courtyard the band reads (`connector_geometry.edge_setback`)."""
+    from .connector_geometry import edge_setback
+    row = probe.geo.measure(ref, edge, pose)
+    if row.get('body_measured'):
+        return float(row['body_setback_mm']), 'body:' + str(row['body_layer'])
+    return (edge_setback(probe.pcb.board_info.board_bounds,
+                         probe.band_rect(ref, pose), edge) or 0.0), 'courtyard'
+
+
+def _deeper_text(edge, deeper) -> str:
+    """The note's clause for the turns seated on an inboard line (#1584), or
+    ''."""
+    if not deeper:
+        return ''
+    each = []
+    for rot, ((kept, basis), near) in sorted(deeper.items()):
+        each.append(f"{kept:.2f}mm inside the {edge} edge ({basis}) at turn {rot:g}"
+                    + (f", the line {near[0]:.2f}mm inside having no free position"
+                       if near is not None else
+                       ", the outline (a notch, a cut-out) holding it there at "
+                       "every position read"))
+    return "; only an inboard line has room: seated " + '; '.join(each)
+
+
+def _courtyard_seat_text(probe, ref, edge, pose) -> str:
+    """The note's clause for a part the library drew a body for that is
+    seated on its courtyard because the outline under it cannot be read as
+    its edge (#1585): why, and how far inside the edge its body stands. ''
+    when the body is the seat's basis or the part draws none."""
+    from .connector_geometry import edge_setback
+    row = probe.geo.measure(ref, edge, pose)
+    if row.get('body_measured'):
+        return ''
+    body = probe.geo.rect(ref, pose)[0]
+    if body is None:
+        return ''
+    inside = edge_setback(probe.pcb.board_info.board_bounds, body, edge)
+    return (f"; seated on its courtyard, not its drawn body "
+            f"({row.get('body_unmeasured_reason')}): its body stands "
+            f"{inside or 0.0:.2f}mm inside the {edge} edge")
 
 
 def _free_stretches(probe, entry, edge, axis, coord, rot, lo, hi, fixed, tally=None):
@@ -528,7 +588,7 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
     for c in entries:
         ref, edge = str(c['ref']), c['edge']
         part = state.parts[ref]
-        rots, face = _turns(state, pcb, bodies, c, edge)
+        rots, face, disagree = _turns(state, pcb, bodies, c, edge)
         probe.faces[ref] = face
         if not rots:
             unseated[ref] = (f"its mating face ({face}) points at the {edge} edge at no "
@@ -548,6 +608,10 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
         spans: Dict[float, float] = {}        # the pads do not fit along the edge
         squeezed = set()                      # nor inside a declared along-edge window
         tally: Dict[str, list] = {}           # every position tested failed a conjunct
+        outward = -1.0 if edge in ('north', 'west') else 1.0
+        # the turns seated on an inboard line, a nearer one having no room:
+        # {rot: ((mm inside, basis) kept, (mm inside, basis) passed over)}
+        deeper: Dict[float, tuple] = {}
         for rot in rots:
             part.ensure_rotation(rot)
             # along: its pads the edge clearance inside the board's span (a
@@ -584,24 +648,43 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
             free = _free_stretches(probe, c, edge, axis, coord, rot, lo, hi, fixed, tally)
             # The depth was read at the edge's midpoint, and a notch there
             # makes it the notch's depth for every position (#1412): read it at
-            # DEPTH_SAMPLES places along the span too, and keep the depth
-            # with the most room. A straight edge reads one depth everywhere,
-            # so the extra reads cost nothing there.
-            tried = {round(coord, 3)}
+            # DEPTH_SAMPLES places along the span too, and keep the NEAREST
+            # depth to the edge that has a free stretch. Not the one with the
+            # most room (#1584): a line pushed inboard past a notch or an
+            # Edge.Cuts hole is not interrupted by it, so it nearly always
+            # has more, and one 20 x 10 mm notch on a 160 mm edge seated a
+            # declared header 10 mm inside on every seed, at an x where the
+            # edge ahead was straight. A straight edge reads one depth
+            # everywhere, so the extra reads cost nothing there.
+            depths = {round(coord, 3): [coord, free]}
             for k in range(DEPTH_SAMPLES):
                 alt, _f = _seat_coord(probe, ref, edge, rot, axis,
                                       lo + (hi - lo) * k / (DEPTH_SAMPLES - 1),
                                       aim)
-                if alt is None or round(alt, 3) in tried:
-                    continue
-                tried.add(round(alt, 3))
-                more = _free_stretches(probe, c, edge, axis, alt, rot, lo, hi,
-                                       fixed)
-                if (sum(f1 - f0 for f0, f1 in more)
-                        > sum(f1 - f0 for f0, f1 in free) + EPS):
-                    coord, free = alt, more
+                if alt is not None and round(alt, 3) not in depths:
+                    depths[round(alt, 3)] = [alt, None]
+            order = sorted(depths.values(), key=lambda d: -outward * d[0])
+            for depth in order:
+                if depth[1] is None:
+                    depth[1] = _free_stretches(probe, c, edge, axis, depth[0], rot,
+                                               lo, hi, fixed)
+                if depth[1]:
+                    coord, free = depth
+                    break
             if free:
                 lines[rot] = Line(coord, tuple(free))
+                # Only an inboard line has room at this turn -- it stands
+                # inside the edge, and not because its pad copper holds it
+                # there -- said, with how far inside it stands and how far a
+                # nearer line it passed over does.
+                at = sum(max(free, key=lambda f: f[1] - f[0])) / 2.0
+                inside = _inside_mm(probe, ref, edge, _pose_across(axis, at, coord, rot))
+                if inside[0] > DEEPER_MM and probe.copper_clear(
+                        ref, _pose_across(axis, at, coord + outward * DEEPER_MM, rot)):
+                    nearer = order[0][0]
+                    deeper[rot] = (inside, (
+                        _inside_mm(probe, ref, edge, _pose_across(axis, at, nearer, rot))
+                        if outward * (nearer - coord) > DEEPER_MM else None))
         if not lines:
             part.ensure_rotation(part.rot)
             unseated[ref] = _unseated_reason(probe, c, edge, axis, target, e,
@@ -613,7 +696,10 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
         _sit(part, seat)
         said[ref] = (f"edge connector {ref} on the {edge} edge"
                      + (f", facing it ({face})" if face else
-                        f", no mating face: {len(lines)} turn(s) seat there"))
+                        f", no mating face: {len(lines)} turn(s) seat there")
+                     + (f" ({disagree})" if disagree else '')
+                     + _deeper_text(edge, {r: d for r, d in deeper.items() if r in lines})
+                     + _courtyard_seat_text(probe, ref, edge, (part.x, part.y, part.rot)))
         notes.append(said[ref])
     # What a part seated on one edge covers wherever it stands is a wall on
     # every other edge's line (`_corners`), and then the parts on one edge

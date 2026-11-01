@@ -4582,10 +4582,14 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
 
     `geom` is the part's `body.BodyGeometry` (None reads as no body);
     `rotation` defaults to the footprint's own, and is what a seat trying a
-    turn passes. Where the body names no face, the entry's declared
-    `mating_face` is the face (basis `declared`, strong), and the entry is
-    graded whatever its class. Returns `{policy, facing, local_face, basis, offset_mm,
-    strong, reason, fails}`. `fails` is True only when the policy grades the
+    turn passes. Where the body names no face, or only a WEAK one (#1586),
+    the entry's declared `mating_face` is the face (basis `declared`, strong;
+    `<body basis>+declared` where the weak reading agrees with it), and the
+    entry is graded whatever its class; a STRONG reading outranks a
+    declaration (`mating.face_with_declaration`). Returns `{policy, facing,
+    local_face, basis, offset_mm, strong, reason, fails, declared_face,
+    body_face, body_strong, disagreement}`, the last naming a declared face
+    the body reads otherwise, whichever won ('' when none). `fails` is True only when the policy grades the
     entry, the face is decisive at that rotation, and it is not the declared
     edge. `strong` (the face's offset reaches `mating.FACE_STRONG_OFFSET_MM`)
     decides the severity: a strong failure is an ERROR, a weak one a WARN --
@@ -4594,18 +4598,26 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
 
     THE predicate the rule calls, so every reader asks one answer for which
     way a part faces. A wrong WEAK face (`placement.mating`) reads as a
-    pass. A footprint's own "PCB Edge" marker
+    pass unless the entry declares the face. A footprint's own "PCB Edge" marker
     (#1245) confirms a face (strong) or vetoes it (an abstention) where it
     draws one, through `mating_face_local`."""
-    from .mating import LocalFace, facing_edge, mating_face_local
+    from .mating import (LocalFace, face_with_declaration, facing_edge,
+                         mating_face_local)
     policy = edge_facing_policy(entry, fp)
     lf = (mating_face_local(fp, geom) if geom is not None
           else LocalFace(None, 0.0, '', 'no body geometry'))
-    if lf.face is None and entry.get('mating_face') in MATING_FACES:
-        # The body names no face; the intent declares one. A declaration is
+    body = lf
+    declared = (entry.get('mating_face')
+                if entry.get('mating_face') in MATING_FACES else None)
+    face, source, disagreement = face_with_declaration(lf, declared)
+    if source == 'declared':
+        # The body names no face, or a weak one; the intent declares one
+        # (#1586: only the author has read the datasheet). A declaration is
         # no weaker than a strong body reading: a wrong turn fails at ERROR.
-        lf = LocalFace(entry['mating_face'], 0.0, 'declared', '', lf.votes,
-                       strong=True, marker=lf.marker)
+        lf = (lf._replace(basis=lf.basis + '+declared', strong=True)
+              if lf.face == face else
+              LocalFace(face, 0.0, 'declared', '', lf.votes, strong=True,
+                        marker=lf.marker))
     rot = (fp.rotation or 0.0) if rotation is None else rotation
     facing = facing_edge(lf.face, rot)
     edge = entry.get('edge')
@@ -4616,7 +4628,9 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
             'basis': lf.basis, 'offset_mm': lf.offset_mm,
             'strong': bool(lf.strong and facing), 'reason': reason,
             'fails': bool(policy == 'graded' and edge and facing
-                          and facing != edge)}
+                          and facing != edge),
+            'declared_face': declared, 'body_face': body.face,
+            'body_strong': bool(body.strong), 'disagreement': disagreement}
 
 
 #: The axis a part slides along when it moves ALONG the named edge: x for a
@@ -4657,32 +4671,16 @@ def edge_span(gate, bounds, edge: str, outline: Dict, *,
     abstention would discard 13 correct measurements to avoid one wrong one.
     """
     ax = _EDGE_AXIS[edge]
-    perp = 1 - ax
     rings = list(getattr(gate, 'rings', None) or [])
     if rings:
-        target = {'north': bounds[1], 'south': bounds[3],
-                  'west': bounds[0], 'east': bounds[2]}[edge]
-        runs = []
-        for seg in gate.edges():
-            a, b = (seg[0], seg[1]), (seg[2], seg[3])
-            if abs(a[perp] - target) > tol or abs(b[perp] - target) > tol:
-                continue
-            lo, hi = sorted((a[ax], b[ax]))
-            if hi - lo > 1e-9:
-                runs.append([lo, hi])
-        if not runs:
+        from .connector_geometry import edge_runs
+        merged = edge_runs(gate, bounds, edge, tol)
+        if not merged:
             return (None, None,
                     f"no Edge.Cuts segment lies on the {edge} side of this "
                     f"outline ({len(rings)} ring(s), "
                     f"{outline.get('cutouts', 0)} cutout(s)), so that edge has "
                     f"no span to take a fraction of")
-        runs.sort()
-        merged = [runs[0]]
-        for lo, hi in runs[1:]:
-            if lo <= merged[-1][1] + tol:
-                merged[-1][1] = max(merged[-1][1], hi)
-            else:
-                merged.append([lo, hi])
         if len(merged) != 1:
             pieces = ', '.join(f"{m[1] - m[0]:.2f}mm" for m in merged)
             return (None, None,
@@ -5896,8 +5894,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # the pads to leave the board, and the edge seat put the estimate
         # exactly where this rule then read 0.00. `overhang_basis` says which
         # reading it was. `amount` keeps its other job: the setback
-        # conjunct's no-overhang gate below, which reads the courtyard on
-        # either basis.
+        # conjunct's no-overhang gate below, on a courtyard seat basis (on a
+        # body basis that gate reads the body, #1585).
         _band_cy, _cy_others = courtyard_overhang_past(
             _geo, band_courtyard_rect(ctx, ref, part), c.get('edge'))
         band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),
@@ -5984,6 +5982,17 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         seat_rect, basis = edge_seat_rect(c, part.rect,
                                           lambda: ctx.body_rect(ref))
         edge = c.get('edge')
+        # #1584: how far inside its declared edge the part stands, on the
+        # basis the setback conjunct below reads it (`seat_rect`), DISCLOSED
+        # on every row -- a row with no class and no `max_setback_mm` arms no
+        # setback, and a header seated 10 mm inside its edge read as a bare
+        # `pass`. A disclosure, never a finding: only an armed setback fails.
+        from .connector_geometry import edge_setback
+        _setback = (edge_setback(ctx.outline_bounds, seat_rect, edge)
+                    if ctx.outline_bounds else None)
+        evidence['setback_mm'] = None if _setback is None else round(_setback, 4)
+        evidence['setback_basis'] = basis
+        evidence['setback_limit_mm'] = None
         if edge and ctx.outline_bounds:
             # Run 27's replay measured the courtyard reading on the same
             # USB1: its pad box is 1.6 mm from the west edge and 1.3 mm from
@@ -6018,14 +6027,38 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             'disposition': ('exempt' if _ef['policy'] != 'graded'
                             else 'no_edge' if not edge
                             else 'abstained' if not _ef['facing']
-                            else 'fail' if _ef['fails'] else 'pass')}
+                            else 'fail' if _ef['fails'] else 'pass'),
+            'declared_face': _ef['declared_face'],
+            'body_face': _ef['body_face'],
+            'body_strong': _ef['body_strong'],
+            'disagreement': _ef['disagreement']}
+        if _ef['disagreement']:
+            # #1586: a declared face the body reads otherwise is SAID,
+            # whichever won -- a weak reading the declaration outranks (KiCad
+            # 10's RJHSE5380 reads its mouth into the board) or a strong one
+            # that overrules the declaration. A WARN: one of the two is wrong,
+            # and only the datasheet says which.
+            yield Violation(
+                rule='edge_connector', severity=WARN, ref=ref,
+                message=f"{ref}'s mating face: {_ef['disagreement']}",
+                measured={'declared_face': _ef['declared_face'],
+                          'body_face': _ef['body_face'],
+                          'body_strong': _ef['body_strong'],
+                          'facing_basis': _ef['basis']},
+                expected={'mating_face': _ef['declared_face']})
         if _ef['fails']:
             yield Violation(
                 rule='edge_connector',
                 severity=(ctx.sev('edge_connector') if _ef['strong']
                           else WARN),
                 ref=ref,
-                message=(f"{ref}'s body leaves its pad row toward the "
+                message=((f"{ref}'s declared mating face "
+                          f"({_ef['local_face']}) points {_ef['facing']} at "
+                          f"this pose, away from its declared {edge} edge -- "
+                          f"its mating face points {_ef['facing']}, not out "
+                          f"of the {edge} edge")
+                         if _ef['basis'] == 'declared' else
+                         f"{ref}'s body leaves its pad row toward the "
                          f"{_ef['facing']} ({_ef['basis']}, "
                          f"{_ef['offset_mm']:.2f}mm), away from its declared "
                          f"{edge} edge -- its mating face points "
@@ -6065,8 +6098,21 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             from .part_class import INTERIOR_AFFINITY_MM
             setback = INTERIOR_AFFINITY_MM
             _sev = WARN
-        if setback is not None and amount <= legality.EPS:
-            # "No overhang" is the courtyard at ZERO margin (#1301): at the
+        if setback is not None:
+            evidence['setback_limit_mm'] = float(setback)
+        # #1585: "no overhang" is read on the shape the setback is measured
+        # on. It was always the courtyard, so a receptacle whose courtyard
+        # crosses the edge was never asked its BODY's setback: tigard's USB-C
+        # J1 (courtyard 0.50 mm past its fab body at the mouth), declared
+        # max_setback_mm 0.1, passed with its body 0.40 mm inside.
+        # An entry that declares no edge (the emitter's withheld SUSPECT,
+        # sonde_xilinx's reversed J2) keeps the courtyard gate: its body has
+        # no declared edge to overhang, and the emitted intent must grade
+        # clean on the board it was read off.
+        seat_over = (amount if basis == 'courtyard' or edge not in _EDGE_AXIS
+                     else courtyard_overhang_past(_geo, seat_rect, edge)[0])
+        if setback is not None and seat_over <= legality.EPS:
+            # "No overhang" is read at ZERO margin (#1301): at the
             # gate's margin a receptacle 0.52 mm inside read as overhanging
             # at 0.55 and was never held to its seat, then failed it at 0.2.
             # The SEAT is a question about the part's BODY -- does its
@@ -6138,6 +6184,25 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         ctx.edge_connector_evidence.append(evidence)
 
 
+def _setback_tail(e) -> str:
+    """The CLI's `; setback ...` clause for one evidence row (#1584, #1585),
+    or '' for a part that reaches its edge: how far inside its declared edge
+    it stands, on the basis the setback conjunct reads (`setback_basis`),
+    the drawn body's own setback beside a courtyard reading, and the limit
+    an armed setback holds it to -- or that none is declared, so a part
+    seated well inside its edge never reads as a bare `pass`."""
+    s = e.get('setback_mm')
+    body = (e.get('body_setback_mm')
+            if e.get('setback_basis') == 'courtyard' else None)
+    if s is None or (s < 0.005 and (body is None or body < 0.005)):
+        return ''
+    lim = e.get('setback_limit_mm')
+    return (f"; setback {s:.2f}mm [{e.get('setback_basis')}"
+            + (f"; body {body:.2f}mm" if body is not None else '')
+            + (f"; limit {lim:.2f}mm" if lim is not None
+               else '; no limit declared') + "]")
+
+
 def _facing_tail(f) -> str:
     """The CLI's `; facing ...` clause for one evidence row (#1155), or ''."""
     if not f or f.get('disposition') is None:
@@ -6154,9 +6219,17 @@ def _facing_tail(f) -> str:
     if f['disposition'] == 'no_edge':
         return (f"; facing {f['facing']} (no edge declared: not graded)"
                 if f.get('facing') else '')
+    said = ''
+    if f.get('disagreement') and f.get('declared_face') and f.get('body_face'):
+        # #1586: which of the two faces the clause graded, and over which
+        said = (f" (declared {f['declared_face']} over the body's weak "
+                f"{f['body_face']})" if 'declared' in str(f.get('basis'))
+                else f" (the body's strong {f['body_face']} over the declared "
+                     f"{f['declared_face']})")
     return (f"; facing {f['facing']} [{f['basis']}, "
             f"{'strong' if f['strong'] else 'weak'}] "
-            f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}")
+            f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}"
+            + said)
 
 
 def band_courtyard_rect(ctx, ref, part):
@@ -6200,21 +6273,32 @@ def _copper_outside_mm(ctx, ref):
     courtyard, often the pad box itself) always carried. A band licenses the
     body, never copper, so the body path must still see it. Castellated pads
     straddle the outline by design and are skipped. 0.0 when nothing leaves
-    the board; findings from a sampled (non-rectangular) outline carry no gap
-    and are not counted, which is harmless because the body path only runs on
-    rectangular outlines."""
+    the board. A finding from a sampled (non-rectangular) outline carries no
+    gap: since the body path runs on such outlines where the edge is straight
+    under the body (#1585), those pads are read by their boxes' distance past
+    the outline (`connector_geometry.pad_copper_depth`)."""
     fp = ctx.pcb.footprints.get(ref)
     prefix = ref + '.'
     worst = 0.0
+    sampled = set()
     for f in ctx.connector_copper()['findings']:
-        if not str(f['pad_ref']).startswith(prefix) or f.get('gap_mm') is None:
+        if not str(f['pad_ref']).startswith(prefix):
             continue
         pads = getattr(fp, 'pads', None) or ()
         index = f.get('pad_index')
         if (isinstance(index, int) and index < len(pads)
                 and getattr(pads[index], 'castellated', False)):
             continue
+        if f.get('gap_mm') is None:
+            if isinstance(index, int):
+                sampled.add(index)
+            continue
         worst = max(worst, -float(f['gap_mm']))
+    if sampled and fp is not None:
+        from .connector_geometry import geometry_for, pad_copper_depth
+        worst = max(worst, pad_copper_depth(
+            geometry_for(ctx, ctx.pcb, ctx.pcb_file), ref,
+            (fp.x, fp.y, fp.rotation or 0.0), only=sampled))
     # A pad the edge grader cannot model -- a trapezoid, a custom pad with no
     # parsed primitives -- yields NO finding: it is recorded as unmeasured
     # and skipped, so the loop above reads 0.0 for a pad that may be entirely
@@ -6288,12 +6372,10 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
                                       default=0.0), 4),
             # Past the outline itself, castellated pads excepted: the number
             # the body path's copper conjunct grades (0.0 = on the board).
-            # None when a finding came from the sampled (non-rectangular)
-            # path, which carries no gap -- the amount is unknown, not zero.
-            'outside_mm': (None if any(
-                str(f['pad_ref']).startswith(prefix) and f.get('gap_mm') is None
-                for f in copper['findings'])
-                else round(_copper_outside_mm(ctx, ref), 4)),
+            # A finding from the sampled (non-rectangular) path carries no
+            # gap; its pad is read by its box's distance past the outline
+            # (#1585), as the conjunct grades it.
+            'outside_mm': round(_copper_outside_mm(ctx, ref), 4),
             # False when a pad's shape defeated the edge grader: `outside_mm`
             # is then a best-effort box reading, so a zero says "not shown to
             # be off the board", never "on the board". Such a part is not
@@ -12258,7 +12340,7 @@ def format_text(r: GradeResult) -> str:
             lines.append(
                 f"    {e['ref']} {e.get('edge') or '(no edge)'}: overhang "
                 f"{e['overhang_mm']:.4f}mm [{e['overhang_basis']}] "
-                f"{e['overhang_disposition']}; pad copper "
+                f"{e['overhang_disposition']}" + _setback_tail(e) + "; pad copper "
                 + (f"{gap:.4f}mm" if gap is not None else 'unmeasured')
                 + f" vs {cu.get('required_mm')}mm {cu.get('disposition')}"
                 + _facing_tail(e.get('facing')))

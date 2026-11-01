@@ -28,8 +28,14 @@ envelopes and a part that draws no body. Text, pads and courtyards are never
 body geometry. Vertices are transformed before taking extrema, so any
 rotation of the supported primitives is exact.
 
-WHAT COUNTS AS A BOUNDARY. A rectangular Edge.Cuts outline with no other cuts.
-Anything else is unmeasured rather than approximated by the bounding box.
+WHAT COUNTS AS A BOUNDARY. A rectangular Edge.Cuts outline with no other cuts;
+or, on any other outline the parser rings, the declared edge where it is
+straight under the part (#1585, `ConnectorGeometry.boundary_under`): one
+Edge.Cuts run on that side of the bounds covering the body along it (and on
+any other side the body crosses), the body's part inside the bounds wholly on
+the board. So a hole elsewhere on the board does not change what "flush"
+means. Anything else is unmeasured rather than approximated by the bounding
+box.
 
 UNMEASURED IS A BASIS, NOT A VERDICT. `band_amount` hands every caller its
 own courtyard reading back, named `legacy_occupancy@margin=<m>`, when the body
@@ -246,6 +252,7 @@ class ConnectorGeometry:
         self._pad_boxes = {}
         self._bodies = None
         self._zero_gate = None
+        self._runs = {}
 
     def zero_gate(self):
         """The board outline at ZERO margin, built once: the gate the band's
@@ -328,18 +335,68 @@ class ConnectorGeometry:
         return (min(p[0] for p in pts), min(p[1] for p in pts),
                 max(p[0] for p in pts), max(p[1] for p in pts)), layer, ''
 
+    def _edge_runs(self, edge):
+        """The straight Edge.Cuts runs on `edge`'s side of the bounds,
+        merged (`edge_runs` on the zero-margin gate), built once per edge."""
+        if edge not in self._runs:
+            self._runs[edge] = edge_runs(self.zero_gate(), self.bounds, edge)
+        return self._runs[edge]
+
+    def boundary_under(self, rect, edge):
+        """'' when the outline under the body `rect` is the declared edge's
+        straight line -- the board-wide rectangle, or (#1585) on any other
+        outline the parser rings: one straight Edge.Cuts run on `edge`'s side
+        covering the body along that edge (and on each other side the body
+        crosses), with the body's part inside the bounds wholly on the board
+        (no notch, cut-out or rounded corner under it). Else the reason.
+
+        Per part, not per board, as `floorplan.edge_span` is per edge: one
+        M3 hole drawn on Edge.Cuts mid-board made every body on the board
+        unmeasured, and the band and the seat then read every connector on
+        its courtyard (tigard J1, body flush on the rectangle, was seated
+        with its body 0.50 mm inside)."""
+        if not self.boundary_reason:
+            return ''
+        if not self.source.blocks or not self.bounds or edge not in EDGES:
+            return self.boundary_reason
+        gate = self.zero_gate()
+        region = _board_region(gate) if gate.active else None
+        if region is None:
+            return self.boundary_reason
+        b = self.bounds
+        outside = dict(zip(EDGES, (b[0] - rect[0], rect[2] - b[2],
+                                   b[1] - rect[1], rect[3] - b[3])))
+        for e in EDGES:
+            if e != edge and outside[e] <= EPS:
+                continue
+            ax = 0 if e in ('north', 'south') else 1
+            lo, hi = max(rect[ax], b[ax]), min(rect[ax + 2], b[ax + 2])
+            if not any(r0 - _RUN_TOL_MM <= lo and hi <= r1 + _RUN_TOL_MM
+                       for r0, r1 in self._edge_runs(e)):
+                return (f'the {e} edge is not one straight Edge.Cuts run under '
+                        f'the body (a notch, a curve or a gap in it there)')
+        clip = (max(rect[0], b[0]), max(rect[1], b[1]),
+                min(rect[2], b[2]), min(rect[3], b[3]))
+        if clip[0] < clip[2] and clip[1] < clip[3] \
+                and not _covers(gate, region, clip):
+            return ('the outline under the body is not plain board (a '
+                    'cut-out, a notch or a rounded corner there)')
+        return ''
+
     def measure(self, ref, edge, pose=None):
         rect, layer, reason = self.rect(ref, pose)
         row = {'body_measured': False, 'body_layer': layer,
                'body_overhang_mm': None, 'body_setback_mm': None,
                'body_signed_position_mm': None, 'units': 'mm',
-               'boundary_basis': 'rectangular Edge.Cuts centreline',
+               'boundary_basis': ('rectangular Edge.Cuts centreline'
+                                  if not self.boundary_reason else
+                                  'straight Edge.Cuts run under the body'),
                'mating_face_basis': 'drawn envelope support line toward '
                                     'the declared edge'}
-        reason = reason or self.boundary_reason
         if not reason and edge not in EDGES:
             reason = ('no declared mating edge; a nearest-edge guess is not '
                       'a requirement')
+        reason = reason or self.boundary_under(rect, edge)
         if reason:
             row['body_unmeasured_reason'] = reason
             return row
@@ -432,6 +489,35 @@ def pad_copper_outside(geometry, gate, ref, pose, only=None):
     return worst
 
 
+def pad_copper_depth(geometry, ref, pose, only=None):
+    """How far `ref`'s pad copper reaches past the OUTLINE at `pose`, as a
+    distance: the farthest point of each pad's rotated box from the board
+    region (`_depth_beyond`), 0.0 when it is all on the board (#1585).
+
+    The reading for pads whose edge-clearance finding came from the sampled
+    (non-rectangular) path, which carries no gap: since the body is measured
+    on such outlines where the edge is straight under it, the band no longer
+    reads the courtyard that used to carry that copper. A box, so it never
+    under-states a round pad. Falls back to `pad_copper_outside` when the
+    region cannot be built."""
+    gate = geometry.zero_gate()
+    region = _board_region(gate) if gate.active else None
+    if region is None:
+        return pad_copper_outside(geometry, gate, ref, pose, only=only)
+    x, y, rot = pose
+    c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+    worst = 0.0
+    for index, lx, ly, hx, hy, tilt in pad_boxes(geometry, ref):
+        if only is not None and index not in only:
+            continue
+        angle = math.radians(tilt + rot)
+        ca, sa = abs(math.cos(angle)), abs(math.sin(angle))
+        ex, ey = hx * ca + hy * sa, hx * sa + hy * ca
+        px, py = x + c * lx + s * ly, y - s * lx + c * ly
+        worst = max(worst, _depth_beyond(region, (px - ex, py - ey, px + ex, py + ey)))
+    return worst
+
+
 def geometry_for(holder, pcb_data, pcb_file):
     """One `ConnectorGeometry` per holder (a grade context or a search state),
     built on first use -- no board without an edge connector pays for it."""
@@ -473,6 +559,60 @@ def _board_region(gate):
             region = None
         gate._region_1403 = region
     return region
+
+
+#: Two Edge.Cuts segments this close (mm) to a bounds side are ON it, and a
+#: run reaching this close to a body's end covers it (`floorplan.edge_span`'s
+#: tolerance).
+_RUN_TOL_MM = 0.01
+
+
+def edge_runs(gate, bounds, edge, tol=_RUN_TOL_MM):
+    """The straight Edge.Cuts runs lying on `edge`'s side of `bounds`, as
+    merged `[lo, hi]` spans along it: `gate`'s ring segments within `tol` of
+    that side, end to end within `tol` merged. [] when the gate has no rings
+    or none lies there. One reading for `floorplan.edge_span` (which wants one
+    span) and the body measurement (which wants the run under a part)."""
+    if edge not in EDGES or not bounds or not getattr(gate, 'rings', None):
+        return []
+    ax = 0 if edge in ('north', 'south') else 1
+    perp = 1 - ax
+    target = {'north': bounds[1], 'south': bounds[3],
+              'west': bounds[0], 'east': bounds[2]}[edge]
+    runs = []
+    for seg in gate.edges():
+        a, b = (seg[0], seg[1]), (seg[2], seg[3])
+        if abs(a[perp] - target) > tol or abs(b[perp] - target) > tol:
+            continue
+        lo, hi = sorted((a[ax], b[ax]))
+        if hi - lo > 1e-9:
+            runs.append([lo, hi])
+    runs.sort()
+    merged = []
+    for lo, hi in runs:
+        if merged and lo <= merged[-1][1] + tol:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return merged
+
+
+def _covers(gate, region, rect):
+    """Does the board `region` cover `rect`, to a micrometre? The region is
+    grown that much once per gate, so a body flush on an edge drawn at the
+    same coordinates is covered."""
+    grown = getattr(gate, '_region_1585', None)
+    if grown is None:
+        try:
+            from shapely.prepared import prep
+            grown = prep(region.buffer(1e-3))
+        except Exception:                                    # noqa: BLE001
+            grown = False
+        gate._region_1585 = grown
+    if grown is False:
+        return False
+    from shapely.geometry import box
+    return bool(grown.covers(box(*rect)))
 
 
 def _depth_beyond(region, rect):
@@ -544,6 +684,19 @@ def courtyard_overhang_past(geometry, rect, edge, skip_rings=None):
         else:
             amount = max(amount, float(courtyard_overhang(geometry, rect, skip_rings)))
     return float(amount), others
+
+
+def edge_setback(bounds, rect, edge):
+    """How far `rect` stands inside the compass `edge` of `bounds`: its
+    outward side's distance from that side's line, 0.0 when it reaches or
+    crosses it (#1584). The one distance a seat line and the grade's
+    setback disclosure both name; None when the edge or the bounds are
+    unknown."""
+    if edge not in EDGES or not bounds or rect is None:
+        return None
+    inside = {'west': rect[0] - bounds[0], 'east': bounds[2] - rect[2],
+              'north': rect[1] - bounds[1], 'south': bounds[3] - rect[3]}[edge]
+    return max(0.0, float(inside))
 
 
 def band_amount(geometry, ref, edge, legacy_amount, margin, pose=None):

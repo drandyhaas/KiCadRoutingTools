@@ -456,9 +456,14 @@ when its class is not graded for a face) and the group you gave it. Then decide,
 - **The mating face of a connector whose facing abstained** (a side-entry
   JST drawn symmetric about its pads) **or is exempt** (a side-push switch
   of class `edge_actuator`, whose actuator points one way and is graded only
-  once a face is declared): find the side its opening is on in the
-  datasheet's PCB-layout drawing and write `mating_face` (`+x`/`-x`/`+y`/`-y`,
-  the footprint's own frame). The side of its solder tabs, away from the
+  once a face is declared) **or reads `weak` on an edge receptacle**
+  (`facing north [courtyard+fab, weak] pass`: a weak face is read off where
+  the body sits on its pads, and the pad layout can set it wrong -- KiCad
+  10's RJ45_Amphenol_RJHSE5380 reads its mouth into the board): find the
+  side its opening is on in the datasheet's PCB-layout drawing and write
+  `mating_face` (`+x`/`-x`/`+y`/`-y`, the footprint's own frame). A declared
+  face outranks a weak reading (never a strong one), and the grade warns
+  where the two disagree. The side of its solder tabs, away from the
   contact row, is a hint to check against the drawing, not a rule: it is
   wrong on 3 of 50 side-entry connectors in the corpus.
 - **The side a vertical header's cable leaves.** A `Vertical` header mates
