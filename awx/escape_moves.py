@@ -46,6 +46,7 @@ class Grid:
     pitch_y: float
     bbox: Tuple[float, float, float, float]
     row: bool = False               # a ROW PART (row_part): its pads in rows round its edge
+    out: Optional[str] = None       # a ONE-ROW part's face: away from its body (grid_of)
 
 
 @dataclass
@@ -76,8 +77,18 @@ class Move:
 def _row_pads(footprint):
     """(the pads of its rows, its pitch along them) for a ROW PART, else None: a part whose pads stand in rows round
     the edge of its box -- a QFN, a QFP, an SO -- each longer than it is wide, and no pad inside the rows but one (an
-    exposed pad). A ball array's balls are round, and its box is full of them"""
-    pads = [p for p in footprint.pads if getattr(p, 'pad_type', '') != 'np_thru_hole']
+    exposed pad). A ball array's balls are round, and its box is full of them. A pad with no copper (a paste
+    aperture) is none of its pads, and neither is a MOUNTING TAB: a pad of TAB_AREA times the median pad's area or
+    more, outside the box of the smaller pads (an edge connector's)"""
+    pads = [p for p in footprint.pads if getattr(p, 'pad_type', '') != 'np_thru_hole'
+            and any(L.endswith('.Cu') for L in (getattr(p, 'layers', None) or ['.Cu']))]
+    if len(pads) < 4:
+        return None
+    area = sorted(p.size_x * p.size_y for p in pads)[len(pads) // 2]
+    small = [p for p in pads if p.size_x * p.size_y < TAB_AREA * area]
+    sx0, sx1 = min(p.global_x for p in small), max(p.global_x for p in small)
+    sy0, sy1 = min(p.global_y for p in small), max(p.global_y for p in small)
+    pads = [p for p in pads if p in small or sx0 <= p.global_x <= sx1 and sy0 <= p.global_y <= sy1]
     if len(pads) < 4:
         return None
     x0, x1 = min(p.global_x for p in pads), max(p.global_x for p in pads)
@@ -96,6 +107,9 @@ def _row_pads(footprint):
     return rows, pitch
 
 
+TAB_AREA = 4.0
+
+
 def row_part(footprint) -> bool:
     """A part whose pads stand in rows round its edge (_row_pads): a QFN, a QFP, an SO -- not a ball array"""
     return _row_pads(footprint) is not None
@@ -111,15 +125,30 @@ def grid_of(footprint) -> Grid:
     -- half a pitch beyond the box, as an array's -- lie half a pitch past
     the pads' outer ends. Measured from the pads' centres, zynq U4's
     (0.9 mm pads at 0.5 mm) lay inside the pads, and its exposed pad's
-    offset read as a 0.25 mm pitch."""
+    offset read as a 0.25 mm pitch.
+
+    A ONE-ROW part (an edge connector's single row) has two faces along its
+    pads, and its pads leave by the one away from its BODY: the side its
+    other copper (its mounting tabs) stands on, else its origin."""
     rp = _row_pads(footprint)
     if rp is not None:
         rows, pitch = rp
-        return Grid(sorted({round(p.global_x, 3) for p in rows}), sorted({round(p.global_y, 3) for p in rows}),
-                    pitch, pitch, (min(p.global_x - p.size_x / 2 for p in rows),
-                                   min(p.global_y - p.size_y / 2 for p in rows),
-                                   max(p.global_x + p.size_x / 2 for p in rows),
-                                   max(p.global_y + p.size_y / 2 for p in rows)), row=True)
+        xs = sorted({round(p.global_x, 3) for p in rows})
+        ys = sorted({round(p.global_y, 3) for p in rows})
+        out = None
+        if len(ys) == 1 or len(xs) == 1:
+            ids = {id(p) for p in rows}
+            rest = [p for p in footprint.pads if id(p) not in ids]
+            bx, by = ((sum(p.global_x for p in rest) / len(rest), sum(p.global_y for p in rest) / len(rest)) if rest
+                      else (getattr(footprint, 'x', xs[0]), getattr(footprint, 'y', ys[0])))
+            if len(ys) == 1 and abs(by - ys[0]) > 1e-3:
+                out = 'up' if by > ys[0] else 'down'
+            elif len(xs) == 1 and abs(bx - xs[0]) > 1e-3:
+                out = 'left' if bx > xs[0] else 'right'
+        return Grid(xs, ys, pitch, pitch, (min(p.global_x - p.size_x / 2 for p in rows),
+                                           min(p.global_y - p.size_y / 2 for p in rows),
+                                           max(p.global_x + p.size_x / 2 for p in rows),
+                                           max(p.global_y + p.size_y / 2 for p in rows)), row=True, out=out)
     xs = sorted({round(p.global_x, 3) for p in footprint.pads})
     ys = sorted({round(p.global_y, 3) for p in footprint.pads})
 
@@ -186,7 +215,9 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
         # between 0.28 mm pads at 0.5 mm), and a via beside it stands in
         # its neighbours'. The lane changes layer beyond the face, where
         # the whole route places its vias
-        if pad.size_x >= pad.size_y:
+        if grid.out:
+            d = grid.out
+        elif pad.size_x >= pad.size_y:
             d = 'left' if px - x0 <= x1 - px else 'right'
         else:
             d = 'up' if py - y0 <= y1 - py else 'down'
