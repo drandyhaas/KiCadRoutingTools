@@ -223,7 +223,17 @@ DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     # float) feeding the engine's board_edge_clearance; same VALUE-level
                     # parity story as read_project_edge_clearance above -- the GUI
                     # planes tab reads the live board rule via gui_utils.
-                    'effective_board_edge_clearance'}
+                    'effective_board_edge_clearance',
+                    # #1578: pure READERS feeding fix_project_for_output's
+                    # `minima` in place_fanout_clearance (the floors of the
+                    # copper the pass laid or moved, and the #530 pad-override
+                    # cap). The writeback itself is registered above.
+                    'copper_minima', 'pad_clearance_override_minimum',
+                    # #1578: place_fanout_clearance --no-fix-drc-settings carries
+                    # the input's siblings to the output path and writes no
+                    # floor. A file copy for a written board; the GUI writes no
+                    # project file and gates its writeback on its own checkbox.
+                    'seed_project_for_output'}
 
 # #381 D8: post-engine passes that are CLI-only BY DESIGN -- report/audit ONLY,
 # they do NOT mutate the output board, so the GUI producing an identical board
