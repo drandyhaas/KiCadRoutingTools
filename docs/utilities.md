@@ -1107,7 +1107,7 @@ reference excuses only the kinds of pair it also breaks, at least as badly.
 project staged beside it (that board's `.kicad_pro` and `.kicad_dru`) and
 again under the project the board ships with, both on the fill as shipped,
 and reports the error count per violation type of each (`authored_drc`,
-#1580) -- class clearance included, which the floor rows leave out when the
+#1580; the silkscreen checks are left out) -- class clearance included, which the floor rows leave out when the
 chain lowered a class on request. It is DISCLOSED next to the verdict and
 never changes it; without `kicad-cli` (or under `--skip-slow`) it says NOT RUN
 rather than reporting 0.

@@ -187,6 +187,10 @@ def main():
               'authored_rule' in (seen[0]['dru'] or '')
               and 'shipped_rule' in (seen[1]['dru'] or ''),
               str([s['dru'] for s in seen[:2]]))
+        check('the silkscreen providers are skipped on both runs (#333)',
+              all(((s['pro'].get('board') or {}).get('design_settings') or {})
+                  .get('rule_severities', {}).get('silk_overlap') == 'ignore'
+                  for s in seen), str([s['pro'].get('board') for s in seen[:1]])[:300])
         check('an authored project with no .kicad_dru is graded with none',
               seen[seen_before]['dru'] is None, str(seen[seen_before]['dru']))
         check('the fill as shipped (no --refill-zones), at the project\'s own '

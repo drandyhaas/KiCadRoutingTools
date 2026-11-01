@@ -267,6 +267,10 @@ def kicad_hole_clearance(board, value, timeout=3600):
             'items': items}
 
 
+#: KiCad's silkscreen rule types, left out of the authored grade (#1580).
+_SILK_TYPES = ('silk_over_copper', 'silk_overlap', 'silk_edge_clearance')
+
+
 def kicad_errors_by_type(board, project_from=None, timeout=3600):
     """KiCad's DRC ERRORS on ``board``'s copper, per violation type (#1580).
 
@@ -275,10 +279,18 @@ def kicad_errors_by_type(board, project_from=None, timeout=3600):
     on the fill as shipped (:func:`_staged_kicad_drc`), at the severities that
     project declares (``--severity-error``). Unconnected items are not
     counted: connectivity does not move with the rules (it is
-    check_connected's question, and board_score's). -> ``{'count': N,
-    'by_type': {type: n}}``, or ``{'error': why}``. Never raises."""
+    check_connected's question, and board_score's). Nor are the silkscreen
+    checks, which no copper floor moves and whose provider can spin for
+    minutes on an art-heavy board (kicad_drc_compare skips it the same way,
+    #333). -> ``{'count': N, 'by_type': {type: n}}``, or ``{'error': why}``.
+    Never raises."""
+    def _no_silk(proj):
+        sev = (proj.setdefault('board', {}).setdefault('design_settings', {})
+               .setdefault('rule_severities', {}))
+        for k in _SILK_TYPES:
+            sev[k] = 'ignore'
     report, err = _staged_kicad_drc(board, timeout=timeout,
-                                    project_from=project_from,
+                                    project_from=project_from, edit=_no_silk,
                                     severity='--severity-error')
     if err:
         return {'error': err}
@@ -347,7 +359,8 @@ def _authored_drc_note(d):
 
 
 def _counted(row, key='violations', paren=False):
-    """A floor row's count as words (``36 vias``, ``5 KiCad violations``),
+    """A floor row's count as words (``36 vias below it``, ``5 KiCad
+    violations``),
     '' when the row carries none. ``paren`` wraps it for a ``was -> is``."""
     n = row.get(key)
     if not isinstance(n, int) or isinstance(n, bool):
