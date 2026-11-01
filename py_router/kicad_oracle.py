@@ -1294,6 +1294,32 @@ def seeds_clear_of_edge(seeds, pcb_data, edge_clearance, track_half):
     return [p for p, dd in zip(seeds, d) if dd >= need]
 
 
+def _end_cluster(clusters, end, containing, tol=0.1):
+    """Index into `clusters` (exact_clusters' list) of the cluster a link end
+    lies on, or None. A zone end is its island's cluster; a pad, track or via
+    end is the cluster holding a pad centre, track end or via within `tol` of
+    it on its layer (a via point, layer None, matches any layer)."""
+    import math as _m
+    x, y, layer, kind = end
+    if kind == 'zone':
+        ii, _ = containing(x, y, layer)
+        if ii is None:
+            return None
+        for k, c in enumerate(clusters):
+            if ii in c['islands']:
+                return k
+        return None
+    best = None
+    for k, c in enumerate(clusters):
+        for px, py, pl in c['points']:
+            if layer and pl and pl != layer and '*' not in pl:
+                continue
+            d = _m.hypot(px - x, py - y)
+            if d <= tol and (best is None or d < best[0]):
+                best = (d, k)
+    return best[1] if best else None
+
+
 def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
                           track_half=0.1, edge_clearance=0.0):
     """Strap endpoints from KiCad's EXACT fill (kicad_exact_fill): the two
@@ -1381,6 +1407,17 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
         return (min(cand)[1], False) if cand else (None, False)
 
     same_pt = abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6
+    # A ZONE end that no island holds is kicad-cli's stand-in anchor too
+    # (#1564): it names the zone outline's first corner, which on a
+    # non-rectangular board lies outside the outline, so containment names
+    # nothing and the strap had no side to start from. The OTHER end is real
+    # copper; `_real_end` keeps it to pick its cluster below.
+    _real_end = None
+    if not same_pt:
+        for _E, _O in ((A, B), (B, A)):
+            if _E[3] == 'zone' and _containing(_E[0], _E[1], _E[2])[0] is None:
+                _real_end = _O
+                break
 
     def _island_outline(idx):
         s = _samples(idx)
@@ -1399,7 +1436,7 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
     # deterministic; later rounds pick up any remaining orphans).
     a_pts = b_pts = None
     _pref_pair = None
-    if same_pt:
+    if same_pt or _real_end is not None:
         try:
             from kicad_exact_fill import exact_clusters
             _cl = exact_clusters(pcb_data, net_id, islands)
@@ -1415,7 +1452,15 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
             _main_pts = _tagged(_cl[0])
             _mt = _KD(np.asarray([(p[0], p[1]) for p in _main_pts]))
             _best = None
-            for _sc in _cl[1:]:
+            _cands = _cl[1:]
+            if _real_end is not None:
+                # The real end's own cluster is the orphan when it is not
+                # the main one; on the main one (or matched nowhere) the
+                # orphan is unnamed, and the smallest gap decides as above.
+                _k = _end_cluster(_cl, _real_end, _containing)
+                if _k:
+                    _cands = [_cl[_k]]
+            for _sc in _cands:
                 _sp = _tagged(_sc)
                 if not _sp:
                     continue
@@ -1455,6 +1500,8 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
                 if _lay_best is not None and _lay_best[0] <= 3.0:
                     _pref_pair = (_lay_best[1], _lay_best[2])
 
+    if a_pts is None and _real_end is not None:
+        return None  # exact clusters show no split to strap
     ia, ina = _containing(ax, ay, al) if a_pts is None else (None, False)
     ib, inb = (None, False) if (same_pt or a_pts is not None) \
         else _containing(bx, by, bl)
@@ -2524,6 +2571,19 @@ def oracle_reconnect(board_file: str, net_names, config,
             collapsed_dups += _collapsed
         work = _deduped
 
+        # #1564: links with a zone end off the board (kicad-cli's outline-
+        # corner stand-in) go LAST: cluster mode rebinds each to its real
+        # split, which is often one an exact-source link of this round
+        # already names, and the loop skips a split it has already taken.
+        def _off_zone_end(w):
+            _nid = name_to_id.get(w[0])
+            return bool(_off_board_end) and _nid is not None and any(
+                e[3] == 'zone' and _off_board_end(_nid, e[0], e[1])
+                for e in (w[1], w[2]))
+        work = ([w for w in work if not _off_zone_end(w)]
+                + [w for w in work if _off_zone_end(w)])
+        _round_keys = set()
+
         # Obstacle-map memo (#499). The base map is a pure function of
         # (net_id, the board's copper, config) and route_plane_connection_wide
         # CLONES it (`clone_fresh`) rather than mutating, so it is reusable
@@ -2572,7 +2632,20 @@ def oracle_reconnect(board_file: str, net_names, config,
                 failed += 1
                 continue
             attempted[_key] = _attempt + 1
+            _round_keys.add(_key)
             force_raw = _attempt == 1  # smart expansion didn't satisfy KiCad
+            # #1564: a zone end off the outline is kicad-cli's outline-corner
+            # stand-in, as a coincident zone|zone anchor is -- no fill and no
+            # copper can lie there, so the link takes cluster mode below and
+            # never a raw retry toward that point.
+            _stand_in = _off_zone_end((net_name, (ax, ay, al, akind),
+                                       (bx, by, bl, bkind)))
+            if force_raw and _stand_in:
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                      f"<->({bx:.2f},{by:.2f})  zone end off the board "
+                      f"-- skipping the raw retry (#1564)")
+                failed += 1
+                continue
             if force_raw and abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6:
                 # A raw retry of a COINCIDENT link is a zero-length bridge at
                 # an artifact anchor -- meaningless copper (#648). The smart
@@ -2844,7 +2917,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                 # split must be fill-side. Fall back to the raw points.
                 src = [(ax, ay, al)] if al else [(ax, ay)]
                 tgt = [(bx, by, bl)] if bl else [(bx, by)]
-            if abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6 and not force_raw:
+            if (_stand_in or (abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6)) \
+                    and not force_raw:
                 # Zone|Zone items carry ONE ratsnest position for both ends
                 # (the isolated island). Target copper provably in the MAIN
                 # cluster: the net's largest track+via component, graded
@@ -2898,6 +2972,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                     print(f"    {net_name}: cluster mode: true gap "
                           f"({ax:.2f},{ay:.2f})[{al}] <-> "
                           f"({bx:.2f},{by:.2f})[{bl}]")
+                    _rk = (net_name, round(ax, 2), round(ay, 2),
+                           round(bx, 2), round(by, 2))
+                    if _stand_in and (
+                            _rk in _round_keys
+                            or (_rk[0], *_rk[3:], *_rk[1:3]) in _round_keys):
+                        print(f"    {net_name}: that gap is a link this "
+                              f"round already took -- not welded twice "
+                              f"(#1564)")
+                        continue
                     # src/tgt are the cluster seeds; the anchor-seeded
                     # derivation in the else-branch is skipped entirely.
                 else:
