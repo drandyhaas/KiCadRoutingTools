@@ -517,6 +517,12 @@ _point_to_seg_dist = point_to_seg_dist
 VIA_WEIGHT = 50.0
 ATTRACT_WEIGHT = 1.0
 DISPLACEMENT_WEIGHT = 0.3
+#: The candidate pitch of the via-clear fallback and the #1563 apart rung, at
+#: most: they search once per stuck cap over the whole displacement cap, where
+#: the descent's `step` (0.2) steps past the gaps of a dense ball field.
+#: Measured at 0.1 against 0.2 on three BGA boards: shorted parts 4 -> 3 on
+#: one, cap grazes 35 -> 23 and 15 -> 13 on two, none worse, for +5..8 s.
+FALLBACK_STEP = 0.1
 
 
 def _point_to_rect_dist(px, py, rect):
@@ -4063,6 +4069,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                      if st.graze_penalty(r, st.caps[r], st.caps[r].x,
                                          st.caps[r].y,
                                          st.caps[r].rot) > EPS]
+            _fb_step = min(step, FALLBACK_STEP)
             for _fi, ref in enumerate(stuck):
                 if progress_callback:
                     progress_callback(
@@ -4080,7 +4087,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                     the least excess -- and only then by cost."""
                     found, gated, fkey = None, False, None
                     for cx, cy in _candidate_positions(
-                            cap, max_displacement_cap, step, grid_step):
+                            cap, max_displacement_cap, _fb_step, grid_step):
                         for rot in rots:
                             if not cap.stays_beneath(cx, cy, rot) or \
                                     st.graze_penalty(ref, cap, cx, cy, rot) > EPS:
@@ -4138,7 +4145,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                     # broken only when nothing else parts the copper (the
                     # #1067 ladder above, same reason).
                     best, broke = _best_apart(st, ref, cap, rots,
-                                              max_displacement_cap, step,
+                                              max_displacement_cap, _fb_step,
                                               grid_step)
                     if best is not None:
                         parted.append(ref)

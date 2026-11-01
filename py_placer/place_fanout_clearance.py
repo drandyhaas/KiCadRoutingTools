@@ -108,7 +108,9 @@ Examples:
                         help="A cap counts as 'near' a BGA if its courtyard is "
                              "within this many mm of the ball field (default: 1.0)")
     parser.add_argument("--step", type=float, default=0.2,
-                        help="Candidate nudge grid step in mm (default: 0.2)")
+                        help="Candidate nudge grid step in mm (default: 0.2); "
+                             "the last-resort search for a stuck cap steps at "
+                             "min(this, 0.1)")
     parser.add_argument("--max-displacement", type=float, default=2.0,
                         help="Initial max move from seed in mm (default: 2.0); "
                              "grown automatically if a cap can't clear")
