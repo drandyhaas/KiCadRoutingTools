@@ -3184,9 +3184,14 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # the pair's class, and a ball whose escape falls short is re-escaped
     # with its class as the run clearance (bga_fanout.class_clearance). Here,
     # in the part's own frame, so the re-escape's ball keys are this frame's.
-    if (net_clearances and not _class_checked and _pad_filter is None
-            and not _single_pass
-            and any(c > clearance + 1e-9 for c in net_clearances.values())):
+    # #1565: a class/type-scoped or track-scoped .kicad_dru rule binding a
+    # net of the part is priced the same way (rules_bind: a board with no
+    # such rule never reaches it).
+    from bga_fanout.class_clearance import rules_bind
+    if (not _class_checked and _pad_filter is None and not _single_pass
+            and ((net_clearances
+                  and any(c > clearance + 1e-9 for c in net_clearances.values()))
+                 or rules_bind(pcb_data, footprint, clearance))):
         from bga_fanout.class_clearance import class_reescape
         _args = dict(_entry_args, _class_checked=True, clearance=clearance)
         return class_reescape(_generate_bga_fanout_core, _args,
@@ -3934,13 +3939,19 @@ def _generate_bga_fanout_core(footprint: Footprint,
     _nc = {int(n): float(c) for n, c in (net_clearances or {}).items()}
     obstacle_cfg.set_net_clearances(_nc, ())
     _nc_foreign = {n: c for n, c in _nc.items() if n not in fanned_net_ids}
+    # #1565: the class/type-scoped and track-scoped .kicad_dru rules -- the
+    # obstacle map's stamps here, the escaping ball's side in the class check
+    from kicad_dru import install_pair_rule_channels
+    _rules = install_pair_rule_channels(obstacle_cfg, pcb_data, fanned_net_ids)
+    _priced = bool(_nc) or _rules.live
 
-    def _pair_cl(net_a, net_b, layer=None):
+    def _pair_cl(net_a, net_b, layer=None, types=None):
         """KiCad's pair clearance between two nets' copper on `layer` (#1529):
-        max(clearance, class A, class B), a .kicad_dru rule replacing it."""
-        if not _nc:
+        max(clearance, class A, class B), a .kicad_dru rule replacing it, and
+        a scoped rule for the items' types (#1565)."""
+        if not _priced:
             return clearance
-        return obstacle_cfg.pair_clearance(net_a, net_b, layer, base=clearance)
+        return _rules(net_a, net_b, layer, base=clearance, types=types)
 
     # #1518: an inner ball's escape on the top layer -- the balls' own layer
     # -- runs down a channel BETWEEN two rows of balls, so the track and its
@@ -4430,7 +4441,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
         best_routes, tracks, grid, track_width, clearance,
         foreign_pads, obstacle_layer_map, esc_net_name,
         dropped_routes=_esc_routes,
-        pair_clearance=_pair_cl if _nc else None)       # #1529
+        pair_clearance=_pair_cl if _priced else None)   # #1529
     if n_escfix:
         print(f"  Pad-clearance: cleared {n_escfix} escape(s) grazing a foreign "
               f"pad by jog-trim/shorten (issue #123)")
@@ -4465,7 +4476,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             d = point_to_segment_distance(via['x'], via['y'],
                                           t['start'][0], t['start'][1],
                                           t['end'][0], t['end'][1])
-            if d < vr + _pair_cl(via['net_id'], t['net_id'], t['layer']) \
+            if d < vr + _pair_cl(via['net_id'], t['net_id'], t['layer'],
+                                 (('via',), ('track',))) \
                     + t['width'] / 2 - via_clear_tol:
                 via_drop.append(via)
                 break
@@ -5201,6 +5213,15 @@ def generate_bga_fanout(footprint: Footprint,
             progress_callback(
                 0, 0, f"BGA fanout {_ref}: dropping plane balls to vias...")
 
+        # #1565: a scoped or track .kicad_dru rule binding a drop net is held
+        # on the obstacle side, as a class is -- folded into the class map the
+        # drop passes take (the same map on a board with no such rule)
+        from bga_fanout.class_clearance import rule_class_map
+        _drop_nc = rule_class_map(
+            pcb_data, clearance, net_clearances,
+            sorted({p.net_id for p in footprint.pads if p.net_id and not (
+                net_filter and matches_net_filter(p.net_name, net_filter))}))
+
         def _drops_at(cl_run, net_ok, cl_floor, have_t, have_v):
             """One drop pass at clearance `cl_run` over the drop nets
             `net_ok` admits (None: all), against the copper laid so far, with
@@ -5212,7 +5233,7 @@ def generate_bga_fanout(footprint: Footprint,
                 no_via_in_pad=(same_net_pad_clearance is not None
                                and same_net_pad_clearance > 0),
                 hole_to_hole_clearance=hole_to_hole_clearance,
-                net_clearances=net_clearances, net_ok=net_ok)
+                net_clearances=_drop_nc, net_ok=net_ok)
             # A drop that failed at the call's via is retried ONCE at the fab-floor
             # rung the signal rescues escalate to (the same ladder, the same
             # disclosure): a rescue's re-run reserves the plane balls at ITS shrunk
@@ -5235,7 +5256,7 @@ def generate_bga_fanout(footprint: Footprint,
                         no_via_in_pad=(same_net_pad_clearance is not None
                                        and same_net_pad_clearance > 0),
                         hole_to_hole_clearance=hole_to_hole_clearance,
-                        net_clearances=net_clearances, net_ok=net_ok)
+                        net_clearances=_drop_nc, net_ok=net_ok)
                     print(f"  Plane drops at the fab floor (track {_tw:.4f} / via {_vs:.2f} / "
                           f"clearance {_cl:.4f}): {len(d2_vias)} more drop via(s), "
                           f"{rep2.get('failed', 0)} of {rep['failed']} still failed")

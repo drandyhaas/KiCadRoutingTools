@@ -33,8 +33,8 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 - **Board rules honoured** - the board's per-layer `.kicad_dru` clearance rules (#498: the
   escape clearance is floored at the largest rule on the escape layers), the project's
   same-net-pad record (#581), and the fab floors and escalation policy every routing step
-  shares (`--fab-tier` / `--escalation`, below). Net classes are not read: the escape runs
-  at `--clearance` throughout
+  shares (`--fab-tier` / `--escalation`, below); net classes (#1529) and the `.kicad_dru`
+  clearance rules scoped by net class or item type and the track-scoped ones (#1565), below
 - **Staggered packages refused** - a staggered no-lead array (AQFN and friends) is not a
   ball grid: its rows read at half the real pitch. bga_fanout stops in a second and prints
   the `qfn_fanout.py ... --escape-method underpad --allow-via-in-pad` command that handles
@@ -172,6 +172,21 @@ others keep it. No rescue rung lowers a classed ball's clearance below its
 class. Plane drops are laid one class at a time, lowest first, each at its
 class. A diff pair's P against its own N is spaced at `--diff-pair-gap` and
 not re-graded here (`drc_grazes` still reports it).
+
+## Class- and type-scoped `.kicad_dru` rules (#1565)
+
+A `.kicad_dru` clearance rule scoped by net class or item type (the #1491
+channel, e.g. `A.NetClass == 'HV' && B.NetClass == 'HV'`) and a track-scoped
+class rule (#735) are held the way the route steps hold them, through the same
+readers (`kicad_dru.install_pair_rule_channels`): the obstacle map stamps a
+foreign track, via or pad at the rule, and `class_clearance.py` grades every
+pair a rule binds -- at any clearance it was laid at, since a rescue rung can
+lay copper below the run clearance -- and re-escapes the balls that fall short.
+Balls alike to every rule re-escape together at the value a rule sets between
+two of them, and a rule between such groups is held on the obstacle side, as a
+class is; plane drops hold it the same way. What still falls short is reported
+unescaped. The run prints `.kicad_dru: N class/type-scoped ... clearance
+rule(s) held by this escape (#1565)`. A board with no such rule is unchanged.
 
 The writeback treats the classes as `route.py` does: kept without
 `--clearance-ceiling`, each capped at `min(class, ceiling)` with it -- so a

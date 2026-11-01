@@ -72,6 +72,20 @@ LAST_UNDERPAD_REPORT: Dict = {}
 LAST_ESCALATED: List[Dict] = []
 
 
+#: #1565: (board, part) pairs whose held .kicad_dru rules this call named, so
+#: an escape re-run down the clearance ladder says it once
+_RULES_SAID: set = set()
+
+
+def _say_rules(rules, footprint, pcb_data):
+    if not rules.live:
+        return
+    key = (getattr(pcb_data, 'source_path', '') or '', getattr(footprint, 'reference', ''))
+    if key not in _RULES_SAID:
+        _RULES_SAID.add(key)
+        print(f"  {rules.describe()}")
+
+
 def resolve_qfn_clearance(explicit, default_class, ceiling=None):
     """The clearance a QFN fanout escapes at, and the lines that say why (#1328).
 
@@ -602,7 +616,9 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
     conflicts with nothing.
 
     ``pair_clearance(net_a, net_b)``, when given, prices each pair at its
-    two nets' classes (#1529); else every pair is ``clearance``.
+    two nets' classes (#1529) and the scoped and track .kicad_dru rules
+    (#1565; ``kind='track'`` for the stub-against-stub term); else every pair
+    is ``clearance``.
 
     Returns True when the candidate must be REJECTED.
     """
@@ -656,7 +672,8 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
             return True
         if has_stub and segment_to_segment_distance(
                 px, py, vx, vy, qpx, qpy, qx, qy) \
-                < track_width + cl - 1e-6:
+                < track_width + (pair_clearance(net_id, qn, kind='track')
+                                 if pair_clearance is not None else cl) - 1e-6:
             return True
     return False
 
@@ -742,9 +759,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     _nc = {int(n): float(c) for n, c in (net_clearances or {}).items()}
     cfg.set_net_clearances(_nc, ())
     _nc_foreign = {n: c for n, c in _nc.items() if n not in fanned_nets}
+    # #1565: the class/type-scoped and track-scoped .kicad_dru rules, as the
+    # surface fan takes them
+    from kicad_dru import install_pair_rule_channels
+    _rules = install_pair_rule_channels(cfg, pcb_data, fanned_nets)
+    _say_rules(_rules, footprint, pcb_data)
+    _priced = bool(_nc) or _rules.live
 
-    def _pc(net_a, net_b):
-        return cfg.pair_clearance(net_a, net_b, base=clearance) if _nc else clearance
+    def _pc(net_a, net_b, types=None, kind='layer'):
+        return (_rules(net_a, net_b, base=clearance, types=types, kind=kind)
+                if _priced else clearance)
     layer_map = build_layer_map(cfg.layers)
     _prog(0, 0, "building obstacle map...")
     # Pad copper is measured exactly, not stamped (bga_fanout.reroute.
@@ -772,6 +796,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                                      clearance=f)
                 install_layer_clearances(_c, None, None, pcb_data)  # #498
                 _c.set_net_clearances(_nc, ())
+                if _rules.live:                                     # #1565
+                    install_pair_rule_channels(_c, pcb_data, fanned_nets)
             hit = _maps[f] = (PadFreeMap(build_base_obstacle_map(
                 pcb_data, _c, nets_to_route=list(fanned_nets),
                 extra_clearance=track_width / 2, net_clearances=_nc_foreign,
@@ -876,11 +902,14 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # layer.
     _stub_clr = cfg.layer_clearance(footprint.layer, clearance)
 
-    def _spc(net_a, net_b):
-        """#1529: `_stub_clr` for the stub of `net_a` against `net_b`."""
-        if not _nc:
+    def _spc(net_a, net_b, kind='layer', types=None):
+        """#1529: `_stub_clr` for the stub of `net_a` against `net_b` (#1565:
+        and the scoped and track rules for the items' types)."""
+        if not _priced:
             return _stub_clr
-        return cfg.pair_clearance(net_a, net_b, footprint.layer, base=clearance)
+        return _rules(net_a, net_b, footprint.layer, base=clearance, kind=kind,
+                      types=types)
+    _TV = (('track',), ('via',))       # #1565: a stub against a via
     # A SET of halves, so an A/B arm can be 'via', 'via,seg', 'off' or 'all'.
     # 'off' wins over everything (an explicit ablation is never partial), and
     # an empty or unrecognised value is 'all' -- a typo must not silently
@@ -1004,7 +1033,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
             if fn == net_id:
                 continue                        # same-net copper is no obstacle
-            if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + _pc(net_id, fn) - 1e-6:
+            if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + _pc(
+                    net_id, fn, (('via',), ('via',))) - 1e-6:
                 return False
         for hx, hy, hd in _drilled_pad_holes:
             # Net-independent drill floor vs every drilled pad (slot-exact).
@@ -1017,19 +1047,20 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # elongated neighbour pad a pitch away). The via is through-all-layers,
             # so an SMD pad on any single layer still conflicts.
             if _seg_hits_pad(vx, vy, vx, vy, pad,
-                             margin=via_size / 2 + _pc(net_id, pad.net_id) - 1e-6):
+                             margin=via_size / 2 + _pc(net_id, pad.net_id, (
+                                 ('via',), (('pad', pad.pad_type or 'smd'),))) - 1e-6):
                 return False
         for sx0, sy0, sx1, sy1, sw, sn in foreign_tracks:
             if sn == net_id:
                 continue
             if point_to_segment_distance(vx, vy, sx0, sy0, sx1, sy1) \
-                    < via_size / 2 + sw / 2 + _pc(net_id, sn) - 1e-6:
+                    < via_size / 2 + sw / 2 + _pc(net_id, sn, (('via',), ('track',))) - 1e-6:
                 return False
         return not run_output_conflict(
             vx, vy, net_id, placed, px, py,
             via_size=via_size, via_drill=via_drill, clearance=clearance,
             track_width=track_width, hole_to_hole=_h2h,
-            pair_clearance=_pc if _nc else None)
+            pair_clearance=_pc if _priced else None)
 
     def stub_clears_erased(px, py, vx, vy, net_id):
         """#619: is the pad->via stub clear of the copper `nets_to_route` erased?
@@ -1068,7 +1099,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 if v.net_id == net_id:
                     continue                # own-net copper is no obstacle
                 if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \
-                        < v.size / 2 + track_width / 2 + _spc(net_id, v.net_id) - 1e-6:
+                        < v.size / 2 + track_width / 2 + _spc(net_id, v.net_id, types=_TV) - 1e-6:
                     return False
         if _gate_seg:
             # Segments, unlike vias, really ARE single-layer objects, so this
@@ -1083,7 +1114,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 if segment_to_segment_distance(px, py, vx, vy,
                                                s.start_x, s.start_y,
                                                s.end_x, s.end_y) \
-                        < s.width / 2 + track_width / 2 + _spc(net_id, s.net_id) - 1e-6:
+                        < s.width / 2 + track_width / 2 + _spc(net_id, s.net_id, 'track') - 1e-6:
                     return False
         if _gate_pad and _erased_pads:
             # CALL the grader; do not mirror it. An earlier revision of this
@@ -1120,7 +1151,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 # -- so skipping the partner pad outright would wave through a
                 # real short 2-3mm away, which is exactly the geometry the
                 # ladder produces. `id(p) in _tie` alone is NOT the rule.
-                _pcl = _spc(net_id, p.net_id)
+                _pcl = _spc(net_id, p.net_id,
+                            types=(('track',), (('pad', p.pad_type or 'smd'),)))
                 if id(p) in _tie and _tie_span_waived(pcb_data, seg, net_id,
                                                      p, _pcl):
                     continue
@@ -1201,7 +1233,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                         via_size=via_size, via_drill=via_drill,
                         clearance=clearance, track_width=track_width,
                         hole_to_hole=_h2h, adds_via=False,
-                        pair_clearance=_pc if _nc else None):
+                        pair_clearance=_pc if _priced else None):
                 return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
@@ -1687,6 +1719,7 @@ def generate_qfn_fanout(footprint: Footprint,
     """
     LAST_CANCEL_SKIPPED.clear()
     LAST_ESCALATED.clear()          # #1328
+    _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
     # (no recognised layout, no pad_infos, a cancel), and the surface fan never
@@ -1994,16 +2027,23 @@ def generate_qfn_fanout(footprint: Footprint,
     # the map's floor, where they would over-block every other stub.
     _fanned_set = set(_fanned_net_ids)
     _nc_foreign = {n: c for n, c in _nc.items() if n not in _fanned_set}
+    # #1565: the class/type-scoped (#1491) and track-scoped (#735) .kicad_dru
+    # rules -- the map's stamps, and `_rules` for the pairs priced below
+    from kicad_dru import install_pair_rule_channels
+    _rules = install_pair_rule_channels(_obs_cfg, pcb_data, _fanned_net_ids)
+    _say_rules(_rules, footprint, pcb_data)
+    _priced = bool(_nc) or _rules.live
 
-    def _pair(cl, net_a, net_b):
+    def _pair(cl, net_a, net_b, kind='layer', types=None):
         """#1529: the clearance between this run's copper of `net_a` and
         copper of `net_b` on the escape layer, from the run's clearance `cl`:
         KiCad's max(cl, class A, class B), which a .kicad_dru rule on that
-        layer replaces (GridRouteConfig.pair_clearance). `cl` itself on a
-        board with no non-Default class."""
-        if not _nc:
+        layer replaces, and a scoped or track rule (#1565) for the items'
+        types (`kind` 'track' for two tracks). `cl` itself on a board with
+        no non-Default class and no such rule."""
+        if not _priced:
             return cl
-        return _obs_cfg.pair_clearance(net_a, net_b, layer, base=cl)
+        return _rules(net_a, net_b, layer, base=cl, kind=kind, types=types)
 
     def _stub_floor(cl, net_id):
         """The routing side of every pair a stub of `net_id` makes at `cl`:
@@ -2050,6 +2090,7 @@ def generate_qfn_fanout(footprint: Footprint,
     _w_max = max([track_width] + list(_power_w.values()))
     _pad_reach = _w_max / 2 + max(
         [clearance, _base_cl] + list(_nc.values())
+        + ([_rules.max_value(clearance)] if _rules.live else [])
         + [getattr(p, 'local_clearance', 0.0) or 0.0
            for pl in pcb_data.pads_by_net.values() for p in pl])
     _sxs = [pt[0] for s in stubs for pt in (s.pad_pos, s.corner_pos, s.stub_end)]
@@ -2124,6 +2165,8 @@ def generate_qfn_fanout(footprint: Footprint,
             _cfg = GridRouteConfig(layers=list(_obs_cfg.layers), track_width=width,
                                    clearance=f)
             install_layer_clearances(_cfg, None, None, pcb_data)  # #498
+            if _rules.live:                                       # #1565
+                install_pair_rule_channels(_cfg, pcb_data, _fanned_net_ids)
             hit = (build_base_obstacle_map(pcb_data, _cfg, nets_to_route=_fanned_net_ids,
                                            extra_clearance=track_width / 2,
                                            net_clearances=_nc_foreign,
@@ -2173,7 +2216,8 @@ def generate_qfn_fanout(footprint: Footprint,
             if layer not in expand_pad_layers(pad.layers, [layer]):
                 continue
             if _segment_pad_gap(p1[0], p1[1], p2[0], p2[1], pad) - width / 2 \
-                    < _pad_need(pad, _pair(cl, net_id, pad.net_id)) - 1e-9:
+                    < _pad_need(pad, _pair(cl, net_id, pad.net_id, types=(
+                        ('track',), (('pad', pad.pad_type or 'smd'),)))) - 1e-9:
                 return True
         # Existing copper of the part's other fanned nets (issue #257).
         for s in _fanned_existing_segs:
@@ -2182,13 +2226,14 @@ def generate_qfn_fanout(footprint: Footprint,
             if segment_to_segment_distance(
                     p1[0], p1[1], p2[0], p2[1],
                     s.start_x, s.start_y, s.end_x, s.end_y) \
-                    < s.width / 2 + width / 2 + _pair(cl, net_id, s.net_id) - 1e-6:
+                    < s.width / 2 + width / 2 + _pair(cl, net_id, s.net_id, 'track') - 1e-6:
                 return True
         for v in _fanned_existing_vias:
             if v.net_id == net_id:
                 continue
             if point_to_segment_distance(v.x, v.y, p1[0], p1[1], p2[0], p2[1]) \
-                    < v.size / 2 + width / 2 + _pair(cl, net_id, v.net_id) - 1e-6:
+                    < v.size / 2 + width / 2 + _pair(cl, net_id, v.net_id, types=(
+                        ('track',), ('via',))) - 1e-6:
                 return True
         return False
 
@@ -2198,7 +2243,7 @@ def generate_qfn_fanout(footprint: Footprint,
                 continue
             if segment_to_segment_distance(p1[0], p1[1], p2[0], p2[1],
                                            a[0], a[1], b[0], b[1]) \
-                    < width / 2 + track_width / 2 + _pair(cl, net_id, rn) - 1e-6:
+                    < width / 2 + track_width / 2 + _pair(cl, net_id, rn, 'track') - 1e-6:
                 return True
         return False
 
@@ -2225,7 +2270,7 @@ def generate_qfn_fanout(footprint: Footprint,
             a, b = s.pad_pos, s.corner_pos
             if segment_to_segment_distance(
                     p1[0], p1[1], p2[0], p2[1], a[0], a[1], b[0], b[1]) \
-                    < track_width + _pair(cl, net_id, s.net_id) - 1e-6:
+                    < track_width + _pair(cl, net_id, s.net_id, 'track') - 1e-6:
                 return True
             if math.hypot(p2[0] - b[0], p2[1] - b[1]) < _tip_spacing:
                 return True
@@ -2235,7 +2280,7 @@ def generate_qfn_fanout(footprint: Footprint,
             if segment_to_segment_distance(
                     p1[0], p1[1], p2[0], p2[1], s.corner_pos[0], s.corner_pos[1],
                     s.stub_end[0], s.stub_end[1]) \
-                    < track_width + _pair(cl, net_id, s.net_id) - 1e-6:
+                    < track_width + _pair(cl, net_id, s.net_id, 'track') - 1e-6:
                 return True
             if math.hypot(p2[0] - s.stub_end[0], p2[1] - s.stub_end[1]) < _tip_spacing:
                 return True
@@ -2371,7 +2416,7 @@ def generate_qfn_fanout(footprint: Footprint,
     _leg_w = _widen_power_stub_legs(
         stubs, _power_w, track_width, clearance, _seg_grazes,
         _hits_neighbour_reserve,
-        pair_clearance=lambda a, b: _pair(clearance, a, b)) if _power_w else {}
+        pair_clearance=lambda a, b: _pair(clearance, a, b, 'track')) if _power_w else {}
 
     # Generate tracks - two segments per stub
     tracks = []

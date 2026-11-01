@@ -82,7 +82,11 @@ class PadFreeMap:
         # #1529: a pad of a net in a wider class is held at that class
         # (cfg.net_clearances, empty unless the caller installed classes).
         self._classes = dict(getattr(cfg, 'net_clearances', None) or {})
-        self._reach = max([cfg.clearance] + lcs + rules + list(self._classes.values()))
+        # #1565: a class/type-scoped .kicad_dru rule binding a pad (its stamp,
+        # GridRouteConfig.pad_obstacle_clearance) replaces that pair
+        self._scoped = getattr(cfg, 'scoped_clearance', None) is not None
+        self._reach = max([cfg.clearance] + lcs + rules + list(self._classes.values())
+                          + ([cfg.scoped_clearance.max_value] if self._scoped else []))
 
     def pads_clear(self, x1, y1, x2, y2, layer):
         """Every stamped pad on `layer` clears the segment at cfg.track_width."""
@@ -110,6 +114,10 @@ class PadFreeMap:
             c = self._classes.get(p.net_id) if classed else None
             if c is not None and c > pc:
                 pc, pb = c, c
+            if self._scoped:
+                s = cfg.scoped_stamp(p.net_id, getattr(p, 'pad_type', None) or 'smd', None)
+                if s is not None:
+                    pc = pb = s
             need = max(pc, cfg.pad_override_clearance(pb, p))
             if segment_pad_gap(x1, y1, x2, y2, p) - hw < need - 1e-9:
                 return False

@@ -152,6 +152,17 @@ class whose nets the part does not touch keeps its value. `drc_grazes` is
 graded at the written project's classes too. (`bga_fanout.py` does the same;
 see its README.)
 
+### Class- and type-scoped `.kicad_dru` rules (#1565)
+
+A `.kicad_dru` clearance rule scoped by net class or item type (the #1491
+channel, e.g. `A.NetClass == 'HV' && B.NetClass == 'HV'`) and a track-scoped
+class rule (#735) price every pair the escape tests, through the same readers
+the route steps use (`kicad_dru.install_pair_rule_channels`): the obstacle maps
+stamp foreign copper at the rule, and the pairs above are priced for the two
+items' types, a track rule on a track pair pair-exact. A rule holds at every
+escalation rung. The run prints `.kicad_dru: N class/type-scoped ... clearance
+rule(s) held by this escape (#1565)`; a board with no such rule is unchanged.
+
 ### Under-pad (via-drop) escape — `--escape-method underpad` (issue #164)
 
 The default `stub` fan spreads each pad laterally at 45°, so on a **crowded

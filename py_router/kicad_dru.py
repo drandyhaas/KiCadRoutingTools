@@ -1237,6 +1237,13 @@ class ScopedClearanceInstall:
         self._memo[key] = e
         return e
 
+    def rule_value(self, net_id: int, pad_type: Optional[str] = None) -> Optional[float]:
+        """The widest value a scoped rule sets for an item of `net_id` (a
+        track or via, or a pad of `pad_type`) against a routed net, pinned
+        up to the fab floor; None when no rule binds it."""
+        e = self._entry(net_id, pad_type)
+        return None if e is None else e[0]
+
     def stamp(self, net_id: int, pad_type: Optional[str], config) -> Optional[float]:
         e = self._entry(net_id, pad_type)
         if e is None:
@@ -1371,6 +1378,160 @@ def scoped_clearance_report(config) -> List[dict]:
              'why': ("routed nets the rule does not cover need more against the "
                      "same copper; route the rule's class in its own call")}
             for name, n in sorted(s.held_up.items())]
+
+
+class PairRuleVerdicts:
+    """KiCad's clearance between two SPECIFIC items, for an engine that
+    prices its own pairs outside a routing call (the QFN and BGA fanouts,
+    #1565): ``config.pair_clearance`` -- the base, the two nets' classes, a
+    class/type-scoped rule (#1491) for the items' types, the layer rule --
+    and then the track channel (#735) pair-exact through
+    ``track_pair_clearance``, as check_drc grades a seg-seg pair. The
+    config's own track map is a per-obstacle over-approximation for shared
+    stamps; a verdict about two named nets does not need one.
+
+    ``live`` is False on a board with neither a scoped nor a track rule; a
+    caller then keeps the pricing it had."""
+
+    def __init__(self, config, pcb_data, track_rules=None, memberships=None):
+        self.cfg = config
+        if track_rules is None:
+            track_rules, memberships = board_track_rules(pcb_data)
+        self.track_rules = list(track_rules or ())
+        self.memberships = dict(memberships or {})
+        self._names = ({nid: n.name for nid, n in (pcb_data.nets or {}).items()}
+                       if self.track_rules and pcb_data is not None else {})
+        self._memo: Dict[tuple, float] = {}
+
+    @property
+    def live(self) -> bool:
+        return self.cfg.scoped_clearance is not None or bool(self.track_rules)
+
+    def describe(self) -> str:
+        """One console line naming what the verdicts hold ('' when not live)."""
+        if not self.live:
+            return ''
+        sc = self.cfg.scoped_clearance
+        parts = ([f"{len(sc.sc.rules)} class/type-scoped (#1491)"] if sc is not None else []) \
+            + ([f"{len(self.track_rules)} track-scoped (#735)"] if self.track_rules else [])
+        return (f".kicad_dru: {' and '.join(parts)} clearance rule(s) held by "
+                f"this escape (#1565)")
+
+    def group_key(self, net_id: int):
+        """Nets with one key are alike to every rule of either channel: the
+        same classes, effective class and rule-named name literals (the
+        scoped channel's signature) and the same track-rule memberships."""
+        sc = self.cfg.scoped_clearance
+        return (sc.sc._sig(net_id) if sc is not None else None,
+                frozenset(self.memberships.get(net_id, ())) if self.track_rules else None)
+
+    def rule_value(self, net_a: int, net_b: int) -> float:
+        """The widest value a rule binding the two nets' tracks or vias sets
+        (0.0 when none binds them)."""
+        v = 0.0
+        for kind in ('track', 'layer'):
+            if self.binds(net_a, net_b, kind=kind):
+                v = max(v, self(net_a, net_b, base=0.0, kind=kind))
+        return v
+
+    def obstacle_floors(self, routed_net_ids, net_ids) -> Dict[int, float]:
+        """{net of `net_ids`: the widest value a rule sets between its tracks
+        and vias and those of the routed nets}, for an engine that holds each
+        OBSTACLE net at one value (a class map): the scoped channel's stamps
+        (``ScopedClearanceInstall.rule_value``) and the track channel's
+        (``effective_track_clearances``) for that routed set."""
+        out: Dict[int, float] = {}
+        sc = self.cfg.scoped_clearance
+        routed = list(routed_net_ids or ())
+        if sc is not None and routed:
+            inst = ScopedClearanceInstall(sc.sc, routed, self.cfg.net_clearances,
+                                          sc.fab_floor)
+            for n in net_ids:
+                v = inst.rule_value(n)
+                if v is not None:
+                    out[n] = v
+        if self.track_rules and routed:
+            for n, v in effective_track_clearances(self.track_rules, self.memberships,
+                                                   net_ids, routed).items():
+                if v > out.get(n, 0.0):
+                    out[n] = v
+        return out
+
+    def binds(self, net_a: int, net_b: int, layer: Optional[str] = None, *,
+              kind: str = 'layer', types=None) -> bool:
+        """Does a scoped rule, or on a track pair a track rule, bind this
+        pair of items? (Its value then holds whatever clearance the copper
+        was laid at.)"""
+        if net_a == net_b:
+            return False
+        sc = self.cfg.scoped_clearance
+        if kind == 'track' and types is None:
+            types = (('track',), ('track',))
+        if sc is not None:
+            ta, tb = (types if types is not None else
+                      (('via',), ('via',)) if kind == 'stack' else
+                      (('track', 'via'), ('track', 'via')))
+            for a in ta:
+                for b in tb:
+                    ka, pa = a if isinstance(a, tuple) else (a, None)
+                    kb, pb = b if isinstance(b, tuple) else (b, None)
+                    if sc.sc.pair_value(net_a, ka, net_b, kb, pa, pb) is not None:
+                        return True
+        if kind == 'track' and self.track_rules:
+            return track_pair_clearance(
+                self.track_rules, self.memberships.get(net_a, ()),
+                self.memberships.get(net_b, ()), 0.0,
+                coupled=nets_coupled(self._names.get(net_a), self._names.get(net_b)),
+                layer=layer)[1] is not None
+        return False
+
+    def max_value(self, base: float) -> float:
+        """The widest value either channel can price a pair at (a reach)."""
+        v = base
+        if self.cfg.scoped_clearance is not None:
+            v = max(v, self.cfg.scoped_clearance.max_value)
+        return max([v] + [r.clearance_mm for r in self.track_rules])
+
+    def __call__(self, net_a: int, net_b: int, layer: Optional[str] = None, *,
+                 base: float, kind: str = 'layer', types=None) -> float:
+        """`kind` 'layer' (the items meet on `layer`, or anywhere when None),
+        'track' (two tracks on `layer`: the track channel applies) or 'stack'
+        (two barrels); `types` as ``GridRouteConfig.pair_clearance``.
+        Memoized: an escape asks the same pair millions of times."""
+        key = (net_a, net_b, layer, base, kind, types)
+        v = self._memo.get(key)
+        if v is None:
+            v = self._memo[key] = self._value(net_a, net_b, layer, base, kind, types)
+        return v
+
+    def _value(self, net_a, net_b, layer, base, kind, types):
+        if kind == 'track' and types is None:
+            types = (('track',), ('track',))
+        v = self.cfg.pair_clearance(net_a, net_b, layer,
+                                    kind='stack' if kind == 'stack' else 'layer',
+                                    base=base, types=types)
+        if kind == 'track' and self.track_rules and net_a != net_b:
+            v = track_pair_clearance(
+                self.track_rules, self.memberships.get(net_a, ()),
+                self.memberships.get(net_b, ()), v,
+                coupled=nets_coupled(self._names.get(net_a), self._names.get(net_b)),
+                layer=layer)[0]
+        return v
+
+
+def install_pair_rule_channels(config, pcb_data, routed_net_ids) -> PairRuleVerdicts:
+    """#1565: give a fanout's config the scoped and track channels the route
+    steps install (``install_track_clearances``, which installs the scoped
+    channel too: the obstacle map's stamps, for this call's routed set), after
+    its layer map and net classes, quietly, and return the pair-exact verdicts
+    for the pairs the engine prices itself. Every value is unchanged on a
+    board with no such rule."""
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        install_track_clearances(config, None, None, pcb_data,
+                                 routed_net_ids=list(routed_net_ids or ()) or None)
+    return PairRuleVerdicts(config, pcb_data)
 
 
 _SCOPED_ANNOUNCED = set()  # (board path, rules) already printed this process
