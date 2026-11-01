@@ -1122,10 +1122,15 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
 
     def named(n):
         return bool(asked) and matches_net_filter(n, asked)
+    # One rule for a broken promise, check_impedance's own (#1582: it no
+    # longer counts the samples at the net's own pad).
+    from check_impedance import promise_broken
+
+    def _broken(r):
+        return promise_broken(r.get('length_no_ground_mm', 0.0),
+                              r.get('length_gap_wrong_mm', 0.0))
     failing = sorted(r['net_name'] for r in rows
-                     if r.get('crossings')
-                     or (r.get('length_no_ground_mm', 0.0)
-                         + r.get('length_gap_wrong_mm', 0.0)) > 0.01)
+                     if r.get('crossings') or _broken(r))
     extra = {}
     if declared:
         extra = {'declared_nets': declared,
@@ -1145,9 +1150,7 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
         # component and the exit code read 0 (test-board run 5, journal [11]).
         return {'ran': True, 'count': None,
                 'reason': 'no routed nets matched --impedance-nets', **extra}
-    broken = sorted(r['net_name'] for r in graded
-                    if (r.get('length_no_ground_mm', 0.0)
-                        + r.get('length_gap_wrong_mm', 0.0)) > 0.01)
+    broken = sorted(r['net_name'] for r in graded if _broken(r))
     crossing = sorted(r['net_name'] for r in graded if r.get('crossings'))
     return {'ran': True, 'count': len(set(broken) | set(crossing)),
             'nets_with_crossing': len(crossing),

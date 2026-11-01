@@ -26,8 +26,14 @@ Usage:
     python3 check_impedance.py board.kicad_pcb --json report.json
     python3 check_impedance.py board.kicad_pcb --verbose      # per-crossing list
 
-Exit code is 1 when any reference-plane crossing is found (so it can gate a
-build the way check_drc.py does), 0 otherwise. ``--exit-zero`` suppresses that.
+Exit code is 1 when any reference-plane crossing is found, or when a net with
+a declared coplanar gap (``--coplanar-gap``, or its own declaration in the
+sibling .kicad_pro) misses it -- no ground beside it, or a gap off the
+declared one, over more than 0.01 mm of its outer-layer length; the coplanar
+audit section names those nets. Samples over the net's own pad, or within the
+pour's clearance of it, are reported apart and never counted (#1582). Exit 0
+otherwise, so it can gate a build the way check_drc.py does. ``--exit-zero``
+suppresses that.
 """
 
 from __future__ import annotations
@@ -74,6 +80,17 @@ DEFAULT_MIN_VOID_LENGTH = 0.30
 # declaration counts as broken. The pour rasterizes at 0.04-0.08mm and KiCad's
 # filler rounds its own outline, so a few hundredths is measurement noise.
 DEFAULT_GAP_TOLERANCE = 0.05
+
+# A net's coplanar promise is broken when more than this length of it has no
+# ground beside it or misses the declared gap (mm). board_score reads the same
+# predicate off the JSON rows (#1389).
+BROKEN_PROMISE_MM = 0.01
+
+
+def promise_broken(length_no_ground_mm: float, length_gap_wrong_mm: float) -> bool:
+    """The one rule for a broken coplanar promise (#1389, #1582)."""
+    return ((length_no_ground_mm or 0.0) + (length_gap_wrong_mm or 0.0)
+            > BROKEN_PROMISE_MM)
 
 
 # =============================================================================
@@ -130,6 +147,17 @@ class NetImpedance:
     outer_length_mm: float = 0.0        # length on outer layers (where CPW applies)
     length_no_ground_mm: float = 0.0    # outer length with NO pour beside it
     length_gap_wrong_mm: float = 0.0    # outer length whose gap misses the promise
+    # Outer length whose gap misses the promise only because the net's OWN
+    # pad is there (#1582): over a pad wider than the track the conductor is
+    # the pad, and just past it the pour still keeps its clearance from the
+    # pad. Like the own-via antipad (#1203), reported here and never counted
+    # in the two above.
+    length_at_own_pad_mm: float = 0.0
+
+    @property
+    def promise_broken(self) -> bool:
+        """Did any of this net's declared-coplanar length miss its gap?"""
+        return promise_broken(self.length_no_ground_mm, self.length_gap_wrong_mm)
 
     @property
     def void_fraction(self) -> float:
@@ -385,6 +413,13 @@ def own_antipad_radius(pcb, ref_layer: str, via, cell: float) -> float:
     plus the clearance the fill model carves it at -- max(zone clearance, the
     plane net's class, the via net's class), as `ZoneFillModel` stamps a
     foreign via -- plus one model cell for its cell-centre quantisation."""
+    return via.size / 2.0 + _pour_clearance(pcb, ref_layer, via.net_id) + cell
+
+
+def _pour_clearance(pcb, layer: str, net_id: int) -> float:
+    """The clearance the fill model carves the pours on `layer` at around an
+    item of `net_id`: max(zone clearance, the plane net's class, the item
+    net's class), as `ZoneFillModel` stamps foreign copper."""
     try:
         from plane_fill_model import _NC_ATTR
         import routing_defaults as _defaults
@@ -394,11 +429,20 @@ def own_antipad_radius(pcb, ref_layer: str, via, cell: float) -> float:
         nc, default_zc = {}, 0.0
     clr = 0.0
     for z in getattr(pcb, 'zones', None) or ():
-        if z.layer != ref_layer or not z.net_id or not z.polygon:
+        if z.layer != layer or not z.net_id or not z.polygon:
             continue
         zc = z.clearance if z.clearance is not None else default_zc
-        clr = max(clr, zc, nc.get(z.net_id, 0.0), nc.get(via.net_id, 0.0))
-    return via.size / 2.0 + clr + cell
+        clr = max(clr, zc, nc.get(z.net_id, 0.0), nc.get(net_id, 0.0))
+    return clr
+
+
+def own_pad_halo(pcb, layer: str, pad, cell: float) -> float:
+    """How far past the net's own `pad` the pour on `layer` is still shaped by
+    it (#1582): the clearance the fill keeps from the pad (its own override
+    included) plus one model cell for the cell-centre quantisation, as
+    :func:`own_antipad_radius` sizes a via's."""
+    return max(_pour_clearance(pcb, layer, pad.net_id),
+               getattr(pad, 'local_clearance', 0.0) or 0.0) + cell
 
 
 def _sample_points(x1: float, y1: float, x2: float, y2: float,
@@ -631,9 +675,27 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                         x=pd.global_x, y=pd.global_y,
                         size=max(pd.size_x, pd.size_y), net_id=pd.net_id))
 
+    # #1582: every copper pad of a net, by layer, for the coplanar audit. A
+    # line landing on a pad wider than itself runs over the pad -- where the
+    # conductor is the pad -- and then through the pour's clearance step
+    # around it, and the gap read from the track's half-width misses the
+    # declared one on both, which no routing can change.
+    from net_queries import expand_pad_layers
+    from routing_utils import point_to_pad_rect_dist
+    copper_pads_by_net: Dict[int, List] = {}
+    for fp in (pcb.footprints or {}).values():
+        for pd in fp.pads:
+            if pd.net_id and getattr(pd, 'pad_type', '') != 'np_thru_hole':
+                copper_pads_by_net.setdefault(pd.net_id, []).append(pd)
+
     for net_id, net_name in selected:
         own_vias = list(vias_by_net.get(net_id, ()))
         own_pads = list(tht_by_net.get(net_id, ()))
+        pads_on: Dict[str, List] = {}
+        for pd in copper_pads_by_net.get(net_id, ()):
+            for ly in expand_pad_layers(list(getattr(pd, 'layers', None) or ()),
+                                        layer_order):
+                pads_on.setdefault(ly, []).append(pd)
         if partners.get(net_id) is not None:
             own_vias += vias_by_net.get(partners[net_id], [])
             own_pads += tht_by_net.get(partners[net_id], [])
@@ -779,19 +841,45 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                 max_probe = max(max_probe, net_gap * 3.0)
             dx, dy = seg.end_x - seg.start_x, seg.end_y - seg.start_y
             half_w = (seg.width or 0.0) / 2.0
+            # #1582: the net's own pads on this layer, each with how far past
+            # it the pour is still shaped by it.
+            halos = []
+            if net_gap > 0:
+                for pd in pads_on.get(layer, ()):
+                    m = own_pad_halo(pcb, layer, pd, same_layer.cell)
+                    reach = math.hypot(pd.size_x, pd.size_y) / 2.0 + m
+                    if (min(seg.start_x, seg.end_x) - reach <= pd.global_x
+                            <= max(seg.start_x, seg.end_x) + reach
+                            and min(seg.start_y, seg.end_y) - reach <= pd.global_y
+                            <= max(seg.start_y, seg.end_y) + reach):
+                        halos.append((pd, m, reach))
 
             for (sx, sy, _) in samples[:n_int]:
                 gap = measure_side_gap(same_layer, sx, sy, dx, dy, half_w,
                                        max_probe, net_id)
+                # Over the net's own pad, or within its pour clearance of it.
+                at_pad = [reach for pd, m, reach in halos
+                          if point_to_pad_rect_dist(sx, sy, pd) <= m]
                 if gap is None:
                     z0_here = z0_nom
                     if net_gap > 0:
-                        result.length_no_ground_mm += per_sample
+                        # Beside a wide pad the pour can sit past the probe:
+                        # probe past the pad before calling it no ground. No
+                        # pour there either is a real break, and it counts.
+                        if at_pad and measure_side_gap(
+                                same_layer, sx, sy, dx, dy, half_w,
+                                max_probe + max(at_pad), net_id) is not None:
+                            result.length_at_own_pad_mm += per_sample
+                        else:
+                            result.length_no_ground_mm += per_sample
                 else:
                     result.gap_samples.append(gap)
                     if net_gap > 0 and \
                             abs(gap - net_gap) > gap_tolerance:
-                        result.length_gap_wrong_mm += per_sample
+                        if at_pad:
+                            result.length_at_own_pad_mm += per_sample
+                        else:
+                            result.length_gap_wrong_mm += per_sample
                     if cpwg_applies(gap, h, ratio_limit):
                         result.tight_gap_length_mm += per_sample
                         z0_here = cpwg_z0(seg.width, gap, h,
@@ -884,15 +972,27 @@ def format_report(report: BoardImpedanceReport, verbose: bool = False,
                 lines.append(f"    {c.describe()}")
 
     # --- coplanar declaration audit ---
-    if report.declared_gap > 0:
+    # #1582: whenever ANY net carries a declared gap -- a per-net declaration
+    # read from the project counts as much as --coplanar-gap. It used to print
+    # for the call-level flag only, so a project-declared board exited 1 on a
+    # broken promise with no line saying why.
+    declared = [n for n in report.nets if n.declared_gap > 0]
+    if declared:
+        gaps = sorted({round(n.declared_gap, 6) for n in declared})
+        src = (f"--coplanar-gap {report.declared_gap:g}mm"
+               if report.declared_gap > 0 and gaps == [round(report.declared_gap, 6)]
+               else "declared gap " + ", ".join(f"{g:g}" for g in gaps) + "mm")
         lines.append("")
-        lines.append(f"-- Coplanar declaration audit (--coplanar-gap "
-                     f"{report.declared_gap:g}mm, tolerance "
-                     f"±{report.gap_tolerance:g}mm) --")
-        outer = sum(n.outer_length_mm for n in report.nets)
-        no_gnd = sum(n.length_no_ground_mm for n in report.nets)
-        wrong = sum(n.length_gap_wrong_mm for n in report.nets)
-        ok = max(0.0, outer - no_gnd - wrong)
+        # ASCII: this line now prints on every project-declared board, and a
+        # parent reading it in another code page lost the whole stdout to one
+        # undecodable '±' (Windows, test_meander_demo_boards).
+        lines.append(f"-- Coplanar declaration audit ({src}, tolerance "
+                     f"+/-{report.gap_tolerance:g}mm) --")
+        outer = sum(n.outer_length_mm for n in declared)
+        no_gnd = sum(n.length_no_ground_mm for n in declared)
+        wrong = sum(n.length_gap_wrong_mm for n in declared)
+        at_pad = sum(n.length_at_own_pad_mm for n in declared)
+        ok = max(0.0, outer - no_gnd - wrong - at_pad)
         lines.append(f"  Outer-layer length declared coplanar: {outer:.1f} mm")
         if outer > 0:
             lines.append(f"    gap as declared:  {ok:>9.1f} mm  "
@@ -901,8 +1001,11 @@ def format_report(report: BoardImpedanceReport, verbose: bool = False,
                          f"({100 * wrong / outer:.1f}%)")
             lines.append(f"    NO ground beside: {no_gnd:>9.1f} mm  "
                          f"({100 * no_gnd / outer:.1f}%)")
-        broken = [n for n in report.nets
-                  if (n.length_no_ground_mm + n.length_gap_wrong_mm) > 0.01]
+            if at_pad > 0:
+                lines.append(f"    at its own pad:   {at_pad:>9.1f} mm  "
+                             f"({100 * at_pad / outer:.1f}%; the pad and the "
+                             f"pour's clearance step past it -- not counted)")
+        broken = [n for n in declared if n.promise_broken]
         if broken:
             lines.append("")
             lines.append("  Nets whose declared gap was NOT achieved "
@@ -981,6 +1084,10 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 sum(n.length_no_ground_mm for n in report.nets), 4),
             'length_gap_wrong_mm': round(
                 sum(n.length_gap_wrong_mm for n in report.nets), 4),
+            'length_at_own_pad_mm': round(
+                sum(n.length_at_own_pad_mm for n in report.nets), 4),
+            'nets_broken_promise': sorted(n.net_name for n in report.nets
+                                          if n.promise_broken),
         },
         'nets': [
             {
@@ -998,6 +1105,9 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 'outer_length_mm': round(n.outer_length_mm, 4),
                 'length_no_ground_mm': round(n.length_no_ground_mm, 4),
                 'length_gap_wrong_mm': round(n.length_gap_wrong_mm, 4),
+                'length_at_own_pad_mm': round(n.length_at_own_pad_mm, 4),
+                'declared_gap_mm': n.declared_gap,
+                'promise_broken': n.promise_broken,
                 'z0_nominal': round(n.z0_nominal, 3),
                 'z0_measured': round(n.z0_measured, 3),
                 'z0_error_pct': round(n.z0_error_pct, 3),
@@ -1128,8 +1238,7 @@ def main() -> int:
 
     if args.exit_zero:
         return 0
-    broken_promise = any((n.length_no_ground_mm + n.length_gap_wrong_mm) > 0.01
-                         for n in report.nets)
+    broken_promise = any(n.promise_broken for n in report.nets)
     return 1 if (report.total_crossings or broken_promise) else 0
 
 

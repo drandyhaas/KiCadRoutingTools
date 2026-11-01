@@ -2828,10 +2828,20 @@ python3 py_tools/check_impedance.py poured.kicad_pcb --coplanar-gap 0.2
 
 Nets the routing steps recorded an impedance declaration for (`--impedance`,
 kept in the sibling `.kicad_pro`) are audited at their own declared coplanar
-gap; `--coplanar-gap` is the fallback for nets without one. Plane nets are
-skipped unless `--include-plane-nets`. Exit 1 when any reference-plane
-crossing is found, else 0 (`--exit-zero`: always 0). The model and every
-option are in [Impedance API](api-impedance.md).
+gap; `--coplanar-gap` is the fallback for nets without one. The coplanar
+declaration audit prints whenever a net carries a declared gap, from either
+source. Over the net's own pad, and within the pour's clearance of it, the gap
+read from the track misses the declaration on any pad wider than the track
+(the conductor there is the pad); that length is reported as `at its own pad`
+(`length_at_own_pad_mm`) and never counted, the way the net's own via antipad
+is never a crossing (#1582). A pad with no pour beside it at all still counts
+as no ground. Plane nets are skipped unless `--include-plane-nets`. Exit 1
+when any reference-plane crossing is found, or when a net misses its declared
+gap -- no ground beside it, or a gap off the declaration -- over more than
+0.01 mm of its outer-layer length (`promise_broken`, the rule `board_score
+--impedance-nets` counts by; the audit names those nets); else 0
+(`--exit-zero`: always 0). The model and every option are in
+[Impedance API](api-impedance.md).
 
 ## Reachability Check (`check_reachability.py`)
 

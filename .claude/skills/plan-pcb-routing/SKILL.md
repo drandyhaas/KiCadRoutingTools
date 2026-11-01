@@ -977,7 +977,9 @@ python3 py_tools/check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
 - The gap must be **achievable**: it is a pour clearance, so it cannot be below
   the fab floor, and near via antipads / pads the real gap will be wider. The
   `check_impedance.py` audit (item 3 above) reports how much of each net
-  actually achieved it.
+  actually achieved it; the length over the net's OWN pads (and the pour's
+  clearance step past them) is listed as `at its own pad` and never breaks
+  the declaration (#1582).
 
 **Report to the user** which nets you declared coplanar, the gap, and the plane
 step it is tied to — this is a coupled choice they may want to override. If the
