@@ -1263,20 +1263,31 @@ def net_match_length(pcb_data: PCBData, net_id: int, mode: str = 'total',
 
 def net_signal_length(pcb_data: PCBData, net_id: int,
                       tolerance: float = 0.02) -> Optional[float]:
-    """The length a net's copper will measure once it ships, read off the
-    board BEFORE the post-route cleanup has run (#1303), in mm with every
-    pad's pad-to-die; None while its copper pads are not all joined.
+    """The length of the copper a net's post-route cleanup will leave, read
+    off the board BEFORE the cleanup has run (#1303), in mm with every pad's
+    pad-to-die; None while its copper pads are not all joined.
 
     A route step's board still carries what its cleanup will trim: fanout
     stubs the new copper made dead ends, and loops where a leg and the
     coupled middle both join the same two points. So a 2-pad net reads its
     pad-to-pad copper path (`pin_pair_path_length`), which is what a loop
     collapses to; a net with more pads reads its copper with every dead-end
-    branch trimmed (leaves that are not pads, repeatedly), the tree KiCad's
-    length DRC then totals. On imx6ulz DQS0 this read P 21.31 / N 16.82 mm
-    where the routing result said P 12.00 / N 13.08 (it carries no stub
-    lengths after a seam re-ask) and the shipped board measured P 21.33 /
-    N 16.82."""
+    branch trimmed (leaves that are not pads, repeatedly). On imx6ulz DQS0
+    this read P 21.31 / N 16.82 mm where the routing result said P 12.00 /
+    N 13.08 (it carries no stub lengths after a seam re-ask) and the shipped
+    board measured P 21.33 / N 16.82.
+
+    It is a PATH measure, not the length KiCad's length/skew DRC grades the
+    shipped copper at (`net_match_length` -> `kicad_net_length_nm`, which
+    `diff_pair_skew` and check_drc read). A track end anywhere inside a
+    via's or pad's copper joins it here at no cost, with the via's barrel
+    charged; KiCad joins a via only to tracks ending at its centre before
+    10.0.4 (a via so joined on one layer charges no barrel) and from 10.0.4
+    cuts such a run at the via pad and measures it to the centre, and it cuts
+    runs at pad edges. Where a track ends inside a via off its centre (#1235)
+    the two differ by up to a via barrel on the copper that ships: glasgow
+    /IO_Banks/Z2 and Z6 matched here to 0.0006 mm and shipped 0.76 and
+    0.19 mm of KiCad 10.0.7 skew, 1.58 mm on 10.0.3 (#1583)."""
     pads = _copper_pads(pcb_data, net_id)
     if len(pads) < 2 or not net_pads_joined(pcb_data, net_id, pads, tolerance):
         return None
