@@ -644,7 +644,9 @@ Use the printed flags as-is:
   the gap, or coupled over less than one pitch or 10% of the pair's length; route_diff reads this off the board, not off its own result, and protects
   such a pair only while its members still run alongside within 1 mm
   (`pair_reports[].protected`, #1361), so a retry may rip the rest), or DRC shows an
-  intra-pair / via-via graze — re-run
+  intra-pair / via-via graze — first read its `pair_reports[].failure_reason`:
+  a polarity or graze code has a fix of its own, and `/diagnose-routing-failures`
+  maps every code. For a pair the geometry crowds out, re-run
   the failing pairs with **smaller track width, smaller gap, AND smaller vias**
   (`--via-size`/`--via-drill` toward the fab via floor). A tighter track+gap fits a
   narrower channel, and smaller vias fit a tight pad pitch (measured: lumenpnp
@@ -3606,6 +3608,30 @@ It also PRINTS what it cannot decide, with the tool that owns each — nine
 rules need a routed board or a finished run, and an unchecked rule that says
 so is honest where a silently absent one is not. `--list` shows both sets
 without reading a plan.
+
+### Then run it through its last pair step, and read the pairs
+
+The all-nets `route.py` step is the long one (up to an hour on a large
+board), and every `route_diff.py` step runs before it. So run the chain
+**through its last `route_diff.py` step first** and read each pair step's
+`JSON_SUMMARY` (or its `--json-out` file) before you start the all-nets step
+(#1598):
+
+- `failed_diff_pairs`, `single_ended_diff_pairs` and `member_incomplete_pairs`;
+- for each pair they name, `pair_reports[].failure_reason` (with
+  `failure_stage` and `blocking_nets`).
+
+A pair is ready for the all-nets step when it is in `routed_diff_pairs`, or
+in `single_ended_diff_pairs` with `failure_reason` `electrically-short` (too
+short for coupling to buy anything). A `member_incomplete_pairs` entry is
+expected only when the pair's members are in `single_ended_followup_nets` (a
+`partial` pair's peeled far terminals, or an `electrically-short` pair's
+members): the all-nets step closes them, and `check_connected` after it says
+whether it did. **Do not proceed to the all-nets step with any other pair
+failure.** Fix it first, at the cost of a pair step (minutes):
+`/diagnose-routing-failures` ("route_diff runs") maps each `failure_reason` to
+its fix, and a smaller track, gap and via (Step 4) fixes only some of them.
+Then run the rest of the chain.
 
 ### Stop conditions
 
