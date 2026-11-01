@@ -174,7 +174,9 @@ Validate routed boards against the *real* spec, with the right checker — most
     rule and a pad `local_clearance` outrank it, since the writeback clamps
     neither. The project is written in EVERY exit path including the zero-move
     one, so a run that legitimately moves nothing still ships the spec it was
-    graded against. `grade_pad_legality` and `quench` keep the uncapped
+    graded against -- but its size floors follow only the copper the pass laid
+    or moved (#1578), and `--no-fix-drc-settings` writes nothing and carries
+    the input's siblings through. `grade_pad_legality` and `quench` keep the uncapped
     `max(base, netclass)` semantics: they write no project, so the class they
     price at is one KiCad will still enforce. With `--intent` (#1067) it also
     holds the intent's decap limits through the quench's own tether gate
