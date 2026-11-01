@@ -18,6 +18,12 @@ nudge and are grazing after it -- whether or not the pass had fixed them
 first, since copper this pass draws can also break a cap that arrived clean.
 They are in the unresolved list too; this line names the cause, which is us.
 
+A graze is a clearance shortfall; a SHORT is a pad in contact with another
+net's copper. A cap no pose clears, shorted where it stands, is moved to the
+pose apart from every foreign copper that grazes least (#1563), named on the
+`Moved off a short` line; one with no such pose within the displacement cap
+is named on the `SHORTED` line (result key `shorted`).
+
 Usage:
   python3 py_placer/place_fanout_clearance.py fanned.kicad_pcb [output.kicad_pcb] [options]
 
@@ -246,6 +252,10 @@ Examples:
             'unresolved': list(result.get('unresolved') or ()),
             'via_resolved': list(result.get('via_resolved') or ()),
             'regrazed': list(result.get('regrazed') or ()),
+            # #1563: unresolved caps still in contact, and caps moved off a
+            # short to a pose that only grazes
+            'shorted': list(result.get('shorted') or ()),
+            'parted': list(result.get('parted') or ()),
             # #1122: only when a cap's rotation is declared, so a run whose
             # intent declares none prints what it printed before.
             **({'declared_rotations': result['declared_rotations']}

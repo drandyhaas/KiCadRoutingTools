@@ -188,6 +188,11 @@ def cap_optimization_summary(result):
     if regrazed:
         summary += (f"; {len(regrazed)} re-grazed by this pass's own "
                     f"connector copper: {', '.join(sorted(regrazed))}")
+    # #1563: of the unresolved, the ones still SHORTED (copper in contact).
+    shorted = result.get('shorted') or []
+    if shorted:
+        summary += (f"; {len(shorted)} SHORTED to foreign copper (no pose "
+                    f"apart from it): {', '.join(sorted(shorted))}")
     # #1067: only when the step carried an intent (the key is absent else).
     decap = result.get('decap') or {}
     decap_broken = sorted(decap.get('broken') or {})

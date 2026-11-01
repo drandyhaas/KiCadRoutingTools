@@ -2279,7 +2279,11 @@ still replay.
 - **Moves.** A cap moves at most `--max-displacement` (default 2 mm), grown
   by `--displacement-growth` up to `--max-displacement-cap` (3 mm) when it
   cannot clear; one that still cannot is reported `Unresolved` for a hand
-  fix. Quarter-turn rotations are tried unless `--no-rotate`;
+  fix. A cap no pose clears whose copper TOUCHES another net's where it
+  stands (a short, not a graze) is moved to the pose apart from all foreign
+  copper that grazes least, named on the `Moved off a short` line; one with
+  no such pose is named on the `SHORTED` line (#1563). Quarter-turn
+  rotations are tried unless `--no-rotate`;
   `--beneath-only` moves only the passives under a BGA's package and keeps
   them there.
 - **Clearance.** Given, `--clearance` is a ceiling: every net class is priced

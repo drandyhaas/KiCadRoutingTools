@@ -3317,6 +3317,60 @@ class _Repair:
                 + self.seg_penalty(ref, cap, x, y, rot)
                 + self.pad_penalty(ref, cap, x, y, rot))
 
+    def contact_depth(self, ref, cap, x, y, rot):
+        """How far the cap's pads OVERLAP foreign copper at a placement -- a
+        short, where graze_penalty is any shortfall of the clearance (#1563).
+        The same items graze_penalty reads (the cap's pruned vias, the tracks
+        it shares a copper layer with, the foreign pads on its side), each at
+        its bare copper: a via's radius, a track's half width, a pad's edge.
+        0 for a placement that touches no foreign copper."""
+        depth = 0.0
+        frames = _frames_of(cap, x, y, rot)
+        rects = cap.pad_rects(x, y, rot)
+        by_id = self._via_radius_by_id
+        for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
+            fr = None if frames is None else frames[i]
+            for v in self.cap_vias[ref]:
+                if v[2] == net:
+                    continue
+                rec = by_id.get(id(v))
+                rad = rec[1] if rec is not None else v[3] - self.clearance
+                d = _pad_point_dist(v[0], v[1], (bx0, by0, bx1, by1), fr)
+                if d < rad - EPS:
+                    depth += rad - d
+        segs = self.cap_segs[ref]
+        effs = self._seg_effs(ref, cap)
+        floors = self._seg_floor_by_id
+        for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
+            fr = None if frames is None else frames[i]
+            for j, t in enumerate(segs):
+                if t[4] == net or (effs is not None and effs[i][j] == _OFF_LAYER):
+                    continue
+                half = t[5] - self._item_reach(floors.get(id(t)))
+                x1, y1, x2, y2 = t[0], t[1], t[2], t[3]
+                if (min(x1, x2) > bx1 + half or max(x1, x2) < bx0 - half or
+                        min(y1, y2) > by1 + half or max(y1, y2) < by0 - half):
+                    continue
+                d = _pad_seg_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1), fr)
+                if d < half - EPS:
+                    depth += half - d
+        fpads = self.cap_foreign_pads[ref]
+        fpf = self._foreign_frames(ref, fpads)
+        for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
+            fa = None if frames is None else frames[i]
+            for j, (px0, py0, px1, py1, pnet, pside) in enumerate(fpads):
+                if pnet == net or (pside is not None and pside != cap.side):
+                    continue
+                gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
+                if gap < -EPS:
+                    fb = None if fpf is None else fpf[j]
+                    if fa is not None or fb is not None:
+                        gap = _pad_gap((bx0, by0, bx1, by1), fa,
+                                       (px0, py0, px1, py1), fb)
+                if gap < -EPS:
+                    depth -= gap
+        return depth
+
     def cost(self, ref, cap, x, y, rot):
         if self._tethers is not None:
             self._last_tether_fails = None
@@ -3410,6 +3464,38 @@ def _on_cap_lattice(cap, rot) -> bool:
     contract alone. (An undeclared cap is offered the absolute `ROTATIONS`
     as before #1122, on its lattice or not.)"""
     return abs((rot - cap.seed_rot + 45.0) % 90.0 - 45.0) <= 1e-6
+
+
+def _best_apart(st, ref, cap, rots, max_disp, step, grid_step):
+    """#1563: the pose within `max_disp` whose pads touch no foreign copper
+    (contact_depth 0), least graze first, then attraction and displacement as
+    cost() weighs them; None when every pose touches something. Returns
+    (best (cost, x, y, rot) or None, the decap claims it breaks or None).
+    The decap gate holds unless no apart pose keeps it -- then the pose
+    breaking fewest claims, by least excess, is taken and its failures are
+    returned, as the via-clear fallback's #1067 ladder does."""
+    tg = st._tethers
+    found, key0 = None, None
+    for cx, cy in _candidate_positions(cap, max_disp, step, grid_step):
+        for rot in rots:
+            if not cap.stays_beneath(cx, cy, rot) or \
+                    st._blocked_geom(ref, cap, cx, cy, rot) or \
+                    st.contact_depth(ref, cap, cx, cy, rot) > EPS:
+                continue
+            fails = ()
+            if tg is not None and ref in tg._tethers_of:
+                fails = tg.tether_failures({ref: (cx, cy, rot)}) or ()
+            soft = (ATTRACT_WEIGHT * st.attraction(cap, cx, cy, rot)
+                    + DISPLACEMENT_WEIGHT * math.hypot(cx - cap.seed_x,
+                                                       cy - cap.seed_y))
+            key = (len(fails), round(sum(f[2] - f[3] for f in fails), 4),
+                   st.graze_penalty(ref, cap, cx, cy, rot), soft)
+            if key0 is None or key < key0:
+                found, key0 = (soft, cx, cy, rot), key
+    if found is None:
+        return None, None
+    broke = (tg.tether_failures({ref: found[1:]}) if key0[0] else None)
+    return found, broke
 
 
 def _cap_rotations(cap, claim, allow_rotations, rotate) -> List[float]:
@@ -3877,6 +3963,8 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
 
     budget = {r: max_displacement for r in st.caps}
     rotate = {r: False for r in st.caps}
+    # #1563: caps the fallback moved off a short to a pose that only grazes
+    parted: List[str] = []
     # process worst violators first
     order = sorted(st.caps, key=lambda r: st.graze_penalty(
         r, st.caps[r], st.caps[r].x, st.caps[r].y, st.caps[r].rot),
@@ -4032,6 +4120,30 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                     if best is not None:
                         st.tether_broken[ref] = _tg.tether_failures(
                             {ref: (best[1], best[2], best[3])})
+                if best is None and st.contact_depth(
+                        ref, cap, cap.x, cap.y, cap.rot) > EPS:
+                    # #1563: no pose clears the cap, and where it stands its
+                    # copper TOUCHES a foreign net's -- a short. A graze is a
+                    # clearance violation; a short is a different net in
+                    # contact. So take the pose that touches nothing, least
+                    # graze first, then the usual soft cost. cost()'s per-net
+                    # gate (#441) cannot judge this: it refuses any net
+                    # grazed more than at the seed, and a pose apart from
+                    # every foreign copper of a field this dense grazes some
+                    # net the short did not. That gate exists so a move
+                    # cannot buy one net's relief with a NEW short on
+                    # another; a pose in contact with nothing cannot short
+                    # any. The hard gates still hold (_blocked_geom: edge,
+                    # courtyards, mover pads), and so does the decap gate,
+                    # broken only when nothing else parts the copper (the
+                    # #1067 ladder above, same reason).
+                    best, broke = _best_apart(st, ref, cap, rots,
+                                              max_displacement_cap, step,
+                                              grid_step)
+                    if best is not None:
+                        parted.append(ref)
+                        if broke:
+                            st.tether_broken[ref] = broke
                 if best is not None:
                     st.apply_pose(ref, best[1], best[2], best[3])
                     disp = math.hypot(cap.x - cap.seed_x, cap.y - cap.seed_y)
@@ -4188,6 +4300,18 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
     if regrazed:
         print(f"  Re-grazed by this pass's own connector copper: "
               f"{', '.join(sorted(regrazed))}")
+    # #1563: of the unresolved, the ones whose copper still TOUCHES a foreign
+    # net's (a short, not a graze), and the ones moved off a short to graze.
+    shorted = [r for r in unresolved
+               if st.contact_depth(r, st.caps[r], st.caps[r].x, st.caps[r].y,
+                                   st.caps[r].rot) > EPS]
+    if parted:
+        print(f"  Moved off a short to a pose that only grazes (none clears "
+              f"within the displacement cap): {', '.join(sorted(parted))}")
+    if shorted:
+        print(f"  SHORTED, copper in contact with a foreign net's via, track "
+              f"or pad (no pose within the displacement cap is apart from "
+              f"it): {', '.join(sorted(shorted))}")
     # #725: disclose what was graded ABOVE the flat --clearance, and why.
     # Printed from the ENGINE so the CLI and the GUI plugin both inherit it.
     required = st.required_rows({n.net_id: n.name for n in pcb_data.nets.values()})
@@ -4201,6 +4325,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
            'unresolved': unresolved, 'bga_refs': st.bga_refs,
            'via_moves': via_moves, 'new_segments': new_segs,
            'via_resolved': via_resolved, 'regrazed': regrazed,
+           'parted': parted, 'shorted': shorted,
            'required': required, 'clearance_notes': list(st.clearance_notes)}
     if claims1122:
         out['declared_rotations'] = {
