@@ -506,6 +506,21 @@ DERIVED_CLAIM_SOURCE = 'placement.crystals'
 def derived_claim(claim) -> bool:
     """A proximity row the toolchain derived, not one an author declared."""
     return (claim.get('context') or {}).get('source') == DERIVED_CLAIM_SOURCE
+
+
+def derived_severity_note(intent) -> Optional[str]:
+    """#1600: what an intent that sets `severity.proximity` is told when it
+    also carries derived rows, which stay at WARN whatever it says (by
+    design, above) -- or None. A disclosure, not a change of severity: the
+    author who set `error` otherwise reads a clean exit as a held claim."""
+    sev = (getattr(intent, 'severity', None) or {}).get('proximity')
+    n = sum(1 for c in getattr(intent, 'proximity', None) or () if derived_claim(c))
+    if sev is None or not n:
+        return None
+    return (f"severity.proximity is {sev!r}, but it does not reach the {n} derived "
+            f"proximity row(s) (context.source {DERIVED_CLAIM_SOURCE}): a derived "
+            f"claim is graded warn whatever severity.proximity says. Drop a row's "
+            f"context.source to make it the intent's own claim, graded {sev}")
 #: #1253. One declared keep-away: `rule` is ONE rule in route.py's own
 #: syntax (`AGGRESSOR:VICTIM:GAP`, `class=` terms), parsed by the router's
 #: `keep_away.parse_keep_away_rules`, so the grade and the router read the
@@ -7435,8 +7450,10 @@ def rule_proximity(ctx) -> Iterator[Violation]:
                 message=(f"{ref} pad {pad.pad_number} is {gap:.2f}mm from "
                          f"{near} pad {partner.pad_number}"
                          + (f" on {net}" if how == 'net' and net else '')
-                         + f", past the declared {limit:.2f}mm proximity "
-                           f"limit"),
+                         # #1600: a row the toolchain derived is no
+                         # author's declaration, and says so
+                         + f", past the {'derived' if derived_claim(claim) else 'declared'} "
+                           f"{limit:.2f}mm proximity limit"),
                 measured={'gap_mm': round(gap, 4), 'near': near,
                           'pad': pad.pad_number,
                           'near_pad': partner.pad_number,
@@ -12116,6 +12133,9 @@ def format_text(r: GradeResult) -> str:
         for v in r.violations:
             tag = 'ERROR' if v.severity == ERROR else 'warn '
             lines.append(f"    [{tag}] {v.rule}: {v.message}")
+    note = derived_severity_note(r.intent)
+    if note:
+        lines.append(f"  note: {note}")
     # #1064: printed, never a rule -- a floorplan PASS says nothing about
     # whether two parts' pads sit on each other, and check_assembly calls
     # that NOT BUILDABLE whatever the nets.
