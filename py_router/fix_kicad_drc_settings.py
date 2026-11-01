@@ -1261,6 +1261,57 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
     return lines
 
 
+def board_size_values(pcb) -> dict:
+    """Every size a measurable fab floor is a statement about, per
+    :data:`FAB_FLOOR_KEYS_MEASURABLE` key: ``{key: [mm, ...]}``, one value per
+    object. :func:`scan_board_minima` is the smallest of each list, and
+    :func:`count_below_floors` counts against them, so a floor's minimum and
+    its count always read the same objects."""
+    # Footprint / board GRAPHIC copper (#908, #337) is a shape, not a track:
+    # a filled fp_poly's stroke width is an outline width and KiCad's
+    # min_track_width rule never grades it. Counting it here wrote
+    # `rules.min_track_width 0.15 -> 0.1` on every step of a chain whose
+    # only 0.1 mm "track" was a SOT-89 tab outline, and made check_complete
+    # read that board as UNSOUND (run 26, esp_prog).
+    via_drills = [v.drill for v in pcb.vias if v.drill]
+    # Through-hole pad / via drills set the smallest hole diameter on the board.
+    hole = list(via_drills)
+    for fp in pcb.footprints.values():
+        for pad in fp.pads:
+            if getattr(pad, "drill", 0):
+                hole.append(pad.drill)
+    return {
+        "min_track_width": [s.width for s in pcb.segments
+                            if s.width and s.width > 0
+                            and not getattr(s, 'graphic', False)],
+        "min_via_diameter": [v.size for v in pcb.vias if v.size],
+        "min_via_drill": via_drills,
+        "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
+                                  if v.size and v.drill and v.size > v.drill],
+        "min_through_hole_diameter": hole,
+    }
+
+
+def count_below_floors(pcb_path: str, floors: dict) -> dict:
+    """How many objects on the board sit below each floor in ``floors``
+    (``{FAB_FLOOR_KEYS_MEASURABLE key: mm}``), over the objects
+    :func:`board_size_values` reads: ``{key: count}``, a key absent when the
+    board has no such object or the floor is not a measurable one (#1580: a
+    relaxed floor carries a count, not only its smallest object). {} when the
+    board cannot be parsed."""
+    if not os.path.isfile(pcb_path):
+        return {}
+    try:
+        from kicad_parser import parse_kicad_pcb
+        values = board_size_values(parse_kicad_pcb(pcb_path))
+    except Exception as e:  # pragma: no cover - parser is robust, but stay safe
+        print(f"warning: could not count board sizes ({e})", file=sys.stderr)
+        return {}
+    return {k: sum(1 for v in values[k] if v < f - _FLOOR_EPS)
+            for k, f in floors.items()
+            if values.get(k) and isinstance(f, (int, float))}
+
+
 def scan_board_minima(pcb_path: str):
     """Smallest track width / via diameter / via drill / via annular ring / hole
     diameter actually present on the board. These are floors KiCad's min-size
@@ -1276,36 +1327,7 @@ def scan_board_minima(pcb_path: str):
         print(f"warning: could not scan board minima ({e})", file=sys.stderr)
         return {}
 
-    out = {}
-    # Footprint / board GRAPHIC copper (#908, #337) is a shape, not a track:
-    # a filled fp_poly's stroke width is an outline width and KiCad's
-    # min_track_width rule never grades it. Counting it here wrote
-    # `rules.min_track_width 0.15 -> 0.1` on every step of a chain whose
-    # only 0.1 mm "track" was a SOT-89 tab outline, and made check_complete
-    # read that board as UNSOUND (run 26, esp_prog).
-    widths = [s.width for s in pcb.segments
-              if s.width and s.width > 0 and not getattr(s, 'graphic', False)]
-    if widths:
-        out["min_track_width"] = min(widths)
-    via_drills = [v.drill for v in pcb.vias if v.drill]
-    if pcb.vias:
-        sizes = [v.size for v in pcb.vias if v.size]
-        if sizes:
-            out["min_via_diameter"] = min(sizes)
-        if via_drills:
-            out["min_via_drill"] = min(via_drills)
-        annular = [(v.size - v.drill) / 2.0 for v in pcb.vias
-                   if v.size and v.drill and v.size > v.drill]
-        if annular:
-            out["min_via_annular_width"] = min(annular)
-    # Through-hole pad / via drills set the smallest hole diameter on the board.
-    hole = list(via_drills)
-    for fp in pcb.footprints.values():
-        for pad in fp.pads:
-            if getattr(pad, "drill", 0):
-                hole.append(pad.drill)
-    if hole:
-        out["min_through_hole_diameter"] = min(hole)
+    out = {k: min(v) for k, v in board_size_values(pcb).items() if v}
     ovr = pad_clearance_override_minimum(pcb)
     if ovr is not None:
         out["min_pad_clearance_override"] = ovr

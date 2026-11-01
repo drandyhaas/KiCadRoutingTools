@@ -789,7 +789,10 @@ override still wins — the tool prints `Required clearance: 0.1600mm
 `-c 0.15`, the same 7 at `-c 0.149`. If you expected a looser `-c` to clear
 class-driven violations, it will not; change the class, or use
 `--clearance-margin` (default 0.05) to filter grid-quantisation noise — and when
-you use it, quote the unfiltered count beside the filtered one.
+you use it, quote the unfiltered count beside the filtered one. The count KiCad
+reports is `--clearance-margin-mm 0.0005` (KiCad's own 500 nm on every class;
+a fraction matches it on one class only); `board_score` discloses it as
+`drc.at_kicad_tolerance` beside `drc` (#1594).
 
 Only fall back to tool defaults when neither net classes nor Constraints are found
 (`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
@@ -981,7 +984,9 @@ python3 py_tools/check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
 - The gap must be **achievable**: it is a pour clearance, so it cannot be below
   the fab floor, and near via antipads / pads the real gap will be wider. The
   `check_impedance.py` audit (item 3 above) reports how much of each net
-  actually achieved it.
+  actually achieved it; the length over the net's OWN pads (and the pour's
+  clearance step past them) is listed as `at its own pad` and never breaks
+  the declaration (#1582).
 
 **Report to the user** which nets you declared coplanar, the gap, and the plane
 step it is tied to — this is a coupled choice they may want to override. If the

@@ -120,7 +120,10 @@ interfaces into separate calls to mix.
 
 Nothing enforces the gap during routing — a coplanar-declared net whose pour
 never arrives is simply routed at a width that assumes a ground it does not
-have. Step 3 is what catches that.
+have. Step 3 is what catches that. A line landing on a pad wider than itself
+reads a wider gap over the pad and just past it, where the pour keeps its
+clearance from the PAD; that length is reported as `at its own pad` and does
+not break the declaration (#1582), while a pad with no pour beside it does.
 
 ## Width for a target impedance
 

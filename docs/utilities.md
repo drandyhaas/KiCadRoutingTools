@@ -98,6 +98,10 @@ Options:
                             Violations smaller than clearance*margin are ignored — filters
                             grid-quantization noise (~8 µm artifacts); raise to e.g. 0.1 to
                             suppress more borderline grazes
+  --clearance-margin-mm MM  An ABSOLUTE tolerance in mm for every clearance grade, instead
+                            of the fraction (#1594; the two flags refuse each other).
+                            0.0005 is KiCad's own (500 nm on every pair) and grades as
+                            KiCad does on every net class
   --nets, -n PATTERN [...]  Only check nets matching these fnmatch patterns
   --debug-lines, -d    Write debug lines on User.7 showing violation locations
   --quiet, -q          Print only a summary line unless there are violations
@@ -191,6 +195,8 @@ Checks 11–12 are on by default; pass `--no-size-checks` to skip them, or overr
 ### Clearance Margin
 
 The DRC checker uses a 5% clearance margin by default to ignore tiny geometric artifacts from corner handling. For example, with a 0.1mm clearance, violations smaller than 0.005mm are ignored.
+
+The margin is a fraction of each pair's own clearance, so it scales with the class: 10 µm at 0.2 mm, 25 µm at 0.5 mm. KiCad's tolerance is an absolute 500 nm on every pair (`net_queries.KICAD_DRC_EPSILON_MM`), so on a board with two classes no fraction reproduces KiCad's grade. `--clearance-margin-mm 0.0005` does (#1594): it replaces the fraction for every clearance grade of the run (pairs, copper-to-hole, hole-to-hole, board edge), and `run_drc(..., clearance_margin_mm=)` is the same in-process. The console line `Clearance tolerance: ...` and the `--json` `graded_at.clearance_margin` / `clearance_margin_mm` say which one a run used. `board_score` keeps `drc` at the 5% default and discloses the count at KiCad's tolerance beside it (`drc.at_kicad_tolerance`).
 
 ### Debug Visualization
 
@@ -1069,7 +1075,11 @@ with `<list>_count` / `<list>_truncated`), a `BLOCKING=` summary and
 disclosure lines (`ADVISORY`, `UNGRADED`, ...); `--json` writes everything.
 DRC pairs that exist only because a `.kicad_dru` track rule raised the pair
 clearance, and vias in paste openings without `--baseline`, are advisory and
-outside `blocking`. Exit 0 graded with blocking 0; 4 graded with blockers;
+outside `blocking`. `drc` grades at check_drc's default 5% clearance margin;
+the same grade at KiCad's own 500 nm tolerance (`check_drc
+--clearance-margin-mm 0.0005`, run beside it) is disclosed as
+`drc.at_kicad_tolerance` and on a `DRC AT KICAD'S TOLERANCE` line, never in
+`blocking` (#1594). Exit 0 graded with blocking 0; 4 graded with blockers;
 3 board state (missing or unreadable board); 2 bad arguments; 1 crash.
 
 ## Completion Check (`check_complete.py`)
@@ -1104,9 +1114,19 @@ the floors this one should still respect); without it the floors are read
 against the project's recorded `fab_floor_origin` (what the board declared
 before the first routing step lowered anything) and copper below them is
 DISCLOSED in the reason, not graded, and `fab_floors` is named unexamined
-when the project records none. The
+when the project records none. A relaxed size floor names its smallest
+object and carries a count (`violations`: the tracks, vias or holes below the
+authored value; `reference_violations` on the reference). The
 copper-to-hole floor is graded by `kicad-cli` on the fill as shipped, and the
 reference excuses only the kinds of pair it also breaks, at least as badly.
+`--authored-from` also has `kicad-cli` grade this copper with the AUTHORED
+project staged beside it (that board's `.kicad_pro` and `.kicad_dru`) and
+again under the project the board ships with, both on the fill as shipped,
+and reports the error count per violation type of each (`authored_drc`,
+#1580; the silkscreen checks are left out) -- class clearance included, which the floor rows leave out when the
+chain lowered a class on request. It is DISCLOSED next to the verdict and
+never changes it; without `kicad-cli` (or under `--skip-slow`) it says NOT RUN
+rather than reporting 0.
 `--baseline` is handed to
 `board_score`. It takes `board_score`'s spec flags (`--clearance`, `--intent`,
 `--impedance-nets`, `--length-groups`, `--net-min-widths`, the size floors),
@@ -2855,10 +2875,20 @@ python3 py_tools/check_impedance.py poured.kicad_pcb --coplanar-gap 0.2
 
 Nets the routing steps recorded an impedance declaration for (`--impedance`,
 kept in the sibling `.kicad_pro`) are audited at their own declared coplanar
-gap; `--coplanar-gap` is the fallback for nets without one. Plane nets are
-skipped unless `--include-plane-nets`. Exit 1 when any reference-plane
-crossing is found, else 0 (`--exit-zero`: always 0). The model and every
-option are in [Impedance API](api-impedance.md).
+gap; `--coplanar-gap` is the fallback for nets without one. The coplanar
+declaration audit prints whenever a net carries a declared gap, from either
+source. Over the net's own pad, and within the pour's clearance of it, the gap
+read from the track misses the declaration on any pad wider than the track
+(the conductor there is the pad); that length is reported as `at its own pad`
+(`length_at_own_pad_mm`) and never counted, the way the net's own via antipad
+is never a crossing (#1582). A pad with no pour beside it at all still counts
+as no ground. Plane nets are skipped unless `--include-plane-nets`. Exit 1
+when any reference-plane crossing is found, or when a net misses its declared
+gap -- no ground beside it, or a gap off the declaration -- over more than
+0.01 mm of its outer-layer length (`promise_broken`, the rule `board_score
+--impedance-nets` counts by; the audit names those nets); else 0
+(`--exit-zero`: always 0). The model and every option are in
+[Impedance API](api-impedance.md).
 
 ## Reachability Check (`check_reachability.py`)
 

@@ -389,6 +389,8 @@ CHEAT_FLAGS = (
     ('FLOOR', '--board-edge-clearance', 'overrides the board edge floor',
      GRADERS + ROUTERS),
     ('FLOOR', '--clearance-margin', 'filters DRC hits by distance', GRADERS),
+    # #1594: the absolute form of the same filter (KiCad's own is 0.0005)
+    ('FLOOR', '--clearance-margin-mm', 'filters DRC hits by distance', GRADERS),
     ('SCOPE', '--nets', 'routes a SUBSET -- "0 unrouted" over 6 of 84 nets '
                         'is not the same claim', NET_SCOPED),
     # `--ignore-nets` HAS NO ENTRY, deliberately. The flag exists only on
