@@ -587,21 +587,43 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             fix_project_for_output(fanned, clearance=te.SPEC_CLEARANCE, track_width=sr.FAN_TRACK,
                                    via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL, verbose=False)
         log(f'  {src} fanned out: {n_t} tracks, {n_v} vias' + (f', refused {failed}' if failed else ''))
-        if joint_fanout and failed:
-            # (a bus ball the engine's comb refused -- boxed by the comb's own stubs and the via sites kept for the
-            # array's other balls -- escaped by the joint plan round the comb, at the run's size: the plan reaches lines
-            # the comb does not (a ball line on a layer below the balls'), so the ball has a tooth and the run takes it)
+        if failed:
+            # (a bus ball the engine's comb refused -- boxed by the comb's own stubs, and with the joint fanout the via
+            # sites kept for the array's other balls -- escaped by the joint plan round the comb, at the run's size: the
+            # plan reaches lines the comb does not (a ball line on a layer below the balls'), so the ball has a tooth and
+            # the run takes it). The plan lays its vias as if the passives beneath the array move, and on a plain bus,
+            # whose rounds run no cap step, the step's own moves them then (--beneath-only): held where they stand, a
+            # refused ball's only way out ran under a decoupling cap's GND pad
             import shutil
             import joint_escape as je
             resc = os.path.join(work, 'fanned_refused.kicad_pcb')
+            # (each ball toward its own part: a bus to several parts, DEST 'A+B', its nets going to each)
+            to_ = dest
+            if len(dests) > 1:
+                to_ = {}
+                for d_ in dests:
+                    for q_ in pcb.footprints[d_].pads:
+                        if q_.net_name in set(failed):
+                            to_.setdefault(short(q_.net_name), d_)
+            far_ = je.far_face(pcb, src, dest) if isinstance(to_, str) else \
+                {n_: je.far_face(pcb, src, d_) for n_, d_ in to_.items()}
             with contextlib.redirect_stdout(sys.stderr):
-                _rr, reps_ = je.fan_array(fanned, resc, src, list(failed), [], spec['layers'], drops=(),
-                                          far=je.far_face(pcb, src, dest), log=lambda *a: None,
-                                          rungs=[run_rules], exit_rays=True, escape_to=dest)
+                _rr, reps_ = je.fan_array(fanned, resc, src, list(failed), [],
+                                          spec['layers'] if spec else list(pcb.board_info.copper_layers), drops=(),
+                                          far=far_, log=lambda *a: None,
+                                          rungs=[run_rules], exit_rays=True, escape_to=to_)
             bare_ = {b_.split('#')[0] for b_ in reps_[-1]['bare']}
             if len(bare_) < len(failed):
                 shutil.copyfile(resc, fanned)
                 fp.copy_pro(resc, fanned)
+                if not joint_fanout:
+                    lock_ = je.passives_beyond(fanned, [src, dest], names)
+                    wr.run([os.path.join('..', 'py_router', 'place_fanout_clearance.py'), fanned, fanned,
+                            '--clearance', str(te.SPEC_CLEARANCE), '--beneath-only']
+                           + (['--lock'] + lock_ if lock_ else []), awx_settings.environ(),
+                           log_path=os.path.join(work, 'caps_refused.log'), own_process=True)
+                    for ln in wr.grep(os.path.join(work, 'caps_refused.log'), r'^(Moved|Stuck|  Unresolved)'):
+                        log(f'  {src}: caps: ' + ln.strip()[:200])
                 served_ = [short(n) for n in failed if short(n) not in bare_]
                 failed = [n for n in failed if short(n) in bare_]
                 log(f'  {src}: the comb\'s refused ball(s) escaped by the joint plan: {", ".join(served_)}'
