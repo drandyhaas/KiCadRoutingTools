@@ -36,7 +36,7 @@ displacement cap; if it still can't, it's reported unresolved.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from kicad_parser import (PCBData, Segment, find_components_by_type,
                           is_immutable_copper)
@@ -658,12 +658,14 @@ def is_near_bga_cap(ref, fp, local_bounds, cap_prefixes, locked, bga_boxes,
 
 
 def movable_cap_refs(pcb_data, pcb_file, cap_prefix=DEFAULT_CAP_PREFIX,
-                     near_margin=DEFAULT_NEAR_MARGIN, extra_locked=(), beneath_only=False) -> Set[str]:
+                     near_margin=DEFAULT_NEAR_MARGIN, extra_locked=(), beneath_only=False,
+                     near_refs=()) -> Set[str]:
     """The refs this step would move on `pcb_data` (is_near_bga_cap, at the
     step's defaults): what a step BEFORE it -- the fanout's joint planning
     (awx joint_escape.movable_refs) -- may treat as not there. `pcb_file`
     supplies the courtyards and the locks, as the step reads them; without one
-    each part's own box and lock flag stand in."""
+    each part's own box and lock flag stand in. `near_refs`: those near these
+    parts instead of a BGA's (the step's --near), nothing beneath held."""
     prefixes = tuple(p.strip() for p in str(cap_prefix).split(',')
                      if p.strip()) or ('C',)
     courtyards = extract_courtyard_bboxes(pcb_file) if pcb_file else {}
@@ -673,6 +675,9 @@ def movable_cap_refs(pcb_data, pcb_file, cap_prefix=DEFAULT_CAP_PREFIX,
     bgas = find_components_by_type(pcb_data, 'BGA')
     boxes = [ball_field_box(fp) for fp in bgas]
     pkgs = [package_box(fp, courtyards) for fp in bgas]
+    if near_refs:
+        boxes = [ball_field_box(pcb_data.footprints[r]) for r in near_refs if r in pcb_data.footprints]
+        beneath_only = False
     return {ref for ref, fp in pcb_data.footprints.items()
             if fp.pads and is_near_bga_cap(ref, fp, courtyards.get(ref) or compute_footprint_bbox_local(fp),
                                            prefixes, locked, boxes, near_margin,
@@ -915,7 +920,8 @@ class _Repair:
                  cap_prefix: str, extra_locked: Set[str],
                  max_displacement_cap: float = 3.0,
                  netclass_ceiling: Optional[float] = None,
-                 beneath_only: bool = False):
+                 beneath_only: bool = False,
+                 near_refs: Sequence[str] = ()):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -1219,6 +1225,15 @@ class _Repair:
                 if p.net_id > 0:
                     self.attract.setdefault(p.net_id, []).append(
                         (p.global_x, p.global_y))
+        # (`near_refs`: the parts whose passives this pass moves INSTEAD of a
+        # BGA's -- each part's own box the region a cap is near, nothing
+        # beneath held: a QFN whose decoupling cap stands across a pad's only
+        # escape, straight out of its row)
+        near_ = [pcb_data.footprints[r] for r in (near_refs or ())
+                 if r in pcb_data.footprints]
+        if near_refs:
+            bga_bboxes = [ball_field_box(fp) for fp in near_]
+            beneath_only = False
 
         # --- static obstacle rects (locked parts incl. BGAs) ---
         # and movable caps near a BGA. Courtyard collisions are checked
@@ -3172,6 +3187,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             on_move=None,
                             progress_callback=None,
                             beneath_only: bool = False,
+                            near_refs: Sequence[str] = (),
                             intent=None) -> Dict:
     """Nudge near-BGA decoupling caps off foreign-net fanout copper (vias
     #130, escape tracks #278, component pads #275) and toward same-net balls.
@@ -3348,6 +3364,10 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                             # beneath it (is_near_bga_cap, _Cap.stays_beneath): awx's joint fanout, whose bus leaves
                             # the arrays across the channel a nudged part beside them would land in
                             beneath_only: bool = False,
+                            # (--near REF..) the parts whose passives the pass moves INSTEAD of the BGAs': each
+                            # part's own box the region a cap is near, nothing beneath held -- awx's bus step to a
+                            # QFN, whose decoupling cap stood across a pad's only escape, straight out of its row
+                            near_refs: Sequence[str] = (),
                             # #1067: a `floorplan.Intent`; its decap limits
                             # (decap_distance, decap_pin_distance at ERROR)
                             # are held no worse per claim. None = no gate.
@@ -3472,7 +3492,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                  default_via_size, cap_prefix, extra_locked,
                  max_displacement_cap=max_displacement_cap,
                  netclass_ceiling=netclass_ceiling,
-                 beneath_only=beneath_only)
+                 beneath_only=beneath_only, near_refs=near_refs)
 
     print(f"BGAs: {', '.join(st.bga_refs) or '(none)'}  "
           f"fanout vias: {len(st.vias)}  "

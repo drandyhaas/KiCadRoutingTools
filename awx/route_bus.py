@@ -396,6 +396,14 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         f.write(txt)
     import fanout_from_plan as fp
     fp.copy_pro(board, base)
+    # (a ROW PART at a destination -- a QFN: each pad has one escape, straight out of its row, and a decoupling cap
+    # standing across one leaves its lane no end at all; such passives are moved off the row escapes first, as the cap
+    # step moves a BGA's off its fanout: clear_row_escapes)
+    by_name_ = {nn_.name: nn_ for nn_ in pcb.nets.values() if nn_.name}
+    keep_ = {p_.component_ref for p_ in pull_pads} | {
+        q_.component_ref for n_ in names if n_ in by_name_ for q_ in by_name_[n_].pads}
+    for d in dests:
+        clear_row_escapes(base, d, names, sorted(keep_ - {src, d}), work, log)
 
     # 2. the source fanned out, the project floor, the ladder
     log(f'  rules: clearance {te.SPEC_CLEARANCE}, track {te.TRACK}, fanout {sr.FAN_TRACK}/{sr.FAN_CLEAR}, '
@@ -1388,6 +1396,65 @@ def keeps_source_escapes(src, escape, joint_fanout, setting):
     if str(setting).strip() == '0':
         return False
     return src in str(setting).split(',')
+
+
+def clear_row_escapes(board, ref, names, keep, work, log=print):
+    """The movable passives beside a ROW PART `ref` (escape_moves.row_part: a QFN) moved off the bus's escapes there,
+    on `board` in place: each of `names`' pads on it has one escape, straight out of its row, and a decoupling cap
+    standing across it leaves its lane no end at all. The escapes are laid on a copy as the plan models them -- the
+    lane track grown by the braid's clearance past the rule's, as the cap step clears copper at the rule (its
+    --clearance a ceiling) --, the cap step moves the passives near `ref` off them (place_fanout_clearance --near, the
+    parts `keep` locked: a termination's, a pull's) and the poses it leaves are put on `board`. Returns the moved
+    refs"""
+    import braid as te
+    import escape_moves as em
+    import route_layers
+    import whole_route as wr
+    import fanout_from_plan as fp
+    import awx_settings
+    from kicad_parser import parse_kicad_pcb
+    from kicad_writer import add_tracks_and_vias_to_pcb
+    with contextlib.redirect_stdout(sys.stderr):
+        pcb = parse_kicad_pcb(board)
+    foot = pcb.footprints.get(ref)
+    if foot is None or not em.row_part(foot):
+        return []
+    grid = em.grid_of(foot)
+    want = set(names)
+    layers = route_layers.escape_layers(pcb.board_info.copper_layers)
+    width = te.TRACK + 2 * max(0.0, te.CLEAR - te.SPEC_CLEARANCE)
+    tracks = []
+    for p in foot.pads:
+        if p.net_name in want:
+            for m in em.enumerate_moves(p, grid, layers, lambda a, b, L: True)[:1]:
+                tracks += [{'start': tuple(a), 'end': tuple(b), 'width': width, 'layer': L, 'net_id': p.net_id}
+                           for a, b, L in m.legs]
+    if not tracks:
+        return []
+    tmp = os.path.join(work, f'row_escapes_{ref}.kicad_pcb')
+    with contextlib.redirect_stdout(sys.stderr):
+        add_tracks_and_vias_to_pcb(board, tmp, tracks, [], [], net_id_to_name={i: n.name for i, n in pcb.nets.items()})
+    fp.copy_pro(board, tmp)
+    moved_board = tmp[:-len('.kicad_pcb')] + '_capped.kicad_pcb'
+    caps_log = os.path.join(work, f'caps_{ref}.log')
+    rc = wr.run([os.path.join('..', 'py_router', 'place_fanout_clearance.py'), tmp, moved_board,
+                 '--clearance', str(te.SPEC_CLEARANCE), '--near', ref] + (['--lock'] + list(keep) if keep else []),
+                awx_settings.environ(), log_path=caps_log, own_process=True)[0]
+    if rc != 0 or not os.path.isfile(moved_board):
+        log(f'  {ref}: the cap step off its row escapes exited {rc} -- the passives stay where they are')
+        return []
+    before, after = wr.footprint_poses(board), wr.footprint_poses(moved_board)
+    moved = {r_: p_ for r_, p_ in sorted(after.items()) if before.get(r_) != p_}
+    if moved:
+        got = wr.place_held(board, tmp[:-len('.kicad_pcb')] + '_held.kicad_pcb', moved)
+        if got != board:
+            import shutil
+            shutil.copyfile(got, board)
+        log(f'  {ref}: a row part -- {len(moved)} passive(s) beside it moved off its pads\' escapes: '
+            + ', '.join(moved))
+    for ln in wr.grep(caps_log, r'^(Stuck|  Unresolved)'):
+        log(f'  {ref}: caps: ' + ln.strip()[:200])
+    return sorted(moved)
 
 
 def escape_blocks(txt, pcb, ref, names, grow=1.5):

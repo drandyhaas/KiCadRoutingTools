@@ -119,6 +119,10 @@ Examples:
                         help="Move only the passives BENEATH a BGA's package, and only to poses "
                              "that keep them beneath it (a part beside the package, in the channel "
                              "the escapes run out into, stays where it is)")
+    parser.add_argument("--near", nargs="+", default=None, metavar="REF",
+                        help="Move the passives near these parts instead of those near a BGA: each "
+                             "part's own box the region a cap is near, --beneath-only not applied "
+                             "(the bus step's QFN, a decoupling cap across a pad's only escape)")
     parser.add_argument("--cap-prefix", default="C,R,FB",
                         help="Comma-separated reference prefix(es) treated as "
                              "movable passives near a BGA (default: C,R,FB = caps, "
@@ -234,6 +238,7 @@ Examples:
         max_passes=args.max_passes,
         verbose=args.verbose,
         beneath_only=args.beneath_only,
+        near_refs=args.near or (),
         intent=intent,
     )
     if intent is not None:

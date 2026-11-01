@@ -247,6 +247,14 @@ def lay_field(board, out, ref, buses, reserve, clearance, work, log=print):
         log('  caps: ' + ln.strip()[:200])
     if rc != 0:
         log(f'  caps: the nudge exited {rc} -- the passives stay where they were')
+    # (a ROW PART destination's passives moved off its pads' escapes on the field, once, as each bus's own step moves
+    # them: every bus then starts from the same field -- route_bus.clear_row_escapes)
+    import make_bench as mb
+    for d, _ns, _t in buses:
+        names_ = set(mb.pair_nets(pcb, ref, d))
+        names_ |= set(rb.pulled_nets(pcb, ref, d, sorted(names_)))
+        keep_ = {q.component_ref for n in pcb.nets.values() if n.name in names_ for q in n.pads} - {ref, d}
+        rb.clear_row_escapes(out, d, sorted(names_), sorted(keep_), work, log=log)
     res = {full[n]: RESERVED for d, ns, _t in buses if d in reserve for n in ns if n in full}
     with contextlib.redirect_stdout(io.StringIO()):
         persist_protected_nets(pro_path_for_board(out), res)
@@ -297,13 +305,15 @@ def _set_protected(pro, mapping):
         json.dump(proj, f, indent=2)
 
 
-def merge(out, boards, log=print):
+def merge(out, boards, log=print, field=None):
     """OUT: the first of `boards` [(board, summary)] with each other's nets' copper taken from its own board -- every
     net of that bus, the ones it routed and the ones it put back as they came (its summary's 'routed' and 'refused'):
     a net put back keeps only the pieces of its escape the bus's lanes still clear, which the field's whole escape on
     the first board does not --, their copper on the first off first; OUT's project the first's, its protected nets
-    every board's but the reservations (a net a bus routed protected as that bus has it). Returns {net short name: the
-    bus (dest) that routed it}"""
+    every board's but the reservations (a net a bus routed protected as that bus has it); and with `field` (the board
+    the buses were routed on), each part another bus moved from where the field has it -- a passive off a row part's
+    escapes (route_bus.clear_row_escapes) -- where that bus left it. Returns {net short name: the bus (dest) that routed
+    it}"""
     import make_bench as mb
     from copy_board import copy_board
     from coherent_nets import net_keys
@@ -349,6 +359,17 @@ def merge(out, boards, log=print):
         copy_board(base_b, out)
     with open(out, 'w', encoding='utf-8') as f:
         f.write(txt)
+    if field:
+        import whole_route as wr
+        was = wr.footprint_poses(field)
+        moved = {}
+        for b, s in rest:
+            moved.update({r_: p_ for r_, p_ in wr.footprint_poses(b).items() if r_ in was and was[r_] != p_})
+        if moved:
+            got = wr.place_held(out, out[:-len('.kicad_pcb')] + '.posed.kicad_pcb', moved)
+            if got != out:
+                shutil.copyfile(got, out)
+            log(f'  merged: {len(moved)} part(s) where their bus moved them: ' + ', '.join(sorted(moved)))
     _set_protected(pro_path_for_board(out), {n: v for n, v in prot.items() if v != RESERVED})
     return bus_of
 
@@ -478,7 +499,7 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     have = [x for x in boards if x]
     n_conf = None
     if have:
-        bus_of = merge(out, have, log=log)
+        bus_of = merge(out, have, log=log, field=field)
         n_conf = conflicts(out, bus_of, os.path.join(work, 'conflicts.json'), log=log)
     else:
         with contextlib.redirect_stdout(io.StringIO()):

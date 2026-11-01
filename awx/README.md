@@ -718,7 +718,14 @@ it. Each of its pads has one escape, straight out of its row on its own layer
 to half a pitch past the pads' outer ends. The lane changes layer beyond that,
 where the whole route places its vias. Each round lays the chosen escapes as
 planned (`fanout_from_plan.row_berths`): the array engine follows a plan over
-a ball grid, and refuses most of a QFN's.
+a ball grid, and refuses most of a QFN's. A decoupling cap standing across a
+pad's one escape leaves that lane no end at all, so before anything is fanned
+the step moves the passives beside the QFN off its pads' escapes
+(`route_bus.clear_row_escapes`: the escapes laid on a copy as the plan models
+them, the cap step's `--near QFN` moving what they meet, a termination's or a
+pull's part locked). On one board a QFN's cap edge stood on the line of one
+pad's escape: that net had no end in any round, and with the cap moved
+0.2 mm all eleven of the bus's nets were routed.
 
 A plain bus from an array an earlier bus went through keeps the escapes that
 step's plan laid it there, instead of fanning that full array out again

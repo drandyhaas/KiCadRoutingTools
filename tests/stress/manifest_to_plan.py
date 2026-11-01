@@ -882,6 +882,8 @@ CAP_FLAG_PARAMS = {
 }
 # Deliberately NOT mapped, and why:
 #   --lock              nargs='+' extra locked refs; the GUI has no control.
+#   --near              nargs='+' the parts whose passives move instead of a
+#                       BGA's: awx's bus step's, the GUI has no control.
 #   --verbose           console verbosity, not a routing parameter.
 CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False),  # inverted sense
                   '--beneath-only': ('cap_beneath_only', True)}

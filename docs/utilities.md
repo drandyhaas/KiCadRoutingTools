@@ -2037,7 +2037,10 @@ still replay.
   cannot clear; one that still cannot is reported `Unresolved` for a hand
   fix. Quarter-turn rotations are tried unless `--no-rotate`;
   `--beneath-only` moves only the passives under a BGA's package and keeps
-  them there.
+  them there. `--near REF ...` moves the passives near those parts instead of
+  the BGAs' (each part's own box the region a passive is near, nothing held
+  beneath): the bus step's way of moving a QFN's decoupling cap off a pad's
+  only escape.
 - **Clearance.** Given, `--clearance` is a ceiling: every net class is priced
   at `min(class, value)` and the output project is clamped to it. Omitted,
   each pair is priced at its own net-class clearance and the classes are kept.
