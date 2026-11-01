@@ -1095,7 +1095,16 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    seed's route folder (`--json-out {dir}/route.json`), `{run}` this folder
    (`--intent {run}/intent.json`). A step's env knobs stay its
    `NAME=value` prefix, as plan-pcb-routing writes them: they reach that
-   step alone.
+   step alone. No `cd` line: the judge runs each line from the repo root,
+   with no shell. This is not plan-pcb-routing's `<board>_plan.sh` (boards
+   by path, `cd` first), but the same commands, and the same checker proves
+   it before any seed is routed:
+   `python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py
+   wk/<run>/judge_chain.txt --board <board>` (it reads the file as a chain,
+   and does not ask it for the plan's `cd`, #1592). The same file routes one
+   seed at the full level, with per-step boards, `chain.log` and that
+   route's own `redo_commands.sh` in `s<S>_full_route/`:
+   `judge_seeds.py wk/<run>/judge.json --chain wk/<run>/judge_chain.txt --seeds S --full`.
    ```text
    python3 -X utf8 py_router/route_planes.py {in} {out} --nets GND --plane-layers B.Cu
    python3 -X utf8 py_router/route.py {in} {out} --nets '*' --json-out {dir}/route.json

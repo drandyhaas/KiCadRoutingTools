@@ -153,17 +153,27 @@ def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
             return
         cmd = ["python3", "-u", "-X", "utf8"] + argv
         knobs = _replay_knobs()
-        quoted = " ".join(env_prefix_tokens(knobs)
-                          + [shlex.quote(a) for a in cmd])
-        header = ""
-        if not os.path.exists(manifest) or os.path.getsize(manifest) == 0:
-            header = ("#!/bin/bash\n"
-                      "# Auto-recorded stress-test command manifest (issue #132).\n"
-                      "# Replay with redo_stress_test.py.\n"
-                      "set -e\n")
         cwd = os.getcwd()
-        with open(manifest, "a", encoding="utf-8") as f:
-            f.write(f"{header}# cwd={shlex.quote(cwd)}\n{quoted}\n")
+        write_record(manifest, cmd, cwd, knobs)
         _register_timing(manifest, cmd, cwd, knobs)
     except Exception:
         pass
+
+
+def write_record(manifest: str, cmd: list, cwd: str, knobs: dict) -> None:
+    """Append ONE command to `manifest` in the recorded format: the header
+    when the file is new, the `# cwd=` line, then the shell-quoted command
+    led by its env knobs as `NAME=value`. The one writer of the format:
+    `record_invocation` uses it, and so does a runner that records the steps
+    it runs into a manifest of their own (judge_seeds' route folders, #1592).
+    Raises on an unwritable path; the caller decides whether that matters."""
+    quoted = " ".join(env_prefix_tokens(knobs)
+                      + [shlex.quote(a) for a in cmd])
+    header = ""
+    if not os.path.exists(manifest) or os.path.getsize(manifest) == 0:
+        header = ("#!/bin/bash\n"
+                  "# Auto-recorded stress-test command manifest (issue #132).\n"
+                  "# Replay with redo_stress_test.py.\n"
+                  "set -e\n")
+    with open(manifest, "a", encoding="utf-8") as f:
+        f.write(f"{header}# cwd={shlex.quote(cwd)}\n{quoted}\n")

@@ -35,8 +35,13 @@ a `route_diff.py` step before route.py, the one `identify-diff-pairs` /
 single nets: the run WARNs, naming the pair count, and judges on (#1472).
 
 Every `route.py` and `route_diff.py` step runs with `--quick 2`, added when
-the line has no `--quick` of its own, so the chain plan-pcb-routing writes for
-the full route can be the file as it stands. A command runs from the current
+the line has no `--quick` of its own, so ONE chain file in this format serves
+both the judging route and the full route (`--full`, `--confirm`, which take
+every `--quick` off): its route steps need no level of their own. It is the
+board's plan-pcb-routing chain with its boards named by placeholder; that
+skill's own `<board>_plan.sh` names them by path and begins with `cd`, and is
+not this format (no step reads {in}). `route_plan_check.py` proves either
+file before it runs (#1592). A command runs from the current
 folder (run from the repo root, as every skill command does), without a
 shell: quote a glob (`'*'`) as you would on the command line, and it reaches
 the tool unexpanded. `python3`/`python` at the head of a line is this
@@ -46,7 +51,12 @@ environment, over the judge's own, and no other step's (#1497).
 
 PER SEED S, from the run folder: `s<S>_route/` is made afresh, the seed's
 placement copied in (`in.kicad_pcb`, siblings included), each step run in
-order with its output in `s<S>_route/chain.log`, the last board copied out to
+order with its output in `s<S>_route/chain.log` and its board in
+`<N>_<script>.kicad_pcb`, the copy and every step written as run to
+`s<S>_route/redo_commands.sh` (redo_record's format: a manifest of that route
+alone, which `tests/stress/redo_stress_test.py` replays, whatever
+REDO_MANIFEST the caller exported -- the tools still self-record into that
+one as before), the last board copied out to
 `s<S>_fast.kicad_pcb` (copy_board, siblings included) and scored by
 `py_tools/quick_score.py` (`--intent` passed through) into
 `s<S>_fast.score.json` -- the names the skill and the GUI's candidates table
@@ -87,10 +97,18 @@ that confirm every one (`--seeds <the close seeds> --confirm K`, #1473). The
 re-run routes its seeds at level 2 again before confirming them: no score
 on disk records the chain, intent and code it was routed with.
 
+THE FULL ROUTE, WITH NO LEVEL-2 PASS. `--full` routes the seeds at the full
+level only, into the `--confirm` names (`s<S>_full_route/`,
+`s<S>_full.kicad_pcb`, `s<S>_full.score.json`), and ranks them by that route.
+`--seeds S --full` is the full route of one board by the chain: per-step
+boards, `chain.log` and the route's own `redo_commands.sh` in
+`s<S>_full_route/`, the routed board in `s<S>_full.kicad_pcb` (#1592).
+
 Exit codes: 0 every seed scored; 4 a seed's chain wrote no board or its
 score could not be read (named); 2 nothing run: judge.json unreadable or
-naming no seed, a seed's placement missing, or a chain that reads no `{in}`,
-writes no `{out}` or names an unknown placeholder.
+naming no seed, a seed's placement missing, `--full` with `--confirm`, or a
+chain that reads no `{in}`, writes no `{out}`, names an unknown placeholder
+or carries a shell builtin (`cd`, `export`: no shell runs the line).
 """
 #: #937 registry: which door(s) show this tool, and whether it changes
 #: the board. Read by krt_registry.py -- by AST, never imported.
@@ -116,6 +134,9 @@ PLACEHOLDERS = ('in', 'out', 'dir', 'seed', 'run')
 _PLACEHOLDER_RE = re.compile(r'(?<!~)\{(\w+)\}')
 #: the steps the judge runs at --quick 2 (plan-pcb-placement 3.7)
 QUICK_SCRIPTS = ('route.py', 'route_diff.py')
+#: shell builtins a plan.sh carries (`cd <repo>` first, #1337) and a chain
+#: cannot: the judge runs each line as a process, with no shell (#1592)
+SHELL_ONLY = ('cd', 'export', 'set', 'source', '.', 'pushd', 'popd', 'unset')
 #: Two seeds' level-2 scores are "close" when they carry the same placement
 #: defects and the second's blocking is within this many nets, and its copper
 #: within this fraction, of the best's: level 2 reads copper -2% to +8% off
@@ -147,20 +168,39 @@ def read_chain(path):
     return steps
 
 
+def placeholders(text):
+    """The placeholder names `text` uses (`{in}` -> 'in'), known or not.
+    KiCad's overbar (`/~{RESET}`) is a net name, not one."""
+    return set(_PLACEHOLDER_RE.findall(text))
+
+
+def is_chain(steps):
+    """Whether these command lines are a chain in this format: one of them
+    names a placeholder. A `<board>_plan.sh` names its boards by path, so it
+    names none; route_plan_check reads a file as a chain by this (#1592)."""
+    return any(placeholders(s) & set(PLACEHOLDERS) for s in steps)
+
+
 def chain_problems(steps):
     """Why this chain cannot judge a seed, or [] when it can."""
     out = []
     if not steps:
         return ['the chain file holds no command']
     for i, s in enumerate(steps, 1):
-        bad = sorted({n for n in _PLACEHOLDER_RE.findall(s) if n not in PLACEHOLDERS})
+        bad = sorted(placeholders(s) - set(PLACEHOLDERS))
         if bad:
             out.append(f"step {i} names {', '.join('{' + n + '}' for n in bad)}; the "
                        f"placeholders are {', '.join('{' + n + '}' for n in PLACEHOLDERS)}")
         try:
-            shlex.split(s)
+            head = step_env(s, split=True)[1][:1]
         except ValueError as ex:
             out.append(f'step {i} does not parse as a command line ({ex}): {s}')
+            continue
+        if head and head[0] in SHELL_ONLY:
+            # run without a shell, `cd` is no program: FileNotFoundError on
+            # Windows and Linux, a no-op /usr/bin/cd on macOS -- never a cwd
+            out.append(f"step {i} is the shell's `{head[0]}`, and the judge runs each line "
+                       f"without a shell, from the current folder (the repo root): drop it")
     if not any('{in}' in s for s in steps):
         out.append('no step reads {in}: the chain never sees the seed\'s placement')
     if not any('{out}' in s for s in steps):
@@ -238,10 +278,26 @@ def step_argv(line, subst, full=False):
     return argv, added
 
 
+def record_step(manifest, argv, knobs=None):
+    """One command into a route folder's own manifest (#1592), in the format
+    `redo_record` writes a self-recorded step in: this interpreter spelled
+    `python3`, the run's cwd, and the knobs the step runs with (the judge's
+    own and the line's prefix) as its `NAME=value` prefix."""
+    from env_knobs import is_replay_knob
+    from redo_record import write_record
+    cmd = ['python3'] + list(argv[1:]) if argv and argv[0] == sys.executable else list(argv)
+    env = dict(os.environ, **(knobs or {}))
+    write_record(manifest, cmd, os.getcwd(),
+                 {k: v for k, v in sorted(env.items()) if is_replay_knob(k)})
+
+
 def judge_seed(run, s, steps, intent, lock, baseline=None, full=False):
     """Route seed `s` by the chain and score it. -> its result dict. With
     `full` the route steps run at the full level and the files are
-    `s<S>_full_route/`, `s<S>_full.*` (`--confirm`)."""
+    `s<S>_full_route/`, `s<S>_full.*` (`--confirm`, `--full`). The route
+    folder gets the per-step boards, `chain.log`, and `redo_commands.sh`: the
+    copy of the placement and every step, as run -- a manifest of this route
+    alone, whatever REDO_MANIFEST the caller exported (#1592)."""
     from copy_board import copy_board
     t0 = time.time()
     tag = 'full' if full else 'fast'
@@ -251,6 +307,9 @@ def judge_seed(run, s, steps, intent, lock, baseline=None, full=False):
     os.makedirs(w)
     cur = os.path.join(w, 'in.kicad_pcb')
     copy_board(placed, cur)
+    manifest = os.path.join(w, 'redo_commands.sh')
+    record_step(manifest, [sys.executable, '-X', 'utf8',
+                           os.path.join(ROOT, 'py_router', 'copy_board.py'), placed, cur])
     res = {'seed': s, 'steps': []}
     log_path = os.path.join(w, 'chain.log')
     with open(log_path, 'w', encoding='utf-8') as log:
@@ -260,6 +319,7 @@ def judge_seed(run, s, steps, intent, lock, baseline=None, full=False):
             argv, added = step_argv(line, {'in': cur, 'out': out, 'dir': w, 'seed': s, 'run': run},
                                     full=full)
             knobs = step_env(line)
+            record_step(manifest, argv, knobs)
             log.write(f"$ {' '.join(shlex.quote(a) for a in [f'{k}={v}' for k, v in knobs.items()] + argv)}\n"
                       + ('# --quick 2 added: the judge routes every route.py / route_diff.py '
                          'step at level 2\n' if added else ''))
@@ -371,6 +431,11 @@ def main(argv=None):
                          f"the best's (at most {CONFIRM_MAX}; the rest are named, with the "
                          f"--seeds ... --confirm K that confirms them). Level 2 cannot tell such "
                          f"seeds apart (#1383)")
+    ap.add_argument('--full', action='store_true',
+                    help="route the seeds at the FULL level only (--quick taken off every route "
+                         "step) and rank them by that route: no level-2 pass. With --seeds S, the "
+                         "full route of one seed by the chain, into s<S>_full_route/ (per-step "
+                         "boards, chain.log, redo_commands.sh) and s<S>_full.kicad_pcb (#1592)")
     ap.add_argument('--jobs', type=int, default=1,
                     help='seeds routed at once (default 1: a judging route takes up to about '
                          '1.3 GB on a small board and 5 GB on a 350-part one)')
@@ -380,6 +445,11 @@ def main(argv=None):
     if a.confirm is not None and a.confirm != 'close' and not (
             a.confirm.isdigit() and int(a.confirm) >= 1):
         print(f"judge_seeds: --confirm {a.confirm!r} is not `close` or a seed count of 1 or more",
+              file=sys.stderr)
+        return 2
+    if a.full and a.confirm is not None:
+        print('judge_seeds: --full routes every seed at the full level already; --confirm '
+              're-routes level-2 seeds at it. Pass one of them. Nothing was routed.',
               file=sys.stderr)
         return 2
     run = os.path.dirname(os.path.abspath(a.judge))
@@ -425,7 +495,8 @@ def main(argv=None):
               + '. Nothing was routed.', file=sys.stderr)
         return 2
     print(f"judge_seeds: seeds {', '.join(map(str, named))}, {len(steps)} step(s) each, "
-          f"{max(1, a.jobs)} at a time")
+          f"{max(1, a.jobs)} at a time"
+          + (', at the full level (--full: no level-2 pass)' if a.full else ''))
     if not a.intent:
         print('  NOTE: no --intent: quick_score leaves the floorplan ungraded')
     pairs = unpaired_diff_pairs(os.path.join(run, f's{named[0]}.kicad_pcb'), steps)
@@ -446,19 +517,24 @@ def main(argv=None):
         print('  NOTE: judge.json names no baseline: quick_score leaves the assembly ungraded')
     lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool:
-        results = list(pool.map(lambda s: judge_seed(run, s, steps, a.intent, lock, baseline),
-                                named))
+        results = list(pool.map(lambda s: judge_seed(run, s, steps, a.intent, lock, baseline,
+                                                     full=a.full), named))
     from quick_score import judge_key
     scored = sorted((r for r in results if 'score' in r), key=lambda r: judge_key(r['score']))
     failed = [r for r in results if 'failed' in r]
     if scored:
         print('judge_seeds: ranked by quick_score.judge_key (floorplan errors + assembly, '
-              'blocking, joins_needed, vias, copper_mm, segments):')
+              'blocking, joins_needed, vias, copper_mm, segments)'
+              + (', full route' if a.full else '') + ':')
         for r in scored:
             print(f"  seed {r['seed']}: {_line(r)}")
-        print(f"judge_seeds: best seed {scored[0]['seed']}: keep its placement "
-              f"s{scored[0]['seed']}.kicad_pcb (never the --quick board)")
-    close = close_seeds(scored)
+        b = scored[0]['seed']
+        print(f"judge_seeds: best seed {b}"
+              + (f" by the full route: keep its placement s{b}.kicad_pcb; its routed board is "
+                 f"s{b}_full.kicad_pcb" if a.full else
+                 f": keep its placement s{b}.kicad_pcb (never the --quick board)"))
+    # the quick/full spread is level 2's: a full route has none to settle
+    close = [] if a.full else close_seeds(scored)
     ranking = [r['seed'] for r in scored]
     # the close seeds `--confirm close` leaves out, past its cap
     left = close[CONFIRM_MAX:] if a.confirm in (None, 'close') else []
@@ -511,6 +587,7 @@ def main(argv=None):
             **{k: (r['score'].get('quality') or {}).get(k)
                for k in ('vias', 'copper_mm', 'segments')}})
             | {'seconds': r['seconds']} for r in results},
+        'level': 'full' if a.full else 2,
         'ranking': [r['seed'] for r in scored],
         'close': close,
         'confirmed': [r['seed'] for r in confirmed],

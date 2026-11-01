@@ -1205,20 +1205,37 @@ judges on.
 
 ```bash
 python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_chain.txt \
-    --intent wk/run/intent.json [--seeds 3,4] [--confirm close|K] [--jobs 1]
+    --intent wk/run/intent.json [--seeds 3,4] [--confirm close|K | --full] [--jobs 1]
 ```
 
 - Every `route.py` and `route_diff.py` step runs at `--quick 2`, added when
-  the line has no `--quick` of its own (and logged), so the full route's
-  chain can be the file as it stands.
+  the line has no `--quick` of its own (and logged), so one chain file in
+  this format serves both the judging route and the full route (`--full`,
+  `--confirm`): its route steps need no level of their own. The format is
+  this one, the board's plan-pcb-routing chain with its boards named by
+  placeholder -- not plan-pcb-routing's `<board>_plan.sh`, which names them
+  by path and begins with `cd` (the runner refuses it: no step reads `{in}`).
+- `route_plan_check.py` proves a chain before any seed is routed (#1592):
+  `python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py
+  wk/run/judge_chain.txt --board <board>` reads a file whose commands name a
+  placeholder as a chain, as this runner reads it, and grades its rules with
+  `{in}` / `{out}` as the boards (a step with `{out}` writes one); R01, the
+  plan's `cd` line, is not asked of a chain. A chain this runner would refuse
+  is its exit 3, for the runner's reason.
 - A command runs from the current folder (the repo root) with no shell: a
   quoted `'*'` reaches the tool as `*`, and `python3` at the head of a line is
   the runner's own interpreter. A leading `NAME=value` prefix
   (`KICAD_SMOOTH_ROUTE=1 python3 ...`) is that step's environment alone,
-  over the runner's (#1497), as `bash` would read it.
+  over the runner's (#1497), as `bash` would read it. A shell builtin
+  (`cd`, `export`, `set`) is no command here, and a chain carrying one is
+  refused.
 - Per seed: `s<S>_route/` made afresh with the placement copied in
   (`copy_board`, siblings included), every step's output in
-  `s<S>_route/chain.log`, the last board copied to `s<S>_fast.kicad_pcb` and
+  `s<S>_route/chain.log` and its board in `<N>_<script>.kicad_pcb`, the copy
+  and every step, as run, in `s<S>_route/redo_commands.sh` (redo_record's
+  format, which `redo_stress_test.py` replays: a manifest of that route
+  alone, whatever `REDO_MANIFEST` the caller exported, into which the tools
+  still record themselves), the last board copied to `s<S>_fast.kicad_pcb` and
   scored by `quick_score.py` (with `--intent`, and `--baseline` from
   judge.json's `baseline`, the board the seeds were placed from) into
   `s<S>_fast.score.json`,
@@ -1239,12 +1256,18 @@ python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_
   more are close, the NOTE and the confirming run name the seeds it leaves
   out with the `--seeds <the close seeds> --confirm K` that confirms every one
   (#1383, #1473). The re-run routes its seeds at level 2 again first.
+- `--full` routes the seeds at the full level only, with no level-2 pass,
+  into the same `s<S>_full_route/`, `s<S>_full.kicad_pcb` and
+  `s<S>_full.score.json`, and ranks them by that route (`level: "full"` in
+  `JSON_SUMMARY:`). `--seeds S --full` is the documented way to route ONE
+  board by a chain at the full level: per-step boards, `chain.log` and the
+  route's own `redo_commands.sh` in `s<S>_full_route/` (#1592).
 
 Exit 0 every seed scored; 4 a seed's chain wrote no board or its score could
 not be read (named); 2 nothing run: `judge.json` unreadable or naming no
-seed, a seed's placement missing, or a chain that reads no `{in}`, writes no
-`{out}` or names an unknown placeholder (`~{...}`, KiCad's overbar in a net
-name, is not one).
+seed, a seed's placement missing, `--full` with `--confirm`, or a chain that
+reads no `{in}`, writes no `{out}`, names an unknown placeholder (`~{...}`,
+KiCad's overbar in a net name, is not one) or carries a shell builtin.
 
 ## Datasheet Template Fit (`fit_template.py`)
 
