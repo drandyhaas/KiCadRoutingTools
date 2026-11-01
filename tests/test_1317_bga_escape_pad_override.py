@@ -126,7 +126,8 @@ def via_rect():
     print('2. via_clears_pad_rects prices the override, raise-only:')
     from bga_fanout.geometry import via_clears_pad_rects
     pad = SimpleNamespace(global_x=0.0, global_y=0.0, size_x=0.4, size_y=0.4,
-                          rect_rotation=0.0, shape='rect', local_clearance=0.12)
+                          rect_rotation=0.0, shape='rect', local_clearance=0.12,
+                          layers=['F.Cu'], pad_type='smd', drill=0.0, net_id=0)
     # ring half 0.15 at x = 0.2 + 0.15 + 0.11: clears 0.1, not 0.12
     x = 0.2 + 0.15 + 0.11
     check('a via 0.11 from a pad overriding 0.12 is refused',

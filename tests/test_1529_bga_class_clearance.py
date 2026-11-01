@@ -153,9 +153,20 @@ def gap_case(tmp):
     fp = pcb.footprints[REF]
     xs = sorted({round(p.global_x, 3) for p in fp.pads})
     ys = sorted({round(p.global_y, 3) for p in fp.pads})
-    on_top = {(round(t.start_x, 3), round(t.start_y, 3)) for t in pcb.segments
-              if t.layer == 'F.Cu'} | {(round(t.end_x, 3), round(t.end_y, 3))
-                                       for t in pcb.segments if t.layer == 'F.Cu'}
+    # A same-net link between two balls of one net (a neighbour connection)
+    # does not escape through the gap: it runs ball to ball on the diagonal,
+    # whose gap is pitch * sqrt(2) wide. Since #1568 measures balls as the
+    # circles they are, such a link is laid where the square-cornered box
+    # used to refuse it.
+    _ball = {(round(p.global_x, 3), round(p.global_y, 3)): p.net_id for p in fp.pads}
+
+    def _link(t):
+        a = _ball.get((round(t.start_x, 3), round(t.start_y, 3)))
+        b = _ball.get((round(t.end_x, 3), round(t.end_y, 3)))
+        return a is not None and a == b == t.net_id
+    top = [t for t in pcb.segments if t.layer == 'F.Cu' and not _link(t)]
+    on_top = {(round(t.start_x, 3), round(t.start_y, 3)) for t in top} | {
+        (round(t.end_x, 3), round(t.end_y, 3)) for t in top}
 
     def inner_on_top(p):
         return (xs[0] < round(p.global_x, 3) < xs[-1]

@@ -167,65 +167,37 @@ def segments_clear_of_pads(segments: List[Dict],
 
 
 def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16, margin: float = 0.0) -> bool:
-    """True if the segment passes through the pad's rectangle (sampled).
+    """True if the segment's CENTRELINE comes within `margin` of the pad's
+    copper (margin 0: enters it).
 
-    margin expands the box (clearance + track half-width) to turn the raw
-    overlap test into a clearance test; default 0.0 keeps the true-short
-    semantics most callers rely on.
+    margin (clearance + track half-width) turns the raw overlap test into a
+    clearance test; default 0.0 keeps the true-short semantics most callers
+    rely on.
 
-    Honors pad.rect_rotation: for a tilted pad each sample point is rotated into
-    the pad's own frame, so the true (rotated) rectangle is tested rather than its
-    axis-aligned bounding box - exact for diagonal pads (e.g. a part placed at a
-    non-orthogonal angle, or a foreign pad seen in a rotated fanout frame).
-
-    Custom-shape pads are tested against their REAL polygon copper (pad.polygons),
-    not the axis-aligned bbox: for a custom pad pad.size_x/size_y is the SYMMETRIC
-    bbox about the pad centre, which for an off-centre outline (a meander antenna,
-    a comb/finger pad) phantom-blocks a via metres of clearance away from any real
-    copper (the antenna at mikoto's AE1: a 20x11mm bbox reaching a QFN 8mm off,
-    the #232 phantom class). Mirrors check_drc's polygon model so the two agree.
+    The pad is check_drc's own copper model (#1568, `segment_pad_gap`): round
+    corners for circle/oval/roundrect, the real polygons of a custom pad, and
+    rect_rotation. It used to be the pad's RECTANGLE grown by the margin with
+    square corners and sampled 16 times, which beside a corner overstated the
+    keep-out by up to margin * (sqrt(2) - 1) -- a BGA ball is a circle, so by
+    up to its radius * (sqrt(2) - 1) even at margin 0 -- and could step over
+    a small pad on a long segment. `samples` is kept for callers and unused.
     """
-    # A sample point within a nanometre of the boundary is decided the
-    # same way in every frame (the last bit used to decide it, and the
-    # same board shifted in memory repaired a different route): with no
-    # margin the test is a raw crossing and a centreline ON the pad edge
-    # is copper on copper, a hit; with a clearance margin a centreline
+    # With no margin the test is a raw crossing and a centreline ON the pad
+    # edge is copper on copper, a hit; with a clearance margin a centreline
     # EXACTLY at clearance is clear, as KiCad grades it.
-    eps = 1e-9 if margin <= 0.0 else -1e-9
-    polys = getattr(pad, 'polygons', None) if getattr(pad, 'shape', None) == 'custom' else None
-    if polys:
-        from check_drc import _point_to_polys_distance
-        n = max(1, int(math.hypot(x2 - x1, y2 - y1) / 0.05))
-        for t in range(n + 1):
-            f = t / n
-            if _point_to_polys_distance(x1 + (x2 - x1) * f,
-                                        y1 + (y2 - y1) * f, polys) <= margin + eps:
-                return True
-        return False
-    hx = pad.size_x / 2.0 + margin + eps
-    hy = pad.size_y / 2.0 + margin + eps
+    from bga_fanout.geometry import pad_reach
+    reach = pad_reach(pad) + max(margin, 0.0) + 1e-9
     px, py = pad.global_x, pad.global_y
-    # Every sample lies on the segment and a hit lies within hypot(hx, hy) of
-    # the pad centre in any frame, so a pad whose reach misses the segment's
-    # box cannot be hit: the same answer without the samples. The pad-aware
+    # A pad whose reach misses the segment's box cannot be hit. The pad-aware
     # checks call this for every pad on the board per route segment.
-    reach = math.hypot(hx, hy)
     if (px + reach < min(x1, x2) or px - reach > max(x1, x2)
             or py + reach < min(y1, y2) or py - reach > max(y1, y2)):
         return False
-    rr = getattr(pad, 'rect_rotation', 0.0)
-    if rr:
-        rad = math.radians(rr)
-        c, s = math.cos(rad), math.sin(rad)
-    for t in range(samples + 1):
-        f = t / samples
-        dx = x1 + (x2 - x1) * f - px
-        dy = y1 + (y2 - y1) * f - py
-        if rr:
-            dx, dy = dx * c + dy * s, -dx * s + dy * c  # into the pad's frame
-        if abs(dx) <= hx and abs(dy) <= hy:
-            return True
-    return False
+    from check_drc import segment_pad_gap
+    gap = segment_pad_gap(x1, y1, x2, y2, pad)
+    if margin <= 0.0:
+        return gap <= 1e-9
+    return gap < margin - 1e-9
 
 
 def segments_clear_of_foreign_pads(segments: List[Dict], layer: str, net_id: int,
@@ -366,10 +338,13 @@ def clear_escapes_of_foreign_pads(routes: List['FanoutRoute'], tracks: List[Dict
     dropped: List[str] = []
 
     for route in routes:
-        mfn = None
-        if pair_clearance is not None:
-            def mfn(pad, _r=route):
-                return track_width / 2 + pair_clearance(_r.net_id, pad.net_id, _r.layer)
+        # #1568: a pad clearance override RAISES the pair's floor, as the
+        # QFN under-pad escape prices it (check_drc's override replaces the
+        # class value; the max is never below it).
+        def mfn(pad, _r=route):
+            pc = (pair_clearance(_r.net_id, pad.net_id, _r.layer)
+                  if pair_clearance is not None else clearance)
+            return track_width / 2 + max(pc, getattr(pad, 'local_clearance', 0.0) or 0.0)
         if route_clear_of_foreign_pads(route, foreign_pads, layer_map, margin=margin,
                                        margin_fn=mfn):
             continue  # already clear at full clearance

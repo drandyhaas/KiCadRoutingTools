@@ -1001,6 +1001,10 @@ def manage_vias(
     # deliberately absent: place_fanout_clearance moves them off the vias.
     exclude_ref = routes[0].pad.component_ref if routes else ''
     immovable_pads = immovable_foreign_pads(pcb_data, exclude_ref)
+    # ...and an NPTH hole among them holds the via's copper off its wall at
+    # the board's declared copper-to-hole floor, as check_drc grades it.
+    from obstacle_map import resolve_hole_clearance
+    _hole_clr = resolve_hole_clearance(pcb_data, None)
 
     # Fab floors for the via-in-pad clamp (#202): floor is a board property
     # (2- vs 4-layer), so key off the board's total copper count. Pass the active
@@ -1048,7 +1052,8 @@ def manage_vias(
         if rung > 0:
             escalated_count += 1
         if not via_clears_pad_rects(pad_x, pad_y, v_size / 2.0,
-                                    clearance, immovable_pads):
+                                    clearance, immovable_pads,
+                                    hole_clearance=_hole_clr):
             # No via can go here: an immovable foreign pad (locked
             # part / connector / test point) overlaps the through
             # via's ring on some layer (#253, ottercast J2 connector,
@@ -5671,7 +5676,8 @@ def main():
             and not getattr(args, 'no_fix_drc_settings', False):
         try:
             from fix_kicad_drc_settings import (fix_project_for_output,
-                                                fanout_fix_kwargs)
+                                                fanout_fix_kwargs,
+                                                step_hole_clearance)
             # The one fanout writeback decision, which the GUI fanout tab
             # applies to the live board. #1529: the escape is spaced at the
             # net classes, so they are kept -- or capped at
@@ -5685,7 +5691,12 @@ def main():
                                     via_size=getattr(args, 'via_size', None),
                                     via_drill=getattr(args, 'via_drill', None),
                                     clearance_ceiling=getattr(args, 'clearance_ceiling',
-                                                              None)))
+                                                              None),
+                                    # #1568: the copper-to-hole floor this step
+                                    # HELD, lowered only to what its own copper
+                                    # needs (route.py's #1493 writeback)
+                                    hole_clearance=step_hole_clearance(
+                                        args.pcb, out_path, eff_clearance)))
         except Exception as _e:
             print(f"  (skipped DRC-settings fix: {_e})")
         # #581: record an ACTIVE same-net pad via clearance so later chain

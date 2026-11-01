@@ -2179,6 +2179,21 @@ class FanoutTab(wx.Panel):
         self._fanout_thread.start()
         self._poll_operation(apply_kw, 'qfn')
 
+    def _held_hole_clearance(self, board, tracks, vias, clearance):
+        """#1568: :func:`gui_utils.held_hole_clearance_live` for this tab's
+        fanout copper (track and via dicts)."""
+        from kicad_parser import Segment, Via
+        from .gui_utils import held_hole_clearance_live
+        segs = [Segment(start_x=t['start'][0], start_y=t['start'][1],
+                        end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
+                        layer=t['layer'], net_id=t['net_id']) for t in tracks]
+        new_vias = [Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                        layers=list(v.get('layers') or ['F.Cu', 'B.Cu']),
+                        net_id=v['net_id']) for v in vias]
+        return held_hole_clearance_live(
+            self.pcb_data, board,
+            {'results': [{'new_segments': segs, 'new_vias': new_vias}]}, clearance)
+
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga',
                               optimize_caps=False, vias_to_remove=None):
@@ -2343,6 +2358,11 @@ class FanoutTab(wx.Panel):
             via_size=_fcfg.get('via_size'), via_drill=_fcfg.get('via_drill'),
             # #1529: the classes kept, or capped at the routing ceiling
             clearance_ceiling=_fcfg.get('class_ceiling'))
+        if _fix_kw is not None:
+            # #1568: the copper-to-hole floor this step HELD, lowered only to
+            # what its own copper needs -- the CLI fanouts' step_hole_clearance
+            _fix_kw['hole_clearance'] = self._held_hole_clearance(
+                board, tracks, vias, _fix_kw['clearance'])
         # #693: gated on the shared "Fix DRC settings after routing" checkbox.
         # This tab is the one whose shared params did not even CARRY the flag,
         # so the gate and the flag were added together -- see the

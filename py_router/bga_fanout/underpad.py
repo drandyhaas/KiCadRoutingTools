@@ -52,6 +52,10 @@ from typing import Dict, List, Optional, Set, Tuple
 from kicad_parser import Footprint, PCBData
 from bga_fanout.types import BGAGrid
 from bga_fanout.geometry import clamp_via_to_pad, endpoint_on_pad
+from bga_fanout.geometry import pad_reach as _pad_reach
+# #1568: a via or stub against a pad is measured on check_drc's own pad
+from check_drc import point_to_pad_distance as _pt_pad_d
+from check_drc import segment_pad_gap as _seg_pad_d
 from geometry_utils import segment_to_segment_distance
 from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
 from routing_defaults import HOLE_TO_HOLE_CLEARANCE
@@ -1158,12 +1162,32 @@ def generate_underpad_escape(footprint: Footprint,
     exact_segs: List[Tuple] = []      # (x1, y1, x2, y2, half_w, net_id, layer) - real tracks
     reserved_sites: List[Tuple] = []  # (x, y, ring_r, drill_r, net_id) - pending via-in-pads
     carve_disks: List[Tuple] = []     # (x, y, keep_r, layer_idx_or_None, net_id) - stamps
-    # A pad's clearance override (#1317) rides in its half-extent here, so
-    # every `half + clearance` test below prices the pad at its override.
+    # (x, y, reach, drill_r, net_id, has_copper, pad, extra): `extra` is the
+    # pad's clearance above the run's -- its override (#1317) or its class
+    # (#1529) -- and every copper test below measures the PAD (#1568,
+    # check_drc's point_to_pad_distance / segment_pad_gap) at clearance +
+    # extra. `reach` (its extent + extra) only windows the candidates: a disc
+    # of radius max(size)/2 under-covers a rectangular pad's corners.
+    # An NPTH entry (has_copper False) carries no copper: a via's copper and
+    # a stub are held off its HOLE, at check_drc's requirements and the
+    # board's declared copper-to-hole floor, read as the route steps read it.
+    from obstacle_map import resolve_hole_clearance
+    from check_drc import (npth_via_clearance, npth_track_clearance,
+                           check_via_hole_overlap)
+    from kicad_parser import pad_drill_capsule
+    _hole_clr = resolve_hole_clearance(pcb_data, None)
+
+    def _npth_seg_hit(pad, x1, y1, x2, y2, hw):
+        (h1x, h1y), (h2x, h2y), hr = pad_drill_capsule(pad)
+        d = (_pt_seg_dist(h1x, h1y, x1, y1, x2, y2) if (h1x, h1y) == (h2x, h2y)
+             else segment_to_segment_distance(x1, y1, x2, y2, h1x, h1y, h2x, h2y))
+        return d < hr + hw + npth_track_clearance(
+            getattr(pad, 'local_clearance', 0.0) or 0.0, clearance, _hole_clr) - 1e-6
+
     exact_pads = [(p2.global_x, p2.global_y,
-                   max(p2.size_x, p2.size_y) / 2.0 + _pad_extra(p2),
+                   _pad_reach(p2) + _pad_extra(p2),
                    (p2.drill or 0.0) / 2.0, p2.net_id,
-                   p2.pad_type != 'np_thru_hole')
+                   p2.pad_type != 'np_thru_hole', p2, _pad_extra(p2))
                   for p2 in footprint.pads]
 
     # Static obstacles ---------------------------------------------------------
@@ -1261,14 +1285,22 @@ def generate_underpad_escape(footprint: Footprint,
             continue
         p_extra = _pad_extra(p)                     # #1317, #1529
         p_keep = p_half + track_width / 2 + clearance + margin + p_extra
+        if p.drill and p.drill > 0 and p.pad_type == 'np_thru_hole':
+            # An NPTH wall holds a track at check_drc's copper-to-hole
+            # requirement (the NPTH fab floor, the board's declared floor,
+            # the pad's override), not at the copper clearance.
+            p_keep = max(p_keep, p.drill / 2.0 + track_width / 2 + margin
+                         + npth_track_clearance(getattr(p, 'local_clearance', 0.0) or 0.0,
+                                                clearance, _hole_clr))
         if p.drill and p.drill > 0:
             occ.block_all(p.global_x, p.global_y, p_keep)
             carve_disks.append((p.global_x, p.global_y, p_keep, None, p.net_id))
             # TH/NPTH copper + drill for the exact via-site check (#393); the
             # locked-SMD copper stays with via_site_ok's exact rect test.
-            exact_pads.append((p.global_x, p.global_y, p_half + p_extra,
+            exact_pads.append((p.global_x, p.global_y,
+                               max(p_half, _pad_reach(p)) + p_extra,
                                p.drill / 2.0, p.net_id,
-                               p.pad_type != 'np_thru_hole'))
+                               p.pad_type != 'np_thru_hole', p, p_extra))
             continue
         # Non-custom pads stamp their REAL RECT outline (rect_rotation-aware),
         # not a disk of radius max(size)/2: that disk under-covers a rect's
@@ -1572,12 +1604,18 @@ def generate_underpad_escape(footprint: Footprint,
                 return "drill hole-to-hole vs a reserved via site"
             if onid != net_id and d < vr + orr + clearance + _cx(onid) - 1e-6:
                 return "via ring vs a reserved via site"
-        for (px, py, half, pdr, pnid, has_cu) in ctx['pads']:
+        for (px, py, half, pdr, pnid, has_cu, pad, extra) in ctx['pads']:
             d = math.hypot(px - x, py - y)
             if pdr and d < vdr + pdr + _h2h - 1e-6:
                 return "drill hole-to-hole vs a pad drill"
-            if has_cu and pnid != net_id and d < vr + half + clearance - 1e-6:
+            if has_cu and pnid != net_id and d < vr + half + clearance \
+                    and _pt_pad_d(x, y, pad) < vr + clearance + extra - 1e-6:
                 return "via ring vs a foreign pad"
+            if not has_cu and pdr and pnid != net_id and check_via_hole_overlap(
+                    x, y, 2 * vr, pad_drill_capsule(pad), npth_via_clearance(
+                        getattr(pad, 'local_clearance', 0.0) or 0.0,
+                        clearance, _hole_clr), 0.0)[0]:
+                return "via ring vs an NPTH hole"
         for (x1, y1, x2, y2, half_w, snid, _li) in ctx['segs']:
             dx, dy = x2 - x1, y2 - y1
             L2 = dx * dx + dy * dy
@@ -2510,10 +2548,15 @@ def generate_underpad_escape(footprint: Footprint,
                 continue
             if _pt_seg_d(ox, oy, gx, gy, vx, vy) < hw + orr + clearance + _cx(onid) - 1e-6:
                 return True
-        for (px_, py_, half, pdr, pnid, has_cu) in ctx['pads']:
-            if not has_cu or pnid == net_id:
+        for (px_, py_, half, pdr, pnid, has_cu, pad, extra) in ctx['pads']:
+            if pnid == net_id:
                 continue
-            if _pt_seg_d(px_, py_, gx, gy, vx, vy) < hw + half + clearance - 1e-6:
+            if not has_cu:
+                if pdr and _npth_seg_hit(pad, gx, gy, vx, vy, hw):
+                    return True
+                continue
+            if _pt_seg_d(px_, py_, gx, gy, vx, vy) < hw + half + clearance \
+                    and _seg_pad_d(gx, gy, vx, vy, pad) < hw + clearance + extra - 1e-6:
                 return True
         return False
 
@@ -3698,9 +3741,11 @@ def generate_underpad_escape(footprint: Footprint,
                     _sok = not any(vnid != _sp.net_id and _pt_seg_d(vx, vy, _ax, _ay, _bx, _by) < _hw + vr + clearance + _cx(vnid) - 1e-6
                                    for (vx, vy, vr, _vd, vnid) in _vs)
                 if _sok:
-                    _sok = not any(has_cu and pnid != _sp.net_id
-                                   and _pt_seg_d(px_, py_, _ax, _ay, _bx, _by) < _hw + half + clearance - 1e-6
-                                   for (px_, py_, half, _pd, pnid, has_cu) in exact_pads)
+                    _sok = not any(pnid != _sp.net_id and (
+                        (has_cu and _pt_seg_d(px_, py_, _ax, _ay, _bx, _by) < _hw + half + clearance
+                         and _seg_pad_d(_ax, _ay, _bx, _by, pad_) < _hw + clearance + extra - 1e-6)
+                        or (not has_cu and _pd and _npth_seg_hit(pad_, _ax, _ay, _bx, _by, _hw)))
+                                   for (px_, py_, half, _pd, pnid, has_cu, pad_, extra) in exact_pads)
                 if _sok:
                     _sok = occ.seg_clear(_sli, (_ax, _ay), (_bx, _by),
                                          exempt=set(occ.disk_cells(_ax, _ay, home_r)) | set(occ.disk_cells(_bx, _by, home_r)))

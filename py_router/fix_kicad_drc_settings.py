@@ -2231,7 +2231,8 @@ def fanout_written_floors(kind, tracks, vias):
 
 
 def fanout_fix_kwargs(kind, tracks, vias, *, clearance, track_width,
-                      via_size, via_drill, clearance_ceiling=None):
+                      via_size, via_drill, clearance_ceiling=None,
+                      hole_clearance=None):
     """THE fanout writeback: the :func:`fix_project_for_output` keywords a
     fanout step's floors are written with, or None when it writes none.
 
@@ -2252,7 +2253,12 @@ def fanout_fix_kwargs(kind, tracks, vias, *, clearance, track_width,
     NO hole-to-hole and no edge clearance: the CLI fanouts pass neither, so
     the edge floor is the fab copper-to-edge pin alone. The tab used to write
     its hole-to-hole and edge settings, never the copper-to-hole floor, and
-    clamped classes only under the Min-Clearance ceiling."""
+    clamped classes only under the Min-Clearance ceiling.
+
+    ``hole_clearance`` is the copper-to-hole floor the step HELD, lowered to
+    what its own copper needs (#1568: :func:`step_hole_clearance` on the CLI,
+    ``gui_utils.held_hole_clearance_live`` in the tab, as route.py writes it
+    since #1493); None writes the copper clearance there, as before."""
     floors, via_floors = fanout_written_floors(kind, tracks, vias)
     if not floors:
         return None
@@ -2260,7 +2266,8 @@ def fanout_fix_kwargs(kind, tracks, vias, *, clearance, track_width,
             "via_diameter": via_size if via_floors else None,
             "via_drill": via_drill if via_floors else None,
             "clamp_nondefault_netclasses": clearance_ceiling is not None,
-            "class_ceiling": clearance_ceiling}
+            "class_ceiling": clearance_ceiling,
+            "hole_clearance": hole_clearance}
 
 
 def plane_fix_kwargs(tracks, vias, *, clearance, hole_to_hole, track_width,

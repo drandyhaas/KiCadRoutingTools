@@ -3072,7 +3072,10 @@ HELD -- the board's own `min_hole_clearance`, which its router keeps NPTH
 walls at -- lowered only to the smallest distance from the copper it drew to a
 hole of another net (a P via's drill beside the N track can sit under it), and
 never below its copper clearance (#1369, `step_hole_clearance`). It used to
-write the copper clearance, which the delivered fill then followed.
+write the copper clearance, which the delivered fill then followed. `route.py`
+(#1493) and the fanouts, `bga_fanout.py`, `qfn_fanout.py` and the Fanout tab
+(#1568), write it the same way, and a floor written under the board's own is
+a `hole_clearance` row in `JSON_SUMMARY.design_rules`.
 
 The `#530` cap lowers `rules.min_clearance` to the smallest pad clearance
 override the run honoured (KiCad floors an override there). That number

@@ -128,29 +128,50 @@ def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
     return out
 
 
+def pad_reach(pad) -> float:
+    """The radius about the pad centre that holds all its copper: the
+    rectangle's circumradius at any rotation, or the farthest polygon vertex
+    (#1568: a window for the exact pad tests, never the test itself)."""
+    r = math.hypot(pad.size_x, pad.size_y) / 2.0
+    for poly in getattr(pad, 'polygons', None) or ():
+        for x, y in poly:
+            r = max(r, math.hypot(x - pad.global_x, y - pad.global_y))
+    return r
+
+
 def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
-                         pads, net_clearances=None) -> bool:
-    """True if a through via at (x, y) clears every pad in `pads` (rect model,
-    rect_rotation-aware) by `clearance` edge-to-edge. Vias span all copper
-    layers, so the pads' own layers are irrelevant. The previous axis-aligned
-    bbox under-covered a ROTATED pad's protruding corners, passing via sites
-    whose ring grazed the real copper. `net_clearances` ({net_id: class
-    clearance}, #1529) holds a pad of a wider class at that class."""
-    from routing_utils import point_to_pad_rect_dist
+                         pads, net_clearances=None, hole_clearance: float = 0.0) -> bool:
+    """True if a through via at (x, y) clears every pad in `pads` by
+    `clearance` edge-to-edge. Vias span all copper layers, so the pads' own
+    layers are irrelevant. The pad is check_drc's own copper model
+    (`point_to_pad_distance`: rect_rotation, the real polygons of a custom
+    pad, and -- #1568 -- the round corners of a circle/oval/roundrect, which
+    the rectangle used here before overstated). `net_clearances` ({net_id:
+    class clearance}, #1529) holds a pad of a wider class at that class.
+
+    An NPTH pad has no copper: the via's copper is held off its HOLE, at
+    check_drc's requirement (`npth_via_clearance`: the pad's override above
+    the NPTH floor, else max(clearance, ``hole_clearance``, the board's
+    declared copper-to-hole floor)). Plated holes are held at copper
+    clearance by their pad, as the route steps hold them (#1217)."""
+    from check_drc import (point_to_pad_distance, _pad_has_no_copper,
+                           npth_via_clearance, check_via_hole_overlap)
+    from kicad_parser import pad_drill_capsule
     for p in pads:
+        lc = getattr(p, 'local_clearance', 0.0) or 0.0
+        cls = net_clearances.get(p.net_id, 0.0) if net_clearances else 0.0
+        if _pad_has_no_copper(p):
+            if (p.drill or 0) > 0 and check_via_hole_overlap(
+                    x, y, 2 * v_half, pad_drill_capsule(p),
+                    npth_via_clearance(lc, max(clearance, cls), hole_clearance),
+                    0.0)[0]:
+                return False
+            continue
         # A pad's clearance override above `clearance` is the pair clearance
         # KiCad grades the via against (#1317); raise-only. So is its net's
         # class (#1529).
-        c = max(clearance, getattr(p, 'local_clearance', 0.0) or 0.0,
-                net_clearances.get(p.net_id, 0.0) if net_clearances else 0.0)
-        # Custom-shape pads: measure to the REAL polygon copper, not the
-        # symmetric bbox rect, which for an off-centre outline (meander antenna,
-        # comb pad) reports a false graze metres from any copper (#232 class).
-        if getattr(p, 'shape', None) == 'custom' and getattr(p, 'polygons', None):
-            from check_drc import _point_to_polys_distance
-            if _point_to_polys_distance(x, y, p.polygons) < v_half + c - 1e-9:
-                return False
-        elif point_to_pad_rect_dist(x, y, p) < v_half + c - 1e-9:
+        c = max(clearance, lc, cls)
+        if point_to_pad_distance(x, y, p) < v_half + c - 1e-9:
             return False
     return True
 
