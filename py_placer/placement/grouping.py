@@ -214,15 +214,20 @@ _SWITCH_NET_PARTS = 4
 
 
 def _is_inductor(fp, ref) -> bool:
-    """A two-pad inductor (L, value in henries), not a ferrite bead."""
+    """A two-pad inductor (L, value in henries), not a ferrite bead. The
+    reference is read past a glued qualifier (`part_class.unqualified_ref`,
+    #1606), as `_is_cap` and the chip test of `template_hints` read it."""
+    from placement.part_class import unqualified_ref
     v = (getattr(fp, 'value', '') or '').replace(' ', '').lower()
     pads = [p for p in fp.pads if p.net_id]
-    return (len(pads) == 2 and re.match(r'^L\d', ref) is not None
+    return (len(pads) == 2 and re.match(r'^L\d', unqualified_ref(ref)) is not None
             and re.search(r'\d(\.\d+)?[pnum\u00b5]?h', v) is not None)
 
 
 def _is_cap(fp, ref) -> bool:
-    return re.match(r'^C\d', ref) is not None and len([p for p in fp.pads if p.net_id]) == 2
+    from placement.part_class import unqualified_ref
+    return (re.match(r'^C\d', unqualified_ref(ref)) is not None
+            and len([p for p in fp.pads if p.net_id]) == 2)
 
 
 def template_hints(doc: Dict, pcb) -> List[str]:
@@ -233,6 +238,7 @@ def template_hints(doc: Dict, pcb) -> List[str]:
     them named a bootstrap or flying-cap pin; a pin named as an RF port. A hint
     for the agent to weigh, never a rule: a stage can show none of these, and
     some that show one need nothing -- the file records those as `none`."""
+    from placement.part_class import unqualified_ref
     named = {t['chip'] for t in template_candidates(doc, all_kinds=True)}
     fps = pcb.footprints or {}
     why: Dict[str, List[str]] = {}
@@ -256,7 +262,7 @@ def template_hints(doc: Dict, pcb) -> List[str]:
     gnd = {nid for nid in on if is_ground(_net(pcb, nid))}
     for ref, fp in fps.items():
         pads = [p for p in fp.pads if p.net_id]
-        if len(pads) < 5 or not re.match(r'^(U|IC)\d', ref):
+        if len(pads) < 5 or not re.match(r'^(U|IC)\d', unqualified_ref(ref)):
             continue
         mine = {p.net_id for p in pads} - gnd
         capped = {p.net_id for p in pads if _CAP_FN.search((p.pinfunction or '').strip())}

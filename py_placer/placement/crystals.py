@@ -17,7 +17,9 @@ roles imply:
 * each load cap, meaning a two-pad cap with one pad on a load net (either
   leg's) and the other on ground: its load-net pad within `cap_mm` of the
   crystal pad on that net. A cap whose other pad is not ground is not a load
-  cap, so it gets no claim.
+  cap, so it gets no claim. A load net is never a supply rail: a part with a
+  supply pin is not a passive crystal (`emc_roles._crystals`, #1605), so a
+  rail's decaps are never claimed as an oscillator's load caps.
 
 The rows are ordinary `proximity[]` claims, so `place_simple`'s claim term
 pulls each subject to its partner: the crystal to its IC, and each cap to the
@@ -52,6 +54,8 @@ LEG_MM = 8.1
 #: (174 crystals with a load cap: median 0.81 mm, p75 2.22 mm).
 CAP_MM = 2.2
 
+#: A capacitor's reference, read past a glued qualifier
+#: (`part_class.unqualified_ref`): crkbd's right-half `rC1` too (#1606).
 _CAP_REF = re.compile(r'^C\d')
 
 
@@ -87,6 +91,7 @@ def crystal_claims(pcb, leg_mm: float = LEG_MM, cap_mm: float = CAP_MM
     a leg through a series part, and per load cap, and a line per crystal
     saying what was found. Reads no pose."""
     from .emc_roles import emc_roles
+    from .part_class import unqualified_ref
     with contextlib.redirect_stdout(io.StringIO()):
         roles = emc_roles(pcb).get('roles') or []
     net_name = {nid: (n.name or '') for nid, n in pcb.nets.items()}
@@ -130,7 +135,7 @@ def crystal_claims(pcb, leg_mm: float = LEG_MM, cap_mm: float = CAP_MM
                 'context': {**leg_ctx, 'role': 'crystal series part'}})
         caps = []
         for c in sorted(pcb.footprints):
-            if c == x or not _CAP_REF.match(c):
+            if c == x or not _CAP_REF.match(unqualified_ref(c)):
                 continue
             cu = [p for p in pcb.footprints[c].pads if p.net_id]
             if len(cu) != 2:
