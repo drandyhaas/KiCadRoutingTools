@@ -17,7 +17,9 @@ roles imply:
 * each load cap, meaning a two-pad cap with one pad on a load net (either
   leg's) and the other on ground: its load-net pad within `cap_mm` of the
   crystal pad on that net. A cap whose other pad is not ground is not a load
-  cap, so it gets no claim.
+  cap, so it gets no claim. A load net is never a supply rail: a part with a
+  supply pin is not a passive crystal (`emc_roles._crystals`, #1605), so a
+  rail's decaps are never claimed as an oscillator's load caps.
 
 The rows are ordinary `proximity[]` claims, so `place_simple`'s claim term
 pulls each subject to its partner: the crystal to its IC, and each cap to the
