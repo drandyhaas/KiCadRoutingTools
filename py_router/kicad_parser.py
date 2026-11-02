@@ -4303,6 +4303,16 @@ def _pt_in_ring(x: float, y: float, ring) -> bool:
     return inside
 
 
+def _pad_carries_copper_layer(pad) -> bool:
+    """An NPTH pad never carries copper, whatever layers it lists; any other
+    pad does when it names a copper layer (`check_drc._pad_has_no_copper`'s
+    rule, negated; this module cannot import check_drc)."""
+    if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return False
+    return any(ln == '*.Cu' or ln.endswith('.Cu')
+               for ln in (getattr(pad, 'layers', None) or ()))
+
+
 def drop_pad_containing_cutouts(board_info, pads_by_net):
     """Drop bogus board cutouts -- a genuine cutout is a HOLE in the copper and
     contains no pads.
@@ -4322,18 +4332,27 @@ def drop_pad_containing_cutouts(board_info, pads_by_net):
     KiCad mills the board along it and grades copper against it -- so dropping
     it outright blinded BOTH the router's edge keep-out and check_drc's edge
     measurement, and copper landed ON the milled line (kicad-cli "actual 0.0000
-    mm"). crkbd is a panelized split keyboard: its REAL 64-point outline nests
-    inside the panel frame, so containment called it a cutout and this rule then
-    deleted it -- the router laid 85 items of copper across the milled gap
-    between the two halves, none of which check_drc could see. Moving it to
+    mm"): crkbd's router laid 85 items of copper across the milled gap between
+    its two halves, none of which check_drc could see. Moving it to
     board_edge_contours keeps the #291 rescue (no pad is marked off-board) while
     restoring the edge clearance the geometry actually demands.
+
+    Only pads that CARRY COPPER are counted (#1607). An NPTH hole is itself a
+    hole, and nothing #291 protects (a routing endpoint) is lost when one
+    reads off-board. crkbd's 64-point ring is that milled gap -- the slot
+    between its two halves and the panel rails, enclosing no copper pad --
+    and it was dropped above, then reclassified, only because two NPTH
+    mouse-bite holes of its breakaway tabs (BT2, BT4) sit on its edge. So the
+    board's interior depended on where other parts sat: piled, the tabs left,
+    the gap became a hole again, and the locked USB-C J1 at an unchanged pose
+    read a 4.63 mm overhang into it there and 0.0 on the placed board.
     """
     cutouts = getattr(board_info, 'board_cutouts', None)
     if not cutouts or not pads_by_net:
         return
     pad_xy = [(p.global_x, p.global_y)
-              for pads in pads_by_net.values() for p in pads]
+              for pads in pads_by_net.values() for p in pads
+              if _pad_carries_copper_layer(p)]
     if not pad_xy:
         return
     kept, dropped = [], []

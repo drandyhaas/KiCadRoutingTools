@@ -793,6 +793,12 @@ outline or past it, its band `max` its zero-margin overhang plus 0.5, and its
 edge at the same reach. It used to read all three at a fixed 0.55 edge
 clearance, so an intent emitted before this carries bands 0.55 mm wider than
 the part's overhang (more on a corner part, whose reading summed both sides).
+For an entry with an edge, `max` is never under the number the grade reads
+against it plus 0.5 (#1607): the body's overhang, or the courtyard's distance
+past the declared edge, and each other edge's overhang. A courtyard hanging
+into a notch or a milled gap reads more past its edge than the summed reading
+(crkbd's J1: 4.63 mm against 1.80), and the band used to fail the board it was
+read off.
 
 Every declared connector on the board gets a row in `edge_connector_evidence`
 (`--json`), including passing ones. Each row carries:
