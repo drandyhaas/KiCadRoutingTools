@@ -5,11 +5,17 @@ oracle" about a net KiCad still calls split.
 
 Two derived 20 mm two-pad GND pours (tests/fixtures/island_semantics):
 
-  pinch  a 0.12 mm corridor that KiCad pours (min_thickness 0.1) and the
-         fill model drops. The plane finalize's oracle ran and cleared the
-         net, so the final re-grade used to keep the model's grade: `failed
-         1 (GND)` on a board KiCad, check_connected and board_score all call
-         connected. It must refill once for that case and ship `failed 0`.
+  pinch  a 0.106 mm channel that KiCad pours (min_thickness 0.1) and the
+         fill model drops: the dividing track is cut in two and its halves
+         offset so they overlap by 1.2 mm, and the model's sampled deflated
+         fill holds no sample in a channel that narrow (KiCad 10.0.3 pours
+         it from 0.100, the model from 0.114). (A 0.12 mm gap between the
+         halves' ends served until #1608 made the model join such pinches
+         exactly, as KiCad does.) The plane finalize's oracle ran and
+         cleared the net, so the final re-grade used to keep the model's
+         grade: `failed 1 (GND)` on a board KiCad, check_connected and
+         board_score all call connected. It must refill once for that case
+         and ship `failed 0`.
   split  a really split pour. The repair re-graded the model's failing pad
          against the oracle's links by centre distance, found no link
          endpoint at it, and printed "Pads still unconnected: none (all
@@ -64,9 +70,9 @@ def main():
     body = text.rstrip('\n')
     assert body.endswith(')')
     pinch = (body[:-1]
-             .replace('(end 10 19.5)', '(end 10 9.29) (locked yes)')
+             .replace('(end 10 19.5)', '(end 10 10.6) (locked yes)')
              .replace('(min_thickness 0.2)', '(min_thickness 0.1)')
-             + '(segment (start 10 10.71) (end 10 19.5) (locked yes) (width 0.3) '
+             + '(segment (start 11.406 9.4) (end 11.406 19.5) (locked yes) (width 0.3) '
                '(layer "B.Cu") (net "SIG2") '
                '(uuid "0c016a08-c2a8-4700-9ba0-ab33b5c0358c"))\n)\n')
     split = text.replace('(end 10 19.5)', '(end 10 19.5) (locked yes)')
