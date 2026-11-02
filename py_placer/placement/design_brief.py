@@ -2237,6 +2237,10 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
                 own = cb.get(key) or (cb.get('overhang_mm.min')
                                       if key == 'overhang_mm' else None)
                 bmap[f"edge_connectors[{c['ref']}].{key}"] = own or 'declared'
+                if key == 'overhang_mm':
+                    # #1603: the emitter's model-derived floor went with
+                    # the band the brief replaced
+                    bmap.pop(f"edge_connectors[{c['ref']}].overhang_mm.min", None)
     if 'body_edge_mm' in (fragment.get('assembly') or {}):
         bmap['assembly.body_edge_mm'] = 'declared'
     if bmap:

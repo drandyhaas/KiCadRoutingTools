@@ -473,12 +473,16 @@ def unrouted_shape(board: str, unrouted_names, pcb=None) -> dict:
 #: `own_pad_shorts` (#1306) is two of ONE part's pads touching on two real
 #: nets. Always measured; `--baseline` only exempts the pairs its footprint
 #: already had.
+#:
+#: `body_in_board_count` (#1603) is the parts whose own 3D model is at board
+#: depth inside the outline. Absolute; null when no model was read (no
+#: kicad-cli), so it lands in `conjuncts_unmeasured`, never as clean.
 ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
                       'containment_blocking', 'courtyard_blocking_gating',
                       'oob_pad_copper_gating_count', 'mating_keepout_count',
                       'pin_in_courtyard', 'testpoint_covered_gating',
                       'body_edge_band_gating', 'graphic_pad_gating',
-                      'own_pad_shorts')
+                      'own_pad_shorts', 'body_in_board_count')
 
 #: The conjuncts that can ACTUALLY flip the verdict while `blocking` is 0, in
 #: this scorer's invocation. Not every conjunct can:
@@ -505,11 +509,14 @@ ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
 #: GRAPHIC copper is no pad intersection, so it fires at `blocking` 0.
 #: #1306 added `own_pad_shorts`: two pads of ONE part are no pair of parts,
 #: so it fires at `blocking` 0 too.
+#: #1603 added `body_in_board_count`: a part's own 3D model at board depth
+#: inside the outline is a fact about one part, so it fires at `blocking` 0.
 ASSEMBLY_LIVE_CONJUNCTS = ('coincident_origins', 'containment_blocking',
                            'oob_pad_copper_gating_count', 'mating_keepout_count',
                            'pin_in_courtyard', 'courtyard_blocking_gating',
                            'testpoint_covered_gating', 'body_edge_band_gating',
-                           'graphic_pad_gating', 'own_pad_shorts')
+                           'graphic_pad_gating', 'own_pad_shorts',
+                           'body_in_board_count')
 
 
 def assembly_component(doc: dict, rc: int) -> dict:

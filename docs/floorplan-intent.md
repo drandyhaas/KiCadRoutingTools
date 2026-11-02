@@ -703,6 +703,23 @@ connector on its courtyard: tigard's USB-C J1 went from body flush to body
 0.50 mm inside. A zero `min` is therefore nonbinding and a positive `min`
 is a real conjunct.
 
+**An emitted floor from the part's 3D model (#1603).** A part whose own
+model has body at board depth (an edge-mount jack the board slides into) is
+seated past its edge by the depth of its slot, and a band floor of 0 let the
+seat put it wholly on the board, its housing in the laminate, which
+check_assembly gates (`body_in_board`, `docs/utilities.md`). So when
+`--emit-intent` reads such a part overhanging its edge, its `min` is its
+band reading there less how far it could move in before that gate reads its
+body on the board (`heights.depth_past_edge`, in the band's own currency):
+the seat then puts it where its body clears the board. It is never above the
+observed reading, so the board it was read off grades it clean, and it is
+labelled `derived_default` in `context.basis`
+(`edge_connectors[<ref>].overhang_mm.min`) beside the band's own
+`observed_baseline`. A part with less than the gate's `DEPTH_MIN_MM2` of such
+body (a USB receptacle's shell lip) keeps `min` 0. Measured: KiCad's stock
+`SMA_Amphenol_132289_EdgeMount`, emitted at the pose its footprint draws,
+reads 11.93 mm and gets `min` 11.719.
+
 **The band is never negative (#1532).** It is how far the part reaches
 PAST its edge, and a body inside the board reads 0, so a negative `min` or
 `max` is refused when the intent (or a brief's `interfaces[].overhang_mm`)

@@ -482,7 +482,11 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   not 12.70, and the module no longer fits a breadboard.
 - **How far an edge receptacle reaches past the edge.** The seat puts a
   receptacle flush with the low end of its `overhang_mm` band, which the
-  emitter writes as 0. Where the datasheet's PCB-layout drawing puts the
+  emitter writes as 0 -- unless the part's own 3D model has body at board
+  depth (an edge-mount jack the board slides into), when it writes the
+  overhang that keeps that body off the board (`derived_default`, #1603;
+  check_assembly gates such a body inside the outline). Where the
+  datasheet's PCB-layout drawing puts the
   board edge inside the body (a USB-C or barrel jack's shell past the edge),
   write that distance as `overhang_mm.min`, `max` at or above it. Seated
   flush instead, ch32v003_usb's USB-C J1 sat 0.88 mm deeper than its drawing
