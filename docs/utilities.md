@@ -2489,6 +2489,13 @@ Options:
                      price lets every step cross them (the plan-pcb-routing
                      skill's route step uses 3.0), trading reference integrity
                      for routability.
+  --keep-pours       Take the planes from the board's own pours, as --finish
+                     does, in a full run, and pour none: step 2 does not run,
+                     so every pour ships with the outline, clearance, pad
+                     connection and priority the board drew, and signals keep
+                     off the inner layers the pours cover (--plane-layer-cost).
+                     Without it, step 2 replaces a same-net pour on a plane
+                     layer with its own.
   --power-nets PATTERN [...] --power-nets-widths MM [...]
                      route.py's own flags, given to every route step (the
                      passes and the diff-pair reroute) ahead of autoplan's

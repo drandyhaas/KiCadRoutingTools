@@ -55,6 +55,11 @@ pours, and the input board is itself a candidate, so a pass ships only if it
 beats it. route.py works on the nets still open, but like any route step it
 may rip and reroute existing copper and runs its plane finalize.
 
+--keep-pours takes the planes from the board's own pours, as --finish does, in
+a full run: step 2 pours nothing, so every pour the board has keeps its
+outline, clearance, pad connection and priority, and the signals keep off
+the inner layers those pours cover.
+
 --power-nets PATTERN [...] with --power-nets-widths MM [...] are route.py's
 own flags, given to every route step ahead of autoplan's rails: route.py
 routes a net at the width of the first pattern that selects it (fnmatch), so
@@ -386,7 +391,8 @@ def plane_layers(n):
     return list(range(1, n - 1))
 
 
-def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, caller_power=()):
+def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, caller_power=(),
+            keep_pours=False):
     from kicad_parser import parse_kicad_pcb, pour_zones
     from list_nets import (read_design_rules, effective_floors,
                            find_power_nets, find_differential_pairs)
@@ -440,10 +446,11 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, caller_power=()):
     power_nets = plane_nets + [n for n, _ in rails if n not in plane_nets]
     power_nets += [n for n, _ in gnd[1:] if n not in power_nets]
 
-    if finish:
+    if finish or keep_pours:
         # The board's own pours: their nets are power nets, and an INNER
         # layer carrying one is a plane the signals should keep off. Teardrops
         # are zones too, but routing output on a signal net, not a pour.
+        # With keep_pours a full run takes these and pours nothing.
         zones = [z for z in pour_zones(pcb.zones) if not z.in_footprint and z.net_name]
         planes = sorted({(z.net_name, z.layer) for z in zones})
         plane_nets = sorted({n for n, _ in planes})
@@ -496,6 +503,8 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, caller_power=()):
     if widths is not None:
         out['caller_power_nets'] = [[p, w] for p, w in caller_power]
         out['net_widths'] = widths
+    if keep_pours:
+        out['keep_pours'] = True
     return out
 
 
@@ -655,8 +664,8 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
     if finish:
         return route_passes(ch, a, L, costs, effort_factor, finish=True)
 
-    # 2. planes, first
-    if a['planes']:
+    # 2. planes, first -- unless the board's own pours are the planes
+    if a['planes'] and not a.get('keep_pours'):
         out, _, _ = ch.run('planes', [
             '{IN}', '{OUT}', '--nets', *[n for n, _ in a['planes']],
             '--plane-layers', *[l for _, l in a['planes']],
@@ -1025,6 +1034,11 @@ def main():
                     metavar='MM',
                     help='the width of each --power-nets pattern, in order: one '
                          'per pattern, or the run is refused before any step runs')
+    ap.add_argument('--keep-pours', action='store_true',
+                    help='take the planes from the board\'s own pours, as --finish '
+                         'does, and pour none: the planes step does not run, so '
+                         'every pour keeps its outline, clearance, pad connection '
+                         'and priority')
     from cli_nets import pin_dash_digit_values
     args = pin_dash_digit_values(ap).parse_args()
 
@@ -1034,7 +1048,8 @@ def main():
                           f"--power-nets-widths {len(args.power_nets_widths)} "
                           f"width(s); give one width per pattern")
         a = analyze(args.input_file, finish=args.finish, plane_cost=args.plane_layer_cost,
-                    caller_power=list(zip(args.power_nets, args.power_nets_widths)))
+                    caller_power=list(zip(args.power_nets, args.power_nets_widths)),
+                    keep_pours=args.keep_pours)
     except Refused as exc:
         print(f"AUTOPLAN: refused: {exc}", flush=True)
         return 2

@@ -18,8 +18,15 @@ them autoplan runs the chain it ran before they existed.
    splitflap_driver the named net's copper is drawn at its width. A malformed
    width and a pattern count that is not the width count are refused for
    their reason, before any step runs.
+3. --keep-pours: the planes are the board's own pours (read off the file
+   here, not through the parser), where autoplan would pour others; the
+   full chain runs no planes step and is otherwise the default chain. On a
+   routed sonde_u every pour ships as the input drew it (its zone text up to
+   the fill: uuid, clearance, pad connection, outline).
 """
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,6 +44,8 @@ from run_utils import check, evidence                        # noqa: E402
 RUN_ALL_TIMEOUT = 900
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 SHEETED = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb')
+POURED = os.path.join(ROOT, 'kicad_files', 'kit-dev-coldfire-xilinx_5213.kicad_pcb')
+SONDE = os.path.join(ROOT, 'kicad_files', 'sonde_u.kicad_pcb')
 SCRIPT = os.path.join(ROOT, 'py_router', 'autoplan.py')
 FAILS = []
 
@@ -344,9 +353,92 @@ def test_power_nets_run():
     assert len(FAILS) == n, FAILS[n:]
 
 
+def zone_blocks(path):
+    """Each board-level (zone ...) block of PATH up to its fill, whitespace
+    folded: what the board says about a pour, not what a fill made of it."""
+    text = open(path, encoding='utf-8').read()
+    out = []
+    depth, quoted, start = 0, False, None
+    for i, c in enumerate(text):
+        if quoted:
+            quoted = not (c == '"' and text[i - 1] != '\\')
+        elif c == '"':
+            quoted = True
+        elif c == '(':
+            depth += 1
+            if depth == 2 and text.startswith('(zone', i) and not text[i + 5].isalnum():
+                start = i
+        elif c == ')':
+            depth -= 1
+            if depth == 1 and start is not None:
+                block = text[start:i + 1]
+                cut = block.find('(filled_polygon')
+                out.append(' '.join((block if cut < 0 else block[:cut]).split()))
+                start = None
+    return out
+
+
+def pours(path):
+    """{(net, layer)} of PATH's copper pours, read off the zone blocks: a zone
+    with a net name, not a keep-out, one layer per entry."""
+    out = set()
+    for b in zone_blocks(path):
+        net = re.search(r'\(net_name "([^"]*)"\)', b) or re.search(r'\(net "([^"]*)"\)', b)
+        if not net or not net.group(1) or '(keepout' in b:
+            continue
+        lay = re.search(r'\(layers? ((?:"[^"]*" ?)+)\)', b)
+        out |= {(net.group(1), l) for l in re.findall(r'"([^"]*)"', lay.group(1))}
+    return out
+
+
+def test_keep_pours_plan():
+    print("--keep-pours: the board's pours are the planes, and nothing is poured")
+    n = len(FAILS)
+    full = AP.analyze(POURED)
+    kept = AP.analyze(POURED, keep_pours=True)
+    want = pours(POURED)
+    expect(set(full['planes']) != want,
+           f"the fixture: autoplan would pour {full['planes']}, not the board's {sorted(want)}")
+    expect(set(kept['planes']) == want, f"the planes are the board's pours ({kept['planes']})")
+    expect(kept['planes'] == AP.analyze(POURED, finish=True)['planes'],
+           "the same planes --finish reads")
+    inner = {l for _, l in want} - {kept['layers'][0], kept['layers'][-1]}
+    expect([c < 0 for c in kept['layer_costs']] == [l in inner for l in kept['layers']],
+           f"signals kept off the inner layers the pours cover ({kept['layer_costs']})")
+    a = dict(A, keep_pours=True)
+    runs = chain_runs(a)
+    expect('planes' not in [k for _, k, _, _ in runs], "no planes step runs")
+    expect([(c, k, t, ' '.join(args)) for c, k, t, args in runs]
+           == [g for g in GOLDEN if g[0] == 'full' and g[1] != 'planes'],
+           "every other step is the default chain's")
+    assert len(FAILS) == n, FAILS[n:]
+
+
+def test_keep_pours_run():
+    print("--keep-pours on a real run: sonde_u's GND pour ships as drawn")
+    n = len(FAILS)
+    before = zone_blocks(SONDE)
+    expect(len(before) == 1 and 'clearance 0.508' in before[0],
+           "the fixture: one pour, at 0.508 clearance")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, 'routed.kicad_pcb')
+        r = _autoplan(SONDE, out, '--keep-pours')
+        expect(r.returncode == 0, f"autoplan exits 0 (rc={r.returncode})")
+        if r.returncode:
+            print(r.stdout[-3000:], r.stderr[-3000:])
+            raise AssertionError('autoplan failed')
+        evidence(out, 'routed board')
+        plan = json.load(open(out + '.autoplan/plan.json'))
+        expect([s['tag'] for s in plan['steps']][:1] == ['route'],
+               f"the chain starts at the route step ({[s['tag'] for s in plan['steps']]})")
+        expect(zone_blocks(out) == before,
+               "the shipped pour is the input's: uuid, clearance, pad connection, outline")
+    assert len(FAILS) == n, FAILS[n:]
+
+
 def main():
     for t in (test_defaults, test_power_nets_steps, test_power_nets_refused,
-              test_power_nets_run):
+              test_power_nets_run, test_keep_pours_plan, test_keep_pours_run):
         before = len(FAILS)
         try:
             t()
