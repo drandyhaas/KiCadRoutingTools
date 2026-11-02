@@ -1787,10 +1787,10 @@ and the snap lays the singles.
 holes, the board edge), placed copper at the audit's bars, a via by the ring
 the router stamps round it.
 
-**Speed:** both searches run in the router's Rust core -- a single's
-(`grid_router.lane_search`) and a pair's (`grid_router.pair_search`), each
-ported exactly, so the snapped plan is byte-identical; an older binary
-searches in Python. A pair's end connectors -- each candidate pose's legs, and
+**Speed:** both searches run in the router's Rust core and only there -- a
+single's (`grid_router.lane_search`, which also names where a lane with no
+path is stuck) and a pair's (`grid_router.pair_search`); a binary without
+them is refused. A pair's end connectors -- each candidate pose's legs, and
 their clearance of the board's fixed copper -- are kept from one try of the
 lane to the next (its first, its wide one, each sweep), and their clearance of
 the copper placed since is measured against what stands within their reach

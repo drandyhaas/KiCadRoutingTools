@@ -232,7 +232,7 @@ def build(E):
         neumaier=sys.version_info >= (3, 12),   # (sum() of floats compensated: the kernel sums as this Python does)
         consts=[we.W_OVER, we.VIA_PREF, we.STACK_COST, we.VIA_MM, we.LOAD_OK, we.W_CONG, we.X_TRUNK, we.FB_AVOID,
                 we.FB_PAIR, we.EPS_X, we.BIG, we.WALLED, we.FAR_TOOTH, we.FENCE_VIAS, we.OPP_DIVE, we.CORNER,
-                we._LANE_PITCH, we._CHG_ROOM, _bd.LPITCH])
+                we._LANE_PITCH, we._CHG_ROOM, _bd.LPITCH, we.TIE_MM])
     h = Handle(_EndsKernel(spec), lanes)
     h.secs = __import__('time').time() - t0_
     return h

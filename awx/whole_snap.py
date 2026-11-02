@@ -29,7 +29,7 @@ rule and NAMED (OUT's 'folded', which the gate fails); a terminal join is never 
 Then SWEEPS: every lane lifted and laid again against the others' real copper, which leaves room for clean jogs where
 the shares made a lane staircase. A lane that cannot be laid in its band FAILS, named (exit 3). The lanes placed later
 hug the ones before, so a bundle turns together, mitred."""
-import sys, json, math, heapq, time, collections
+import sys, json, math, time, collections
 import awx_settings
 import numpy as np
 
@@ -42,14 +42,11 @@ from plane_pad_tap import make_local_window
 from obstacle_map import (build_base_obstacle_map, add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
                           same_net_pad_via_keepout_cells)
 from routing_context import _add_free_via_positions
-try:                     # a single's search in Rust (grid_router >= 0.23); an older binary searches in Python
-    from grid_router import lane_search as _lane_search
-except ImportError:
-    _lane_search = None
-try:                     # ...and a pair's (grid_router >= 0.23.1)
-    from grid_router import pair_search as _pair_search
-except ImportError:
-    _pair_search = None
+try:                     # a single's search and a pair's, in Rust
+    from grid_router import lane_search as _lane_search, pair_search as _pair_search
+except ImportError as exc:
+    raise SystemExit(f'whole_snap: grid_router has no lane_search / pair_search ({exc}) -- rebuild it: '
+                     'python3 build_router.py')
 
 plan = json.load(open(sys.argv[1]))
 OUT = sys.argv[2]
@@ -958,7 +955,6 @@ def _route(n, strict=True, wide=False, neck=False):
     XROOM.clear()
     XROOM.update(mask=W.get('xroom'), i0=W['i0'], j0=W['j0'])
     i0, j0, band, bad, vbad, dist, arc = W['i0'], W['j0'], W['band'], W['bad'], W['vbad'], W['dist'], W['arc']
-    softL = {L_: m_.tolist() for L_, m_ in W['soft'].items()} if W.get('soft') is not None else None
     NI, NJ = band.shape
     a_out, a_in = end_dirs(n)
     P = LANE[n]['pts']
@@ -1055,134 +1051,7 @@ def _route(n, strict=True, wide=False, neck=False):
     unit = lambda d: (DIRS[d][0] / math.hypot(*DIRS[d]), DIRS[d][1] / math.hypot(*DIRS[d]))
     ROOM0 = [_pairs.dive_room(cfg, ctx.pair_ends[n][0], unit(d)) if no90 else 0.0 for d in range(8)]
     ROOM1 = [_pairs.dive_room(cfg, ctx.pair_ends[n][1], unit(d)) if no90 else 0.0 for d in range(8)]
-    # the search reads its maps as plain lists: the same values, without numpy's cost per element
-    bandL, arcL, distL = band.tolist(), arc.tolist(), dist.tolist()
-    tolL = W['tol'].tolist() if W.get('tol') is not None else None
-    badL = {L_: m_.tolist() for L_, m_ in bad.items()}
-    vbadL = [m_.tolist() for m_ in vbad]
-    BENDT = [[min(abs(nd - d), 8 - abs(nd - d)) for nd in range(8)] for d in range(8)]     # 45-degree steps of a turn
     STEPT = [g * (math.sqrt(2) if di and dj else 1.0) for di, dj in DIRS]                   # a move's length
-
-    def search(S, d0, E, dN, poses=False, multi=None):
-        """the A* from grid cell S, leaving on heading d0, to E: its states, or (None, states searched). poses: S and E
-        are a pair's POSES past its end runs, not terminal joins -- no join rules, E reached on its heading dN and
-        clear of everything. multi: ([(S, d0)], {E: {dN}}) -- from every start to any end at once (no heuristic), each
-        end's heading asked at the end alone (a cell another end passes through): no path here, none for any one; and
-        a search with no path returns (None, (how far along the lane it got, the state there)) -- a pair's poses, or a
-        single's start and end (every heading), to name where a lane that cannot be laid is stuck"""
-        h = (lambda i, j: 0.0) if multi else (lambda i, j: math.hypot(i - E[0], j - E[1]) * g)
-        EG = multi[1] if multi else None
-        # from a pose, the pair router looks pairs.pose_probe_steps straight ahead before it accepts it: that many
-        # straight steps owed at the start, and taken into the far pose
-        PR = _pairs.pose_probe_steps(cfg) if poses else 0
-        # a state -- cell (i, j), heading d, vias taken k, straight counts (a, b) -- is ONE int, its fields in that order
-        # in a mixed radix: ordered as the tuple is (the heap pops the same states in the same order), a fifth of its
-        # memory (K35 SCK, 1.8 M states: the pairs' snap stood at 843 MB); unpacked for the path
-        C1 = CAP + 1
-        C0 = max(CAP, RT, ST, PR, max((v_[1] for v_ in XS.values()), default=0) if cross else 0) + 1
-        MA, MK = C1, C0 * C1
-        MD = (K + 1) * MK
-        MJ = 8 * MD
-        MI = NJ * MJ
-
-        def unpack(s_):
-            i_, r_ = divmod(s_, MI); j_, r_ = divmod(r_, MJ); d_, r_ = divmod(r_, MD); k_, r_ = divmod(r_, MK)
-            return (i_, j_, d_, k_, divmod(r_, MA))
-        best, pq = {}, []
-        for S_, d0_ in (multi[0] if multi else [(S, d0)]):
-            start = S_[0] * MI + S_[1] * MJ + d0_ * MD + PR * MA
-            best[start] = 0.0
-            pq.append((h(*S_), 0.0, start))
-        heapq.heapify(pq)
-        prev = {}
-        goal = None
-        npop = 0
-        far = (-math.inf, None)                   # (multi) the farthest along the lane the search got
-        while pq:
-            f_, c_, st = heapq.heappop(pq)
-            if best.get(st, math.inf) < c_ - 1e-12:
-                continue
-            npop += 1
-            i, r_ = divmod(st, MI); j, r_ = divmod(r_, MJ); d, r_ = divmod(r_, MD); k, r_ = divmod(r_, MK)
-            sc = divmod(r_, MA)
-            if multi and arcL[i][j] > far[0]:
-                far = (arcL[i][j], st)
-            if (((i, j) in EG and d in EG[(i, j)]) if multi else (i, j) == E) and k == K and (not poses or sc[1] >= PR):
-                goal = st
-                break
-            L = lays[k]
-            # a via here: the next layer, near the plan's via, where a via clears
-            # an opposite-hands pair swaps its legs ONCE: its first dive is the crossover, any later one a plain dive
-            if cross and k == 0 and K >= 1:
-                if sc[0] <= 0 and sc[1] >= XS[d][0] and ROOM0[d] <= arcL[i][j] <= total - ROOM1[d] \
-                        and not badL[lays[k + 1]][i][j] and xo(i, j, d) is not None:
-                    x_, y_ = (i + i0) * g, (j + j0) * g
-                    dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
-                    if dv <= rvia:
-                        nst = i * MI + j * MJ + d * MD + (k + 1) * MK + XS[d][1] * MA
-                        nc = c_ + W_VIA * dv
-                        if nc < best.get(nst, math.inf) - 1e-12:
-                            best[nst] = nc; prev[nst] = st
-                            heapq.heappush(pq, (nc + h(i, j), nc, nst))
-            elif k < K and not vbadL[d % 4][i][j] and sc[0] <= 0 and sc[1] >= ST and ROOM0[d] <= arcL[i][j] <= total - ROOM1[d]:
-                x_, y_ = (i + i0) * g, (j + j0) * g
-                dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
-                if dv <= rvia and not badL[lays[k + 1]][i][j]:
-                    nst = i * MI + j * MJ + d * MD + (k + 1) * MK + ST * MA
-                    nc = c_ + W_VIA * dv
-                    if nc < best.get(nst, math.inf) - 1e-12:
-                        best[nst] = nc; prev[nst] = st
-                        heapq.heappush(pq, (nc + h(i, j), nc, nst))
-            for nd in range(8):
-                bend = BENDT[d][nd]
-                if bend >= 3 or (no90 and bend >= 2) or (bend and sc[0] > 0):
-                    continue
-                di, dj = DIRS[nd]
-                ni, nj = i + di, j + dj
-                if not (0 <= ni < NI and 0 <= nj < NJ) or not bandL[ni][nj]:
-                    continue
-                if not poses:
-                    # no fold at either end: the first move within 90 degrees of the join out of the tooth, the last
-                    # within 90 of the join into the berth (the audit folds a turn over 100)
-                    if (i, j) == S and k == 0 and DIRS[nd][0] * jS[0] + DIRS[nd][1] * jS[1] < -1e-9:
-                        continue
-                    if (ni, nj) == E and k == K and DIRS[nd][0] * jE[0] + DIRS[nd][1] * jE[1] < -1e-9:
-                        continue
-                    # ...and every move within a track width of either end runs within 90 degrees of its stub's own
-                    # way (a sum of such moves cannot fold, so neither can the lane's first or last track width:
-                    # SDQ4's stub runs 14 degrees off north, and a last move east read as 90 degrees against the
-                    # router direction)
-                    if strict and k == 0 and math.hypot(i - S[0], j - S[1]) * g <= TW and DIRS[nd][0] * a_out[0] + DIRS[nd][1] * a_out[1] < -1e-9:
-                        continue
-                    if strict and k == K and math.hypot(ni - E[0], nj - E[1]) * g <= TW and DIRS[nd][0] * a_in[0] + DIRS[nd][1] * a_in[1] < -1e-9:
-                        continue
-                if ((ni, nj) != E or poses) and badL[L][ni][nj]:
-                    continue
-                a_ = arcL[ni][nj]
-                if not (gate[k][0] <= a_ <= gate[k][1]):
-                    continue
-                step = STEPT[nd]
-                nc = c_ + step * (1 + W_DEV * distL[ni][nj]) + W_BEND * bend
-                if tolL is not None and distL[ni][nj] > tolL[ni][nj]:
-                    nc += step * W_KEEP * (distL[ni][nj] - tolL[ni][nj])
-                if softL is not None and softL[L][ni][nj]:
-                    nc += W_SHARE * step
-                if not multi and (ni, nj) == E:
-                    eb = min(abs(nd - dN), 8 - abs(nd - dN))
-                    if (no90 and eb >= 2) or (poses and eb):
-                        continue
-                    nc += W_BEND * eb
-                nst = ni * MI + nj * MJ + nd * MD + k * MK + (((max(sc[0] - 1, 0) * MA + min(sc[1] + 1, CAP)) if not bend
-                                                              else RT * MA + 1) if no90 else 0)
-                if nc < best.get(nst, math.inf) - 1e-12:
-                    best[nst] = nc; prev[nst] = st
-                    heapq.heappush(pq, (nc + h(ni, nj), nc, nst))
-        if goal is None:
-            return None, ((far[0], None if far[1] is None else unpack(far[1])) if multi else npop)
-        path = [goal]
-        while path[-1] in prev:
-            path.append(prev[path[-1]])
-        return [unpack(s_) for s_ in path[::-1]], npop
 
     TURN_UNITS = _pairs.pose_turn_units(cfg)
 
@@ -1196,30 +1065,27 @@ def _route(n, strict=True, wide=False, neck=False):
         q = _pairs.pose_turn_over(moves, TURN_UNITS)
         return None if q is None else ((cells[q][0] + i0) * g, (cells[q][1] + j0) * g)
 
-    def search_native():
-        """search(S, d0, E, dN) for a single, by grid_router.lane_search: the same search, the same path. What it
-        cannot form exactly itself -- a via's distance from the plan's via site, math.hypot of two non-integers -- is
-        a table filled here the way search() forms it, within reach of each site (+inf beyond: out of rvia)"""
+    def search_native(far=False):
+        """a SINGLE's path, by grid_router.lane_search: A* over (cell, heading, vias taken) in the lane's band --
+        octilinear moves, a turn of at most 90 degrees, each move its length times (1 + W_DEV x its cell's distance
+        from the smooth line) and W_BEND per 45 degrees of turn, a via where the plan's is within rvia and its arc
+        gates allow it, no fold at either end -- its states and the states it expanded. `far`: where it has no path,
+        the search again with no estimate and the end on any heading, for the farthest along the lane it gets -- its
+        third value (that arc, that state), to name where the lane is stuck"""
         LN = list(bad)
-        dv = np.full((K, NI, NJ), np.inf)
-        rc = int(math.ceil(rvia / g)) + 2
-        for k_, (vx_, vy_) in enumerate(vpts[:K]):
-            ci, cj = int(round(vx_ / g)) - i0, int(round(vy_ / g)) - j0
-            for i_ in range(max(0, ci - rc), min(NI, ci + rc + 1)):
-                for j_ in range(max(0, cj - rc), min(NJ, cj + rc + 1)):
-                    dv[k_, i_, j_] = math.hypot((i_ + i0) * g - vx_, (j_ + j0) * g - vy_)
         ok = lambda v_: [not (DIRS[nd][0] * v_[0] + DIRS[nd][1] * v_[1] < -1e-9) for nd in range(8)]
-        p_, npop_ = _lane_search(
+        p_, npop_, far_ = _lane_search(
             np.ascontiguousarray(band, bool), np.ascontiguousarray(np.stack([bad[L_] for L_ in LN]), bool),
             np.ascontiguousarray(np.stack(vbad), bool), np.ascontiguousarray(arc, np.float64),
-            np.ascontiguousarray(dist, np.float64), dv, (int(S[0]), int(S[1])), (int(E[0]), int(E[1])), int(d0),
-            int(dN), [LN.index(L_) for L_ in lays], [(float(a_), float(b_)) for a_, b_ in gate], float(room0),
-            float(total - room1), float(rvia), float(W_VIA), float(W_DEV), float(W_BEND), float(g), float(TW),
-            list(STEPT), ok(jS), ok(jE), ok(a_out), ok(a_in), bool(strict))
-        return ([(i_, j_, d_, k_, (0, 0)) for (i_, j_, d_, k_) in p_] if p_ is not None else None), npop_
+            np.ascontiguousarray(dist, np.float64), vtable(), (int(S[0]), int(S[1])), (int(E[0]), int(E[1])),
+            int(d0), int(dN), [LN.index(L_) for L_ in lays], [(float(a_), float(b_)) for a_, b_ in gate],
+            float(room0), float(total - room1), float(rvia), float(W_VIA), float(W_DEV), float(W_BEND), float(g),
+            float(TW), list(STEPT), ok(jS), ok(jE), ok(a_out), ok(a_in), bool(strict), far=far)
+        return ([(i_, j_, d_, k_, (0, 0)) for (i_, j_, d_, k_) in p_] if p_ is not None else None), npop_, far_
 
     def vtable():
-        # (a via's distance from the plan's k-th site, math.hypot's as search() forms it, within reach of each site)
+        # (a via's distance from the plan's k-th site, math.hypot's, within reach of each site: +inf beyond, out of
+        # rvia -- what the Rust search cannot form exactly itself)
         dv = np.full((K, NI, NJ), np.inf)
         rc = int(math.ceil(rvia / g)) + 2
         for k_, (vx_, vy_) in enumerate(vpts[:K]):
@@ -1230,10 +1096,11 @@ def _route(n, strict=True, wide=False, neck=False):
         return dv
 
     def psearch(S, d0, E, dN, multi=None):
-        """search(S, d0, E, dN, poses=True, multi=multi) for a PAIR, by grid_router.pair_search where the binary has it:
-        the same search, the same path -- search_native's tables, and the crossover's clearance called back"""
-        if _pair_search is None:
-            return search(S, d0, E, dN, poses=True, multi=multi)
+        """a PAIR's path from pose S (heading d0) to pose E (dN), by grid_router.pair_search: the single's search with
+        the pair router's moves (its straight runs after a turn and round a via, its crossover where its hands differ,
+        called back for the crossover's clearance) and no join rules at the poses. multi: ([(S, d0)], {E: {dN}}) --
+        from every start to any end at once, no estimate; with no path, (how far along the lane it got, the state
+        there) for its second value"""
         LN = list(bad)
         soft_ = W.get('soft')
         zero_ = np.zeros((NI, NJ), bool)
@@ -1364,13 +1231,13 @@ def _route(n, strict=True, wide=False, neck=False):
             return None, (f'no end connector with a body between them ({len(cands[0])} x {len(cands[1])} candidate '
                           f'poses, {tried} tried' + (', then none from any to any' if tried < len(combos) else '') + ')' + stuck)
     else:
-        path, npop = search_native() if _lane_search is not None else search(S, d0, E, dN)
+        path, npop, _f = search_native()
         if path is None:
             # where it gets stuck: the farthest along the lane any path from its start reaches (the failure's place,
             # for the solve -- its tooth said nothing of it: K35 SA4 was stuck 26 mm on, between two resistors' pads)
-            _p, far_ = search(S, d0, E, dN, multi=([(S, d0)], {E: set(range(8))}))
-            if _p is None and far_[1] is not None:
-                fi_, fj_, _fd, fk_, _fs = far_[1]
+            _p, _n, far_ = search_native(far=True)
+            if _p is None and far_ is not None:
+                fi_, fj_, _fd, fk_ = far_[1]
                 STUCK_AT['last'] = ((fi_ + i0) * g, (fj_ + j0) * g)
                 if W.get('stages'):
                     debug_map(n, W, STUCK_AT['last'], [lays[fk_]] + list(lays))

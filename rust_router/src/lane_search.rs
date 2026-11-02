@@ -60,11 +60,13 @@ fn bend_of(a: u8, b: u8) -> i32 {
 }
 
 /// The search. Maps are the window's (NI x NJ): band, bad[layer], vbad[heading % 4], arc, dist, and dv[k] (a via's
-/// distance from the plan's k-th via site, math.hypot's, +inf out of its reach). Returns (the path's states, or
-/// None; the states expanded).
+/// distance from the plan's k-th via site, math.hypot's, +inf out of its reach). `far`: the search the snap runs where
+/// a lane has no path, to name where it is stuck -- no estimate (every state in order of its cost), the end reached
+/// on any heading at no price -- recording the state FARTHEST along the lane (its arc) that it pops. Returns (the
+/// path's states, or None; the states expanded; with `far`, (that arc, that state), else None).
 #[pyfunction]
 #[pyo3(signature = (band, bad, vbad, arc, dist, dv, s, e, d0, dn, lays, gate, room0, arc_hi, rvia, w_via, w_dev,
-                    w_bend, g, tw, step, start_ok, end_ok, out_ok, in_ok, strict))]
+                    w_bend, g, tw, step, start_ok, end_ok, out_ok, in_ok, strict, far=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn lane_search(
     band: PyReadonlyArray2<bool>,
@@ -93,7 +95,8 @@ pub fn lane_search(
     out_ok: Vec<bool>,
     in_ok: Vec<bool>,
     strict: bool,
-) -> PyResult<(Option<Vec<State>>, usize)> {
+    far: bool,
+) -> PyResult<(Option<Vec<State>>, usize, Option<(f64, State)>)> {
     let band = band.as_array();
     let bad = bad.as_array();
     let vbad = vbad.as_array();
@@ -102,7 +105,8 @@ pub fn lane_search(
     let dv = dv.as_array();
     let (ni_, nj_) = (band.shape()[0] as i32, band.shape()[1] as i32);
     let kk = (lays.len() - 1) as u8;
-    let h = |i: i32, j: i32| ihypot((i - e.0) as i64, (j - e.1) as i64) * g;
+    let h = |i: i32, j: i32| if far { 0.0 } else { ihypot((i - e.0) as i64, (j - e.1) as i64) * g };
+    let mut far_at: (f64, Option<State>) = (f64::NEG_INFINITY, None);
 
     let start: State = (s.0, s.1, d0, 0);
     let mut best: FxHashMap<State, f64> = FxHashMap::default();
@@ -118,6 +122,9 @@ pub fn lane_search(
         }
         npop += 1;
         let (i, j, d, k) = st;
+        if far && arc[[i as usize, j as usize]] > far_at.0 {
+            far_at = (arc[[i as usize, j as usize]], Some(st));
+        }
         if (i, j) == e && k == kk {
             goal = Some(st);
             break;
@@ -175,7 +182,7 @@ pub fn lane_search(
                 continue;
             }
             let mut nc = c_ + step[nd as usize] * (1.0 + w_dev * dist[[niu, nju]]) + w_bend * (bend as f64);
-            if (ni, nj) == e {
+            if !far && (ni, nj) == e {
                 nc += w_bend * (bend_of(nd, dn) as f64);
             }
             let nst: State = (ni, nj, nd, k);
@@ -186,8 +193,9 @@ pub fn lane_search(
             }
         }
     }
+    let far_out = if far { far_at.1.map(|st| (far_at.0, st)) } else { None };
     let goal = match goal {
-        None => return Ok((None, npop)),
+        None => return Ok((None, npop, far_out)),
         Some(gl) => gl,
     };
     let mut path = vec![goal];
@@ -195,5 +203,5 @@ pub fn lane_search(
         path.push(*p);
     }
     path.reverse();
-    Ok((Some(path), npop))
+    Ok((Some(path), npop, far_out))
 }

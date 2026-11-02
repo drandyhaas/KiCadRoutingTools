@@ -452,6 +452,19 @@ src/
 
 ## Version History
 
+### 0.24.2 (2026-11-02)
+
+- **`EndsKernel`: a tie is no crossing**: two lanes whose places round the
+  source's box or the destination's stand within `TIE_MM` of each other (one
+  exit, two layers) do not cross -- `whole_ends._crossed`, the Python's rule
+  since 2026-10-27, which the kernel still read as two strict orders: since
+  then a bus scored in the kernel counted such ties as crossings (in the
+  inversions and in the source's far-face cut) where the Python did not.
+- **`lane_search(..., far=True)`**: the search with no estimate and the end on
+  any heading, returning the state farthest along the lane it popped -- where a
+  lane with no path is stuck, which the snap had searched for in Python; it
+  returns that as a third value (None without `far`).
+
 ### 0.24.1 (2026-10-25)
 
 - **`EndsKernel` on two routing layers**: the ends estimate's own two-layer

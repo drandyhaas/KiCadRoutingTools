@@ -117,6 +117,7 @@ pub struct EndsKernel {
     lane_pitch: f64,
     chg_room: f64,
     lpitch: f64,
+    tie_mm: f64,
 }
 
 /// Python's sum() of floats: since 3.12 compensated (Neumaier, CPython's builtin_sum: the compensation added at the
@@ -345,6 +346,13 @@ fn between(lo: f64, hi: f64, v: f64, whole: f64) -> bool {
     }
 }
 
+/// whole_ends._crossed: two lanes CROSS where their places round the source's box (`pa`, `pb`) and the destination's
+/// (`da`, `db`) stand in STRICTLY opposite orders -- a tie at either end (within `tie`: one exit, two layers) decides
+/// nothing
+fn crossed(pa: f64, pb: f64, da: f64, db: f64, tie: f64) -> bool {
+    (pa < pb - tie && da > db + tie) || (pa > pb + tie && da < db - tie)
+}
+
 fn lt(a: (f64, usize), b: (f64, usize)) -> bool {
     a.0 < b.0 || (a.0 == b.0 && a.1 < b.1)
 }
@@ -567,7 +575,7 @@ impl EndsKernel {
                 let mut r: i64 = 0;
                 for a in 0..nl_ {
                     for b in a + 1..nl_ {
-                        if lt(kp[a], kp[b]) != lt(kd[a], kd[b]) {
+                        if crossed(kp[a].0, kp[b].0, kd[a].0, kd[b].0, self.tie_mm) {
                             r += 1;
                         }
                     }
@@ -590,7 +598,7 @@ impl EndsKernel {
         let mut inv: Vec<(usize, usize)> = Vec::new();
         for a in 0..nl_ {
             for b in a + 1..nl_ {
-                if lt(kp[a], kp[b]) != lt(kd[a], kd[b]) {
+                if crossed(kp[a].0, kp[b].0, kd[a].0, kd[b].0, self.tie_mm) {
                     inv.push((a, b));
                 }
             }
@@ -1455,6 +1463,7 @@ impl EndsKernel {
             lane_pitch: c[16],
             chg_room: c[17],
             lpitch: c[18],
+            tie_mm: c[19],
         })
     }
 
