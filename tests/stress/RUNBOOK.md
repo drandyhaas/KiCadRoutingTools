@@ -751,6 +751,11 @@ flags. Extend its table when a future flag goes.
   in parallel; **waves must be sequential** (they share git state). Compare two
   waves: `ab_replay_grade.py --compare OLD/summary.json NEW/summary.json`.
   `--regrade <wavedir> --set <runs_setN>` re-grades finals without re-routing.
+  Each row also carries REPORTED audit columns (`AUDIT_FIELDS`, #1232-#1236):
+  check_weird's advisory categories, check_via_mask's two, and
+  check_impedance's crossing totals, each as the final board's count minus the
+  unrouted input's. `--compare` prints them under the verdict and the verdict
+  never reads them, until their run-to-run spread on the corpus is known.
   - **The recorded runs are the baseline** (rule 1 below), so to A/B HEAD against
     them you run ONE new wave -- but compare it against the recorded boards
     RE-GRADED with today's grader, never against a stored `summary.json` (a few

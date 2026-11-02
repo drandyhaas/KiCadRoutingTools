@@ -451,6 +451,75 @@ def grade(pcb, clearance, baseline=None):
         out["drc_real"] = max(0, out["drc"] - cie - _vip)
     else:
         out["drc_real"] = None
+    out.update(_audit_grade(pcb, baseline))
+    return out
+
+
+#: #1232-#1236: the REPORTED audit columns. Each is router-introduced (the final
+#: board's count minus the unrouted input's), or None when it could not be
+#: measured. compare() prints them beside the verdict and never in it.
+AUDIT_FIELDS = ("audit_off_angle_corner", "audit_short_fragment",
+                "audit_off_centre_via_end", "audit_via_mask_contact",
+                "audit_via_mask_web", "impedance_crossings",
+                "impedance_nets_with_crossing", "impedance_length_over_void_mm")
+
+
+def _impedance_totals(pcb):
+    import tempfile as _tf
+    fd, path = _tf.mkstemp(suffix='.json', prefix='abimp_')
+    os.close(fd)
+    try:
+        subprocess.run([sys.executable, "-X", "utf8",
+                        str(REPO / 'py_tools' / 'check_impedance.py'), str(pcb),
+                        "--exit-zero", "--json", path],
+                       capture_output=True, text=True)
+        with open(path, encoding='utf-8') as fh:
+            return json.load(fh).get("totals") or {}
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _audit_grade(pcb, baseline=None):
+    """The AUDIT_FIELDS for one final board. Without a readable baseline the
+    input counts as clean, so a field is then the final board's own count."""
+    out = {k: None for k in AUDIT_FIELDS}
+    has_base = bool(baseline) and os.path.exists(str(baseline))
+    for p in (REPO / 'py_router', REPO / 'py_tools'):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+    try:
+        from kicad_parser import parse_kicad_pcb
+        from check_weird import advisory_findings
+        from check_via_mask import via_mask_findings, split_inherited, counts
+        final_pd = parse_kicad_pcb(str(pcb))
+        base_pd = parse_kicad_pcb(str(baseline)) if has_base else None
+
+        def weird(pd):
+            c = {}
+            for f in (advisory_findings(pd) if pd is not None else []):
+                c[f['category']] = c.get(f['category'], 0) + 1
+            return c
+        wf, wb = weird(final_pd), weird(base_pd)
+        for cat in ('off-angle-corner', 'short-fragment', 'off-centre-via-end'):
+            out["audit_" + cat.replace('-', '_')] = wf.get(cat, 0) - wb.get(cat, 0)
+        new, _inh = split_inherited(via_mask_findings(final_pd),
+                                    via_mask_findings(base_pd) if base_pd else [])
+        vm = counts(new)
+        out["audit_via_mask_contact"] = vm['via-mask-contact']
+        out["audit_via_mask_web"] = vm['via-mask-web']
+    except Exception as exc:                                   # noqa: BLE001
+        out["audit_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        tf = _impedance_totals(pcb)
+        tb = _impedance_totals(baseline) if has_base else {}
+        for key in ("crossings", "nets_with_crossing", "length_over_void_mm"):
+            if key in tf:
+                out["impedance_" + key] = round(tf[key] - tb.get(key, 0), 3)
+    except Exception as exc:                                   # noqa: BLE001
+        out["impedance_error"] = f"{type(exc).__name__}: {exc}"
     return out
 
 
@@ -666,6 +735,36 @@ def regrade(out_dir, set_dir):
     return results
 
 
+def print_audit_columns(old, new, boards):
+    """The AUDIT_FIELDS summed over boards whose chains are complete in both
+    arms and that carry the field in both. Reported only: compare()'s verdict
+    never reads them. Returns {field: (old_sum, new_sum, boards_up,
+    boards_down, boards_counted)}."""
+    rows = {}
+    for k in AUDIT_FIELDS:
+        so = sn = 0
+        up = down = n = 0
+        for b in boards:
+            o, w = old.get(b), new.get(b)
+            if not (o and w and o.get("chain_complete") and w.get("chain_complete")):
+                continue
+            vo, vn = o.get(k), w.get(k)
+            if vo is None or vn is None:
+                continue
+            so += vo; sn += vn; n += 1
+            up += vn > vo
+            down += vn < vo
+        rows[k] = (so, sn, up, down, n)
+    if any(r[4] for r in rows.values()):
+        print("\nreported audit columns (router-introduced, NOT in the verdict):")
+        print(f"  {'column':32} {'old':>10} {'new':>10} {'up':>4} {'down':>5} {'boards':>7}")
+        for k, (so, sn, up, down, n) in rows.items():
+            if n:
+                print(f"  {k:32} {_fmt(round(so, 3)):>10} {_fmt(round(sn, 3)):>10} "
+                      f"{up:>4} {down:>5} {n:>7}")
+    return rows
+
+
 def _fmt(v):
     return "-" if v is None else str(v)
 
@@ -787,6 +886,7 @@ def compare(old_json, new_json):
         print(f"lineage scope: {len(_unscoped)} board(s) carry routable nets that "
               f"no step of the final lineage routes (unscoped, old->new): "
               f"{', '.join(_unscoped)}")
+    print_audit_columns(old, new, boards)
     if t_old and t_new:
         print(f"total replay wall-clock: {t_old:.1f}s -> {t_new:.1f}s  ({t_old/t_new:.2f}x)")
         print("\nper-tool: wall-clock (summed) and peak RSS (max) over boards complete in both:")

@@ -86,7 +86,8 @@ LENS_COMPONENTS = {
     'connectivity': ('unrouted', 'broken'),
     # diff_pairs: the .kicad_dru pair-rule rows #1303 split out of `drc`
     'drc': ('drc', 'undersized', 'diff_pairs'),
-    'spec': ('impedance', 'floorplan', 'length', 'net_widths'),
+    # audit: board_score --spec, the failed audit.py checks (#1237)
+    'spec': ('impedance', 'floorplan', 'length', 'net_widths', 'audit'),
     'intent': ('floorplan',),
 }
 
@@ -379,7 +380,8 @@ def lens_contradictions(lenses, score):
 _UNGRADED_FLAG = {'floorplan': '--intent', 'impedance': '--impedance-nets',
                   'length': '--length-groups', 'net_widths': '--net-min-widths',
                   # #1183: check_assembly's moved-vs-baseline courtyard gate.
-                  'assembly.courtyard_gating': '--baseline'}
+                  'assembly.courtyard_gating': '--baseline',
+                  'audit': '--spec'}
 
 
 def ungraded_set(score):
@@ -414,6 +416,29 @@ def ungraded_set(score):
     return out if seen else None
 
 
+def _known(score):
+    """Every component a score names, graded or not."""
+    if not isinstance(score, dict):
+        return set()
+    ung = score.get('ungraded')
+    out = {str(k) for k in ung} if isinstance(ung, list) else set()
+    for key in ('blocking_by', 'components'):
+        if isinstance(score.get(key), dict):
+            out |= {str(k) for k in score[key]}
+    return out
+
+
+def _unknown_to(score, comp):
+    """Does a full score (one with `blocking_by`) not know component `comp`
+    at all: absent from its `blocking_by` and `components`?"""
+    by = score.get('blocking_by') if isinstance(score, dict) else None
+    if not isinstance(by, dict):
+        return False
+    base = comp.split('.', 1)[0]
+    comps = score.get('components') if isinstance(score.get('components'), dict) else {}
+    return base not in by and base not in comps
+
+
 def commensurability(old, new):
     """(differ, hint, false_improvement) -- or None when the two are comparable.
 
@@ -433,6 +458,10 @@ def commensurability(old, new):
     a_ung, b_ung = ungraded_set(old), ungraded_set(new)
     if a_ung is None or b_ung is None:
         return None                     # nothing to compare against
+    # A component one score has never heard of (written before board_score
+    # had it, e.g. 'audit' before #1237) was not graded by it either.
+    a_ung |= {k for k in _known(new) if _unknown_to(old, k)}
+    b_ung |= {k for k in _known(old) if _unknown_to(new, k)}
     differ = sorted(a_ung ^ b_ung)
     if not differ:
         return None

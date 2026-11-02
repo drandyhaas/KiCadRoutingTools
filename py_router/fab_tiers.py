@@ -105,6 +105,13 @@ FabBucket = collections.namedtuple(
     ('bucket', 'requested', 'bucketed', 'saturated', 'buckets',
      'fine_via_rung'))
 
+#: #1232: JLCPCB's soldermask via plugging: "Filled vias should have >= 0.35 mm
+#: clearance from other soldermask openings (e.g. pads)"
+#: (jlcpcb.com/capabilities/pcb-capabilities, Via Plugging). A grading limit
+#: for check_via_mask's via-mask-web, not a routing floor, so it is not in
+#: FLOOR_KEYS.
+JLC_PLUGGED_VIA_MASK_WEB_MM = 0.35
+
 # _FAB_FLOORS[layer_count][tier] -> flat floor dict. Layer count is bucketed to
 # 2 (1-2 layer) vs 4 (multilayer). 'standard' preserves the historical floors so a
 # bare default run is unchanged; 'advanced' is the JLC tighter/more-costly tier and
