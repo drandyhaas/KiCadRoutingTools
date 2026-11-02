@@ -321,6 +321,12 @@ _FINALIZE_ROUTE_KNOBS = (
 )
 
 
+def _scoped_rules_of(config):
+    """The class/type-scoped .kicad_dru rules (#1491) ``config`` routes by
+    (a kicad_dru.ScopedClearanceRules), for a nested sub-run (#1602)."""
+    return getattr(getattr(config, 'scoped_clearance', None), 'sc', None)
+
+
 def _finalize_route_knobs(call_kwargs: dict) -> dict:
     """This batch_route call's own values of _FINALIZE_ROUTE_KNOBS."""
     return {k: call_kwargs[k] for k in _FINALIZE_ROUTE_KNOBS if k in call_kwargs}
@@ -2242,6 +2248,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # per-obstacle map). None (both fronts) -> auto-read the
                 # sibling .kicad_dru track rules; explicit dict (tests) wins.
                 track_clearances: Optional[Dict[int, float]] = None,
+                # #1602: the class/type-scoped .kicad_dru rules (#1491) a PARENT
+                # run resolved (kicad_dru.ScopedClearanceRules), handed to a
+                # nested sub-run like layer_clearances. Internal: no CLI flag,
+                # no GUI control; None = read this run's own .kicad_dru.
+                scoped_clearance_rules: Optional[object] = None,
                 final_reconcile: bool = True,
                 # --quick LEVEL. 1, a placement review's first round: route
                 # the main pass and skip the recovery tail -- the net rescue,
@@ -3437,7 +3448,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     install_layer_clearances(config, layer_clearances, input_file, pcb_data,
                              net_keepouts=True)
     install_track_clearances(config, track_clearances, input_file, pcb_data,
-                             routed_net_ids=[nid for _, nid in net_ids])
+                             routed_net_ids=[nid for _, nid in net_ids],
+                             scoped_rules=scoped_clearance_rules)
     # Net-filtered keep-outs: the board's .kicad_dru `disallow` rules on a
     # named rule area, derived with config.rules just above (net_keepouts.
     # derive_area_keepouts) and stamped per net while a bound net routes.
@@ -3958,7 +3970,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # set (raise-only on seg-vs-seg stamps; the layer rules went in before
     # the swap passes, above).
     install_track_clearances(config, track_clearances, input_file, pcb_data,
-                             routed_net_ids=base_map_exclusions)
+                             routed_net_ids=base_map_exclusions,
+                             scoped_rules=scoped_clearance_rules)
     # #1260: a pour island of a zone net outside this run that no routed net
     # has a terminal inside can only be CUT by this run (nothing here repairs
     # it), so it is an obstacle on every map built from this config. Scope is
@@ -4001,6 +4014,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if config.same_net_pad_clearance > 0:
         _reconcile_kwargs['same_net_pad_clearance'] = config.same_net_pad_clearance
     _reconcile_kwargs['track_clearances'] = dict(config.track_clearances)
+    # #1602: and the class/type-scoped rules (#1491), which the forwarded
+    # track map above used to switch off in the sub-run: a lap then routed a
+    # net through the gap a scoped rule had closed to this pass.
+    _reconcile_kwargs['scoped_clearance_rules'] = _scoped_rules_of(config)
     base_obstacles = build_base_obstacle_map(
         pcb_data, config, base_map_exclusions,
         net_clearances=net_clearances,
@@ -7274,6 +7291,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # CLI leg below cannot auto-read them; both legs
                         # forward the same map).
                         track_clearances=dict(config.track_clearances or {}),
+                        # #1602: and the scoped rules (#1491).
+                        scoped_clearance_rules=_scoped_rules_of(config),
                         # The finalize's reroute sub-runs route by THIS
                         # step's knobs, not batch_route's defaults.
                         route_knobs=_finalize_route_knobs(_reconcile_kwargs),
@@ -7372,6 +7391,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         layer_clearances=dict(config.layer_clearances or {}),
                         # #1135: same reason for the track-to-track rules.
                         track_clearances=dict(config.track_clearances or {}),
+                        # #1602: and the scoped rules (#1491).
+                        scoped_clearance_rules=_scoped_rules_of(config),
                         # The finalize's reroute sub-runs route by THIS
                         # step's knobs, not batch_route's defaults.
                         route_knobs=_finalize_route_knobs(_reconcile_kwargs),
