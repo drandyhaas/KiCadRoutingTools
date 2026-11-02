@@ -2320,6 +2320,22 @@ def courtyard_gating(blocking_pairs, moved) -> list:
 COURTYARD_ERROR_MIN_DEPTH_MM = 0.01
 
 
+def courtyard_gate_depth_mm(severity: Optional[str]) -> Optional[float]:
+    """The shallowest courtyard pair check_assembly can gate on a project of
+    this `courtyards_overlap` severity (`courtyard_severity_of`): every real
+    pair from `COURTYARD_ERROR_MIN_DEPTH_MM` at `error` (#1385), the run-23
+    blocking floor `COURTYARD_BLOCKING_MIN_DEPTH_MM` otherwise, and None at
+    `ignore`, where no courtyard pair gates. A pair is measured on courtyard
+    plus pad copper (`occupancy_shape`), so a part whose pad copper reaches
+    this far past its drawn courtyard can make a gating pair with a neighbour
+    whose courtyard it never touches (#1588, `body.pad_reach_courtyards`)."""
+    if severity == 'ignore':
+        return None
+    if severity == 'error':
+        return COURTYARD_ERROR_MIN_DEPTH_MM
+    return COURTYARD_BLOCKING_MIN_DEPTH_MM
+
+
 def courtyard_error_pairs(pairs, severity, waivers, *, synthetic_refs=(),
                           silk_occupancy_refs=(),
                           undrawn_refs=()) -> list:

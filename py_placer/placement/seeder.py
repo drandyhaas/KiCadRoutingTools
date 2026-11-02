@@ -84,7 +84,16 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # inherit: placing from scratch has no incumbent worth improving on, and
     # "no worse than where you already are" would admit a part whose current
     # pose is fully inside a keep-out. One loop, two policies, both named.
-    if not state.keepout_clear(ref, (r, tht)):
+    # #1588: and the pad copper reaching past the grade rect, which
+    # `rule_keepout` grades beside the courtyard -- the same cached compare
+    # for every part whose pads lie within it.
+    rects = (r, tht)
+    if state.keepouts_for and state.keepouts_for.get(ref) \
+            and _pad_copper_overhang(state, ref) > 1e-6:
+        from .floorplan import pad_copper_rects
+        rects = rects + tuple(pad_copper_rects(state.pcb_data.footprints[ref],
+                                               (x, y, rot), copper_only=True))
+    if not state.keepout_clear(ref, rects):
         return False
     # #797, the FOURTH conjunct: without it a search could seat an unrelated
     # part in the middle of a region the intent reserved, and

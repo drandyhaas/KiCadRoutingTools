@@ -495,6 +495,85 @@ def estimated_courtyards(pcb_data, pcb_file: Optional[str] = None,
     return out
 
 
+# ---------------------------------------------------------------------------
+# #1588: a drawn courtyard its own pad copper reaches past
+# ---------------------------------------------------------------------------
+class PadReach(NamedTuple):
+    """A part that DRAWS a courtyard whose pad copper reaches past it far
+    enough to make a pair check_assembly gates (#1588). check_assembly grades
+    a part on its courtyard UNITED with its pad copper (`legality.
+    occupancy_shape`), so a neighbour the drawn courtyard keeps clear can
+    still stand on such a pad: KiCad's `courtyards_overlap` sees no overlap,
+    the grade gates one. Placement seats the part on `local`, the box of
+    that occupancy, as #1300 seats a part that draws no courtyard on its.
+
+    A placement INPUT, never a grade, like `CourtyardEstimate`. `local` is in
+    the footprint's own unrotated frame; `reach_mm` is how far the copper
+    stands past the drawn courtyard's box, on its worst side."""
+    ref: str
+    side: str
+    local: Bbox
+    reach_mm: float
+
+
+def pad_reach_courtyards(pcb_data, pcb_file: Optional[str], floor_mm: float,
+                         skip=()) -> Dict[str, PadReach]:
+    """`{ref: PadReach}` for every part that draws a courtyard and whose pad
+    copper reaches at least `floor_mm` past it -- the depth from which
+    check_assembly can gate a pair (`legality.courtyard_gate_depth_mm`), so
+    a part reaching less cannot make one and is left as drawn. Measured on
+    check_assembly's own occupancy (`legality.occupancy_shape`, the drawn
+    outline united pad by pad with the copper) at the footprint's own
+    unrotated pose, after the occupancy box (`BodyGeometry.occupancy_local`)
+    as the broad phase. A container (`legality._container_kind`) is graded on
+    its pins, never on its occupancy (#1465), and is left out; so is a ref in
+    `skip` (place_simple's fallback)."""
+    from placement.legality import (_container_kind,
+                                    _part_local_bounds_and_bodies,
+                                    footprint_at_pose, occupancy_shape)
+    fps = pcb_data.footprints or {}
+    skip = frozenset(skip)
+
+    def broad(ref, geom):
+        if (ref in skip or ref not in fps or geom is None
+                or geom.source != SOURCE_COURTYARD
+                or geom.court_shape_local is None
+                or geom.body_local is None or geom.occupancy_local is None):
+            return False
+        cx0, cy0, cx1, cy1 = geom.body_local
+        o = geom.occupancy_local
+        return max(cx0 - o[0], cy0 - o[1], o[2] - cx1, o[3] - cy1) >= floor_mm
+
+    # the broad phase on the bodies alone, so a board whose pads all lie
+    # within their courtyards pays one `board_bodies` and nothing more
+    if not any(broad(r, g) for r, g in board_bodies(pcb_data, pcb_file).items()):
+        return {}
+    lbs, bodies = _part_local_bounds_and_bodies(pcb_data, pcb_file)
+    out: Dict[str, PadReach] = {}
+    for ref, lb in sorted(lbs.items()):
+        geom = bodies.get(ref)
+        fp = fps.get(ref)
+        if not broad(ref, geom) or lb.synthetic:
+            continue
+        cx0, cy0, cx1, cy1 = geom.body_local
+        if _container_kind(pcb_data, ref, geom.occupancy_local, geom.source,
+                           False):
+            continue
+        try:
+            shape = occupancy_shape(footprint_at_pose(fp, (0.0, 0.0, 0.0)),
+                                    lb, geom)
+        except Exception:                                    # noqa: BLE001
+            continue
+        x0, y0, x1, y1 = shape.bounds
+        reach = max(cx0 - x0, cy0 - y0, x1 - cx1, y1 - cy1, 0.0)
+        if reach < floor_mm:
+            continue
+        out[ref] = PadReach(ref, lb.side, (min(cx0, x0), min(cy0, y0),
+                                           max(cx1, x1), max(cy1, y1)),
+                            round(reach, 4))
+    return out
+
+
 def courtyard_sides_with_estimates(pcb_data, pcb_file: str,
                                    drawn: Optional[Dict[str, Dict[str, Bbox]]]
                                    = None, skip=()):

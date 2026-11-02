@@ -390,6 +390,15 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
   the part it overlaps, the keep-out it is in, how far outside its block's
   zone), and a `{seed}` run WARNs once about a part illegal in every seed
   (`illegal_every_seed` in `judge.json`).
+- **Pad copper past a courtyard (#1588).** check_assembly grades a part on
+  its courtyard united with its pad copper, so a part whose pads reach past
+  its drawn courtyard as deep as check_assembly gates a pair from on the
+  project (0.01 mm at `courtyards_overlap: error`, 0.3 mm otherwise, never at
+  `ignore`) is seated, annealed, kept out of keep-outs and template-fitted on
+  that occupancy's box. Those parts are named before the anneal as a NOTE
+  (`pad_overhang` in each seed's report and `JSON_SUMMARY`, and in
+  `judge.json`; a `{seed}` run prints it once). A part with no legal pose on
+  it falls back to the drawn courtyard, as an estimated courtyard does.
 - **Deterministic.** The same board, inputs and `--seed` give the same
   placement. Seeds differ more than most input changes, so place several and
   judge them by routing.
