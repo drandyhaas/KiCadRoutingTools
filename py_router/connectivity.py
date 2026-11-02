@@ -404,6 +404,55 @@ def endpoint_reaches_via(x, y, radius, via, layers, copper_layers=None) -> bool:
                                                    COINCIDENCE_TOL)
 
 
+#: A track end this close to a via's centre IS on it (#1235): a millionth of
+#: a millimetre, KiCad's own unit, so only an end the board itself places
+#: elsewhere reads off-centre.
+VIA_CENTRE_TOL = 1e-6
+
+
+def off_centre_via_ends(segments, vias, copper_layers=None):
+    """Track ends that lie inside a same-net via's copper but not on its
+    centre (#1235): ``[(segment, end, via, offset_mm)]``, ``end`` 0 for the
+    segment's start and 1 for its end, one row per (end, via) pair.
+
+    The definition is #1235's: the same net, the via carries copper on the
+    track's layer (`via_copper_layers`), and ``0 < offset <= via radius``.
+    Such an end is connected -- the barrel holds it -- so no connectivity or
+    DRC check sees it, but KiCad's length measure joins a via only to the
+    tracks ending at its centre before 10.0.4 and from 10.0.4 cuts the run
+    at the via pad and measures it to the centre, so the routed copper and
+    KiCad's length disagree there (#1583).
+
+    Graphic (footprint / board art) copper and net 0 are skipped."""
+    from collections import defaultdict
+    vias = [v for v in vias if v.net_id]
+    cell = max([1.0] + [getattr(v, 'size', 0.0) or 0.0 for v in vias])
+    grid = defaultdict(list)          # (net, cx, cy) -> vias
+    for v in vias:
+        grid[(v.net_id, math.floor(v.x / cell), math.floor(v.y / cell))].append(v)
+    spans = {}
+    out = []
+    for s in segments:
+        if not s.net_id or getattr(s, 'graphic', False):
+            continue
+        for end, (x, y) in enumerate(((s.start_x, s.start_y),
+                                      (s.end_x, s.end_y))):
+            cx, cy = math.floor(x / cell), math.floor(y / cell)
+            cand = [v for i in (-1, 0, 1) for j in (-1, 0, 1)
+                    for v in grid.get((s.net_id, cx + i, cy + j), ())]
+            for v in cand:
+                r = (getattr(v, 'size', 0.0) or 0.0) / 2.0
+                d = math.hypot(x - v.x, y - v.y)
+                if not (VIA_CENTRE_TOL < d <= r + 1e-9):
+                    continue
+                span = spans.get(id(v))
+                if span is None:
+                    span = spans[id(v)] = via_copper_layers(v, copper_layers)
+                if s.layer in span:
+                    out.append((s, end, v, d))
+    return out
+
+
 
 def strict_joint_roots(segments, vias=(), pads=(), copper_layers=None) -> Dict[int, object]:
     """{id(segment): root} for ONE net's segments, joined only where they

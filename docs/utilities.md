@@ -2794,10 +2794,17 @@ category each:
   corner, through a copper web thinner than the min-track floor (#416, KiCad's
   `connection_width`);
 - `kicad-dangling` -- a joint segment whose ends both lie on other same-net
-  tracks, which KiCad's DRC reports as `track_dangling` (#1217).
+  tracks, which KiCad's DRC reports as `track_dangling` (#1217);
+- `off-centre-via-end` -- a track end inside a same-net via's copper, on a
+  layer the via carries, but not on its centre (#1235). It is connected, so
+  DRC and connectivity pass it, but KiCad's length measure reads it
+  differently from ours, which is how a matched pair ships skewed (#1583).
+  An end that is also a pad's terminal names the pad. **Advisory**: printed
+  after the report, never counted in the headline or the exit code, since a
+  via-in-pad is drawn this way and a human-routed board carries many.
 
 It never modifies the board — use it as a triage pass before or after the
-other checkers. Exit 1 when anything is found, else 0.
+other checkers. Exit 1 when anything but an advisory category is found, else 0.
 
 **Removable** is graded by the same predicate route.py's post-route cleanup
 removes by (`pcb_modification.StrictRemovalModel`, #1063): a segment, or an
@@ -2823,8 +2830,8 @@ Options:
   --tolerance FLOAT     Minimum finding size in mm (dangle/tail length, gap,
                         duplicated-copper length, via diameter); smaller findings are
                         dropped. Default: 0.1; use 0 to report everything.
-                        soft-joint, narrow-pad-joint and kicad-dangling carry no
-                        size and are always reported
+                        soft-joint, narrow-pad-joint, kicad-dangling and
+                        off-centre-via-end carry no size and are always reported
   --max-print INT       Max findings printed per category (<=0 prints all; default 20)
 ```
 

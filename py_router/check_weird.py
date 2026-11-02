@@ -81,6 +81,20 @@ Categories:
                      KiCad's own grade -- and with NO size, since KiCad warns
                      at any length. Measured on six routed boards: every
                      finding is one of KiCad's track_dangling warnings.
+  off-centre-via-end a track end inside a same-net via's copper on a layer
+                     the via carries, but not on its centre (#1235): 0 <
+                     offset <= the via's radius. Connected -- the barrel
+                     holds it -- so neither DRC nor connectivity sees it, but
+                     KiCad's length measure and ours read it differently
+                     (before 10.0.4 a via joins only the tracks ending at its
+                     centre; from 10.0.4 the run is cut at the via pad and
+                     measured to the centre), so a matched pair can ship
+                     skewed (#1583). An end that is also a pad's terminal
+                     names the pad in the detail. ADVISORY: reported, with no size
+                     (KiCad treats any offset alike), but not counted in the
+                     headline or the exit code -- an end on a pad is how a
+                     via-in-pad is drawn, and a human-routed board carries
+                     many.
 
 This script NEVER modifies the board (read-only; nothing is written back).
 Net 0 (unconnected) copper is skipped -- "same-net" semantics do not apply.
@@ -89,7 +103,7 @@ Usage:
     python3 check_weird.py board.kicad_pcb [--nets PATTERN ...] [--thorough]
                                            [--max-print N]
 
-Exit code 0 when clean, 1 when any findings.
+Exit code 0 when clean, 1 when any findings (advisory categories aside).
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -109,6 +123,7 @@ from check_connected import (matches_any_pattern, check_net_connectivity,
 from check_drc import point_to_pad_distance
 from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad, strict_joint_roots,
                           endpoint_reaches_via, lands_on_interior,
+                          off_centre_via_ends,
                           span_endpoint_degree, via_copper_layers)
 from routing_constants import SOFT_JOINT_MIN_GAP
 from pcb_modification import (_point_anchored, _prune_net_cycles, _pt_seg_dist,
@@ -119,7 +134,10 @@ from pcb_modification import (_point_anchored, _prune_net_cycles, _pt_seg_dist,
 CATEGORIES = ['dangling-end', 'soft-joint', 'redundant-cycle',
               'removable-segment', 'stacked-copper', 'unsupported-via',
               'dangling-via', 'orphan-island', 'narrow-pad-joint',
-              'kicad-dangling']
+              'kicad-dangling', 'off-centre-via-end']
+# Reported, but not counted in the headline or the exit code (see the module
+# docstring): check_complete blocks DONE on that exit code.
+ADVISORY_CATEGORIES = frozenset({'off-centre-via-end'})
 # Cost cap for the removable scan (skip unless --thorough): the removal pass's
 # own cap (#1063), so the checker never grades a net the pass may not clean.
 MAX_SEGS_PER_NET = STRICT_REMOVAL_MAX_SEGS
@@ -676,6 +694,31 @@ def _check_stacked(net_id, name, net_segs, net_vias, findings):
                             size=getattr(v, 'size', None)))
 
 
+def _check_off_centre_via_ends(name, net_segs, net_vias, net_pads,
+                               copper_layers, findings):
+    """#1235: track ends inside a same-net via's copper, off its centre
+    (connectivity.off_centre_via_ends). One finding per (end, via); no
+    size."""
+    seen = set()
+    for s, end, v, d in off_centre_via_ends(net_segs, net_vias, copper_layers):
+        x, y = (s.start_x, s.start_y) if end == 0 else (s.end_x, s.end_y)
+        key = (s.layer, round(x, 4), round(y, 4), round(v.x, 4), round(v.y, 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        half = (s.width or 0.0) / 2.0
+        on_pad = [p for p in net_pads
+                  if endpoint_reaches_pad(x, y, half, (s.layer,), p)]
+        note = ''
+        if on_pad:
+            note = (f"; also on pad {on_pad[0].component_ref}."
+                    f"{on_pad[0].pad_number}")
+        findings.append(_finding(
+            'off-centre-via-end', name, s.layer, x, y,
+            f"track end {d:.4f}mm off the centre of the via at "
+            f"({v.x:.4f}, {v.y:.4f}){note}"))
+
+
 def stacked_copper_over_model(segs_by_net, vias_by_net, net_name):
     """The stacked-copper check over a per-net write model (run-7 E3).
 
@@ -1086,6 +1129,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                       findings, removable)
         _check_removable(net_id, name, net_segs, removable, findings)
         _check_stacked(net_id, name, net_segs, net_vias, findings)
+        _check_off_centre_via_ends(name, net_segs, net_vias, net_pads,
+                                   copper_layers, findings)
         _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
                               net_zones, copper_layers, findings)
         _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
@@ -1099,13 +1144,32 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
     return findings, skipped_nets
 
 
+def blocking_findings(findings: List[Dict]) -> List[Dict]:
+    """The findings the headline and the exit code count: all of them but
+    the ADVISORY_CATEGORIES."""
+    return [f for f in findings if f['category'] not in ADVISORY_CATEGORIES]
+
+
 def print_report(findings: List[Dict], skipped_nets: List[Tuple[str, int]],
                  max_print: int = 20) -> None:
     by_cat = defaultdict(list)
     for f in findings:
         by_cat[f['category']].append(f)
-    if findings:
-        print(f"\nFOUND {len(findings)} WEIRD THINGS:\n")
+    limit_all = max_print is not None and max_print <= 0
+
+    def print_items(cat, indent):
+        items = by_cat.get(cat, [])
+        limit = len(items) if limit_all else max_print
+        for f in items[:limit]:
+            print(f"{indent}net {f['net']} ({f['layer']}) at "
+                  f"({f['x']:.3f}, {f['y']:.3f}): {f['detail']}")
+        if len(items) > limit:
+            print(f"{indent}... and {len(items) - limit} more "
+                  f"(use --max-print 0 to show all)")
+
+    counted = blocking_findings(findings)
+    if counted:
+        print(f"\nFOUND {len(counted)} WEIRD THINGS:\n")
         # CATEGORIES is hand-maintained, so a check whose category was
         # never registered would print NOTHING while still counting toward the
         # headline and the exit code (#696: that shipped, and blocked DONE with
@@ -1113,18 +1177,16 @@ def print_report(findings: List[Dict], skipped_nets: List[Tuple[str, int]],
         # registered ones, so a future omission can only ever cost ordering.
         unregistered = [c for c in sorted(by_cat) if c not in CATEGORIES]
         for cat in CATEGORIES + unregistered:
-            items = by_cat.get(cat, [])
-            print(f"  {cat}: {len(items)}")
-            limit = len(items) if (max_print is not None and max_print <= 0) \
-                else max_print
-            for f in items[:limit]:
-                print(f"    net {f['net']} ({f['layer']}) at "
-                      f"({f['x']:.3f}, {f['y']:.3f}): {f['detail']}")
-            if len(items) > limit:
-                print(f"    ... and {len(items) - limit} more "
-                      f"(use --max-print 0 to show all)")
+            if cat in ADVISORY_CATEGORIES:
+                continue
+            print(f"  {cat}: {len(by_cat.get(cat, []))}")
+            print_items(cat, '    ')
     else:
         print("\nNO WEIRD THINGS FOUND!")
+    for cat in sorted(ADVISORY_CATEGORIES):
+        if by_cat.get(cat):
+            print(f"\n  advisory, not counted: {cat} x{len(by_cat[cat])}")
+            print_items(cat, '      ')
     if skipped_nets:
         print(f"\n  removable-segment: skipped {len(skipped_nets)} net(s) "
               f"with >{MAX_SEGS_PER_NET} segments "
@@ -1153,9 +1215,10 @@ def main():
                              'gap, duplicated-copper length, via diameter); '
                              'smaller findings are dropped. Default 0.1; use '
                              '0 to report everything. soft-joint, '
-                             'narrow-pad-joint and kicad-dangling carry no '
-                             'size and are ALWAYS reported -- smaller is '
-                             'worse, or KiCad warns at any length.')
+                             'narrow-pad-joint, kicad-dangling and '
+                             'off-centre-via-end carry no size and are ALWAYS '
+                             'reported -- smaller is worse, or KiCad treats '
+                             'any amount alike.')
     parser.add_argument('--max-print', type=int, default=20,
                         help='Max findings printed per category '
                              '(<=0 prints all; default 20)')
@@ -1167,7 +1230,7 @@ def main():
                                           tolerance=args.tolerance,
                                          thorough=args.thorough, quiet=False)
     print_report(findings, skipped_nets, max_print=args.max_print)
-    sys.exit(1 if findings else 0)
+    sys.exit(1 if blocking_findings(findings) else 0)
 
 
 if __name__ == '__main__':
