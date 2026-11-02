@@ -219,23 +219,11 @@ def find_via_position(
     # Collect all valid via positions, sorted by distance
     valid_positions = []
 
-    # Open via cells within the search radius. The Rust obstacle map returns
-    # every non-via-blocked cell nearest-first in one batched FFI call
-    # (grid_router 0.16.0), replacing an O(radius^2) per-cell is_via_blocked()
-    # spiral - the wide-radius plane-tap search was thousands of FFI calls. Fall
-    # back to the spiral if the binary predates the batch query.
-    if hasattr(obstacles, 'open_via_cells_within'):
-        open_cells = obstacles.open_via_cells_within(pad_gx, pad_gy, max_radius_grid)
-    else:
-        open_cells = []
-        for radius in range(1, max_radius_grid + 1):
-            for dx in range(-radius, radius + 1):
-                for dy in range(-radius, radius + 1):
-                    if abs(dx) != radius and abs(dy) != radius:
-                        continue
-                    gx, gy = pad_gx + dx, pad_gy + dy
-                    if not obstacles.is_via_blocked(gx, gy):
-                        open_cells.append((gx, gy))
+    # Open via cells within the search radius: the Rust obstacle map returns
+    # every non-via-blocked cell nearest-first in one batched FFI call, where a
+    # per-cell is_via_blocked() spiral was thousands of calls on the wide-radius
+    # plane-tap search.
+    open_cells = obstacles.open_via_cells_within(pad_gx, pad_gy, max_radius_grid)
 
     # Thin candidate via sites to ~1 per via-radius bin (#263). A wide forced-via
     # search (max_search_radius 10mm at 0.05 grid = ~125k cells) otherwise

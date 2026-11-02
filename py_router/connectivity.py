@@ -1937,65 +1937,26 @@ def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = F
     Returns:
         List of (idx_a, idx_b, distance) tuples representing MST edges.
         The edges are in the order they were added to the tree (not sorted by length).
+
+    Prim from point 0 in the router's Rust core (grid_router.mst_prim, Euclidean: each distance
+    sqrt(dx*dx + dy*dy); grid_router.mst_l1, Manhattan): the lowest-numbered point among equal keys, a key
+    lowered only by a strictly shorter edge, in O(n) memory.
     """
     if len(points) < 2:
         return []
-    if len(points) == 2:
-        if use_manhattan:
-            dist = abs(points[0][0] - points[1][0]) + abs(points[0][1] - points[1][1])
-        else:
-            dist = math.sqrt((points[0][0] - points[1][0])**2 + (points[0][1] - points[1][1])**2)
-        return [(0, 1, dist)]
-
-    # Prim's algorithm, vectorized with numpy. The per-step frontier update and
-    # min-selection are O(n) array ops instead of Python loops, so the whole MST
-    # is O(n^2) numpy work rather than O(n^2) interpreted work - a large win on
-    # big nets (connectors, wide buses). argmin/strict-less-than tie-breaking
-    # matches the scalar version (first-index wins).
-    n = len(points)
+    import os
+    import sys
+    rd = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router'))
+    if rd not in sys.path:
+        sys.path.insert(0, rd)
+    import grid_router
     pts = np.asarray(points, dtype=np.float64)
-    xs = pts[:, 0]
-    ys = pts[:, 1]
-
-    in_tree = np.zeros(n, dtype=bool)
-    nearest = np.zeros(n, dtype=np.intp)
-    edges = []
-
-    # Every row of the distance matrix at once, by the same arithmetic the
-    # per-node form used (`xs - xs[idx]` and so on, element by element), so
-    # each distance is the same float; it is computed once per tree instead
-    # of once per node added.
-    dx = xs[None, :] - xs[:, None]
-    dy = ys[None, :] - ys[:, None]
+    xs, ys = np.ascontiguousarray(pts[:, 0]), np.ascontiguousarray(pts[:, 1])
     if use_manhattan:
-        dist = np.abs(dx) + np.abs(dy)
-    else:
-        dist = np.sqrt(dx * dx + dy * dy)
-
-    # Start with node 0. `min_dist` holds +inf for every node in the tree,
-    # so its argmin is the argmin over the nodes outside it.
-    in_tree[0] = True
-    min_dist = dist[0].copy()
-    min_dist[0] = np.inf  # node 0 is in the tree
-
-    for _ in range(n - 1):
-        # Find the non-tree node closest to the tree.
-        best_j = int(np.argmin(min_dist))
-        best_dist = float(min_dist[best_j])
-        if not np.isfinite(best_dist):
-            break
-
-        in_tree[best_j] = True
-        min_dist[best_j] = np.inf
-        edges.append((int(nearest[best_j]), best_j, best_dist))
-
-        # Pull every remaining node toward the freshly added node where closer.
-        d = dist[best_j]
-        update = (~in_tree) & (d < min_dist)
-        min_dist[update] = d[update]
-        nearest[update] = best_j
-
-    return edges
+        _total, edges = grid_router.mst_l1(xs, ys)
+        return [(int(a), int(b), abs(float(xs[b]) - float(xs[a])) + abs(float(ys[b]) - float(ys[a])))
+                for a, b in edges]
+    return [(int(a), int(b), float(d)) for a, b, d in grid_router.mst_prim(xs, ys)]
 
 
 def compute_mst_segments(points: List[Tuple[float, float]]) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:

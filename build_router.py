@@ -310,6 +310,10 @@ def build_from_source(script_dir, rust_dir):
         dst = os.path.join(rust_dir, 'grid_router.so')
 
     print("Copying %s -> %s" % (src, dst))
+    # (a new file, never the old one written over: macOS keeps a loaded library's code signature by its file, and a
+    # library copied over it in place is killed on import -- exit 137, no message)
+    if os.path.exists(dst):
+        os.remove(dst)
     shutil.copy2(src, dst)
 
     _remove_stale_copies(script_dir)

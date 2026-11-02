@@ -471,6 +471,9 @@ def check_bus_dependencies():
     laid nothing (exit 2)`, and named the missing module only in a stage log
     under its work directory. route_bus.py and whole_route.py call this before
     they start. Loads the probe (`load=True`): the step imports it anyway.
+    ...and the Rust library at Cargo.toml's version (check_rust_library): the
+    step's ends estimate and its snap's searches run in it, and an older binary
+    sent them down slower paths without a word.
     Raises StartupCheckError naming what is missing or too old.
     """
     problems = dependency_problems(BUS_PACKAGES, load=True)
@@ -479,6 +482,7 @@ def check_bus_dependencies():
             problems,
             "ERROR: the bus step (awx/route_bus.py) needs Python libraries "
             "that are missing or too old:"))
+    check_rust_library()
 
 
 def _raise_if_missing(missing, exc=StartupCheckError):
