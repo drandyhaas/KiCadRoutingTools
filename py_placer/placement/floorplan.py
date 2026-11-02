@@ -11563,27 +11563,39 @@ def emit_intent(pcb_data, pcb_file: str, *,
                                  pcb_data, pcb_file, ref, _emit_bodies)),
                          'overhang_mm': {'min': 0.0,
                                          'max': round(amt + 0.5, 3)}}
-                # #961: an edged entry's band is GRADED on the drawn body
-                # when one can be measured, so a band observed only on the
-                # occupancy reading can come out narrower than the body it
-                # blesses -- a pad-box courtyard 1.6 mm inboard of a flush
-                # body is esp_prog's USB1. Widen to the body in that case
-                # alone, and say so: where the body reads no more than `amt`
-                # the emitted band is unchanged. Either way `max` is at least
-                # the number the rule grades (`body_outside_mm`, or `amt`
-                # itself when no body is measured) plus 0.5, so an edged
-                # entry still grades its band clean by construction. Measured
-                # on the 22 tracked boards: the widening never fires.
-                body = _overhang_geo.measure(ref, entry['edge'])
-                if (body['body_measured']
-                        and body['body_outside_mm'] > amt + legality.EPS):
-                    entry['overhang_mm']['max'] = round(
-                        body['body_outside_mm'] + 0.5, 3)
+                # #961/#1607: an edged entry's band is GRADED on the number
+                # `rule_edge_connector` reads -- the drawn body when one can
+                # be measured, else the courtyard's distance past the
+                # DECLARED edge (`courtyard_overhang_past`, #1403) -- and the
+                # other edges' overhang against the same `max`. `amt` is the
+                # summed ranking reading, which can come out narrower than
+                # either: a pad-box courtyard 1.6 mm inboard of a flush body
+                # is esp_prog's USB1, and crkbd's J1, hanging into the milled
+                # gap past a notch, read 1.80 summed and 4.63 past its edge.
+                # Widen to the grade's reading in that case alone, and say
+                # so: where it is no more than `amt` the emitted band is
+                # unchanged. Either way `max` is at least every number the
+                # rule grades against it plus 0.5, so an edged entry grades
+                # its band clean on the board it was read off by
+                # construction.
+                _cy, _cy_others = courtyard_overhang_past(
+                    _overhang_geo, erect[ref], entry['edge'])
+                graded, _gbasis, body = band_amount(
+                    _overhang_geo, ref, entry['edge'], _cy, 0.0)
+                _gothers = (body.get('other_body_edge_overhang_mm')
+                            if body['body_measured'] else _cy_others) or {}
+                need = max([graded] + list(_gothers.values()))
+                if need > amt + legality.EPS:
+                    entry['overhang_mm']['max'] = round(need + 0.5, 3)
                     entry['note'] = (
                         f"band max from the drawn body's "
-                        f"{body['body_outside_mm']:.3f}mm overhang "
-                        f"({body['body_layer']}), wider than the occupancy "
-                        f"reading {amt:.3f}mm it would otherwise use")
+                        f"{need:.3f}mm overhang ({body['body_layer']}), "
+                        if body['body_measured'] else
+                        f"band max from the courtyard's {need:.3f}mm "
+                        f"overhang past the outline (the reading the grade "
+                        f"takes, #1403), ") + (
+                        f"wider than the occupancy reading {amt:.3f}mm it "
+                        f"would otherwise use")
                 # #1603: a part whose own 3D model has body at board depth
                 # (an edge-mount jack the board slides into) must overhang
                 # far enough to keep that body off the board. The band's
@@ -11596,10 +11608,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 # code, not an observation: `derived_default`.
                 past = depth_past_edge(state.heights, pcb_data, ref, entry['edge'])
                 if past is not None:
-                    reading = band_amount(
-                        _overhang_geo, ref, entry['edge'],
-                        courtyard_overhang_past(_overhang_geo, erect[ref],
-                                                entry['edge'])[0], 0.0)[0]
+                    reading = graded
                     floor = math.floor(max(0.0, min(reading, reading - past))
                                        * 1000.0) / 1000.0
                     if floor > legality.EPS:
