@@ -5777,18 +5777,29 @@ def rule_zone_exclusive(ctx) -> Iterator[Violation]:
                     expected={'zone': list(z.rect), 'overlap_area_mm2': 0.0})
 
 
-def _container_pad_rects(ctx, ref):
-    """A container's pad copper boxes at the pose the grade holds it at
-    (`ctx.state`, else the file's): what `rule_keepout` measures it on."""
+def pad_copper_rects(fp, pose, copper_only=False):
+    """`fp`'s pad copper boxes (board frame) with the part at `pose`
+    ((x, y, rot)); with `copper_only`, only the pads that put copper on a
+    copper layer (`legality._pad_carries_copper`, what check_assembly's
+    occupancy unites)."""
+    out = []
+    for q in legality.pads_at_pose(fp, pose):
+        if copper_only and not legality._pad_carries_copper(q):
+            continue
+        cx, cy, hx, hy = legality.pad_copper_box(q)
+        out.append((cx - hx, cy - hy, cx + hx, cy + hy))
+    return out
+
+
+def _container_pad_rects(ctx, ref, copper_only=False):
+    """A part's pad copper boxes at the pose the grade holds it at
+    (`ctx.state`, else the file's): what `rule_keepout` measures a container
+    on, and every other part on too, beside its courtyard (#1588)."""
     fp = ctx.pcb.footprints[ref]
     p = (getattr(ctx.state, 'parts', None) or {}).get(ref)
     pose = (p.x, p.y, p.rot) if p is not None else (fp.x, fp.y,
                                                     fp.rotation or 0.0)
-    out = []
-    for q in legality.pads_at_pose(fp, pose):
-        cx, cy, hx, hy = legality.pad_copper_box(q)
-        out.append((cx - hx, cy - hy, cx + hx, cy + hy))
-    return out
+    return pad_copper_rects(fp, pose, copper_only)
 
 
 def rule_keepout(ctx) -> Iterator[Violation]:
@@ -5806,16 +5817,24 @@ def rule_keepout(ctx) -> Iterator[Violation]:
         # #1463 for exclusive zones): a keep-out inside an enclosure -- a
         # can's fence -- is no hit on the enclosure, while a post standing
         # in a keep-out still is. The seat already reads pads only.
-        rects = (_container_pad_rects(ctx, ref) if ref in cont
-                 else (part.rect, part.tht_rect))
         # `allow` and the side filter, from the SHARED resolver: the grader
         # and the seat predicate must agree on WHICH keep-outs bind a ref, not
         # merely on the geometry once they do. A through-hole part occupies
         # BOTH faces -- its leads pass through the keep-out even when its body
         # sits on the other side -- which is why `sides` is `part.sides` and
         # the hit test is given both rects.
-        for k in keepouts_for_ref(ctx.intent.keepouts, ref, part.sides,
-                                  hts.height(ref) if hts is not None else None):
+        binding = keepouts_for_ref(ctx.intent.keepouts, ref, part.sides,
+                                   hts.height(ref) if hts is not None else None)
+        if not binding:
+            continue
+        # #1588: and its pad copper, beside the courtyard -- what
+        # check_assembly grades it on, and what `mountable` and a rule-area
+        # keep-out (#1031) already read: a pad reaching past the courtyard
+        # into a keep-out is in it. Inert for a pad within the courtyard.
+        rects = (_container_pad_rects(ctx, ref) if ref in cont
+                 else (part.rect, part.tht_rect,
+                       *_container_pad_rects(ctx, ref, copper_only=True)))
+        for k in binding:
             if keepout_hit(k, rects):
                 name = k['name']
                 shape = (_fmt_rect(k['rect']) if k.get('rect') is not None

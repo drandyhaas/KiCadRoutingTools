@@ -118,8 +118,12 @@ SCATTERED_SEEDS = 6
 CLUSTERED_SEEDS = 6
 JUDGED_SEEDS = 6
 #: A part whose pad copper reaches further than this (mm) past its drawn
-#: courtyard is named before the anneal (#1386).
-PAD_REACH_WARN_MM = 0.3
+#: courtyard is named before the anneal (#1386), for information only: a
+#: courtyard pair is graded courtyard on courtyard, as KiCad grades it
+#: (#1588), so such a pad gates nothing by itself. It is held out of
+#: keep-outs, and a neighbour may stand over it. KLC's courtyard margin is
+#: 0.25 mm, so a reach past this is more than a drawing's rounding.
+PAD_REACH_NOTE_MM = 0.3
 #: Anchored seeds (`--anchored`) are opt-in, numbered after the clustered ones.
 #: Over 10 boards, 6 scattered + 6 anchored routed better than the default
 #: seeds on two (covg blocking 3.1 -> 0.1, bitaxe) and worse on three (tigard,
@@ -724,6 +728,22 @@ def _many_seeds(ap, a):
     return 2 if rcs - {0, 4} else (4 if 4 in rcs else 0)
 
 
+def pad_reach_text(wide, locked=()):
+    """The pre-flight line for `wide` ({ref: mm}), the parts whose pad copper
+    reaches more than `PAD_REACH_NOTE_MM` past their drawn courtyard (#1386);
+    None when there are none. Information, not a prediction: a seed prints
+    it, and a run of several seeds prints it once."""
+    if not wide:
+        return None
+    return (f"pad copper reaches more than {PAD_REACH_NOTE_MM:g} mm past the drawn "
+            "courtyard: " + ', '.join(
+                f"{r} {v:.2f} mm" + (' (locked)' if r in locked else '')
+                for r, v in sorted(wide.items()))
+            + "; courtyards are graded as drawn, as KiCad grades them, so a "
+              "neighbour may stand over such a pad; keep-outs hold the copper "
+              "(#1588)")
+
+
 def judge_order(reports):
     """`{seed: report}` (each seed's summary or `--json` report) -> its legal
     seeds in judging order: the placement's own defects first -- floorplan
@@ -776,8 +796,10 @@ def _name_judged(a, seeds, summaries):
     seed's parts with the check each fails and `illegal_every_seed` the parts
     illegal in every seed, WARNED once (#1540), `refused` and
     `oversubscribed` the intent's own faults, the same in every seed and
-    each WARNED once, `fold` the parts that follow a claim into their
-    partner's group and the groups that emptied, likewise said once,
+    each WARNED once, `pad_overhang` the parts whose pad copper reaches past
+    their drawn courtyard (#1386), the same in every seed and said once,
+    `fold` the parts that follow a claim into their partner's group and the
+    groups that emptied, likewise said once,
     `floorplan` each seed's
     floorplan errors, `assembly` its check_assembly blocking count, and
     `baseline` the board the seeds were placed from, which judge_seeds hands
@@ -804,6 +826,10 @@ def _name_judged(a, seeds, summaries):
            # together, likewise
            'oversubscribed': next((summaries[s]['oversubscribed'] for s in seeds
                                    if summaries.get(s, {}).get('oversubscribed')), []),
+           # the parts whose pad copper reaches past their drawn courtyard,
+           # likewise ({ref: mm}, #1386)
+           'pad_overhang': next((summaries[s]['pad_overhang'] for s in seeds
+                                 if summaries.get(s, {}).get('pad_overhang')), {}),
            # the claims priced over legs the grade does not read, likewise (#1426)
            'claim_arity': next((summaries[s]['claim_arity'] for s in seeds
                                 if summaries.get(s, {}).get('claim_arity')), []),
@@ -850,6 +876,10 @@ def _name_judged(a, seeds, summaries):
                   f"check_floorplan --intent before keeping it")
     for rec in doc['claim_arity']:
         print(f"  WARNING: {arity_text(rec)}")
+    note = next((summaries[s]['pad_overhang_note'] for s in seeds
+                 if summaries.get(s, {}).get('pad_overhang_note')), None)
+    if note:
+        print(f"  NOTE: (every seed) {note}")
     if doc['fold']:
         from placement.grouping import fold_text
         moved_line, dissolved_lines = fold_text(doc['fold'])
@@ -1310,22 +1340,16 @@ def main(argv=None):
             too_big.add(r)
             print(f"  WARNING: {r} ({w:.2f} x {h:.2f} mm) does not fit in the usable area "
                   f"({ux1 - ux0:.2f} x {uy1 - uy0:.2f} mm) at either quarter turn")
-    # a part whose pad copper reaches past its drawn courtyard is priced on the
-    # courtyard here, but check_assembly gates courtyard plus pad copper, so a
-    # neighbour can end over the pad (#1386). Not a container's: check_assembly
-    # grades a container on its pins, never on courtyard plus pad copper
-    # (#1465), and the anneal prices those pins' copper.
+    # a part whose pad copper reaches past its drawn courtyard (#1386): said,
+    # not priced -- courtyards are graded as drawn (#1588). Not a container:
+    # check_assembly grades a container on its pins (#1465).
     from placement.seeder import _pad_copper_overhang
     wide = {r: round(_pad_copper_overhang(state, r), 2) for r in sorted(state.parts)
             if r not in state.container_refs
-            and _pad_copper_overhang(state, r) > PAD_REACH_WARN_MM}
-    if wide:
-        print("  WARNING: pad copper reaches past the drawn courtyard: " + ', '.join(
-            f"{r} {v:.2f} mm" + (' (locked)' if r not in movable else '')
-            for r, v in wide.items())
-            + "; the anneal prices the courtyard, check_assembly gates courtyard plus "
-              "pad copper, so a neighbour can end over such a pad and the seed grade "
-              "NOT BUILDABLE (ranked below the buildable seeds)")
+            and _pad_copper_overhang(state, r) > PAD_REACH_NOTE_MM}
+    wide_note = pad_reach_text(wide, set(state.parts) - set(movable))
+    if wide_note:
+        print(f"  NOTE: {wide_note}")
     t1 = time.time()
     moves = a.moves or MOVES_PER_PART * len(movable)
 
@@ -1643,6 +1667,7 @@ def main(argv=None):
               'links': links,
               'groups': model.groups, 'stats': res['stats'], 'templates': drift,
               'hints_saturated': saturated, 'template_keepout': tk, 'pad_overhang': wide,
+              'pad_overhang_note': wide_note,
               'template_off': off, 'faces': face_report,
               'seconds': {'setup': round(t1 - t0, 1), 'anneal': round(t2 - t1, 1)},
               'anneals': passes, 'moves_total': sum(p['moves'] for p in passes)}
@@ -1652,7 +1677,8 @@ def main(argv=None):
                                           ('final', 'moves', 'seed', 'start', 'reseated', 'illegal',
                                            'illegal_why', 'tight',
                                            'refused', 'oversubscribed', 'claim_arity', 'floorplan',
-                                           'assembly', 'bga_field', 'template_off', 'decap_residual', 'claims_left', 'hints_saturated', 'estimate_fallback', 'faces', 'fold', 'links', 'moves_total', 'seconds')}))
+                                           'assembly', 'bga_field', 'template_off', 'decap_residual', 'claims_left', 'hints_saturated', 'estimate_fallback',
+                                           'pad_overhang', 'pad_overhang_note', 'faces', 'fold', 'links', 'moves_total', 'seconds')}))
     return 4 if illegal or refused or model.edge_oversubscribed else 0
 
 

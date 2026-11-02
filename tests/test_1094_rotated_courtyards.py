@@ -7,9 +7,10 @@ KiCad's own DRC -- with `courtyards_overlap` forced to error -- reports 0, and
 six fab CONTAINMENTS against U1 that turned the human board NOT BUILDABLE.
 
 The fix keeps the rects as the broad phase and measures a pair the rects say
-overlaps on the drawn outlines (courtyard and .Fab), with the pad copper
-united pad by pad. The same measure seats a declared fixed pose (#1054), so
-the generator does not refuse what the checker accepts.
+overlaps on the drawn outlines (courtyard and .Fab) -- a courtyard as drawn,
+without its pads since #1588, as KiCad's courtyards_overlap tests it. The
+same measure seats a declared fixed pose (#1054), so the generator does not
+refuse what the checker accepts.
 
 The synthetic boards below are sign-independent: two 2x2 squares at 45
 degrees are diamonds whatever the rotation convention, so the expected
@@ -203,10 +204,11 @@ def line(a, b, layer='F.CrtYd'):
 class TestOutlineDetails(unittest.TestCase):
     """The hunks the #1094 verifier could revert without a test noticing."""
 
-    def test_pad_copper_past_the_courtyard_still_occupies(self):
+    def test_pad_copper_past_the_courtyard_is_no_courtyard_pair(self):
         """A's pad pokes 0.6 mm past its 1 x 1 courtyard; B's courtyard
-        overlaps only that pad, by 0.1 mm. The occupancy is the drawing UNITED with the
-        pads, so the pair is found."""
+        overlaps only that pad, by 0.1 mm. KiCad's courtyards_overlap tests
+        the courtyards as drawn, which do not meet, so there is no pair
+        (#1588; #1094 united the pads and found one KiCad does not report)."""
         body = (
             '  (footprint "t:A" (layer "F.Cu") (at 10 10)\n'
             '    (property "Reference" "A" (at 0 0) (layer "F.SilkS"))\n'
@@ -220,7 +222,7 @@ class TestOutlineDetails(unittest.TestCase):
                  net=2))
         with tempfile.TemporaryDirectory() as td:
             g = grade(raw_board(td, body))
-        self.assertEqual(courtyard_pairs(g), {('A', 'B')})
+        self.assertEqual(courtyard_pairs(g), set())
 
     def test_an_open_courtyard_falls_back_to_its_hull(self):
         """Three sides of a square drawn: the outline does not close, so the

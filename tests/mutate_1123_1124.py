@@ -5,9 +5,10 @@ One row per load-bearing line, each reverting it; every row names the test
 case that must fail. **THE ROWS TO LOOK AT FIRST if this file ever goes red**
 restore the defect each issue measured, or the reason it went unseen:
 
-  * `occupancy-on-the-box` / `overrun-on-the-box` (#1123) -- a custom pad's
-    size box is symmetric about its anchor, so its empty side enlarged the
-    part's occupancy and its empty corner could read as copper off the board;
+  * `overrun-on-the-box` (#1123) -- a custom pad's size box is symmetric
+    about its anchor, so its empty corner could read as copper off the
+    board (the occupancy rows went with #1588: a drawn courtyard is graded
+    as drawn, without its pads);
   * `posed-box-stale` (#1123) -- `pads_at_pose` turned the copper and kept
     the box, which then missed the copper at any turn but a half one.
 
@@ -52,30 +53,20 @@ def _t(name, *cases):
 
 
 T1123 = 'test_1123_custom_pad_copper_legality.py'
-L_PAD = _t(T1123, 'l_pad_occupies')
 CORNER = _t(T1123, 'box_corner_off')
 SPIKE = _t(T1123, 'spiked_primitive')
 QUARTER = _t(T1123, 'quarter_turn')
 OBLIQUE = _t(T1123, 'oblique_turn')
 CASTELLATED = _t(T1123, 'castellation_reads')
 DISJOINT = _t(T1123, 'disjoint_copper')
-T1094 = _t('test_1094_rotated_courtyards.py')
 
 # (name, target, old, new, tests, expect)
 ROWS = [
     # -- #1123: custom pads on their copper ----------------------------------
-    ('occupancy-on-the-box', 'leg',
-     "            pp = custom_pad_copper(pad)",
-     "            pp = None",
-     (L_PAD,), 'KILLED'),
     ('overrun-on-the-box', 'leg',
      "            copper = custom_pad_copper(p)",
      "            copper = None",
      (CORNER, CASTELLATED), 'KILLED'),
-    ('outline-pads-dropped-from-occupancy', 'leg',
-     "                pp = Polygon(pts) if len(pts) >= 3 else None",
-     "                pp = None",
-     (T1094,), 'KILLED'),
     ('copper-keeps-the-spike', 'pads',
      "    parts = areal_parts(_copper_geometry(pad))",
      "    parts = [_copper_geometry(pad)]",
@@ -100,10 +91,6 @@ ROWS = [
     ('copper-first-part-only', 'pads',
      "    return parts[0] if len(parts) == 1 else unary_union(parts)",
      "    return parts[0]",
-     (DISJOINT,), 'KILLED'),
-    ('occupancy-drops-multipolygon', 'leg',
-     "            if pp.is_valid and not shape.contains(pp):",
-     "            if pp.is_valid and not shape.contains(pp) and pp.geom_type == 'Polygon':",
      (DISJOINT,), 'KILLED'),
     ('posed-custom-tilt-turns', 'leg',
      "            pad.rect_rotation = getattr(original, 'rect_rotation', 0.0)",

@@ -604,6 +604,15 @@ gate, `place_pose` and the graders:
   other and every seed graded NOT BUILDABLE. It is an input, not a grade: the graders, and
   two declared or locked poses judged against each other
   (`_Part.drawn_rect`), still read what the board draws.
+- **Pad copper past a drawn courtyard (#1588).** A courtyard pair is
+  graded courtyard on courtyard, as KiCad's `courtyards_overlap` grades it
+  (`legality.occupancy_shape`: a drawn courtyard as drawn, the occupancy box
+  only for a part that draws none), so a neighbour may stand over a pad that
+  reaches past its own courtyard, and the placer seats on the drawn
+  courtyard. place_simple names such parts (more than `PAD_REACH_NOTE_MM`)
+  once, as information (`pad_overhang`, in each seed's report and in
+  `judge.json`). A keep-out is physical, so it reads pad copper beside the
+  courtyard, in the grade (`rule_keepout`) and the seat (`pose_ok`).
 
 [docs/floorplan-intent.md](../../docs/floorplan-intent.md) has the intent's
 rules, and [docs/utilities.md](../../docs/utilities.md) each tool's full
