@@ -234,6 +234,15 @@ python3 -X utf8 py_router/route.py board_routed.kicad_pcb board_retry.kicad_pcb 
     2>&1 | tee /tmp/route_retry.txt
 ```
 
+**Keep the run's rule decision.** "Toward the fab floor" in the tables above
+holds where the project's rules are aspirational stock. When they are the
+user's own product rules (`/plan-pcb-routing` Step 4, "Whose rules does the
+project hold?"), the floor is the board's own Board Setup minimums: the retry
+carries the failing step's `--escalation board` (or `off`) and
+`--no-fix-drc-settings`, shrinks no size below those minimums, and names any
+shrink below them as a decision for the user rather than proposing it as the
+fix.
+
 Routing only the failed nets preserves the successful routes (already in the input file) and is much faster than a full re-run. **On a board with pours, add the poured nets to `--nets` too** (#1032): the retry's copper can cut a pour, and its in-run plane finalize repairs only the poured nets inside its scope. A broken poured net is retried the same way, with `route.py`, never a standalone `repair_planes.py` (#1112). After the retry, re-check with `check_connected.py`, and if nets still fail, repeat the diagnosis on the new log — the failure mode often changes after the first fix.
 
 **For a pair step, the retry is a `route_diff.py` call** on the failing pairs'

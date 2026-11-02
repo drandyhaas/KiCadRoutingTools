@@ -141,6 +141,14 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
 
   In REPORT.md, say what you asked and what was declared from each answer,
   or that nobody was there to ask.
+- **In `full` mode, ask whose design rules the project holds**, in the same
+  breath: the routing that follows depends on it
+  (`.claude/skills/plan-pcb-routing/SKILL.md`, Step 4, "Whose rules does the
+  project hold?"). Aspirational stock rules route at the fab floor with the
+  floor writeback on; the user's own product rules route at the board's own
+  minimums with `--escalation board` (or `off`) and `--no-fix-drc-settings`,
+  and every descent below them is reported as a decision. Record the answer
+  in REPORT.md.
 - **Nothing is sacred except a KiCad lock.** `place_simple` re-places every
   part the board does not lock (`(locked yes)`) or the intent does not seat
   (`fixed_poses[]`). For a from-scratch experiment with everything off the
