@@ -1062,7 +1062,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                            pcb_data=None,
                            strict_fragments: bool = False,
                            via_in_pad_margin: Optional[float] = None,
-                           unflashed_hole_only: bool = False) -> Dict:
+                           unflashed_hole_only: bool = False,
+                           fill_model_for=None) -> Dict:
     """Check connectivity for a single net.
 
     Args:
@@ -1099,6 +1100,11 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             keeps the outline credit for grading; the strict removal model
             (#1063) passes True so a removal never leaves an annulus-only
             joint KiCad grades open.
+        fill_model_for: zone -> fill model, replacing the board's cached
+            model as the zone credit's source (None from it = no model, the
+            legacy blob). Default None reads the cached model. The graze
+            prune passes plane_fill_model.trusted_zone_model (#1581) to grade
+            a removal that leaves copper joined only by the pour.
 
     Returns dict with:
         - connected: bool - whether all pads are connected
@@ -1316,7 +1322,9 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         # legacy blob credit.
         _zm = None
         try:
-            if pcb_data is not None:
+            if fill_model_for is not None:
+                _zm = fill_model_for(zone)
+            elif pcb_data is not None:
                 from plane_fill_model import get_zone_model
                 _zm = get_zone_model(pcb_data, zone)
             else:
@@ -2483,6 +2491,48 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                     return not any(_out_of(*p[0]) == _ao
                                    for p in _isl if p is not _cont)
 
+                def _kicad_stranded_pads(nid, name):
+                    """The pads KiCad's own fill leaves off the net's main
+                    cluster (#1581). A KiCad-only link names its ends as KiCad
+                    reports them, and a zone island's end is the ZONE (its
+                    first corner), so the pad it strands went unnamed:
+                    `stranded_pads: []` for a GND pad cut off in a fill
+                    pocket. One pcbnew refill (memoised per file, shared with
+                    the multi-outline test above) and the same deterministic
+                    clusters the oracle straps from; main = the cluster with
+                    the most pads, as the copper grade picks it. [] when the
+                    refill is unavailable."""
+                    try:
+                        if not _exact_g['fetched']:
+                            _exact_g['fetched'] = True
+                            from kicad_exact_fill import refill_islands
+                            _exact_g['map'] = refill_islands(pcb_file)
+                        _m = _exact_g['map']
+                        if not _m:
+                            return []
+                        from kicad_exact_fill import exact_clusters
+                        _cl = exact_clusters(
+                            pcb_data, nid,
+                            [(_ly, _p) for (_n2, _ly), _ps in _m.items()
+                             if _n2 == name for _p in _ps])
+                        if len(_cl) <= 1:
+                            return []
+                        _main = max(_cl, key=lambda c: (len(c['pads']),
+                                                        len(c['points'])))
+                        out = []
+                        for _c in _cl:
+                            if _c is _main:
+                                continue
+                            for _p in _c['pads']:
+                                _cu = [l for l in (_p.layers or ())
+                                       if l.endswith('.Cu')]
+                                out.append((_p.global_x, _p.global_y,
+                                            _cu[0] if _cu else '',
+                                            _p.component_ref))
+                        return sorted(out, key=lambda t: (t[3] or '', t[0], t[1]))
+                    except Exception:                         # noqa: BLE001
+                        return []
+
                 _issue_names = {i['net_name'] for i in issues}
                 _skip_names = set(skipped_cross_board)
                 _zone_net_ids = {_z.net_id for _z in pcb_data.zones}
@@ -2524,7 +2574,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                         'num_vias': len(vias_by_net.get(_nid, [])),
                         'num_pads': len(pads_by_net.get(_nid, [])),
                         'num_components': len(_nl) + 1,
-                        'disconnected_pads': [],
+                        'disconnected_pads': _kicad_stranded_pads(_nid, _name),
                         'kicad_only': True,
                         'message': ("KiCad refill reports "
                                     f"{len(_nl)} unconnected link(s) copper "
