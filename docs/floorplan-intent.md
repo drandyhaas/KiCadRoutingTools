@@ -2022,9 +2022,14 @@ SIM socket (`KON-SIM-01`, `Nano_SIM`), so a chip named for the interface it
 serves (`USB-ESD-6`) is no edge receptacle. Receptacle pins (`CC1`, `CC2`,
 `SBU1`, `SBU2`, `SHIELD`) are read before a symbol's `_<suffix>` (`CC1_A5` is
 `CC1`), and a SON package (`USON`, `WSON`, ...) or an eSIM's machine form
-factor (`MFF2`) is an IC package like a QFN, whatever its pins. A connector
-named only by its part number and carrying no such pins
-still needs its `class` declared.
+factor (`MFF2`) is an IC package like a QFN, whatever its pins. The package
+is read on the footprint ITEM, not its library (#1604): the USB connector of a
+board whose house library is `tomu-fpga:` is still a receptacle. A chip
+package is no switch either (`USB_Switch_TSSOP-10`, `SOT-23-5_Switching`),
+`tact` inside `contact` names no button (`PhoenixContact_...` is a terminal
+block), and a pad-less footprint or a logo (`USB_Logo_Copper`) is no edge
+part at all. A connector named only by its part number and carrying no such
+pins still needs its `class` declared.
 
 With `--declare-classes`, connector-family parts that claim no edge (headers,
 JST, terminal blocks; `part_class` calls them `connector_affinity`) are also
