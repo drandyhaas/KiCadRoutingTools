@@ -2319,7 +2319,9 @@ question. The answer: every decap (below) on the pin's exact net, either side,
 any distance, whoever else it also serves.
 
 **What a decap is -- one rule for the grade, the gate and the placer.** A cap
-(`groups.is_decoupling_cap`: a `C*` bridging two nets) is a decap
+(`groups.is_decoupling_cap`: a `C*` bridging two nets, its reference read
+past a lower-case qualifier glued on in front, so crkbd's right-half `rC3`
+is one, #1606) is a decap
 (`grouping.BoardView.decaps`, read through `groups.decap_population`) when it
 runs
 

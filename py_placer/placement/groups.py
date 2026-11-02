@@ -525,8 +525,14 @@ def is_decoupling_cap(fp, ref: str) -> bool:
 
     Both differences favour distinct-nets. `ref[:1]` rather than `ref[0]` also
     survives an empty reference instead of raising.
+
+    The reference is read past a glued qualifier (`part_class.
+    unqualified_ref`, #1606): crkbd's right half numbers its caps `rC3` ..
+    `rC16`, and read as written they decoupled nothing while their left-half
+    twins `C3` .. `C16` were the board's decaps.
     """
-    if fp is None or ref[:1].upper() != 'C':
+    from .part_class import unqualified_ref
+    if fp is None or unqualified_ref(ref)[:1].upper() != 'C':
         return False
     return len({p.net_id for p in fp.pads if p.net_id > 0}) == 2
 

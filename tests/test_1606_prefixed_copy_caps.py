@@ -4,9 +4,10 @@ right half (`rY1`, `rC1`, `rC2`, `rU1`) is a copy of its left.
 
 `crystals.crystal_claims` found a crystal's load caps only among references
 matching `^C\\d`, so crkbd's `rY1` had none while `Y1`, wired identically,
-had C1 and C2. The same test sat in `grouping`'s template hints (`_is_cap`,
-`_is_inductor`, the `U`/`IC` chip test). Both read the reference through
-`part_class.unqualified_ref` now,
+had C1 and C2. The same test sat in `groups.is_decoupling_cap` (the decap
+population: crkbd's right-half decaps `rC3`..`rC16` decoupled nothing) and
+in `grouping`'s template hints (`_is_cap`, `_is_inductor`, the `U`/`IC` chip
+test). All read the reference through `part_class.unqualified_ref` now,
 which sets a LOWER-case qualifier glued in front of an upper-case
 designator aside and nothing else: a qualifier behind a separator
 (`_designator`'s `PWR_SW1`) is not read, because as a passive's designator
@@ -19,7 +20,9 @@ Y1, its IC U3 and its load caps C23/C24 renamed rY1/rU3/rC23/rC24.
 Cases:
 * `unqualified_ref` on the copy spelling and on what it must leave alone;
 * the renamed crystal gets the same claims as the original, with its caps
-  under their new names.
+  under their new names;
+* a renamed decap stays in the decap population with the same rails and
+  owners.
 
     python3 -X utf8 tests/test_1606_prefixed_copy_caps.py [case ...]
 """
@@ -64,6 +67,9 @@ def _renamed(pcb, names):
     """A copy of `pcb` with each reference in `names` renamed, the way a
     board copies a half: the key, the footprint's reference, its pads'."""
     pcb = copy.deepcopy(pcb)
+    # the decap view is cached on the board (`grouping.decap_view`), and a
+    # deep copy carries it, keyed by the old references
+    pcb.__dict__.pop('_decap_view', None)
     fps = {}
     for ref, fp in pcb.footprints.items():
         new = names.get(ref, ref)
@@ -104,6 +110,22 @@ def test_a_copied_crystal_keeps_its_load_caps():
                        names.get(r['near'], r['near'])) for r in rows)
     assert ren(rows) == ren(rows2), (ren(rows), ren(rows2))
     print(f"  PASS: {want}")
+
+
+def test_a_copied_decap_is_still_a_decap():
+    from placement.groups import decap_population, is_decoupling_cap
+    pcb = _parse(TIGARD)
+    pop = _quiet(decap_population, pcb)
+    cap = sorted(pop)[0]
+    assert cap.startswith('C') and is_decoupling_cap(
+        pcb.footprints[cap], cap), cap
+    copied = _renamed(pcb, {cap: 'r' + cap})
+    assert is_decoupling_cap(copied.footprints['r' + cap], 'r' + cap)
+    pop2 = _quiet(decap_population, copied)
+    assert pop2.get('r' + cap) == pop[cap], (pop[cap], pop2.get('r' + cap))
+    assert cap not in pop2
+    print(f"  PASS: r{cap} decouples {pop[cap][0]} for {pop[cap][1]}, "
+          f"as {cap} does")
 
 
 TESTS = [v for k, v in sorted(globals().items())
