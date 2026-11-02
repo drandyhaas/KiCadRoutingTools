@@ -946,7 +946,10 @@ zone-covered nets is also checked against KiCad's own DRC with a zone refill
 (`kicad-cli`, the same oracle as
 [`kicad_unconnected.py`](#kicad-unconnected-count-kicad_unconnectedpy)): a
 net KiCad sees connected is reclassified CONNECTED (a fill-model artifact),
-and a net only KiCad sees unconnected is added as an issue. One status line
+and a net only KiCad sees unconnected is added as an issue, its stranded
+pads listed under `Disconnected pads` from KiCad's own fill (one pcbnew
+refill: a KiCad link names a zone island by the zone's first corner, so the
+link alone names no pad). One status line
 always says whether the cross-check ran, agreed, changed something, or could
 not run (no `kicad-cli`, a DRC timeout), so a silent clean pass is never
 ambiguous. `KICAD_NO_GRADE_RECONCILE=1` disables it.

@@ -4556,7 +4556,10 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     check_net_connectivity confirms the net is no worse connected without it -- a
     load-bearing graze (e.g. a plane tap that is a pad's sole connection to the
     pour) is kept and left for DRC. Zoned nets are checked WITH their pour, so a
-    tap that the fill makes redundant can still be dropped. Mirrors
+    tap that the fill makes redundant can still be dropped -- but a removal
+    that leaves copper joined to its net ONLY by the pour must hold under the
+    joins KiCad's fill is sure of (#1581, plane_fill_model.trusted_zone_model),
+    not under the model's prediction alone. Mirrors
     prune_redundant_cycles' write-list / pcb_data sync.
 
     Returns (segments_removed, nets_pruned, original_segments_to_remove)."""
@@ -4567,6 +4570,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     # _prune_net_cycles.grazes only ORDERS cycle-edge drops, but here grazing GATES
     # removal, so an over-approximation would delete legitimate non-violating copper.
     from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist
+    from plane_fill_model import trusted_zone_model
+    _trusted_models = {}   # #1581: one conservative fill model per zone
 
     routed_seg_ids = set()
     for r in results:
@@ -4711,6 +4716,13 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 net_id, net_segs, net_vias, net_pads, net_zones,
                 return_graph=True, pcb_data=pcb_data)
             graph_grade = before_grade.get('graph')
+        # #1581 pour-only joins, built lazily (see the gate below): the net's
+        # copper with no zone credit, and its connectivity with the zone
+        # credit TRUSTED only where KiCad's fill is sure to join.
+        cu_graph = trust = None
+
+        def _trusted_model(z):
+            return trusted_zone_model(pcb_data, z, _trusted_models)
         seg_pos = {id(s): i for i, s in enumerate(net_segs)}
         _verify = _PRUNE_CONN_VERIFY
         dropped = []
@@ -4763,6 +4775,46 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                         net_vias, net_pads, net_zones, pcb_data=pcb_data)
                 if worse(before_grade, after_grade):
                     continue  # load-bearing through fill the validator denies
+            # #1581: a removal that SPLITS the net's copper leaves one side
+            # joined to the rest only by the pour, and the gates above grade
+            # that join with the fill MODEL, which pours channels KiCad does
+            # not (its opening passes a 45-degree gap under min_thickness, and
+            # it keeps no hole clearance). Measured: a GND pad ringed by four
+            # via-in-pad pins lost its only stub through a 0.086 mm gap, the
+            # net shipped open and the oracle could not put it back. So such
+            # a removal must also leave the net no worse when only the joins
+            # KiCad's fill is sure of count (trusted_zone_model). Removals
+            # that keep a copper path never reach this.
+            if net_zones:
+                if cu_graph is None:
+                    cu_graph = check_net_connectivity(
+                        net_id, net_segs, net_vias, net_pads, [],
+                        return_graph=True, pcb_data=pcb_data).get('graph') or {}
+                if cu_graph:
+                    splits = (analyze_conn_excluding(
+                        cu_graph, trial_excl)['num_copper_components']
+                        > analyze_conn_excluding(
+                            cu_graph, dropped_idx)['num_copper_components'])
+                else:
+                    splits = True   # no graph to tell: grade it
+                if splits:
+                    if trust is None:
+                        trust = check_net_connectivity(
+                            net_id, net_segs, net_vias, net_pads, net_zones,
+                            return_graph=True, zone_credit_validator=_zcv,
+                            pcb_data=pcb_data, fill_model_for=_trusted_model)
+                    if trust.get('graph') is not None:
+                        after_trust = analyze_conn_excluding(
+                            trust['graph'], trial_excl)
+                    else:
+                        after_trust = check_net_connectivity(
+                            net_id, [x for i, x in enumerate(net_segs)
+                                     if i not in trial_excl],
+                            net_vias, net_pads, net_zones,
+                            zone_credit_validator=_zcv, pcb_data=pcb_data,
+                            fill_model_for=_trusted_model)
+                    if worse(trust, after_trust):
+                        continue  # joined only by fill KiCad may not pour
             kept_after = [x for i, x in enumerate(net_segs) if i not in trial_excl]
             if _soft_joint_pairs(kept_after, net_vias, net_pads) - baseline_joints:
                 # Removal would open a soft joint: neck to clear instead.

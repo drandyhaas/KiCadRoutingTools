@@ -119,8 +119,10 @@ def _label_components(free):
 class ZoneFillModel:
     """Reached-fill bitmap for one zone (net + layer + outline)."""
 
-    def __init__(self, pcb_data, zone, net_clearances=None):
+    def __init__(self, pcb_data, zone, net_clearances=None,
+                 conservative=False, hole_clearance=0.0):
         self.ok = False
+        self.conservative = bool(conservative)
         net_id = zone.net_id
         layer = zone.layer
         # Per-net class clearances (#483 item 5). Explicit arg wins (tests /
@@ -143,6 +145,22 @@ class ZoneFillModel:
             return
         self.x0, self.y0, self.cell = x0, y0, cell
         self.nx, self.ny = nx, ny
+        # CONSERVATIVE mode (#1581): every keep-out grows by `_cm` and the
+        # opening is skipped, so a free cell is a CORE cell -- its centre at
+        # least (clearance + min_thickness/2 + cell/2) from every foreign
+        # edge, the zone outline and the board edge. Every point of the
+        # segment between two 4-adjacent core centres then lies at least
+        # (clearance + min_thickness/2) from foreign copper, so KiCad's
+        # deflate-then-inflate fill holds a min_thickness-wide strip along
+        # it: a core path IS fill KiCad pours, whatever the channel's angle.
+        # The default model's opening uses a 1-cell structuring element at
+        # min_thickness 0.1 (a plus shape), which passes a 45-degree channel
+        # down to ~0.07 mm. The slack covers the sampled segment stamps
+        # (discs every 0.9 cell, ~1 um under the capsule) and KiCad's arc
+        # approximation. Hole clearance is stamped here only: KiCad keeps
+        # its fill max(clearance, hole clearance) from a foreign drill.
+        _cm = (mth / 2.0 + cell / 2.0 + 0.01) if self.conservative else 0.0
+        _hc = float(hole_clearance or 0.0) if self.conservative else 0.0
 
         # Cell-center erosion at the CLEARANCE boundary: fill can exist at a
         # cell iff the cell center is >= zc from every foreign edge and
@@ -203,7 +221,7 @@ class ZoneFillModel:
                                          ex1, ey1, ex2, ey2)
 
         def _stamp_disc(px, py, r):
-            R = r + guard
+            R = r + guard + _cm
             i0, i1 = max(0, _gi(px - R, x0)), min(nx, _gi(px + R, x0) + 2)
             j0, j1 = max(0, _gi(py - R, y0)), min(ny, _gi(py + R, y0) + 2)
             if i0 >= i1 or j0 >= j1:
@@ -214,7 +232,7 @@ class ZoneFillModel:
 
         def _stamp_rect(px, py, hx, hy, r_extra=0.0):
             # rounded-rect keep-out: distance from cell center to the rect
-            R = r_extra + guard
+            R = r_extra + guard + _cm
             i0 = max(0, _gi(px - hx - R, x0))
             i1 = min(nx, _gi(px + hx + R, x0) + 2)
             j0 = max(0, _gi(py - hy - R, y0))
@@ -275,7 +293,7 @@ class ZoneFillModel:
         def _stamp_rot_rect(px, py, hx, hy, ang_deg):
             # exact rotated-rect keep-out: rotate cell centers into the
             # pad frame, then the same rounded-rect distance as _stamp_rect
-            R = guard
+            R = guard + _cm
             rad = math.radians(ang_deg)
             ca, sa = math.cos(rad), math.sin(rad)
             reach = math.hypot(hx, hy) + R
@@ -341,6 +359,9 @@ class ZoneFillModel:
         for v in f_vias:
             guard = max(guard_base, _nc.get(v.net_id, 0.0))
             _stamp_disc(v.x, v.y, v.size / 2.0)
+            if _hc > 0 and (getattr(v, 'drill', 0) or 0) > 0:
+                guard = _hc
+                _stamp_disc(v.x, v.y, v.drill / 2.0)
         guard = guard_base
         for s in f_segs:
             guard = max(guard_base, _nc.get(s.net_id, 0.0))
@@ -376,6 +397,15 @@ class ZoneFillModel:
                     guard = max(guard_base,
                                 _nc.get(p.net_id, 0.0),
                                 getattr(p, 'local_clearance', 0.0) or 0.0)
+                if _hc > 0 and is_th and p.net_id != net_id:
+                    _g = guard
+                    guard = max(_hc, getattr(p, 'local_clearance', 0.0) or 0.0)
+                    _hx = getattr(p, 'hole_x', None)
+                    _hy = getattr(p, 'hole_y', None)
+                    _hx = p.global_x if _hx is None else _hx
+                    _hy = p.global_y if _hy is None else _hy
+                    _stamp_disc(_hx, _hy, p.drill / 2.0)
+                    guard = _g
                 if p.pad_type == 'np_thru_hole':
                     _stamp_disc(p.global_x, p.global_y, (p.drill or 0) / 2.0)
                     continue
@@ -411,7 +441,7 @@ class ZoneFillModel:
         # keep-out edge, and the global min-thickness OPENING below now
         # handles the boundary rim (the old explicit mth/2 rim here would
         # double-count it).
-        rim = 0.0
+        rim = _cm
         for ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
             if ko.get('copper_pour_allowed', True):
                 continue
@@ -516,6 +546,14 @@ class ZoneFillModel:
         # outline AND its cut-outs (Zone.holes): KiCad never fills a hole.
         free &= _rings_inside_rows(
             cxs, cys, [zone.polygon] + list(getattr(zone, 'holes', None) or ())).T
+        if self.conservative:
+            # The core also keeps min_thickness/2 inside the zone's own
+            # outline and out of its cut-outs (KiCad deflates those edges too).
+            guard = 0.0
+            for _r in [zone.polygon] + list(getattr(zone, 'holes', None) or ()):
+                if len(_r) >= 3:
+                    _stamp_ring_band(_r)
+            guard = guard_base
 
         # Min-thickness OPENING (KiCad parity): erode by mth/2 then dilate
         # by mth/2 -- exactly the filler's deflate-then-stroke. Regions
@@ -524,7 +562,7 @@ class ZoneFillModel:
         # numpy fallback approximates it with an iterated 3x3 square
         # (over-opens diagonal slivers by < one cell -- strictly the
         # conservative direction).
-        r_cells = int(round((mth / 2.0) / cell))
+        r_cells = 0 if self.conservative else int(round((mth / 2.0) / cell))
         if r_cells > 0:
             if _HAS_SCIPY:
                 yy, xx = np.ogrid[-r_cells:r_cells + 1, -r_cells:r_cells + 1]
@@ -587,13 +625,17 @@ class ZoneFillModel:
         widens the probe: an item of that diameter touches a component if
         any cell within size/2 (+1 cell slack) carries its label -- a via
         barrel whose CENTER cell is eroded still touches the fill that laps
-        its edge."""
+        its edge. A CONSERVATIVE model ignores `size` and answers for the
+        point's own cell: a widened probe takes the smallest label in its
+        window, which may be a component across a wall from the point."""
         if not self.ok:
             return None
         i = int((x - self.x0) / self.cell)
         j = int((y - self.y0) / self.cell)
         if not (0 <= i < self.nx and 0 <= j < self.ny):
             return None
+        if getattr(self, 'conservative', False):
+            size = 0.0
         r = int(math.ceil((size / 2.0) / self.cell)) + 1 if size > 0 else 0
         if r == 0:
             return int(self.labels[i, j])
@@ -940,6 +982,52 @@ def get_zone_model(pcb_data, zone):
                 _MODELS_BY_ZONE_ID.clear()
             _MODELS_BY_ZONE_ID[id(zone)] = m
     return m if m.ok else None
+
+
+#: pcbnew's factory ``m_HoleClearance`` (probed on 10.0.3: a fresh BOARD()
+#: reads 0.25), which KiCad fills and grades at when the project leaves
+#: ``min_hole_clearance`` out.
+KICAD_FACTORY_HOLE_CLEARANCE = 0.25
+
+
+def fill_hole_clearance(pcb_data) -> float:
+    """The copper-to-hole clearance KiCad's filler keeps from a foreign drill
+    on this board: the declared rule (obstacle_map.declared_hole_clearance),
+    else pcbnew's factory value. A project that declares 0 reads as the
+    factory value here, which only makes a conservative model stricter."""
+    try:
+        from obstacle_map import declared_hole_clearance
+        v, src = declared_hole_clearance(pcb_data)
+    except Exception:                                           # noqa: BLE001
+        v, src = 0.0, ''
+    return float(v) if src and v > 0 else KICAD_FACTORY_HOLE_CLEARANCE
+
+
+def trusted_zone_model(pcb_data, zone, cache):
+    """A fill model whose component joins KiCad's fill is sure to make (#1581),
+    for a REMOVAL pass that would leave copper joined to its net only by the
+    pour.
+
+    KiCad's own fill when it is installed (an IslandFillModel: it IS the
+    fill), else a CONSERVATIVE ZoneFillModel (cores at clearance +
+    min_thickness/2, the board's hole clearance stamped), built once per zone
+    into the caller's `cache` dict and never published to the shared caches:
+    a grader reading it would grade every marginal channel open. When the
+    conservative model cannot be built (an oversize zone) the default model
+    answers, as it does for every other reader."""
+    m = cache.get(id(zone))
+    if m is not None:
+        return m
+    std = get_zone_model(pcb_data, zone)
+    if isinstance(std, IslandFillModel):
+        m = std
+    else:
+        c = ZoneFillModel(pcb_data, zone, conservative=True,
+                          hole_clearance=fill_hole_clearance(pcb_data))
+        m = c if c.ok else std
+    cache[id(zone)] = m
+    return m
+
 
 def lookup_zone_model(zone):
     """Prebuilt model for this zone OBJECT, or None. No pcb_data needed --
