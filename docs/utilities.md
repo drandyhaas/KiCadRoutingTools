@@ -2444,7 +2444,8 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    `route.py --force-reroute`, single-ended; a net that route lays no copper
    for keeps its pair copper.
 6. **Route**: `route.py` over every net, with the poured nets and rails as
-   power nets, a finer grid around fine-pitch parts and deeper rip-up on
+   power nets at 0.3 (`autoplan.RAIL_WIDTH`; a net the caller's `--power-nets`
+   select at its width), a finer grid around fine-pitch parts and deeper rip-up on
    congested boards; the members of any pair `route_diff.py` could not couple
    are rippable, so the stubs it left do not block their partners. The first
    pass keeps signals off the planes; up to two further passes on the result
@@ -2488,6 +2489,16 @@ Options:
                      price lets every step cross them (the plan-pcb-routing
                      skill's route step uses 3.0), trading reference integrity
                      for routability.
+  --power-nets PATTERN [...] --power-nets-widths MM [...]
+                     route.py's own flags, given to every route step (the
+                     passes and the diff-pair reroute) ahead of autoplan's
+                     rails: route.py routes a net at the width of the first
+                     pattern that selects it (fnmatch), so a net they select,
+                     a rail included, routes at their width, and every other
+                     net keeps autoplan's choice. One finite width above 0 per
+                     pattern, or the run is refused before any step (exit 2).
+                     The analysis states each routed net they give a width
+                     (`net_widths`).
 ```
 
 The chain, each step's arguments, return code, iterations and grade are
