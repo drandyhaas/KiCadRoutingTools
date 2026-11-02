@@ -2091,43 +2091,24 @@ def _part_local_bounds_and_bodies(pcb_data, pcb_file: Optional[str] = None):
 
 def occupancy_shape(fp, lb: 'LocalBounds', geom=None):
     """A part's own-side occupancy as board-frame geometry at its file pose
-    (#1094): the drawn courtyard outline united with the part's pad copper
-    when the courtyard rung answered, else the occupancy box, oriented.
+    (#1094): the drawn courtyard outline when the courtyard rung answered,
+    else the occupancy box (body or pads, united with the pad box), oriented.
 
-    The pads are united pad by pad (`check_pads`' outline, the checker that
-    already measures pad copper) rather than as their bbox: a stepped QFP
-    courtyard hugs its pin rows, and the pad BBOX would put back the corners
-    the drawing cut away (StickHub U1<->Y1, 2.01 mm2, which KiCad does not
-    report). A CUSTOM pad is united as its parsed primitives
-    (`check_pads.custom_pad_copper`, #1123), not as its size box, which is
-    symmetric about the anchor and so covers whatever side the copper does
-    not reach; the box only where the parser could not draw the pad.
-    A pad that puts no copper on a copper layer -- an NPTH hole, or a
-    paste-only aperture -- is not occupancy and is skipped
-    (`_pad_carries_copper`, the predicate `PartPads` builds from, #1128).
+    The drawn courtyard AS DRAWN, with no pad copper united in (#1588): it is
+    what KiCad's `courtyards_overlap` tests, and a pad reaching past its own
+    courtyard into a neighbour's is no courtyard pair there. Uniting the pads
+    (as #1094 did, pad by pad) made check_assembly gate pairs kicad-cli 10.0
+    reports none of -- on #1588's repro every seed NOT BUILDABLE on 2-5 of
+    them, KiCad clean -- and taught the placer a rule KiCad does not have.
+    Pad copper is graded where it is a rule: pad to pad clearance, the
+    outline, rule areas and intent keep-outs. A part that draws no courtyard
+    keeps its occupancy box, which KiCad cannot grade at all.
     """
-    from shapely.geometry import Polygon, box
-    from shapely.ops import unary_union
+    from shapely.geometry import box
     court = getattr(geom, 'court_shape_local', None) if geom else None
     if court is None or lb.synthetic:
         return place_local_shape(box(*lb.local), fp.x, fp.y, fp.rotation)
-    shape = place_local_shape(court, fp.x, fp.y, fp.rotation)
-    from check_pads import custom_pad_copper, pad_outline_polygon
-    extra = []
-    for pad in (fp.pads or ()):
-        if not _pad_carries_copper(pad):
-            continue
-        try:
-            pp = custom_pad_copper(pad)
-            if pp is None:
-                pts = pad_outline_polygon(pad)
-                pp = Polygon(pts) if len(pts) >= 3 else None
-        except Exception:                                    # noqa: BLE001
-            continue
-        if pp is not None:
-            if pp.is_valid and not shape.contains(pp):
-                extra.append(pp)
-    return unary_union([shape] + extra) if extra else shape
+    return place_local_shape(court, fp.x, fp.y, fp.rotation)
 
 
 def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
@@ -2318,22 +2299,6 @@ def courtyard_gating(blocking_pairs, moved) -> list:
 #: deep, and the six slivers this census also finds are 0.0-0.0075 mm -- the
 #: polygon round-off of two courtyards that touch.
 COURTYARD_ERROR_MIN_DEPTH_MM = 0.01
-
-
-def courtyard_gate_depth_mm(severity: Optional[str]) -> Optional[float]:
-    """The shallowest courtyard pair check_assembly can gate on a project of
-    this `courtyards_overlap` severity (`courtyard_severity_of`): every real
-    pair from `COURTYARD_ERROR_MIN_DEPTH_MM` at `error` (#1385), the run-23
-    blocking floor `COURTYARD_BLOCKING_MIN_DEPTH_MM` otherwise, and None at
-    `ignore`, where no courtyard pair gates. A pair is measured on courtyard
-    plus pad copper (`occupancy_shape`), so a part whose pad copper reaches
-    this far past its drawn courtyard can make a gating pair with a neighbour
-    whose courtyard it never touches (#1588, `body.pad_reach_courtyards`)."""
-    if severity == 'ignore':
-        return None
-    if severity == 'error':
-        return COURTYARD_ERROR_MIN_DEPTH_MM
-    return COURTYARD_BLOCKING_MIN_DEPTH_MM
 
 
 def courtyard_error_pairs(pairs, severity, waivers, *, synthetic_refs=(),

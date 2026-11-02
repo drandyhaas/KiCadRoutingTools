@@ -604,19 +604,15 @@ gate, `place_pose` and the graders:
   other and every seed graded NOT BUILDABLE. It is an input, not a grade: the graders, and
   two declared or locked poses judged against each other
   (`_Part.drawn_rect`), still read what the board draws.
-- **Pad copper past a drawn courtyard (#1588).** `check_assembly` grades a
-  part on its courtyard united with its pad copper, so the same state seats
-  a part whose pads reach past its drawn courtyard on that occupancy's box
-  (`body.pad_reach_courtyards`, `QuenchState.pad_reach`) -- only when they
-  reach as deep as check_assembly gates a pair from on the project
-  (`legality.courtyard_gate_depth_mm`: 0.01 mm at `courtyards_overlap:
-  error`, 0.3 mm otherwise, never at `ignore`). Everything reading `rect`
-  holds the copper: the neighbour test, the anneal's overlap, keep-outs and
-  a template fit. place_simple names those parts once (`pad_overhang`, in
-  each seed's report and in `judge.json`) and falls back to the drawn
-  courtyard as it does for an estimate. Keep-outs read pad copper beside the
-  courtyard on every state, in the grade (`rule_keepout`) and the seat
-  (`pose_ok`).
+- **Pad copper past a drawn courtyard (#1588).** A courtyard pair is
+  graded courtyard on courtyard, as KiCad's `courtyards_overlap` grades it
+  (`legality.occupancy_shape`: a drawn courtyard as drawn, the occupancy box
+  only for a part that draws none), so a neighbour may stand over a pad that
+  reaches past its own courtyard, and the placer seats on the drawn
+  courtyard. place_simple names such parts (more than `PAD_REACH_NOTE_MM`)
+  once, as information (`pad_overhang`, in each seed's report and in
+  `judge.json`). A keep-out is physical, so it reads pad copper beside the
+  courtyard, in the grade (`rule_keepout`) and the seat (`pose_ok`).
 
 [docs/floorplan-intent.md](../../docs/floorplan-intent.md) has the intent's
 rules, and [docs/utilities.md](../../docs/utilities.md) each tool's full

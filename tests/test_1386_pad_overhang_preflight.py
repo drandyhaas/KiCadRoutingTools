@@ -1,13 +1,13 @@
-"""#1386: place_simple prices a part's drawn courtyard, but check_assembly gates
-courtyard PLUS pad copper, so a neighbour can be parked over a pad that reaches
-past its owner's courtyard and the seed grades NOT BUILDABLE.
+"""#1386: place_simple names the parts whose pad copper reaches past their
+drawn courtyard.
 
-The pre-flight now names each part whose pad copper reaches past its drawn
-courtyard as deep as check_assembly gates a pair from (`legality.
-courtyard_gate_depth_mm`: 0.3 mm on this project-less board; locked ones
-marked), before the anneal, and the report carries them (`pad_overhang`).
-Since #1588 the seat holds that copper too (tests/test_1588_pad_reach_seat.py).
-An ordinary part, whose pads sit inside its courtyard, is not named.
+The pre-flight names each part whose pad copper reaches more than
+`PAD_REACH_NOTE_MM` past its drawn courtyard (locked ones marked), before the
+anneal, and the report carries them (`pad_overhang`). Since #1588 it is
+information, not a prediction: check_assembly grades courtyards as drawn, as
+KiCad does, so such a pad gates nothing by itself
+(tests/test_1588_courtyard_as_drawn.py). An ordinary part, whose pads sit
+inside its courtyard, is not named.
 
     python3 tests/test_1386_pad_overhang_preflight.py
 """
@@ -69,9 +69,8 @@ def main():
         evidence(js, 'the place_simple report')
         rep = json.load(open(js))
         ok('the parts whose pads reach past the courtyard are named, locked one marked',
-           'NOTE: pad copper reaches past the drawn courtyard by 0.3 mm or more, the depth '
-           'check_assembly gates a courtyard pair from on this project: J1 1.50 mm '
-           '(locked), J2 1.50 mm;' in r.stdout, r.stdout[-900:])
+           'NOTE: pad copper reaches more than 0.3 mm past the drawn courtyard: '
+           'J1 1.50 mm (locked), J2 1.50 mm;' in r.stdout, r.stdout[-900:])
         ok('... an ordinary part is not, and the report carries the two',
            sorted(rep['pad_overhang']) == ['J1', 'J2'], rep['pad_overhang'])
     if FAILS:

@@ -1226,43 +1226,6 @@ class QuenchState:
                 courtyard_sides_with_estimates(pcb_data, pcb_file,
                                                drawn=self._drawn_courtyards,
                                                skip=frozenset(estimate_skip)))
-        #: #1588: {ref: body.PadReach} -- the parts that draw a courtyard
-        #: their own pad copper reaches past by at least the depth
-        #: check_assembly gates a pair from on this project (`legality.
-        #: courtyard_gate_depth_mm`). check_assembly grades courtyard plus
-        #: pad copper, so with `estimate_courtyards` each is seated on that
-        #: occupancy's box instead of the drawn courtyard, and `rect`,
-        #: `grade_rect` and every test reading them (the neighbour test, the
-        #: anneal's overlap, keep-outs, a template fit) hold the copper as
-        #: they hold a courtyard. A ref in `estimate_skip` keeps what the
-        #: board draws (place_simple's fallback). Empty on every board whose
-        #: pads lie within their courtyards.
-        self.pad_reach: Dict[str, object] = {}
-        #: ...and that depth (mm), None when nothing was measured
-        self.pad_reach_floor: Optional[float] = None
-        if estimate_courtyards:
-            try:
-                from .legality import (courtyard_gate_depth_mm,
-                                       courtyard_severity_of)
-                _floor = courtyard_gate_depth_mm(
-                    courtyard_severity_of(pcb_file)[0])
-            except Exception:                                # noqa: BLE001
-                _floor = None
-            if _floor is not None:
-                from placement.body import pad_reach_courtyards
-                self.pad_reach_floor = _floor
-                self.pad_reach = pad_reach_courtyards(
-                    pcb_data, pcb_file, _floor, skip=frozenset(estimate_skip))
-            if self.pad_reach:
-                courtyards = dict(courtyards)
-                for _ref, _pr in self.pad_reach.items():
-                    _sides = dict(courtyards.get(_ref) or {})
-                    if not _sides:
-                        continue
-                    # the side `courtyard_for_side` reads for the part
-                    _key = _pr.side if _pr.side in _sides else next(iter(_sides))
-                    _sides[_key] = _pr.local
-                    courtyards[_ref] = _sides
         file_locked = set(extract_locked_refs(pcb_file))
         locked_refs = set(file_locked)
         if extra_locked_refs:
