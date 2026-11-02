@@ -23,6 +23,11 @@ The control is G3, a GND pad in the open flood with a stub that grazes a
 foreign pad on its way to a via: KiCad's fill surely joins G3, so the gate
 must still let that stub go.
 
+Since #1608 the default model no longer joins the pocket either (it keeps the
+hole clearance and opens at min_thickness as KiCad does), so on this board
+the prune's own grade already keeps the stub and the trusted gate is a second
+line: tests/test_1608_fill_model_kicad_parity.py pins the default model.
+
 The hole half: at a = 0.72 the copper gap (0.468) passes a conservative model
 without hole clearance, but with min_hole_clearance 0.4 the drill-to-drill gap
 is 0.018 mm and KiCad pours nothing (checked with kicad-cli 10.0.3).
@@ -151,12 +156,11 @@ def main():
         ca, cb = m.query_component(*a), m.query_component(*b)
         return bool(ca) and ca == cb
 
-    print('the mechanism (preconditions -- if one fails the fixture no longer '
-          'tests the bug)')
+    print('the mechanism')
     pcb, gnd, fz = load('ring.kicad_pcb', 0.45, True, 0.15, control=True)
-    check(joined(get_zone_model(pcb, fz)),
-          "the default model joins U1's GND pocket to the flood through the "
-          "0.086 mm gap")
+    check(not joined(get_zone_model(pcb, fz)),
+          "the default model does not join U1's GND pocket to the flood "
+          "through the 0.086 mm gap either (#1608)")
     check(not joined(trusted_zone_model(pcb, fz, {})),
           'the trusted (conservative) model does not: KiCad pours nothing '
           'there')

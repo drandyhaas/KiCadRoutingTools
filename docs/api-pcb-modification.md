@@ -194,10 +194,10 @@ the routing pipeline applies both so the model and the output file agree.
 > **#1581 -- a pour-only join must be one KiCad's fill makes.** A removal
 > that SPLITS the net's copper (the net's copper-only graph gains a
 > component) leaves one side joined to the rest only by the pour, and both
-> grades above read that join off the fill MODEL, which pours channels
-> KiCad does not: its min-thickness opening passes a 45-degree gap down to
-> about 0.07 mm at min_thickness 0.1, and it keeps no hole clearance. So
-> such a removal is graded a third time, with the zone credit taken from
+> grades above read that join off the fill MODEL, a raster of KiCad's fill
+> (since #1608 it keeps the hole clearance and opens at min_thickness as
+> KiCad does, but it is still sampled, and its probe is widened). So such a
+> removal is graded a third time, with the zone credit taken from
 > `plane_fill_model.trusted_zone_model` (passed as
 > `check_net_connectivity(..., fill_model_for=...)`): KiCad's own fill when
 > it is installed, else a CONSERVATIVE `ZoneFillModel` whose free cells are
@@ -205,9 +205,9 @@ the routing pipeline applies both so the model and the output file agree.
 > edge, the zone outline and the board edge, with every foreign drill kept
 > at the board's hole clearance (`fill_hole_clearance`: the declared rule,
 > else pcbnew's factory 0.25), queried at the point's own cell. A path of
-> such cores is fill KiCad pours. Measured: a GND pad ringed by four
-> via-in-pad pins lost its only stub through a 0.086 mm gap and shipped
-> open. Removals that keep a copper path never reach this grade, and the
+> such cores is fill KiCad pours. Measured before #1608: a GND pad ringed
+> by four via-in-pad pins lost its only stub through a 0.086 mm gap and
+> shipped open. Removals that keep a copper path never reach this grade, and the
 > conservative model is never published to the shared caches.
 > `tests/test_1581_graze_prune_pour_only_join.py` pins it, and
 > `tests/test_1581_route_keeps_pour_only_join_kicad.py` grades route.py's
