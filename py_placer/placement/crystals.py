@@ -54,6 +54,8 @@ LEG_MM = 8.1
 #: (174 crystals with a load cap: median 0.81 mm, p75 2.22 mm).
 CAP_MM = 2.2
 
+#: A capacitor's reference, read past a glued qualifier
+#: (`part_class.unqualified_ref`): crkbd's right-half `rC1` too (#1606).
 _CAP_REF = re.compile(r'^C\d')
 
 
@@ -89,6 +91,7 @@ def crystal_claims(pcb, leg_mm: float = LEG_MM, cap_mm: float = CAP_MM
     a leg through a series part, and per load cap, and a line per crystal
     saying what was found. Reads no pose."""
     from .emc_roles import emc_roles
+    from .part_class import unqualified_ref
     with contextlib.redirect_stdout(io.StringIO()):
         roles = emc_roles(pcb).get('roles') or []
     net_name = {nid: (n.name or '') for nid, n in pcb.nets.items()}
@@ -132,7 +135,7 @@ def crystal_claims(pcb, leg_mm: float = LEG_MM, cap_mm: float = CAP_MM
                 'context': {**leg_ctx, 'role': 'crystal series part'}})
         caps = []
         for c in sorted(pcb.footprints):
-            if c == x or not _CAP_REF.match(c):
+            if c == x or not _CAP_REF.match(unqualified_ref(c)):
                 continue
             cu = [p for p in pcb.footprints[c].pads if p.net_id]
             if len(cu) != 2:
