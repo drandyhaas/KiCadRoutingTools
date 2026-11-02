@@ -2185,8 +2185,11 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
         cfg_sj = GridRouteConfig(track_width=track_width, clearance=clearance,
                                  grid_step=grid_step, via_size=via_size,
                                  via_drill=via_drill, layers=all_layers)
-        from kicad_dru import install_layer_clearances
+        from kicad_dru import install_layer_clearances, install_track_clearances
         install_layer_clearances(cfg_sj, None, None, pcb_data)  # #498
+        # #1602: and the track/scoped channels (#1135/#1491): a bridge is a
+        # track, and a class/type-scoped rule binds it like any other
+        install_track_clearances(cfg_sj, None, None, pcb_data)
         nb = close_soft_joints(bridge_results, pcb_data, None, cfg_sj)
         if nb:
             for br in bridge_results:
@@ -4768,6 +4771,13 @@ Examples:
         # block -- so discovering it via pcb_data.source_path found nothing on
         # a fresh output path, and return vias ignored every layer rule.
         install_layer_clearances(gnd_config, None, args.input_file, pcb_data)
+        # #1602: and the track/scoped channels (#1135/#1491), as create_plane
+        # installs them: a class/type-scoped rule binds a return via too.
+        from kicad_dru import install_track_clearances
+        install_track_clearances(
+            gnd_config, None, args.input_file, pcb_data,
+            routed_net_ids=[nid for nid, n in pcb_data.nets.items()
+                            if n.name == args.gnd_via_net] or None)
         coord = GridCoord(gnd_config.grid_step)
 
         # Cross-class clearance (#434/#439), resolved exactly as create_plane

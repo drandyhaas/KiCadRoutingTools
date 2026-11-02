@@ -273,6 +273,39 @@ def plane_repair(td):
           f'{seen}')
 
 
+def gnd_vias(td):
+    print('5. route_planes --add-gnd-vias prices its return vias with the scoped rules')
+    import add_gnd_vias
+    import route_planes
+    b = write_board(td, 'gv', zone_board_text())
+    out = os.path.join(td, 'gv_out.kicad_pcb')
+    seen = []
+    orig = add_gnd_vias.add_gnd_vias_to_existing_board
+
+    def spy(pcb_data, net, dist, config, *a, **kw):
+        seen.append(config.scoped_clearance)
+        return orig(pcb_data, net, dist, config, *a, **kw)
+    add_gnd_vias.add_gnd_vias_to_existing_board = spy
+    argv = sys.argv
+    sys.argv = ['route_planes.py', b, out, '--nets', 'GND', '--plane-layers', 'B.Cu',
+                '--add-gnd-vias', '--gnd-via-net', 'GND']
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                route_planes.main()
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    raise AssertionError(f'BROKEN TEST: route_planes exited {e.code}: '
+                                         f'{buf.getvalue()[-1200:]}')
+    finally:
+        sys.argv = argv
+        add_gnd_vias.add_gnd_vias_to_existing_board = orig
+    check('the GND-via config carries the scoped channel',
+          len(seen) == 1 and seen[0] is not None and seen[0].sc.names == ['HV pads'],
+          f'{seen}')
+
+
 def main():
     td = tempfile.mkdtemp(prefix='t1602_')
     try:
@@ -281,6 +314,7 @@ def main():
         gui(td)
         forwarding(td)
         plane_repair(td)
+        gnd_vias(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)
     if failures:

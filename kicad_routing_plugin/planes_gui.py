@@ -1221,9 +1221,15 @@ class PlanesTab(wx.Panel):
                     # #498: the board's .kicad_dru per-layer clearance rules, read
                     # from the live board's own project file as create_plane does
                     # above -- CLI parity with route_planes main.
-                    from kicad_dru import install_layer_clearances
+                    from kicad_dru import (install_layer_clearances,
+                                           install_track_clearances)
                     install_layer_clearances(gnd_config, None, self.board_filename,
                                              self.pcb_data)
+                    # #1602: and the track/scoped channels, as the CLI does
+                    install_track_clearances(
+                        gnd_config, None, self.board_filename, self.pcb_data,
+                        routed_net_ids=[nid for nid, n in self.pcb_data.nets.items()
+                                        if n.name == gnd_via_net] or None)
                     coord = GridCoord(gnd_config.grid_step)
 
                     # Build obstacle map from PCB data (excluding no nets since we want all obstacles)
