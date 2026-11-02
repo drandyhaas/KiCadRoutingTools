@@ -123,6 +123,13 @@ on its footprint.
     its declared underside, moving with its connector. Unassembled parts with no model (test pads, solder jumpers) get no
     body. A back-side part hangs below the board. Parts off the board lie on
     the table.
+- **Shield cans not drawn yet** (#1573): a can the design brief's `cans[]`
+  declares by `wall_mm` rather than by a footprint `ref` compiles to a
+  block's `fence_mm` band round its zone; that band is drawn on its face as
+  see-through grey walls, as tall as the can's declared room inside (2 mm
+  when no height is declared), so the viewer sees the cans the placement is
+  held to. Any intent block with a `fence_mm` is drawn the same way. A drawn
+  can is a footprint, and is drawn as one.
 - **Airwires**: the nets the objective prices (ground is left out), as one
   spanning tree per net, recomputed every frame.
 - **Text**: place_movie's caption at the top left, and the group key along the

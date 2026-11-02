@@ -61,6 +61,36 @@ function buildBoard(sc) {
   return board;
 }
 
+// The walls of the shield cans not drawn yet (#1573, record.py can_walls):
+// the band `w` wide round each zone, a see-through wall `h` tall on its face,
+// a child of the board so it turns over with it and a seed grid's board
+// clones carry it.
+function buildWalls(sc, board) {
+  const d = sc.thickness;
+  const col = rgb(sc.colors.wall);
+  const mat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.4, metalness: 0.6,
+                                               transparent: true, opacity: 0.4, depthWrite: false });
+  const lm = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.8 });
+  const loop = (pts) => pts.map((p) => new THREE.Vector2(p[0], p[1]));
+  for (const W of sc.walls || []) {
+    const [x0, y0, x1, y1] = W.zone, w = W.w;
+    const s = new THREE.Shape(loop([[x0 - w, y0 - w], [x1 + w, y0 - w], [x1 + w, y1 + w], [x0 - w, y1 + w]]));
+    s.holes.push(new THREE.Path(loop([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])));
+    const g = new THREE.ExtrudeGeometry(s, { depth: W.h, bevelEnabled: false });
+    g.rotateX(Math.PI / 2);           // shape (x, y) -> three (x, z); depth -> -y, as the board
+    const edges = new THREE.EdgesGeometry(g);
+    for (const side of W.sides) {
+      const up = side === 'F' ? 1 : -1;
+      const m = new THREE.Mesh(g, mat);
+      m.position.y = up > 0 ? d + W.h : 0;      // y in [d, d + h] on top, [-h, 0] below
+      sided(m, 3, up);
+      const e = new THREE.LineSegments(edges, lm);
+      e.position.copy(m.position);
+      board.add(m, e);
+    }
+  }
+}
+
 function buildTable(sc) {
   const [x0, y0, x1, y1] = sc.bounds;
   const span = 40 * Math.max(x1 - x0, y1 - y0, 20);     // past the frame, even round the seed grid
@@ -839,6 +869,7 @@ window.m3dInit = async function (o) {
   const root = new THREE.Group();
   world.add(root);
   root.add(buildBoard(sc));
+  if (sc.walls) buildWalls(sc, S.boardMesh);
   buildParts(sc, root);
   buildAir(sc, root);
   if (sc.copper) buildCopper(sc, root);

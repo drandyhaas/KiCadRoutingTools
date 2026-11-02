@@ -19,7 +19,9 @@ camera closes in, and each anneal snapshot plays as a short move with a hop.
 
 Writes two JSON files into --work, which the page (page/movie3d.mjs) draws:
 
-  scene.json     the board (outline, cutouts, thickness), every part in its
+  scene.json     the board (outline, cutouts, thickness, and the walls of
+                 the shield cans the intent fences but no footprint draws
+                 yet), every part in its
                  OWN frame (pads, courtyard, a body box with a height by part
                  kind), its side and group colour, the nets the airwires join,
                  the key and the colours; and, from models.py, the parts'
@@ -86,6 +88,10 @@ PREFIX_HEIGHTS = {'R': 0.35, 'C': 0.5, 'L': 0.8, 'FB': 0.5, 'D': 0.45, 'LED': 0.
                   'P': 3.0, 'BT': 3.0, 'F': 1.0}
 #: Parts drawn by their courtyard (mechanical bodies), not by their pad field.
 COURT_BODY = ('J', 'P', 'SW', 'S', 'BT')
+#: A shield can's wall, when nothing declares the room under the can: its
+#: height (mm), and its colour (tin-plated steel).
+WALL_H = 2.0
+WALL_RGB = (176, 180, 188)
 
 
 def _prefix(ref):
@@ -193,6 +199,30 @@ def part_scene(ref, fp, part, colour, fixed, board_area=0.0):
             'dnp': bool(getattr(fp, 'dnp', False))}
 
 
+def can_walls(intent):
+    """The walls of the shield cans not drawn yet (#1573): each block's
+    `fence_mm` band round its zone -- what a `cans[]` row with `wall_mm`
+    compiles to, and the band its fence keep-outs hold clear -- on the face
+    the block names (both when it names none, as the keep-outs do). A wall
+    stands as tall as the room a height keep-out declares over the same zone
+    on that face, plus the cover margin it was declared less (a can's
+    `interior_height_mm`), else WALL_H. A drawn can is a footprint already,
+    and needs nothing here."""
+    from placement.heights import MARGIN_MM
+    walls = []
+    for z in intent.blocks:
+        if not z.fence_mm or z.rect is None:
+            continue
+        sides = [z.side] if z.side else ['F', 'B']
+        room = [float(k['max_height_mm']) for k in intent.keepouts
+                if k.get('max_height_mm') is not None and k.get('rect') is not None
+                and tuple(k['rect']) == tuple(z.rect) and set(sides) & set(k['sides'])]
+        walls.append({'name': z.name, 'sides': sides, 'zone': [round(v, 4) for v in z.rect],
+                      'w': round(z.fence_mm, 4),
+                      'h': round(min(room) + MARGIN_MM if room else WALL_H, 4)})
+    return walls
+
+
 class Recorder(Story):
     """The placement story, recorded as timeline rows for the 3D page. The
     Story (placement_story.py) decides what happens when; this supplies the
@@ -239,6 +269,10 @@ class Recorder(Story):
         fixed_rgb = (120, 118, 108)
         if len(self.movable) < len(st.parts):
             key.append({'rgb': list(fixed_rgb), 'mark': 'solid', 'text': 'fixed'})
+        from placement import floorplan
+        walls = can_walls(floorplan.load_intent(args.intent)) if args.intent else []
+        if walls:
+            key.append({'rgb': list(WALL_RGB), 'mark': 'ring', 'text': 'shield can wall (not drawn yet)'})
         # every part place_simple models, and any other footprint with pads
         # (a pad-less logo it does not model is left out)
         self.refs = sorted(r for r in pcb.footprints if not r.startswith('#')
@@ -293,7 +327,7 @@ class Recorder(Story):
         self.scene = {
             'thickness': round(self.d, 4), 'real_thickness': round(real, 4), 'table': TABLE, 'bounds': [bx0, by0, bx1, by1],
             'outline': outline, 'cutouts': cutouts, 'parts': parts, 'nets': nets, 'key': key,
-            'glb': None, 'board_alpha': BOARD_ALPHA,
+            'walls': walls, 'glb': None, 'board_alpha': BOARD_ALPHA,
             # the poses the models are exported at: the page re-poses each by
             # F(now) F(export)^-1
             'export_poses': {r: [pcb.footprints[r].x, pcb.footprints[r].y,
@@ -303,7 +337,7 @@ class Recorder(Story):
                        'hole': list(th.rgb('pad_hole')), 'air': [150, 162, 185],
                        'table': [34, 36, 40], 'moved': [255, 255, 255],
                        'band': list(th.rgb('chrome_band')), 'text': list(th.rgb('chrome_text')),
-                       'best': list(th.rgb('status_best'))}}
+                       'best': list(th.rgb('status_best')), 'wall': list(WALL_RGB)}}
         diag = math.hypot(bx1 - bx0, by1 - by0)
         self.arc = min(15.0, max(2.5, 0.15 * diag))
 
