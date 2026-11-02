@@ -13,6 +13,11 @@ When this skill is invoked with a KiCad PCB file, perform a comprehensive analys
 emits the plan as an executable artifact and then PROVES it, with a checker
 that refuses by name rather than a paragraph you are trusted to have read.
 
+**Settle one question before the first chain: whose rules does the project
+hold?** Step 4's "Whose rules does the project hold?" decides it once, and
+every sizing rule after it (the fab floor, the escalation policy, the
+DRC-settings writeback) is conditional on the answer.
+
 There is no driver here, and that is deliberate (the staged placement drivers
 were retired too, for `/plan-pcb-placement`). Routing's failure mode is the CHAIN
 being wrong, not a judgement being wrong, so what this half needs is a checker
@@ -570,6 +575,69 @@ power net the analysis could not trace gets the width its IPC-2221 table gives
 for your estimate. Settle the widths here: changing them after the board is
 routed means routing it again.
 
+### Whose rules does the project hold? (decide once, before the first chain; #1599)
+
+The floors in the board's `.kicad_pro` / `.kicad_dru` (Board Setup >
+Constraints, the net classes, the custom rules) are one of two things, and the
+sizing advice in the rest of this skill depends on which. **Do not infer it
+from the numbers.** Take it from the user's own words or the design brief's
+free-text `product` fields when either says it; otherwise ask the user ONCE,
+with the plan, before the first chain, and state the answer at the top of the
+plan report. When nobody can be asked (an unattended stress or corpus run, a
+recorded replay), the answer is "aspirational", which is how every recorded
+manifest routes.
+
+- **Aspirational stock rules** (a corpus or stress board, a stock template
+  nobody tuned, a human layout that itself routes under its own classes:
+  zynq's reference violates its 0.2 class 499 times, routed at about 0.1).
+  The defaults stand: `--escalation fab` (a failing net may descend below the
+  board's own minimums, down to the fab tier floor) and the DRC-settings
+  writeback on (the output project's floors are lowered to the copper routed,
+  so KiCad grades the board at the floor it ships with). The fab-floor advice
+  below ("Route signals at the FAB floor by default", Step 2c item 1, the
+  fanout retry at the manufacturing floor) is for these boards. Report the
+  floors the run lowered: route.py's end-of-run `Design rules [...]` line, and
+  `check_complete.py`'s verdict reason, which DISCLOSES (without counting it
+  against the verdict) each floor the project declared before the first
+  writeback (its recorded `fab_floor_origin`) that copper now sits below,
+  with a count of the objects below it.
+- **The user's own product rules** (the floors are what their fab or their
+  spec allows). The board's minimums ARE the floor, and nothing goes below
+  them by default:
+  - `--escalation board` on every step that takes it (`route.py`,
+    `route_diff.py`, `route_planes.py`, `bga_fanout.py`, `qfn_fanout.py`, and
+    `repair_planes.py` if it runs). A descent then stops at the board's own
+    `rules.min_*` (an unset key falls back to the fab tier floor, an unset
+    `min_clearance` to the Default class), a via never rings below
+    `min_via_annular_width` (#1579), and a non-Default net never descends below
+    its own class. `--escalation off` instead when no size may move at all: a
+    net that cannot complete at the requested geometry fails and is reported
+    (only a wide power/impedance net may neck, for at most 2 mm at a pad entry).
+  - `--no-fix-drc-settings` on every one of those steps AND on
+    `place_fanout_clearance.py` (which takes no `--escalation`). The output
+    then ships the input's project as authored, and under `board` a descent
+    stops at what KiCad grades that unchanged project at. (GUI: the Route
+    tab's Escalation choice, and "Fix DRC settings after routing" unticked.)
+  - Request no size below the board's minimums. `--track-width`,
+    `--via-size` / `--via-drill` come from the Board Setup constraints that
+    `list_nets.py --design-rules` prints, not from the fab floor; leave
+    `--clearance` / `--clearance-ceiling` (and the cap pass's `--clearance`)
+    OMITTED so each class routes at its own clearance, as the project grades
+    it; leave `--hole-to-hole-clearance` / `--board-edge-clearance` omitted
+    too (they then read the board's own). Neither flag above stops an explicit
+    request: it is drawn as asked, floored only at the physical fab floor.
+  - Every descent is a DECISION for the user, not one the run makes. Each one
+    is a `design_rules` row in the step's `JSON_SUMMARY` (net, kind,
+    requested, delivered, site) and in the `Design rules [...]` line; report
+    them per net class and kind, with what each bought (the nets the same step
+    leaves open at `--escalation off`), and keep one only when the user agrees.
+    `--strict-sizes` makes any descent fail the step (exit 3).
+  - At the end, `check_complete.py <routed> --authored-from <input board>`
+    measures the copper against the floors the input project declared and
+    names every size floor broken, with a count of the tracks, vias or holes
+    below it (verdict UNSOUND). That count is the disclosure; with the flags
+    above it should read nothing relaxed.
+
 ### Read the board's design rules and pass them to the CLI
 
 With a size flag omitted, the router takes the board's **Default net class**
@@ -605,6 +673,12 @@ for fine-pitch boards (#111/#115):**
   floors.** `--design-rules` reads them from `design_settings.rules` and combines
   them with the JLCPCB fab minimum (backstop when a Constraint is 0/unset — e.g.
   `min_clearance` is frequently 0) into a single **manufacturing floor**.
+
+The list below is written for **aspirational rules** (the decision above).
+On the **user's own rules**, read every "fab floor" in it as the board's own
+Board Setup minimum, leave the clearance flags omitted, and carry
+`--escalation board` (or `off`) and `--no-fix-drc-settings` on every step:
+nothing here licenses going below the board's minimums on such a board.
 
 Use the printed flags as-is:
 
@@ -651,7 +725,8 @@ Use the printed flags as-is:
   (`--via-size`/`--via-drill` toward the fab via floor). A tighter track+gap fits a
   narrower channel, and smaller vias fit a tight pad pitch (measured: lumenpnp
   USB_D's two 0.5 mm vias collide by 0.1 mm at the connector pitch — a smaller via
-  clears it). Step **toward, never below**, the fab floors, and keep `--impedance`
+  clears it). Step **toward, never below**, the fab floors (the board's own
+  minimums on the user's own rules), and keep `--impedance`
   so the ohms target is held as the geometry shrinks.
 
   **Necking is floored at the FAB minimum, not at your spec width.** When the
@@ -695,7 +770,10 @@ Use the printed flags as-is:
   keep and honour the other net classes otherwise, so a bare `--clearance` does
   not lower the class a dropped ball sits in (#1529) (never below it — the floor is the rule the human
   board passes DRC against, so tightening board-wide is manufacturable and needs
-  no rule-area settings). If still short, also try the smaller **fine-pitch escape
+  no rule-area settings). That retry is for aspirational rules: on the user's
+  own rules, under `--no-fix-drc-settings`, a ceiling below a net class routes
+  copper the unchanged project grades as clearance violations, so it is a
+  descent to put to the user (Whose rules, above). If still short, also try the smaller **fine-pitch escape
   via** (below) and/or a narrower `--track-width` toward the floor. Do not proceed
   to signal routing with `failed > 0` unexpected — those balls are dropped from the
   output and will fail later as "no rippable blockers".
@@ -1720,7 +1798,11 @@ Nudges decoupling caps near the BGA off the foreign-net fanout vias (the
 ball. Run it on the fully-fanned board — after the LAST fanout, **before**
 signal routing. Use the
 **same `--clearance`** you gave the fanout / your DRC floor — that's the only
-setting that matters (it reads each via's real size from the board).
+setting that matters (it reads each via's real size from the board). Here
+`--clearance` is a CEILING (#768): every net class is priced at
+`min(class, value)` and the output project's classes are clamped down to it.
+On the user's own rules (Step 4, "Whose rules") omit it, so each pair is priced
+at its own class, and pass `--no-fix-drc-settings`.
 
 python3 py_placer/place_fanout_clearance.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
     --clearance 0.1
@@ -1750,8 +1832,12 @@ copper came from. Grade with `check_drc.py` before acting: the repair pass
 deliberately over-blocks a track on a layer the board never declared, so some
 of these grade clean and some are real. By default (`--cap-prefix C,R,FB`) it moves 2-pad
 **caps, resistors and ferrite beads** near a BGA (RN-style arrays auto-excluded since only
-2-copper-pad parts move); it never overlaps parts, and is a no-op when nothing
-collides. Feed `board_step1c.kicad_pcb`
+2-copper-pad parts move); it never overlaps parts, and moves nothing when
+nothing collides. That zero-move run still WRITES the output project (#769):
+given `--clearance`, every net class is clamped down to it, and the size
+floors follow only the copper the pass laid or moved (a #313 via nudge), so a
+run that moved nothing lowers no size floor (#1578). `--no-fix-drc-settings`
+writes none of it and carries the input's project through as it was. Feed `board_step1c.kicad_pcb`
 into the next step. **With multiple BGAs, run it ONCE after the LAST fanout,
 not after each.** The pass is board-global — it reads every via on the board
 (`for v in pcb_data.vias`) and every BGA footprint for the same-net ball
@@ -1933,10 +2019,18 @@ since been reverted (item 2).
    --via-drill 0.15`
    The fab-floor clamps pin track/clearance/via UP automatically (with a
    warning) on boards whose layer count can't take them — passing those
-   four is always safe. The clamp is the PHYSICAL fab floor: an explicit
-   size is never pinned up to the `--fab-tier` floor or the board's own
-   minimums. Grading stays honest via the `.kicad_pro` floor
-   writeback.
+   four always yields a size the fab can make. The clamp is the PHYSICAL
+   fab floor: an explicit size is never pinned up to the `--fab-tier` floor
+   or the board's own minimums. **This item is for aspirational rules only**
+   (Step 4, "Whose rules"). The `.kicad_pro` floor writeback then lowers the
+   output project's floors to the copper routed, so KiCad and `check_drc`
+   grade the board at the floor it ships with -- which is the intent there,
+   and is also exactly why a board below its authored floors grades clean.
+   What the writeback lowered is disclosed by route.py's `Design rules [...]`
+   line and counted by `check_complete.py` (per floor, against the recorded
+   `fab_floor_origin`, or `--authored-from <input>`). On the user's own
+   rules, skip item 1: route at the board's minimums with
+   `--no-fix-drc-settings`.
    **EXCEPTION — `--hole-to-hole-clearance` does NOT clamp**: route.py
    board-derives h2h only when the flag is OMITTED and honors an explicit
    value verbatim, while `check_drc` pins its grade UP to the board's
@@ -3157,7 +3251,10 @@ Rules of the loop:
 - **Bounded, guided adjustment — not a grid sweep.** At most 2–3 targeted
   re-runs per step, each driven by a diagnosed failure mode (the symptom→knob
   table below and the failure-pattern table in Diagnose and Retry). Never
-  loosen below the fab/board-constraint floor.
+  loosen below the floor Step 4's "Whose rules" decision set: the fab tier
+  floor on aspirational rules, the board's own Board Setup minimums on the
+  user's own rules (where a descent below them is the user's call, not a
+  tuning knob).
 - **Signals to read after each step:** the `JSON_SUMMARY` line (failed nets,
   `rescue` block, `single_ended_diff_pairs`/`failed_diff_pairs`,
   `drc_grazes`), the FAILED NET HISTORIES block (`preexisting_blockers`
@@ -3306,7 +3403,7 @@ After running routing commands:
 | "no rippable blockers found" | Route blocked by non-rippable obstacle | Use `--no-bga-zones`; if pads are "boxed in by static obstacles", shrink geometry / finer grid (see "Route signals at the FAB floor by default" below) |
 | "Re-route FAILED: no path found" | Ripped net couldn't find new path | Capacity problem (`--max-iterations` self-extends, #529): `--max-ripup`, clearance, or layers |
 | Many multipoint pads failed on same component | Congested area | Shrink geometry toward the fab floor (see below); keep `--max-ripup` at ~5 (deeper measured worse) |
-| Many failures cluster in one channel/region | Tracks too fat for the channel | **Congestion escalation**: re-route the whole signal step (not just the failed nets) at smaller track/via/clearance down to the fab floor (see "Route signals at the FAB floor by default" below) |
+| Many failures cluster in one channel/region | Tracks too fat for the channel | **Congestion escalation**: re-route the whole signal step (not just the failed nets) at smaller track/via/clearance down to the fab floor on aspirational rules, the board's own minimums on the user's own (see "Route signals at the FAB floor by default" below) |
 | 2-layer board: low completion, via count far above a hand layout, or copper badly skewed to F.Cu while B.Cu sits empty | Default B.Cu cost (3.0×) over-penalizes the back layer | Retry with balanced `--layer-costs 1.0 1.5` (down toward `1.0 1.0`) — see "Dense 2-layer boards: rebalance layer costs" below |
 | Routes near BGA boundary failing | BGA exclusion zone too aggressive | Use `--no-bga-zones` |
 
@@ -3376,12 +3473,18 @@ boards stay 100% connected at every setting — the win is via count and balance
 
 #### Route signals at the FAB floor by default (thin is faster AND more complete)
 
+**Scope: aspirational rules only** (Step 4, "Whose rules does the project
+hold?"). On the user's own product rules the board's `min_track_width` IS the
+floor: route at it with `--escalation board` (or `off`) and
+`--no-fix-drc-settings`, and put any thinner track to the user as a decision.
+
 **`track_width` and `via_diameter` are NOT DRC floors** (Step 4), and — this is
 the subtlety — **the fab floor is NOT the board's `min_track_width` constraint
 either.** Three different numbers get confused here; keep them straight:
 
 - **Board `min_track_width`** (from `.kicad_pro`, often 0.2 mm) — the
-  author's self-imposed DRC rule. Often conservative. Note `list_nets
+  author's self-imposed DRC rule. On aspirational stock rules it is often
+  conservative; on the user's own rules it is the floor. Note `list_nets
   --design-rules` reports the "Manufacturing floor" line's track as `max(this, JLC
   min)` (labelled `DRC track floor = board min_track_width`), so that number is
   **clamped to this constraint** (0.2) — do not treat it as the routing target
@@ -3412,8 +3515,9 @@ hunt for.
 
 1. **Take the fab floor**, not the board constraint: the fab's physical track
    minimum (JLC 0.0889 mm / 3.5 mil; use 0.127 mm / 5 mil for a zero-cost,
-   high-yield default). Going below the board's `min_track_width` is intended here
-   — it's what the human did. (Keep DRC honest separately: grade at the clearance
+   high-yield default). On aspirational rules, going below the board's
+   `min_track_width` is intended here — it's what the human did (on the
+   user's own rules it is not; see the scope note above). (Keep DRC honest separately: grade at the clearance
    floor from `--design-rules`; a thinner track only *increases* clearance to
    neighbours, so it never creates a clearance violation.)
 2. **Route the whole signal step at that width** (re-route everything, not just the
