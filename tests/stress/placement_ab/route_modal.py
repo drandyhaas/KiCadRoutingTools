@@ -146,7 +146,9 @@ def deploy(app, src, corpus, tree, files):
     shutil.copy2(os.path.join(HERE, 'route_placed.py'), os.path.join(sd, 'route_placed.py'))
     sha = subprocess.run(['git', '-C', src, 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(['git', '-C', src, 'status', '--porcelain'], capture_output=True, text=True).stdout.strip()
-    prov = f"{src}@{sha}{'+dirty' if dirty else ''} {app}"
+    # Forward slashes: the string rides into the image's env, where Modal
+    # unescapes it, so a Windows `G:\gitwork\...` fails the build on `\g`.
+    prov = f"{src.replace(os.sep, '/')}@{sha}{'+dirty' if dirty else ''} {app}"
     log = os.path.join(CACHE, f'deploy_{app}.log')
     print(f'deploying {app} ({prov}); log {log}', flush=True)
     env = {**os.environ, 'KRT_PAB_STAGE': sd, 'KRT_PAB_APP': app, 'KRT_PAB_PROV': prov}
