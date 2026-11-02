@@ -2694,6 +2694,8 @@ class RoutingDialog(wx.Dialog):
             # without it REPLACES a net's existing pour, as route_planes does.
             if hasattr(_po, 'skip_existing_zones'):
                 _po.skip_existing_zones.SetValue(False)
+            if hasattr(_po, 'fewest_plane_layers'):
+                _po.fewest_plane_layers.SetValue(False)
         except Exception:
             pass
         # #581: the via-in-pad policy controls live on the Basic tab now

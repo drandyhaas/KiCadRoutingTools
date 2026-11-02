@@ -3063,6 +3063,17 @@ def _stitch_plane_area_vias(
 _LAST_PAD_TALLY: dict = {}
 
 
+_LAST_PLANE_PACKING: Dict = {}
+
+
+def consume_plane_packing() -> dict:
+    """the last create_plane's --fewest-plane-layers record (plane_packing.pack_plane_layers: the poured pairs, the
+    layers each supply went to, the layers freed), then cleared; {} when it did not pack"""
+    out = dict(_LAST_PLANE_PACKING)
+    _LAST_PLANE_PACKING.clear()
+    return out
+
+
 def consume_pad_tally() -> dict:
     """Take (and clear) the last pour's pad tally."""
     global _LAST_PAD_TALLY
@@ -3215,6 +3226,7 @@ def create_plane(
     stitch_fence_pitch: Optional[float] = None,
     stitch_inset: Optional[float] = None,
     stitch_max_freq: Optional[float] = None,
+    fewest_plane_layers: bool = False,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -3259,6 +3271,7 @@ def create_plane(
         _empty_plane_results (never a short tuple).
     """
     _dump_engine_config('create_plane', dict(locals()))
+    _args0 = dict(locals())                 # (the call's own arguments: a packing's trial splits run on them)
     if all_layers is None:
         all_layers = ['F.Cu', 'B.Cu']
 
@@ -3292,6 +3305,19 @@ def create_plane(
     # Whether the CALLER handed us live board state decides who is authoritative
     # about existing zones further down (see Step 2).
     _live_pcb_data = pcb_data is not None
+    _LAST_PLANE_PACKING.clear()
+    if fewest_plane_layers:
+        # FEWEST PLANE LAYERS (plane_packing): the plan's supplies packed onto the fewest of the layers it gave them
+        # that still serve every BGA ball through copper no narrower than each net's declared power width, the layers
+        # beside a ground plane freed first -- each layer tried by a dry run of this engine on that layer alone, at
+        # this call's own settings (a caller's live board copied for each). The run then pours the packed pairs
+        import copy as _copy
+        from plane_packing import pack_plane_layers, PACK_OWN_ARGS
+        net_names, plane_layers, layer_nets, _rec = pack_plane_layers(
+            input_file, list(net_names), list(plane_layers),
+            {k: v for k, v in _args0.items() if k not in PACK_OWN_ARGS},
+            pcb_data=_copy.deepcopy(pcb_data) if _live_pcb_data else None)
+        _LAST_PLANE_PACKING.update(_rec)
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
@@ -4416,6 +4442,10 @@ Examples:
                              "via-in-pad. Default: the project's recorded value, else -1.")
 
     # Debug options
+    parser.add_argument("--fewest-plane-layers", action="store_true",
+                        help="Pack the supplies (every plane net but the ground family, whose planes stand as named) "
+                             "onto the FEWEST of the layers --plane-layers gives them that still serve every BGA ball "
+                             "of each, the rest of those layers left free for signals (plane_packing)")
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--skip-existing-zones", action="store_true",
                         help="Keep an existing same-net zone (don't recreate); "
@@ -4626,12 +4656,8 @@ Examples:
     # GUI's (the planes tab's Cancel button); the CLI passes neither. There is
     # deliberately no wall-clock budget -- no result this tool produces may
     # depend on timing.
-    create_plane(
-        input_file=args.input_file,
-        output_file=args.output_file,
+    plane_kw = dict(
         ripup_blocker_select=args.ripup_blocker_select,
-        net_names=net_names,
-        plane_layers=plane_layers,
         via_size=args.via_size,
         via_drill=args.via_drill,
         track_width=args.track_width,
@@ -4651,7 +4677,6 @@ Examples:
         all_layers=args.layers,
         verbose=args.verbose,
         dry_run=args.dry_run,
-        layer_nets=layer_nets,
         board_edge_clearance=args.board_edge_clearance,
         voronoi_seed_interval=args.voronoi_seed_interval,
         plane_max_iterations=args.plane_max_iterations,
@@ -4666,7 +4691,14 @@ Examples:
         clamp_netclasses=args._clamp_netclasses,
         clearance_ceiling=args._clearance_ceiling,
         net_clearances=_explicit_nc,
+        fewest_plane_layers=args.fewest_plane_layers,
     )
+    create_plane(input_file=args.input_file, output_file=args.output_file, net_names=net_names,
+                 plane_layers=plane_layers, layer_nets=layer_nets, **plane_kw)
+    # (--fewest-plane-layers: the pairs the engine packed and poured)
+    _pack = consume_plane_packing() or None
+    if _pack and _pack.get('pairs'):
+        net_names, plane_layers = [p_[0] for p_ in _pack['pairs']], [p_[1] for p_ in _pack['pairs']]
 
     _wrote_output = bool(args.output_file) and os.path.isfile(args.output_file) and (
         _out_before is None or os.path.getmtime(args.output_file) != _out_before)
@@ -4886,13 +4918,10 @@ Examples:
     # the record entirely. Run 14 poured GND on both inner layers and its
     # summary said `"plane_nets": ["GND"]`. Keep that key as it was -- consumers
     # read it -- and state the actual zones alongside.
-    try:
-        _layers = list(getattr(args, 'plane_layers', None) or [])
-        _summary["plane_zones"] = [
-            {"net": _n, "layer": (_layers[_i] if _i < len(_layers) else None)}
-            for _i, _n in enumerate(args.nets)]
-    except Exception:                                       # noqa: BLE001
-        pass
+    # (the pairs POURED: --fewest-plane-layers moves supplies off the layers --plane-layers named)
+    _summary["plane_zones"] = [{"net": _n, "layer": _L} for _n, _L in zip(net_names, plane_layers)]
+    if _pack is not None:
+        _summary["fewest_plane_layers"] = _pack
     # #487: the plane resistance/ampacity numbers used to live only in stdout
     # ("report-only ... print and discard"). Fold the per-net results the
     # engine noted into the machine-readable summary so chains/graders/skills

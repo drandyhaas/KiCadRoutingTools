@@ -398,6 +398,7 @@ BOOL_FLAGS = {
     # "Skip existing zones" box; reset unticked, so a step WITHOUT the flag
     # replaces the pour, as the CLI does).
     '--skip-existing-zones': 'skip_existing_zones',
+    '--fewest-plane-layers': 'fewest_plane_layers',
     '--no-gnd-vias': 'no_gnd_vias',
     # route.py spells it --no-bga-zones (plural, nargs='*'); bga_fanout uses the
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).

@@ -353,6 +353,21 @@ class CreatePlanesOptionsPanel(wx.Panel):
         zone_sizer.Add(self.skip_existing_zones, 0,
                        wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # route_planes.py --fewest-plane-layers, named after the create_plane
+        # param (plane_packing). Unchecked is the CLI default: every net is
+        # poured on the layer the plan names.
+        self.fewest_plane_layers = wx.CheckBox(
+            self, label="Fewest plane layers (pack the supplies, free layers for signals)")
+        self.fewest_plane_layers.SetValue(False)
+        self.fewest_plane_layers.SetToolTip(
+            "Checked: the supplies (every plane net but the ground family, whose "
+            "planes stay as named) are packed onto the fewest of the layers they "
+            "were given that still serve every BGA ball, each pour no narrower "
+            "than its net's declared power width; the layers beside a ground "
+            "plane are freed first, for signals.")
+        zone_sizer.Add(self.fewest_plane_layers, 0,
+                       wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         sizer.Add(zone_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # (No Blocker Handling box: the pour step does no routing (#562
@@ -541,6 +556,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'thermal_relief': self.thermal_relief.GetValue(),
             'thermal_vias': self.thermal_vias.GetValue(),
             'skip_existing_zones': self.skip_existing_zones.GetValue(),
+            'fewest_plane_layers': self.fewest_plane_layers.GetValue(),
             'stitch_vias': self.stitch_vias.GetValue(),
             'stitch_pitch': self.stitch_pitch.GetValue(),
             # 0 = auto/off in the controls -> None for the engine (CLI parity)
@@ -1141,6 +1157,9 @@ class PlanesTab(wx.Panel):
                 # `replace_existing`). It was hardcoded True, so the GUI could
                 # never replay a step that omitted the flag.
                 skip_existing_zones=config.get('skip_existing_zones', False),
+                # The "Fewest plane layers" checkbox (route_planes.py
+                # --fewest-plane-layers): the supplies packed (plane_packing).
+                fewest_plane_layers=config.get('fewest_plane_layers', False),
                 net_clearances=_plane_net_clearances,
                 clamp_netclasses=_plane_clamp,
                 clearance_ceiling=_plane_ceiling,

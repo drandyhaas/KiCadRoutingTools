@@ -122,13 +122,45 @@ A net earns a zone on a shared layer if it has **any** connection point there �
 
 A net with **no copper at all** on the layer still earns one. Because pours run before routing (#562), a virgin *inner* layer carries neither vias nor pads — every pad is SMD on an outer layer — so a requested inner split plane used to produce **zero zones** for *both* nets, with only a buried `no vias or pads on layer, skipping zone` warning to show for it (issue #598). Such a net is now seeded from its pads **projected onto the layer** (their x/y, whatever layer the copper sits on, off-board pads excluded): those positions exist regardless of routing state, they are where the route step's pour-launch vias come down, and they partition the layer the way the components themselves are spread over the board. These are partition seeds only — they never enter the via list, so no MST edge or spine is invented for them, and a net that has seeds of its own is untouched. (A pad the route step drops to this plane is a virtual via on the net's spines already, so the projection seeds only a net with none.)
 
+### Fewest Plane Layers (`--fewest-plane-layers`)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--fewest-plane-layers` | off | Pack the plan's supplies onto the fewest of their layers that still serve every BGA ball, the rest of those layers left free for signals (`plane_packing.py`) |
+
+The `--nets` / `--plane-layers` pairs are the plan; with this option its
+**supplies** -- every plane net but the ground family, whose planes stand as
+named -- are moved onto as few of the layers the plan gave them as will serve
+them. First fit, the supplies with the most BGA balls first: each goes onto the
+first layer already in use that still serves every supply on it, else onto the
+next of the plan's layers. A layer is tried by a dry run of this step on that
+layer alone (the same split, the same settings), and it serves its supplies
+when every BGA ball of each, and every other pad of the net its pour covers, is
+reached by that net's pour through copper **no narrower than the net's declared
+power width** (`--power-nets` / `--power-nets-widths`): the net's share of the
+layer (its pours less the pours above them, grown by their clearance), shrunk
+by half that width, still reaches within half the width of each. A neck or a
+finger narrower than the width vanishes, and a pad behind one is unserved. A
+net with no declared width is held to reaching its balls at all.
+
+The layers taken **last** are the ones beside a ground plane in the stackup
+(the plan's ground-family layers), so the layers freed for signals each have a
+ground plane beside them, as the outer signal layers do. The run names the
+packing (`fewest planes: ...`), the freed layers and any freed layer with no
+ground plane beside it; `JSON_SUMMARY.plane_zones` lists the pairs poured and
+`JSON_SUMMARY.fewest_plane_layers` the record. Each trial is a dry run of the
+step on one layer, so the option costs a few of the step's own runs.
+
+The GUI planes tab exposes it as the "Fewest plane layers" checkbox, unticked by
+default as on the CLI.
+
 ### Re-routing Options (accepted, no effect on the pour)
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--no-bga-zone`, `--no-bga-zones` | off | Was: disable BGA auto-exclusion zones when re-routing ripped nets |
-| `--power-nets` | - | Was: glob patterns for power nets to re-route with wider tracks |
-| `--power-nets-widths` | - | Was: track widths in mm for each power-net pattern |
+| `--power-nets` | - | Was: glob patterns for power nets to re-route with wider tracks. With `--fewest-plane-layers`, the supplies whose declared width the packing holds their pours to |
+| `--power-nets-widths` | - | Was: track widths in mm for each power-net pattern. With `--fewest-plane-layers`, each supply's declared width: its pour must reach every ball and covered pad through copper no narrower |
 | `--ripup-blocker-select` | `count` | Blocker selection algorithm for a rip-up ladder ([rip-up-reroute.md](rip-up-reroute.md)) |
 
 These are still parsed, so recorded commands keep working, but the pour has
@@ -595,6 +627,7 @@ The plane generation code is organized into several modules:
 | `plane_zone_geometry.py` | Voronoi cells for a shared layer's split, polygon clipping, route sampling for the cells' seeds |
 | `plane_split_raster.py` | The shared layer's raster finishing: regions on one label grid, fills modelled as KiCad pours them, octilinear outlines |
 | `plane_resistance.py` | Resistance analysis - calculates plane resistance and max current capacity |
+| `plane_packing.py` | `--fewest-plane-layers`: the plan's supplies packed onto the fewest of their layers that serve every BGA ball through copper no narrower than each net's declared width, the layers beside a ground plane freed first |
 
 ### Key Functions
 

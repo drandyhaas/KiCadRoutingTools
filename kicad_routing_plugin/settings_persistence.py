@@ -241,6 +241,7 @@ def get_dialog_settings(dialog):
         'planes_thermal_relief': dialog.planes_tab.create_options.thermal_relief.GetValue(),
         'planes_thermal_vias': dialog.planes_tab.create_options.thermal_vias.GetValue(),
         'planes_skip_existing_zones': dialog.planes_tab.create_options.skip_existing_zones.GetValue(),
+        'planes_fewest_plane_layers': dialog.planes_tab.create_options.fewest_plane_layers.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
         'planes_stitch_vias': dialog.planes_tab.create_options.stitch_vias.GetValue(),
@@ -784,6 +785,9 @@ def restore_dialog_settings(dialog, settings):
     if 'planes_skip_existing_zones' in settings:
         dialog.planes_tab.create_options.skip_existing_zones.SetValue(
             bool(settings['planes_skip_existing_zones']))
+    if 'planes_fewest_plane_layers' in settings:
+        dialog.planes_tab.create_options.fewest_plane_layers.SetValue(
+            bool(settings['planes_fewest_plane_layers']))
     if 'planes_add_gnd_vias' in settings:
         dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
     if 'planes_gnd_via_distance' in settings:
