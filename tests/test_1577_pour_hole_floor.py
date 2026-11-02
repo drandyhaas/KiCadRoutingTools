@@ -113,7 +113,7 @@ def vias_clear(td):
     check('the pour placed vias (the case under test)',
           'New vias placed: 0' not in log and 'New vias placed' in log, log[-600:])
     check('the banner names the held floor',
-          'Copper-to-hole floor written at 0.2 mm' in log, log[-600:])
+          "Copper-to-hole floor this step's copper holds: 0.2 mm" in log, log[-600:])
     got = rules(out).get('min_hole_clearance')
     check('min_hole_clearance kept at 0.2 (it was 0.16)', got == 0.2, str(got))
     return src

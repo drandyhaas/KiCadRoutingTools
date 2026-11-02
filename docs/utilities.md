@@ -3137,7 +3137,10 @@ write the copper clearance, which the delivered fill then followed. `route.py`
 (#1493), the fanouts, `bga_fanout.py`, `qfn_fanout.py` and the Fanout tab
 (#1568), and the pours, `route_planes.py`, `repair_planes.py` and the Planes
 tab (#1577), write it the same way, and a floor written under the board's own
-is a `hole_clearance` row in `JSON_SUMMARY.design_rules`.
+is a `hole_clearance` row in `JSON_SUMMARY.design_rules`. A writeback only
+ever lowers this floor: a step whose copper holds more than the project
+already declares says so (`Copper-to-hole floor stays ...`) rather than
+raising it.
 
 The `#530` cap lowers `rules.min_clearance` to the smallest pad clearance
 override the run honoured (KiCad floors an override there). That number

@@ -2729,10 +2729,13 @@ def step_hole_clearance(input_pcb, output_pcb, clearance, verbose=True, ledger=T
         except Exception:                                    # noqa: BLE001
             pass
     if verbose and v is not None:
+        # The step's TARGET, not what the project ends up declaring: the
+        # writer only ever lowers a floor, so a project an earlier step left
+        # lower keeps its value (the writer says so).
         why = (f"its own copper sits {step_min:g} mm from a foreign hole"
                if step_min is not None and step_min < held else
                "its own copper clears every foreign hole by it")
-        print(f"  Copper-to-hole floor written at {v:g} mm: the step held "
+        print(f"  Copper-to-hole floor this step's copper holds: {v:g} mm -- it held "
               f"{held:g} mm and {why} (#1369)")
     return v
 
@@ -2956,6 +2959,17 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
             f"kicad_routing_tools.{CLASS_CLEARANCE_RELAXED_CLASSES_KEY}: recorded"]
         LAST_PROJECT_WRITES[:] = list(changes)
     _ccr_lines = list(_ccr_lines) + nondefault_class_descent_disclosure(_lowered_classes)
+    # A copper-to-hole floor this step needs ABOVE the one the project already
+    # declares is not written: the writer only lowers. Say so, or the step's
+    # "holds X" reads as the project's value.
+    _hc_now = _rules_before.get("min_hole_clearance")
+    _hc_want = targets.get("min_hole_clearance") if hole_clearance is not None else None
+    if isinstance(_hc_now, (int, float)) and _hc_want is not None \
+            and _hc_want > _hc_now + _FLOOR_EPS:
+        _ccr_lines = list(_ccr_lines) + [
+            f"  Copper-to-hole floor stays {_hc_now:g} mm, below the "
+            f"{_hc_want:g} mm this step's copper holds: a routing step never "
+            f"raises a floor, so the lower value an earlier step wrote stands"]
     if not changes:
         if verbose:
             print(f"  DRC settings already consistent ({out_pro})")

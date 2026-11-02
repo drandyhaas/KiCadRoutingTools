@@ -79,8 +79,8 @@ def test_route_diff_keeps_the_held_hole_floor():
         got = rules_of(out).get('min_hole_clearance')
         check('min_hole_clearance is the held 0.25, not the copper clearance',
               near(got, 0.25), got)
-        check('the writeback says what it wrote and why',
-              'Copper-to-hole floor written at 0.25 mm' in log)
+        check('the writeback says what the step holds and why',
+              "Copper-to-hole floor this step's copper holds: 0.25 mm" in log)
         check('no min_hole_clearance write is listed',
               'rules.min_hole_clearance:' not in log)
 
