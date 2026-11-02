@@ -296,6 +296,20 @@ def _designator(ref: str) -> str:
     return _prefix(re.split(r'[_\-.]', ref or '')[-1])
 
 
+#: A lower-case qualifier glued in front of an upper-case designator.
+_GLUED_QUALIFIER = re.compile(r'^[a-z]+(?=[A-Z])')
+
+
+def unqualified_ref(ref: str) -> str:
+    """`ref` with a lower-case qualifier glued in front of its designator set
+    aside: `C1` for `rC1`, the way crkbd numbers its right half (`rC1`,
+    `rU1`, `rY1`) as a copy of its left (#1606). Any other reference comes
+    back unchanged. A qualifier behind a separator (`_designator`'s
+    `PWR_SW1`) is NOT read here: as a passive's designator it reads the
+    connector `USB_C1` and the keyboard diode `D_C1` as capacitors."""
+    return _GLUED_QUALIFIER.sub('', ref or '', count=1)
+
+
 def _prefix(ref: str) -> str:
     m = _PREFIX_RE.match(ref or '')
     return (m.group(1) if m else '').upper()
