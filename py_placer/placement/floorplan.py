@@ -11089,7 +11089,8 @@ def _decap_mode(v) -> str:
 def _emitted_basis(decaps, budget, conns, blocks,
                    assembly=None, band_default=(),
                    decaps_basis: Optional[str] = None,
-                   pin_basis: Optional[str] = None) -> Dict[str, str]:
+                   pin_basis: Optional[str] = None,
+                   depth_floor=()) -> Dict[str, str]:
     """`{intent path: basis}` for every number the emitter chose: what it
     READ off this board is `observed_baseline`; a constant of this module is
     `derived_default`. The envelope RECT is not here -- it is the outline,
@@ -11115,6 +11116,10 @@ def _emitted_basis(decaps, budget, conns, blocks,
                 out[f"edge_connectors[{c['ref']}].{k}"] = (
                     'derived_default' if k == 'overhang_mm'
                     and c['ref'] in band_default else 'observed_baseline')
+        # #1603: a band floor read off the part's 3D model is this code's
+        # number, whatever the band's ceiling is
+        if c['ref'] in depth_floor and 'overhang_mm' in c:
+            out[f"edge_connectors[{c['ref']}].overhang_mm.min"] = 'derived_default'
     for b in blocks or ():
         for k in ('side', 'zone'):
             if k in b:
@@ -11448,6 +11453,11 @@ def emit_intent(pcb_data, pcb_file: str, *,
     #: default band, the sanity cap, the affinity floor) rather than a band
     #: read off the part -- labelled `derived_default`, not an observation.
     band_default = set()
+    #: #1603: refs whose `overhang_mm.min` is read off their 3D model's body
+    #: at board depth (`heights.depth_past_edge`), likewise `derived_default`
+    depth_floor = set()
+    from .connector_geometry import band_amount, courtyard_overhang_past
+    from .heights import depth_past_edge
     for ref in sorted(parts):
         near = _at_edge_gate.rect_outside_amount(parts[ref].rect)
         # the overhang the grade reads its band on, at zero margin (#1301)
@@ -11574,6 +11584,33 @@ def emit_intent(pcb_data, pcb_file: str, *,
                         f"{body['body_outside_mm']:.3f}mm overhang "
                         f"({body['body_layer']}), wider than the occupancy "
                         f"reading {amt:.3f}mm it would otherwise use")
+                # #1603: a part whose own 3D model has body at board depth
+                # (an edge-mount jack the board slides into) must overhang
+                # far enough to keep that body off the board. The band's
+                # floor is how far past the edge it reads now, less how far
+                # the part could move in before check_assembly's gate reads
+                # that body on the board (`depth_past_edge`) -- in the band's
+                # own currency, so the seat puts the part there, never wholly
+                # on the board (a `min` of 0 did). Never above the reading
+                # (this pose grades its band clean), and a number of this
+                # code, not an observation: `derived_default`.
+                past = depth_past_edge(state.heights, pcb_data, ref, entry['edge'])
+                if past is not None:
+                    reading = band_amount(
+                        _overhang_geo, ref, entry['edge'],
+                        courtyard_overhang_past(_overhang_geo, erect[ref],
+                                                entry['edge'])[0], 0.0)[0]
+                    floor = math.floor(max(0.0, min(reading, reading - past))
+                                       * 1000.0) / 1000.0
+                    if floor > legality.EPS:
+                        entry['overhang_mm']['min'] = floor
+                        depth_floor.add(ref)
+                        entry['note'] = (
+                            (entry['note'] + '; ' if entry.get('note') else '')
+                            + f"band min {floor:.3f}mm from the part's 3D "
+                              f"model: with less overhang its body at board "
+                              f"depth is on the board, which check_assembly "
+                              f"gates (#1603)")
             if declare_classes and pc is not None \
                     and pc.name in ('edge_receptacle', 'edge_actuator'):
                 entry['class'] = pc.name
@@ -12034,6 +12071,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # merged over it re-labels what it declares.
             'basis': _emitted_basis(
                 _decaps, _budget, conns, blocks, _assembly, band_default,
+                depth_floor=depth_floor,
                 decaps_basis=(_census.get('decaps_basis')
                               if str(_census.get('decaps_basis') or '')
                               .startswith('reference:') else None),

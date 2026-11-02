@@ -21,7 +21,8 @@ Trust nothing it told you. Measure it yourself, from the repo root.
 3. **Every mode** (read the whole output, not the first line):
    - `python3 -X utf8 py_tools/check_assembly.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD>`: must be buildable
      (`--baseline` arms the courtyard gate: a pair a moved part entered gates). It names
-     pad copper past the outline and any part on a PCB-edge plug's mating region (`mating_keepout_refs`);
+     pad copper past the outline, any part on a PCB-edge plug's mating region (`mating_keepout_refs`)
+     and any part whose own 3D model is through the board (`BODY THROUGH THE BOARD`, `body_in_board`);
      name each one in your verdict. A part still in the staging pile is pad copper off the outline, so it is
      in `oob_pad_copper_gating_refs`; any such part on the board you grade is a FAIL. (`place_simple` names
      the parts it left illegal in its `JSON_SUMMARY` line, `illegal`, and exits 4, not in the ledger.)

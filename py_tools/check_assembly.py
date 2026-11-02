@@ -1092,6 +1092,40 @@ def main():
                      and r not in rule_gating else ''))
         if len(rule_items) > 20:
             print(f"    ... and {len(rule_items) - 20} more (--json lists every one)")
+    # #1603, the FOURTEENTH: a part whose own 3D model has body at board
+    # depth -- strictly between the board's faces -- inside the outline: a
+    # body through the laminate. An edge-mount SMA jack whose board slides
+    # into its slot, placed wholly on the board, graded `buildable` with
+    # ~12 mm of flange and barrel through the board. Absolute, like #1096's
+    # pad copper off the outline: no pose of a part puts its body through a
+    # board it can be built on, and a lock does not exempt it. Its own pads
+    # and drilled holes are left out (a lead in its hole), so is a cutout (a
+    # mid-mount part over its slot), and a body that starts on the edge reads
+    # nothing. Read off the same export as the heights, so a board kicad-cli
+    # cannot export is reported unmeasured and does not gate, as every
+    # height rule is skipped there.
+    from placement import heights as _heights
+    try:
+        through = _heights.body_in_board(
+            _heights.for_board(pcb, args.board, declared_heights), pcb)
+    except Exception as exc:                                 # noqa: BLE001
+        through = {'rows': [], 'gating_refs': [], 'count': 0,
+                   'unmeasured': f'{type(exc).__name__}: {str(exc)[:120]}',
+                   'basis': None}
+    through_gating = list(through['gating_refs'])
+    if through['rows']:
+        print(f"  BODY THROUGH THE BOARD ({len(through_gating)} part(s) GATE): "
+              f"a part's own 3D model is at board depth inside the outline"
+              + (" -- NOT BUILDABLE" if through_gating else ''))
+        for r in through['rows']:
+            b = r['box']
+            print(f"    {r['ref']} {r['area_mm2']}mm2 at x {b[0]}..{b[2]}, "
+                  f"y {b[1]}..{b[3]}"
+                  + ('' if r['gates'] else
+                     f"  [under {_heights.DEPTH_MIN_MM2:g}mm2: a model drawn "
+                     f"low, never gates]"))
+    elif through['unmeasured']:
+        print(f"  body through the board: not measured ({through['unmeasured']})")
     # #1250, the NINTH: a test point a move left under another part's body
     # (`tp_gating`, above). #1255, the TENTH: a body inside the body-to-edge
     # band the intent DECLARES (`edge_band_gating`, empty when undeclared).
@@ -1100,7 +1134,7 @@ def main():
                          or courtyard_gating or off_outline_pads or mating
                          or graphic_gating
                          or pin_hits or tp_gating or edge_band_gating
-                         or own_gating or rule_gating)
+                         or own_gating or rule_gating or through_gating)
     verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
 
@@ -1289,6 +1323,15 @@ def main():
                                          if moved_refs is not None else None),
             'graphic_pad_unmeasured': _gp_un,
             'graphic_pad_basis': leg.get('graphic_pad_basis'),
+            # #1603: parts whose own 3D model is at board depth inside the
+            # outline -- a conjunct, absolute. `body_in_board` lists every
+            # part with any such cell (`gates` per row); None (not 0) when
+            # the models could not be read, with the reason.
+            'body_in_board_count': (len(through_gating)
+                                    if not through['unmeasured'] else None),
+            'body_in_board': through['rows'],
+            'body_in_board_unmeasured': through['unmeasured'],
+            'body_in_board_basis': through['basis'],
             # #1306: one part's own pads touching on two real nets -- a
             # conjunct, measured (an int) with or without --baseline, which
             # only exempts the pairs its footprint already had.
