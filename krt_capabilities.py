@@ -100,7 +100,7 @@ KNOWN_MODULES = (
 FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
                 'repair_planes.py', 'place_simple.py',
                 'check_drc.py', 'check_floorplan.py',
-                'bga_fanout.py', 'qfn_fanout.py')
+                'bga_fanout.py', 'qfn_fanout.py', 'autoplan.py')
 # NOT here, deliberately: `place_pose.py`. This tuple's contract, enforced by
 # `tests/test_798_registrar_flags.py`, is that every flag the source registers
 # is visible in `--help` as an option and accepted by the top-level parser.

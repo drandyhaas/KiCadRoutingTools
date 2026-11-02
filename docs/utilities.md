@@ -2516,6 +2516,12 @@ Options:
                      `no_route_pass` (a board from another step, or the input)
                      or `no_board`, each with `why` and a null `route_summary`.
                      A file already at FILE is removed when the run starts.
+  --fab-tier {standard,advanced,auto}, --fab-overrides FILE, --escalation {off,board,fab}
+                     The shared fab flags: autoplan's floors (step 1) come
+                     from them, and each one given is passed to every step
+                     that takes them (planes, fanout, diff pairs, route) and
+                     to the check_drc that grades each step; the decap step
+                     takes none.
 ```
 
 The chain, each step's arguments, return code, iterations and grade are

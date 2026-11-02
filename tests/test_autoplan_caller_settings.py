@@ -33,6 +33,18 @@ them autoplan runs the chain it ran before they existed.
    own power_widths record reads back at 0.4), --finish on that routed board
    (the input ships, no pass), and a refused run, which leaves no stale file
    behind.
+5. --fab-tier, --fab-overrides, --escalation: autoplan's floors are the
+   tier's (JLC's standard via 0.45/0.20 under standard, never the advanced
+   0.25/0.15), the override file's values, or the board's own rules under
+   board (a project written here). Each flag the caller types is recorded
+   as typed, a default value included, and a relative file as its absolute
+   path; a missing file is refused (exit 2) before any step, and the stale
+   --json-out document is gone. Chain.run and Chain.check_drc pass them to
+   exactly the tools whose own parser lists all three (read off each tool's
+   --help), and to none without a caller setting. On a routed sonde_u, given
+   the file by a relative path, the route step's own parser read it (its
+   unknown-key warning, in that step's log), route.py's own summary reports
+   the tier and policy, and every track is at least the file's width.
 """
 import json
 import os
@@ -335,9 +347,9 @@ def test_power_nets_refused():
     assert len(FAILS) == n, FAILS[n:]
 
 
-def _autoplan(*argv):
+def _autoplan(*argv, cwd=None):
     return subprocess.run([sys.executable, '-X', 'utf8', SCRIPT, *argv],
-                          capture_output=True, text=True, timeout=1800)
+                          capture_output=True, text=True, timeout=1800, cwd=cwd)
 
 
 def test_run():
@@ -544,9 +556,160 @@ def test_keep_pours_run():
     assert len(FAILS) == n, FAILS[n:]
 
 
+FAB_FLAGS = ('--fab-tier', '--fab-overrides', '--escalation')
+
+
+def _analysis(board, *argv, cwd=None):
+    r = _autoplan(board, os.devnull + '.kicad_pcb', '--dry-run', *argv, cwd=cwd)
+    m = re.search(r'^AUTOPLAN_ANALYSIS: (\{.*\})$', r.stdout, re.M)
+    return json.loads(m.group(1)) if r.returncode == 0 and m else None
+
+
+def _floors(a):
+    return a and {k: a[k] for k in ('clearance', 'track', 'via', 'drill',
+                                    'fine_via', 'fine_drill')}
+
+
+def test_fab_floors():
+    print("--fab-tier / --fab-overrides / --escalation: autoplan's own floors")
+    n = len(FAILS)
+    with tempfile.TemporaryDirectory() as tmp:
+        board = os.path.join(tmp, 'b.kicad_pcb')
+        with open(POURED) as src, open(board, 'w') as dst:
+            dst.write(src.read())
+        json.dump({'board': {'design_settings': {'rules': {
+            'min_clearance': 0.2, 'min_track_width': 0.25}}}},
+            open(os.path.join(tmp, 'b.kicad_pro'), 'w'))
+        floor = os.path.join(tmp, 'floor.txt')
+        open(floor, 'w').write('clearance = 0.2\ntrack_width = 0.2\n'
+                               'via_diameter = 0.6\nvia_drill = 0.3\n')
+
+        a = _analysis(board)
+        expect(a and (a['fine_via'], a['fine_drill']) == (0.25, 0.15)
+               and a['clearance'] < 0.2 and 'fab_args' not in a,
+               f"the fixture: by default the fine via is the advanced 0.25/0.15 and "
+               f"the clearance under the board's 0.2 ({_floors(a)})")
+        a = _analysis(board, '--fab-tier', 'standard')
+        expect(a and min(a['via'], a['fine_via']) >= 0.45
+               and min(a['drill'], a['fine_drill']) >= 0.2,
+               f"--fab-tier standard: no via under JLC's standard 0.45/0.20 ({_floors(a)})")
+        a = _analysis(board, '--fab-overrides', floor)
+        expect(a and (a['clearance'], a['track'], a['fine_via'], a['fine_drill'])
+               == (0.2, 0.2, 0.6, 0.3) and a['via'] >= 0.6 and a['drill'] >= 0.3,
+               f"--fab-overrides: the file's clearance, track and via ({_floors(a)})")
+        a = _analysis('b.kicad_pcb', '--fab-overrides', 'floor.txt', cwd=tmp)
+        expect(a and a.get('fab_args') == ['--fab-overrides', os.path.realpath(floor)],
+               f"a relative file is recorded as its absolute path ({a and a.get('fab_args')})")
+        a = _analysis(board, '--fab-tier', 'auto', '--escalation', 'fab')
+        expect(a and a.get('fab_args') == ['--fab-tier', 'auto', '--escalation', 'fab'],
+               f"a flag given at its default value is recorded ({a and a.get('fab_args')})")
+        a = _analysis(board, '--escalation', 'board')
+        expect(a and (a['clearance'], a['track']) == (0.2, 0.25),
+               f"--escalation board: the board's own min_clearance and "
+               f"min_track_width ({_floors(a)})")
+        out = os.path.join(tmp, 'o.kicad_pcb')
+        js = os.path.join(tmp, 'o.json')
+        open(js, 'w').write('{"status": "route_pass"}')
+        check([sys.executable, '-X', 'utf8', SCRIPT, board, out, '--json-out', js,
+               '--fab-overrides', os.path.join(tmp, 'missing.txt')],
+              refuse='missing.txt is no file', code=2)
+        expect(not os.path.exists(out + '.autoplan') and not os.path.exists(js),
+               "a missing file: no step ran, and the earlier document is gone")
+    assert len(FAILS) == n, FAILS[n:]
+
+
+def _takes_fab_flags(path):
+    r = subprocess.run([sys.executable, '-X', 'utf8', path, '--help'],
+                       capture_output=True, text=True, timeout=300)
+    return r.returncode == 0 and all(f in r.stdout for f in FAB_FLAGS)
+
+
+def test_fab_steps():
+    print("the fab flags reach the steps whose own parser takes them, and only those")
+    n = len(FAILS)
+    takes = {k: _takes_fab_flags(p) for k, p in AP.TOOLS.items()}
+    expect(sum(takes.values()) >= 4 and not all(takes.values()),
+           f"the fixture: some step tools take the flags and some do not ({takes})")
+    flags = ['--fab-tier', 'standard', '--escalation', 'off', '--fab-overrides', '/F']
+    with tempfile.TemporaryDirectory() as tmp:
+        stub = os.path.join(tmp, 'stub.py')
+        open(stub, 'w').write('raise SystemExit(0)\n')
+        orig = dict(AP.TOOLS)
+        AP.TOOLS.update({k: stub for k in AP.TOOLS})
+        try:
+            for fab in (flags, []):
+                ch = AP.Chain(os.path.join(tmp, 'in.kicad_pcb'), tmp, fab_args=fab)
+                for kind in orig:
+                    ch.run(kind, ['{IN}', '--x'], kind)
+                for kind, step in zip(orig, ch.steps):
+                    want = [ch.cur, '--x'] + (fab if takes[kind] else [])
+                    expect(step['argv'][0] == stub and step['argv'][1:] == want,
+                           f"{kind} ({'takes' if takes[kind] else 'does not take'} them), "
+                           f"{'with' if fab else 'without'} a caller setting: "
+                           f"{' '.join(step['argv'][2:]) or 'nothing'} added")
+        finally:
+            AP.TOOLS.clear()
+            AP.TOOLS.update(orig)
+
+        drc = os.path.join(AP.HERE, 'check_drc.py')
+        takes_drc = _takes_fab_flags(drc)
+        expect(takes_drc, "the fixture: check_drc's own parser takes them")
+        log = os.path.join(tmp, 'drc_argv.json')
+        open(os.path.join(tmp, 'check_drc.py'), 'w').write(
+            'import json, sys\n'
+            f'json.dump(sys.argv[1:], open({log!r}, "w"))\n'
+            'json.dump({"violations": 0, "items": []}, '
+            'open(sys.argv[sys.argv.index("--json") + 1], "w"))\n')
+        here = AP.HERE
+        AP.HERE = tmp
+        try:
+            for fab in (flags, []):
+                ch = AP.Chain(os.path.join(tmp, 'in.kicad_pcb'), tmp, fab_args=fab)
+                d = ch.check_drc(os.path.join(tmp, 'in.kicad_pcb'))
+                argv = json.load(open(log))
+                expect(d is not None and (argv[-len(fab):] == fab if fab
+                                          else not set(FAB_FLAGS) & set(argv)),
+                       f"the grading check_drc, {'with' if fab else 'without'} a caller "
+                       f"setting: {' '.join(argv[argv.index('--json') + 2:]) or 'nothing'} added")
+        finally:
+            AP.HERE = here
+    assert len(FAILS) == n, FAILS[n:]
+
+
+def test_fab_run():
+    print("a real run: sonde_u under --fab-tier standard --escalation off --fab-overrides")
+    n = len(FAILS)
+    with tempfile.TemporaryDirectory() as tmp:
+        floor = os.path.join(tmp, 'floor.txt')
+        open(floor, 'w').write('clearance = 0.2\ntrack_width = 0.2\nnot_a_floor_key = 1\n')
+        out = os.path.join(tmp, 'routed.kicad_pcb')
+        js = os.path.join(tmp, 'autoplan.json')
+        r = _autoplan(SONDE, out, '--keep-pours', '--json-out', js, '--fab-tier', 'standard',
+                      '--escalation', 'off', '--fab-overrides', 'floor.txt', cwd=tmp)
+        expect(r.returncode == 0, f"autoplan exits 0 (rc={r.returncode})")
+        if r.returncode:
+            print(r.stdout[-3000:], r.stderr[-3000:])
+            raise AssertionError('autoplan failed')
+        doc = json.load(open(evidence(js, '--json-out document')))
+        route = [s for s in doc['steps'] if s['tool'] == 'route']
+        warned = [s['tag'] for s in route if "not_a_floor_key" in
+                  open(os.path.join(out + '.autoplan', s['log'])).read()]
+        expect(route and warned == [s['tag'] for s in route],
+               f"each route step's own parser read the file ({warned})")
+        rules = (doc['route_summary'] or {}).get('design_rules') or {}
+        expect((rules.get('fab_tier'), rules.get('escalation_policy')) == ('standard', 'off'),
+               f"route.py's own summary: tier standard, policy off "
+               f"({rules.get('fab_tier')}, {rules.get('escalation_policy')})")
+        widths = sorted({s.width for s in parse_kicad_pcb(out).segments})
+        expect(widths and widths[0] >= 0.2 - 1e-6,
+               f"every track is at least the file's 0.2 ({widths[:4]})")
+    assert len(FAILS) == n, FAILS[n:]
+
+
 def main():
     for t in (test_defaults, test_power_nets_steps, test_power_nets_refused,
-              test_keep_pours_plan, test_keep_pours_run, test_shipped_record, test_run):
+              test_keep_pours_plan, test_keep_pours_run, test_shipped_record, test_run,
+              test_fab_floors, test_fab_steps, test_fab_run):
         before = len(FAILS)
         try:
             t()
