@@ -23,6 +23,16 @@ them autoplan runs the chain it ran before they existed.
    full chain runs no planes step and is otherwise the default chain. On a
    routed sonde_u every pour ships as the input drew it (its zone text up to
    the fill: uuid, clearance, pad connection, outline).
+4. --json-out: each route pass, and no other step, runs with route.py's own
+   --json-out; the document carries that file's object for the pass that
+   shipped, verbatim, the step that shipped and the chain plan.json has.
+   Every other outcome says so in `status`, with a null summary: a pass
+   whose summary is missing, a board from a step that is no pass (the
+   diff-pair reroute, the input under --finish), no board at all. Real runs:
+   splitflap_driver routed (with --power-nets /CLOCK_IN at 0.4, which route.py's
+   own power_widths record reads back at 0.4), --finish on that routed board
+   (the input ships, no pass), and a refused run, which leaves no stale file
+   behind.
 """
 import json
 import os
@@ -111,13 +121,13 @@ A = dict(layers=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'], clearance=0.09,
          parts=[('U1', 'bga', 0.8), ('U2', 'qfn', 0.4), ('U3', 'mezz', 0.4)])
 
 
-def chain_runs(a, finish=False):
+def chain_runs(a, finish=False, **kw):
     """[(chain, kind, tag, args)] of every step run_plan builds for A."""
     ch = Recorder(input_grade=G(7) if finish else None)
     orig = AP.Chain
-    AP.Chain = lambda *args, **kw: ch
+    AP.Chain = lambda *args, **k: ch
     try:
-        AP.run_plan('IN', 'OUT', a, 'WORK', finish=finish, effort_factor=4.0)
+        AP.run_plan('IN', 'OUT', a, 'WORK', finish=finish, effort_factor=4.0, **kw)
     finally:
         AP.Chain = orig
     return [('finish' if finish else 'full', k, t, args) for k, t, args in ch.runs]
@@ -330,12 +340,14 @@ def _autoplan(*argv):
                           capture_output=True, text=True, timeout=1800)
 
 
-def test_power_nets_run():
-    print("--power-nets on a real run: splitflap_driver, /CLOCK_IN at 0.4")
+def test_run():
+    print("a real run: splitflap_driver, --power-nets /CLOCK_IN at 0.4, --json-out")
     n = len(FAILS)
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, 'routed.kicad_pcb')
-        r = _autoplan(BOARD, out, '--power-nets', '/CLOCK_IN', '--power-nets-widths', '0.4')
+        js = os.path.join(tmp, 'autoplan.json')
+        r = _autoplan(BOARD, out, '--power-nets', '/CLOCK_IN', '--power-nets-widths', '0.4',
+                      '--json-out', js)
         expect(r.returncode == 0, f"autoplan exits 0 (rc={r.returncode})")
         if r.returncode:
             print(r.stdout[-3000:], r.stderr[-3000:])
@@ -350,6 +362,102 @@ def test_power_nets_run():
         expect(segs and wide >= 0.9 * length(segs),
                f"/CLOCK_IN copper is drawn at 0.4 ({wide:.1f} of {length(segs):.1f} mm)")
         expect(all(s.width <= 0.4 + 1e-6 for s in segs), "and none of it wider")
+
+        doc = json.load(open(evidence(js, '--json-out document')))
+        plan = json.load(open(out + '.autoplan/plan.json'))
+        shipped = [s for s in plan['steps']
+                   if s.get('log') == os.path.basename(plan['final'])[:-len('.kicad_pcb')] + '.log']
+        expect(len(shipped) == 1 and doc['status'] == 'route_pass'
+               and doc['shipped_step'] == shipped[0]['tag']
+               and doc['shipped_board'] == os.path.basename(plan['final']),
+               f"a route pass shipped, and the document names it "
+               f"({doc['status']}, {doc['shipped_step']}, {doc['shipped_board']})")
+        argv = shipped[0]['argv'] if shipped else []
+        mine = argv[argv.index('--json-out') + 1] if '--json-out' in argv else None
+        expect(mine and doc['route_summary'] == json.load(open(evidence(mine, 'route.py summary'))),
+               "its summary is the object route.py's own --json-out wrote for that pass")
+        pw = ((doc['route_summary'] or {}).get('power_widths') or {}).get('/CLOCK_IN') or {}
+        expect(pw.get('requested_mm') == 0.4,
+               f"route.py's own record: /CLOCK_IN requested at 0.4 ({pw.get('requested_mm')})")
+        expect(all(doc[k] == plan[k] for k in ('analysis', 'steps', 'final', 'grade')),
+               "the chain and grade are plan.json's")
+        expect([s['tag'] for s in plan['steps'] if '--json-out' in s['argv']]
+               == [s['tag'] for s in plan['steps']
+                   if s['tool'] == 'route' and s['tag'] != 'reroute_pairs'],
+               "every route pass ran with --json-out")
+
+        print("--finish on the routed board: the input ships, and the document says no pass did")
+        fin = os.path.join(tmp, 'finished.kicad_pcb')
+        js2 = os.path.join(tmp, 'finished.json')
+        r = _autoplan(out, fin, '--finish', '--json-out', js2)
+        expect(r.returncode == 0, f"--finish exits 0 (rc={r.returncode})")
+        doc = json.load(open(evidence(js2, '--json-out document')))
+        expect(doc['status'] == 'no_route_pass' and doc['route_summary'] is None
+               and doc['shipped_step'] == 'input' and 'input' in doc.get('why', ''),
+               f"status no_route_pass, the input named, no summary ({doc['status']}, "
+               f"{doc['shipped_step']}, {doc.get('why')})")
+
+        print("a refused run leaves no stale document")
+        open(js, 'w').write('{"status": "route_pass"}')
+        check([sys.executable, '-X', 'utf8', SCRIPT, BOARD, out, '--json-out', js,
+               '--power-nets', 'NOPE'], refuse='give one width per pattern', code=2)
+        expect(not os.path.exists(js), "the earlier document is gone")
+    assert len(FAILS) == n, FAILS[n:]
+
+
+class Steps:
+    """A finished chain's steps, as Chain records them."""
+
+    def __init__(self, steps):
+        self.steps = steps
+
+
+def test_shipped_record():
+    print("--json-out: each outcome, said in its status")
+    n = len(FAILS)
+    with tempfile.TemporaryDirectory() as tmp:
+        def step(i, tool, tag, summary=None):
+            stem = os.path.join(tmp, f'step{i:02d}_{tag}')
+            if summary is not None:
+                json.dump(summary, open(stem + '.summary.json', 'w'))
+            return {'tool': tool, 'tag': tag, 'ok': True, 'log': os.path.basename(stem) + '.log'}
+        board = lambda i, tag: os.path.join(tmp, f'step{i:02d}_{tag}.kicad_pcb')
+        summary = {'successful': 12, 'failed': 1, 'power_widths': {'GND': {'requested_mm': 0.3}}}
+        ch = Steps([step(1, 'planes', 'planes'), step(2, 'route', 'reroute_pairs'),
+                    step(3, 'route', 'route', {'successful': 9}), step(4, 'route', 'route_p2', summary),
+                    step(5, 'route', 'route_p3')])
+        d = AP.shipped_record(ch, board(4, 'route_p2'))
+        expect(d['status'] == 'route_pass' and d['route_summary'] == summary
+               and d['shipped_step'] == 'route_p2' and 'why' not in d,
+               f"the shipped pass's own summary, verbatim ({d})")
+        d = AP.shipped_record(ch, board(5, 'route_p3'))
+        expect(d['status'] == 'route_pass_without_summary' and d['route_summary'] is None
+               and 'route_p3' in d['why'], f"a shipped pass with no summary says so ({d})")
+        d = AP.shipped_record(ch, board(2, 'reroute_pairs'))
+        expect(d['status'] == 'no_route_pass' and d['route_summary'] is None
+               and 'from reroute_pairs' in d['why'],
+               f"the reroute is a route step but no pass ({d})")
+        d = AP.shipped_record(ch, board(1, 'planes'))
+        expect(d['status'] == 'no_route_pass' and d['shipped_step'] == 'planes',
+               f"the last step that succeeded, named ({d})")
+        d = AP.shipped_record(ch, os.path.join(tmp, 'input.kicad_pcb'))
+        expect(d['status'] == 'no_route_pass' and d['shipped_step'] == 'input'
+               and d['route_summary'] is None, f"the input under --finish ({d})")
+        d = AP.shipped_record(ch, None)
+        expect(d['status'] == 'no_board' and d['shipped_board'] is None
+               and d['route_summary'] is None, f"no board at all ({d})")
+
+    print("--json-out: route pass commands")
+    runs = chain_runs(dict(A), route_json=True) + chain_runs(dict(A), finish=True, route_json=True)
+    for c, k, t, args in runs:
+        flagged = '--json-out' in args
+        want = k == 'route' and t != 'reroute_pairs'
+        expect(flagged == want and (not flagged or args[args.index('--json-out') + 1] == '{JSON}'),
+               f"{c} {t}: {'--json-out {JSON}' if want else 'no --json-out'}")
+    plain = [(c, k, t, ' '.join(a for i, a in enumerate(args)
+                                if '--json-out' not in args[max(i - 1, 0):i + 1]))
+             for c, k, t, args in runs]
+    expect(plain == GOLDEN, "and every command is otherwise the default one")
     assert len(FAILS) == n, FAILS[n:]
 
 
@@ -438,7 +546,7 @@ def test_keep_pours_run():
 
 def main():
     for t in (test_defaults, test_power_nets_steps, test_power_nets_refused,
-              test_power_nets_run, test_keep_pours_plan, test_keep_pours_run):
+              test_keep_pours_plan, test_keep_pours_run, test_shipped_record, test_run):
         before = len(FAILS)
         try:
             t()

@@ -2506,6 +2506,16 @@ Options:
                      pattern, or the run is refused before any step (exit 2).
                      The analysis states each routed net they give a width
                      (`net_widths`).
+  --json-out FILE    Also write FILE: `status`, `shipped_step` (the step whose
+                     board ships, `input` for the input under --finish),
+                     `shipped_board`, `route_summary` -- the object route.py's
+                     own --json-out wrote for the route pass that shipped (each
+                     pass runs with one) -- and the chain as in plan.json
+                     (`analysis`, `steps`, `final`, `grade`). `status` is
+                     `route_pass`; otherwise `route_pass_without_summary`,
+                     `no_route_pass` (a board from another step, or the input)
+                     or `no_board`, each with `why` and a null `route_summary`.
+                     A file already at FILE is removed when the run starts.
 ```
 
 The chain, each step's arguments, return code, iterations and grade are
