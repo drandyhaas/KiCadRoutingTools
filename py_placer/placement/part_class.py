@@ -37,6 +37,10 @@ from typing import Dict, Optional, Tuple
 
 # Lexical: substrings of footprint_name.lower(). Stock KiCad library naming;
 # house libraries miss, which is why classification also reads pin functions.
+# The connector and actuator stems read the whole `lib:item` (both fronts
+# carry it): a library (`Connector_Molex:`, `Jack:`, `ScrewTerminals:`, a
+# `switches` library) is often the only sign a part is one. The chip-package
+# veto reads the item only (#1604).
 CONNECTOR_FP = ('connector', 'usb', 'hdmi', 'rj45', 'jack', 'pinheader',
                 'pinsocket', 'terminal', 'dsub', 'molex', 'jst', 'hirose',
                 'microsd', 'sim', 'card', 'banana', 'header', 'socket')
@@ -65,9 +69,8 @@ def is_mount_hole_name(name) -> bool:
     them all as holes, so a D-sub's edge claim was never emitted. A hole
     named otherwise (`JLCPCB:AssemblyToolingHole`, `Plain_Hole_3mm`) is
     NPTH-only and classifies `mount_hole` through `classify_part`'s
-    structural rule. The item, not `lib:item`, because the text parser keeps
-    the library prefix and the pcbnew path does not -- a rule on the whole
-    string would answer differently on the two fronts. So a house library
+    structural rule. The item, not `lib:item`: a library is named for a
+    board, a vendor or a family of parts, not for this part. So a house library
     NAMED MountingHole whose item is not (`MountingHole:2.5mm`) is not a hole
     by name; an NPTH-only one is still caught by the structural rule."""
     item = str(name or '').rsplit(':', 1)[-1].lower()
@@ -80,15 +83,17 @@ EDGE_RECEPTACLE_FP = ('usb', 'hdmi', 'rj45', 'rj11', 'dsub', 'd-sub',
                       'microsd', 'sd_card', 'sdcard', 'sim', 'card',
                       'jack', 'displayport', 'cardedge', 'card_edge')
 # Switches/buttons whose actuator may overhang the edge by design.
-EDGE_ACTUATOR_FP = ('switch', 'slide', 'sw_', 'button', 'tact', 'pushbutton')
+EDGE_ACTUATOR_FP = ('switch', 'slide', 'sw_', 'button', 'pushbutton')
 #: Stems too short to test as a bare substring, matched only with no letter on
 #: either side (#1331). A DC power-input jack named for what it is
 #: (`DC-IN-SMD_DC-045A-13A`, `DC_IN`) is a receptacle, and the `dc_in` inside
 #: `Converter_DCDC_Intel_QFN-24` is not. The hyphen spelling of the `sw_` stem
 #: (`SW-TH_TK-6580A8-1`, `SW-SMD_TS-1010A-B`) is an actuator, and Samtec's
 #: `TSW-114` pin header is not: both bare substrings hit those on the corpus.
+#: `tact` (a tactile switch) is read anywhere but inside `contact` (#1604):
+#: `PhoenixContact_MC_1,5_...` is a terminal block, not a button.
 EDGE_RECEPTACLE_WORDS = re.compile(r'(?<![a-z])dc[-_]?in(?![a-z])')
-EDGE_ACTUATOR_WORDS = re.compile(r'(?<![a-z])sw-')
+EDGE_ACTUATOR_WORDS = re.compile(r'(?<![a-z])sw-|(?<!con)tact')
 
 # Reference-designator prefixes. IEEE-315 convention, NOT a property of the
 # file -- prefix evidence alone never makes a receptacle.
@@ -134,8 +139,7 @@ CONNECTOR_EVIDENCE_RE = re.compile(
 #: An INTERFACE_FP stem standing as a WORD of the footprint item -- the way
 #: a connector is named for its interface (`USB-MICRO-B-...`, `USB_C_...`,
 #: `KON-SIM-01`, a SIM connector) -- rather than fused into a part number
-#: (`USBLC6-2P6`, `0603USB`, `SIM800C`, `SIM28ML`). Read on the item, which
-#: both fronts carry (the pcbnew front has no library name).
+#: (`USBLC6-2P6`, `0603USB`, `SIM800C`, `SIM28ML`). Read on the item.
 INTERFACE_WORD_RE = re.compile(r'(?<![a-z0-9])(?:%s)(?![a-z0-9])'
                                % '|'.join(INTERFACE_FP))
 #: Designators a CHIP carries (#1587). Beside one, the stem standing as a word
@@ -192,9 +196,8 @@ def _connector_evidence(name: str, pref: str, recep_pins) -> Optional[str]:
     return None
 
 # Connector families the substring tables above miss, read as WORDS of the
-# footprint ITEM (`lib:item` -> item). The item, because the pcbnew front
-# has no library name: a token that matched `Connector_Coaxial:` classed
-# `SMA_..._EdgeMount` a connector on the CLI and nothing in the GUI. Over
+# footprint ITEM (`lib:item` -> item). The item, because these tokens are
+# short enough to match a library name (`Connector_Coaxial:`). Over
 # the 478 corpus human boards these were the real edge connectors that
 # claimed no edge (BNC, FAKRA, edge-mount SMA, card-edge fingers, SFP cages,
 # FFC, WAGO). Two strengths, as for the tables above:
@@ -217,6 +220,9 @@ RF_SMA_RE = re.compile(r'(?<![a-z0-9])(?:rp-?)?sma(?![a-z])')
 RF_EDGE_MOUNT_RE = re.compile(r'edge|launch|horizontal|right.?angle'
                               r'|(?<![a-z])(?:ang|ra)(?![a-z])')
 DIODE_PACKAGE_RE = re.compile(r'^d[_-]|diode|do-?214')
+#: `logo` beginning or ending a word of the item (`USB_Logo_Copper`,
+#: `OLIMEX_LOGO_TB`, `kicadlogo`), never inside one (`ANALOGOUT`).
+LOGO_RE = re.compile(r'(?<![a-z])logo|logo(?![a-z])')
 CONNECTOR_WORD_RE = re.compile(r'(?<![a-z])conn(?![a-z])|connector|card'
                                r'|cartridge')
 # An item that says EDGE (`PCB-Edge_PCIexpress_x1`, `cartridge_edge_72`) or
@@ -331,11 +337,19 @@ def classify_part(fp, ref: str) -> PartClass:
     if 'testpoint' in name or pref == 'TP':
         return PartClass('testpoint', 'medium', ('footprint name/prefix',))
 
+    # A part with no pads, or a logo, mates with nothing and is pressed by
+    # nobody (#1604): `Symbol:USB_Logo` named its interface as a word.
+    item = name.rsplit(':', 1)[-1]
+    if not pads or LOGO_RE.search(item):
+        return PartClass(None, None)
+
     pins = {str(getattr(p, 'pinfunction', '') or '').upper() for p in pads}
     recep_pins = _receptacle_pins(pins)
-    is_ic_pkg = _is_ic_package(name)
+    # The package is read on the ITEM (#1604): a library named for a chip
+    # (`tomu-fpga:`) holds that board's USB connector and headers too.
+    is_ic_pkg = _is_ic_package(item)
     item_cls = ('edge_receptacle' if is_card_fingers(fp) else
-                _item_connector_class(name.rsplit(':', 1)[-1], pref))
+                _item_connector_class(item, pref))
     # #1534: an INTERFACE stem (`usb`, `sim`) counts only beside connector
     # evidence; every other receptacle stem names a connector by itself
     iface = any(k in name for k in INTERFACE_FP)
@@ -346,8 +360,11 @@ def classify_part(fp, ref: str) -> PartClass:
                   or EDGE_RECEPTACLE_WORDS.search(name) is not None)
                  and not is_ic_pkg)
                 or item_cls == 'edge_receptacle')
-    fp_act = (any(k in name for k in EDGE_ACTUATOR_FP)
-              or EDGE_ACTUATOR_WORDS.search(name) is not None)
+    # A chip package names a switch IC (`USB_Switch_TSSOP-10`,
+    # `SOT-23-5_Switching`), never an actuator (#1604).
+    fp_act = ((any(k in name for k in EDGE_ACTUATOR_FP)
+               or EDGE_ACTUATOR_WORDS.search(name) is not None)
+              and not is_ic_pkg)
     desig = _designator(ref)
 
     if ((fp_recep or recep_pins) and not is_ic_pkg) \
