@@ -2145,10 +2145,15 @@ def oracle_reconnect(board_file: str, net_names, config,
     # refill stages it -- a GUI staged save has no .kicad_dru sibling) and
     # resolved on each parse below, so the map is keyed by THAT board's ids
     # whichever front staged it. No rules file: nothing is installed.
+    # #1602: the same install carries the class/type-scoped rules (#1491),
+    # so a board whose .kicad_dru has only those installs it too -- the
+    # callers' configs are fresh, and their welds used to route blind to it.
     _track_src = project_from or board_file
     try:
-        from kicad_dru import read_board_track_clearances
-        _track_live = bool(read_board_track_clearances(_track_src)[0])
+        from kicad_dru import (read_board_track_clearances,
+                               board_has_scoped_clearance_rules)
+        _track_live = (bool(read_board_track_clearances(_track_src)[0])
+                       or board_has_scoped_clearance_rules(_track_src))
     except Exception:                                       # noqa: BLE001
         _track_live = False
 

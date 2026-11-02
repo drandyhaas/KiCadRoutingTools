@@ -893,7 +893,8 @@ _TRACK_ANNOUNCED = set()  # (board path, rules) already printed this process
 
 
 def install_track_clearances(config, track_clearances, input_file,
-                             pcb_data=None, routed_net_ids=None):
+                             pcb_data=None, routed_net_ids=None,
+                             scoped_rules=None):
     """Resolve and install the track-to-track clearance map on ``config``,
     engine-side so BOTH fronts inherit it (like install_layer_clearances: no
     flag, no GUI control -- the .kicad_dru is the single source of truth). An
@@ -908,21 +909,30 @@ def install_track_clearances(config, track_clearances, input_file,
     diff pair KiCad couples by name, for ``pair_clearance``'s P<->N sites --
     the per-net map above prices the partner too. Empty otherwise, and on the
     explicit-dict path, whose map a parent resolved (a nested sub-run then
-    prices P<->N at that map, over-requiring)."""
+    prices P<->N at that map, over-requiring).
+
+    The class/type-scoped channel (#1491) is installed on BOTH paths, over
+    the same routed set: ``scoped_rules`` (a parent's resolved
+    ScopedClearanceRules) wins, else it is read beside ``input_file``. The
+    explicit-dict path used to skip it, so every nested sub-run -- the
+    reconciliation laps, the in-run plane finalize -- routed blind to it and
+    shipped copper the main pass had refused (#1602)."""
     config.track_partner_clearances = {}
     config.scoped_clearance = None
+    if not input_file:
+        input_file = getattr(pcb_data, 'source_path', "") or ""
+    # #1491: the class/type-scoped rules, over the same routed set (the same
+    # install points, so every engine that installs the track channel -- the
+    # route, diff-pair, plane and oracle steps, CLI and GUI alike, and every
+    # nested sub-run of theirs -- has both)
+    install_scoped_clearances(config, input_file, pcb_data, routed_net_ids,
+                              given=scoped_rules)
     if track_clearances is not None:
         config.track_clearances = dict(track_clearances)
         return
-    if not input_file:
-        input_file = getattr(pcb_data, 'source_path', "") or ""
     if not input_file or pcb_data is None:
         config.track_clearances = {}
         return
-    # #1491: the class/type-scoped rules, over the same routed set (the same
-    # install points, so every engine that installs the track channel -- the
-    # route, diff-pair, plane and oracle steps, CLI and GUI alike -- has both)
-    install_scoped_clearances(config, input_file, pcb_data, routed_net_ids)
     rules, notes = read_board_track_clearances(input_file)
     if not rules:
         config.track_clearances = {}
@@ -1039,6 +1049,21 @@ def is_scoped_clearance_rule(rule) -> bool:
             and _parse_track_condition(rule.condition_src or '') is None)
 
 
+def board_has_scoped_clearance_rules(board_path: str) -> bool:
+    """Does the sibling ``<board>.kicad_dru`` carry a rule the scoped channel
+    honours (#1491)? For an engine that installs the channel per parse only
+    when the board has something to install (the oracle, #1602)."""
+    dru = os.path.splitext(board_path)[0] + ".kicad_dru" if board_path else ""
+    if not dru or not os.path.isfile(dru):
+        return False
+    try:
+        from design_rules import parse_dru
+        return any(is_scoped_clearance_rule(r)
+                   for r in parse_dru(open(dru, encoding="utf-8").read())[0])
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 class ScopedClearanceRules:
     """The board's class/type-scoped clearance rules (#1491), resolved
     pair-exact through `design_rules._rule_matches` (A/B commutative, the last
@@ -1089,6 +1114,24 @@ class ScopedClearanceRules:
         except OSError:
             orders = {}
         return cls(dr, sel, orders)
+
+    def rebind(self, pcb_data, copper_layers=None) -> 'ScopedClearanceRules':
+        """These rules for ``pcb_data`` (#1602): a PARENT run's resolved rules
+        handed to a nested sub-run. Itself when the board's nets carry the
+        same ids (the GUI's sub-runs share the board; a re-parse of the
+        written output usually agrees), else rebuilt by NAME from the files
+        the parent read (``dr.source``) -- the memberships are keyed by net
+        id, and a re-parse may number the nets differently."""
+        names = {nid: n.name for nid, n in (getattr(pcb_data, 'nets', None) or {}).items()
+                 if getattr(n, 'name', None)}
+        if pcb_data is None or names == self.dr.net_names:
+            return self
+        try:
+            again = ScopedClearanceRules.for_board(pcb_data, self.dr.source or None,
+                                                   copper_layers=copper_layers)
+        except Exception:                                        # noqa: BLE001
+            again = None
+        return again if again is not None else self
 
     @property
     def names(self) -> List[str]:
@@ -1345,19 +1388,27 @@ class ScopedClearanceInstall:
         return class_value if best is None else best
 
 
-def install_scoped_clearances(config, input_file, pcb_data, routed_net_ids=None):
+def install_scoped_clearances(config, input_file, pcb_data, routed_net_ids=None,
+                              given=None):
     """Install the scoped channel on ``config`` for this call's routed set
     (#1491), engine-side like the layer and track channels -- no flag, no GUI
     control. ``config.scoped_clearance`` is None on a board with no rule in
-    the subset, and every stamp is then exactly what it was."""
+    the subset, and every stamp is then exactly what it was.
+
+    ``given`` (#1602): the ScopedClearanceRules a PARENT run resolved, which
+    a nested sub-run (a reconciliation lap, the plane finalize and its
+    reconnects) is handed as it is handed the layer map: it wins over the
+    auto-read, re-bound to this call's board, because the sub-run reads the
+    output file, whose .kicad_dru is the parent's carry and not its source."""
     config.scoped_clearance = None
     if pcb_data is None:
         return
+    copper = list(getattr(getattr(pcb_data, 'board_info', None),
+                          'copper_layers', None) or []) or None
     try:
-        sc = ScopedClearanceRules.for_board(
-            pcb_data, input_file or None,
-            copper_layers=list(getattr(getattr(pcb_data, 'board_info', None),
-                                       'copper_layers', None) or []) or None)
+        sc = (given.rebind(pcb_data, copper_layers=copper) if given is not None
+              else ScopedClearanceRules.for_board(pcb_data, input_file or None,
+                                                  copper_layers=copper))
     except Exception as e:                                       # noqa: BLE001
         print(f"  .kicad_dru: class/type-scoped clearance rules not read ({e})")
         return
@@ -1373,7 +1424,8 @@ def install_scoped_clearances(config, input_file, pcb_data, routed_net_ids=None)
     config.scoped_clearance = ScopedClearanceInstall(
         sc, routed_net_ids if routed_net_ids is not None else nets,
         getattr(config, 'net_clearances', None), floor)
-    path = os.path.abspath(input_file or getattr(pcb_data, 'source_path', '') or '')
+    path = os.path.abspath(sc.dr.source or input_file
+                           or getattr(pcb_data, 'source_path', '') or '')
     _key = (path, tuple((r.name, r.condition_src,
                          r.constraints['clearance']['min']) for r in sc.rules))
     if _key not in _SCOPED_ANNOUNCED:

@@ -913,6 +913,11 @@ def repair_planes(
     # #562 finalize forwards its run's, as it does layer_clearances, because
     # the output's .kicad_dru sibling does not exist yet mid-run.
     track_clearances: Optional[dict] = None,
+    # #1602: the class/type-scoped .kicad_dru rules (#1491) the #562
+    # finalize's run resolved (kicad_dru.ScopedClearanceRules), forwarded
+    # like the maps above and on into the reconnect sub-runs. None = read
+    # the board's own.
+    scoped_clearance_rules: Optional[object] = None,
     # The route step's own search / soft-cost / keepout / keep-away knobs
     # ({batch_route kwarg: value}), forwarded into the nested batch_route
     # sub-runs that reconnect rip casualties and join regions, under each
@@ -1141,7 +1146,15 @@ def repair_planes(
     # on seg-vs-seg pairs; the effective map over the plane nets this run
     # repairs). Same precedence as the layer map above.
     install_track_clearances(config, track_clearances, input_file, pcb_data,
-                             routed_net_ids=net_ids)
+                             routed_net_ids=net_ids,
+                             scoped_rules=scoped_clearance_rules)
+    # #1602: the reconnect / region-join batch_route sub-runs below take the
+    # same scoped rules: they route the file this run is writing, whose
+    # .kicad_dru is a carry, not the rules' source.
+    _sc1602 = getattr(getattr(config, 'scoped_clearance', None), 'sc', None)
+    if _sc1602 is not None:
+        route_knobs = dict(route_knobs or {})
+        route_knobs.setdefault('scoped_clearance_rules', _sc1602)
 
     # Cross-class clearance (#434): the repair step's own copper (region joins,
     # pad taps) and its ripped-blocker reconnects were priced at the uniform
