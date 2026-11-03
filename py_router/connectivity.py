@@ -423,9 +423,20 @@ def off_centre_via_ends(segments, vias, copper_layers=None):
     at the via pad and measures it to the centre, so the routed copper and
     KiCad's length disagree there (#1583).
 
+    An end that a segment on its layer carries on to the via's centre (a
+    via-centre bridge, `close_soft_joints`) is not off-centre: the copper
+    reaches the centre, which is where KiCad measures it to.
+
     Graphic (footprint / board art) copper and net 0 are skipped."""
     from collections import defaultdict
     vias = [v for v in vias if v.net_id]
+    at_vertex = defaultdict(list)     # (net, layer, end point) -> the far ends
+    for s in segments:
+        if not s.net_id or getattr(s, 'graphic', False):
+            continue
+        for (x, y), far in (((s.start_x, s.start_y), (s.end_x, s.end_y)),
+                            ((s.end_x, s.end_y), (s.start_x, s.start_y))):
+            at_vertex[(s.net_id, s.layer, round(x, 4), round(y, 4))].append(far)
     cell = max([1.0] + [getattr(v, 'size', 0.0) or 0.0 for v in vias])
     grid = defaultdict(list)          # (net, cx, cy) -> vias
     for v in vias:
@@ -444,6 +455,9 @@ def off_centre_via_ends(segments, vias, copper_layers=None):
                 r = (getattr(v, 'size', 0.0) or 0.0) / 2.0
                 d = math.hypot(x - v.x, y - v.y)
                 if not (VIA_CENTRE_TOL < d <= r + 1e-9):
+                    continue
+                if any(math.hypot(fx - v.x, fy - v.y) <= VIA_CENTRE_TOL for fx, fy in
+                       at_vertex[(s.net_id, s.layer, round(x, 4), round(y, 4))]):
                     continue
                 span = spans.get(id(v))
                 if span is None:

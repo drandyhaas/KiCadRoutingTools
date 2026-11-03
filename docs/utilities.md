@@ -2798,8 +2798,10 @@ category each:
 - `off-centre-via-end` -- a track end inside a same-net via's copper, on a
   layer the via carries, but not on its centre (#1235). It is connected, so
   DRC and connectivity pass it, but KiCad's length measure reads it
-  differently from ours, which is how a matched pair ships skewed (#1583).
-  An end that is also a pad's terminal names the pad. **Advisory**: printed
+  differently from the routed copper, which is how a matched pair shipped
+  skewed (#1583). An end a segment carries on to the via's centre (the
+  route cleanup's via-centre bridge) is not reported. An end that is also a
+  pad's terminal names the pad. **Advisory**: printed
   after the report, never counted in the headline or the exit code, since a
   via-in-pad is drawn this way and a human-routed board carries many.
 

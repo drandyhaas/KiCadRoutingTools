@@ -213,7 +213,7 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # the overlap gate until 5 pads were genuinely disconnected).
 from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
                           endpoint_reaches_via, lands_on_interior,
-                          span_endpoint_degree)
+                          off_centre_via_ends, span_endpoint_degree)
 _STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
@@ -874,8 +874,66 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                                      width=w, layer=s.layer, net_id=s.net_id))
             break  # one connector firms the joint; move to the next segment
 
-    if new_conns or web_conns or via_pad_conns:
-        for c in new_conns + web_conns + via_pad_conns:
+    # Off-centre via end (#1235, #1583): a track that ends inside a same-net
+    # via's copper but off its centre is connected -- the barrel holds it --
+    # but KiCad's length measure runs a track to a via only through the via's
+    # centre, so the pair it belongs to ships a skew the router never saw.
+    # Firm it the soft-joint way, with copper inside the via's own disc only:
+    # the track is cut back to where it enters the via's copper (E) and a
+    # bridge runs from E straight to the centre, at the track's width on its
+    # layer -- the line KiCad 10.0.4+ measures such a run on (pad entry to
+    # centre), and a track ending at the centre for 10.0.3, so both read the
+    # copper's own length, which the path measure charges (`_net_track_graph`).
+    # The track's run up to E is never moved (moving the ends changed the
+    # routing downstream, #1235). An end the cut cannot take -- copper this
+    # run did not lay, held copper, a vertex another segment shares, a
+    # segment wholly inside the via -- is bridged from where it ends instead.
+    # One per end, from the definition check_weird reports
+    # (`off_centre_via_ends`), so detection and repair agree.
+    centre_conns = []
+    routed_ids = {id(x) for r in results if not r.get('cleanup')
+                  for x in (r.get('new_segments') or ())}
+    oc_segs = [s for s in pcb_data.segments
+               if (scope_net_ids is None or s.net_id in scope_net_ids)
+               and not _sense_copper(s)]
+    oc_vias = [v for v in pcb_data.vias
+               if (scope_net_ids is None or v.net_id in scope_net_ids)
+               and not _sense_copper(v)]
+    done_ends = set()
+    for s, end, v, d in off_centre_via_ends(oc_segs, oc_vias, _copper or None):
+        ex, ey = (s.start_x, s.start_y) if end == 0 else (s.end_x, s.end_y)
+        ox, oy = (s.end_x, s.end_y) if end == 0 else (s.start_x, s.start_y)
+        key = (s.net_id, s.layer, rk(ex, ey))
+        if key in done_ends:
+            continue
+        w, r = s.width, (getattr(v, 'size', 0.0) or 0.0) / 2.0
+        bx, by = ex, ey              # where the bridge starts
+        cut = (id(s) in routed_ids and not is_immutable_copper(s)
+               and ep_count[key] == 1 and math.hypot(ox - v.x, oy - v.y) > r)
+        if cut:
+            # E: where the track, walked from its far end, enters the disc
+            L = math.hypot(ex - ox, ey - oy)
+            ux, uy = (ex - ox) / L, (ey - oy) / L
+            fx, fy = ox - v.x, oy - v.y
+            b = fx * ux + fy * uy
+            disc = b * b - (fx * fx + fy * fy - r * r)
+            te = -b - math.sqrt(max(disc, 0.0))
+            if 1e-6 < te < L - 1e-6:
+                bx, by = ox + ux * te, oy + uy * te
+        if (math.hypot(bx - v.x, by - v.y) + w / 2.0 > r + 1e-6
+                and not clears(s.net_id, bx, by, v.x, v.y, s.layer, w)):
+            continue
+        done_ends.add(key)
+        if (bx, by) != (ex, ey):
+            if end == 0:
+                s.start_x, s.start_y = bx, by
+            else:
+                s.end_x, s.end_y = bx, by
+        centre_conns.append(Segment(start_x=bx, start_y=by, end_x=v.x, end_y=v.y,
+                                    width=w, layer=s.layer, net_id=s.net_id))
+
+    if new_conns or web_conns or via_pad_conns or centre_conns:
+        for c in new_conns + web_conns + via_pad_conns + centre_conns:
             pcb_data.segments.append(c)
         # Tagged so accounting/summary code can tell this cleanup copper from a
         # net's routed result (it has no net-level identity of its own).
@@ -888,7 +946,10 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
         if via_pad_conns:
             results.append({'new_segments': via_pad_conns, 'new_vias': [],
                             'cleanup': 'via_pad_bridge'})
-    return len(new_conns) + len(web_conns) + len(via_pad_conns)
+        if centre_conns:
+            results.append({'new_segments': centre_conns, 'new_vias': [],
+                            'cleanup': 'via_centre_bridge'})
+    return len(new_conns) + len(web_conns) + len(via_pad_conns) + len(centre_conns)
 
 
 # ---------------------------------------------------------------------------
@@ -2186,8 +2247,11 @@ STRICT_REMOVAL_MAX_SEGS = 500
 #: like any other -- through the via branch when those vias can go, else
 #: through the bridge; and where a trace already runs through both via and pad
 #: the bridge is the only redundant copper there (watchy RESE: a 0.25 bridge
-#: laid over a 0.0889 trace).
-CLOSE_SOFT_JOINT_KINDS = frozenset({'soft_joint_bridge', 'terminal_web_connector'})
+#: laid over a 0.0889 trace). A via-centre bridge (#1583) is redundant to
+#: connectivity by construction -- the via already holds the end -- and is
+#: there for KiCad's length measure, so the collapse never takes it back.
+CLOSE_SOFT_JOINT_KINDS = frozenset({'soft_joint_bridge', 'terminal_web_connector',
+                                    'via_centre_bridge'})
 
 
 def _rk_node(layer, x, y):

@@ -1113,8 +1113,9 @@ def pin_pair_path_length(pcb_data: PCBData, net_id: int,
     Walks a WEIGHTED graph over the net's own copper: each segment contributes
     an edge of its own length, coincident endpoints and T-junctions (an endpoint
     landing on another segment's interior) join at zero cost, and a via joins
-    the layers it spans at its barrel length from the stackup. Pads attach to
-    any endpoint or T-point that falls inside their copper.
+    the layers it spans at its barrel length from the stackup, a track reaching
+    it straight from where it enters the via's copper to the centre (#1583). Pads attach to any
+    endpoint or T-point that falls inside their copper.
 
     Returns None when the two pads are not joined by copper (an unrouted or
     broken net) -- distinguish that from 0.0, which means pad-to-pad direct
@@ -1279,15 +1280,15 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
 
     It is a PATH measure, not the length KiCad's length/skew DRC grades the
     shipped copper at (`net_match_length` -> `kicad_net_length_nm`, which
-    `diff_pair_skew` and check_drc read). A track end anywhere inside a
-    via's or pad's copper joins it here at no cost, with the via's barrel
-    charged; KiCad joins a via only to tracks ending at its centre before
-    10.0.4 (a via so joined on one layer charges no barrel) and from 10.0.4
-    cuts such a run at the via pad and measures it to the centre, and it cuts
-    runs at pad edges. Where a track ends inside a via off its centre (#1235)
-    the two differ by up to a via barrel on the copper that ships: glasgow
-    /IO_Banks/Z2 and Z6 matched here to 0.0006 mm and shipped 0.76 and
-    0.19 mm of KiCad 10.0.7 skew, 1.58 mm on 10.0.3 (#1583)."""
+    `diff_pair_skew` and check_drc read): a branch the path does not walk is
+    not in it, and a track end inside a pad joins it at no cost where KiCad
+    cuts runs at pad edges. A track ending inside a via is charged from where
+    it enters the via's copper straight to the centre (#1583), the copper the
+    post-route cleanup's via-centre bridge leaves (close_soft_joints) and the
+    line KiCad measures there -- 10.0.4+ cuts such a run at the via pad and
+    measures it to the centre, 10.0.3 joins a via only to tracks ending at
+    its centre. Joined for free, a pair matched here to 0.0006 mm shipped
+    0.76 mm of KiCad skew."""
     pads = _copper_pads(pcb_data, net_id)
     if len(pads) < 2 or not net_pads_joined(pcb_data, net_id, pads, tolerance):
         return None
@@ -1388,8 +1389,8 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     # Vias and the two pads are DISCS of copper, not points: a track ends
     # anywhere inside them, not on their centre (real boards miss the centre by
     # tens of um). Each disc is a landing zone -- any segment node inside it
-    # joins at no cost, and a segment passing THROUGH it gets split there so a
-    # via mid-run is reachable.
+    # joins (a via's at its distance from the centre, below), and a segment
+    # passing THROUGH it gets split there so a via mid-run is reachable.
     discs = []  # (cx, cy, radius, layers, hit_test, kind, obj)
     for v in pcb_data.vias:
         if v.net_id != net_id or len(v.layers or ()) < 2:
@@ -1439,12 +1440,24 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             t = _project(px, py, tolerance)
             if t is not None:
                 cuts.append(t)
-        for (cx, cy, radius, dlayers, _hit, _kind, _obj) in discs:
+        for (cx, cy, radius, dlayers, _hit, kind, _obj) in discs:
             if s.layer not in dlayers:
                 continue
             t = _project(cx, cy, radius + tolerance)
             if t is not None:
                 cuts.append(t)
+            if kind == 'via':
+                # #1583: and where it crosses the via's edge, so a run ending
+                # inside the via reaches the centre in a straight line from
+                # there -- the copper a via-centre bridge leaves
+                # (close_soft_joints), and the line KiCad 10.0.4+ measures
+                fx, fy = s.start_x - cx, s.start_y - cy
+                b = fx * ux + fy * uy
+                disc = b * b - (fx * fx + fy * fy - radius * radius)
+                if disc > 0:
+                    for t in (-b - math.sqrt(disc), -b + math.sqrt(disc)):
+                        if tolerance < t < length - tolerance:
+                            cuts.append(t)
 
         cuts.sort()
         for t1, t2 in zip(cuts, cuts[1:]):
@@ -1454,8 +1467,14 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             n2 = key(s.start_x + ux * t2, s.start_y + uy * t2, s.layer)
             add_edge(n1, n2, t2 - t1)
 
-    # Attach each disc: one synthetic node per layer it spans, joined at no cost
-    # to every segment node inside its copper on that layer. A via's barrel then
+    # Attach each disc: one synthetic node per layer it spans, joined to every
+    # segment node inside its copper on that layer -- a pad at no cost, a via
+    # at the node's distance from its centre (#1583): KiCad runs a track into
+    # a via only through the centre, so a track ending inside the barrel off
+    # its centre is charged from where it enters the via's copper (cut above)
+    # straight to the centre -- the bridge close_soft_joints lays there -- and
+    # a matcher that joined it for free matched the pair to a length KiCad
+    # never measures. A via's barrel then
     # links its own per-layer nodes at the length KiCad measures (charged once
     # across the span, so a mid-span layer change isn't billed twice); a plated
     # pad barrel links its layers at no cost.
@@ -1497,7 +1516,8 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                 if nlayer != layer:
                     continue
                 if hit(nx, ny):
-                    add_edge(hub, node, 0.0)
+                    add_edge(hub, node, math.hypot(nx - cx, ny - cy)
+                             if kind == 'via' else 0.0)
                     joined = True
             if joined or kind == 'pad' \
                     or layer in via_contact_layers.get(id(obj), ()):

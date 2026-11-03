@@ -873,9 +873,10 @@ When enabled:
    escape or seam re-ask returns no stub lengths, and on imx6ulz DQS0 the result
    read P 12.00 < N 13.08 while the board had P 21.31 > N 16.82. A member whose
    pads are not joined yet falls back to the result's own sums (segments plus
-   recorded stub lengths), as before. It is a path measure, not KiCad's: a
-   track that ends inside a via off its centre is charged differently by
-   KiCad's skew DRC, by up to a via barrel (#1583; step 6 reports what ships)
+   recorded stub lengths), as before. A track that ends inside a via is
+   charged from where it enters the via straight to the centre, the line
+   KiCad's skew DRC measures and the copper the post-route cleanup's
+   via-centre bridge leaves (#1583; step 6 reports what ships)
 2. If the difference exceeds `--length-match-tolerance` (default 0.1mm), meanders are added to the shorter track. When the first bump count falls short because foreign copper beside the leg clamps its bumps, more bumps are added at a lower amplitude (never above `--meander-amplitude`) before the pair is reported `meanders-ran-out` (#1583)
 3. The meanders are placed with clearance checking against the other track of the pair
 4. For polarity-swapped pairs, stub lengths are correctly recalculated using post-swap assignments (P gets P_source + N_target stubs, N gets N_source + P_target stubs) -- in the fallback; the board copper already carries the swap
