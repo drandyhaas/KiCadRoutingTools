@@ -14,9 +14,10 @@ was accepted and silently did not reach the row.
 A synthetic board: U1 a QFN locked at one corner, its crystal Y1 locked
 40 mm away, the load caps C1 / C2 free. Pinned here:
 
-  1. the emitter writes the derived rows, Y1's at 8.1 mm;
+  1. the emitter writes the derived rows, Y1's at 8.9 mm (8.1 plus its
+     0.8 mm pad, #1613);
   2. place_simple names the broken claim (`WARNING: claim Y1 near U1 ...
-     past its derived 8.1 mm limit`) and lists it in `claims_left`;
+     past its derived 8.9 mm limit`) and lists it in `claims_left`;
   3. check_floorplan says `past the derived` for a derived row and
      `past the declared` for the same row with its source dropped;
   4. with `severity.proximity` set it prints a `note:` that the severity
@@ -105,8 +106,8 @@ def main():
             doc = json.load(fh)
         rows = {(p['ref'], p['near']): p for p in doc.get('proximity') or ()}
         y1 = rows.get(('Y1', 'U1')) or {}
-        check('1. the emitter derives the crystal claim at 8.1 mm',
-              y1.get('max_mm') == 8.1
+        check('1. the emitter derives the crystal claim at 8.9 mm',
+              y1.get('max_mm') == 8.9
               and (y1.get('context') or {}).get('source') == 'placement.crystals',
               json.dumps(doc.get('proximity')))
 
@@ -123,21 +124,21 @@ def main():
         line = next((l for l in r.stdout.splitlines()
                      if 'WARNING: claim Y1 near U1' in l), '')
         check('2. place_simple names the claim Y1 leaves past its limit',
-              re.search(r'Y1 pad \d+ is [\d.]+ mm from U1, past its derived 8\.1 '
+              re.search(r'Y1 pad \d+ is [\d.]+ mm from U1, past its derived 8\.9 '
                         r'mm limit', line) is not None
               and 'severity.proximity' in line, line or r.stdout[-1200:])
         with open(evidence(rep, 'place_simple report'), encoding='utf-8') as fh:
             left = json.load(fh).get('claims_left') or []
         got = [c for c in left if c['ref'] == 'Y1' and c['near'] == 'U1']
-        check('...and lists it in claims_left, derived, past 8.1 mm',
+        check('...and lists it in claims_left, derived, past 8.9 mm',
               len(got) == 1 and got[0]['derived'] is True
-              and got[0]['gap_mm'] > 8.1, json.dumps(left))
+              and got[0]['gap_mm'] > 8.9, json.dumps(left))
 
         # 3. derived vs declared
         out = _grade(evidence(placed, 'placed board'), intent)
         prox = [l for l in out.splitlines() if 'proximity: Y1 pad' in l]
         check('3. the grade says "past the derived" for the derived row, at warn',
-              prox and all('past the derived 8.10mm proximity limit' in l
+              prox and all('past the derived 8.90mm proximity limit' in l
                            and '[warn ]' in l for l in prox), '\n'.join(prox))
         check('...and prints no severity note when the intent sets none',
               'severity.proximity is' not in out, out[-600:])
@@ -147,10 +148,10 @@ def main():
         own_p = os.path.join(tmp, 'own.json')
         with open(own_p, 'w', encoding='utf-8') as fh:
             json.dump(own, fh)
-        out = _grade(placed, own_p, refuse='past the declared 8.10mm proximity limit')
+        out = _grade(placed, own_p, refuse='past the declared 8.90mm proximity limit')
         prox = [l for l in out.splitlines() if 'proximity: Y1 pad' in l]
         check('...and "past the declared" once its source is dropped, an error',
-              prox and all('past the declared 8.10mm proximity limit' in l
+              prox and all('past the declared 8.90mm proximity limit' in l
                            and '[ERROR]' in l for l in prox), '\n'.join(prox))
 
         # 4. severity.proximity disclosed

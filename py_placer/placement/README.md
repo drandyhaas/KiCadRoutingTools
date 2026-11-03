@@ -169,7 +169,8 @@ nets (`crystals.py`) and writes them into the intent as proximity claims
 (graded as warnings; `place_simple` derives the same rows itself when an intent
 lacks them): each crystal leg within 8.1 mm of its pin and each load
 cap within 2.2 mm of the crystal, pad edge to pad edge (three human boards in
-four do at least that well). A leg that reaches its pin through a series
+four do at least that well), each plus the size of the crystal pad it measures
+from (#1613: a through-hole can's big pads keep its caps further off). A leg that reaches its pin through a series
 resistor (the RP2040's XOUT, an STM32's) is claimed link by link: the crystal
 at the resistor, the resistor at the pin. Every claim's subject is then moved into the group of the
 part its claims end at: the load caps follow the crystal and the crystal
@@ -190,7 +191,7 @@ emptied `clock` group is dropped, and `near` entries that named it point at
 | ground | the same tree for ground: a plane, each pad only drops a via | `--ground-weight` (0.02) |
 | crossings | each crossing among the signal trees' edges, in mm of wire | `--crossing-weight` (2) |
 | claims | each claimed pad's distance to its partner's pad, per mm (intent `proximity[]`, crystals) | `--claim-weight` (1) |
-| claim limits | each claimed pad past its claim's `max_mm`, pad edge to the nearest partner pad on its net as `check_floorplan` grades it (a crystal leg past 8.1 mm of its pin, a load cap past 2.2 mm of its crystal), per mm | `--claim-limit-weight` (10) |
+| claim limits | each claimed pad past its claim's `max_mm`, pad edge to the nearest partner pad on its net as `check_floorplan` grades it (a crystal leg past 8.1 mm of its pin, a load cap past 2.2 mm of its crystal, each plus the crystal pad's size), per mm | `--claim-limit-weight` (10) |
 | decaps | each decap's distance to the supply-pin site it is matched to, per mm. A decap is a cap from ground to a rail some chip other than a connector (or the board's own contacts, a part whose pads span half the board) has a supply pin on, or between two rails that each carry a supply pin of one chip (a stacked domain), the rule `check_groups` reports by and `check_floorplan` grades by (`BoardView.decaps`); a chip's supply pins include its pins on a rail named as one, or named as one on a net local to it (`BoardView.rail_pins`). A rail's decaps are matched to its pin sites (an IC's supply pins within 1.5 mm of each other) at the least total distance, every site taking one decap before any takes two, so decaps spread over the pins; a decap goes to the sites of the chips in its own group when one is on its rail (an LDO's output cap at the LDO, not at the MCU's VDD pin). A decap none of whose chips is in its group (a load or RC cap the groups file put elsewhere, which `check_groups` WARNs) is left out of this term | `--decap-weight` (2) |
 | group contiguity | the spanning tree over a group's courtyards, priced by the gap between neighbours: zero while the group is one contiguous piece, whatever its shape | `--group-weight` (5) |
 | `near` / `apart` / `edge` | the groups file's hints (above) | `--near-weight` (2), `--apart-weight` (5), `--edge-weight` (2) |

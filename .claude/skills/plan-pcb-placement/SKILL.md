@@ -307,7 +307,8 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
   `links[]` row (below) instead of a `proximity` row, or claim a member
   that is not its anchor. The emitted intent carries these
   crystal claims as `proximity[]` rows (`context.source`
-  `placement.crystals`, `max_mm` 8.1 and 2.2), graded as warnings; edit a
+  `placement.crystals`, `max_mm` 8.1 and 2.2, each plus the size of the
+  crystal pad it measures from), graded as warnings; edit a
   row's `max_mm` to loosen or tighten that loop, or drop the `source` to
   make it an error-graded claim. Each limit is priced, not guaranteed: a
   seed can leave a crystal past it, so read the grade's `proximity`
