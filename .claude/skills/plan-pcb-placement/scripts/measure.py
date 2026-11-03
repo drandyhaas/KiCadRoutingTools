@@ -15,7 +15,9 @@ worktree is not under the worktree's slug (#1177). The filters compose
 
 - `--self`: the transcript whose shell call to measure.py is still waiting
   for its result, i.e. the agent running this command. The default when no
-  other filter is given.
+  other filter is given. Claude Code files the call's row a moment AFTER the
+  tool starts (0-3 s, measured), so a search that finds none waits up to
+  SELF_WAIT_S for it, re-reading only the transcripts written to lately.
 - `--evidence PATH`: its OWN tool calls name PATH (the run's work dir or
   board). A delegation prompt (Agent/Task) is not the run's own work, and a
   call to measure.py is the measuring, not the run, so neither counts.
@@ -53,6 +55,7 @@ import json
 import os
 import re
 import sys
+import time
 
 KRT_TOOL = {'scope': ['combined'], 'kind': 'utility'}
 
@@ -64,6 +67,11 @@ MEASURE_RE = re.compile(r'measure\.py\b')
 #: how far from a transcript's end its in-flight call can sit (a parallel
 #: sibling's result may be written after it).
 SELF_TAIL_BYTES = 4 << 20
+#: how long --self waits for its own call's row, which Claude Code writes after
+#: the tool starts, and how recently a transcript must have been written to be
+#: re-read while it waits.
+SELF_WAIT_S = 10.0
+SELF_RECENT_S = 60.0
 REFUSED = 3
 SCRIPT_RE = re.compile(r'([\w./\\-]*\w\.py)\b')
 #: converge's own subcommands. Matching a closed set means an argument that
@@ -322,7 +330,14 @@ def select(base, self_=False, evidence=(), agent_id=None, cwd=None):
         want = 'agent-%s.jsonl' % re.sub(r'^agent-', '', agent_id)
         paths = [p for p in paths if os.path.basename(p) == want]
     if self_:
-        paths = [p for p in paths if in_flight_measure(p)]
+        found = [p for p in paths if in_flight_measure(p)]
+        until = time.time() + SELF_WAIT_S
+        while not found and time.time() < until:
+            time.sleep(0.5)
+            now = time.time()
+            found = [p for p in paths if now - os.path.getmtime(p) < SELF_RECENT_S
+                     and in_flight_measure(p)]
+        paths = found
     hits = {}
     if evidence:
         pats = [evidence_patterns(e, cwd) for e in evidence]

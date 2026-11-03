@@ -1235,7 +1235,8 @@ Routing Completes): run them once, here, not again inside the routing.
    ```
    `beautify_labels` moves reference labels clear of pads, holes, the edge
    and each other and touches nothing else (copper byte for byte, siblings
-   copied). It does not see drawn silk, a part's own outline included, so
+   copied). Its exit 4 is not a failure: the board is written, and the labels
+   it found no legal spot for are named and left as they were. It does not see drawn silk, a part's own outline included, so
    it can trade one overlap for another: one board went from 4 KiCad silk
    errors to 0, another from 54 to 76. Keep `labelled.kicad_pcb` as the
    board only when its silk count is lower, and put both counts in
