@@ -94,6 +94,11 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
         board_segs.extend(_isegs)
         board_vias.extend(_ivias)
 
+    # #1609: a pair that is BOTH unmoved input copper stood that far apart on
+    # the input board, so it is never the reason to refuse.
+    from rip_up_reroute import input_pair_unmoved
+    held = input_pair_unmoved(pcb_data) or (lambda a, b: False)
+
     owners: set = set()
     for cand in segments:
         c_clr_half = cand.width / 2
@@ -104,7 +109,7 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
             need = c_clr_half + s.width / 2 + _track_pair_clr(cand.net_id, s.net_id, cand.layer)
             if any(point_to_segment_distance(px, py, s.start_x, s.start_y,
                                              s.end_x, s.end_y) < need
-                   for px, py in _seg_points(cand)):
+                   for px, py in _seg_points(cand)) and not held(cand, s):
                 owners.add(s.net_id)
                 if not collect:
                     return owners
@@ -112,7 +117,8 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
             if v.net_id in own_ids or v.net_id in owners:
                 continue
             need = c_clr_half + v.size / 2 + _pair_clr(cand.net_id, v.net_id, cand.layer)
-            if any(math.hypot(px - v.x, py - v.y) < need for px, py in _seg_points(cand)):
+            if any(math.hypot(px - v.x, py - v.y) < need
+                   for px, py in _seg_points(cand)) and not held(cand, v):
                 owners.add(v.net_id)
                 if not collect:
                     return owners
@@ -133,7 +139,7 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
             if h2h > 0 and cv.drill > 0 and v.drill > 0 \
                     and not (id(cv) in inp_ids and id(v) in inp_ids):
                 need = max(need, cv.drill / 2 + v.drill / 2 + h2h)
-            if math.hypot(cv.x - v.x, cv.y - v.y) < need:
+            if math.hypot(cv.x - v.x, cv.y - v.y) < need and not held(cv, v):
                 owners.add(v.net_id)
                 if not collect:
                     return owners
@@ -142,7 +148,7 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
                 continue
             need = cv.size / 2 + s.width / 2 + _pair_clr(cv.net_id, s.net_id, s.layer)
             if point_to_segment_distance(cv.x, cv.y, s.start_x, s.start_y,
-                                         s.end_x, s.end_y) < need:
+                                         s.end_x, s.end_y) < need and not held(cv, s):
                 owners.add(s.net_id)
                 if not collect:
                     return owners

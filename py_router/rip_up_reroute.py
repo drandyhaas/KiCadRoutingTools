@@ -62,11 +62,44 @@ def mark_input_copper(pcb_data) -> None:
     run, a sub-run that parsed its own file, and repair_planes when nothing has
     marked the board yet. The objects are kept as well as their ids, so no id
     can be reused while the mark lives. The GUI rebuilds every copper object
-    before a step and forgets the mark there (forget_input_copper)."""
+    before a step and forgets the mark there (forget_input_copper).
+
+    Each object's geometry is recorded too (#1609), for input_pair_unmoved."""
     segs = tuple(pcb_data.segments or ())
     vias = tuple(pcb_data.vias or ())
     pcb_data._input_copper = (frozenset(map(id, segs)) | frozenset(map(id, vias)),
-                              segs, vias)
+                              segs, vias,
+                              {id(o): _copper_geometry(o) for o in segs + vias})
+
+
+def _copper_geometry(o) -> tuple:
+    """Where a segment or via sits, as the restore tests measure it."""
+    if hasattr(o, 'start_x'):
+        return (o.start_x, o.start_y, o.end_x, o.end_y, o.width, o.layer, o.net_id)
+    return (o.x, o.y, o.size, o.drill, tuple(o.layers or ()), o.net_id)
+
+
+def input_pair_unmoved(pcb_data):
+    """A test `(a, b) -> bool` that is True when both items were HANDED to
+    the step (mark_input_copper) and both still sit where the input had them;
+    None when the run marked no input.
+
+    Such a pair stood that far apart on the input board, so putting one back
+    beside the other makes nothing worse than the input: a restore test never
+    refuses on it (#1609). Copper an earlier step laid at a smaller clearance
+    than this step's otherwise "collides" with its own untouched neighbours,
+    and the refused restore cascades into rips of more input nets. Copper this
+    run laid, or input copper it moved, is graded as before."""
+    mark = getattr(pcb_data, '_input_copper', None)
+    if not mark:
+        return None
+    ids, geom = mark[0], mark[3]
+
+    def unmoved(a, b):
+        return (id(a) in ids and id(b) in ids
+                and geom[id(a)] == _copper_geometry(a)
+                and geom[id(b)] == _copper_geometry(b))
+    return unmoved
 
 
 def forget_input_copper(pcb_data) -> None:
@@ -447,7 +480,9 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     smaller of that and `clearance`: it sat beside the saved copper before
     the rip, so only a graze the flat test already refused is refused there.
     No config, or a board that declares no class, layer rule or track rule,
-    prices every pair at `clearance`, as before.
+    prices every pair at `clearance`, as before. A pair that is BOTH unmoved
+    input copper is never a collision, at any clearance (#1609,
+    input_pair_unmoved).
     """
     own = set(own_net_ids)
     segs = saved_result.get('new_segments', []) or []
@@ -521,11 +556,16 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
 
     hits = []
     seen = set()
+    held = input_pair_unmoved(pcb_data)
 
-    def _hit(kind, obj):
+    def _hit(kind, obj, mine):
+        # True when the pair counts (#1609: an unmoved input pair never does).
+        if held is not None and held(mine, obj):
+            return False
         if id(obj) not in seen:
             seen.add(id(obj))
             hits.append((kind, obj))
+        return True
 
     # Restored segments vs other-net segments (same layer) and vias (all layers).
     for s in segs:
@@ -536,15 +576,13 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             thr = hw + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
             if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
                                 o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
-                _hit('segment', o)
-                if first_only:
+                if _hit('segment', o, s) and first_only:
                     return hits
         for v in o_vias:
             thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
             if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
                                s.end_x, s.end_y) < thr * thr:
-                _hit('via', v)
-                if first_only:
+                if _hit('via', v, s) and first_only:
                     return hits
 
     # Restored vias (span layers) vs other-net vias and segments.
@@ -556,15 +594,13 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
                     and not (id(vv) in inp_all and id(v) in inp_all):
                 thr = max(thr, vv.drill / 2.0 + v.drill / 2.0 + h2h)
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
-                _hit('via', v)
-                if first_only:
+                if _hit('via', v, vv) and first_only:
                     return hits
         for o in o_segs:
             thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
             if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
                                o.end_x, o.end_y) < thr * thr:
-                _hit('segment', o)
-                if first_only:
+                if _hit('segment', o, vv) and first_only:
                     return hits
 
     return hits

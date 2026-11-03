@@ -673,7 +673,7 @@ def _escaped_on_input(pcb_data, net_id, bare, reach=0.05):
     mark = getattr(pcb_data, '_input_copper', None)
     if not mark:
         return []
-    _ids, segs, vias = mark
+    _ids, segs, vias = mark[:3]
     pts = [(s.start_x, s.start_y) for s in segs if s.net_id == net_id]
     pts += [(s.end_x, s.end_y) for s in segs if s.net_id == net_id]
     pts += [(v.x, v.y) for v in vias if v.net_id == net_id]
