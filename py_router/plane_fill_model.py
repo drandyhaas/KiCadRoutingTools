@@ -1174,9 +1174,20 @@ def install_kicad_fill(pcb_data, islands):
 
 def board_edge_rule(pcb_data) -> float:
     """The copper-to-Edge.Cuts rule KiCad fills this board's zones at: the
-    `min_copper_edge_clearance` of the board file's sibling .kicad_pro, the
-    project KiCad's own refill reads (0.0 with no project or no rule). Both
-    fronts set `source_path` to the board file."""
+    live board's declared `min_copper_edge_clearance` when PCBData was built
+    from one (the #1187 channel, `live_rules_provider`, asked now: mid-plan
+    the GUI's writeback pins it in pcbnew's memory and the file beside the
+    board is still the original, as `kicad_fill_hole_clearance` reads the
+    hole rule), else the board file's sibling .kicad_pro, the project KiCad's
+    own refill reads (0.0 with no project or no rule)."""
+    provider = getattr(pcb_data, 'live_rules_provider', None)
+    if callable(provider):
+        try:
+            v = (provider() or {}).get('min_copper_edge_clearance')
+        except Exception:                                       # noqa: BLE001
+            v = None
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return max(0.0, float(v))
     path = getattr(pcb_data, 'source_path', '') or ''
     if not path:
         return 0.0

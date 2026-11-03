@@ -9895,8 +9895,9 @@ def _live_records(board):
 
 def _live_design_rules(board):
     """What PCBData.live_rules_provider answers for a live pcbnew board
-    (#1187, #1038): the design-settings rules the connection-width floor and
-    the obstacle map's copper-to-hole floor read, in mm -- the ones the board
+    (#1187, #1038): the design-settings rules the connection-width floor,
+    the obstacle map's copper-to-hole floor and the fill model's board-edge
+    gap (plane_fill_model.board_edge_rule) read, in mm -- the ones the board
     DECLARES (fix_kicad_drc_settings.live_declared_rules), so a project-less
     board at pcbnew's factory values answers what its file answers: nothing.
     None when the board declares none of them or has no design settings,
@@ -9904,7 +9905,8 @@ def _live_design_rules(board):
     try:
         from fix_kicad_drc_settings import live_declared_rules
         out = live_declared_rules(
-            board, ('min_track_width', 'min_connection', 'min_hole_clearance'))
+            board, ('min_track_width', 'min_connection', 'min_hole_clearance',
+                    'min_copper_edge_clearance'))
     except Exception:
         return None
     return out or None

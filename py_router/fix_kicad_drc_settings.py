@@ -497,6 +497,12 @@ def connection_width_floor(pcb_data, track_width=None, *,
     path = getattr(pcb_data, 'source_path', '') or ''
     provider = getattr(pcb_data, 'live_rules_provider', None)
     live = provider() if callable(provider) else None
+    # The rules this reader has always taken from the live board: one that
+    # declares only the edge clearance (which the fill model reads from the
+    # same channel) still sends it to the file.
+    live = {k: v for k, v in (live or {}).items()
+            if k in ('min_track_width', 'min_connection',
+                     'min_hole_clearance')} or None
     if live is not None:
         floor = web_min_connection(
             {'board': {'design_settings': {'rules': dict(live)}}})
