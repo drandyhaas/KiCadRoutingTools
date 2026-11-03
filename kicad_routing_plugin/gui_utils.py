@@ -66,6 +66,43 @@ def save_board_via_ui_thread_ex(path, board, timeout_s=None):
         SAVE_BOARD_UI_TIMEOUT_S if timeout_s is None else timeout_s)
 
 
+def remove_listed_segments(board, pcbnew, segments) -> int:
+    """Remove the live board's tracks a strip list names, as the CLI writer's
+    strip does (kicad_writer.match_stack_members, #1556): matched by span,
+    canonical layer and net, COUNTED, and the listed width first. A set of
+    endpoint keys removed EVERY member of a same-span stack, the keeper too,
+    and matched across layers. Returns the number removed."""
+    if not segments:
+        return 0
+    from kicad_parser import POSITION_DECIMALS as D, pcbnew_copper_layer_names
+    from kicad_writer import match_stack_members
+    id_to_name = pcbnew_copper_layer_names()
+
+    def _span(a, b, layer, net):
+        return (frozenset((a, b)), layer, net)
+    targets = [(_span((round(s.start_x, D), round(s.start_y, D)),
+                      (round(s.end_x, D), round(s.end_y, D)),
+                      s.layer, s.net_id), s.width)
+               for s in segments]
+    tracks = [t for t in board.GetTracks()
+              if t.Type() == pcbnew.PCB_TRACE_T]  # not vias / arcs
+    items = []
+    for track in tracks:
+        a = (round(pcbnew.ToMM(track.GetStart().x), D),
+             round(pcbnew.ToMM(track.GetStart().y), D))
+        b = (round(pcbnew.ToMM(track.GetEnd().x), D),
+             round(pcbnew.ToMM(track.GetEnd().y), D))
+        # Canonical layer name, as s.layer is: a renamed layer's display
+        # name matched no key and left ripped copper (#1056).
+        items.append((_span(a, b, id_to_name.get(track.GetLayer()),
+                            track.GetNetCode()),
+                      pcbnew.ToMM(track.GetWidth())))
+    gone, _unmatched = match_stack_members(targets, items)
+    for i in sorted(gone):
+        board.RemoveNative(tracks[i])
+    return len(gone)
+
+
 def ui_thread_status(status_text, progress_bar, message):
     """Show `message` for work running ON the wx main thread.
 
@@ -1469,29 +1506,17 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
         _orc_rm = ((orc.get('removed_segments') or [])
                    + (orc.get('removed_vias') or []))
         if _orc_rm:
-            _rm_keys = set()
-            for s in _orc_rm:
-                if hasattr(s, 'start_x'):
-                    _rm_keys.add((round(s.start_x, 3), round(s.start_y, 3),
-                                  round(s.end_x, 3), round(s.end_y, 3),
-                                  s.net_id))
-                else:
-                    _rm_keys.add((round(s.x, 3), round(s.y, 3), s.net_id))
-            _n_orc_rm = 0
-            for item in list(board.GetTracks()):
-                if item.Type() == pcbnew.PCB_VIA_T:
-                    k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
-                         round(pcbnew.ToMM(item.GetPosition().y), 3),
-                         item.GetNetCode())
-                else:
-                    k = (round(pcbnew.ToMM(item.GetStart().x), 3),
-                         round(pcbnew.ToMM(item.GetStart().y), 3),
-                         round(pcbnew.ToMM(item.GetEnd().x), 3),
-                         round(pcbnew.ToMM(item.GetEnd().y), 3),
-                         item.GetNetCode())
-                    if k not in _rm_keys:
-                        k = (k[2], k[3], k[0], k[1], k[4])
-                if k in _rm_keys:
+            # Segments counted and width-preferring, as the CLI's fragment
+            # delete (remove_segments_from_content, #1556); vias by position.
+            _n_orc_rm = remove_listed_segments(
+                board, pcbnew, [s for s in _orc_rm if hasattr(s, 'start_x')])
+            _rm_keys = {(round(s.x, 3), round(s.y, 3), s.net_id)
+                        for s in _orc_rm if not hasattr(s, 'start_x')}
+            for item in list(board.GetTracks()) if _rm_keys else ():
+                if item.Type() == pcbnew.PCB_VIA_T and (
+                        round(pcbnew.ToMM(item.GetPosition().x), 3),
+                        round(pcbnew.ToMM(item.GetPosition().y), 3),
+                        item.GetNetCode()) in _rm_keys:
                     board.RemoveNative(item)
                     _n_orc_rm += 1
             if _n_orc_rm:

@@ -1367,36 +1367,9 @@ class DifferentialTab(wx.Panel):
         # from a prior routing pass stays on the live board.
         segs_to_remove = results_data.get('segments_to_remove') or []
         if segs_to_remove:
-            # Counted and width-preferring, as the CLI writer's strip
-            # (kicad_writer.match_stack_members, #1556): a set of span keys
-            # removed EVERY member of a same-span stack, the keeper too.
-            from kicad_writer import match_stack_members
-
-            def _span(a, b, layer, net):
-                return (frozenset((a, b)), layer, net)
-            targets = [(_span((round(s.start_x, POSITION_DECIMALS),
-                               round(s.start_y, POSITION_DECIMALS)),
-                              (round(s.end_x, POSITION_DECIMALS),
-                               round(s.end_y, POSITION_DECIMALS)),
-                              s.layer, s.net_id), s.width)
-                       for s in segs_to_remove]
-            tracks = [t for t in board.GetTracks()
-                      if t.Type() == pcbnew.PCB_TRACE_T]  # not vias / arcs
-            items = []
-            for track in tracks:
-                a = (round(pcbnew.ToMM(track.GetStart().x), POSITION_DECIMALS),
-                     round(pcbnew.ToMM(track.GetStart().y), POSITION_DECIMALS))
-                b = (round(pcbnew.ToMM(track.GetEnd().x), POSITION_DECIMALS),
-                     round(pcbnew.ToMM(track.GetEnd().y), POSITION_DECIMALS))
-                # Canonical layer name, as s.layer is: a renamed layer's
-                # display name matched no key and left ripped copper (#1056).
-                items.append((_span(a, b, id_to_name.get(track.GetLayer()),
-                                    track.GetNetCode()),
-                              pcbnew.ToMM(track.GetWidth())))
-            gone, _unmatched = match_stack_members(targets, items)
-            for i in sorted(gone):
-                board.RemoveNative(tracks[i])
-                tracks_removed += 1
+            # Counted and width-preferring, as the CLI writer's strip (#1556).
+            from .gui_utils import remove_listed_segments
+            tracks_removed += remove_listed_segments(board, pcbnew, segs_to_remove)
 
         # Remove original-board VIAS the pipeline flagged (#508 finding 11:
         # route_diff now returns vias_to_remove; swig_gui parity).

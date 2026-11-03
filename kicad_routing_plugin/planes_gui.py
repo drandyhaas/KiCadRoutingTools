@@ -1497,29 +1497,19 @@ class PlanesTab(wx.Panel):
         strips = getattr(self, '_strip_segments', None) or []
         if strips:
             import pcbnew as _p
-            _keys = set()
-            for s in strips:
-                if hasattr(s, 'start_x'):
-                    _keys.add((round(s.start_x, 3), round(s.start_y, 3),
-                               round(s.end_x, 3), round(s.end_y, 3),
-                               s.net_id))
-                else:  # via
-                    _keys.add((round(s.x, 3), round(s.y, 3), s.net_id))
-            _removed = 0
-            for item in list(board.GetTracks()):
-                if item.Type() == _p.PCB_VIA_T:
-                    k = (round(_p.ToMM(item.GetPosition().x), 3),
-                         round(_p.ToMM(item.GetPosition().y), 3),
-                         item.GetNetCode())
-                else:
-                    k = (round(_p.ToMM(item.GetStart().x), 3),
-                         round(_p.ToMM(item.GetStart().y), 3),
-                         round(_p.ToMM(item.GetEnd().x), 3),
-                         round(_p.ToMM(item.GetEnd().y), 3),
-                         item.GetNetCode())
-                    if k not in _keys:
-                        k = (k[2], k[3], k[0], k[1], k[4])  # reversed ends
-                if k in _keys:
+            from .gui_utils import remove_listed_segments
+            # Segments counted and width-preferring, as the CLI writer's
+            # strip (#1556): a set of endpoint keys removed every member of a
+            # same-span stack, the keeper too. Vias by position.
+            _removed = remove_listed_segments(
+                board, _p, [s for s in strips if hasattr(s, 'start_x')])
+            _keys = {(round(s.x, 3), round(s.y, 3), s.net_id)
+                     for s in strips if not hasattr(s, 'start_x')}
+            for item in list(board.GetTracks()) if _keys else ():
+                if item.Type() == _p.PCB_VIA_T and (
+                        round(_p.ToMM(item.GetPosition().x), 3),
+                        round(_p.ToMM(item.GetPosition().y), 3),
+                        item.GetNetCode()) in _keys:
                     board.RemoveNative(item)
                     _removed += 1
             if _removed:
@@ -2020,32 +2010,18 @@ class PlanesTab(wx.Panel):
             if delta.is_empty:
                 return
 
-            # Remove stripped segments/vias: match live board items by rounded
-            # endpoint(s)+net, same key style as the ripped-copper strip loop.
-            rm_keys = set()
-            for s in delta.segments_to_remove:
-                rm_keys.add((round(s.start_x, 3), round(s.start_y, 3),
-                             round(s.end_x, 3), round(s.end_y, 3), s.net_id))
-            via_keys = set()
-            for v in delta.vias_to_remove:
-                via_keys.add((round(v.x, 3), round(v.y, 3), v.net_id))
-            removed = 0
-            for item in list(board.GetTracks()):
-                if item.Type() == pcbnew.PCB_VIA_T:
-                    k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
-                         round(pcbnew.ToMM(item.GetPosition().y), 3),
-                         item.GetNetCode())
-                    if k in via_keys:
-                        board.RemoveNative(item)
-                        removed += 1
-                    continue
-                a = (round(pcbnew.ToMM(item.GetStart().x), 3),
-                     round(pcbnew.ToMM(item.GetStart().y), 3),
-                     round(pcbnew.ToMM(item.GetEnd().x), 3),
-                     round(pcbnew.ToMM(item.GetEnd().y), 3),
-                     item.GetNetCode())
-                b = (a[2], a[3], a[0], a[1], a[4])  # endpoints reversed
-                if a in rm_keys or b in rm_keys:
+            # Remove stripped segments counted and width-preferring, as
+            # clean_plane_copper's file strip (#1556); vias by position.
+            from .gui_utils import remove_listed_segments
+            removed = remove_listed_segments(board, pcbnew,
+                                             delta.segments_to_remove)
+            via_keys = {(round(v.x, 3), round(v.y, 3), v.net_id)
+                        for v in delta.vias_to_remove}
+            for item in list(board.GetTracks()) if via_keys else ():
+                if item.Type() == pcbnew.PCB_VIA_T and (
+                        round(pcbnew.ToMM(item.GetPosition().x), 3),
+                        round(pcbnew.ToMM(item.GetPosition().y), 3),
+                        item.GetNetCode()) in via_keys:
                     board.RemoveNative(item)
                     removed += 1
 
