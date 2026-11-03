@@ -3,10 +3,10 @@
 A 3D take on `py_placer/place_movie.py`. It tells the same placement story
 (the input with its piles, the fixed parts flying to their places, the
 scatter, the anneal, the best placement) on a 3D board, rendered to an .mp4.
-With `--route`, it also films place_movie's flow: one seed's placement and
-fast route, then every judged seed's board side by side, the best one picked,
-and its routes, with copper appearing and ripped copper going. It is a
-prototype, to judge whether a 3D movie is worth more work.
+With `--route` or `--route-chain`, it also films place_movie's flow: one
+seed's placement and fast route, then every judged seed's board side by side,
+the best one picked, and its routes, with copper appearing and ripped copper
+going. It is a prototype, to judge whether a 3D movie is worth more work.
 
 **The story is shared with the 2D movie.** `py_placer/placement_story.py`
 holds it: place_simple's hooks, the piles, the schedule and the captions.
@@ -41,14 +41,28 @@ the seed differently are refused (exit 2). The movie is written beside it as
 JSON and the frames go to the output's name + `_movie3d/` (or `--work`).
 
 With `--route BOARD:SET` (a stress-corpus board whose recorded chain routes
-this one), it runs place_movie's own `run_flow`, in `--route-work` (default:
-the output's name + `_work`, place_movie's default, so a 2D flow run's work
-is reused):
+this one) or `--route-chain FILE` (the chain a placement run routes its seeds
+with, its `judge_chain.txt`), it runs place_movie's own `run_flow`, in
+`--route-work` (default: the output's name + `_work`, place_movie's default,
+so a 2D flow run's work is reused):
 
 1. the round's seeds are placed (`--scattered` 6, `--clustered` 6, and the
    opt-in `--anchored`, 0);
 2. the `--judge` 6 cheapest legal seeds are fast-routed;
 3. the best of them is routed in full.
+
+`--route-chain` routes each seed the way `py_placer/judge_seeds.py --chain`
+does, with judge_seeds' own code: the chain file is in its format (one
+command per line, boards named by `{in}` `{out}` `{dir}` `{seed}` `{run}`),
+the fast routes run every route.py / route_diff.py step at `--quick 2`, the
+full route takes `--quick` off, each route is scored by quick_score with the
+`--intent` given and the input board as the baseline, and the best is picked
+by `quick_score.judge_key`. The routes land in judge_seeds' names in
+`--route-work` (`s<S>_route/`, `s<S>_full_route/` and their scores). Run it
+from the repo root, as judge_seeds is run: the chain's commands run from the
+current folder. So the movie routes the seeds with the run's own chain and
+picks the seed its judge picks, where `--route` routes with the corpus
+board's recorded chain. The two options are exclusive.
 
 The movie films a seed the judge did NOT pick, so the pick is something the
 viewer sees happen: the judged seed the objective rates cheapest, or the next
@@ -160,8 +174,8 @@ Over the whole movie the camera orbits slowly, 20 degrees either side of a
 base azimuth, at 46 degrees of elevation. Each frame is fitted to the board,
 or to the board and the piles.
 
-With `--route`, the placed seed's routes follow, as place_movie's 2D flow
-plays them:
+With `--route` or `--route-chain`, the placed seed's routes follow, as
+place_movie's 2D flow plays them:
 
 1. The fast route plays: one router event per frame. New copper is lit white
    (cyan when the router restored it). A ripped track turns magenta, then
@@ -229,8 +243,8 @@ view across the board's long side wins a near tie.
   unreadable model again). kicad-cli writes no
   metallic factor, and glTF's default of 1 makes every model a black mirror,
   so the page sets each model material's metalness to 0.15.
-- `route3d.py` plays a route_placed.py chain as route_movie's `play_chain`
-  does, with its own helpers. Each track, via and pour gets the tick it was
+- `route3d.py` plays a route_placed.py or judge_seeds.py chain as
+  route_movie's `play_chain` does, with its own helpers. Each track, via and pour gets the tick it was
   born at and the tick it died at (stage3d's copper lifetimes). A frame names
   one tick, and the page's shader shows, lights or reddens each item for it.
 - `render.mjs` uses Node and playwright-core to open `page/index.html` in
