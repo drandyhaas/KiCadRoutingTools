@@ -1584,6 +1584,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # P/N skew rule's, the explicit override, else the default
     config.intra_pair_tolerances, _intra_src = resolve_intra_pair_tolerances(
         diff_pair_ids_to_route, config, pcb_data, input_file, intra_pair_tolerance)
+    config.skew_graded_net_ids = frozenset(
+        nid for _n, p in diff_pair_ids_to_route
+        if p.p_net_id in (config.intra_pair_tolerances or {})
+        for nid in (p.p_net_id, p.n_net_id))
     _by_rule = sorted({r for _s, r in _intra_src.values() if r})
     if _by_rule and not config.diff_pair_intra_match:
         print(f"Intra-pair matching on for {sum(1 for _s, r in _intra_src.values() if r)} "

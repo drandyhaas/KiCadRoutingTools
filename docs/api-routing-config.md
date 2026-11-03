@@ -566,6 +566,7 @@ on the corpus.
 | `gnd_via_enabled` | `True` | Place GND return vias next to diff-pair signal vias |
 | `diff_pair_intra_match` | `False` | Meander the shorter of P/N to match lengths within the pair |
 | `intra_pair_tolerances` | `None` | `{P net id: mm}`, set by the diff-pair engine (#1503): the pairs matched P to N this run and the skew each is matched to -- a `.kicad_dru` P/N skew rule's max, the explicit override, else `length_match_tolerance` |
+| `skew_graded_net_ids` | `frozenset()` | Set by the diff-pair engine: P and N of every pair in `intra_pair_tolerances`. With the length-match members `run_length_matching` records, the nets the post-route cleanup gives a via-centre bridge (#1583, `pcb_modification.length_graded_net_ids`) |
 | `ac_couple_match` | `False` | End-to-end length-match AC-coupled pairs split by series caps: concatenated P vs N path (#196) |
 | `diff_chamfer_extra` | `1.5` | Meander chamfer multiplier for pairs (avoids P/N crossings) |
 | `diff_pair_hybrid_escape` | `True` | When a coupled pair's terminal connector can't clear foreign copper (#165 graze), keep the coupled middle and defer each terminal leg to a single-ended point-to-point join instead of failing the whole pair |

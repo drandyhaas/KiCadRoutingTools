@@ -557,6 +557,19 @@ def _sense_copper(item) -> bool:
     return bool(getattr(item, 'sense', '') or getattr(item, 'held_by', ''))
 
 
+def length_graded_net_ids(pcb_data: PCBData, config) -> set:
+    """The nets whose LENGTH a grade reads (#1583): both members of every pair
+    matched P to N this run (`config.skew_graded_net_ids`) and the members of
+    every length-match group it formed (`config._length_matched_names`, which
+    `run_length_matching` records). Empty for a config neither engine set,
+    such as a pour step's."""
+    ids = set(getattr(config, 'skew_graded_net_ids', None) or ())
+    names = getattr(config, '_length_matched_names', None)
+    if names:
+        ids |= {nid for nid, n in pcb_data.nets.items() if n.name in names}
+    return ids
+
+
 def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                       clearance: float = None) -> int:
     """Bridge same-net SOFT JOINTS with a TINY coincident segment (#soft-joint).
@@ -890,14 +903,21 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     # segment wholly inside the via -- is bridged from where it ends instead.
     # One per end, from the definition check_weird reports
     # (`off_centre_via_ends`), so detection and repair agree.
+    # Only on a net whose LENGTH a grade reads (`length_graded_net_ids`):
+    # anywhere else the barrel already joins the end and the bridge is copper
+    # with no purpose -- laid by a pour step over every signal net it was
+    # handed, it changed what every later step routed around.
     centre_conns = []
     routed_ids = {id(x) for r in results if not r.get('cleanup')
                   for x in (r.get('new_segments') or ())}
+    graded = length_graded_net_ids(pcb_data, config)
     oc_segs = [s for s in pcb_data.segments
-               if (scope_net_ids is None or s.net_id in scope_net_ids)
+               if s.net_id in graded
+               and (scope_net_ids is None or s.net_id in scope_net_ids)
                and not _sense_copper(s)]
     oc_vias = [v for v in pcb_data.vias
-               if (scope_net_ids is None or v.net_id in scope_net_ids)
+               if v.net_id in graded
+               and (scope_net_ids is None or v.net_id in scope_net_ids)
                and not _sense_copper(v)]
     done_ends = set()
     for s, end, v, d in off_centre_via_ends(oc_segs, oc_vias, _copper or None):

@@ -266,6 +266,9 @@ class GridRouteConfig:
     # every pair under diff_pair_intra_match, else those a .kicad_dru P/N skew
     # rule binds; None: none (`length_matching.intra_pair_on`)
     intra_pair_tolerances: Optional[Dict[int, float]] = None
+    # P and N of those same pairs: the nets whose shipped skew is graded, so
+    # the post-route cleanup lays them a via-centre bridge (#1583)
+    skew_graded_net_ids: FrozenSet[int] = frozenset()
     ac_couple_match: bool = False  # End-to-end length-match AC-coupled pairs split by series caps (#196)
     # Hybrid escape: when a coupled pair's terminal connector can't clear foreign
     # copper (#165 graze), keep the coupled middle and defer each terminal leg to

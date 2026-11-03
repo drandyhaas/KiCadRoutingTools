@@ -19,6 +19,10 @@ centre, the via, a B.Cu track, pad B:
   3. KiCad's length model reads that length too, for 10.0.4+ and 10.0.3.
   4. Copper this run did not lay is never cut: it gets a bridge from where
      it ends.
+  5. Only a net whose length a grade reads gets the bridge: a pair member
+     matched P to N, or a length-match group member. Any other net's end is
+     left as it is -- the barrel joins it, and a pour step handed every
+     signal net used to bridge them all.
 
     python3 tests/test_1583_via_centre_bridge.py
 """
@@ -37,7 +41,7 @@ from net_queries import (kicad_net_length_nm, net_signal_length,  # noqa: E402
                          pin_pair_path_length)
 from pcb_modification import CLOSE_SOFT_JOINT_KINDS, close_soft_joints  # noqa: E402
 from routing_config import GridRouteConfig                     # noqa: E402
-from synth import make_pad, make_pcb, make_seg, make_via       # noqa: E402
+from synth import make_net, make_pad, make_pcb, make_seg, make_via  # noqa: E402
 
 failures = []
 R = 0.3                     # the via's radius
@@ -60,13 +64,14 @@ def board():
     info = BoardInfo(layers={0: 'F.Cu', 31: 'B.Cu'}, copper_layers=['F.Cu', 'B.Cu'],
                      board_bounds=(-2, -2, 12, 2))
     pcb = make_pcb(segments=[t1, t2], vias=[via], pads_by_net={1: [pa, pb]},
-                   board_info=info)
+                   nets={1: make_net(1, '/CLK_P')}, board_info=info)
     return pcb, t1, t2, via, pa, pb
 
 
-def cfg():
+def cfg(graded=frozenset({1})):
     return GridRouteConfig(clearance=0.15, track_width=0.15, via_size=0.6,
-                           via_drill=0.3, layers=['F.Cu', 'B.Cu'], grid_step=0.05)
+                           via_drill=0.3, layers=['F.Cu', 'B.Cu'], grid_step=0.05,
+                           skew_graded_net_ids=graded)
 
 
 def entry_distance():
@@ -122,6 +127,20 @@ check("the bridge starts at its end", b is not None and (b.start_x, b.start_y) =
       and (b.end_x, b.end_y) == (CX, CY))
 check("no off-centre end is left", off_centre_via_ends(pcb.segments, pcb.vias,
                                                        ['F.Cu', 'B.Cu']) == [])
+
+print("5. only a net whose length is graded is bridged")
+pcb, t1, t2, via, pa, pb = board()
+results = [{'new_segments': [t1, t2], 'new_vias': [via]}]
+n = close_soft_joints(results, pcb, None, cfg(graded=frozenset()))
+check("an ungraded net: no bridge, the track untouched",
+      n == 0 and (t1.end_x, t1.end_y) == P, f"{n} ({t1.end_x}, {t1.end_y})")
+pcb, t1, t2, via, pa, pb = board()
+c = cfg(graded=frozenset())
+c._length_matched_names = frozenset({'/CLK_P'})
+results = [{'new_segments': [t1, t2], 'new_vias': [via]}]
+check("a length-match group member: bridged",
+      close_soft_joints(results, pcb, None, c) == 1
+      and any(r.get('cleanup') == 'via_centre_bridge' for r in results))
 
 print()
 if failures:
