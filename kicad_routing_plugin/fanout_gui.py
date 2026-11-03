@@ -2388,7 +2388,17 @@ class FanoutTab(wx.Panel):
                     # apart is exactly how #780 happened. `_optimize_decoupling_caps`
                     # already gates its pricing on this one value; the writeback
                     # must gate on the same one or the halves can disagree again.
-                    nondefault_clamp_mm=_fcfg.get('clearance_ceiling'))
+                    #
+                    # And only when that pass RAN: it is the writeback of the
+                    # cap pass (place_fanout_clearance.py's, #768), not of the
+                    # fanout. bga_fanout.py keeps the classes without a
+                    # --clearance-ceiling since #1529 (class_ceiling above), so
+                    # a fanout with no cap pass, or one the pass refused, lowered
+                    # every wider class here and not on the CLI.
+                    nondefault_clamp_mm=(
+                        _fcfg.get('clearance_ceiling')
+                        if cap_summary is not None
+                        and not cap_summary.startswith(CAP_NOT_RUN) else None))
                 # Disclosed, because it CHANGES THE BOARD'S DECLARED SPEC and
                 # an operator reading the log must see that. Printed only when
                 # something actually moved: no ceiling -> empty list -> silence,
