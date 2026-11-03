@@ -1444,7 +1444,11 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
             _cl = None
         if _cl and len(_cl) >= 2:
             def _tagged(c):
-                pts = [(x, y, l, None) for x, y, l in c['points']]
+                # each island by its own index (its interior seeds the
+                # strap); untagged, only the copper -- the cluster's
+                # `points` repeat the islands' EDGE samples, and tagged
+                # None they won the nearest approach and became seeds
+                pts = [(x, y, l, None) for x, y, l in c['copper_points']]
                 for ii in c['islands']:
                     pts += [(x, y, l, ii) for x, y, l in _samples(ii)]
                 return pts
@@ -1602,23 +1606,36 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
     _win = (min(pa[0], pb[0]) - 8.0, min(pa[1], pb[1]) - 8.0,
             max(pa[0], pb[0]) + 8.0, max(pa[1], pb[1]) + 8.0)
 
+    def _interior(ii):
+        layer, poly = islands[ii]
+        return [(x, y, layer) for x, y in rasterize_interior(
+            poly, _win, 0.25, inset=track_half + 0.05,
+            edge_samples=_samples(ii))][:1500]
+
+    def _in_win(x, y):
+        return _win[0] <= x <= _win[2] and _win[1] <= y <= _win[3]
+
     def _side_seeds(pt, pts):
         origin = pt[3]
         if origin is not None:
-            layer, poly = islands[origin]
-            cells = rasterize_interior(
-                poly, _win, 0.25, inset=track_half + 0.05,
-                edge_samples=_samples(origin))
+            cells = _interior(origin)
             if cells:
-                return [(x, y, layer) for x, y in cells][:1500]
+                return cells
             # Sliver island with no interior at track width: edge samples.
             return [(x, y, l) for x, y, l in _samples(origin)
-                    if _win[0] <= x <= _win[2]
-                    and _win[1] <= y <= _win[3]][:400]
-        return [(px, py, pl) if pl else (px, py)
-                for px, py, pl, _o in pts
-                if _win[0] <= px <= _win[2]
-                and _win[1] <= py <= _win[3]][:400]
+                    if _in_win(x, y)][:400]
+        # The nearest approach is track, pad or via copper: seed the side's
+        # copper points, and each of its islands by its INTERIOR -- the
+        # side's island points are edge samples, the illegal starts above
+        # (one GND strap ended on such a point, 0.032 mm inside a foreign
+        # track's clearance, because a seed overrides the obstacle map).
+        seeds = [(px, py, pl) if pl else (px, py)
+                 for px, py, pl, _o in pts
+                 if _o is None and _in_win(px, py)][:400]
+        for ii in sorted({p[3] for p in pts if p[3] is not None
+                          and _in_win(p[0], p[1])}):
+            seeds += _interior(ii)
+        return seeds
 
     # #1168: never a seed the run's own edge floor forbids.
     src = seeds_clear_of_edge(_side_seeds(pa, a_pts), pcb_data,

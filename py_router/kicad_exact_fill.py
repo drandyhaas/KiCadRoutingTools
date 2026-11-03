@@ -835,7 +835,11 @@ def exact_clusters(pcb_data, net_id: int, islands,
 
     Returns clusters largest-first, each
       {'islands': [idx...], 'pads': [Pad...], 'points': [(x, y, layer)...],
-       'has_pads': bool}. len(clusters) > 1 => KiCad demands links.
+       'copper_points': [(x, y, layer)...], 'has_pads': bool}.
+    `points` holds the islands' edge samples and the copper's points;
+    `copper_points` only the pads, track ends and vias -- a fill EDGE point
+    is not a legal start for a track, a copper point is.
+    len(clusters) > 1 => KiCad demands links.
     """
     import math as _m
     from kicad_oracle import _net_track_components, _cluster_points
@@ -971,7 +975,8 @@ def exact_clusters(pcb_data, net_id: int, islands,
 
     def bucket(root):
         return clusters.setdefault(root, {'islands': [], 'pads': [],
-                                          'points': [], 'has_pads': False})
+                                          'points': [], 'copper_points': [],
+                                          'has_pads': False})
 
     for ii, (layer, poly) in enumerate(islands):
         c = bucket(find(('i', ii)))
@@ -983,14 +988,16 @@ def exact_clusters(pcb_data, net_id: int, islands,
         c['pads'].append(p)
         c['has_pads'] = True
         cu = [l for l in p.layers if l.endswith('.Cu')]
-        c['points'].append((p.global_x, p.global_y, cu[0] if cu else None))
+        c['copper_points'].append((p.global_x, p.global_y, cu[0] if cu else None))
     for i, s in enumerate(segs):
         c = bucket(find(('c', comp_of_seg[i])))
-        c['points'].append((s.start_x, s.start_y, s.layer))
-        c['points'].append((s.end_x, s.end_y, s.layer))
+        c['copper_points'].append((s.start_x, s.start_y, s.layer))
+        c['copper_points'].append((s.end_x, s.end_y, s.layer))
     for j, v in enumerate(vias):
         c = bucket(find(('c', comp_of_via[j])))
-        c['points'].append((v.x, v.y, None))
+        c['copper_points'].append((v.x, v.y, None))
+    for c in clusters.values():
+        c['points'].extend(c['copper_points'])
     return sorted(clusters.values(), key=lambda c: -len(c['points']))
 
 
