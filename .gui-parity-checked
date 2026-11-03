@@ -1,3 +1,80 @@
+21abea9a5693800f2249049bf84f589df0c2a7f2 2026-11-02 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 7978996d..cda7c123 (181 commits, 133 non-merge) on this Windows box
+(KiCad 10.0), plus the fixes it produced (9d409ecf, 134c6602, f49d5b36) and
+the two test pins they moved (caffe606, 21abea9a). The range holds the
+#1518-#1608 batches (batch 1 15e3c9d8, batch 2 24482d2c, batch 3 cda7c123).
+
+METHOD. Two read-only halves plus every gate.
+(A) Flags and kwargs: every argparse flag in py_router/, py_tools/ and
+  py_placer/ diffed by AST between the two commits; the signatures of
+  batch_route, batch_route_diff_pairs, create_plane, the fanout and repair
+  entry points and GridRouteConfig diffed; the kicad_routing_plugin diff
+  (6 files) read; wx controls checked against settings_persistence and
+  reset_params_to_defaults.
+(B) Post-passes, results data and parse paths: every CLI main() body diffed
+  for post-engine passes; new results keys and records; PCBData built both
+  ways (text and pcbnew 10) on 8 synthetic boards plus esp_prog, watchy and
+  tigard for #1607's cutout reclassification and #1608's hole clearance.
+(C) Gates: all 70 tests/gui_parity gates PASS on 21abea9a (the three that
+  do not re-exec run under KiCad's python directly). test_gui_engine_parity:
+  PARITY, copper sets identical (799 segments, 128 vias, 0 unconnected, 0 DRC
+  on both fronts). Modal suite ALL GREEN on 21abea9a (1129).
+
+IN RANGE, NO GAP:
+- bga_fanout --immovable-refs / generate_bga_fanout(immovable_refs)
+  (#1521/#1562): the BGA panel's immovable_refs control, saved, restored,
+  reset per step, mapped by manifest_to_plan.
+- The fanouts' net_clearances / clearance_ceiling (#1529): the CLI passes
+  the ceiling and the engine reads the classes; the tab passes
+  live_net_clearances() and the routing ceiling (None when unticked).
+- scoped_clearance_rules (#1602): installed by the top level on both
+  fronts, forwarded only to nested sub-runs; route_planes' GND vias and
+  soft-joint bridges install the channel on both (planes_gui :1224-1250).
+- place_fanout_clearance --no-fix-drc-settings (#1578): CAP_BOOL_FLAGS maps
+  it to fix_drc_check; the standalone cap step's clamp gates on it.
+- cap_net_clearances (#1561), the annular-ring board floor (#1579), the
+  held copper-to-hole floor (#1568/#1577, held_hole_clearance_dicts): every
+  GUI site mirrors its CLI twin.
+- route.py's in-range passes (#1525 dead-end sweep, #1543 via merge, #1554
+  lap victims) live in batch_route, so the GUI gets them.
+- #1607's cutout reclassification and #1608's kicad_fill_hole_clearance:
+  measured identical on both parse paths, a declared 0 included.
+- Not GUI routing: judge_seeds --full, check_drc --clearance-margin-mm,
+  cover_facts --refs; bga_fanout's drc_grazes / decap_deferred_refs JSON is
+  CLI-only output (fanout_drc_grazes in KNOWN_CLI_ONLY).
+
+FOUND AND FIXED:
+- 9d409ecf: the fanout tab clamped every non-Default class to the placement
+  ceiling after every fanout, the cap pass's writeback (#782) run without
+  the pass; bga_fanout.py keeps the classes without --clearance-ceiling
+  since #1529. Now only when the cap pass ran. test_fanout_floor_parity_gui
+  gains the arm (fails before: GUI Wide 0.15, CLI 0.4).
+- 134c6602: #1556's counted, width-preferring strip reached the route and
+  differential tabs only; the Planes tab's cleanup strips and cleanup delta
+  and the oracle's fragment delete still removed every member of a
+  same-span stack, across layers. One helper,
+  gui_utils.remove_listed_segments, at all five; gate
+  test_1556_live_strip_counted (and test_1056's rip control re-aimed at
+  the helper, caffe606).
+- f49d5b36: plane_fill_model.board_edge_rule read the edge rule only from
+  the file, so mid-plan the GUI's model ignored the live writeback; it reads
+  live_rules_provider first now. tests/test_fill_model_edge_rule_live.py.
+
+OPEN, NOT CHANGED:
+- The standalone cap step writes no size floors for copper it lays nudging
+  vias, where the CLI cap pass now writes that copper's floors (#1578);
+  fanout_gui records the omission as deliberate (#782).
+- live_net_clearances takes one class per net; net_clearance_map_by_id the
+  widest of several pattern memberships. Unmeasured on multi-membership
+  boards.
+- coupled_pair_floors (#1542/#1526) reads per-class diff_pair_gap from the
+  saved .kicad_pro on the GUI too: an unsaved Board Setup edit is invisible.
+- CLI late passes that re-parse output_file read the mid-run-synced hole
+  floor; the GUI's view keeps the live board's stricter pre-writeback value.
+  Inert before #1608 stamped hole clearance; likely small.
+- Carried from earlier audits: the Planes tab ignores route_planes --layers;
+  Layer Costs order; the #1279 dangling-member warning is CLI-only.
+
 7978996dace6e34c26a39eacae293059ec4c6780 2026-10-29 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of 1239f2a2..b6b2aeac (238 commits, 213 non-merge) on main, the first
 on KiCad 10.0.6 (this Mac moved from 10.0.0 to match the cloud stress image),
