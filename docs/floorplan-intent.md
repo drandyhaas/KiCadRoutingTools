@@ -967,6 +967,19 @@ roster):
    a rule to ERROR, but never demote one out of the refusal.
 5. Nothing answers for it in `dispositions.rules`.
 
+The board fact behind the edge rules (`edge_connector`, and the advisory
+`pins_to_edge`) is a part that classifies as an edge receptacle or actuator,
+or a **connector-family part** (#1610): class `connector_affinity`, or a part
+with pads and a connector reference (`J`, `P`, `X`, `CN`) that `part_class`
+leaves without a class, unless its footprint name says it is something else
+(an `X` crystal). A connector-family part makes no edge claim, and a pile's
+staging pose gives it none, but whether a right-angle cable connector or a
+jack named only by its part number needs an edge is a design fact the board
+file does not carry. So the roster owes `edge_connector` for it and names
+every such part in the applicability reason: declare an `edge_connectors[]`
+entry for each, or write `dispositions.rules.edge_connector`. A board with
+none of these parts reads the edge rules not applicable.
+
 Budget keys work the same way. `legality_budget` without `overlap_area` or
 `oob_count` owes that key a `dispositions.withheld.<key>`. The debt is read off
 the budget the plan actually declares, not off the plan's

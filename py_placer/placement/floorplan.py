@@ -8925,10 +8925,40 @@ def _brief_claims(rule: str, brief_fragment) -> List[str]:
         return [str(k.get('rule')) for k in frag.get('keep_away') or ()]
     return []
 
-#: Part classes whose presence makes the edge rules applicable. Strict on
-#: purpose: `connector_affinity` (a header, a JST) makes no edge claim, and
-#: counting it would make the edge rules applicable on nearly every board.
+#: Part classes that claim an edge by themselves.
 _EDGE_CLAIM_CLASSES = ('edge_receptacle', 'edge_actuator')
+
+
+def _edge_rule_parts(pcb_data) -> Tuple[List[str], List[str]]:
+    """`(claimants, connectors)`: the parts that classify as edge receptacles
+    or actuators, and the CONNECTOR-FAMILY parts beside them (#1610) -- class
+    `connector_affinity`, or a part with pads and a connector reference
+    (`CONN_PREFIX_MED`) that `classify_part` leaves without a class.
+
+    A connector of the second list makes no edge claim (a header can sit
+    inside a board), but whether it needs one is a design fact the board file
+    does not carry: a right-angle cable connector does, and a jack named only
+    by its part number classifies as nothing. So the roster owes the edge rule
+    for them too, and names them, rather than reading "not applicable" on a
+    board whose cable connectors all need an edge."""
+    from .part_class import CONN_PREFIX_MED, _prefix, classify_part
+    from .roles import _CONNECTOR_FP_ROLES, infer_role
+    claim, conn = [], []
+    for r, fp in sorted((pcb_data.footprints or {}).items()):
+        name = classify_part(fp, r).name
+        if name in _EDGE_CLAIM_CLASSES:
+            claim.append(r)
+        elif name == 'connector_affinity':
+            conn.append(r)
+        elif (name is None and _prefix(r) in CONN_PREFIX_MED
+              and non_aperture_pads(fp)):
+            # The prefix is convention only, and `X` names crystals too: a
+            # footprint name that says what else the part is outranks it.
+            role = infer_role(fp, r, None)
+            if (role['source'] != 'footprint'
+                    or role['role'] in _CONNECTOR_FP_ROLES):
+                conn.append(r)
+    return claim, conn
 
 
 def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
@@ -8956,15 +8986,21 @@ def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
                        "none, and the board file has none this intent can "
                        "grade")
     if rule in ('edge_connector', 'pins_to_edge'):
-        from .part_class import classify_part
-        refs = sorted(r for r, fp in (pcb_data.footprints or {}).items()
-                      if classify_part(fp, r).name in _EDGE_CLAIM_CLASSES)
-        if not refs:
-            return False, ("no part classifies as an edge receptacle or "
-                           "actuator, so nothing has an edge to claim")
-        return True, (f"{len(refs)} part(s) classify as edge receptacles or "
-                      f"actuators ({', '.join(refs[:6])}"
-                      + (', ...' if len(refs) > 6 else '') + ")")
+        claim, conn = _edge_rule_parts(pcb_data)
+        if not claim and not conn:
+            return False, ("no part classifies as an edge receptacle, "
+                           "actuator or connector, so nothing has an edge "
+                           "to claim")
+        # Every ref is named: these are the parts the author must answer
+        # for, one by one.
+        why = []
+        if claim:
+            why.append(f"{len(claim)} part(s) classify as edge receptacles "
+                       f"or actuators ({', '.join(claim)})")
+        if conn:
+            why.append(f"{len(conn)} connector-family part(s) whose edge, if "
+                       f"any, only a declaration can say ({', '.join(conn)})")
+        return True, '; '.join(why)
     if rule in ('decap_distance', 'decap_ungraded'):
         # tethered + beyond-radius is every cap with an IC on its rail. The
         # SPLIT between the two moves with the poses; the SUM does not, so
