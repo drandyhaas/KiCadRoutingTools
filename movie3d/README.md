@@ -217,8 +217,16 @@ view across the board's long side wins a near tie.
   ships is pointed at its `.step` twin, a still-missing model is found by
   its file name in the library, and failing that it takes the one the
   make-3d-movie skill found on the web (`find_models.py`, one per
-  footprint). The GLB is cached in `movie3d/cache/<key>/` (gitignored), keyed by the staged board, kicad-cli's version and each found model file's size and time, so a
-  re-render or another seed does not export again. kicad-cli writes no
+  footprint). One model file kicad-cli cannot read fails the whole export,
+  so when it fails with found models staged, the board is exported without
+  them, and then with a half of them at a time, a half that fails halved
+  again (one export per try, a few seconds each), until the ones it cannot
+  read are known: only their parts are boxes, and `record:` names each
+  such model with its parts. When the board does not export even without
+  the found models, every part is a box and `record:` gives the reason.
+  The GLB is cached in `movie3d/cache/<key>/` (gitignored), keyed by the staged board, kicad-cli's version and each found model file's size and time, so a
+  re-render or another seed does not export again (nor look for an
+  unreadable model again). kicad-cli writes no
   metallic factor, and glTF's default of 1 makes every model a black mirror,
   so the page sets each model material's metalness to 0.15.
 - `route3d.py` plays a route_placed.py chain as route_movie's `play_chain`

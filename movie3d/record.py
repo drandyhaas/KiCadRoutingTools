@@ -770,6 +770,9 @@ def attach_models(a, rec):
           + (f"; {info['note']}" if info['note'] else '') + "); "
           + (f"{len(boxed)} fell back to a box ({', '.join(boxed)})" if boxed else 'none fell back to a box')
           + (f"; {len(bare)} have no model and nothing assembled ({', '.join(bare)})" if bare else '')
+          + (f"; {len(info['unreadable'])} found model(s) kicad-cli cannot read, drawn as a box: "
+             + ', '.join(f"{u['model']} ({', '.join(u['refs'])})" for u in info['unreadable'])
+             if info['unreadable'] else '')
           + (f"; drawn from models found on the web: {', '.join(info['found'])}"
              if info['found'] else '')
           + (f"; {len(dnp)} DNP part(s) not populated, so drawn as pads: "
