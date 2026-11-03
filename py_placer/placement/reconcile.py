@@ -339,16 +339,23 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
     contradiction). A row whose mechanical value lost ANOTHER row's
     contradiction does not name mechanical its winner.
     """
+    from .floorplan import _EDGE_LETTERS
+
+    def _edge(e):
+        return _EDGE_LETTERS.get(e, e) if isinstance(e, str) else e
+
     geo = _Geometry(pcb, board_path, floors_used)
     bounds = pcb.board_info.board_bounds if pcb.board_info else None
     brief_entries = {str(c.get('ref')): c
                      for c in (brief_fragment or {}).get('edge_connectors')
                      or [] if c.get('ref') and c.get('edge')}
-    brief_edges = {r: c.get('edge') for r, c in brief_entries.items()}
+    # an edge letter is read as the edge it names, as the intent loader reads
+    # it, or `S` against the board's `south` is a DRIFT on a part where it sits
+    brief_edges = {r: _edge(c.get('edge')) for r, c in brief_entries.items()}
     intent_entries = {str(c.get('ref')): c
                       for c in (intent_doc or {}).get('edge_connectors')
                       or [] if c.get('ref') and c.get('edge')}
-    intent_edges = {r: c.get('edge') for r, c in intent_entries.items()}
+    intent_edges = {r: _edge(c.get('edge')) for r, c in intent_entries.items()}
     brief_auth = 'declared'
     if brief_source and os.path.isfile(brief_source):
         brief_source = f"{brief_source} (sha256 {_sha256(brief_source)})"

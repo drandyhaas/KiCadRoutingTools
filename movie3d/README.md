@@ -91,7 +91,9 @@ Without it, every part is drawn as a box. **A model the library lacks** is
 found on the web by the skill -- and so is one for a part whose footprint
 names no model at all -- and recorded with `find_models.py` in
 `movie3d/cache/found/` (gitignored): its download is kept only when it is a
-STEP or VRML model (https only, at most 40 MB, a zip read in memory).
+STEP or VRML model (https only, at most 40 MB, a zip read in memory), and a
+VRML `Switch` is kept as a `Group` of the choice it shows, since kicad-cli's
+GLB export cannot read one and fails the whole board on it.
 make_movie runs no agent: it draws whatever has been recorded, names the
 models still missing, and keeps the box for a found model that does not sit
 on its footprint.
@@ -215,7 +217,7 @@ view across the board's long side wins a near tie.
   ships is pointed at its `.step` twin, a still-missing model is found by
   its file name in the library, and failing that it takes the one the
   make-3d-movie skill found on the web (`find_models.py`, one per
-  footprint). The GLB is cached in `movie3d/cache/<key>/` (gitignored), keyed by the staged board and kicad-cli's version, so a
+  footprint). The GLB is cached in `movie3d/cache/<key>/` (gitignored), keyed by the staged board, kicad-cli's version and each found model file's size and time, so a
   re-render or another seed does not export again. kicad-cli writes no
   metallic factor, and glTF's default of 1 makes every model a black mirror,
   so the page sets each model material's metalness to 0.15.

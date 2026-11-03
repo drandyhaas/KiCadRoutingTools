@@ -23,8 +23,9 @@ movie itself never runs an agent.
         MAX_BYTES, a zip read in memory and only its model members taken (no
         path from the archive is used), and kept only when it starts like a
         STEP (`ISO-10303-21`) or VRML (`#VRML`) model; a GitHub or GitLab
-        page link is turned into its raw-file link. Exit 1, with the reason,
-        when the file is refused.
+        page link is turned into its raw-file link. A VRML `Switch` is kept as
+        a `Group` of the choice it shows, since kicad-cli's GLB export cannot
+        read one. Exit 1, with the reason, when the file is refused.
     python3 movie3d/find_models.py library KEY PATH --match exact|equivalent [--note N]
         KEY's model is an installed library file (KiCad renames models:
         `SW_CuK_JS202011CQN...` became `SW_CK_JS202011CQN...`).
@@ -276,6 +277,93 @@ def _model_kind(blob):
     return None
 
 
+_VRML_TOKEN = re.compile(rb'"(?:\\.|[^"\\])*"|#[^\n]*|[{}\[\]]|USE\s+[^\s{}\[\]]+|[^\s{}\[\]"#]+')
+
+
+def _vrml_nodes(body):
+    """The top-level nodes of a VRML field list's inside, as byte strings: a
+    node runs to the `}` that closes it, a `USE name` is a node of its own."""
+    nodes, start, depth = [], None, 0
+    for m in _VRML_TOKEN.finditer(body):
+        t = m.group()
+        if t.startswith(b'#'):
+            continue
+        if start is None:
+            start = m.start()
+        if t in (b'{', b'['):
+            depth += 1
+        elif t in (b'}', b']'):
+            depth -= 1
+            if depth == 0:
+                nodes.append(body[start:m.end()])
+                start = None
+        elif depth == 0 and t.startswith(b'USE'):
+            nodes.append(body[start:m.end()])
+            start = None
+    return nodes
+
+
+def _vrml_without_switch(blob):
+    """`(blob, n)`: the VRML with each `Switch` turned into a `Group` of the
+    one choice it shows. KiCad's own 3D viewer draws a Switch, but
+    `kicad-cli pcb export glb` reads VRML through OpenCASCADE, which refuses
+    it ("VrmlFormatError"), and that one file fails the export of the WHOLE
+    board, so every part of the movie fell back to a box."""
+    n = 0
+    while True:
+        m, prev = None, None
+        for t in _VRML_TOKEN.finditer(blob):
+            if t.group() == b'{' and prev is not None and prev.group() == b'Switch':
+                m = prev
+                break
+            if not t.group().startswith(b'#'):
+                prev = t
+        if m is None:
+            return blob, n
+        brace = t.start()
+        depth, end, choices = 0, None, []
+        for t in _VRML_TOKEN.finditer(blob, brace):
+            tok = t.group()
+            if tok == b'{' or tok == b'[':
+                depth += 1
+            elif tok == b'}' or tok == b']':
+                depth -= 1
+                if depth == 0:
+                    end = t.end()
+                    break
+        if end is None:
+            return blob, n
+        # the Switch's own fields, read at its depth (a nested Switch's are not)
+        inner = blob[brace + 1:end - 1]
+        which, field, depth, start = -1, None, 0, None      # whichChoice's VRML default
+        for t in _VRML_TOKEN.finditer(inner):
+            tok = t.group()
+            if tok.startswith(b'#'):
+                continue
+            if depth == 0 and field == b'whichChoice':
+                which = int(tok) if re.fullmatch(rb'-?\d+', tok) else which
+                field = None
+                continue
+            if depth == 0 and field == b'choice' and start is None:
+                start = t.start()
+            if tok in (b'{', b'['):
+                depth += 1
+            elif tok in (b'}', b']'):
+                depth -= 1
+                if depth == 0 and start is not None:
+                    body = inner[start:t.end()]
+                    choices = (_vrml_nodes(body[1:-1]) if body.startswith(b'[')
+                               else _vrml_nodes(body)[:1])
+                    field, start = None, None
+            elif depth == 0 and start is not None and tok.startswith(b'USE'):
+                choices, field, start = [inner[start:t.end()]], None, None
+            elif depth == 0 and start is None:
+                field = tok
+        shown = choices[which] if 0 <= which < len(choices) else b''
+        blob = blob[:m.start()] + b'Group { children [ ' + shown + b' ] }' + blob[end:]
+        n += 1
+
+
 def _raw_url(url):
     """A repository's page link turned into its raw-file link."""
     m = re.match(r'https://github\.com/([^/]+)/([^/]+)/blob/(.+)$', url)
@@ -376,13 +464,18 @@ def main(argv=None):
     if blob is None:
         print(f'find_models: refused {args.url}: {kind}', file=sys.stderr)
         return 1
+    switches = 0
+    if kind == '.wrl':
+        blob, switches = _vrml_without_switch(blob)
     os.makedirs(os.path.join(FOUND, key), exist_ok=True)
     name = os.path.join(key, key + kind)
     with open(os.path.join(FOUND, name), 'wb') as f:
         f.write(blob)
     _record(key, {'status': 'found', 'file': name, 'url': args.url, 'source': args.source,
                   'match': args.match, 'note': args.note})
-    print(f'find_models: {key}: kept {len(blob) // 1024} kB of {kind[1:].upper()} ({args.match})')
+    print(f'find_models: {key}: kept {len(blob) // 1024} kB of {kind[1:].upper()} ({args.match})'
+          + (f'; {switches} Switch node(s) made the Group of the choice each shows, '
+             f'which kicad-cli\'s GLB export can read' if switches else ''))
     return 0
 
 

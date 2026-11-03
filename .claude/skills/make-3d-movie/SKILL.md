@@ -122,7 +122,9 @@ python3 movie3d/find_models.py none KEY --note "<what you tried>"
 - **`add`** downloads the file and checks it:
   - https only, at most 40 MB;
   - a zip is read in memory and only its model taken;
-  - the file is kept only if it really is a STEP or VRML model.
+  - the file is kept only if it really is a STEP or VRML model;
+  - a VRML `Switch` is rewritten as the `Group` of the choice it shows, since
+    kicad-cli's GLB export cannot read one and then draws every part as a box.
 
   A refusal prints the reason. "An HTML page" means you gave a page, not the
   file: give its raw-file URL. If one candidate is refused, try the next.

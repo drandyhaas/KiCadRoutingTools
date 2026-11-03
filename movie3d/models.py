@@ -27,6 +27,7 @@ again.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'py_router'))
 from model_export import (GLB_TIMEOUT_S, _cli_version, _glb_node_names,  # noqa: E402,F401
-                          model_dirs, resolve_cli, stage_models)
+                          _library_index, _share_dirs, model_dirs, resolve_cli,
+                          stage_models)
 CACHE = os.path.join(HERE, 'cache')
 def export(board_text, board_dir, refs, cli=None, cache=CACHE):
     """`(info, why)`: the parts' models as one GLB, or (None, why).
@@ -54,7 +56,12 @@ def export(board_text, board_dir, refs, cli=None, cache=CACHE):
     dirs = model_dirs(cli, board_dir)
     text, counts, missing, found_refs = stage_models(board_text, dirs, board_dir,
                                                      found=find_models.load_index())
-    key = hashlib.sha1((text + '\0' + _cli_version(cli)).encode('utf-8')).hexdigest()[:16]
+    # the staged text names a found model by its path only, so a model `add`
+    # replaced would otherwise be drawn from the export of the one before it
+    stamps = ''.join(f'\0{p}:{os.path.getsize(p)}:{os.path.getmtime(p)}'
+                     for p in sorted(set(re.findall(r'\(model\s+"([^"]+)"', text)))
+                     if p.startswith(find_models.FOUND) and os.path.isfile(p))
+    key = hashlib.sha1((text + '\0' + _cli_version(cli) + stamps).encode('utf-8')).hexdigest()[:16]
     out_dir = os.path.join(cache, key)
     glb = os.path.join(out_dir, 'parts.glb')
     meta = os.path.join(out_dir, 'export.json')
