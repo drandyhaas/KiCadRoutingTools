@@ -113,9 +113,10 @@ Options:
   --min-via-diameter FLOAT  Minimum via outer diameter in mm (default: fab floor)
   --min-via-drill FLOAT     Minimum via drill diameter in mm (default: fab floor)
   --size-margin FLOAT       Absolute tolerance in mm for the size checks (default: 0)
-  --check-pad-edge          Also check pad-to-board-edge clearance. Off by default:
-                            pad-edge violations are almost always pre-existing
-                            edge-connector pads, not router-introduced.
+  --check-pad-edge          Also check pad-to-board-edge clearance, each pad at the
+                            .kicad_dru edge_clearance rule binding it, if any. Off
+                            by default: pad-edge violations are almost always
+                            pre-existing edge-connector pads, not router-introduced.
   --baseline BOARD          The board this one was derived from (checks 6, 15, 16 and 19)
   --json FILE               Also write the result as JSON: the graded floors with their
                             source (graded_at), the violation and accepted counts,
@@ -731,6 +732,20 @@ raised to it, as routing raises it
 0.01, and every routed copy is graded at 0.20. Its knob keeps its source and
 adds `declared` and `raised_to`. A value at or above the floor is read as
 given.
+That value is each pad's requirement unless a `.kicad_dru` `edge_clearance`
+rule binds the pad (#1615): the rule then sets it, in file order, the last
+matching rule winning, below the floor too, as KiCad grades it. Edge-launch
+connectors depend on this, because their land runs to the edge. The edge seat,
+this tool, the floorplan grade and `check_drc --check-pad-edge` all read it
+(`design_rules.PadEdgeRules`), and `pad_edge.rules_applied` names the rule and
+its pads. A courtyard term (`A.insideCourtyard('J1')`,
+`A.intersectsCourtyard('J1')`) is read as J1's own pads, which the row's
+`note` says, because placement keeps courtyards apart. A rule whose condition
+is not modelled (a predicate such as `memberOfSheet()`, or a term on `B`, the
+edge item) may bind a pad.
+Such a pad fails only short of the lower of its possible requirements, is
+listed `unmeasured` between the two, and the rule is listed in
+`rules_unmeasured`.
 Exit 0 written; 2 the request does not name a thing on this board (a typo you
 rewrite); 3 the board carries copper (`--allow-routed` to override); 4 well
 formed, and the board said no (a measurement you act on), nothing written —

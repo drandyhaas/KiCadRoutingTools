@@ -818,7 +818,9 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
   (and the body's own setback beside a courtyard reading), so a classless
   header seated 10 mm inside its edge never reads as a bare `pass`;
 - `pad_copper_edge`: the part's pad-copper edge clearance from
-  `grade_pad_edge_clearance`, at the floor `grade_pad_legality` resolves. This
+  `grade_pad_edge_clearance`, at the floor `grade_pad_legality` resolves, or
+  at a `.kicad_dru` `edge_clearance` rule binding the part's pads (#1615,
+  named in `rules_applied` and `requirement_source`). This
   is the channel `check_drc --check-pad-edge` grades, and it is reported
   alongside the body because a legal body overhang does not make the copper
   legal. The *clearance* half is evidence only: a pad inside the edge floor

@@ -6471,15 +6471,26 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 # top-priority placement defect was looked for at all.
                 print("Checking pad-to-board-edge clearances "
                       "(--check-pad-edge is on)...")
+            # #1615: a .kicad_dru edge_clearance rule sets the clearance of
+            # the pads it binds, as KiCad grades them; a pad an unmodelled
+            # rule may bind is graded at the lower of its possible values
+            from design_rules import PadEdgeRules
+            try:
+                pad_edge_rules = PadEdgeRules(pcb_data, pcb_file)
+            except (OSError, ValueError):
+                pad_edge_rules = None
             for pad_net, pads in pads_by_net.items():
                 if matching_pad_nets is not None and pad_net not in matching_pad_nets:
                     continue
                 for pad in pads:
                     if _pad_has_no_copper(pad):
                         continue  # No copper on this pad (pure NPTH)
+                    pad_edge_floor = (pad_edge_rules.for_pad(pad, effective_board_edge_clearance)[0]
+                                      if pad_edge_rules is not None
+                                      else effective_board_edge_clearance)
                     has_violation, overlap, edge = check_pad_board_edge(
                         pad, pad_edge_rings, pad_edge_outer, edge_cutouts,
-                        effective_board_edge_clearance, board_bounds, clearance_margin)
+                        pad_edge_floor, board_bounds, clearance_margin)
                     if has_violation:
                         net_name = pcb_data.nets.get(pad_net, None)
                         net_str = net_name.name if net_name else f"net_{pad_net}"
@@ -7053,7 +7064,9 @@ if __name__ == "__main__":
     parser.add_argument('--size-margin', type=float, default=0.0,
                         help='Absolute tolerance in mm for the size checks (default: 0)')
     parser.add_argument('--check-pad-edge', action='store_true',
-                        help='Also check pad-to-board-edge clearance (issue #236). '
+                        help='Also check pad-to-board-edge clearance (issue #236), '
+                             'each pad at the .kicad_dru edge_clearance rule binding '
+                             'it, if any (#1615). '
                              'Off by default: pad-edge violations are almost always '
                              'pre-existing edge-connector pads, not router-introduced.')
     parser.add_argument('--baseline', metavar='BOARD', default=None,

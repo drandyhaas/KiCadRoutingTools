@@ -1745,6 +1745,135 @@ def board_min_clearance_cached(pcb_data) -> float:
     return v
 
 
+def _edge_item_unknown(node):
+    """`node` with every term that reads B as ('unknown',). An edge
+    clearance is evaluated with B the Edge.Cuts shape it is measured to,
+    which no RuleItem models."""
+    if not isinstance(node, tuple) or not node:
+        return node
+    op = node[0]
+    if op in ('prop', 'call', 'area'):
+        return ('unknown',) if node[1] in ('B', 'AB') else node
+    if op == 'coupled':
+        return ('unknown',)
+    if op == 'cmp':
+        lhs, rhs = _edge_item_unknown(node[2]), _edge_item_unknown(node[3])
+        return ('unknown',) if 'unknown' in (lhs[0], rhs[0]) else node
+    if op in ('and', 'or', 'not'):
+        return (op,) + tuple(_edge_item_unknown(c) for c in node[1:])
+    return node
+
+
+#: A.insideCourtyard('X') / A.intersectsCourtyard('X') on an edge rule
+_COURTYARD_TERM = re.compile(
+    r"\bA\.(?:insideCourtyard|intersectsCourtyard)\(\s*('[^']*'|\"[^\"]*\")\s*\)",
+    re.IGNORECASE)
+
+
+def _has_unknown(node) -> bool:
+    if not isinstance(node, tuple) or not node:
+        return False
+    return node[0] == 'unknown' or any(_has_unknown(c) for c in node[1:])
+
+
+class PadEdgeRules:
+    """The board-edge clearance each pad is graded at (#1615): the floor
+    the caller passes, replaced by every `.kicad_dru` `edge_clearance` rule
+    that binds the pad, in file order, the last winning. That is KiCad's
+    order, and an explicit rule binds below the Board Setup minimum too.
+    Edge-launch connectors rely on that: their land runs to the edge.
+
+    A pad's `A.insideCourtyard('X')` / `A.intersectsCourtyard('X')` is read
+    as `A.memberOfFootprint('X')`, and `notes` says so: placement keeps
+    courtyards apart, so the only pads in X's courtyard are X's own. (An
+    edge-connector rule is often written that way.)
+
+    A rule whose condition this resolver cannot evaluate for a pad (an
+    unmodelled predicate, or a term on B, the edge item) MAY bind it, so
+    `for_pad` returns a RANGE: `(lo, hi, rule)`, lo == hi when every rule
+    decided. A grader fails a pad only short of `lo` and passes it at
+    `hi`, and between the two says it could not tell. `rule` names the
+    rule that set the decided value, '' for the caller's floor.
+
+    `active` is False on a board with no edge rule, where every pad reads
+    `(base, base, '')`."""
+
+    def __init__(self, pcb_data, board_path: Optional[str] = None):
+        path = board_path or getattr(pcb_data, 'source_path', '') or ''
+        self.rules: List[tuple] = []
+        #: [{'rule', 'reason'}] for each rule whose condition is not modelled
+        self.unmodelled: List[dict] = []
+        #: {rule name: how its condition was read}, for a courtyard term
+        self.notes: Dict[str, str] = {}
+        self.dr = None
+        self._cache: Dict[tuple, tuple] = {}
+        dru = os.path.splitext(path)[0] + '.kicad_dru' if path else ''
+        if not dru or not os.path.isfile(dru):
+            return
+        dr = DesignRules.from_project(pcb_data, path)
+        for rule in dr.rules:
+            spec = rule.constraints.get('edge_clearance') or {}
+            if spec.get('min') is None:
+                continue
+            if rule.unsupported and not rule.unsupported.startswith('condition'):
+                # a severity, a value or a layer clause the resolver does not
+                # read: not evaluated, and said so
+                self.unmodelled.append({'rule': rule.name, 'reason': rule.unsupported})
+                continue
+            src = rule.condition_src
+            if src is not None and _COURTYARD_TERM.search(src):
+                src = _COURTYARD_TERM.sub(r'A.memberOfFootprint(\1)', src)
+                self.notes[rule.name] = ('a courtyard term read as the pads of '
+                                         'that footprint')
+            ast = _edge_item_unknown(parse_condition_maybe(src))
+            self.rules.append((rule, ast, float(spec['min'])))
+            if _has_unknown(ast):
+                self.unmodelled.append({
+                    'rule': rule.name,
+                    'reason': ('condition not modelled for an edge clearance: '
+                               + (rule.unsupported or 'it reads B, the edge item'))})
+        if self.rules:
+            self.dr = dr
+
+    @property
+    def active(self) -> bool:
+        return bool(self.rules)
+
+    def for_pad(self, pad, base: float) -> Tuple[float, float, str]:
+        if not self.rules:
+            return base, base, ''
+        key = (getattr(pad, 'component_ref', None), getattr(pad, 'pad_number', None),
+               getattr(pad, 'net_id', None), getattr(pad, 'pad_type', None),
+               tuple(getattr(pad, 'layers', None) or ()), base)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        from check_drc import pad_copper_layers
+        dr = self.dr
+        item = dr.item_for_pad(pad)
+        ctx = ('edge_clearance', dr._net_name_set())
+        lo = hi = None
+        decided = ''
+        for layer in sorted(pad_copper_layers(pad, dr.copper_layers)) or [None]:
+            # the values this layer may resolve to, walked in file order
+            values, rule_name = {base}, ''
+            for rule, ast, value in self.rules:
+                m = rule_may_match(rule, ast, item, None, layer, dr.copper_layers, ctx)
+                if m is True:
+                    values, rule_name = {value}, rule.name
+                elif m is None:
+                    values = values | {value}
+            # a pad is clear only when every layer's copper is
+            if lo is None or min(values) > lo:
+                lo = min(values)
+            if hi is None or max(values) > hi:
+                hi = max(values)
+                decided = rule_name
+        out = (lo, hi, decided if lo == hi else '')
+        self._cache[key] = out
+        return out
+
+
 def _netclass_dict(nc) -> dict:
     """A live NETCLASS -> the same dict shape the file loader builds."""
     def g(name, has=None):

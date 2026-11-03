@@ -204,6 +204,17 @@ class _Probe:
         self.bounds = outline.get('bounds') or pcb.board_info.board_bounds
         self.copper = BoardOutlineGate(pcb.board_info,
                                        state.board_edge_clearance + COPPER_SLACK_MM)
+        # #1615: a .kicad_dru edge_clearance rule sets the clearance of the
+        # pads it binds, as KiCad grades them; a pad an unmodelled rule may
+        # bind is seated at the larger of its possible values
+        from design_rules import PadEdgeRules
+        try:
+            rules = PadEdgeRules(pcb, pcb_file)
+        except (OSError, ValueError):
+            rules = None
+        self.edge_rules = rules if rules is not None and rules.active else None
+        self._margins: Dict[str, Dict[int, float]] = {}
+        self._gates: Dict[float, object] = {}
         #: each part's mating face in its own frame ('' for none)
         self.faces: Dict[str, str] = {}
         #: #1531: the parts this state seats on a basis the band is not
@@ -239,15 +250,53 @@ class _Probe:
                   if row.get('body_measured') else cy_others) or {}
         return amount + sum(others.values()), basis
 
+    def pad_margins(self, ref) -> Dict[int, float]:
+        """{pad index: the inset its copper is seated at}, empty when no
+        edge rule binds any of `ref`'s pads differently from the board's
+        floor (`connector_geometry.pad_boxes` indexes pads the same way)."""
+        got = self._margins.get(ref)
+        if got is None:
+            got = {}
+            base = self.state.board_edge_clearance
+            fp = self.pcb.footprints.get(ref)
+            if self.edge_rules is not None and fp is not None:
+                from .connector_geometry import pad_boxes
+                for index, *_box in pad_boxes(self.geo, ref):
+                    _lo, hi, _rule = self.edge_rules.for_pad(fp.pads[index], base)
+                    got[index] = hi + COPPER_SLACK_MM
+                if all(abs(m - (base + COPPER_SLACK_MM)) <= 1e-12 for m in got.values()):
+                    got = {}
+            self._margins[ref] = got
+        return got
+
+    def copper_margin(self, ref) -> float:
+        """The largest inset any of `ref`'s pads is seated at."""
+        margins = self.pad_margins(ref)
+        return (max(margins.values()) if margins
+                else self.state.board_edge_clearance + COPPER_SLACK_MM)
+
     def copper_clear(self, ref, pose) -> bool:
-        """Every pad's copper the board's edge clearance inside the outline
+        """Every pad's copper its edge clearance inside the outline
         (`connector_geometry.pad_copper_outside`), asked pad by pad only when
         the box round all of them is not clear."""
         from .connector_geometry import pad_copper_outside
-        box = _pad_box(self.geo, ref, pose)
-        if box is None or self.copper.rect_outside_amount(box) <= 1e-9:
-            return True
-        return pad_copper_outside(self.geo, self.copper, ref, pose) <= 1e-9
+        from .legality import BoardOutlineGate
+        margins = self.pad_margins(ref)
+        if not margins:
+            box = _pad_box(self.geo, ref, pose)
+            if box is None or self.copper.rect_outside_amount(box) <= 1e-9:
+                return True
+            return pad_copper_outside(self.geo, self.copper, ref, pose) <= 1e-9
+        by_margin: Dict[float, set] = {}
+        for index, margin in margins.items():
+            by_margin.setdefault(margin, set()).add(index)
+        for margin, only in by_margin.items():
+            gate = self._gates.get(margin)
+            if gate is None:
+                gate = self._gates[margin] = BoardOutlineGate(self.pcb.board_info, margin)
+            if pad_copper_outside(self.geo, gate, ref, pose, only=only) > 1e-9:
+                return False
+        return True
 
     def why(self, entry, edge, pose, obstacles) -> Tuple[str, object]:
         """`('', None)` when every conjunct `rule_edge_connector` and check_drc
@@ -601,7 +650,7 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
             room = (float(lim['max']) - target) / 2.0 if lim.get('max') is not None else BAND_SLACK_MM
             aim += max(0.0, min(BAND_SLACK_MM, room))
         axis = 0 if edge in ('north', 'south') else 1
-        e = state.board_edge_clearance + COPPER_SLACK_MM
+        e = probe.copper_margin(ref)
         lines = {}
         # why each turn has no seat, for the reason a caller prints
         floors: Dict[float, float] = {}       # the band never comes down to `target`

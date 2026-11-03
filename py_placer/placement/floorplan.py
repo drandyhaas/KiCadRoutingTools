@@ -6355,6 +6355,18 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
     unmeasured = [u for u in copper['unmeasured']
                   if str(u['pad_ref']).startswith(prefix)]
     gap = (copper.get('minimum_gap_by_ref_mm') or {}).get(ref)
+    # #1615: the requirement THIS part's pads are graded at -- a .kicad_dru
+    # edge rule sets it for the pads it binds, the board's floor the rest
+    # (pads share a number -- a jack's four ground pads -- so a list, not a dict)
+    ruled = [row for row in copper.get('rules_applied') or ()
+             for p in row['pads'] if str(p).startswith(prefix)]
+    required = copper['required_mm']
+    if ruled:
+        fp = ctx.pcb.footprints.get(ref)
+        copper_pads = sum(1 for p in getattr(fp, 'pads', None) or ()
+                          if not legality._pad_has_no_copper(p))
+        reqs = [row['required_mm'] for row in ruled]
+        required = max(reqs) if len(ruled) >= copper_pads else max(reqs + [required])
     if findings:
         copper_disposition = 'fail'
     elif unmeasured or copper['rules_unmeasured']:
@@ -6384,8 +6396,11 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
             None if others is None else {e: r4(v) for e, v in others.items()}),
         'body_unmeasured_reason': body.get('body_unmeasured_reason'),
         'pad_copper_edge': {
-            'required_mm': copper['required_mm'],
-            'requirement_source': copper.get('requirement_source'),
+            'required_mm': required,
+            'requirement_source': (
+                ', '.join(sorted({f"rule '{row['rule']}'" for row in ruled}))
+                if ruled else copper.get('requirement_source')),
+            'rules_applied': sorted({row['rule'] for row in ruled}),
             'minimum_gap_mm': r4(gap),
             'shortfall_mm': round(max((f['shortfall_mm'] for f in findings),
                                       default=0.0), 4),
