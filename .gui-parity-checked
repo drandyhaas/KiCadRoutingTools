@@ -1,3 +1,25 @@
+cdf00e884486a3d2fc972fcfd6a69e490a7066e2 2026-11-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 21abea9a..cdf00e88 (12 commits) on macOS (KiCad 10.0.6), for v0.23.8.
+kicad_routing_plugin/ is unchanged in the range; the engine changes are
+#1609 (input-pair restore), #1583 (via-centre bridge) and the two fixes the
+gates produced (350e8e39, cdf00e88). No new CLI flag, engine kwarg or
+results key reaches a GUI call site: GridRouteConfig.skew_graded_net_ids is
+set inside batch_route_diff_pairs, and close_soft_joints reads it and
+_length_matched_names on both fronts.
+
+GATES. At 19fb6afd 69/70 tests/gui_parity gates passed; FAIL
+test_gui_livechain_rp2350 (GUI 4 / CLI 2 introduced GND-to-pin
+segment clearance), bisected to #1583. Two causes, both fixed:
+- the pour step's close_soft_joints (scope None) laid the bridge on every
+  signal net's input copper, perturbing the chain -> the bridge is now laid
+  only on length-graded nets (cdf00e88);
+- the oracle exact-fill strap seeded a raw fill-edge point, which overrides
+  the obstacle map, and ended 0.032 mm inside a pin's clearance (350e8e39).
+After the fixes all 70 gates PASS (rp2350: GUI 0 / CLI 0 introduced; the
+three that do not re-exec run under KiCad's python directly). Modal suite
+ALL GREEN (1133). Corpus sets 1-10 vs the pre-#1583 control: real DRC
+3 -> 3, incomplete nets 83 -> 79.
+
 21abea9a5693800f2249049bf84f589df0c2a7f2 2026-11-02 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of 7978996d..cda7c123 (181 commits, 133 non-merge) on this Windows box
 (KiCad 10.0), plus the fixes it produced (9d409ecf, 134c6602, f49d5b36) and
