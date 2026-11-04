@@ -157,6 +157,18 @@ already, so it was a plain gain and ships. Without a KiCad python the raster
 grade stands. The JSON report names the pour nets among `lost` / `gained` as
 `lost_zone` / `gained_zone`.
 
+The raster also errs the other way, and that error used to pass unchecked
+because it makes a run read *better*: it pours onto a pad that a thermal
+relief or a foreign net class's clearance keeps KiCad's fill off, so a
+fanout stub or tap the run removed read as no loss (`lost []`, accepted)
+while the end-of-run re-grade, which reads such a net on KiCad's fill, named
+it broken (#1619, #1620). So a pour net the final re-grade reads open while
+the raster credits it is graded on KiCad's exact fill of both boards
+whatever the verdict, together with every pour net the raster grades worse.
+With no refill to be had, such a net that the re-grade charges to this run
+(`broken_by_run`) takes the re-grade's reading, so the gate and the run's
+summary agree.
+
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
 (`lost`, `gained`, `worsened`,
 `disconnected_pads_before/after`, `nets_compared`, `verdict`, and, when a

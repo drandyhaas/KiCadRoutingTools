@@ -9350,21 +9350,60 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                  if i in _before_map and i in _after_map
                  and (_after_map[i][1] > _before_map[i][1]
                       or (_before_map[i][0] and not _after_map[i][0]))})
-            if _verdict == 'reject' and _zhit600:
+            # The same error the other way round (#1619, #1620): a pour net
+            # the run's final re-grade read OPEN on KiCad's fill (or on the
+            # oracle's verdict, #1339) while this raster credits it. The
+            # raster pours onto a pad KiCad's thermal relief or a foreign
+            # class's clearance keeps the fill off, so a stub or tap this run
+            # removed read as no loss: the gate accepted with "lost []" while
+            # the end-of-run summary named the net broken. Those nets are
+            # graded on KiCad's exact fill of both boards too, whatever the
+            # verdict -- and, with them, every pour net the raster grades
+            # worse, since the verdict may turn.
+            _rg600 = _FINAL_REGRADE[0] or {}
+            _rg_broken600 = (set(_rg600.get('failed_single') or ())
+                             | set(_rg600.get('open_single') or ())
+                             | {d.get('net_name') for d in
+                                (_rg600.get('failed_multipoint') or ())})
+            _dis600 = sorted(
+                {_name_of(i) for i in _zone_ids600
+                 if i in _before_map and i in _after_map
+                 and _after_map[i][0] and _name_of(i) in _rg_broken600})
+            _need600 = sorted(set(_dis600) | (
+                set(_zhit600) if (_dis600 or _verdict == 'reject') else set()))
+            if _need600:
                 _ex600 = _exact_gate_pours(
-                    _zhit600, return_results, input_file, output_file,
+                    _need600, return_results, input_file, output_file,
                     locals().get('_before_pcb'), locals().get('_after_pcb'),
                     stage_board_fn,
                     lambda: _stage_change_set666('Improvement gate (GUI)'),
                     _drop_staged666)
+                _id600 = {_name_of(i): i for i in _zone_ids600}
+                for _nm600, (_b600, _a600) in _ex600.items():
+                    _before_map[_id600[_nm600]] = _b600
+                    _after_map[_id600[_nm600]] = _a600
                 if _ex600:
-                    _id600 = {_name_of(i): i for i in _zone_ids600}
-                    for _nm600, (_b600, _a600) in _ex600.items():
-                        _before_map[_id600[_nm600]] = _b600
-                        _after_map[_id600[_nm600]] = _a600
                     print(f"  Improvement gate: pour net(s) "
                           f"{', '.join(sorted(_ex600))} graded on KiCad's "
                           f"exact fill of both boards")
+                # No refill to be had (no KiCad python, a multi-outline
+                # board): a disagreeing net the re-grade charges to THIS run
+                # (connected on the input, broken now) takes the re-grade's
+                # reading, so the gate and the summary say the same thing.
+                _rg_pads600 = {d.get('net_name'): len(d.get('failed_pads') or ())
+                               for d in (_rg600.get('failed_multipoint') or ())}
+                _taken600 = [n for n in _dis600 if n not in _ex600
+                             and n in set(_rg600.get('broken_by_run') or ())]
+                for _nm600 in _taken600:
+                    _after_map[_id600[_nm600]] = (
+                        False, max(1, _rg_pads600.get(_nm600) or 0,
+                                   _after_map[_id600[_nm600]][1]))
+                if _taken600:
+                    print(f"  Improvement gate: pour net(s) "
+                          f"{', '.join(_taken600)} graded as the final "
+                          f"re-grade reads them (broken by this run; no "
+                          f"KiCad refill to grade both boards on)")
+                if _ex600 or _taken600:
                     _cmp = compare_connectivity(_before_map, _after_map,
                                                 _name_of,
                                                 zone_net_ids=_zone_ids600)
