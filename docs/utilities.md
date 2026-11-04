@@ -2993,6 +2993,11 @@ project's net-class clearances, which KiCad fills at whatever the pour's own
 zone clearance says. The JSON's `gap_source` (`stored`, `refill`, `model`)
 and a note name which one; a stored fill lying over the trace reads gap 0 and
 says to refill. The reference-plane check reads the fill model either way.
+A net carrying a recorded declaration also reports its declared ohms against
+the model's reading of the shipped copper -- the width, and for a pair the
+measured P/N gap where the two run coupled -- and names a net more than 10%
+off (`nets_ohms_off_target`, `ohms_off_pct`; #1630). That is disclosure:
+neither the exit code nor `board_score`'s count includes it.
 Plane nets are skipped unless `--include-plane-nets`. Exit 1
 when any reference-plane crossing is found, or when a net misses its declared
 gap -- no ground beside it, or a gap off the declaration -- over more than

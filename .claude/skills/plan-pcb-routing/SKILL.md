@@ -661,6 +661,17 @@ manifest routes.
     (annular_width min X mm): this step's N via(s) it binds meet it` or
     `... K BELOW it` (`JSON_SUMMARY.design_rules.annular_rules`), and
     `check_drc` for the whole board.
+  - **A pair class the project SOLVED** (its own `diff_pair_width` /
+    `diff_pair_gap` from a fab or field solver, not the stock 0.2 / 0.25):
+    omit `--track-width` and `--diff-pair-gap`, so each pair is built at its
+    class geometry and graded at the gap KiCad grades it at (a `.kicad_dru`
+    rule binding the pair, else the class gap, floored at the board minimum;
+    #1630). `--impedance` would replace the class width with this tool's
+    closed-form solve at that gap, which can differ from the project's own
+    solver by several percent: pass it only when the user wants this tool's
+    width, and say so. With it omitted nothing in this toolchain reads the
+    pair's ohms -- `check_impedance.py` compares only a declaration an
+    `--impedance` step recorded -- so say that in the report.
   - Every descent is a DECISION for the user, not one the run makes. Each one
     is a `design_rules` row in the step's `JSON_SUMMARY` (net, kind,
     requested, delivered, site) and in the `Design rules [...]` line; report
@@ -731,7 +742,9 @@ Use the printed flags as-is:
   physical floor** instead (thinner is both more complete and faster — see "Route
   signals at the FAB floor by default" in Diagnose and Retry). Keep the net-class
   width only for **current-carrying nets** (`--power-nets`).
-  **Do NOT keep the net-class gap/width for impedance-controlled (diff-pair) nets** —
+  **Do NOT keep the net-class gap/width for impedance-controlled (diff-pair) nets**
+  (unless the project solved that class itself -- see "A pair class the project
+  SOLVED" under the user's own product rules) —
   the stock net class is usually wide (`diff_pair_gap` 0.25 / width 0.2 mm), and a
   fat pair is a wider bundle that gets dropped on congested boards (measured:
   a 4-layer FPGA corpus board routes all 13 of its pairs at `--diff-pair-gap 0.1` but loses 2 at

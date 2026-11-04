@@ -86,6 +86,16 @@ DEFAULT_MIN_VOID_LENGTH = 0.30
 # filler rounds its own outline, so a few hundredths is measurement noise.
 DEFAULT_GAP_TOLERANCE = 0.05
 
+# How far a declared impedance may sit off the model's reading of the shipped
+# copper before the audit names the net (#1630), in percent: a fab's usual
+# controlled-impedance tolerance. Disclosure only -- the exit code ignores it.
+DECLARED_OHMS_TOLERANCE_PCT = 10.0
+
+# A diff pair's P and N count as coupled where their copper is within this
+# multiple of the declared pair gap: a breakout or a fan-out apart from its
+# partner is not a coupled line, and the formula does not apply there.
+COUPLED_GAP_FACTOR = 2.0
+
 # A net's coplanar promise is broken when more than this length of it has no
 # ground beside it or misses the declared gap (mm). board_score reads the same
 # predicate off the JSON rows (#1389).
@@ -158,6 +168,21 @@ class NetImpedance:
     # pad. Like the own-via antipad (#1203), reported here and never counted
     # in the two above.
     length_at_own_pad_mm: float = 0.0
+    # --- declared impedance (#1630, disclosure): the ohms a route step was
+    # asked for (its record in the sibling .kicad_pro), against the model's
+    # reading of the shipped width -- and, for a pair, the shipped P<->N gap.
+    declared_ohms: float = 0.0
+    declared_differential: bool = False
+    shipped_ohms: float = 0.0           # length-weighted over `ohms_length_mm`
+    ohms_length_mm: float = 0.0         # length the reading covers (a pair: coupled)
+
+    @property
+    def ohms_off_pct(self) -> Optional[float]:
+        """How far the shipped impedance is off the declared one, %; None
+        when there is no declaration or no length to read it on."""
+        if self.declared_ohms <= 0 or self.ohms_length_mm <= 0:
+            return None
+        return 100.0 * (self.shipped_ohms - self.declared_ohms) / self.declared_ohms
 
     @property
     def promise_broken(self) -> bool:
@@ -638,6 +663,65 @@ def _nominal_z0(pcb, layer: str, width: float, coplanar_gap: float = 0.0) -> flo
                         params.copper_thickness, params.dielectric_constant)
 
 
+def _point_seg_dist(x: float, y: float, s) -> float:
+    ex, ey = s.end_x - s.start_x, s.end_y - s.start_y
+    l2 = ex * ex + ey * ey
+    t = 0.0 if l2 <= 0 else max(0.0, min(1.0, ((x - s.start_x) * ex
+                                               + (y - s.start_y) * ey) / l2))
+    return math.hypot(x - s.start_x - t * ex, y - s.start_y - t * ey)
+
+
+def shipped_impedance(pcb, segs, partner_segs, spec: dict,
+                      sample_step: float = DEFAULT_SAMPLE_STEP
+                      ) -> Tuple[float, float]:
+    """(ohms, length mm): the model's impedance of a net's SHIPPED copper,
+    length-weighted, for its declaration `spec` (#1630). Single-ended: Z0 at
+    each segment's width. Differential: Zdiff at each sample's width and its
+    measured edge-to-edge gap to the partner on the same layer, over the
+    length where the two are coupled (within COUPLED_GAP_FACTOR x the declared
+    pair gap). A declared coplanar gap selects the CPW model, as the route
+    step solved with. (0, 0) when nothing could be read."""
+    from impedance import calculate_impedance_for_layer
+    diff = bool(spec.get('differential'))
+    cg = float(spec.get('coplanar_gap') or 0.0)
+    pg = float(spec.get('pair_gap') or 0.0)
+    limit = COUPLED_GAP_FACTOR * pg if pg > 0 else 0.5
+    cache: Dict[Tuple[str, float, float], float] = {}
+
+    def z_at(layer, width, gap):
+        key = (layer, round(width, 5), round(gap, 4))
+        if key not in cache:
+            r = calculate_impedance_for_layer(pcb, layer, width, gap,
+                                              coplanar_gap=cg)
+            cache[key] = float(r.get('zdiff' if diff else 'z0') or 0.0)
+        return cache[key]
+
+    total = length = 0.0
+    for seg in segs:
+        seg_len = math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y)
+        if seg_len <= 0 or not seg.width:
+            continue
+        samples = _sample_points(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                                 sample_step)
+        n_int = max(1, len(samples) - 1)
+        per = seg_len / n_int
+        mates = [p for p in partner_segs if p.layer == seg.layer and p.width]
+        for sx, sy, _ in samples[:n_int]:
+            gap = 0.0
+            if diff:
+                if not mates:
+                    continue
+                gap = min(_point_seg_dist(sx, sy, p) - p.width / 2.0
+                          for p in mates) - seg.width / 2.0
+                if gap <= 0 or gap > limit:
+                    continue
+            z = z_at(seg.layer, seg.width, gap)
+            if z > 0:
+                total += z * per
+                length += per
+    return (total / length if length > 0 else 0.0), length
+
+
 def publish_class_clearances(pcb) -> None:
     """Give the fill model the clearances KiCad fills at (#1624).
 
@@ -751,7 +835,9 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                       gap_tolerance: float = DEFAULT_GAP_TOLERANCE,
                       board_name: str = "",
                       net_declared_gaps: Optional[Dict[int, float]] = None,
-                      fill_source: str = 'auto') -> BoardImpedanceReport:
+                      fill_source: str = 'auto',
+                      net_declared_ohms: Optional[Dict[int, dict]] = None
+                      ) -> BoardImpedanceReport:
     """Walk every routed segment and measure what the pre-route model assumed.
 
     Args:
@@ -785,6 +871,11 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             KiCad's fill is read at exact distance; the model to within half
             a cell. The reference-plane continuity check reads the model
             either way.
+        net_declared_ohms: Per-net impedance declarations (net_id -> the
+            sibling .kicad_pro record: ohms, differential, pair_gap,
+            coplanar_gap), auto-read like the gaps. Each such net reports the
+            model's impedance of its shipped copper against the declared one
+            (#1630, `shipped_impedance`); disclosure only.
 
     Returns:
         BoardImpedanceReport. Diagnostic only; pcb's copper is not modified
@@ -1148,6 +1239,16 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                 result.z0_error_pct = 100.0 * (
                     result.z0_measured - result.z0_nominal) / result.z0_nominal
 
+        # #1630: the declared ohms against the model's reading of the copper
+        spec = (net_declared_ohms or {}).get(net_id)
+        if spec and float(spec.get('ohms') or 0) > 0:
+            result.declared_ohms = float(spec['ohms'])
+            result.declared_differential = bool(spec.get('differential'))
+            mates = (segments_by_net.get(partners.get(net_id), [])
+                     if result.declared_differential else [])
+            result.shipped_ohms, result.ohms_length_mm = shipped_impedance(
+                pcb, segments_by_net[net_id], mates, spec, sample_step)
+
         if result.routed_length_mm > 0:
             report.nets.append(result)
 
@@ -1282,6 +1383,34 @@ def format_report(report: BoardImpedanceReport, verbose: bool = False,
         else:
             lines.append("  All declared-coplanar copper achieved its gap.")
 
+    # --- declared impedance (#1630) ---
+    held = [n for n in report.nets if n.declared_ohms > 0]
+    if held:
+        lines.append("")
+        lines.append(f"-- Declared impedance vs the shipped copper (the model's "
+                     f"reading; disclosure, tolerance +/-"
+                     f"{DECLARED_OHMS_TOLERANCE_PCT:g}%) --")
+        lines.append(f"  {'net':<28} {'declared':>9} {'shipped':>9} {'off':>8} "
+                     f"{'read over mm':>13}")
+        off = 0
+        for n in sorted(held, key=lambda n: (-(abs(n.ohms_off_pct)
+                                               if n.ohms_off_pct is not None
+                                               else 1e9), n.net_name))[:top]:
+            pct = n.ohms_off_pct
+            unit = 'diff' if n.declared_differential else ''
+            if pct is None:
+                lines.append(f"  {n.net_name[:28]:<28} {n.declared_ohms:>7.1f}{unit[:1]:<2}"
+                             f" {'-':>9} {'-':>8} {0.0:>13.1f}  (nothing to read: "
+                             f"{'no coupled length' if n.declared_differential else 'no stackup'})")
+                off += 1
+                continue
+            flag = '  OFF TARGET' if abs(pct) > DECLARED_OHMS_TOLERANCE_PCT else ''
+            off += bool(flag)
+            lines.append(f"  {n.net_name[:28]:<28} {n.declared_ohms:>7.1f}{unit[:1]:<2}"
+                         f" {n.shipped_ohms:>9.1f} {pct:>+7.1f}% {n.ohms_length_mm:>13.1f}{flag}")
+        lines.append(f"  {off} of {len(held)} declared net(s) off target or unread "
+                     f"(not counted in the exit code).")
+
     # --- side gap / CPW ---
     gaps = report.all_gaps
     lines.append("")
@@ -1347,6 +1476,12 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 sum(n.length_at_own_pad_mm for n in report.nets), 4),
             'nets_broken_promise': sorted(n.net_name for n in report.nets
                                           if n.promise_broken),
+            # #1630: disclosure, not in the exit code
+            'declared_ohms_tolerance_pct': DECLARED_OHMS_TOLERANCE_PCT,
+            'nets_ohms_off_target': sorted(
+                n.net_name for n in report.nets if n.declared_ohms > 0 and (
+                    n.ohms_off_pct is None
+                    or abs(n.ohms_off_pct) > DECLARED_OHMS_TOLERANCE_PCT)),
         },
         'nets': [
             {
@@ -1370,6 +1505,12 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 'z0_nominal': round(n.z0_nominal, 3),
                 'z0_measured': round(n.z0_measured, 3),
                 'z0_error_pct': round(n.z0_error_pct, 3),
+                'declared_ohms': n.declared_ohms,
+                'declared_differential': n.declared_differential,
+                'shipped_ohms': round(n.shipped_ohms, 3),
+                'ohms_length_mm': round(n.ohms_length_mm, 4),
+                'ohms_off_pct': (None if n.ohms_off_pct is None
+                                 else round(n.ohms_off_pct, 3)),
                 'crossing_detail': [
                     {'kind': c.kind, 'layer': c.layer, 'ref_layer': c.ref_layer,
                      'x': round(c.x, 4), 'y': round(c.y, 4),
@@ -1443,6 +1584,7 @@ def main() -> int:
     # entry (even gap 0 = declared non-coplanar) outranks --coplanar-gap,
     # which remains the fallback for nets/boards without records.
     net_declared_gaps = {}
+    net_declared_ohms = {}
     try:
         from protected_nets import read_impedance_specs, pro_path_for_board
         _specs = read_impedance_specs(pro_path_for_board(args.input))
@@ -1463,6 +1605,8 @@ def main() -> int:
             net_declared_gaps = {
                 _n2i[nm]: float(sp.get('coplanar_gap', 0) or 0)
                 for nm, sp in _specs.items() if nm in _n2i}
+            net_declared_ohms = {_n2i[nm]: sp for nm, sp in _specs.items()
+                                 if nm in _n2i}
             _cop = sum(1 for g in net_declared_gaps.values() if g > 0)
             print(f"Auto-read {len(net_declared_gaps)} net impedance "
                   f"declaration(s) from the sibling .kicad_pro "
@@ -1486,7 +1630,8 @@ def main() -> int:
         coplanar_gap=args.coplanar_gap,
         gap_tolerance=args.gap_tolerance,
         board_name=os.path.basename(args.input),
-        net_declared_gaps=net_declared_gaps)
+        net_declared_gaps=net_declared_gaps,
+        net_declared_ohms=net_declared_ohms)
 
     print(format_report(report, verbose=args.verbose, top=args.top))
 

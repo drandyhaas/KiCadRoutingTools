@@ -193,6 +193,15 @@ _escalation_warned = set()
 # vocabulary, only the keys the board declares > 0), set per run the same way.
 _ESCALATION = DEFAULT_ESCALATION
 _BOARD_FLOORS = {}
+# #1630: the clearance floor of a RULE- or CLASS-set clearance when #1262
+# raised the base floor to the Default class (``--escalation board`` with the
+# writeback off): the board minimum KiCad grades such a clearance at, which
+# the Default class does not bind. None = no such raise this run.
+_BOARD_RULE_CLEARANCE = None
+
+#: The key :func:`floor_board_clearance_at_class` carries that floor under in
+#: the floors dict it returns; :func:`set_escalation_policy` reads it off.
+RULE_CLEARANCE_KEY = 'rule_clearance'
 
 # The per-run LEDGER: what went below a requested size, where, and by how much.
 _LEDGER = {'narrowed': [], 'fab_tier': [], 'ceiling_lowered': {}}
@@ -216,8 +225,10 @@ def get_default_fab_tier():
 def set_escalation_policy(policy, board_floors=None):
     """Set the process-wide escalation policy and the board's declared floors
     (a FLOOR_KEYS dict, e.g. from ``design_rules.board_floor_dict``). Resets
-    the per-run ledger: this marks the start of a run."""
-    global _ESCALATION, _BOARD_FLOORS
+    the per-run ledger: this marks the start of a run. A
+    :data:`RULE_CLEARANCE_KEY` entry is the floor of rule- and class-set
+    clearances (:func:`rule_fab_floors`, #1630)."""
+    global _ESCALATION, _BOARD_FLOORS, _BOARD_RULE_CLEARANCE
     policy = policy or DEFAULT_ESCALATION
     if policy not in ESCALATION_POLICIES:
         raise ValueError(f"unknown escalation policy {policy!r} "
@@ -225,13 +236,18 @@ def set_escalation_policy(policy, board_floors=None):
     _ESCALATION = policy
     _BOARD_FLOORS = {k: float(v) for k, v in (board_floors or {}).items()
                      if k in FLOOR_KEYS and v is not None and float(v) > 0}
+    rc = (board_floors or {}).get(RULE_CLEARANCE_KEY)
+    _BOARD_RULE_CLEARANCE = float(rc) if rc is not None else None
     reset_ledger()
 
 
 def get_escalation_policy():
     """``(policy, board_floors_dict)`` -- pass back to
     ``set_escalation_policy(*prev)`` to restore."""
-    return (_ESCALATION, dict(_BOARD_FLOORS))
+    floors = dict(_BOARD_FLOORS)
+    if _BOARD_RULE_CLEARANCE is not None:
+        floors[RULE_CLEARANCE_KEY] = _BOARD_RULE_CLEARANCE
+    return (_ESCALATION, floors)
 
 
 def may_narrow():
@@ -374,7 +390,11 @@ def floor_board_clearance_at_class(floors, graded_clearance,
     Only the clearance BASE moves: non-Default nets are floored at their own
     class under every policy (``GridRouteConfig.rule_floors``), and a
     ``.kicad_dru`` layer rule or a pad clearance override replaces the base
-    where it applies, at its usual precedence. Returns the new floors dict."""
+    where it applies, at its usual precedence. So the floor those are raised
+    to stays the one before the raise -- the board minimum KiCad grades
+    them at -- carried as ``floors[RULE_CLEARANCE_KEY]`` for
+    :func:`rule_fab_floors` (#1630: a pair rule at 0.11 under a 0.15 Default
+    class was built at 0.15). Returns the new floors dict."""
     out = dict(floors or {})
     if not isinstance(graded_clearance, (int, float)) or graded_clearance <= 0:
         return out
@@ -390,6 +410,7 @@ def floor_board_clearance_at_class(floors, graded_clearance,
     if prev is not None and abs(prev - target) <= 1e-9:
         return out
     out['clearance'] = target
+    out[RULE_CLEARANCE_KEY] = float(prev) if prev is not None else 0.0
     if announce:
         if below:
             print(f"  --escalation board, project writeback off: the run's "
@@ -694,6 +715,30 @@ def fab_floors(copper_layer_count, tier=None, overrides=None):
     necks down to first. Flat dict of FLOOR_KEYS (raised to the board's own
     floors under ``--escalation board``)."""
     return fab_floor_ladder(copper_layer_count, tier, overrides)[0]
+
+
+def rule_fab_floors(copper_layer_count, tier=None, overrides=None):
+    """:func:`fab_floors` for a clearance a RULE or a non-Default CLASS sets
+    -- the fab floor ``DesignRules`` (step 5) and the scoped channel raise
+    such a value to (#1630).
+
+    The same dict, except under ``--escalation board`` with the writeback off,
+    where #1262 raises the clearance floor to the Default class: that floor is
+    the clearance BASE's, and KiCad grades a rule or another class at the
+    board minimum instead. A pair rule at 0.11 under a 0.15 Default class was
+    built and logged at 0.15 while KiCad grades 0.11 clean."""
+    if _ESCALATION != 'board' or _BOARD_RULE_CLEARANCE is None:
+        return fab_floors(copper_layer_count, tier, overrides)
+    if tier is None:
+        tier = _DEFAULT_TIER
+        if overrides is None:
+            overrides = _DEFAULT_OVERRIDES
+    floors = dict(_BOARD_FLOORS)
+    floors.pop('clearance', None)
+    if _BOARD_RULE_CLEARANCE > 0:
+        floors['clearance'] = _BOARD_RULE_CLEARANCE
+    return _apply_board_floors(
+        _tier_rungs(copper_layer_count, tier, overrides), floors)[0]
 
 
 def fab_floor_min(copper_layer_count, tier=None, overrides=None):

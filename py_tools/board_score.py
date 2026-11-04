@@ -1184,9 +1184,14 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
                 'reason': 'no routed nets matched --impedance-nets', **extra}
     broken = sorted(r['net_name'] for r in graded if _broken(r))
     crossing = sorted(r['net_name'] for r in graded if r.get('crossings'))
+    off_ohms = set((d.get('totals') or {}).get('nets_ohms_off_target') or ())
     return {'ran': True, 'count': len(set(broken) | set(crossing)),
             'nets_with_crossing': len(crossing),
             'nets_broken_promise': broken,
+            # #1630: a declared impedance the shipped copper misses, on
+            # check_impedance's model -- disclosed, not in `count`
+            'nets_ohms_off_target': sorted(r['net_name'] for r in graded
+                                           if r['net_name'] in off_ohms),
             'nets_analyzed': len(graded),
             'crossings': sum(int(r.get('crossings') or 0) for r in graded),
             'segments_over_void': sum(int(r.get('segments_over_void') or 0)

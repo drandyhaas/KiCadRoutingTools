@@ -1415,9 +1415,11 @@ def install_scoped_clearances(config, input_file, pcb_data, routed_net_ids=None,
     if sc is None:
         return
     try:
-        from fab_tiers import fab_floors
-        floor = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None) or [])
-                           or 2).get('clearance')
+        # #1630: a rule's value floors at the board minimum, never at the
+        # Default class #1262 floors the clearance base at.
+        from fab_tiers import rule_fab_floors
+        floor = rule_fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None)
+                                    or []) or 2).get('clearance')
     except Exception:                                            # noqa: BLE001
         floor = None
     nets = [nid for nid, n in pcb_data.nets.items() if getattr(n, 'name', None)]
@@ -1619,12 +1621,13 @@ def _install_rules_quietly(config, input_file, pcb_data, net_keepouts=False):
         return
     try:
         from design_rules import install_design_rules
-        from fab_tiers import fab_floors
+        from fab_tiers import rule_fab_floors
         copper = list(getattr(getattr(pcb_data, 'board_info', None),
                               'copper_layers', None) or getattr(config, 'layers', []) or [])
         fab = None
         try:
-            fab = fab_floors(len(copper) or 2)
+            # #1630: the floor a rule- or class-set value is raised to
+            fab = rule_fab_floors(len(copper) or 2)
         except Exception:                                       # noqa: BLE001
             fab = None
         install_design_rules(config, input_file, pcb_data, fab_floor=fab,

@@ -351,6 +351,30 @@ def _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer=Non
     return out
 
 
+def _coupled_excess(config, net_id, nids, kind, base_clearance, layer=None):
+    """#1630: per foreign item, where it is `net_id`'s own diff-pair partner
+    and a rule binding the pair sets their clearance (config.
+    coupled_pair_clearances: #1293, #1526, #1542), that value minus
+    `base_clearance` (negative where it relaxes); NaN elsewhere. `kind` is
+    'track' (a track), 'layer' (a via) or 'pad', as `coupled_pair_value`
+    reads it. All NaN without such a rule -- the router builds the pair at
+    that value, so a pass that measures it at the class moves it off."""
+    out = np.full(len(nids), np.nan)
+    cpc = getattr(config, 'coupled_pair_clearances', None) if config is not None else None
+    if not cpc or not len(nids):
+        return out
+    own = int(net_id or 0)
+    nids = np.asarray(nids)
+    for key in cpc:
+        if own not in key or len(key) != 2:
+            continue
+        other = next(iter(key - {own}))
+        v = config.coupled_pair_value(own, other, kind, layer)
+        if v is not None:
+            out[nids == other] = v - base_clearance
+    return out
+
+
 def _fold_scoped_excess(excess, scoped):
     """#1491/#1561: where a scoped rule binds (`scoped` not NaN) its value
     REPLACES the class term in `excess` (None = no class term); elsewhere
@@ -425,6 +449,11 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
             excess = np.maximum(excess, fcls)
         excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
                                          plc, excess, base_clearance, own_type)
+        # #1630: the partner's pad at the rule binding the pair; a pad's own
+        # override still outranks it
+        cx_ = _coupled_excess(config, net_id, nids[near], 'pad', base_clearance, layer)
+        excess = _fold_scoped_excess(
+            excess, np.where(plc[near] > 0, np.nan, cx_))
     # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
     # rotated by R(-rot); identity for axis-aligned pads): shrink the
     # half-extents by the corner radius, take the outside distance to that
@@ -670,6 +699,10 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                 sx_, np.array([track_clearances.get(int(f), -math.inf)
                                for f in fnid], dtype=float) - base_clearance))
         excess = _fold_scoped_excess(excess, sx_)
+    if config is not None and getattr(config, 'coupled_pair_clearances', None):
+        # #1630: the pair's own partner at the rule binding the pair
+        excess = _fold_scoped_excess(excess, _coupled_excess(
+            config, net_id, nid[near], 'track', base_clearance, layer))
     if exact:
         # The exact segment-to-segment distance (2026-09-11): the minimum
         # between two segments is attained at an endpoint of one of them
@@ -771,6 +804,10 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     if config is not None and getattr(config, 'scoped_clearance', None) is not None:
         excess = _fold_scoped_excess(excess, _scoped_excess(
             config, net_id, nids[near], 'via', base_clearance, layer, own_type=own_type))
+    if config is not None and getattr(config, 'coupled_pair_clearances', None):
+        # #1630: the partner's via at the rule binding the pair
+        excess = _fold_scoped_excess(excess, _coupled_excess(
+            config, net_id, nids[near], 'layer', base_clearance, layer))
     if excess is not None:
         d = d - excess
     return float(np.min(d))

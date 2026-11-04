@@ -6553,22 +6553,36 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
     foreign) per offender (e.g. a signal grazing an SMA-class trace is ranked by
     its 0.35 shortfall, not the 0.1 global).
 
-    #617: `config` is optional and used only for `resolve_hole_clearance`'s
-    explicit `config.hole_clearance` override -- the board read itself is
-    driven by `pcb_data.source_path`, so a caller with no config in hand still
-    gets the board's declared floor."""
+    #617: `config` is optional. It feeds `resolve_hole_clearance`'s explicit
+    `config.hole_clearance` override -- the board read itself is driven by
+    `pcb_data.source_path`, so a caller with no config in hand still gets the
+    board's declared floor -- and (#1630) its class/type-scoped rules and the
+    rules binding a diff pair's P against its N, which replace the class term
+    as the distance helpers fold them."""
     import numpy as np
     from single_ended_routing import (_foreign_pad_arrays, _foreign_seg_arrays,
-                                      _foreign_via_arrays, _foreign_hole_capsules)
+                                      _foreign_via_arrays, _foreign_hole_capsules,
+                                      _scoped_excess, _coupled_excess,
+                                      _fold_scoped_excess, _fold_scoped_pad_excess)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     from obstacle_map import resolve_hole_clearance
 
-    def _excess(fnids):
+    def _excess(fnids, ftype=None, kind=None):
         # per-foreign class clearance above `clearance` (the moving net's floor)
         if not net_clearances:
-            return np.zeros(len(fnids), dtype=float)
-        return np.array([max(0.0, net_clearances.get(int(f), clearance) - clearance)
-                         for f in fnids], dtype=float)
+            out = np.zeros(len(fnids), dtype=float)
+        else:
+            out = np.array([max(0.0, net_clearances.get(int(f), clearance) - clearance)
+                            for f in fnids], dtype=float)
+        if config is None or ftype is None:
+            return out
+        # #1630: the rules the router built the copper at REPLACE the class
+        # term, as the distance helpers fold them: a class/type-scoped rule
+        # (#1491), then a rule binding a pair's P against its own N.
+        out = _fold_scoped_excess(out, _scoped_excess(config, net_id, fnids, ftype,
+                                                      clearance, s.layer))
+        return _fold_scoped_excess(out, _coupled_excess(config, net_id, fnids, kind,
+                                                        clearance, s.layer))
     required = clearance + s.width / 2.0
     # NPTH mounting/mechanical holes carry no copper, so the pad/seg/via terms
     # miss them; a track crossing one is graded at the higher NPTH-to-track floor
@@ -6649,6 +6663,13 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
             fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
             frc, frs = rc[near], rs[near]
             fexc = np.maximum(plc[near] - clearance, 0.0) + _excess(nids[near])  # +#436 class
+            if config is not None:
+                # #1630: a scoped rule or the pair rule replaces the class term
+                # (a pad's own override still outranks both)
+                fexc = _fold_scoped_pad_excess(config, pcb_data, net_id, s.layer, near,
+                                               nids, plc, fexc, clearance)
+                _cx = _coupled_excess(config, net_id, nids[near], 'pad', clearance, s.layer)
+                fexc = _fold_scoped_excess(fexc, np.where(plc[near] > 0, np.nan, _cx))
             # Work in each pad's LOCAL frame (query offsets rotated by R(-rot),
             # identity for axis-aligned pads) so tilted pads use their true
             # outline (#356). Closest point on the pad's rounded-rect boundary:
@@ -6689,7 +6710,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
             qx = ax[None, :] + tt * abx[None, :]
             qy = ay[None, :] + tt * aby[None, :]
             d = np.hypot(sx[:, None] - qx, sy[:, None] - qy) - hw[None, :]
-            d = d - _excess(fnid[near])[None, :]  # #436 class-excess
+            d = d - _excess(fnid[near], 'track', 'track')[None, :]  # #436 class-excess
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j])
 
@@ -6701,7 +6722,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
         if near.any():
             fcx, fcy, fr = vx[near], vy[near], vr[near]
             d = np.hypot(sx[:, None] - fcx[None, :], sy[:, None] - fcy[None, :]) - fr[None, :]
-            d = d - _excess(vnid[near])[None, :]  # #436 class-excess
+            d = d - _excess(vnid[near], 'via', 'layer')[None, :]  # #436 class-excess
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, fcx[j], fcy[j])
 
@@ -6780,9 +6801,12 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     Returns (segments_changed, nets_changed, original_segments_to_remove,
     added_segments) -- same contract as nudge_grazing_octolinear.
 
-    #617: `config` is optional and only feeds `resolve_hole_clearance`'s
-    explicit `config.hole_clearance` override; the board's declared
-    min_hole_clearance is read off `pcb_data.source_path` either way."""
+    #617: `config` is optional; it feeds `resolve_hole_clearance`'s explicit
+    `config.hole_clearance` override (the board's declared min_hole_clearance
+    is read off `pcb_data.source_path` either way), and the scoped .kicad_dru
+    rules and the rules binding a diff pair's P against its N (#1561, #1630),
+    which the graze test, the offender and the acceptance gate all read: a
+    pair the router built at its rule's gap is not a graze."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
@@ -6917,15 +6941,20 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # only on the handful that fail this.
         eff = eff_clr(s.net_id)  # #436 own floor; foreign class excess folded in
         thr = eff + s.width / 2.0 - 1e-4
+        # #1630: `config` too, as clears() reads it -- a scoped rule or a rule
+        # binding a pair's P against its N sets that clearance, and measured
+        # at the class the pair was moved off the gap the rule allows.
         if min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer,
-                                     base_clearance=eff),
+                                     base_clearance=eff, config=config),
                _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer,
-                                     net_clearances=net_clearances, base_clearance=eff),
+                                     net_clearances=net_clearances, base_clearance=eff,
+                                     config=config),
                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer,
-                                     net_clearances=net_clearances, base_clearance=eff)) < thr:
+                                     net_clearances=net_clearances, base_clearance=eff,
+                                     config=config)) < thr:
             return True
         # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308),
         # with each hole's own override folded into the distance (#760).
