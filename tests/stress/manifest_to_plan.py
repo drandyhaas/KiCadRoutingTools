@@ -964,20 +964,10 @@ def prune_manifest(cmds, manifest=None):
     qfn_fanout has no --dry-run, so the CLI exited 2 with no output).
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from redo_stress_test import compute_prune_keep, is_check_cmd
-    from cli_argv_check import rejection
-    rejected = {}
-    for i, (_cwd, argv) in enumerate(cmds):
-        if is_check_cmd(argv) or '--help' in argv or '-h' in argv:
-            continue
-        why = rejection(argv, cwd=_cwd or (os.path.dirname(os.path.abspath(
-            manifest)) if manifest else None))
-        if why:
-            rejected[i] = why
-    keep, _info = compute_prune_keep(
-        [(c, ['true']) if i in rejected else (c, a)
-         for i, (c, a) in enumerate(cmds)])
-    return keep - set(rejected), rejected
+    from redo_stress_test import compute_prune_keep, refused_commands
+    rejected = refused_commands(cmds, manifest)
+    keep, _info = compute_prune_keep(cmds, refused=rejected)
+    return keep, rejected
 
 
 def plan_steps_from_manifest(manifest, keep_files=False):

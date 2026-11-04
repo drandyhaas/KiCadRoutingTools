@@ -81,6 +81,7 @@ for _d in (str(HERE), str(REPO / 'py_router'), str(REPO / 'py_placer'),
 
 import cli_argv_check  # noqa: E402
 from redo_stress_test import (board_io, compute_prune_keep,  # noqa: E402
+                              refused_commands,
                               is_check_cmd, parse_manifest)
 
 #: Self-recording steps that scope no net: they copy a board, draw a rule
@@ -253,7 +254,7 @@ def lineage_scope(manifest, board=None):
     chain's unrouted input; by default the first lineage command's input."""
     from kicad_parser import parse_kicad_pcb
     cmds = parse_manifest(manifest)
-    keep, info = compute_prune_keep(cmds)
+    keep, info = compute_prune_keep(cmds, refused=refused_commands(cmds, manifest))
     board = board or input_board(cmds, keep, manifest)
     rep = {'manifest': str(manifest), 'board': board,
            'final': info.get('final_board'), 'lineage': [],

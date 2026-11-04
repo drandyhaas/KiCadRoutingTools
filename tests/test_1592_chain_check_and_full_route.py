@@ -30,7 +30,8 @@ Checks:
   5. every route folder carries `redo_commands.sh`, a manifest of that route
      alone: the placement's copy and each step as run (with its env-knob
      prefix), which `redo_stress_test.parse_manifest` reads back -- while the
-     tools still record themselves into the caller's REDO_MANIFEST.
+     tools still record themselves into the caller's REDO_MANIFEST (all but
+     the --help step, which wrote nothing, #1640).
 
     python3 tests/test_1592_chain_check_and_full_route.py
 """
@@ -191,10 +192,11 @@ def runner_cases(td):
     rec = parse_manifest(evidence(caller, "the caller's manifest"))
     rec_tools = [next((os.path.basename(a) for a in argv if a.endswith('.py')), '?')
                  for _cwd, argv in rec]
-    # each tool records itself at the top of its main (route.py before its
-    # argparse, so its --help too); the judge's own copy is not a CLI run
+    # each tool records itself at the top of its main; the judge's own copy is
+    # not a CLI run, and route.py's --help wrote nothing, so the recorder took
+    # it back (#1640)
     ok("the tools still record themselves into the caller's REDO_MANIFEST",
-       rec_tools == ['copy_board.py', 'route.py'], str(rec_tools))
+       rec_tools == ['copy_board.py'], str(rec_tools))
     check([sys.executable, '-X', 'utf8', RUNNER, judge, '--chain', chain], accept=True)
     cmds = parse_manifest(evidence(os.path.join(run, 's0_route', 'redo_commands.sh'),
                                    'level-2 manifest'))

@@ -742,7 +742,10 @@ flags. Extend its table when a future flag goes.
   the absolute source board still resolves) — prefer it over bare `--remap` so a
   recorded `# cwd=` can't overwrite the original run. `--skip-checks` drops the
   `check_*` steps (grade the final yourself); `--verbatim` replays superseded
-  retries too (default prunes to the file-dependency chain).
+  retries too (default prunes to the file-dependency chain). A command its tool
+  refused writes nothing and is not kept in the manifest (#1640: the recorder
+  takes back a command that wrote nothing); an older manifest's refused command
+  is skipped when the tool's own parser refuses it.
 
 - **Whole set, graded (full chain):** `python3 tests/stress/ab_replay_grade.py
   --set ~/Documents/kicad_stress_test/runs_set1 --out <wavedir> --label new
