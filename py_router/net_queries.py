@@ -1195,8 +1195,10 @@ def pin_pair_path_length(pcb_data: PCBData, net_id: int,
     an edge of its own length, coincident endpoints and T-junctions (an endpoint
     landing on another segment's interior) join at zero cost, and a via joins
     the layers it spans at its barrel length from the stackup, a track reaching
-    it straight from where it enters the via's copper to the centre (#1583). Pads attach to any
-    endpoint or T-point that falls inside their copper.
+    it straight from where it enters the via's copper to the centre (#1583).
+    Pads attach to any endpoint or T-point whose track copper touches theirs,
+    a via whose copper overlaps theirs, and each other where their copper
+    touches (#1629).
 
     Returns None when the two pads are not joined by copper (an unrouted or
     broken net) -- distinguish that from 0.0, which means pad-to-pad direct
@@ -1247,6 +1249,12 @@ def net_pads_joined(pcb_data: PCBData, net_id: int, pads=None,
 
     The rule `pin_pair_path_length` applies to two pads, applied to every pad,
     on the same graph: segments, T-junctions and vias join, zones/pours do NOT.
+    Copper joins where it touches, as check_connected and KiCad have it
+    (#1629): a track whose round end reaches a pad's exact outline (a
+    rotated pad, a cap that stops short of the edge), a via whose barrel
+    overlaps a pad, two same-net pads whose copper overlaps. Before, it read
+    a point inside the pad's axis box only, and check_drc and board_score
+    skipped the skew of three connected pairs KiCad graded out of range.
     False for an unrouted net, a net carrying only fanout stubs, a broken net,
     one whose pads meet only through a plane, and a net with fewer than two
     copper pads. `pads` overrides which pads must be joined (default: every
@@ -1424,6 +1432,21 @@ def net_match_pad_to_die(pcb_data: PCBData, net_id: int,
     return _sum((getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id))
 
 
+def _track_reaches_pad_at(pad, x: float, y: float, half_width: float,
+                          tolerance: float) -> bool:
+    """Does a track point at (x, y), half_width wide, touch `pad`'s copper?
+    check_connected's endpoint rule (#1629): the round cap reaches the
+    pad's exact outline (rotation, roundrect corners, custom polygons), not
+    only the pad's axis box."""
+    reach = max(half_width - 1e-6, tolerance)
+    if abs(x - pad.global_x) > pad.size_x / 2 + pad.size_y / 2 + reach \
+            or abs(y - pad.global_y) > pad.size_x / 2 + pad.size_y / 2 + reach:
+        return False
+    if not getattr(pad, 'shape', None) or (pad.size_x <= 0 and pad.size_y <= 0):
+        return _pad_holds_point(pad, x, y, tolerance)
+    return _point_to_pad_distance()(x, y, pad) <= reach
+
+
 def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                      tolerance: float = 0.02):
     """(adjacency, pad_nodes) over ONE net's track copper, with `pads` attached.
@@ -1431,6 +1454,11 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     The weighted graph `pin_pair_path_length` walks (see its docstring for the
     joining rules); `pad_nodes` maps id(pad) to the pad's per-layer hub nodes.
     None when the net has no segments at all.
+
+    Copper joins where it touches, as check_connected and KiCad have it
+    (#1629): a track node joins a pad when its round cap reaches the pad's
+    exact outline, a via joins a pad its copper overlaps, and two of `pads`
+    whose copper touches on a shared layer join each other.
     """
     segments = [s for s in pcb_data.segments if s.net_id == net_id]
     if not segments:
@@ -1464,6 +1492,9 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
         adjacency.setdefault(n1, []).append((n2, w))
         adjacency.setdefault(n2, []).append((n1, w))
 
+    # each track node's half width: a node's copper is its track's round cap
+    half_w: Dict[int, float] = {}
+
     copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
     from kicad_parser import pad_is_plated_through
 
@@ -1490,7 +1521,8 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
         pad_layers = [l for l in expand_pad_layers(pad.layers, copper_layers)]
         radius = max(pad.size_x, pad.size_y) / 2
         discs.append((pad.global_x, pad.global_y, radius, pad_layers,
-                      lambda x, y, _p=pad: _pad_holds_point(_p, x, y, tolerance),
+                      lambda x, y, hw=0.0, _p=pad: _track_reaches_pad_at(
+                          _p, x, y, hw, tolerance),
                       'pad', pad))
 
     # Cut each segment at every T-junction (another segment's endpoint on its
@@ -1547,6 +1579,8 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             n1 = key(s.start_x + ux * t1, s.start_y + uy * t1, s.layer)
             n2 = key(s.start_x + ux * t2, s.start_y + uy * t2, s.layer)
             add_edge(n1, n2, t2 - t1)
+            for n in (n1, n2):
+                half_w[n] = max(half_w.get(n, 0.0), (s.width or 0.0) / 2)
 
     # Attach each disc: one synthetic node per layer it spans, joined to every
     # segment node inside its copper on that layer -- a pad at no cost, a via
@@ -1570,19 +1604,38 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     # centred in an SMD pad whose tracks leave on an inner layer never reached
     # its pad: board_score read imx6ulz's DQ3/DQ7 as "not joined by track
     # copper" and left the whole length group ungraded, though KiCad measured
-    # both nets.
+    # both nets. Since #1629 a via joins a pad its COPPER overlaps
+    # (check_connected's via-in-pad rule): a barrel overlapping a pad's edge
+    # with its centre outside joins it, as KiCad's connectivity has it.
     via_pad_contacts = []          # (via, pad, [layers both carry])
     via_contact_layers: Dict[int, set] = {}
-    for (vx, vy, _vr, vlayers, _vh, vkind, via) in discs:
+    for (vx, vy, vr, vlayers, _vh, vkind, via) in discs:
         if vkind != 'via':
             continue
         for (_px, _py, _pr, players, _ph, pkind, pad) in discs:
-            if pkind != 'pad' or not _pad_holds_point(pad, vx, vy, tolerance):
+            if pkind != 'pad' or not _track_reaches_pad_at(
+                    pad, vx, vy, (getattr(via, 'size', 0) or 0) / 2, tolerance):
                 continue
             common = [l for l in vlayers if l in players]
             if common:
                 via_pad_contacts.append((via, pad, common))
                 via_contact_layers.setdefault(id(via), set()).update(common)
+
+    # #1629: two of `pads` whose copper touches on a shared copper layer are
+    # one terminal (check_connected's _pads_join) -- a module's two
+    # overlapping same-number pads, a pad stacked on another.
+    pad_pad_contacts = []          # (pad, pad, [shared layers])
+    _pad_discs = [d for d in discs if d[5] == 'pad']
+    if len(_pad_discs) > 1:
+        from check_connected import _pads_join
+        for i, (ax, ay, ar, alayers, _ah, _ak, pa) in enumerate(_pad_discs):
+            for (bx, by, br, blayers, _bh, _bk, pb) in _pad_discs[i + 1:]:
+                if math.hypot(ax - bx, ay - by) > (math.hypot(pa.size_x, pa.size_y)
+                                                   + math.hypot(pb.size_x, pb.size_y)) / 2 + tolerance:
+                    continue
+                common = [l for l in alayers if l in blayers]
+                if common and _pads_join(pa, pb, tolerance):
+                    pad_pad_contacts.append((pa, pb, common))
 
     track_nodes = list(adjacency.keys())
     pad_nodes: Dict[int, List[int]] = {}
@@ -1596,9 +1649,12 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                 nx, ny, nlayer = _node_xy[node]
                 if nlayer != layer:
                     continue
-                if hit(nx, ny):
-                    add_edge(hub, node, math.hypot(nx - cx, ny - cy)
-                             if kind == 'via' else 0.0)
+                if kind == 'via':
+                    if hit(nx, ny):
+                        add_edge(hub, node, math.hypot(nx - cx, ny - cy))
+                        joined = True
+                elif hit(nx, ny, half_w.get(node, 0.0)):
+                    add_edge(hub, node, 0.0)
                     joined = True
             if joined or kind == 'pad' \
                     or layer in via_contact_layers.get(id(obj), ()):
@@ -1631,6 +1687,11 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
         for layer in common:
             if layer in vh and layer in ph:
                 add_edge(vh[layer], ph[layer], 0.0)
+    for pa, pb, common in pad_pad_contacts:
+        ha, hb = hubs_by_obj.get(id(pa), {}), hubs_by_obj.get(id(pb), {})
+        for layer in common:
+            if layer in ha and layer in hb:
+                add_edge(ha[layer], hb[layer], 0.0)
 
     return adjacency, pad_nodes
 

@@ -3411,8 +3411,11 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                             diff_pair_gap, `design_rules.DesignRules`).
 
     As in the length pass, a member whose pads are not joined by track copper
-    is reported "not measured" (its group or pair is not graded; connectivity
-    already counts it), and a rule whose scope is not modelled is listed NOT
+    is reported "not measured" (its group or pair is not graded). Copper joins
+    where it touches, as connectivity has it (#1629), so such a member is one
+    check_connected reports open -- or one whose pads meet only through a
+    pour, which board_score lists in `ungraded` (`diff_pairs.unjoined_pairs`)
+    because nothing else counts it. A rule whose scope is not modelled is listed NOT
     GRADED with its reason. Returns the summary, or None when the board
     declares neither kind.
     """

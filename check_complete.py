@@ -647,6 +647,16 @@ def _grade(a, doc):
                 + ' -- the copper they bind is not graded at the rule here and '
                   'KiCad still enforces them')
             continue
+        if _name == 'diff_pairs.unjoined_pairs':
+            # #1629: connected pairs whose skew nothing here measured.
+            _uj = (_comps.get('diff_pairs') or {}).get('unjoined_connected') or ()
+            reasons.append(
+                f'{len(_uj)} diff pair(s) connected but not measured (pads not '
+                f'joined by track copper): '
+                + ', '.join(f"{r['p_net']} / {r['n_net']}" for r in _uj[:4])
+                + (' ...' if len(_uj) > 4 else '')
+                + ' -- their skew is ungraded here and KiCad still grades it')
+            continue
         _c = _comps.get(_name)
         if isinstance(_c, dict) and _c.get('declared'):
             notes.append(f'{_name}: the board DECLARES it '

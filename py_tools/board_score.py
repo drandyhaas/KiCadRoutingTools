@@ -691,7 +691,13 @@ def ungraded_entries(parts: dict) -> list:
         # #1490: the clearance half -- a NetClass- / Type-scoped .kicad_dru
         # clearance rule check_drc does not model.
         + (['drc.dru_rules']
-           if (parts.get('drc') or {}).get('ungraded_rules') else []))
+           if (parts.get('drc') or {}).get('ungraded_rules') else [])
+        # #1629: a pair whose members connectivity passes but whose pads its
+        # track copper does not join (they meet through a pour): its skew is
+        # graded by KiCad and by nothing here.
+        + (['diff_pairs.unjoined_pairs']
+           if (parts.get('diff_pairs') or {}).get('ran')
+           and (parts.get('diff_pairs') or {}).get('unjoined_connected') else []))
 
 
 def baseline_problem(path: str):
@@ -1760,6 +1766,15 @@ def main():
     shape = unrouted_shape(args.board, conn.get('unrouted_net_names', []),
                            pcb=_pcb)
     diff_pairs = score_diff_pairs(args.board, drc, pcb=_pcb)
+    # #1629: an unjoined pair whose members connectivity does not list as
+    # unrouted or broken is connected some other way (through a pour, say) --
+    # its skew is measured by nothing here, and `count` cannot see it.
+    if conn.get('ran') and diff_pairs.get('unjoined_pairs'):
+        _open = set(conn.get('nets') or ())
+        _uj = [r for r in diff_pairs['unjoined_pairs']
+               if r['p_net'] not in _open and r['n_net'] not in _open]
+        if _uj:
+            diff_pairs['unjoined_connected'] = _uj
     parts = {'unrouted': {'ran': conn['ran'], 'count': conn.get('unrouted'),
                           'nets': conn.get('unrouted_net_names', []),
                           'pads': conn.get('unrouted_pads', {}),
@@ -1864,6 +1879,14 @@ def main():
         if _dp.get('no_coupled_copper'):
             print(f"  NO COUPLED COPPER (P and N never run side by side): "
                   f"{', '.join(_dp['no_coupled_copper'])}")
+    if _dp.get('unjoined_connected'):
+        _ujc = _dp['unjoined_connected']
+        print(f"DIFF PAIRS NOT MEASURED: {len(_ujc)} pair(s) connected, but "
+              f"their pads are not joined by track copper (for instance they "
+              f"meet through a pour), so their skew is graded by KiCad and not "
+              f"here: "
+              + ', '.join(f"{r['p_net']} / {r['n_net']}" for r in _ujc[:4])
+              + (' ...' if len(_ujc) > 4 else ''))
     # Measured, not counted (#1379, #1389): what the routing steps were asked
     # for, and the impedance declarations no --impedance-nets named.
     _ru = (score['components'].get('net_widths') or {}).get('requested_under') or {}
