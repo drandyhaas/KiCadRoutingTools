@@ -29,6 +29,7 @@ cheaper than the old per-query bucket scan.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 
@@ -831,12 +832,15 @@ class ZoneFillModel:
                         _stamp_capsule(rx1, ry1, rx2, ry2, 0.0, False)
                 guard = guard_base
 
-        # Every Edge.Cuts item below is kept at KiCad's edge gap,
-        # max(the zone's clearance, the board's copper-to-edge rule): the
+        # Every Edge.Cuts item below is kept at KiCad's edge gap: the
         # filler knocks each one out at that gap before the min-thickness
         # opening, so a strip between the edge and a pad that is thinner than
-        # min_thickness pours nothing.
-        guard = max(guard_base, board_edge_rule(pcb_data))
+        # min_thickness pours nothing. The gap is the edge clearance ALONE
+        # (#1643, probed on kicad-cli 10.0.6): the board's rule, or the
+        # .kicad_dru edge_clearance rule binding this zone on this layer --
+        # never the zone's, its class's or a clearance rule's value, and
+        # measured from the edge line's centre whatever its width.
+        guard = zone_edge_gap(pcb_data, net_id, layer)
 
         # Board OUTLINE (#1564): KiCad clips the fill to the board outline,
         # but the model clipped only to the zone polygon. A plane drawn as
@@ -1179,7 +1183,10 @@ def board_edge_rule(pcb_data) -> float:
     the GUI's writeback pins it in pcbnew's memory and the file beside the
     board is still the original, as `kicad_fill_hole_clearance` reads the
     hole rule), else the board file's sibling .kicad_pro, the project KiCad's
-    own refill reads (0.0 with no project or no rule)."""
+    own refill reads: a declared 0 is 0 (KiCad pours to the edge), and a
+    project that leaves the key out, or no project at all, is pcbnew's
+    factory 0.5 (probed on kicad-cli 10.0.6, #1643). A PCBData with neither
+    a source path nor a live board is no KiCad board, and reads 0.0."""
     provider = getattr(pcb_data, 'live_rules_provider', None)
     if callable(provider):
         try:
@@ -1191,8 +1198,47 @@ def board_edge_rule(pcb_data) -> float:
     path = getattr(pcb_data, 'source_path', '') or ''
     if not path:
         return 0.0
-    from fix_kicad_drc_settings import read_project_edge_clearance
-    return float(read_project_edge_clearance(path) or 0.0)
+    from fix_kicad_drc_settings import find_project
+    try:
+        with open(find_project(path), encoding='utf-8') as fh:
+            rules = (((json.load(fh).get('board') or {}).get('design_settings') or {})
+                     .get('rules') or {})
+    except (OSError, ValueError, AttributeError):
+        rules = {}
+    v = rules.get('min_copper_edge_clearance')
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return max(0.0, float(v))
+    return KICAD_FACTORY_EDGE_CLEARANCE
+
+
+#: pcbnew's factory ``m_CopperEdgeClearance``: probed on kicad-cli 10.0.6, a
+#: board whose project leaves ``min_copper_edge_clearance`` out (or that has
+#: no project) fills 0.5 mm from Edge.Cuts.
+KICAD_FACTORY_EDGE_CLEARANCE = 0.5
+
+
+def zone_edge_gap(pcb_data, net_id, layer) -> float:
+    """The gap KiCad's filler keeps a zone of `net_id` on `layer` from
+    Edge.Cuts (#1643): `board_edge_rule`, replaced by each `.kicad_dru`
+    `edge_clearance` rule that binds the zone there, in file order, the last
+    winning (a rule below the board's minimum binds too). A rule whose
+    condition cannot be decided for a zone may bind, and the larger value is
+    taken, so the model never pours where KiCad might not."""
+    base = board_edge_rule(pcb_data)
+    rules = getattr(pcb_data, '_zone_edge_rules', None)
+    if rules is None:
+        try:
+            from design_rules import PadEdgeRules
+            rules = PadEdgeRules(pcb_data)
+        except Exception:                                       # noqa: BLE001
+            rules = False
+        try:
+            pcb_data._zone_edge_rules = rules
+        except Exception:                                       # noqa: BLE001
+            pass
+    if not rules or not rules.active:
+        return base
+    return rules.for_zone(net_id, layer, base)[1]
 
 
 def set_board_net_clearances(pcb_data, net_clearances):

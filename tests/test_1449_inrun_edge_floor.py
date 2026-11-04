@@ -22,13 +22,14 @@ edge too, the way the writeback does (raised, never lowered).
      #1449's own verdict did not run, which is a skip, not a pass.
 
 The fixture's zone and class clearance are 0.1, under the pin (#1643). At
-0.2 the fill model's edge gap, max(zone clearance, edge rule) since #1564,
+0.2 the fill model's edge gap, then max(zone clearance, edge rule) (#1564),
 was 0.2 at the project's 0.05 rule as at the pin, so the model read the neck
 split before routing, route.py routed GND in its main loop, and the oracle
-had nothing to strap. At 0.1 the neck (0.5 mm between the wall pad's end and
-the edge) is 0.5 - 0.1 - 0.1 = 0.30 in the model at the project's rule, over
-the 0.25 min thickness, and 0.5 - 0.2 - 0.1 = 0.20 at the pin, under it.
-`make_fixture.py OUTDIR` rebuilds it.
+had nothing to strap. The gap is now the edge rule alone, as KiCad's filler
+keeps it, and at 0.1 the neck (0.5 mm between the wall pad's end and the
+edge) is 0.5 - 0.05 - 0.1 = 0.35 at the project's rule (0.30 under the older
+gap), over the 0.25 min thickness, and 0.5 - 0.2 - 0.1 = 0.20 at the pin,
+under it. `make_fixture.py OUTDIR` rebuilds it.
 
     python3 tests/test_1449_inrun_edge_floor.py
 """

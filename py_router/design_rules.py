@@ -1777,7 +1777,8 @@ def _has_unknown(node) -> bool:
 
 
 class PadEdgeRules:
-    """The board-edge clearance each pad is graded at (#1615): the floor
+    """The board-edge clearance each pad is graded at (#1615), and each
+    zone's fill kept at (`for_zone`, #1643): the floor
     the caller passes, replaced by every `.kicad_dru` `edge_clearance` rule
     that binds the pad, in file order, the last winning. That is KiCad's
     order, and an explicit rule binds below the Board Setup minimum too.
@@ -1870,6 +1871,33 @@ class PadEdgeRules:
                 hi = max(values)
                 decided = rule_name
         out = (lo, hi, decided if lo == hi else '')
+        self._cache[key] = out
+        return out
+
+    def for_zone(self, net_id: int, layer: str, base: float) -> Tuple[float, float, str]:
+        """The same range for a zone of `net_id` filling `layer`: the gap
+        KiCad's filler keeps from Edge.Cuts there. Measured on kicad-cli
+        10.0.6 (tests/test_1643_zone_edge_gap.py): that gap is the edge
+        clearance alone -- the board's rule, replaced by a binding rule here,
+        a lower one too -- whatever the zone's or its class's clearance."""
+        if not self.rules:
+            return base, base, ''
+        key = ('zone', net_id, layer, base)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        dr = self.dr
+        item = dr.item_for_net(net_id, type='zone', layer=layer)
+        ctx = ('edge_clearance', dr._net_name_set())
+        values, rule_name = {base}, ''
+        for rule, ast, value in self.rules:
+            m = rule_may_match(rule, ast, item, None, layer, dr.copper_layers, ctx)
+            if m is True:
+                values, rule_name = {value}, rule.name
+            elif m is None:
+                values = values | {value}
+        lo, hi = min(values), max(values)
+        out = (lo, hi, rule_name if lo == hi else '')
         self._cache[key] = out
         return out
 

@@ -60,16 +60,26 @@ def main():
 def test_cutouts():
     """Board cutouts are keep-outs (crkbd #490): KiCad's filler pulls fill
     out of Edge.Cuts openings; the model predicted fill straight through
-    them, and the fill-aware via preference steered taps onto the phantom."""
+    them, and the fill-aware via preference steered taps onto the phantom.
+    The band is the board's edge clearance, not the zone's (#1643: probed on
+    kicad-cli 10.0.6, a cutout is kept the edge rule away, and with no rule
+    the fill runs to it)."""
     zone = make_zone()
     pcb = make_pcb(0.0)
     pcb.board_info.board_cutouts = [[(4.0, 4.0), (6.0, 4.0),
                                      (6.0, 6.0), (4.0, 6.0)]]
+    pcb.live_rules_provider = lambda: {'min_copper_edge_clearance': 0.2}
     m = ZoneFillModel(pcb, zone)
     assert m.ok
     assert not m.query_component(5.0, 5.0), "fill inside cutout"
-    assert not m.query_component(6.1, 5.0), "fill within guard of ring"
+    assert not m.query_component(6.1, 5.0), "fill within the edge rule of the ring"
     assert m.query_component(7.5, 5.0), "fill missing outside band"
+    pcb.live_rules_provider = lambda: {'min_copper_edge_clearance': 0.0}
+    m = ZoneFillModel(pcb, zone)
+    assert m.ok
+    assert not m.query_component(5.0, 5.0), "fill inside cutout"
+    assert m.query_component(6.1, 5.0), \
+        "no edge rule: the fill must reach the ring, not stop at the zone clearance"
 
 
 if __name__ == '__main__':

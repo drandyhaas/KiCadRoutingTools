@@ -5,11 +5,12 @@
 for a neck of width GAP between the wall's end and the bottom board edge. The
 zone's and the Default class's clearance is CLEARANCE, the project's
 min_copper_edge_clearance EDGE. The neck is GAP - (edge gap) - CLEARANCE wide,
-and the fill model's edge gap is max(CLEARANCE, edge rule) (#1564), so the
-defaults (0.5, 0.05, 0.1) give 0.30 mm at the project's rule, over the 0.25
-min thickness, and 0.20 mm at the 0.2 fab-edge pin, under it. CLEARANCE must
-stay under the pin, or the model's gap is the same at both and the neck reads
-split before routing (#1643). From the #1449 report.
+where the edge gap is the edge rule alone, in KiCad and in the fill model
+(#1643), so the defaults (0.5, 0.05, 0.1) give 0.35 mm at the project's
+rule, over the 0.25 min thickness, and 0.20 mm at the 0.2 fab-edge pin,
+under it. The 0.1 CLEARANCE also keeps it whole under the model's older
+max(CLEARANCE, edge rule) gap (0.30 mm), which read the neck split before
+routing at a 0.2 CLEARANCE. From the #1449 report.
 
 usage: make_fixture.py OUTDIR [GAP_MM] [EDGE_MM] [CLEARANCE_MM]
 """
