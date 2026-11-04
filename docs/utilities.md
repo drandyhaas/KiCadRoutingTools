@@ -34,7 +34,8 @@ runnable tool in the clone with a one-line purpose.
   [run ledger](#run-ledger-convergepy) ·
   [label tidy](#label-tidy-beautify_labelspy) ·
   [decap clearance repair](#decap-clearance-repair-place_fanout_clearancepy) ·
-  [rule-area writer](#rule-area-writer-add_rule_areapy)
+  [rule-area writer](#rule-area-writer-add_rule_areapy) ·
+  [mounting-hole copper](#mounting-hole-copper-check_mounting_holespy)
 - Pictures: [board renderer](#board-renderer-route_renderpy) ·
   [placement renderer](#placement-renderer-render_placementpy) ·
   [floorplan overlay](#floorplan-overlay-render_planpy) ·
@@ -97,6 +98,10 @@ Options:
                             Violations smaller than clearance*margin are ignored — filters
                             grid-quantization noise (~8 µm artifacts); raise to e.g. 0.1 to
                             suppress more borderline grazes
+  --clearance-margin-mm MM  An ABSOLUTE tolerance in mm for every clearance grade, instead
+                            of the fraction (#1594; the two flags refuse each other).
+                            0.0005 is KiCad's own (500 nm on every pair) and grades as
+                            KiCad does on every net class
   --nets, -n PATTERN [...]  Only check nets matching these fnmatch patterns
   --debug-lines, -d    Write debug lines on User.7 showing violation locations
   --quiet, -q          Print only a summary line unless there are violations
@@ -108,13 +113,16 @@ Options:
   --min-via-diameter FLOAT  Minimum via outer diameter in mm (default: fab floor)
   --min-via-drill FLOAT     Minimum via drill diameter in mm (default: fab floor)
   --size-margin FLOAT       Absolute tolerance in mm for the size checks (default: 0)
-  --check-pad-edge          Also check pad-to-board-edge clearance. Off by default:
-                            pad-edge violations are almost always pre-existing
-                            edge-connector pads, not router-introduced.
-  --baseline BOARD          The board this one was derived from (checks 15 and 16)
+  --check-pad-edge          Also check pad-to-board-edge clearance, each pad at the
+                            .kicad_dru edge_clearance rule binding it, if any. Off
+                            by default: pad-edge violations are almost always
+                            pre-existing edge-connector pads, not router-introduced.
+  --baseline BOARD          The board this one was derived from (checks 6, 15, 16 and 19)
   --json FILE               Also write the result as JSON: the graded floors with their
                             source (graded_at), the violation and accepted counts,
-                            by_type, contacts_by_type, via_in_paste and every item.
+                            by_type, contacts_by_type, via_in_paste, keepout and every item.
+                            An item's `short` is true only for copper of two nets in
+                            contact, never for a drill, hole or edge item.
                             Complete regardless of --max-print
   --render DIR              Write one cropped PNG per spatial cluster of violations
                             (drawn by route_render)
@@ -161,7 +169,7 @@ The DRC checker validates:
 3. **Via-to-track clearance** - Vias maintain clearance from tracks on other nets. A via KiCad types blind, buried or micro is graded only on the copper layers between its end layers, here, in check 5 and inside a filled copper graphic (#1268); a via with no type word is a through via whatever its `(layers ...)` pair, as KiCad loads it
 4. **Via-to-via clearance** - Vias maintain clearance from each other
 5. **Pad-to-via clearance** - Vias maintain clearance from pads on other nets (an SMD pad off a blind/micro via's span is not graded against it)
-6. **Pad-to-pad clearance** - Pads of different nets on a shared copper layer maintain clearance (catches overlaps/shorts, e.g. a placement step nudging a part onto a foreign pad). Two pads of ONE footprint that TOUCH on different nets are a `pad-pad` violation too (#1306, `check_drc.footprint_own_pad_census`, which check_assembly and place_pose read): KiCad reports them as `shorting_items`, or as `clearance` at actual 0 against a no-net pad. Exempt as KiCad exempts them: one net, one pad number (unless it carries two different real nets), one `net_tie_pad_groups` group; two no-net pads are not graded. With `--baseline BOARD`, a contact the baseline's same footprint already had is accepted `inherited-own-pad-contact`. Two of a footprint's pads closer than clearance without touching are library pad geometry no step changes; KiCad reports each as `clearance`, and check_drc counts them on a console line without grading them.
+6. **Pad-to-pad clearance** - Pads of different nets on a shared copper layer maintain clearance (catches overlaps/shorts, e.g. a placement step nudging a part onto a foreign pad). Two pads of ONE footprint that TOUCH on different nets are a `pad-pad` violation too (#1306, `check_drc.footprint_own_pad_census`, which check_assembly and place_pose read): KiCad reports them as `shorting_items`, or as `clearance` at actual 0 against a no-net pad. Exempt as KiCad exempts them: one net, one pad number (unless it carries two different real nets), one `net_tie_pad_groups` group; two no-net pads are not graded. With `--baseline BOARD`, a contact the baseline's same footprint already had is accepted `inherited-own-pad-contact`. Two of a footprint's pads closer than clearance without touching are library pad geometry no step changes; KiCad reports each as `clearance`, so check_drc publishes each pair without grading it (#1628): an accepted `own-footprint-gap` row named under WARNINGS (`LIBRARY PAD GAPS: N pair(s)`, each with its gap and requirement), the `--json` `own_footprint_gaps` count, `board_score`'s `drc.library_pad_gaps` and console line (also before routing), a `check_complete` disclosure, and a channel of its own in `kicad_drc_compare` (`kicad_library_pad_gaps`). What clears one is the board's own: a `.kicad_dru` clearance rule check_drc models (scoped by net class, item type or net name), a pad or footprint `(clearance)` override, or a net-tie pad group. A project that sets `clearance` to `ignore` publishes none.
 7. **Copper-to-hole clearance** - Tracks maintain clearance from NPTH (no-copper) drill holes of other nets — a real fab short the via-drill hole check misses (e.g. a track across a mounting hole)
 8. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
 9. **Board edge clearance** - Tracks and vias maintain clearance from the real `Edge.Cuts` outline (outer ring **plus interior cutouts/slots**), so copper routed into a cutout — which sits inside the bounding box — is caught. Falls back to the bounding box when the parser finds no usable outline. With `--check-pad-edge`, pads are checked too.
@@ -173,17 +181,25 @@ The DRC checker validates:
 15. **Graphic copper grazing the edge** - Inside the outline but within the edge clearance, footprint graphic copper is accepted as `immutable-graphic` (library art no routing pass can fix). With `--baseline BOARD`, a graze on a part whose pose differs from the baseline is a `graphic-board-edge` violation (`origin: placement`); an unmoved one is accepted `inherited`. Without it, grazes are accepted `unverified` and a console line says so.
 16. **Via in a solder-paste opening** (`via-in-paste`, #962) - A via whose barrel overlaps a paste opening of its own net and is not filled AND capped (IPC-4761 Type VII; the via's own spec, then the board setup, then KiCad's factory value, token by token). Paste wicks into such a barrel, and KiCad has no such check. A filled+capped via is accepted `protected-via-in-paste`; with `--baseline BOARD`, a via the baseline already had inside an opening, unprotected, is accepted `inherited-via-in-paste`; on a file older than KiCad 10 (version < 20250000), which cannot carry per-via capping/filling at all, every other such via is accepted `undeclarable-via-in-paste` (the requirement belongs on the fab drawing). A buried via, or a blind via that does not reach the paste side, is not a hit. A console line and the `--json` `via_in_paste` block count every class.
 
-17. **`.kicad_dru` length windows** (`length-out-of-range`, #1313) - Every `(constraint length (min ..) (max ..))` rule in the sibling `.kicad_dru`, read by `kicad_dru.read_board_length_rules`. The rule binding a net is KiCad's (the last matching rule in file order), and the net is measured the way KiCad's length DRC measures it (`net_queries.net_match_length`, mode `total`: track and via-barrel copper plus every pad's pad-to-die length); outside the window it is a violation, KiCad's `length_out_of_range`. Honoured conditions: none (every net), or `||`-joined `A.NetClass == 'X'`, `A.NetName == 'X'` and `A.hasNetclass('X')` terms (KiCad's case-insensitive `*`/`?` wildcards; class by membership). A console line counts the nets graded and out of range, names the nets **not measured** (pads not joined by track copper -- not routed yet, which connectivity already counts), and names every rule whose condition is not modelled with the nets it may bind, as **NOT GRADED** (KiCad still grades them). Each via is charged over the layers it joins, as KiCad charges it (`net_queries.kicad_via_length`); on routed_output with a test `.kicad_dru` this matched kicad-cli 10.0.0's `length_out_of_range` actuals to 0.1 µm on every routed net. The one deliberate difference: KiCad also grades a net that is not routed yet, by whatever copper it has, where this check reports it not measured.
-18. **`.kicad_dru` diff-pair rules** (`skew-out-of-range`, `diff-pair-uncoupled`, #1303) - Every `(constraint skew ..)` and `(constraint diff_pair_uncoupled (max ..))` rule, read through the same channel as check 17 (`read_board_length_rules(kinds=...)`; `A.inDiffPair('X')` is honoured too, with KiCad's case-sensitive match on the pair's base name). **Skew**: the nets a rule binds form one group, and each net is graded by how much shorter it is than the group's longest (`net_match_length`, mode `total`); with `(within_diff_pairs)` each pair (KiCad's `+`/`-`, `P`/`N` suffix pairing) is its own group. **Uncoupled**: for each pair, `max(P, N track length) - coupled length`, where the coupled length is KiCad's (`net_queries.diff_pair_coupling`: parallel facing spans on one layer with nothing between them, under the pair's binding `diff_pair_gap` window). These are KiCad's `skew_out_of_range` and `diff_pair_uncoupled_length_too_long`; on a 4-layer imx6ulz route and a fixture of ten cases (straight, diagonal, offset, split layers, wide gap, a track or a via between P and N) the actuals matched kicad-cli 10.0.0 to 0.1 µm. Unjoined members, unmodelled conditions and time-domain (`ps`) bounds are reported as in check 16. `board_score` counts these rows in its `diff_pairs` component, not in `drc`.
+17. **`.kicad_dru` length windows** (`length-out-of-range`, #1313) - Every `(constraint length (min ..) (max ..))` rule in the sibling `.kicad_dru`, read by `kicad_dru.read_board_length_rules`. The rule binding a net is KiCad's (the last matching rule in file order), and the net is measured the way KiCad's length DRC measures it (`net_queries.net_match_length`, mode `total`: track and via-barrel copper plus every pad's pad-to-die length); outside the window it is a violation, KiCad's `length_out_of_range`. Honoured conditions: none (every net), or `||`-joined `A.NetClass == 'X'`, `A.NetName == 'X'` and `A.hasNetclass('X')` terms (KiCad's case-insensitive `*`/`?` wildcards; class by membership). A console line counts the nets graded and out of range, names the nets **not measured** (pads not joined by track copper -- not routed yet, which connectivity already counts; copper joins where it touches, as connectivity has it, #1629), and names every rule whose condition is not modelled with the nets it may bind, as **NOT GRADED** (KiCad still grades them). The net is measured as the installed kicad-cli's release measures it (`net_queries.length_measure_release`, #1432): KiCad's length DRC changed within the 10.0 series by up to about one via barrel per via (which layers a via joins and how much of an inner layer it is charged, where runs are cut at via and pad outlines, which tracks merge into a run), and each change is gated on the release that made it, from 10.0.0 to 10.0.7 (the table is in [the API](api-net-analysis.md)). A newer kicad-cli is measured as 10.0.7, an older one as 10.0.0, and with no kicad-cli the measure is 10.0.7's. The printed length equals that release's `length_out_of_range` actual at its four decimals on every net of three routed boards and a one-net-per-change fixture, for 10.0.0, 10.0.2, 10.0.4, 10.0.5, 10.0.6 and 10.0.7 (`tests/test_1432_kicad_release_length.py`). A console line names the release measured as, and the installed kicad-cli when it is outside the modelled range. The one deliberate difference: KiCad also grades a net that is not routed yet, by whatever copper it has, where this check reports it not measured.
+18. **`.kicad_dru` diff-pair rules** (`skew-out-of-range`, `diff-pair-uncoupled`, #1303) - Every `(constraint skew ..)` and `(constraint diff_pair_uncoupled (max ..))` rule, read through the same channel as check 17 (`read_board_length_rules(kinds=...)`; `A.inDiffPair('X')` is honoured too, with KiCad's case-sensitive match on the pair's base name). **Skew**: the nets a rule binds form one group, and each net is graded by how much shorter it is than the group's longest (`net_match_length`, mode `total`); with `(within_diff_pairs)` each pair (KiCad's `+`/`-`, `P`/`N` suffix pairing) is its own group. **Uncoupled**: for each pair, `max(P, N track length) - coupled length`, where the coupled length is KiCad's (`net_queries.diff_pair_coupling`: parallel facing spans on one layer with nothing between them, under the pair's binding `diff_pair_gap` window). These are KiCad's `skew_out_of_range` and `diff_pair_uncoupled_length_too_long`; on a 4-layer route and a fixture of ten cases (straight, diagonal, offset, split layers, wide gap, a track or a via between P and N) the actuals matched kicad-cli 10.0.0 to 0.1 µm. The lengths a skew is taken from are measured as check 17 measures them, as the installed kicad-cli's release does (#1432); the skew subtracts float mm where KiCad subtracts integer nm, so it can differ from KiCad's in the fourth decimal. Unjoined members, unmodelled conditions and time-domain (`ps`) bounds are reported as in check 16. `board_score` counts these rows in its `diff_pairs` component, not in `drc`; a pair whose members connectivity passes while their pads are not joined by track copper (they meet through a pour) is measured by nothing here, so `board_score` lists it in `ungraded` as `diff_pairs.unjoined_pairs` and `check_complete` does not read the board DONE (#1629).
+19. **Copper in a keep-out rule area** (`keepout`) - Every rule area (`(zone ... (keepout ...))`, board-level and footprint-owned alike, as `PCBData.board_info.keepouts` reads them) is graded against the copper it forbids: with `(tracks not_allowed)`, a track on one of the area's copper layers (`*.Cu` and `F&B.Cu` expanded; no layer list = every copper layer) whose copper -- the centreline grown by half its width -- reaches into the area, outline minus holes; with `(vias not_allowed)`, a via whose copper disk reaches into it and that has copper on one of the area's layers (a blind or buried via off them is not a hit). A reach of no more than the clearance margin (see below) is not graded. Each row names the area, the net, the layer and a point inside, with how far the copper reaches past the area's edge and how much centreline lies inside. With `--baseline BOARD`, the same item the baseline already had in the same-named area is accepted `inherited-keepout`. Not graded: pads and footprints (an area's `(pads ...)` / `(footprints ...)` flags are not read), zone fill (a pour fills around a keep-out by construction), and footprint graphic copper. kicad-cli 10.0.0 reported no `items_not_allowed` for a track through a tracks-not-allowed rule area when we measured it, while 10.0.3 and 10.0.7 report one row per track inside (#1591), so this stays check_drc's own class on every release: `kicad_drc_compare` keeps it on a `keepout` channel of its own, with KiCad's `items_not_allowed` count printed beside it, and `board_score` counts it in `drc` (blocking). A console line and the `--json` `keepout` block count the violations and the inherited rows.
+20. **`.kicad_dru` `disallow` rules** (`items-not-allowed`, #1527) - Every `(constraint disallow track|via|through_via|micro_via|blind_via|buried_via)` rule, graded per track and per via as KiCad's `items_not_allowed`, one row per item naming the last matching rule in file order. A rule whose condition the resolver evaluates (`A.NetClass == 'HS' && A.Layer != 'F.Cu'`, a `(layer ...)` clause, `A.NetName == ...`) binds a track on its own layer and a via on each layer it has copper on; a via's `A.Layer` is undefined, as KiCad reads it, so `A.Layer` comparisons never bind a via. A rule on a named rule area is graded through the router's own net-filtered keep-out (`net_keepouts.derive_area_keepouts` + `audit_items`). What neither reaches -- another token (`pad`, `zone`, `hole`, ...) or a condition outside both models -- is named `NOT GRADED (disallow)`; `board_score` lists it in `drc.ungraded_rules` and `check_complete` reads INCOMPLETE. `board_score` counts the rows in `drc` (blocking).
+
+A `.kicad_dru` clearance rule check_drc does not model (`A.insideCourtyard(...)`, a layer clause beside a name term) is named `NOT GRADED (clearance)` (#1490). The violations it MAY make legal -- the rule relaxes the pair's requirement to a value the gap meets, and its condition, read three-valued with the unmodelled terms unknown, does not rule the pair out -- stay counted but are tagged `unverified_rule` (#1528): a console line `UNVERIFIED (clearance): N violation(s) ...`, the `--json` `unverified` count and `board_score`'s `drc.unverified` say how many of the count KiCad may not report.
+
+**Severity (#1626).** Each finding is graded at the severity KiCad gives it. The KiCad check a row answers to is its type's (`check_drc.KICAD_SEVERITY_KEY`: the clearance family is `clearance`, or `shorting_items` when the copper of two real nets touches; drill pairs `hole_to_hole`; edge rows `copper_edge_clearance`; size rows `track_width` / `via_diameter` / `drill_out_of_range` / `annular_width`; `disallow` and keep-out rows `items_not_allowed`; the length, skew and uncoupled rows their own). A project `rule_severities` of `ignore` is a check KiCad does not run: the row is accepted `severity-ignore` and counted on a `SEVERITY IGNORE` line. Otherwise the violating `.kicad_dru` rule's own `(severity ...)` decides when it has one (a clearance row is asked of the same resolver that graded it), and the project's severity when it has not; a `warning` is accepted `severity-warning` and listed under WARNINGS (`SEVERITY WARNING: N finding(s)`, each with the rule or project key that set it). An unset severity is an error. That precedence (a rule's severity over the project's error or warning, a project `ignore` over any rule) was measured on kicad-cli 10.0.6. A severity governs KiCad's rule and not the physical fab floor: a spacing row whose gap is below the fab floor of its kind (copper clearance, hole to hole, copper to edge; touching copper included) and a size row below the fab floor's size (or one only the fab floor makes, which KiCad does not report) keep counting. `--json` counts `severity_warnings` and `severity_ignored`; `board_score` carries both in `drc` and prints them (not blocking); `check_complete` discloses them. `kicad_drc_compare` grades its staged copy, whose copper classes it stages at `error`, with `run_drc(severity_overrides=...)` set to the same.
 Same-net copper overlaps -- a track crossing its own net on one layer, two same-net vias touching -- are printed as warnings, not violations, as KiCad permits them. So is a part's net-less footprint copper touching its own pad's net (`footprint-own-copper`, #995), which KiCad's DRC reports as `shorting_items` but is not a short.
 
 Checks 11–12 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
 
-`--baseline BOARD` is the board this one was derived from (the unrouted input, or the placement run's starting board). It is a checker option, not a routing parameter; pass it whenever you have that board, or pre-existing vias in paste openings and a footprint's own touching pads read as violations against the run.
+`--baseline BOARD` is the board this one was derived from (the unrouted input, or the placement run's starting board). It is a checker option, not a routing parameter; pass it whenever you have that board, or pre-existing vias in paste openings, a footprint's own touching pads and copper the input already had in a keep-out read as violations against the run.
 
 ### Clearance Margin
 
 The DRC checker uses a 5% clearance margin by default to ignore tiny geometric artifacts from corner handling. For example, with a 0.1mm clearance, violations smaller than 0.005mm are ignored.
+
+The margin is a fraction of each pair's own clearance, so it scales with the class: 10 µm at 0.2 mm, 25 µm at 0.5 mm. KiCad's tolerance is an absolute 500 nm on every pair (`net_queries.KICAD_DRC_EPSILON_MM`), so on a board with two classes no fraction reproduces KiCad's grade. `--clearance-margin-mm 0.0005` does (#1594): it replaces the fraction for every clearance grade of the run (pairs, copper-to-hole, hole-to-hole, board edge), and `run_drc(..., clearance_margin_mm=)` is the same in-process. The console line `Clearance tolerance: ...` and the `--json` `graded_at.clearance_margin` / `clearance_margin_mm` say which one a run used.
 
 ### Debug Visualization
 
@@ -277,7 +293,20 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
 python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
     --groups groups.json --intent intent.json --seeds 0-3 [--clustered-seeds 2-3] \
     [--jobs 4] --json 's{seed}.json'
+# where each group would go, non-binding (#1481): one anchored seed, nothing written
+python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
+    --groups groups.json --intent intent.json --preview [--seed 0] [--draft-zones draft.json]
 ```
+
+- **A preview before placing** (`--preview`, #1481). It places ONE seed --
+  `--seed`, default 0, from the anchored start -- in a scratch directory,
+  prints each group's box and centre there (over its members' courtyards, on
+  the basis a zone measures them), and draws OUT: that board, with the boxes
+  as draft zones. `--draft-zones` also writes them as draft `blocks[]` to
+  edit, check with `check_floorplan --plan-only` and paste into the intent;
+  nothing reads the draft back. No board is written, and the intent is not
+  changed. (The anchored start's own solve, unannealed, is no preview: on a
+  pile with nothing fixed it puts every group on the board's centre.)
 
 - **Inputs.** `--groups` is the groups file (`py_tools/check_groups.py`
   checks it): each group a set of parts kept together, with optional `near`,
@@ -285,6 +314,11 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
   (`check_floorplan --emit-intent`): its `proximity[]` claims, keep-outs,
   zones, declared faces, `fixed_poses[]`, and the decap limits it grades at
   error (priced per mm past each limit, `--decap-limit-weight`).
+- **The plan, checked first.** Before any seed (once, in the parent of a
+  `--seeds` run) the intent goes through `floorplan.plan_check`, what
+  `check_floorplan --plan-only` runs: its warnings are printed once, and an
+  error -- a plan no placement can satisfy, or a block that resolves to
+  nothing -- refuses the run at exit 2 with nothing written (#1468).
 - **What stays put.** Parts the board locks (`(locked yes)`) and parts the
   intent seats at a declared pose, written there first. Faces the intent or a
   group's `side` declares are applied first, by the writer's flip.
@@ -300,6 +334,14 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
   region or shape; its gap tree is a cost term that keeps it in one piece.
   The hints are soft terms; the intent's keep-outs and zones bind every part
   through the anneal's overlap term. Every weight is a flag (`--help`).
+- **How much it runs (#1483).** One seed anneals up to three times per pass
+  (a restart from a fresh start until one is legal), and the #1300 courtyard
+  fallback and the face pass are passes of their own. place_simple prints the
+  worst case before it starts ("up to N anneal(s) in all"), an estimate after
+  each anneal's first tenth of moves ("estimate: about S s for this anneal"),
+  and in its last line the kept run's moves with every anneal counted
+  ("N anneal(s), M moves in all, 3 front, 3 face"); the `--json` report
+  carries each one (`anneals`: pass, run, moves, seconds) and `moves_total`.
 - **A part that draws no courtyard** is seated on an estimated one (#1300,
   `body.estimated_courtyards`): its .Fab body, else its silk, else its pads,
   united with its pads -- what `check_assembly` grades it on -- with no
@@ -309,9 +351,55 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
   legal seed keeps the graded bodies apart; a NOTE names the parts. Two
   declared or locked poses are still judged against each other on what the
   board draws.
+- **A part under another part's body (#1443).** Each part's height, and the
+  room under each part, are read off its 3D model (one `kicad-cli pcb export
+  glb` of the board, cached by the footprints' models in
+  `~/.cache/krt_heights`), else off an IPC-7351 name (`CAPC1005X55N` is
+  0.55 mm tall). A part may stand inside a COVER's occupancy -- a module on
+  headers, a shield can, a part whose body stands off the board -- where the
+  cover's model is over it at least its height plus 0.5 mm higher (and at
+  least 1.5 mm: every lower underside the corpus showed was a model's offset
+  or a standoff, not room; a declared `heights[].underside_mm` has no such
+  floor), never in a
+  courtyard the cover draws and never on the cover's pads; and it may not
+  stand under a cover's raised body past that occupancy (a module's overhang)
+  where the two models meet, cell by cell -- the human boards tuck a part's
+  edge under a raised body with as little as 0.06 mm to spare, never through
+  one. A part something reaches from above (a connector, a switch, a test
+  point: `part_class` classes it, or its designator says so) never goes
+  under, and nothing goes inside its outline (the run names a part whose
+  model's room that sets aside), unless the intent declares its
+  `heights[].underside_mm`. Only a model's surfaces that
+  face the board say how much room is under it, so a model drawn without a
+  bottom reads as solid, not hollow. A part whose height is unknown is judged on its occupancy alone, as
+  before, and with no kicad-cli every height is unknown. The seat gate, the
+  anneal, check_assembly and place_pose read the one measurement
+  (`placement.heights`); the run prints which parts have room under them.
+  On the human boards, 157 put 2898 parts inside another part's outline and
+  KiCad flags 87 of them: the covers draw no courtyard where parts go under.
+  A card in a socket or a module on stacking connectors is DECLARED in the
+  design brief (`covers[]`, from `cover_facts.py` and the datasheets,
+  compiled into the intent; `removable` lets a test point under it): its body
+  moves with its connector, a part goes under it only when its height is
+  known and fits, and its standoffs are held at their lengths as template
+  members (a standoff that cannot move holds the connector instead: each
+  seed seats it at a legal turn that puts the standoff there). `heights[]` declares a part's height or underside from its
+  datasheet, and a keep-out's `max_height_mm` admits a part of known height
+  no taller (`docs/floorplan-intent.md`).
   A run that leaves a part with no legal pose is annealed again from a fresh
   start, up to two more times (the last one shoves its remaining overlaps
   apart where they stand); the run with the fewest illegal parts is kept.
+  Each part left illegal is named with the check it fails (`illegal_why`:
+  the part it overlaps, the keep-out it is in, how far outside its block's
+  zone), and a `{seed}` run WARNs once about a part illegal in every seed
+  (`illegal_every_seed` in `judge.json`).
+- **Pad copper past a courtyard (#1386, #1588).** Courtyards are graded as
+  drawn, as KiCad grades them, so a part whose pads reach past its drawn
+  courtyard is seated on that courtyard and a neighbour may stand over such
+  a pad; its pads are held out of keep-outs. A part reaching more than 0.3
+  mm is named before the anneal as an information NOTE (`pad_overhang` in
+  each seed's report and `JSON_SUMMARY`, and in `judge.json`; a `{seed}` run
+  prints it once).
 - **Deterministic.** The same board, inputs and `--seed` give the same
   placement. Seeds differ more than most input changes, so place several and
   judge them by routing.
@@ -341,7 +429,13 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
   `refused`: the declared poses that are not legal, and `oversubscribed`:
   the edges that cannot seat all their declared parts together -- both the
   same in every seed, so they do not keep a seed from the judge, and each
-  printed once as a WARNING).
+  printed once as a WARNING -- and `links`: each seed's intent links, every
+  row with its gap, `max_mm`, `past` and graded `severity`). A link is
+  priced, not held, and graded a WARN unless the intent's `severity.link`
+  promotes it, so the judge does not rank by it: each link a seed leaves
+  past its `max_mm` is named on that seed's line and in one WARNING (the
+  seeds past it, the seeds holding it, and whether the first judged seed
+  breaks a link another holds, #1632).
   Judging all 12 default seeds instead of the 6 cheapest shipped worse.
 - **Output.** The placed board with its siblings, a `JSON_SUMMARY:` line
   (final cost, moves, seed, `start` -- `scattered`, `clustered` or `anchored` -- parts
@@ -410,7 +504,9 @@ python3 -X utf8 py_tools/check_groups.py board.kicad_pcb --groups groups.json --
   and why, no row yet), and a WARN for a template member in another group
   than its chip's. As a HINT, each chip the board's pins and nets suggest
   that no group names or records `none`:
-  - `emc_roles` reads a switching converter;
+  - `emc_roles` reads a switching converter, or a switching-converter
+    candidate (a pin-less part an inductor shares a net with; never a part
+    it calls a connector), and the hint says which;
   - a pin's net carries an inductor and at most four other parts;
   - a cap sits across two of its pins, one named a bootstrap or flying-cap
     pin;
@@ -434,6 +530,7 @@ python3 py_placer/place_pose.py BOARD OUT face U1 W USB1
 python3 py_placer/place_pose.py BOARD OUT lock U1 CON1
 python3 py_placer/place_pose.py BOARD OUT set U1 129.9 98.3 rotate CON2 180 lock U1
 python3 py_placer/place_pose.py BOARD OUT replicate --from CH1 --to CH2 --to CH3 [--anchor REF | --offset DX DY] [--allow-net-mismatch REF.PAD ...] [--only REFS | --skip REFS] [--search MM]
+python3 py_placer/place_pose.py BOARD OUT replicate --channel U1,C1,C2 --channel U2,C3,C4   # copies inside one sheet (#1480)
 python3 py_placer/place_pose.py BOARD OUT --intent intent.json replicate   # the intent's replicate[]
 ```
 
@@ -467,7 +564,13 @@ under a rotation that carries the row.
 The verdict is `placement.legality.grade_pad_legality` — the same numbers
 `check_assembly` and `render_placement`'s review sheet print, netclass- and
 `.kicad_dru`-aware — on the candidate board against the same grade on the
-input. A request is refused when it makes a category worse:
+input. A pad pair is priced as `check_drc` grades it, through check_drc's own
+resolver (`PairRuleChannels`, #1575): a `.kicad_dru` clearance rule scoped by
+net class, item type or net name (`A.NetClass == 'HS' && B.Type == 'Pad'`)
+replaces the class value for the pairs it binds, and a diff pair's P against
+its N takes a coupled-pair rule or the class's `diff_pair_gap` (KiCad's
+"(diff pair)" rule); a requirement above the floor names the rule that set
+it (`rule 'pad_escape'`). A request is refused when it makes a category worse:
 
 - the counts (pad conflicts, hole conflicts, pads off-board) **and their
   magnitudes** (`pad_shortfall`, `oob_pad_amount`);
@@ -498,6 +601,15 @@ verdict the verb acts on, `legal` is whether the board is clean at this pose.
 rectangular outline, or one within 0.1 mm of its bbox (measured against the
 bbox shrunk by that stray, `pad_edge.outline_inset_mm`); a castellated pad
 straddling the outline is exempt there, as it is off the board (#1326).
+A snap (`--snap`, or `--near`) is the exception that looks at the part
+itself: it also runs when the moved part is in a gating pair at the requested
+pose -- a courtyard overlap the project grades as an error, a pad conflict,
+one it already had included -- and takes the nearest pose where the part is
+in no such pair (`pose_ops.own_pairs`, #1506). Another part's damage never
+refuses a candidate. Such an own-pair snap has no `--snap-tries` budget
+(#1536): it re-grades every pose within `--radius`, nearest first, until one
+clears the part; when none does, it is written as asked, and the note
+(`snap_note`) says how many poses it re-graded and what refused them. The text report prints the courtyard error pairs before and after.
 `--strict-legal` refuses unless the result is clean; `--force` writes anyway
 and records `forced`. A KiCad `(locked yes)` refuses a direct move — name the
 ref in `unlock` in the same call if you mean it; `--force` deliberately does
@@ -511,7 +623,13 @@ finding, refuses at exit 4, and nothing is written; with the rule demoted to
 warn the pose is written and the row reported. `JSON_SUMMARY.zone_check` names the block, the
 zone and the overrun before and after. The check is relative, like the legality
 verdict: a move from the pile toward its zone is never refused for not
-arriving. `--force` writes anyway and says so. A call that only locks or
+arriving. `--force` writes anyway and says so. The intent's `keepouts[]`
+(fence keep-outs included) are graded the same way, as check_floorplan's
+`keepout` rule measures them: a pose that puts a moved part inside one it was
+not in, or deeper inside a rect one, refuses at exit 4
+(`intent_keepout_pairs`), a `--near` snap's ranker and re-grade avoid them, and
+`JSON_SUMMARY.keepout_check` names the keep-outs graded; with the rule demoted
+to warn the moved parts inside one are reported (`inside_after`), not refused. A call that only locks or
 unlocks moves nothing and records `zone_check.skipped`. With a plan in hand,
 pass it.
 
@@ -622,6 +740,20 @@ raised to it, as routing raises it
 0.01, and every routed copy is graded at 0.20. Its knob keeps its source and
 adds `declared` and `raised_to`. A value at or above the floor is read as
 given.
+That value is each pad's requirement unless a `.kicad_dru` `edge_clearance`
+rule binds the pad (#1615): the rule then sets it, in file order, the last
+matching rule winning, below the floor too, as KiCad grades it. Edge-launch
+connectors depend on this, because their land runs to the edge. The edge seat,
+this tool, the floorplan grade and `check_drc --check-pad-edge` all read it
+(`design_rules.PadEdgeRules`), and `pad_edge.rules_applied` names the rule and
+its pads. A courtyard term (`A.insideCourtyard('J1')`,
+`A.intersectsCourtyard('J1')`) is read as J1's own pads, which the row's
+`note` says, because placement keeps courtyards apart. A rule whose condition
+is not modelled (a predicate such as `memberOfSheet()`, or a term on `B`, the
+edge item) may bind a pad.
+Such a pad fails only short of the lower of its possible requirements, is
+listed `unmeasured` between the two, and the rule is listed in
+`rules_unmeasured`.
 Exit 0 written; 2 the request does not name a thing on this board (a typo you
 rewrite); 3 the board carries copper (`--allow-routed` to override); 4 well
 formed, and the board said no (a measurement you act on), nothing written —
@@ -658,7 +790,8 @@ another part's body, a pad on another part's footprint graphic copper.
 Without a baseline those are report-only, because healthy human boards ship
 such pairs by design. Always gating: pad copper off the outline, a pad
 intersection between parts, copper landing on a KiCad-locked part, a stack of
-parts at one origin, a containment, and (when `--intent` declares
+parts at one origin, a containment, a part whose own 3D model is at board
+depth inside the outline (#1603, below), and (when `--intent` declares
 `assembly.body_edge_mm`) a body inside the body-to-edge band. `--intent` also
 reads `overlap_waivers` and a `mating:<ref>` keep-out, and each
 `fixed_poses[].accept_courtyard_overlap` pair (#1298): that pair's courtyard
@@ -668,7 +801,38 @@ drawn-body containment, pads and holes keep their gates. `check_floorplan
 --emit-intent` writes those pairs, with a WARNING, for declared poses that
 overlap each other. Courtyards are graded
 at the project's own `courtyards_overlap` severity unless
-`--ignore-project-severity`.
+`--ignore-project-severity`. A part standing under another's body with room
+to spare (#1443, the placer's notes above) is labelled `height_clear` on
+every channel and never gates; one under a raised body too low for it is a
+`height` pair, which gates like a courtyard pair (JSON `heights`,
+`height_clear`, `height_pairs`).
+
+**A body through the board (#1603).** The same export says where a part's
+model is at board depth: strictly between the board's two faces (0.2 mm in
+from each, `heights.DEPTH_FACE_MM`), read as the model's surfaces in that
+slab and its cross-section half way through the board. A right-angle or
+edge-mount jack whose board slides into its slot is seated past the edge by
+the slot's depth; placed wholly on the board, its housing is in the
+laminate. Such a part is NOT BUILDABLE, absolutely and lock or not, when the
+part of that body on 0.25 mm cells wholly inside the outline is at least
+`DEPTH_MIN_MM2` (4 mm^2) in area OR at least `DEPTH_MIN_SPAN_MM` (3 mm) long
+-- the longest side of its box in the part's own frame (#1635): by area
+alone, the stock edge-mount SMA jack 0.7 mm in, its body 0.74 mm inside the
+edge across 6.5 mm, read 2.0 mm^2 and passed (`BODY THROUGH THE BOARD`, JSON
+`body_in_board_count`, `body_in_board` rows with `area_mm2`, `span_mm`,
+`inside_mm` -- how far the deepest such cell lies inside the outline --
+`box` and `gates`; a row under the gate prints what it measured). What lies on the
+part's own pads and drilled holes is left out (a header's pins in their
+holes), a cutout is not the board (a mid-mount part over its slot reads
+nothing), and a body that starts on the edge reads nothing. A board whose
+models were not read (no kicad-cli, an export whose frame is a guess, as on
+a board with one resolved model) reports `body_in_board_count` null with
+`body_in_board_unmeasured`, and does not gate. Measured on the 22 tracked
+boards: the only bodies inside an outline are SOT models drawn 1.0-1.45 mm
+low, at most 0.94 mm^2 (esp_prog Q1/Q2, glasgow_revC U7) and 2.5 mm long,
+listed and not gating. A micro-B receptacle's front lip at board depth
+(5.25 x 0.5 mm, past the edge as drawn) gates once it is inside the outline,
+so `--emit-intent` gives such a receptacle a band floor too.
 
 Exit 0 buildable; 2 usage or load error; 4 not buildable.
 
@@ -720,6 +884,29 @@ cropped PNG per part. Markdown to stdout is the default (`--md`); `--json`
 prints the JSON instead, and `-o FILE` writes either to a file. The design
 brief is read as `board_brief.py` reads it (`--brief`, `--no-brief`).
 
+**The schematic.** The sheet reads the project's root schematic beside the
+board (`<board>.kicad_sch`, else the one `.kicad_pro`'s; `--schematic PATH`
+names another, `--no-schematic` reads none) and its whole sheet tree
+(KiCad 6+ `.kicad_sch`; a KiCad 5 `.sch` is reported, not read). Each
+footprint is matched to its symbol by the uuids of its `(path ...)`, so a
+part matches whatever its reference. The `## Schematic` section prints, per
+sheet, its **blocks** -- the parts drawn together (average linkage on the gap
+between their symbols' drawn boxes, cut at 25.4 mm) -- with the short notes
+drawn beside each ("RTC Clock Crystal"), the parts drawn on their own, and
+the designer's **layout notes** ("C11 close to pin45", "Place R4/R5 close to
+RP2040"): each split into clauses, with a candidate `proximity` row
+(`max_mm` null) for every clause whose two parts the note names. Each row is
+checked against the netlist, and one whose part is not on the named pin's net
+(a note left behind by a renumbering) is printed as STALE with the parts that
+are. Each part's
+entry gives its sheet and block (`parts[].schematic` in the JSON). A sheet
+file that cannot be found, and a board part on no symbol, are named. On 239
+corpus boards against where their designers put the parts, how close two
+parts are drawn predicted how close they sit (median AUC 0.76) better than the
+netlist did (0.60), and a drawn block sat 0.20 as wide as random parts of its
+size, against 0.45 for netlist clusters of the same count. The plugin's
+Placement tab stages the tree beside its `input.kicad_pcb`.
+
 Exit 0 written; 2 an unreadable design brief.
 
 ## Rule-Area Writer (`add_rule_area.py`)
@@ -727,7 +914,9 @@ Exit 0 written; 2 an unreadable design brief.
 Writes a copper keep-out rule area -- `(zone ... (keepout ...))` -- onto a board.
 A module's PCB antenna needs one on every layer; the router stamps
 a rule area (`obstacle_map.add_rule_area_keepout_obstacles`), placement grades
-it, and KiCad reports copper inside it as `items_not_allowed`.
+it, and `check_drc.py` reports copper inside it as a `keepout` violation
+(check 19; kicad-cli 10.0.0 reported no `items_not_allowed` for one when we
+measured it, while 10.0.3 and 10.0.7 report one per track inside, #1591).
 
 ```bash
 python3 py_router/add_rule_area.py in.kicad_pcb out.kicad_pcb \
@@ -745,6 +934,57 @@ footprints stay allowed by default). A board-level rule area of the same
 input's siblings. Exit 0 written, 2 for a usage error, a `--ref` the board
 does not have, or a layer it does not have.
 
+**Mounting holes (#1442).** `--mounting-holes` (with `--name` as a prefix and an
+optional `--ring MM`) writes one area per mounting hole instead of a shape: its
+screw-head ring, 0.4 x the drill past the hole's edge (about an ISO 7380 head,
+for every metric size), named `<name>_<ref>` and forbidding `tracks vias`. A
+mounting hole is a footprint that is ONE round hole: at most 9 pads, the widest
+a round drill of 2.0 mm or wider, every other pad that hole drawn again (front
+and back pads) or a small plated stitching via inside its pad (KiCad's
+`_Pad_Via`), none on a signal net (a milled slot, or a part of several holes
+such as a keyboard stabilizer, is not one). A hole drawn with the outline -- an
+Edge.Cuts circle of 2.0 to 7.0 mm that is not the board's own outline -- is one
+too, named `CUT1`, `CUT2` ... in file order (#1502). A wider Edge.Cuts circle
+is a window (a lens, a tube, a cable cut-out), not a screw hole: it is no
+mounting hole and gets no ring (#1648). 7.0 mm is ISO 273's coarse-series
+clearance hole for M6, the widest clearance any series gives the screws the
+ring is derived for (`mounting_holes.EDGE_CUT_MAX_SCREW_DIAMETER`); a footprint
+hole has no such limit. `--skip HOLE ...` leaves the named holes, by the
+names the run prints, without a ring: a hole that takes no screw, such as an
+alignment or test-fixture hole; a name that is not one of the board's mounting
+holes is exit 2, nothing written. A hole whose pad carries a net (a
+ground ring) gets no area, since its own copper has to reach it; an
+`unconnected-*` pin net is not such a net. The router and the plane
+steps honour the areas like any other; [`check_mounting_holes.py`](#mounting-hole-copper-check_mounting_holespy)
+grades the result.
+
+**Cover hole sites (#1636).** With `--intent <intent.json>`, `--mounting-holes`
+also rings each site a floorplan intent's `covers[].holes[]` declare -- where a
+module covering a connector is screwed down -- at the same screw-head ring
+(`--ring` applies), centred where check_assembly's `mountable` grades the site,
+its connector at its pose on this board, named `<name>_<connector>_H<n>`.
+Nothing else keeps copper off such a site before routing, so a track through
+it turned a cover from mountable to not after the route. A site where the
+board's own mounting hole is fitted is left to that hole; a cover row whose
+connector the board lacks, or has on the other face, writes nothing.
+`--intent` without `--mounting-holes`, or an intent that cannot be loaded,
+exits 2.
+
+## Mounting-Hole Copper (`check_mounting_holes.py`)
+
+KiCad checks a mounting hole against the ordinary hole clearance only; the
+screw head, washer or standoff on it is not in the board file, so a track laid
+up to the hole passes every DRC. This reports each mounting hole's other-net
+tracks and vias inside the screw-head ring (0.4 x the drill past the edge, or
+`--ring MM`); copper of the hole's own net is not reported.
+
+```bash
+python3 py_tools/check_mounting_holes.py board.kicad_pcb [--ring MM]
+```
+
+Exit 0 when every ring is clear, 1 when any holds another net's copper.
+Declare the ring before routing with `add_rule_area.py --mounting-holes`.
+
 ## Connectivity Checker (`check_connected.py`)
 
 Verifies that all nets are fully connected after routing. Detects two types of issues:
@@ -756,7 +996,14 @@ Unrouted detection is based on whether a net is actually covered by a copper
 zone, not a hard-coded name list — a power net (GND, +3V3, …) with no plane on
 this board *is* reported as unrouted. Same-net pads whose copper overlaps (e.g.
 a castellated module's co-located through-hole + SMD pad pair) count as
-connected even with no track between them.
+connected even with no track between them, and so do same-number pads of a
+footprint that declares them jumpered (`duplicate_pad_numbers_are_jumpers yes`,
+or a `jumper_pad_groups` group). An auto-named `unconnected-*` net with two or
+more pads on ONE footprint (a connector's shield or mounting tabs, a reversible
+footprint's doubled pins) is an open net like any other, as KiCad's DRC counts
+it (#1405), and route.py's wildcard routes it after the named nets. One whose
+pads lie on several footprints (separate no-connect pins under one auto-name)
+is skipped and listed, as a single-pad one is; `--nets` naming it still checks it.
 
 ### Usage
 
@@ -777,7 +1024,10 @@ zone-covered nets is also checked against KiCad's own DRC with a zone refill
 (`kicad-cli`, the same oracle as
 [`kicad_unconnected.py`](#kicad-unconnected-count-kicad_unconnectedpy)): a
 net KiCad sees connected is reclassified CONNECTED (a fill-model artifact),
-and a net only KiCad sees unconnected is added as an issue. One status line
+and a net only KiCad sees unconnected is added as an issue, its stranded
+pads listed under `Disconnected pads` from KiCad's own fill (one pcbnew
+refill: a KiCad link names a zone island by the zone's first corner, so the
+link alone names no pad). One status line
 always says whether the cross-check ran, agreed, changed something, or could
 not run (no `kicad-cli`, a DRC timeout), so a silent clean pass is never
 ambiguous. `KICAD_NO_GRADE_RECONCILE=1` disables it.
@@ -930,9 +1180,32 @@ Three verdicts: **DONE** (every component that could be graded is graded and
 clean; exit 0), **INCOMPLETE** (a component ran and could not answer, or an
 added instrument found something; exit 4) and **UNSOUND** (the board grades
 clean only against floors a DRC writeback lowered; exit 5). Ungraded
-components do not block DONE but are named in the verdict line.
+components do not block DONE but are named in the verdict line -- except a
+`.kicad_dru` size rule `check_drc` cannot model, which makes the verdict
+INCOMPLETE. A component the BOARD declares and nothing grades (a project
+diff-pair net class with no `.kicad_dru` skew / `diff_pair_uncoupled` rule
+that binds it) is named apart, `DISCLOSED, not counted`. Net impedance
+declarations recorded by `route.py --impedance` and the power widths route.py
+was asked for are measured without a flag and reported by `board_score`
+(`impedance.declared_failing`, `net_widths.requested_under`), not graded.
 `--authored-from` is the board the chain started from (its project carries
-the floors this one should still respect); `--baseline` is handed to
+the floors this one should still respect); without it the floors are read
+against the project's recorded `fab_floor_origin` (what the board declared
+before the first routing step lowered anything) and copper below them is
+DISCLOSED in the reason, not graded, and `fab_floors` is named unexamined
+when the project records none. A relaxed size floor names its smallest
+object and carries a count (`violations`: the tracks, vias or holes below the
+authored value; `reference_violations` on the reference). With
+`--authored-from` each object is held to the floor that binds IT in the
+authored project (#1627): the Board Setup minimum, unless a rule of the
+authored `.kicad_dru` sets its minimum (resolved as `check_drc` resolves a
+size floor; the graded board's own `.kicad_dru` is not read, so a rule a chain
+added cannot excuse its copper). Copper below Board Setup that such a rule
+allows is not counted; it is listed under `measured_kept` with
+`held_by_rule` and the rule names. The
+copper-to-hole floor is graded by `kicad-cli` on the fill as shipped, and the
+reference excuses only the kinds of pair it also breaks, at least as badly.
+`--baseline` is handed to
 `board_score`. It takes `board_score`'s spec flags (`--clearance`, `--intent`,
 `--impedance-nets`, `--length-groups`, `--net-min-widths`, the size floors),
 `--skip-slow` (only `board_score`, not the added instruments) and `--timeout S`
@@ -1028,35 +1301,86 @@ python3 -X utf8 py_placer/place_fanout_clearance.py {in} {out} --clearance 0.2 -
 python3 -X utf8 py_router/route.py {in} {out} --nets '*' --json-out {dir}/route.json
 ```
 
+When `list_nets.py --diff-pairs` finds pairs on the board, the chain carries
+a `route_diff.py` step before `route.py`, the one `identify-diff-pairs` /
+`plan-pcb-routing` give the board. Without one, `route.py` routes each pair as
+two single nets, and the runner WARNs once, naming the pair count (#1472); it
+judges on.
+
 ```bash
 python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_chain.txt \
-    --intent wk/run/intent.json [--seeds 3,4] [--jobs 1]
+    --intent wk/run/intent.json [--seeds 3,4] [--confirm close|K | --full] [--jobs 1]
 ```
 
 - Every `route.py` and `route_diff.py` step runs at `--quick 2`, added when
-  the line has no `--quick` of its own (and logged), so the full route's
-  chain can be the file as it stands.
+  the line has no `--quick` of its own (and logged), so one chain file in
+  this format serves both the judging route and the full route (`--full`,
+  `--confirm`): its route steps need no level of their own. The format is
+  this one, the board's plan-pcb-routing chain with its boards named by
+  placeholder -- not plan-pcb-routing's `<board>_plan.sh`, which names them
+  by path and begins with `cd` (the runner refuses it: no step reads `{in}`).
+- `route_plan_check.py` proves a chain before any seed is routed (#1592):
+  `python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py
+  wk/run/judge_chain.txt --board <board>` reads a file whose commands name a
+  placeholder as a chain, as this runner reads it, and grades its rules with
+  `{in}` / `{out}` as the boards (a step with `{out}` writes one); R01, the
+  plan's `cd` line, is not asked of a chain. A chain this runner would refuse
+  is its exit 3, for the runner's reason.
 - A command runs from the current folder (the repo root) with no shell: a
   quoted `'*'` reaches the tool as `*`, and `python3` at the head of a line is
-  the runner's own interpreter.
+  the runner's own interpreter. A leading `NAME=value` prefix
+  (`KICAD_SMOOTH_ROUTE=1 python3 ...`) is that step's environment alone,
+  over the runner's (#1497), as `bash` would read it. A shell builtin
+  (`cd`, `export`, `set`) is no command here, and a chain carrying one is
+  refused.
 - Per seed: `s<S>_route/` made afresh with the placement copied in
   (`copy_board`, siblings included), every step's output in
-  `s<S>_route/chain.log`, the last board copied to `s<S>_fast.kicad_pcb` and
+  `s<S>_route/chain.log` and its board in `<N>_<script>.kicad_pcb`, the copy
+  and every step, as run, in `s<S>_route/redo_commands.sh` (redo_record's
+  format, which `redo_stress_test.py` replays: a manifest of that route
+  alone, whatever `REDO_MANIFEST` the caller exported, into which the tools
+  still record themselves), the last board copied to `s<S>_fast.kicad_pcb` and
   scored by `quick_score.py` (with `--intent`, and `--baseline` from
   judge.json's `baseline`, the board the seeds were placed from) into
   `s<S>_fast.score.json`,
   the names the skill and the GUI's candidates table read. A step's non-zero
   exit is logged and the chain goes on; a step whose `{out}` was not written
   stops that seed.
+- With no `--seeds`, a seed `judge.json` grades with a floorplan error or a
+  NOT BUILDABLE assembly (its `floorplan` / `assembly` count above 0) is
+  skipped and named, since no route clears either (#1645); `judge.json`
+  still names it, ranked last (#1296). When every named seed is such a
+  seed, nothing is routed (exit 2, pointing at the skill's "When no seed can
+  be judged"). `--seeds` routes exactly the seeds it names, an unclean one
+  included (a seed repaired by hand, say). A seed `judge.json` did not grade
+  is routed.
 - At the end the seeds are ranked by `quick_score.judge_key` and the best
   named; keeping it (its placement, never the `--quick` board) is the
   skill's step. `JSON_SUMMARY:` carries every seed's score and the ranking.
+- Level 2 is a screen, not a verdict: its copper reads a few percent off the
+  full route's per seed. Seeds within that spread of the best (the same
+  placement defects, blocking within 1 net, copper within 10%) are NOTEd
+  (`close` in `JSON_SUMMARY:`), and `--confirm close` routes them again at
+  the full level (`--quick` taken off every route step) into
+  `s<S>_full.kicad_pcb` / `s<S>_full.score.json` and names the best of them
+  (`confirmed`); `--confirm K` confirms the K best ranked instead.
+  `--confirm close` takes at most 4 seeds, the best of the close ones; when
+  more are close, the NOTE and the confirming run name the seeds it leaves
+  out with the `--seeds <the close seeds> --confirm K` that confirms every one
+  (#1383, #1473). The re-run routes its seeds at level 2 again first.
+- `--full` routes the seeds at the full level only, with no level-2 pass,
+  into the same `s<S>_full_route/`, `s<S>_full.kicad_pcb` and
+  `s<S>_full.score.json`, and ranks them by that route (`level: "full"` in
+  `JSON_SUMMARY:`). `--seeds S --full` is the documented way to route ONE
+  board by a chain at the full level: per-step boards, `chain.log` and the
+  route's own `redo_commands.sh` in `s<S>_full_route/` (#1592).
 
 Exit 0 every seed scored; 4 a seed's chain wrote no board or its score could
 not be read (named); 2 nothing run: `judge.json` unreadable or naming no
-seed, a seed's placement missing, or a chain that reads no `{in}`, writes no
-`{out}` or names an unknown placeholder (`~{...}`, KiCad's overbar in a net
-name, is not one).
+seed (or, with no `--seeds`, naming only seeds with a floorplan error or a NOT
+BUILDABLE assembly), a seed's placement missing, `--full` with `--confirm`, or a chain that
+reads no `{in}`, writes no `{out}`, names an unknown placeholder (`~{...}`,
+KiCad's overbar in a net name, is not one) or carries a shell builtin.
 
 ## Datasheet Template Fit (`fit_template.py`)
 
@@ -1121,6 +1445,36 @@ WARN). Exit 0 fitted. Exit 2 means one of:
 - an unreadable input;
 - a sketch the board cannot fit: a partner listed after its member, or no
   pose within reach.
+
+## Cover facts (`cover_facts.py`)
+
+What a board says about the bodies its connectors carry: the facts a
+`covers[]` row (#1443, `docs/floorplan-intent.md`) is declared from. A card
+in a socket or a module on stacking connectors stands over the board, and
+how low it reaches depends on the socket and the card fitted, which the
+board does not say. For each connector (ten pads or more), and each part
+whose 3D models raise a body past its own outline, it prints in the
+connector's own frame:
+- its footprint and its height (its model's top, when one resolves);
+- each model it names that does not resolve;
+- what its resolved models raise over the board, with that model's
+  underside -- one card type's, to weigh against the datasheets;
+- the standoffs and mounting holes (a hole 2 mm or wider, at most one
+  numbered pad) within 15 mm of one of its four axes, each with its distance
+  along the axis and its offset to the axis's left;
+- the parts inside the raised extent now, with their heights where known.
+
+```bash
+python3 -X utf8 py_tools/cover_facts.py board.kicad_pcb --refs J3 J8 --json facts.json
+```
+
+`--refs` takes references space- or comma-separated, and a repeated
+`--refs` adds to the list. A reference the board does not have is named and
+refused (exit 2), never dropped, since a report short of one connector reads
+as complete.
+
+Facts only; the skill's §3.4b turns them and the datasheets into a row.
+Exit 0, or 2 for an unreadable board or a `--refs` the board does not have.
 
 ## Run Ledger (`converge.py`)
 
@@ -1365,12 +1719,19 @@ and the net. Every stress run makes one (`<rundir>/routing.mp4`, through
 
 ```bash
 python3 py_router/route_movie.py RUNDIR                       # RUNDIR/routing.mp4
+python3 py_router/route_movie.py RUNDIR --final kept.kicad_pcb # the lineage of the board the run kept
 python3 py_router/route_movie.py step1.kicad_pcb step2.kicad_pcb final.kicad_pcb -o run.mp4
 ```
 
-- A run dir's boards play in chain order -- the order its `redo_commands.sh`
-  writes them (without one: `stepN` in the name, else the order they were
-  written, a `final*` board last) -- and the movie ends on the last. The first
+- A run dir plays the LINEAGE of its final board -- the boards a replay of its
+  `redo_commands.sh` makes (the pruner's chain, `redo_stress_test.
+  compute_prune_keep`), in the order it writes them -- and ends on the final
+  board. A try the run went back from, and a branch nothing went on from, are
+  not played. The final board is `--final` when given (a name or path), else
+  the last board the chain writes whose name says `final`, else the last board
+  it writes: the manifest records what was written, not what was kept, so a run
+  whose last try was rejected names its kept board. Without a manifest: `stepN`
+  in the name, else the order they were written, a `final*` board last. The first
   frame is the chain's input board, the first board `redo_commands.sh` reads,
   when it can be found. Pours are drawn faint, so a track over a plane on its
   own layer still reads.
@@ -1396,7 +1757,15 @@ A movie of a placement, step by step, in the routing movie's style -- and,
 with `--route`, of the placement skill's whole flow: seeds placed, the
 cheapest fast-routed and judged, the best routed in full. It takes every
 `place_simple.py` argument (BOARD and OUT first) and places the board exactly
-as `place_simple.py` does: the same placement for the same seed.
+as `place_simple.py` does: the same placement for the same seed and start.
+`--seed S` is filmed from the start seed S has in a run of `--scattered`,
+`--clustered` and `--anchored` (place_simple's default seeds when none is
+given), whose counts become that run's `--clustered-seeds` and
+`--anchored-seeds` lists, and a `place_movie: filming seed S from a ... start`
+line names it. So a kept seed is filmed with its run's counts, or with its
+start list (`--clustered-seeds S`); a list and a count that start the seed
+differently are refused (exit 2). The 3D movie (`movie3d/make_movie.py`)
+takes the seed and its start the same way.
 
 ```bash
 python3 -X utf8 py_placer/place_movie.py board.kicad_pcb placed.kicad_pcb \
@@ -1845,7 +2214,8 @@ Options:
                       secondary edge but far from the primary edge are reassigned to the
                       secondary direction for more even distribution
   --check-for-previous  Skip pads that already have fanouts (also avoids occupied channels)
-  --no-inner-top-layer  Prevent inner pads from using F.Cu
+  --no-inner-top-layer  Prevent inner pads from using F.Cu (automatic when the gap
+                      between balls cannot hold the track at clearance, #1518)
   --same-net-pad-clearance MM  > 0 forbids via-in-pad entirely (under-pad escapes
                       and plane drops run dog-bone; a ball with no legal off-pad
                       via site fails visibly) and is recorded in the sibling
@@ -1886,16 +2256,38 @@ Options:
                       (#360/#424). Per-net counts land in
                       JSON_SUMMARY.plane_drop; KICAD_FANOUT_PLANE_DROP=0/1
                       overrides the flag (the recorded-manifest A/B switch)
+  --immovable-refs REF [REF ...]
+                      Parts the fanout keeps its vias and escapes off, as if
+                      they were locked, separated by spaces or commas
+                      (`C17, C31` as place_fanout_clearance prints them); a
+                      ref not on the board is an error, exit 1 (#1562).
+                      By default it may lay copper on an unlocked 2-pad
+                      C/R/FB part, which place_fanout_clearance then moves; name a part that step could not clear and the
+                      fanout drops a ball it cannot escape instead (#1521).
+                      JSON_SUMMARY.drc_grazes counts the grazes left on parts
+                      that step moves as deferred_to_decap (the parts in
+                      deferred_parts), included in its total (#1560)
   --add-teardrops     Add teardrop settings to all pads and vias in the output
   --fab-tier {standard,advanced,auto}  JLC fab capability floor (default: auto)
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
   --escalation {off,board,fab}, --clearance-ceiling MM, --strict-sizes
                       As on the routing CLIs (see [Fab Tier Options](configuration.md#fab-tier-options));
-                      the ceiling caps this tool's one --clearance
+                      the ceiling caps --clearance and every net class
   --no-fix-drc-settings, --relax-drc-severities, --keep-thermal, --enable-used-layers
                       The post-run DRC-settings writeback, as on the routing CLIs
                       (see [DRC Settings Fixer](#drc-settings-fixer-fix_kicad_drc_settingspy))
 ```
+
+`--clearance` sets the Default net class for the run; every other class is
+read from the board's `.kicad_pro`, as `route.py` reads it, and the escape is
+spaced at KiCad's pairwise `max(clearance, class A, class B)` (#1529). That
+holds for the copper the fab-floor rescue lays below `--clearance` too: a
+class between the two is graded there, and a ball that cannot meet its class
+is reported unescaped rather than shipped below it (#1567). A plane drop's
+fab-floor retry likewise stops at its net's class (or `.kicad_dru` rule), and
+a drop that cannot meet it is left for the plane tap. The
+output project keeps the classes, or caps each at `min(class, ceiling)` under
+`--clearance-ceiling` -- in a chain pass the ceiling, as on the route steps.
 
 Escape stub ends are snapped to the `--grid-step` grid, and the decorative
 end-jog is validated against the full obstacle map (foreign pads + tracks +
@@ -2035,7 +2427,11 @@ still replay.
 - **Moves.** A cap moves at most `--max-displacement` (default 2 mm), grown
   by `--displacement-growth` up to `--max-displacement-cap` (3 mm) when it
   cannot clear; one that still cannot is reported `Unresolved` for a hand
-  fix. Quarter-turn rotations are tried unless `--no-rotate`;
+  fix. A cap no pose clears whose copper TOUCHES another net's where it
+  stands (a short, not a graze) is moved to the pose apart from all foreign
+  copper that grazes least, named on the `Moved off a short` line; one with
+  no such pose is named on the `SHORTED` line (#1563). Quarter-turn
+  rotations are tried unless `--no-rotate`;
   `--beneath-only` moves only the passives under a BGA's package and keeps
   them there. `--near REF ...` moves the passives near those parts instead of
   the BGAs' (each part's own box the region a passive is near, nothing held
@@ -2054,9 +2450,146 @@ still replay.
   rotations (`blocks[].rotation`, `rotation_candidates`) are held too. The run
   prints the decap grade before and after. Without `--intent` a cap can move
   past a decap limit silently.
+- **The project.** Written on every exit, a run that moved nothing included
+  (#769): the input's `.kicad_pro` carried over, the `--clearance` ceiling
+  when given, and the size floors (track, via, drill, ring) of the copper the
+  pass laid or moved -- a via it nudged and its connector segments -- and of
+  nothing else (#1578). A cap move lays no copper, so a run that only moved
+  caps writes no size floor. `--no-fix-drc-settings` writes none of it and
+  carries the input's project through as it was, as on a routing step; in
+  the GUI the "Fix DRC settings after routing" box is the same switch.
 
 Exit 0 written (unresolved caps are reported, not failed); 2 unreadable input,
 or two intent blocks declaring one part at different angles.
+
+## Deterministic Plan Router (`autoplan.py`)
+
+Routes a board through a chain built from the board itself -- footprints,
+net names, layer count and the board's own design rules -- without an agent.
+It makes the same kinds of choices the plan-pcb-routing skill asks an agent
+to make, and runs each step as its own process in `<output>.autoplan/`:
+
+1. **Design rules**: the fab clearance floor for every step, as the route
+   steps' `--clearance-ceiling` (a finished board meets the fab floor; a net
+   class declared above it is aspirational, as in the plan-pcb-routing
+   skill's chains), the fab track floor, the working via, and the fine via
+   for fine-pitch escapes (`list_nets.read_design_rules`).
+2. **Planes first**: on 4+ layer boards, the fewest inner layers that put a
+   plane next to every signal layer, so each signal layer has a reference:
+   In1+In2 on 4 layers, In1+In4 on 6, In1+In3+In6 on 8
+   (`autoplan.plane_layers`). The first is GND, the second the dominant rail
+   (when one reaches 10 pads), any others GND again. Signals are kept off
+   them until the route step's later passes (`--plane-layer-cost`). GND on B.Cu on 2-layer
+   boards, where the pour is an outer layer the signals share. Rails are the nets
+   `list_nets.find_power_nets` names, and nets carrying power pins
+   (`power_in`/`power_out`) of two or more parts that are not a diff pair.
+3. **Fanout**: the part's shape is read from its copper pads, in its own
+   frame, one land per pin, with each exposed pad set aside together with the
+   pads under it, and each marker (a net-less pad unlike the part's commonest
+   pad, such as a BGA's corner outline pads). A grid array (no exposed pad, at least three
+   rows and three columns of three or more pads, each axis on a regular
+   lattice, the two pitches within 2x of each other, with interior pads) gets
+   `bga_fanout.py` when it is more than two rows deep or at 0.5 mm or finer;
+   a four-sided perimeter package (pads on all four edges, any others within
+   1.5 pitches of an edge: an aQFN's second ring, corner pads set in) gets
+   `qfn_fanout.py` at 0.5 mm or finer, or above 40 pads at 0.8 mm or finer.
+   A dense board-to-board mezzanine (a CM4/CM5's: 200 or more surface pads on
+   at most four lines, 0.4 mm along them) gets `qfn_fanout.py` with the
+   under-pad method and via-in-pad, as the plan-pcb-routing skill does.
+   The pitch is measured along a pad row (each axis of a grid separately; the
+   finer one counts). A two-row part (DFN, a connector), a part whose pads
+   form neither shape (a mezzanine aside), a through-hole part other than a PGA, and any
+   connector, socket, header or magnetics by footprint name
+   (`autoplan.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
+   A part that drops escapes is retried with the fine via (BGA), then with
+   the dogbone (BGA) or under-pad (QFN) method, keeping the attempt that
+   escaped most.
+   BGA escapes take the same layer costs as the route step.
+4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts. A 2-pad
+   C/R/FB part it leaves shorted to a BGA's fanout copper (a `short: true`
+   pad-via or pad-segment item of `check_drc`, the copper on a net of that
+   BGA's balls) is held in a re-fan of that BGA from the board it was fanned
+   on (`bga_fanout.py --immovable-refs`, its whole retry ladder), every later
+   fanout replayed at the rung it was accepted at, and
+   `place_fanout_clearance.py` runs again. The board with fewer shorts, then
+   fewer dropped escapes, is kept; a dropped ball is routed from the bare ball
+   by the route step (#1521).
+5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`. A
+   pair net the step leaves in a track or via DRC violation (by `check_drc`,
+   against the board before the step) is ripped and routed again on its own with
+   `route.py --force-reroute`, single-ended; a net that route lays no copper
+   for keeps its pair copper.
+6. **Route**: `route.py` over every net, with the poured nets and rails as
+   power nets, a finer grid around fine-pitch parts and deeper rip-up on
+   congested boards; the members of any pair `route_diff.py` could not couple
+   are rippable, so the stubs it left do not block their partners. The first
+   pass keeps signals off the planes; up to two further passes on the result
+   may cross them at 3.0 (`autoplan.PLANE_FALLBACK_COST`), so a plane carries
+   only what could not route without it.
+
+A step that fails is skipped and the chain continues from the last good board.
+
+Each route pass is graded: open nets are the nets `check_connected` reports
+unrouted or broken (its KiCad cross-check off, so the same board always grades
+the same), and DRC is `check_drc`'s real violations at the board's recorded
+floors. A pass is kept only if it is no worse than the best board so far on
+both and better on one; the first pass that is not kept ends the passes, and
+a tie keeps the earlier board.
+
+### Usage
+
+```bash
+python3 py_router/autoplan.py input.kicad_pcb output.kicad_pcb [OPTIONS]
+
+Options:
+  --dry-run          Print the analysis (AUTOPLAN_ANALYSIS) and exit
+  --finish           Run step 6 alone on a board another chain has already
+                     prepared and routed: the planes are read from the board's
+                     pours (not its teardrops), and the input board is graded
+                     first and ships unless a pass beats it. route.py works on
+                     the nets still open, but like any route step it may rip
+                     and reroute existing copper and runs its plane finalize
+  --effort-factor F  A route pass after the first starts only while the router
+                     iterations spent, plus the last pass's again, stay within
+                     F times the first pass's (default 2; a finite number >= 0).
+                     A forecast, not a cap: a pass that starts runs to its
+                     end. Iterations are the JSON_SUMMARY total_iterations the
+                     router reproduces exactly, so the same board always gets
+                     the same passes; a pass that reports none starts no other.
+  --plane-layer-cost C  The --layer-costs entry of every inner plane layer in
+                     the fanout, diff pair and first route steps. Negative
+                     (default -1) keeps signals off the planes, so each stays
+                     a solid reference for the layers next to it, and only the
+                     later route passes may cross them, at 3.0; a positive
+                     price lets every step cross them (the plan-pcb-routing
+                     skill's route step uses 3.0), trading reference integrity
+                     for routability.
+```
+
+The chain, each step's arguments, return code, iterations and grade are
+written to `<output>.autoplan/plan.json`; the last line is `AUTOPLAN_SUMMARY`
+with the final step and its open and DRC counts. If no route pass succeeds,
+the best board the chain has ships (with `--finish`, the input board itself),
+replacing the output and its whole sibling set. The input may be a board
+inside `<output>.autoplan/` from an earlier run: it is staged before that
+directory is cleared.
+
+Net names reach every tool as patterns that select that net alone through the
+tools' own selectors, which also match a pattern's last sheet component and
+read a leading `!` as an exclusion: `GND` is passed as `GN[D/]`, `-BATT` as
+`[--]BAT[T/]`, `!RESET` as `[ -!]RESE[T/]`, and a sheet-qualified name as
+written. Each pattern is checked against the board's nets; a net no pattern
+isolates is left out of the power, exclusion and pair lists, and named.
+
+### Example
+
+```bash
+# Route an unrouted board end to end, no agent
+python3 py_router/autoplan.py board.kicad_pcb board_routed.kicad_pcb
+
+# Close what an agent's chain left open, as its last step
+python3 py_router/autoplan.py step9_route.kicad_pcb board_finished.kicad_pcb --finish
+```
 
 ## Build Script (`build_router.py`)
 
@@ -2337,10 +2870,19 @@ category each:
   corner, through a copper web thinner than the min-track floor (#416, KiCad's
   `connection_width`);
 - `kicad-dangling` -- a joint segment whose ends both lie on other same-net
-  tracks, which KiCad's DRC reports as `track_dangling` (#1217).
+  tracks, which KiCad's DRC reports as `track_dangling` (#1217);
+- `off-centre-via-end` -- a track end inside a same-net via's copper, on a
+  layer the via carries, but not on its centre (#1235). It is connected, so
+  DRC and connectivity pass it, but KiCad's length measure reads it
+  differently from the routed copper, which is how a matched pair shipped
+  skewed (#1583). An end a segment carries on to the via's centre (the
+  route cleanup's via-centre bridge) is not reported. An end that is also a
+  pad's terminal names the pad. **Advisory**: printed
+  after the report, never counted in the headline or the exit code, since a
+  via-in-pad is drawn this way and a human-routed board carries many.
 
 It never modifies the board — use it as a triage pass before or after the
-other checkers. Exit 1 when anything is found, else 0.
+other checkers. Exit 1 when anything but an advisory category is found, else 0.
 
 **Removable** is graded by the same predicate route.py's post-route cleanup
 removes by (`pcb_modification.StrictRemovalModel`, #1063): a segment, or an
@@ -2366,8 +2908,8 @@ Options:
   --tolerance FLOAT     Minimum finding size in mm (dangle/tail length, gap,
                         duplicated-copper length, via diameter); smaller findings are
                         dropped. Default: 0.1; use 0 to report everything.
-                        soft-joint, narrow-pad-joint and kicad-dangling carry no
-                        size and are always reported
+                        soft-joint, narrow-pad-joint, kicad-dangling and
+                        off-centre-via-end carry no size and are always reported
   --max-print INT       Max findings printed per category (<=0 prints all; default 20)
 ```
 
@@ -2439,17 +2981,49 @@ python3 py_tools/check_impedance.py poured.kicad_pcb --coplanar-gap 0.2
 
 Nets the routing steps recorded an impedance declaration for (`--impedance`,
 kept in the sibling `.kicad_pro`) are audited at their own declared coplanar
-gap; `--coplanar-gap` is the fallback for nets without one. Plane nets are
-skipped unless `--include-plane-nets`. Exit 1 when any reference-plane
-crossing is found, else 0 (`--exit-zero`: always 0). The model and every
-option are in [Impedance API](api-impedance.md).
+gap; `--coplanar-gap` is the fallback for nets without one. The coplanar
+declaration audit prints whenever a net carries a declared gap, from either
+source. Over the net's own pad, and within the pour's clearance of it, the gap
+read from the track misses the declaration on any pad wider than the track
+(the conductor there is the pad); that length is reported as `at its own pad`
+(`length_at_own_pad_mm`) and never counted, the way the net's own via antipad
+is never a crossing (#1582). A pad with no pour beside it at all still counts
+as no ground. The gap is read on KiCad's own fill, at exact distance (#1624):
+the `(filled_polygon ...)` KiCad stored in the board when it carries one,
+else the fill model, to within half its cell and at the project's net-class
+clearances, which KiCad fills at whatever the pour's own zone clearance says.
+No refill is run: fill the board (`fill_for_delivery.py`) to grade on KiCad's
+own fill. The JSON's `gap_source` (`stored`, `model`) and a note name which
+one; a stored fill lying over the trace reads gap 0 and
+says to refill. The reference-plane check reads the fill model either way.
+A net carrying a recorded declaration also reports its declared ohms against
+the model's reading of the shipped copper -- the width, and for a pair the
+measured P/N gap where the two run coupled -- and names a net more than 10%
+off (`nets_ohms_off_target`, `ohms_off_pct`; #1630). That is disclosure:
+neither the exit code nor `board_score`'s count includes it. A record a
+step wrote with `--impedance-declare-only` (`declare_only`: the copper is
+the project's, only the ohms were recorded) is graded the same way and
+marked declare-only; any other record left `applied: false` is skipped.
+Plane nets are skipped unless `--include-plane-nets`. Exit 1
+when any reference-plane crossing is found, or when a net misses its declared
+gap -- no ground beside it, or a gap off the declaration -- over more than
+0.01 mm of its outer-layer length (`promise_broken`, the rule `board_score
+--impedance-nets` counts by; the audit names those nets); else 0
+(`--exit-zero`: always 0). The model and every option are in
+[Impedance API](api-impedance.md).
 
 ## Reachability Check (`check_reachability.py`)
 
 Is this pad reachable at all, or is the router being blamed for the geometry?
 It measures the widest track that can get from the pad to the rest of its
 net (a distance transform plus an exact widest path), at the clearances the
-board would actually route at (its net classes, pinned up to the fab floor).
+board would actually route at: each foreign track, via and pad is held to the
+value its PAIR with the routed net's track gets, through check_drc's resolver
+(both net classes, the sibling `.kicad_dru`'s class/type-scoped and layer
+rules, a pad override; #1625), pinned up to the fab floor. The knobs line
+names a rule or class that set a pair's value (`pairs priced by rule
+'<name>': 0.1mm`), and `--json` carries it as `clearance_sources`. A via's
+legality is judged at the same track pricing.
 
 ```bash
 python3 py_tools/check_reachability.py board.kicad_pcb --pad U3.23
@@ -2676,7 +3250,7 @@ step** (issue #160), pinning the floors to the clearances/sizes they just routed
 with, so the written project is DRC-consistent by default. If the output is a new
 file with no project yet, they copy the input board's `.kicad_pro` (or seed a
 complete one when the input has none). Pass `--no-fix-drc-settings` to skip it
-(every one of them but `place_fanout_clearance.py`, which always writes; route.py's
+(every one of them, `place_fanout_clearance.py` too since #1578; route.py's
 mid-run copy of it, the #650 in-run floor sync, is skipped with it, #1285), or
 `--relax-drc-severities` to ALSO lower the non-routing severities (off by
 default, #856; `--keep-thermal` is accepted as a deprecated no-op). Every routing step
@@ -2688,9 +3262,32 @@ floors only when it placed a via and nothing when it drew nothing (#1195,
 `fanout_fix_kwargs`). A pour (`route_planes.py`, the Planes tab) writes its
 via floors and hole-to-hole only when it placed a via, its track floor only
 when it laid a track, and its copper-to-hole floor only when it drew either
-(#1319, `plane_fix_kwargs`). A bare pour writes the copper clearance alone,
-because a KiCad refill regrows the pour at max(zone clearance, net class). The
-`FAB FLOOR RELAXED` disclosure compares against the floors the board declared
+(#1319, `plane_fix_kwargs`); its soft-joint bridges, which join copper the
+board already carried, are not copper it drew (#1577,
+`plane_floor_segments`). A bare pour writes the copper clearance alone,
+because a KiCad refill regrows the pour at max(zone clearance, net class).
+`route_diff.py` (and the Differential tab) writes the copper-to-hole floor it
+HELD -- the board's own `min_hole_clearance`, which its router keeps NPTH
+walls at -- lowered only to the smallest distance from the copper it drew to a
+hole of another net (a P via's drill beside the N track can sit under it), and
+never below its copper clearance (#1369, `step_hole_clearance`). It used to
+write the copper clearance, which the delivered fill then followed. `route.py`
+(#1493), the fanouts, `bga_fanout.py`, `qfn_fanout.py` and the Fanout tab
+(#1568), and the pours, `route_planes.py`, `repair_planes.py` and the Planes
+tab (#1577), write it the same way, and a floor written under the board's own
+is a `hole_clearance` row in `JSON_SUMMARY.design_rules`. A writeback only
+ever lowers this floor: a step whose copper holds more than the project
+already declares says so (`Copper-to-hole floor stays ...`) rather than
+raising it.
+
+The `#530` cap lowers `rules.min_clearance` to the smallest pad clearance
+override the run honoured (KiCad floors an override there). That number
+belongs to one part, so the writeback records it
+(`kicad_routing_tools.pad_override_min_clearance`: `{rule, board}`), and
+`--escalation board` reads the board's own minimum (`board`) while the rule
+still holds the capped value (#1369).
+
+The `FAB FLOOR RELAXED` disclosure compares against the floors the board declared
 before the chain began (`kicad_routing_tools.fab_floor_origin`). A floor that
 origin does not carry was never declared, so nothing is reported as its
 "ORIGINAL".
@@ -2832,11 +3429,21 @@ python3 py_tools/fill_for_delivery.py routed.kicad_pcb -o delivered.kicad_pcb
 |------|---------|
 | `-o, --output` | Destination board (required, and not the input itself). Its siblings (`.kicad_pro`, `.kicad_prl`, `.kicad_dru`, design brief) are copied first, via `copy_board`. |
 | `--timeout N` | Seconds to allow the KiCad fill (default: the exact-fill budget). |
+| `--baseline BOARD` | The board *before* the routing that made the input. Used only when the re-save changes the file format (below): vias it already had under solder keep what it gave them. |
 | `--exit-zero` | Report problems but exit 0. |
 
 `route.py --write-fill` does the same thing in place, at the very end of a
 run, after the DRC-floor writeback — so the fill is graded against the
 project's real net classes.
+
+**File format.** KiCad saves what it runs, so a board older than KiCad 10 comes
+back as KiCad 10's format (printed as `file format: 20241229 -> 20260206`; KiCad
+9 cannot open the copy). That format can declare per-via protection, and the
+re-save writes an explicit `(capping no) (filling no)` on every via. The tool
+removes those tokens again and declares IPC-4761 Type VII on the vias in a pad
+or paste opening — the declaration the route step makes on a KiCad 10 file — so
+`check_drc` reports the same zero via-in-paste violations it did on the input.
+A filled copy with more unprotected vias-in-paste than its input is refused.
 
 ### Output
 
@@ -2971,6 +3578,37 @@ python3 py_tools/clean_ignored.py --delete -y  # delete without asking
 ```
 
 It always works from the repository root, wherever it is run from.
+
+## kicad-cli Path (`kicad_cli_path.py`)
+
+Prints the path of `kicad-cli` as the repo's own tools resolve it
+(`kicad_oracle.find_kicad_cli`: `$KICAD_CLI`, then PATH and the packaged
+locations such as the macOS app bundle, then versioned Windows installs). A
+stock macOS KiCad keeps the binary off PATH, so a bare `kicad-cli` exits 127
+there; use this instead in shell recipes:
+
+```bash
+KCLI=$(python3 py_tools/kicad_cli_path.py) && "$KCLI" pcb drc board.kicad_pcb --format json -o drc.json
+```
+
+stdout carries only the path. Exit 1, with the reason on stderr, means no
+`kicad-cli` was found.
+
+## PDF Pages (`pdf_text.py`)
+
+Finds pages, prints page text, or renders a page of a datasheet PDF, through
+whichever backend the machine has: poppler, pypdf, PyMuPDF, or macOS's own
+PDFKit (no install needed on a Mac).
+
+```bash
+python3 py_tools/pdf_text.py ds.pdf --find "layout example" "typical application"
+python3 py_tools/pdf_text.py ds.pdf --pages 31-33
+python3 py_tools/pdf_text.py ds.pdf --render 41 --out fig41.png --dpi 200
+```
+
+`--find` prints `page N: <line>` for each matching line; `--render` writes a
+PNG to open as an image. `--backend` forces one. Exit 2 is a bad argument or
+an unreadable file, exit 3 that no backend could do it.
 
 ## Common Workflows
 

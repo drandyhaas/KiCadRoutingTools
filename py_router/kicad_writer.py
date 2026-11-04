@@ -57,17 +57,10 @@ def move_copper_text_to_silkscreen(content: str) -> str:
         if start == -1:
             break
 
-        # Find the matching closing paren by counting nesting
-        depth = 0
-        end = start
-        for j in range(start, len(content)):
-            if content[j] == '(':
-                depth += 1
-            elif content[j] == ')':
-                depth -= 1
-                if depth == 0:
-                    end = j + 1
-                    break
+        # Find the matching closing paren. #1437: string-aware -- a text
+        # like "note :(" used to be counted as nesting, the block swallowed
+        # the items after it, and their copper (layer ...) went to silk.
+        end = _sexpr_block_end(content, start)
 
         # Extract the gr_text block
         block = content[start:end]
@@ -506,6 +499,81 @@ def stamp_via_protection_in_content(content: str, stamps_by_uuid: dict):
         pos = at
     out.append(content[pos:])
     return ''.join(out), len(edits)
+
+
+def strip_via_protection_in_content(content: str, drops_by_uuid: dict):
+    """Remove protection tokens from the `(via ...)` blocks named by uuid (#1367).
+
+    `drops_by_uuid` is {via uuid: [token, ...]}. Only a token that is a direct
+    child of the via block is removed, together with the line it stands on.
+    The inverse of `stamp_via_protection_in_content`: it undoes the explicit
+    tokens a pcbnew re-save wrote onto vias that had none, so the via inherits
+    the board's `(setup ...)` again. Returns `(content, n_vias_edited)`."""
+    if not drops_by_uuid:
+        return content, 0
+    from kicad_parser import _via_blocks
+    uuid_re = re.compile(r'\(uuid\s+"([^"]+)"\)')
+    edits = []   # (absolute start, absolute end) spans to delete
+    n_vias = 0
+    for start, blk in _via_blocks(content):
+        um = uuid_re.search(blk)
+        if not um or um.group(1) not in drops_by_uuid:
+            continue
+        spans = []
+        depth, in_str, i = 0, False, 0
+        while i < len(blk):
+            c = blk[i]
+            if in_str:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == '(':
+                depth += 1
+                if depth == 2:
+                    m = re.match(r'\(([A-Za-z_]+)', blk[i:])
+                    if m and m.group(1) in drops_by_uuid[um.group(1)]:
+                        j, d2, s2 = i, 0, False
+                        while j < len(blk):
+                            cj = blk[j]
+                            if s2:
+                                if cj == '\\':
+                                    j += 2
+                                    continue
+                                if cj == '"':
+                                    s2 = False
+                            elif cj == '"':
+                                s2 = True
+                            elif cj == '(':
+                                d2 += 1
+                            elif cj == ')':
+                                d2 -= 1
+                                if d2 == 0:
+                                    break
+                            j += 1
+                        k = i
+                        while k > 0 and blk[k - 1] in ' \t':
+                            k -= 1
+                        if k > 0 and blk[k - 1] == '\n':
+                            k -= 1
+                        spans.append((start + k, start + j + 1))
+            elif c == ')':
+                depth -= 1
+            i += 1
+        if spans:
+            edits.extend(spans)
+            n_vias += 1
+    if not edits:
+        return content, 0
+    out, pos = [], 0
+    for a, b in sorted(edits):
+        out.append(content[pos:a])
+        pos = b
+    out.append(content[pos:])
+    return ''.join(out), n_vias
 
 
 def via_net_name(net_id: int, net_id_to_name: dict) -> Optional[str]:
@@ -1197,8 +1265,12 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
         for via_to_remove in remove_vias:
             x, y = via_to_remove['x'], via_to_remove['y']
             want_net = via_to_remove.get('net_id')
+            # #1438: KiCad writes the via TYPE as a bare keyword after the
+            # head -- `(via blind`, `(via buried`, `(via micro` -- so a
+            # head-then-newline pattern left every non-through via in place.
             pattern = re.compile(
-                rf'\t\(via\s*\n\s*\(at\s+{_num_pat(x)}\s+{_num_pat(y)}\)[\s\S]*?\n\t\)')
+                r'\t\(via(?:[ \t]+(?:blind|buried|micro|through))?[ \t]*\r?\n'
+                rf'\s*\(at\s+{_num_pat(x)}\s+{_num_pat(y)}\)[\s\S]*?\n\t\)')
             for m in pattern.finditer(content):
                 block = m.group(0)
                 # Net gate (was net-blind): never delete a DIFFERENT net's via
@@ -1496,6 +1568,14 @@ def modify_segment_layers(content: str, segment_mods: List[Dict],
     return result, count
 
 
+# #1439: a locked segment is spelled `(segment locked (start ...` (bare head,
+# older files) or with a `(locked)` / `(locked yes)` child after `(width ...)`.
+# The swap's head pattern allowed neither, so locked copper silently kept its
+# old net. Same forms kicad_parser accepts.
+_SEG_LOCK_HEAD = r'(?:\s+locked)?'
+_SEG_LOCK_CHILD = r'(?:\(locked(?:\s+(?:yes|no|true|false))?\s*\)\s+)?'
+
+
 def swap_segment_nets_at_positions(content: str, positions: set,
                                    old_net_id: int, new_net_id: int,
                                    layer: str = None,
@@ -1521,10 +1601,10 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
     if use_names:
         # KiCad 10: match (net "name")
-        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+"((?:[^"\\]|\\.)*)"\)'
+        segment_pattern = r'\(segment' + _SEG_LOCK_HEAD + r'\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+' + _SEG_LOCK_CHILD + r'\(layer\s+"?([^")]+)"?\).*?\(net\s+"((?:[^"\\]|\\.)*)"\)'
     else:
         # KiCad 9: match (net <id>)
-        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
+        segment_pattern = r'\(segment' + _SEG_LOCK_HEAD + r'\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+' + _SEG_LOCK_CHILD + r'\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
 
     count = 0
 
@@ -1565,6 +1645,41 @@ def swap_segment_nets_at_positions(content: str, positions: set,
     return result, count
 
 
+def _sexpr_block_end(content: str, start: int) -> int:
+    """Index just past the balanced s-expression opening at ``start``.
+
+    Quote-aware AND escape-aware (#1440): KiCad writes a quote inside a
+    string as ``\\"``, and a scan that took that quote as the closing
+    delimiter flipped in/out of string state for the rest of the block, so a
+    ``(`` in such a net name swallowed the NEXT block into this one. Returns
+    ``len(content)`` when the block never closes.
+    """
+    n = len(content)
+    depth = 0
+    in_str = False
+    esc = False
+    k = start
+    while k < n:
+        ch = content[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return k + 1
+        k += 1
+    return n
+
+
 def assert_balanced_sexpr(text: str, label: str = 'board'):
     """#523 backstop: refuse to write a structurally broken board.
 
@@ -1599,6 +1714,49 @@ def assert_balanced_sexpr(text: str, label: str = 'board'):
             f"corrupted the board (#523)")
 
 
+def match_stack_members(targets, items, strict_width: bool = False):
+    """Which ``items`` a strip list removes: ``targets`` and ``items`` are
+    ``(span_key, width)`` rows (``items`` in board / file order). Returns
+    ``(item indices to remove, target indices left unmatched)``.
+
+    COUNTED, never a set (#318): a span carrying N same-net segments with K
+    of them listed loses exactly K. Within a span the EXACT width is taken
+    first (#1556): a same-span stack whose widths differ -- a 0.0762 fanout
+    connector under a 0.1 route connector -- loses the member that was
+    listed, not whichever comes first in the file. Taking the first left the
+    keeper's twin on the board and removed the keeper, and a later
+    board-vs-file reconcile then removed the twin too, opening the joint.
+    Only a target whose width matches no member of its span falls back to the
+    first free member (``strict_width`` refuses that and reports it
+    unmatched instead, for a caller that strips one member of a stack it
+    chose by width, #162).
+    """
+    def _w(w):
+        return None if w is None else round(float(w), 4)
+
+    by_span = {}
+    for i, (k, _w_) in enumerate(items):
+        by_span.setdefault(k, []).append(i)
+    taken = set()
+    pending = []
+    for t, (k, w) in enumerate(targets):
+        hit = next((i for i in by_span.get(k, ())
+                    if i not in taken and _w(items[i][1]) == _w(w)), None)
+        if hit is None:
+            pending.append(t)
+        else:
+            taken.add(hit)
+    unmatched = []
+    for t in pending:
+        hit = None if strict_width else next(
+            (i for i in by_span.get(targets[t][0], ()) if i not in taken), None)
+        if hit is None:
+            unmatched.append(t)
+        else:
+            taken.add(hit)
+    return taken, unmatched
+
+
 def remove_segments_from_content(content: str, segments: List,
                                  net_id_to_name: Dict = None,
                                  unmatched_out: List = None,
@@ -1608,19 +1766,18 @@ def remove_segments_from_content(content: str, segments: List,
     Used by the dead-end sweep (issue #84) to strip original input-file copper
     that prune_dead_end_segments flagged as a dead end -- copper the writer would
     otherwise carry into the output verbatim. A segment is matched by its
-    unordered endpoint pair plus layer and net, which uniquely identifies it
-    (a duplicate with the same endpoints/layer/net is interchangeable). The whole
-    block (including its trailing uuid) is removed, not just the net token.
+    unordered endpoint pair plus layer and net, preferring a block of the
+    target's own width when the span carries several (``match_stack_members``,
+    #1556). The whole block (including its trailing uuid) is removed, not just
+    the net token.
 
     Pass ``net_id_to_name`` whenever the file references nets by name
     (``kicad_parser.board_uses_name_nets``), whatever its version stamp: a
     ``(net "name")`` block matches a target only through the map, so a
     pre-KiCad-10 file with name refs matched nothing without it (#1312).
 
-    ``match_width`` adds the track width to the key, for a caller removing
-    some members of a same-span stack whose widths differ (#162): without it
-    the counted match takes the FIRST block of the span, which may be the
-    wider one meant to stay.
+    ``match_width`` makes the width REQUIRED rather than preferred: a target
+    whose width matches no block of its span is left unmatched (#162).
 
     Returns ``(modified_content, count_removed)``.
     """
@@ -1640,25 +1797,13 @@ def remove_segments_from_content(content: str, segments: List,
     def _canon(nid):
         return net_id_to_name.get(nid, nid) if net_id_to_name else nid
 
-    def seg_key(p1, p2, layer, net_token, width=None):
-        return (frozenset((p1, p2)), layer, net_token,
-                round(width, 4) if match_width and width is not None else None)
+    def seg_key(p1, p2, layer, net_token):
+        return (frozenset((p1, p2)), layer, net_token)
 
-    # COUNTED multiset, not a set (#318 follow-up): a board can legitimately
-    # carry N identical-span segments with only K < N of them strip-listed
-    # (sechzig /PWR1V35: two byte-identical slivers, cleanup removed one). A
-    # set-based match deleted EVERY block with the key, including the keeper.
-    from collections import Counter
-    targets = Counter()
-    by_key = {}
-    for s in segments:
-        # The width is read only when it is part of the key: the default
-        # match is span + layer + net, which a caller may hand without one.
-        k = seg_key(pos_key(s.start_x, s.start_y),
-                    pos_key(s.end_x, s.end_y), s.layer, _canon(s.net_id),
-                    s.width if match_width else None)
-        targets[k] += 1
-        by_key.setdefault(k, []).append(s)
+    targets = [(seg_key(pos_key(s.start_x, s.start_y),
+                        pos_key(s.end_x, s.end_y), s.layer, _canon(s.net_id)),
+                getattr(s, 'width', None))
+               for s in segments]
 
     start_re = re.compile(r'\(start\s+([\d.-]+)\s+([\d.-]+)\)')
     end_re = re.compile(r'\(end\s+([\d.-]+)\s+([\d.-]+)\)')
@@ -1673,37 +1818,18 @@ def remove_segments_from_content(content: str, segments: List,
     # plain nested-paren regex breaks on KiCad v10 auto-net names that contain
     # parentheses, e.g. (net "Net-(R2-Pad1)") -- the inner parens are inside a
     # string and must not count toward block nesting.
-    out = []
+    spans = []                 # (j, k) of every segment block, file order
+    items = []                 # (span_key or None, width) per block
     pos = 0
-    n = len(content)
-    count = 0
     while True:
         j = content.find('(segment', pos)
         if j < 0:
-            out.append(content[pos:])
             break
-        out.append(content[pos:j])
-        depth = 0
-        in_str = False
-        k = j
-        while k < n:
-            ch = content[k]
-            if in_str:
-                if ch == '"':
-                    in_str = False
-            elif ch == '"':
-                in_str = True
-            elif ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    k += 1
-                    break
-            k += 1
+        k = _sexpr_block_end(content, j)
         block = content[j:k]
         ms, me, ml = start_re.search(block), end_re.search(block), layer_re.search(block)
-        keep = True
+        key = None
+        mw = None
         if ms and me and ml:
             mn = net_name_re.search(block)
             if mn:
@@ -1716,28 +1842,31 @@ def remove_segments_from_content(content: str, segments: List,
             else:
                 mi = net_id_re.search(block)
                 net_token = _canon(int(mi.group(1))) if mi else None
-            mw = width_re.search(block) if match_width else None
+            mw = width_re.search(block)
             key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
                           pos_key(float(me.group(1)), float(me.group(2))),
-                          ml.group(1) or ml.group(2), net_token,
-                          float(mw.group(1)) if mw else None)
-            if targets.get(key, 0) > 0:
-                targets[key] -= 1
-                keep = False
-                count += 1
-        if keep:
-            out.append(block)
+                          ml.group(1) or ml.group(2), net_token)
+        spans.append((j, k))
+        items.append((key, float(mw.group(1)) if mw else None))
         pos = k
+
+    gone, unmatched = match_stack_members(targets, items,
+                                          strict_width=match_width)
+    out = []
+    pos = 0
+    for i, (j, k) in enumerate(spans):
+        if i in gone:
+            out.append(content[pos:j])
+            pos = k
+    out.append(content[pos:])
     if unmatched_out is not None:
         # Strip targets whose block was NOT found (e.g. its layer/net token in
         # the text only matches after the writer's later transforms). The
         # residual post-transform pass retries EXACTLY these -- passing the
         # full list again would let round 2 consume a same-key KEEPER block
         # that round 1 legitimately left (the counted-multiset guarantee).
-        for k, n in targets.items():
-            if n > 0:
-                unmatched_out.extend(by_key[k][:n])
-    return ''.join(out), count
+        unmatched_out.extend(segments[t] for t in unmatched)
+    return ''.join(out), len(gone)
 
 
 def remove_vias_from_content(content: str, vias: List,
@@ -1790,24 +1919,7 @@ def remove_vias_from_content(content: str, vias: List,
             out.append(content[pos:])
             break
         out.append(content[pos:j])
-        depth = 0
-        in_str = False
-        k = j
-        while k < n:
-            ch = content[k]
-            if in_str:
-                if ch == '"':
-                    in_str = False
-            elif ch == '"':
-                in_str = True
-            elif ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    k += 1
-                    break
-            k += 1
+        k = _sexpr_block_end(content, j)
         block = content[j:k]
         ma = at_re.search(block)
         keep = True

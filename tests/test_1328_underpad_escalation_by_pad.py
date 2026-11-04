@@ -7,14 +7,14 @@ run rescued were found by NET NAME (`n not in best[2]`), so a net with two
 pads that escapes one of them at the rung was still in the dropped names: the
 pad went unrecorded in LAST_ESCALATED and the narrowing ledger, and the run
 said "escapes 0 of them" while shipping one more escape below the requested
-clearance. rp2350_fpga_eensy_prePlane U6 is that case: /RP2354A/1V1 has four
+clearance. rp2350_fpga_eensy_prePlane U6 is that case: /RP2354A/1V1 has three
 dropped pads at 0.1 mm, and pad 50 escapes at 0.09.
 
 Checks:
-  1. precondition: with escalation off, U6 drops 41 pads and /RP2354A/1V1 is
-     named four times, so a name-based difference cannot see one of them
+  1. precondition: with escalation off, U6 drops 39 pads and /RP2354A/1V1 is
+     named three times, so a name-based difference cannot see one of them
      leave;
-  2. at the default policy U6 drops 40, LAST_ESCALATED names U6.50 at 0.09,
+  2. at the default policy U6 drops 38, LAST_ESCALATED names U6.50 at 0.09,
      the ledger holds one clearance row for /RP2354A/1V1 at the underpad
      site, and the console says it escapes 1;
   3. the single-pad case is unchanged: routed_output U2's Net-(U2A-DATA_6)
@@ -65,15 +65,17 @@ def _run(board, ref, policy):
 
 def main():
     dropped_off, esc_off, _, _ = _run(RP2350, 'U6', 'off')
-    assert len(dropped_off) == 41 and not esc_off, (len(dropped_off), esc_off)
-    assert dropped_off.count(RAIL) == 4, dropped_off.count(RAIL)
-    print(f"  PASS: precondition: escalation off drops 41 pads, {RAIL} four times")
+    # 41 and four times before #1568 measured the candidate via against pads
+    # exactly; two of those pads now escape at 0.1 mm.
+    assert len(dropped_off) == 39 and not esc_off, (len(dropped_off), esc_off)
+    assert dropped_off.count(RAIL) == 3, dropped_off.count(RAIL)
+    print(f"  PASS: precondition: escalation off drops 39 pads, {RAIL} three times")
 
     dropped, esc, rows, text = _run(RP2350, 'U6', 'fab')
-    assert len(dropped) == 40 and dropped.count(RAIL) == 3, (len(dropped), dropped.count(RAIL))
+    assert len(dropped) == 38 and dropped.count(RAIL) == 2, (len(dropped), dropped.count(RAIL))
     assert esc == [{'net': RAIL, 'pad': 'U6.50', 'clearance': 0.09}], esc
     assert [(r['net_name'], r['kind'], r['delivered']) for r in rows] == [(RAIL, 'clearance', 0.09)], rows
-    assert 'escapes 1 of them (40 still dropped)' in text, text
+    assert 'escapes 1 of them (38 still dropped)' in text, text
     print(f"  PASS: U6.50 ({RAIL}) rescued at 0.09 is named, ledgered and counted")
 
     _, esc, rows, _ = _run(U2BOARD, 'U2', 'fab')

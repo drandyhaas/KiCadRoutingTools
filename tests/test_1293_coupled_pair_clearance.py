@@ -25,7 +25,10 @@ diff_pair_gap_out_of_range). The inverse "keep pairs apart" form
 
 The fixture is cap_chain (pairs DPA_P/N, DPB_P/N) with a Default class at
 clearance 0.25, an HS class (pattern DP*) with diff_pair_gap 0.15, and a rule
-`AB.isCoupledDiffPair() && A.hasNetclass('HS')` at 0.15.
+`AB.isCoupledDiffPair() && A.hasNetclass('HS')` at 0.15. A class gap below
+the class clearance is itself KiCad's implicit "(diff pair)" rule (#1542,
+test_1542_class_pair_gap.py), so the rows that must see the coupled-pair
+rule alone (C, E) stage the class gap at the clearance, 0.25.
 
 Checks:
   A. match_dp_suffix reproduces KiCad's MatchDpSuffix on its own examples
@@ -79,15 +82,20 @@ def quiet(fn, *a, **kw):
         return fn(*a, **kw)
 
 
-def project(min_clearance=0.0):
+def project(min_clearance=0.0, gap=0.15):
     """A KiCad 10 project KiCad itself reads (net_settings v4, from a tracked
-    board): Default and HS at clearance 0.25, pair gap 0.15, DP* -> HS."""
+    board): Default and HS at clearance 0.25, pair gap ``gap``, DP* -> HS.
+
+    A gap below the clearance is KiCad's implicit "netclass (diff pair)" rule
+    (#1542): P<->N is graded at the gap with no .kicad_dru at all. The rows
+    that must see the coupled-pair rule ALONE (C, E) stage gap 0.25, where
+    that implicit rule does not apply."""
     with open(os.path.join(ROOT, 'kicad_files', 'flat_hierarchy.kicad_pro'),
               encoding='utf-8') as fh:
         d = json.load(fh)
     base = copy.deepcopy(next(c for c in d['net_settings']['classes']
                               if c['name'] == 'Default'))
-    base.update(clearance=0.25, track_width=0.2, diff_pair_gap=0.15,
+    base.update(clearance=0.25, track_width=0.2, diff_pair_gap=gap,
                 diff_pair_width=0.2, via_diameter=0.6, via_drill=0.3)
     d['net_settings']['classes'] = [base, dict(base, name='HS')]
     d['net_settings']['netclass_patterns'] = [{'netclass': 'HS', 'pattern': 'DP*'}]
@@ -104,11 +112,11 @@ def dru(*rules):
         for name, cond, mm, layer, kind in rules)
 
 
-def stage(d, stem, rules, min_clearance=0.0):
+def stage(d, stem, rules, min_clearance=0.0, gap=0.15):
     pcb = os.path.join(d, stem + '.kicad_pcb')
     shutil.copy(os.path.join(ROOT, 'kicad_files', 'cap_chain.kicad_pcb'), pcb)
     with open(os.path.join(d, stem + '.kicad_pro'), 'w', encoding='utf-8') as fh:
-        json.dump(project(min_clearance), fh, indent=2)
+        json.dump(project(min_clearance, gap), fh, indent=2)
     if rules is not None:
         with open(os.path.join(d, stem + '.kicad_dru'), 'w', encoding='utf-8') as fh:
             fh.write(rules)
@@ -175,7 +183,7 @@ def t_support():
 def _rules(d, text):
     from design_rules import DesignRules
     from kicad_parser import parse_kicad_pcb
-    pcb_path = stage(d, 'r', text)
+    pcb_path = stage(d, 'r', text, gap=0.25)
     pcb = quiet(parse_kicad_pcb, pcb_path)
     ids = {n.name: i for i, n in pcb.nets.items()}
     return DesignRules.from_project(pcb, pcb_path,
@@ -246,18 +254,20 @@ def t_writeback_and_pricing():
 
 # ------------------------------------------------------------------ E-F
 def _route(d, stem, rules):
+    """The class gap equals the clearance here, so only the rules file can
+    take P<->N below it; the gap asked for is the call's 0.15."""
     import route_diff
-    src = stage(d, stem, rules)
+    src = stage(d, stem, rules, gap=0.25)
     out = os.path.join(d, stem + '_o.kicad_pcb')
     with open(os.path.join(d, stem + '_o.kicad_pro'), 'w', encoding='utf-8') as fh:
-        json.dump(project(), fh)
+        json.dump(project(gap=0.25), fh)
     if rules is not None:
         shutil.copy(os.path.join(d, stem + '.kicad_dru'),
                     os.path.join(d, stem + '_o.kicad_dru'))
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         route_diff.batch_route_diff_pairs(src, out, PAIRS, enable_layer_switch=True,
-                                          diff_pair_gap=0.15, diff_pair_gap_from_class=True)
+                                          diff_pair_gap=0.15)
     return log.getvalue(), evidence(out, 'routed board')
 
 

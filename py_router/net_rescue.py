@@ -661,16 +661,12 @@ def _fence_window(obstacles, window, cfg):
     from routing_config import GridCoord
 
     coord = GridCoord(cfg.grid_step)
-    min_x, min_y, max_x, max_y = bi.board_bounds
     edge_clearance = (cfg.board_edge_clearance if cfg.board_edge_clearance > 0
                       else cfg.clearance)
-    track_expand = coord.to_grid_dist(edge_clearance + cfg.track_width / 2)
-    via_expand = coord.to_grid_dist_safe(edge_clearance + cfg.via_size / 2)
-    gmin_x, gmin_y = coord.to_grid(min_x, min_y)
-    gmax_x, gmax_y = coord.to_grid(max_x, max_y)
     _add_rectangular_edge_obstacles(obstacles, coord, len(cfg.layers),
-                                    gmin_x, gmin_y, gmax_x, gmax_y,
-                                    track_expand, via_expand)
+                                    bi.board_bounds,
+                                    edge_clearance + cfg.track_width / 2,
+                                    edge_clearance + cfg.via_size / 2)
 
 
 def seed_rows(points, cfg, window):
@@ -1334,11 +1330,15 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     for s in pcb_data.segments)
                 if not _bare:
                     continue
-                if not escape_has_routable_layer(_pad, config):
+                # the net's own view: a .kicad_dru track ban forbids it
+                # layers the run routes for others (#1527)
+                from net_keepouts import config_for_nets
+                if not escape_has_routable_layer(
+                        _pad, config_for_nets(pcb_data, (net_id,), config)):
                     print(f"    bare-ball escape: {_pad.component_ref}."
                           f"{_pad.pad_number} skipped (no routable layer "
                           f"for its via to reach besides the pad's own; "
-                          f"the rest are outside --layers)")
+                          f"the rest are outside --layers or banned to the net)")
                     continue
                 _cu = [l for l in _pad.layers if l.endswith('.Cu')]
                 try:
@@ -1389,7 +1389,11 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                     # #1070: THIS run's drill floor, not
                                     # the board's min_hole_to_hole.
                                     hole_to_hole_clearance=(
-                                        config.hole_to_hole_clearance))
+                                        config.hole_to_hole_clearance),
+                                    # #1529: the route step's own class
+                                    # map (ceiling-capped), not the file's.
+                                    net_clearances=dict(
+                                        config.net_clearances or {}))
                             finally:
                                 pcb_data._fanout_all_foreign_immovable = \
                                     False
@@ -1430,7 +1434,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                         config, 'layer_costs', None),
                                     plane_drop='off',
                                     hole_to_hole_clearance=(
-                                        config.hole_to_hole_clearance))
+                                        config.hole_to_hole_clearance),
+                                    net_clearances=dict(
+                                        config.net_clearances or {}))
                             except Exception:
                                 _ft, _fv = [], []
                             if _ft or _fv:
@@ -1973,7 +1979,7 @@ def _escalation_ladder(config, pcb_data, net_id):
 
 
 def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
-                             cancel_check=None):
+                             cancel_check=None, scope_key=('full',)):
     """One escalation rung: a BOARD-GLOBAL obstacle map rebuilt at the rung's
     geometry (a smaller width/via gains nothing on the run's shared map --
     its inflation is baked at the run geometry, the #371 lesson), then the
@@ -1994,7 +2000,7 @@ def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
     from connectivity import get_net_endpoints_anchor_split
 
     obstacles = _pristine_rescue_map(pcb_data, pcb_data, cfg, net_id,
-                                     net_clearances, ('full',))
+                                     net_clearances, scope_key)
     # Same-net barrels are free transitions, at h2h distance (the rescue's
     # #470 + custody-h2h pairing; every seeding site carries both).
     _add_free_via_positions(obstacles, pcb_data, [net_id], cfg)
@@ -2057,6 +2063,152 @@ def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
         num = num_after
         edge_results.append(result)
     return edge_results, num <= 1
+
+
+def _commit_whole_net(state, net_name, net_id, edge_results, flag):
+    """Merge a whole-net retry's accepted copper (already on pcb_data) into
+    the run's result channels: as the net's result when it had none, else
+    folded into its authoritative result, whose pad debt clears (the net
+    grades fully connected). `flag` marks the merged result's origin."""
+    routed_results = state.routed_results
+    merged = {
+        'net_name': net_name,
+        'net_id': net_id,
+        'new_segments': [s for r in edge_results
+                         for s in r['new_segments']],
+        'new_vias': [v for r in edge_results
+                     for v in r.get('new_vias', [])],
+        'iterations': sum(r.get('iterations', 0) for r in edge_results),
+        flag: True,
+    }
+    prev = routed_results.get(net_id)
+    if prev is None:
+        # Was failed_single: the merged result IS the net's result now
+        # (same channels as a rescue-recovered failed net).
+        state.results.append(merged)
+        routed_results[net_id] = merged
+        if net_id in state.remaining_net_ids:
+            state.remaining_net_ids.remove(net_id)
+        if net_id not in state.routed_net_ids:
+            state.routed_net_ids.append(net_id)
+    else:
+        # Kept-but-open / partial multipoint: fold the copper INTO the
+        # net's AUTHORITATIVE result (a separate entry is dropped by the
+        # #87 superseded-result filter -- the rescue's partial-branch
+        # lesson). Fully connected now, so the pad debt clears.
+        _fold_into_result(state, prev, merged)
+        prev_failed = prev.get('failed_pads_info') or []
+        if prev_failed:
+            prev['failed_pads_info'] = []
+            if 'tap_pads_connected' in prev:
+                prev['tap_pads_connected'] = (
+                    prev.get('tap_pads_connected', 0) + len(prev_failed))
+
+
+def own_requirement_config(config, net_id):
+    """A copy of the run's config that prices foreign copper at `net_id`'s
+    OWN requirement (#1618), or None when that is the run's shared one.
+
+    A routing call prices every foreign obstacle at the widest requirement
+    over its routed nets: the class floor (set_net_clearances, over the
+    routed set) and the class/type-scoped .kicad_dru stamps
+    (kicad_dru.ScopedClearanceInstall, maxed over the routed nets' groups).
+    A net of a narrower class, or one a scoped rule does not cover, is then
+    fenced out of gaps that are legal for it. The copy re-derives both for
+    this net alone. None -- nothing to retry -- when the net's class floor is
+    the run's and the run's scoped stamps come from one group of routed nets
+    (every single-class board without scoped rules)."""
+    floor = (config.net_clearance_floor if config.net_clearance_floor is not None
+             else config.clearance)
+    nc = config.net_clearances or {}
+    own = max(config.clearance, nc.get(net_id, config.clearance))
+    sc = getattr(config, 'scoped_clearance', None)
+    if own >= floor - 1e-9 and not (sc is not None and len(sc.reps) > 1):
+        return None
+    cfg = replace(config)
+    cfg.set_net_clearances(nc, [net_id])
+    if sc is not None:
+        from kicad_dru import ScopedClearanceInstall
+        cfg.scoped_clearance = ScopedClearanceInstall(
+            sc.sc, [net_id], cfg.net_clearances, sc.fab_floor)
+    return cfg
+
+
+def own_requirement_retry(state, single_ended_nets, net_clearances=None,
+                          progress_callback=None, cancel_check=None):
+    """#1618: one whole-net retry, at the net's own clearance requirement,
+    for every net of this run the main pass left failed or open.
+
+    The retry is _attempt_net_at_geometry -- a board-global map built from the
+    board as it stands (this run's copper included), the net's gaps closed
+    one edge at a time, no rip authority -- at the run's own track and via
+    geometry, but with foreign copper priced as THIS net requires
+    (own_requirement_config), not at the widest requirement of the call.
+    Accepted only when the net grades fully connected; a rejected retry is
+    undone, so the worst case is "nothing changes". It runs before the
+    rescue and the terminal escalation, which narrow the net: a net that
+    fits at full width once its own clearance is honoured is routed at full
+    width.
+
+    Inert on a board whose nets all share one requirement (no candidate
+    config). Returns {'attempted', 'nets': {name: 'recovered' |
+    'unrecovered'}, 'time'} or None when nothing was attempted."""
+    from pcb_modification import remove_route_from_pcb_data
+    pcb_data = state.pcb_data
+    config = state.config
+    candidates = []
+    for net_name, net_id in sorted(set(single_ended_nets)):
+        if cancel_check and cancel_check():
+            break
+        if net_id not in pcb_data.nets:
+            continue
+        if len(pcb_data.pads_by_net.get(net_id, [])) < 2:
+            continue
+        cfg = own_requirement_config(config, net_id)
+        if cfg is None:
+            continue
+        num0, _pts, _pads = _net_component_info(pcb_data, net_id)
+        if num0 <= 1:
+            continue
+        candidates.append((net_name, net_id, num0, cfg))
+    if not candidates:
+        return None
+    print(f"\nOwn-requirement retry (#1618): {len(candidates)} net(s) left "
+          f"open, retried with foreign copper priced at their own clearance "
+          f"requirement")
+    outcomes: Dict[str, str] = {}
+    summary = {'attempted': 0, 'nets': outcomes, 'time': 0.0}
+    t0 = time.time()
+    for _idx, (net_name, net_id, num0, cfg) in enumerate(candidates):
+        if cancel_check and cancel_check():
+            break
+        if progress_callback:
+            progress_callback(_idx + 1, len(candidates),
+                              f"Own-requirement retry: {net_name}")
+        summary['attempted'] += 1
+        edges, fully = _attempt_net_at_geometry(
+            pcb_data, net_id, cfg, net_clearances, cancel_check,
+            scope_key=('own_requirement',))
+        if not fully:
+            for r in reversed(edges):
+                remove_route_from_pcb_data(pcb_data, r)
+            outcomes[net_name] = 'unrecovered'
+            record_net_event(state, net_id, "own_requirement_retry_failed",
+                             {"components": num0})
+            print(f"    own-requirement retry: {net_name} unrecovered")
+            continue
+        _commit_whole_net(state, net_name, net_id, edges,
+                          'is_own_requirement_retry')
+        outcomes[net_name] = 'recovered'
+        record_net_event(state, net_id, "own_requirement_retry_succeeded",
+                         {"edges_routed": len(edges), "components_before": num0})
+        print(f"    {GREEN}own-requirement retry: {net_name} recovered{RESET} "
+              f"({num0} -> 1 parts)")
+    summary['time'] = round(time.time() - t0, 2)
+    _rec = sum(1 for v in outcomes.values() if v == 'recovered')
+    print(f"Own-requirement retry: {_rec} recovered, "
+          f"{summary['attempted'] - _rec} unrecovered ({summary['time']:.1f}s)")
+    return summary if summary['attempted'] else None
 
 
 def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
@@ -2172,38 +2324,8 @@ def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
                            net_name=net_name)
         except Exception:                                       # noqa: BLE001
             pass
-        merged = {
-            'net_name': net_name,
-            'net_id': net_id,
-            'new_segments': [s for r in edge_results
-                             for s in r['new_segments']],
-            'new_vias': [v for r in edge_results
-                         for v in r.get('new_vias', [])],
-            'iterations': sum(r.get('iterations', 0) for r in edge_results),
-            'is_terminal_escalation': True,
-        }
-        prev = routed_results.get(net_id)
-        if prev is None:
-            # Was failed_single: the merged result IS the net's result now
-            # (same channels as a rescue-recovered failed net).
-            state.results.append(merged)
-            routed_results[net_id] = merged
-            if net_id in state.remaining_net_ids:
-                state.remaining_net_ids.remove(net_id)
-            if net_id not in state.routed_net_ids:
-                state.routed_net_ids.append(net_id)
-        else:
-            # Kept-but-open / partial multipoint: fold the copper INTO the
-            # net's AUTHORITATIVE result (a separate entry is dropped by the
-            # #87 superseded-result filter -- the rescue's partial-branch
-            # lesson). Fully connected now, so the pad debt clears.
-            _fold_into_result(state, prev, merged)
-            prev_failed = prev.get('failed_pads_info') or []
-            if prev_failed:
-                prev['failed_pads_info'] = []
-                if 'tap_pads_connected' in prev:
-                    prev['tap_pads_connected'] = (
-                        prev.get('tap_pads_connected', 0) + len(prev_failed))
+        _commit_whole_net(state, net_name, net_id, edge_results,
+                          'is_terminal_escalation')
         record_net_event(state, net_id, "terminal_escalation_succeeded",
                          {"geometry": geom, "edges_routed": len(edge_results),
                           "components_before": num0,

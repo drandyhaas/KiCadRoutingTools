@@ -1,3 +1,155 @@
+cdf00e884486a3d2fc972fcfd6a69e490a7066e2 2026-11-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 21abea9a..cdf00e88 (12 commits) on macOS (KiCad 10.0.6), for v0.23.8.
+kicad_routing_plugin/ is unchanged in the range; the engine changes are
+#1609 (input-pair restore), #1583 (via-centre bridge) and the two fixes the
+gates produced (350e8e39, cdf00e88). No new CLI flag, engine kwarg or
+results key reaches a GUI call site: GridRouteConfig.skew_graded_net_ids is
+set inside batch_route_diff_pairs, and close_soft_joints reads it and
+_length_matched_names on both fronts.
+
+GATES. At 19fb6afd 69/70 tests/gui_parity gates passed; FAIL
+test_gui_livechain_rp2350 (GUI 4 / CLI 2 introduced GND-to-pin
+segment clearance), bisected to #1583. Two causes, both fixed:
+- the pour step's close_soft_joints (scope None) laid the bridge on every
+  signal net's input copper, perturbing the chain -> the bridge is now laid
+  only on length-graded nets (cdf00e88);
+- the oracle exact-fill strap seeded a raw fill-edge point, which overrides
+  the obstacle map, and ended 0.032 mm inside a pin's clearance (350e8e39).
+After the fixes all 70 gates PASS (rp2350: GUI 0 / CLI 0 introduced; the
+three that do not re-exec run under KiCad's python directly). Modal suite
+ALL GREEN (1133). Corpus sets 1-10 vs the pre-#1583 control: real DRC
+3 -> 3, incomplete nets 83 -> 79.
+
+21abea9a5693800f2249049bf84f589df0c2a7f2 2026-11-02 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 7978996d..cda7c123 (181 commits, 133 non-merge) on this Windows box
+(KiCad 10.0), plus the fixes it produced (9d409ecf, 134c6602, f49d5b36) and
+the two test pins they moved (caffe606, 21abea9a). The range holds the
+#1518-#1608 batches (batch 1 15e3c9d8, batch 2 24482d2c, batch 3 cda7c123).
+
+METHOD. Two read-only halves plus every gate.
+(A) Flags and kwargs: every argparse flag in py_router/, py_tools/ and
+  py_placer/ diffed by AST between the two commits; the signatures of
+  batch_route, batch_route_diff_pairs, create_plane, the fanout and repair
+  entry points and GridRouteConfig diffed; the kicad_routing_plugin diff
+  (6 files) read; wx controls checked against settings_persistence and
+  reset_params_to_defaults.
+(B) Post-passes, results data and parse paths: every CLI main() body diffed
+  for post-engine passes; new results keys and records; PCBData built both
+  ways (text and pcbnew 10) on 8 synthetic boards plus esp_prog, watchy and
+  tigard for #1607's cutout reclassification and #1608's hole clearance.
+(C) Gates: all 70 tests/gui_parity gates PASS on 21abea9a (the three that
+  do not re-exec run under KiCad's python directly). test_gui_engine_parity:
+  PARITY, copper sets identical (799 segments, 128 vias, 0 unconnected, 0 DRC
+  on both fronts). Modal suite ALL GREEN on 21abea9a (1129).
+
+IN RANGE, NO GAP:
+- bga_fanout --immovable-refs / generate_bga_fanout(immovable_refs)
+  (#1521/#1562): the BGA panel's immovable_refs control, saved, restored,
+  reset per step, mapped by manifest_to_plan.
+- The fanouts' net_clearances / clearance_ceiling (#1529): the CLI passes
+  the ceiling and the engine reads the classes; the tab passes
+  live_net_clearances() and the routing ceiling (None when unticked).
+- scoped_clearance_rules (#1602): installed by the top level on both
+  fronts, forwarded only to nested sub-runs; route_planes' GND vias and
+  soft-joint bridges install the channel on both (planes_gui :1224-1250).
+- place_fanout_clearance --no-fix-drc-settings (#1578): CAP_BOOL_FLAGS maps
+  it to fix_drc_check; the standalone cap step's clamp gates on it.
+- cap_net_clearances (#1561), the annular-ring board floor (#1579), the
+  held copper-to-hole floor (#1568/#1577, held_hole_clearance_dicts): every
+  GUI site mirrors its CLI twin.
+- route.py's in-range passes (#1525 dead-end sweep, #1543 via merge, #1554
+  lap victims) live in batch_route, so the GUI gets them.
+- #1607's cutout reclassification and #1608's kicad_fill_hole_clearance:
+  measured identical on both parse paths, a declared 0 included.
+- Not GUI routing: judge_seeds --full, check_drc --clearance-margin-mm,
+  cover_facts --refs; bga_fanout's drc_grazes / decap_deferred_refs JSON is
+  CLI-only output (fanout_drc_grazes in KNOWN_CLI_ONLY).
+
+FOUND AND FIXED:
+- 9d409ecf: the fanout tab clamped every non-Default class to the placement
+  ceiling after every fanout, the cap pass's writeback (#782) run without
+  the pass; bga_fanout.py keeps the classes without --clearance-ceiling
+  since #1529. Now only when the cap pass ran. test_fanout_floor_parity_gui
+  gains the arm (fails before: GUI Wide 0.15, CLI 0.4).
+- 134c6602: #1556's counted, width-preferring strip reached the route and
+  differential tabs only; the Planes tab's cleanup strips and cleanup delta
+  and the oracle's fragment delete still removed every member of a
+  same-span stack, across layers. One helper,
+  gui_utils.remove_listed_segments, at all five; gate
+  test_1556_live_strip_counted (and test_1056's rip control re-aimed at
+  the helper, caffe606).
+- f49d5b36: plane_fill_model.board_edge_rule read the edge rule only from
+  the file, so mid-plan the GUI's model ignored the live writeback; it reads
+  live_rules_provider first now. tests/test_fill_model_edge_rule_live.py.
+
+OPEN, NOT CHANGED:
+- The standalone cap step writes no size floors for copper it lays nudging
+  vias, where the CLI cap pass now writes that copper's floors (#1578);
+  fanout_gui records the omission as deliberate (#782).
+- live_net_clearances takes one class per net; net_clearance_map_by_id the
+  widest of several pattern memberships. Unmeasured on multi-membership
+  boards.
+- coupled_pair_floors (#1542/#1526) reads per-class diff_pair_gap from the
+  saved .kicad_pro on the GUI too: an unsaved Board Setup edit is invisible.
+- CLI late passes that re-parse output_file read the mid-run-synced hole
+  floor; the GUI's view keeps the live board's stricter pre-writeback value.
+  Inert before #1608 stamped hole clearance; likely small.
+- Carried from earlier audits: the Planes tab ignores route_planes --layers;
+  Layer Costs order; the #1279 dangling-member warning is CLI-only.
+
+7978996dace6e34c26a39eacae293059ec4c6780 2026-10-29 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 1239f2a2..b6b2aeac (238 commits, 213 non-merge) on main, the first
+on KiCad 10.0.6 (this Mac moved from 10.0.0 to match the cloud stress image),
+plus the fix it produced (7978996d). The range holds the #1461-#1508 rounds,
+#1503's intra-pair tolerance and its GUI override, #1491's scoped .kicad_dru
+clearance rules, the oracle forced-link/sliver-weld clearance fix, PR #1509
+and #1475/#1479.
+
+METHOD. Read-only halves plus every gate.
+(A) Flags and kwargs: every argparse flag in py_router/, py_tools/ and
+  py_placer/ compared between the two commits; batch_route,
+  batch_route_diff_pairs, create_plane, the fanout and repair entry points and
+  GridRouteConfig compared; the kicad_routing_plugin diff (9 files) read; wx
+  controls added and removed swept.
+(B) Gates: all 69 tests/gui_parity gates, 68 PASS on b6b2aeac (the same three
+  -- test_966_unset_clearance, test_967_pad_geometry_coverage,
+  test_zero_diff_pair_width_gui -- run under KiCad's python directly), 69 PASS
+  on 7978996d. test_gui_engine_parity: PARITY, copper sets identical (799
+  segments, 128 vias, 0 unconnected, 0 DRC on both fronts).
+
+IN RANGE, NO GAP:
+- route_diff --force-reroute / batch_route_diff_pairs(force_reroute) (#1399)
+  and net_name_patterns (d10ee7a7): passed by the Differential tab and the
+  plan executor.
+- route_diff --length-match-tolerance default None and the engine's
+  intra_pair_tolerance (#1503): the tab's length_match_tolerance_check
+  ("over .kicad_dru") passes it; saved and restored by settings_persistence,
+  reset per step, set by plans (_GEOMETRY_OVERRIDE_CHECKS);
+  test_settings_roundtrip PASS with it. The intra-pair records are persisted
+  at the gui_utils, ai_plan and swig_gui writebacks.
+- route_diff --json-out / batch_route_diff_pairs(json_out): CLI-only output,
+  registered so (test_engine_kwarg_parity, test_manifest_plan_parity PASS).
+- GridRouteConfig.scoped_clearance (#1491) is installed inside
+  install_track_clearances, which both engines call (route.py:3306,
+  route_diff.py:1422), so the GUI gets the scoped rules with no wiring.
+  GridRouteConfig.intra_pair_tolerances is set by the engine.
+- Placement-tool flags (place_simple --draft-zones/--plan-checked/--preview/
+  --repair-decaps, judge_seeds --confirm, place_pose --channel) reach the
+  placement tab through the skill it runs; the tab's one change stages the
+  project's schematic for that run (placement_run._stage_schematic).
+- New utility flags (add_rule_area/check_mounting_holes --ring and
+  --mounting-holes, board_context --schematic, cover_facts, pdf_text,
+  fill_for_delivery --baseline, autoplan) belong to no GUI routing tab.
+
+FOUND AND FIXED (7978996d):
+- test_714_mirror_pcbnew_parity FAILED on 10.0.6, the flip_witnesses WZONE3
+  witness only: pcbnew 10.0.6 mirrors a flipped footprint's inner-layer items
+  through the stack (In1.Cu -> In4.Cu on six layers), where 10.0.0 left them
+  and the writer still did. flip_layer_token takes the board's inner-layer
+  count, the writer reads it (board_inner_copper_count) and writes a flipped
+  all-copper layer list in layer-id order; the gate PASSES on 10.0.6, and
+  tests/test_714_inner_layer_flip.py is its wx-free half.
+
 1239f2a2cee29a7d0b4977b113843b1b90d601f5 2026-10-22 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of 1abb3657..d9b20741 (363 commits, 336 non-merge) on grouped-placement,
 before it fast-forwards main for v0.23.7, plus the fix it produced (1239f2a2).

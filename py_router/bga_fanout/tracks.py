@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 
 from kicad_parser import PCBData
 from bga_fanout.types import create_track, route_uid, FanoutRoute
-from bga_fanout.collision import check_segment_collision
+from bga_fanout.collision import check_segment_collision, spacing_to
 from bga_fanout.constants import POSITION_TOLERANCE
 
 
@@ -59,7 +59,7 @@ def detect_collisions(
                 continue
             if check_segment_collision(t1['start'], t1['end'],
                                        t2['start'], t2['end'],
-                                       min_spacing):
+                                       spacing_to(t2, min_spacing)):
                 collision_count += 1
                 if len(collision_pairs) < max_pairs:
                     collision_pairs.append((t1, t2))
@@ -67,23 +67,51 @@ def detect_collisions(
     return collision_count, collision_pairs
 
 
-def convert_segments_to_tracks(pcb_data: PCBData) -> List[Dict]:
-    """
-    Convert PCB segments to track format for collision checking.
+def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float,
+                        bounds: Tuple[float, float, float, float] = None) -> List[Dict]:
+    """The copper already on the board, as existing-track dicts for the
+    collision checks: every segment, and every via as a zero-length track on
+    each of `layers` it has copper on.
 
-    Args:
-        pcb_data: PCB data containing segments
+    Each carries `spacing_extra` = (its width - `track_width`) / 2: the checks'
+    `min_spacing` (track_width + clearance) is sized for two of this run's
+    tracks, so a via or a wider track needs that much more between centrelines
+    (`collision.spacing_to`). `bounds` (xmin, ymin, xmax, ymax) keeps only the
+    copper that reaches into it.
 
-    Returns:
-        List of track dictionaries
+    #1551: the board's copper used to enter the checks only with
+    check_for_previous (the "skip pads that already have fanout" option), and
+    its vias never did, so a fanout on a board that already carried copper
+    near the array validated its escapes against nothing but each other.
     """
-    existing_tracks = []
+    from geometry_utils import via_copper_layers
+
+    def _inside(x0, y0, x1, y1, h):
+        return bounds is None or (x1 + h >= bounds[0] and x0 - h <= bounds[2]
+                                  and y1 + h >= bounds[1] and y0 - h <= bounds[3])
+
+    out = []
+    layer_set = set(layers)
     for seg in pcb_data.segments:
-        existing_tracks.append(create_track(
-            (seg.start_x, seg.start_y), (seg.end_x, seg.end_y),
-            seg.width, seg.layer, seg.net_id, is_existing=True
-        ))
-    return existing_tracks
+        if seg.layer not in layer_set:
+            continue
+        if not _inside(min(seg.start_x, seg.end_x), min(seg.start_y, seg.end_y),
+                       max(seg.start_x, seg.end_x), max(seg.start_y, seg.end_y),
+                       seg.width / 2):
+            continue
+        t = create_track((seg.start_x, seg.start_y), (seg.end_x, seg.end_y),
+                         seg.width, seg.layer, seg.net_id, is_existing=True)
+        t['spacing_extra'] = (seg.width - track_width) / 2
+        out.append(t)
+    for via in pcb_data.vias:
+        if not _inside(via.x, via.y, via.x, via.y, via.size / 2):
+            continue
+        for layer in via_copper_layers(via, layers):
+            t = create_track((via.x, via.y), (via.x, via.y), via.size, layer,
+                             via.net_id, is_existing=True)
+            t['spacing_extra'] = (via.size - track_width) / 2
+            out.append(t)
+    return out
 
 
 def generate_tracks_from_routes(

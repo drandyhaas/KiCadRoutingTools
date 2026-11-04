@@ -547,7 +547,18 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
         arrays_to_merge += [arr for arr in ghost_costs.values() if len(arr) > 0]
     if not arrays_to_merge:
         return
+    if not env_knobs.PROXIMITY_SUM:
+        # MAX mode: the map's write is a per-cell max-insert, so handing it
+        # each source as it is writes exactly the map the stacked rows would.
+        # Stacking copied every row of every source on each prepare -- 4-9 M
+        # rows on a board whose rip-up holds dozens of ripped corridors, and
+        # the memo below misses whenever one ghost is added or dropped, which
+        # is nearly every prepare there.
+        for arr in arrays_to_merge:
+            obstacles.set_layer_proximity_batch(arr)
+        return
 
+    # SUM mode composes the rows itself, so it stacks them.
     # P5 (soft-knobs review): phase-3 and diff-pair paths re-prepare many
     # times between cache changes; memoize the concatenation keyed on the
     # cache's identity signature so unchanged caches skip the O(all-nets)
@@ -586,43 +597,42 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
         all_costs = memo[1]
     else:
         all_costs = np.vstack(arrays_to_merge)
-        if env_knobs.PROXIMITY_SUM:
-            # Compose the SUM in numpy so the Rust write primitive stays the
-            # idempotent max-insert: pack (layer, gx, gy) into one int64 key,
-            # group, and sum each cell's per-source costs. Output rows are
-            # unique per cell. In 'zoned' mode, cells inside a BGA escape
-            # field take the per-cell MAX instead (mandatory approaches are
-            # not an avoidable crowd).
-            _OFF = 1 << 23  # grid coords are well inside +/-2^23
-            packed = ((all_costs[:, 0].astype(np.int64) << 48)
-                      | ((all_costs[:, 1].astype(np.int64) + _OFF) << 24)
-                      | (all_costs[:, 2].astype(np.int64) + _OFF))
-            uniq, inv = np.unique(packed, return_inverse=True)
-            sums = np.bincount(inv, weights=all_costs[:, 3].astype(np.float64),
-                               minlength=len(uniq))
-            composed = np.empty((len(uniq), 4), dtype=np.int32)
-            composed[:, 0] = (uniq >> 48).astype(np.int32)
-            composed[:, 1] = ((uniq >> 24) & ((1 << 24) - 1)).astype(np.int32) - _OFF
-            composed[:, 2] = (uniq & ((1 << 24) - 1)).astype(np.int32) - _OFF
-            composed[:, 3] = np.minimum(sums, float(np.iinfo(np.int32).max)).astype(np.int32)
-            if env_knobs.PROXIMITY_SUM_MODE == 'softcap':
-                # softcap (#584): per-cell max + alpha*(sum - max) -- the
-                # max-mode floor plus a fraction of the crowd pressure.
-                maxs = np.zeros(len(uniq), dtype=np.int64)
-                np.maximum.at(maxs, inv, all_costs[:, 3].astype(np.int64))
-                a = env_knobs.PROXIMITY_SOFTCAP_ALPHA
-                blended = maxs + a * (sums - maxs)
-                composed[:, 3] = np.minimum(
-                    blended, float(np.iinfo(np.int32).max)).astype(np.int32)
-            if _zone_rects:
-                maxs = np.zeros(len(uniq), dtype=np.int32)
-                np.maximum.at(maxs, inv, all_costs[:, 3])
-                in_zone = np.zeros(len(uniq), dtype=bool)
-                for (x0, y0, x1, y1) in _zone_rects:
-                    in_zone |= ((composed[:, 1] >= x0) & (composed[:, 1] <= x1)
-                                & (composed[:, 2] >= y0) & (composed[:, 2] <= y1))
-                composed[in_zone, 3] = maxs[in_zone]
-            all_costs = composed
+        # Compose the SUM in numpy so the Rust write primitive stays the
+        # idempotent max-insert: pack (layer, gx, gy) into one int64 key,
+        # group, and sum each cell's per-source costs. Output rows are
+        # unique per cell. In 'zoned' mode, cells inside a BGA escape
+        # field take the per-cell MAX instead (mandatory approaches are
+        # not an avoidable crowd).
+        _OFF = 1 << 23  # grid coords are well inside +/-2^23
+        packed = ((all_costs[:, 0].astype(np.int64) << 48)
+                  | ((all_costs[:, 1].astype(np.int64) + _OFF) << 24)
+                  | (all_costs[:, 2].astype(np.int64) + _OFF))
+        uniq, inv = np.unique(packed, return_inverse=True)
+        sums = np.bincount(inv, weights=all_costs[:, 3].astype(np.float64),
+                           minlength=len(uniq))
+        composed = np.empty((len(uniq), 4), dtype=np.int32)
+        composed[:, 0] = (uniq >> 48).astype(np.int32)
+        composed[:, 1] = ((uniq >> 24) & ((1 << 24) - 1)).astype(np.int32) - _OFF
+        composed[:, 2] = (uniq & ((1 << 24) - 1)).astype(np.int32) - _OFF
+        composed[:, 3] = np.minimum(sums, float(np.iinfo(np.int32).max)).astype(np.int32)
+        if env_knobs.PROXIMITY_SUM_MODE == 'softcap':
+            # softcap (#584): per-cell max + alpha*(sum - max) -- the
+            # max-mode floor plus a fraction of the crowd pressure.
+            maxs = np.zeros(len(uniq), dtype=np.int64)
+            np.maximum.at(maxs, inv, all_costs[:, 3].astype(np.int64))
+            a = env_knobs.PROXIMITY_SOFTCAP_ALPHA
+            blended = maxs + a * (sums - maxs)
+            composed[:, 3] = np.minimum(
+                blended, float(np.iinfo(np.int32).max)).astype(np.int32)
+        if _zone_rects:
+            maxs = np.zeros(len(uniq), dtype=np.int32)
+            np.maximum.at(maxs, inv, all_costs[:, 3])
+            in_zone = np.zeros(len(uniq), dtype=bool)
+            for (x0, y0, x1, y1) in _zone_rects:
+                in_zone |= ((composed[:, 1] >= x0) & (composed[:, 1] <= x1)
+                            & (composed[:, 2] >= y0) & (composed[:, 2] <= y1))
+            composed[in_zone, 3] = maxs[in_zone]
+        all_costs = composed
         # Bound first, then store WITH keepalive refs (see the note above):
         # per_net_costs and the member arrays are held so their ids cannot be
         # recycled while this entry is live.

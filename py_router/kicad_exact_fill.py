@@ -390,23 +390,60 @@ _REFILL_MEMO_CAP = 8
 _REFILL_FAILED: set = set()
 
 
+#: The siblings a refill reads (#1494): the project's net classes and the
+#: .kicad_dru's custom rules both move a pour's clearance.
+_FILL_SIBLINGS = ('.kicad_pro', '.kicad_dru')
+
+
+def _effective_sibling(board_file: str, ext: str, project_from: str = None):
+    """The `ext` sibling a refill of `board_file` runs with: its own, else
+    `project_from`'s (a mid-chain board has none yet: the writeback runs after
+    the oracle, #338), else None."""
+    own = os.path.splitext(os.path.abspath(board_file))[0] + ext
+    if os.path.isfile(own):
+        return own
+    if project_from:
+        alt = os.path.splitext(os.path.abspath(project_from))[0] + ext
+        if os.path.isfile(alt):
+            return alt
+    return None
+
+
+def _stage_siblings(board_file: str, tmpdir: str, stem: str,
+                    project_from: str = None) -> None:
+    """Copy every `copy_board.SIBLING_EXTS` sibling of `board_file` (each
+    falling back to `project_from`'s) beside the staged board, so
+    `pcbnew.LoadBoard` builds its DRC engine with the board's custom rules
+    too: staged with the .kicad_pro alone, a pour pulled back only to the
+    zone or class clearance and shipped against a .kicad_dru it was never
+    filled to (#1494: 202 pad-to-zone errors under a 0.8 mm rule)."""
+    try:
+        from copy_board import SIBLING_EXTS
+    except Exception:                                        # noqa: BLE001
+        SIBLING_EXTS = _FILL_SIBLINGS
+    for ext in SIBLING_EXTS:
+        src = _effective_sibling(board_file, ext, project_from)
+        if src is not None:
+            shutil.copyfile(src, os.path.join(tmpdir, stem + ext))
+
+
 def _refill_memo_key(board_file: str, project_from: str = None):
     """Identity of everything a refill's result depends on: the board file's
-    bytes (path + mtime_ns + size as proxy) and the EFFECTIVE .kicad_pro
-    (the sibling, else project_from's -- netclass rules change the fill).
-    None = unkeyable (missing file); caller skips the memo."""
+    bytes (path + mtime_ns + size as proxy) and the EFFECTIVE .kicad_pro and
+    .kicad_dru (the sibling, else project_from's -- netclass rules and custom
+    rules both change the fill, #1494). None = unkeyable (missing file);
+    caller skips the memo."""
     try:
         bp = os.path.abspath(board_file)
         st = os.stat(bp)
         key = [bp, st.st_mtime_ns, st.st_size]
-        pro = os.path.splitext(bp)[0] + '.kicad_pro'
-        if not os.path.isfile(pro) and project_from:
-            pro = os.path.splitext(os.path.abspath(project_from))[0] + '.kicad_pro'
-        if os.path.isfile(pro):
-            pst = os.stat(pro)
-            key += [os.path.abspath(pro), pst.st_mtime_ns, pst.st_size]
-        else:
-            key += [None]
+        for ext in _FILL_SIBLINGS:
+            sib = _effective_sibling(bp, ext, project_from)
+            if sib is not None:
+                sst = os.stat(sib)
+                key += [sib, sst.st_mtime_ns, sst.st_size]
+            else:
+                key += [None]
         return tuple(key)
     except OSError:
         return None
@@ -439,6 +476,10 @@ class RefillStatus(NamedTuple):
     reason: str
     detail: str = ''
     elapsed_s: Optional[float] = None
+    #: `write_filled_board` only (#1367): the record of what the re-save did to
+    #: the board's file format and via protection, or None when it did not
+    #: change the format (see `fab_notes.reconcile_resaved_via_protection`).
+    via_protection: Optional[dict] = None
 
     @property
     def ok(self) -> bool:
@@ -525,13 +566,14 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     refill of `board_file`. The islands are None whenever `status.ok` is False,
     and the status says WHICH of the six causes it was.
 
-    The board is staged into a temp dir WITH its sibling .kicad_pro so the
-    refill runs at the project's real netclasses (a bare board refills at
-    stock rules and shrinks tight pours -- the phantom-divergence trap).
+    The board is staged into a temp dir WITH its siblings -- the .kicad_pro,
+    so the refill runs at the project's real netclasses (a bare board refills
+    at stock rules and shrinks tight pours -- the phantom-divergence trap),
+    and the .kicad_dru, whose custom rules move a pour too (#1494).
     Each (filled_polygon ...) block of the saved board is one connected
     island polygon (KiCad's fracture output), so island discovery is free.
 
-    MEMOIZED on (board bytes, effective .kicad_pro bytes) identity -- a
+    MEMOIZED on (board bytes, effective .kicad_pro and .kicad_dru) identity -- a
     refill is a pure function of those, and the plane-finalize pipeline
     (#562) refills the same unchanged file from several consumers
     (per-net fragility, the oracle's first round) at a pcbnew subprocess
@@ -559,15 +601,10 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
         stem = os.path.splitext(os.path.basename(board_file))[0]
         staged = os.path.join(tmpdir, stem + '.kicad_pcb')
         shutil.copyfile(board_file, staged)
-        sib_pro = os.path.splitext(board_file)[0] + '.kicad_pro'
-        if not os.path.isfile(sib_pro) and project_from:
-            # Mid-chain boards have no sibling project yet (the writeback
-            # runs after the oracle, #338) -- stage the INPUT's project so
-            # the refill runs at the real netclasses, not stock rules.
-            sib_pro = os.path.splitext(project_from)[0] + '.kicad_pro'
-        if os.path.isfile(sib_pro):
-            shutil.copyfile(sib_pro, os.path.join(tmpdir,
-                                                  stem + '.kicad_pro'))
+        # Mid-chain boards have no sibling project yet (the writeback runs
+        # after the oracle, #338) -- the INPUT's project and rules are staged
+        # so the refill runs at the real netclasses and custom rules (#1494).
+        _stage_siblings(board_file, tmpdir, stem, project_from)
         script = os.path.join(tmpdir, 'refill.py')
         with open(script, 'w') as f:
             f.write(_REFILL_SCRIPT)
@@ -624,8 +661,17 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
 def write_filled_board(board_file: str, dst_file: str,
                        timeout: int = EXACT_FILL_TIMEOUT,
                        verbose: bool = False,
-                       project_from: str = None) -> RefillStatus:
+                       project_from: str = None,
+                       baseline_file: str = None) -> RefillStatus:
     """Write a FILLED copy of `board_file` to `dst_file` (#910).
+
+    The save is KiCad's, so a board older than KiCad 10 comes back in KiCad
+    10's file format, with an explicit `(capping no) (filling no)` on every
+    via. Those tokens are undone and the vias in a pad or paste opening are
+    declared Type VII (#1367, `fab_notes.reconcile_resaved_via_protection`);
+    `baseline_file` is the board BEFORE the routing that made `board_file`,
+    whose own vias under solder keep what it gave them. What was done rides
+    in the returned status's `via_protection`.
 
     The routed deliverable carries zone OUTLINES with no `(filled_polygon ...)`
     -- `kicad_writer` writes the `(fill yes ...)` properties and nothing in the
@@ -661,12 +707,7 @@ def write_filled_board(board_file: str, dst_file: str,
         stem = os.path.splitext(os.path.basename(board_file))[0]
         staged = os.path.join(tmpdir, stem + '.kicad_pcb')
         shutil.copyfile(board_file, staged)
-        sib_pro = os.path.splitext(board_file)[0] + '.kicad_pro'
-        if not os.path.isfile(sib_pro) and project_from:
-            sib_pro = os.path.splitext(project_from)[0] + '.kicad_pro'
-        if os.path.isfile(sib_pro):
-            shutil.copyfile(sib_pro, os.path.join(tmpdir,
-                                                  stem + '.kicad_pro'))
+        _stage_siblings(board_file, tmpdir, stem, project_from)     # #1494
         script = os.path.join(tmpdir, 'refill.py')
         with open(script, 'w') as f:
             f.write(_REFILL_SCRIPT)
@@ -681,6 +722,18 @@ def write_filled_board(board_file: str, dst_file: str,
             return RefillStatus('refill_failed',
                                 f'rc={r.returncode} {_why}'.strip(),
                                 time.monotonic() - _t0)
+        # The re-save is KiCad 10's: undo the migration's explicit via tokens
+        # and declare Type VII where it is owed (#1367). Done on the temp
+        # copy, so a failure here never touches the destination.
+        via_rec = None
+        try:
+            from fab_notes import reconcile_resaved_via_protection
+            via_rec = reconcile_resaved_via_protection(
+                staged, filled, baseline_file, quiet=not verbose)
+        except Exception as e:  # noqa: BLE001 -- the fill itself succeeded
+            if verbose:
+                print(f"  (via protection after the re-save not reconciled: "
+                      f"{type(e).__name__}: {e})")
         # Written only once the refill succeeded, so a failure never leaves a
         # half-written deliverable behind.
         shutil.copyfile(filled, dst_file)
@@ -696,7 +749,7 @@ def write_filled_board(board_file: str, dst_file: str,
                             time.monotonic() - _t0)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-    return RefillStatus('ok', '', time.monotonic() - _t0)
+    return RefillStatus('ok', '', time.monotonic() - _t0, via_rec)
 
 
 def parse_filled_islands(text: str
@@ -782,7 +835,11 @@ def exact_clusters(pcb_data, net_id: int, islands,
 
     Returns clusters largest-first, each
       {'islands': [idx...], 'pads': [Pad...], 'points': [(x, y, layer)...],
-       'has_pads': bool}. len(clusters) > 1 => KiCad demands links.
+       'copper_points': [(x, y, layer)...], 'has_pads': bool}.
+    `points` holds the islands' edge samples and the copper's points;
+    `copper_points` only the pads, track ends and vias -- a fill EDGE point
+    is not a legal start for a track, a copper point is.
+    len(clusters) > 1 => KiCad demands links.
     """
     import math as _m
     from kicad_oracle import _net_track_components, _cluster_points
@@ -918,7 +975,8 @@ def exact_clusters(pcb_data, net_id: int, islands,
 
     def bucket(root):
         return clusters.setdefault(root, {'islands': [], 'pads': [],
-                                          'points': [], 'has_pads': False})
+                                          'points': [], 'copper_points': [],
+                                          'has_pads': False})
 
     for ii, (layer, poly) in enumerate(islands):
         c = bucket(find(('i', ii)))
@@ -930,14 +988,16 @@ def exact_clusters(pcb_data, net_id: int, islands,
         c['pads'].append(p)
         c['has_pads'] = True
         cu = [l for l in p.layers if l.endswith('.Cu')]
-        c['points'].append((p.global_x, p.global_y, cu[0] if cu else None))
+        c['copper_points'].append((p.global_x, p.global_y, cu[0] if cu else None))
     for i, s in enumerate(segs):
         c = bucket(find(('c', comp_of_seg[i])))
-        c['points'].append((s.start_x, s.start_y, s.layer))
-        c['points'].append((s.end_x, s.end_y, s.layer))
+        c['copper_points'].append((s.start_x, s.start_y, s.layer))
+        c['copper_points'].append((s.end_x, s.end_y, s.layer))
     for j, v in enumerate(vias):
         c = bucket(find(('c', comp_of_via[j])))
-        c['points'].append((v.x, v.y, None))
+        c['copper_points'].append((v.x, v.y, None))
+    for c in clusters.values():
+        c['points'].extend(c['copper_points'])
     return sorted(clusters.values(), key=lambda c: -len(c['points']))
 
 

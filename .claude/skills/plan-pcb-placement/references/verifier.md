@@ -21,7 +21,8 @@ Trust nothing it told you. Measure it yourself, from the repo root.
 3. **Every mode** (read the whole output, not the first line):
    - `python3 -X utf8 py_tools/check_assembly.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD>`: must be buildable
      (`--baseline` arms the courtyard gate: a pair a moved part entered gates). It names
-     pad copper past the outline and any part on a PCB-edge plug's mating region (`mating_keepout_refs`);
+     pad copper past the outline, any part on a PCB-edge plug's mating region (`mating_keepout_refs`)
+     and any part whose own 3D model is through the board (`BODY THROUGH THE BOARD`, `body_in_board`);
      name each one in your verdict. A part still in the staging pile is pad copper off the outline, so it is
      in `oob_pad_copper_gating_refs`; any such part on the board you grade is a FAIL. (`place_simple` names
      the parts it left illegal in its `JSON_SUMMARY` line, `illegal`, and exits 4, not in the ledger.)
@@ -32,12 +33,28 @@ Trust nothing it told you. Measure it yourself, from the repo root.
 4. **`full` mode, also:**
    - `python3 -X utf8 py_tools/board_score.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD> --json <RUN DIR>/verify_<N>_score.json`: blocking 0, unrouted 0, broken 0;
    - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD>`: DONE;
-   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD> --authored-from <INPUT BOARD>`: **report it, not gating**, and name any floor it lists;
+   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD> --authored-from <INPUT BOARD>`: **report it, not gating**, and name any floor it lists. (Without `--authored-from` check_complete reads the floors against the project's recorded `fab_floor_origin` and DISCLOSES copper below them in its reason, without changing the verdict. The Board Setup minimums are the spec: pass `--min-track-width` / `--min-via-diameter` / `--min-via-drill` with them;)
    - `python3 -X utf8 py_router/check_connected.py <BOARD>`: no disconnected pads;
-   - `python3 -X utf8 py_router/check_drc.py <BOARD> --baseline <INPUT BOARD> --clearance-margin 0.1`: no real violations.
+   - `python3 -X utf8 py_router/check_drc.py <BOARD> --baseline <INPUT BOARD>`: no violations. Pass no `--clearance-margin`: at check_drc's default margin this line grades what `board_score`'s `drc` grades, so the `drc` lens below cannot pass a graze the score blocks.
 5. **Declared classes.** Name every `ungraded` component as UNEXAMINED. If the
-   board declares a class (diff pairs, impedance, length groups, power widths,
-   high-speed nets) and its component is ungraded, the verdict is FAIL. For
+   board declares a class (diff pairs, impedance, length groups, high-speed
+   nets, or widths given in `--net-min-widths`) and its component is
+   ungraded, the verdict is FAIL. The power widths a run asked of `route.py`
+   (`--power-nets-widths`) are not such a declaration: `net_widths` reads
+   `ungraded` without `--net-min-widths`, and those widths are measured and
+   reported as below, not graded. The tools also name declarations they found and report them without
+   blocking `check_complete`: a project diff-pair net class with no
+   `.kicad_dru` skew / diff_pair_uncoupled rule binding it is
+   `diff_pairs.declared` -- unless a route_diff step length-matched the
+   pair, which records its tolerance and is graded at it (#1503) --
+   (write the rule with the budget the board needs,
+   e.g. `(rule "pair skew" (condition "A.NetClass == '<class>'") (constraint
+   skew (max 0.15mm) (within_diff_pairs)))` in `<BOARD>.kicad_dru`); the
+   project's `net_impedance` records and the power widths the run asked of
+   `route.py` are measured with no flag (`impedance.declared_failing`,
+   `net_widths.requested_under`). Read them and report them. A net-class
+   `track_width` is not a spec (the router discloses copper under it in
+   `design_rules`), so it is not an ungraded declaration. For
    declared diff pairs, length groups or high-speed nets, also run the
    `review-routed-board` skill's Steps 2–4 (length matching, return vias,
    impedance, diff pairs) and report them.

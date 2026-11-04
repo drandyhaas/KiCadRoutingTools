@@ -26,8 +26,19 @@ Usage:
     python3 check_impedance.py board.kicad_pcb --json report.json
     python3 check_impedance.py board.kicad_pcb --verbose      # per-crossing list
 
-Exit code is 1 when any reference-plane crossing is found (so it can gate a
-build the way check_drc.py does), 0 otherwise. ``--exit-zero`` suppresses that.
+Exit code is 1 when any reference-plane crossing is found, or when a net with
+a declared coplanar gap (``--coplanar-gap``, or its own declaration in the
+sibling .kicad_pro) misses it -- no ground beside it, or a gap off the
+declared one, over more than 0.01 mm of its outer-layer length; the coplanar
+audit section names those nets. Samples over the net's own pad, or within the
+pour's clearance of it, are reported apart and never counted (#1582). Exit 0
+otherwise, so it can gate a build the way check_drc.py does. ``--exit-zero``
+suppresses that.
+
+The coplanar gap is read on KiCad's own fill at exact distance (#1624): the
+(filled_polygon ...) KiCad stored in the board, else the fill model at the
+project's net-class clearances (no refill is run). The report's
+``gap_source`` names which.
 """
 
 from __future__ import annotations
@@ -71,9 +82,30 @@ DEFAULT_SAMPLE_STEP = 0.15
 DEFAULT_MIN_VOID_LENGTH = 0.30
 
 # How far a measured coplanar gap may stray from the declared one before the
-# declaration counts as broken. The pour rasterizes at 0.04-0.08mm and KiCad's
+# declaration counts as broken. The fill model rasterizes at 0.04-0.08mm and KiCad's
 # filler rounds its own outline, so a few hundredths is measurement noise.
 DEFAULT_GAP_TOLERANCE = 0.05
+
+# How far a declared impedance may sit off the model's reading of the shipped
+# copper before the audit names the net (#1630), in percent: a fab's usual
+# controlled-impedance tolerance. Disclosure only -- the exit code ignores it.
+DECLARED_OHMS_TOLERANCE_PCT = 10.0
+
+# A diff pair's P and N count as coupled where their copper is within this
+# multiple of the declared pair gap: a breakout or a fan-out apart from its
+# partner is not a coupled line, and the formula does not apply there.
+COUPLED_GAP_FACTOR = 2.0
+
+# A net's coplanar promise is broken when more than this length of it has no
+# ground beside it or misses the declared gap (mm). board_score reads the same
+# predicate off the JSON rows (#1389).
+BROKEN_PROMISE_MM = 0.01
+
+
+def promise_broken(length_no_ground_mm: float, length_gap_wrong_mm: float) -> bool:
+    """The one rule for a broken coplanar promise (#1389, #1582)."""
+    return ((length_no_ground_mm or 0.0) + (length_gap_wrong_mm or 0.0)
+            > BROKEN_PROMISE_MM)
 
 
 # =============================================================================
@@ -130,6 +162,33 @@ class NetImpedance:
     outer_length_mm: float = 0.0        # length on outer layers (where CPW applies)
     length_no_ground_mm: float = 0.0    # outer length with NO pour beside it
     length_gap_wrong_mm: float = 0.0    # outer length whose gap misses the promise
+    # Outer length whose gap misses the promise only because the net's OWN
+    # pad is there (#1582): over a pad wider than the track the conductor is
+    # the pad, and just past it the pour still keeps its clearance from the
+    # pad. Like the own-via antipad (#1203), reported here and never counted
+    # in the two above.
+    length_at_own_pad_mm: float = 0.0
+    # --- declared impedance (#1630, disclosure): the ohms a route step was
+    # asked for (its record in the sibling .kicad_pro), against the model's
+    # reading of the shipped width -- and, for a pair, the shipped P<->N gap.
+    declared_ohms: float = 0.0
+    declared_differential: bool = False
+    declare_only: bool = False          # the record changed no width (#1630)
+    shipped_ohms: float = 0.0           # length-weighted over `ohms_length_mm`
+    ohms_length_mm: float = 0.0         # length the reading covers (a pair: coupled)
+
+    @property
+    def ohms_off_pct(self) -> Optional[float]:
+        """How far the shipped impedance is off the declared one, %; None
+        when there is no declaration or no length to read it on."""
+        if self.declared_ohms <= 0 or self.ohms_length_mm <= 0:
+            return None
+        return 100.0 * (self.shipped_ohms - self.declared_ohms) / self.declared_ohms
+
+    @property
+    def promise_broken(self) -> bool:
+        """Did any of this net's declared-coplanar length miss its gap?"""
+        return promise_broken(self.length_no_ground_mm, self.length_gap_wrong_mm)
 
     @property
     def void_fraction(self) -> float:
@@ -147,6 +206,10 @@ class BoardImpedanceReport:
     ratio_limit: float = CPWG_GAP_RATIO_LIMIT
     declared_gap: float = 0.0
     gap_tolerance: float = 0.0
+    # #1624: whose fill the coplanar gaps were read on -- 'stored' (the
+    # (filled_polygon ...) KiCad wrote into the board), 'model' (the fill
+    # model) or '' (no gap measured).
+    gap_source: str = ''
 
     # --- board-level rollups (the acceptance-criteria numbers) ---
     @property
@@ -250,6 +313,77 @@ def _overlapping_components(ma, mb) -> List[Tuple[int, int]]:
     return [(b, a) for a, b in out] if swap else out
 
 
+class ExactFill:
+    """KiCad's own fill of one layer's pours, for the coplanar gap (#1624).
+
+    Built from the (filled_polygon ...) islands KiCad stored in the board,
+    keyed by net. The gap is the EXACT distance
+    from a point of the trace's centreline to the nearest foreign fill, less
+    the half-width: a reading of KiCad's copper, not of a grid. (The fill
+    model's reading moves by up to a cell with where its grid falls under the
+    track, and a correct 0.20 mm gap read 0.15.) Nearest distance rather than
+    a perpendicular probe: a pour cut back by a clearance is that far from
+    EVERY point of the track, so the nearest fill is the clearance itself,
+    also at a bend or beside the net's own via, where a perpendicular can
+    pass through the copper's rounded clearance and read wide.
+
+    A point inside the fill, or fill closer than the half-width, is fill over
+    the trace: KiCad never fills there, so the stored fill predates the
+    copper (or is a short). It reads 0 -- a broken promise -- and is counted
+    in `overlaps`, so the report can say to refill.
+    """
+
+    def __init__(self, polys_by_net: Dict[int, List]):
+        import numpy as np
+        import shapely
+        from shapely.geometry import Polygon
+        self.nets: Dict[int, Tuple[object, object]] = {}
+        self.overlaps: set = set()
+        for nid, polys in polys_by_net.items():
+            # buffer(0) turns KiCad's fractured outline (a hole reached by a
+            # zero-width slit) into a polygon with a true hole.
+            parts = [Polygon(p).buffer(0) for p in polys if len(p) >= 3]
+            geom = shapely.unary_union([g for g in parts if not g.is_empty])
+            if geom.is_empty:
+                continue
+            shapely.prepare(geom)
+            segs = []
+            for ring in shapely.get_parts(shapely.boundary(geom)):
+                c = np.asarray(ring.coords)
+                if len(c) >= 2:
+                    segs.append(np.stack([c[:-1], c[1:]], axis=1))
+            if not segs:
+                continue
+            lines = shapely.linestrings(np.concatenate(segs))
+            self.nets[nid] = (geom, shapely.STRtree(lines))
+
+    def gap(self, x: float, y: float, half_width: float, max_probe: float,
+            exclude_net: int) -> Optional[float]:
+        """Edge-to-edge gap from the trace at (x, y) to the nearest foreign
+        fill within `max_probe`, else None."""
+        import shapely
+        best: Optional[float] = None
+        pt = None
+        for nid, (geom, tree) in self.nets.items():
+            if nid == exclude_net:
+                continue
+            if shapely.contains_xy(geom, x, y):
+                self.overlaps.add((round(x, 4), round(y, 4)))
+                return 0.0
+            if pt is None:
+                pt = shapely.Point(x, y)
+            idx, dist = tree.query_nearest(pt, max_distance=half_width + max_probe,
+                                           return_distance=True)
+            if len(dist):
+                g = float(dist.min()) - half_width
+                if g < -1e-6:
+                    self.overlaps.add((round(x, 4), round(y, 4)))
+                g = max(0.0, g)
+                if best is None or g < best:
+                    best = g
+        return best
+
+
 class LayerCopper:
     """Filled-pour occupancy for one copper layer.
 
@@ -267,13 +401,20 @@ class LayerCopper:
     same-net pour, and none once the stale pour was deleted.
     """
 
-    def __init__(self, pcb, layer: str):
+    def __init__(self, pcb, layer: str,
+                 exact_polys: Optional[Dict[int, List]] = None):
         self.layer = layer
         self.entries: List[Tuple[int, int, object]] = []   # (idx, net_id, model)
-        # Rasterization pitch of the coarsest model on this layer. Occupancy is
-        # tested at CELL CENTRES, so a distance probe first reports copper half
-        # a cell late on average; callers de-bias with this.
+        # Rasterization pitch of the coarsest model on this layer: how far a
+        # model's fill edge can sit from the true one (half a cell either way).
         self.cell: float = 0.0
+        # #1624: KiCad's OWN fill of the pours of these nets on this layer
+        # (its stored polygons). The side gap to them is measured at exact distance,
+        # and the model is not asked about them for it.
+        self.exact_nets = set(exact_polys or ())
+        self.exact: Optional[ExactFill] = (
+            ExactFill(exact_polys) if any((exact_polys or {}).values())
+            else None)
         # (zone index, component) -> the key of the copper it belongs to; only
         # components merged with another pour's are listed.
         self._same_copper: Dict[Tuple[int, int], Tuple[int, int]] = {}
@@ -324,7 +465,11 @@ class LayerCopper:
         self._same_copper = {k: find(k) for k in parent}
 
     def __bool__(self) -> bool:
-        return bool(self.entries)
+        return bool(self.entries) or bool(self.exact_nets)
+
+    def model_only_nets(self) -> set:
+        """Nets with a pour here whose side gap the fill model answers."""
+        return {n for _i, n, _m in self.entries} - self.exact_nets
 
     def key_at(self, x: float, y: float) -> Optional[Tuple[int, int]]:
         """(zone index, fill component) of the copper covering (x, y), else
@@ -344,9 +489,10 @@ class LayerCopper:
                        exclude_net: int) -> Optional[Tuple[int, int]]:
         """Same as key_at but ignoring pours belonging to `exclude_net` -- used
         for the coplanar-ground probe, where the trace's own net's pour is not
-        a coplanar ground, it is the trace."""
+        a coplanar ground, it is the trace. Pours whose KiCad fill is known
+        (`exact_nets`) are measured by `ExactFill` instead and skipped here."""
         for idx, net_id, model in self.entries:
-            if net_id == exclude_net:
+            if net_id == exclude_net or net_id in self.exact_nets:
                 continue
             if model.query_component(x, y):
                 return (idx, net_id)
@@ -385,6 +531,13 @@ def own_antipad_radius(pcb, ref_layer: str, via, cell: float) -> float:
     plus the clearance the fill model carves it at -- max(zone clearance, the
     plane net's class, the via net's class), as `ZoneFillModel` stamps a
     foreign via -- plus one model cell for its cell-centre quantisation."""
+    return via.size / 2.0 + _pour_clearance(pcb, ref_layer, via.net_id) + cell
+
+
+def _pour_clearance(pcb, layer: str, net_id: int) -> float:
+    """The clearance the fill model carves the pours on `layer` at around an
+    item of `net_id`: max(zone clearance, the plane net's class, the item
+    net's class), as `ZoneFillModel` stamps foreign copper."""
     try:
         from plane_fill_model import _NC_ATTR
         import routing_defaults as _defaults
@@ -394,11 +547,20 @@ def own_antipad_radius(pcb, ref_layer: str, via, cell: float) -> float:
         nc, default_zc = {}, 0.0
     clr = 0.0
     for z in getattr(pcb, 'zones', None) or ():
-        if z.layer != ref_layer or not z.net_id or not z.polygon:
+        if z.layer != layer or not z.net_id or not z.polygon:
             continue
         zc = z.clearance if z.clearance is not None else default_zc
-        clr = max(clr, zc, nc.get(z.net_id, 0.0), nc.get(via.net_id, 0.0))
-    return via.size / 2.0 + clr + cell
+        clr = max(clr, zc, nc.get(z.net_id, 0.0), nc.get(net_id, 0.0))
+    return clr
+
+
+def own_pad_halo(pcb, layer: str, pad, cell: float) -> float:
+    """How far past the net's own `pad` the pour on `layer` is still shaped by
+    it (#1582): the clearance the fill keeps from the pad (its own override
+    included) plus one model cell for the cell-centre quantisation, as
+    :func:`own_antipad_radius` sizes a via's."""
+    return max(_pour_clearance(pcb, layer, pad.net_id),
+               getattr(pad, 'local_clearance', 0.0) or 0.0) + cell
 
 
 def _sample_points(x1: float, y1: float, x2: float, y2: float,
@@ -425,16 +587,24 @@ def measure_side_gap(copper: LayerCopper, x: float, y: float,
     gap (the tighter side dominates the coupling). None means no coplanar
     ground within `max_probe` -- i.e. microstrip governs and there is no CPW
     correction to make.
+
+    Pours whose KiCad fill is known (`copper.exact`) are measured exactly
+    (#1624, see `ExactFill`); the rest are probed on the fill model, and the
+    smaller of the two is the gap.
     """
     if not copper:
         return None
+    best: Optional[float] = None
+    if copper.exact is not None:
+        best = copper.exact.gap(x, y, half_width, max_probe, exclude_net)
+    if not copper.model_only_nets() - {exclude_net}:
+        return best             # every foreign pour here was measured exactly
     # Unit normal to the trace direction.
     norm = math.hypot(dx, dy)
     if norm <= 0:
-        return None
+        return best
     nx, ny = -dy / norm, dx / norm
 
-    best: Optional[float] = None
     steps = int(max_probe / probe_step) + 1
     for sign in (1.0, -1.0):
         d = half_width
@@ -444,19 +614,27 @@ def measure_side_gap(copper: LayerCopper, x: float, y: float,
                 break
             if copper.foreign_key_at(x + nx * sign * d, y + ny * sign * d,
                                      exclude_net):
-                gap = d - half_width
+                # #1624: find the model's fill edge between the last miss and
+                # this hit, rather than de-biasing the step. The model's edge
+                # is unbiased (a cell is fill when its centre is, so its edge
+                # sits within half a cell either side of the true one:
+                # 0.176-0.221 for a true 0.200 at a 0.05 cell); the old
+                # `cell/2 + step/2` de-bias read a correct 0.20 as 0.15 or
+                # 0.20 by where the grid fell, the 0.15 a tolerance miss.
+                lo = max(half_width, d - probe_step)
+                hi = d
+                for _b in range(6):
+                    mid = (lo + hi) / 2.0
+                    if copper.foreign_key_at(x + nx * sign * mid,
+                                             y + ny * sign * mid, exclude_net):
+                        hi = mid
+                    else:
+                        lo = mid
+                gap = (lo + hi) / 2.0 - half_width
                 if best is None or gap < best:
                     best = gap
                 break
-    if best is None:
-        return None
-    # De-bias the rasterization: the pour is detected at the first CELL CENTRE
-    # that carries fill, which sits on average half a cell beyond the true
-    # copper edge (plus half a probe step of search granularity). Without this
-    # every measured gap reads ~one cell wide -- a 0.20mm declared gap
-    # measured 0.25mm and the audit called a correct pour off-target.
-    bias = copper.cell / 2.0 + probe_step / 2.0
-    return max(0.0, best - bias)
+    return None if best is None else max(0.0, best)
 
 
 def _nominal_z0(pcb, layer: str, width: float, coplanar_gap: float = 0.0) -> float:
@@ -485,6 +663,144 @@ def _nominal_z0(pcb, layer: str, width: float, coplanar_gap: float = 0.0) -> flo
                         params.copper_thickness, params.dielectric_constant)
 
 
+def _point_seg_dist(x: float, y: float, s) -> float:
+    ex, ey = s.end_x - s.start_x, s.end_y - s.start_y
+    l2 = ex * ex + ey * ey
+    t = 0.0 if l2 <= 0 else max(0.0, min(1.0, ((x - s.start_x) * ex
+                                               + (y - s.start_y) * ey) / l2))
+    return math.hypot(x - s.start_x - t * ex, y - s.start_y - t * ey)
+
+
+def shipped_impedance(pcb, segs, partner_segs, spec: dict,
+                      sample_step: float = DEFAULT_SAMPLE_STEP
+                      ) -> Tuple[float, float]:
+    """(ohms, length mm): the model's impedance of a net's SHIPPED copper,
+    length-weighted, for its declaration `spec` (#1630). Single-ended: Z0 at
+    each segment's width. Differential: Zdiff at each sample's width and its
+    measured edge-to-edge gap to the partner on the same layer, over the
+    length where the two are coupled (within COUPLED_GAP_FACTOR x the declared
+    pair gap). A declared coplanar gap selects the CPW model, as the route
+    step solved with. (0, 0) when nothing could be read."""
+    from impedance import calculate_impedance_for_layer
+    diff = bool(spec.get('differential'))
+    cg = float(spec.get('coplanar_gap') or 0.0)
+    pg = float(spec.get('pair_gap') or 0.0)
+    limit = COUPLED_GAP_FACTOR * pg if pg > 0 else 0.5
+    cache: Dict[Tuple[str, float, float], float] = {}
+
+    def z_at(layer, width, gap):
+        key = (layer, round(width, 5), round(gap, 4))
+        if key not in cache:
+            r = calculate_impedance_for_layer(pcb, layer, width, gap,
+                                              coplanar_gap=cg)
+            cache[key] = float(r.get('zdiff' if diff else 'z0') or 0.0)
+        return cache[key]
+
+    total = length = 0.0
+    for seg in segs:
+        seg_len = math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y)
+        if seg_len <= 0 or not seg.width:
+            continue
+        samples = _sample_points(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                                 sample_step)
+        n_int = max(1, len(samples) - 1)
+        per = seg_len / n_int
+        mates = [p for p in partner_segs if p.layer == seg.layer and p.width]
+        for sx, sy, _ in samples[:n_int]:
+            gap = 0.0
+            if diff:
+                if not mates:
+                    continue
+                gap = min(_point_seg_dist(sx, sy, p) - p.width / 2.0
+                          for p in mates) - seg.width / 2.0
+                if gap <= 0 or gap > limit:
+                    continue
+            z = z_at(seg.layer, seg.width, gap)
+            if z > 0:
+                total += z * per
+                length += per
+    return (total / length if length > 0 else 0.0), length
+
+
+def publish_class_clearances(pcb) -> None:
+    """Give the fill model the clearances KiCad fills at (#1624).
+
+    KiCad fills a pour at max(zone clearance, the net class of each item);
+    the fill model stamps at the zone's own clearance unless the board's
+    class map is published, which only the plane steps did. A class at 0.2
+    with the pour's zone at 0.12 then read 0.10 where KiCad leaves 0.20.
+    Published from the sibling project, a Default-only net at the Default
+    class; a map a caller already published is kept."""
+    try:
+        from plane_fill_model import _NC_ATTR, set_board_net_clearances
+        from list_nets import (board_default_netclass_clearance,
+                               net_clearance_map_by_id)
+    except Exception:                                           # noqa: BLE001
+        return
+    path = getattr(pcb, 'source_path', '') or ''
+    if getattr(pcb, _NC_ATTR, None) or not path or not os.path.isfile(path):
+        return
+    names = {nid: n.name for nid, n in (pcb.nets or {}).items()
+             if nid and getattr(n, 'name', '')}
+    try:
+        nc = dict(net_clearance_map_by_id(path, names) or {})
+        default = board_default_netclass_clearance(path)
+    except Exception:                                           # noqa: BLE001
+        return
+    if default:
+        for nid in names:
+            nc.setdefault(nid, float(default))
+    set_board_net_clearances(pcb, nc)
+
+
+#: How `analyze_impedance` finds KiCad's fill for the coplanar gap (#1624):
+#: 'auto' reads the fill stored in the board, else the fill model; 'model'
+#: reads the fill model only.
+FILL_SOURCES = ('auto', 'model')
+
+
+def kicad_fill_islands(pcb, fill_source: str = 'auto'
+                       ) -> Tuple[Optional[Dict[Tuple[str, str], List]], str, str]:
+    """(islands, source, why) -- KiCad's fill of the board, for the gap.
+
+    'stored' is the (filled_polygon ...) KiCad wrote into the board file: what
+    KiCad shows, plots and grades without a refill. With none stored, None and
+    'model', with `why` naming the reason. No refill is run: the audit grades
+    the fill the board carries, or says it read the model."""
+    if fill_source == 'model':
+        return None, 'model', 'fill_source=model'
+    path = getattr(pcb, 'source_path', '') or ''
+    if path and os.path.isfile(path):
+        try:
+            from kicad_parser import read_board_text
+            from kicad_exact_fill import parse_filled_islands
+            text = read_board_text(path)
+            if '(filled_polygon' in text:
+                got = parse_filled_islands(text)
+                if got:
+                    return got, 'stored', ''
+        except Exception:                                       # noqa: BLE001
+            pass
+    return None, 'model', 'the board stores no fill'
+
+
+def _exact_polys_by_layer(pcb, islands) -> Dict[str, Dict[int, List]]:
+    """{layer: {net_id: [polygon, ...]}} for every pour the stored fill
+    covers; a pour it does not carry is left to the fill model."""
+    if not islands:
+        return {}
+    ids: Dict[str, int] = {}
+    for nid, n in (pcb.nets or {}).items():
+        if nid and getattr(n, 'name', ''):
+            ids.setdefault(n.name, nid)
+    out: Dict[str, Dict[int, List]] = {}
+    for (name, layer), polys in islands.items():
+        nid = ids.get(name)
+        if nid:
+            out.setdefault(layer, {}).setdefault(nid, []).extend(polys)
+    return out
+
+
 def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                       sample_step: float = DEFAULT_SAMPLE_STEP,
                       min_void_length: float = DEFAULT_MIN_VOID_LENGTH,
@@ -493,7 +809,10 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                       coplanar_gap: float = 0.0,
                       gap_tolerance: float = DEFAULT_GAP_TOLERANCE,
                       board_name: str = "",
-                      net_declared_gaps: Optional[Dict[int, float]] = None) -> BoardImpedanceReport:
+                      net_declared_gaps: Optional[Dict[int, float]] = None,
+                      fill_source: str = 'auto',
+                      net_declared_ohms: Optional[Dict[int, dict]] = None
+                      ) -> BoardImpedanceReport:
     """Walk every routed segment and measure what the pre-route model assumed.
 
     Args:
@@ -502,8 +821,9 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             None/empty analyzes every routed signal net.
         sample_step: Distance between samples along a trace, mm.
         min_void_length: Ignore void runs shorter than this (fill
-            quantisation). A run inside the antipad of the net's own via or its
-            P/N partner's is never a crossing, whatever its length (#1203).
+            quantisation). A run inside the antipad of the net's own via or
+            plated through-hole pad, or its P/N partner's, is never a
+            crossing, whatever its length (#1203, #1498).
         ratio_limit: Side gap <= ratio_limit * h counts as coplanar-coupled.
         include_plane_nets: Also analyze nets that own a pour (off by default;
             a plane net's own traces are not controlled-impedance signals).
@@ -519,10 +839,26 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             (#521). A net with an entry audits at ITS declared gap (0 = that
             net was declared non-coplanar); nets without one fall back to
             ``coplanar_gap``.
+        fill_source: Whose fill the coplanar gap is read on (#1624).
+            'auto': the fill KiCad stored in the board, else the fill model
+            (no refill is run). 'model': the fill model only.
+            KiCad's fill is read at exact distance; the model to within half
+            a cell. The reference-plane continuity check reads the model
+            either way.
+        net_declared_ohms: Per-net impedance declarations (net_id -> the
+            sibling .kicad_pro record: ohms, differential, pair_gap,
+            coplanar_gap), auto-read like the gaps. Each such net reports the
+            model's impedance of its shipped copper against the declared one
+            (#1630, `shipped_impedance`); disclosure only.
 
     Returns:
-        BoardImpedanceReport. Diagnostic only; pcb is not modified.
+        BoardImpedanceReport. Diagnostic only; pcb's copper is not modified
+        (the project's class clearances are published to its fill model,
+        `publish_class_clearances`).
     """
+    if fill_source not in FILL_SOURCES:
+        raise ValueError(f"fill_source must be one of {FILL_SOURCES}, "
+                         f"not {fill_source!r}")
     report = BoardImpedanceReport(board=board_name, sample_step=sample_step,
                                   ratio_limit=ratio_limit,
                                   declared_gap=coplanar_gap,
@@ -582,6 +918,26 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
         report.notes.append("No routed nets matched the filter.")
         return report
 
+    # #1624: the model stamps at the clearances KiCad fills at, and the
+    # coplanar gap is read on the fill KiCad stored in the board when it
+    # carries one.
+    publish_class_clearances(pcb)
+    auditing = any((net_declared_gaps or {}).get(nid, coplanar_gap) > 0
+                   for nid, _nm in selected)
+    islands, source, why = kicad_fill_islands(pcb, fill_source)
+    exact_by_layer = _exact_polys_by_layer(pcb, islands)
+    report.gap_source = source
+    if source == 'model' and auditing:
+        report.notes.append(
+            f"Coplanar gaps read on the fill MODEL, not KiCad's fill ({why}): "
+            f"within half a model cell of KiCad's, and the model does not "
+            f"read .kicad_dru rules. Fill the board (fill_for_delivery.py) "
+            f"to grade on KiCad's own fill.")
+    elif source == 'stored':
+        report.notes.append(
+            "Coplanar gaps read at exact distance on the fill KiCad stored in "
+            "the board.")
+
     # Lazily-built copper occupancy, one model set per layer (expensive to
     # rasterize, so shared across every net that references it).
     copper_cache: Dict[str, LayerCopper] = {}
@@ -589,7 +945,7 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
     def copper_for(layer: str) -> LayerCopper:
         got = copper_cache.get(layer)
         if got is None:
-            got = LayerCopper(pcb, layer)
+            got = LayerCopper(pcb, layer, exact_by_layer.get(layer))
             copper_cache[layer] = got
         return got
 
@@ -613,11 +969,48 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
     for v in pcb.vias:
         if v.net_id:
             vias_by_net.setdefault(v.net_id, []).append(v)
+    # #1498: a plated through-hole PAD of the net (or its partner) is the same
+    # layer change: its barrel passes every reference layer, carving an
+    # antipad its trace runs over, which no routing can remove. Sized as a
+    # via of the pad's larger side, the way the fill model carves it.
+    from types import SimpleNamespace
+    try:
+        from kicad_parser import pad_is_plated_through
+    except Exception:                                        # noqa: BLE001
+        pad_is_plated_through = None
+    tht_by_net: Dict[int, List] = {}
+    if pad_is_plated_through is not None:
+        for fp in (pcb.footprints or {}).values():
+            for pd in fp.pads:
+                if pd.net_id and pad_is_plated_through(pd):
+                    tht_by_net.setdefault(pd.net_id, []).append(SimpleNamespace(
+                        x=pd.global_x, y=pd.global_y,
+                        size=max(pd.size_x, pd.size_y), net_id=pd.net_id))
+
+    # #1582: every copper pad of a net, by layer, for the coplanar audit. A
+    # line landing on a pad wider than itself runs over the pad -- where the
+    # conductor is the pad -- and then through the pour's clearance step
+    # around it, and the gap read from the track's half-width misses the
+    # declared one on both, which no routing can change.
+    from net_queries import expand_pad_layers
+    from routing_utils import point_to_pad_rect_dist
+    copper_pads_by_net: Dict[int, List] = {}
+    for fp in (pcb.footprints or {}).values():
+        for pd in fp.pads:
+            if pd.net_id and getattr(pd, 'pad_type', '') != 'np_thru_hole':
+                copper_pads_by_net.setdefault(pd.net_id, []).append(pd)
 
     for net_id, net_name in selected:
         own_vias = list(vias_by_net.get(net_id, ()))
+        own_pads = list(tht_by_net.get(net_id, ()))
+        pads_on: Dict[str, List] = {}
+        for pd in copper_pads_by_net.get(net_id, ()):
+            for ly in expand_pad_layers(list(getattr(pd, 'layers', None) or ()),
+                                        layer_order):
+                pads_on.setdefault(ly, []).append(pd)
         if partners.get(net_id) is not None:
             own_vias += vias_by_net.get(partners[net_id], [])
+            own_pads += tht_by_net.get(partners[net_id], [])
         # #521: a net's own recorded declaration outranks the call-level gap.
         net_gap = (net_declared_gaps or {}).get(net_id, coplanar_gap)
         result = NetImpedance(net_id=net_id, net_name=net_name,
@@ -664,6 +1057,10 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                                                        ref_copper.cell))
                          for v in own_vias
                          if _via_spans(v, ref_layer, layer_order)]
+                # #1498: a through-hole pad spans every copper layer
+                discs += [(pd.x, pd.y, own_antipad_radius(pcb, ref_layer, pd,
+                                                          ref_copper.cell))
+                          for pd in own_pads]
                 lo_x = min(seg.start_x, seg.end_x)
                 hi_x = max(seg.start_x, seg.end_x)
                 lo_y = min(seg.start_y, seg.end_y)
@@ -756,19 +1153,45 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                 max_probe = max(max_probe, net_gap * 3.0)
             dx, dy = seg.end_x - seg.start_x, seg.end_y - seg.start_y
             half_w = (seg.width or 0.0) / 2.0
+            # #1582: the net's own pads on this layer, each with how far past
+            # it the pour is still shaped by it.
+            halos = []
+            if net_gap > 0:
+                for pd in pads_on.get(layer, ()):
+                    m = own_pad_halo(pcb, layer, pd, same_layer.cell)
+                    reach = math.hypot(pd.size_x, pd.size_y) / 2.0 + m
+                    if (min(seg.start_x, seg.end_x) - reach <= pd.global_x
+                            <= max(seg.start_x, seg.end_x) + reach
+                            and min(seg.start_y, seg.end_y) - reach <= pd.global_y
+                            <= max(seg.start_y, seg.end_y) + reach):
+                        halos.append((pd, m, reach))
 
             for (sx, sy, _) in samples[:n_int]:
                 gap = measure_side_gap(same_layer, sx, sy, dx, dy, half_w,
                                        max_probe, net_id)
+                # Over the net's own pad, or within its pour clearance of it.
+                at_pad = [reach for pd, m, reach in halos
+                          if point_to_pad_rect_dist(sx, sy, pd) <= m]
                 if gap is None:
                     z0_here = z0_nom
                     if net_gap > 0:
-                        result.length_no_ground_mm += per_sample
+                        # Beside a wide pad the pour can sit past the probe:
+                        # probe past the pad before calling it no ground. No
+                        # pour there either is a real break, and it counts.
+                        if at_pad and measure_side_gap(
+                                same_layer, sx, sy, dx, dy, half_w,
+                                max_probe + max(at_pad), net_id) is not None:
+                            result.length_at_own_pad_mm += per_sample
+                        else:
+                            result.length_no_ground_mm += per_sample
                 else:
                     result.gap_samples.append(gap)
                     if net_gap > 0 and \
                             abs(gap - net_gap) > gap_tolerance:
-                        result.length_gap_wrong_mm += per_sample
+                        if at_pad:
+                            result.length_at_own_pad_mm += per_sample
+                        else:
+                            result.length_gap_wrong_mm += per_sample
                     if cpwg_applies(gap, h, ratio_limit):
                         result.tight_gap_length_mm += per_sample
                         z0_here = cpwg_z0(seg.width, gap, h,
@@ -788,15 +1211,36 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                 result.z0_error_pct = 100.0 * (
                     result.z0_measured - result.z0_nominal) / result.z0_nominal
 
+        # #1630: the declared ohms against the model's reading of the copper
+        spec = (net_declared_ohms or {}).get(net_id)
+        if spec and float(spec.get('ohms') or 0) > 0:
+            result.declared_ohms = float(spec['ohms'])
+            result.declared_differential = bool(spec.get('differential'))
+            result.declare_only = bool(spec.get('declare_only'))
+            mates = (segments_by_net.get(partners.get(net_id), [])
+                     if result.declared_differential else [])
+            result.shipped_ohms, result.ohms_length_mm = shipped_impedance(
+                pcb, segments_by_net[net_id], mates, spec, sample_step)
+
         if result.routed_length_mm > 0:
             report.nets.append(result)
+
+    over = sum(len(c.exact.overlaps) for c in copper_cache.values()
+               if c.exact is not None)
+    if over:
+        report.notes.append(
+            f"{over} sample(s) of a trace lie under KiCad's {source} fill of "
+            f"another net, which KiCad never fills: the fill predates the "
+            f"copper (or the board is shorted). Read as gap 0; refill "
+            f"(fill_for_delivery.py) and grade again.")
 
     runs = sum(n.own_via_antipad_runs for n in report.nets)
     if runs:
         report.notes.append(
-            f"{runs} void run(s) inside an antipad of the net's own via (or its "
-            f"P/N partner's) are a layer change, not a plane slot: counted as "
-            f"own_via_antipad_runs, never as a crossing (#1203).")
+            f"{runs} void run(s) inside an antipad of the net's own via or "
+            f"through-hole pin (or its P/N partner's) are a layer change, not a "
+            f"plane slot: counted as own_via_antipad_runs, never as a crossing "
+            f"(#1203, #1498).")
     return report
 
 
@@ -860,15 +1304,27 @@ def format_report(report: BoardImpedanceReport, verbose: bool = False,
                 lines.append(f"    {c.describe()}")
 
     # --- coplanar declaration audit ---
-    if report.declared_gap > 0:
+    # #1582: whenever ANY net carries a declared gap -- a per-net declaration
+    # read from the project counts as much as --coplanar-gap. It used to print
+    # for the call-level flag only, so a project-declared board exited 1 on a
+    # broken promise with no line saying why.
+    declared = [n for n in report.nets if n.declared_gap > 0]
+    if declared:
+        gaps = sorted({round(n.declared_gap, 6) for n in declared})
+        src = (f"--coplanar-gap {report.declared_gap:g}mm"
+               if report.declared_gap > 0 and gaps == [round(report.declared_gap, 6)]
+               else "declared gap " + ", ".join(f"{g:g}" for g in gaps) + "mm")
         lines.append("")
-        lines.append(f"-- Coplanar declaration audit (--coplanar-gap "
-                     f"{report.declared_gap:g}mm, tolerance "
-                     f"±{report.gap_tolerance:g}mm) --")
-        outer = sum(n.outer_length_mm for n in report.nets)
-        no_gnd = sum(n.length_no_ground_mm for n in report.nets)
-        wrong = sum(n.length_gap_wrong_mm for n in report.nets)
-        ok = max(0.0, outer - no_gnd - wrong)
+        # ASCII: this line now prints on every project-declared board, and a
+        # parent reading it in another code page lost the whole stdout to one
+        # undecodable '±' (Windows, test_meander_demo_boards).
+        lines.append(f"-- Coplanar declaration audit ({src}, tolerance "
+                     f"+/-{report.gap_tolerance:g}mm) --")
+        outer = sum(n.outer_length_mm for n in declared)
+        no_gnd = sum(n.length_no_ground_mm for n in declared)
+        wrong = sum(n.length_gap_wrong_mm for n in declared)
+        at_pad = sum(n.length_at_own_pad_mm for n in declared)
+        ok = max(0.0, outer - no_gnd - wrong - at_pad)
         lines.append(f"  Outer-layer length declared coplanar: {outer:.1f} mm")
         if outer > 0:
             lines.append(f"    gap as declared:  {ok:>9.1f} mm  "
@@ -877,8 +1333,11 @@ def format_report(report: BoardImpedanceReport, verbose: bool = False,
                          f"({100 * wrong / outer:.1f}%)")
             lines.append(f"    NO ground beside: {no_gnd:>9.1f} mm  "
                          f"({100 * no_gnd / outer:.1f}%)")
-        broken = [n for n in report.nets
-                  if (n.length_no_ground_mm + n.length_gap_wrong_mm) > 0.01]
+            if at_pad > 0:
+                lines.append(f"    at its own pad:   {at_pad:>9.1f} mm  "
+                             f"({100 * at_pad / outer:.1f}%; the pad and the "
+                             f"pour's clearance step past it -- not counted)")
+        broken = [n for n in declared if n.promise_broken]
         if broken:
             lines.append("")
             lines.append("  Nets whose declared gap was NOT achieved "
@@ -896,6 +1355,36 @@ def format_report(report: BoardImpedanceReport, verbose: bool = False,
                 lines.append(f"  ... and {len(ranked) - top} more nets")
         else:
             lines.append("  All declared-coplanar copper achieved its gap.")
+
+    # --- declared impedance (#1630) ---
+    held = [n for n in report.nets if n.declared_ohms > 0]
+    if held:
+        lines.append("")
+        lines.append(f"-- Declared impedance vs the shipped copper (the model's "
+                     f"reading; disclosure, tolerance +/-"
+                     f"{DECLARED_OHMS_TOLERANCE_PCT:g}%) --")
+        lines.append(f"  {'net':<28} {'declared':>9} {'shipped':>9} {'off':>8} "
+                     f"{'read over mm':>13}")
+        off = 0
+        for n in sorted(held, key=lambda n: (-(abs(n.ohms_off_pct)
+                                               if n.ohms_off_pct is not None
+                                               else 1e9), n.net_name))[:top]:
+            pct = n.ohms_off_pct
+            unit = 'diff' if n.declared_differential else ''
+            if pct is None:
+                lines.append(f"  {n.net_name[:28]:<28} {n.declared_ohms:>7.1f}{unit[:1]:<2}"
+                             f" {'-':>9} {'-':>8} {0.0:>13.1f}  (nothing to read: "
+                             f"{'no coupled length' if n.declared_differential else 'no stackup'})")
+                off += 1
+                continue
+            flag = '  OFF TARGET' if abs(pct) > DECLARED_OHMS_TOLERANCE_PCT else ''
+            if n.declare_only:
+                flag += '  (declare-only: the project sized it)'
+            off += bool(flag)
+            lines.append(f"  {n.net_name[:28]:<28} {n.declared_ohms:>7.1f}{unit[:1]:<2}"
+                         f" {n.shipped_ohms:>9.1f} {pct:>+7.1f}% {n.ohms_length_mm:>13.1f}{flag}")
+        lines.append(f"  {off} of {len(held)} declared net(s) off target or unread "
+                     f"(not counted in the exit code).")
 
     # --- side gap / CPW ---
     gaps = report.all_gaps
@@ -935,6 +1424,7 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
         'board': report.board,
         'sample_step_mm': report.sample_step,
         'ratio_limit': report.ratio_limit,
+        'gap_source': report.gap_source,
         'notes': report.notes,
         'totals': {
             'nets_analyzed': len(report.nets),
@@ -957,6 +1447,16 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 sum(n.length_no_ground_mm for n in report.nets), 4),
             'length_gap_wrong_mm': round(
                 sum(n.length_gap_wrong_mm for n in report.nets), 4),
+            'length_at_own_pad_mm': round(
+                sum(n.length_at_own_pad_mm for n in report.nets), 4),
+            'nets_broken_promise': sorted(n.net_name for n in report.nets
+                                          if n.promise_broken),
+            # #1630: disclosure, not in the exit code
+            'declared_ohms_tolerance_pct': DECLARED_OHMS_TOLERANCE_PCT,
+            'nets_ohms_off_target': sorted(
+                n.net_name for n in report.nets if n.declared_ohms > 0 and (
+                    n.ohms_off_pct is None
+                    or abs(n.ohms_off_pct) > DECLARED_OHMS_TOLERANCE_PCT)),
         },
         'nets': [
             {
@@ -974,9 +1474,19 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 'outer_length_mm': round(n.outer_length_mm, 4),
                 'length_no_ground_mm': round(n.length_no_ground_mm, 4),
                 'length_gap_wrong_mm': round(n.length_gap_wrong_mm, 4),
+                'length_at_own_pad_mm': round(n.length_at_own_pad_mm, 4),
+                'declared_gap_mm': n.declared_gap,
+                'promise_broken': n.promise_broken,
                 'z0_nominal': round(n.z0_nominal, 3),
                 'z0_measured': round(n.z0_measured, 3),
                 'z0_error_pct': round(n.z0_error_pct, 3),
+                'declared_ohms': n.declared_ohms,
+                'declared_differential': n.declared_differential,
+                'declare_only': n.declare_only,
+                'shipped_ohms': round(n.shipped_ohms, 3),
+                'ohms_length_mm': round(n.ohms_length_mm, 4),
+                'ohms_off_pct': (None if n.ohms_off_pct is None
+                                 else round(n.ohms_off_pct, 3)),
                 'crossing_detail': [
                     {'kind': c.kind, 'layer': c.layer, 'ref_layer': c.ref_layer,
                      'x': round(c.x, 4), 'y': round(c.y, 4),
@@ -996,7 +1506,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
     parser.add_argument('input', help='Routed .kicad_pcb file')
-    parser.add_argument('--nets', nargs='+', metavar='PATTERN',
+    parser.add_argument('--nets', nargs='+', action='extend', metavar='PATTERN',
                         help='Only analyze these nets (fnmatch patterns). '
                              'Default: every routed net.')
     parser.add_argument('--sample-step', type=float, default=DEFAULT_SAMPLE_STEP,
@@ -1006,9 +1516,9 @@ def main() -> int:
                         default=DEFAULT_MIN_VOID_LENGTH,
                         help=f'Ignore void runs shorter than this in mm '
                              f'(default {DEFAULT_MIN_VOID_LENGTH}; filters fill '
-                             f'quantisation. The net\'s own via antipads, and '
-                             f'its P/N partner\'s, are exempted whatever the '
-                             f'length)')
+                             f'quantisation. The net\'s own via and '
+                             f'through-hole pin antipads, and its P/N '
+                             f'partner\'s, are exempted whatever the length)')
     parser.add_argument('--gap-ratio-limit', type=float,
                         default=CPWG_GAP_RATIO_LIMIT,
                         help=f'Side gap <= this multiple of the dielectric '
@@ -1050,6 +1560,7 @@ def main() -> int:
     # entry (even gap 0 = declared non-coplanar) outranks --coplanar-gap,
     # which remains the fallback for nets/boards without records.
     net_declared_gaps = {}
+    net_declared_ohms = {}
     try:
         from protected_nets import read_impedance_specs, pro_path_for_board
         _specs = read_impedance_specs(pro_path_for_board(args.input))
@@ -1061,15 +1572,20 @@ def main() -> int:
             # run never made. The record is kept so a later step with a usable
             # stackup can recompute it; this audit skips it. A record written
             # before #906 has no `applied` key at all and is treated as applied,
-            # which is what it meant then.
+            # which is what it meant then. A DECLARE-ONLY record (#1630) is
+            # graded: the project sized that copper itself and declared the
+            # ohms it was sized for.
+            from protected_nets import impedance_graded
             _unapplied = sorted(nm for nm, sp in _specs.items()
-                                if sp.get('applied') is False)
+                                if not impedance_graded(sp))
             _specs = {nm: sp for nm, sp in _specs.items()
-                      if sp.get('applied') is not False}
+                      if impedance_graded(sp)}
             _n2i = {n.name: nid for nid, n in pcb.nets.items() if n.name}
             net_declared_gaps = {
                 _n2i[nm]: float(sp.get('coplanar_gap', 0) or 0)
                 for nm, sp in _specs.items() if nm in _n2i}
+            net_declared_ohms = {_n2i[nm]: sp for nm, sp in _specs.items()
+                                 if nm in _n2i}
             _cop = sum(1 for g in net_declared_gaps.values() if g > 0)
             print(f"Auto-read {len(net_declared_gaps)} net impedance "
                   f"declaration(s) from the sibling .kicad_pro "
@@ -1093,7 +1609,8 @@ def main() -> int:
         coplanar_gap=args.coplanar_gap,
         gap_tolerance=args.gap_tolerance,
         board_name=os.path.basename(args.input),
-        net_declared_gaps=net_declared_gaps)
+        net_declared_gaps=net_declared_gaps,
+        net_declared_ohms=net_declared_ohms)
 
     print(format_report(report, verbose=args.verbose, top=args.top))
 
@@ -1104,8 +1621,7 @@ def main() -> int:
 
     if args.exit_zero:
         return 0
-    broken_promise = any((n.length_no_ground_mm + n.length_gap_wrong_mm) > 0.01
-                         for n in report.nets)
+    broken_promise = any(n.promise_broken for n in report.nets)
     return 1 if (report.total_crossings or broken_promise) else 0
 
 

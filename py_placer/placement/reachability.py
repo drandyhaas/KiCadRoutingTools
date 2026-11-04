@@ -10,8 +10,11 @@ This is that measurement. No physics, no heuristics, three classical steps:
 
   1. **Rasterise foreign copper, one grid per clearance class.** Clearance is
      PAIRWISE -- a KiCad netclass pair, plus `.kicad_dru` rules that scope a
-     clearance to a layer or a net -- so one grid at one clearance is already
-     the wrong model on any board with more than a Default class.
+     clearance to a layer, a net class, an item type or a net -- so one grid
+     at one clearance is already the wrong model on any board with more than
+     a Default class. Given a clearance model (`PairPricing`, #1625), each
+     object is stamped at the value its pair with the routed net's track
+     gets, through check_drc's own resolver.
 
   2. **Euclidean distance transform per class**, then
 
@@ -196,14 +199,106 @@ def _pad_on_layer(pad, layer) -> bool:
     return layer in layers or any(l in ('*.Cu',) for l in layers)
 
 
+def outline_edges(pcb):
+    """`[((x0, y0), (x1, y1)), ...]`: every Edge.Cuts edge copper must keep
+    away from (#1402) -- the outline's rings, every cutout and slot, and a
+    milled inner contour -- in the DRC's own reading (`check_drc.
+    board_edge_geometry`). A plain rectangle has no ring in the parser (its
+    bounds ARE the outline), so its four sides are returned from the bounds."""
+    from check_drc import board_edge_geometry
+    rings, _outer, _cut = board_edge_geometry(pcb.board_info)
+    edges = []
+    for ring in rings:
+        pts = list(ring)
+        for a, b in zip(pts, pts[1:] + pts[:1]):
+            edges.append((tuple(a), tuple(b)))
+    if not rings:
+        bb = getattr(pcb.board_info, 'board_bounds', None)
+        if bb:
+            x0, y0, x1, y1 = bb
+            c = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            edges.extend(zip(c, c[1:] + c[:1]))
+    return edges
+
+
+class PairPricing:
+    """The clearance a TRACK of the routed net must keep from each foreign
+    object, as check_drc grades the pair (#1625): `legality.
+    PadClearanceModel`, whose `pair` is check_drc's own resolution -- the
+    larger of the two net classes, the class/type-scoped `.kicad_dru` rule
+    binding the pair (which REPLACES it, raising or relaxing), the layer
+    rules standing after it, the rule binding a diff pair's P against its N,
+    and a pad override last. Each value is pinned up to `floor` (the fab
+    clearance this tool measures at), as the router pins a rule's.
+
+    `sources` records what set a value other than the board-wide base:
+    {source: sorted values}, e.g. {"rule 'hs_to_pads'": [0.1]}, so the
+    report can name a rule that changed the answer."""
+
+    def __init__(self, model, net_id, floor=None, board_copper=()):
+        self.model = model
+        self.net = int(net_id or 0)
+        self.floor = float(floor or 0.0)
+        self.board_copper = tuple(board_copper or ())      # stack order
+        self._track = {}
+        self.sources: Dict[str, set] = {}
+
+    def _routed(self, layer):
+        f = self._track.get(layer)
+        if f is None:
+            f = self._track[layer] = self.model.item_floor(
+                self.net, 'track', frozenset((layer,)))
+        return f
+
+    def _price(self, other, layer):
+        mine = self._routed(layer)
+        v, src = self.model.pair_with_source(mine, other)
+        if (not src and v < self.model.base - 1e-9 and mine.rkey is not None
+                and other.rkey is not None):
+            # a rule RELAXING the pair below the base: `pair_with_source`
+            # discloses only a raise (check_drc's `_mark_required`), and the
+            # rule that lowered it is the one a reader needs named
+            src = self.model._channel_pair(mine, other)[1]
+        v = max(float(v), self.floor)
+        if src:
+            self.sources.setdefault(src, set()).add(round(v, 4))
+        return v
+
+    def pad(self, pad, layer):
+        return self._price(self.model.pad_floor(pad), layer)
+
+    def via(self, via, layer):
+        try:
+            from geometry_utils import via_copper_layers
+            cu = frozenset(via_copper_layers(via, list(self.board_copper)))
+        except Exception:                                       # noqa: BLE001
+            cu = frozenset()
+        return self._price(self.model.item_floor(
+            via.net_id, 'via', cu or frozenset(self.board_copper)), layer)
+
+    def segment(self, seg):
+        return self._price(self.model.item_floor(seg.net_id, 'track',
+                                                 frozenset((seg.layer,))),
+                           seg.layer)
+
+
 def slack_field(pcb, target_net_id, layer, view, base_clearance,
-                net_clearances=None, step=0.01):
+                net_clearances=None, step=0.01, edge_clearance=None,
+                pricing=None):
     """(slack, own, D) for one layer.
 
-    `net_clearances` is {net_id: clearance_mm} -- the per-net map the routing
-    config already resolves from netclasses and `.kicad_dru`, so this grades at
-    what the board would actually route at rather than at one guessed number.
-    Nets absent from it use `base_clearance`.
+    `pricing` (a `PairPricing` for the routed net, #1625) prices each
+    foreign track, via and pad at the clearance the PAIR gets -- the routed
+    net's track against that object's type and net, through check_drc's
+    resolver, `.kicad_dru` rules included. Without it, `net_clearances` --
+    {net_id: clearance_mm}, ONE number per foreign net, whatever the item or
+    the routed net -- and `base_clearance` for nets absent from it.
+
+    `edge_clearance` (#1402) is the copper-to-Edge.Cuts floor: when given, the
+    outline, every cutout and slot (a mouse-bite row's drilled webs included)
+    is an obstacle at that clearance, so a lane the outline closes reads
+    closed. NPTH holes are obstacles either way, at the base clearance.
+    None keeps the field copper-only, as before.
     """
     ndimage = _require_scipy()
     w = int(math.ceil((view[2] - view[0]) / step))
@@ -214,30 +309,56 @@ def slack_field(pcb, target_net_id, layer, view, base_clearance,
     own = np.zeros((h, w), dtype=bool)
     nc = dict(net_clearances or {})
 
+    def grid_at(c):
+        return per_class.setdefault(round(float(c), 4),
+                                    np.zeros((h, w), dtype=bool))
+
     def grid_for(net_id):
-        c = round(float(nc.get(net_id, base_clearance)), 4)
-        return per_class.setdefault(c, np.zeros((h, w), dtype=bool))
+        return grid_at(nc.get(net_id, base_clearance))
 
     for s in pcb.segments:
         if s.layer != layer:
             continue
-        g = own if s.net_id == target_net_id else grid_for(s.net_id)
+        g = (own if s.net_id == target_net_id else
+             grid_at(pricing.segment(s)) if pricing is not None else
+             grid_for(s.net_id))
         _capsule(g, s.start_x, s.start_y, s.end_x, s.end_y, s.width / 2.0,
                  view, step)
     for v in pcb.vias:                            # a via blocks every layer
-        g = own if v.net_id == target_net_id else grid_for(v.net_id)
+        g = (own if v.net_id == target_net_id else
+             grid_at(pricing.via(v, layer)) if pricing is not None else
+             grid_for(v.net_id))
         _capsule(g, v.x, v.y, v.x, v.y, v.size / 2.0, view, step)
     for fp in pcb.footprints.values():
         for p in fp.pads:
             if getattr(p, 'pad_type', '') == 'np_thru_hole':
-                # NPTH has no copper: only its hole matters, and that is a
-                # drill constraint, not a clearance one.
+                # NPTH has no copper: only its hole matters (#1402: an
+                # obstacle at the base clearance, on every layer).
+                if (p.drill or 0) > 0:
+                    from kicad_parser import pad_drill_capsule
+                    p1, p2, r = pad_drill_capsule(p)
+                    _capsule(grid_for(None), p1[0], p1[1], p2[0], p2[1], r,
+                             view, step)
                 continue
             if not _pad_on_layer(p, layer):
                 continue
-            g = own if p.net_id == target_net_id else grid_for(p.net_id)
+            g = (own if p.net_id == target_net_id else
+                 grid_at(pricing.pad(p, layer)) if pricing is not None else
+                 grid_for(p.net_id))
             _rect(g, p.global_x, p.global_y, p.size_x, p.size_y, view, step,
                   getattr(p, 'rect_rotation', 0.0) or 0.0)
+    # #1402: the outline, cutouts and slots, at the copper-to-edge floor. A
+    # line drawn at least one cell thick cannot be stepped across.
+    if edge_clearance is not None and edge_clearance > 0:
+        eg = per_class.setdefault(round(float(edge_clearance), 4),
+                                  np.zeros((h, w), dtype=bool))
+        for (ax, ay), (bx, by) in outline_edges(pcb):
+            if (max(ax, bx) < view[0] - edge_clearance
+                    or min(ax, bx) > view[2] + edge_clearance
+                    or max(ay, by) < view[1] - edge_clearance
+                    or min(ay, by) > view[3] + edge_clearance):
+                continue
+            _capsule(eg, ax, ay, bx, by, step, view, step)
     # #1031: a rule area forbidding tracks on this layer is an obstacle at the
     # base clearance, exactly as the router prices it (clearance +
     # track_width/2 from the region), so a pad seated in the band no longer
@@ -376,6 +497,11 @@ class Reachability:
     #: to the object's edge; `clearance` is what converts `bottleneck_mm` into
     #: `gap_mm` for that blocker.
     near: Tuple[dict, ...] = ()
+    #: #1625: what priced a foreign object at other than the base clearance,
+    #: {source: [values]} -- "rule '<name>'", 'layer rule', 'netclass', 'pad
+    #: override' -- when the field was built from a clearance model. Not in
+    #: `to_dict` (its key set is pinned); the CLI publishes it.
+    pricing_sources: Optional[dict] = None
 
     @property
     def wide_open(self) -> bool:
@@ -724,7 +850,7 @@ def _point_seg_dist(px, py, x0, y0, x1, y1):
 
 
 def nearest_foreign(pcb, x, y, net_id, layers=None, net_clearances=None,
-                    base_clearance=None):
+                    base_clearance=None, pricing=None):
     """The two nearest pieces of FOREIGN copper to (x, y), nearest first.
 
     "Which two things form this throat" is the question every reader asks
@@ -752,12 +878,21 @@ def nearest_foreign(pcb, x, y, net_id, layers=None, net_clearances=None,
     `net_clearances` / `base_clearance`, when given, stamp each entry with the
     clearance in force for THAT blocker, which is what converts the bottleneck
     into a physical gap (see `Reachability.gap_mm`). Published per blocker so
-    the conversion is auditable instead of assumed.
+    the conversion is auditable instead of assumed. `pricing` (#1625), when
+    given, stamps each at the PAIR's value instead -- the one `slack_field`
+    built the field at for that object, on the throat's layer.
     """
     lay = set(layers or ())
     nc = dict(net_clearances or {})
+    _lay1 = next(iter(lay)) if len(lay) == 1 else None
 
-    def _clr(nid):
+    def _clr(nid, obj=None, kind=None):
+        if pricing is not None and obj is not None:
+            if kind == 'pad':
+                return pricing.pad(obj, _lay1 or (obj.layers or [None])[0])
+            if kind == 'via':
+                return pricing.via(obj, _lay1)
+            return pricing.segment(obj)
         if base_clearance is None:
             return None
         return float(nc.get(nid, base_clearance))
@@ -784,7 +919,8 @@ def nearest_foreign(pcb, x, y, net_id, layers=None, net_clearances=None,
                             'pad': f'{fp.reference}.{p.pad_number}',
                             'net': (pcb.nets[p.net_id].name
                                     if p.net_id in pcb.nets else None),
-                            'net_id': p.net_id, 'clearance': _clr(p.net_id),
+                            'net_id': p.net_id,
+                            'clearance': _clr(p.net_id, p, 'pad'),
                             'x': round(p.global_x, 4), 'y': round(p.global_y, 4),
                             'layer': (p.layers or [None])[0],
                             'dist': round(d, 5)})
@@ -796,7 +932,8 @@ def nearest_foreign(pcb, x, y, net_id, layers=None, net_clearances=None,
             out.append({'kind': 'via', 'ref': None, 'pad': None,
                         'net': (pcb.nets[v.net_id].name
                                 if v.net_id in pcb.nets else None),
-                        'net_id': v.net_id, 'clearance': _clr(v.net_id),
+                        'net_id': v.net_id,
+                        'clearance': _clr(v.net_id, v, 'via'),
                         'x': round(v.x, 4), 'y': round(v.y, 4),
                         'layer': None, 'dist': round(d, 5)})
     for s in pcb.segments:
@@ -810,7 +947,8 @@ def nearest_foreign(pcb, x, y, net_id, layers=None, net_clearances=None,
             out.append({'kind': 'segment', 'ref': None, 'pad': None,
                         'net': (pcb.nets[s.net_id].name
                                 if s.net_id in pcb.nets else None),
-                        'net_id': s.net_id, 'clearance': _clr(s.net_id),
+                        'net_id': s.net_id,
+                        'clearance': _clr(s.net_id, s, 'segment'),
                         'x': round(s.start_x, 4), 'y': round(s.start_y, 4),
                         'layer': s.layer, 'dist': round(d, 5)})
     out.sort(key=lambda e: e['dist'])
@@ -849,8 +987,16 @@ def without_routed_copper(pcb):
 def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
                      layers=None, view=None, track_mm=0.15, via_mm=0.6,
                      base_clearance=0.15, net_clearances=None, step=0.01,
-                     margin_mm=4.0) -> Reachability:
+                     margin_mm=4.0, edge_clearance=None,
+                     clearance_model=None, clearance_floor=None) -> Reachability:
     """Can a track of `track_mm` get from `seed_xy` to the rest of its net?
+
+    `clearance_model` (a `legality.PadClearanceModel` built for the board,
+    #1625) prices each foreign object at the clearance the pair actually gets
+    -- the routed net's track against that object, `.kicad_dru` rules
+    included -- pinned up to `clearance_floor`; `net_clearances` is then not
+    read. The result's `pricing_sources` names what set a value other than
+    the base (a rule, a net class, a pad override).
 
     `view` defaults to a `margin_mm` box around the seed, because the answer is
     LOCAL: a throat is a property of the copper within a few millimetres, and
@@ -874,10 +1020,15 @@ def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
                 seed_xy[0] + margin_mm, seed_xy[1] + margin_mm)
     view = tuple(float(v) for v in view)
 
+    pricing = None
+    if clearance_model is not None:
+        pricing = PairPricing(clearance_model, net_id, clearance_floor,
+                              pcb.board_info.copper_layers or layers)
     slacks, owns, Ds = [], [], []
     for layer in layers:
         s, o, D = slack_field(pcb, net_id, layer, view, base_clearance,
-                              net_clearances, step)
+                              net_clearances, step,
+                              edge_clearance=edge_clearance, pricing=pricing)
         slacks.append(s)
         owns.append(o)
         Ds.append(D)
@@ -984,5 +1135,8 @@ def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
         r.near = nearest_foreign(pcb, throat[1], throat[2], net_id,
                                  (layers[throat[0]],),
                                  net_clearances=net_clearances,
-                                 base_clearance=base_clearance)
+                                 base_clearance=base_clearance,
+                                 pricing=pricing)
+    if pricing is not None:
+        r.pricing_sources = {k: sorted(v) for k, v in pricing.sources.items()}
     return r

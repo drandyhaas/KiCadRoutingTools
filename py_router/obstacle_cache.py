@@ -830,7 +830,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # double-counting.
         layer_widths.append(config.route_reserve_width(layer_name))
         # #498: a .kicad_dru layer rule REPLACES the net/class value on its layer.
-        clr_l = config.layer_clearance(layer_name, obs_clearance)
+        clr_l = config.layer_clearance(layer_name, obs_clearance, net_id)
         # A track-scoped DRU rule RAISES the seg-vs-seg capsule only (#735);
         # the via ring keeps clr_l. Add/remove parity is automatic (the same
         # NetObstacleData arrays are batch-added and batch-removed).
@@ -866,7 +866,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) \
                     else config.track_width
                 via_block_mm = (config.via_size / 2 + seg_w / 2
-                                + config.layer_clearance(seg.layer, obs_clearance)  # #498
+                                + config.layer_clearance(seg.layer, obs_clearance, net_id)  # #498
                                 + extra_clearance)
                 _vs = segment_blocked_spans(          # #815
                     seg.start_x, seg.start_y, seg.end_x, seg.end_y,
@@ -881,7 +881,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
-            _clr_l = config.layer_clearance(seg.layer, obs_clearance)  # #498
+            _clr_l = config.layer_clearance(seg.layer, obs_clearance, net_id)  # #498
             _trk_l = config.track_obstacle_clearance(net_id, _clr_l)  # dru track rule
             expansion_mm = max(coord.grid_step,
                                own_half + _trk_l
@@ -923,13 +923,13 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         vs = via.size if (getattr(via, 'size', 0) and via.size > 0) else config.via_size
         # #498: the via meets each layer's copper ON that layer -> per-layer rule.
         via_track_list = [max(1, coord.to_grid_dist_safe(
-            vs / 2 + lw / 2 + config.layer_clearance(ln, obs_clearance) + extra_clearance))
+            vs / 2 + lw / 2 + config.layer_clearance(ln, obs_clearance, net_id) + extra_clearance))
             for ln, lw in zip(config.layers, layer_widths)]
         # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
         # Float radius (no floor) so the disc threshold blocks the true clearance.
         # #498: barrels meet on every stack layer -> stack max.
         via_via_radius = max(1.0, (vs / 2 + config.via_size / 2
-                                   + config.stack_clearance(obs_clearance)) * coord.inv_step)
+                                   + config.stack_clearance(obs_clearance, net_id)) * coord.inv_step)
         _collect_via_obstacles(via, coord, num_layers, via_track_list,
                                 via_via_radius, diagonal_margin,
                                 blocked_cells_set, blocked_vias_set,
@@ -968,7 +968,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     for pad in pads:
         _collect_pad_obstacles(pad, coord, layer_map, config, extra_clearance,
                                 blocked_cells_set, blocked_vias_set,
-                                obs_clearance=obs_clearance)
+                                obs_clearance=(obs_clearance if config.scoped_clearance is None
+                                               else config.pad_obstacle_clearance(pad)))
 
     # Concatenate and deduplicate (the Rust map refcounts batch adds, so
     # each cell must appear once per net - same as the old set semantics)
@@ -1175,7 +1176,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # minimum (KiCad semantics, measured) -- parity with _add_pad_obstacle.
     def _layer_clr(layer_name):
         return config.pad_override_clearance(
-            config.layer_clearance(layer_name, clearance), pad)
+            config.layer_clearance(layer_name, clearance, pad=pad), pad)
 
     def _clr_groups(expanded):
         groups = {}
@@ -1492,6 +1493,7 @@ def precompute_via_placement_obstacles(
     # #543: mirror the builders' cross-class pricing (see exclude_net_id above).
     _own = exclude_net_id is not None and net_id == exclude_net_id
     obs_clr = config.clearance if _own else config.obstacle_clearance(net_id)
+    _obs_net = None if _own else net_id     # #1491: a foreign net's rules in file order
 
     # Collect blocked positions as numpy chunks (one per segment/via stamp), then
     # concatenate. Duplicate counts are preserved - the obstacle maps are REFERENCE
@@ -1515,13 +1517,13 @@ def precompute_via_placement_obstacles(
         # #543: the net's class clearance under the seg's layer rule (#434/#498),
         # exactly as build_via_obstacle_map prices this segment.
         via_margin = (config.via_size / 2 + seg.width / 2
-                      + config.layer_clearance(seg.layer, obs_clr) + grid_cushion)
+                      + config.layer_clearance(seg.layer, obs_clr, _obs_net) + grid_cushion)
         via_chunks.append(segment_blocked_cells_array(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_margin, config.grid_step))
         # Routing map: capsule at the per-layer track width, NO cushion (== _add_segment_routing_obstacle).
         if seg.layer in cell_chunks:
             route_margin = (track_w_by_layer[seg.layer] / 2 + seg.width / 2
-                            + config.layer_clearance(seg.layer, obs_clr))
+                            + config.layer_clearance(seg.layer, obs_clr, _obs_net))
             cell_chunks[seg.layer].append(segment_blocked_cells_array(
                 seg.start_x, seg.start_y, seg.end_x, seg.end_y, route_margin, config.grid_step))
 
@@ -1536,7 +1538,7 @@ def precompute_via_placement_obstacles(
         # #543: stack-max class clearance for foreign vias, run clearance for the
         # exclude net's own -- exactly the builder's (size, clearance) grouping.
         vv_mm = (via.size / 2 + config.via_size / 2
-                 + config.stack_clearance(obs_clr) + grid_cushion)
+                 + config.stack_clearance(obs_clr, _obs_net) + grid_cushion)
         vv_sq = (vv_mm / config.grid_step) ** 2
         via_chunks.append(center + circle_offsets(max(1, int(math.ceil(math.sqrt(vv_sq)))), vv_sq))
         # Via map: drill hole-to-hole keepout, stamped IN ADDITION to the via-via
@@ -1560,7 +1562,7 @@ def precompute_via_placement_obstacles(
         # width (== build_routing_obstacle_map's via loop). The via spans all layers.
         for layer in all_copper_layers:
             r_mm = (via.size / 2 + track_w_by_layer[layer] / 2
-                    + config.layer_clearance(layer, obs_clr)  # #543 (#434/#498)
+                    + config.layer_clearance(layer, obs_clr, _obs_net)  # #543 (#434/#498)
                     + config.grid_step / 2)
             rg = coord.to_grid_dist_safe(r_mm)
             # tie -> OPEN. Mirrors build_routing_obstacle_map's via loop, which

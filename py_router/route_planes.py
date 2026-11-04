@@ -2173,17 +2173,25 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
         cfg_sj = GridRouteConfig(track_width=track_width, clearance=clearance,
                                  grid_step=grid_step, via_size=via_size,
                                  via_drill=via_drill, layers=all_layers)
-        from kicad_dru import install_layer_clearances
+        from kicad_dru import install_layer_clearances, install_track_clearances
         install_layer_clearances(cfg_sj, None, None, pcb_data)  # #498
+        # #1602: and the track/scoped channels (#1135/#1491): a bridge is a
+        # track, and a class/type-scoped rule binds it like any other
+        install_track_clearances(cfg_sj, None, None, pcb_data)
         nb = close_soft_joints(bridge_results, pcb_data, None, cfg_sj)
         if nb:
             for br in bridge_results:
                 for bs in br.get('new_segments', []):
-                    all_new_segments.append({
-                        'start': (bs.start_x, bs.start_y),
-                        'end': (bs.end_x, bs.end_y),
-                        'width': bs.width, 'layer': bs.layer,
-                        'net_id': bs.net_id, 'from_restore': True})
+                    # soft_joint (#1577): copper the board already carried,
+                    # joined -- not the step's own for its DRC floors
+                    # (fix_kicad_drc_settings.plane_floor_segments)
+                    _br = {'start': (bs.start_x, bs.start_y),
+                           'end': (bs.end_x, bs.end_y),
+                           'width': bs.width, 'layer': bs.layer,
+                           'net_id': bs.net_id, 'from_restore': True,
+                           'soft_joint': True}
+                    all_new_segments.append(_br)
+                    _LAST_SOFT_JOINT_BRIDGES.append(_br)
             print(f"  Closed {nb} soft joint(s) in plane/restored copper")
     except Exception as e:
         print(f"  (soft-joint close skipped: {e})")
@@ -2296,7 +2304,7 @@ def _signal_copper(pcb_data, plane_net_ids):
 
 
 def _resolve_zone_clearance(zone_clearance, clearance, min_thickness,
-                            pcb_data, via_size, net_names=None):
+                            pcb_data, via_size, net_names=None, record=True):
     """Resolve the pour clearance (see call site). None -> the routed
     clearance; then, if a BGA via lattice the pour must serve (a field with a
     ball on a plane net, or a plane-net via in it) leaves less than
@@ -2311,12 +2319,18 @@ def _resolve_zone_clearance(zone_clearance, clearance, min_thickness,
     clearance (escalated, or an explicit tight --zone-clearance) only
     survives refill if the project floor drops with it. Without the record,
     the .kicad_pro writeback kept the nominal floor and the refilled pour
-    sealed the very BGA corridors the escalation opened."""
+    sealed the very BGA corridors the escalation opened.
+
+    ``record`` False leaves the ledger to the caller: a run that keeps every
+    existing zone (``skip_existing_zones``) draws no pour of its own, so there
+    is no regrown pour for the floor to follow -- recording its resolved value
+    lowered the Default class for nothing (#1369)."""
     zc = _resolve_zone_clearance_impl(
         zone_clearance, clearance, min_thickness, pcb_data, via_size,
         net_names)
-    import clearance_ledger
-    clearance_ledger.record(zc)
+    if record:
+        import clearance_ledger
+        clearance_ledger.record(zc)
     return zc
 
 
@@ -2341,7 +2355,15 @@ def _resolve_zone_clearance_impl(zone_clearance, clearance, min_thickness,
     # the one that passes between its vias one pitch apart.
     need = []            # (clearance, ref, pitch, via) per field that threads
     unthreaded = []      # (ref, pitch, via, clearance it would need)
+    from kicad_parser import non_aperture_pads, pads_form_matrix
     for fp in find_components_by_type(pcb_data, 'BGA'):
+        # A via LATTICE needs a ball matrix: detect_package_type calls every
+        # LGA/CSP/WLP a 'BGA' (so their interior lands stay clear of routes,
+        # #144), but a perimeter land pattern has no interior balls for the
+        # pour to thread between -- an 8-pad LGA read as a field lowered the
+        # whole board's clearance for a lattice it does not have (#1369).
+        if not pads_form_matrix(non_aperture_pads(fp)):
+            continue
         pitch = detect_bga_pitch(fp)
         if not pitch:
             continue
@@ -3097,6 +3119,19 @@ def consume_zone_replacements() -> list:
     return out
 
 
+#: The soft-joint bridges the last create_plane() wrote (#1577): main()
+#: leaves them out of the copper its DRC-floor writeback counts as drawn
+#: (fix_kicad_drc_settings.plane_floor_segments). Taken like the pad tally.
+_LAST_SOFT_JOINT_BRIDGES: list = []
+
+
+def consume_soft_joint_bridges() -> list:
+    """Take (and clear) the last pour's soft-joint bridge dicts."""
+    global _LAST_SOFT_JOINT_BRIDGES
+    out, _LAST_SOFT_JOINT_BRIDGES = list(_LAST_SOFT_JOINT_BRIDGES), []
+    return out
+
+
 def _note_zone_replacements(replaced_pours_by_target, zone_data, layer_nets,
                             board_edge_clearance) -> None:
     """Print, and record for JSON_SUMMARY, what replacing each existing pour
@@ -3323,6 +3358,7 @@ def create_plane(
     # (engine-side, so the Planes tab's log shows it too).
     _LAST_SENSE_BRANCHES.clear()
     _LAST_ZONE_REPLACEMENTS.clear()   # #1329: filled once the new pours exist
+    _LAST_SOFT_JOINT_BRIDGES.clear()  # #1577: filled by the finalize
     from sense_branch import report as _sense_report
     _sense_report(pcb_data)
 
@@ -3359,7 +3395,7 @@ def create_plane(
     # (but still warned about when they cannot thread).
     zone_clearance = _resolve_zone_clearance(
         zone_clearance, clearance, min_thickness, pcb_data, via_size,
-        net_names)
+        net_names, record=False)
     # (this call's virtual vias, filled per net below: none carried over from an earlier call on the same pcb_data)
     pcb_data._deferred_pad_seeds = {}
 
@@ -3483,6 +3519,12 @@ def create_plane(
             if _zp > shared_layer_priority.get(net_name, 0):
                 shared_layer_priority[net_name] = _zp
 
+    # The resolved pour clearance reaches the clearance ledger only when this
+    # call draws a pour (#1369): kept zones refill at their own clearance.
+    if any(should_create_zones):
+        import clearance_ledger
+        clearance_ledger.record(zone_clearance)
+
     # Step 3: Get board bounds for zone polygon
     board_bounds = pcb_data.board_info.board_bounds
     if not board_bounds or (board_bounds[2] - board_bounds[0]) <= 0 or (board_bounds[3] - board_bounds[1]) <= 0:
@@ -3599,8 +3641,11 @@ def create_plane(
         # (the --net-clearances file, or the GUI's own class map, already
         # capped there) is used as given, as batch_route does.
         if net_clearances and clamp_netclasses and clearance_ceiling is not None:
-            net_clearances = {nid: min(c, clearance_ceiling)
-                              for nid, c in net_clearances.items()}
+            from fab_tiers import cap_net_clearances
+            net_clearances = cap_net_clearances(
+                net_clearances, clearance_ceiling,
+                net_names={nid: n.name for nid, n in pcb_data.nets.items()},
+                board_path=input_file)
     # The plane nets of this call set the floor foreign obstacles are priced
     # from, as in repair_planes and batch_route (#1290).
     if net_clearances:
@@ -4603,8 +4648,9 @@ Examples:
     plane_layers = []
     layer_nets = {}
 
+    from plane_groups import split_plane_group
     for net_arg, layer in zip(args.nets, args.plane_layers):
-        nets_on_layer = [n.strip() for n in net_arg.split('|')]
+        nets_on_layer = split_plane_group(net_arg)
         for net in nets_on_layer:
             net_names.append(net)
             plane_layers.append(layer)
@@ -4745,6 +4791,13 @@ Examples:
         # block -- so discovering it via pcb_data.source_path found nothing on
         # a fresh output path, and return vias ignored every layer rule.
         install_layer_clearances(gnd_config, None, args.input_file, pcb_data)
+        # #1602: and the track/scoped channels (#1135/#1491), as create_plane
+        # installs them: a class/type-scoped rule binds a return via too.
+        from kicad_dru import install_track_clearances
+        install_track_clearances(
+            gnd_config, None, args.input_file, pcb_data,
+            routed_net_ids=[nid for nid, n in pcb_data.nets.items()
+                            if n.name == args.gnd_via_net] or None)
         coord = GridCoord(gnd_config.grid_step)
 
         # Cross-class clearance (#434/#439), resolved exactly as create_plane
@@ -4759,8 +4812,11 @@ Examples:
                                   args.input_file,
                                   {nid: n.name for nid, n in pcb_data.nets.items()}))
         if _nc_by_name is None and gnd_net_clearances and args._clamp_netclasses:
-            gnd_net_clearances = {nid: min(c, args._clearance_ceiling)
-                                  for nid, c in gnd_net_clearances.items()}
+            from fab_tiers import cap_net_clearances
+            gnd_net_clearances = cap_net_clearances(
+                gnd_net_clearances, args._clearance_ceiling,
+                net_names={nid: n.name for nid, n in pcb_data.nets.items()},
+                board_path=args.input_file)
 
         # Build obstacle map
         obstacles = build_base_obstacle_map(pcb_data, gnd_config, [],
@@ -4773,7 +4829,8 @@ Examples:
             args.gnd_via_distance,
             gnd_config,
             obstacles,
-            coord
+            coord,
+            net_clearances=gnd_net_clearances
         )
 
         if gnd_vias:
@@ -4837,8 +4894,9 @@ Examples:
 
     # Make the output project's KiCad DRC constraints consistent with the routed
     # clearances/sizes (issue #160); only edits the .kicad_pro, never the board.
-    if not args.no_fix_drc_settings and not args.dry_run \
-            and args.output_file and os.path.isfile(args.output_file):
+    _wrote_output = (not args.dry_run and args.output_file
+                     and os.path.isfile(args.output_file))
+    if not args.no_fix_drc_settings and _wrote_output:
         try:
             import clearance_ledger
             eff_clearance = clearance_ledger.effective(args.clearance)
@@ -4848,21 +4906,40 @@ Examples:
                       f"grading at this floor")
             from fix_kicad_drc_settings import (fix_project_for_output, drc_fix_kwargs,
                                                 read_project_edge_clearance,
-                                                drawn_copper, plane_fix_kwargs)
+                                                drawn_copper_items, plane_fix_kwargs,
+                                                step_hole_clearance)
             # #1319: only the floors of copper this step drew -- the Planes
             # tab makes the same decision from the copper it applied. Counted
-            # off the files, so the GND return vias above are included.
-            _n_tracks, _n_vias = drawn_copper(args.input_file, args.output_file)
-            if _n_tracks is None:
+            # off the files, so the GND return vias above are included; the
+            # soft-joint bridges, which join copper the input already
+            # carried, are not (#1577, plane_floor_segments).
+            _bridges = consume_soft_joint_bridges()
+            _drawn = drawn_copper_items(args.input_file, args.output_file,
+                                        exclude=_bridges)
+            if _drawn[1] is None:
                 _n_tracks = _n_vias = 1     # unreadable: write as before
+            else:
+                _n_tracks, _n_vias = len(_drawn[1]), len(_drawn[2])
             _plane_kw = plane_fix_kwargs(
                 _n_tracks, _n_vias, clearance=eff_clearance,
                 hole_to_hole=args.hole_to_hole_clearance,
                 track_width=args.track_width, via_size=args.via_size,
                 via_drill=args.via_drill)
-            if not (_n_tracks or _n_vias):
-                print("  Bare pour (no track or via drawn): writing the copper "
-                      "clearance only -- no size or copper-to-hole floor (#1319)")
+            # #1577: the copper-to-hole floor this step HELD, lowered only to
+            # what its own copper needs, as route.py (#1493) and route_diff
+            # (#1369) write it; a lowering is a design_rules ledger row, so
+            # --strict-sizes sees it. A bare pour writes none (#1319).
+            _hole_clr = None
+            if _n_tracks or _n_vias:
+                _hole_clr = step_hole_clearance(
+                    args.input_file, args.output_file, eff_clearance,
+                    drawn=_drawn if _drawn[1] is not None else None)
+            else:
+                _also = (f"; its {len(_bridges)} soft-joint bridge(s) join "
+                         f"copper the board already carried" if _bridges else "")
+                print("  Bare pour (no track or via drawn" + _also + "): writing "
+                      "the copper clearance only -- no size or copper-to-hole "
+                      "floor (#1319)")
             # #338: record the PROJECT's copper-to-edge rule, never this
             # tool's --board-edge-clearance -- that is the plane-zone INSET
             # (default 0.5), not an enforced DRC floor; writing it into a
@@ -4876,13 +4953,16 @@ Examples:
                 track_width=_plane_kw['track_width'],
                 via_diameter=_plane_kw['via_diameter'],
                 via_drill=_plane_kw['via_drill'],
+                hole_clearance=_hole_clr,
                 copper_holes=_plane_kw['copper_holes'],
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+    if _wrote_output:
         # #581: record an ACTIVE same-net pad via clearance in the output's
         # project so every later chain step keeps its vias off same-net pads
-        # too. After fix_project_for_output so the .kicad_pro exists.
+        # too. After fix_project_for_output so the .kicad_pro exists; written
+        # even under --no-fix-drc-settings (#1415).
         try:
             from protected_nets import (persist_same_net_pad_clearance,
                                         pro_path_for_board)
@@ -4898,7 +4978,8 @@ Examples:
     import json as _json, clearance_ledger as _cl
     _summary = {
         "min_clearance_used": _cl.effective(args.clearance),
-        "plane_nets": sorted(set(args.nets)),
+        # #1495: a split layer's '|' group is its nets, not one name
+        "plane_nets": sorted(set(__import__('plane_groups').plane_net_names(args.nets))),
     }
     # `plane_nets` is a de-duplicated NAME list, and --nets/--plane-layers are
     # matched POSITIONALLY, so `--nets GND GND --plane-layers In1.Cu In2.Cu`

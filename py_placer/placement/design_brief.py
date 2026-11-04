@@ -54,9 +54,10 @@ than ignored, because an author who wrote one believes it is being honoured:
 
 * an envelope or outline -- `floorplan`'s module docstring is the rule, the
   board outline is not ours to change;
-* a height limit -- nothing in the placement stack measures z (no height in
-  `legality.GradedPart`, none in the parser), so a declared limit would grade
-  nothing at all. A constraint the author believes they set and the grader
+* a height limit -- nothing in the placement stack grades a board-wide one:
+  heights are judged per part and per area (#1443, `placement.heights`):
+  which part fits under which, a declared cover, a keep-out's
+  `max_height_mm`; so a declared board-wide limit would grade nothing at all. A constraint the author believes they set and the grader
   never checks is the exact failure `_reject_unknown` exists to prevent.
 """
 from __future__ import annotations
@@ -71,6 +72,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import floorplan as fp
+from .heights import is_glob
 
 SCHEMA_VERSION = 1
 KIND = 'design-brief'
@@ -102,7 +104,14 @@ class BriefError(fp.IntentError):
 
 _TOP_LEVEL_KEYS = {'schema', 'kind', 'board', 'units', 'min_reader',
                    'product', 'interfaces', 'keepouts', 'fixed', 'unknown',
-                   'proximity', 'context', 'arrays', 'assembly', 'keep_away'}
+                   'proximity', 'context', 'arrays', 'assembly', 'keep_away',
+                   'covers', 'heights', 'cans'}
+#: #1443. What stands over the board and how tall the parts are, from
+#: datasheets: `covers[]` (a card in its socket, a module on its stacking
+#: connector) and `heights[]` (a part's height, or the room under its body).
+#: The rows ARE the intent's (validated by the intent loader's own
+#: `_cover_claims` / `_height_claims`) and compile into it 1:1, so a cover
+#: worked out once from the datasheets travels with the board.
 #: #1253. Two NET groups no closer than GAP mm: a list of rules in route.py's
 #: own `--keep-away` syntax (`AGGRESSOR:VICTIM:GAP`, `class=` terms), each a
 #: string or `{"rule": ..., "why": ...}`, or "unknown". ONE declaration with
@@ -117,6 +126,18 @@ _TOP_LEVEL_KEYS = {'schema', 'kind', 'board', 'units', 'min_reader',
 #: gate; `why` and `requirement` ride into its `context`. `sides` is not
 #: here: the emitter OBSERVES it off the board.
 _ASSEMBLY_KEYS = {'body_edge_mm', 'why', 'requirement', 'note', 'context'}
+#: #1475. One shield can: the area it encloses (`zone`, board mm), its face,
+#: the room inside it (`interior_height_mm`, from `source`), and which parts
+#: belong under it per face (`members`). `ref` names the can's footprint when
+#: it is drawn; `wall_mm` is the band its wall will take when it is not.
+#: Compiled into rows the intent already grades -- a block, keep-outs and a
+#: height -- never graded as a key of its own.
+_CAN_KEYS = {'name', 'ref', 'zone', 'side', 'interior_height_mm', 'wall_mm',
+             'members', 'source', 'why', 'requirement', 'note', 'context'}
+_CAN_FACE_KEYS = {'in', 'either'}
+#: The prefix of every row a `cans[]` entry compiles to, and refused on a
+#: keep-out the brief declares itself, as `fence:` is in the intent.
+CAN_PREFIX = 'can:'
 
 #: Keys refused BY NAME, with the reason, rather than as merely unknown.
 _REFUSED_TOP_LEVEL = {
@@ -125,10 +146,11 @@ _REFUSED_TOP_LEVEL = {
     'outline': 'the board outline is READ from the board, never authored',
     'board_size': 'board size is a mechanical decision this toolchain does '
                   'not make; nothing here writes Edge.Cuts',
-    'height': 'nothing in the placement stack measures height -- there is no '
-              'z in legality.GradedPart and none in the parser -- so a '
-              'declared limit would grade nothing, which is worse than not '
-              'declaring it',
+    'height': 'nothing in the placement stack grades a board-wide height '
+              'limit -- heights are judged per part and per area (#1443): '
+              "which part fits under which, an intent's covers[], a "
+              "keep-out's max_height_mm -- so a declared limit would grade "
+              'nothing, which is worse than not declaring it',
 }
 
 _PRODUCT_KEYS = {'form_factor', 'primary_axis', 'held_by', 'user_top_side'}
@@ -247,6 +269,11 @@ class Brief:
     #: Defaulted, like `proximity`.
     keep_away: Tuple[Dict[str, object], ...] = ()
     keep_away_unknown: bool = False
+    #: #1443. Declared covers and part heights. Defaulted, like `proximity`.
+    covers: Tuple[Dict[str, object], ...] = ()
+    heights: Tuple[Dict[str, object], ...] = ()
+    #: #1475. Declared shield cans. Defaulted, like `proximity`.
+    cans: Tuple[Dict[str, object], ...] = ()
 
 
 # --------------------------------------------------------------------------
@@ -713,6 +740,11 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
                 raise BriefError(f"{where}.overhang_mm: expected "
                                  f"{{'min': .., 'max': ..}}, got {oh!r}")
             fp._reject_unknown(oh, _OVERHANG_KEYS, f"{where}.overhang_mm")
+            # #1532: the intent loader's own refusal, raised as the brief's
+            try:
+                fp.check_overhang_band(oh, f"{where}.overhang_mm")
+            except fp.IntentError as exc:
+                raise BriefError(str(exc)) from None
         if c.get('along_edge') == 'center' \
                 and c.get('along_edge_tolerance_mm') is None:
             raise BriefError(
@@ -733,6 +765,10 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
         k = dict(k)
         k.setdefault('name', f"brief-keepout{i}")
         where = f"{where} ({k['name']})"
+        if str(k['name']).startswith(CAN_PREFIX):
+            raise BriefError(f"{where}: the name is reserved -- `{CAN_PREFIX}` "
+                             f"keep-outs are compiled from `cans[]` (#1475). "
+                             f"Declare the can there")
         has_rect, has_circle = k.get('rect') is not None, k.get('circle') is not None
         if has_rect == has_circle:
             raise BriefError(f"{where}: needs exactly one of `rect` or "
@@ -802,6 +838,12 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
     except ValueError as exc:
         raise BriefError(str(exc)) from None
 
+    # #1443. Validated by the intent's own loader, so a row the brief accepts
+    # is a row the compiled intent loads.
+    covers = fp._cover_claims(raw)
+    heights = fp._height_claims(raw)
+    cans = _can_rows(raw, heights)
+
     unknown = fp._str_tuple(raw.get('unknown'), 'unknown')
     return Brief(schema=SCHEMA_VERSION, kind=KIND,
                  board=str(raw.get('board') or ''), units=units,
@@ -811,7 +853,153 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
                  context=fp._obj(raw.get('context'), 'context'),
                  source_path=source_path, arrays=tuple(arrays),
                  assembly=dict(assembly), keep_away=tuple(keep_away),
-                 keep_away_unknown=raw.get('keep_away') == BRIEF_UNKNOWN)
+                 keep_away_unknown=raw.get('keep_away') == BRIEF_UNKNOWN,
+                 covers=tuple(covers), heights=tuple(heights),
+                 cans=tuple(cans))
+
+
+def _can_rows(raw: Dict, heights) -> List[Dict]:
+    """Validate the brief's `cans[]` (#1475). Strict, like every row here:
+    each refusal is a claim the compiled rows could not carry as written.
+
+    Members are LITERAL refs, not globs: a member is pulled into the zone and
+    allowed past its keep-out, so a pattern that matches one part too many
+    lets a stranger under the can with nothing said."""
+    got = raw.get('cans')
+    if got is None:
+        return []
+    if not isinstance(got, list):
+        raise BriefError(f"cans: expected a list, got {type(got).__name__}")
+    from .heights import MARGIN_MM
+    out: List[Dict] = []
+    names: Dict[str, int] = {}
+    can_of: Dict[str, str] = {}
+    height_refs = {str(h.get('ref')) for h in heights}
+    for i, c in enumerate(got):
+        where = f"cans[{i}]"
+        if not isinstance(c, dict):
+            raise BriefError(f"{where}: expected an object with a `name`")
+        fp._reject_unknown(c, _CAN_KEYS, where)
+        fp._entry_context(c, where)
+        name = c.get('name')
+        if not name or not isinstance(name, str):
+            raise BriefError(f"{where}: expected an object with a `name`")
+        where = f"{where} ({name})"
+        if name in names:
+            raise BriefError(f"{where}: duplicate can name (already "
+                             f"cans[{names[name]}])")
+        names[name] = i
+        if c.get('zone') is None:
+            raise BriefError(
+                f"{where}: needs `zone` [x0, y0, x1, y1], the area the can "
+                f"encloses in board mm -- it is not read off a drawn can")
+        zone = fp._rect(c['zone'], f"{where}.zone")
+        if zone[2] - zone[0] <= 0 or zone[3] - zone[1] <= 0:
+            raise BriefError(f"{where}.zone: {list(zone)} encloses no area")
+        side = c.get('side')
+        if side not in ('F', 'B'):
+            raise BriefError(f"{where}.side: {side!r}, expected 'F' or 'B' "
+                             f"-- the face the can stands on")
+        if not c.get('source') or not isinstance(c['source'], str):
+            raise BriefError(
+                f"{where}: needs `source` -- where interior_height_mm comes "
+                f"from (the can's datasheet or drawing)")
+        if c.get('interior_height_mm') is None:
+            raise BriefError(
+                f"{where}: needs `interior_height_mm`, the room under the "
+                f"lid from its datasheet. It is never guessed: a part is "
+                f"admitted under the can only by a declared height")
+        ih = fp._number(c['interior_height_mm'],
+                        f"{where}.interior_height_mm")
+        if ih <= MARGIN_MM:
+            raise BriefError(
+                f"{where}.interior_height_mm: {ih:g} leaves no room -- a part "
+                f"fits under a cover with {MARGIN_MM:g} mm to spare")
+        ref = c.get('ref')
+        if ref is not None:
+            if not isinstance(ref, str) or not ref or is_glob(ref):
+                raise BriefError(f"{where}.ref: {ref!r}, expected the can's "
+                                 f"reference (no pattern)")
+            if c.get('wall_mm') is not None:
+                raise BriefError(
+                    f"{where}: `wall_mm` is for a can not drawn yet -- {ref}'s "
+                    f"own pads are its wall. Drop one of them")
+            if ref in height_refs:
+                raise BriefError(
+                    f"{where}: {ref} is also in heights[]. The can's room "
+                    f"is interior_height_mm here; keep one")
+            if ref in can_of:
+                raise BriefError(f"{where}: {ref} is already claimed by "
+                                 f"cans[{can_of[ref]!r}]")
+        else:
+            if c.get('wall_mm') is None:
+                raise BriefError(
+                    f"{where}: needs `ref` (the drawn can) or `wall_mm` (the "
+                    f"band its wall will take, for a can not drawn yet)")
+            if fp._number(c['wall_mm'], f"{where}.wall_mm") <= 0:
+                raise BriefError(f"{where}.wall_mm must be more than 0")
+        members = c.get('members')
+        if not isinstance(members, dict) or not members:
+            raise BriefError(
+                f"{where}: needs `members` {{face: {{in: [..], either: "
+                f"[..]}}}} -- a can that names no part claims nothing")
+        seen: Dict[str, str] = {}
+        for face in sorted(members):
+            fw = f"{where}.members.{face}"
+            if face not in ('F', 'B'):
+                raise BriefError(f"{fw}: expected the face 'F' or 'B'")
+            m = members[face]
+            if not isinstance(m, dict):
+                raise BriefError(f"{fw}: expected {{in: [..], either: [..]}}")
+            fp._reject_unknown(m, _CAN_FACE_KEYS, fw)
+            for key in ('in', 'either'):
+                for r in fp._str_tuple(m.get(key), f"{fw}.{key}"):
+                    if is_glob(r):
+                        raise BriefError(
+                            f"{fw}.{key}: {r!r} is a pattern -- members are "
+                            f"literal references, so no stranger is let "
+                            f"under the can by a match nobody meant")
+                    if r == ref:
+                        raise BriefError(f"{fw}.{key}: {r} is the can itself")
+                    if r in seen:
+                        raise BriefError(f"{fw}.{key}: {r} is also listed at "
+                                         f"{seen[r]} -- one claim per part")
+                    if r in can_of:
+                        raise BriefError(
+                            f"{fw}.{key}: {r} is listed by "
+                            f"cans[{can_of[r]!r}] too -- one can per part")
+                    seen[r] = f"{face}.{key}"
+        if not seen:
+            raise BriefError(f"{where}.members: lists no part")
+        if ref is None and not fp._str_tuple(
+                (members.get(side) or {}).get('in'), where):
+            raise BriefError(
+                f"{where}: a can not drawn yet needs `in` parts on its own "
+                f"face {side} -- its wall band is drawn round them")
+        for r in seen:
+            can_of[r] = name
+        if ref is not None:
+            can_of[ref] = name
+        row = dict(c)
+        row['zone'] = list(zone)
+        out.append(row)
+    # Two cans over one area of one face cannot both hold: each can's keep-out
+    # shuts out the other's parts, so a part either can claims is refused by
+    # the other.
+    for i, a in enumerate(out):
+        for b in out[i + 1:]:
+            shared = sorted(set(a['members']) & set(b['members']))
+            za, zb = a['zone'], b['zone']
+            w = min(za[2], zb[2]) - max(za[0], zb[0])
+            h = min(za[3], zb[3]) - max(za[1], zb[1])
+            if shared and w > 0 and h > 0:
+                raise BriefError(
+                    f"cans[{names[b['name']]}] ({b['name']}): its zone overlaps "
+                    f"cans[{names[a['name']]}] ({a['name']}) on face "
+                    f"{', '.join(shared)} by {w:g} x {h:g} mm -- each can's "
+                    f"keep-out shuts out the other's parts. Give them "
+                    f"separate zones")
+    return out
 
 
 def _fixed_pose(f: Dict, where: str, interface_refs) -> None:
@@ -1196,6 +1384,22 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
     if brief.keep_away_unknown:
         unknown.append('keep_away')
 
+    # #1475. A can compiles into rows the intent already grades, one set per
+    # face it lists: a block holding its `in` parts to the zone (tolerance 0,
+    # so no member reaches under the wall) and a keep-out over the zone that
+    # lets in only the can's own parts. Then, on the can's own face, its
+    # height: a drawn can (`ref`) is a cover with `interior_height_mm` of room
+    # under it; a can not drawn yet is a fence round the zone and a keep-out
+    # admitting parts no taller than the room less the cover margin, so a
+    # one-sided part passes the same height test before the can is drawn and
+    # after (a through-hole or reached-from-above part does not; see
+    # docs/design-brief.md).
+    can_blocks, can_heights = _compile_cans(brief, keeps, declared, unmatched,
+                                            refset if refs_known else set())
+    can_members = sorted({str(r) for c in brief.cans
+                          for m in c['members'].values()
+                          for key in ('in', 'either') for r in m.get(key) or ()})
+
     fragment: Dict[str, object] = {}
     if asm:
         fragment['assembly'] = asm
@@ -1209,6 +1413,31 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         fragment['proximity'] = prox
     if arrs:
         fragment['arrays'] = arrs
+    # #1443. Compiled 1:1, as `arrays[]`: the row's own `source` is where its
+    # numbers came from (a datasheet), so the brief's provenance rides in
+    # `context`.
+    for key, rows, ident in (('covers', brief.covers, 'connector'),
+                             ('heights', brief.heights, 'ref')):
+        out_rows = []
+        for i, row in enumerate(rows):
+            entry = dict(row)
+            ctx = dict(row.get('context') or {})
+            ctx.update({'brief_row': i, 'from': 'brief'})
+            entry['context'] = ctx
+            declared.append(f"{key}[{row[ident]}]")
+            for m in [row[ident]] + [str(x['ref']) for x in row.get('standoffs') or ()]:
+                if refs_known and refset and m not in refset and not (
+                        key == 'heights' and is_glob(m)
+                        and any(fnmatch.fnmatchcase(r, m) for r in refset)):
+                    # a `heights[]` ref may be a glob (`placement.heights`)
+                    unmatched.append(m)
+            out_rows.append(entry)
+        if out_rows:
+            fragment[key] = out_rows
+    if can_heights:
+        fragment['heights'] = list(fragment.get('heights') or []) + can_heights
+    if can_blocks:
+        fragment['blocks'] = can_blocks
     if fposes:
         fragment['fixed_poses'] = fposes
     # A RUNNING MAX, not a literal, since #902: a brief carrying both an
@@ -1234,6 +1463,26 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
     if kaway:
         # #1253: reader 10 introduced `keep_away[]`.
         need_reader = max(need_reader, 10)
+    if fragment.get('covers') or fragment.get('heights'):
+        need_reader = max(need_reader, fp.COVERS_READER)
+    if brief.cans:
+        # #1475: the undrawn can's fence (`fence_mm`, reader 16) is the
+        # newest row a can compiles to; one number for every can row.
+        need_reader = max(need_reader, fp.FENCE_READER)
+    if any(h.get('under_cover') for h in fragment.get('heights') or ()):
+        need_reader = max(need_reader, fp.UNDER_COVER_READER)
+    if any(c.get('top_mm') is not None or c.get('insertion')
+           or any(st.get('off_mm') is not None for st in c.get('standoffs') or ())
+           for c in fragment.get('covers') or ()):
+        need_reader = max(need_reader, fp.MOUNT_READER)
+    if any(c.get('holes') for c in fragment.get('covers') or ()):
+        need_reader = max(need_reader, fp.HOLES_READER)
+    # #1589: a body that starts off the origin, or a site behind it
+    if any(c.get('start_mm') is not None
+           or any(float(s['length_mm']) < 0
+                  for s in list(c.get('standoffs') or ()) + list(c.get('holes') or ()))
+           for c in fragment.get('covers') or ()):
+        need_reader = max(need_reader, fp.BEHIND_READER)
     if need_reader:
         fragment['min_reader'] = need_reader
 
@@ -1268,6 +1517,12 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         counts['arrays'] = len(brief.arrays)
     if brief.keep_away:
         counts['keep_away'] = len(brief.keep_away)
+    if brief.covers:
+        counts['covers'] = len(brief.covers)
+    if brief.heights:
+        counts['heights'] = len(brief.heights)
+    if brief.cans:
+        counts['cans'] = len(brief.cans)
     if fposes:
         counts['fixed_poses'] = len(fposes)
     report = {
@@ -1294,6 +1549,10 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         'fixed': [dict(f) for f in brief.fixed],
         'product': dict(brief.product),
     }
+    if can_members:
+        # #1475: every part a `cans[]` row speaks for, so the merge can take
+        # them out of the blocks the emitter inferred. Only when declared.
+        report['can_members'] = can_members
     if kaway:
         # #1253: the rule each `keep_away[N].rule` clause declares, by row,
         # so coverage can ask whether the graded intent carries THAT rule.
@@ -1301,6 +1560,70 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         report['keep_away_rules'] = {str(r['row']): r['rule']
                                      for r in brief.keep_away}
     return fragment, report
+
+
+def can_row_name(name: str, what: str) -> str:
+    """`can:<name>:<what>`, the name of a row a `cans[]` entry compiles to."""
+    return f"{CAN_PREFIX}{name}:{what}"
+
+
+def _compile_cans(brief: Brief, keeps: List[Dict], declared: List[str],
+                  unmatched: List[str], refset) -> Tuple[List[Dict], List[Dict]]:
+    """`cans[]` -> (blocks, heights rows), its keep-outs appended to `keeps`
+    (#1475). Every row carries `context.derived_from: cans[<name>]`, so drift
+    and the report trace it back to the line the author wrote."""
+    from .heights import MARGIN_MM
+    blocks: List[Dict] = []
+    heights: List[Dict] = []
+    for i, c in enumerate(brief.cans):
+        name, side, ref = str(c['name']), c['side'], c.get('ref')
+        zone = list(c['zone'])
+        ih = float(c['interior_height_mm'])
+        origin = f"cans[{name}]"
+        ctx: Dict[str, object] = dict(c.get('context') or {})
+        ctx.update({'brief_row': i, 'from': 'brief', 'derived_from': origin})
+        for key in ('why', 'requirement'):
+            if c.get(key):
+                ctx[key] = c[key]
+        faces = {f: c['members'][f] for f in sorted(c['members'])}
+        # Every face's parts, on every face's keep-out: a through-hole member
+        # listed on one face has its leads on the other, and a keep-out of the
+        # other face would refuse them.
+        ours = sorted({str(r) for m in faces.values()
+                       for key in ('in', 'either') for r in m.get(key) or ()})
+        allow = ours + ([glob.escape(ref)] if ref else [])
+        for f, m in faces.items():
+            ins = [str(r) for r in m.get('in') or ()]
+            if ins:
+                b: Dict[str, object] = {
+                    'name': can_row_name(name, f), 'refs': ins, 'zone': zone,
+                    'side': f, 'tolerance_mm': 0.0, 'context': dict(ctx)}
+                if ref is None and f == side:
+                    b['fence_mm'] = float(c['wall_mm'])
+                blocks.append(b)
+            keeps.append({'name': can_row_name(name, f), 'rect': zone,
+                          'sides': [f], 'allow': list(allow),
+                          'why': f"inside can {name!r}: its own parts only",
+                          'context': dict(ctx)})
+        if ref is None:
+            keeps.append({'name': can_row_name(name, 'height'), 'rect': zone,
+                          'sides': [side],
+                          'max_height_mm': round(ih - MARGIN_MM, 6),
+                          'why': (f"under can {name!r}: {ih:g} mm of room, "
+                                  f"less the {MARGIN_MM:g} mm cover margin"),
+                          'context': dict(ctx)})
+        else:
+            # The face and zone ride along for `can_consequences`, which
+            # checks them against the drawn can.
+            heights.append({'ref': ref, 'underside_mm': ih,
+                            'source': str(c['source']),
+                            'context': dict(ctx, can_side=side, can_zone=zone)})
+        declared.extend([f"{origin}.members", f"{origin}.zone",
+                         f"{origin}.interior_height_mm"])
+        for r in ours + ([ref] if ref else []):
+            if refset and r not in refset:
+                unmatched.append(r)
+    return blocks, heights
 
 
 def connector_consequences(fragment: Dict, report: Dict, pcb=None,
@@ -1600,7 +1923,121 @@ def compile_with_consequences(brief: 'Brief', pcb=None,
     frag, rep = compile_brief(
         brief, board_refs=sorted((pcb.footprints or {}) if pcb else ()),
         refs_known=pcb is not None)
-    return connector_consequences(frag, rep, pcb, board_path)
+    frag, rep = connector_consequences(frag, rep, pcb, board_path)
+    return can_consequences(frag, rep, pcb, board_path)
+
+
+#: #1475. How much of a can's zone its drawn courtyard may cover and the can
+#: still have room inside. KiCad's RF_Shielding footprints draw the courtyard
+#: as a ring (an outer and an inner outline), which covers none of it; a
+#: courtyard drawn over the whole can covers all of it, and KiCad's DRC then
+#: flags every part inside as a courtyard overlap.
+CAN_COURTYARD_COVER_MAX = 0.5
+
+#: #1475. How far a drawn can's zone may reach past the can's outline (its
+#: body united with its pads, as placement reads it): a rounding allowance,
+#: not a margin. Room is given only under the can.
+CAN_ZONE_PAST_MM = 0.01
+
+
+def can_consequences(fragment: Dict, report: Dict, pcb=None,
+                     board_path: str = ''):
+    """The board facts a drawn can's row depends on, which the pure compile
+    cannot see (#1475). One `report['consequences']` row per drawn can:
+
+      * `withheld` -- its room is NOT compiled when the can is not on this
+        face, when the zone reaches past the can's outline (its body and
+        pads: room is given only under the can), when that outline cannot be
+        read, or when its drawn courtyard covers the zone (read as drawn, a
+        ring leaving its inside open): KiCad flags every part inside such a
+        courtyard, so room under it would pass a board KiCad's DRC fails.
+        Its members are then refused under the can's body, as before;
+      * `compiled` -- otherwise, naming a can that is not KiCad-locked, since
+        the zone is in board coordinates and does not follow a can a placer
+        moves.
+    """
+    cans = [h for h in (fragment.get('heights') or ())
+            if str((h.get('context') or {}).get('derived_from', '')
+                   ).startswith('cans[')]
+    if not cans or pcb is None:
+        return fragment, report
+    import copy
+    from .legality import footprint_side
+    frag = copy.deepcopy(fragment)
+    rep = copy.deepcopy(report)
+    rows = rep.setdefault('consequences', [])
+    geo, geo_err = None, ''
+    drop = set()
+    for h in cans:
+        ref, origin = str(h['ref']), str(h['context']['derived_from'])
+        fp_ = (pcb.footprints or {}).get(ref)
+        if fp_ is None:
+            continue                        # reported as unmatched already
+        zone = h['context']['can_zone']
+        side = h['context']['can_side']
+        face = footprint_side(fp_)
+        why = None
+        if face != side:
+            why = f"{ref} is on the {face} face, and the row declares {side}"
+        else:
+            if geo is None:
+                try:
+                    from placement.body import board_bodies
+                    geo = board_bodies(pcb, board_path or None)
+                except Exception as exc:                     # noqa: BLE001
+                    geo, geo_err = {}, f"{type(exc).__name__}: {exc}"
+            body = geo.get(ref)
+            shape = getattr(body, 'court_shape_local', None)
+            occ = getattr(body, 'occupancy_local', None)
+            if body is None:
+                why = (f"{ref}'s outline could not be read"
+                       + (f" ({geo_err})" if geo_err else '')
+                       + ", so the zone cannot be checked against it")
+            elif occ is not None:
+                from .heights import to_board
+                ob = to_board(occ, (fp_.x, fp_.y, fp_.rotation or 0.0))
+                past = max(ob[0] - zone[0], ob[1] - zone[1],
+                           zone[2] - ob[2], zone[3] - ob[3])
+                if past > CAN_ZONE_PAST_MM:
+                    why = (f"the zone reaches {past:.2f}mm past {ref}'s "
+                           f"outline, so it is not under the can: give the "
+                           f"can's inside")
+            if why is None and shape is not None:
+                from shapely.geometry import box as _box
+                from .heights import to_local
+                loc = _box(*to_local(zone, (fp_.x, fp_.y, fp_.rotation or 0.0)))
+                frac = shape.intersection(loc).area / max(loc.area, 1e-9)
+                if frac > CAN_COURTYARD_COVER_MAX:
+                    why = (f"{ref}'s drawn courtyard covers {frac:.0%} of the "
+                           f"zone. KiCad flags every part inside a courtyard, "
+                           f"so no room is given under it: draw the courtyard "
+                           f"as a ring (an outer and an inner outline), as "
+                           f"KiCad's RF_Shielding footprints do")
+        if why is not None:
+            drop.add(ref)
+            rows.append({'id': f"{origin}.interior_height_mm", 'ref': ref,
+                         'status': 'withheld', 'compiled_to': None,
+                         'grader': None, 'basis': None, 'value': None,
+                         'why': why})
+            continue
+        locked = bool(getattr(fp_, 'locked', False)) or any(
+            str(f.get('ref')) == ref for f in frag.get('fixed_poses') or ())
+        rows.append({'id': f"{origin}.interior_height_mm", 'ref': ref,
+                     'status': 'compiled', 'compiled_to': f"heights[{ref}]",
+                     'grader': 'heights', 'basis': 'declared',
+                     'value': h['underside_mm'],
+                     'why': ('room under the drawn can' if locked else
+                             f"room under the drawn can; {ref} is not locked "
+                             f"and the zone is in board coordinates, so lock "
+                             f"it (or fix its pose) before placing")})
+    if drop:
+        frag['heights'] = [h for h in frag['heights']
+                           if not (str(h.get('ref')) in drop and str(
+                               (h.get('context') or {}).get('derived_from', '')
+                           ).startswith('cans['))]
+        if not frag['heights']:
+            frag.pop('heights')
+    return frag, rep
 
 
 def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
@@ -1726,9 +2163,32 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
     # outrank.
     # #1253 `keep_away` too: the emitter writes none, since which nets are
     # noisy is not readable off a board.
-    for key in ('arrays', 'fixed_poses', 'keep_away'):
+    # #1443 `covers` and `heights` too: the emitter writes neither.
+    for key in ('arrays', 'fixed_poses', 'keep_away', 'covers', 'heights'):
         if fragment.get(key):
             out[key] = list(emitted.get(key) or []) + list(fragment[key])
+    # #1475. A can's blocks are APPENDED, and the parts a can speaks for leave
+    # the blocks the emitter inferred (a sheet's observed box): kept there,
+    # one part would be pulled to two zones. The emitted block keeps its
+    # zone for the rest of its parts, and its `refs` already list every
+    # member, so its `group` -- which would add the can's parts back -- goes.
+    if fragment.get('blocks') or report.get('can_members'):
+        claimed = set(report.get('can_members') or ())
+        kept_blocks = []
+        for b in emitted.get('blocks') or []:
+            took = sorted(claimed & set(b.get('refs') or ()))
+            if took:
+                b = dict(b)
+                b['refs'] = [r for r in b['refs'] if r not in claimed]
+                b.pop('group', None)
+                report['contradictions'].append(
+                    f"block {b.get('name')!r}: the brief puts "
+                    f"{', '.join(took)} under a can -- the brief wins, and "
+                    f"the inferred block keeps its other parts")
+                if not b['refs']:
+                    continue
+            kept_blocks.append(b)
+        out['blocks'] = kept_blocks + list(fragment.get('blocks') or ())
     # #1255. Merged INTO the emitted block, which carries the observed
     # `sides`: the brief states the assembler's band and nothing else there.
     if fragment.get('assembly'):
@@ -1777,6 +2237,10 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
                 own = cb.get(key) or (cb.get('overhang_mm.min')
                                       if key == 'overhang_mm' else None)
                 bmap[f"edge_connectors[{c['ref']}].{key}"] = own or 'declared'
+                if key == 'overhang_mm':
+                    # #1603: the emitter's model-derived floor went with
+                    # the band the brief replaced
+                    bmap.pop(f"edge_connectors[{c['ref']}].overhang_mm.min", None)
     if 'body_edge_mm' in (fragment.get('assembly') or {}):
         bmap['assembly.body_edge_mm'] = 'declared'
     if bmap:
@@ -1906,7 +2370,8 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
                         f"brief, absent from the intent"))
             continue
         # By SHAPE, not only by name: a face change keeps the name (#959).
-        for field_name in ('rect', 'circle', 'sides', 'allow'):
+        for field_name in ('rect', 'circle', 'sides', 'allow',
+                           'max_height_mm'):
             if field_name in k and cur.get(field_name) != k[field_name]:
                 out.append((kid, f"keepout {k.get('name')!r}.{field_name}: "
                                  f"brief says {k[field_name]!r}, the intent "
@@ -1988,6 +2453,65 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
                     + ', the intent '
                     + (f"says {theirs!r}" if theirs is not None
                        else 'does not declare it')))
+    # #1443. Keyed on the connector / the part; every field but `context`,
+    # both sides read by the intent's own loader so `42` and `42.0` agree.
+    for key, ident, norm in (('covers', 'connector', fp._cover_claims),
+                             ('heights', 'ref', fp._height_claims)):
+        try:
+            rows = norm({key: intent_doc.get(key)})
+        except fp.IntentError:
+            rows = list(intent_doc.get(key) or [])
+        have_rows = {str(r.get(ident)): r for r in rows}
+        for r in (fragment.get(key) or []):
+            name = str(r.get(ident))
+            cur = have_rows.get(name)
+            cid = ((r.get('context') or {}).get('derived_from')
+                   or f"{key}[{name}]")
+            if cur is None:
+                out.append((cid, f"{name}: the brief declares this in {key}[]; "
+                                 f"the intent has no entry for it"))
+                continue
+            for k in sorted((set(r) | set(cur)) - {'context'}):
+                if r.get(k) != cur.get(k):
+                    out.append((cid, f"{key}[{name}].{k}: brief says "
+                                     f"{r.get(k)!r}, the intent {cur.get(k)!r}"))
+        # #1475: a can's room the brief no longer compiles (the can gone, or
+        # its room withheld) drifts, as a stale derived keep-out does.
+        frag_names = {str(r.get(ident)) for r in fragment.get(key) or ()}
+        for name, cur in sorted(have_rows.items()):
+            src = str((cur.get('context') or {}).get('derived_from') or '')
+            if src.startswith('cans[') and name not in frag_names:
+                out.append((src, f"{key}[{name}]: the intent carries it from "
+                                 f"{src}, which the brief no longer compiles"))
+    # #1475. A can's blocks, keyed on the name, every field it compiles; and
+    # a `can:` block the brief no longer compiles drifts too, as a derived
+    # keep-out does above.
+    have_b = {str(b.get('name')): b for b in (intent_doc.get('blocks') or [])}
+    frag_b = set()
+    for b in (fragment.get('blocks') or []):
+        name = str(b.get('name'))
+        frag_b.add(name)
+        cid = (b.get('context') or {}).get('derived_from') or ''
+        cur = have_b.get(name)
+        if cur is None:
+            out.append((cid, f"block {name!r}: compiled from the brief, "
+                             f"absent from the intent"))
+            continue
+        for field_name in ('refs', 'zone', 'side', 'tolerance_mm', 'fence_mm',
+                           'exclusive'):
+            mine, theirs = b.get(field_name), cur.get(field_name)
+            if field_name == 'exclusive':
+                mine, theirs = bool(mine), bool(theirs)
+            elif field_name == 'refs':
+                mine, theirs = sorted(mine or ()), sorted(theirs or ())
+            if mine != theirs:
+                out.append((cid, f"block {name!r}.{field_name}: brief says "
+                                 f"{mine!r}, the intent {theirs!r}"))
+    for name, cur in sorted(have_b.items()):
+        src = (cur.get('context') or {}).get('derived_from')
+        if name.startswith(CAN_PREFIX) and name not in frag_b:
+            out.append((src or '', f"block {name!r}: the intent carries it "
+                                   f"from a can the brief no longer declares"))
     # #1054. Keyed on the ref.
     have_fp = {str(f.get('ref')): f for f in (intent_doc.get('fixed_poses')
                                               or [])}

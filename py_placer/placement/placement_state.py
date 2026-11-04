@@ -611,11 +611,14 @@ def body_contact_pairs(grade) -> Dict[frozenset, set]:
     gates (#896). Courtyards are not here: a courtyard is a keep-out margin,
     not a body, and the courtyard channel has its own gate."""
     from placement.body import SOURCE_SILK
+    from placement.legality import HEIGHT_WAIVER
     srcs = (grade or {}).get('body_sources') or {}
     out: Dict[frozenset, set] = {}
     for q in (grade or {}).get('pairs') or ():
         if q.kind not in ('pad_intersection', 'pads_under_body', 'fab'):
             continue
+        if q.waiver == HEIGHT_WAIVER:
+            continue        # #1443: one stands under the other's body
         if q.kind == 'fab' and SOURCE_SILK in (srcs.get(q.a), srcs.get(q.b)):
             continue
         out.setdefault(frozenset((q.a, q.b)), set()).add(q.side)

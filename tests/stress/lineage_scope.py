@@ -33,9 +33,17 @@ For one manifest this reads:
                        track, so a net only a pour scopes is `pour_only`
       repair_planes.py --nets with --plane-layers, else the zones on the
                        board at that step (filtered by --nets/--plane-layers)
+      check_join.py    with --keep-staged, the one net its hand join lays
+                       (#1637); without it a check, never in the lineage
       qfn/bga_fanout   escape stubs on the part's pads: context only
                        (`escaped_by`), never routing -- a stub joins no pads
-      place_fanout_clearance.py, copy_board.py, cp, mv: no net
+      no net           copy_board.py, cp, mv (a board copied); add_rule_area.py
+                       (a keep-out drawn); place_fanout_clearance.py,
+                       place_pose.py, beautify_labels.py (parts, labels or
+                       existing vias moved, no pad joined); fill_for_delivery.py
+                       (the board's own zones filled, as KiCad does).
+                       autoplan.py routes its whole chain in one recorded
+                       step, so it stays `unmodelled`
   * the board's ROUTABLE nets, the ones check_connected grades: named, >= 2
     pads, not an auto-named 'unconnected-*', pads not already joined by
     overlapping copper -- read off the chain's unrouted input board.
@@ -51,6 +59,10 @@ and REPORTS (it never fails a board):
                          it does not know, a parser it cannot build, a --group
                          that does not resolve). While one is listed, the
                          lists above are an UPPER bound.
+
+The CLI's last line counts the manifests with a net in one of the first three
+lists and, apart from them, the manifests with an unmodelled step -- a step
+it cannot read is not a net it found unscoped (#1593).
 """
 from __future__ import annotations
 
@@ -71,14 +83,19 @@ for _d in (str(HERE), str(REPO / 'py_router'), str(REPO / 'py_placer'),
 
 import cli_argv_check  # noqa: E402
 from redo_stress_test import (board_io, compute_prune_keep,  # noqa: E402
+                              refused_commands,
                               is_check_cmd, parse_manifest)
 
-#: Steps that move or copy boards and scope no net.
-NO_SCOPE_TOOLS = {'place_fanout_clearance.py', 'copy_board.py', 'cp', 'mv'}
+#: Self-recording steps that scope no net: they copy a board, draw a rule
+#: area, move parts or labels, or fill the board's own zones -- none routes a
+#: pad of any net (#1593). autoplan.py is NOT here: it routes.
+NO_SCOPE_TOOLS = {'place_fanout_clearance.py', 'copy_board.py', 'cp', 'mv',
+                  'add_rule_area.py', 'place_pose.py', 'beautify_labels.py',
+                  'fill_for_delivery.py'}
 FANOUT_TOOLS = {'qfn_fanout.py', 'bga_fanout.py'}
 REPAIR_TOOLS = {'repair_planes.py', 'route_disconnected_planes.py'}
 #: Step kinds that connect pads (a net they scope is routed by the chain).
-ROUTING_KINDS = {'route', 'pair', 'repair'}
+ROUTING_KINDS = {'route', 'pair', 'repair', 'join'}
 
 
 def _quiet(fn, *a, **k):
@@ -202,6 +219,11 @@ def step_scope(argv, cwd, pcb, zones):
             return 'repair', {n for n in nets if n in board_nets}, ''
         return 'repair', {n for n, ly in zones
                           if (not nets or n in nets) and (not layers or ly in layers)}, ''
+    if tool == 'check_join.py':
+        # A kept board (--keep-staged) lays a hand join of ONE net (#1637);
+        # a pure check never reaches the lineage (is_check_cmd).
+        net = ns.get('net')
+        return 'join', {net} if net in board_nets else set(), ''
     if tool in FANOUT_TOOLS:
         from net_queries import matches_net_filter
         ref = ns.get('component')
@@ -239,7 +261,7 @@ def lineage_scope(manifest, board=None):
     chain's unrouted input; by default the first lineage command's input."""
     from kicad_parser import parse_kicad_pcb
     cmds = parse_manifest(manifest)
-    keep, info = compute_prune_keep(cmds)
+    keep, info = compute_prune_keep(cmds, refused=refused_commands(cmds, manifest))
     board = board or input_board(cmds, keep, manifest)
     rep = {'manifest': str(manifest), 'board': board,
            'final': info.get('final_board'), 'lineage': [],
@@ -321,7 +343,7 @@ def main():
     a = ap.parse_args()
     if a.board and len(a.manifests) > 1:
         ap.error('--board names ONE manifest\'s input board')
-    reps, flagged = [], 0
+    reps, flagged, unread, errors = [], 0, 0, 0
     for m in a.manifests:
         try:
             rep = lineage_scope(m, board=a.board)
@@ -332,9 +354,14 @@ def main():
         n = {k: len(rep.get(k) or []) for k in
              ('unscoped', 'unscoped_input_copper', 'pour_only', 'unmodelled')}
         if rep.get('error'):
+            errors += 1
             print(f"{board}: ERROR {rep['error']}")
         elif any(n.values()):
-            flagged += 1
+            # "with nets" is a non-empty NET list; an unread step alone is an
+            # upper bound on those lists, not a net found unscoped (#1593)
+            flagged += any(n[k] for k in
+                           ('unscoped', 'unscoped_input_copper', 'pour_only'))
+            unread += bool(n['unmodelled'])
             print(f"{board}: unscoped={n['unscoped']} "
                   f"unscoped_input_copper={n['unscoped_input_copper']} "
                   f"pour_only={n['pour_only']} unmodelled={n['unmodelled']}  "
@@ -346,7 +373,9 @@ def main():
             for u in rep.get('unmodelled') or []:
                 print(f"    unmodelled: {u}")
     print(f"{len(reps)} manifest(s): {flagged} with nets their final lineage "
-          f"does not scope")
+          f"does not scope, {unread} with a lineage step it cannot read (its "
+          f"lists an upper bound)"
+          + (f", {errors} not read at all (ERROR)" if errors else ''))
     if a.json_out:
         with open(a.json_out, 'w', encoding='utf-8') as fh:
             json.dump(reps, fh, indent=1)

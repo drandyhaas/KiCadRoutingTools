@@ -526,7 +526,8 @@ def test_declared_edge_connectors_within_band_are_not_oob():
     """The promise in rule_edge_connector's docstring, kept: a declared edge
     connector inside its own overhang band leaves `oob_count` before the
     budget sees it. Outside the band it stays counted AND the edge rule names
-    it (two rules, one fact); an entry with no `max` exempts nothing."""
+    it (two rules, one fact); an entry with no `max` is flush at its `min`,
+    so it exempts no part standing further out."""
     raw = _emit()
     raw['legality_budget'] = {'oob_count': 0}
     conns = raw['edge_connectors']
@@ -549,7 +550,8 @@ def test_declared_edge_connectors_within_band_are_not_oob():
     assert ref not in leg[0].measured['exempt'], leg[0].measured
     assert edge, f"{ref} outside its band was not named by edge_connector"
     assert r.legality['oob_count_exempt'] == n_oob - 1
-    # No max at all: an unbounded band vouches for nothing.
+    # No max at all: the band is flush at its min, so a part well off the
+    # board is still counted.
     conns[i]['overhang_mm'] = {'min': 0.0}
     r = _graded(raw)
     leg = [v for v in r.violations if v.rule == 'legality']

@@ -203,7 +203,7 @@ def compute_net_obstacle_cells(
         # value under-attributes wide-clearance nets' real blocking reach.
         _clr = config.obstacle_clearance(net_id) if hasattr(config, 'obstacle_clearance') else config.clearance
         if hasattr(config, 'layer_clearance'):  # #498: layer rule replaces
-            _clr = config.layer_clearance(config.layers[layer_idx], _clr)
+            _clr = config.layer_clearance(config.layers[layer_idx], _clr, net_id)
         expansion_mm = reserve_width / 2 + seg_width / 2 + _clr + extra_clearance
         cells = segment_blocked_cells_array(x1, y1, x2, y2, expansion_mm, grid_step)
         if len(cells):
@@ -215,7 +215,7 @@ def compute_net_obstacle_cells(
         # (so an off-grid via is covered without the old floored-circle drift).
         _clr = config.obstacle_clearance(net_id) if hasattr(config, 'obstacle_clearance') else config.clearance
         if hasattr(config, 'stack_clearance'):  # #498: via spans the stack
-            _clr = config.stack_clearance(_clr)
+            _clr = config.stack_clearance(_clr, net_id)
         via_margin = via_size / 2 + config.track_width / 2 + _clr + extra_clearance
         cells = segment_blocked_cells_array(x, y, x, y, via_margin, grid_step)
         if len(cells):
@@ -679,9 +679,13 @@ def analyze_static_blockers(
     pcb_data: PCBData,
     config: GridRouteConfig,
     nets_to_route: Optional[Set[int]] = None,
+    stalled_net_id: Optional[int] = None,
 ) -> Dict[str, List[str]]:
     """
     Analyze what static obstacles are blocking the given cells.
+
+    `stalled_net_id` is the net whose search stalled; footprint copper lifted
+    for it (#908 own-pad lift) is not reported as a blocking track.
 
     Returns a dict with categories of blockers:
     - 'pads': list of "NetName (pad ref)" strings for blocking pads
@@ -766,10 +770,22 @@ def analyze_static_blockers(
         else:
             result['pads'].append(f"{net_name} ({len(refs)} pads)")
 
+    # #908: footprint copper the obstacle map lifts for the net being routed
+    # does not block it, so it is not named. For any other net it still is.
+    own_pad = {}
+    if stalled_net_id is not None:
+        try:
+            from check_drc import graphic_own_pad_nets
+            own_pad = graphic_own_pad_nets(pcb_data)
+        except Exception:
+            own_pad = {}
+
     # Check pre-existing tracks from other nets
     track_blockers = set()
     for seg in pcb_data.segments:
         if seg.net_id in nets_to_route:
+            continue
+        if stalled_net_id in own_pad.get(id(seg), ()):
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
@@ -817,13 +833,16 @@ def print_blocking_analysis(
     pcb_data: Optional[PCBData] = None,
     config: Optional[GridRouteConfig] = None,
     nets_to_route: Optional[Set[int]] = None,
+    stalled_net_id: Optional[int] = None,
 ):
     """Print blocking analysis results."""
     if not blockers:
         msg = f"{prefix}No previously-routed nets blocking"
         # If we have the data, analyze static blockers
         if blocked_cells and pcb_data and config:
-            static = analyze_static_blockers(blocked_cells, pcb_data, config, nets_to_route)
+            static = analyze_static_blockers(blocked_cells, pcb_data, config,
+                                             nets_to_route,
+                                             stalled_net_id=stalled_net_id)
             details = []
             if static['pads']:
                 details.append(f"pads: {', '.join(static['pads'][:5])}")

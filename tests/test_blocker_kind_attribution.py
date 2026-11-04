@@ -62,6 +62,39 @@ def test_kind_split_and_blame_stash():
     print(f"  PASS: kinds split (TRACKNET {tc2} track / PADNET {pc3} pad)")
 
 
+def test_own_pad_footprint_copper_not_named_for_its_own_net():
+    # #908: a footprint's net-0 copper touching its own pad is lifted from the
+    # obstacle map for that pad's net, so the diagnostic must not name it as
+    # that net's blocker (moteus_c1 NT5: "net_0(4 track)" on a start cell the
+    # bridge did not block). For any other net it still blocks and is named.
+    pad = make_pad(net_id=1, x=5.0, y=5.0, ref='NT9', num='1', net_name='ME',
+                   size_x=0.25, size_y=0.25, shape='circle')
+    bridge = make_seg(5.0, 5.0, 5.0, 5.4, net_id=0, graphic=True,
+                      owner_ref='NT9')
+    fp = Footprint(reference='NT9', footprint_name='t:t', x=5.0, y=5.0,
+                   rotation=0.0, layer='F.Cu', pads=[pad])
+    cfg = GridRouteConfig(layers=['F.Cu', 'B.Cu'], grid_step=0.1,
+                          track_width=0.2, clearance=0.2)
+    gx, gy = GridCoord(cfg.grid_step).to_grid(5.1, 5.2)
+    from blocking_analysis import analyze_static_blockers
+    for net, named in ((1, False), (4, True)):
+        pcb = make_pcb(nets={1: make_net(1, 'ME'), 4: make_net(4, 'OTHER')},
+                       segments=[bridge], footprints={'NT9': fp},
+                       pads_by_net={1: [pad]})
+        # The octolinear post-passes leave the foreign-segment cache None;
+        # the diagnostic must not depend on it.
+        pcb._foreign_seg_arr_cache = None
+        out = ser._identify_blocking_obstacles([(gx, gy, 0)], pcb, cfg,
+                                               current_net_id=net)
+        assert (0 in out) is named, (net, out)
+        # The `Static blockers: ... pre-existing tracks:` line, same rule.
+        static = analyze_static_blockers([(gx, gy, 0)], pcb, cfg,
+                                         nets_to_route={net},
+                                         stalled_net_id=net)
+        assert bool(static['tracks']) is named, (net, static)
+    print("  PASS: own-pad footprint copper named for foreign nets only")
+
+
 class _FakeObstacles:
     def is_blocked(self, x, y, layer):
         return True  # everything walled: the printer must attribute all 8
@@ -98,3 +131,4 @@ def test_printer_stashes_track_blame_only():
 if __name__ == '__main__':
     test_kind_split_and_blame_stash()
     test_printer_stashes_track_blame_only()
+    test_own_pad_footprint_copper_not_named_for_its_own_net()

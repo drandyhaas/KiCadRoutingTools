@@ -2,8 +2,9 @@
 """#1214: moving or rotating a footprint must carry its own keep-out zone.
 
 A footprint-internal `(zone ...)` stores its `(polygon (pts (xy ...)))` in
-ABSOLUTE board coordinates (the same fact `_FLIP_NAMED_REFUSALS['zone']` in
-`py_placer/placement/writer.py` records for the mirror). The move and rotate
+ABSOLUTE board coordinates (the same fact the flip in
+`py_placer/placement/writer.py` mirrors it about), and so does a footprint
+`(point ...)`, which each case also carries on one of the pads. The move and rotate
 path of `write_placed_output` rewrites the footprint's `(at ...)`, rotates
 pad and text angles, but leaves the zone's `(pts ...)` untouched, so moving a
 footprint leaves its keep-out zone behind at the old absolute position.
@@ -79,7 +80,10 @@ def _inject_zone(src, dst, ref, pts):
         if key != ref:
             continue
         close = fp_text.rindex(')')
-        body = fp_text[:close] + '\n\t\t' + _zone_sexpr(pts) + '\n\t' + fp_text[close:]
+        point = (f'(point (at {pts[0][0]:.6f} {pts[0][1]:.6f}) (size 1) '
+                 f'(layer "F.Fab") (uuid "12140000-0000-0000-0000-000000000001"))')
+        body = (fp_text[:close] + '\n\t\t' + _zone_sexpr(pts) + '\n\t\t'
+                + point + '\n\t' + fp_text[close:])
         out = text[:s] + body + text[e:]
         break
     if out is None:
@@ -161,6 +165,19 @@ def _run_case(base, tmp, ref, dx, dy, delta_rot):
         problems.append(
             f"{case}: a zone corner ended {worst:.4f} mm from the pad it was "
             f"drawn on -- the zone did not move with its pads")
+    pm = None
+    for _s, _e, fp_text, _raw, key in __import__('kicad_parser').iter_footprint_blocks(
+            open(out, encoding='utf-8').read()):
+        if key == ref:
+            pm = re.search(r'\(point\s+\(at\s+([-\d.]+)\s+([-\d.]+)\)', fp_text)
+    if pm is None:
+        problems.append(f"{case}: the output footprint lost its (point ...)")
+    else:
+        off = math.hypot(float(pm.group(1)) - pads[order[0]].global_x,
+                         float(pm.group(2)) - pads[order[0]].global_y)
+        if off > TOL:
+            problems.append(f"{case}: the (point ...) ended {off:.4f} mm from "
+                            f"the pad it was drawn on")
     # The parser must serve the moved zone as the footprint's keep-out.
     want = [(round(x, 6), round(y, 6)) for x, y in got]
     seen = [[(round(x, 6), round(y, 6)) for x, y in k['polygon']]
@@ -216,7 +233,7 @@ def main():
             print("  " + p)
         return 1
     print(f"PASS: {len(CASES)} moves and rotations carry the keep-out zone "
-          f"with the footprint's pads")
+          f"and the point with the footprint's pads")
     return 0
 
 

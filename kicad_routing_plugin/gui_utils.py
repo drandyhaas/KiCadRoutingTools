@@ -66,6 +66,43 @@ def save_board_via_ui_thread_ex(path, board, timeout_s=None):
         SAVE_BOARD_UI_TIMEOUT_S if timeout_s is None else timeout_s)
 
 
+def remove_listed_segments(board, pcbnew, segments) -> int:
+    """Remove the live board's tracks a strip list names, as the CLI writer's
+    strip does (kicad_writer.match_stack_members, #1556): matched by span,
+    canonical layer and net, COUNTED, and the listed width first. A set of
+    endpoint keys removed EVERY member of a same-span stack, the keeper too,
+    and matched across layers. Returns the number removed."""
+    if not segments:
+        return 0
+    from kicad_parser import POSITION_DECIMALS as D, pcbnew_copper_layer_names
+    from kicad_writer import match_stack_members
+    id_to_name = pcbnew_copper_layer_names()
+
+    def _span(a, b, layer, net):
+        return (frozenset((a, b)), layer, net)
+    targets = [(_span((round(s.start_x, D), round(s.start_y, D)),
+                      (round(s.end_x, D), round(s.end_y, D)),
+                      s.layer, s.net_id), s.width)
+               for s in segments]
+    tracks = [t for t in board.GetTracks()
+              if t.Type() == pcbnew.PCB_TRACE_T]  # not vias / arcs
+    items = []
+    for track in tracks:
+        a = (round(pcbnew.ToMM(track.GetStart().x), D),
+             round(pcbnew.ToMM(track.GetStart().y), D))
+        b = (round(pcbnew.ToMM(track.GetEnd().x), D),
+             round(pcbnew.ToMM(track.GetEnd().y), D))
+        # Canonical layer name, as s.layer is: a renamed layer's display
+        # name matched no key and left ripped copper (#1056).
+        items.append((_span(a, b, id_to_name.get(track.GetLayer()),
+                            track.GetNetCode()),
+                      pcbnew.ToMM(track.GetWidth())))
+    gone, _unmatched = match_stack_members(targets, items)
+    for i in sorted(gone):
+        board.RemoveNative(tracks[i])
+    return len(gone)
+
+
 def ui_thread_status(status_text, progress_bar, message):
     """Show `message` for work running ON the wx main thread.
 
@@ -832,6 +869,129 @@ def default_netclass(board):
     return None
 
 
+def persist_live_tool_records(board, same_net_pad_clearance=None):
+    """Record the step's tool records on the live board: protected nets,
+    impedance declarations, pour-served balls and an active same-net pad via
+    clearance. The GUI twin of the CLI's record block, and INDEPENDENT of the
+    DRC-floor writeback: "Fix DRC settings after routing" unchecked keeps the
+    floors where they are, it must not void the protection of the step's
+    routed pairs (#1415). Callers run it whether or not
+    ``update_live_drc_floors`` does (which itself calls it first). Best-effort:
+    never raises."""
+    # #521: manual (non-plan) runs consume the engine-noted protection
+    # candidates here -- the per-step floor update is the GUI's step boundary.
+    # Recorded in the board's records (tool_records): its .kicad_pro, like the
+    # CLI writeback, AND the board itself, because KiCad's own project save
+    # rewrites the .kicad_pro from the copy it loaded and drops them. A board
+    # with no project, or no file yet, records on the board alone.
+    try:
+        from protected_nets import (consume_protection_candidates,
+                                    consume_impedance_specs,
+                                    consume_pour_served_pads,
+                                    persist_protected_nets,
+                                    persist_impedance_specs,
+                                    persist_pour_served_pads,
+                                    pro_path_for_board)
+        if board is not None:
+            _bf = board.GetFileName() or ""
+            _pro = pro_path_for_board(_bf) if _bf else ""
+            persist_protected_nets(_pro, consume_protection_candidates(),
+                                   board=board)
+            persist_impedance_specs(_pro, consume_impedance_specs(), board=board)
+            # #1503: the pairs matched P to N, and the skew each was matched to
+            from protected_nets import (consume_intra_pair_tolerances,
+                                        persist_intra_pair_tolerances)
+            persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances(),
+                                          board=board)
+            # #1379: the power widths this step was asked for, measured and disclosed.
+            from protected_nets import consume_power_widths, persist_power_widths
+            persist_power_widths(_pro, consume_power_widths(), board=board)
+            # #678: the fanout tab's pour-served balls, same step boundary.
+            persist_pour_served_pads(_pro, consume_pour_served_pads(),
+                                     board=board)
+            # #581: an ACTIVE same-net pad via clearance, as every CLI routing
+            # step records it, so a later chain step keeps vias off same-net
+            # pads too (the persist is a no-op for <= 0).
+            if same_net_pad_clearance is not None:
+                from protected_nets import persist_same_net_pad_clearance
+                persist_same_net_pad_clearance(_pro, same_net_pad_clearance,
+                                               board=board)
+    except Exception:
+        pass
+
+
+def held_hole_clearance_live(pcb_data, board, results_data, clearance):
+    """The copper-to-hole floor to write for this step (#1369): the
+    board's declared hole clearance the engine held
+    (``obstacle_map.declared_hole_clearance`` on the PCBData it routed),
+    lowered only to what the copper this step drew needs
+    (``fix_kicad_drc_settings.step_copper_to_hole``) -- the GUI twin of
+    route_diff.py's ``step_hole_clearance``, shared by the differential
+    and route tabs (#1493). None (write the copper clearance, as before)
+    when the board declares none."""
+    try:
+        from obstacle_map import declared_hole_clearance
+        from fix_kicad_drc_settings import (step_copper_to_hole,
+                                            held_hole_clearance)
+        held, _src = declared_hole_clearance(
+            pcb_data, board.GetFileName() or None)
+        if not held or clearance is None or held <= clearance:
+            return None
+        segs, vias = [], []
+        for result in results_data.get('results', []):
+            segs.extend(result.get('new_segments', []))
+            vias.extend(result.get('new_vias', []))
+        segs.extend(results_data.get('all_swap_segments', []))
+        vias.extend(results_data.get('all_swap_vias', []))
+        # The board the copper was drawn on: the routed PCBData without
+        # the copper this step removed.
+        from types import SimpleNamespace
+
+        def _sk(s):
+            a = (round(s.start_x, 4), round(s.start_y, 4))
+            b = (round(s.end_x, 4), round(s.end_y, 4))
+            return (min(a, b), max(a, b), s.layer, s.net_id)
+
+        def _vk(v):
+            return (round(v.x, 4), round(v.y, 4), v.net_id)
+        _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
+        _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
+        pcb = SimpleNamespace(
+            segments=[s for s in pcb_data.segments if _sk(s) not in _gone_s],
+            vias=[v for v in pcb_data.vias if _vk(v) not in _gone_v],
+            footprints=pcb_data.footprints,
+            board_info=pcb_data.board_info)
+        step_min = step_copper_to_hole(pcb, segs, vias, held, clearance)
+        v = held_hole_clearance(held, clearance, step_min)
+        # #1493: a floor written under the one held is ledgered, as the CLI's
+        # step_hole_clearance ledgers it
+        if v is not None and v < float(held) - 1e-6:
+            from fab_tiers import note_narrowing
+            note_narrowing(None, 'hole_clearance', float(held), v,
+                           "copper-to-hole floor written under the board's own: "
+                           "this step's copper sits closer to a foreign hole")
+        return v
+    except Exception as e:                                  # noqa: BLE001
+        print(f"(copper-to-hole floor: {e}; following the copper clearance)")
+        return None
+
+
+def held_hole_clearance_dicts(pcb_data, board, tracks, vias, clearance):
+    """:func:`held_hole_clearance_live` for a tab whose copper is the
+    engine's track and via DICTS (the fanout tab, #1568; the Planes tab,
+    #1577) rather than routing results."""
+    from kicad_parser import Segment, Via
+    segs = [Segment(start_x=t['start'][0], start_y=t['start'][1],
+                    end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
+                    layer=t['layer'], net_id=t['net_id']) for t in tracks]
+    new_vias = [Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                    layers=list(v.get('layers') or ['F.Cu', 'B.Cu']),
+                    net_id=v['net_id']) for v in vias]
+    return held_hole_clearance_live(
+        pcb_data, board,
+        {'results': [{'new_segments': segs, 'new_vias': new_vias}]}, clearance)
+
+
 def update_live_drc_floors(board, *, clearance=None, track_width=None,
                            via_size=None, via_drill=None,
                            hole_to_hole=None, edge_clearance=None,
@@ -874,38 +1034,7 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
     "floors relaxed" line to every fanout run as a side effect of a clamp fix.
 
     Best-effort: never raises."""
-    # #521: manual (non-plan) runs consume the engine-noted protection
-    # candidates here -- the per-step floor update is the GUI's step boundary.
-    # Recorded in the board's records (tool_records): its .kicad_pro, like the
-    # CLI writeback, AND the board itself, because KiCad's own project save
-    # rewrites the .kicad_pro from the copy it loaded and drops them. A board
-    # with no project, or no file yet, records on the board alone.
-    try:
-        from protected_nets import (consume_protection_candidates,
-                                    consume_impedance_specs,
-                                    consume_pour_served_pads,
-                                    persist_protected_nets,
-                                    persist_impedance_specs,
-                                    persist_pour_served_pads,
-                                    pro_path_for_board)
-        if board is not None:
-            _bf = board.GetFileName() or ""
-            _pro = pro_path_for_board(_bf) if _bf else ""
-            persist_protected_nets(_pro, consume_protection_candidates(),
-                                   board=board)
-            persist_impedance_specs(_pro, consume_impedance_specs(), board=board)
-            # #678: the fanout tab's pour-served balls, same step boundary.
-            persist_pour_served_pads(_pro, consume_pour_served_pads(),
-                                     board=board)
-            # #581: an ACTIVE same-net pad via clearance, as every CLI routing
-            # step records it, so a later chain step keeps vias off same-net
-            # pads too (the persist is a no-op for <= 0).
-            if same_net_pad_clearance is not None:
-                from protected_nets import persist_same_net_pad_clearance
-                persist_same_net_pad_clearance(_pro, same_net_pad_clearance,
-                                               board=board)
-    except Exception:
-        pass
+    persist_live_tool_records(board, same_net_pad_clearance)
     _clamped = []
     try:
         import pcbnew
@@ -1019,6 +1148,11 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                 _clr_floor = _dru_min
         except Exception:
             pass
+        # #1369: the floor WITHOUT the pad-override cap below, and the rule
+        # the board declared before this writer, for the provenance record.
+        _mc_uncapped = float(_clr_floor) if _clr_floor is not None else None
+        _mc_before = (bds.m_MinClearance / 1e6
+                      if 'min_clearance' in _declared else None)
         # #530: never above the smallest pad override the run honoured (KiCad
         # floors an override at min_clearance) -- parity with compute_targets.
         try:
@@ -1028,6 +1162,11 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
         except Exception:
             pass
         lower('m_MinClearance', _clr_floor)
+        # #1369: a rule lowered for a pad override is recorded as such, so
+        # --escalation board reads the board's own minimum (the file
+        # writeback records the same in the project).
+        from fix_kicad_drc_settings import record_live_pad_override_floor
+        record_live_pad_override_floor(board, _mc_before, _mc_uncapped)
         lower('m_TrackMinWidth', track_width, min_w)
         lower('m_ViasMinSize', via_size, min_via)
         lower('m_MinThroughDrill', via_drill, min_hole)
@@ -1367,29 +1506,17 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
         _orc_rm = ((orc.get('removed_segments') or [])
                    + (orc.get('removed_vias') or []))
         if _orc_rm:
-            _rm_keys = set()
-            for s in _orc_rm:
-                if hasattr(s, 'start_x'):
-                    _rm_keys.add((round(s.start_x, 3), round(s.start_y, 3),
-                                  round(s.end_x, 3), round(s.end_y, 3),
-                                  s.net_id))
-                else:
-                    _rm_keys.add((round(s.x, 3), round(s.y, 3), s.net_id))
-            _n_orc_rm = 0
-            for item in list(board.GetTracks()):
-                if item.Type() == pcbnew.PCB_VIA_T:
-                    k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
-                         round(pcbnew.ToMM(item.GetPosition().y), 3),
-                         item.GetNetCode())
-                else:
-                    k = (round(pcbnew.ToMM(item.GetStart().x), 3),
-                         round(pcbnew.ToMM(item.GetStart().y), 3),
-                         round(pcbnew.ToMM(item.GetEnd().x), 3),
-                         round(pcbnew.ToMM(item.GetEnd().y), 3),
-                         item.GetNetCode())
-                    if k not in _rm_keys:
-                        k = (k[2], k[3], k[0], k[1], k[4])
-                if k in _rm_keys:
+            # Segments counted and width-preferring, as the CLI's fragment
+            # delete (remove_segments_from_content, #1556); vias by position.
+            _n_orc_rm = remove_listed_segments(
+                board, pcbnew, [s for s in _orc_rm if hasattr(s, 'start_x')])
+            _rm_keys = {(round(s.x, 3), round(s.y, 3), s.net_id)
+                        for s in _orc_rm if not hasattr(s, 'start_x')}
+            for item in list(board.GetTracks()) if _rm_keys else ():
+                if item.Type() == pcbnew.PCB_VIA_T and (
+                        round(pcbnew.ToMM(item.GetPosition().x), 3),
+                        round(pcbnew.ToMM(item.GetPosition().y), 3),
+                        item.GetNetCode()) in _rm_keys:
                     board.RemoveNative(item)
                     _n_orc_rm += 1
             if _n_orc_rm:

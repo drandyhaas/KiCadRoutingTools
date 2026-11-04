@@ -30,14 +30,15 @@ if TYPE_CHECKING:
 
 
 # Run-scoped ledgers kept on pcb_data: rip victims and their saved copper,
-# #134 refusals, #666 queued cap moves, exact-name rip overrides, via-unblock
+# #134 refusals, #666 queued cap moves, exact-name rip overrides, the nets
+# --nets negates (#1621), via-unblock
 # blame, #189 shrunk-via sizes and #1156's rip authority. The CLI parses a fresh board per step, so
 # they start empty; the GUI keeps ONE PCBData across runs, where an earlier
 # run's entries would be read as this run's (a stale victim pulled into the
 # escalation and stale-strip scope, a shrunk via size emitted at a cell where
 # a full via now fits). Nested sub-runs share the outer run's ledgers.
 RUN_LEDGERS = ('_preexisting_rips', '_rip_saved', '_refused_saved_134',
-               '_pending_cap_moves', '_rip_override_names',
+               '_pending_cap_moves', '_rip_override_names', '_hands_off_names',
                '_via_unblock_blame', '_unblock_via_sizes', '_unblock_via_sites',
                '_rip_authority_ids')
 
@@ -62,11 +63,44 @@ def mark_input_copper(pcb_data) -> None:
     run, a sub-run that parsed its own file, and repair_planes when nothing has
     marked the board yet. The objects are kept as well as their ids, so no id
     can be reused while the mark lives. The GUI rebuilds every copper object
-    before a step and forgets the mark there (forget_input_copper)."""
+    before a step and forgets the mark there (forget_input_copper).
+
+    Each object's geometry is recorded too (#1609), for input_pair_unmoved."""
     segs = tuple(pcb_data.segments or ())
     vias = tuple(pcb_data.vias or ())
     pcb_data._input_copper = (frozenset(map(id, segs)) | frozenset(map(id, vias)),
-                              segs, vias)
+                              segs, vias,
+                              {id(o): _copper_geometry(o) for o in segs + vias})
+
+
+def _copper_geometry(o) -> tuple:
+    """Where a segment or via sits, as the restore tests measure it."""
+    if hasattr(o, 'start_x'):
+        return (o.start_x, o.start_y, o.end_x, o.end_y, o.width, o.layer, o.net_id)
+    return (o.x, o.y, o.size, o.drill, tuple(o.layers or ()), o.net_id)
+
+
+def input_pair_unmoved(pcb_data):
+    """A test `(a, b) -> bool` that is True when both items were HANDED to
+    the step (mark_input_copper) and both still sit where the input had them;
+    None when the run marked no input.
+
+    Such a pair stood that far apart on the input board, so putting one back
+    beside the other makes nothing worse than the input: a restore test never
+    refuses on it (#1609). Copper an earlier step laid at a smaller clearance
+    than this step's otherwise "collides" with its own untouched neighbours,
+    and the refused restore cascades into rips of more input nets. Copper this
+    run laid, or input copper it moved, is graded as before."""
+    mark = getattr(pcb_data, '_input_copper', None)
+    if not mark:
+        return None
+    ids, geom = mark[0], mark[3]
+
+    def unmoved(a, b):
+        return (id(a) in ids and id(b) in ids
+                and geom[id(a)] == _copper_geometry(a)
+                and geom[id(b)] == _copper_geometry(b))
+    return unmoved
 
 
 def forget_input_copper(pcb_data) -> None:
@@ -447,7 +481,9 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     smaller of that and `clearance`: it sat beside the saved copper before
     the rip, so only a graze the flat test already refused is refused there.
     No config, or a board that declares no class, layer rule or track rule,
-    prices every pair at `clearance`, as before.
+    prices every pair at `clearance`, as before. A pair that is BOTH unmoved
+    input copper is never a collision, at any clearance (#1609,
+    input_pair_unmoved).
     """
     own = set(own_net_ids)
     segs = saved_result.get('new_segments', []) or []
@@ -486,6 +522,17 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
         own_half = max(own_half, v.size / 2.0)
     margin = own_half + (config.max_pair_clearance(base=clearance)
                          if pairwise else clearance)
+    # A restored via is also held off a foreign via's DRILL at the
+    # hole-to-hole floor, which is net-blind and, between two fab-tier vias,
+    # wider than their copper clearance; the box reaches that too (a foreign
+    # via's own box already grows by its size, which covers its drill). A
+    # pair of vias the step was HANDED stood on the input board, so it is
+    # never the reason to refuse (#980's rule, applied to the drills).
+    h2h = (getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0) if config else 0.0
+    _inp_all = getattr(pcb_data, '_input_copper', None)
+    inp_all = _inp_all[0] if _inp_all else frozenset()
+    if h2h > 0 and vias:
+        margin = max(margin, max(v.drill for v in vias) / 2.0 + h2h)
     minx, maxx = min(xs) - margin, max(xs) + margin
     miny, maxy = min(ys) - margin, max(ys) + margin
 
@@ -510,11 +557,16 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
 
     hits = []
     seen = set()
+    held = input_pair_unmoved(pcb_data)
 
-    def _hit(kind, obj):
+    def _hit(kind, obj, mine):
+        # True when the pair counts (#1609: an unmoved input pair never does).
+        if held is not None and held(mine, obj):
+            return False
         if id(obj) not in seen:
             seen.add(id(obj))
             hits.append((kind, obj))
+        return True
 
     # Restored segments vs other-net segments (same layer) and vias (all layers).
     for s in segs:
@@ -525,15 +577,13 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             thr = hw + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
             if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
                                 o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
-                _hit('segment', o)
-                if first_only:
+                if _hit('segment', o, s) and first_only:
                     return hits
         for v in o_vias:
             thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
             if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
                                s.end_x, s.end_y) < thr * thr:
-                _hit('via', v)
-                if first_only:
+                if _hit('via', v, s) and first_only:
                     return hits
 
     # Restored vias (span layers) vs other-net vias and segments.
@@ -541,16 +591,17 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
         vr = vv.size / 2.0
         for v in o_vias:
             thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
+            if h2h > 0 and vv.drill > 0 and v.drill > 0 \
+                    and not (id(vv) in inp_all and id(v) in inp_all):
+                thr = max(thr, vv.drill / 2.0 + v.drill / 2.0 + h2h)
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
-                _hit('via', v)
-                if first_only:
+                if _hit('via', v, vv) and first_only:
                     return hits
         for o in o_segs:
             thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
             if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
                                o.end_x, o.end_y) < thr * thr:
-                _hit('segment', o)
-                if first_only:
+                if _hit('segment', o, vv) and first_only:
                     return hits
 
     return hits
@@ -586,6 +637,61 @@ def restore_write_entry(pruned: dict, input_ids) -> Optional[dict]:
     return {'net_name': pruned.get('net_name'), 'net_id': pruned.get('net_id'),
             'new_segments': own_s, 'new_vias': own_v,
             'iterations': pruned.get('iterations', 0), 'extends': pruned}
+
+
+def select_force_reroute_nets(pcb_data: PCBData, net_ids, overrides,
+                              input_file=None):
+    """The nets ``--force-reroute`` may strip, and their copper, shared by
+    route.py and route_diff.py.
+
+    ``net_ids`` is the ``[(name, id)]`` the step was asked to route and
+    ``overrides`` the ``--nets`` patterns, which are the #521 exact-name
+    override. A net with no copper routes normally anyway; a plane
+    (zone-owning) net belongs to route_planes; a protected net (length-matched
+    group, routed diff pair) is skipped unless named EXACTLY (no glob) in
+    ``overrides``; KiCad-locked copper is never stripped. The exact-name
+    overrides are stashed on ``pcb_data`` so the in-run ladders honour the
+    ones this pre-run filter did (run-6 z2).
+
+    Returns ``{net_id: (segments, vias)}`` -- the saved copper, NOT yet removed
+    from ``pcb_data`` (the caller strips it and keeps the objects for custody).
+    """
+    from kicad_parser import pour_zones
+    zone_nids = {z.net_id for z in pour_zones(pcb_data.zones)}
+    copper_nids = ({s.net_id for s in pcb_data.segments}
+                   | {v.net_id for v in pcb_data.vias})
+    cand, skipped_plane = [], []
+    for name, nid in net_ids:
+        if nid not in copper_nids:
+            continue  # no existing copper -- routes normally anyway
+        if nid in zone_nids:
+            skipped_plane.append(name)
+            continue
+        cand.append((name, nid))
+    if skipped_plane:
+        print(f"--force-reroute: skipping {len(skipped_plane)} plane "
+              f"(zone-owning) net(s) -- planes belong to route_planes: "
+              f"{', '.join(skipped_plane[:6])}"
+              f"{', ...' if len(skipped_plane) > 6 else ''}")
+    ripped: Dict[int, Tuple[list, list]] = {}
+    if not cand:
+        return ripped
+    from protected_nets import (protection_map, filter_rippable_names,
+                                stash_rip_overrides)
+    prot = protection_map(pcb_data, input_file)
+    overrides = list(overrides)
+    stash_rip_overrides(pcb_data, overrides)
+    keep = set(n for n, _ in cand)
+    if prot:
+        keep = set(filter_rippable_names(
+            [n for n, _ in cand], prot, override_patterns=overrides,
+            context="--force-reroute"))
+    for name, nid in cand:
+        if name not in keep:
+            continue
+        ripped[nid] = ([s for s in pcb_data.segments if s.net_id == nid],
+                       [v for v in pcb_data.vias if v.net_id == nid])
+    return ripped
 
 
 def partition_force_restores(force_ripped, pcb_data: PCBData,

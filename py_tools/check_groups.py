@@ -33,9 +33,14 @@ checked before any part moves:
                    intent's `proximity[]` rows, and each passive crystal with
                    its load caps at its IC's oscillator pins
                    (`placement/crystals.py`) -- and the group each follows
-                   its partner into. A claimed cap is no decap conflict
-                   (`--no-crystals`: checked as if no crystal claim were
-                   written).
+                   its partner into (`moved`), its group's other parts with
+                   it when it is the anchor. A group all of whose parts
+                   leave is DISSOLVED (`dissolved`): a WARN names the group
+                   that absorbs it and its own `near` / `apart` / `edge`
+                   hints, which are dropped, and the group table lists the
+                   groups as they will be placed. A claimed cap is no decap
+                   conflict (`--no-crystals`: checked as if no crystal claim
+                   were written).
 
     python3 py_tools/check_groups.py board.kicad_pcb --groups groups.json --intent intent.json
     python3 py_tools/check_groups.py board.kicad_pcb --groups groups.json --json out.json
@@ -54,7 +59,7 @@ import sys
 
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 from placement.grouping import (GroupsError, analyze, claim_rows,  # noqa: E402
-                                fold_followers, follower_roots, load_groups,
+                                fold_groups, fold_text, follower_roots, load_groups,
                                 template_candidates, template_hints)
 
 
@@ -93,25 +98,42 @@ def main(argv=None):
             return 2
         seated = sorted({str(f['ref']) for f in intent.fixed_poses
                          if str(f['ref']) in (pcb.footprints or {})})
-        tmpls = list(intent.templates)
+        tmpls = list(intent.templates) + intent.cover_templates()
     rows, crystal_notes = claim_rows(pcb, intent_doc, crystals=not a.no_crystals)
     followers = sorted(follower_roots(rows))
     for line in crystal_notes:
         print(f"  {line} -- seated by its claim, beside the IC")
     if seated:
         print(f"  at a declared pose (fixed): {', '.join(seated)}")
-    # a template's members follow its chip, as place_simple folds them
-    _folded, moved = fold_followers(doc, rows + [{'ref': m['ref'], 'near': t['anchor']}
-                                                 for t in tmpls for m in t['members']])
-    if moved:
-        print("  follow their claim into their partner's group: " + ', '.join(
-            f"{r} ({f} -> {t})" for r, (f, t) in sorted(moved.items())))
+    # a claimed part, and a template's member, follow their partner into its
+    # group, as place_simple folds them (#1467: a group they empty is dropped)
+    fold = fold_groups(doc, rows, tmpls)
+    moved, gone = fold['moved'], {d['group']: d for d in fold['dissolved']}
+    moved_line, dissolved_lines = fold_text(fold)
+    if moved_line:
+        print(f"  {moved_line}")
     rep = analyze(doc, pcb, followers=followers, extra_fixed=seated)
+    rep['warnings'] += dissolved_lines
+    rep['moved'] = {r: list(ft) for r, ft in sorted(moved.items())}
+    rep['dissolved'] = fold['dissolved']
 
+    # the groups as place_simple places them: a part that follows a claim is
+    # listed in its partner's group, and a dissolved group says where it went
+    held = {k: {r for g in rep['groups'] for r in g[k]} for k in ('movable', 'fixed')}
     for g in rep['groups']:
-        fixed = f"  fixed: {', '.join(g['fixed'])}" if g['fixed'] else ''
-        print(f"  {g['name']:<14} {g.get('role') or '-':<11} "
-              f"{len(g['movable'])} movable: {', '.join(g['movable'])}{fixed}")
+        role = g.get('role') or '-'
+        d = gone.get(g['name'])
+        if d:
+            print(f"  {g['name']:<14} {role:<11} dissolved into {d['into']}: " + '; '.join(
+                f"{', '.join(rs)} -> {t}" for t, rs in sorted(d['parts'].items())))
+            continue
+        come = sorted(r for r, (_f, t) in moved.items() if t == g['name'])
+        now = {k: [r for r in g[k] if r not in moved]
+               + [f"{r} (from {moved[r][0]})" for r in come if r in held[k]]
+               for k in ('movable', 'fixed')}
+        fixed = f"  fixed: {', '.join(now['fixed'])}" if now['fixed'] else ''
+        print(f"  {g['name']:<14} {role:<11} "
+              f"{len(now['movable'])} movable: {', '.join(now['movable'])}{fixed}")
     if rep['links']:
         print("  signal links between groups (rails excluded):")
         for row in rep['links']:
@@ -151,6 +173,7 @@ def main(argv=None):
                'pulled': [p['ref'] for p in rep['pulled']],
                'decap_cross_group': [d['cap'] for d in rep['decap_cross_group']],
                'crystals': crystal_notes, 'followers': followers,
+               'moved': rep['moved'], 'dissolved': sorted(gone),
                'seated': seated,
                'template_candidates': [t['chip'] for t in cands], 'template_hints': len(hints)}
     print('JSON_SUMMARY: ' + json.dumps(summary, sort_keys=True))

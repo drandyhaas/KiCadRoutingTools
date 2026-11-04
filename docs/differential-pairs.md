@@ -70,7 +70,7 @@ python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*"
     --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
 
-Nets with _P/_N, P/N, or +/- suffixes will be paired automatically.
+Nets with _P/_N, -P/-N, P/N, or +/- suffixes will be paired automatically.
 
 A `--nets` (or positional) pattern token may list several patterns separated by
 commas, e.g. `--nets "/DVI_CK_P,/DVI_CK_N"`; the token is split so each pattern
@@ -404,9 +404,27 @@ ends have stubs - the swap is committed directly without re-routing.)
 
 For a pair NOT matching `--polarity-swap-nets` (or with the flag absent
 entirely - the default), pad swaps never
-happen: only the flip resolution is tried, and if no flip produces a clean
-route the pair is **skipped** with a warning (no crossing tracks are ever
-written).
+happen: only the flip resolution is tried.
+
+When no candidate produces a clean route (no crossing tracks are ever
+written), the coupled route gives up and the log names every candidate with
+the reason it failed, then what runs next -- the hybrid escape (a coupled
+middle with single-ended terminal legs, which resolve polarity at the pads),
+and if that fails too, the single-ended follow-up:
+
+```
+  WARNING: Polarity mismatch not resolved by any coupled candidate:
+    no swap: intra-pair clearance (P and N 0.0376mm apart)
+    pad swap: intra-pair clearance (P and N 0.0376mm apart)
+    flipped source: intra-pair clearance (P and N 0.0758mm apart)
+    flipped target: no escape path
+  COUPLED ROUTE FAILED - polarity mismatch, and no candidate routed clean; trying the hybrid escape
+```
+
+A pair whose swap the policy denies reads `pad swap: not allowed for this pair
+(--polarity-swap-nets)` there, and its last line says so; such a pair is listed in
+`JSON_SUMMARY.polarity_swap_denied_pairs`. `no opposite-side option` is printed
+only when neither end can flip.
 
 ## Via Placement
 
@@ -698,25 +716,34 @@ the GUI diff tab gets the same answer:
 - **The measure** (`net_queries.diff_pair_coupling` / `diff_pair_skew`, see
   [the API](api-net-analysis.md)) is KiCad's: coupled length as KiCad 10's
   diff-pair coupling DRC computes it, in its integer geometry, and P/N skew as
-  its skew DRC does. Both matched kicad-cli 10.0.0 to 0.1 µm.
-- **Coupled** means the pair's copper carries at least one pitch (track width +
-  gap) of coupled run at a gap no wider than 1.5x the gap the pair was routed at
-  (`diff_pair_custody.measure_pair_copper`). The router lays its coupled run AT
-  the gap (a 45° run lands ~12 µm wider after grid snapping); its via approach
-  tracks and a hybrid's single-ended legs sit 3-6x apart and do not count. The
-  floor is one pitch, not a fraction: a hybrid's coupled middle can be 1.4 mm of
-  a 3 mm pair and is still the coupled route, while two legs that only pass each
-  other at a corner leave 2 µm to 0.15 mm.
+  its skew DRC does, from lengths measured as the installed kicad-cli's release
+  measures them (#1432). Both matched kicad-cli 10.0.0 to 0.1 µm.
+- **Coupled** means the pair's coupled run -- at a gap no wider than 1.5x the
+  gap the pair was routed at -- is at least one pitch (track width + gap) long
+  AND covers at least 10% of the pair's length
+  (`diff_pair_custody.measure_pair_copper`, `meets_coupled_floor`; the share is
+  `COUPLED_SHARE_FLOOR`, #1429). The router lays its coupled run AT the gap (a
+  45° run lands ~12 µm wider after grid snapping); its via approach tracks and a
+  hybrid's single-ended legs sit 3-6x apart and do not count. The pair's length
+  is the longer member's track length, `max(length_p_mm, length_n_mm)` -- the
+  length KiCad's coupling test measures against (its `diff_pair_uncoupled`
+  actual is that length minus the coupled run), so the share is
+  `coupled / (coupled + uncoupled)`. The pitch rejects two legs that only pass
+  each other at a corner (2 µm to 0.15 mm); the share rejects a coupled sliver
+  on a long pair (0.5 mm of a 21.5 mm pair used to read `coupled`). A hybrid's
+  coupled middle (1.4 mm of a 3 mm pair) passes both.
 - **Every claimed pair carries its record** as `pair_reports[].copper`:
   `coupled_mm`, `uncoupled_mm`, `length_p_mm` / `length_n_mm`, `layers_p` /
-  `layers_n`, `skew_mm`, the gap window and `coupled`.
+  `layers_n`, `skew_mm`, the gap window, `coupled_floor_mm`, `coupled_share`
+  (coupled run over the pair's length, capped at 1), `coupled_share_floor` and
+  `coupled`.
 - **A pair routed but not coupled** is outcome `uncoupled`, listed in
   `JSON_SUMMARY.uncoupled_diff_pairs` (and the GUI's completion dialog), and is
   **not** counted in `routed_diff_pairs` / `successful`. The end-of-run summary
   names it with what does ship:
 
   ```
-  Not coupled:   1 pair(s) routed whose shipped copper is not coupled (#1303; not credited as routed; protected only while the members still run alongside, #1361): /DRAM/DRAM_DQS0 (0.000mm coupled of 21.081mm; P on F.Cu/In2.Cu, N on B.Cu/F.Cu; skew 4.510mm; 0.000mm alongside within 1mm, not protected)
+  Not coupled:   1 pair(s) routed whose shipped copper is not coupled (#1303: under one pitch or 10% of the pair's length, #1429; not credited as routed; protected only while the members still run alongside, #1361): /DRAM/DRAM_DQS0 (0.000mm coupled of 21.081mm (0.0%); P on F.Cu/In2.Cu, N on B.Cu/F.Cu; skew 4.510mm; 0.000mm alongside within 1mm, not protected)
   ```
 
   A `partial` pair with no coupled copper is flagged `no_coupled_trunk` and
@@ -727,9 +754,10 @@ the GUI diff tab gets the same answer:
   Not coupled at the routed gap is not split (#1361). A pair that is not
   coupled also carries `alongside_mm`: KiCad's coupled length again, at any gap
   up to 1 mm (`diff_pair_custody.ALONGSIDE_GAP_MM`, the radius beyond which the
-  seam re-ask's score counts copper as split). When that is at least one pitch
-  and both members end terminal to terminal, the pair stays protected and its
-  report says `"protected": true`. The case is the seam re-ask: on ulx3s it
+  seam re-ask's score counts copper as split), and its share `alongside_share`.
+  When that run passes the same two floors as `coupled` -- one pitch and 10% of
+  the pair's length (#1429) -- and both members end terminal to terminal, the
+  pair stays protected and its report says `"protected": true`. The case is the seam re-ask: on ulx3s it
   routes GPDI straight from the AC caps to the HDMI pins, P and N 0.8 mm apart
   (the connector's pin pitch), with 0.17-0.40 mm of skew. Unprotected, the
   chain's next steps ripped GPDI_D1 and laid P on In2.Cu beside N on F.Cu.
@@ -767,9 +795,10 @@ This helps visualize the routing structure without affecting the actual routed c
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--diff-pair-gap` | board class, else 0.101 | Gap between P and N traces (mm). Omitted (the GUI: override unchecked), each pair takes its net class's `diff_pair_gap` and the call the Default class's; a class that leaves it unset inherits Default's, and a 0 is unset, falling back to the class clearance (the same rule makes an omitted `--track-width` the class `diff_pair_width`, else the class track width). Raised, never lowered, to the clearance (#441), the pair's net class (#530) and any `.kicad_dru` clearance rule that binds the pair on a layer it routes on (#1145): KiCad grades P against N as two nets. A pair a coupled-pair rule grades -- a clearance rule whose condition ANDs in `AB.isCoupledDiffPair()`, e.g. `AB.isCoupledDiffPair() && A.hasNetclass('USB')` -- keeps the gap asked for, floored at that rule alone (#1293). A "keep pairs apart" rule (`!AB.isCoupledDiffPair()`) never raises it: KiCad exempts a pair's own partner, by name (#1295) |
+| `--diff-pair-gap` | board class, else 0.101 | Gap between P and N traces (mm). Omitted (the GUI: override unchecked), each pair takes its net class's `diff_pair_gap` and the call the Default class's; a class that leaves it unset inherits Default's, and a 0 is unset, falling back to the class clearance (the same rule makes an omitted `--track-width` the class `diff_pair_width`, else the class track width). Raised, never lowered, to the clearance (#441), the pair's net class (#530) and any `.kicad_dru` clearance rule that binds the pair on a layer it routes on (#1145): KiCad grades P against N as two nets. A pair a coupled-pair rule grades -- a clearance rule whose condition ANDs in `AB.isCoupledDiffPair()`, e.g. `AB.isCoupledDiffPair() && A.hasNetclass('USB')` -- keeps the gap asked for, floored at that rule alone (#1293). So does a pair whose net class has a `diff_pair_gap` below its clearance -- KiCad then grades P against N at that gap (its implicit "netclass '...' (diff pair)" rule, floored at the board minimum clearance; #1542) -- and a pair a class-scoped clearance rule binds, e.g. `A.NetClass == 'CSI' && B.NetClass == 'CSI'` (floored at the board minimum clearance too, which KiCad's coupling check grades the gap at; #1526). Under `--escalation board --no-fix-drc-settings` such a rule still floors at the board minimum, not at the Default class the clearance base descends to there (#1630), and the post-route graze passes price P against N at the same rule, so the cleanup no longer moves the pair off its gap. A "keep pairs apart" rule (`!AB.isCoupledDiffPair()`) never raises it: KiCad exempts a pair's own partner, by name (#1295) |
 | `--track-width` | board class, else 0.3 | Each leg's width (mm). Omitted, the net class's `diff_pair_width` (see above). With `--impedance` it is the min-width floor and the no-stackup fallback |
-| `--impedance` | - | Target differential impedance (ohms, e.g. 100): solves each layer's leg width from the board stackup at `--diff-pair-gap` |
+| `--impedance` | - | Target differential impedance (ohms, e.g. 100): solves each layer's leg width from the board stackup at the gap the pairs are BUILT at -- `--diff-pair-gap` after every floor above, or, with it omitted, each pair's own class gap -- and records that gap with the declaration (#1630). Pairs of one call built at different gaps get one width per layer, which is said; route each gap in its own call. `check_impedance.py` reads the declared ohms back off the shipped width and P/N gap (disclosure) |
+| `--impedance-declare-only` | off | With `--impedance`: record the target ohms and the gap each pair is built at (a `declare_only` net_impedance record) and change nothing else -- the pairs route as without `--impedance`, at their class geometry, and `check_impedance.py` grades the shipped width and P/N gap against the ohms. No later step recomputes widths from such a record. For a pair class the project solved itself (#1630); the Differential tab's Declare Only box |
 | `--coplanar-gap` | - | Declares that every pair in the call runs through a same-layer ground pour this far (mm) from each trace's outer edge, so outer layers use the coplanar-waveguide model (requires `--impedance`; see [configuration.md](configuration.md#differential-pair-options-route_diffpy-only)) |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--max-setback-angle` | 45 | Half-angle of the setback angle scan (degrees) |
@@ -845,8 +874,14 @@ When enabled:
    escape or seam re-ask returns no stub lengths, and on imx6ulz DQS0 the result
    read P 12.00 < N 13.08 while the board had P 21.31 > N 16.82. A member whose
    pads are not joined yet falls back to the result's own sums (segments plus
-   recorded stub lengths), as before
-2. If the difference exceeds `--length-match-tolerance` (default 0.1mm), meanders are added to the shorter track
+   recorded stub lengths), as before. The copper kept is measured as KiCad's
+   skew DRC measures it (#1623): copper inside a pad that the run carries is
+   charged, a run ending at a pad's anchor is charged from the pad's outline,
+   and a via the stackup between the layers it joins. A track that ends inside
+   a via is charged from where it enters the via straight to the centre, the
+   line KiCad's skew DRC measures and the copper the post-route cleanup's
+   via-centre bridge leaves (#1583; step 6 reports what ships)
+2. If the difference exceeds `--length-match-tolerance` (default 0.1mm), meanders are added to the shorter track. When the first bump count falls short because foreign copper beside the leg clamps its bumps, more bumps are added at a lower amplitude (never above `--meander-amplitude`) before the pair is reported `meanders-ran-out` (#1583)
 3. The meanders are placed with clearance checking against the other track of the pair
 4. For polarity-swapped pairs, stub lengths are correctly recalculated using post-swap assignments (P gets P_source + N_target stubs, N gets N_source + P_target stubs) -- in the fallback; the board copper already carries the swap
 5. A multipoint pair's meander lands in the **leg** that held the copper it
@@ -868,6 +903,16 @@ When enabled:
    joined). `matcher_status` / `matcher_delta_mm` keep what the matcher reported;
    `delta_before_mm` stays the matcher's estimate. The `Intra-pair (shipped
    copper)` console line prints the regraded verdict
+7. **A pair the cleanup moved out of its tolerance is matched again** (#1622),
+   before the regrade, on the copper the cleanup left
+   (`length_matching.rematch_intra_pairs_on_shipped_copper`): a graze re-bend
+   took 1.378 mm out of a member matched to 0.089 mm, and the pair shipped at
+   1.466 mm against 0.127 mm. Every pair with a single coupled result whose
+   shipped skew (`diff_pair_skew`) is over its tolerance is meandered once more,
+   and the new copper is kept only when that skew goes down; otherwise the
+   copper is left exactly as the cleanup left it. The record's `rematch` says
+   what happened (`skew_before_mm`, `skew_after_mm`, `kept`), and on a kept one
+   `matcher_status` / `matcher_delta_mm` are the second pass's
 
 ```bash
 # Enable intra-pair matching

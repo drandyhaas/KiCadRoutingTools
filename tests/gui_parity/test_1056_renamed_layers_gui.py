@@ -161,6 +161,14 @@ def _old_mapping():
     return _Patched(swig_gui, '_build_layer_mappings', _display_name_mappings)
 
 
+def _old_strip_mapping():
+    """The pre-fix rip strip: the live strip (gui_utils.remove_listed_segments,
+    which every tab's strip calls) keyed by display name."""
+    import kicad_parser
+    return _Patched(kicad_parser, 'pcbnew_copper_layer_names',
+                    lambda: _display_name_mappings()[1])
+
+
 def _no_lset_name():
     """The builder before the fix: no canonical token for a non-copper layer,
     so it falls through to the display name."""
@@ -317,7 +325,7 @@ def main():
               [s.layer for s in sig] == ['In1.Cu'], f"{[s.layer for s in sig]}")
         check("the Route tab strips the ripped SIG track", not left,
               f"{len(left)} left")
-        _, bad_left = _rip(path, _old_mapping)
+        _, bad_left = _rip(path, _old_strip_mapping)
         check("negative control: keyed by display name, the track stays",
               len(bad_left) == 1, f"{len(bad_left)} left")
 

@@ -40,6 +40,8 @@ Patterns are matched in order - first matching pattern determines the width. Obs
 
 **Note:** Power net widths are automatically enforced to be at least the run's base track width (`--track-width`, else the Default net class's). This prevents accidentally specifying power widths smaller than signal widths.
 
+**The widths asked for are measured, not graded.** Each `route.py` step (and the GUI's routing tab) records the widths it was given in the output's `kicad_routing_tools` records (`power_widths`, net name -> mm), and `board_score.py` measures every recorded net against them with no flag: copper narrower than the request is reported in `net_widths.requested_under` (and on a `REQUESTED POWER WIDTHS` line), except a pad neck -- copper within the router's pad-entry zone of a narrower pad of its own net, at no less than that pad's short side -- which is excused and listed per net (`pad_neck_allowed_mm`). It is not counted in `blocking`: the router narrows a power route where its width does not fit and discloses it, so a request is what it aimed for. A width a net must have goes in `--net-min-widths`, which is graded (with the same pad-neck allowance) and outranks the record. A net class's own `track_width` is a drawing default, not a spec: the router honours it and discloses copper under it, and nothing grades it.
+
 ## Neck-Down for Failed Power Routes
 
 A wide power track sometimes cannot fit where it matters most - escaping a fine-pitch pad,
@@ -66,10 +68,17 @@ checkbox under the Power Widths field in the plugin. The narrowed sections are s
 escapes, so the current-carrying impact matches a hand-routed neck-down.
 
 Under `--escalation off` (the GUI's Escalation `off`) the neck-down is bounded to the pad
-entry: a failed wide edge retries narrower only when its pads are at most 2 mm apart and
-the narrow route is at most 2 mm long (`routing_defaults.PAD_ENTRY_NECK_MM`), and a
+entry (`routing_defaults.PAD_ENTRY_NECK_MM`, 2 mm): a failed wide edge whose pads are at
+most 2 mm apart retries narrower when the narrow route is at most 2 mm long, and a
 via-to-pad tap drawn narrower than the net's width is refused past the same length. A
-longer edge fails at the power width and is reported instead of shipping as a thin trunk.
+longer edge (or a short one whose narrow route is longer) is routed in two legs (#1452):
+at the power width to a landing near the pin, then at the default width into it, kept only
+when that narrow leg fits the pad-entry zone -- which under `off` is the allowance less the
+taper (`--neckdown-length` capped at 2 mm minus `--neckdown-taper-length`), so the zone and
+its taper together stay within 2 mm at each pad. The trunk keeps the power width and only
+the pin entry narrows. When no such route exists the edge fails at the power width rather
+than shipping a thin trunk, and the log says so: `Neck-down refused (--escalation off)`
+with the edge's span, and a hint naming the allowance instead of advising a smaller track.
 
 ## AI-Powered Power Net Analysis
 

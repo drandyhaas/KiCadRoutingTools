@@ -14,7 +14,10 @@ final board (issue #231): the agent's superseded retries (a route command it ran
 5x, only the last feeding downstream) and dead-end branches (an output nothing
 consumes) are skipped. This is much faster and deterministic -- each kept command
 re-reads its own input board, so dropping the overwritten writes can't change its
-result. Pass --verbatim to replay every recorded command literally.
+result. Pass --verbatim to replay every recorded command literally, and
+--continue-on-error with it to get past a step that fails again. A command its
+tool refuses before doing anything is never replayed (#1640): since then the
+recorder does not keep one, and an older manifest's is skipped in either mode.
 
 Usage:
   redo_stress_test.py <manifest> [--remap OLD:NEW ...] [--verbatim] [--skip-checks] [--dry-run]
@@ -321,30 +324,9 @@ def parse_manifest(path):
     return cmds
 
 
-_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-
-def split_env_prefix(argv):
-    """(env, argv): the command's leading `NAME=value` assignments, and the
-    command that follows them (#1302).
-
-    The recorder writes the env knobs a step ran with as that prefix -- the
-    shell's own spelling, so `bash redo_commands.sh` applies them -- and an
-    agent may type one by hand. A replayer must apply them as the child's
-    ENVIRONMENT: handed to Popen as argv, `KICAD_PLANE_FRAGILITY_COST=0` was
-    run as a program (PermissionError / FileNotFoundError), and a replayer
-    that dropped them routed the step at the defaults instead. The parsed
-    manifest keeps the prefix in argv, so every reader sees what was run;
-    the analysis helpers (board_io, is_check_cmd, the pruner) are blind to
-    it by construction, and anything that EXECUTES or converts a command
-    splits it here."""
-    env = {}
-    i = 0
-    while i < len(argv) and _ENV_ASSIGN.match(argv[i]):
-        k, v = argv[i].split("=", 1)
-        env[k] = v
-        i += 1
-    return env, list(argv[i:])
+# the parser lives beside the writer (`redo_record.env_prefix_tokens`), so
+# every reader of a recorded line splits it the one way (#1302, #1497)
+from redo_record import split_env_prefix  # noqa: E402
 
 
 def relocate_moved_scripts(argv):
@@ -390,8 +372,32 @@ def apply_remaps(argv, remaps):
     return out
 
 
-def is_check_cmd(argv):
+#: The write flag that makes a check_* tool's command a COPPER step: it writes
+#: a board a chain continues from, and records itself (#1397). Matched with
+#: argparse's own rule that an unambiguous prefix of a long option is it.
+CHECK_WRITE_FLAGS = ("--keep-staged",)
+
+
+def _writes_board(argv):
+    for a in argv:
+        name = a.split("=", 1)[0]
+        if len(name) > 2 and name.startswith("--") and any(
+                f.startswith(name) for f in CHECK_WRITE_FLAGS):
+            return True
+    return False
+
+
+def _is_check_tool(argv):
     return any(os.path.basename(a).startswith("check_") for a in argv)
+
+
+def is_check_cmd(argv):
+    """A check: a check_* tool that reads boards and writes none. A check_*
+    command with a write flag (`check_join --keep-staged OUT`, #1637) is a
+    copper step to every reader of a manifest -- the pruner, contamination,
+    seeding, the clobber guard, --skip-checks, the plan converters --
+    because a chain continues from the board it writes."""
+    return _is_check_tool(argv) and not _writes_board(argv)
 
 
 def mirror_project_sibling(argv, cwd):
@@ -477,7 +483,31 @@ def board_io(argv):
             os.path.basename(vals[idx[-1]]))
 
 
-def compute_prune_keep(cmds):
+def refused_commands(cmds, manifest=None):
+    """{index: why} for every command its tool would refuse before doing
+    anything (cli_argv_check): at argparse, or in a post-parse check its main
+    makes on the arguments or on a file they name, resolved against the
+    command's recorded cwd (else the manifest's folder).
+
+    A refused command ran nothing and wrote no board. Since #1640 the
+    recorder takes such a command back out of the manifest; this reads the
+    ones an older manifest still carries. Checks and `--help` are not asked.
+    The parser is TODAY'S (see cli_argv_check), and only the tools it knows
+    are judged."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from cli_argv_check import rejection
+    here = os.path.dirname(os.path.abspath(manifest)) if manifest else None
+    out = {}
+    for i, (_cwd, argv) in enumerate(cmds):
+        if is_check_cmd(argv) or '--help' in argv or '-h' in argv:
+            continue
+        why = rejection(argv, cwd=_cwd or here)
+        if why:
+            out[i] = why
+    return out
+
+
+def compute_prune_keep(cmds, refused=None, final_board=None):
     """Indices (0-based) of the commands needed to reproduce the final board.
 
     Builds the file-dependency DAG (issue #231) and keeps only the transitive
@@ -503,14 +533,25 @@ def compute_prune_keep(cmds):
     that writer SUCCEEDED in the original run -- true when the agent only advanced
     after a success, the normal case. The manifest records no exit status, so a
     rare "earlier attempt succeeded, later attempt failed" ordering would keep a
-    failing command; rerun without --prune (verbatim) if a pruned replay fails."""
+    failing command; rerun with --verbatim --continue-on-error if a pruned
+    replay fails. A command its tool REFUSES is never recorded since #1640
+    (redo_record takes the record back); for an older manifest, `refused`
+    ({index: why}, `refused_commands`) names the ones the tool's own parser
+    refuses, and they are pruned as if they were not in the manifest.
+
+    `final_board` (a basename) is the board to reproduce, when the run kept
+    one that is not the last board written (#1638: a rejected last try); its
+    LAST writer is the final command. Default: the last board written."""
     n = len(cmds)
+    refused = refused or {}
     producer = {}
     deps = [set() for _ in range(n)]
     out_of = [None] * n
     in_of = [[] for _ in range(n)]
     final = None
     for i, (_cwd, argv) in enumerate(cmds):
+        if i in refused:
+            continue  # ran nothing and wrote no board
         ins, out = board_io(argv)
         in_of[i] = ins
         if is_check_cmd(argv):
@@ -519,10 +560,12 @@ def compute_prune_keep(cmds):
         deps[i] = {producer[b] for b in ins if b in producer}
         if out is not None:
             producer[out] = i
-            final = i
+            if final_board is None or out == os.path.basename(final_board):
+                final = i
 
     if final is None:
-        return set(range(n)), {"final_index": None, "final_board": None, "dropped": []}
+        return (set(range(n)) - set(refused),
+                {"final_index": None, "final_board": None, "dropped": []})
 
     keep = set()
     stack = [final]
@@ -536,13 +579,14 @@ def compute_prune_keep(cmds):
     produced_any = {o for o in out_of if o}
     produced_kept = {out_of[i] for i in keep if out_of[i]}
     for i, (_cwd, argv) in enumerate(cmds):
-        if not is_check_cmd(argv):
+        if not is_check_cmd(argv) or i in refused:
             continue
         # keep a check iff every board it reads exists after pruning
         if all(b in produced_kept or b not in produced_any for b in in_of[i]):
             keep.add(i)
 
-    dropped = [i for i in range(n) if i not in keep and not is_check_cmd(cmds[i][1])]
+    dropped = [i for i in range(n) if i not in keep and not is_check_cmd(cmds[i][1])
+               and i not in refused]
 
     # CHAIN-HOLE detection (zynq final_board lesson): a kept command reading a
     # board that NO recorded command produces is normally just the seed input
@@ -550,7 +594,8 @@ def compute_prune_keep(cmds):
     # a board mid-run (cp/mv is not recorded), so the pruner cannot see past
     # it -- the replay would silently run current code on STALE original-run
     # copper and the A/B verdict is contaminated. Callers must warn loudly.
-    first_nc = next((i for i in range(n) if not is_check_cmd(cmds[i][1])), None)
+    first_nc = next((i for i in range(n) if not is_check_cmd(cmds[i][1])
+                     and i not in refused), None)
     seed_ok = set(in_of[first_nc]) if first_nc is not None else set()
     holes = sorted({b for i in keep if not is_check_cmd(cmds[i][1])
                     for b in in_of[i]
@@ -770,7 +815,8 @@ def main():
                          "that cwd isn't covered by --remap. The source board (absolute "
                          "path) still resolves either way.")
     ap.add_argument("--skip-checks", action="store_true",
-                    help="Skip check_*.py commands (they do not mutate the board)")
+                    help="Skip check_*.py commands (they do not mutate the board; a "
+                         "check_join --keep-staged writes one, and is replayed)")
     ap.add_argument("--verbatim", action="store_true",
                     help="Replay EVERY recorded command in order, including the agent's "
                          "superseded retries and dead-end branches. By default the replay "
@@ -779,8 +825,10 @@ def main():
                          "signal-route command recorded 5x runs once) and deterministic "
                          "(each kept command re-reads its own input, independent of the "
                          "dropped writes). Use --verbatim to reproduce the literal "
-                         "sequence, or if a pruned replay fails on a failed-retry "
-                         "ordering (see compute_prune_keep()).")
+                         "sequence, or -- with --continue-on-error, which gets past "
+                         "a step that fails again -- if a pruned replay fails on a "
+                         "failed-retry ordering (see compute_prune_keep()). A command "
+                         "its tool refuses at parsing is skipped in either mode.")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan, run nothing")
     ap.add_argument("--skip-validate", action="store_true",
                     help="Skip the parser-parity validation (validate_pcb_data.py: "
@@ -833,9 +881,17 @@ def main():
     if remaps:
         print("Remaps: " + ", ".join(f"{o} -> {n}" for o, n in remaps))
 
+    # A command its tool refuses ran nothing in the original run either: it
+    # is never replayed, in either mode, and binds no board (#1640). The
+    # recorder no longer writes one; an older manifest may still carry it.
+    refused = refused_commands(cmds, args.manifest)
+    for i, why in sorted(refused.items()):
+        print(f"    refused [{i+1}]: {why} -- not replayed")
+    live = [c for i, c in enumerate(cmds) if i not in refused]
+
     prune_keep = None
     if not args.verbatim:
-        prune_keep, info = compute_prune_keep(cmds)
+        prune_keep, info = compute_prune_keep(cmds, refused=refused)
         dropped = info["dropped"]
         print(f"Pruning to file-dependency chain: running {len(prune_keep)} of "
               f"{len(cmds)} command(s), dropping {len(dropped)} superseded/dead-end "
@@ -858,7 +914,7 @@ def main():
                       "(a single-point zone kiss grades as disconnected). "
                       "Re-record the chain to end on route.py with the "
                       "plane nets in --nets.")
-        warn_contamination(cmds)
+        warn_contamination(live)
         for i in dropped:
             _ins, out = board_io(cmds[i][1])
             tool = next((os.path.basename(a) for a in cmds[i][1] if a.endswith(".py")), "?")
@@ -867,14 +923,14 @@ def main():
         # Verbatim replays inherit hole files just the same -- the zynq #315
         # "still broken" verdict came from grading a verbatim replay's tail
         # that descended from a recorded artifact. Warn here too.
-        warn_contamination(cmds)
+        warn_contamination(live)
 
     # Seed input-only relative boards (e.g. <board>_input.kicad_pcb) into the dest
     # so the first command finds them -- without this the chain breaks (issue: a
     # relative seed file the original run dir had but no recorded command produces).
     dest_dirs = [args.workdir] if args.workdir else [n for _o, n in remaps]
     for d in dest_dirs:
-        seeded = seed_input_boards(args.manifest, cmds, d)
+        seeded = seed_input_boards(args.manifest, live, d)
         if seeded:
             print(f"Seeded input board(s) into {d}: {', '.join(seeded)}")
         side = seed_side_files(args.manifest, cmds, d)
@@ -885,6 +941,9 @@ def main():
     timings = []   # per-command (index, seconds, returncode, argv) for later comparison
     t0 = time.time()
     for i, (cwd, argv) in enumerate(cmds, 1):
+        if (i - 1) in refused:
+            print(f"[{i}/{len(cmds)}] refused: {' '.join(map(shlex.quote, argv[:3]))} ...")
+            continue
         if prune_keep is not None and (i - 1) not in prune_keep:
             print(f"[{i}/{len(cmds)}] prune: {' '.join(map(shlex.quote, argv[:3]))} ...")
             continue
@@ -981,8 +1040,21 @@ def main():
         if rc != 0 or timed_out:
             failures += 1
             # check tools return non-zero when they find issues -- not a real error;
-            # a timeout is always a real (non-termination) failure.
+            # a timeout is always a real (non-termination) failure. A check
+            # tool that WRITES a board (check_join --keep-staged, #1637)
+            # still writes it on a finding, so it failed only when its board
+            # was not written.
             real = timed_out or not is_check_cmd(argv)
+            if real and not timed_out and _is_check_tool(argv):
+                _out = board_io(argv)[1]
+                _vals = [a.split("=", 1)[1] if a.startswith("-") and "=" in a else a
+                         for a in run_argv]
+                _tok = next((v for v in reversed(_vals)
+                             if _out and os.path.basename(v) == _out), None)
+                _res = (_tok if not _tok or os.path.isabs(_tok)
+                        else os.path.join(cwd or ".", _tok))
+                real = not (_res and os.path.isfile(_res)
+                            and os.path.getmtime(_res) >= cmd_t0 - 1)
             if real:
                 print("    (timed out)" if timed_out else "    (non-check command failed)")
             if real and not args.continue_on_error:
@@ -995,7 +1067,7 @@ def main():
         print(f"\nReplayed {ran} of {len(cmds)} command(s) (pruned to the dependency "
               f"chain) in {total:.1f}s ({failures} non-zero exits).")
     else:
-        print(f"\nReplayed {len(cmds)} command(s) in {total:.1f}s ({failures} non-zero exits).")
+        print(f"\nReplayed {len(cmds) - len(refused)} command(s) in {total:.1f}s ({failures} non-zero exits).")
     # Per-command timing breakdown (slowest first) -- comparable across code versions.
     if timings:
         print("Per-command time (slowest first):")
@@ -1013,7 +1085,7 @@ def main():
     # Resolve the FINAL board path (used by the PNG snapshot and validation).
     fb_path = None
     try:
-        _keep, _info = compute_prune_keep(cmds)
+        _keep, _info = compute_prune_keep(cmds, refused=refused)
         fb = _info.get("final_board")
     except Exception:
         fb = None

@@ -54,6 +54,12 @@ def _union(rects):
             max(q[2] for q in rects), max(q[3] for q in rects))
 
 
+def _face(fp):
+    """'F' or 'B': `legality.footprint_side`, the one side rule (#878)."""
+    from placement.legality import footprint_side
+    return footprint_side(fp)
+
+
 def _moved(a, b):
     return (abs(a.x - b.x) > 1e-6 or abs(a.y - b.y) > 1e-6
             or abs(((a.rotation or 0) - (b.rotation or 0) + 180) % 360 - 180) > 1e-6
@@ -122,7 +128,14 @@ class Story:
     # -- setup ----------------------------------------------------------------
     def start(self, pcb, board, args, built):
         from kicad_parser import parse_kicad_pcb
+        if getattr(self, 'pcb', None) is not None:
+            # place_simple builds again (a face it chose, an estimate
+            # fallback): the story goes on with the new state, and a part that
+            # changed face turns over where it lies
+            self.rebuilt(pcb, built)
+            return
         self.state, self.model, self.movable, _notes = built
+        self.faces = {r: _face(f) for r, f in pcb.footprints.items()}
         self.pcb, self.args = pcb, args
         self.hold = max(1, int(round(STEP_HOLD * self.a.fps)))
         self.setup(pcb, board, args)
@@ -181,6 +194,34 @@ class Story:
         if declared:
             self.shot(f"faces and poses: {', '.join(declared)} at their declared face or pose",
                       moved=declared, times=self.hold, poses=self.pile)
+
+    def rebuilt(self, pcb, built):
+        """Go on with place_simple's new state: `on_faces` for the parts
+        whose face it changed, at the poses they hold now."""
+        old = {r: (p.x, p.y, p.rot) for r, p in self.state.parts.items()}
+        self.state, self.model, self.movable, _notes = built
+        self.pcb = pcb
+        changed = {r: _face(f) for r, f in pcb.footprints.items()
+                   if r in self.faces and _face(f) != self.faces[r]}
+        if changed:
+            self.on_faces(changed, old)
+            self.faces.update(changed)
+
+    def settled(self, pcb, state, model, movable):
+        """place_simple kept this state (it may be one built before the
+        last): go on with it, turning back any part whose face it undoes."""
+        if state is self.state:
+            return
+        self.rebuilt(pcb, (state, model, movable, []))
+
+    def on_faces(self, changed, poses):
+        """Parts turned to another face ({ref: 'F'|'B'}), at `poses`."""
+        to_b = sorted(r for r, f in changed.items() if f == 'B')
+        to_f = sorted(r for r, f in changed.items() if f == 'F')
+        what = '; '.join(x for x in (
+            f"to the back: {', '.join(to_b)}" if to_b else '',
+            f"to the front: {', '.join(to_f)}" if to_f else '') if x)
+        self.shot(f"faces: {what}", moved=sorted(changed), times=self.hold)
 
     def _rects_at(self, poses):
         """{ref: courtyard rect} of each part at its pose in `poses` (its turn
@@ -334,6 +375,13 @@ def install(story):
         story.start(pcb, board, args, out)
         return out
     place_simple.build = _build
+
+    settled = place_simple.settled
+
+    def _settled(pcb, state, model, movable):
+        settled(pcb, state, model, movable)
+        story.settled(pcb, state, model, movable)
+    place_simple.settled = _settled
 
     scatter, anneal = simple_anneal.scatter, simple_anneal.anneal
 

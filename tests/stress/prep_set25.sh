@@ -16,7 +16,6 @@ mkdir -p "$STRESS/boards_unrouted_set25" "$STRESS/boards_set25"
 # short-name (the staged source file is <short-name>.kicad_pcb)
 NAMES=(
   "peaksat_obc_adcs"
-  "spartan6_4layer"
   "icebreaker_v10e"
   "lwdo_sdr"
   "muons_sipm_v2"

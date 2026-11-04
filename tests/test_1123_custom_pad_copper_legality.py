@@ -6,8 +6,9 @@ parsed primitives. Two placement graders still took the pad's size box, which
 is symmetric about the anchor and so covers whatever side the copper does
 not reach:
 
-  * `legality.occupancy_shape` -- the courtyard united with its pads, so a
-    custom pad's empty box side enlarged a part's occupancy (#1094);
+  * `legality.occupancy_shape` -- then the courtyard united with its pads,
+    so a custom pad's empty box side enlarged a part's occupancy (#1094;
+    since #1588 a drawn courtyard is graded as drawn, without its pads);
   * `legality.pad_copper_overrun_mm` -- pad copper past the outline, so a
     custom pad's empty box corner could read as off the board (#1096).
 
@@ -226,8 +227,8 @@ def test_an_oblique_turn_encloses_the_copper():
 
 def test_disjoint_copper_is_every_part():
     """A bar and a square that do not touch: the copper is a MultiPolygon,
-    and every part of it is read -- by the helper, the overrun's vertices
-    and the occupancy."""
+    and every part of it is read -- by the helper and the overrun's
+    vertices. The occupancy is the courtyard alone (#1588)."""
     import check_pads
     from placement.legality import _copper_vertices
     path = _board(_fp('U1', 10, 10, _pad('1', [_BAR_POLY.replace(
@@ -240,9 +241,10 @@ def test_disjoint_copper_is_every_part():
     assert abs(cu.area - 0.68) < 1e-6, cu.area
     xs = [x for x, _y in _copper_vertices(cu)]
     assert (round(min(xs), 6), round(max(xs), 6)) == (9.8, 12.0), xs
-    # courtyard 1.4 x 0.6 holds the bar; the square lies outside it
+    # courtyard 1.4 x 0.6 holds the bar; the square lies outside it, and
+    # the occupancy is the courtyard as drawn (#1588)
     area = _occupancy_area(path, 'U1')
-    assert abs(area - 1.04) < 1e-6, area
+    assert abs(area - 0.84) < 1e-6, area
     print("  disjoint copper: %.2f mm2 in two parts, vertices x %.1f..%.1f, "
           "occupancy %.2f" % (cu.area, min(xs), max(xs), area))
 

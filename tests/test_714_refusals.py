@@ -8,15 +8,14 @@ indistinguishable from success at every call site. That is the same argument
 `writer.py`'s #829 guard already makes for raising rather than skipping, and it
 is why the default for an unrecognised node here is a REFUSAL.
 
-REFUSING IS CHEAP, MEASURED. Over the 22 tracked boards
-(`tests/measure_714_mirror_convention.py` section A, 1349 footprint blocks) the
-refusal set touches at most 7 blocks: `primitives` 6, `zone` 1. Four of the
-constructs below have NO corpus witness at all -- `chamfer`, `rect_delta`,
-`fp_text_box`, `group` -- which is the whole argument for refusing them: no
-corpus gate can validate a rule for a construct the corpus does not contain, so
-any rule for it is an unfalsifiable guess. Those four are exercised here by
-INJECTING them into a real board, which is the only way to test a refusal for
-something nothing ships.
+WHAT STILL REFUSES IS RARE. Custom-pad primitives, chamfered corners,
+footprint zones and points, groups, embedded files and the other constructs
+the stress corpus carries in quantity now flip, each compared against pcbnew's
+own flip (`tests/gui_parity/test_714_mirror_pcbnew_parity.py`). Over the
+corpus's 71503 footprint blocks about 200 still refuse, most of them per-layer
+padstacks, and the rest are constructs a few footprints carry (`rect_delta`,
+`dimension`, KiCad 6's `tedit`). A refusal here is exercised by INJECTING its
+construct into a real board.
 
 A REFUSAL IS ONLY A GUARD IF IT REFUSES FOR ITS OWN REASON. An `ImportError`,
 an `AttributeError` or a `KeyError` also stops the write, and reads identical
@@ -121,20 +120,9 @@ def main():
                 'new_y': round(fp.y, 6), 'new_rotation': fp.rotation,
                 'new_side': side}])
 
-        rp = os.path.join(REPO, 'kicad_files',
-                          'rp2350_fpga_eensy_prePlane.kicad_pcb')
-        oc = os.path.join(REPO, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
         tg = os.path.join(REPO, 'kicad_files', 'tigard.kicad_pcb')
 
-        # --- the two constructs the corpus DOES carry
-        results.append(_expect_refusal(
-            'footprint-internal (zone) [rp2350 J2, the only corpus witness]',
-            'J2', ['zone'], lambda: flip(rp, 'J2')))
-        results.append(_expect_refusal(
-            'custom pad (primitives) [orangecrab U9]',
-            'U9', ['primitives'], lambda: flip(oc, 'U9')))
-
-        # --- the four with NO corpus witness, injected
+        # --- injected constructs the mirror still has no rule for
         p = _inject(tg, os.path.join(tmp, 'textbox.kicad_pcb'), 'J7',
                     extra='(fp_text_box "x" (start 0 0) (end 1 1) '
                           '(layer "F.SilkS"))')
@@ -154,11 +142,35 @@ def main():
         results.append(_expect_refusal(
             'a head in neither the refusal table nor the whitelist',
             'J7', ['fp_holographic_sticker'], lambda: flip(p, 'J7')))
+        p = _inject(tg, os.path.join(tmp, 'rectdelta.kicad_pcb'), 'J7',
+                    sub=(r'\(roundrect_rratio [^)]*\)', '(rect_delta 0 0.1)'))
+        results.append(_expect_refusal('a trapezoid pad (rect_delta ...)',
+                                       'J7', ['rect_delta'],
+                                       lambda: flip(p, 'J7')))
         p = _inject(tg, os.path.join(tmp, 'chamfer.kicad_pcb'), 'J7',
+                    sub=(r'\(roundrect_rratio [^)]*\)', '(chamfer middle_left)'))
+        results.append(_expect_refusal('a (chamfer ...) corner name KiCad does '
+                                       'not write', 'J7', ['middle_left'],
+                                       lambda: flip(p, 'J7')))
+        p = _inject(tg, os.path.join(tmp, 'primarc.kicad_pcb'), 'J7',
                     sub=(r'\(roundrect_rratio [^)]*\)',
-                         '(chamfer top_left bottom_left)'))
-        results.append(_expect_refusal('(chamfer ...) corner names',
-                                       'J7', ['chamfer'],
+                         '(primitives (gr_poly (pts (xy 0 0) (arc (start 0 1) '
+                         '(mid 1 0) (end 0 -1))) (width 0) (fill yes)))'))
+        results.append(_expect_refusal('an (arc ...) in a custom pad polygon\'s '
+                                       'point list', 'J7', ['gr_poly', 'arc'],
+                                       lambda: flip(p, 'J7')))
+        p = _inject(tg, os.path.join(tmp, 'primkind.kicad_pcb'), 'J7',
+                    sub=(r'\(roundrect_rratio [^)]*\)',
+                         '(primitives (gr_bbox (start 0 0) (end 1 1)))'))
+        results.append(_expect_refusal('a primitive kind outside the measured '
+                                       'five', 'J7', ['gr_bbox'],
+                                       lambda: flip(p, 'J7')))
+        p = _inject(tg, os.path.join(tmp, 'zonefill.kicad_pcb'), 'J7',
+                    extra='(zone (layer "F.Cu") (uuid "0") (polygon (pts '
+                          '(xy 0 0) (xy 1 0) (xy 1 1))) (filled_polygon '
+                          '(layer "F.Cu") (pts (xy 0 0) (xy 1 0) (xy 1 1))))')
+        results.append(_expect_refusal('a footprint zone carrying a fill',
+                                       'J7', ['filled_polygon'],
                                        lambda: flip(p, 'J7')))
         p = _inject(tg, os.path.join(tmp, 'fandb.kicad_pcb'), 'J7',
                     pad_layers='(layers "F&B.Cu" "F.Mask" "F.Paste")')
@@ -193,8 +205,15 @@ def main():
                          '(size 0.6 1.55)\n\t\t\t(padstack (layer "F.Cu" '
                          '(size 0.6 1.55)))'))
         results.append(_expect_refusal(
-            'a pad child outside the whitelist (KiCad 9/10 padstack)',
+            'a per-layer (padstack ...) (named refusal)',
             'J7', ['padstack'], lambda: flip(p, 'J7')))
+        # The pad WHITELIST arm: a child in neither table.
+        p = _inject(tg, os.path.join(tmp, 'padchild.kicad_pcb'), 'J7',
+                    sub=(r'\(size 0\.6 1\.55\)',
+                         '(size 0.6 1.55)\n\t\t\t(pad_holographic 1)'))
+        results.append(_expect_refusal(
+            'a pad child outside the whitelist',
+            'J7', ['pad_holographic'], lambda: flip(p, 'J7')))
 
         p = _inject(tg, os.path.join(tmp, 'nolayer.kicad_pcb'), 'J7',
                     sub=(r'\(layer "F\.Cu"\)\n', ''))

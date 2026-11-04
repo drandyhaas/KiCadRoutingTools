@@ -12,7 +12,8 @@ route_planes.py on the same files:
 
   class   HV sits in a 0.8 mm net class (Default 0.2): every return via must
           clear the HV pad by 0.8 (#1030). Negative control: the obstacle map
-          built without net_clearances, i.e. the GUI before #1030.
+          and the return vias' exact copper check given no net_clearances,
+          i.e. the GUI before #1030.
   dru     no class; a .kicad_dru rule sets F.Cu clearance to 0.8 mm (#498).
           The GUI never installed the rules. The CLI did, but read them beside
           the OUTPUT board, which gets its copy only after the GND-via block,
@@ -190,6 +191,28 @@ def _stage(d, arm):
 
 # ------------------------------------------------------------------ the fronts
 
+#: Set while the class arm's negative control runs: the return vias' exact
+#: copper check is then handed no class map either, like the obstacle map.
+_CLASSES_OFF = []
+
+
+class _ClassesOff:
+    """The class arm's control: no net classes reach the GND-via step --
+    neither its obstacle map nor its exact copper check."""
+
+    def __init__(self, patched):
+        self.patched = patched
+
+    def __enter__(self):
+        self.patched.__enter__()
+        _CLASSES_OFF.append(True)
+        return self
+
+    def __exit__(self, *exc):
+        _CLASSES_OFF.clear()
+        return self.patched.__exit__(*exc)
+
+
 class _Patched:
     """Swap one module attribute for the duration of a `with`."""
 
@@ -222,9 +245,11 @@ def _gui(board_path, off=None, ncl=None):
     seen = {}
     real = add_gnd_vias.add_gnd_vias_to_existing_board
 
-    def spy(pcb_data, net, dist, config, obstacles, coord):
+    def spy(pcb_data, net, dist, config, obstacles, coord, **kw):
         seen['config'] = config
-        return real(pcb_data, net, dist, config, obstacles, coord)
+        if _CLASSES_OFF:
+            kw.pop('net_clearances', None)
+        return real(pcb_data, net, dist, config, obstacles, coord, **kw)
 
     config = {'assignments': [(['GND'], ['B.Cu'])],
               'via_size': VIA, 'via_drill': DRILL, 'clearance': BASE,
@@ -293,8 +318,8 @@ def main():
         return real_map(*a, **k)
 
     controls = {
-        'class': lambda: _Patched(obstacle_map, 'build_base_obstacle_map',
-                                  map_without_classes),
+        'class': lambda: _ClassesOff(_Patched(obstacle_map, 'build_base_obstacle_map',
+                                              map_without_classes)),
         'dru': lambda: _Patched(kicad_dru, 'install_layer_clearances',
                                 lambda *a, **k: None),
         # The tab reads `from .swig_gui import explicit_net_clearances` at

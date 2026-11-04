@@ -634,6 +634,16 @@ def extract_fab_shapes(pcb_file: str) -> Dict[str, Dict[str, tuple]]:
     return _extract_outline_shapes(pcb_file, _FAB_LAYER, '.Fab"')
 
 
+def extract_silk_shapes(pcb_file: str) -> Dict[str, Dict[str, tuple]]:
+    """Per-side F/B.SilkS OUTLINES, `{ref: {side: (geometry, how)}}` (#1401);
+    `extract_silk_sides`' shape-keeping twin. `how` is `OUTLINE_POLYGON` when
+    the silk CLOSES into a loop (a drawn housing) and `OUTLINE_HULL` when it
+    does not (corner brackets, side ticks), where the convex hull of what was
+    drawn stands in. Only the first is an outline a part can be said to sit
+    inside."""
+    return _extract_outline_shapes(pcb_file, _SILK_LAYER, '.SilkS"')
+
+
 def extract_courtyard_bboxes(pcb_file: str) -> Dict[str, Bbox]:
     """
     Parse courtyard (F.CrtYd / B.CrtYd) extents from each footprint block.
@@ -748,19 +758,35 @@ def courtyard_for_side(sides: Optional[Dict[str, Bbox]],
     return sides.get(side) or next(iter(sides.values()))
 
 
-def warn_missing_courtyards(refs, label: str = 'placement') -> None:
-    """Print a one-line warning naming refs that have no courtyard at all.
+def warn_missing_courtyards(refs, label: str = 'placement',
+                            estimates=None) -> None:
+    """Say what placement does with the pad-bearing parts that draw no
+    courtyard (`refs`), up front, before anything is placed.
 
-    Those parts fall back to `compute_footprint_bbox_local`, which is the union
-    of PAD rects with no courtyard margin at all — a 0402's IPC courtyard is
-    ~2.9x1.5mm against a ~1.9x0.9mm pad box — so the part is modelled smaller
-    than it is and can be packed to a courtyard violation. Silence was the
-    complaint in #456 item 3; the geometry itself is unchanged.
+    Placement seats such a part on an ESTIMATED courtyard (#1300,
+    `body.estimated_courtyards`): what it occupies, its .Fab body, else its
+    silk, else its pads, united with its pads -- the occupancy
+    check_assembly grades it on. `estimates` ({ref: CourtyardEstimate}) are
+    those estimates; their refs are named in one NOTE, per basis (`fab` /
+    `silk` / `pad_bbox`, `body.format_estimates`). A drawn courtyard is
+    authoritative and replaces the estimate, so there is nothing to
+    synthesize. Only a ref with no estimate (a container, a part the
+    placer's fallback keeps on its pads) is modelled by its bare pad box,
+    `compute_footprint_bbox_local`, with no margin at all: that one is the
+    WARNING, since it can be packed into its neighbour's body. Silence was
+    the complaint in #456 item 3; a warning that called every such part a
+    pad box led a user to draw courtyards of their own (#1466).
     """
-    refs = sorted(refs)
+    from placement.body import format_estimates
+    refs = set(refs)
+    estimates = {r: e for r, e in (estimates or {}).items() if r in refs}
+    note = format_estimates(estimates, label)
+    if note:
+        print(note)
+    refs = sorted(r for r in refs if r not in estimates)
     if not refs:
         return
     shown = ', '.join(refs[:12]) + (', ...' if len(refs) > 12 else '')
     print(f"  WARNING [{label}]: {len(refs)} footprint(s) have no courtyard "
-          f"(F/B.CrtYd) and fall back to their pad bounding box, which carries "
-          f"no courtyard margin: {shown}")
+          f"(F/B.CrtYd) and no estimate, so they fall back to their pad "
+          f"bounding box, which carries no courtyard margin: {shown}")

@@ -67,7 +67,11 @@ def main():
               summ.get('poured_nets') == ['GND'] and summ.get('has_copper') is False,
               str(summ.get('poured_nets')))
 
-        # 2. interf_u_plane
+        # 2. interf_u_plane: GENERATED and gitignored, so a fresh clone has
+        # none until fixture_boards builds it from the tracked interf_u.
+        sys.path.insert(0, TESTS_DIR)
+        import fixture_boards
+        fixture_boards.ensure('interf_u_plane.kicad_pcb')
         out, doc, summ = brief('interf_u_plane.kicad_pcb', tmp)
         pours = (doc.get('pours') or {}).get('pours') or []
         check('interf_u_plane: two unfilled pours, GND and VCC',

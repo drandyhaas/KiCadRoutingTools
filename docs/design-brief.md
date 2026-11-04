@@ -57,6 +57,8 @@ already grade, and that `place_simple` reads wherever it reads the intent
 | `mount_mode`, `cable_entry`, `cable_envelope_mm`, `product.user_top_side` | compiled by `connector_consequences` into `max_setback_mm`, `side` and cable `keepouts[]` -- see [below](#connector-declarations-compile-to-clauses) | `context.basis`, `context.compiled_from` |
 | `assembly.body_edge_mm` | `assembly.body_edge_mm`, merged into the emitted `assembly` block; `why` and `requirement` move into `assembly.context.body_edge_mm`. Graded by check_assembly's `body_edge_band`, not by a floorplan rule (see [below](#assemblybody_edge_mm-the-assemblers-edge-rule)) | `context.basis`: `declared`, `min_reader` 9 |
 | `keep_away` | `keep_away[]`, one intent row per rule, in its canonical spelling; `why` and `requirement` move into `context`. Graded by `keep_away`, and read by the routing engines too (see [below](#keep_away-two-net-groups-apart)) | `source: "brief"`, `context.keep_away_note`, `min_reader` 10 |
+| `covers[]`, `heights[]` | `covers[]` / `heights[]`, one intent row per brief row, validated by the intent's own loader; the row's `source` (its datasheet) is kept. Graded by the `cover` rule, check_assembly's `height` pairs and the placer (see [below](#covers-and-heights-what-stands-over-the-board)) | `context.brief_row`, `context.from: "brief"`, `min_reader` 15 (20 with a `heights[].under_cover`, 21 with a cover's `top_mm`, `insertion` or a standoff's `off_mm`, 22 with a cover's `holes`, 23 with a cover's `start_mm` or a hole or standoff behind the connector's origin) |
+| `cans[]` | per listed face, a `blocks[]` row (`can:<name>:<face>`, the `in` parts, tolerance 0) and a `keepouts[]` row over the zone allowing the can's own parts; on the can's face, a `heights[]` underside for a drawn can or a `fence_mm` and a `max_height_mm` keep-out for one not drawn yet (see [below](#cans-a-shield-can-as-one-row)) | `context.derived_from: "cans[<name>]"`, `min_reader` 16 |
 | `product`, `unknown[]` | `context` | — |
 
 ### The compiler declares nothing that nothing grades
@@ -100,7 +102,7 @@ board alone gives.
       "edge": "east",                        // north|south|east|west|"unknown"
       "along_edge": "center",                // "center" | {"from":f, "to":f} | "unknown"
       "along_edge_tolerance_mm": 0.5,        // REQUIRED with "center"
-      "overhang_mm": { "min": 0.0, "max": 0.65 },
+      "overhang_mm": { "min": 0.0, "max": 0.65 },   // past the edge; never negative (#1532)
       "mating_face": "+y",                   // +x|-x|+y|-y in the footprint's own frame, or "unknown":
                                              // the side it opens on, for a body that names none
       "mount_mode": "edge_mount",            // compiled -- see below
@@ -318,8 +320,10 @@ merely unknown — an author who wrote one believes it is being honoured:
   toolchain writes `Edge.Cuts`.
 - **`board_size`** — the same fact one step earlier: board size is a mechanical
   decision this toolchain does not make.
-- **`height`** — nothing in the placement stack measures z. There is no height
-  in `legality.GradedPart` and none in the parser, so a declared limit would
+- **`height`** — nothing in the placement stack grades a board-wide height
+  limit. Heights are judged per part and per area (#1443): which part fits
+  under which, a declared `covers[]` body, a keep-out's `max_height_mm` (see
+  `floorplan-intent.md`), so a declared board-wide limit would
   grade **nothing**, which is worse than not declaring it: it is exactly the
   "constraint the author believes they set and the grader never checks" failure
   the strict key sets exist to prevent.
@@ -422,7 +426,7 @@ splitflap_driver, glasgow_revC, ulx3s -- their briefs are
 
 | declaration | compiles to | basis |
 |---|---|---|
-| `mount_mode: edge_mount` | `max_setback_mm` 0.75, on the drawn body (the courtyard when the library drew no fab or silk outline) | `derived_default` -- two shipping edge-mount bodies sit past the receptacle seat's 0.5 mm: tigard J7 at 0.60, rp2350 J3 at 0.614. As built the seat binds on neither, because each courtyard reaches the edge and the seat is asked only of a part whose courtyard sits a margin inside; 0.75 admits those bodies wherever it does bind |
+| `mount_mode: edge_mount` | `max_setback_mm` 0.75, on the drawn body (the courtyard when the library drew no fab or silk outline) | `derived_default` -- two shipping edge-mount bodies sit past the receptacle seat's 0.5 mm: tigard J7 at 0.60, rp2350 J3 at 0.614. Since #1585 the seat is asked whenever the drawn body does not overhang (it used to be asked only of a part whose courtyard sat inside, so it bound on neither); 0.75 admits those bodies |
 | `mount_mode: through_edge` | the same `max_setback_mm` 0.75: the part reaches the edge, read on the drawn body when the entry is an edge receptacle (the class `user_facing`, the emitter's classifier or a declared edge assigns) and on the courtyard otherwise. How far PAST it is `overhang_mm`, declared or emitted, never derived -- an overhang floor of 0 is vacuous (a body inside the board reads 0 overhang) | `derived_default` |
 | `mount_mode: top_mount` / `bottom_mount` | an exemption, reported `carried`: NOT held to the edge-receptacle seat; its declared edge and overhang still grade it, and nothing measures the mount itself | declared -- without it, `user_facing` would make vertical headers edge receptacles and fail them |
 | `cable_entry: perpendicular_top` / `_bottom`, with `product.user_top_side` | `side`: the face the cable plugs into, graded as `edge_connector_side` | declared; a fixed **WARN** an intent cannot raise; `place_simple` applies the face before it places |
@@ -538,7 +542,9 @@ For each crystal or oscillator it writes one rule that keeps the clock nets
 away from every switch node the pins name: a converter's SW or LX pin, or a
 discrete switch's drain on an inductor net. Where a part's pins carry no
 function, that side is a `candidate` read off the nets: a pin-less buck's
-inductor end, or the one undecoupled output of a pin-less oscillator. The
+inductor end, or the one undecoupled output of a pin-less oscillator. A part
+`emc_roles` calls a connector is never a candidate, so a coax jack with a
+bias-tee inductor on its centre pin proposes no switch node (#1590). The
 gap is 3 mm, a derived default and not a datasheet value. It is twice
 route.py's `--keep-away-free`, so the band reaches past the radius the router
 leaves unpriced around each net's own pins. Each proposal carries
@@ -549,9 +555,98 @@ ulx3s, `/power/L1,/power/L2,/power/L3:CLK_25MHz:3` is already inside at
 1.05 mm, with the oscillator Y1 and the buck U4 on opposite faces. Nothing
 reads a proposal until it is pasted.
 
+## `covers[]` and `heights[]`: what stands over the board
+
+```jsonc
+"covers": [{ "connector": "J3", "side": "F", "axis_deg": 90, "width_mm": 22,
+             "underside_mm": 2.5, "length_mm": 44, "removable": true,
+             "standoffs": [{ "ref": "H2", "length_mm": 42 }],
+             "source": "socket datasheet: 2.5 mm card height; single-sided 2242 card" }],
+"heights": [{ "ref": "U7", "height_mm": 1.1, "source": "U7 datasheet, package drawing" }]
+```
+
+A card in a socket, a module on a stacking connector or a shield on headers
+stands over the board, and how low it reaches depends on the socket and on
+the card fitted -- which the board file does not say. The rows are the
+intent's own (`docs/floorplan-intent.md`, "`covers[]` and `heights[]`"):
+every number is the author's, from the datasheets, and `py_tools/
+cover_facts.py` prints what the board does know. They live in the brief
+because a cover worked out once has to survive every later emit: the brief
+travels with the board, and each `--emit-intent` compiles its rows in again.
+`removable` says whether the body comes off in service, which decides
+whether a test point may stand under it. A module screwed down through its
+own holes declares them as `holes[]` (`{length_mm, off_mm, diameter_mm}`,
+from its drawing) even before any standoff is on the board, and
+check_assembly's `mountable` row names what stands at each hole site. A
+hole or standoff behind the connector's origin takes a negative
+`length_mm`, and a body that reaches behind it a negative `start_mm`, so a
+module with holes on both sides of its connector is one row.
+
+## `cans[]`: a shield can as one row
+
+```jsonc
+"cans": [{ "name": "RF", "ref": "J10", "zone": [206.6, 164.1, 237.4, 194.9],
+           "side": "F", "interior_height_mm": 2.5,
+           "source": "the can's datasheet: 2.5 mm inside the lid",
+           "members": { "F": { "in": ["U18", "C72"], "either": ["C96", "R75"] } } }]
+```
+
+A shield can is a zone some parts must be inside, every other part must stay
+out of, and nothing taller than its lid may stand in. Written by hand that is
+a block per face, a keep-out per face and a height row, all saying the same
+zone in board coordinates; a `cans[]` row says it once and compiles to them:
+
+| compiled to | for | reads |
+|---|---|---|
+| `blocks[]` `can:<name>:<face>` | each listed face with `in` parts | the `in` parts held to `zone`, `tolerance_mm` 0 (no member reaches under the wall); not exclusive |
+| `keepouts[]` `can:<name>:<face>` | each listed face | `zone` on that face, `allow` = every face's `in` and `either` plus the can's own `ref` (a through-hole member's leads are on both faces, and a drawn can stands over its own zone) |
+| `heights[]` `{ref, underside_mm}` | the can's face, drawn (`ref`) | `interior_height_mm` of room under the can, judged as any declared cover |
+| `fence_mm` on the face's block, and `keepouts[]` `can:<name>:height` | the can's face, not drawn yet (`wall_mm`) | the band the wall will take, and `max_height_mm` = `interior_height_mm` less the 0.5 mm cover margin, so a one-sided part passes the same height test before the can is drawn and after (see below for the parts that do not) |
+
+`in` parts are pulled into the zone; `either` parts may stand inside or
+out; every part not listed is out. Members are literal references, never
+patterns. A face not listed claims nothing: list `B` only when the can's
+footprint area on the other face is kept for its own parts too.
+Two cans whose zones overlap on a face both list are refused: each can's
+keep-out would shut out the other's parts.
+`interior_height_mm` and `source` are required -- a part is admitted under a
+can only by a declared height, never a guessed one -- and `zone` is required
+with or without `ref`: it is not read off the drawn can. A member whose
+height is unknown, or too tall, is refused under it, and the keep-out
+finding says which (`it admits parts no taller than 2mm, and C1 is 2.01mm`);
+for an `in` member under a can not drawn yet, `place_simple`'s plan check
+refuses the run before placing anything.
+
+Two kinds of part are judged differently before the can is drawn and after.
+A through-hole member is refused under a can not drawn yet whatever its
+height (`R20 stands on both faces`: the height keep-out does not know its
+other face), while a drawn can admits it by height. A part reached from
+above (a test point, a connector, a switch) is admitted under a can not
+drawn yet by its height, and a drawn can refuses it.
+
+A drawn can's checks need the board, so `compile_with_consequences` makes
+them and reports one row per can. Its room is **withheld** when the can is
+not on the declared face, when the zone reaches past the can's outline (its
+body and pads: room is given only under the can), when that outline cannot
+be read, or when its drawn courtyard covers the zone: KiCad
+flags every part inside a courtyard as a courtyard overlap, so room under it
+would pass a board KiCad's DRC fails. The courtyard is read as drawn: KiCad's
+RF_Shielding footprints draw it as a ring (an outer and an inner outline),
+which leaves the inside open, and a can drawn that way has its room. A can
+that is not locked is named, because its zone is in board coordinates and does not
+follow a can a placer moves.
+
+Openings in the wall (a dashed fence, an in and an out, a single mouse-hole)
+are not declared: a drawn can's pads are the wall the router routes round.
+What a track crossing the wall costs is not priced.
+
+On `--emit-intent` a part a can claims leaves the block the emitter inferred
+for its sheet (the block keeps its zone for its other parts, and drops its
+`group`, which would add them back); each one is reported as a contradiction.
+
 ## Deferred, and named rather than silently absent
 
-Height limits as geometry, thermal, panel/depanel, a cable keep-out WITHOUT a
+A board-wide height limit, thermal, panel/depanel, a cable keep-out WITHOUT a
 declared envelope (a declared `cable_envelope_mm` derives one),
 subsystem decomposition,
 a side POLICY beyond the advisory connector face, a mounting datum as a

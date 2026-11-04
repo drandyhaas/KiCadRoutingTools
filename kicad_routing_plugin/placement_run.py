@@ -358,7 +358,38 @@ def stage_inputs(workdir, snapshot_path, board_filename):
         mech = os.path.join(os.path.dirname(stem), MECHANICAL_NAME)
         if os.path.isfile(mech):
             shutil.copyfile(mech, os.path.join(workdir, MECHANICAL_NAME))
+        _stage_schematic(workdir, board_filename)
     return staged
+
+
+def _stage_schematic(workdir, board_filename):
+    """The project's schematic tree beside input.kicad_pcb: the root as
+    input.kicad_sch (what board_context looks for beside the board) and each
+    sub-sheet at its path relative to the root, so the hierarchy resolves as
+    it did. Without it a run from this tab read no sheets and no drawn
+    blocks, while the same skill run on the board in place read both. A
+    sheet file outside the root's folder is not staged, and board_context
+    names it as not found."""
+    try:
+        from placement.schematic import discover, tree_files
+    except Exception:                                      # noqa: BLE001
+        return
+    try:
+        root, _looked = discover(board_filename)
+        if root is None:
+            return
+        inside, _outside = tree_files(root)
+        for path, rel in inside:
+            same = os.path.normcase(os.path.abspath(path)) == \
+                os.path.normcase(os.path.abspath(root))
+            dst = os.path.join(workdir, "input.kicad_sch" if same else rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(path, dst)
+    except Exception as exc:                               # noqa: BLE001
+        # An unreadable schematic must not stop the run; board_context then
+        # reports none beside the board. Said on KiCad's console, not lost.
+        print(f"Placement: schematic not staged ({type(exc).__name__}: "
+              f"{exc})", file=sys.stderr)
 
 
 def _fwd(path):
@@ -634,16 +665,32 @@ def _seed_defaults():
         return 6, 6, 6
 
 
+def _placement_defects(doc, named):
+    """judge_seeds' seeds it skips with no `--seeds` (#1645): the named seeds
+    judge.json grades with a floorplan error or a NOT BUILDABLE assembly.
+    judge_seeds is the authority; the import is guarded like `_seed_defaults`
+    and the fallback is a copy."""
+    try:
+        from judge_seeds import placement_defects
+        return set(placement_defects(doc, named))
+    except Exception:                                      # noqa: BLE001
+        fp, asm = doc.get("floorplan") or {}, doc.get("assembly") or {}
+        return {s for s in named if fp.get(str(s)) or asm.get(str(s))}
+
+
 def _named_judged(rows):
     """The seeds `judge.json` names (place_simple writes it beside the seeds'
-    boards once every seed is placed), else None."""
+    boards once every seed is placed) that judge_seeds will route with no
+    `--seeds` -- not one it grades with a placement defect (#1645) -- else
+    None."""
     for r in rows:
         if r["placed"]:
             try:
                 with open(os.path.join(os.path.dirname(r["placed"]), "judge.json"),
                           encoding="utf-8") as fh:
                     doc = json.load(fh)
-                return {int(s) for s in doc.get("judge") or ()}
+                named = [int(s) for s in doc.get("judge") or ()]
+                return set(named) - _placement_defects(doc, named)
             except (OSError, ValueError, TypeError, AttributeError):
                 return None
     return None

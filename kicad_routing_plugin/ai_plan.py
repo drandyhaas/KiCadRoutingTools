@@ -30,6 +30,8 @@ PLAN_RESULT_SCHEMA = (
     '"params": {"diff_pair_width": <mm>, "diff_pair_gap": <mm>, '
     '"impedance": <target differential ohms, optional - when set, per-layer '
     'trace width is derived from the stackup and overrides diff_pair_width>, '
+    '"impedance_declare_only": <true to RECORD the impedance target for '
+    'check_impedance without changing the pair geometry, optional>, '
     '"layer_costs": [<per-copper-layer cost multiplier, in board layer order>, ...]}} | '
     '{"action": "route", "nets": ["<glob>", ...], '
     '"params": {"track_width": <mm>, "clearance": <mm>, "via_size": <mm>, '
@@ -363,6 +365,9 @@ _GEOMETRY_OVERRIDE_CHECKS = {
     # and each pair uses its OWN netclass diff geometry (the omitted-flag default).
     'diff_pair_width': 'diff_pair_width_check',
     'diff_pair_gap': 'diff_pair_gap_check',
+    # #1503: a plan's tolerance == the CLI passing --length-match-tolerance,
+    # which overrides a .kicad_dru P/N skew rule for the pairs it matches
+    'length_match_tolerance': 'length_match_tolerance_check',
 }
 
 
@@ -1085,6 +1090,9 @@ def apply_step_selection(step, dialog, all_steps=None):
     elif action == "route_diff":
         tab = dialog.differential_tab
         wanted = step.get("pairs") or ["*"]
+        # The step's raw patterns, as route_diff.py passes its --nets: a glob
+        # is no #521 override, so --force-reroute keeps protected pairs.
+        dialog._plan_net_globs = [str(w) for w in wanted]
         # A plan's "pairs" may be base names ("/USB/D") OR the individual P/N
         # net names the recorded route_diff --nets carried ("/USB/D+",
         # "/USB/D-"). manifest_to_plan forwards --nets verbatim, so match a pair
@@ -1170,13 +1178,16 @@ def _match_net_names(pcb_data, globs):
     if not includes:
         includes = ["*"]
     names = []
+    from net_queries import multipad_unconnected_to_route
+    multipad_nc = multipad_unconnected_to_route(pcb_data)
     for net in pcb_data.nets.values():
         if not net.net_id or not net.name:
             continue
         # CLI parity: expand_net_patterns drops KiCad no-connect nets
-        # ('unconnected-*') from every selection; the plan executor must not
-        # hand the net panel nets the CLI would never route.
-        if net.name.lower().startswith('unconnected-'):
+        # ('unconnected-*') from every selection EXCEPT the multi-pad ones
+        # nothing joins (#1405); the plan executor must not hand the net panel
+        # nets the CLI would never route, nor hold back ones it would.
+        if net.name.lower().startswith('unconnected-') and net.name not in multipad_nc:
             continue
         # Sheet-path aware, like the CLI's expand_net_patterns (#493): an
         # unqualified '!GND' must exclude the board's '/GND'.
@@ -1703,7 +1714,12 @@ class PlanExecutor:
                         edge_clearance=floors.get('board_edge_clearance'),
                         diff_pair_width=floors.get('diff_pair_width'),
                         diff_pair_gap=floors.get('diff_pair_gap'),
-                        clamp_nondefault_netclasses=_clamp)
+                        clamp_nondefault_netclasses=_clamp,
+                        # #1492: the raw override is the ceiling the classes
+                        # land at, min(class, ceiling)
+                        class_ceiling=(self.dialog.clearance.GetValue()
+                                       if _clamp and hasattr(self.dialog, 'clearance')
+                                       else None))
                     fix_project_for_output(board_file, input_pcb=board_file,
                                            minima=_minima, **_fix_kw)
                     # The SAME floors on the live board. KiCad's own save
@@ -1738,6 +1754,16 @@ class PlanExecutor:
                                        board=_live)
                 persist_impedance_specs(_pro, consume_impedance_specs(),
                                         board=_live)
+                # #1503: the pairs matched P to N, and the skew each was matched to
+                from protected_nets import (consume_intra_pair_tolerances,
+                                            persist_intra_pair_tolerances)
+                persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances(),
+                                              board=_live)
+                # #1379: the plan's power-net width requests, measured and disclosed.
+                from protected_nets import (consume_power_widths,
+                                            persist_power_widths)
+                persist_power_widths(_pro, consume_power_widths(),
+                                     board=_live)
                 # #678: the plan's fanout steps' pour-served balls.
                 persist_pour_served_pads(_pro, consume_pour_served_pads(),
                                          board=_live)

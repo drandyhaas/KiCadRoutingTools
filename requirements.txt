@@ -64,3 +64,4 @@ Pillow>=9.2.0
 # CP-SAT parameters (max_num_deterministic_batches, share_glue_clauses), and
 # CP-SAT's plans move between versions.
 ortools>=9.15
+

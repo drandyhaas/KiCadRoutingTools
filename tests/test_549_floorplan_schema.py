@@ -140,15 +140,35 @@ KEY_SETS = {
         # #1211: sibling sheet instances laid out as copies of one.
         'replicate',
         # a chip's datasheet layout, seated and carried by place_simple.
-        'templates'},
+        'templates',
+        # #1443: a body a connector carries, and declared part heights.
+        'covers', 'heights', 'links', 'chains', 'rails'},
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                     'tolerance_mm', 'context',
                     # #893: a DECISION and a SET, never both on one block.
-                    'rotation', 'rotation_candidates'} | FREE,
-    '_KEEPOUT_KEYS': {'name', 'rect', 'circle', 'sides', 'allow',
+                    'rotation', 'rotation_candidates',
+                    # #1475: a band round the zone no part may use.
+                    'fence_mm'} | FREE,
+    # #1443: `max_height_mm`, a part of known height no taller may stand in it.
+    '_KEEPOUT_KEYS': {'name', 'rect', 'circle', 'sides', 'allow', 'max_height_mm',
                       'context'} | FREE,
+    # #1443: one declared cover, every number the author's, and its standoffs.
+    '_COVER_KEYS': {'connector', 'side', 'axis_deg', 'width_mm', 'underside_mm',
+                    'length_mm', 'offset_mm', 'standoffs', 'removable', 'source',
+                    'top_mm', 'insertion', 'context',
+                    # #1537: the body's own mounting-hole sites.
+                    'holes',
+                    # #1589: where the body begins, behind the origin too.
+                    'start_mm'} | FREE,
+    # #1504: a corner standoff's offset, and the path a card goes in by.
+    '_COVER_STANDOFF_KEYS': {'ref', 'length_mm', 'rot', 'off_mm'},
+    '_COVER_INSERTION_KEYS': {'angle_deg', 'travel_mm'},
+    # #1537: one hole site, placed as a standoff is, from the body's drawing.
+    '_COVER_HOLE_KEYS': {'length_mm', 'off_mm', 'diameter_mm'} | FREE,
+    '_HEIGHT_KEYS': {'ref', 'height_mm', 'underside_mm', 'under_cover', 'source',
+                     'context'} | FREE,
     '_EDGE_CONNECTOR_KEYS': {
         'ref', 'edge', 'overhang_mm', 'max_setback_mm', 'class', 'source',
         'suspect', 'suspect_reason', 'overhang_capped',
@@ -197,9 +217,14 @@ KEY_SETS = {
                          'context', 'accept_courtyard_overlap'} | FREE,
     # #1253: one rule per row, in route.py's own syntax.
     '_KEEP_AWAY_KEYS': {'rule', 'source', 'context'} | FREE,
+    # #1477: two sets of parts within max_mm; a chain of such links.
+    '_LINK_KEYS': {'name', 'a', 'b', 'max_mm', 'context'} | FREE,
+    '_CHAIN_KEYS': {'name', 'stages', 'max_mm', 'context'} | FREE,
+    # #1478: supply nets priced as rails whatever their fan-out.
+    '_RAILS_KEYS': {'nets', 'context'} | FREE,
     # #1211: `place_pose replicate`'s own flags, plus the grade's tolerance.
-    '_REPLICATE_KEYS': {'from', 'to', 'anchor', 'allow_net_mismatch', 'only',
-                        'skip', 'search_mm', 'tolerance_mm',
+    '_REPLICATE_KEYS': {'from', 'to', 'channels', 'anchor', 'allow_net_mismatch',
+                        'only', 'skip', 'search_mm', 'tolerance_mm',
                         'source', 'context'} | FREE,
 }
 
@@ -255,7 +280,15 @@ def test_the_key_sets_are_exactly_what_is_documented():
         '_ARRAY_KEYS': 'arrays[]',
         '_FIXED_POSE_KEYS': 'fixed_poses[]',
         '_KEEP_AWAY_KEYS': 'keep_away[]',
+        '_LINK_KEYS': 'links[]',
+        '_CHAIN_KEYS': 'chains[]',
+        '_RAILS_KEYS': 'rails[]',
         '_REPLICATE_KEYS': 'replicate[]',
+        '_COVER_KEYS': 'covers[]',
+        '_COVER_STANDOFF_KEYS': 'covers[].standoffs[]',
+        '_COVER_INSERTION_KEYS': 'covers[].insertion',
+        '_COVER_HOLE_KEYS': 'covers[].holes[]',
+        '_HEIGHT_KEYS': 'heights[]',
     }
     checked = 0
     for name, row in sorted(TABLE_ROWS.items()):
@@ -292,12 +325,13 @@ def test_an_intent_using_every_known_key_loads():
         # block, so the vocabulary cannot be covered by a single entry.
         'blocks': [{'name': 'power', 'group': 'sheet:1', 'refs': ['U3'],
                     'zone': [2, 2, 40, 30], 'side': 'F', 'exclusive': True,
-                    'tolerance_mm': 0.7, 'rotation': 90,
+                    'tolerance_mm': 0.7, 'rotation': 90, 'fence_mm': 1.0,
                     'note': 'n', 'context': {'why': 'w'}},
                    {'name': 'mcu', 'refs': ['U1'],
                     'rotation_candidates': [0, 90, 180, 270]}],
         'keepouts': [{'name': 'k', 'rect': [0, 0, 6, 6], 'sides': ['F'],
-                      'allow': ['MH1'], 'note': 'n', 'context': {'why': 'w'}},
+                      'allow': ['MH1'], 'note': 'n', 'context': {'why': 'w'},
+                      'max_height_mm': 1.0},
                      {'name': 'k2', 'circle': [50, 5, 8], 'sides': ['F', 'B'],
                       'allow': [], 'note': '', 'context': {}}],
         'edge_connectors': [{
@@ -367,19 +401,39 @@ def test_an_intent_using_every_known_key_loads():
         # #1253. One rule per row, in route.py's own syntax.
         'keep_away': [{'rule': 'SW:FB,class=Analog:0.5', 'note': 'n',
                        'source': 'brief', 'context': {'why': 'w'}}],
+        # #1477. A link and a chain of them.
+        'links': [{'name': 'l', 'a': ['U3'], 'b': ['C*'], 'max_mm': 8,
+                   'why': 'w', 'context': {'why': 'w'}}],
+        'chains': [{'name': 'c', 'stages': [['J1'], ['U3'], ['U1']],
+                    'max_mm': [5, 10], 'why': 'w', 'context': {'why': 'w'}}],
+        # #1478. Supplies priced as rails.
+        'rails': [{'nets': ['+5V', '/VBUS'], 'why': 'w', 'context': {'why': 'w'}}],
         # #1211. `only` and `skip` are exclusive, so the second row carries
         # `skip`.
         'replicate': [{'from': 'CH1', 'to': ['CH2', 'CH3'], 'anchor': 'J1',
                        'allow_net_mismatch': ['U19.2'], 'only': ['U1'],
                        'search_mm': 2.0, 'tolerance_mm': 0.1, 'why': 'w',
                        'note': 'n', 'source': 's', 'context': {'why': 'w'}},
-                      {'from': 'CH1', 'to': ['CH4'], 'skip': ['R1']}],
+                      {'from': 'CH1', 'to': ['CH4'], 'skip': ['R1']},
+                      # #1480: copies inside one sheet, named by their parts
+                      {'channels': [['U5', 'C5'], ['U6', 'C6']]}],
         # A chip's datasheet layout: each member's pose in the chip's frame.
         'templates': [{'anchor': 'U1', 'source': 's', 'note': 'n', 'why': 'w',
                        'tolerance_mm': 0.3, 'context': {'why': 'w'},
                        'members': [{'ref': 'C1', 'at': [1.5, 0.0], 'rot': 90,
                                     'pads': {'C1': ['1'], 'U1': ['3']}, 'note': 'n'}],
                        'fitted': {'legs_gap_mm': {'C1': 0.2}, 'gap_mm': 0.15}}],
+        # #1443. A declared cover, every key on one row, and part heights.
+        'covers': [{'connector': 'J3', 'side': 'F', 'axis_deg': 90, 'width_mm': 22,
+                    'underside_mm': 2.5, 'length_mm': 44, 'offset_mm': 0.0,
+                    'start_mm': -2.0,
+                    'standoffs': [{'ref': 'MH2', 'length_mm': 42, 'rot': 0, 'off_mm': 0.0}],
+                    'top_mm': 3.5, 'insertion': {'angle_deg': 25, 'travel_mm': 2},
+                    'holes': [{'length_mm': 40, 'off_mm': 8.0, 'diameter_mm': 2.7,
+                               'why': 'w', 'note': 'n'}],
+                    'removable': True, 'source': 's', 'why': 'w', 'note': 'n', 'context': {'why': 'w'}}],
+        'heights': [{'ref': 'U9', 'height_mm': 0.8, 'underside_mm': 2.0, 'source': 's',
+                     'under_cover': True, 'why': 'w', 'note': 'n', 'context': {'why': 'w'}}],
     }
     # Every key of every set must appear above, or this proves less than it
     # claims -- the point is coverage of the vocabulary, not of a sample.
@@ -403,9 +457,13 @@ def test_an_intent_using_every_known_key_loads():
     seen |= set(raw['proximity'][0])
     seen |= set(raw['arrays'][0]) | set(raw['fixed_poses'][0])
     seen |= set(raw['keep_away'][0])
+    seen |= set(raw['links'][0]) | set(raw['chains'][0]) | set(raw['rails'][0])
     for r in raw['replicate']:
         seen |= set(r)
     seen |= set(raw['dispositions'])
+    seen |= set(raw['covers'][0]) | set(raw['covers'][0]['standoffs'][0])
+    seen |= set(raw['covers'][0]['insertion']) | set(raw['covers'][0]['holes'][0])
+    seen |= set(raw['heights'][0])
     for k in raw['keepouts']:
         seen |= set(k)
     missing = sorted({k for keys in KEY_SETS.values() for k in keys} - seen)
@@ -685,9 +743,18 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'plan_edge_crowded',
                                         'plan_board_overfull',
                                         'plan_board_crowded',
+                                        # #1468: a member larger than its
+                                        # zone; the zone-fill heuristic
+                                        # (settable to warn only)
+                                        'plan_zone_member_oversized',
+                                        'plan_zone_utilisation',
                                         'plan_fixed_pose_conflict',
                                         'plan_fixed_overlap',
                                         'plan_fixed_overlap_budget',
+                                        # #1463
+                                        'plan_fixed_in_exclusive_zone',
+                                        # #1631
+                                        'plan_zone_on_fixed',
                                         # #959 (#1000)
                                         'edge_connector_side',
                                         # an edge whose declared parts
@@ -703,13 +770,22 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         # #1253: a keep-away side matching
                                         # no net
                                         'keep_away_unresolved',
+                                        # #1477: a link side matching no
+                                        # part
+                                        'link_unresolved',
                                         # #1211: a copy the board cannot
                                         # resolve
                                         'replicate_unresolved',
                                         'template_unresolved',
                                         # a switching stage's caps' ground
                                         # return
-                                        'template_ground_return'}
+                                        'template_ground_return',
+                                        # #1387: a keep-out binding a
+                                        # template member, not its chip
+                                        'plan_template_keepout',
+                                        # #1443: a cover the board cannot
+                                        # resolve
+                                        'cover_unresolved'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         # Two names accept one direction only, and say so at load:

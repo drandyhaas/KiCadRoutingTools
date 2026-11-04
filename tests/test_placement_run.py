@@ -142,6 +142,36 @@ for _label, _ok in (("the GUI's import path (copy_board.SIBLING_EXTS)", True),
     check(f"{_label}: discover_mechanical finds the staged mechanical.json",
           bool(discover_mechanical(st)), st)
 
+# The project's schematic tree reaches the staged board too: board_context
+# reads `<board>.kicad_sch` and its sub-sheets, by paths relative to the root,
+# so the root is staged as input.kicad_sch and a sub-sheet keeps its folder.
+from placement.schematic import discover as discover_schematic  # noqa: E402
+from placement.schematic import tree_files  # noqa: E402
+sch_dir = os.path.join(TMP, "boards_sch")
+os.makedirs(os.path.join(sch_dir, "sheets"))
+sch_board = os.path.join(sch_dir, "proj.kicad_pcb")
+open(sch_board, "w").write("(kicad_pcb (version 20260206))\n")
+open(os.path.join(sch_dir, "proj.kicad_sch"), "w").write(
+    '(kicad_sch (version 20231120) (uuid "r")\n'
+    '  (sheet (at 0 0) (size 10 10) (uuid "s1")\n'
+    '    (property "Sheetname" "Power" (at 0 0 0))\n'
+    '    (property "Sheetfile" "sheets/power.kicad_sch" (at 0 0 0))))\n')
+open(os.path.join(sch_dir, "sheets", "power.kicad_sch"), "w").write(
+    '(kicad_sch (version 20231120) (uuid "p"))\n')
+wk_sch = create_workdir(sch_board, "place")
+st_sch = stage_inputs(wk_sch, snapshot, sch_board)
+root_sch, _looked = discover_schematic(st_sch)
+check("the staged board finds its schematic as input.kicad_sch",
+      root_sch is not None and os.path.normcase(root_sch)
+      == os.path.normcase(os.path.join(wk_sch, "input.kicad_sch")), root_sch)
+inside, outside = tree_files(root_sch) if root_sch else ([], ["unreadable"])
+check("the staged hierarchy resolves whole (the sub-sheet in its folder)",
+      sorted(r.replace("\\", "/") for _p, r in inside)
+      == ["input.kicad_sch", "sheets/power.kicad_sch"] and not outside,
+      (inside, outside))
+check("a board with no schematic stages none",
+      not os.path.exists(os.path.join(wk, "input.kicad_sch")))
+
 # ----------------------------------------------- retention + .gitignore (#1057)
 
 runs_root = os.path.join(board_dir, RUNS_DIRNAME)

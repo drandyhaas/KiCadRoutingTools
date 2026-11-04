@@ -529,6 +529,19 @@ class DifferentialTab(wx.Panel):
             "Gap as spacing, overriding Pair Width. 0 = off (use Pair Width).")
         param_grid.Add(self.diff_impedance, 0, wx.EXPAND)
 
+        # #1630: declare the ohms without changing the pair geometry; named
+        # after the engine param, so a plan step reaches it
+        param_grid.Add(wx.StaticText(self, label="Declare Only:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.impedance_declare_only = wx.CheckBox(self, label="")
+        self.impedance_declare_only.SetValue(False)
+        self.impedance_declare_only.SetToolTip(
+            "#1630: with Diff Impedance > 0, RECORD the target ohms for these nets and "
+            "change nothing else -- they route at the project's own pair width and gap, as "
+            "without Diff Impedance, and check_impedance.py grades the copper against "
+            "the ohms. For a pair class the project sized itself; a later step never "
+            "recomputes widths from the record. (CLI: --impedance-declare-only)")
+        param_grid.Add(self.impedance_declare_only, 0, wx.EXPAND)
+
         # Min turning radius
         param_grid.Add(wx.StaticText(self, label="Min Turn Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['diff_pair_min_turning_radius']
@@ -1004,8 +1017,11 @@ class DifferentialTab(wx.Panel):
                     net_clearances[net.net_id] = class_clearance_cache.get(
                         cname, _diff_clearance)
                 if config.get('clamp_netclasses', False):
-                    net_clearances = {nid: min(clr, _diff_clearance)
-                                      for nid, clr in net_clearances.items()}
+                    from fab_tiers import cap_net_clearances  # #1561 discloses
+                    net_clearances = cap_net_clearances(
+                        net_clearances, _diff_clearance,
+                        net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
+                        class_of=all_net_to_class)
             except Exception as e:
                 print(f"Warning: Could not get net class clearances: {e}")
                 net_clearances = None
@@ -1027,6 +1043,7 @@ class DifferentialTab(wx.Panel):
                 layer_costs=config.get('layer_costs') or None,  # per-layer bias (#193); None -> all 1.0
                 track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),
                 impedance=config.get('impedance'),  # when set, overrides per-layer width
+                impedance_declare_only=config.get('impedance_declare_only', False),
                 # #486: CPW-over-ground vs microstrip. route_diff.py passes
                 # args.coplanar_gap here; without it the shared Coplanar Gap
                 # control is honoured for single-ended routing but silently
@@ -1128,6 +1145,7 @@ class DifferentialTab(wx.Panel):
                 length_match_groups=config.get('length_match_groups'),
                 length_match_tolerance=config.get('length_match_tolerance',
                                                   defaults.LENGTH_MATCH_TOLERANCE),
+                intra_pair_tolerance=config.get('intra_pair_tolerance'),
                 meander_amplitude=config.get('meander_amplitude', defaults.MEANDER_AMPLITUDE),
                 meander_spacing=config.get('meander_spacing', defaults.MEANDER_SPACING),
                 time_matching=config.get('time_matching', False),
@@ -1139,6 +1157,12 @@ class DifferentialTab(wx.Panel):
                 mps_segment_intersection=config.get('mps_segment_intersection', False),
                 schematic_dir=config.get('schematic_dir'),
                 add_teardrops=config.get('add_teardrops', False),
+                # #1399: the shared "Force re-route selected nets" box, here
+                # re-routing the selected pairs AS pairs. The raw patterns are
+                # the #521 exact-name override (None = interactive selection,
+                # which names its nets exactly), as the signal tab passes.
+                force_reroute=config.get('force_reroute', False),
+                net_name_patterns=config.get('net_name_patterns'),
                 skip_routing=config.get('skip_routing', False),
                 debug_memory=config.get('debug_memory', False),
                 return_results=True,
@@ -1263,8 +1287,9 @@ class DifferentialTab(wx.Panel):
             _kept = sorted(r['pair'] for r in results_data.get('pair_reports') or []
                            if r.get('outcome') == 'uncoupled' and r.get('protected'))
             msg += (f"Not coupled: {len(uncoupled_pairs)} "
-                    f"(routed, but no coupled run on the board - not counted "
-                    f"as routed): {', '.join(uncoupled_pairs)}\n")
+                    f"(routed, but the board carries no coupled run over "
+                    f"enough of the pair's length - not counted as routed): "
+                    f"{', '.join(uncoupled_pairs)}\n")
             if _kept:
                 msg += (f"  still alongside, so protected: {', '.join(_kept)}\n")
         # Companion GND return vias with no legal site (the CLI prints the
@@ -1356,25 +1381,9 @@ class DifferentialTab(wx.Panel):
         # from a prior routing pass stays on the live board.
         segs_to_remove = results_data.get('segments_to_remove') or []
         if segs_to_remove:
-            remove_keys = set()
-            for s in segs_to_remove:
-                a = (round(s.start_x, POSITION_DECIMALS), round(s.start_y, POSITION_DECIMALS))
-                b = (round(s.end_x, POSITION_DECIMALS), round(s.end_y, POSITION_DECIMALS))
-                remove_keys.add((frozenset((a, b)), s.layer, s.net_id))
-            for track in list(board.GetTracks()):
-                if track.Type() != pcbnew.PCB_TRACE_T:
-                    continue  # skip vias / arcs
-                a = (round(pcbnew.ToMM(track.GetStart().x), POSITION_DECIMALS),
-                     round(pcbnew.ToMM(track.GetStart().y), POSITION_DECIMALS))
-                b = (round(pcbnew.ToMM(track.GetEnd().x), POSITION_DECIMALS),
-                     round(pcbnew.ToMM(track.GetEnd().y), POSITION_DECIMALS))
-                # Canonical layer name, as s.layer is: a renamed layer's
-                # display name matched no key and left ripped copper (#1056).
-                key = (frozenset((a, b)), id_to_name.get(track.GetLayer()),
-                       track.GetNetCode())
-                if key in remove_keys:
-                    board.RemoveNative(track)
-                    tracks_removed += 1
+            # Counted and width-preferring, as the CLI writer's strip (#1556).
+            from .gui_utils import remove_listed_segments
+            tracks_removed += remove_listed_segments(board, pcbnew, segs_to_remove)
 
         # Remove original-board VIAS the pipeline flagged (#508 finding 11:
         # route_diff now returns vias_to_remove; swig_gui parity).
@@ -1460,8 +1469,14 @@ class DifferentialTab(wx.Panel):
                 import clearance_ledger
                 eff_clearance = clearance_ledger.effective(cfg.get('clearance')) \
                     if cfg.get('clearance') else cfg.get('clearance')
+                # #1369: the copper-to-hole floor this step HELD, lowered only
+                # to what the copper it just drew needs -- route_diff.py's
+                # step_hole_clearance, from the tab's applied lists.
+                _hole_clr = self._held_hole_clearance(board, results_data,
+                                                      eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
+                    hole_clearance=_hole_clr,
                     hole_to_hole=cfg.get('hole_to_hole_clearance'),
                     edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=cfg.get('track_width'),
@@ -1487,7 +1502,8 @@ class DifferentialTab(wx.Panel):
                         board, targets, _sev,
                         diff_pair_gap=_dp_gap,
                         diff_pair_width=cfg.get('track_width'),
-                        clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):
+                        clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False),
+                        class_ceiling=cfg.get('clearance_ceiling')):  # #1492
                     board.SetModified()
                     print("DRC settings: loosened Board Setup floors to the diff-pair routing values (save to persist)")
             except Exception as e:
@@ -1528,8 +1544,20 @@ class DifferentialTab(wx.Panel):
                 edge_clearance=_cfg.get('board_edge_clearance'),
                 # #581: recorded as route_diff.py records it
                 same_net_pad_clearance=_cfg.get('same_net_pad_clearance'))
+        else:
+            # The tool records (protected pairs, impedance, same-net pad
+            # clearance) are not DRC floors: an unchecked box must not void
+            # them (#1415, as route_diff.py --no-fix-drc-settings).
+            from .gui_utils import persist_live_tool_records
+            persist_live_tool_records(
+                board, _cfg.get('same_net_pad_clearance'))
 
         return tracks_added, vias_added, tracks_removed
+
+    def _held_hole_clearance(self, board, results_data, clearance):
+        """#1369: :func:`gui_utils.held_hole_clearance_live` for this tab."""
+        from .gui_utils import held_hole_clearance_live
+        return held_hole_clearance_live(self.pcb_data, board, results_data, clearance)
 
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""
@@ -1577,6 +1605,7 @@ class DifferentialTab(wx.Panel):
             'diff_pair_width_from_class': not self.diff_pair_width_check.GetValue(),
             'diff_pair_gap_from_class': not self.diff_pair_gap_check.GetValue(),
             'impedance': self.diff_impedance.GetValue() or None,  # 0 = off
+            'impedance_declare_only': self.impedance_declare_only.GetValue(),
             'min_turning_radius': self.min_turning_radius.GetValue(),
             'max_setback_angle': self.max_setback_angle.GetValue(),
             'max_turn_angle': self.max_turn_angle.GetValue(),

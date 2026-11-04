@@ -14,10 +14,15 @@ or the numbers do not compare.
 
 Exit 0 when the mode's DONE conditions all hold, 4 when they do not, 2 on
 usage, 1 when the board or the baseline is missing or empty, or the intent
-is missing.
+is missing. Usage covers a `--spec` that board_score or check_complete
+would refuse (checked by their own parsers, before anything runs), a
+`--spec` with `--mode place` (which runs neither), and a grader that exits
+2: it graded nothing, so its error is printed and no verdict is (#1642).
 """
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -28,11 +33,57 @@ KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'instrument'}
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))))
 
+#: The flags grade.py passes the spec readers itself; a --spec cannot name one.
+_OWN_FLAGS = ('--baseline', '--intent', '--json', '--quiet', '--authored-from',
+              '--help')
+
+
+def spec_problem(spec_args):
+    """Why board_score or check_complete -- the two graders a --spec reaches --
+    would refuse `spec_args`, judged by their OWN parsers before anything
+    runs; None when both take it. A misspelt name used to reach both, which
+    died on `unrecognized arguments` while grade.py printed `blocking: null`
+    and exited 4, the code of a real not-done (#1642)."""
+    for flag in spec_args[0::2]:
+        if flag in _OWN_FLAGS:
+            return f'{flag} is set by grade.py itself, not a spec flag'
+    for d in ('', 'py_router', 'py_tools'):
+        if os.path.join(ROOT, d) not in sys.path:
+            sys.path.insert(0, os.path.join(ROOT, d))
+    import board_score
+    import check_complete
+    for name, parser in (('board_score', board_score.build_parser()),
+                         ('check_complete', check_complete.build_parser())):
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                parser.parse_args(['board.kicad_pcb', *spec_args])
+        except SystemExit:
+            # its last line is `<prog>: error: <why>`, and <prog> here is
+            # grade.py's own argv[0]
+            lines = err.getvalue().strip().splitlines() or ['refused']
+            return f'{name} would refuse it: {lines[-1].partition("error: ")[2] or lines[-1]}'
+    return None
+
+
+#: The graders of the grade() in progress that exited 2, each with its reason.
+_usage = []
+
 
 def _run(argv):
     p = subprocess.run([sys.executable, '-X', 'utf8'] + [str(a) for a in argv],
                        cwd=ROOT, capture_output=True, text=True,
                        encoding='utf-8', errors='replace')
+    if p.returncode == 2:
+        # Every grader's usage code (check_connected's: its scope chose no
+        # net). It graded nothing, so nothing it would have written is a
+        # verdict. The reason is its argparse `error:` line, else the last
+        # line it wrote (stdout ends with the banner's EXIT=2).
+        err = (p.stderr or '').strip().splitlines()
+        why = ([l for l in err if ': error:' in l] or err
+               or [l for l in (p.stdout or '').strip().splitlines()
+                   if not l.startswith('EXIT=')] or ['no output'])[-1]
+        _usage.append(f'{os.path.basename(str(argv[0]))} exited 2: {why}')
     return p.returncode, (p.stdout or '') + (p.stderr or '')
 
 
@@ -64,6 +115,7 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
     os.makedirs(tmp, exist_ok=True)
     with open(board, 'rb') as fh:
         sha = hashlib.sha256(fh.read()).hexdigest()
+    del _usage[:]
     out = {'board': board, 'sha256': sha, 'mode': mode, 'baseline': baseline,
            'intent': intent,
            'has_kicad_pro': os.path.isfile(os.path.splitext(board)[0] + '.kicad_pro')}
@@ -150,13 +202,18 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
                   or {}).get('assembly') or {}).get('courtyard_gating_armed'))
         rc, log = _run(['py_router/check_connected.py', board])
         out['check_connected_rc'] = rc
-        rc, log = _run(['py_router/check_drc.py', board, '--baseline', baseline,
-                        '--clearance-margin', '0.1'])
+        # At check_drc's own default margin, the one board_score's `drc`
+        # grades at: a wider margin recorded check_drc_rc 0 beside drc 1 on
+        # a track 7% inside the clearance (#1595).
+        rc, log = _run(['py_router/check_drc.py', board, '--baseline', baseline])
         out['check_drc_rc'] = rc
         done = done and out['blocking'] == 0 and out['check_complete'] == 'DONE' \
             and out['check_connected_rc'] == 0 and out['check_drc_rc'] == 0
 
     out['done'] = bool(done)
+    if _usage:
+        out['done'] = None              # a grader graded nothing: no verdict
+        out['usage_errors'] = list(_usage)
     dst = os.path.join(out_dir, f'grade_{label}.json')
     with open(dst, 'w', encoding='utf-8') as fh:
         json.dump(out, fh, indent=2, sort_keys=True)
@@ -175,8 +232,10 @@ def main(argv=None):
                     help="default: the board's own directory")
     ap.add_argument('--spec', action='append', default=[], metavar='NAME=VALUE',
                     help='a spec flag the board declares, without its leading '
-                         'dashes, passed to board_score and check_complete; '
-                         'repeatable, e.g. --spec net-min-widths=widths.json')
+                         'dashes, passed to board_score and check_complete '
+                         '(--mode full only; one either would refuse is '
+                         'refused here); repeatable, e.g. '
+                         '--spec net-min-widths=widths.json')
     a = ap.parse_args(argv)
     spec = []
     for s in a.spec:
@@ -184,11 +243,23 @@ def main(argv=None):
         if not sep or not name.strip():
             ap.error(f'--spec {s!r}: expected NAME=VALUE')
         spec.append(('--' + name.strip().lstrip('-'), value))
+    if spec and a.mode != 'full':
+        ap.error('--spec is read only by board_score and check_complete, '
+                 'which only --mode full runs; --mode place would ignore it')
+    why = spec_problem([x for pair in spec for x in pair])
+    if why:
+        ap.error(f'--spec: {why}')
     out, dst = grade(a.board, a.baseline, a.intent, a.mode, a.label, a.out_dir,
                      spec)
     keys = ('done', 'blocking', 'unrouted', 'broken', 'drc', 'vias',
             'copper_mm', 'segments', 'check_complete', 'check_complete_authored',
             'assembly_verdict', 'floorplan_errors')
+    if out.get('usage_errors'):
+        for e in out['usage_errors']:
+            print(f'grade.py: {e}', file=sys.stderr)
+        print(f'grade.py: a grader refused its arguments, so nothing in '
+              f'{dst} is a verdict', file=sys.stderr)
+        return 2
     print(json.dumps({k: out.get(k) for k in keys if k in out}))
     print('wrote', dst)
     return 0 if out['done'] else 4

@@ -183,6 +183,10 @@ def _inflated_pad(pad, mx: float, my: float):
       margin. A positive margin grows the polygons. A negative one leaves them
       un-shrunk, which is a superset (a via can only be flagged more, never
       less), and the caller discloses it.
+    - chamfered rect (#1450), the other pad carrying `polygons`: a positive
+      margin is the grown box with its grown radius, without the outline, a
+      superset of KiCad's grown chamfer. At zero or a negative margin the
+      opening is the copper outline, un-shrunk (a superset, disclosed).
     """
     if getattr(pad, 'shape', '') == 'custom':
         polys = getattr(pad, 'polygons', None)
@@ -198,6 +202,8 @@ def _inflated_pad(pad, mx: float, my: float):
     if getattr(pad, 'shape', '') == 'circle':
         sy = sx
     changes = {'size_x': sx, 'size_y': sy}
+    if getattr(pad, 'polygons', None) and (mx > 0 or my > 0):
+        changes['polygons'] = None
     if getattr(pad, 'shape', '') == 'roundrect':
         r0 = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
         r1 = max(0.0, r0 + min(mx, my))
@@ -254,6 +260,8 @@ def pad_aperture(pad, fp, board_info, layer: str) -> Optional[PasteAperture]:
     approx = tuple(getattr(pad, 'geometry_approximations', ()) or ())
     if custom and mx < 0:
         approx = approx + ('custom pad paste reduction not applied (superset)',)
+    elif not custom and getattr(pad, 'polygons', None) and (mx < 0 or my < 0):
+        approx = approx + ('chamfered pad paste reduction not applied (superset)',)
     return PasteAperture(
         owner_ref=getattr(pad, 'component_ref', '') or '',
         layer=layer,
@@ -451,17 +459,34 @@ def _pad_overlaps(ap: PasteAperture, pad) -> bool:
     overlap for a stroked shape.
     """
     from check_drc import _pad_perimeter_points, point_to_pad_distance
-    if aperture_distance(pad.global_x, pad.global_y, ap) <= 1e-9:
+    # A point can be in the opening only inside its bounds, and within `reach`
+    # of the pad only inside the pad's bounds grown by it: both are supersets
+    # (`_ring_bounds`, `_pad_bounds`), so testing them first changes no
+    # answer and skips the exact distance for nearly every sample. Without it
+    # a mounting hole's paste-only pad -- a custom polygon of ~1000 edges --
+    # cost 38 s per footprint (32.7 M point-segment distances), once per
+    # route step's every board load.
+    ab = ap.bounds
+    if _in_bounds(pad.global_x, pad.global_y, ab) and \
+            aperture_distance(pad.global_x, pad.global_y, ap) <= 1e-9:
         return True
     n = max(8, int(max(pad.size_x, pad.size_y) / 0.05) + 1)
     for (px, py) in _pad_perimeter_points(pad, n):
-        if aperture_distance(px, py, ap) <= 1e-9:
+        if _in_bounds(px, py, ab) and aperture_distance(px, py, ap) <= 1e-9:
             return True
     reach = ap.width / 2.0 if ap.shape_pad is None else 0.0
+    pb = _pad_copper_bounds(pad)
     for (vx, vy) in _boundary_samples(ap):
-        if point_to_pad_distance(vx, vy, pad) <= reach + 1e-9:
+        if _in_bounds(vx, vy, pb, reach) and \
+                point_to_pad_distance(vx, vy, pad) <= reach + 1e-9:
             return True
     return False
+
+
+def _in_bounds(x, y, b, grow=0.0) -> bool:
+    """Is (x, y) inside the bounds `b` grown by `grow` (and a hair)?"""
+    g = grow + 1e-6
+    return b[0] - g <= x <= b[2] + g and b[1] - g <= y <= b[3] + g
 
 
 def _pad_copper_bounds(pad):

@@ -120,7 +120,18 @@ interfaces into separate calls to mix.
 
 Nothing enforces the gap during routing — a coplanar-declared net whose pour
 never arrives is simply routed at a width that assumes a ground it does not
-have. Step 3 is what catches that.
+have. Step 3 is what catches that. A line landing on a pad wider than itself
+reads a wider gap over the pad and just past it, where the pour keeps its
+clearance from the PAD; that length is reported as `at its own pad` and does
+not break the declaration (#1582), while a pad with no pour beside it does.
+
+KiCad fills a pour at the larger of its zone clearance and the net class of
+each item it clears, so a line whose net class is the declared gap gets that
+gap from a pour whose zone clearance is below it. Step 3 reads the gap at exact
+distance on the fill stored in the board (#1624), as `fill_for_delivery.py`
+writes it; on a board with no stored fill it reads the fill model at the
+project's class clearances, to within half a model cell, and says so. It runs
+no refill: fill the board first to grade on KiCad's own fill.
 
 ## Width for a target impedance
 
@@ -371,6 +382,14 @@ because two of them were silently wrong on real boards.
   needs a two-plane closed form or fab-calibrated tables. Treat inner-layer
   differential targets on strongly asymmetric stacks as ~5% figures, and
   confirm against your fab's coupon data when the window is tight.
+
+A project that sized its controlled-impedance class itself (a fab or field
+solver's width and gap) can keep that copper and still have it graded:
+`--impedance <ohms> --impedance-declare-only` on `route.py` / `route_diff.py`
+records the target (a `declare_only` net_impedance record, with each pair's
+built gap) and changes no copper, and no later step recomputes widths from
+it (#1630). `check_impedance.py` then reads the ohms back off the shipped
+copper on this module's formulas and names a net more than 10% off.
 
 Post-route verification lives in `check_impedance.py`:
 

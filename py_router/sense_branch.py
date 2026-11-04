@@ -1000,7 +1000,7 @@ def sense_obstacle_rows(b: SenseBranch, config, coord, layer_map, clearance: flo
     names = sorted(layer_map, key=layer_map.get)
     for s in b.segments:
         seg_w = s.width if s.width > 0 else config.get_track_width(s.layer)
-        seg_clr = config.layer_clearance(s.layer, clearance)
+        seg_clr = config.layer_clearance(s.layer, clearance, b.net_id)
         trk = config.track_obstacle_clearance(b.net_id, seg_clr)
         exp = config.route_reserve_width(s.layer) / 2 + seg_w / 2 + trk + extra_clearance
         vblk = config.via_size / 2 + seg_w / 2 + seg_clr + extra_clearance
@@ -1015,19 +1015,21 @@ def sense_obstacle_rows(b: SenseBranch, config, coord, layer_map, clearance: flo
         if _via_on_join(v, join):
             continue                    # a via on the join pad is the join
         vs = v.size if v.size > 0 else config.via_size
-        full = _via_track_expansion_per_layer(vs, config, coord, clearance, extra_clearance)
+        full = _via_track_expansion_per_layer(vs, config, coord, clearance, extra_clearance,
+                                              net_id=b.net_id)
         # Per layer of THIS map (a plane tap map has one layer).
         vte = [full[config.layers.index(n)] if n in config.layers else max(full)
                for n in names]
         vv = max(1.0, (vs / 2 + config.via_size / 2
-                       + config.stack_clearance(clearance)) * coord.inv_step)
+                       + config.stack_clearance(clearance, b.net_id)) * coord.inv_step)
         # On the layers of its span only, as build_base_obstacle_map stamps
         # every other via (a blind via leaves the layers below it free).
         _add_via_obstacle(col, v, coord, len(names), vte, vv,
                           diagonal_margin=defaults.DIAGONAL_MARGIN, routing_layers=names)
     for p in b.sense_pads:
         _add_pad_obstacle(col, p, coord, layer_map, config, extra_clearance,
-                          clearance_override=clearance)
+                          clearance_override=(clearance if config.scoped_clearance is None
+                                              else config.pad_obstacle_clearance(p)))
     cells = (np.concatenate(col.cells) if col.cells else np.empty((0, 3), np.int32))
     vias = (np.concatenate(col.vias) if col.vias else np.empty((0, 2), np.int32))
     # Near the join pad the rule holds only the copper that sticks out of it:
@@ -1046,7 +1048,7 @@ def sense_obstacle_rows(b: SenseBranch, config, coord, layer_map, clearance: flo
             on = cells[:, 2] == li
             if on.any():
                 clr = config.track_obstacle_clearance(
-                    b.net_id, config.layer_clearance(lname, clearance)) + extra_clearance
+                    b.net_id, config.layer_clearance(lname, clearance, b.net_id)) + extra_clearance
                 keep[on] = _still_blocked(
                     b, cells[on, 0] * step, cells[on, 1] * step,
                     config.route_reserve_width(lname) / 2.0,
@@ -1057,7 +1059,8 @@ def sense_obstacle_rows(b: SenseBranch, config, coord, layer_map, clearance: flo
         layers = sorted(set(names) | {s.layer for s in b.segments})
         keep = _still_blocked(b, vias[:, 0] * step, vias[:, 1] * step,
                               config.via_size / 2.0, config.via_size / 2.0,
-                              config.stack_clearance(clearance) + extra_clearance, layers)
+                              config.stack_clearance(clearance, b.net_id) + extra_clearance,
+                              layers)
         keep &= ~((vias[:, 0] == centre[0]) & (vias[:, 1] == centre[1]))
         vias = np.unique(vias[keep], axis=0)
     return np.ascontiguousarray(cells, dtype=np.int32), np.ascontiguousarray(vias, dtype=np.int32)

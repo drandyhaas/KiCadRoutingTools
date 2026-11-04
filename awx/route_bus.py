@@ -1655,11 +1655,14 @@ def _pad_block(fp_text, number, with_net):
     """(start, end) in `fp_text` of the pad block numbered `number`, the first with a (net ...) token if `with_net`, else
     the first without one; None when there is none"""
     from kicad_parser import find_matching_paren
+    # a number is quoted, or bare in the older spelling KiCad still reads (#1290)
+    pad_head = re.compile(r'\(pad\s+(?:"%s"|%s(?=[\s()]))' % ((re.escape(number),) * 2))
     i = 0
     while True:
-        j = fp_text.find(f'(pad "{number}"', i)
-        if j < 0:
+        m = pad_head.search(fp_text, i)
+        if m is None:
             return None
+        j = m.start()
         k = find_matching_paren(fp_text, j)
         if (re.search(r'\(net\s', fp_text[j:k]) is not None) == with_net:
             return j, k

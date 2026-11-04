@@ -1053,8 +1053,11 @@ class PlanesTab(wx.Panel):
                 _plane_net_clearances[net.net_id] = class_clearance_cache.get(
                     cname, _plane_clearance)
             if _plane_clamp:
-                _plane_net_clearances = {nid: min(clr, _plane_clearance)
-                                         for nid, clr in _plane_net_clearances.items()}
+                from fab_tiers import cap_net_clearances  # #1561 discloses
+                _plane_net_clearances = cap_net_clearances(
+                    _plane_net_clearances, _plane_clearance,
+                    net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
+                    class_of=all_net_to_class)
         except Exception as e:
             print(f"Warning: Could not get net class clearances: {e}")
             _plane_net_clearances = None
@@ -1237,9 +1240,15 @@ class PlanesTab(wx.Panel):
                     # #498: the board's .kicad_dru per-layer clearance rules, read
                     # from the live board's own project file as create_plane does
                     # above -- CLI parity with route_planes main.
-                    from kicad_dru import install_layer_clearances
+                    from kicad_dru import (install_layer_clearances,
+                                           install_track_clearances)
                     install_layer_clearances(gnd_config, None, self.board_filename,
                                              self.pcb_data)
+                    # #1602: and the track/scoped channels, as the CLI does
+                    install_track_clearances(
+                        gnd_config, None, self.board_filename, self.pcb_data,
+                        routed_net_ids=[nid for nid, n in self.pcb_data.nets.items()
+                                        if n.name == gnd_via_net] or None)
                     coord = GridCoord(gnd_config.grid_step)
 
                     # Build obstacle map from PCB data (excluding no nets since we want all obstacles)
@@ -1256,7 +1265,8 @@ class PlanesTab(wx.Panel):
                         gnd_via_distance,
                         gnd_config,
                         obstacles,
-                        coord
+                        coord,
+                        net_clearances=_plane_net_clearances
                     )
 
                     # Add to new vias list
@@ -1467,6 +1477,14 @@ class PlanesTab(wx.Panel):
         with redirect_prints_to_log(self.append_log):
             return self._apply_results_to_board_body()
 
+    def _held_hole_clearance(self, board, tracks, vias, clearance):
+        """#1577: :func:`gui_utils.held_hole_clearance_live` for this tab's
+        plane copper (track and via dicts) -- route_planes' main writes the
+        same floor with step_hole_clearance."""
+        from .gui_utils import held_hole_clearance_dicts
+        return held_hole_clearance_dicts(self.pcb_data, board, tracks, vias,
+                                         clearance)
+
     def _apply_results_to_board_body(self):
         import pcbnew
 
@@ -1498,29 +1516,19 @@ class PlanesTab(wx.Panel):
         strips = getattr(self, '_strip_segments', None) or []
         if strips:
             import pcbnew as _p
-            _keys = set()
-            for s in strips:
-                if hasattr(s, 'start_x'):
-                    _keys.add((round(s.start_x, 3), round(s.start_y, 3),
-                               round(s.end_x, 3), round(s.end_y, 3),
-                               s.net_id))
-                else:  # via
-                    _keys.add((round(s.x, 3), round(s.y, 3), s.net_id))
-            _removed = 0
-            for item in list(board.GetTracks()):
-                if item.Type() == _p.PCB_VIA_T:
-                    k = (round(_p.ToMM(item.GetPosition().x), 3),
-                         round(_p.ToMM(item.GetPosition().y), 3),
-                         item.GetNetCode())
-                else:
-                    k = (round(_p.ToMM(item.GetStart().x), 3),
-                         round(_p.ToMM(item.GetStart().y), 3),
-                         round(_p.ToMM(item.GetEnd().x), 3),
-                         round(_p.ToMM(item.GetEnd().y), 3),
-                         item.GetNetCode())
-                    if k not in _keys:
-                        k = (k[2], k[3], k[0], k[1], k[4])  # reversed ends
-                if k in _keys:
+            from .gui_utils import remove_listed_segments
+            # Segments counted and width-preferring, as the CLI writer's
+            # strip (#1556): a set of endpoint keys removed every member of a
+            # same-span stack, the keeper too. Vias by position.
+            _removed = remove_listed_segments(
+                board, _p, [s for s in strips if hasattr(s, 'start_x')])
+            _keys = {(round(s.x, 3), round(s.y, 3), s.net_id)
+                     for s in strips if not hasattr(s, 'start_x')}
+            for item in list(board.GetTracks()) if _keys else ():
+                if item.Type() == _p.PCB_VIA_T and (
+                        round(_p.ToMM(item.GetPosition().x), 3),
+                        round(_p.ToMM(item.GetPosition().y), 3),
+                        item.GetNetCode()) in _keys:
                     board.RemoveNative(item)
                     _removed += 1
             if _removed:
@@ -1570,6 +1578,13 @@ class PlanesTab(wx.Panel):
 
         def get_layer_id(layer_name):
             return name_to_id.get(layer_name, pcbnew.F_Cu)
+
+        # The copper this step drew, for its DRC floors (#1319): every via
+        # and track but the soft-joint bridges, which join copper the board
+        # already carried (#1577) -- route_planes' main leaves the same out.
+        from fix_kicad_drc_settings import plane_floor_segments
+        _floor_vias = list(getattr(self, '_new_vias', None) or [])
+        _floor_segs = plane_floor_segments(getattr(self, '_new_segments', None) or [])
 
         # Add vias from create_plane results
         vias_added = 0
@@ -1902,7 +1917,7 @@ class PlanesTab(wx.Panel):
         # main makes the same decision (plane_fix_kwargs) from its files.
         from fix_kicad_drc_settings import plane_fix_kwargs
         _pkw = plane_fix_kwargs(
-            tracks_added, vias_added, clearance=(cfg or {}).get('clearance'),
+            len(_floor_segs), len(_floor_vias), clearance=(cfg or {}).get('clearance'),
             hole_to_hole=(cfg or {}).get('hole_to_hole_clearance'),
             track_width=(cfg or {}).get('track_width'),
             via_size=(cfg or {}).get('via_size'),
@@ -1916,8 +1931,15 @@ class PlanesTab(wx.Panel):
                 import clearance_ledger
                 eff_clearance = clearance_ledger.effective(cfg.get('clearance')) \
                     if cfg.get('clearance') else cfg.get('clearance')
+                # #1577: the copper-to-hole floor the step HELD, lowered only
+                # to what its own copper needs -- route_planes' main writes it
+                # with step_hole_clearance. None for a bare pour (#1319).
+                _hole_clr = (self._held_hole_clearance(board, _floor_segs,
+                                                       _floor_vias, eff_clearance)
+                             if _pkw['copper_holes'] else None)
                 targets = compute_targets(
                     clearance=eff_clearance,
+                    hole_clearance=_hole_clr,
                     hole_to_hole=_pkw['hole_to_hole'],
                     edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=_pkw['track_width'],
@@ -1931,7 +1953,8 @@ class PlanesTab(wx.Panel):
                 _sev = severity_plan() if cfg.get('relax_drc_severities') else {}
                 if apply_targets_to_board(
                         board, targets, _sev,
-                        clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):
+                        clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False),
+                        class_ceiling=cfg.get('clearance_ceiling')):  # #1492
                     board.SetModified()
                     print("DRC settings: loosened Board Setup floors to the plane routing values")
             except Exception as e:
@@ -1962,6 +1985,11 @@ class PlanesTab(wx.Panel):
                 hole_to_hole=_pkw['hole_to_hole'],
                 # #581: recorded as route_planes.py records it
                 same_net_pad_clearance=_cfg.get('same_net_pad_clearance'))
+        else:
+            # records are not DRC floors (#1415)
+            from .gui_utils import persist_live_tool_records
+            persist_live_tool_records(
+                board, _cfg.get('same_net_pad_clearance'))
 
         # (No oracle recheck here, #562: after plane CREATION the remaining
         # gaps are deliberate -- the route step's in-run plane finalize and
@@ -2001,32 +2029,18 @@ class PlanesTab(wx.Panel):
             if delta.is_empty:
                 return
 
-            # Remove stripped segments/vias: match live board items by rounded
-            # endpoint(s)+net, same key style as the ripped-copper strip loop.
-            rm_keys = set()
-            for s in delta.segments_to_remove:
-                rm_keys.add((round(s.start_x, 3), round(s.start_y, 3),
-                             round(s.end_x, 3), round(s.end_y, 3), s.net_id))
-            via_keys = set()
-            for v in delta.vias_to_remove:
-                via_keys.add((round(v.x, 3), round(v.y, 3), v.net_id))
-            removed = 0
-            for item in list(board.GetTracks()):
-                if item.Type() == pcbnew.PCB_VIA_T:
-                    k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
-                         round(pcbnew.ToMM(item.GetPosition().y), 3),
-                         item.GetNetCode())
-                    if k in via_keys:
-                        board.RemoveNative(item)
-                        removed += 1
-                    continue
-                a = (round(pcbnew.ToMM(item.GetStart().x), 3),
-                     round(pcbnew.ToMM(item.GetStart().y), 3),
-                     round(pcbnew.ToMM(item.GetEnd().x), 3),
-                     round(pcbnew.ToMM(item.GetEnd().y), 3),
-                     item.GetNetCode())
-                b = (a[2], a[3], a[0], a[1], a[4])  # endpoints reversed
-                if a in rm_keys or b in rm_keys:
+            # Remove stripped segments counted and width-preferring, as
+            # clean_plane_copper's file strip (#1556); vias by position.
+            from .gui_utils import remove_listed_segments
+            removed = remove_listed_segments(board, pcbnew,
+                                             delta.segments_to_remove)
+            via_keys = {(round(v.x, 3), round(v.y, 3), v.net_id)
+                        for v in delta.vias_to_remove}
+            for item in list(board.GetTracks()) if via_keys else ():
+                if item.Type() == pcbnew.PCB_VIA_T and (
+                        round(pcbnew.ToMM(item.GetPosition().x), 3),
+                        round(pcbnew.ToMM(item.GetPosition().y), 3),
+                        item.GetNetCode()) in via_keys:
                     board.RemoveNative(item)
                     removed += 1
 

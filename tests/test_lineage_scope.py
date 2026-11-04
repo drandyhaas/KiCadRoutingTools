@@ -29,6 +29,11 @@ manifest + board pins what it must see:
  7. without swapping sys.stdout under the wave's worker threads (#383): the
     parser and the net expansion print, so the row is computed in a child.
     The control row shows the watcher DOES see the in-process call swap it.
+ 8. the steps that scope no net read `none` (#1593): add_rule_area,
+    place_pose, beautify_labels and fill_for_delivery around a `'*'` route
+    leave nothing unscoped AND nothing unmodelled, while autoplan.py (it
+    routes) stays unmodelled; the CLI's tally counts a manifest "with nets"
+    only for a non-empty net list, and the unread step apart.
 """
 import contextlib
 import io
@@ -250,6 +255,44 @@ def main():
           f"{in_row} redirect(s)")
     check("control: the in-process report DOES redirect (the counter can see)",
           in_control > 0, f"{in_control} redirect(s)")
+
+    print("8. a step that scopes no net reads `none` (#1593)")
+    man4 = os.path.join(tmp, 'redo_no_scope.sh')
+    write_manifest(man4, tmp, [
+        py('add_rule_area.py', 'board.kicad_pcb s0.kicad_pcb --name MOUNT '
+                               '--mounting-holes'),
+        py('route.py', "s0.kicad_pcb s1.kicad_pcb '*'"),
+        py('place_pose.py', 's1.kicad_pcb s2.kicad_pcb lock U1'),
+        py('beautify_labels.py', 's2.kicad_pcb s3.kicad_pcb'),
+        py('fill_for_delivery.py', 's3.kicad_pcb -o final.kicad_pcb')])
+    rep4 = LS.lineage_scope(evidence(man4, 'no-scope manifest'))
+    kinds = {s['tool']: s['kind'] for s in rep4['lineage']}
+    check("all five steps are the lineage", len(rep4['lineage']) == 5,
+          f"{[(s['index'], s['tool'], s['kind']) for s in rep4['lineage']]}")
+    check("add_rule_area, place_pose, beautify_labels, fill_for_delivery: none",
+          all(kinds.get(t) == 'none' for t in
+              ('add_rule_area.py', 'place_pose.py', 'beautify_labels.py',
+               'fill_for_delivery.py')), f"{kinds}")
+    check("...so nothing is unmodelled and nothing unscoped",
+          rep4['unmodelled'] == [] and not rep4['unscoped']
+          and not rep4['pour_only'], f"{LS.compact(rep4)}")
+    man5 = os.path.join(tmp, 'redo_autoplan.sh')
+    write_manifest(man5, tmp, [
+        py('route.py', "board.kicad_pcb s0.kicad_pcb '*'"),
+        py('autoplan.py', 's0.kicad_pcb final.kicad_pcb')])
+    rep5 = LS.lineage_scope(evidence(man5, 'autoplan manifest'))
+    check("autoplan.py (it routes) stays unmodelled",
+          [s['kind'] for s in rep5['lineage']] == ['route', 'unmodelled']
+          and len(rep5['unmodelled']) == 1 and not rep5['unscoped'],
+          f"{LS.compact(rep5)}")
+    r = run_check([sys.executable, '-X', 'utf8',
+                   os.path.join(ROOT, 'tests', 'stress', 'lineage_scope.py'),
+                   man, man4, man5], accept=True)
+    check("the tally: 1 with nets, the unread step apart",
+          '3 manifest(s): 1 with nets their final lineage does not scope, '
+          '1 with a lineage step it cannot read' in r.stdout, r.stdout[-400:])
+    check("...and the unread step is still named",
+          'unmodelled: step 2 autoplan.py' in r.stdout, r.stdout[-400:])
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

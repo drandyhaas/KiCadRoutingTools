@@ -27,6 +27,8 @@ of the main.
 
 `parsed_args(argv)` hands back the parsed namespace itself, through the
 same child: lineage_scope.py reads what each step SCOPES that way.
+`long_form(argv)` respells each short option as its long one from the same
+parser, for readers keyed by long spellings (manifest_to_plan, #1460).
 
 The parser is TODAY'S. A command recorded under an older commit that used a
 flag removed since then reads as rejected here; that is what a replay of it
@@ -36,13 +38,17 @@ corpus no KEPT command is refused either way: the guard is for the shape.)
 import atexit
 import json
 import os
+import re
 import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-#: The tools manifest_to_plan converts, by basename -> path under the repo.
+#: The tools manifest_to_plan converts, by basename -> path under the repo,
+#: and check_join, whose --keep-staged command is a copper step (#1637) that
+#: lineage_scope scopes and the pruner may find refused.
 TOOL_PATHS = {
+    'check_join.py': 'py_tools/check_join.py',
     'route.py': 'py_router/route.py',
     'route_diff.py': 'py_router/route_diff.py',
     'route_planes.py': 'py_router/route_planes.py',
@@ -111,6 +117,18 @@ sys.path.insert(0, here)
 import cli_argv_check
 for line in sys.stdin:
     req = json.loads(line)
+    if req.get('options'):
+        # option_spellings(): each short option -> [its action's first long
+        # option, whether it takes a value].
+        table = {}
+        for act in p._actions:
+            longs = [o for o in act.option_strings if o.startswith('--')]
+            for o in act.option_strings:
+                if longs and not o.startswith('--'):
+                    table[o] = [longs[0], act.nargs != 0]
+        out.write('##R ' + json.dumps({'ok': True, 'options': table}) + '\n')
+        out.flush()
+        continue
     args, cwd = req['args'], req.get('cwd')
     err = io.StringIO()
     try:
@@ -211,6 +229,13 @@ def _route_force_reroute_unscoped(ns, cwd):
         return "--force-reroute requires an explicit net scope"
 
 
+def _diff_force_reroute_unscoped(ns, cwd):
+    patterns = [p.strip() for p in list(ns.net_patterns or []) + list(ns.nets or [])
+                if p.strip()]
+    if ns.force_reroute and not patterns:
+        return "--force-reroute requires an explicit net scope"
+
+
 def _route_group_sources(ns, cwd):
     if not ns.group:
         return None
@@ -235,6 +260,16 @@ def _power_nets_count_mismatch(ns, cwd):
     pn = list(getattr(ns, 'power_nets', None) or [])
     pw = list(getattr(ns, 'power_nets_widths', None) or [])
     if len(pn) != len(pw):
+        return (f"--power-nets ({len(pn)}) and --power-nets-widths ({len(pw)}) "
+                f"must have the same length")
+
+
+def _route_power_nets_count_mismatch(ns, cwd):
+    # route.py: widths may be omitted (the engine then sizes the power nets
+    # itself); given, they must pair one to one with the nets (#1410).
+    pn = list(getattr(ns, 'power_nets', None) or [])
+    pw = list(getattr(ns, 'power_nets_widths', None) or [])
+    if pn and pw and len(pn) != len(pw):
         return (f"--power-nets ({len(pn)}) and --power-nets-widths ({len(pw)}) "
                 f"must have the same length")
 
@@ -274,9 +309,9 @@ def _cap_intent_unreadable(ns, cwd):
 POST_PARSE = {
     'route.py': (_fab_overrides_missing, _output_twice, _route_group_empty,
                  _keep_away, _route_force_reroute_unscoped, _route_group_sources,
-                 _net_clearances_unreadable),
+                 _route_power_nets_count_mismatch, _net_clearances_unreadable),
     'route_diff.py': (_keep_away, _fab_overrides_missing, _output_twice,
-                      _net_clearances_unreadable),
+                      _diff_force_reroute_unscoped, _net_clearances_unreadable),
     'route_planes.py': (_fab_overrides_missing, _output_twice,
                         _planes_count_mismatch, _net_clearances_unreadable),
     'repair_planes.py': (_fab_overrides_missing, _output_twice,
@@ -314,6 +349,7 @@ REFUSAL_SITES = {
         'if _kae': ('argv', '_keep_away'),
         '--force-reroute requires an explicit net':
             ('argv', '_route_force_reroute_unscoped'),
+        '--power-nets (': ('argv', '_route_power_nets_count_mismatch'),
         '--component matched no footprint on this':
             ('board', "the board's footprint references"),
         # parse_sources is the argument half; block_refs, in the same try,
@@ -330,6 +366,8 @@ REFUSAL_SITES = {
         'call:load_net_clearances': ('file', '_net_clearances_unreadable'),
     },
     'route_diff.py': {
+        '--force-reroute requires an explicit net':
+            ('argv', '_diff_force_reroute_unscoped'),
         '--keep-away: ': ('argv', '_keep_away'),
         'call:read_brief_keep_away': (
             'board', "reads the design brief beside the input board"),
@@ -366,8 +404,11 @@ REFUSAL_SITES = {
         'if bga_components': ('board', "auto-detects the BGA on the board"),
         'if args.component not in pcb_data.footprints':
             ('board', "the board's footprint references"),
+        'except ValueError from resolve_immovable_refs':
+            ('board', "the board's footprint references (#1562)"),
         'if _stagger_why and (not env_knobs.ALLOW_STAGGERED_BGA)':
             ('board', "the part's pad lattice (#500)"),
+        'if _refusal': ('board', "which nets the --nets patterns name (#1641)"),
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'qfn_fanout.py': {
@@ -377,6 +418,7 @@ REFUSAL_SITES = {
         'if args.component not in pcb_data.footprints':
             ('board', "the board's footprint references"),
         'if _single': ('board', "the part's pads (#1195: not a QFN/QFP)"),
+        'if _refusal': ('board', "which nets the --nets patterns name (#1641)"),
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'place_fanout_clearance.py': {
@@ -526,6 +568,83 @@ def _ask(tool, args, cwd, want_ns=False):
         if line.startswith('##R '):
             return json.loads(line[4:])
     return None
+
+
+_spellings = {}
+
+
+def option_spellings(tool):
+    """{short option: (long option, takes a value)} from `tool`'s real parser,
+    e.g. qfn_fanout's '-c' -> ('--component', True); {} when its parser cannot
+    be built here."""
+    if tool not in _spellings:
+        proc = _child(tool)
+        table = {}
+        if proc is not None:
+            proc.stdin.write(json.dumps({'options': True}) + '\n')
+            proc.stdin.flush()
+            for line in proc.stdout:
+                if line.startswith('##R '):
+                    table = {k: tuple(v) for k, v in
+                             json.loads(line[4:]).get('options', {}).items()}
+                    break
+        _spellings[tool] = table
+    return _spellings[tool]
+
+
+#: argparse's own test for a negative number, which it reads as a value.
+_NEGATIVE_NUMBER = re.compile(r'^-\d+$|^-\d*\.\d+$')
+
+
+def _respell(a, table):
+    """The long spelling of one argument the way argparse reads it: `-c`,
+    `-c=U2` and `-cU2` are `--component U2`, `-Ov` is two switches. Anything
+    else -- a long option, a value, a negative number, a net name such as
+    '-BATT' whose first letter is no short option of the tool -- as written."""
+    if a.startswith('--') or not a.startswith('-') or len(a) < 2 \
+            or _NEGATIVE_NUMBER.match(a):
+        return [a]
+    if a in table:
+        return [table[a][0]]
+    opt, eq, val = a.partition('=')
+    if eq and opt in table:
+        return [table[opt][0]] + ([val] if table[opt][1] else [])
+    words, rest = [], a[1:]
+    while rest:
+        opt = '-' + rest[0]
+        if opt not in table:
+            return [a]
+        name, takes_value = table[opt]
+        words.append(name)
+        rest = rest[1:]
+        if takes_value:
+            if rest:
+                words.append(rest)
+            break
+    return words
+
+
+def long_form(argv):
+    """The recorded command with every short option respelled as its long
+    option, by the tool's own parser (#1460). Readers of a command line that
+    match long spellings -- manifest_to_plan, the parity gate -- otherwise
+    lose a short option with its value, or take it into the list before it:
+    a recorded `qfn_fanout.py ... -c U2` converted to a fanout step with no
+    component. Unchanged when the tool is not one this module checks or its
+    parser cannot be built here; nothing after a bare '--' is touched."""
+    found = tool_args(argv)
+    if found is None:
+        return list(argv)
+    tool, args = found
+    table = option_spellings(tool)
+    if not table:
+        return list(argv)
+    out = list(argv[:len(argv) - len(args)])
+    for k, a in enumerate(args):
+        if a == '--':
+            return out + args[k:]
+        out += _respell(a, table)
+    return out
 
 
 def parsed_args(argv, cwd=None):

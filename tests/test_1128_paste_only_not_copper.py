@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """#1128: a pad on no copper layer is not copper to the placement graders.
 
-`legality.occupancy_shape` (a part's courtyard united with its pad copper,
-the courtyard census's occupancy) and `legality.pad_copper_overrun_mm` (THE
+`legality.occupancy_shape` (then a part's courtyard united with its pad
+copper, the courtyard census's occupancy; since #1588 a drawn courtyard
+alone) and `legality.pad_copper_overrun_mm` (THE
 gating measure for pad copper past the outline, read by check_assembly and
 render_placement's `--gate`) skipped NPTH pads but read `pad.layers` nowhere,
 so a paste-only aperture counted as copper. Both now skip every pad that puts
@@ -13,12 +14,12 @@ no copper on a copper layer (`legality._pad_carries_copper`, the predicate
   and a 1 x 1 F.Paste-only pad 3 mm further out -- the overrun is 0.01, not
   the paste pad's 3.21;
 * a paste-only pad outside the courtyard does not enlarge the occupancy;
-* controls: an F.Cu+F.Paste pad and a through-hole `*.Cu` pad outside the
-  courtyard still do, an NPTH pad still does not, and an F.Cu pad past the
-  edge still overruns;
+* controls: since #1588 no pad outside a drawn courtyard enlarges the
+  occupancy (copper or not), and an F.Cu pad past the edge still overruns;
 * jetson-agx-thor's H5-H8 (KiCad 10 demo, skipped without it): occupancy
-  62.41 mm2 either way -- their drawn paste apertures lie inside the hole
-  pad's copper, which is why tests/measure_1128_paste_only_pads.py finds no
+  29.24 mm2, their drawn courtyard (#1588; 62.41 with the hole pad's copper
+  united in, as before) -- either way the paste apertures add nothing, as
+  they lie inside the hole pad's copper, which is why tests/measure_1128_paste_only_pads.py finds no
   real board the fix moves.
 
     python3 -X utf8 tests/test_1128_paste_only_not_copper.py [case ...]
@@ -119,7 +120,9 @@ def test_a_paste_pad_outside_the_courtyard_is_not_occupancy():
 
 
 def test_copper_pads_outside_still_count():
-    """Controls: the predicate is copper, not 'SMD on F.Cu only'."""
+    """Controls: the overrun predicate is copper, not 'SMD on F.Cu only'.
+    The occupancy of a part that draws a courtyard is that courtyard, as
+    KiCad grades it (#1588), whatever pads stand outside it."""
     smd = _occupancy(_board('U1', 15, 15, [
         _pad('1', 0, 0.6, 0.4, '"F.Cu"'),
         _pad('2', 3.0, 1, 1, '"F.Cu" "F.Paste"')]))
@@ -131,8 +134,8 @@ def test_copper_pads_outside_still_count():
         _pad('1', 0, 0.6, 0.4, '"F.Cu"'),
         _pad('2', 3.0, 1, 1, '"*.Cu" "*.Mask"', kind='np_thru_hole',
              drill=0.9)]))
-    assert abs(smd - 2.0) < 1e-6, smd
-    assert abs(tht - 2.0) < 1e-6, tht
+    assert abs(smd - 1.0) < 1e-6, smd
+    assert abs(tht - 1.0) < 1e-6, tht
     assert abs(npth - 1.0) < 1e-6, npth
     over = _overrun(_board('U1', 29.71, 15, [
         _pad('1', 0, 0.6, 0.4, '"F.Cu"'),
@@ -143,8 +146,8 @@ def test_copper_pads_outside_still_count():
         _pad('2', 3.0, 1, 1, '"*.Cu" "*.Mask"', kind='np_thru_hole',
              drill=0.9)]))
     assert abs(hole - 0.01) < 1e-6, hole
-    print(f"  PASS: F.Cu+F.Paste {smd:.1f} and THT {tht:.1f} mm2 still "
-          f"counted, NPTH {npth:.1f}; a copper pad 3.21 mm out still "
+    print(f"  PASS: occupancy the courtyard with an F.Cu+F.Paste ({smd:.1f}), "
+          f"THT ({tht:.1f}) or NPTH ({npth:.1f}) pad outside; a copper pad 3.21 mm out still "
           f"overruns, an NPTH hole there does not ({hole:.2f})")
 
 
@@ -172,9 +175,9 @@ def test_jetson_spacers_do_not_move():
         paste = [p for p in pcb.footprints[ref].pads
                  if not _pad_carries_copper(p)]
         assert len(paste) == 4, (ref, len(paste))
-        assert abs(area - 62.41) < 0.005, (ref, area)
+        assert abs(area - 29.24) < 0.005, (ref, area)
     print("  PASS: jetson H5-H8 each carry 4 paste-only pads and occupy "
-          "62.41 mm2 either way")
+          "their 29.24 mm2 courtyard")
 
 
 TESTS = [

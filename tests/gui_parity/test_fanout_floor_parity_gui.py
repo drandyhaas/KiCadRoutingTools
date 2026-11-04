@@ -7,9 +7,11 @@
 does NOT self-skip without it: exit 2)
 
 THE GAP. The CLI fanouts finish with `fix_project_for_output(clearance,
-track_width, via size and drill when the step may write via floors, every
-non-Default class clamped)` -- no hole-to-hole, no edge clearance beyond the
-fab pin, and the copper-to-hole floor lowered to the clearance with the rest.
+track_width, via size and drill when the step may write via floors, the
+non-Default classes kept -- or capped at --clearance-ceiling, #1529)` -- no
+hole-to-hole, no edge clearance beyond the
+fab pin, and the copper-to-hole floor the step held, lowered only to what its
+own copper needs (`step_hole_clearance`, #1568).
 The fanout tab finished with `update_live_drc_floors` over its own set: the
 config's hole-to-hole and edge clearance, never the copper-to-hole floor, and
 classes clamped only under the Min-Clearance ceiling. So after the same
@@ -26,6 +28,12 @@ with the keywords the CLI mains pass -- spelled out HERE, independently of the
 shared decision, so the gate tests that decision rather than itself. The
 floors each front then DECLARES must be the same: every KiCad rule, the repo's
 via-drill floor, and each net class's clearance.
+
+One more arm on the project board: a BGA step with the Min-Clearance override
+ticked (the PLACEMENT ceiling set, as a converted `bga_fanout --clearance X`
+step has it), the routing Clearance ceiling unticked and no cap pass.
+bga_fanout.py keeps the classes there (#1529); the tab lowered Wide 0.4 to
+the placement ceiling, the cap pass's writeback (#782) run without the pass.
 """
 import glob
 import json
@@ -53,6 +61,7 @@ MM = 1e6
 #: wrote and the CLI fanouts never pass.
 CFG = {'fix_drc_settings': True, 'clearance': 0.15, 'track_width': 0.15,
        'via_size': 0.3, 'via_drill': 0.2, 'clearance_ceiling': None,
+       'class_ceiling': None,
        'hole_to_hole_clearance': 0.3, 'board_edge_clearance': 0.4}
 RULES = ('min_clearance', 'min_track_width', 'min_connection', 'min_via_diameter',
          'min_through_hole_diameter', 'min_via_annular_width',
@@ -61,16 +70,18 @@ BOARDS = {'project': 'flat_hierarchy.kicad_pcb',
           'project-less': 'splitflap_driver.kicad_pcb'}
 
 
-def cli_kwargs(kind, tracks, vias):
+def cli_kwargs(kind, tracks, vias, cfg=CFG):
     """What bga_fanout's / qfn_fanout's main hands fix_project_for_output, read
     off their writeback code: None = QFN with no copper (nothing written)."""
     if kind == 'qfn' and not (tracks or vias):
         return None
     via = kind != 'qfn' or bool(vias)
-    return {'clearance': CFG['clearance'], 'track_width': CFG['track_width'],
-            'via_diameter': CFG['via_size'] if via else None,
-            'via_drill': CFG['via_drill'] if via else None,
-            'clamp_nondefault_netclasses': True}
+    return {'clearance': cfg['clearance'], 'track_width': cfg['track_width'],
+            'via_diameter': cfg['via_size'] if via else None,
+            'via_drill': cfg['via_drill'] if via else None,
+            # #1529: the classes kept without a ceiling, capped with one
+            'clamp_nondefault_netclasses': cfg['class_ceiling'] is not None,
+            'class_ceiling': cfg['class_ceiling']}
 
 
 def _reexec_into_kicad():
@@ -167,7 +178,7 @@ def main():
                if isinstance(c, dict) and c.get('clearance') is not None}
         return rules, cls
 
-    def run_arm(board_kind, kind, tracks, vias):
+    def run_arm(board_kind, kind, tracks, vias, cfg=CFG):
         src = os.path.join(REPO, 'kicad_files', BOARDS[board_kind])
         src_pro = os.path.splitext(src)[0] + '.kicad_pro'
         d = tempfile.mkdtemp(prefix='fanoutfloor_')
@@ -189,7 +200,7 @@ def main():
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 tab._apply_fanout_results(tracks, vias, failed_nets=[],
-                                          fanout_config=dict(CFG),
+                                          fanout_config=dict(cfg),
                                           fanout_kind=kind)
         finally:
             _pcbnew.GetBoard = real
@@ -207,9 +218,12 @@ def main():
             f.write(txt)
         if os.path.isfile(src_pro):
             shutil.copyfile(src_pro, os.path.splitext(cli)[0] + '.kicad_pro')
-        kw = cli_kwargs(kind, tracks, vias)
+        kw = cli_kwargs(kind, tracks, vias, cfg)
         if kw is not None:
             with contextlib.redirect_stdout(io.StringIO()):
+                # #1568: the hole floor the CLI mains compute off the written
+                # board, against their input
+                kw['hole_clearance'] = F.step_hole_clearance(src, cli, kw['clearance'])
                 F.fix_project_for_output(cli, input_pcb=src, **kw)
         return gui_floors(live), cli_floors(os.path.splitext(cli)[0] + '.kicad_pro')
 
@@ -247,6 +261,25 @@ def main():
             check("and every net class's clearance", not cdiff,
                   f"(GUI, CLI): {cdiff}")
 
+    print("-- project board, BGA, Min-Clearance override ticked, no ceiling, "
+          "no cap pass --")
+    net = next(n for n in parse_kicad_pcb(
+        os.path.join(REPO, 'kicad_files', BOARDS['project'])).nets if n)
+    track = {'start': (100.0, 100.0), 'end': (101.0, 100.0), 'width': 0.15,
+             'layer': 'F.Cu', 'net_id': net}
+    via = {'x': 101.0, 'y': 100.0, 'size': 0.3, 'drill': 0.2, 'net_id': net,
+           'layers': ['F.Cu', 'B.Cu']}
+    cfg_p = dict(CFG, clearance_ceiling=CFG['clearance'])
+    (g_rules, g_cls), (c_rules, c_cls) = run_arm('project', 'bga', [track], [via],
+                                                 cfg_p)
+    check("the CLI keeps the Wide class here (the arm tests something)",
+          c_cls.get('Wide') == 0.4, f"CLI classes {c_cls}")
+    cdiff = {k: (g_cls.get(k), c_cls.get(k)) for k in set(g_cls) | set(c_cls)
+             if g_cls.get(k) is None or c_cls.get(k) is None
+             or abs(g_cls[k] - c_cls[k]) > 1e-6}
+    check("every net class's clearance is the same", not cdiff,
+          f"(GUI, CLI): {cdiff}")
+
     print("-- the configs the tab really applies with --")
     # The arms above hand _apply_fanout_results this file's CFG. The tab
     # builds its own, one dict literal per fanout kind, and a key missing
@@ -254,7 +287,7 @@ def main():
     # clearance at all, so the tab wrote no clearance where qfn_fanout does.
     import ast
     need = {'clearance', 'track_width', 'via_size', 'via_drill',
-            'fix_drc_settings', 'same_net_pad_clearance'}
+            'fix_drc_settings', 'same_net_pad_clearance', 'class_ceiling'}
     tree = ast.parse(open(os.path.join(REPO, 'kicad_routing_plugin',
                                        'fanout_gui.py'), encoding='utf-8').read())
     lacking = []

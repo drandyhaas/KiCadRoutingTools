@@ -11,7 +11,7 @@ The GUI builds PCBData from pcbnew (`build_pcb_data_from_board`), and
 `declared_cap_rotations` resolves the intent's blocks against THAT data, so
 the CLI test (tests/test_1122_fanout_declared_rotation.py) cannot speak for
 this front. The fixture is the CLI test's: the U30 crop at clearance 0.1 with
-a 0.6 / 2.0 mm budget, 2.0 mm decap limits and C24 declared at 270 -- the
+a 1.0 / 2.0 mm budget, 2.0 mm decap limits and C24 declared at 270 -- the
 configuration in which the run KEPT is the one without the decap gate.
 
 Exits 2 when no python with pcbnew+wx exists: it is a killer gate for
@@ -42,7 +42,7 @@ KICAD_PYTHONS = [
 FIX = os.path.join(REPO, 'tests', 'fixtures', '1067', 'u30_crop.kicad_pcb')
 TOOL = os.path.join(REPO, 'py_placer', 'place_fanout_clearance.py')
 HOST_PYTHON = os.environ.get('KRT_HOST_PYTHON') or sys.executable
-TIGHT = {'clearance': 0.1, 'cap_max_displacement': 0.6,
+TIGHT = {'clearance': 0.1, 'cap_max_displacement': 1.0,
          'cap_max_displacement_cap': 2.0}
 
 
@@ -113,7 +113,7 @@ def main():
     host_env = {k: v for k, v in os.environ.items()
                 if not k.startswith('PYTHON')}
     r = subprocess.run([HOST_PYTHON, '-X', 'utf8', TOOL, board, cli_out,
-                        '--clearance', '0.1', '--max-displacement', '0.6',
+                        '--clearance', '0.1', '--max-displacement', '1.0',
                         '--max-displacement-cap', '2.0', '--intent', held],
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=REPO, env=host_env)

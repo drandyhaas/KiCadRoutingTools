@@ -72,8 +72,13 @@ def _marker_blocks(tree):
     out = []
 
     def _is_marker(stmt):
-        for n in ast.walk(stmt):
-            if isinstance(n, ast.Constant) and n.value == MARKER:
+        # An assignment TO `...['partial_restore_134']` -- the settle marking
+        # its result. A statement that only READS the key (a set built from
+        # `r.get('partial_restore_134')`, #1427) settles nothing.
+        for t in stmt.targets:
+            if (isinstance(t, ast.Subscript)
+                    and isinstance(t.slice, ast.Constant)
+                    and t.slice.value == MARKER):
                 return True
         return False
 

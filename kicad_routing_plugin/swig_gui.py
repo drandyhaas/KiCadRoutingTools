@@ -764,6 +764,39 @@ class RoutingDialog(wx.Dialog):
             v = mins.get(src)
             if isinstance(v, (int, float)) and v > 1e-9:
                 out[key] = float(v)
+        # #1579: the annular ring, which every descent now holds round its
+        # drill (fab_tiers._apply_board_floors), read as the CLI reads
+        # min_via_annular_width: the ring the board DECLARES while the
+        # writeback runs, and with it off what KiCad grades the unchanged
+        # project at -- the live value, KiCad's factory one where nothing
+        # declared it (#1287, graded_board_floors).
+        try:
+            import pcbnew
+            from fix_kicad_drc_settings import live_declared_rules
+            _b = pcbnew.GetBoard()
+            if _b is not None:
+                _ring = _b.GetDesignSettings().m_ViasMinAnnularWidth / 1e6
+                _fix = getattr(self, 'fix_drc_check', None)
+                _writeback = bool(_fix.GetValue()) if _fix is not None else True
+                if _ring > 1e-9 and (not _writeback or 'min_via_annular_width' in (
+                        live_declared_rules(_b, ('min_via_annular_width',)) or {})):
+                    out['annular'] = round(float(_ring), 6)
+        except Exception:
+            pass
+        if 'clearance' in out:
+            # #1369: a min_clearance the writeback capped at a pad clearance
+            # override is not a board minimum; the board's records say what
+            # is (fab_tiers.board_declared_min_clearance, as the CLI reads it).
+            try:
+                import pcbnew
+                import tool_records
+                from fab_tiers import board_declared_min_clearance
+                _b = pcbnew.GetBoard()
+                if _b is not None:
+                    out['clearance'] = float(board_declared_min_clearance(
+                        out['clearance'], tool_records.live_namespace(_b)))
+            except Exception:
+                pass
         if 'clearance' not in out:
             # #1160: an unset Board Setup minimum leaves the Default class as
             # the clearance every Default net is graded at -- the CLI's
@@ -893,7 +926,22 @@ class RoutingDialog(wx.Dialog):
         return self.same_net_pad_clearance.GetValue()
 
     def _effective_via_size(self):
-        return self._effective_geometry_floor('via_size')
+        """Pinned up so the via keeps the fab floor's annular ring around the
+        effective drill (#1433) -- parity with the CLI's enforce_fab_floors,
+        through the same fab_tiers.via_size_for_annular_ring. Like the CLI,
+        which pins only when --via-size AND --via-drill are both given, this
+        pins only when both override checkboxes are checked; a board-derived
+        value is the board's own and is left as it is."""
+        val = self._effective_geometry_floor('via_size')
+        if not (self.via_size_check.GetValue() and self.via_drill_check.GetValue()):
+            return val
+        from fab_tiers import via_size_for_annular_ring, parse_fab_overrides
+        ncu = len(self.pcb_data.board_info.copper_layers) or 2
+        tier = self.fab_tier.GetString(self.fab_tier.GetSelection())
+        path = self.fab_overrides_path.GetValue().strip()
+        ovr = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
+        return via_size_for_annular_ring(val, self._effective_via_drill(),
+                                         ncu, tier, ovr)
 
     def _effective_via_drill(self):
         return self._effective_geometry_floor('via_drill')
@@ -1041,6 +1089,16 @@ class RoutingDialog(wx.Dialog):
         impedance_sizer.Add(self.impedance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         impedance_sizer.Add(self.impedance_value, 1, wx.EXPAND)
         impedance_sizer.Add(wx.StaticText(parent, label="\u03A9"), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 3)
+        # #1630: named after the engine param, so a plan step reaches it
+        self.impedance_declare_only = wx.CheckBox(parent, label="declare only")
+        self.impedance_declare_only.SetValue(False)
+        self.impedance_declare_only.SetToolTip(
+            "#1630: with Impedance ticked, RECORD the target ohms for these nets and "
+            "change nothing else -- they route at the project's own widths, as "
+            "without Impedance, and check_impedance.py grades the copper against "
+            "the ohms. For a net class the project sized itself; a later step never "
+            "recomputes widths from the record. (CLI: --impedance-declare-only)")
+        impedance_sizer.Add(self.impedance_declare_only, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
         grid.Add(impedance_sizer, 0, wx.EXPAND)
 
         # Integer parameters
@@ -1492,7 +1550,8 @@ class RoutingDialog(wx.Dialog):
             "Protected nets (length-matched groups, routed diff pairs) are skipped "
             "unless selected by exact name; KiCad-locked copper is never ripped; "
             "plane nets are skipped (use the Planes tab). If the re-route fails "
-            "outright, the original copper is restored.")
+            "outright, the original copper is restored. On the Differential "
+            "Pairs tab the selected pairs are re-routed as coupled pairs.")
         options_inner.Add(self.force_reroute, 0, wx.ALL, 3)
 
         # Keep input copper (#84 / --keep-input-copper): the flip side of rip --
@@ -1744,7 +1803,18 @@ class RoutingDialog(wx.Dialog):
                                                         initial=defaults.LENGTH_MATCH_TOLERANCE, inc=r['inc'])
         self.length_match_tolerance.SetDigits(r['digits'])
         self.length_match_tolerance.SetToolTip("Acceptable length difference in mm for matched nets")
-        length_params_sizer.Add(self.length_match_tolerance, 0, wx.RIGHT, 10)
+        length_params_sizer.Add(self.length_match_tolerance, 0, wx.RIGHT, 5)
+        # #1503: a diff pair a .kicad_dru P/N skew rule binds is matched to the
+        # rule's max unless this is ticked (the CLI's explicit
+        # --length-match-tolerance); ticked, every matched pair takes the value
+        self.length_match_tolerance_check = wx.CheckBox(options_scroll, label="over .kicad_dru")
+        self.length_match_tolerance_check.SetValue(False)
+        self.length_match_tolerance_check.SetToolTip(
+            "Diff pairs: match every pair's P/N skew to this tolerance, over a "
+            ".kicad_dru skew rule (within_diff_pairs). Unticked, a pair such a rule "
+            "binds is matched to the rule's max.")
+        length_params_sizer.Add(self.length_match_tolerance_check, 0,
+                                wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         length_params_sizer.Add(wx.StaticText(options_scroll, label="Amplitude:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         r = defaults.PARAM_RANGES['meander_amplitude']
         self.meander_amplitude = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
@@ -2033,6 +2103,9 @@ class RoutingDialog(wx.Dialog):
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
                 'relax_drc_severities': self.relax_drc_severities_check.GetValue(),
                 'clamp_netclasses': self._ceiling_on(),
+                # #1492: the raw ceiling for the writeback's class clamp
+                'clearance_ceiling': (self.clearance.GetValue()
+                                      if self._ceiling_on() else None),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 # route_planes.py --net-clearances: the Advanced tab's Net
@@ -2329,12 +2402,15 @@ class RoutingDialog(wx.Dialog):
         # the list for connectivity checking
         self.all_nets = []
 
+        from net_queries import multipad_unconnected_to_route
+        multipad_nc = multipad_unconnected_to_route(self.pcb_data)
         for net_id, net in self.pcb_data.nets.items():
             name = net.name
             if not name:
                 continue
-            # Skip unconnected nets
-            if name.lower().startswith('unconnected-'):
+            # Skip no-connect nets, except the multi-pad ones nothing joins
+            # (#1405), which the CLI wildcard routes
+            if name.lower().startswith('unconnected-') and name not in multipad_nc:
                 continue
             # Skip nets with fewer than 2 pads
             if len(net.pads) < 2:
@@ -2739,6 +2815,7 @@ class RoutingDialog(wx.Dialog):
                     ('allow_via_in_pad', False),
                     ('plane_drop', True),    # #424 drops: default ON
                     ('plane_net_layers_ctrl', ''),   # future-pour decl, empty
+                    ('immovable_refs', ''),          # #1521: none held
                     # bga_fanout --diff-pairs / --diff-pair-gap: no coupling,
                     # the CLI's default gap.
                     ('diff_pair_patterns_ctrl', ''),
@@ -2798,6 +2875,11 @@ class RoutingDialog(wx.Dialog):
                 _dt.diff_pair_width.SetValue(defaults.DIFF_PAIR_WIDTH)
             if hasattr(_dt, 'diff_pair_gap'):
                 _dt.diff_pair_gap.SetValue(defaults.DIFF_PAIR_GAP)
+            # route_diff.py without --impedance: 0 = off
+            if hasattr(_dt, 'diff_impedance'):
+                _dt.diff_impedance.SetValue(0.0)
+            if hasattr(_dt, 'impedance_declare_only'):
+                _dt.impedance_declare_only.SetValue(False)
         except Exception:
             pass
         # Reset basic parameters to defaults
@@ -2845,6 +2927,7 @@ class RoutingDialog(wx.Dialog):
         # abandoned every reset from this line onward -- every control below
         # kept the previous step's value. Use the control's own default.
         self.impedance_value.SetValue(defaults.IMPEDANCE_DEFAULT)
+        self.impedance_declare_only.SetValue(False)
         self.coplanar_gap.SetValue(defaults.COPLANAR_GAP)
         self.coplanar_nets_ctrl.SetValue("")
         self.max_iterations.SetValue(defaults.MAX_ITERATIONS)
@@ -2907,6 +2990,7 @@ class RoutingDialog(wx.Dialog):
         self.crossing_penalty.SetValue(defaults.CROSSING_PENALTY)
         self.length_match_groups_ctrl.SetValue("")
         self.length_match_tolerance.SetValue(defaults.LENGTH_MATCH_TOLERANCE)
+        self.length_match_tolerance_check.SetValue(False)
         self.meander_amplitude.SetValue(defaults.MEANDER_AMPLITUDE)
         self.meander_spacing.SetValue(defaults.MEANDER_SPACING)
         self.time_matching_check.SetValue(defaults.TIME_MATCHING)
@@ -3024,6 +3108,7 @@ class RoutingDialog(wx.Dialog):
         # a silent SI regression, since a manifest records nothing when ON.
         self.differential_tab.gnd_via_check.SetValue(True)
         self.differential_tab.intra_match_check.SetValue(False)
+        self.differential_tab.impedance_declare_only.SetValue(False)
         self.differential_tab.ac_couple_check.SetValue(False)
 
         # Reset fanout tab
@@ -3221,6 +3306,7 @@ class RoutingDialog(wx.Dialog):
             'debug_lines': self.debug_lines_check.GetValue(),
             # Impedance routing
             'impedance': self.impedance_value.GetValue() if self.impedance_check.GetValue() else None,
+            'impedance_declare_only': self.impedance_declare_only.GetValue(),
             'coplanar_gap': self.coplanar_gap.GetValue(),
             'coplanar_nets': _split_net_list(self.coplanar_nets_ctrl.GetValue()) or None,
             # Advanced parameters
@@ -3275,6 +3361,10 @@ class RoutingDialog(wx.Dialog):
             'fix_drc_settings': self.fix_drc_check.GetValue(),
             'relax_drc_severities': self.relax_drc_severities_check.GetValue(),
             'clamp_netclasses': self._ceiling_on(),
+            # #1492: the RAW ceiling (#768), which the writeback clamps each
+            # non-Default class to -- min(class, ceiling) -- None unchecked
+            'clearance_ceiling': (self.clearance.GetValue()
+                                  if self._ceiling_on() else None),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
@@ -3311,6 +3401,10 @@ class RoutingDialog(wx.Dialog):
             # Length matching
             'length_match_groups': self._parse_length_match_groups(),
             'length_match_tolerance': self.length_match_tolerance.GetValue(),
+            # #1503: the override over a .kicad_dru P/N skew rule, else None
+            'intra_pair_tolerance': (self.length_match_tolerance.GetValue()
+                                     if self.length_match_tolerance_check.GetValue()
+                                     else None),
             'meander_amplitude': self.meander_amplitude.GetValue(),
             'meander_spacing': self.meander_spacing.GetValue(),
             # Time matching
@@ -3643,8 +3737,11 @@ class RoutingDialog(wx.Dialog):
                 # other class routed at its own clearance, no clamp.
                 if config.get('clamp_netclasses', False):
                     _base_clr = config['clearance']
-                    net_clearances = {nid: min(clr, _base_clr)
-                                      for nid, clr in net_clearances.items()}
+                    from fab_tiers import cap_net_clearances  # #1561 discloses
+                    net_clearances = cap_net_clearances(
+                        net_clearances, _base_clr,
+                        net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
+                        class_of=all_net_to_class)
             except Exception as e:
                 print(f"Warning: Could not get net class clearances: {e}")
                 # Fall back to using config clearance for all nets
@@ -3790,6 +3887,7 @@ class RoutingDialog(wx.Dialog):
                     grid_step=config['grid_step'],
                     via_cost=config['via_cost'],
                     impedance=config.get('impedance'),
+                    impedance_declare_only=config.get('impedance_declare_only', False),
                     coplanar_gap=config.get('coplanar_gap', 0.0),
                     coplanar_nets=config.get('coplanar_nets'),
                     max_iterations=config['max_iterations'],
@@ -4062,25 +4160,9 @@ class RoutingDialog(wx.Dialog):
         tracks_removed = 0
         segs_to_remove = results_data.get('segments_to_remove') or []
         if segs_to_remove:
-            remove_keys = set()
-            for s in segs_to_remove:
-                a = (round(s.start_x, POSITION_DECIMALS), round(s.start_y, POSITION_DECIMALS))
-                b = (round(s.end_x, POSITION_DECIMALS), round(s.end_y, POSITION_DECIMALS))
-                remove_keys.add((frozenset((a, b)), s.layer, s.net_id))
-            for track in list(board.GetTracks()):
-                if track.Type() != pcbnew.PCB_TRACE_T:
-                    continue  # skip vias / arcs
-                a = (round(pcbnew.ToMM(track.GetStart().x), POSITION_DECIMALS),
-                     round(pcbnew.ToMM(track.GetStart().y), POSITION_DECIMALS))
-                b = (round(pcbnew.ToMM(track.GetEnd().x), POSITION_DECIMALS),
-                     round(pcbnew.ToMM(track.GetEnd().y), POSITION_DECIMALS))
-                # Canonical layer name, as s.layer is: a renamed layer's
-                # display name matched no key and left ripped copper (#1056).
-                key = (frozenset((a, b)), id_to_name.get(track.GetLayer()),
-                       track.GetNetCode())
-                if key in remove_keys:
-                    board.RemoveNative(track)
-                    tracks_removed += 1
+            # Counted and width-preferring, as the CLI writer's strip (#1556).
+            from .gui_utils import remove_listed_segments
+            tracks_removed += remove_listed_segments(board, pcbnew, segs_to_remove)
 
         # Remove stale input VIAS of ripped/re-routed nets (#284), mirroring the
         # CLI writer's remove_vias_from_content -- previously the GUI only
@@ -4319,8 +4401,14 @@ class RoutingDialog(wx.Dialog):
                 import clearance_ledger
                 eff_clearance = clearance_ledger.effective(config.get('clearance')) \
                     if config.get('clearance') else config.get('clearance')
+                # #1493: the copper-to-hole floor this step HELD, lowered
+                # only to what the copper it drew needs -- route.py's
+                # step_hole_clearance, as the differential tab writes it (#1369)
+                from .gui_utils import held_hole_clearance_live
                 targets = compute_targets(
                     clearance=eff_clearance,
+                    hole_clearance=held_hole_clearance_live(
+                        self.pcb_data, board, results_data, eff_clearance),
                     hole_to_hole=config.get('hole_to_hole_clearance'),
                     edge_clearance=config.get('board_edge_clearance'),
                     track_width=config.get('track_width'),
@@ -4333,7 +4421,8 @@ class RoutingDialog(wx.Dialog):
                 _sev = severity_plan() if config.get('relax_drc_severities') else {}
                 drc_changes = apply_targets_to_board(
                     board, targets, _sev,
-                    clamp_nondefault_netclasses=config.get('clamp_netclasses', False))
+                    clamp_nondefault_netclasses=config.get('clamp_netclasses', False),
+                    class_ceiling=config.get('clearance_ceiling'))  # #1492
                 if drc_changes:
                     board.SetModified()
                     print(f"DRC settings: loosened {len(drc_changes)} Board Setup "
@@ -4365,6 +4454,11 @@ class RoutingDialog(wx.Dialog):
             persist_protected_nets(_pro, consume_protection_candidates(),
                                    board=board)
             persist_impedance_specs(_pro, consume_impedance_specs(), board=board)
+            # #1503: the pairs matched P to N, and the skew each was matched to
+            from protected_nets import (consume_intra_pair_tolerances,
+                                        persist_intra_pair_tolerances)
+            persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances(),
+                                          board=board)
         except Exception:
             pass
 
@@ -4468,6 +4562,13 @@ class RoutingDialog(wx.Dialog):
                 edge_clearance=config.get('board_edge_clearance'),
                 # #581: recorded as route.py records --same-net-pad-clearance
                 same_net_pad_clearance=config.get('same_net_pad_clearance'))
+        else:
+            # The tool records (protected nets, impedance, same-net pad
+            # clearance) are not DRC floors: an unchecked box must not void
+            # them (#1415, as route.py --no-fix-drc-settings).
+            from .gui_utils import persist_live_tool_records
+            persist_live_tool_records(
+                board, config.get('same_net_pad_clearance'))
 
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""

@@ -220,7 +220,8 @@ def main():
              'containment_blocking': 5, 'courtyard_blocking_gating': None,
              'oob_pad_copper_gating_count': 0, 'mating_keepout_count': 0,
              'pin_in_courtyard': 0, 'testpoint_covered_gating': None,
-             'body_edge_band_gating': 0, 'own_pad_shorts': 0}, 4)
+             'body_edge_band_gating': 0, 'own_pad_shorts': 0,
+             'body_in_board_count': 0}, 4)
         check('count is 1, not 8', r.get('count') == 1,
               f"count={r.get('count')!r} basis={r.get('count_basis')!r}")
         check('...and the basis says WHY it is not a sum',
@@ -278,8 +279,9 @@ def main():
         # #1250 a test point a moved member left under a body the seventh,
         # #1255 a body inside a DECLARED body-to-edge band the eighth, and
         # #1266 a moved member's pad on another part's graphic copper the
-        # ninth, and #1306 two of one part's own pads shorted the tenth.
-        print('the ten conjuncts that can REALLY fire at blocking 0 are '
+        # ninth, #1306 two of one part's own pads shorted the tenth, and
+        # #1603 a part's own model through the board the eleventh.
+        print('the eleven conjuncts that can REALLY fire at blocking 0 are '
               'named')
         check('locked_contacts is not among them',
               tuple(board_score.ASSEMBLY_LIVE_CONJUNCTS)
@@ -287,7 +289,8 @@ def main():
                   'oob_pad_copper_gating_count', 'mating_keepout_count',
                   'pin_in_courtyard', 'courtyard_blocking_gating',
                   'testpoint_covered_gating', 'body_edge_band_gating',
-                  'graphic_pad_gating', 'own_pad_shorts'),
+                  'graphic_pad_gating', 'own_pad_shorts',
+                  'body_in_board_count'),
               repr(board_score.ASSEMBLY_LIVE_CONJUNCTS))
         r = board_score.assembly_component(
             {'blocking': 0, 'buildable': False, 'verdict': 'NOT BUILDABLE',
@@ -305,7 +308,7 @@ def main():
              'oob_pad_copper_gating_count': 0, 'mating_keepout_count': 0,
              'pin_in_courtyard': 0, 'testpoint_covered_gating': 0,
              'body_edge_band_gating': 0, 'graphic_pad_gating': 0,
-             'own_pad_shorts': 0,
+             'own_pad_shorts': 0, 'body_in_board_count': 0,
              'courtyard_gating_basis': 'moved-vs-baseline'}, 0)
         check('a doc produced WITH --baseline reports the conjunct as armed',
               r.get('courtyard_gating_armed') is True

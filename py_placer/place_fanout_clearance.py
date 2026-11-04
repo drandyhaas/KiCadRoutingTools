@@ -18,6 +18,12 @@ nudge and are grazing after it -- whether or not the pass had fixed them
 first, since copper this pass draws can also break a cap that arrived clean.
 They are in the unresolved list too; this line names the cause, which is us.
 
+A graze is a clearance shortfall; a SHORT is a pad in contact with another
+net's copper. A cap no pose clears, shorted where it stands, is moved to the
+pose apart from every foreign copper that grazes least (#1563), named on the
+`Moved off a short` line; one with no such pose within the displacement cap
+is named on the `SHORTED` line (result key `shorted`).
+
 Usage:
   python3 py_placer/place_fanout_clearance.py fanned.kicad_pcb [output.kicad_pcb] [options]
 
@@ -102,7 +108,9 @@ Examples:
                         help="A cap counts as 'near' a BGA if its courtyard is "
                              "within this many mm of the ball field (default: 1.0)")
     parser.add_argument("--step", type=float, default=0.2,
-                        help="Candidate nudge grid step in mm (default: 0.2)")
+                        help="Candidate nudge grid step in mm (default: 0.2); "
+                             "the last-resort search for a stuck cap steps at "
+                             "min(this, 0.1)")
     parser.add_argument("--max-displacement", type=float, default=2.0,
                         help="Initial max move from seed in mm (default: 2.0); "
                              "grown automatically if a cap can't clear")
@@ -134,6 +142,16 @@ Examples:
                         help="Max repair passes (default: 30)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print each accepted move")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not write the output's .kicad_pro DRC settings: "
+                             "the input's project (and its other siblings) is "
+                             "carried through as it was, the --clearance "
+                             "ceiling included (#1578), as every routing CLI "
+                             "and the GUI's 'Fix DRC settings after routing' "
+                             "box do. By default the ceiling, when given, is "
+                             "written, and a via this pass nudged writes its "
+                             "own floors; a run that moved no copper writes no "
+                             "size floor.")
     from placement.cli_gates import add_intent_arg, load_intent_or_exit
     add_intent_arg(parser, summary=(
         "Its decap limits -- decaps.max_distance_mm and "
@@ -251,10 +269,18 @@ Examples:
             'unresolved': list(result.get('unresolved') or ()),
             'via_resolved': list(result.get('via_resolved') or ()),
             'regrazed': list(result.get('regrazed') or ()),
+            # #1563: unresolved caps still in contact, and caps moved off a
+            # short to a pose that only grazes
+            'shorted': list(result.get('shorted') or ()),
+            'parted': list(result.get('parted') or ()),
             # #1122: only when a cap's rotation is declared, so a run whose
             # intent declares none prints what it printed before.
             **({'declared_rotations': result['declared_rotations']}
                if result.get('declared_rotations') else {}),
+            # #1561: the classes the ceiling lowered more than 2x
+            **({'design_rules': {'ceiling_lowered_classes':
+                                 __import__('fab_tiers').ceiling_lowered_classes()}}
+               if __import__('fab_tiers').ceiling_lowered_classes() else {}),
             'decap': result.get('decap')}, sort_keys=True, default=str))
 
     def _write_drc_floors():
@@ -303,9 +329,34 @@ Examples:
 
         No edge_clearance is passed: --board-edge-clearance here is a placement
         margin, not a routing-enforced floor, and must not tighten the rule.
+
+        * the SIZE floors (track, via, drill, ring, hole) -- those of the copper
+          this pass laid or moved, and no other (#1578): a nudged via (#313) and
+          its connector segments. They used to be the whole board's smallest
+          objects, so a run that moved NOTHING and left the board byte-identical
+          lowered routed_output's min_via_annular_width 0.13 -> 0.05 and
+          min_via_diameter 0.35 -> 0.3 for vias the input already carried, and
+          KiCad's 199 annular_width / 199 via_diameter errors on that copper
+          went to 0. A cap move lays no copper, so it writes none; #1195's rule
+          for qfn_fanout. The custody half above -- the project carried, the
+          severities, `fab_floor_origin` -- is untouched.
+
+        `--no-fix-drc-settings` writes none of it: the input's siblings are
+        carried through as they were (#1578), as a routing CLI's are.
         """
+        if args.no_fix_drc_settings:
+            try:
+                from fix_kicad_drc_settings import seed_project_for_output
+                seed_project_for_output(args.output_file, args.input_file)
+            except Exception as e:                             # noqa: BLE001
+                print(f"  (could not carry the project through: {e})")
+            print("  DRC settings: not written (--no-fix-drc-settings); the "
+                  "input's project is carried through as it was")
+            return
         try:
-            from fix_kicad_drc_settings import fix_project_for_output
+            from fix_kicad_drc_settings import (fix_project_for_output,
+                                                copper_minima,
+                                                pad_clearance_override_minimum)
             from list_nets import board_constraint
             from placement.fanout_clearance import resolve_pair_clearance
             from placement.legality import resolve_npth_floor
@@ -334,9 +385,18 @@ Examples:
                     _hc = resolve_npth_floor(pcb_data, args.input_file)
                 except Exception:                              # noqa: BLE001
                     _hc = None
+            # #1578: the size floors of the copper this pass laid or moved
+            # only, and the #530 pad-override cap on the clearance family.
+            _minima = copper_minima(
+                result.get('new_segments') or (),
+                [vd for _ox, _oy, vd in (result.get('via_moves') or ())])
+            _ovr = pad_clearance_override_minimum(pcb_data)
+            if _ovr is not None:
+                _minima['min_pad_clearance_override'] = _ovr
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
                 clearance=_target,
+                minima=_minima,
                 hole_clearance=_hc,
                 clamp_nondefault_netclasses=args.clearance is not None)
         except Exception as e:

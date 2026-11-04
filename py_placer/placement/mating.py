@@ -42,10 +42,14 @@ library: confidently WRONG on three receptacles whose PAD layout, not their
 housing, sets the offset -- CUI SJ1-3533NG (x2, -x at 0.90 mm; its twin
 SJ1-3535NG, same housing, reads -y) and Neutrik NMJ6HCD3 (-x at 1.36 mm; the
 opening is +x) -- while 60+ correct micro-USB / USB-C faces sit in the same
-0.6-1.6 mm range. Above 2 mm no wrong face is known (227 checked). A weak
-face that is itself wrong is NOT caught: a jack seated with its opening into
-the board by a search that points even a weak face at the edge reads as a
-pass to the facing conjunct.
+0.6-1.6 mm range, and KiCad 10's RJ45_Amphenol_RJHSE5380 reads +y at 0.69
+mm where its twin RJHSE538X -- the same housing and four LED pads more --
+reads the right -y (#1586). Above 2 mm no wrong face is known (227 checked).
+A weak face that is itself wrong is not caught by the reading: a jack seated
+with its opening into the board reads as a pass to the facing conjunct. What
+corrects it is a declared `mating_face`, which OUTRANKS a weak reading in the
+seat and in the grade (`face_with_declaration`); a strong reading still
+outranks a declaration, and either way a disagreement is said.
 
 A THIRD source, since #1245: the "PCB Edge" marker many footprints draw, a
 text beside a line where the board edge goes (`marker_face_local`, carried
@@ -56,8 +60,9 @@ never names a face alone: a marker that agrees makes the body's face STRONG
 and no marker leaves today's reading. Calibrated on KiCad 10's 154 marked
 stock footprints: it agrees with all
 73 strong body faces at every quarter turn, agrees with 75 weak ones and
-vetoes one (the Pico W module's RF-edge marker). The three wrong jacks above
-draw no marker, so for them the weak tier is still the only guard.
+vetoes one (the Pico W module's RF-edge marker). The wrong jacks above draw
+no marker, so for them the weak tier and a declared `mating_face` are the
+guards.
 
 Known limit: a card-edge PLUG in a file with no `attrs` (interf_u's ISA
 BUS1: 62 netted SMD fingers, no model) is not recognised as one, and reads
@@ -214,6 +219,37 @@ def mating_face_local(fp, geom) -> LocalFace:
                      'its PCB-edge marker puts the board edge on its %s side, '
                      'against the %s face its body reads' % (mk.face, lf.face),
                      votes, marker=mk)
+
+
+def face_with_declaration(lf: LocalFace, declared) -> Tuple[Optional[str], str, str]:
+    """`(face, source, disagreement)`: the face a seat turns by and the grade
+    grades, given the body's reading `lf` and an intent's declared
+    `mating_face` (#1586).
+
+    A declaration outranks a WEAK reading and an abstention -- only the
+    author has read the datasheet, and a weak face is read off where the
+    body sits on its pads, which the pad layout can set wrong (KiCad 10's
+    RJ45_Amphenol_RJHSE5380 reads +y, 0.69 mm, where its twin with four LED
+    pads reads -y; both jacks open at -y). A STRONG reading outranks a
+    declaration. `source` is 'declared' or 'body' ('' when there is no face);
+    `disagreement` words a declared face the body reads otherwise, whichever
+    won, '' when they agree or either is silent."""
+    if declared not in _UNIT:
+        declared = None
+    if declared and (lf.face is None or not lf.strong):
+        face, source = declared, 'declared'
+    else:
+        face, source = lf.face, ('body' if lf.face else '')
+    said = ''
+    if declared and lf.face and lf.face != declared:
+        reading = (f"the {lf.face} face its body reads "
+                   f"{'strongly' if lf.strong else 'weakly'} "
+                   f"({lf.basis}, {lf.offset_mm:.2f}mm)")
+        said = (f"its declared mating_face {declared} outranks {reading}"
+                if source == 'declared' else
+                f"{reading} overrules the declared mating_face {declared}: check "
+                f"the datasheet, and drop or correct the declaration")
+    return face, source, said
 
 
 def marker_face_local(fp, geom) -> Optional[MarkerFace]:

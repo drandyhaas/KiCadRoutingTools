@@ -88,6 +88,9 @@ REGISTRY = {
     'persist_protected_nets': ['_write_drc_floors', 'update_live_drc_floors'],
     # #521 companion: per-net impedance declarations recorded the same way.
     'persist_impedance_specs': ['_write_drc_floors', 'update_live_drc_floors'],
+    # #1379 companion: the power-net widths a step was asked for, recorded so
+    # board_score measures the board against them (disclosed, not counted).
+    'persist_power_widths': ['_write_drc_floors', 'update_live_drc_floors'],
     # #678 companion: the balls a BGA fanout promised to serve by fill contact,
     # recorded in the sibling .kicad_pro so a later route step's plane finalize
     # can audit the promise. Same shape and same two GUI writeback sites as its
@@ -120,10 +123,17 @@ REGISTRY = {
     'fanout_fix_kwargs': ['_apply_fanout_results'],
     # #1319: the same rule for a pour -- no size or copper-to-hole floor for
     # copper the step did not draw. route_planes' main counts its copper off
-    # the files (drawn_copper); the Planes tab's apply decides with the same
-    # function from the copper it applied.
+    # the files (drawn_copper_items, which also feeds its #1577 copper-to-hole
+    # census, less the soft-joint bridges); the Planes tab's apply decides
+    # with the same function from the copper it applied, less the same
+    # bridges (plane_floor_segments).
     'plane_fix_kwargs': ['_apply_results_to_board_body'],
-    'drawn_copper': ['plane_fix_kwargs'],
+    'drawn_copper_items': ['plane_floor_segments'],
+    # #1369: route_diff writes the copper-to-hole floor it HELD, lowered only
+    # to what the copper it drew needs (off the files on the CLI). The
+    # Differential tab decides with the same two cores (step_copper_to_hole,
+    # held_hole_clearance) from the copper it applied.
+    'step_hole_clearance': ['_held_hole_clearance'],
     # #857: the end-of-run `Design rules [...]` line (and, CLI-only, the
     # --strict-sizes exit 3). route.py's line comes from inside batch_route on
     # both fronts; route_diff / route_planes / the fanouts print it from their
@@ -213,7 +223,17 @@ DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     # float) feeding the engine's board_edge_clearance; same VALUE-level
                     # parity story as read_project_edge_clearance above -- the GUI
                     # planes tab reads the live board rule via gui_utils.
-                    'effective_board_edge_clearance'}
+                    'effective_board_edge_clearance',
+                    # #1578: pure READERS feeding fix_project_for_output's
+                    # `minima` in place_fanout_clearance (the floors of the
+                    # copper the pass laid or moved, and the #530 pad-override
+                    # cap). The writeback itself is registered above.
+                    'copper_minima', 'pad_clearance_override_minimum',
+                    # #1578: place_fanout_clearance --no-fix-drc-settings carries
+                    # the input's siblings to the output path and writes no
+                    # floor. A file copy for a written board; the GUI writes no
+                    # project file and gates its writeback on its own checkbox.
+                    'seed_project_for_output'}
 
 # #381 D8: post-engine passes that are CLI-only BY DESIGN -- report/audit ONLY,
 # they do NOT mutate the output board, so the GUI producing an identical board
@@ -351,6 +371,7 @@ _TERMINAL = (ast.Return, ast.Raise, ast.Continue, ast.Break)
 SAME_SYMBOL_TWINS = {
     'persist_protected_nets',
     'persist_impedance_specs',
+    'persist_power_widths',
     'persist_pour_served_pads',
     'fanout_fix_kwargs',
     'plane_fix_kwargs',

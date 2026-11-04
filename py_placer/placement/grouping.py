@@ -34,6 +34,14 @@ are fixed members, the rest of the group is placed around them, and nothing
 moves them. `edge` is one of N/S/E/W (the board side a group belongs on),
 `near` / `apart` name other groups.
 
+`flippable` names the group's parts that may stand on the other face of the
+board -- the agent's judgement of the parts, like the groups (`placement.
+faces`). A part keeps the face it has unless the front has no room for it (no
+legal pose, or past a decap or claim limit), when place_simple sends it, or
+its group's other flippable parts, to the back. A part
+not listed never changes face, and a group's `side` puts all of it on one
+face whatever this says.
+
 `templates` names the group's TEMPLATE CANDIDATES: chips whose datasheet
 layout the agent will copy into an intent `templates[]` row (the
 plan-pcb-placement skill's §3.5):
@@ -59,7 +67,7 @@ EDGES = ('N', 'S', 'E', 'W')
 # one may too, and the full name is unambiguous.
 _EDGE_NAMES = {'north': 'N', 'south': 'S', 'east': 'E', 'west': 'W'}
 GROUP_KEYS = ('name', 'role', 'refs', 'anchor', 'why', 'edge', 'side', 'near',
-              'apart', 'note', 'templates')
+              'apart', 'note', 'templates', 'flippable')
 #: What a template candidate is: a stage that switches current through an
 #: inductor, transformer, flying or bootstrap cap, or a motor; or the parts
 #: between a radio chip's RF pins and its antenna.
@@ -143,6 +151,14 @@ def validate_doc(doc, where: str = 'groups') -> Dict:
             v = g.get(key) or []
             if not isinstance(v, list):
                 raise GroupsError(f"{where}: group {name!r} `{key}` must be a list of group names")
+        fl = g.get('flippable')
+        if fl is not None:
+            if not isinstance(fl, list) or not all(isinstance(r, str) for r in fl):
+                raise GroupsError(f"{where}: group {name!r} `flippable` must be a list of refs")
+            stray = sorted(set(fl) - set(refs))
+            if stray:
+                raise GroupsError(f"{where}: group {name!r} `flippable` names {stray}, "
+                                  f"which are not among its refs")
         _check_templates(g, name, refs, where, chips)
     for i, g in enumerate(groups):
         for key in ('near', 'apart'):
@@ -198,15 +214,20 @@ _SWITCH_NET_PARTS = 4
 
 
 def _is_inductor(fp, ref) -> bool:
-    """A two-pad inductor (L, value in henries), not a ferrite bead."""
+    """A two-pad inductor (L, value in henries), not a ferrite bead. The
+    reference is read past a glued qualifier (`part_class.unqualified_ref`,
+    #1606), as `_is_cap` and the chip test of `template_hints` read it."""
+    from placement.part_class import unqualified_ref
     v = (getattr(fp, 'value', '') or '').replace(' ', '').lower()
     pads = [p for p in fp.pads if p.net_id]
-    return (len(pads) == 2 and re.match(r'^L\d', ref) is not None
+    return (len(pads) == 2 and re.match(r'^L\d', unqualified_ref(ref)) is not None
             and re.search(r'\d(\.\d+)?[pnum\u00b5]?h', v) is not None)
 
 
 def _is_cap(fp, ref) -> bool:
-    return re.match(r'^C\d', ref) is not None and len([p for p in fp.pads if p.net_id]) == 2
+    from placement.part_class import unqualified_ref
+    return (re.match(r'^C\d', unqualified_ref(ref)) is not None
+            and len([p for p in fp.pads if p.net_id]) == 2)
 
 
 def template_hints(doc: Dict, pcb) -> List[str]:
@@ -217,15 +238,20 @@ def template_hints(doc: Dict, pcb) -> List[str]:
     them named a bootstrap or flying-cap pin; a pin named as an RF port. A hint
     for the agent to weigh, never a rule: a stage can show none of these, and
     some that show one need nothing -- the file records those as `none`."""
+    from placement.part_class import unqualified_ref
     named = {t['chip'] for t in template_candidates(doc, all_kinds=True)}
     fps = pcb.footprints or {}
     why: Dict[str, List[str]] = {}
     try:
         from placement.emc_roles import emc_roles
         for r in emc_roles(pcb).get('roles') or []:
-            kind = r.get('role') if r.get('role') != 'unknown' else r.get('candidate')
-            if kind == 'switching converter':
+            if r.get('role') == 'switching converter':
                 why.setdefault(r['part'], []).append('emc_roles reads a switching converter')
+            elif r.get('role') == 'unknown' and r.get('candidate') == 'switching converter':
+                # #1590: a pin-less part is a CANDIDATE, read off an inductor
+                # on its net, and the hint says so
+                why.setdefault(r['part'], []).append(
+                    'emc_roles reads a switching-converter candidate (its pins carry no function)')
     except Exception as ex:      # a hint never stops the check
         why.setdefault('?', []).append(f"emc_roles could not read the board ({type(ex).__name__})")
     on: Dict[int, Set[str]] = {}
@@ -236,7 +262,7 @@ def template_hints(doc: Dict, pcb) -> List[str]:
     gnd = {nid for nid in on if is_ground(_net(pcb, nid))}
     for ref, fp in fps.items():
         pads = [p for p in fp.pads if p.net_id]
-        if len(pads) < 5 or not re.match(r'^(U|IC)\d', ref):
+        if len(pads) < 5 or not re.match(r'^(U|IC)\d', unqualified_ref(ref)):
             continue
         mine = {p.net_id for p in pads} - gnd
         capped = {p.net_id for p in pads if _CAP_FN.search((p.pinfunction or '').strip())}
@@ -668,17 +694,57 @@ def follower_roots(claims: Iterable[Dict]) -> Dict[str, str]:
     return roots
 
 
-def fold_followers(doc: Dict, claims: Iterable[Dict]) -> Tuple[Dict, Dict[str, Tuple[str, str]]]:
-    """`(doc, moved)`: the groups file with every `proximity[]` subject moved
-    into the group of the part its claims end at (`follower_roots`) -- and,
-    when a subject is its group's anchor, the rest of that group with it --
-    and {ref: (from group, to group)} for each part moved.
+def fold_groups(doc: Dict, rows: Iterable[Dict], templates: Iterable[Dict] = ()) -> Dict:
+    """The groups as place_simple places them: `{'doc', 'moved', 'dissolved'}`
+    from `fold_followers`, over the proximity claims `rows` (`claim_rows`)
+    and each `templates` member's claim at its chip. The one fold both
+    check_groups and place_simple report (#1467)."""
+    claims = list(rows) + [{'ref': m['ref'], 'near': t['anchor']}
+                           for t in templates for m in t['members']]
+    out, moved, dissolved = fold_followers(doc, claims)
+    return {'doc': out, 'moved': moved, 'dissolved': dissolved}
+
+
+def fold_text(fold: Dict) -> Tuple[Optional[str], List[str]]:
+    """`fold_groups`' result as text: `(moved, dissolved)`, the line naming
+    the parts moved (None when none is) and one line per dissolved group,
+    naming the group that absorbs it and the hints of its own it drops."""
+    moved = None
+    if fold['moved']:
+        moved = "parts that follow a claim into their partner's group: " + ', '.join(
+            f"{r} ({f} -> {t})" for r, (f, t) in sorted(fold['moved'].items()))
+    out = []
+    for d in fold['dissolved']:
+        parts = '; '.join(f"{', '.join(rs)} -> {t}" for t, rs in sorted(d['parts'].items()))
+        lost = '; '.join(f"{k} {', '.join(v) if isinstance(v, list) else v}"
+                         for k, v in sorted(d['lost'].items()))
+        out.append(f"group {d['group']} is dissolved into {d['into']} -- its parts follow "
+                   f"their claims, or its anchor's, out of it ({parts}) -- so "
+                   + (f"its own hints are dropped ({lost})" if lost else
+                      "it drops no hint of its own")
+                   + f" and hints naming it now name {d['into']}; to keep a group, "
+                   "declare a distance across groups in the intent's links[], "
+                   "which merges nothing, not as a proximity[] row")
+    return moved, out
+
+
+def fold_followers(doc: Dict, claims: Iterable[Dict]
+                   ) -> Tuple[Dict, Dict[str, Tuple[str, str]], List[Dict]]:
+    """`(doc, moved, dissolved)`: the groups file with every `proximity[]`
+    subject moved into the group of the part its claims end at
+    (`follower_roots`) -- and, when a subject is its group's anchor, the rest
+    of that group with it -- {ref: (from group, to group)} for each part
+    moved, and a record per group the move empties.
 
     A follower is placed beside its partner, so it must share its
     partner's group: a crystal in a clock group of its own would be held
     apart from the IC whose pins it belongs at. A group the move empties is
     dropped, and the `near` and `apart` entries naming it are pointed at the
-    group that took its parts. The input is not modified."""
+    group that took its parts; its OWN `near`, `apart` and `edge` go with it.
+    Each `dissolved` record is {'group', 'into' (the group those entries now
+    name), 'parts' ({group: refs it took}), 'lost' ({hint: what it named},
+    leaving out a `near` group its parts went to)}. The input is not
+    modified."""
     roots = follower_roots(claims)
     where = group_of(doc)
     moved = {s: (where[s], where[r]) for s, r in roots.items()
@@ -694,7 +760,7 @@ def fold_followers(doc: Dict, claims: Iterable[Dict]) -> Tuple[Dict, Dict[str, T
                 if r not in moved and where.get(r) == g['name']:
                     moved[r] = (g['name'], moved[a][1])
     if not moved:
-        return doc, {}
+        return doc, {}, []
     out = json.loads(json.dumps(doc))
     for g in out['groups']:
         g['refs'] = [r for r in g['refs'] if r not in moved]
@@ -706,6 +772,22 @@ def fold_followers(doc: Dict, claims: Iterable[Dict]) -> Tuple[Dict, Dict[str, T
     for _s, (f, t) in sorted(moved.items()):
         if f in gone:
             took.setdefault(f, t)
+    dissolved = []
+    for g in doc['groups']:
+        if g['name'] not in gone:
+            continue
+        parts: Dict[str, List[str]] = {}
+        for r in g['refs']:
+            if r in moved:
+                parts.setdefault(moved[r][1], []).append(r)
+        # a `near` its parts now sit in is kept by the move; nothing else is
+        lost = {k: [n for n in g[k] if k == 'apart' or n not in parts]
+                for k in ('near', 'apart') if g.get(k)}
+        lost = {k: v for k, v in lost.items() if v}
+        if g.get('edge'):
+            lost['edge'] = g['edge']
+        dissolved.append({'group': g['name'], 'into': took.get(g['name']),
+                          'parts': parts, 'lost': lost})
     out['groups'] = [g for g in out['groups'] if g['refs']]
     for g in out['groups']:
         for key in ('near', 'apart'):
@@ -717,7 +799,7 @@ def fold_followers(doc: Dict, claims: Iterable[Dict]) -> Tuple[Dict, Dict[str, T
                     g[key] = names
                 else:
                     del g[key]
-    return out, moved
+    return out, moved, dissolved
 
 
 def tree_weight(n: int) -> float:

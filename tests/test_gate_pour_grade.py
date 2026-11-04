@@ -21,7 +21,9 @@ Checks:
   B. _exact_gate_pours grades the pours on KiCad's exact fill of both boards
      (CLI files, GUI staged saves, every temp dropped; no refill keeps the
      raster grade), and a retry's GND-for-/P0.17 "trade" is a plain gain
-  C. batch_route's gate re-grades a pour-driven rejection before acting on it
+  C. batch_route's gate re-grades a pour-driven rejection before acting on it,
+     and on any verdict a pour net the final re-grade reads open while the
+     raster credits it (#1619, #1620)
 
     python3 tests/test_gate_pour_grade.py
 """
@@ -196,7 +198,12 @@ def t_wiring():
     check('the step gate re-grades a pour-driven rejection before acting',
           g >= 0 and body.find('_verdict = gate_verdict(_cmp)', g) < e
           < body.find("if _verdict == 'reject' and return_results:", g)
-          and "if _verdict == 'reject' and _zhit600:" in body[g:e])
+          and "set(_zhit600) if (_dis600 or _verdict == 'reject')" in body[g:e])
+    # #1619/#1620: and, whatever the verdict, a pour net the final re-grade
+    # reads open while the raster credits it
+    check('...and a pour net the final re-grade reads open, on any verdict',
+          '_FINAL_REGRADE[0]' in body[g:e]
+          and "_after_map[i][0] and _name_of(i) in _rg_broken600" in body[g:e])
 
 
 def main():

@@ -413,6 +413,21 @@ def reset_hint_condenser() -> None:
     _HINT_SENTENCES_SEEN.clear()
 
 
+#: #1597: what the rip the hint below offers can NOT do. `blocked_by` names
+#: the nets whose copper walls the failed pad, but a rip lifts only tracks
+#: and vias: a pad ringed by those nets' PADS stays walled (a test board's
+#: pad caged by four signal pins: two all-nets laps and the named rip each
+#: ended on the same failed set and the same copper). Telling the two apart
+#: is a reachability run, too costly for every failed net here, so the hint
+#: says what stays and names the instrument that grades the placement with
+#: the routing set aside. Fixed text, so condense_hint prints it once a run.
+RIP_LEAVES_PADS_HINT = (
+    " A rip lifts their tracks and vias only; their pads stay. If pads wall "
+    "the failed pad, no rip frees it: check the pad first with "
+    "py_tools/check_reachability.py <board> --pad <REF.PAD>, which sets the "
+    "routing aside -- CAGED there is placement, not copper.")
+
+
 def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
                               routed_net_ids=(), rip_existing_names=None,
                               return_names=False, anchors=None):
@@ -526,9 +541,11 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     # names, so no authority machinery ever receives them (a47f244).
     prot_txt = ""
     try:
-        from protected_nets import protection_map
-        _pmap = protection_map(pcb_data,
-                               getattr(pcb_data, 'source_path', None))
+        from protected_nets import effective_protection_map
+        # The effective set (#1395): a net this run lifted by exact name is
+        # not one the router "will NEVER rip".
+        _pmap = effective_protection_map(
+            pcb_data, getattr(pcb_data, 'source_path', None))
         if _pmap and anchors:
             from geometry_utils import point_to_segment_distance
             _pnames = []
@@ -642,7 +659,8 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
             f"rip and re-route them in this run (issue #103) -- the decisive "
             f"blocker may be any of them, so start with the full set (each "
             f"ripped net is re-routed and the run reports honestly if one "
-            f"cannot be), then bisect if you want a minimal rip.{prot_out_txt}"
+            f"cannot be), then bisect if you want a minimal rip."
+            f"{RIP_LEAVES_PADS_HINT}{prot_out_txt}"
             f"{had_txt}{lock_txt}" + prot_txt, names)
 
 
@@ -655,7 +673,7 @@ def _escaped_on_input(pcb_data, net_id, bare, reach=0.05):
     mark = getattr(pcb_data, '_input_copper', None)
     if not mark:
         return []
-    _ids, segs, vias = mark
+    _ids, segs, vias = mark[:3]
     pts = [(s.start_x, s.start_y) for s in segs if s.net_id == net_id]
     pts += [(s.end_x, s.end_y) for s in segs if s.net_id == net_id]
     pts += [(v.x, v.y) for v in vias if v.net_id == net_id]
@@ -734,8 +752,10 @@ def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
     plane_like = n_pads >= plane_like_pads
     remedy = ("re-create the plane for this net (route_planes.py), or fan it "
               "out explicitly" if plane_like else
-              "re-run the fanout for this net (bga_fanout.py / qfn_fanout.py "
-              "--escape-method underpad, or a smaller --via-size)")
+              "re-run the fanout for this net: bga_fanout.py, or for a "
+              "QFN/QFP pad qfn_fanout.py --escape-method underpad (the stub "
+              "escape skips interior pads, #1641), with a smaller --via-size "
+              "if the via did not fit")
     hint = (f"Hint: pad {where} is a fanout-dropped ball (no escape stub) -- "
             f"it sits inside {ref}'s pad field with no copper of {name} "
             f"attached, so no rip authority or retry can reach it"
@@ -968,6 +988,19 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
     if result is None:
         return _ret("")
     iters = result.get('iterations_forward', 0) + result.get('iterations_backward', 0)
+    refused = result.get('pad_entry_refused')
+    if refused:
+        # #1452: a narrower track DID reach the pad; --escalation off refused
+        # it because no route kept the net's width outside the pad entry.
+        # Advising a smaller track would ask for exactly what was refused.
+        return _ret(
+            f"Hint: under --escalation off a wide net may narrow only within "
+            f"{refused['allowance_mm']:g} mm of a pad; this edge spans "
+            f"{refused['span_mm']:g} mm and a {refused['neck_width_mm']:g} mm "
+            f"track reaches it, but no route keeps "
+            f"{refused['net_width_mm']:g} mm outside that pad entry. Open a "
+            f"wider channel to the pad, or allow narrowing (--escalation fab).",
+            dict(refused, verdict='pad_entry_allowance', iterations=iters))
     if iters >= 20000:
         return _ret("")
     finer = config.grid_step / 2
@@ -982,12 +1015,21 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
             grid_advice = (f"--grid-step {finer:g} scoped to just the failing nets "
                            f"via --nets (board-global it is ~{cells / 1e6:.0f}M "
                            f"cells/layer and may exhaust memory)")
+    # A suggested clearance / track is only ever NARROWER than the run's own
+    # (#1394): advising 0.15 to a run already at 0.09 / 0.0762 asked for a
+    # wider clearance and track, the opposite of the lever.
+    narrower = []
+    if config.clearance > 0.15:
+        narrower.append("--clearance 0.15")
+    if config.track_width > 0.15:
+        narrower.append("--track-width 0.15")
+    advice = " ".join([grid_advice] + narrower)
     return _ret(
         f"Hint: search exhausted after only {iters} iterations with no rippable "
         f"blockers - the start/target pads are boxed in by static obstacles "
         f"(neighboring pads + clearance), not by congestion. For fine-pitch "
         f"parts try a finer grid and/or smaller clearance/track, e.g. "
-        f"{grid_advice} --clearance 0.15 --track-width 0.15 "
+        f"{advice} "
         f"(current: grid {config.grid_step:g}, clearance {config.clearance:g}, "
         f"track {config.track_width:g} mm)",
         # The same decision as data: the iteration count it was made on and

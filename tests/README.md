@@ -59,7 +59,7 @@ modal run tests/stress/modal_suite/run_all_modal.py --fast        # unit lane on
 modal run tests/stress/modal_suite/run_all_modal.py --filters "908 910"  # those families
 ```
 
-Its other options: `--timeout` (per test, default 600), `--jobs` (per
+Its other options: `--timeout` (per test, default 1000), `--jobs` (per
 container, default 2), `--out-dir DIR` (every shard's log; default a temp dir,
 printed), and `--write-durations` (below), which `--force-durations` lets
 write from a red run.
@@ -103,15 +103,19 @@ Three things to know before you trust its output:
 
   The suite image's self-skips have three different reasons, so read each
   `SKIP:` line rather than assuming:
-  - **No KiCad.** Six would be recovered by giving the suite image KiCad:
-    `test_910_fill_for_delivery` and the two `test_1279_*_pcbnew` tests (each
-    wants KiCad's bundled python), and three that run a pcbnew/wx half under
+  - **No KiCad.** Eight would be recovered by giving the suite image KiCad:
+    `test_910_fill_for_delivery`, the two `test_1279_*_pcbnew` tests and
+    `test_1450_chamfered_pad_pcbnew` (each wants KiCad's bundled python), and three that run a pcbnew/wx half under
     KiCad's python and self-skip without one (found reviewing #1272: such a
     half used to print a skip and pass, so it ran nowhere):
     `test_505_min_connection_clamp`, `test_505_gui_half_runs` and
-    `test_engine_kwarg_parity_launch`.
-  - **No `ortools`.** The `test_622_*` tests that plan with CP-SAT skip
-    without it, and `requirements.txt` does not list it.
+    `test_engine_kwarg_parity_launch`. An eighth needs kicad-cli rather than
+    KiCad's python: `test_1449_inrun_edge_floor` routes on every host, but
+    its oracle half -- KiCad's refill at the pinned edge -- runs only with
+    kicad-cli, and without it the file exits 77 (#1643).
+  - **No `ortools`** (a local Python only). The `test_622_*` tests that plan
+    with CP-SAT skip without it. `requirements.txt` lists it -- the bus step
+    needs it (#1355) -- so the suite image installs it and runs them.
 
 The image is a clean checkout of HEAD (reproducible, and you can keep editing
 while it runs); `KICAD_SWEEP_DIRTY=1` ships the working tree instead and stamps

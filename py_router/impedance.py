@@ -1438,9 +1438,17 @@ def print_impedance_routing_plan(pcb: PCBData, layers: List[str], target_z0: flo
 
                 note = ""
                 if width_mm < min_width:
-                    note = f" (clamped to min {min_width:.3f}mm)"
+                    # #1630: the impedance of the copper laid, at the clamped
+                    # width -- it read the unclamped width's (89.5 ohm beside a
+                    # 0.4 mm pair the same model puts at 56.3)
                     width_mm = min_width
                     width_mil = width_mm * 39.3701
+                    verify = calculate_impedance_for_layer(pcb, layer_name, width_mm,
+                                                           spacing,
+                                                           coplanar_gap=coplanar_gap)
+                    verified = verify.get('zdiff' if is_differential else 'z0', 0)
+                    note = (f" (clamped to min {min_width:.3f}mm: OFF the "
+                            f"{target_z0:g} {z_unit} target)")
 
                 print(f"{layer_name:<12} {layer_type:<12} {width_mm:<12.4f} {width_mil:<12.2f} {verified:.1f} {z_unit}{note}")
             else:

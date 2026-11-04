@@ -60,6 +60,7 @@ def get_dialog_settings(dialog):
         # Advanced parameters
         'impedance_check': dialog.impedance_check.GetValue(),
         'impedance_value': dialog.impedance_value.GetValue(),
+        'impedance_declare_only': dialog.impedance_declare_only.GetValue(),
         'coplanar_gap': dialog.coplanar_gap.GetValue(),
         'coplanar_nets': dialog.coplanar_nets_ctrl.GetValue(),
         'max_iterations': dialog.max_iterations.GetValue(),
@@ -138,6 +139,7 @@ def get_dialog_settings(dialog):
 
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
+        'length_match_tolerance_check': dialog.length_match_tolerance_check.GetValue(),
         'meander_amplitude': dialog.meander_amplitude.GetValue(),
         'meander_spacing': dialog.meander_spacing.GetValue(),
         'time_matching_check': dialog.time_matching_check.GetValue(),
@@ -178,6 +180,8 @@ def get_dialog_settings(dialog):
         'diff_pair_width': dialog.differential_tab.diff_pair_width.GetValue(),
         'diff_pair_gap': dialog.differential_tab.diff_pair_gap.GetValue(),
         'diff_impedance': dialog.differential_tab.diff_impedance.GetValue(),
+        'diff_impedance_declare_only':
+            dialog.differential_tab.impedance_declare_only.GetValue(),
         'min_turning_radius': dialog.differential_tab.min_turning_radius.GetValue(),
         'max_setback_angle': dialog.differential_tab.max_setback_angle.GetValue(),
         'max_turn_angle': dialog.differential_tab.max_turn_angle.GetValue(),
@@ -205,6 +209,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_escape_method': dialog.fanout_tab.bga_options.get_escape_method(),
         'fanout_bga_plane_drop': dialog.fanout_tab.bga_options.plane_drop.GetValue(),
         'fanout_bga_plane_net_layers': dialog.fanout_tab.bga_options.plane_net_layers_ctrl.GetValue(),
+        'fanout_bga_immovable_refs': dialog.fanout_tab.bga_options.immovable_refs.GetValue(),  # #1521
         'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
         'fanout_bga_cap_capture_radius': dialog.fanout_tab.bga_options.cap_capture_radius.GetValue(),
         'fanout_bga_cap_near_margin': dialog.fanout_tab.bga_options.cap_near_margin.GetValue(),
@@ -389,6 +394,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.impedance_check.SetValue(settings['impedance_check'])
     if 'impedance_value' in settings:
         dialog.impedance_value.SetValue(settings['impedance_value'])
+    if 'impedance_declare_only' in settings:
+        dialog.impedance_declare_only.SetValue(bool(settings['impedance_declare_only']))
     if 'coplanar_gap' in settings:
         dialog.coplanar_gap.SetValue(settings['coplanar_gap'])
     if 'coplanar_nets' in settings:
@@ -533,6 +540,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.length_match_groups_ctrl.SetValue(settings['length_match_groups'])
     if 'length_match_tolerance' in settings:
         dialog.length_match_tolerance.SetValue(settings['length_match_tolerance'])
+    if 'length_match_tolerance_check' in settings:
+        dialog.length_match_tolerance_check.SetValue(settings['length_match_tolerance_check'])
     if 'meander_amplitude' in settings:
         dialog.meander_amplitude.SetValue(settings['meander_amplitude'])
     if 'meander_spacing' in settings:
@@ -624,6 +633,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.diff_pair_gap.SetValue(settings['diff_pair_gap'])
     if 'diff_impedance' in settings:
         dialog.differential_tab.diff_impedance.SetValue(settings['diff_impedance'])
+    if 'diff_impedance_declare_only' in settings:
+        dialog.differential_tab.impedance_declare_only.SetValue(
+            bool(settings['diff_impedance_declare_only']))
     # Restore the diff-pair width/gap override checkboxes and sync spinctrl enable
     if 'diff_pair_width_override' in settings:
         dialog.differential_tab.diff_pair_width_check.SetValue(settings['diff_pair_width_override'])
@@ -699,6 +711,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.set_escape_method(settings['fanout_bga_escape_method'])
     if 'fanout_bga_plane_drop' in settings:
         dialog.fanout_tab.bga_options.plane_drop.SetValue(bool(settings['fanout_bga_plane_drop']))
+    if 'fanout_bga_immovable_refs' in settings:   # #1521
+        dialog.fanout_tab.bga_options.immovable_refs.SetValue(
+            str(settings['fanout_bga_immovable_refs'] or ''))
     if 'fanout_bga_plane_net_layers' in settings:
         dialog.fanout_tab.bga_options.plane_net_layers_ctrl.SetValue(
             str(settings['fanout_bga_plane_net_layers']))

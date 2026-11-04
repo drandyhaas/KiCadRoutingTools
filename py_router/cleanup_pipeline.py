@@ -105,8 +105,11 @@ def _smooth_skip_net_ids(pcb_data):
     import protected_nets as _pn
     names = set(_pn.protection_map(pcb_data))
     names |= set(_pn._notes.get(_pn.PRO_KEY, {}) or {})
-    names |= set(_pn.read_impedance_for_pcb_data(pcb_data))
-    names |= set(_pn._notes.get(_pn.IMPEDANCE_KEY, {}) or {})
+    # A DECLARE-ONLY record (#1630) changes no copper decision, this one
+    # included: the copper is the project's, routed as without --impedance.
+    for _imp in (_pn.read_impedance_for_pcb_data(pcb_data),
+                 _pn._notes.get(_pn.IMPEDANCE_KEY, {}) or {}):
+        names |= {nm for nm, sp in _imp.items() if _pn.impedance_reapplies(sp)}
     return {nid for nid, net in pcb_data.nets.items()
             if getattr(net, 'name', None) in names}
 
@@ -325,7 +328,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _gz_segs, _gz_nets, _gz_strip = prune_grazing_segments(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             check_foreign_segments=True, keep_input_copper=keep_input_copper,
-            net_clearances=_nc)
+            net_clearances=_nc,
+            config=config)  # #1619: scoped .kicad_dru rules
         counts['graze_pruned'] = _gz_segs
         _trace('graze')
         strip.extend(_gz_strip)
@@ -351,7 +355,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             keep_input_copper=keep_input_copper,
-            net_clearances=_nc, board_edge_clearance=_bec)
+            net_clearances=_nc, board_edge_clearance=_bec,
+            config=config)  # #1561: scoped .kicad_dru rules
         counts['octolinear_nudged'] = _nz_segs
         _trace('octolinear')
         strip.extend(_nz_strip)
@@ -393,7 +398,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             max_shift=config.grid_step,
             net_clearances=_nc, board_edge_clearance=_bec,
             same_net_pad_clearance=getattr(config, 'same_net_pad_clearance',
-                                           -1.0))  # #581
+                                           -1.0),  # #581
+            config=config)  # #1561: scoped .kicad_dru rules
         counts['vias_nudged'] = _vn_moved
         _trace('via_nudge')
         if _vn_moved:

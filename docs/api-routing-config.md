@@ -565,6 +565,8 @@ on the corpus.
 | `max_turn_angle` | `180.0` | Cumulative turn limit before reset (prevents U-turns) |
 | `gnd_via_enabled` | `True` | Place GND return vias next to diff-pair signal vias |
 | `diff_pair_intra_match` | `False` | Meander the shorter of P/N to match lengths within the pair |
+| `intra_pair_tolerances` | `None` | `{P net id: mm}`, set by the diff-pair engine (#1503): the pairs matched P to N this run and the skew each is matched to -- a `.kicad_dru` P/N skew rule's max, the explicit override, else `length_match_tolerance` |
+| `skew_graded_net_ids` | `frozenset()` | Set by the diff-pair engine: P and N of every pair in `intra_pair_tolerances`. With the length-match members `run_length_matching` records, the nets the post-route cleanup gives a via-centre bridge (#1583, `pcb_modification.length_graded_net_ids`) |
 | `ac_couple_match` | `False` | End-to-end length-match AC-coupled pairs split by series caps: concatenated P vs N path (#196) |
 | `diff_chamfer_extra` | `1.5` | Meander chamfer multiplier for pairs (avoids P/N crossings) |
 | `diff_pair_hybrid_escape` | `True` | When a coupled pair's terminal connector can't clear foreign copper (#165 graze), keep the coupled middle and defer each terminal leg to a single-ended point-to-point join instead of failing the whole pair |
@@ -588,7 +590,7 @@ on the corpus.
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `power_tap_neckdown` | `True` | Retry failed wide power taps with a narrow neck from the pad |
-| `neckdown_length` | `2.5` | Length of the pad-entry zone at each pad end: the power width capped at the pad's short side where it fits, narrow only where it does not (#1318) |
+| `neckdown_length` | `2.5` | Length of the pad-entry zone at each pad end: the power width capped at the pad's short side where it fits, narrow only where it does not (#1318). Under `--escalation off` capped at `PAD_ENTRY_NECK_MM` less `neckdown_taper_length` (#1452) |
 | `neckdown_taper_length` | `0.5` | Taper from narrow to full width (0 = abrupt) |
 
 ### Clearance details and DRC margins
@@ -607,8 +609,9 @@ on the corpus.
 | `board_copper_layers` | `[]` | The BOARD's copper layer list the `layer_clearances` map was expanded over, recorded by `kicad_dru.install_layer_clearances`. `pad_pair_clearance` resolves a `*.Cu` pad's shared layers over it, as `check_drc` does (a pad on an unrouted, unruled inner layer keeps its class value); `layers` stands in when it is empty |
 | `track_clearances` | `{}` | `{net_id: mm}` — the track-to-track channel (#735): the effective per-obstacle map computed from the board's `.kicad_dru` TRACK-scoped rules (`A.NetClass=='X' && B.NetClass!='X' && A.Type=='track' && B.Type=='track'`) over THIS call's routed set. Applied by `track_obstacle_clearance(net_id, resolved)` — **raise-only** over the fully-resolved pair value, seg-vs-seg obstacle expansion only (pads/vias exempt), per-layer like every segment stamp. Auto-read engine-side (`kicad_dru.install_track_clearances`, same no-flag convention as `layer_clearances`); an explicit dict (tests/GUI) wins and stops the auto-read. Empty map short-circuits to byte-identical behavior. The PLACEMENT side reads the same rules pair-EXACTLY rather than through this map (`kicad_dru.track_pair_clearance`, the resolver `check_drc` and `placement/fanout_clearance`'s connector gate both call since #735); `kicad_dru.board_track_rules(pcb_data)` is the quiet reader for an engine that has no `GridRouteConfig`. A "keep pairs apart" rule (`!AB.isCoupledDiffPair()`, #1295) and a rule's `(layer ...)` clause are read too; this map prices both on every net and layer they could bind (see below) |
 | `track_partner_clearances` | `{}` | `{frozenset({P, N}): mm}` -- with a "keep pairs apart" track rule (#1295), the pair-exact track-rule value of every diff pair KiCad couples by name (`kicad_dru.coupled_net_pairs`), which `pair_clearance(P, N, kind='track')` reads instead of `track_clearances` (that map raises the partner too). Engine-computed by `kicad_dru.install_track_clearances`; empty on its explicit-dict path (a nested sub-run) and on a board without such a rule, where it is inert |
-| `coupled_pair_clearances` | `{}` | `{frozenset({P, N}): {'track': {layer: mm}, 'layer': {layer: mm}, 'stack': mm or None}}` — each diff pair's P<->N clearance where a `.kicad_dru` coupled-pair rule (`AB.isCoupledDiffPair()` ANDed into a clearance rule) is what KiCad grades it at (#1293), by `pair_clearance` kind; a layer is listed only where that rule governs it. Engine-computed by `batch_route_diff_pairs` (`route_diff.coupled_pair_floors`), read first by `pair_clearance`; no CLI flag and no GUI control, the rules file is the source. Empty map is inert |
-| `rules` | `None` | The board's design rules resolved in **KiCad's own order** (`design_rules.DesignRules`), which the three maps above are being migrated onto (#530). Installed engine-side by `kicad_dru.install_layer_clearances` for both fronts, from the sibling `.kicad_pro` + `.kicad_dru` (`DesignRules.from_project`) or the live board (`from_pcbnew`) — same no-flag convention as `layer_clearances`. Carries `board_min` (the board's `min_*` constraints), `classes`, per-net `memberships`, the parsed custom `rules`, and the active `fab_floor`. `floor(kind, net_id, layer, type=)` is the smallest value DRC accepts for a kind on that net/layer (fab floor applied, `None` when nothing declares one) and backs `config.size_floors(...)`; `draw_size(...)` is the size to DRAW (explicit CLI value, else resolved class/rule `opt`, clamped into `[min, max]`; `diff_pair=<pair name>` resolves a coupled-pair member, whose class track width is the class `diff_pair_width`, as KiCad's `inDiffPair` implicit rule has it). **`None` means "no rules declared" and every consumer must treat it as such** — a board with neither sibling still builds a table rather than inventing a Default class. The #498/#530 clearance caps reach `rules.min_clearance` ONLY (#900): the net classes keep the clearance the board was routed to. `rules.net_keepouts` holds the net-filtered keep-outs its `disallow` rules on named rule areas define (`net_keepouts.derive_area_keepouts`, run by `install_design_rules`; each honoured rule's `honoured` says what, and `unsupported()` stops listing it), which the engines attach to the board and stamp per bound net |
+| `scoped_clearance` | `None` | The class/type-scoped channel (#1491): a `kicad_dru.ScopedClearanceInstall` over the board's `.kicad_dru` clearance rules whose condition reads only `NetClass`, `Type`, `Pad_Type`, `Via_Type`, `NetName` (#1528, compared as KiCad compares it: case-insensitive, a literal with `*`/`?` a wildcard) and `hasNetclass`/`hasExactNetclass` (joined by `&&`, `\|\|`, `!`; no `(layer ...)` clause, not the #735 track shape), such as `A.NetClass == 'CSI' && B.NetClass == 'CSI'`, `A.NetClass == 'HS' && B.Type == 'Pad'` or `A.NetName == '/GND' && B.NetClass == 'HS'`. Matched pair-exact through `design_rules` (A/B commutative, the last matching rule wins, the rule REPLACES the class value, fab-floor pinned). A foreign obstacle is stamped at the max over THIS call's routed nets of (the rule's value where one binds, else the class value) -- `obstacle_clearance` for tracks/vias, `pad_obstacle_clearance(pad)` for pads -- so a tightening rule raises a stamp and a relaxing rule lowers one only when every routed net is in its scope (route that class in its own call); a net the run leaves open whose own requirement is lower than the shared stamps gets one whole-net retry at its own requirement (`net_rescue.own_requirement_retry`, #1618, which installs a `ScopedClearanceInstall` over that net alone); a relaxing rule another routed net held up is reported in `JSON_SUMMARY.design_rules.scoped_clearance.held_up` and on the console. `pair_clearance` reads it pair-exact, and so do the passes that move copper after routing (octolinear smoothing, graze re-bend, micro-shift, via nudge) and the terminal checks: the `single_ended_routing._seg_foreign_*_dist` / `_pt_foreign_pad_dist` helpers fold the rule by item type when given the `config` (#1561). Installed by `kicad_dru.install_track_clearances` on BOTH its paths (route, route_diff, plane create/repair, oracle sub-routes -- the oracle installs it whenever the rules source carries such a rule -- and the QFN and BGA fanouts through `kicad_dru.install_pair_rule_channels`, #1565, whose `PairRuleVerdicts` prices the pairs a fanout tests itself: `pair_clearance` for the two items' types, then a track rule pair-exact). A nested sub-run (route.py's reconciliation laps, the in-run plane finalize and its reconnect sub-runs) is handed its parent's resolved rules as the internal `scoped_clearance_rules` kwarg (`install_track_clearances(..., scoped_rules=)`), re-bound by net NAME when its board numbers the nets differently (`ScopedClearanceRules.rebind`), because it routes the output file whose `.kicad_dru` is a carry, not the rules' source (#1602: the explicit-dict path used to leave the channel off, and a reconciliation lap shipped copper the main pass had refused). `None` on a board with no such rule, where it is inert. `check_drc` grades the same rules pair-exact. Against the layer channel the LATER rule in the file wins, per pair and layer (KiCad's last match), on both sides through one resolver: `ScopedClearanceRules.resolve_pair` (the scoped value and the layer rules after it) and `kicad_dru.apply_layer_rules`; a stamp site names its obstacle (`layer_clearance(layer, fallback, net_id)` / `pad=`, `stack_clearance(fallback, net_id)`) so the stamp is ordered the same way |
+| `coupled_pair_clearances` | `{}` | `{frozenset({P, N}): {'track': {layer: mm}, 'layer': {layer: mm}, 'stack': mm or None}}` — each diff pair's P<->N clearance where a rule binding the pair is what KiCad grades it at -- a `.kicad_dru` coupled-pair rule (`AB.isCoupledDiffPair()` ANDed into a clearance rule, #1293), the class's implicit "(diff pair)" rule (`diff_pair_gap` below the class clearance, #1542) or a class/type-scoped rule (#1526) -- by `pair_clearance` kind; a layer is listed only where that rule governs it. Engine-computed by `batch_route_diff_pairs` (`route_diff.coupled_pair_floors`), read first by `pair_clearance`; no CLI flag and no GUI control, the rules file is the source. Empty map is inert |
+| `rules` | `None` | The board's design rules resolved in **KiCad's own order** (`design_rules.DesignRules`), which the three maps above are being migrated onto (#530). Installed engine-side by `kicad_dru.install_layer_clearances` for both fronts, from the sibling `.kicad_pro` + `.kicad_dru` (`DesignRules.from_project`) or the live board (`from_pcbnew`) — same no-flag convention as `layer_clearances`. Carries `board_min` (the board's `min_*` constraints), `classes`, per-net `memberships`, the parsed custom `rules`, and the active `fab_floor`. `floor(kind, net_id, layer, type=)` is the smallest value DRC accepts for a kind on that net/layer (fab floor applied, `None` when nothing declares one) and backs `config.size_floors(...)`; `draw_size(...)` is the size to DRAW (explicit CLI value, else resolved class/rule `opt`, clamped into `[min, max]`; `diff_pair=<pair name>` resolves a coupled-pair member, whose class track width is the class `diff_pair_width`, as KiCad's `inDiffPair` implicit rule has it). **`None` means "no rules declared" and every consumer must treat it as such** — a board with neither sibling still builds a table rather than inventing a Default class. The #498/#530 clearance caps reach `rules.min_clearance` ONLY (#900): the net classes keep the clearance the board was routed to. `rules.net_keepouts` holds the net-filtered keep-outs its `disallow` rules on named rule areas define (`net_keepouts.derive_area_keepouts`, run by `install_design_rules`; each honoured rule's `honoured` says what, and `unsupported()` stops listing it), which the engines attach to the board and stamp per bound net, and the TRACK BANS of its `disallow track` rules scoped without an area (#1527, `net_keepouts.derive_layer_bans`: `layer_ban` entries with no polygon), which the route entries honour by routing each bound net with those layers forbidden (`net_keepouts.config_for_nets`) and the stub-switch validators refuse (`forbidden_destination`). A scope-evaluable `disallow` rule any step does not honour (a `via` token; a track ban in a step that does not derive it) carries `router_unhonoured` and `unsupported()` lists it, while the resolver still evaluates it for check_drc |
 
 #### Cross-class clearance (KiCad `max(classA, classB)`)
 
@@ -651,8 +654,15 @@ assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> 
   (`net_clearances[nid] = min(class, ceiling)`) before it is installed — a class
   *tighter* than the ceiling survives; a *looser* one is capped, because stock net
   classes are largely aspirational (real boards, and even the human-routed references,
-  route below them). The output `.kicad_pro` writeback then clamps every class down to
-  that same routed floor, so KiCad grades exactly what was routed. When it is OMITTED
+  route below them). The output `.kicad_pro` writeback then clamps every non-Default
+  class down to that same `min(class, ceiling)` (#1492: the ceiling, never the Default
+  class's routed value, which one descent on one Default net used to drag every class
+  down to), so KiCad grades exactly what was routed. An automatic clearance descent on
+  a class's OWN net lowers that class to it, records it under
+  `kicad_routing_tools.class_clearance_relaxed_classes` (`{class: {from, to, nets}}`,
+  the per-class twin of the Default class's `class_clearance_relaxed`), prints
+  `NET CLASS <name> CLEARANCE LOWERED BY A DESCENT`, and `check_complete
+  --authored-from` names it. When it is OMITTED
   there is no ceiling: each net routes at its own class and the writeback preserves the
   non-Default classes; `--clearance` then sets only the Default class for the run
   (#530), and the writeback lowers the Default class to it when it is below (never
@@ -675,10 +685,13 @@ is graded by `check_drc` at the pair's own value instead, and these methods retu
   over the layer rules (via vs via). Net-0 copper takes the widest track rule. A diff
   pair's P against its own N, on a layer a coupled-pair rule governs
   (`coupled_pair_clearances`, #1293), is that rule's value instead.
-- `pad_pair_clearance(pad, other_net, layer=None, *, other_pad=None, base=None)` — the
+- `pad_pair_clearance(pad, other_net, layer=None, *, other_pad=None, base=None, other_type=None)` — the
   same against a pad: the layer rule on `layer` (a track), else the max over the copper
   layers the two share (a via, or `other_pad`), then the pad / footprint override, which
-  replaces the value (`check_drc`'s `_pad_pair_cl`).
+  replaces the value (`check_drc`'s `_pad_pair_cl`). `other_type` (`'track'` or `'via'`)
+  names the copper `other_net` lays, so a class/type-scoped rule for the other type does
+  not price it; omitted, the value is the max over both. route_diff's connector-graze
+  guard prices every foreign pad this way, with `other_type='track'` (#1574).
   `pad_pair_clearance_before_override(...)` stops short of the override, for a site that
   keeps its own override handling.
 - `max_pair_clearance(base=None)` — an upper bound over every pair: the radius a
@@ -713,6 +726,34 @@ mm}, 'layer': {layer: mm}, 'stack': mm}}`), which `pair_clearance` reads first;
 `check_drc` grades the pair at the same value per item type; and the DRC writeback
 caps `rules.min_clearance` at the rule (`kicad_dru.min_rule_clearance`), because KiCad
 grades a pair's gap at max(that minimum, the class `diff_pair_gap`).
+
+Two more rules bind P against its own N and take the same path:
+
+- **The net class's own pair gap (#1542).** When a class has `0 < diff_pair_gap <
+  clearance`, KiCad adds an implicit rule, reported as `netclass '<class>' (diff
+  pair)`: the P and N of a pair in that class (the names `MatchDpSuffix` couples) are
+  graded against each other at the class gap, on every item kind, after the class
+  clearance and before every `.kicad_dru` rule, floored at the board minimum clearance.
+  A class that sets no gap of its own takes Default's. `DesignRules` models it
+  (`pair_gap_clearance`), so `coupled_pair_clearance`, `check_drc` (and through it
+  `board_score` / `check_complete`) and `route_diff` read it with no rules file at all.
+- **A class/type-scoped rule that binds the pair (#1526)**, e.g. `A.NetClass == 'CSI'
+  && B.NetClass == 'CSI'`: it replaces the class value for P against N too, so where it
+  is what KiCad grades the pair's tracks at on every routable layer, it floors the gap
+  alone. KiCad's coupling check still grades the gap itself at the board minimum
+  clearance (the `diff_pair_gap` minimum), which an explicit clearance rule does not
+  lower, so such a pair's gap is floored at that minimum too.
+
+Under any of these rules the hybrid escape's single-ended pieces keep the rule as the
+coupled middle does: a terminal leg (`_route_hybrid_leg`) stamps the partner's copper
+at the rule rather than at the partner's class clearance, so a leg can reach its own
+middle end laid at the rule's gap; where legs or a #444 seam re-ask run alongside the
+partner at a grid pitch above the routed gap, `pull_to_pair_gap` lays them at the gap
+(a 0.1 mm gap is not a grid pitch on a 0.1 mm grid, and such copper read uncoupled);
+and a layer combination whose coupled middle crossed its own partner's pad is retried
+with that end's launch a step further in (`LAUNCH_RETRIES_PARTNER_PAD`), because the
+narrower pair's launch swath can clear between its own two pads. With no such rule all
+three are inert.
 
 The negated form is KiCad's **"keep pairs apart"** rule (#1295), e.g. `A.NetClass ==
 '100Ohm-diff' && !AB.isCoupledDiffPair() && A.Type == 'Track' && B.Type == 'Track'`: a

@@ -26,7 +26,7 @@ from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
                           _batch_cells_one_layer, _batch_vias,
                           block_track_cells_near_drills, resolve_hole_clearance,
                           block_track_cells_near_override_pad_holes, _pad_has_copper,
-                          block_via_cells_near_npth_floors)
+                          block_via_cells_near_npth_floors, via_floor_npth_holes)
 from plane_obstacle_builder import (
     _precompute_circle_offsets,
     _batch_block_circles_via, _batch_block_circles_cell
@@ -458,6 +458,13 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     plane_models = models_by_layer.get(plane_layer) or []
     if not plane_models:
         return None
+
+    # A fixed layer order (#1398). The caller hands a set of layer-name
+    # strings, whose iteration order follows PYTHONHASHSEED; the anchor
+    # attribution below takes the FIRST layer whose island an anchor touches,
+    # so a hash-ordered walk made the discovered regions (and the joins
+    # routed from them) differ from one process to the next.
+    zone_layers = sorted(zone_layers)
 
     min_x, min_y, max_x, max_y = zone_bounds
     min_gx, min_gy = coord.to_grid(min_x, min_y)
@@ -3270,7 +3277,9 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
     if not legs:
         return True
 
-    rings, _outer, _cuts = board_edge_geometry(pcb_data.board_info)
+    # rect_ring: a plain rectangle has no outline ring, and without one this
+    # gate measured no edge at all (an oracle strap widened into the edge band)
+    rings, _outer, _cuts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
     edge_clr = board_edge_clearance
     if edge_clr is None:
         edge_clr = getattr(config, 'board_edge_clearance', 0.0) or 0.0
@@ -3318,7 +3327,15 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         best = 0.0
         for nid in nids:
             best = max(best, config.layer_clearance(
-                layer, config.obstacle_clearance(nid)))
+                layer, config.obstacle_clearance(nid), nid))
+        if config.scoped_clearance is not None:
+            # #1491: a pad may be priced apart from its net's tracks
+            _one = {}
+            for p in _pads_l:
+                _one.setdefault((p.net_id, p.pad_type), p)
+            for _p in _one.values():
+                best = max(best, config.layer_clearance(
+                    layer, config.pad_obstacle_clearance(_p), pad=_p))
         return best
 
     _clr_max_by_layer = {}
@@ -3341,7 +3358,7 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         bb = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
         if _sense_live and terminal_sense_dist(
                 pcb_data, net_id, x1, y1, x2, y2, layer, half) < half + \
-                config.layer_clearance(layer, config.obstacle_clearance(net_id)) - EPS:
+                config.layer_clearance(layer, config.obstacle_clearance(net_id), net_id) - EPS:
             return False
         clr_max = _clr_max_by_layer.get(layer)
         if clr_max is None:
@@ -3353,7 +3370,7 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                              & (_vy <= bb[3] + vreq))[0]:
             v = _vias_l[vi]
             req = half + v.size / 2.0 + config.layer_clearance(  # #498
-                layer, config.obstacle_clearance(v.net_id))
+                layer, config.obstacle_clearance(v.net_id), v.net_id)
             if not (bb[0] - req <= v.x <= bb[2] + req
                     and bb[1] - req <= v.y <= bb[3] + req):
                 continue
@@ -3373,7 +3390,7 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
             # track, and so is this foreign segment
             req = half + s.width / 2.0 + config.track_obstacle_clearance(
                 s.net_id, config.layer_clearance(
-                    layer, config.obstacle_clearance(s.net_id)))
+                    layer, config.obstacle_clearance(s.net_id), s.net_id))
             if not (bb[0] - req <= max(s.start_x, s.end_x)
                     and min(s.start_x, s.end_x) <= bb[2] + req
                     and bb[1] - req <= max(s.start_y, s.end_y)
@@ -3402,7 +3419,7 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                 if p.pad_type != 'np_thru_hole' and (on_layer or is_th):
                     clr = config.pad_override_clearance(
                         config.layer_clearance(  # #498: meet on the leg's layer
-                            layer, config.obstacle_clearance(pnid)),
+                            layer, config.pad_obstacle_clearance(p), pad=p),  # #1491
                         p)
                     pext = max(p.size_x, p.size_y) / 2.0
                     req = half + pext + clr
@@ -3500,7 +3517,7 @@ def build_base_obstacles(
         # #498: one grouped value stamps ALL layers here, so take the stack max
         # -- conservative on relaxed layers (over-blocks a repair join near a
         # foreign via), never under the rule on tightened ones.
-        _clr = config.stack_clearance(config.obstacle_clearance(via.net_id))
+        _clr = config.stack_clearance(config.obstacle_clearance(via.net_id), via.net_id)
         foreign_centers_by_size.setdefault((via.size, _clr), []).append(
             coord.to_grid(via.x, via.y))
     for (vsize, _clr), centers in foreign_centers_by_size.items():
@@ -3575,7 +3592,7 @@ def build_base_obstacles(
             continue
         layer_idx = layer_map.get(seg.layer)
         _seg_clr = config.layer_clearance(  # #498 (#434 cross-class)
-            seg.layer, config.obstacle_clearance(seg.net_id))
+            seg.layer, config.obstacle_clearance(seg.net_id), seg.net_id)
         if layer_idx is None:
             # Copper on a layer OUTSIDE routing_layers (repair joins route on
             # the plane layers only): tracks cannot go there, but a repair
@@ -3637,13 +3654,13 @@ def build_base_obstacles(
             # and the pad net's netclass clearance (#434 cross-class).
             # #498: one value stamps every layer the pad is on -> max over the
             # pad's per-layer resolution (conservative on relaxed layers).
-            _pc = config.obstacle_clearance(pad_net_id)
+            _pc = config.pad_obstacle_clearance(pad)              # #1491
             if getattr(config, 'layer_clearances', None):
                 _pls = [l for l in (pad.layers or [])
                         if l.endswith('.Cu') and l != '*.Cu']
-                _pc = (config.stack_clearance(_pc)
+                _pc = (config.stack_clearance(_pc, pad=pad)
                        if ('*.Cu' in (pad.layers or []) or not _pls)
-                       else max(config.layer_clearance(l, _pc) for l in _pls))
+                       else max(config.layer_clearance(l, _pc, pad=pad) for l in _pls))
             pad_clr = config.pad_override_clearance(_pc, pad)
             pad_expansion_mm = track_width / 2 + pad_clr + cushion
             half_w, half_h = pad_rect_halfspan(pad, pad_expansion_mm)
@@ -3706,18 +3723,9 @@ def build_base_obstacles(
     # every NPTH hole of every net, plus #441's ring-uncovered plated holes
     # foreign to the nets this map routes -- the same population
     # add_drill_hole_obstacles hands it.
-    _via_npth = []
-    for _nid, _pads in pcb_data.pads_by_net.items():
-        for _pad in _pads:
-            if _pad.drill <= 0:
-                continue
-            if not _pad_has_copper(_pad):
-                _via_npth.extend(pad_drill_circles(_pad))
-            elif (max(_pad.size_x, _pad.size_y) < _pad.drill
-                  and _nid not in exclude_net_ids):
-                _via_npth.extend(pad_drill_circles(_pad))
     block_via_cells_near_npth_floors(
-        obstacles, pcb_data, _via_npth, config.via_size, config.via_drill,
+        obstacles, pcb_data, via_floor_npth_holes(pcb_data, exclude_net_ids),
+        config.via_size, config.via_drill,
         config.clearance, hole_to_hole_clearance,
         resolve_hole_clearance(pcb_data, config), config.grid_step)
 

@@ -597,9 +597,15 @@ The `.kicad_pro` writeback follows the copper the step drew (#1319). A pour
 that placed no via writes no via, drill or hole-to-hole floor. One that laid
 no track writes no track floor. One that drew neither (the line `Bare pour (no
 track or via drawn)`) writes no copper-to-hole floor either. It writes only
-the copper clearance, which the pour's KiCad refill needs. The Planes tab
-makes the same decision (`fix_kicad_drc_settings.plane_fix_kwargs`) from the
-copper it applied.
+the copper clearance, which the pour's KiCad refill needs. The soft-joint
+bridges the finalize lays (`Closed N soft joint(s)`) join copper the board
+already carried, so they are not copper the step drew (#1577). A pour that
+did draw copper writes the copper-to-hole floor it held -- the board's own
+`min_hole_clearance` -- lowered only to what that copper needs, as `route.py`
+does (`step_hole_clearance`), and a floor written under the board's own is a
+`hole_clearance` row in `JSON_SUMMARY.design_rules` (`--strict-sizes` exits
+3). The Planes tab makes the same decisions (`fix_kicad_drc_settings.
+plane_fix_kwargs`, `plane_floor_segments`) from the copper it applied.
 
 ## Post-Processing
 
@@ -619,7 +625,7 @@ The plane generation code is organized into several modules:
 | `route_planes.py` | Main CLI and orchestration - loads PCB, pours each net's zone, places thermal arrays and stitching, splits shared layers, and writes output |
 | `plane_io.py` | I/O utilities - zone extraction, PCB file reading/writing, net ID resolution |
 | `plane_obstacle_builder.py` | Obstacle map construction - builds grid-based maps for via placement and routing; pad classification |
-| `plane_fill_model.py` | Zone fill model with KiCad's filler semantics (clearance, minimum width, island removal); gates stitching sites and fanout pour-direct |
+| `plane_fill_model.py` | Zone fill model with KiCad's filler semantics (clearance; the hole clearance from every foreign drill -- the board's `min_hole_clearance`, else pcbnew's factory 0.25 -- with an NPTH's hole kept the hole clearance alone; the minimum-width opening, its deflated fill sampled exactly at half-cell points, so a channel under `min_thickness` never joins; island removal; clipped to the board outline and kept the edge clearance alone from every Edge.Cuts item -- the board's `min_copper_edge_clearance`, replaced by a `.kicad_dru` `edge_clearance` rule that binds the zone on that layer, never the zone's or its class's clearance, as KiCad 10's filler does (#1643)); gates stitching sites and fanout pour-direct, and is the zone credit of the connectivity grader, the oracle and the plane repairs |
 | `plane_lattice.py` | The plane's web through a BGA via lattice: the pour clearance that still threads it |
 | `plane_write_reconcile.py` | Keeps the write list and `pcb_data` in step when a pass removes copper (#508) |
 | `add_gnd_vias.py` | GND return via placement (`--add-gnd-vias`) |
@@ -805,7 +811,9 @@ a short trace to an adjacent same-net pad (a connector GND pin to its shield
 pad). With `--rip-blocker-nets`, the repair does the same: when no via fits and
 no same-net via is within the close-reuse radius, it routes a trace to the
 nearest same-net pad/via reachable on the pad's layer. If a signal net crosses
-that corridor, it is **ripped** (up to `--max-rip-nets`), the pad connected, and
+that corridor, it is **ripped** (up to `--max-rip-nets`; never a net that pours
+anywhere on the board, a protected or locked net, or -- in a route step's
+finalize -- a net the step's `--nets` negates, #1620/#1621), the pad connected, and
 the ripped net reconnected in the same run: restore-first, then an end-of-run
 reconnect pass, with custody restore of its original copper if that fails
 (#517). Pass `--power-nets`/`--power-nets-widths` so the reconnect routes

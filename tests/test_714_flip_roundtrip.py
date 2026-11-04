@@ -60,10 +60,10 @@ RUN_ALL_TIMEOUT = 600
 
 # `orangecrab_ext_pll J4` and `ulx3s BAT1` are already on B.Cu and already
 # carry `(justify mirror)`, so the REMOVAL branch is exercised rather than
-# only the insertion branch. Deliberately NOT `rp2350 J2`, which carries the
-# corpus's one footprint-internal `(zone ...)` and is therefore a REFUSAL
-# witness (tests/test_714_refusals.py), not a flip fixture -- a fixture the
-# transform refuses cannot round-trip, and the two lists must not overlap.
+# only the insertion branch. `rp2350 J2` carries a footprint-internal
+# `(zone ...)` and `orangecrab U9` custom-pad primitives. A fixture the
+# transform refuses cannot round-trip, so none of these may be a refusal
+# witness (tests/test_714_refusals.py).
 FIXTURES = [
     ('tigard', 'J7'),
     ('tigard', 'J1'),
@@ -71,7 +71,19 @@ FIXTURES = [
     ('orangecrab_ext_pll', 'J4'),
     ('ulx3s', 'BAT1'),
     ('rp2350_fpga_eensy_prePlane', 'SW1'),
+    ('rp2350_fpga_eensy_prePlane', 'J2'),
+    ('orangecrab_ext_pll', 'U9'),
 ]
+# Every part of the corpus-witness fixture the pcbnew parity gate compares:
+# primitives, chamfered corners, absolute zones and points (here flipped at a
+# HELD rotation, so their mirror is composed with a rotation and undone),
+# groups, embedded files and the other passed-through constructs.
+WITNESS_BOARD = 'tests/fixtures/714/flip_witnesses'
+FIXTURES += [(WITNESS_BOARD, r) for r in (
+    [f'WPRIM{i}' for i in range(1, 7)] + [f'WCHAM{i}' for i in range(1, 5)]
+    + [f'W{t}{i}' for t in ('ZONE', 'SPMR', 'KEL', 'GRP', 'PT', 'PLC', 'EMB')
+       for i in range(1, 4)]
+    + ['WCCL1', 'WCCL2'])]
 
 # Per-surface floors on how much of the block a real flip must change. A flip
 # that rewrote one line would satisfy an involution perfectly.
@@ -215,7 +227,8 @@ def main():
     problems, checked = [], 0
     try:
         for board, ref in FIXTURES:
-            src = os.path.join(REPO, 'kicad_files', board + '.kicad_pcb')
+            src = (os.path.join(REPO, board + '.kicad_pcb') if '/' in board
+                   else os.path.join(REPO, 'kicad_files', board + '.kicad_pcb'))
             if not os.path.isfile(src):
                 problems.append(f"{board}: board not tracked")
                 continue
@@ -226,10 +239,10 @@ def main():
             here = (fp0.layer or 'F.Cu')[0]
             other = 'F' if here == 'B' else 'B'
 
-            ctrl = _control(src, os.path.join(tmp, f"{board}_{ref}_ctrl.kicad_pcb"))
-            f1 = _flip(ctrl, os.path.join(tmp, f"{board}_{ref}_f1.kicad_pcb"),
+            ctrl = _control(src, os.path.join(tmp, f"{os.path.basename(board)}_{ref}_ctrl.kicad_pcb"))
+            f1 = _flip(ctrl, os.path.join(tmp, f"{os.path.basename(board)}_{ref}_f1.kicad_pcb"),
                        ref, other)
-            f2 = _flip(f1, os.path.join(tmp, f"{board}_{ref}_f2.kicad_pcb"),
+            f2 = _flip(f1, os.path.join(tmp, f"{os.path.basename(board)}_{ref}_f2.kicad_pcb"),
                        ref, here)
 
             h_ctrl, h_f1, h_f2 = _sha(ctrl), _sha(f1), _sha(f2)

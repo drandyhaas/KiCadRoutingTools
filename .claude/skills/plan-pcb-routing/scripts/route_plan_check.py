@@ -3,11 +3,26 @@
 
     python3 -X utf8 route_plan_check.py <board>_plan.sh
     python3 -X utf8 route_plan_check.py <run dir> --board board.kicad_pcb
+    python3 -X utf8 route_plan_check.py wk/<run>/judge_chain.txt --board board.kicad_pcb
     python3 -X utf8 route_plan_check.py <plan> --list
 
 Exit: 0 checked and clean, 1 crash, 2 usage, 3 the plan could not be read,
 4 a rule failed. Deliberately the fail-closed dialect `board_score.py` uses --
 1 is a CRASH, never a finding, so a traceback can never read as a verdict.
+
+TWO FORMATS, ONE SET OF RULES (#1592)
+-------------------------------------
+A `<board>_plan.sh` names its boards by path and begins with `cd <repo>`. A
+JUDGING CHAIN -- the file `py_placer/judge_seeds.py` runs, which
+plan-pcb-placement 3.7 has the agent write -- names them by placeholder
+(`{in}` the board a step reads, `{out}` the one it writes) and is run from
+the repo root with no shell. A file whose commands name a judge_seeds
+placeholder is read as a chain, exactly as judge_seeds reads it
+(`read_chain`), and every rule applies with `{in}`/`{out}` as its boards --
+a step with `{out}` is one that writes a board -- except R01: judge_seeds
+asks a chain for no `cd`. A chain judge_seeds would refuse (no `{in}`, no
+`{out}`, an unknown placeholder, a shell builtin such as that `cd`) is exit
+3, for judge_seeds' own reason.
 
 WHY A CHECKER AND NOT A DRIVER
 -------------------------------
@@ -124,13 +139,25 @@ def scalar(argv, flag):
         return None
 
 
+def is_kept_join(argv):
+    """`check_join.py ... --keep-staged <out>`: the one `check_*` tool that
+    writes a board, the hand join a chain continues from (#1397, #1646)."""
+    return tool_of(argv) == 'check_join.py' and '--keep-staged' in argv
+
+
 def is_check(argv):
-    """A read-only grader, by the repo's own convention (`check_*`)."""
+    """A read-only grader, by the repo's own convention (`check_*`) -- not
+    a kept join, which writes a board."""
     t = tool_of(argv)
-    return bool(t and t.startswith('check_'))
+    return bool(t and t.startswith('check_')) and not is_kept_join(argv)
 
 
-def boards_in(argv):
+def boards_in(argv, chain=False):
+    """The board tokens: `.kicad_pcb` paths, or in a judging chain the
+    tokens naming `{in}` / `{out}` (#1592)."""
+    if chain:
+        from judge_seeds import placeholders
+        return [a for a in argv if placeholders(a) & {'in', 'out'}]
     return [a for a in argv if a.endswith('.kicad_pcb')]
 
 
@@ -139,12 +166,13 @@ def boards_in(argv):
 class Plan:
     """Everything a rule may read: the raw text, and the recorded commands."""
 
-    def __init__(self, path, text, cmds, board=None):
+    def __init__(self, path, text, cmds, board=None, chain=False):
         self.path = path
         self.text = text
         self.lines = text.splitlines()
         self.cmds = cmds                      # [(cwd, argv)], file order
         self.board = board                    # PCBData, or None
+        self.chain = chain                    # a judge_seeds chain ({in}/{out})
 
     @property
     def argvs(self):
@@ -159,7 +187,13 @@ class Plan:
 
     @property
     def mutating(self):
-        """Commands that write a board: not a check, and naming a board."""
+        """Commands that write a board: not a check, and naming a board --
+        in a chain, naming `{out}`, since judge_seeds reads a step without
+        one as writing no board."""
+        if self.chain:
+            from judge_seeds import placeholders
+            return [a for a in self.argvs if not is_check(a) and tool_of(a)
+                    and any('out' in placeholders(t) for t in a)]
         return [a for a in self.argvs if not is_check(a) and boards_in(a)
                 and tool_of(a)]
 
@@ -186,13 +220,23 @@ def r_starts_with_cd(p):
 def r_no_pipes(p):
     """SKILL.md :2640 -- no pipes. `manifest_to_plan` tokenises pipe segments
     into NET GLOBS, which is measured, not theoretical: a `2>&1 | tee x.log`
-    tail converts to `nets: ['*', '2>&1', '|', 'tee', 'x.log']`."""
+    tail converts to `nets: ['*', '2>&1', '|', 'tee', 'x.log']`.
+
+    A pipe is a `|` the shell reads, outside quotes (#1495): a quoted split
+    plane group, `--nets GND '+3V3|+5V'`, is one argument and no pipe."""
+    import shlex
     bad = []
     for n, ln in enumerate(p.lines, 1):
         s = ln.strip()
-        if not s or s.startswith('#'):
+        if not s or s.startswith('#') or '|' not in s:
             continue
-        if '|' in s:
+        try:
+            lx = shlex.shlex(s.rstrip('\\'), posix=True, punctuation_chars='|&;')
+            lx.whitespace_split = True
+            piped = any(set(t) <= {'|', '&'} and '|' in t for t in lx)
+        except ValueError:
+            piped = True            # unbalanced quotes: the shell's reading is unknown
+        if piped:
             bad.append(f'line {n} carries a pipe: {s[:70]!r}')
     return bad
 
@@ -207,29 +251,48 @@ def r_verification_is_commented(p):
     and a plan with no verification are the same file.
     """
     bad = []
-    for n, ln in enumerate(p.lines, 1):
-        s = ln.strip()
+    lines = p.lines
+    n = 0
+    while n < len(lines):
+        first, s = n + 1, lines[n].strip()
+        while not s.startswith('#') and s.endswith('\\') and n + 1 < len(lines):
+            n += 1
+            s = s[:-1] + ' ' + lines[n].strip()
+        n += 1
         if not s or s.startswith('#'):
             continue
-        t = tool_of(s.split())
-        if t and t.startswith('check_'):
-            bad.append(f'line {n} runs {t} as an EXECUTABLE line; its exit '
+        argv = s.split()
+        if is_check(argv):
+            bad.append(f'line {first} runs {tool_of(argv)} as an EXECUTABLE line; its exit '
                        f'code becomes the chain verdict. Comment it out.')
     return bad
 
 
 def r_ends_on_route(p):
-    """SKILL.md :2282 and :2562 -- the last board-mutating command is
-    `route.py`. Only route.py finalizes planes, so a chain ending on a bare
-    re-pour or a diff step writes a final board no weld/oracle pass ever
-    verified. That is a PLAN ERROR, not a tuning choice."""
-    if not p.mutating:
+    """SKILL.md "End every chain on route.py" -- the last board-mutating
+    command is `route.py`. Only route.py finalizes planes, so a chain ending
+    on a bare re-pour or a diff step writes a final board no weld/oracle pass
+    ever verified. That is a PLAN ERROR, not a tuning choice.
+
+    The one exception: hand joins (`check_join.py --keep-staged`) FOLLOW the
+    final route.py, since a route step after a join may rip its net (#1360,
+    #1646). They are the only commands that may come after it."""
+    muts = list(p.mutating)
+    if not muts:
         return ['the plan has no board-mutating command at all']
-    last = tool_of(p.mutating[-1])
+    while muts and is_kept_join(muts[-1]):
+        muts.pop()
+    if not muts:
+        return ['the plan writes no board but by hand joins: no route.py '
+                'finalizes it']
+    last = tool_of(muts[-1])
     if last != 'route.py':
-        return [f'the last board-mutating command is {last}, not route.py. '
+        after = (' (the hand joins after it do not change that)'
+                 if len(muts) < len(p.mutating) else '')
+        return [f'the last board-mutating command is {last}, not route.py{after}. '
                 f'Only route.py finalizes planes, so this ships a board whose '
-                f'welds and taps nothing verified.']
+                f'welds and taps nothing verified. Only a hand join '
+                f'(check_join.py --keep-staged) may follow the final route.py.']
     return []
 
 
@@ -263,15 +326,36 @@ def r_diff_gap_not_below_clearance(p):
     return bad
 
 
+def _keeps_a_relief_pour(p, argv):
+    """True when this route_planes command's `--thermal-relief` REPLACES a
+    designer's relief pour (SKILL.md Step 3, "A pour the board already has",
+    #1329): the board (needs --board) already carries a thermal-connected
+    pour on a net the command pours. Without the board the claim cannot be
+    checked, so it is not credited (#1406)."""
+    if tool_of(argv) != 'route_planes.py' or p.board is None:
+        return False
+    pats = values(argv, '--nets')
+    return any(getattr(z, 'pad_connection', None) == 'thermal'
+               and any(fnmatch.fnmatchcase(z.net_name, pat) for pat in pats)
+               for z in getattr(p.board, 'zones', []) or [])
+
+
 def r_no_teardrops_or_thermal(p):
     """SKILL.md :1044 -- do not recommend `--add-teardrops` (7% of human
-    boards use them) and do not set `--thermal-relief`."""
+    boards use them) and do not set `--thermal-relief`, except to re-pour a
+    designer's thermal-relief pour and keep its relief (Step 3, #1329)."""
     bad = []
     for argv in p.argvs:
         for flag in ('--add-teardrops', '--thermal-relief'):
-            if flag in argv:
-                bad.append(f'{tool_of(argv)} passes {flag}, which the skill '
-                           f'says to leave alone')
+            if flag not in argv:
+                continue
+            if flag == '--thermal-relief' and _keeps_a_relief_pour(p, argv):
+                continue
+            bad.append(f'{tool_of(argv)} passes {flag}, which the skill '
+                       f'says to leave alone'
+                       + (' unless the pour it replaces is already a '
+                          'thermal-relief pour (pass --board to show it)'
+                          if flag == '--thermal-relief' else ''))
     return bad
 
 
@@ -325,7 +409,7 @@ def r_cp_carries_the_project(p):
     for argv in p.argvs:
         if not argv or argv[0] != 'cp':
             continue
-        pcbs = boards_in(argv)
+        pcbs = boards_in(argv, p.chain)
         if not pcbs:
             continue
         stem = os.path.basename(pcbs[-1])[:-len('.kicad_pcb')]
@@ -421,8 +505,10 @@ def r_net_coverage_reconciles(p):
         impedance_se |= {n for n in _globs(argv, '--nets')
                          if not n.startswith('!')}
     plane_nets = set()
+    from plane_groups import plane_net_names
     for argv in pours:
-        plane_nets |= _globs(argv, '--nets')
+        # #1495: a split layer's quoted '|' group pours each of its nets
+        plane_nets |= set(plane_net_names(values(argv, '--nets')))
 
     bad = []
     orphans = set()
@@ -588,7 +674,8 @@ RULES = (
     ('R02', 'no pipes', 'Step 10 rule 5', r_no_pipes),
     ('R03', 'verification is commented, not executable', 'Step 9',
      r_verification_is_commented),
-    ('R04', 'the chain ends on route.py', 'End every chain on route.py', r_ends_on_route),
+    ('R04', 'the chain ends on route.py (hand joins after it)', 'End every chain on route.py',
+     r_ends_on_route),
     ('R05', 'the three verification commands are present', 'Important Notes 4',
      r_checkers_are_present),
     ('R06', 'diff-pair gap is not below clearance', 'Step 4 diff pairs',
@@ -627,24 +714,56 @@ RULES = (
 )
 
 
+#: Rules a judging chain is not asked, and why (#1592).
+NOT_ASKED_OF_A_CHAIN = {
+    'R01': 'not asked of a judging chain: judge_seeds runs every step from '
+           'the repo root',
+}
+
+
+def read_chain_commands(manifest, text):
+    """[(None, argv)] for a judging chain, read as judge_seeds reads it, or
+    None when the file is not one (no command line names a judge_seeds
+    placeholder). A chain judge_seeds would refuse raises ValueError with
+    its reason, which main() reports as exit 3."""
+    import shlex
+    from judge_seeds import chain_problems, is_chain, read_chain
+    if not is_chain([ln for ln in text.splitlines()
+                     if ln.strip() and not ln.lstrip().startswith('#')]):
+        return None
+    steps = read_chain(manifest)
+    bad = chain_problems(steps)
+    if bad:
+        raise ValueError('the chain cannot judge a seed (judge_seeds would '
+                         'refuse it): ' + '; '.join(bad))
+    return [(None, shlex.split(s)) for s in steps]
+
+
 def check(path, board_path=None):
-    """(failures, skipped) -- failures is [(id, what, cite, [reasons])]."""
+    """(plan, failures, skipped) -- failures is [(id, what, cite, [reasons])],
+    skipped [(id, what, cite, why)]."""
     sys.path.insert(0, os.path.join(ROOT, 'py_router'))
     from make_plan import plan_commands, resolve_manifest
     manifest = resolve_manifest(path)
     with open(manifest, encoding='utf-8', errors='replace') as fh:
         text = fh.read()
-    cmds = plan_commands(path)
+    cmds = read_chain_commands(manifest, text)
+    chain = cmds is not None
+    if not chain:
+        cmds = plan_commands(path)
     board = None
     if board_path:
         from kicad_parser import parse_kicad_pcb
         board = parse_kicad_pcb(board_path)
-    plan = Plan(manifest, text, cmds, board)
+    plan = Plan(manifest, text, cmds, board, chain=chain)
 
     failures, skipped = [], []
     for rid, what, cite, fn in RULES:
         if board is None and 'needs --board' in what:
-            skipped.append((rid, what, cite))
+            skipped.append((rid, what, cite, 'pass --board to check it'))
+            continue
+        if chain and rid in NOT_ASKED_OF_A_CHAIN:
+            skipped.append((rid, what, cite, NOT_ASKED_OF_A_CHAIN[rid]))
             continue
         reasons = fn(plan)
         if reasons:
@@ -692,12 +811,16 @@ def main(argv=None):
         shown = os.path.relpath(plan.path)
     except ValueError:      # another Windows drive: no relative path exists
         shown = plan.path
-    print(f'{shown}: {len(plan.cmds)} recorded '
+    print(f'{shown}: '
+          + ('a judging chain ({in}/{out}, the judge_seeds format): '
+             if plan.chain else '')
+          + f'{len(plan.cmds)} {"" if plan.chain else "recorded "}'
           f'command(s), {len(plan.mutating)} of them board-mutating')
     for rid, what, cite, _fn in RULES:
         hit = next((f for f in failures if f[0] == rid), None)
-        if (rid, what, cite) in [(s[0], s[1], s[2]) for s in skipped]:
-            print(f'  SKIP  {rid}  {what}  -- pass --board to check it')
+        skip = next((s for s in skipped if s[0] == rid), None)
+        if skip:
+            print(f'  SKIP  {rid}  {what}  -- {skip[3]}')
         elif hit:
             print(f'  FAIL  {rid}  {what}   [SKILL.md, {cite}]')
             for reason in hit[3]:

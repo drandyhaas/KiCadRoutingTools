@@ -45,6 +45,7 @@ if _TESTS not in sys.path:
     sys.path.insert(0, _TESTS)
 
 from kicad_parser import parse_kicad_pcb
+from check_drc import point_to_pad_distance
 from copy_board import copy_board
 from synth import make_via
 import placement.legality as L
@@ -66,6 +67,10 @@ CLEAR = 0.1
 ANCHOR_CAP = 'C20'
 ANCHOR_NET = 69
 ANCHOR_GAP = 0.1346
+# ...measured on the two pads' BOXES, which is how `_anchor_pad` finds the
+# pair. TP32.1 is a CIRCLE facing C20's roundrect corner, and since #1520 the
+# pass prices both as the shapes check_drc grades: their real gap is this.
+ANCHOR_REAL_GAP = 0.2710
 MOVER_A, MOVER_B = 'C49', 'C62'
 
 # The inert board's recorded result. #725 did not move it; #731 did, on
@@ -88,8 +93,12 @@ MOVER_A, MOVER_B = 'C49', 'C62'
 # this: it moved C19 to clear a phantom and put its GND pad 0.145mm inside a
 # real F.Cu track, so check_drc flagged a PAD-SEGMENT on the output of a board
 # that is clean as it ships. It is clean again now.
-INERT_UNRESOLVED = ['C23']
-INERT_PLACEMENTS = 1
+#
+# #1520 moved it again: C18's and C23's "real" grazes lay only on their pads'
+# box CORNERS (roundrect pads), which check_drc measures clear, and the pass
+# now prices the corner as check_drc does. So the board has no violator at all.
+INERT_UNRESOLVED = []
+INERT_PLACEMENTS = 0
 
 
 def _repair(path, clearance=CLEAR, prefix='C,R,FB', pcb=None):
@@ -195,7 +204,7 @@ class TestSourcesReachTheEngine(unittest.TestCase):
         got = _short(st, ANCHOR_CAP)
         self.assertIn(pad.net_id,
                       got, 'the %s override never reached the shortfall' % owner)
-        self.assertAlmostEqual(got[pad.net_id], 0.5 - gap, places=4)
+        self.assertAlmostEqual(got[pad.net_id], 0.5 - ANCHOR_REAL_GAP, places=4)
     # MUTATION: `_pad_shortfalls` back to `if gap < self.clearance - EPS:`
     # (with the matching `self.clearance - gap`) -> got == {}.
 
@@ -355,7 +364,7 @@ class TestChannels(unittest.TestCase):
     def test_static_foreign_pad_is_charged(self):
         got = _short(self.st, ANCHOR_CAP)
         self.assertIn(ANCHOR_NET, got)
-        self.assertAlmostEqual(got[ANCHOR_NET], 0.5 - ANCHOR_GAP, places=3)
+        self.assertAlmostEqual(got[ANCHOR_NET], 0.5 - ANCHOR_REAL_GAP, places=3)
     # MUTATION: `_pad_shortfalls` back to the flat scalar -> {}.
 
     def test_mover_vs_mover_pad_is_charged(self):
@@ -706,7 +715,8 @@ class TestPruneRadiiStayExact(unittest.TestCase):
                 self.st.base_cap_pad[key],
                 _pad_pair_shortfall(cap.pad_rects(), other.pad_rects(),
                                     self.st.clearance,
-                                    self.st._pair_effs(ref, cap, oref, other)),
+                                    self.st._pair_effs(ref, cap, oref, other),
+                                    cap.pad_frames(), other.pad_frames()),
                 places=9,
                 msg='%s<->%s baseline is not in the candidates currency'
                     % (ref, oref))
@@ -717,7 +727,9 @@ class TestPruneRadiiStayExact(unittest.TestCase):
             for ref, oref in [tuple(key)]
             if _pad_pair_shortfall(self.st.caps[ref].pad_rects(),
                                    self.st.caps[oref].pad_rects(),
-                                   self.st.clearance) == 0.0)
+                                   self.st.clearance, None,
+                                   self.st.caps[ref].pad_frames(),
+                                   self.st.caps[oref].pad_frames()) == 0.0)
         self.assertGreater(flat_zero, 0,
                            'every raised baseline is also non-zero flat -- this '
                            'test would pass vacuously')
@@ -1053,18 +1065,24 @@ class TestShapeContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = _stage(td, 'noref', classes=_default_class(0.4),
                        dru=_dru('In1.Cu', 0.9))
-            st = _repair(p)
+            pcb = parse_kicad_pcb(p)
+            st = _repair(p, pcb=pcb)
             ref = 'C7'          # C20's vias clear both ways; C7's do not
             cap = st.caps[ref]
             vias = st.cap_vias[ref]
             self.assertTrue(vias)
             flat = st.via_penalty(cap, cap.x, cap.y, cap.rot, vias)
             expect = over = 0.0
-            for (bx0, by0, bx1, by1, net) in cap.pad_rects():
+            # the cap's copper pads, index-aligned with pad_rects (the same
+            # filter), measured by check_drc as the shapes they are (#1520)
+            real = [q for q in pcb.footprints[ref].pads
+                    if any(str(l).endswith('.Cu') for l in q.layers)]
+            self.assertEqual(len(real), len(cap.pad_rects()))
+            for q, (bx0, by0, bx1, by1, net) in zip(real, cap.pad_rects()):
                 for v in vias:
                     if v[2] == net:
                         continue
-                    d = _point_to_rect_dist(v[0], v[1], (bx0, by0, bx1, by1))
+                    d = point_to_pad_distance(v[0], v[1], q)
                     ko = st._via_radius_by_id[id(v)][1] + CLEAR
                     if d < ko - 1e-6:
                         expect += ko - d
@@ -1159,6 +1177,14 @@ class TestInertness(unittest.TestCase):
             return [ln.strip() for ln in buf.getvalue().splitlines()
                     if '<-> via at' in ln]
 
+        # The stock board's one row was a via off a locked pad's corner ARC,
+        # which the pass measures clear since #1520 (as check_drc does), so
+        # put a foreign via ON a locked pad's copper.
+        lpad = next(p for r in locked for p in pcb.footprints[r].pads
+                    if L._pad_carries_copper(p))
+        other = next(n for n in sorted(pcb.nets) if n not in (0, lpad.net_id))
+        pcb.vias.append(make_via(lpad.global_x, lpad.global_y, net_id=other,
+                                 size=0.3, drill=0.15))
         # ON THE BRANCH: convert the pad that actually HAS a via in its
         # keep-out, or the row it should keep does not exist either way.
         # (Match the ref token exactly -- 'U8.16'.startswith('U8.1') is True,

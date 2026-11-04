@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import re
 from typing import List, Tuple, Optional, Dict
 
 from bga_fanout.types import BGAGrid, Channel
@@ -18,6 +19,85 @@ from bga_fanout.constants import POSITION_TOLERANCE
 # so the fanout may ignore its copper when placing vias. Everything else --
 # locked parts, connectors, test points, ICs -- never moves (#253/#254).
 MOVABLE_PASSIVE_PREFIXES = ('C', 'R', 'FB')
+
+
+def endpoint_on_pad(pad, x: float, y: float, tol: float) -> bool:
+    """True when a track end at (x, y) lands on `pad`'s copper (#1411).
+
+    "Fanned" means a same-net track end sits in the ball's copper, not
+    within a few microns of its centre: a route laid by another step may
+    start anywhere inside the ball (0.15-0.2 mm off-centre is common), and
+    a centre-only test calls that net unfanned, re-escapes it and drops its
+    existing copper from the obstacle grid. `tol` keeps the old centre
+    window as a floor so a pad smaller than it still matches."""
+    dx = x - pad.global_x
+    dy = y - pad.global_y
+    if abs(dx) < tol and abs(dy) < tol:
+        return True
+    if (getattr(pad, 'shape', '') or '') == 'circle':
+        return math.hypot(dx, dy) <= min(pad.size_x, pad.size_y) / 2.0
+    rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rr:
+        c, s = math.cos(math.radians(rr)), math.sin(math.radians(rr))
+        dx, dy = dx * c + dy * s, -dx * s + dy * c
+    return abs(dx) <= pad.size_x / 2.0 and abs(dy) <= pad.size_y / 2.0
+
+
+def movable_passive(fp, pcb_data, copper_pads) -> bool:
+    """True for a part place_fanout_clearance moves off the fanout's vias:
+    an unlocked part of at most two copper pads with a movable-passive
+    prefix.
+
+    A part named in `pcb_data._fanout_immovable_refs` (bga_fanout's
+    `--immovable-refs`) is held like a locked one: a chain that ran the
+    clearance step and was left with a part it could not clear re-fans with
+    that part named, so the fanout keeps its vias and escapes off the part's
+    pads and drops the balls it cannot escape instead (#1521)."""
+    return (not getattr(fp, 'locked', False)
+            and fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
+            and len(copper_pads) <= 2
+            and fp.reference not in (getattr(pcb_data, '_fanout_immovable_refs', None)
+                                     or ()))
+
+
+def resolve_immovable_refs(pcb_data, refs) -> List[str]:
+    """The references `--immovable-refs` names, checked against the board
+    (#1562).
+
+    Each argument may carry several refs separated by commas or whitespace, so
+    `C17,C31`, `C17, C31` (the form place_fanout_clearance prints its
+    unresolved parts in) and `C17 C31` read alike. A ref that is not a part on
+    the board raises ValueError naming it, as an unknown `--component` is
+    refused: holding a part that does not exist holds nothing, and a typo would
+    otherwise re-fan exactly as before while the log said the part was held.
+    Returns the refs in order, without repeats; [] for none."""
+    out: List[str] = []
+    for arg in refs or ():
+        for ref in re.split(r'[\s,]+', str(arg)):
+            if ref and ref not in out:
+                out.append(ref)
+    known = set(pcb_data.footprints)
+    known.update(fp.reference for fp in pcb_data.footprints.values())
+    unknown = [r for r in out if r not in known]
+    if unknown:
+        raise ValueError(
+            f"--immovable-refs names {len(unknown)} part(s) that are not on "
+            f"the board: {', '.join(unknown)}")
+    return out
+
+
+def decap_deferred_refs(pcb_data, board_path, held=()) -> set:
+    """The parts a graze of this fanout's copper is left to the clearance step
+    on (#1560): the ones place_fanout_clearance moves, by its own rule at its
+    defaults (placement.fanout_clearance.movable_cap_refs), less the parts
+    `held` with --immovable-refs -- a part that step could not clear, which
+    the fanout keeps off, so a graze on it is the fanout's own."""
+    import contextlib
+    import io
+    import _placer_path  # noqa: F401  (placement lives in py_placer/)
+    from placement.fanout_clearance import movable_cap_refs
+    with contextlib.redirect_stdout(io.StringIO()):
+        return set(movable_cap_refs(pcb_data, board_path)) - set(held or ())
 
 
 def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
@@ -42,36 +122,56 @@ def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
                        if any(str(l).endswith('.Cu') for l in p.layers)]
         if not copper_pads:
             continue
-        movable = (not all_immovable
-                   and not getattr(fp, 'locked', False)
-                   and fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
-                   and len(copper_pads) <= 2)
-        if movable:
+        if not all_immovable and movable_passive(fp, pcb_data, copper_pads):
             continue
         out.extend(copper_pads)
     return out
 
 
+def pad_reach(pad) -> float:
+    """The radius about the pad centre that holds all its copper: the
+    rectangle's circumradius at any rotation, or the farthest polygon vertex
+    (#1568: a window for the exact pad tests, never the test itself)."""
+    r = math.hypot(pad.size_x, pad.size_y) / 2.0
+    for poly in getattr(pad, 'polygons', None) or ():
+        for x, y in poly:
+            r = max(r, math.hypot(x - pad.global_x, y - pad.global_y))
+    return r
+
+
 def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
-                         pads) -> bool:
-    """True if a through via at (x, y) clears every pad in `pads` (rect model,
-    rect_rotation-aware) by `clearance` edge-to-edge. Vias span all copper
-    layers, so the pads' own layers are irrelevant. The previous axis-aligned
-    bbox under-covered a ROTATED pad's protruding corners, passing via sites
-    whose ring grazed the real copper."""
-    from routing_utils import point_to_pad_rect_dist
+                         pads, net_clearances=None, hole_clearance: float = 0.0) -> bool:
+    """True if a through via at (x, y) clears every pad in `pads` by
+    `clearance` edge-to-edge. Vias span all copper layers, so the pads' own
+    layers are irrelevant. The pad is check_drc's own copper model
+    (`point_to_pad_distance`: rect_rotation, the real polygons of a custom
+    pad, and -- #1568 -- the round corners of a circle/oval/roundrect, which
+    the rectangle used here before overstated). `net_clearances` ({net_id:
+    class clearance}, #1529) holds a pad of a wider class at that class.
+
+    An NPTH pad has no copper: the via's copper is held off its HOLE, at
+    check_drc's requirement (`npth_via_clearance`: the pad's override above
+    the NPTH floor, else max(clearance, ``hole_clearance``, the board's
+    declared copper-to-hole floor)). Plated holes are held at copper
+    clearance by their pad, as the route steps hold them (#1217)."""
+    from check_drc import (point_to_pad_distance, _pad_has_no_copper,
+                           npth_via_clearance, check_via_hole_overlap)
+    from kicad_parser import pad_drill_capsule
     for p in pads:
-        # A pad's clearance override above `clearance` is the pair clearance
-        # KiCad grades the via against (#1317); raise-only.
-        c = max(clearance, getattr(p, 'local_clearance', 0.0) or 0.0)
-        # Custom-shape pads: measure to the REAL polygon copper, not the
-        # symmetric bbox rect, which for an off-centre outline (meander antenna,
-        # comb pad) reports a false graze metres from any copper (#232 class).
-        if getattr(p, 'shape', None) == 'custom' and getattr(p, 'polygons', None):
-            from check_drc import _point_to_polys_distance
-            if _point_to_polys_distance(x, y, p.polygons) < v_half + c - 1e-9:
+        lc = getattr(p, 'local_clearance', 0.0) or 0.0
+        cls = net_clearances.get(p.net_id, 0.0) if net_clearances else 0.0
+        if _pad_has_no_copper(p):
+            if (p.drill or 0) > 0 and check_via_hole_overlap(
+                    x, y, 2 * v_half, pad_drill_capsule(p),
+                    npth_via_clearance(lc, max(clearance, cls), hole_clearance),
+                    0.0)[0]:
                 return False
-        elif point_to_pad_rect_dist(x, y, p) < v_half + c - 1e-9:
+            continue
+        # A pad's clearance override above `clearance` is the pair clearance
+        # KiCad grades the via against (#1317); raise-only. So is its net's
+        # class (#1529).
+        c = max(clearance, lc, cls)
+        if point_to_pad_distance(x, y, p) < v_half + c - 1e-9:
             return False
     return True
 
@@ -169,6 +269,16 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
 
     # Even the deepest rung's via bulges past this pad: hold it at that floor.
     deepest = len(floors) - 1
+    from fab_tiers import get_escalation_policy
+    if get_escalation_policy()[0] == 'board' \
+            and floors[deepest]['via_diameter'] > via_size + 1e-9:
+        # #1579: no rung is SMALLER than the request -- under --escalation
+        # board the board's annular ring can raise every rung's via above it
+        # (ring 0.12 round a 0.15 drill is a 0.39 via; the request is 0.3) --
+        # so there is no descent to take. Keep the request, which bulges, as
+        # the no-ladder branch above does; a rung's larger via would bulge
+        # further. --escalation fab is left as it was.
+        return via_size, via_drill, 'floor', 0
     note_narrowing(getattr(pad, 'net_id', None), 'via_diameter', via_size,
                    floors[deepest]['via_diameter'], 'via-in-pad clamp (floor)')
     return floors[deepest]['via_diameter'], floors[deepest]['via_drill'], 'floor', deepest
@@ -497,6 +607,18 @@ class PendingVias:
             self._max_drill = d
         if s > self._max_size:
             self._max_size = s
+
+    def discard(self, x, y, net_id):
+        """Forget the via recorded at exactly (x, y) on `net_id`: a route
+        that needs a via in two balls (a neighbour link off the top layer)
+        and is refused the second gives back the first. `_max_*` stay as
+        they are, for the reason `tighten` gives."""
+        for i, row in enumerate(self._rows):
+            if row[0] == x and row[1] == y and row[4] == net_id:
+                del self._rows[i]
+                del self._xs[i]
+                return True
+        return False
 
     def verdict(self, x, y, size, drill, net_id, bulges=False, tol=1e-6,
                 track_width=0.0):

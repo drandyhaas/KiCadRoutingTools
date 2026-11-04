@@ -195,12 +195,83 @@ EDGE_BAND_SANITY_MM = 5.0
 #: promote, so the rule above mandates the bump; an older build refuses both
 #: keys by name, and `fit_template.py` stamps `min_reader` 14 on a row that
 #: carries either.
-READER_VERSION = 14
+#: 15 (#1443): `covers[]` -- a body a connector carries over the board (a
+#: card in a socket, a module on a stacking connector), its underside and
+#: its standoffs at their lengths; `heights[]` -- a part's declared height
+#: or underside; and a keep-out's `max_height_mm`. Each changes what the
+#: placer may put where and what check_assembly gates, so the rule above
+#: mandates the bump; an older build refuses every one of them by name.
+#: 16 (#1475): `blocks[].fence_mm` -- a band that wide round a block's zone,
+#: kept clear of every part (members too): where a shield can's wall will
+#: stand. Compiled at load into four keep-outs (`fence_keepouts`), so it
+#: changes what the placer may put where and what the grade reports; an
+#: older build refuses the key by name.
+#: 17 (#1477): `links[]` and `chains[]` -- two sets of parts within MAX mm
+#: of each other, courtyard to courtyard, without merging their groups;
+#: a chain is links between consecutive stages. Graded by `link` (WARN by
+#: default, promotable) and priced by `place_simple`, so the rule above
+#: mandates the bump; an older build refuses both keys by name.
+#: 18 (#1478): `rails[]` -- supply nets priced by `place_simple` as rails
+#: (`--rail-weight`) whatever their fan-out. It changes what the placer
+#: pulls where; an older build refuses the key by name.
+#: 19 (#1480): `replicate[].channels` -- copies inside one sheet named by
+#: their parts, matched index for index. Graded by `replicate` and applied
+#: by `place_pose replicate --intent`; an older build refuses the key by
+#: name.
+#: 20 (#1500): `heights[].under_cover` -- a part reached from above (a
+#: connector, a switch) judged under a cover by its declared height rather
+#: than refused there. It changes what place_simple, place_pose and
+#: check_assembly admit under a cover; an older build refuses the key by
+#: name.
+#: 21 (#1504): `covers[].top_mm` (a body's own top, so bodies are judged
+#: against each other), `covers[].insertion` (the path a card goes in by)
+#: and `covers[].standoffs[].off_mm` (a standoff off the centre line), and
+#: the `mountable` rule that grades them. They change what the placer and
+#: the grade admit; an older build refuses the keys by name.
+#: 22 (#1537): `covers[].holes[]` -- the body's own mounting holes, from its
+#: drawing, where no standoff is on the board yet. `mountable` names what
+#: stands in each hole's screw-head ring and is NO when one is blocked; an
+#: older build refuses the key by name.
+#: 23 (#1589): `covers[].start_mm` -- where the body begins along its axis,
+#: signed, so a module reaching behind its connector's origin has that strip
+#: judged -- and a SIGNED `length_mm` on `covers[].holes[]` and
+#: `.standoffs[]`, a site behind the origin. Each changes what the grade and
+#: the placer admit; an older build refuses `start_mm` by name and a
+#: negative length by its bound.
+READER_VERSION = 23
 #: The reader version that first reads `templates[]`.
 TEMPLATES_READER = 13
 #: The reader version that first reads a template row's `kind` and
 #: `ground_return_mm`.
 TEMPLATE_KIND_READER = 14
+#: The reader version that first reads `covers[]`, `heights[]` and a
+#: keep-out's `max_height_mm` (#1443).
+COVERS_READER = 15
+#: The reader version that first reads `blocks[].fence_mm` (#1475).
+FENCE_READER = 16
+#: The reader version that first reads `links[]` and `chains[]` (#1477).
+LINKS_READER = 17
+#: The reader version that first reads `rails[]` (#1478).
+RAILS_READER = 18
+#: The reader version that first reads `replicate[].channels` (#1480).
+CHANNELS_READER = 19
+#: The reader version that first reads `heights[].under_cover` (#1500).
+UNDER_COVER_READER = 20
+#: The reader version that first reads `covers[].top_mm`, `.insertion` and
+#: `.standoffs[].off_mm` (#1504).
+MOUNT_READER = 21
+#: The reader version that first reads `covers[].holes[]` (#1537).
+HOLES_READER = 22
+#: The reader version that first reads `covers[].start_mm` and a hole or
+#: standoff behind the connector's origin (#1589).
+BEHIND_READER = 23
+#: #1475. The keep-outs a block's `fence_mm` compiles to are named
+#: `fence:<block>:<N|S|W|E>`; an intent may not name its own keep-out so.
+FENCE_KEEPOUT_PREFIX = 'fence:'
+#: How far (mm) a cover's standoff may sit from where the row puts it -- its
+#: length along the axis, on the centre line -- before the `cover` rule
+#: reports it: room for the anneal's final legality step, as a template's.
+COVER_STANDOFF_TOLERANCE_MM = 0.3
 
 #: #1357. A row's FREE TEXT -- the author's reason for it, which no rule
 #: grades -- has ONE meaning and three spellings. `why` is canonical;
@@ -244,7 +315,8 @@ _TOP_LEVEL_KEYS = {
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
     'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
     'assembly', 'proximity', 'dispositions', 'arrays', 'fixed_poses',
-    'keep_away', 'replicate', 'templates',
+    'keep_away', 'replicate', 'templates', 'covers', 'heights',
+    'links', 'chains', 'rails',
 }
 #: #959 (#997). WRITTEN answers to "why is this not graded", one map per kind
 #: of question: a rule the plan leaves dark, a budget key the emitter withheld,
@@ -262,7 +334,9 @@ _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                # #893. `rotation` is a DECISION (this angle);
                # `rotation_candidates` is a SET a search may choose from.
                # Declaring both on one block is refused -- see `_rotation`.
-               'rotation', 'rotation_candidates'}
+               'rotation', 'rotation_candidates',
+               # #1475: a band round the zone no part may use
+               'fence_mm'}
 #: Block keys a retired reader honoured, refused by name with what replaced
 #: them rather than as unknown: an author who wrote one meant it.
 _RETIRED_BLOCK_KEYS = {
@@ -327,8 +401,39 @@ _ASSEMBLY_SIDES = ('F', 'B', 'both')
 # pinned against them by tests/test_549_floorplan_grade.py -- so a new emitted
 # key fails there, rather than as an artifact that stops loading months later.
 _ENVELOPE_KEYS = {'rect', 'tolerance_mm'}
-_KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow',
+_KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'max_height_mm',
                  'context'} | _FREE_TEXT_KEYS
+#: #1443. One `covers[]` row: a body `connector` carries over the board on
+#: face `side`, `width_mm` wide and `underside_mm` above the face, along
+#: `axis_deg` (the connector's frame, a quarter turn) to `length_mm` (else
+#: its farthest standoff), its centre line `offset_mm` to the axis's left;
+#: each standoff `{ref, length_mm, rot?}` held that far along the axis.
+#: `removable`: the body comes off in service (a card in its socket), so a
+#: test point may stand under it where it fits. `source` says where the
+#: numbers came from (a datasheet, a model). #1504: `top_mm`, the body's own
+#: top over the face (so a body under another body is judged); `insertion`
+#: `{angle_deg, travel_mm?}`, the card going in at that angle and turning
+#: down about the connector (the path the parts past its far end and the
+#: bodies over it must clear); a standoff's `off_mm`, its offset to the left
+#: of the body's centre line (a module screwed down at two corners). #1537:
+#: `holes`, the body's own mounting holes `{length_mm, off_mm?, diameter_mm}`
+#: placed as a standoff is, from its drawing -- a site, not a part, so it
+#: needs nothing on the board. #1589: `start_mm`, where the body begins along
+#: the axis (signed; default the origin), and a hole's or standoff's
+#: `length_mm` signed, a site behind the origin.
+_COVER_KEYS = {'connector', 'side', 'axis_deg', 'width_mm', 'underside_mm',
+               'length_mm', 'offset_mm', 'start_mm', 'standoffs', 'holes', 'removable',
+               'source', 'top_mm', 'insertion', 'context'} | _FREE_TEXT_KEYS
+_COVER_STANDOFF_KEYS = {'ref', 'length_mm', 'rot', 'off_mm'}
+_COVER_HOLE_KEYS = {'length_mm', 'off_mm', 'diameter_mm'} | _FREE_TEXT_KEYS
+_COVER_INSERTION_KEYS = {'angle_deg', 'travel_mm'}
+#: #1443. One `heights[]` row: a part's `height_mm` (its top above its face)
+#: and/or `underside_mm` (the room under its body, across its occupancy),
+#: from `source`. `under_cover: true` (#1500, with `height_mm`) lets a part
+#: reached from above -- a connector, a switch -- stand under a cover by its
+#: declared height instead of being refused there.
+_HEIGHT_KEYS = {'ref', 'height_mm', 'underside_mm', 'under_cover', 'source',
+                'context'} | _FREE_TEXT_KEYS
 #: `source`, `suspect`, `suspect_reason`, `overhang_capped` and
 #: `observed_overhang_mm` are emitter-written and read by nothing today; they
 #: are accepted because `emit_intent` writes them and the round trip must
@@ -401,6 +506,21 @@ DERIVED_CLAIM_SOURCE = 'placement.crystals'
 def derived_claim(claim) -> bool:
     """A proximity row the toolchain derived, not one an author declared."""
     return (claim.get('context') or {}).get('source') == DERIVED_CLAIM_SOURCE
+
+
+def derived_severity_note(intent) -> Optional[str]:
+    """#1600: what an intent that sets `severity.proximity` is told when it
+    also carries derived rows, which stay at WARN whatever it says (by
+    design, above) -- or None. A disclosure, not a change of severity: the
+    author who set `error` otherwise reads a clean exit as a held claim."""
+    sev = (getattr(intent, 'severity', None) or {}).get('proximity')
+    n = sum(1 for c in getattr(intent, 'proximity', None) or () if derived_claim(c))
+    if sev is None or not n:
+        return None
+    return (f"severity.proximity is {sev!r}, but it does not reach the {n} derived "
+            f"proximity row(s) (context.source {DERIVED_CLAIM_SOURCE}): a derived "
+            f"claim is graded warn whatever severity.proximity says. Drop a row's "
+            f"context.source to make it the intent's own claim, graded {sev}")
 #: #1253. One declared keep-away: `rule` is ONE rule in route.py's own
 #: syntax (`AGGRESSOR:VICTIM:GAP`, `class=` terms), parsed by the router's
 #: `keep_away.parse_keep_away_rules`, so the grade and the router read the
@@ -408,13 +528,22 @@ def derived_claim(claim) -> bool:
 #: brief refuses by name: this is a relation between two NET groups at a
 #: functional distance, not a copper clearance between two parts.
 _KEEP_AWAY_KEYS = {'rule', 'source', 'context'} | _FREE_TEXT_KEYS
+#: #1477. Two sets of parts (`a`, `b`: reference globs) whose nearest
+#: courtyards are within `max_mm` of each other; a chain, consecutive
+#: `stages` (each a list of reference globs) linked so, at one `max_mm` or
+#: one per link.
+_LINK_KEYS = {'name', 'a', 'b', 'max_mm', 'context'} | _FREE_TEXT_KEYS
+_CHAIN_KEYS = {'name', 'stages', 'max_mm', 'context'} | _FREE_TEXT_KEYS
+#: #1478. Supply nets (net-name globs, as `--nets` takes them) that
+#: `place_simple` prices as rails whatever their fan-out.
+_RAILS_KEYS = {'nets', 'context'} | _FREE_TEXT_KEYS
 #: #1211. One declared channel copy: `from` and `to` name sheet INSTANCES
 #: (a sheet name or a path, as `place_pose replicate` takes them); the rest
 #: are that verb's own flags, so a declaration and a command line read
 #: alike. `tolerance_mm` is the grade's: how far a target part may sit from
 #: the source arrangement before it is reported.
-_REPLICATE_KEYS = {'from', 'to', 'anchor', 'allow_net_mismatch', 'only',
-                   'skip', 'search_mm', 'tolerance_mm', 'source',
+_REPLICATE_KEYS = {'from', 'to', 'channels', 'anchor', 'allow_net_mismatch',
+                   'only', 'skip', 'search_mm', 'tolerance_mm', 'source',
                    'context'} | _FREE_TEXT_KEYS
 #: The default `replicate[].tolerance_mm`: the writer's coordinates are
 #: exact to 1e-6 mm, so a copy the tools made reads 0; this is room for a
@@ -503,6 +632,9 @@ class Zone:
     #: honoured exactly), and the set a search may choose from. Never both.
     rotation: Optional[float] = None
     rotation_candidates: Optional[Tuple[float, ...]] = None
+    #: #1475. The width of the band round `rect` kept clear of every part,
+    #: compiled into `Intent.keepouts` (`fence_keepouts`).
+    fence_mm: Optional[float] = None
     note: str = ''
     #: Free-form provenance, read by nothing (see `_BLOCK_KEYS`). Carried on
     #: the Zone rather than dropped: `keepouts`/`edge_connectors`/
@@ -572,9 +704,19 @@ class Intent:
     fixed_poses: Tuple[Dict[str, object], ...] = ()
     #: #1253. Declared keep-aways, `[{rule, source?, note?, context?}]`, one
     #: rule each. NEVER emitted: which nets are noisy and which sensitive is
-    #: a design fact the board does not hold. Graded by `keep_away`; the
-    #: placer does not read it.
+    #: a design fact the board does not hold. Graded by `keep_away` and
+    #: priced by `place_simple` (#1476).
     keep_away: Tuple[Dict[str, object], ...] = ()
+    #: #1477. Declared links, `[{name, a, b, max_mm, source, why?}]` (`a`, `b`
+    #: reference globs), each `chains[]` stage pair one more. NEVER emitted:
+    #: how close two parts of a design must sit is a design decision. Graded
+    #: by `link`; priced by `place_simple` past `max_mm`, groups unmerged.
+    links: Tuple[Dict[str, object], ...] = ()
+    #: #1478. Declared supply rails, `[{nets, source, why?}]` (`nets`
+    #: net-name globs). NEVER emitted: which supplies are wide or poured is a
+    #: design fact. Read by `place_simple` only, which prices them as rails;
+    #: nothing grades them.
+    rails: Tuple[Dict[str, object], ...] = ()
     #: #1211. Declared channel copies, `[{from, to[], anchor?, ...}]`. NEVER
     #: emitted: which instance is the template is a design decision. Copied
     #: by `place_pose replicate --intent`; graded by `replicate`, which the
@@ -586,6 +728,70 @@ class Intent:
     #: not the board. Seated and carried by `place_simple`; graded by
     #: `template`.
     templates: Tuple[Dict[str, object], ...] = ()
+    #: #1443. Declared covers, `[{connector, side, axis_deg, width_mm,
+    #: underside_mm, length_mm?, offset_mm?, standoffs[{ref, length_mm,
+    #: rot?}], source}]`. NEVER emitted: a card's underside depends on the
+    #: socket and on the card fitted, which the board does not say. Judged by
+    #: `placement.heights` (a part under the body must be KNOWN to fit), the
+    #: standoffs held by `place_simple` as a template on the connector
+    #: (`cover_templates`), graded by `cover`.
+    covers: Tuple[Dict[str, object], ...] = ()
+    #: #1443. Declared part heights, `[{ref, height_mm?, underside_mm?,
+    #: source}]`, over the 3D models' (`placement.heights.with_declared`).
+    heights: Tuple[Dict[str, object], ...] = ()
+
+    def height_declarations(self) -> Optional[Dict[str, list]]:
+        """The `covers[]` and `heights[]` rows as plain data for
+        `placement.heights.for_board`, or None when there are none."""
+        if not self.covers and not self.heights:
+            return None
+        return {'covers': [dict(c) for c in self.covers],
+                'heights': [dict(h) for h in self.heights]}
+
+    def cover_templates(self) -> List[Dict[str, object]]:
+        """Each cover's standoffs as a `templates[]` row anchored on its
+        connector, at the lengths the cover gives them -- what `place_simple`
+        seats and carries, as a datasheet template's members."""
+        from .heights import standoff_at
+        out = []
+        for c in self.covers:
+            if not c['standoffs']:
+                continue
+            out.append({'anchor': c['connector'],
+                        'members': [{'ref': s['ref'], 'at': list(standoff_at(c, s)),
+                                     'rot': s['rot']} for s in c['standoffs']],
+                        'tolerance_mm': COVER_STANDOFF_TOLERANCE_MM,
+                        'why': f"cover on {c['connector']}: standoffs at their lengths"})
+        return out
+
+    def cover_connector_poses(self, pcb_data, held) -> List[Dict[str, object]]:
+        """#1507: each cover whose connector may move while a standoff may
+        not (`held`: the refs locked in the board or at a declared pose), as
+        `{'connector', 'standoffs', 'poses'}` -- the connector's poses, one
+        per quarter turn, that put every held standoff at its length (within
+        the cover's tolerance), the connector keeping its face. A template's
+        cost only pulls an anchor toward a member that cannot move, so the
+        connector is seated at one of these instead (`place_simple`)."""
+        from .templates import member_target
+        fps = pcb_data.footprints
+        out = []
+        for t in self.cover_templates():
+            j = t['anchor']
+            if j not in fps or j in held:
+                continue
+            hm = [m for m in t['members'] if m['ref'] in held and m['ref'] in fps]
+            if not hm:
+                continue
+            poses = []
+            for rot in (0.0, 90.0, 180.0, 270.0):
+                f0 = fps[hm[0]['ref']]
+                ox, oy, _r = member_target((0.0, 0.0, rot), hm[0])
+                pose = (f0.x - ox, f0.y - oy, rot)
+                if all(math.dist(member_target(pose, m)[:2], (fps[m['ref']].x, fps[m['ref']].y))
+                       <= t['tolerance_mm'] for m in hm[1:]):
+                    poses.append(pose)
+            out.append({'connector': j, 'standoffs': [m['ref'] for m in hm], 'poses': poses})
+        return out
 
     def assembly_sides(self) -> str:
         """The declared policy, or 'both' -- which constrains nothing.
@@ -821,6 +1027,28 @@ def _number(value, where: str, lo=None, hi=None) -> float:
     return v
 
 
+def check_overhang_band(band: Dict, where: str) -> None:
+    """Refuse an `overhang_mm` bound that no pose can meet (#1532).
+
+    The band is how far the part reaches PAST its edge, and the reading never
+    goes below zero (`connector_geometry`: a body inside the board reads 0
+    overhang), so a negative `min` or `max` -- a socket set back from the
+    edge, written as `{min: -0.5, max: -0.1}` -- failed the grade on every
+    edge and left the seat no room, while it loaded clean. A setback is
+    `max_setback_mm`. Shared by the intent loader and the design brief."""
+    for key in ('min', 'max'):
+        if band.get(key) is None:
+            continue
+        v = _number(band[key], f"{where}.{key}")
+        if v < 0:
+            raise IntentError(
+                f"{where}.{key}: {v:g} -- an overhang band is how far the "
+                f"part reaches PAST its edge, and a body inside the board "
+                f"reads 0, so no pose can meet a negative bound. For a part "
+                f"set back from its edge, declare `max_setback_mm` (the most "
+                f"it may sit inside) and an overhang `max` of 0")
+
+
 def _proximity_claims(raw: Dict) -> List[Dict]:
     """Validate `proximity[]` (#902), AT LOAD.
 
@@ -973,6 +1201,94 @@ def _keep_away_claims(raw: Dict) -> List[Dict]:
     return out
 
 
+def _link_claims(raw: Dict) -> List[Dict]:
+    """Validate `links[]` and `chains[]` (#1477), AT LOAD, for
+    `_proximity_claims`'s reason, into one list of links: each chain's
+    consecutive stages become links named `<chain>:<k>` (stage k to k+1),
+    `source` naming the row each came from."""
+    out: List[Dict] = []
+    seen: Dict[str, str] = {}
+
+    def refs(v, where):
+        t = _str_tuple(v, where)
+        if not t:
+            raise IntentError(f"{where}: expected a non-empty list of "
+                              f"reference globs")
+        return t
+
+    def add(name, a, b, m, src, row):
+        if name in seen:
+            raise IntentError(f"{src}: the link name {name!r} repeats "
+                              f"{seen[name]}")
+        seen[name] = src
+        out.append({'name': name, 'a': a, 'b': b, 'max_mm': m, 'source': src,
+                    'why': free_text(row), 'context': row.get('context') or {}})
+
+    for key, keys in (('links', _LINK_KEYS), ('chains', _CHAIN_KEYS)):
+        got = raw.get(key)
+        if got is None:
+            continue
+        if not isinstance(got, list):
+            raise IntentError(f"{key}: expected a list of rows, got "
+                              f"{type(got).__name__}")
+        for i, row in enumerate(got):
+            where = f"{key}[{i}]"
+            if not isinstance(row, dict):
+                raise IntentError(f"{where}: expected an object")
+            _reject_unknown(row, keys, where)
+            _entry_context(row, where)
+            _free_text_strings(row, where)
+            name = str(row.get('name') or f"{key[:-1]}{i}")
+            if key == 'links':
+                add(name, refs(row.get('a'), f"{where}.a"),
+                    refs(row.get('b'), f"{where}.b"),
+                    _number(row.get('max_mm'), f"{where}.max_mm", lo=0.0),
+                    where, row)
+                continue
+            stages = row.get('stages')
+            if not isinstance(stages, list) or len(stages) < 2:
+                raise IntentError(f"{where}.stages: expected a list of two "
+                                  f"or more stages, each a list of "
+                                  f"reference globs")
+            stages = [refs(st, f"{where}.stages[{k}]")
+                      for k, st in enumerate(stages)]
+            m = row.get('max_mm')
+            ms = (list(m) if isinstance(m, list) else [m] * (len(stages) - 1))
+            if len(ms) != len(stages) - 1:
+                raise IntentError(f"{where}.max_mm: one number, or one per "
+                                  f"link ({len(stages) - 1}), got {len(ms)}")
+            for k in range(len(stages) - 1):
+                add(f"{name}:{k}", stages[k], stages[k + 1],
+                    _number(ms[k], f"{where}.max_mm", lo=0.0), where, row)
+    return out
+
+
+def _rail_claims(raw: Dict) -> List[Dict]:
+    """Validate `rails[]` (#1478), AT LOAD: each row's `nets`, a non-empty
+    list of net-name globs."""
+    got = raw.get('rails')
+    if got is None:
+        return []
+    if not isinstance(got, list):
+        raise IntentError(f"rails: expected a list of rows, got "
+                          f"{type(got).__name__}")
+    out = []
+    for i, row in enumerate(got):
+        where = f"rails[{i}]"
+        if not isinstance(row, dict):
+            raise IntentError(f"{where}: expected an object with `nets`")
+        _reject_unknown(row, _RAILS_KEYS, where)
+        _entry_context(row, where)
+        _free_text_strings(row, where)
+        nets = _str_tuple(row.get('nets'), f"{where}.nets")
+        if not nets:
+            raise IntentError(f"{where}.nets: expected a non-empty list of "
+                              f"net-name globs")
+        out.append({'nets': nets, 'source': where, 'why': free_text(row),
+                    'context': row.get('context') or {}})
+    return out
+
+
 def _replicate_claims(raw: Dict) -> List[Dict]:
     """Validate `replicate[]` (#1211), AT LOAD: `place_pose replicate` acts
     on it and never calls `validate_intent`.
@@ -1007,6 +1323,28 @@ def _replicate_claims(raw: Dict) -> List[Dict]:
                               f"`to` (sheet names or paths)")
         _reject_unknown(r, _REPLICATE_KEYS, where)
         _entry_context(r, where)
+        r = dict(r)
+        if 'channels' in r:
+            # #1480: channels named by their parts, the first the source,
+            # matched index for index -- for copies inside one sheet. Given
+            # `from` / `to` labels, so every report names them alike.
+            if 'from' in r or 'to' in r:
+                raise IntentError(f"{where}: `channels` names the copies by "
+                                  f"their parts, `from`/`to` by their sheets; "
+                                  f"declare one")
+            ch = r['channels']
+            if not isinstance(ch, list) or len(ch) < 2:
+                raise IntentError(f"{where}.channels: expected two or more "
+                                  f"channels, each a list of references")
+            ch = [_strs(c, f"{where}.channels[{k}]") for k, c in enumerate(ch)]
+            if len({len(c) for c in ch}) != 1:
+                raise IntentError(f"{where}.channels: every channel lists its "
+                                  f"parts in the same order, so they must be "
+                                  f"the same length")
+            from .replicate import CHANNEL_PREFIX
+            r['channels'] = ch
+            r['from'] = CHANNEL_PREFIX + ch[0][0]
+            r['to'] = [CHANNEL_PREFIX + c[0] for c in ch[1:]]
         src = r.get('from')
         if not isinstance(src, str) or not norm_name(src):
             raise IntentError(f"{where}.from: expected a sheet name or path, "
@@ -1060,6 +1398,207 @@ def _template_claims(raw: Dict) -> List[Dict]:
         return validate(raw.get('templates'))
     except TemplateError as ex:
         raise IntentError(str(ex)) from ex
+
+
+def _source(row, where: str) -> str:
+    """A declaration's `source`: a non-empty string (#1443 -- a height or a
+    cover is read from a datasheet or a model, and says which)."""
+    s = row.get('source')
+    if not isinstance(s, str) or not s.strip():
+        raise IntentError(f"{where}.source: say where the numbers come from "
+                          f"(a datasheet, a 3D model), got {s!r}")
+    return s
+
+
+def _cover_claims(raw: Dict) -> List[Dict]:
+    """Validate `covers[]` (#1443), AT LOAD: the placement tools act on it
+    and never call `validate_intent`. Every number is the author's: nothing
+    is filled in. What needs the board -- the refs, the connector's face, the
+    standoffs where the row puts them -- is the `cover` rule's question."""
+    got = raw.get('covers')
+    if got is None:
+        return []
+    if not isinstance(got, list):
+        raise IntentError(f"covers: expected a list of rows, got {type(got).__name__}")
+    out: List[Dict] = []
+    owner: Dict[str, str] = {}
+    for i, c in enumerate(got):
+        where = f"covers[{i}]"
+        if not isinstance(c, dict):
+            raise IntentError(f"{where}: expected an object with `connector`")
+        _reject_unknown(c, _COVER_KEYS, where)
+        _entry_context(c, where)
+        row = dict(c)
+        con = c.get('connector')
+        if not isinstance(con, str) or not con.strip():
+            raise IntentError(f"{where}.connector: expected a reference, got {con!r}")
+        if con in owner:
+            raise IntentError(f"{where}.connector: {con} is already {owner[con]}")
+        owner[con] = where
+        for k in ('side', 'axis_deg', 'width_mm', 'underside_mm', 'removable'):
+            if k not in c:
+                raise IntentError(f"{where}: needs `{k}` -- a cover's numbers are "
+                                  f"declared, never assumed")
+        if c['side'] not in ('F', 'B'):
+            raise IntentError(f"{where}.side: 'F' or 'B', got {c['side']!r}")
+        if not isinstance(c['removable'], bool):
+            raise IntentError(f"{where}.removable: true or false (does the body come "
+                              f"off in service?), got {c['removable']!r}")
+        a = _number(c['axis_deg'], f"{where}.axis_deg")
+        if abs(a / 90.0 - round(a / 90.0)) > 1e-6:
+            raise IntentError(f"{where}.axis_deg: a quarter turn (0, 90, 180, 270) in "
+                              f"the connector's frame, got {a!r}")
+        row['axis_deg'] = float(round(a / 90.0) * 90 % 360)
+        row['width_mm'] = _number(c['width_mm'], f"{where}.width_mm", lo=0.0)
+        if row['width_mm'] <= 0:
+            raise IntentError(f"{where}.width_mm: expected > 0")
+        row['underside_mm'] = _number(c['underside_mm'], f"{where}.underside_mm", lo=0.0)
+        # `start_mm` (#1589): signed, where the body begins along the axis
+        # (negative behind the connector's origin); absent, the origin
+        for k in ('length_mm', 'offset_mm', 'start_mm'):
+            if c.get(k) is not None:
+                row[k] = _number(c[k], f"{where}.{k}", lo=0.0 if k == 'length_mm' else None)
+        row['source'] = _source(c, where)
+        sts = c.get('standoffs') or []
+        if not isinstance(sts, list):
+            raise IntentError(f"{where}.standoffs: expected a list of {{ref, length_mm}}")
+        clean = []
+        for j, s in enumerate(sts):
+            w = f"{where}.standoffs[{j}]"
+            if not isinstance(s, dict):
+                raise IntentError(f"{w}: expected an object with `ref` and `length_mm`")
+            _reject_unknown(s, _COVER_STANDOFF_KEYS, w)
+            r = s.get('ref')
+            if not isinstance(r, str) or not r.strip() or r == con:
+                raise IntentError(f"{w}.ref: expected a reference other than the "
+                                  f"connector, got {r!r}"
+                                  + (" -- a hole site with no part on the board is "
+                                     "`holes[]` {length_mm, off_mm, diameter_mm}"
+                                     if r is None else ''))
+            if r in owner:
+                raise IntentError(f"{w}.ref: {r} is already {owner[r]}")
+            owner[r] = w
+            if 'length_mm' not in s:
+                raise IntentError(f"{w}: needs `length_mm`, its distance along the "
+                                  f"axis from the connector's origin")
+            # signed (#1589): a standoff behind the connector's origin
+            ln = _number(s['length_mm'], f"{w}.length_mm")
+            rot = _number(s.get('rot', 0.0), f"{w}.rot")
+            if abs(rot / 90.0 - round(rot / 90.0)) > 1e-6:
+                raise IntentError(f"{w}.rot: a quarter turn, got {rot!r}")
+            st = {'ref': r, 'length_mm': ln, 'rot': float(rot) % 360.0}
+            if s.get('off_mm') is not None:
+                st['off_mm'] = _number(s['off_mm'], f"{w}.off_mm")
+            clean.append(st)
+        row['standoffs'] = clean
+        hs = c.get('holes') or []
+        if not isinstance(hs, list):
+            raise IntentError(f"{where}.holes: expected a list of "
+                              f"{{length_mm, off_mm, diameter_mm}}")
+        holes = []
+        for j, hl in enumerate(hs):
+            w = f"{where}.holes[{j}]"
+            if not isinstance(hl, dict):
+                raise IntentError(f"{w}: expected an object with `length_mm` and "
+                                  f"`diameter_mm`")
+            _reject_unknown(hl, _COVER_HOLE_KEYS, w)
+            for k in ('length_mm', 'diameter_mm'):
+                if k not in hl:
+                    raise IntentError(f"{w}: needs `{k}` -- a hole site is declared from "
+                                      f"the body's drawing, never derived")
+            d = _number(hl['diameter_mm'], f"{w}.diameter_mm", lo=0.0)
+            if d <= 0:
+                raise IntentError(f"{w}.diameter_mm: expected > 0")
+            # signed (#1589): a module's holes on both sides of its connector
+            hole = {'length_mm': _number(hl['length_mm'], f"{w}.length_mm"),
+                    'off_mm': _number(hl.get('off_mm', 0.0), f"{w}.off_mm"),
+                    'diameter_mm': d}
+            txt = free_text(hl)
+            if txt:
+                hole['why'] = txt
+            holes.append(hole)
+        if holes:
+            row['holes'] = holes
+        if not clean and row.get('length_mm') is None:
+            raise IntentError(f"{where}: needs `length_mm` or a standoff -- nothing "
+                              f"says how far the body reaches")
+        if row.get('length_mm') is None or row.get('start_mm') is not None:
+            far = (row['length_mm'] if row.get('length_mm') is not None
+                   else max(s['length_mm'] for s in clean))
+            near = row.get('start_mm') or 0.0
+            if far <= near:
+                raise IntentError(
+                    f"{where}: its body reaches nowhere -- it ends {far:g}mm along the "
+                    f"axis (" + ('`length_mm`' if row.get('length_mm') is not None
+                                 else 'its farthest standoff')
+                    + f") and starts at {near:g}mm"
+                    + (" (`start_mm`)" if row.get('start_mm') is not None else
+                       " (the connector's origin; `start_mm` says where it starts)"))
+        if c.get('top_mm') is not None:
+            row['top_mm'] = _number(c['top_mm'], f"{where}.top_mm", lo=0.0)
+            if row['top_mm'] <= row['underside_mm']:
+                raise IntentError(f"{where}.top_mm: {row['top_mm']:g} is not above its "
+                                  f"underside_mm {row['underside_mm']:g}")
+        ins = c.get('insertion')
+        if ins is not None:
+            if not isinstance(ins, dict):
+                raise IntentError(f"{where}.insertion: expected {{angle_deg, travel_mm?}}")
+            _reject_unknown(ins, _COVER_INSERTION_KEYS, f"{where}.insertion")
+            if 'angle_deg' not in ins:
+                raise IntentError(f"{where}.insertion: needs `angle_deg`, the angle the "
+                                  f"card goes in at, from the socket's datasheet")
+            ang = _number(ins['angle_deg'], f"{where}.insertion.angle_deg")
+            if not 0.0 < ang < 90.0:
+                raise IntentError(f"{where}.insertion.angle_deg: between 0 and 90, "
+                                  f"got {ang:g}")
+            row['insertion'] = {'angle_deg': ang, 'travel_mm': _number(
+                ins.get('travel_mm', 0.0), f"{where}.insertion.travel_mm", lo=0.0)}
+        out.append(row)
+    return out
+
+
+def _height_claims(raw: Dict) -> List[Dict]:
+    """Validate `heights[]` (#1443), AT LOAD: one row per part, each
+    carrying `height_mm` and/or `underside_mm`, and its `source`."""
+    got = raw.get('heights')
+    if got is None:
+        return []
+    if not isinstance(got, list):
+        raise IntentError(f"heights: expected a list of rows, got {type(got).__name__}")
+    out: List[Dict] = []
+    seen: Dict[str, int] = {}
+    for i, h in enumerate(got):
+        where = f"heights[{i}]"
+        if not isinstance(h, dict):
+            raise IntentError(f"{where}: expected an object with `ref`")
+        _reject_unknown(h, _HEIGHT_KEYS, where)
+        _entry_context(h, where)
+        r = h.get('ref')
+        if not isinstance(r, str) or not r.strip():
+            raise IntentError(f"{where}.ref: expected a reference, got {r!r}")
+        if r in seen:
+            raise IntentError(f"{where}.ref: {r} repeats heights[{seen[r]}]")
+        seen[r] = i
+        row = dict(h)
+        if h.get('height_mm') is None and h.get('underside_mm') is None:
+            raise IntentError(f"{where}: declares neither `height_mm` nor "
+                              f"`underside_mm`, so it says nothing")
+        for k in ('height_mm', 'underside_mm'):
+            if h.get(k) is not None:
+                row[k] = _number(h[k], f"{where}.{k}", lo=0.0)
+        if row.get('height_mm') is not None and row['height_mm'] <= 0:
+            raise IntentError(f"{where}.height_mm: expected > 0")
+        if 'under_cover' in h:
+            if not isinstance(h['under_cover'], bool):
+                raise IntentError(f"{where}.under_cover: expected true or false, "
+                                  f"got {h['under_cover']!r}")
+            if h['under_cover'] and row.get('height_mm') is None:
+                raise IntentError(f"{where}.under_cover: needs the part's `height_mm` -- "
+                                  f"a part reached from above goes under a cover only by "
+                                  f"a height its datasheet gives")
+        row['source'] = _source(h, where)
+        out.append(row)
+    return out
 
 
 def _along_edge_claim(c: Dict, i: int) -> None:
@@ -1461,6 +2000,16 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                          b['rotation_candidates'],
                          f"blocks[{i}].rotation_candidates"))
         zone_rect = b.get('zone')
+        fence = None
+        if b.get('fence_mm') is not None:
+            fence = _number(b['fence_mm'], f"blocks[{i}].fence_mm", lo=0.0)
+            if fence <= 0:
+                raise IntentError(f"blocks[{i}] ({name}): fence_mm must be "
+                                  f"more than 0")
+            if not zone_rect:
+                raise IntentError(
+                    f"blocks[{i}] ({name}): fence_mm needs a `zone` -- the "
+                    f"band is drawn round it")
         blocks.append(Zone(
             name=name,
             rect=_rect(zone_rect, f"blocks[{i}].zone") if zone_rect else None,
@@ -1471,6 +2020,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             tolerance_mm=b.get('tolerance_mm'),
             rotation=rot,
             rotation_candidates=rot_cands,
+            fence_mm=fence,
             note=free_text(b),
             context=b.get('context') or {},
         ))
@@ -1488,6 +2038,11 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         _entry_context(k, f"keepouts[{i}]")
         k = dict(k)
         k.setdefault('name', f"keepout{i}")
+        if str(k['name']).startswith(FENCE_KEEPOUT_PREFIX):
+            raise IntentError(
+                f"keepouts[{i}]: the name {k['name']!r} is reserved -- "
+                f"`{FENCE_KEEPOUT_PREFIX}` keep-outs are compiled from "
+                f"`blocks[].fence_mm` (#1475). Declare the fence there")
         if 'rect' in k and k['rect'] is not None:
             k['rect'] = _rect(k['rect'], f"keepouts[{i}].rect")
         elif 'circle' in k and k['circle'] is not None:
@@ -1502,7 +2057,13 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                               f"`circle`")
         k['sides'] = tuple(k.get('sides') or ('F', 'B'))
         k['allow'] = _str_tuple(k.get('allow'), f"keepouts[{i}].allow")
+        if k.get('max_height_mm') is not None:
+            # #1443: a part whose height is KNOWN and no more than this may
+            # stand in it; an unknown height is never risked
+            k['max_height_mm'] = _number(k['max_height_mm'],
+                                         f"keepouts[{i}].max_height_mm", lo=0.0)
         keepouts.append(k)
+    keepouts += fence_keepouts(blocks)
 
     conns = []
     for i, c in enumerate(raw.get('edge_connectors') or []):
@@ -1533,6 +2094,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                                   f"{{'min': .., 'max': ..}}")
             _reject_unknown(oh, _OVERHANG_KEYS,
                             f"edge_connectors[{i}] ({c['ref']}).overhang_mm")
+            check_overhang_band(
+                oh, f"edge_connectors[{i}] ({c['ref']}).overhang_mm")
         _along_edge_claim(c, i)
         if c.get('side') is not None and c['side'] not in ('F', 'B'):
             raise IntentError(
@@ -1568,6 +2131,11 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             "be raised to error -- nothing in the placement stack moves a "
             "part between faces (#836), so an error would be a red mark no "
             "run could clear")
+    if severity.get('plan_zone_utilisation') == ERROR:
+        raise IntentError(
+            "severity: plan_zone_utilisation is a heuristic and cannot be "
+            "raised to error -- area is necessary, not sufficient, so a zone "
+            "past the ratio can still fit (#1468)")
     if severity.get('mechanical_drift') == WARN:
         # #959: the pose is a recorded fact, so a turn (or a pad-less ref's
         # drift) stays an ERROR whatever the plan says, and a move is a WARN
@@ -1774,9 +2342,23 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         arrays=tuple(arrays),
         fixed_poses=tuple(fixed_poses),
         keep_away=tuple(_keep_away_claims(raw)),
+        links=tuple(_link_claims(raw)),
+        rails=tuple(_rail_claims(raw)),
         replicate=tuple(_replicate_claims(raw)),
         templates=tuple(_template_claims(raw)),
+        covers=tuple(_cover_claims(raw)),
+        heights=tuple(_height_claims(raw)),
     )
+    _covered = {s['ref']: f"covers ({c['connector']})"
+                for c in intent.covers for s in c['standoffs']}
+    _covered.update({c['connector']: f"covers ({c['connector']})" for c in intent.covers})
+    for t in intent.templates:
+        for r in [t['anchor']] + [m['ref'] for m in t['members']]:
+            if r in _covered:
+                raise IntentError(
+                    f"templates ({t['anchor']}) and {_covered[r]} both place {r}: a "
+                    f"cover holds its standoffs at their lengths as a template "
+                    f"anchored on its connector, so the two cannot share a part")
     # A disposition for a rule the intent ARMS says "this is not graded" about
     # a rule that is -- the two statements cannot both be true, and a reader
     # trusting the disposition would skip a live finding. Checked here, where
@@ -2340,7 +2922,8 @@ def validate_intent(intent: Intent) -> List[Violation]:
             if a.side and b.side and a.side != b.side:
                 continue
             area = legality.rect_overlap_area(a.rect, b.rect)
-            if area > legality.EPS:
+            if area > legality.EPS and not _overlap_closed_by_keepout(
+                    intent, a, b):
                 ex = [z.name for z in (a, b) if z.exclusive]
                 out.append(Violation(
                     rule='intent_zone_overlap',
@@ -2364,6 +2947,34 @@ def validate_intent(intent: Intent) -> List[Violation]:
                               'other_block': b.name},
                     expected={'overlap_area_mm2': 0.0}))
     return out
+
+
+def _overlap_closed_by_keepout(intent: Intent, a: Zone, b: Zone) -> bool:
+    """Is the area two blocks share already closed to one block's members by
+    a keep-out (#1475)? Then a member of only one of them may stand there,
+    as with an `exclusive` zone, and `intent_zone_overlap`'s "a member of
+    either may be placed there" would be false. A shield can is the case: its
+    keep-out over its own zone shuts out the members of the sheet block it
+    stands in. Decided only for literal members -- a `group` or a pattern
+    names parts the intent alone cannot list -- and only by keep-outs that
+    bind a part whatever its height."""
+    from .heights import is_glob
+    ov = (max(a.rect[0], b.rect[0]), max(a.rect[1], b.rect[1]),
+          min(a.rect[2], b.rect[2]), min(a.rect[3], b.rect[3]))
+    sides = {a.side or b.side} if (a.side or b.side) else {'F', 'B'}
+    closing = [k for k in intent.keepouts
+               if k.get('rect') is not None and k.get('max_height_mm') is None
+               and sides <= set(k.get('sides') or ('F', 'B'))
+               and _rect_contains(k['rect'], ov)]
+    if not closing:
+        return False
+    for z in (a, b):
+        if z.group or not z.refs or any(is_glob(r) for r in z.refs):
+            continue
+        if all(any(keepouts_for_ref([k], r, sides) for k in closing)
+               for r in z.refs):
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -2432,9 +3043,12 @@ def _circle_hits_rect(cx, cy, radius, rect) -> bool:
 # implementations.
 # --------------------------------------------------------------------------
 
-def keepouts_for_ref(keepouts, ref: str, sides) -> Tuple[Dict, ...]:
+def keepouts_for_ref(keepouts, ref: str, sides, height=None) -> Tuple[Dict, ...]:
     """The keep-out entries that BIND `ref`: not exempted by `allow`, and
-    sharing at least one face with it.
+    sharing at least one face with it -- nor, for a keep-out with a
+    `max_height_mm` (#1443), by `ref`'s KNOWN `height` being no more than
+    that (an unknown height, None, is bound: nothing is risked on a guess;
+    so is a part on both faces).
 
     Pose-INVARIANT by construction -- an fnmatch against a reference and the
     set of faces a part occupies are both unchanged by moving it -- which is
@@ -2452,6 +3066,12 @@ def keepouts_for_ref(keepouts, ref: str, sides) -> Tuple[Dict, ...]:
         if any(allow_pattern_matches(pat, ref) for pat in (k.get('allow') or ())):
             continue
         if not (set(sides) & set(k.get('sides') or ('F', 'B'))):
+            continue
+        cap = k.get('max_height_mm')
+        # a part on both faces (through-hole) also stands on the other face,
+        # where its height -- its leads' -- is not known
+        if (cap is not None and height is not None and len(set(sides)) == 1
+                and height <= cap + 1e-9):
             continue
         out.append(k)
     return tuple(out)
@@ -2759,6 +3379,30 @@ def derived_mating_keepouts(pcb_data, pcb_file: Optional[str] = None
     return tuple(out)
 
 
+def fence_keepouts(blocks) -> List[Dict]:
+    """The keep-outs each block's `fence_mm` compiles to (#1475): a band that
+    wide round its zone, as four rects -- the north and south ones spanning
+    the corners -- on the block's face (both faces when it names none), with
+    no `allow`. Members are kept out of it too: the band is where a shield
+    can's wall will stand, wherever the parts inside end up, so a member
+    the zone's own `tolerance_mm` lets stray is still refused there."""
+    out = []
+    for z in blocks:
+        if not z.fence_mm or z.rect is None:
+            continue
+        x0, y0, x1, y1 = z.rect
+        w = z.fence_mm
+        for edge, r in (('N', (x0 - w, y0 - w, x1 + w, y0)),
+                        ('S', (x0 - w, y1, x1 + w, y1 + w)),
+                        ('W', (x0 - w, y0, x0, y1)),
+                        ('E', (x1, y0, x1 + w, y1))):
+            out.append({'name': f"{FENCE_KEEPOUT_PREFIX}{z.name}:{edge}",
+                        'rect': r, 'sides': (z.side,) if z.side else ('F', 'B'),
+                        'allow': (), 'why': f"block {z.name!r}'s fence_mm {w:g}",
+                        'context': {'compiled_from': f"blocks.{z.name}.fence_mm"}})
+    return out
+
+
 def with_derived_keepouts(keepouts, pcb_data, pcb_file: Optional[str] = None
                           ) -> Tuple[Dict, ...]:
     """`keepouts` plus the derived mating keep-outs no entry already names
@@ -2768,6 +3412,57 @@ def with_derived_keepouts(keepouts, pcb_data, pcb_file: Optional[str] = None
     return declared + tuple(k for k in derived_mating_keepouts(pcb_data,
                                                                pcb_file)
                             if k['name'] not in names)
+
+
+#: #1451: the keep-outs a board's rule areas forbidding footprints imply.
+RULE_AREA_PREFIX = 'rule_area:'
+
+
+def rule_area_keepouts(pcb_data, fixed=()) -> Tuple[Dict, ...]:
+    """The rule areas forbidding footprints as seat keep-outs (#1451): what a
+    placement SEARCH keeps a part's courtyard out of, so it does not walk a
+    part into an RF module's antenna keep-out that the grade then refuses
+    (`legality.rule_area_item_findings`, KiCad's items_not_allowed).
+
+    Only an area that stays where it is through the placement -- board
+    level, or owned by a part in `fixed` (KiCad-locked) -- since a
+    footprint-owned area moves with its owner; and only one drawn as an
+    axis-aligned rectangle, the shape this channel holds. On the faces it
+    covers, allowing its owner. Not handed to check_floorplan's grade: a
+    pristine board ships such items, and check_assembly gates only an item
+    its baseline did not have.
+    """
+    import glob as _glob
+    from shapely.geometry import Polygon
+    bi = getattr(pcb_data, 'board_info', None)
+    out = []
+    for i, ko in enumerate(getattr(bi, 'keepouts', None) or ()):
+        if ko.get('footprints_allowed', True) or ko.get('holes'):
+            continue
+        owner = ko.get('owner') or ''
+        if owner and owner not in fixed:
+            continue
+        pts = [tuple(q) for q in (ko.get('polygon') or ())]
+        if len(pts) < 3:
+            continue
+        poly = Polygon(pts)
+        x0, y0, x1, y1 = poly.bounds
+        if poly.area < (x1 - x0) * (y1 - y0) * (1 - 1e-6):
+            continue
+        layers = {str(t) for t in (ko.get('layers') or ())}
+        sides = tuple(s for s in ('F', 'B')
+                      if not layers or f'{s}.Cu' in layers or '*.Cu' in layers
+                      or 'F&B.Cu' in layers)
+        if not sides:
+            continue
+        out.append({'name': f"{RULE_AREA_PREFIX}{owner or 'board'}:{ko.get('name') or i}",
+                    'rect': (round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)),
+                    'sides': sides,
+                    'allow': (_glob.escape(owner),) if owner else (),
+                    'context': {'source': 'derived',
+                                'derived_from': 'a rule area forbidding footprints'
+                                                + (f' of {owner}' if owner else ' (board level)')}})
+    return tuple(out)
 
 
 def mating_keepouts(pcb_data, pcb_file: Optional[str] = None,
@@ -2801,6 +3496,25 @@ def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
     rect."""
     ks = (mating_keepouts(pcb_data, pcb_file, declared)
           if keepouts is None else tuple(keepouts))
+    return keepout_findings(pcb_data, pcb_file, ks)
+
+
+def keepout_findings(pcb_data, pcb_file: Optional[str], keepouts, *,
+                     height_of=None, containers=()) -> List[Dict]:
+    """`[{ref, keepout, side, area_mm2}]`: the parts inside `keepouts` at the
+    file's poses, on the placement state's rects (see
+    `mating_keepout_findings`), resolved by `keepouts_for_ref` and measured
+    by `keepout_hit`. `area_mm2` is a rect keep-out's overlap area, and 1.0
+    for a circle -- `keepout_hit`'s marker, not a measurement.
+
+    `height_of(ref)` (#1443), when given, is a part's known height, so a
+    keep-out with a `max_height_mm` admits a part no taller; without it such
+    a keep-out binds every part, as an unknown height does. `containers`
+    (#1475) are measured on their pad copper, never their frame rect, as
+    `rule_keepout` grades them. With both, this is `rule_keepout`'s verdict
+    without building the grade's placement state (#1535: `place_pose`
+    re-grades every snap candidate with it)."""
+    ks = tuple(keepouts or ())
     if not ks:
         return []
     from .parser import courtyard_for_side, extract_courtyard_sides
@@ -2831,8 +3545,15 @@ def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
                 tht = legality.offset_far(legality.rotate_far(tl, rot),
                                           fp.x, fp.y)
         sides = legality.sides_occupied(side, has_tht)
-        for k in keepouts_for_ref(ks, ref, sides):
-            a = keepout_hit(k, (rect, tht))
+        rects = (rect, tht)
+        if ref in containers:
+            rects = []
+            for q in legality.pads_at_pose(fp, (fp.x, fp.y, rot)):
+                cx, cy, hx, hy = legality.pad_copper_box(q)
+                rects.append((cx - hx, cy - hy, cx + hx, cy + hy))
+        for k in keepouts_for_ref(ks, ref, sides,
+                                  height_of(ref) if height_of is not None else None):
+            a = keepout_hit(k, rects)
             if a:
                 out.append({'ref': ref, 'keepout': k['name'],
                             'side': side, 'area_mm2': round(a, 4)})
@@ -2949,6 +3670,12 @@ def resolve_blocks(intent: Intent, pcb_data, group_sources: Sequence[str] = ()
     matched against the raw derive_groups key AND its `short_name` form, because
     `short_name` is what `--list-groups` prints and therefore what anyone would
     copy into an intent file.
+
+    A `group` that does not resolve is ONE finding (#1469): it says that the
+    key takes the board's own groups only (KiCad groups, schematic sheets),
+    never a groups-file name, that the parts go in `refs`, and which tool
+    lists the board's groups. "Matched no footprint" is for a block whose
+    `refs` alone match nothing.
     """
     refs_all = sorted(pcb_data.footprints)
     derived: Dict[str, List[str]] = {}
@@ -2962,6 +3689,7 @@ def resolve_blocks(intent: Intent, pcb_data, group_sources: Sequence[str] = ()
     problems: List[Violation] = []
     for z in intent.blocks:
         members = set()
+        unresolved_group = False
         for pattern in z.refs:
             members.update([r for r in refs_all if fnmatch.fnmatchcase(r, pattern)])
         if z.group:
@@ -2972,17 +3700,23 @@ def resolve_blocks(intent: Intent, pcb_data, group_sources: Sequence[str] = ()
                 problems.append(Violation(
                     rule='block_unresolved', block=z.name,
                     severity=intent.severity_of('block_unresolved'),
-                    message=(f"block {z.name!r}: group {z.group!r} does not "
-                             f"exist on this board. Available: "
+                    message=(f"block {z.name!r}: group {z.group!r} is not a "
+                             f"group of this board. blocks[].group takes only "
+                             f"the groups the board itself defines -- its "
+                             f"KiCad groups and schematic sheets (here: "
                              f"{', '.join(sorted(by_short)[:6]) or 'none'}"
-                             f"{' ...' if len(by_short) > 6 else ''}. Derive "
-                             f"them with --group-by and --list-groups first"),
+                             f"{' ...' if len(by_short) > 6 else ''}; "
+                             f"`render_placement.py BOARD --list-groups` "
+                             f"lists them) -- never a name from a groups "
+                             f"file. To zone a groups-file group, list its "
+                             f"parts in the block's `refs`"),
                     measured={'group': z.group,
                               'available': sorted(by_short)[:12]}))
+                unresolved_group = True
             else:
                 members.update(found)
         out[z.name] = sorted(members)
-        if not members:
+        if not members and not unresolved_group:
             problems.append(Violation(
                 rule='block_unresolved', block=z.name,
                 severity=intent.severity_of('block_unresolved'),
@@ -3015,7 +3749,8 @@ def _inflate(rect, by: float):
 
 
 def zone_covered_by_keepout(zone, keepouts, member_sides=None,
-                            tolerance: float = 0.0) -> Optional[str]:
+                            tolerance: float = 0.0,
+                            member_heights=None) -> Optional[str]:
     """The name of a keep-out that swallows `zone` whole for a member that it
     actually BINDS, or None (#702).
 
@@ -3050,6 +3785,10 @@ def zone_covered_by_keepout(zone, keepouts, member_sides=None,
     with a corner bitten out still has room -- and deciding whether what is
     left can actually hold the part is a different (harder) question than this
     one.
+
+    `member_heights` is `{ref: height or None}`, the heights the grade's
+    `keepout` rule reads (#1475): a `max_height_mm` keep-out over a can's zone
+    binds only the members too tall for it, as it does in the grade.
     """
     if zone.rect is None:
         return None
@@ -3069,7 +3808,8 @@ def zone_covered_by_keepout(zone, keepouts, member_sides=None,
         # and the grade use, so `allow` globs and `sides` are honoured here
         # exactly as they are there.
         for ref, sides in member_sides.items():
-            if keepouts_for_ref((k,), ref, sides):
+            if keepouts_for_ref((k,), ref, sides,
+                                (member_heights or {}).get(ref)):
                 return str(k.get('name') or '<unnamed>')
     return None
 
@@ -3373,6 +4113,14 @@ class _Ctx:
         #: One row per declared template: each member's drift from its
         #: template pose, passing ones too.
         self.template_measured: List[Dict[str, object]] = []
+        #: #1443. One row per declared cover: each standoff's distance along
+        #: the axis and off its centre line, passing ones too.
+        self.cover_measured: List[Dict[str, object]] = []
+        #: #1504: `mount_report`'s rows, filled by `rule_mountable`
+        self.mount_measured: List[Dict[str, object]] = []
+        #: #1443. The board's heights with the intent's declarations, read
+        #: once when a rule asks (`_ctx_heights`).
+        self._heights = None
         #: #1051. One row per declared array, formed or not: the verdict,
         #: the order it could place and the members it could not.
         self.array_measured: List[Dict[str, object]] = []
@@ -3422,43 +4170,68 @@ class _Ctx:
         The amount is `rect_outside_amount` with the part's OWN milled rings
         skipped -- the exact call `QuenchState.legality_metrics` makes -- so
         "counted" and "exempt" are decided on one number, never on two
-        readings of the outline. Only `edge_claims()` entries qualify (a
-        `connector_affinity` row claims no edge), only entries with a `max`
-        (an unbounded band would exempt any overhang whatever, which is the
-        run-10 160 mm case), and only when the part is actually off the board
-        (an interior connector is not "exempt" from anything). A part outside
+        readings of the outline. The entries that qualify are the ones
+        `place_simple` seats on their edge (`edge_seat.seats`): every
+        `edge_claims()` entry, and a `connector_affinity` row that names an
+        edge (a header an author put on one). An entry with no `max` is
+        flush: its band ends at its `min`, give or take the seat's own
+        `BAND_SLACK_MM`, where the seat holds it -- never unbounded, which
+        would exempt any overhang whatever (the run-10 160 mm case). A pin
+        header seated flush by its body has its courtyard past the edge by
+        design, and counted, it failed every seed of a run that declared
+        `oob_count: 0`. Only a part actually off the board qualifies (an
+        interior connector is not "exempt" from anything). A part outside
         its band is NOT exempt: it stays in the count AND `rule_edge_connector`
         names it, two rules reporting one fact.
         """
         if self._oob_exempt is None:
-            from .connector_geometry import courtyard_overhang, geometry_for
+            from .connector_geometry import courtyard_overhang_past, geometry_for
+            from .edge_seat import BAND_SLACK_MM
             out: Dict[str, float] = {}
-            for c in self.intent.edge_claims():
+            for c in self.intent.edge_connectors:
+                if c.get('class') == 'connector_affinity' and not c.get('edge'):
+                    continue
                 ref = c['ref']
                 part = self.parts.get(ref)
-                lim = c.get('overhang_mm') or {}
-                if part is None or lim.get('max') is None:
+                if part is None:
                     continue
+                lim = c.get('overhang_mm') or {}
                 lo = float(lim.get('min', 0.0))
-                hi = float(lim['max'])
+                hi = float(lim['max']) if lim.get('max') is not None else lo + BAND_SLACK_MM
                 own = self.state._owned_rings(ref)  # noqa: SLF001
                 amt = self.gate.rect_outside_amount(part.rect,
                                                     skip_rings=own)
                 # #961: "exempt" is decided on the band's OWN currency, the
                 # one `rule_edge_connector` grades -- the drawn body where it
                 # can be measured, the courtyard at zero margin where it
-                # cannot (#1301). `amt` still decides whether the census
-                # counted the part at all.
+                # cannot (#1301), on the part placement seats (#1531,
+                # `band_courtyard_rect`). `amt` still decides whether the
+                # census counted the part at all.
+                _cy, _cy_others = courtyard_overhang_past(
+                    geometry_for(self, self.pcb, self.pcb_file),
+                    band_courtyard_rect(self, ref, part), c.get('edge'),
+                    skip_rings=own)
                 band, _basis, _body = _band_amount(
-                    self, ref, c.get('edge'), courtyard_overhang(
-                        geometry_for(self, self.pcb, self.pcb_file),
-                        part.rect, skip_rings=own))
+                    self, ref, c.get('edge'), _cy)
+                # #1403: the band reads the declared edge alone, so the
+                # exemption must not license a part hanging past ANOTHER edge
+                # by more than the band's own maximum.
+                _others = (_body.get('other_body_edge_overhang_mm')
+                           if _body.get('body_measured') else _cy_others) or {}
+                if any(v > hi + legality.EPS for v in _others.values()):
+                    continue
                 # The same body path that must still see copper off the
                 # outline (`rule_edge_connector`): a part with pads past the
                 # edge stays counted, whatever its body reads.
                 copper_ok = (not _body.get('body_measured')
                              or (_copper_outside_mm(self, ref) <= legality.EPS
                                  and not _unmodellable_pads(self, ref)))
+                # #962: nor does the band license the copper a footprint
+                # DRAWS (a tab, an antenna) past the outline, read off the
+                # census the edge seat's own measure agrees with
+                # (`seeder.graphic_copper_past`), as a datum's is below
+                if amt > legality.EPS and ref in self._graphic_copper_off_board():
+                    copper_ok = False
                 if (amt > legality.EPS and copper_ok
                         and lo - legality.EPS <= band <= hi + legality.EPS):
                     out[ref] = float(band)
@@ -3809,10 +4582,14 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
 
     `geom` is the part's `body.BodyGeometry` (None reads as no body);
     `rotation` defaults to the footprint's own, and is what a seat trying a
-    turn passes. Where the body names no face, the entry's declared
-    `mating_face` is the face (basis `declared`, strong), and the entry is
-    graded whatever its class. Returns `{policy, facing, local_face, basis, offset_mm,
-    strong, reason, fails}`. `fails` is True only when the policy grades the
+    turn passes. Where the body names no face, or only a WEAK one (#1586),
+    the entry's declared `mating_face` is the face (basis `declared`, strong;
+    `<body basis>+declared` where the weak reading agrees with it), and the
+    entry is graded whatever its class; a STRONG reading outranks a
+    declaration (`mating.face_with_declaration`). Returns `{policy, facing,
+    local_face, basis, offset_mm, strong, reason, fails, declared_face,
+    body_face, body_strong, disagreement}`, the last naming a declared face
+    the body reads otherwise, whichever won ('' when none). `fails` is True only when the policy grades the
     entry, the face is decisive at that rotation, and it is not the declared
     edge. `strong` (the face's offset reaches `mating.FACE_STRONG_OFFSET_MM`)
     decides the severity: a strong failure is an ERROR, a weak one a WARN --
@@ -3821,18 +4598,26 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
 
     THE predicate the rule calls, so every reader asks one answer for which
     way a part faces. A wrong WEAK face (`placement.mating`) reads as a
-    pass. A footprint's own "PCB Edge" marker
+    pass unless the entry declares the face. A footprint's own "PCB Edge" marker
     (#1245) confirms a face (strong) or vetoes it (an abstention) where it
     draws one, through `mating_face_local`."""
-    from .mating import LocalFace, facing_edge, mating_face_local
+    from .mating import (LocalFace, face_with_declaration, facing_edge,
+                         mating_face_local)
     policy = edge_facing_policy(entry, fp)
     lf = (mating_face_local(fp, geom) if geom is not None
           else LocalFace(None, 0.0, '', 'no body geometry'))
-    if lf.face is None and entry.get('mating_face') in MATING_FACES:
-        # The body names no face; the intent declares one. A declaration is
+    body = lf
+    declared = (entry.get('mating_face')
+                if entry.get('mating_face') in MATING_FACES else None)
+    face, source, disagreement = face_with_declaration(lf, declared)
+    if source == 'declared':
+        # The body names no face, or a weak one; the intent declares one
+        # (#1586: only the author has read the datasheet). A declaration is
         # no weaker than a strong body reading: a wrong turn fails at ERROR.
-        lf = LocalFace(entry['mating_face'], 0.0, 'declared', '', lf.votes,
-                       strong=True, marker=lf.marker)
+        lf = (lf._replace(basis=lf.basis + '+declared', strong=True)
+              if lf.face == face else
+              LocalFace(face, 0.0, 'declared', '', lf.votes, strong=True,
+                        marker=lf.marker))
     rot = (fp.rotation or 0.0) if rotation is None else rotation
     facing = facing_edge(lf.face, rot)
     edge = entry.get('edge')
@@ -3843,7 +4628,9 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
             'basis': lf.basis, 'offset_mm': lf.offset_mm,
             'strong': bool(lf.strong and facing), 'reason': reason,
             'fails': bool(policy == 'graded' and edge and facing
-                          and facing != edge)}
+                          and facing != edge),
+            'declared_face': declared, 'body_face': body.face,
+            'body_strong': bool(body.strong), 'disagreement': disagreement}
 
 
 #: The axis a part slides along when it moves ALONG the named edge: x for a
@@ -3884,32 +4671,16 @@ def edge_span(gate, bounds, edge: str, outline: Dict, *,
     abstention would discard 13 correct measurements to avoid one wrong one.
     """
     ax = _EDGE_AXIS[edge]
-    perp = 1 - ax
     rings = list(getattr(gate, 'rings', None) or [])
     if rings:
-        target = {'north': bounds[1], 'south': bounds[3],
-                  'west': bounds[0], 'east': bounds[2]}[edge]
-        runs = []
-        for seg in gate.edges():
-            a, b = (seg[0], seg[1]), (seg[2], seg[3])
-            if abs(a[perp] - target) > tol or abs(b[perp] - target) > tol:
-                continue
-            lo, hi = sorted((a[ax], b[ax]))
-            if hi - lo > 1e-9:
-                runs.append([lo, hi])
-        if not runs:
+        from .connector_geometry import edge_runs
+        merged = edge_runs(gate, bounds, edge, tol)
+        if not merged:
             return (None, None,
                     f"no Edge.Cuts segment lies on the {edge} side of this "
                     f"outline ({len(rings)} ring(s), "
                     f"{outline.get('cutouts', 0)} cutout(s)), so that edge has "
                     f"no span to take a fraction of")
-        runs.sort()
-        merged = [runs[0]]
-        for lo, hi in runs[1:]:
-            if lo <= merged[-1][1] + tol:
-                merged[-1][1] = max(merged[-1][1], hi)
-            else:
-                merged.append([lo, hi])
         if len(merged) != 1:
             pieces = ', '.join(f"{m[1] - m[0]:.2f}mm" for m in merged)
             return (None, None,
@@ -4088,6 +4859,80 @@ def open_zone_rect(zone_rect, open_sides):
     return tuple(z)
 
 
+def zone_parts(state, pcb_data, pcb_file: str):
+    """`{ref: part}`: `state.parts` on the basis place_simple SEATS a part on
+    (#1466). A part that draws no courtyard is measured on its ESTIMATED
+    courtyard, from the map the placer's own state reads
+    (`body.courtyard_sides_with_estimates`), at the pose `state` gives it;
+    every other part is `state`'s own. A state that already estimates every
+    such part (the placer's) is returned as it is; one that skipped some
+    (`QuenchState.estimate_skip`, place_simple's #1300 fallback, which seats
+    them on their pad box for legality) gets the estimate for those.
+
+    The rules a placement is SEATED against ask it, so the seat and the
+    grade read one part: the zone rules, the plan check's zone sums, the
+    emitter's zone extents, the anchors a declared pose compiles to
+    (`reconcile.anchor_blocks`, #1530) and an edge connector's overhang
+    BAND where no body is measured -- its grade, its seat, the census
+    exemption and the emitter's observed band (`band_courtyard_rect`,
+    #1531). The legality budget, the outline and the edge rule's other
+    conjuncts (which edge, how far set back, where along it) keep reading
+    the state -- what KiCad judges -- so a courtyard-less connector flush
+    with the edge is not newly an off-board part. The estimated parts are
+    built once per state and follow its poses."""
+    parts = getattr(state, 'parts', None) or {}
+    have = getattr(state, 'courtyard_estimates', None)
+    if have and not getattr(state, 'estimate_skip', None):
+        return parts
+    cache = getattr(state, '_zone_parts', None)
+    if cache is None:
+        from .body import courtyard_sides_with_estimates
+        from .quench import _Part
+        cache = {}
+        try:
+            sides, est = courtyard_sides_with_estimates(
+                pcb_data, pcb_file,
+                drawn=getattr(state, '_drawn_courtyards', None))
+        except (OSError, ValueError):
+            sides, est = {}, {}
+        fps = getattr(pcb_data, 'footprints', None) or {}
+        for ref in est:
+            if ref in parts and ref in fps and ref not in (have or ()):
+                cache[ref] = _Part(ref, fps[ref], sides,
+                                   getattr(parts[ref], 'locked', False))
+        try:
+            state._zone_parts = cache
+        except AttributeError:
+            pass
+    if not cache:
+        return parts
+    out = dict(parts)
+    for ref, p in cache.items():
+        sp = parts[ref]
+        rot = sp.rot % 360
+        p.ensure_rotation(rot)
+        p.x, p.y, p.rot = sp.x, sp.y, rot
+        out[ref] = p
+    return out
+
+
+def _ctx_zone_parts(ctx):
+    """`ctx.parts` (`GradedPart`s) on the zone basis (`zone_parts`)."""
+    got = getattr(ctx, '_zone_graded', None)
+    if got is None:
+        st = ctx.state
+        zp = zone_parts(st, ctx.pcb, ctx.pcb_file)
+        got = dict(ctx.parts)
+        if zp is not getattr(st, 'parts', None):
+            for ref, p in zp.items():
+                if ref in got and p is not st.parts.get(ref):
+                    got[ref] = legality.GradedPart(
+                        ref=ref, side=p.side, rect=p.rect(),
+                        tht_rect=p.tht_rect(), has_tht=p.has_tht)
+        ctx._zone_graded = got
+    return got
+
+
 def zone_is_anchor(zone_rect, part, tol: float) -> bool:
     """Is this zone a spec-COORDINATE rather than a region? (#799)
 
@@ -4133,6 +4978,42 @@ def _anchor_reachable(zone, part, tol: float, claim=None) -> bool:
             zone.rect, rotate_local_bounds(*part.grade_by_rot[0.0], r % 360),
             tol)
         for r in rots)
+
+
+def _anchor_min_inside(zone_rect, part, claim, clearance: float
+                       ) -> Tuple[float, float]:
+    """`(area, area_with_clearance)`: the least of `zone_rect` (inflated by
+    its tolerance) a member graded as an ANCHOR there (`_anchor_reachable`)
+    still covers (#1468), over the rotations it may take -- the same ones
+    `_anchor_reachable` reads. Its centre is held inside, so on each axis it
+    covers at least half its extent, or the whole zone: the minimum, with the
+    centre on a corner, is `min(Z, e / 2)` per axis. At a rotation where the
+    part fits the zone it covers its whole box. The clearance figure grows
+    each axis by `clearance`, capped at the zone, as the WARN sum does."""
+    from .legality import rotate_local_bounds
+    zw = max(0.0, zone_rect[2] - zone_rect[0])
+    zh = max(0.0, zone_rect[3] - zone_rect[1])
+    rot, cands = claim if claim else (None, None)
+    if getattr(part, 'locked', False) or (rot is None and not cands):
+        # the part's own lattice: a quarter turn is the seed's to give
+        rots = [part.rot] + ([] if getattr(part, 'locked', False)
+                             else [part.rot + 90.0])
+    elif rot is not None:
+        rots = [rot]
+    else:
+        rots = list(cands)
+    best = None
+    for r in rots:
+        b = rotate_local_bounds(*part.grade_by_rot[0.0], r % 360)
+        w, h = b[2] - b[0], b[3] - b[1]
+        if zone_fits_courtyard(zone_rect, b, 0.0):
+            ox, oy = w, h
+        else:
+            ox, oy = min(zw, w / 2.0), min(zh, h / 2.0)
+        got = (ox * oy, min(zw, ox + clearance) * min(zh, oy + clearance))
+        if best is None or got[0] < best[0]:
+            best = got
+    return best
 
 
 def zone_origin_box(zone_rect, bounds, tol: float):
@@ -4530,6 +5411,13 @@ def intent_zone_keepout_problems(intent, blocks, pcb_data,
         fp = pcb_data.footprints[ref]
         member_sides[ref] = legality.sides_occupied(
             legality.footprint_side(fp), legality.footprint_has_through_pads(fp))
+    # #1475: a height-limited keep-out binds a member as the grade's `keepout`
+    # rule binds it -- by its height -- read the way that rule reads it.
+    member_heights = {}
+    if any(k.get('max_height_mm') is not None for k in intent.keepouts):
+        from .heights import for_board
+        hts = for_board(pcb_data, pcb_file or None, intent.height_declarations())
+        member_heights = {r: hts.height(r) for r in member_sides}
 
     # #1174: the grade's open sides, so neither half refuses an edge member
     # the grade lets sit past its zone's open side.
@@ -4543,7 +5431,8 @@ def intent_zone_keepout_problems(intent, blocks, pcb_data,
                 and not zone_open_sides(z.rect, _bounds, _claimed.get(r))}
         if not mine:
             continue
-        hit = zone_covered_by_keepout(z, intent.keepouts, mine, tol)
+        hit = zone_covered_by_keepout(z, intent.keepouts, mine, tol,
+                                      member_heights)
         if hit is not None:
             out.append(Violation(
                 rule='intent_zone_in_keepout', block=z.name,
@@ -4563,7 +5452,8 @@ def intent_zone_keepout_problems(intent, blocks, pcb_data,
     # keep-out -- which is every board `emit_intent` can write -- this function
     # has already returned, so it costs no file read at all.
     needs = [z for z in zoned
-             if any(keepouts_for_ref(intent.keepouts, r, member_sides[r])
+             if any(keepouts_for_ref(intent.keepouts, r, member_sides[r],
+                                     member_heights.get(r))
                     for r in blocks.get(z.name, ()) if r in member_sides)]
     if not needs:
         return out
@@ -4578,7 +5468,8 @@ def intent_zone_keepout_problems(intent, blocks, pcb_data,
             lb = locals_.get(ref)
             if lb is None or lb.synthetic:
                 continue
-            bound = keepouts_for_ref(intent.keepouts, ref, member_sides[ref])
+            bound = keepouts_for_ref(intent.keepouts, ref, member_sides[ref],
+                                     member_heights.get(ref))
             if not bound:
                 continue
             fp = pcb_data.footprints[ref]
@@ -4688,12 +5579,16 @@ def _member_pad_rect(ctx, ref):
 
 def rule_zone_containment(ctx) -> Iterator[Violation]:
     claimed = claimed_edges(ctx.intent)
+    # #1466: a courtyard-less member is held to its zone by the estimated
+    # courtyard place_simple seats it on, not by its smaller pad box
+    zparts = (_ctx_zone_parts(ctx)
+              if any(z.rect is not None for z in ctx.intent.blocks) else {})
     for z in ctx.intent.blocks:
         if z.rect is None:
             continue
         tol = ctx.intent.zone_tolerance(z)
         for ref in ctx.blocks.get(z.name, ()):
-            part = ctx.parts.get(ref)
+            part = zparts.get(ref)
             if part is None:
                 continue
             # #1174: an edge-claim member's declared edge, where the zone
@@ -4835,7 +5730,18 @@ def rule_assembly_side(ctx) -> Iterator[Violation]:
 def rule_zone_exclusive(ctx) -> Iterator[Violation]:
     """An exclusive zone is real estate reserved for its block, so a stranger
     inside it is the finding. This is what makes "keep this area clear for the
-    RF section" checkable rather than aspirational."""
+    RF section" checkable rather than aspirational.
+
+    A CONTAINER is no stranger (#1463): its rect is a frame other parts sit
+    inside by design, which the courtyard channel and `_ctx_overlap_exact`
+    already exempt, and so does the seat gate (`quench.build_zone_spec`).
+    Graded here, a locked enclosure over a reserved region failed every seed
+    and no placement could fix it."""
+    cont = set(getattr(ctx.state, 'container_refs', ()) or ())
+    # #1466: on the zone basis, as `rule_zone_containment` measures members
+    zparts = (_ctx_zone_parts(ctx)
+              if any(z.rect is not None and z.exclusive
+                     for z in ctx.intent.blocks) else {})
     for z in ctx.intent.blocks:
         if z.rect is None or not z.exclusive:
             continue
@@ -4852,10 +5758,10 @@ def rule_zone_exclusive(ctx) -> Iterator[Violation]:
         # had deliberately declined to bind and therefore could not repair.
         # The seat gate (`quench.exclusive_spec`) skips the same zones, so the
         # two agree at every severity.
-        if not (members & set(ctx.parts)):
+        if not (members & set(zparts)):
             continue
-        for ref, part in sorted(ctx.parts.items()):
-            if ref in members:
+        for ref, part in sorted(zparts.items()):
+            if ref in members or ref in cont:
                 continue
             if z.side and part.side != z.side:
                 continue
@@ -4871,28 +5777,83 @@ def rule_zone_exclusive(ctx) -> Iterator[Violation]:
                     expected={'zone': list(z.rect), 'overlap_area_mm2': 0.0})
 
 
+def pad_copper_rects(fp, pose, copper_only=False):
+    """`fp`'s pad copper boxes (board frame) with the part at `pose`
+    ((x, y, rot)); with `copper_only`, only the pads that put copper on a
+    copper layer (`legality._pad_carries_copper`, what check_assembly's
+    occupancy unites)."""
+    out = []
+    for q in legality.pads_at_pose(fp, pose):
+        if copper_only and not legality._pad_carries_copper(q):
+            continue
+        cx, cy, hx, hy = legality.pad_copper_box(q)
+        out.append((cx - hx, cy - hy, cx + hx, cy + hy))
+    return out
+
+
+def _container_pad_rects(ctx, ref, copper_only=False):
+    """A part's pad copper boxes at the pose the grade holds it at
+    (`ctx.state`, else the file's): what `rule_keepout` measures a container
+    on, and every other part on too, beside its courtyard (#1588)."""
+    fp = ctx.pcb.footprints[ref]
+    p = (getattr(ctx.state, 'parts', None) or {}).get(ref)
+    pose = (p.x, p.y, p.rot) if p is not None else (fp.x, fp.y,
+                                                    fp.rotation or 0.0)
+    return pad_copper_rects(fp, pose, copper_only)
+
+
 def rule_keepout(ctx) -> Iterator[Violation]:
     # PART-outer, so `keepouts_for_ref` is called once per part over the whole
     # list -- which is the resolution its own docstring describes, and the
     # same shape `QuenchState` uses to build `keepouts_for`. Keep-out-outer
     # with a 1-tuple worked, but rebuilt two sets per (keep-out, part) pair.
     # Violation order is not affected: `grade` sorts on `Violation.sort_key`.
+    # #1443: a height-limited keep-out admits a part whose height is known
+    hts = (_ctx_heights(ctx) if any(k.get('max_height_mm') is not None
+                                    for k in ctx.intent.keepouts) else None)
+    cont = set(getattr(ctx.state, 'container_refs', ()) or ())
     for ref, part in sorted(ctx.parts.items()):
+        # #1475: a CONTAINER is graded on its pads, never its frame rect (as
+        # #1463 for exclusive zones): a keep-out inside an enclosure -- a
+        # can's fence -- is no hit on the enclosure, while a post standing
+        # in a keep-out still is. The seat already reads pads only.
         # `allow` and the side filter, from the SHARED resolver: the grader
         # and the seat predicate must agree on WHICH keep-outs bind a ref, not
         # merely on the geometry once they do. A through-hole part occupies
         # BOTH faces -- its leads pass through the keep-out even when its body
         # sits on the other side -- which is why `sides` is `part.sides` and
         # the hit test is given both rects.
-        for k in keepouts_for_ref(ctx.intent.keepouts, ref, part.sides):
-            if keepout_hit(k, (part.rect, part.tht_rect)):
+        binding = keepouts_for_ref(ctx.intent.keepouts, ref, part.sides,
+                                   hts.height(ref) if hts is not None else None)
+        if not binding:
+            continue
+        # #1588: and its pad copper, beside the courtyard -- what
+        # check_assembly grades it on, and what `mountable` and a rule-area
+        # keep-out (#1031) already read: a pad reaching past the courtyard
+        # into a keep-out is in it. Inert for a pad within the courtyard.
+        rects = (_container_pad_rects(ctx, ref) if ref in cont
+                 else (part.rect, part.tht_rect,
+                       *_container_pad_rects(ctx, ref, copper_only=True)))
+        for k in binding:
+            if keepout_hit(k, rects):
                 name = k['name']
                 shape = (_fmt_rect(k['rect']) if k.get('rect') is not None
                          else f"circle {k['circle']}")
+                # #1475: a height-limited keep-out binds a part by its height,
+                # so say which height (or that none is known) and the limit
+                tall = ''
+                if k.get('max_height_mm') is not None:
+                    h = hts.height(ref) if hts is not None else None
+                    tall = (f": it admits parts no taller than "
+                            f"{k['max_height_mm']:g}mm, and {ref} "
+                            + (f"is {h:g}mm" if h is not None and
+                               len(part.sides) == 1 else
+                               "stands on both faces" if h is not None else
+                               "has no known height"))
                 yield Violation(
                     rule='keepout', severity=ctx.sev('keepout'), ref=ref,
                     message=(f"{ref} ({part.side}) is inside keep-out "
-                             f"{name!r} {shape}"),
+                             f"{name!r} {shape}{tall}"),
                     measured={'keepout': name, 'side': part.side,
                               'sides_occupied': sorted(part.sides)},
                     expected={'allow': list(k.get('allow') or ())})
@@ -4905,7 +5866,7 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
     reporting it as a defect forever -- kept by `rule_legality` through
     `_Ctx.oob_exempt()`, for a declared part inside its own overhang band
     (it was a promise with no implementation until run 26 measured it)."""
-    from .connector_geometry import courtyard_overhang, geometry_for
+    from .connector_geometry import courtyard_overhang_past, geometry_for
     for c in ctx.intent.edge_connectors:
         ref = c['ref']
         part = ctx.parts.get(ref)
@@ -4935,8 +5896,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # clearance), which every routing step's DRC writeback rewrites, so
         # one pose graded differently placed and routed (daplink: 3 errors
         # after routing, nothing moved).
-        amount = courtyard_overhang(geometry_for(ctx, ctx.pcb, ctx.pcb_file),
-                                    part.rect)
+        _geo = geometry_for(ctx, ctx.pcb, ctx.pcb_file)
+        amount, _ = courtyard_overhang_past(_geo, part.rect, c.get('edge'))
         lim = c.get('overhang_mm') or {}
         lo = float(lim.get('min', 0.0))
         hi = lim.get('max')
@@ -4945,12 +5906,38 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # it replaces -- at zero margin, wherever that body can be measured.
         # Graded at a margin, the courtyard let esp_prog's USB1, 0.15 mm
         # INSIDE its edge, read 0.10 and satisfy a band `check_drc
-        # --check-pad-edge` failed. Where no body can be read `band` IS
-        # `amount`, and `overhang_basis` says which it was. `amount` keeps its
-        # other job: the setback conjunct's no-overhang gate below, which
-        # reads the courtyard on either basis.
+        # --check-pad-edge` failed. Where no body can be read the band is the
+        # courtyard's overhang on the basis place_simple SEATS the part on
+        # (#1531, `band_courtyard_rect`): for a part that draws no courtyard,
+        # its estimated one. Read on its pad box, a positive minimum asked
+        # the pads to leave the board, and the edge seat put the estimate
+        # exactly where this rule then read 0.00. `overhang_basis` says which
+        # reading it was. `amount` keeps its other job: the setback
+        # conjunct's no-overhang gate below, on a courtyard seat basis (on a
+        # body basis that gate reads the body, #1585).
+        _band_cy, _cy_others = courtyard_overhang_past(
+            _geo, band_courtyard_rect(ctx, ref, part), c.get('edge'))
         band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),
-                                                  amount)
+                                                  _band_cy)
+        # #1403: the band above is ONE distance past the declared edge. What
+        # the part does past a DIFFERENT edge is graded on its own: more than
+        # the band's maximum is an error (the sum used to bound it); anything
+        # up to it is a fact of the pose (a courtyard longer than its edge
+        # overhangs both ends by design) and rides in the evidence row's
+        # `other_edge_overhang_mm`, silent, as the sum was.
+        _others = (body.get('other_body_edge_overhang_mm')
+                   if body.get('body_measured') else _cy_others) or {}
+        for _oe, _ov in sorted(_others.items()):
+            if hi is not None and _ov > float(hi) + legality.EPS:
+                yield Violation(
+                    rule='edge_connector', severity=ctx.sev('edge_connector'),
+                    ref=ref,
+                    message=(f"{ref} overhangs the {_oe} edge by {_ov:.2f}mm, "
+                             f"past the declared maximum {float(hi):.2f}mm "
+                             f"(its band is declared on the "
+                             f"{c.get('edge')} edge)"),
+                    measured={'edge': _oe, 'overhang_mm': round(_ov, 4)},
+                    expected={'edge': c.get('edge'), 'max': float(hi)})
         if band < lo - legality.EPS:
             yield Violation(
                 rule='edge_connector', severity=ctx.sev('edge_connector'),
@@ -4998,6 +5985,9 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                 expected={'pad_copper_outside_mm': 0.0})
         evidence = _connector_evidence(ctx, c, ref, band, overhang_basis, body,
                                        lo, hi)
+        evidence['other_edge_overhang_mm'] = {
+            e: round(v, 4) for e, v in sorted(_others.items())
+            if v > legality.EPS}
         # The SEAT BASIS, decided once for the two conjuncts that ask where
         # the part's MATING FACE is (nearest edge, seat). A receptacle's
         # pads sit well inboard of its opening by construction: a micro-USB
@@ -5011,6 +6001,17 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         seat_rect, basis = edge_seat_rect(c, part.rect,
                                           lambda: ctx.body_rect(ref))
         edge = c.get('edge')
+        # #1584: how far inside its declared edge the part stands, on the
+        # basis the setback conjunct below reads it (`seat_rect`), DISCLOSED
+        # on every row -- a row with no class and no `max_setback_mm` arms no
+        # setback, and a header seated 10 mm inside its edge read as a bare
+        # `pass`. A disclosure, never a finding: only an armed setback fails.
+        from .connector_geometry import edge_setback
+        _setback = (edge_setback(ctx.outline_bounds, seat_rect, edge)
+                    if ctx.outline_bounds else None)
+        evidence['setback_mm'] = None if _setback is None else round(_setback, 4)
+        evidence['setback_basis'] = basis
+        evidence['setback_limit_mm'] = None
         if edge and ctx.outline_bounds:
             # Run 27's replay measured the courtyard reading on the same
             # USB1: its pad box is 1.6 mm from the west edge and 1.3 mm from
@@ -5045,14 +6046,38 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             'disposition': ('exempt' if _ef['policy'] != 'graded'
                             else 'no_edge' if not edge
                             else 'abstained' if not _ef['facing']
-                            else 'fail' if _ef['fails'] else 'pass')}
+                            else 'fail' if _ef['fails'] else 'pass'),
+            'declared_face': _ef['declared_face'],
+            'body_face': _ef['body_face'],
+            'body_strong': _ef['body_strong'],
+            'disagreement': _ef['disagreement']}
+        if _ef['disagreement']:
+            # #1586: a declared face the body reads otherwise is SAID,
+            # whichever won -- a weak reading the declaration outranks (KiCad
+            # 10's RJHSE5380 reads its mouth into the board) or a strong one
+            # that overrules the declaration. A WARN: one of the two is wrong,
+            # and only the datasheet says which.
+            yield Violation(
+                rule='edge_connector', severity=WARN, ref=ref,
+                message=f"{ref}'s mating face: {_ef['disagreement']}",
+                measured={'declared_face': _ef['declared_face'],
+                          'body_face': _ef['body_face'],
+                          'body_strong': _ef['body_strong'],
+                          'facing_basis': _ef['basis']},
+                expected={'mating_face': _ef['declared_face']})
         if _ef['fails']:
             yield Violation(
                 rule='edge_connector',
                 severity=(ctx.sev('edge_connector') if _ef['strong']
                           else WARN),
                 ref=ref,
-                message=(f"{ref}'s body leaves its pad row toward the "
+                message=((f"{ref}'s declared mating face "
+                          f"({_ef['local_face']}) points {_ef['facing']} at "
+                          f"this pose, away from its declared {edge} edge -- "
+                          f"its mating face points {_ef['facing']}, not out "
+                          f"of the {edge} edge")
+                         if _ef['basis'] == 'declared' else
+                         f"{ref}'s body leaves its pad row toward the "
                          f"{_ef['facing']} ({_ef['basis']}, "
                          f"{_ef['offset_mm']:.2f}mm), away from its declared "
                          f"{edge} edge -- its mating face points "
@@ -5092,8 +6117,21 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             from .part_class import INTERIOR_AFFINITY_MM
             setback = INTERIOR_AFFINITY_MM
             _sev = WARN
-        if setback is not None and amount <= legality.EPS:
-            # "No overhang" is the courtyard at ZERO margin (#1301): at the
+        if setback is not None:
+            evidence['setback_limit_mm'] = float(setback)
+        # #1585: "no overhang" is read on the shape the setback is measured
+        # on. It was always the courtyard, so a receptacle whose courtyard
+        # crosses the edge was never asked its BODY's setback: tigard's USB-C
+        # J1 (courtyard 0.50 mm past its fab body at the mouth), declared
+        # max_setback_mm 0.1, passed with its body 0.40 mm inside.
+        # An entry that declares no edge (the emitter's withheld SUSPECT,
+        # sonde_xilinx's reversed J2) keeps the courtyard gate: its body has
+        # no declared edge to overhang, and the emitted intent must grade
+        # clean on the board it was read off.
+        seat_over = (amount if basis == 'courtyard' or edge not in _EDGE_AXIS
+                     else courtyard_overhang_past(_geo, seat_rect, edge)[0])
+        if setback is not None and seat_over <= legality.EPS:
+            # "No overhang" is read at ZERO margin (#1301): at the
             # gate's margin a receptacle 0.52 mm inside read as overhanging
             # at 0.55 and was never held to its seat, then failed it at 0.2.
             # The SEAT is a question about the part's BODY -- does its
@@ -5165,18 +6203,62 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         ctx.edge_connector_evidence.append(evidence)
 
 
+def _setback_tail(e) -> str:
+    """The CLI's `; setback ...` clause for one evidence row (#1584, #1585),
+    or '' for a part that reaches its edge: how far inside its declared edge
+    it stands, on the basis the setback conjunct reads (`setback_basis`),
+    the drawn body's own setback beside a courtyard reading, and the limit
+    an armed setback holds it to -- or that none is declared, so a part
+    seated well inside its edge never reads as a bare `pass`."""
+    s = e.get('setback_mm')
+    body = (e.get('body_setback_mm')
+            if e.get('setback_basis') == 'courtyard' else None)
+    if s is None or (s < 0.005 and (body is None or body < 0.005)):
+        return ''
+    lim = e.get('setback_limit_mm')
+    return (f"; setback {s:.2f}mm [{e.get('setback_basis')}"
+            + (f"; body {body:.2f}mm" if body is not None else '')
+            + (f"; limit {lim:.2f}mm" if lim is not None
+               else '; no limit declared') + "]")
+
+
 def _facing_tail(f) -> str:
     """The CLI's `; facing ...` clause for one evidence row (#1155), or ''."""
-    if not f or f.get('disposition') in (None, 'exempt'):
+    if not f or f.get('disposition') is None:
         return ''
+    if f['disposition'] == 'exempt':
+        # #1392: said, not silent -- a side-push switch whose actuator points
+        # along its edge read "pass" with no facing word at all. Declaring a
+        # `mating_face` grades it (`edge_facing_policy`).
+        why = str(f.get('policy') or '').replace('exempt: ', '', 1)
+        return (f"; facing exempt ({why or 'by policy'}: not graded unless "
+                f"the entry declares a mating_face)")
     if f['disposition'] == 'abstained':
         return f"; facing abstained ({f.get('reason') or 'no face'})"
     if f['disposition'] == 'no_edge':
         return (f"; facing {f['facing']} (no edge declared: not graded)"
                 if f.get('facing') else '')
+    said = ''
+    if f.get('disagreement') and f.get('declared_face') and f.get('body_face'):
+        # #1586: which of the two faces the clause graded, and over which
+        said = (f" (declared {f['declared_face']} over the body's weak "
+                f"{f['body_face']})" if 'declared' in str(f.get('basis'))
+                else f" (the body's strong {f['body_face']} over the declared "
+                     f"{f['declared_face']})")
     return (f"; facing {f['facing']} [{f['basis']}, "
             f"{'strong' if f['strong'] else 'weak'}] "
-            f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}")
+            f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}"
+            + said)
+
+
+def band_courtyard_rect(ctx, ref, part):
+    """The courtyard rect a declared `overhang_mm` band reads when the drawn
+    body cannot be measured (#1531): the part on the basis place_simple
+    seats it on (`zone_parts`) -- for a part that draws no courtyard, its
+    estimated one, which `edge_seat._Probe.band_rect` reads too. `part` is
+    the context's own record, the answer for every other part."""
+    zp = _ctx_zone_parts(ctx).get(ref)
+    return zp.rect if zp is not None else part.rect
 
 
 def _band_amount(ctx, ref, edge, courtyard_amount):
@@ -5210,21 +6292,32 @@ def _copper_outside_mm(ctx, ref):
     courtyard, often the pad box itself) always carried. A band licenses the
     body, never copper, so the body path must still see it. Castellated pads
     straddle the outline by design and are skipped. 0.0 when nothing leaves
-    the board; findings from a sampled (non-rectangular) outline carry no gap
-    and are not counted, which is harmless because the body path only runs on
-    rectangular outlines."""
+    the board. A finding from a sampled (non-rectangular) outline carries no
+    gap: since the body path runs on such outlines where the edge is straight
+    under the body (#1585), those pads are read by their boxes' distance past
+    the outline (`connector_geometry.pad_copper_depth`)."""
     fp = ctx.pcb.footprints.get(ref)
     prefix = ref + '.'
     worst = 0.0
+    sampled = set()
     for f in ctx.connector_copper()['findings']:
-        if not str(f['pad_ref']).startswith(prefix) or f.get('gap_mm') is None:
+        if not str(f['pad_ref']).startswith(prefix):
             continue
         pads = getattr(fp, 'pads', None) or ()
         index = f.get('pad_index')
         if (isinstance(index, int) and index < len(pads)
                 and getattr(pads[index], 'castellated', False)):
             continue
+        if f.get('gap_mm') is None:
+            if isinstance(index, int):
+                sampled.add(index)
+            continue
         worst = max(worst, -float(f['gap_mm']))
+    if sampled and fp is not None:
+        from .connector_geometry import geometry_for, pad_copper_depth
+        worst = max(worst, pad_copper_depth(
+            geometry_for(ctx, ctx.pcb, ctx.pcb_file), ref,
+            (fp.x, fp.y, fp.rotation or 0.0), only=sampled))
     # A pad the edge grader cannot model -- a trapezoid, a custom pad with no
     # parsed primitives -- yields NO finding: it is recorded as unmeasured
     # and skipped, so the loop above reads 0.0 for a pad that may be entirely
@@ -5262,6 +6355,18 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
     unmeasured = [u for u in copper['unmeasured']
                   if str(u['pad_ref']).startswith(prefix)]
     gap = (copper.get('minimum_gap_by_ref_mm') or {}).get(ref)
+    # #1615: the requirement THIS part's pads are graded at -- a .kicad_dru
+    # edge rule sets it for the pads it binds, the board's floor the rest
+    # (pads share a number -- a jack's four ground pads -- so a list, not a dict)
+    ruled = [row for row in copper.get('rules_applied') or ()
+             for p in row['pads'] if str(p).startswith(prefix)]
+    required = copper['required_mm']
+    if ruled:
+        fp = ctx.pcb.footprints.get(ref)
+        copper_pads = sum(1 for p in getattr(fp, 'pads', None) or ()
+                          if not legality._pad_has_no_copper(p))
+        reqs = [row['required_mm'] for row in ruled]
+        required = max(reqs) if len(ruled) >= copper_pads else max(reqs + [required])
     if findings:
         copper_disposition = 'fail'
     elif unmeasured or copper['rules_unmeasured']:
@@ -5291,19 +6396,20 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
             None if others is None else {e: r4(v) for e, v in others.items()}),
         'body_unmeasured_reason': body.get('body_unmeasured_reason'),
         'pad_copper_edge': {
-            'required_mm': copper['required_mm'],
-            'requirement_source': copper.get('requirement_source'),
+            'required_mm': required,
+            'requirement_source': (
+                ', '.join(sorted({f"rule '{row['rule']}'" for row in ruled}))
+                if ruled else copper.get('requirement_source')),
+            'rules_applied': sorted({row['rule'] for row in ruled}),
             'minimum_gap_mm': r4(gap),
             'shortfall_mm': round(max((f['shortfall_mm'] for f in findings),
                                       default=0.0), 4),
             # Past the outline itself, castellated pads excepted: the number
             # the body path's copper conjunct grades (0.0 = on the board).
-            # None when a finding came from the sampled (non-rectangular)
-            # path, which carries no gap -- the amount is unknown, not zero.
-            'outside_mm': (None if any(
-                str(f['pad_ref']).startswith(prefix) and f.get('gap_mm') is None
-                for f in copper['findings'])
-                else round(_copper_outside_mm(ctx, ref), 4)),
+            # A finding from the sampled (non-rectangular) path carries no
+            # gap; its pad is read by its box's distance past the outline
+            # (#1585), as the conjunct grades it.
+            'outside_mm': round(_copper_outside_mm(ctx, ref), 4),
             # False when a pad's shape defeated the edge grader: `outside_mm`
             # is then a best-effort box reading, so a zero says "not shown to
             # be off the board", never "on the board". Such a part is not
@@ -5401,12 +6507,20 @@ def _grade_along_edge(ctx, c, ref, part, sev) -> Iterator[Violation]:
     # 200mm one.
     past = max(f0 * span - (centre - lo), (centre - lo) - f1 * span)
     if past > legality.EPS:
+        # the percentages in as many decimals as tell the part's from the
+        # nearer end's, and `past` in the unit it reads in: a part 40 nm past
+        # a band end read "at 18% ... band 17%-18% (0.00mm past)" (#1633)
+        end = f0 if (centre - lo) < f0 * span else f1
+        nd = next((k for k in range(7)
+                   if f"{100.0 * frac:.{k}f}" != f"{100.0 * end:.{k}f}"), 7)
+        far = (f"{past:.2f}mm" if past >= 0.01 else f"{past:.3f}mm" if past >= 0.001
+               else f"{past * 1e6:.0f}nm")
         yield Violation(
             rule='edge_connector', severity=sev, ref=ref,
-            message=(f"{ref} sits at {100.0 * frac:.0f}% along the "
+            message=(f"{ref} sits at {100.0 * frac:.{nd}f}% along the "
                      f"{span:.2f}mm {edge} edge, outside the declared band "
-                     f"{100.0 * f0:.0f}%-{100.0 * f1:.0f}% "
-                     f"({past:.2f}mm past its nearer end)"),
+                     f"{100.0 * f0:.{nd}f}%-{100.0 * f1:.{nd}f}% "
+                     f"({far} past its nearer end)"),
             measured={'along_edge_fraction': round(frac, 4),
                       'along_edge_offset_mm': round(offset, 4),
                       'along_edge_offset_pct': round(100.0 * offset / span, 2),
@@ -6460,8 +7574,10 @@ def rule_proximity(ctx) -> Iterator[Violation]:
                 message=(f"{ref} pad {pad.pad_number} is {gap:.2f}mm from "
                          f"{near} pad {partner.pad_number}"
                          + (f" on {net}" if how == 'net' and net else '')
-                         + f", past the declared {limit:.2f}mm proximity "
-                           f"limit"),
+                         # #1600: a row the toolchain derived is no
+                         # author's declaration, and says so
+                         + f", past the {'derived' if derived_claim(claim) else 'declared'} "
+                           f"{limit:.2f}mm proximity limit"),
                 measured={'gap_mm': round(gap, 4), 'near': near,
                           'pad': pad.pad_number,
                           'near_pad': partner.pad_number,
@@ -6678,6 +7794,45 @@ def rule_keep_away(ctx) -> Iterator[Violation]:
                 expected={'gap_mm': gap_mm})
 
 
+def rule_link(ctx) -> Iterator[Violation]:
+    """Two declared sets of parts within MAX mm of each other (#1477): the
+    gap between their nearest courtyards, Manhattan and 0 once they touch,
+    on the courtyard place_simple seats each part on (`zone_parts`) -- the
+    gap `place_simple`'s `within` term prices (`simple.rect_gap`), so the
+    placer and the grade read one number. A side matching no part is
+    `link_unresolved`. WARN by default."""
+    from .simple import rect_gap as manhattan_gap
+    parts = _ctx_zone_parts(ctx)
+    names = sorted(parts)
+    for ln in ctx.intent.links:
+        sides = [sorted({r for r in names for pat in ln[k]
+                         if fnmatch.fnmatchcase(r, pat)}) for k in ('a', 'b')]
+        if not sides[0] or not sides[1]:
+            empty = [k for k, sd in zip(('a', 'b'), sides) if not sd]
+            yield Violation(
+                rule='link_unresolved',
+                severity=ctx.intent.severity_of('link_unresolved', WARN),
+                message=(f"link {ln['name']!r} ({ln['source']}): side "
+                         f"{' and '.join(empty)} matches no part on this "
+                         f"board, so nothing is measured"),
+                measured={'link': ln['name'], 'empty_sides': empty},
+                expected={'max_mm': ln['max_mm']})
+            continue
+        gap, pair = min((manhattan_gap(parts[a].rect, parts[b].rect), (a, b))
+                        for a in sides[0] for b in sides[1])
+        if gap > ln['max_mm'] + legality.EPS:
+            yield Violation(
+                rule='link', severity=ctx.intent.severity_of('link', WARN),
+                ref=pair[0],
+                message=(f"link {ln['name']!r} ({ln['source']}): its nearest "
+                         f"parts {pair[0]} and {pair[1]} are {gap:.2f}mm "
+                         f"apart, courtyard to courtyard (Manhattan), past "
+                         f"its {ln['max_mm']:g}mm"),
+                measured={'link': ln['name'], 'gap_mm': round(gap, 4),
+                          'pair': list(pair)},
+                expected={'max_mm': ln['max_mm']})
+
+
 def rule_replicate(ctx) -> Iterator[Violation]:
     """Each declared copy target laid out as a translated copy of its
     source instance (#1211) -- how far it is from that, never how it got
@@ -6822,6 +7977,404 @@ def rule_template(ctx) -> Iterator[Violation]:
             measured={'index': i, 'off': len(off), 'max_mm': worst['worst_mm'],
                       'worst': [m['ref'] for m in off[:NAMED_WORST]]},
             expected={'tolerance_mm': tol})
+
+
+def _ctx_heights(ctx):
+    """#1443: the board's heights with the intent's declarations, read once."""
+    if ctx._heights is None:
+        from . import heights as _h
+        ctx._heights = _h.for_board(ctx.pcb, ctx.pcb_file,
+                                    ctx.intent.height_declarations())
+    return ctx._heights
+
+
+def rule_cover(ctx) -> Iterator[Violation]:
+    """Each declared cover (#1443) checked against the board, never
+    completed from it: its connector on the row's face, and each standoff
+    where the row puts it -- `length_mm` along the axis from the connector's
+    origin, `off_mm` (default 0) to the left of the centre line -- within
+    `COVER_STANDOFF_TOLERANCE_MM`. One
+    `cover` finding per cover with a standoff off its place; a row naming a
+    ref the board does not have, or a connector on the other face, is
+    `cover_unresolved`. WARN by default (both names); the `severity` map may
+    promote either. What stands UNDER the body is graded where every part
+    pair is: check_assembly's height pairs. Every cover is recorded on
+    `ctx.cover_measured`."""
+    from .heights import along_axis, to_local
+    sev = ctx.intent.severity_of('cover', default=WARN)
+    sev_unres = ctx.intent.severity_of('cover_unresolved', default=WARN)
+    fps = ctx.pcb.footprints or {}
+    for i, c in enumerate(ctx.intent.covers):
+        con = c['connector']
+        key = f"covers[{i}] ({con})"
+        missing = [r for r in [con] + [s['ref'] for s in c['standoffs']] if r not in fps]
+        reason = None
+        if missing:
+            reason = f"the board has no {', '.join(missing)}"
+        elif legality.footprint_side(fps[con]) != c['side']:
+            reason = (f"{con} is on {legality.footprint_side(fps[con])}.Cu, the row "
+                      f"says {c['side']}")
+        if reason:
+            ctx.cover_measured.append({'index': i, 'connector': con,
+                                       'state': 'unresolved', 'reason': reason})
+            yield Violation(rule='cover_unresolved', severity=sev_unres, ref=con,
+                            message=f"{key}: not checked -- {reason}",
+                            measured={'index': i}, expected={'connector': con})
+            continue
+        f = fps[con]
+        pose = (f.x, f.y, f.rotation or 0.0)
+        rows, off = [], []
+        for s in c['standoffs']:
+            p = fps[s['ref']]
+            lx, ly = to_local((p.x, p.y, p.x, p.y), pose)[:2]
+            t, w = along_axis(c, (lx, ly))
+            # #1504: measured against its declared offset from the line (0
+            # unless the row says `off_mm`: a corner screw)
+            miss = math.hypot(t - s['length_mm'], w - s.get('off_mm', 0.0))
+            row = {'ref': s['ref'], 'declared_mm': s['length_mm'],
+                   'along_mm': round(t, 3), 'off_line_mm': round(w, 3),
+                   'declared_off_mm': s.get('off_mm', 0.0), 'miss_mm': round(miss, 3)}
+            rows.append(row)
+            if miss > COVER_STANDOFF_TOLERANCE_MM + legality.EPS:
+                off.append(row)
+        length = (c['length_mm'] if c.get('length_mm') is not None
+                  else max(s['length_mm'] for s in c['standoffs']))
+        ctx.cover_measured.append({
+            'index': i, 'connector': con, 'state': 'measured', 'passes': not off,
+            'width_mm': c['width_mm'], 'underside_mm': c['underside_mm'],
+            'length_mm': length, 'start_mm': c.get('start_mm', 0.0),
+            'source': c['source'], 'standoffs': rows})
+        if not off:
+            continue
+        w = max(off, key=lambda x: x['miss_mm'])
+        yield Violation(
+            rule='cover', severity=sev, ref=w['ref'], block=ctx.owner.get(w['ref']),
+            message=(f"{key}: {len(off)} of {len(rows)} standoff(s) off the place the "
+                     f"cover gives them -- worst {w['ref']}, {w['along_mm']:.2f}mm "
+                     f"along the axis (declared {w['declared_mm']:g}mm) and "
+                     f"{w['off_line_mm']:+.2f}mm off its centre line (declared "
+                     f"{w['declared_off_mm']:+g}mm)"),
+            measured={'index': i, 'off': len(off), 'max_mm': w['miss_mm'],
+                      'worst': [x['ref'] for x in off[:NAMED_WORST]]},
+            expected={'tolerance_mm': COVER_STANDOFF_TOLERANCE_MM})
+
+
+def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, object]]:
+    """#1504: whether each declared cover's body can be MOUNTED where its
+    connector stands, one row per `covers[]` row: its standoffs (on the
+    board, and where the row puts them), how far its body reaches past the
+    outline, the parts under it with the least room (judged on the shape the
+    verdict judges, `Heights.under_declared`, #1539), every pair the heights
+    refuse with it (a part under it too tall or of unknown height, a part
+    its insertion path cannot clear, another body it meets), and the order
+    its insertion path asks (`heights.insertion_order`: this body in before
+    a removable one over its way in), and since #1537 what stands at each
+    of its own hole sites (`holes[]`, `_hole_sites`). `mountable` is False
+    when a standoff is missing, off its place or off the board, a hole site
+    has a part, pad or other-net copper in its screw-head ring, a pair is
+    refused, or two bodies each block the other's way in; None when the cover is not
+    resolved on this board. Facts for `rule_mountable` and check_assembly;
+    the body's overhang past the outline is reported, not judged (a module
+    may overhang by design)."""
+    from .body import board_bodies
+    from .heights import (cover_rect, for_board, insertion_order, standoff_at,
+                          to_board, to_local)
+    if not intent.covers:
+        return []
+    fps = pcb.footprints or {}
+    h = heights if heights is not None else for_board(pcb, pcb_file or None,
+                                                      intent.height_declarations())
+    geo = board_bodies(pcb, pcb_file or None)
+    gate = legality.BoardOutlineGate(pcb.board_info, 0.0)
+    poses = {r: (f.x, f.y, f.rotation or 0.0) for r, f in fps.items()}
+    sides = {r: legality.footprint_side(f) for r, f in fps.items()}
+    order = insertion_order(h, poses)
+    rows = []
+    for i, c in enumerate(intent.covers):
+        con = c['connector']
+        row = {'index': i, 'connector': con, 'removable': c['removable']}
+        if con not in fps or sides[con] != c['side']:
+            row.update(state='unresolved', mountable=None,
+                       why=(f"the board has no {con}" if con not in fps else
+                            f"{con} is on {sides[con]}.Cu, the row says {c['side']}"))
+            rows.append(row)
+            continue
+        pose = poses[con]
+        occ_c = getattr(geo.get(con), 'occupancy_local', None)
+        body = to_board(cover_rect(c), pose)
+        row['body_past_outline_mm'] = round(gate.rect_outside_amount(body), 3)
+        why, sts = [], []
+        for s in c['standoffs']:
+            if s['ref'] not in fps:
+                sts.append({'ref': s['ref'], 'state': 'missing'})
+                why.append(f"standoff {s['ref']} is not on the board")
+                continue
+            g, f = geo.get(s['ref']), fps[s['ref']]
+            want = to_board((*standoff_at(c, s),) * 2, pose)[:2]
+            miss = math.dist(want, (f.x, f.y))
+            occ = getattr(g, 'occupancy_local', None)
+            off = (gate.rect_outside_amount(to_board(occ, poses[s['ref']]))
+                   if occ is not None else 0.0)
+            sts.append({'ref': s['ref'], 'miss_mm': round(miss, 3),
+                        'past_outline_mm': round(off, 3)})
+            if miss > COVER_STANDOFF_TOLERANCE_MM + legality.EPS:
+                why.append(f"standoff {s['ref']} is {miss:.2f}mm off its place")
+            if off > legality.EPS:
+                why.append(f"standoff {s['ref']} is {off:.2f}mm past the outline")
+        row['standoffs'] = sts
+        if c.get('holes'):
+            row['holes'] = _hole_sites(c, pose, pcb, geo, poses, sides, gate, why)
+        under, blocked = [], []
+        skip = {s['ref'] for s in c['standoffs']} | {con}
+        if occ_c is not None:
+            for r, g in sorted(geo.items()):
+                occ = getattr(g, 'occupancy_local', None)
+                if r in skip or r not in fps or occ is None or sides[r] != c['side']:
+                    continue
+                v = h.pair(con, pose, occ_c, c['side'], r, poses[r], occ, sides[r],
+                           inside=False)
+                if v:
+                    blocked.append({'ref': r, 'area_mm2': round(v, 3)})
+                # #1539: under it, and its room, on the shape and height the
+                # verdict above judges it by (its model's cells where it has
+                # one), never its occupancy box against its whole height
+                u = h.under_declared(con, pose, r, poses[r], occ)
+                if u is not None:
+                    under.append({'ref': r, **u})
+        known = [u for u in under if u['room_mm'] is not None]
+        row['under'] = len(under)
+        row['least_room'] = min(known, key=lambda u: u['room_mm']) if known else None
+        row['blocked'] = blocked
+        for b in blocked:
+            why.append(f"{b['ref']} is refused with it ({b['area_mm2']:g}mm2)")
+        row['before'] = [b for a, b in order if a == con]      # this goes in first
+        row['after'] = [a for a, b in order if b == con]       # these go in first
+        both = sorted(set(row['before']) & set(row['after']))
+        if both:
+            why.append(f"it and {', '.join(both)} each block the other's way in")
+        row['why'] = why
+        row['state'] = 'measured'
+        row['mountable'] = not why
+        rows.append(row)
+    return rows
+
+
+def _cover_site_xy(c, hole, pose) -> Tuple[float, float]:
+    """Where `covers[]` row `c` puts its `holes[]` entry `hole` on the board,
+    its connector at `pose`."""
+    from .heights import standoff_at, to_board
+    return tuple(to_board((*standoff_at(c, hole),) * 2, pose)[:2])
+
+
+def _cover_site_standoff(mounts, x, y):
+    """The board's own mounting hole (of `mounts`) fitted at a cover's hole
+    site (x, y) -- within `COVER_STANDOFF_TOLERANCE_MM`, the nearest -- or
+    None."""
+    return min((m for m in mounts if math.hypot(m.x - x, m.y - y)
+                <= COVER_STANDOFF_TOLERANCE_MM + legality.EPS),
+               key=lambda m: math.hypot(m.x - x, m.y - y), default=None)
+
+
+def cover_hole_sites(intent, pcb) -> List[Dict[str, object]]:
+    """#1636: every declared cover's `holes[]` site on this board, where
+    `mount_report` grades it: `{connector, index (0-based), at (x, y),
+    diameter_mm, standoff}` -- `standoff` the board's own mounting hole
+    fitted there (its ref), else None. A row whose connector the board lacks,
+    or has on the other face, is left out (`mount_report` calls it
+    unresolved). For a step that keeps copper off the sites BEFORE routing
+    (`add_rule_area --mounting-holes --intent`), so the router is given the
+    ring the grade then reads."""
+    import mounting_holes as mh
+    fps = pcb.footprints or {}
+    mounts = None
+    out = []
+    for c in intent.covers or ():
+        con = c['connector']
+        fp = fps.get(con)
+        if fp is None or legality.footprint_side(fp) != c['side'] \
+                or not c.get('holes'):
+            continue
+        if mounts is None:
+            mounts = mh.mounting_holes(pcb)
+        pose = (fp.x, fp.y, fp.rotation or 0.0)
+        for k, hl in enumerate(c['holes']):
+            x, y = _cover_site_xy(c, hl, pose)
+            st = _cover_site_standoff(mounts, x, y)
+            out.append({'connector': con, 'index': k, 'at': (x, y),
+                        'diameter_mm': float(hl['diameter_mm']),
+                        'standoff': st.ref if st is not None else None})
+    return out
+
+
+def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, object]]:
+    """#1537: each of a cover's own mounting holes (`holes[]`), where the row
+    puts it -- `length_mm` along the axis, `off_mm` to the left of the centre
+    line, as a standoff -- and what stands within its screw-head ring
+    (`mounting_holes.reach`, the ring check_mounting_holes uses): the
+    standoff there (a mounting hole on the board within
+    `COVER_STANDOFF_TOLERANCE_MM` of the site; its own pads and nets are its
+    own), the parts whose occupancy reaches into the ring and the pads and
+    other-net copper inside it, on either face (the screw passes through the
+    board). A site with anything in it appends to `why`; a free site with no
+    standoff yet is reported (`standoff` None), not judged, and so is a site
+    past the outline, as the body's own overhang is.
+
+    The cover's own connector is reported at a site, not judged (#1589):
+    the site is drawn in that connector's frame, so no placement moves one
+    against the other, and the module's drawing puts its holes where its
+    own socket lets them be. A site its body or pads reach carries
+    `connector` (`{ref, gap_mm, pads}`), else None -- a row whose site lands
+    on its own connector is the declaration to read again."""
+    import mounting_holes as mh
+    from .heights import to_local
+    mounts = mh.mounting_holes(pcb)
+    con = c['connector']
+    out = []
+    for k, hl in enumerate(c['holes']):
+        x, y = _cover_site_xy(c, hl, pose)
+        d = hl['diameter_mm']
+        far = mh.reach(d)
+        st = _cover_site_standoff(mounts, x, y)
+        own = {st.ref} if st is not None else set()
+        parts, con_gap = [], None
+        for r, g in sorted(geo.items()):
+            occ = getattr(g, 'occupancy_local', None)
+            fpr = (pcb.footprints or {}).get(r)
+            if r in own or occ is None or fpr is None or not fpr.pads:
+                continue
+            lx, ly = to_local((x, y, x, y), poses[r])[:2]
+            gap = math.hypot(max(occ[0] - lx, 0.0, lx - occ[2]),
+                             max(occ[1] - ly, 0.0, ly - occ[3]))
+            if gap < far:
+                if r == con:
+                    con_gap = round(gap - d / 2.0, 3)
+                    continue
+                parts.append({'ref': r, 'side': sides[r], 'gap_mm': round(gap - d / 2.0, 3)})
+        parts.sort(key=lambda p: (p['gap_mm'], p['ref']))
+        pads, con_pads = [], []
+        for p in mh.pads_near(pcb, x, y, d, skip_refs=own):
+            (con_pads if p['ref'] == con else pads).append(
+                {'ref': p['ref'], 'pad': p['pad'], 'net': p['net'],
+                 'gap_mm': round(p['gap'], 3)})
+        copper = [{'kind': h['kind'], 'layer': h['layer'], 'net': h['net'],
+                   'gap_mm': round(h['gap'], 3)}
+                  for h in mh.copper_near(pcb, x, y, d, nets=st.nets if st else frozenset())]
+        reach_con = None
+        if con_gap is not None or con_pads:
+            gaps = [g for g in [con_gap] + [p['gap_mm'] for p in con_pads] if g is not None]
+            reach_con = {'ref': con, 'gap_mm': min(gaps),
+                         'pads': [p['pad'] for p in con_pads]}
+        site = {'index': k, 'at': [round(x, 3), round(y, 3)], 'length_mm': hl['length_mm'],
+                'off_mm': hl['off_mm'], 'diameter_mm': d, 'reach_mm': round(far, 3),
+                'standoff': st.ref if st is not None else None,
+                'past_outline_mm': round(gate.rect_outside_amount((x - d / 2, y - d / 2,
+                                                                   x + d / 2, y + d / 2)), 3),
+                'parts': parts, 'pads': pads, 'copper': copper, 'connector': reach_con}
+        site['fits'] = not (parts or pads or copper)
+        out.append(site)
+        if not site['fits']:
+            what = ([p['ref'] for p in parts]
+                    + [f"pad {p['ref']}.{p['pad']}" for p in pads if p['ref'] not in
+                       {q['ref'] for q in parts}]
+                    + [f"{h['kind']} {h['net']}" for h in copper])
+            why.append(f"hole {k + 1} ({hl['length_mm']:g}mm along, {hl['off_mm']:+g}mm off): "
+                       + (f"standoff {st.ref} there, but " if st is not None
+                          else 'no standoff fits: ')
+                       + f"{', '.join(what[:6])}" + (f" +{len(what) - 6} more" if len(what) > 6
+                                                    else '')
+                       + f" within {far:.2f}mm of the site")
+    return out
+
+
+def rule_mountable(ctx) -> Iterator[Violation]:
+    """#1504: one `mountable` finding per declared cover whose body cannot be
+    mounted where its connector stands (`mount_report`), WARN unless the
+    `severity` map promotes it. The report rides on `ctx.mount_measured`."""
+    if not ctx.intent.covers:
+        return
+    sev = ctx.intent.severity_of('mountable', default=WARN)
+    try:
+        rows = mount_report(ctx.intent, ctx.pcb, ctx.pcb_file)
+    except Exception as ex:                                  # noqa: BLE001
+        ctx.mount_measured.append({'state': 'unmeasured', 'why': f'{type(ex).__name__}: {ex}'})
+        return
+    ctx.mount_measured.extend(rows)
+    for m in rows:
+        if m.get('mountable') is False:
+            yield Violation(
+                rule='mountable', severity=sev, ref=m['connector'],
+                block=ctx.owner.get(m['connector']),
+                message=(f"covers[{m['index']}] ({m['connector']}): its body cannot be "
+                         f"mounted -- " + '; '.join(m['why'][:4])
+                         + (f"; +{len(m['why']) - 4} more" if len(m['why']) > 4 else '')),
+                measured={'index': m['index'], 'why': m['why'][:NAMED_WORST]},
+                expected={'mountable': True})
+
+
+def template_keepout_findings(intent, parts, anchor_pose=None,
+                               height=None) -> List[Dict]:
+    """The intent's keep-outs against its datasheet templates (#1387): a
+    keep-out that binds a template MEMBER but not the template's anchor makes
+    the template pose forbidden wherever the anchor stands under it, and the
+    member is then carried (`simple.follow`) into the region it may not enter
+    -- or left off its template pose. Nothing else says so: the keep-out
+    admits the chip, the template places its support parts, and the drift is
+    only a WARN.
+
+    `parts` maps each ref to an object with `sides`, `ensure_rotation` and
+    `grade_rects` (a `quench.QuenchState`'s parts). `anchor_pose(ref)` gives
+    the anchor's `(x, y, rot)` where it is known (a placement, a locked or
+    declared pose), else None. `height(ref)` gives a part's known height
+    (else None): a height-limited keep-out admits a part no taller than its
+    limit (#1443), and binds it here only as `keepouts_for_ref` binds it. Returns `[{'index', 'anchor', 'ref', 'keepout',
+    'forced', 'at'}]`: `forced` where the member's template pose for that
+    anchor pose lies inside the keep-out (`at` is the pose); else the keep-out
+    admits the anchor but not the member, so some anchor poses are refused
+    their own template."""
+    from .templates import member_target
+    out = []
+    for i, decl in enumerate(intent.templates):
+        a = decl['anchor']
+        A = parts.get(a)
+        if A is None or not intent.keepouts:
+            continue
+        free = {k['name'] for k in intent.keepouts} - {
+            k['name'] for k in keepouts_for_ref(
+                intent.keepouts, a, A.sides, height(a) if height else None)}
+        apose = anchor_pose(a) if anchor_pose is not None else None
+        for m in decl['members']:
+            P = parts.get(m['ref'])
+            if P is None:
+                continue
+            for k in keepouts_for_ref(intent.keepouts, m['ref'], P.sides,
+                                      height(m['ref']) if height else None):
+                if apose is not None:
+                    pose = member_target(apose, m)
+                    P.ensure_rotation(pose[2])
+                    if keepout_hit(k, P.grade_rects(*pose)):
+                        out.append({'index': i, 'anchor': a, 'ref': m['ref'],
+                                    'keepout': k['name'], 'forced': True,
+                                    'at': [round(v, 3) for v in pose]})
+                elif k['name'] in free:
+                    out.append({'index': i, 'anchor': a, 'ref': m['ref'],
+                                'keepout': k['name'], 'forced': False, 'at': None})
+    return out
+
+
+def template_keepout_text(f: Dict) -> str:
+    """One finding of `template_keepout_findings`, in words."""
+    if f['forced']:
+        return (f"keep-out {f['keepout']!r} binds {f['ref']}, a member of {f['anchor']}'s "
+                f"template, and the template puts {f['ref']} at "
+                f"({f['at'][0]:g}, {f['at'][1]:g}, {f['at'][2]:g}) for {f['anchor']}'s pose, "
+                f"inside it: the template pose is forbidden there, so {f['ref']} cannot "
+                f"stand on its template; add {f['ref']} to the keep-out's `allow`, or "
+                f"move {f['anchor']}")
+    return (f"keep-out {f['keepout']!r} admits {f['anchor']} but binds {f['ref']}, a member "
+            f"of its template: wherever {f['anchor']} stands with {f['ref']}'s template "
+            f"pose inside the region, {f['ref']} cannot be on the template; add "
+            f"{f['ref']} to the keep-out's `allow` if the region should hold the whole "
+            f"stage")
 
 
 def rule_pins_to_edge(ctx) -> Iterator[Violation]:
@@ -7003,12 +8556,15 @@ RULES = (
     ('decap_pin_distance', rule_decap_pin_distance),
     ('proximity', rule_proximity),
     ('keep_away', rule_keep_away),
+    ('link', rule_link),
     ('must_lock', rule_must_lock),
     ('legality', rule_legality),
     ('pins_to_edge', rule_pins_to_edge),
     ('array_formation', rule_array_formation),
     ('replicate', rule_replicate),
     ('template', rule_template),
+    ('cover', rule_cover),
+    ('mountable', rule_mountable),
 )
 
 #: Rules whose violations are raised OUTSIDE the `RULES` loop, and so have no
@@ -7036,6 +8592,9 @@ _NON_RULE_SEVERITIES = frozenset({
     # no net on THIS board is a different claim from a distance. WARN by
     # default, like the rule it stands in for.
     'keep_away_unresolved',
+    # #1477, beside `link` for the same reason: a side matching no part is
+    # a different claim from a distance. WARN by default, like the rule.
+    'link_unresolved',
     # #1211, beside `replicate`: a declaration the board cannot resolve (an
     # unknown sheet, instances not wired alike) is a different claim from a
     # distance. WARN by default, like the rule it stands in for.
@@ -7047,6 +8606,14 @@ _NON_RULE_SEVERITIES = frozenset({
     # far from the chip's is a claim about the template itself, which a
     # member exactly at its pose can still break. WARN by default.
     'template_ground_return',
+    # #1443, beside `cover`: a row naming a ref the board does not have, or
+    # a connector on the other face, is a different claim from a standoff
+    # off its place. WARN by default, like the rule.
+    'cover_unresolved',
+    # Raised by `plan_check`, beside `template`: a keep-out that binds a
+    # template member but not its anchor (`template_keepout_findings`). WARN
+    # by default, like the template it concerns.
+    'plan_template_keepout',
     # #959 (#1001). Raised by `grade` itself when `mechanical.json` is read:
     # a part that moved off (or turned away from) its declared mechanical
     # pose. WARN for a move the grade-time anchor already reports at ERROR
@@ -7072,6 +8639,19 @@ _NON_RULE_SEVERITIES = frozenset({
     'plan_fixed_outside_zone', 'plan_zone_overfull', 'plan_zone_crowded',
     'plan_edge_overfull', 'plan_edge_crowded', 'plan_board_overfull',
     'plan_board_crowded',
+    # #1463: a FIXED stranger (a file lock, or a declared pose) already
+    # inside an exclusive zone, which every seed then carries.
+    'plan_fixed_in_exclusive_zone',
+    # #1631: a member with no pose in its zone clear of a fixed or locked
+    # part's courtyard. WARN unless a declared overlap budget is short of
+    # the overlap it is forced into.
+    'plan_zone_on_fixed',
+    # #1468, beside the zone bounds: a member larger than its zone (graded
+    # on its centre, charged the area it still covers), WARN unless set; and
+    # the zone utilisation heuristic, settable only DOWN like
+    # `edge_connector_side` -- area is not a bound, so an error would refuse
+    # a plan that can fit.
+    'plan_zone_member_oversized', 'plan_zone_utilisation',
     # #1054: two exact declarations that the fixed-pose check's own
     # courtyard/pad/hole geometry says cannot both be seated.
     'plan_fixed_pose_conflict',
@@ -7109,6 +8689,7 @@ _SKIP_REASON = {
     'decap_pin_distance': 'the intent declares no decaps.max_pin_distance_mm',
     'proximity': 'the intent declares no proximity claims',
     'keep_away': 'the intent declares no keep_away rules',
+    'link': 'the intent declares no links or chains',
     'must_lock': 'the intent declares no must_lock patterns',
     'legality': 'the intent declares no legality_budget',
     # The rule's exclusion list IS the declaration: without it every
@@ -7117,6 +8698,8 @@ _SKIP_REASON = {
     'array_formation': 'the intent declares no arrays',
     'replicate': 'the intent declares no replicate copies',
     'template': 'the intent declares no templates',
+    'cover': 'the intent declares no covers',
+    'mountable': 'the intent declares no covers',
 }
 
 
@@ -7278,6 +8861,8 @@ def _wants(intent: Intent, rule: str) -> bool:
         return bool(intent.proximity)
     if rule == 'keep_away':
         return bool(intent.keep_away)
+    if rule == 'link':
+        return bool(intent.links)
     if rule == 'must_lock':
         return bool(intent.must_lock)
     if rule == 'legality':
@@ -7293,6 +8878,8 @@ def _wants(intent: Intent, rule: str) -> bool:
         return bool(intent.replicate)
     if rule == 'template':
         return bool(intent.templates)
+    if rule in ('cover', 'mountable'):
+        return bool(intent.covers)
     return True
 
 
@@ -7317,12 +8904,15 @@ _ARMING_KEY = {
     'decap_pin_distance': 'decaps.max_pin_distance_mm',
     'proximity': 'proximity[]',
     'keep_away': 'keep_away[]',
+    'link': 'links[] or chains[]',
     'must_lock': 'must_lock[]',
     'legality': 'legality_budget',
     'pins_to_edge': 'edge_connectors[]',
     'array_formation': 'arrays[]',
     'replicate': 'replicate[]',
     'template': 'templates[]',
+    'cover': 'covers[]',
+    'mountable': 'covers[]',
 }
 
 #: What each rule reports at when the intent's `severity` map says nothing.
@@ -7333,8 +8923,8 @@ _ARMING_KEY = {
 #: table cannot drift from the rules without failing.
 _RULE_DEFAULT_SEVERITY = dict({name: ERROR for name, _ in RULES},
                               assembly_side=WARN, decap_ungraded=WARN,
-                              pins_to_edge=WARN, keep_away=WARN,
-                              replicate=WARN, template=WARN)
+                              pins_to_edge=WARN, keep_away=WARN, link=WARN,
+                              replicate=WARN, template=WARN, cover=WARN)
 
 #: A rule whose severity the intent's map cannot change, because the rule
 #: ignores the map (`rule_pins_to_edge` always yields WARN).
@@ -7361,6 +8951,9 @@ _POLICY_RULES = {
     # #1253. Which nets are noisy and which sensitive is a design fact.
     'keep_away': ('a design relation between two net groups; nothing on the '
                   'board says which nets are noisy and which are sensitive'),
+    # #1477. How close two parts of a design must sit is a design decision.
+    'link': ('a design relation between two sets of parts; nothing on the '
+             'board says how close they must sit'),
     # #1211. The board says which instances are siblings; that one of them
     # is the TEMPLATE the others copy is a design decision.
     'replicate': ('a design decision about which sheet instance is the '
@@ -7370,6 +8963,14 @@ _POLICY_RULES = {
     'template': ("an arrangement read from a part's datasheet; the board says "
                  'which parts are wired to the chip, not where its datasheet '
                  'puts them'),
+    # #1443. A card's underside depends on the socket and on the card fitted.
+    'cover': ('a body a connector carries, read from its datasheets; the board '
+              'says where the connector is, not which card it takes or how '
+              'low that card reaches'),
+    # #1504. Whether that body can be mounted follows from the same rows.
+    'mountable': ('a body a connector carries, read from its datasheets; the '
+                  'board says where the connector is, not which card it takes '
+                  'or how it goes in'),
 }
 
 
@@ -7396,10 +8997,40 @@ def _brief_claims(rule: str, brief_fragment) -> List[str]:
         return [str(k.get('rule')) for k in frag.get('keep_away') or ()]
     return []
 
-#: Part classes whose presence makes the edge rules applicable. Strict on
-#: purpose: `connector_affinity` (a header, a JST) makes no edge claim, and
-#: counting it would make the edge rules applicable on nearly every board.
+#: Part classes that claim an edge by themselves.
 _EDGE_CLAIM_CLASSES = ('edge_receptacle', 'edge_actuator')
+
+
+def _edge_rule_parts(pcb_data) -> Tuple[List[str], List[str]]:
+    """`(claimants, connectors)`: the parts that classify as edge receptacles
+    or actuators, and the CONNECTOR-FAMILY parts beside them (#1610) -- class
+    `connector_affinity`, or a part with pads and a connector reference
+    (`CONN_PREFIX_MED`) that `classify_part` leaves without a class.
+
+    A connector of the second list makes no edge claim (a header can sit
+    inside a board), but whether it needs one is a design fact the board file
+    does not carry: a right-angle cable connector does, and a jack named only
+    by its part number classifies as nothing. So the roster owes the edge rule
+    for them too, and names them, rather than reading "not applicable" on a
+    board whose cable connectors all need an edge."""
+    from .part_class import CONN_PREFIX_MED, _prefix, classify_part
+    from .roles import _CONNECTOR_FP_ROLES, infer_role
+    claim, conn = [], []
+    for r, fp in sorted((pcb_data.footprints or {}).items()):
+        name = classify_part(fp, r).name
+        if name in _EDGE_CLAIM_CLASSES:
+            claim.append(r)
+        elif name == 'connector_affinity':
+            conn.append(r)
+        elif (name is None and _prefix(r) in CONN_PREFIX_MED
+              and non_aperture_pads(fp)):
+            # The prefix is convention only, and `X` names crystals too: a
+            # footprint name that says what else the part is outranks it.
+            role = infer_role(fp, r, None)
+            if (role['source'] != 'footprint'
+                    or role['role'] in _CONNECTOR_FP_ROLES):
+                conn.append(r)
+    return claim, conn
 
 
 def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
@@ -7427,15 +9058,21 @@ def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
                        "none, and the board file has none this intent can "
                        "grade")
     if rule in ('edge_connector', 'pins_to_edge'):
-        from .part_class import classify_part
-        refs = sorted(r for r, fp in (pcb_data.footprints or {}).items()
-                      if classify_part(fp, r).name in _EDGE_CLAIM_CLASSES)
-        if not refs:
-            return False, ("no part classifies as an edge receptacle or "
-                           "actuator, so nothing has an edge to claim")
-        return True, (f"{len(refs)} part(s) classify as edge receptacles or "
-                      f"actuators ({', '.join(refs[:6])}"
-                      + (', ...' if len(refs) > 6 else '') + ")")
+        claim, conn = _edge_rule_parts(pcb_data)
+        if not claim and not conn:
+            return False, ("no part classifies as an edge receptacle, "
+                           "actuator or connector, so nothing has an edge "
+                           "to claim")
+        # Every ref is named: these are the parts the author must answer
+        # for, one by one.
+        why = []
+        if claim:
+            why.append(f"{len(claim)} part(s) classify as edge receptacles "
+                       f"or actuators ({', '.join(claim)})")
+        if conn:
+            why.append(f"{len(conn)} connector-family part(s) whose edge, if "
+                       f"any, only a declaration can say ({', '.join(conn)})")
+        return True, '; '.join(why)
     if rule in ('decap_distance', 'decap_ungraded'):
         # tethered + beyond-radius is every cap with an IC on its rail. The
         # SPLIT between the two moves with the poses; the SUM does not, so
@@ -7708,6 +9345,12 @@ class GradeResult:
     # withheld key was a bare `continue` in rule_legality and the run printed
     # "PASS: N rules ran, no violations" with overlap unmeasured.
     budget_abstained: Dict[str, str] = field(default_factory=dict)
+    #: #1420: withheld keys the plan ANSWERS with `dispositions.withheld.<key>`
+    #: ({key: the plan's why}). Not graded either, but acknowledged on
+    #: purpose, so they are not an absent verdict: they leave `budget_abstained`
+    #: and `not_graded`, and ride here so the wire still says what stayed
+    #: ungraded.
+    budget_dispositioned: Dict[str, str] = field(default_factory=dict)
     #: #712: the along-edge position of every declared edge connector, taken
     #: whether or not anyone declared a claim about it. Advisory, like the
     #: `health` block -- a measurement, never a verdict.
@@ -7731,6 +9374,10 @@ class GradeResult:
     #: Every declared template's members' drift from their template poses,
     #: passing ones included. Empty when the intent declares none.
     template_measured: List[Dict[str, object]] = field(default_factory=list)
+    #: #1443: every declared cover's standoffs against the lengths it gives
+    #: them, passing ones included. Empty when the intent declares none.
+    cover_measured: List[Dict[str, object]] = field(default_factory=list)
+    mount_measured: List[Dict[str, object]] = field(default_factory=list)
     #: #1051: every declared array's formation measurement, formed or not,
     #: with the members its pin order could not place. Empty when no array
     #: is declared.
@@ -7801,8 +9448,12 @@ class GradeResult:
         out = {}
         if self.budget_abstained:
             out['budget_abstained'] = len(self.budget_abstained)
+        # A rule the plan answers with `dispositions.rules.<rule>` was left
+        # ungraded on purpose (#1420): written down is not absent.
+        _answered = ((getattr(self.intent, 'dispositions', None) or {})
+                     .get('rules', {}))
         _armed = sum(1 for k, r in self.rules_skipped.items()
-                     if not _is_not_asked(k, r))
+                     if not _is_not_asked(k, r) and k not in _answered)
         if _armed:
             out['rules_skipped_armed'] = _armed
         _edge = sum(1 for e in self.edge_seating
@@ -7892,7 +9543,9 @@ def _run_rules(ctx, abstained=None, leave_out=()):
 def _ctx_census(ctx):
     """The ctx's `CourtyardCensus`, built once."""
     if ctx._census is None:
-        ctx._census = legality.CourtyardCensus(ctx.pcb, ctx.pcb_file)
+        ctx._census = legality.CourtyardCensus(
+            ctx.pcb, ctx.pcb_file,
+            declared_heights=ctx.intent.height_declarations())
     return ctx._census
 
 
@@ -8054,7 +9707,7 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
 
     THE GRADE'S GEOMETRY, from the grade's own placement state: the rect
     `rule_zone_containment` and `rule_zone_exclusive` test (courtyard, else
-    pad bbox), never `legality.part_local_bounds`' occupancy, which adds the
+    the estimate place_simple seats the part on, `zone_parts`), never `legality.part_local_bounds`' occupancy, which adds the
     drawn .Fab body -- measured differing by more than 0.05 mm on 29 corpus
     parts (ulx3s U9 by 7 mm), so a satisfied board failed its own grade
     (Phase-4 verifier). A part the state does not carry is graded by neither
@@ -8071,6 +9724,7 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
     if state is None:
         import pose_score
         state = pose_score.make_state(pcb_data, pcb_file)
+    zparts = zone_parts(state, pcb_data, pcb_file)
     for zb in intent.blocks:
         if zb.rect is None:
             continue
@@ -8087,13 +9741,14 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
             # so it can make nothing unsatisfiable either (round-2 verifier:
             # a zone exclusive to a courtyard-less logo refused a plan the
             # grade passed).
-            if not (owners & set(state.parts)):
+            if not (owners & set(zparts)):
                 continue
             for ref in blocks.get(zb.name, ()):
-                if ref in owners:
+                # A container is no stranger (#1463), as in the grade.
+                if ref in owners or ref in state.container_refs:
                     continue
                 fp = (pcb_data.footprints or {}).get(ref)
-                sp = state.parts.get(ref)
+                sp = zparts.get(ref)
                 if fp is None or sp is None:
                     continue
                 if za.side and sp.side != za.side:
@@ -8345,6 +10000,190 @@ def edge_oversubscribed_findings(intent: Intent, pcb_data, pcb_file: str, *,
     return out
 
 
+def _fixed_pose_grade_rect(part, f):
+    """`(rect, rot)`: the grade rect of quench part `part` at the DECLARED
+    pose of `fixed_poses[]` entry `f`, on its declared face. Stage 0 seats
+    the pose exactly, so this is where the part will be graded."""
+    rot = f.get('rot')
+    rot = (part.rot if rot is None or rot == 'unknown'
+           else float(rot) % 360.0)
+    fx_, fy_ = float(f['x']), float(f['y'])
+    side = f.get('side')
+    if side in ('F', 'B') and side != getattr(part, 'side', side):
+        # The DECLARED face: the part's courtyard mirrored the way the
+        # placement writer flips a footprint (local y -> -y, the caller's
+        # angle), then turned to the declared rotation -- not its outline on
+        # the face it is on now.
+        from .legality import rotate_local_bounds
+        b0 = part.grade_by_rot[0.0]
+        e = rotate_local_bounds(b0[0], -b0[3], b0[2], -b0[1], rot)
+        return (fx_ + e[0], fy_ + e[1], fx_ + e[2], fy_ + e[3]), rot
+    return part.grade_rect(fx_, fy_, rot), rot
+
+
+def _zone_on_fixed_findings(intent: Intent, ctx, state, blocks, zparts
+                            ) -> List[Violation]:
+    """`plan_zone_on_fixed` (#1631): a zone member with no pose in its zone
+    that clears the courtyards of the parts that will not move -- a
+    `fixed_poses[]` entry at its declared pose and face, a FILE-locked part
+    at its pose. The placer seats neither anywhere else, so every seed ends
+    with that member against it.
+
+    Each fixed courtyard is handed to `zone_pose_feasibility` as a keep-out
+    on its own face, the question `intent_zone_in_keepout` asks of a
+    declared keep-out. A rect search, so the finding is a WARN; it is an
+    ERROR (the zone's and `legality`'s own severity unless this one is set)
+    only when a declared `legality_budget.overlap_area` is short of the
+    overlap the member is forced into on the budget's own geometry: its
+    graded outline must lie in the zone with its tolerance (an anchor-graded
+    or open-sided member is never an ERROR), and the fixed parts' graded
+    outlines cover C of that zone's area Z, so it overlaps them by at least
+    `outline - (Z - C)`.
+
+    Not judged: a fixed part that is a container (no stranger, as in the
+    grade), a pair with a courtyard waiver, a pair either part of which is
+    a height cover (one may sit under the other, #1443), and a project
+    that waives courtyard overlap (the grade prices none)."""
+    out: List[Violation] = []
+    if getattr(state, 'courtyards_ignored', False):
+        return out
+    zoned = [z for z in intent.blocks if z.rect is not None
+             and blocks.get(z.name)]
+    if not zoned:
+        return out
+    fx = {str(f['ref']): f for f in intent.fixed_poses}
+    cont = set(getattr(state, 'container_refs', ()) or ())
+    # what will not move, on the face it will be on: (ref, face, rect, pose)
+    fixed = []
+    for ref, part in sorted(zparts.items()):
+        if ref in cont:
+            continue
+        if ref in fx:
+            f = fx[ref]
+            r, rot = _fixed_pose_grade_rect(part, f)
+            face = f.get('side') if f.get('side') in ('F', 'B') else part.side
+            pose = ((float(f['x']), float(f['y']), rot)
+                    if face == part.side else None)
+            fixed.append((ref, face, r, pose, True))
+        elif ref in ctx.locked:
+            fixed.append((ref, part.side, tuple(part.rect()),
+                          (part.x, part.y, part.rot), False))
+    if not fixed:
+        return out
+    pinned = {f[0] for f in fixed}
+    waived = {frozenset(p_) for p_ in intent.courtyard_waiver_pairs()}
+    planned = _planned_sides(intent, blocks)
+    bounds = getattr(getattr(ctx.pcb, 'board_info', None), 'board_bounds',
+                     None)
+    claimed = claimed_edges(intent)
+    budget = (intent.legality_budget or {}).get('overlap_area')
+    census = None
+    covers = ()
+    for z in zoned:
+        tol = intent.zone_tolerance(z)
+        zr = _inflate(z.rect, tol)
+        for ref in blocks.get(z.name, ()):
+            part = zparts.get(ref)
+            if part is None or ref in pinned or ref in cont:
+                continue
+            face = planned.get(ref, part.side)
+            if census is None:
+                census = _ctx_census(ctx)
+                covers = set(getattr(census.heights, 'covers', None) or ())
+            bound = [{'name': f_ref, 'rect': fr, 'sides': (f_face,),
+                      'allow': ()}
+                     for f_ref, f_face, fr, _pose, _decl in fixed
+                     if f_ref != ref and f_face == face
+                     and frozenset((ref, f_ref)) not in waived
+                     and ref not in covers and f_ref not in covers
+                     and legality.rect_overlap_area(fr, zr) > legality.EPS]
+            if not bound:
+                continue
+            local0 = part.grade_by_rot[0.0]
+            if face != part.side:
+                # the declared face: the courtyard mirrored as the writer
+                # flips it (local y -> -y), as `_fixed_pose_grade_rect` does
+                local0 = (local0[0], -local0[3], local0[2], -local0[1])
+            opened = zone_open_sides(z.rect, bounds, claimed.get(ref))
+            fp = (ctx.pcb.footprints or {}).get(ref)
+            v = None
+            for base in sorted({((fp.rotation if fp is not None else 0.0)
+                                 or 0.0) % 360.0, 0.0}):
+                v = zone_pose_feasibility(z.rect, tol,
+                                          _LocalPart(base, local0, None),
+                                          bound, open_sides=opened)
+                if v['feasible']:
+                    break
+            if v is None or v['feasible']:
+                continue
+            names = list(v['keepouts_freeing'] or v['keepouts_joint']
+                         or v['bound'])
+            forced = None
+            anchor = zone_is_anchor(z.rect, _LocalPart(0.0, local0, None),
+                                    tol)
+            if budget is not None and not anchor and not opened:
+                forced = _forced_fixed_overlap(ctx, census, ref, zr,
+                                               [f_ for f_ in fixed
+                                                if f_[0] in names])
+            over = (forced is not None
+                    and forced > float(budget) + legality.EPS)
+            sev = (_plan_severity(intent, 'plan_zone_on_fixed',
+                                  ('zone_containment', 'legality'))
+                   if over else intent.severity_of('plan_zone_on_fixed',
+                                                   WARN))
+            kinds = ', '.join(
+                f"{n} ({'fixed_poses[]' if n in fx else 'locked'})"
+                for n in names)
+            out.append(Violation(
+                rule='plan_zone_on_fixed', severity=sev, ref=ref,
+                block=z.name,
+                message=(f"block {z.name!r} member {ref} has no pose inside "
+                         f"its zone (tolerance {tol:g}mm), at any of "
+                         f"{len(v['rotations'])} rotations, on {face}.Cu "
+                         f"that clears the courtyard of {kinds}, which the "
+                         f"placer never moves -- so every seed leaves {ref} "
+                         f"against it"
+                         + (f". Fitting it forces at least {forced:.2f}mm2 "
+                            f"of courtyard overlap, over the declared "
+                            f"legality_budget.overlap_area {float(budget):g}"
+                            if over else '')
+                         + ". Move the zone, the fixed pose or the lock"),
+                measured={'zone': list(z.rect), 'tolerance_mm': tol,
+                          'face': face, 'fixed': names,
+                          'reason': v['reason'],
+                          'rotations': [round(r_, 3) for r_ in v['rotations']],
+                          'forced_overlap_mm2': (None if forced is None
+                                                 else round(forced, 4))},
+                expected={'legal_poses': '>= 1'}))
+    return out
+
+
+def _forced_fixed_overlap(ctx, census, ref, zone_rect, fixed):
+    """The courtyard overlap, on the overlap budget's geometry, that member
+    `ref` cannot avoid with the fixed parts `fixed` (`(ref, face, rect,
+    pose, declared)` rows) while its graded outline stays inside
+    `zone_rect`: its outline area less the zone area their outlines leave
+    free. None when either side is not in the budget's universe, or a fixed
+    part is declared on a face other than its board face (its outline there
+    is not measured)."""
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+    mine = _budget_outline_areas(ctx, [ref]).get(ref)
+    if mine is None:
+        return None
+    if any(f_[3] is None for f_ in fixed):
+        return None
+    graded, _x = legality.courtyard_budget_universe(
+        census, [f_[0] for f_ in fixed], {f_[0]: f_[3] for f_ in fixed})
+    if len(graded) != len(fixed):
+        return None
+    zb = box(*zone_rect)
+    shapes = [(g.poly if g.poly is not None else box(*g.rect)).intersection(zb)
+              for g in graded.values()]
+    covered = unary_union(shapes).area if shapes else 0.0
+    return mine[1] - (zb.area - covered)
+
+
 def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                group_sources: Sequence[str] = (),
                clearance: Optional[float] = None,
@@ -8373,6 +10212,13 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
       4c. `plan_fixed_pose_conflict` (ERROR): two declared exact poses whose
           courtyards, pads or holes conflict under the fixed-pose check's own
           geometry.
+      4d. `plan_fixed_in_exclusive_zone` (the zone's own severity unless
+          set, #1463): a FILE-locked non-member already inside an exclusive
+          zone, or a `fixed_poses[]` non-member declared inside one. Every
+          seed carries it; a container is no stranger.
+      4e. `plan_zone_on_fixed` (#1631, WARN; ERROR past a declared overlap
+          budget): a member with no pose in its zone clear of a fixed or
+          file-locked part's courtyard on its face (`_zone_on_fixed_findings`).
       8. `plan_fixed_overlap` (WARN, per pair) / `plan_fixed_overlap_budget`
          (ERROR): two FILE-locked parts whose courtyards overlap on a shared
          face overlap in every placement. The grade counts courtyard overlap
@@ -8381,7 +10227,8 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
          the ERROR fires only when the locked pairs ALONE exceed that budget,
          which no arrangement of the other parts can undo.
       5. `plan_zone_overfull` / `_crowded`: per FACE, the members' areas,
-         locked ones included (courtyard, else pad bbox; a through-hole
+         locked ones included (courtyard, else the estimated one
+         place_simple seats the part on, `zone_parts`; a through-hole
          member's drilled footprint, clipped to its courtyard, charged to the
          far face) against the zone's area.
          Fitting area A into a zone of area Z forces at least A - Z of
@@ -8392,12 +10239,13 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
          With no budget declared, or a project that waives courtyard overlap
          (the grade then prices none), nothing bounds the overlap, and it is
          the WARN (the placer's legality gate never admits an overlap, so it
-         may leave members illegal). An anchor-graded member
-         (`zone_is_anchor`) is not
-         charged.
-         Anchor-graded members and zones holding a waived pair are not
-         charged; a locked member is, because the grade counts its overlap
-         too.
+         may leave members illegal).
+         Zones holding a waived pair are not charged; a locked member is,
+         because the grade counts its overlap too. An anchor-graded member
+         is named (`plan_zone_member_oversized`, #1468) and charged, to the
+         WARN sums only, the zone area its held centre still makes it cover
+         (`_anchor_min_inside`). Below the bounds, `plan_zone_utilisation`
+         (WARN only) is the heuristic past `options.ZONE_FIT_UTILISATION`.
       6. `plan_edge_overfull` / `_crowded`: one edge-claimed part whose PAD
          extent in its own frame, at its best 90-degree rotation, is longer
          than the edge (ERROR); the claimed parts' summed extents against the
@@ -8455,31 +10303,20 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     #     loader refuses a fixed pose on any `edge_connectors` ref
     #     (`_fixed_pose_entries`), so no member graded here has one.
     _fx = {str(f['ref']): f for f in intent.fixed_poses}
+    # #1466: every zone below measures a courtyard-less member on the
+    # estimated courtyard place_simple seats it on (`zone_parts`)
+    _zparts = (zone_parts(state, pcb_data, pcb_file)
+               if any(z.rect is not None for z in intent.blocks) else {})
     for z in intent.blocks:
         if z.rect is None:
             continue
         tol = intent.zone_tolerance(z)
         for ref in blocks.get(z.name, ()):
             f = _fx.get(ref)
-            part = state.parts.get(ref)
+            part = _zparts.get(ref)
             if f is None or part is None:
                 continue
-            rot = f.get('rot')
-            rot = (part.rot if rot is None or rot == 'unknown'
-                   else float(rot) % 360.0)
-            fx_, fy_ = float(f['x']), float(f['y'])
-            side = f.get('side')
-            if side in ('F', 'B') and side != getattr(part, 'side', side):
-                # The DECLARED face: the part's courtyard mirrored the way
-                # the placement writer flips a footprint (local y -> -y, the
-                # caller's angle), then turned to the declared rotation --
-                # not its outline on the face it is on now.
-                from .legality import rotate_local_bounds
-                b0 = part.grade_by_rot[0.0]
-                e = rotate_local_bounds(b0[0], -b0[3], b0[2], -b0[1], rot)
-                r = (fx_ + e[0], fy_ + e[1], fx_ + e[2], fy_ + e[3])
-            else:
-                r = part.grade_rect(fx_, fy_, rot)
+            r, rot = _fixed_pose_grade_rect(part, f)
             if zone_fits_courtyard(z.rect, r, tol):
                 esc, _axis = _rect_escape(z.rect, r)
             else:
@@ -8524,6 +10361,63 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             measured=conflict,
             expected={'conflicts': []}))
     measured['fixed_pose_conflicts'] = fixed_pose_conflicts
+
+    # 4d. #1463: a FIXED stranger already inside an exclusive zone -- a
+    #     FILE-locked non-member at its pose, or a `fixed_poses[]` non-member
+    #     at its declared one. The placer moves neither, so every seed
+    #     carries the grade's `zone_exclusive` finding; this names it before
+    #     the first is placed. A container is no stranger (the grade's own
+    #     exemption), and the grade's per-seed finding stays.
+    _cont = set(getattr(state, 'container_refs', ()) or ())
+    for v in rule_zone_exclusive(ctx):
+        if v.ref in ctx.locked and v.ref not in _fx:
+            out.append(Violation(
+                rule='plan_fixed_in_exclusive_zone',
+                severity=intent.severity.get('plan_fixed_in_exclusive_zone',
+                                             v.severity),
+                ref=v.ref, block=v.block,
+                message=(f"{v.ref} is LOCKED in the board and already inside "
+                         f"an exclusive zone: {v.message}. Nothing the "
+                         f"placer does will move it, so every seed carries "
+                         f"it -- make it a member of {v.block!r}, or move "
+                         f"the zone or the pose"),
+                measured=v.measured, expected=v.expected))
+    for z in intent.blocks:
+        if z.rect is None or not z.exclusive:
+            continue
+        members = set(blocks.get(z.name, ()))
+        if not (members & set(ctx.parts)):
+            continue                    # #797: the grade binds nobody here
+        for ref, f in sorted(_fx.items()):
+            part = _zparts.get(ref)
+            if part is None or ref in members or ref in _cont:
+                continue
+            side = f.get('side')
+            side = side if side in ('F', 'B') else getattr(part, 'side', None)
+            if z.side and side != z.side:
+                continue
+            r, rot = _fixed_pose_grade_rect(part, f)
+            area = legality.rect_overlap_area(r, z.rect)
+            if area <= legality.EPS:
+                continue
+            out.append(Violation(
+                rule='plan_fixed_in_exclusive_zone',
+                severity=intent.severity.get('plan_fixed_in_exclusive_zone',
+                                             ctx.sev('zone_exclusive')),
+                ref=ref, block=z.name,
+                message=(f"{ref}'s fixed pose ({float(f['x']):g}, "
+                         f"{float(f['y']):g}) intrudes {area:.2f}mm2 into "
+                         f"{z.name!r}'s exclusive zone, and {ref} is not a "
+                         f"member. The placer seats the pose exactly, so "
+                         f"every seed carries it -- make it a member, or "
+                         f"move the zone or the pose"),
+                measured={'overlap_area_mm2': round(area, 4),
+                          'pose': [float(f['x']), float(f['y']), rot]},
+                expected={'zone': list(z.rect), 'overlap_area_mm2': 0.0}))
+
+    # 4e. #1631: a member with no pose in its zone clear of what will not
+    #     move -- a fixed pose or a file lock -- on the member's face.
+    out.extend(_zone_on_fixed_findings(intent, ctx, state, blocks, _zparts))
 
     # 8. two FILE-locked parts overlapping -- in every placement there is.
     # #1162: on the reading the budget is graded in (check_assembly's drawn
@@ -8614,7 +10508,7 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     for z in intent.blocks:
         if z.rect is None:
             continue
-        members = [r for r in blocks.get(z.name, ()) if r in state.parts]
+        members = [r for r in blocks.get(z.name, ()) if r in _zparts]
         if any(frozenset((a_, b_)) in waived
                for a_ in members for b_ in members if a_ < b_):
             continue
@@ -8631,8 +10525,9 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         per_face_x = {'F': 0.0, 'B': 0.0}
         _outline = _budget_outline_areas(ctx, members)
         counted = []
+        anchored = []
         for r in members:
-            part = state.parts[r]
+            part = _zparts[r]
             b0 = part.grade_by_rot[0.0]
             w, h = b0[2] - b0[0], b0[3] - b0[1]
             if _anchor_reachable(z, part, tol, _claims.get(r)):
@@ -8643,6 +10538,37 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 # the block DECLARES (`rotation` / `rotation_candidates`),
                 # where a fit at one angle does not forbid the anchor at
                 # another (b6a63ad8 verifier).
+                # #1468: not silently. Its CENTRE is held to the zone, so it
+                # still covers at least the zone area `_anchor_min_inside`
+                # bounds, charged to the WARN sums -- never to the ERROR's,
+                # whose currency is the graded outline this rect bound
+                # would overstate.
+                planned_side = planned_sides.get(r, part.side)
+                inside, inside_c = _anchor_min_inside(
+                    zr, part, _claims.get(r), clr_used)
+                per_face[planned_side] = (
+                    per_face.get(planned_side, 0.0) + inside)
+                per_face_c[planned_side] = (
+                    per_face_c.get(planned_side, 0.0) + inside_c)
+                anchored.append(r)
+                out.append(Violation(
+                    rule='plan_zone_member_oversized',
+                    severity=intent.severity_of('plan_zone_member_oversized',
+                                                WARN),
+                    ref=r, block=z.name,
+                    message=(f"{r} ({w:.2f} x {h:.2f}mm by courtyard) does "
+                             f"not fit zone {z.name!r} ({zr[2] - zr[0]:.2f} x "
+                             f"{zr[3] - zr[1]:.2f}mm with its {tol:g}mm "
+                             f"tolerance) at a rotation it may take, so the "
+                             f"grade holds only its CENTRE in the zone and "
+                             f"the rest may sit outside. It still covers at "
+                             f"least {inside:.2f}mm2 of the zone, charged to "
+                             f"the zone's sum. If the zone is meant to hold "
+                             f"the whole part, make it larger"),
+                    measured={'courtyard_mm': [round(w, 4), round(h, 4)],
+                              'charged_mm2': round(inside, 4)},
+                    expected={'zone_mm': [round(zr[2] - zr[0], 4),
+                                          round(zr[3] - zr[1], 4)]}))
                 continue
             if zone_open_sides(z.rect, ctx.outline_bounds,
                                _claimed5.get(r)):
@@ -8687,7 +10613,10 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                           'members_outline_area_mm2': round(need_x, 3),
                           'zone_area_mm2': round(zarea, 3),
                           'overlap_budget_mm2': overlap_budget,
-                          'members': counted})
+                          'members': counted,
+                          # #1468: charged only the part their centre
+                          # holds inside the zone
+                          'anchor_members': anchored})
         excess = need - zarea
         # The forced overlap the BUDGET sees (Bonferroni on the outlines and
         # far-side clusters it measures).
@@ -8719,7 +10648,8 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 severity=intent.severity_of('plan_zone_crowded', WARN),
                 block=z.name,
                 message=(f"zone {z.name!r} is {zarea:.2f}mm2 and its "
-                         f"{len(counted)} member(s) on {worst}.Cu "
+                         f"{len(counted) + len(anchored)} member(s) on "
+                         f"{worst}.Cu "
                          f"need {need:.2f}mm2 by courtyard: they fit only by "
                          f"overlapping ({excess:.2f}mm2 at least), which the "
                          f"placer's legality gate never admits -- it may "
@@ -8742,6 +10672,29 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 measured={'members_area_with_clearance_mm2':
                           round(per_face_c[face_c], 4), 'face': face_c},
                 expected={'zone_area_mm2': round(zarea, 4)}))
+        elif zarea > legality.EPS \
+                and need >= _opts.ZONE_FIT_UTILISATION * zarea:
+            # #1468: the advisory below the bounds. Zones well short of full
+            # failed to seat every member (60% and 77% courtyard fill, every
+            # seed), and nothing above said so. A HEURISTIC, never an error:
+            # area is necessary, not sufficient, so a zone under the ratio can
+            # still fail and one over it can fit.
+            out.append(Violation(
+                rule='plan_zone_utilisation', severity=WARN, block=z.name,
+                message=(f"zone {z.name!r} is {need / zarea:.0%} covered by "
+                         f"its {len(counted) + len(anchored)} member(s)' "
+                         f"courtyards on {worst}.Cu ({need:.2f} of "
+                         f"{zarea:.2f}mm2) -- past the "
+                         f"{_opts.ZONE_FIT_UTILISATION:.0%} where zones have "
+                         f"been measured failing to seat every member. A "
+                         f"heuristic, not a bound: area is necessary, not "
+                         f"sufficient, so the zone may still fit, and one "
+                         f"under it may not. Give the zone room, or place "
+                         f"one seed before many"),
+                measured={'utilisation': round(need / zarea, 4),
+                          'members_area_mm2': round(need, 4), 'face': worst},
+                expected={'utilisation':
+                          f'< {_opts.ZONE_FIT_UTILISATION}'}))
     measured['zones'] = zone_rows
 
     # 6. edge length -- a single part's PAD extent vs the edge (ERROR); the
@@ -8900,6 +10853,28 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                          f"this is the policy's problem, not the plan's"),
                 measured={'utilisation': util1},
                 expected={'utilisation': '<= 1.0'}))
+    # 9. #1387: a keep-out that binds a template member but not its anchor.
+    #    The anchor's pose is known where it is locked in the board or
+    #    declared (`fixed_poses[]`): then the member's template pose is tested
+    #    against the region itself.
+    def _anchor_pose(ref):
+        f = _fx.get(ref)
+        if f is not None and f.get('rot') not in (None, 'unknown'):
+            return (float(f['x']), float(f['y']), float(f['rot']) % 360.0)
+        if ref in ctx.locked and ref in state.parts:
+            p = state.parts[ref]
+            return (p.x, p.y, p.rot)
+        return None
+    _th = (_ctx_heights(ctx).height if any(
+        k.get('max_height_mm') is not None for k in intent.keepouts) else None)
+    for f in template_keepout_findings(intent, state.parts, _anchor_pose, _th):
+        out.append(Violation(
+            rule='plan_template_keepout',
+            severity=intent.severity_of('plan_template_keepout', WARN),
+            ref=f['ref'], block=ctx.owner.get(f['ref']),
+            message=f"templates[{f['index']}] ({f['anchor']}): " + template_keepout_text(f),
+            measured={k: f[k] for k in ('keepout', 'forced', 'at')},
+            expected={'allow': f['ref']}))
     out.sort(key=lambda v: v.sort_key())
     return out, measured
 
@@ -8944,7 +10919,8 @@ def _grade_ctx(intent: Intent, pcb_data, pcb_file: str, *,
     # never a fixed 0.55 edge clearance
     clr, edge = resolved_floors(pcb_file, clearance, board_edge_clearance)
     state = QuenchState(pcb_data, pcb_file, clearance=clr,
-                        board_edge_clearance=edge)
+                        board_edge_clearance=edge,
+                        declared_heights=intent.height_declarations())
 
     try:
         from .parser import extract_locked_refs
@@ -9003,6 +10979,11 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                  for k, v in (intent.budget_withheld or {}).items()
                  if not _declared_by_hand(intent, str(k))}
     found, ran, skipped = _run_rules(ctx, abstained)
+    # #1420: a withheld key the plan answers (`dispositions.withheld`) is
+    # acknowledged, not an absent verdict.
+    _held_why = (intent.dispositions or {}).get('withheld', {})
+    dispositioned = {k: _held_why[k] for k in abstained if k in _held_why}
+    abstained = {k: v for k, v in abstained.items() if k not in _held_why}
     violations.extend(found)
     violations.extend(exclusive_unsatisfiable(intent, blocks, pcb_data,
                                               pcb_file, state=state))
@@ -9120,11 +11101,14 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         health=health_out,
         rules_run=tuple(ran), rules_skipped=skipped,
         budget_abstained=abstained,
+        budget_dispositioned=dispositioned,
         edge_seating=list(ctx.edge_seating),
         proximity_measured=list(ctx.proximity_measured),
         keep_away_measured=list(ctx.keep_away_measured),
         replicate_measured=list(ctx.replicate_measured),
         template_measured=list(ctx.template_measured),
+        cover_measured=list(ctx.cover_measured),
+        mount_measured=list(ctx.mount_measured),
         array_measured=list(ctx.array_measured),
         edge_connector_evidence=list(ctx.edge_connector_evidence),
         decap_pin_evidence=pin_evidence,
@@ -9384,7 +11368,8 @@ def _decap_mode(v) -> str:
 def _emitted_basis(decaps, budget, conns, blocks,
                    assembly=None, band_default=(),
                    decaps_basis: Optional[str] = None,
-                   pin_basis: Optional[str] = None) -> Dict[str, str]:
+                   pin_basis: Optional[str] = None,
+                   depth_floor=()) -> Dict[str, str]:
     """`{intent path: basis}` for every number the emitter chose: what it
     READ off this board is `observed_baseline`; a constant of this module is
     `derived_default`. The envelope RECT is not here -- it is the outline,
@@ -9410,6 +11395,10 @@ def _emitted_basis(decaps, budget, conns, blocks,
                 out[f"edge_connectors[{c['ref']}].{k}"] = (
                     'derived_default' if k == 'overhang_mm'
                     and c['ref'] in band_default else 'observed_baseline')
+        # #1603: a band floor read off the part's 3D model is this code's
+        # number, whatever the band's ceiling is
+        if c['ref'] in depth_floor and 'overhang_mm' in c:
+            out[f"edge_connectors[{c['ref']}].overhang_mm.min"] = 'derived_default'
     for b in blocks or ():
         for k in ('side', 'zone'):
             if k in b:
@@ -9561,11 +11550,17 @@ def emit_intent(pcb_data, pcb_file: str, *,
     # that leaves the outline, which the emitted intent would then flag against
     # itself.
     cand = {}
+    _zp = None
     for key in sorted(derived):
         members = [r for r in derived[key] if r in parts]
         if len(members) < 2:
             continue
-        rects = [parts[r].rect for r in members]
+        # #1466: on the basis the zone is graded on (`zone_parts`), or a
+        # zone drawn round a courtyard-less member's pad box fails its own
+        # grade
+        if _zp is None:
+            _zp = zone_parts(state, pcb_data, pcb_file)
+        rects = [_zp[r].rect() for r in members]
         cand[key] = (members, (
             max(bounds[0], min(r[0] for r in rects) - zone_pad_mm),
             max(bounds[1], min(r[1] for r in rects) - zone_pad_mm),
@@ -9636,7 +11631,11 @@ def emit_intent(pcb_data, pcb_file: str, *,
                              'bounding box overlaps another block, so no zone '
                              'is claimed. Add one only if this really is a '
                              'contiguous area')
-        if len(sides) == 1:
+        # #1484: a pile's faces are staging too -- make_unplaced keeps each
+        # part's face, so an all-front block is pinned by nothing but where it
+        # was piled, and place_simple reads a block side as a DECLARED face
+        # (a flippable part in it could never flip). Kept for locked members.
+        if len(sides) == 1 and not (_pile and not set(members) <= _pile_locked):
             entry['side'] = sides.pop()
         blocks.append(entry)
 
@@ -9699,13 +11698,25 @@ def emit_intent(pcb_data, pcb_file: str, *,
                                     f'sits fully on-board')
         return None
 
+    # #1531: an observed BAND reads the courtyard `rule_edge_connector`
+    # grades a band on (`band_courtyard_rect`: the estimated one for a part
+    # that draws none), so an emitted band still grades the board it was
+    # read off clean. Whether a part is AT an edge, and which, stay on the
+    # board's own courtyard, as the rule's other conjuncts read it.
+    if _zp is None:
+        _zp = zone_parts(state, pcb_data, pcb_file)
+    erect = {r: (_zp[r].rect()
+                 if _zp.get(r) is not None
+                 and _zp[r] is not state.parts.get(r) else parts[r].rect)
+             for r in parts}
+
     def _band_cap(ref: str) -> float:
         """The largest overhang that can still be READ as a declared band.
 
         An overhang wider than the part itself puts the part entirely off the
         outline, which no spec expresses; below that, `EDGE_BAND_SANITY_MM`
         keeps a small part's legitimate band from being called damage."""
-        rect = parts[ref].rect
+        rect = erect[ref]
         try:
             extent = max(abs(rect[2] - rect[0]), abs(rect[3] - rect[1]))
         except Exception:                                       # noqa: BLE001
@@ -9721,15 +11732,37 @@ def emit_intent(pcb_data, pcb_file: str, *,
     #: default band, the sanity cap, the affinity floor) rather than a band
     #: read off the part -- labelled `derived_default`, not an observation.
     band_default = set()
+    #: #1603: refs whose `overhang_mm.min` is read off their 3D model's body
+    #: at board depth (`heights.depth_past_edge`), likewise `derived_default`
+    depth_floor = set()
+    from .connector_geometry import band_amount, courtyard_overhang_past
+    from .heights import depth_past_edge
     for ref in sorted(parts):
         near = _at_edge_gate.rect_outside_amount(parts[ref].rect)
-        # the overhang the grade reads its band on, at zero margin (#1301)
-        amt = courtyard_overhang(_overhang_geo, parts[ref].rect)
         if _pile and ref not in _pile_locked:
             if near > legality.EPS:
                 _pose_withheld.append(ref)
             continue
         if near > legality.EPS:
+            # #1634: the overhang is a DISTANCE -- the courtyard's farthest
+            # reach past the outline, along the normal of the edge the part
+            # sits on and of the others (`courtyard_overhang_past`, the
+            # reading #1403 gave the grade), at zero margin (#1301) -- never
+            # `courtyard_overhang`'s ranking sum, which adds each off-board
+            # corner of a non-rectangular outline and read a jack 11.93 mm
+            # past the edge as 35.79 once the far corner was chamfered.
+            edge0 = (_nearest_edge(
+                parts[ref].rect, bounds, edge_reach_mm(state),
+                facing=lambda: _part_facing(pcb_data, pcb_file, ref,
+                                            _emit_bodies))
+                if bounds else None)
+            _cy0, _cy0_others = courtyard_overhang_past(
+                _overhang_geo, erect[ref], edge0)
+            amt = max([_cy0] + list(_cy0_others.values()))
+            # An entry declaring NO edge is graded on the summed reading
+            # (`courtyard_overhang_past` with no edge), so its band is read
+            # in that currency: the board it was read off grades it clean.
+            amt_edgeless = courtyard_overhang(_overhang_geo, erect[ref])
             # An OBSERVED overhang above the sanity cap is not a band. Emitting
             # it as one launders the damage into the spec that is supposed to
             # gate the damage's repair -- see EDGE_BAND_SANITY_MM.
@@ -9739,6 +11772,13 @@ def emit_intent(pcb_data, pcb_file: str, *,
             if fp is not None:
                 from .part_class import classify_part, default_band
                 pc = classify_part(fp, ref)
+            # #1634: a part whose own 3D model has body at board depth past
+            # its edge is an edge-mount part whatever its name says: it is
+            # given that edge (and so #1603's floor below), as a class would.
+            _depth_edged = (
+                not over_cap and (pc is None or pc.name not in SEATED_CLASSES)
+                and (depth_past_edge(state.heights, pcb_data, ref, edge0)
+                     or 0.0) > legality.EPS)
             if pc is not None and pc.name == 'mount_hole':
                 # Run-5: never bless a mounting hole's overhang -- the
                 # pattern fit owns hole positions, and an observation entry
@@ -9766,7 +11806,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
                     # that is plausible (under the sanity cap): a suspect
                     # pose's edge is withheld, but a card's fingers 1.7 mm
                     # past the edge are not damage (pcie_backplane J2)
-                    band = default_band(pc.name, fp, 0.0 if over_cap else amt)
+                    band = default_band(pc.name, fp,
+                                        0.0 if over_cap else amt_edgeless)
                     entry['overhang_mm'] = band
                     if band == default_band(pc.name, fp):
                         band_default.add(ref)
@@ -9781,8 +11822,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
                         f'plausible band ({_band_cap(ref):.3f}mm) and is '
                         f'treated as DAMAGE, not an allowance')
                 else:
-                    entry['overhang_mm'] = {'min': 0.0,
-                                            'max': round(amt + 0.5, 3)}
+                    entry['overhang_mm'] = {
+                        'min': 0.0, 'max': round(amt_edgeless + 0.5, 3)}
                 conns.append(entry)
                 declared.add(ref)
                 continue
@@ -9806,7 +11847,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
                                   f'how a 160mm displacement became a 160mm '
                                   f'spec allowance (run 10)')}
                 band_default.add(ref)
-            elif pc is None or pc.name not in SEATED_CLASSES:
+            elif (pc is None or pc.name not in SEATED_CLASSES) \
+                    and not _depth_edged:
                 # Only an edge part claims an edge: the placer seats only
                 # those (`edge_seat.SEATED_CLASSES`), so a cap or a solder
                 # jumper the designer put by the edge, declared on it, failed
@@ -9814,39 +11856,74 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 # The band stays, so the observed pose still grades clean.
                 entry = {'ref': ref,
                          'overhang_mm': {'min': 0.0,
-                                         'max': round(amt + 0.5, 3)},
+                                         'max': round(amt_edgeless + 0.5, 3)},
                          'note': (f'overhang observed at {amt:.3f}mm; not an '
                                   f'edge part '
                                   f'({(pc and pc.name) or "no part class"}),'
                                   f' so no edge is claimed')}
             else:
-                entry = {'ref': ref, 'edge': _nearest_edge(
-                             parts[ref].rect, bounds, edge_reach_mm(state),
-                             facing=lambda: _part_facing(
-                                 pcb_data, pcb_file, ref, _emit_bodies)),
+                entry = {'ref': ref, 'edge': edge0,
                          'overhang_mm': {'min': 0.0,
                                          'max': round(amt + 0.5, 3)}}
-                # #961: an edged entry's band is GRADED on the drawn body
-                # when one can be measured, so a band observed only on the
-                # occupancy reading can come out narrower than the body it
-                # blesses -- a pad-box courtyard 1.6 mm inboard of a flush
-                # body is esp_prog's USB1. Widen to the body in that case
-                # alone, and say so: where the body reads no more than `amt`
-                # the emitted band is unchanged. Either way `max` is at least
-                # the number the rule grades (`body_outside_mm`, or `amt`
-                # itself when no body is measured) plus 0.5, so an edged
-                # entry still grades its band clean by construction. Measured
-                # on the 22 tracked boards: the widening never fires.
-                body = _overhang_geo.measure(ref, entry['edge'])
-                if (body['body_measured']
-                        and body['body_outside_mm'] > amt + legality.EPS):
-                    entry['overhang_mm']['max'] = round(
-                        body['body_outside_mm'] + 0.5, 3)
+                if _depth_edged:
+                    entry['note'] = (
+                        f"an edge part by its 3D model, which has body at "
+                        f"board depth past the {edge0} edge "
+                        f"({(pc and pc.name) or 'no part class'})")
+                # #961/#1607: an edged entry's band is GRADED on the number
+                # `rule_edge_connector` reads -- the drawn body when one can
+                # be measured, else the courtyard's distance past the
+                # DECLARED edge (`courtyard_overhang_past`, #1403) -- and the
+                # other edges' overhang against the same `max`. `amt` is the
+                # courtyard's reading (#1634), which a drawn body can exceed:
+                # a pad-box courtyard 1.6 mm inboard of a flush body. Widen
+                # to the grade's reading in that case alone, and say so:
+                # where it is no more than `amt` the emitted band is
+                # unchanged. Either way `max` is at least every number the
+                # rule grades against it plus 0.5, so an edged entry grades
+                # its band clean on the board it was read off by
+                # construction.
+                _cy, _cy_others = _cy0, _cy0_others
+                graded, _gbasis, body = band_amount(
+                    _overhang_geo, ref, entry['edge'], _cy, 0.0)
+                _gothers = (body.get('other_body_edge_overhang_mm')
+                            if body['body_measured'] else _cy_others) or {}
+                need = max([graded] + list(_gothers.values()))
+                if need > amt + legality.EPS:
+                    entry['overhang_mm']['max'] = round(need + 0.5, 3)
                     entry['note'] = (
                         f"band max from the drawn body's "
-                        f"{body['body_outside_mm']:.3f}mm overhang "
-                        f"({body['body_layer']}), wider than the occupancy "
-                        f"reading {amt:.3f}mm it would otherwise use")
+                        f"{need:.3f}mm overhang ({body['body_layer']}), "
+                        if body['body_measured'] else
+                        f"band max from the courtyard's {need:.3f}mm "
+                        f"overhang past the outline (the reading the grade "
+                        f"takes, #1403), ") + (
+                        f"wider than the courtyard's {amt:.3f}mm it would "
+                        f"otherwise use")
+                # #1603: a part whose own 3D model has body at board depth
+                # (an edge-mount jack the board slides into) must overhang
+                # far enough to keep that body off the board. The band's
+                # floor is how far past the edge it reads now, less how far
+                # the part could move in before check_assembly's gate reads
+                # that body on the board (`depth_past_edge`) -- in the band's
+                # own currency, so the seat puts the part there, never wholly
+                # on the board (a `min` of 0 did). Never above the reading
+                # (this pose grades its band clean), and a number of this
+                # code, not an observation: `derived_default`.
+                past = depth_past_edge(state.heights, pcb_data, ref, entry['edge'])
+                if past is not None:
+                    reading = graded
+                    floor = math.floor(max(0.0, min(reading, reading - past))
+                                       * 1000.0) / 1000.0
+                    if floor > legality.EPS:
+                        entry['overhang_mm']['min'] = floor
+                        depth_floor.add(ref)
+                        entry['note'] = (
+                            (entry['note'] + '; ' if entry.get('note') else '')
+                            + f"band min {floor:.3f}mm from the part's 3D "
+                              f"model: with less overhang its body at board "
+                              f"depth is on the board, which check_assembly "
+                              f"gates (#1603)")
             if declare_classes and pc is not None \
                     and pc.name in ('edge_receptacle', 'edge_actuator'):
                 entry['class'] = pc.name
@@ -10295,6 +12372,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
                            + '): staging poses are not claims'),
                 'withheld': ['edge_connectors[].edge read off a pose',
                              'blocks[].zone',
+                             'blocks[].side read off a face',
                              'legality_budget.oob_count'],
                 'refs_off_board': sorted(_pose_withheld),
                 'kept': ('KiCad-locked parts; a brief / mechanical.json '
@@ -10306,6 +12384,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # merged over it re-labels what it declares.
             'basis': _emitted_basis(
                 _decaps, _budget, conns, blocks, _assembly, band_default,
+                depth_floor=depth_floor,
                 decaps_basis=(_census.get('decaps_basis')
                               if str(_census.get('decaps_basis') or '')
                               .startswith('reference:') else None),
@@ -10506,6 +12585,9 @@ def format_text(r: GradeResult) -> str:
         for v in r.violations:
             tag = 'ERROR' if v.severity == ERROR else 'warn '
             lines.append(f"    [{tag}] {v.rule}: {v.message}")
+    note = derived_severity_note(r.intent)
+    if note:
+        lines.append(f"  note: {note}")
     # #1064: printed, never a rule -- a floorplan PASS says nothing about
     # whether two parts' pads sit on each other, and check_assembly calls
     # that NOT BUILDABLE whatever the nets.
@@ -10570,6 +12652,22 @@ def format_text(r: GradeResult) -> str:
               f"({m['fit_offset'][0]:+.2f}, {m['fit_offset'][1]:+.2f})"
             + (f", {len(m['left_in_place'])} left out by the declaration"
                if m.get('left_in_place') else ''))
+    for m in r.cover_measured:
+        if m.get('state') == 'unresolved':
+            lines.append(f"  covers[{m['index']}] {m['connector']}: not measured -- "
+                         f"{m['reason']}")
+            continue
+        lines.append(f"  covers[{m['index']}] {m['connector']}: body "
+                     + (f"{m['width_mm']:g} wide, {m['start_mm']:+g} to "
+                        f"{m['length_mm']:g}mm along its axis" if m.get('start_mm') else
+                        f"{m['width_mm']:g} x {m['length_mm']:g}mm")
+                     + f", underside {m['underside_mm']:g}mm ({m['source']})"
+                     + ''.join(f"; {s['ref']} {s['along_mm']:.2f}mm along "
+                               f"(declared {s['declared_mm']:g}), "
+                               f"{s['off_line_mm']:+.2f}mm off the line"
+                               + (f" (declared {s['declared_off_mm']:+g})"
+                                  if s.get('declared_off_mm') else '')
+                               for s in m['standoffs']))
     for m in r.template_measured:
         if m.get('state') == 'unresolved':
             lines.append(f"  templates[{m['index']}] {m['anchor']}: not measured")
@@ -10612,7 +12710,7 @@ def format_text(r: GradeResult) -> str:
             lines.append(
                 f"    {e['ref']} {e.get('edge') or '(no edge)'}: overhang "
                 f"{e['overhang_mm']:.4f}mm [{e['overhang_basis']}] "
-                f"{e['overhang_disposition']}; pad copper "
+                f"{e['overhang_disposition']}" + _setback_tail(e) + "; pad copper "
                 + (f"{gap:.4f}mm" if gap is not None else 'unmeasured')
                 + f" vs {cu.get('required_mm')}mm {cu.get('disposition')}"
                 + _facing_tail(e.get('facing')))
@@ -10642,6 +12740,12 @@ def format_text(r: GradeResult) -> str:
                      f"DERIVABLE -- not graded, not passed:")
         for key in sorted(r.budget_abstained):
             lines.append(f"    - {key}: {r.budget_abstained[key]}")
+    if r.budget_dispositioned:
+        lines.append(f"  {len(r.budget_dispositioned)} withheld value(s) "
+                     f"ANSWERED by the plan (dispositions.withheld) -- "
+                     f"ungraded on purpose:")
+        for key in sorted(r.budget_dispositioned):
+            lines.append(f"    - {key}: {r.budget_dispositioned[key]}")
     if r.rules_skipped:
         lines.append(f"  {len(r.rules_skipped)} rule(s) did not run:")
         for name in sorted(r.rules_skipped):
@@ -11101,6 +13205,7 @@ def to_json(r: GradeResult) -> Dict:
         'rules_run': list(r.rules_run),
         'rules_skipped': r.rules_skipped,
         'budget_abstained': r.budget_abstained,
+        'budget_dispositioned': r.budget_dispositioned,
         'edge_seating': r.edge_seating,
         'edge_connector_evidence': r.edge_connector_evidence,
         'decap_pin_evidence': r.decap_pin_evidence,
@@ -11113,6 +13218,8 @@ def to_json(r: GradeResult) -> Dict:
            else {}),
         **({'templates': r.template_measured} if r.template_measured
            else {}),
+        **({'covers': r.cover_measured} if r.cover_measured else {}),
+        **({'mountable': r.mount_measured} if r.mount_measured else {}),
         **({'pad_stacks': r.pad_stacks} if r.pad_stacks is not None
            else {}),
     }
@@ -11141,6 +13248,7 @@ def summary(r: GradeResult) -> Dict:
                                        else r.dark_undispositioned),
         # Not a violation count and not a pass: channels nothing graded.
         'budget_abstained': len(r.budget_abstained),
+        'budget_dispositioned': len(r.budget_dispositioned),
         'edge_seating_rows': len(r.edge_seating),
         'edge_seating_declared': sum(1 for e in r.edge_seating
                                      if e.get('declared')),

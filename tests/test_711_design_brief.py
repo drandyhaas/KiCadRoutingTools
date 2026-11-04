@@ -116,11 +116,11 @@ def test_a_board_brief_document_is_refused_by_kind():
 
 def test_the_undeclarable_keys_are_refused_by_name_with_the_reason():
     """Not "unknown key" -- an author who wrote `height` believes it is being
-    honoured, and nothing in this tree measures z."""
+    honoured, and nothing in this tree grades a board-wide height limit."""
     msg = _rejects(_base(envelope={'rect': [0, 0, 10, 10]}), 'envelope')
     assert 'not declarable' in msg and 'READ from the board' in msg, msg
     msg = _rejects(_base(height={'max_mm': 3.0}), 'height')
-    assert 'nothing in the placement stack measures height' in msg, msg
+    assert 'nothing in the placement stack grades a board-wide height limit' in msg, msg
     assert 'would grade nothing' in msg, msg
     msg = _rejects(_base(outline={}), 'outline')
     assert 'not declarable' in msg, msg

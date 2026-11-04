@@ -71,6 +71,7 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `!GND` | Exclude net named "GND" |
 | `!*VCC*` | Exclude nets containing "VCC" |
 | `"*" "!GND" "!VCC"` | All nets except GND and VCC |
+| `D[3]` | The net named `D[3]` (a pattern that spells a board net is that net, not a `[...]` class, #1641) |
 
 **Note:** Nets starting with "unconnected-" (KiCad pins not connected in schematic) are automatically excluded,
 and so is any net with **a single pad on the whole board** (#1342) -- a spare pin the schematic still names
@@ -78,6 +79,11 @@ and so is any net with **a single pad on the whole board** (#1342) -- a spare pi
 that only blocks routing. This is bga_fanout's #122 rule (`single_pad_net_ids`), applied whatever `--nets`
 says; the run prints `Skipping N single-pad/NC net(s)` and `JSON_SUMMARY` carries `skipped_nc`. Such a net
 counts as neither requested nor failed.
+
+**Selected nothing (#1641):** each `--nets` pattern that selects no pad on the part is printed and listed
+in `JSON_SUMMARY`'s `unmatched`, with its `reason` (`interior` -- the stub escape skips interior pads and `--escape-method underpad` reaches them -- `not_on_part`, `single_pad`, `unconnected`, `no_such_net`); `requested` counts only what a
+pattern selected. A `--nets` list none of whose patterns names a net on the board is refused, exit 2, with no
+board written, as `route.py` refuses one.
 
 ## Options
 
@@ -133,6 +139,35 @@ never the fab floor the ladder was allowed to reach -- and a Default class it
 lowers is recorded and announced by the writeback's descent record (#1160), so
 the next step says so. A run in which nothing escalates writes the run
 clearance, as before. `drc_grazes` is graded at that written floor.
+
+### Net classes: spaced pairwise, and kept (#1529)
+
+The run clearance is the Default class. Every other class is read from the
+board's `.kicad_pro` (the GUI reads the live board's), as `route.py` reads it,
+and every pair the escape tests -- a stub or via against foreign copper, a pad,
+another fanned net's copper, a neighbouring chip's reserved escape room, this
+run's own stubs -- is priced at KiCad's `max(clearance, class A, class B)`,
+which a `.kicad_dru` rule on the layer replaces. A stub escalates (#1328) no
+lower than its own class. The run prints `Netclass clearances for N net(s)
+...` when the board has any.
+
+The writeback then treats the classes as `route.py` does: kept when
+`--clearance-ceiling` is omitted, each capped at `min(class, ceiling)` when it
+is given. A class is never lowered to the clearance the escape ran at, so a
+class whose nets the part does not touch keeps its value. `drc_grazes` is
+graded at the written project's classes too. (`bga_fanout.py` does the same;
+see its README.)
+
+### Class- and type-scoped `.kicad_dru` rules (#1565)
+
+A `.kicad_dru` clearance rule scoped by net class or item type (the #1491
+channel, e.g. `A.NetClass == 'HV' && B.NetClass == 'HV'`) and a track-scoped
+class rule (#735) price every pair the escape tests, through the same readers
+the route steps use (`kicad_dru.install_pair_rule_channels`): the obstacle maps
+stamp foreign copper at the rule, and the pairs above are priced for the two
+items' types, a track rule on a track pair pair-exact. A rule holds at every
+escalation rung. The run prints `.kicad_dru: N class/type-scoped ... clearance
+rule(s) held by this escape (#1565)`; a board with no such rule is unchanged.
 
 ### Under-pad (via-drop) escape — `--escape-method underpad` (issue #164)
 

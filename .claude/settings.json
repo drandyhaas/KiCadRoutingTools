@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch"
+      "WebFetch",
+      "Bash(bash tests/stress/run_board.sh:*)",
+      "Bash(bash tests/stress/run_queue.sh:*)",
+      "Bash(bash tests/stress/run_place_board.sh:*)"
     ]
   }
 }

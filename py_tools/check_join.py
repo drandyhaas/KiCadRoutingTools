@@ -57,13 +57,14 @@ Examples:
                    help='polyline points (x,y,layer) and via positions '
                         '(via:x,y), in order')
     p.add_argument('--width', type=float, default=None,
-                   help="track width in mm (default: the board's Default "
-                        "netclass track_width, else 0.3)")
+                   help="track width in mm (default: the net's own netclass "
+                        "track_width, else the Default class's, else 0.3)")
     p.add_argument('--via-size', type=float, default=None,
-                   help="via outer diameter (default: board netclass, "
-                        "else 0.5)")
+                   help="via outer diameter (default: the net's own netclass, "
+                        "else the Default class's, else 0.5)")
     p.add_argument('--via-drill', type=float, default=None,
-                   help="via drill (default: board netclass, else 0.3)")
+                   help="via drill (default: the net's own netclass, else the "
+                        "Default class's, else 0.3)")
     p.add_argument('--keep-staged', metavar='PATH', default=None,
                    help='also write the staged board (input + candidate) '
                         'here, for inspection in KiCad')
@@ -206,13 +207,25 @@ def main(argv=None):
               f"of this board ({', '.join(copper)})", file=sys.stderr)
         return 2
 
-    width = (args.width
+    # #1499: the net's OWN class first, as route.py routes it
+    # (list_nets.net_track_width_map_by_id), then Default, then the defaults
+    try:
+        from list_nets import read_design_rules, resolve_net_class
+        _dr = read_design_rules(args.board)
+        _own = (_dr.get('classes') or {}).get(resolve_net_class(args.net, _dr)) or {}
+    except Exception:                                        # noqa: BLE001
+        _own = {}
+
+    def _cls(key):
+        v = _own.get(key)
+        return float(v) if isinstance(v, (int, float)) and v > 0 else None
+    width = (args.width or _cls('track_width')
              or board_default_netclass_param(args.board, 'track_width')
              or defaults.TRACK_WIDTH)
-    via_size = (args.via_size
+    via_size = (args.via_size or _cls('via_diameter')
                 or board_default_netclass_param(args.board, 'via_diameter')
                 or defaults.VIA_SIZE)
-    via_drill = (args.via_drill
+    via_drill = (args.via_drill or _cls('via_drill')
                  or board_default_netclass_param(args.board, 'via_drill')
                  or defaults.VIA_DRILL)
 
@@ -271,6 +284,13 @@ def main(argv=None):
             _stage_board(args.board, staged, pcb, net_id, cand_segs,
                          cand_vias)
             if args.keep_staged:
+                # A kept board is a board-mutating step a chain continues
+                # from, so it self-records like copy_board; a pure check
+                # writes nothing and records nothing (#1397). Recorded BEFORE
+                # the write, as every recorder is: the recorder takes back a
+                # command it saw write nothing (#1640).
+                from redo_record import record_invocation
+                record_invocation()
                 shutil.copy(staged, args.keep_staged)
                 from copy_board import SIBLING_EXTS   # ONE list (#711)
                 for ext in SIBLING_EXTS:

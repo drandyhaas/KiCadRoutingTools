@@ -33,6 +33,10 @@ PAIRS = [
     ("SSRXP", "SSRXN"),
     # indexed P/N
     ("FE_CLK_P0", "FE_CLK_N0"),
+    # issue #1456: -P/-N and .P/.N
+    ("/TOP/digital interface/ADC_MISO-P", "/TOP/digital interface/ADC_MISO-N"),
+    ("CLK.P", "CLK.N"),
+    ("Net-(U1-CLK-P)", "Net-(U1-CLK-N)"),
     # USB
     ("USB_DP", "USB_DM"),
     ("USB_DP", "USB_DN"),
@@ -53,7 +57,9 @@ PAIRS = [
 NON_PAIRS = ["GND", "VCC", "CLK", "Net-(R1-Pad1)", "+3V3", "",
              # ordinary hyphenation is not polarity (issue #290 stays narrow:
              # only an underscore-led suffix after the sign qualifies)
-             "3V3-MCU", "+3V3_AUX"]
+             "3V3-MCU", "+3V3_AUX",
+             # #1456: the ref-pin '-' of an auto-name is not a polarity separator
+             "Net-(U1-P)", "Net-(U1-N)"]
 
 
 def run():

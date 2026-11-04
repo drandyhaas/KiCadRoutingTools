@@ -68,7 +68,15 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   (read `pile` and `has_copper` on its `JSON_SUMMARY` line; `poured_nets`
   names the nets a pour already serves) and
   `python3 -X utf8 py_tools/board_context.py <board> --md` (every part's value,
-  pin functions, nets by face, what each cap serves, `CROSSED` pin-order pairs).
+  pin functions, nets by face, what each cap serves, `CROSSED` pin-order pairs,
+  and, from the project's schematic, each sheet's drawn blocks with the notes
+  beside them and the designer's layout notes). It finds the schematic beside
+  the board (`<board>.kicad_sch`); if its `## Schematic` section says none was
+  found and the project has one elsewhere, run it again with
+  `--schematic <root .kicad_sch>`. A part that draws no courtyard is placed
+  on an estimated one (its .Fab body, else silk, else pads, with its pads;
+  the NOTE names each part's basis), so do not synthesize courtyards: a drawn
+  courtyard is authoritative and replaces the estimate.
 - **Read `references/part-roles.md` before you judge what a part is.** A
   prefix, a footprint name or pins named IN/OUT mislead: an RF amplifier
   reads as a regulator, a crystal's load cap as a decap.
@@ -82,6 +90,16 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   from it (next section). If the user states a mechanical fact (a
   connector's edge, a mounting-hole position), it is a requirement, and the
   verifier checks it.
+- **The user's placement intent outranks the priors.** The human-board
+  numbers in `references/placement-lessons.md` and the defaults in this
+  skill (where a regulator goes, which group a part joins) are what to do
+  when nobody says. When the user states where something goes ("each
+  regulator beside the parts it supplies", "filter, then regulator, then
+  loads"), follow the user, and write it so the placer can act on it (a
+  group, a `near`, a zone in §3.4c, a distance as in §3.3: a `proximity`
+  row inside one group, a `links[]` row across groups). In REPORT.md, name
+  each place where the user's intent and a prior differed and which you
+  followed.
 - **Ask for the EMC rows the board cannot state.** Run
   `python3 -X utf8 py_tools/board_context.py <board> --json -o <ctx.json>`
   and read `emc_roles.roles`: each converter, crystal, oscillator and ESD
@@ -90,8 +108,10 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   pad edge, and a ready `proximity` row with `max_mm` left null. Ask the
   user for the limits (crystal to its load pins, input cap to the
   regulator's VIN and PGND, inductor to SW, ESD array or diode to its
-  connector), put the rows in the brief's or the intent's `proximity`, and
-  report which you were given. Ask
+  connector, and each row of the schematic's layout notes, §3.3), put each
+  row whose two parts are in one group in the brief's or the intent's
+  `proximity`, and each row across groups in the intent's `links[]`
+  (§3.3), and report which you were given. Ask
   in the same breath about `emc_roles.keep_away`: per crystal or oscillator,
   a rule keeping its clock nets away from every switch node, with its
   measured gap and a `brief_row` ready to paste into the brief's
@@ -99,6 +119,36 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   it from net names. A converter you give a datasheet template (§3.5) needs
   only the `keep_away` rows: the template places its support parts, so do
   not ask for their limits.
+- **Ask about the enclosure.** The board file cannot say whether it goes in
+  an enclosure, under a lid or a shield can, or has a height limit over an
+  area, so ask, in the same breath, and record each answer where a grade
+  reads it (`docs/design-brief.md` has each row):
+  - **a height limit over an area** (a lid, a can's roof, an enclosure wall
+    sloping over one corner): a keep-out with `max_height_mm` in the intent's
+    `keepouts[]` (the intent's `min_reader` 15 or more). A part whose height
+    is known and no more than that may stand in it; every other part is kept
+    out unless its `allow` names it;
+  - **a part's height nothing gives** (no 3D model), or the room under a
+    module drawn solid to the board: the brief's `heights[]` (`ref`,
+    `height_mm` or `underside_mm`, `source`), from its datasheet only;
+  - **an area no part may use** (a rib, a battery well, a boss's screw
+    head): the brief's `keepouts[]`, with `allow` naming a part that belongs
+    there;
+  - **a boss or mounting hole the enclosure fixes**: its pose, as a brief
+    `fixed[]` row with a `pose`, or placed and locked (§3.1);
+  - **parts that must sit inside a can, or outside the enclosure's reach**:
+    regions, §3.4c; a card or module over the board: a cover, §3.4b.
+
+  In REPORT.md, say what you asked and what was declared from each answer,
+  or that nobody was there to ask.
+- **In `full` mode, ask whose design rules the project holds**, in the same
+  breath: the routing that follows depends on it
+  (`.claude/skills/plan-pcb-routing/SKILL.md`, Step 4, "Whose rules does the
+  project hold?"). Aspirational stock rules route at the fab floor with the
+  floor writeback on; the user's own product rules route at the board's own
+  minimums with `--escalation board` (or `off`) and `--no-fix-drc-settings`,
+  and every descent below them is reported as a decision. Record the answer
+  in REPORT.md.
 - **Nothing is sacred except a KiCad lock.** `place_simple` re-places every
   part the board does not lock (`(locked yes)`) or the intent does not seat
   (`fixed_poses[]`). For a from-scratch experiment with everything off the
@@ -159,6 +209,17 @@ python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --emit-inte
 - `place_simple` reads the intent's `proximity` claims, keep-outs, zones,
   declared faces, `fixed_poses`, the edges of `edge_connectors[]` and the
   decap limits it grades at error.
+- **Answer every `OWED:` line** of the emit's rule roster. Each names a rule
+  the board says applies and nothing arms, with the key that arms it
+  (`OWED: zone_containment: ... Arm it with blocks[].zone ... or write why
+  it does not: dispositions.rules.zone_containment`). Arm it only from a
+  requirement (the user's, the brief's, a datasheet's): a region the user
+  gives (§3.4c), a decap limit, an edge. Otherwise write why it does not
+  apply, in one line, under the intent's `dispositions.rules.<rule>` (a
+  withheld budget key under `dispositions.withheld.<key>`), such as
+  `"zone_containment": "no region was given; groups place this board"`.
+  Never invent a limit to clear one. The roster prints again with every
+  `check_floorplan --intent`; list your answers in REPORT.md.
 - **Waive the locked parts' own overlaps**, right after the intent exists:
 
   ```bash
@@ -194,10 +255,41 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
 - **Every part the board does not lock (and the intent does not seat in
   `fixed_poses[]`) is in exactly one group.** Fixed parts may be listed too:
   a connector in its interface's group anchors it.
-- **Group by function, not by sheet or by net count:** the power entry and its
-  conditioning, the core and its decaps, its clock, an interface with its
-  protection and series parts, signal conditioning, the user interface (LEDs
-  with their resistors, buttons). Five to eight groups suit a small board.
+- **Group by function:** the power entry and its conditioning, the core and
+  its decaps, its clock, an interface with its protection and series parts,
+  signal conditioning, the user interface (LEDs with their resistors,
+  buttons). Five to eight groups suit a small board. Never group by net count.
+- **Start from the schematic when `board_context` read one** (its
+  `## Schematic` section). The designer drew the functions there:
+  - **Sheets are the first cut.** Take each sheet as a group, put a small
+    sheet in the group it serves (a connector sheet with its interface), and
+    split a sheet that holds several functions (an MCU sheet with USB and
+    LEDs) along its blocks.
+  - **Keep each drawn block in one group.** A block is the parts drawn
+    together (a regulator with its caps, a crystal with its load caps, an LED
+    with its resistor). Split one only for a reason you write in the group's
+    `why`, such as a cap drawn beside the wrong chip.
+  - **Read the notes.** A note beside a block ("ESP32 3V3 LDO", "Buck
+    Converter (12v -> 5v)") says what the block is: use it for the group's
+    name and `why`, and for the template candidates (a buck or boost note
+    names a switching stage).
+  - **A layout note is the designer's own proximity claim** ("C11 close to
+    pin45"). Write each row the `### Layout notes` subsection prints, with a
+    `why` quoting the note, and ask the user for each limit along with the
+    EMC rows (§2). Where it goes depends on the groups, as for every
+    distance (the fold, below): both parts in one group, the intent's
+    `proximity[]`; across groups, a `links[]` row (`a` the subject, `b` its
+    partner), which keeps both groups. A link measures courtyard to
+    courtyard and has no `pads`, so a note at another group's pin is held
+    only to that part. When the subject belongs with that pin's part (a
+    cap at its supply pin), move it into that group and write the
+    `proximity[]` row with `pads` instead. With nobody to ask, use
+    2.0 mm for a part named at a pin (a row with `pads`) and 5.0 mm for a
+    part named near a part. A note that does not name its subject lists the
+    parts drawn nearest it: write its row only when the note, those parts
+    and the nets leave no doubt which two parts, and which pin, it means.
+    Never write a row marked STALE: the note names a part that is not on
+    that pin's net. Name the rows you added, and their limits, in REPORT.md.
 - **A cap belongs with the IC whose supply pin it decouples.** A load or RC
   cap belongs with its crystal or its button.
 - **Crystals are claimed for you.** `place_simple` claims each passive
@@ -206,9 +298,17 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
   into the IC's group. The rest of their clock group follows
   only when the crystal is that group's `anchor`; any other member stays in
   the clock group. Every intent `proximity` claim works the same way: the
-  claimed part joins its partner's group. The emitted intent carries these
+  claimed part joins its partner's group, and a claimed anchor takes its
+  whole group along; claims chain, so one row can fold several groups into
+  one. A group so emptied is dropped with its own `near`, `apart` and
+  `edge`: `check_groups` WARNs once for each, naming the group that absorbs
+  it and the hints lost, and `place_simple` says it once per run and in
+  `judge.json`'s `fold`. If the group should stay, write the distance as a
+  `links[]` row (below) instead of a `proximity` row, or claim a member
+  that is not its anchor. The emitted intent carries these
   crystal claims as `proximity[]` rows (`context.source`
-  `placement.crystals`, `max_mm` 8.1 and 2.2), graded as warnings; edit a
+  `placement.crystals`, `max_mm` 8.1 and 2.2, each plus the size of the
+  crystal pad it measures from), graded as warnings; edit a
   row's `max_mm` to loosen or tighten that loop, or drop the `source` to
   make it an error-graded claim. Each limit is priced, not guaranteed: a
   seed can leave a crystal past it, so read the grade's `proximity`
@@ -216,10 +316,64 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
 - **Hints, each a soft term of the objective:** `near` (a list of groups to
   sit against), `apart` (groups to keep 3 mm from), `edge` (`N`/`S`/`E`/`W`,
   a group that belongs on a board side; a group holding an edge connector
-  needs none). **Do not send the power group to an edge**: on 437 human boards
-  the regulator sits by its power entry -- say `near` its entry's group.
+  needs none).
+- **`near` is a sum of pulls, never a "between".** Each entry is one
+  independent term: the gap between the two groups' nearest courtyards
+  (Manhattan, nothing once they touch) times `--near-weight` (default 2 per
+  mm), added to every other term; a pair both groups name counts once.
+  Several entries are a vote: `near: [filter, load_a, load_b, load_c]`
+  sends the group to the loads, which outnumber the filter, and with more
+  than two it goes where most of them are. To put a stage between its entry
+  and its loads, name only the entry: its output net already pulls it toward
+  the parts it feeds (at `--rail-weight` 0.3 per mm when that net is a rail
+  -- ground, or more than a quarter of the parts and more than six -- else
+  at a signal's full weight). On a large board that rule leaves every
+  supply but ground at signal weight; list the supplies that are routed wide
+  or poured in the intent's `rails[]` (`{"nets": [...]}`, net-name globs;
+  `min_reader` 18) and they are priced as rails. When the user gives a distance or an order
+  ("the filter within 8 mm of the input", "filter, then regulator, then
+  load"), declare it in the intent as a link -- `links[]` (`a`, `b`: the two
+  sets of parts, `max_mm`) or `chains[]` (`stages` in order, `max_mm` one or
+  per link): free within the distance, priced past it, the groups never
+  merged (a `proximity` row across groups would merge them; `min_reader`
+  17). For a stage that must stand in one area, the user's region is a zone
+  (§3.4c).
+- **Where a regulator goes** (the one rule; `references/part-roles.md` and
+  the lessons point here):
+  - **A regulator that makes a rail for several groups** is in the power
+    group, which sits by its power entry, between the entry and the loads:
+    on the human boards two conditioners in three sit nearer the entry than
+    the main IC does, and no nearer the outline than an average part. Say `near` its
+    entry's group, and only that; never its loads' groups (above), and never
+    an `edge`.
+  - **A regulator that feeds one consumer** joins that consumer's group: a
+    point-of-load LDO whose output feeds one chip or one analog section, DDR
+    termination (VTT) with its DRAM, a voltage reference with the ADC or
+    comparator it feeds. It joins the group, not the chip: humans keep a
+    single-load LDO's output pin about 12 mm from its load, so write no
+    `proximity` row pulling it onto the chip.
 - **Faces:** give a group a `side` (`F`/`B`) only to put all its parts on that
   face; without one each part keeps its face.
+- **`flippable`: the group's parts that may stand on the back.** A part stays
+  on the front unless place_simple needs the room for it. When a part that
+  is not flippable has no room, its group's flippable parts nearest where it
+  wants to be go to the back instead, only enough to free its area. List one only when
+  the board is assembled on both faces: set the intent's `assembly.sides` to
+  `"both"` (the emitter writes what the pile shows, `"F"`, which forbids
+  every flip). On the 171 of 437 human boards that use both faces (share of
+  boards with any on the back, of those that have the kind):
+  - **list** SMD passives of any size (85% of boards put some on the back),
+    SMD diodes (68%), SMD transistors (55%), resistor networks, small SMD ICs
+    (SOT, SOIC, QFN under 50 mm2 of courtyard, about 50%), and internal SMD
+    connectors: FPC (8 of 17), card slots (10 of 22), wire-to-board (10 of 25);
+  - **do not list** big parts (SMD over 150 mm2: 31%; over 500 mm2: 1 of 27),
+    BGAs (5 of 32), QFPs (6 of 30), modules (4 of 16), through-hole parts
+    (passives 3 of 26, DIP 0 of 11, switches 8 of 47), LEDs and switches the
+    user sees or presses, a switching stage's inductor and loop caps (the
+    loop stays on one face), and every connector facing the outside (barrel
+    0 of 14, RJ45 0 of 11, HDMI 0 of 9, USB 1 of 13 SMD);
+  - two-layer boards use the back far less (73 of 230, against 69 of 165
+    four-layer), so list little there.
 - **Name the template candidates** in the group that holds each one, as
   `"templates": [{"chip": "U2", "kind": "switching stage", "why": "buck
   converter; its datasheet's layout figure"}]`. §3.5 copies each one's
@@ -285,8 +439,10 @@ python3 -X utf8 py_tools/check_groups.py wk/<run>/fixed.kicad_pcb --groups wk/<r
 
 It reads the intent the way `place_simple` will: seated parts are fixed,
 and it names each claimed part that will follow its partner into the
-partner's group. The groups it lists and checks are the file as written, so
-a follower still shows in the group you gave it. Fix every ERROR (a part
+partner's group. Its group table shows the groups as `place_simple` will
+place them: a follower is listed in its partner's group, marked `(from
+<group>)`, and a group the claims empty reads `dissolved into <group>`. Its
+other checks (links, pulled parts, decaps) read the file as written. Fix every ERROR (a part
 in no group or in two, a ref not on the board) and
 read every WARN: a part with more signal links to another group may belong
 there; a decap "exempt" because no IC of its group carries its rail is right
@@ -300,16 +456,23 @@ python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --intent wk
 ```
 
 For each edge connector, read its edge, its facing (`facing ... pass`, or
-`facing abstained (...)` when its body names no face) and the group you gave
-it. Then decide, from the part's function and its datasheet:
+`facing abstained (...)` when its body names no face, `facing exempt (...)`
+when its class is not graded for a face) and the group you gave it. Then decide, from the part's function and its datasheet:
 
 - **The edge, and roughly where along it** when that matters (a USB or
   barrel jack where the enclosure opens, a debug header out of the user's
   way): `edge`, and `along_edge_band` as fractions of the edge.
 - **The mating face of a connector whose facing abstained** (a side-entry
-  JST drawn symmetric about its pads): find the side its opening is on in the
-  datasheet's PCB-layout drawing and write `mating_face` (`+x`/`-x`/`+y`/`-y`,
-  the footprint's own frame). The side of its solder tabs, away from the
+  JST drawn symmetric about its pads) **or is exempt** (a side-push switch
+  of class `edge_actuator`, whose actuator points one way and is graded only
+  once a face is declared) **or reads `weak` on an edge receptacle**
+  (`facing north [courtyard+fab, weak] pass`: a weak face is read off where
+  the body sits on its pads, and the pad layout can set it wrong -- KiCad
+  10's RJ45_Amphenol_RJHSE5380 reads its mouth into the board): find the
+  side its opening is on in the datasheet's PCB-layout drawing and write
+  `mating_face` (`+x`/`-x`/`+y`/`-y`, the footprint's own frame). A declared
+  face outranks a weak reading (never a strong one), and the grade warns
+  where the two disagree. The side of its solder tabs, away from the
   contact row, is a hint to check against the drawing, not a rule: it is
   wrong on 3 of 50 side-entry connectors in the corpus.
 - **The side a vertical header's cable leaves.** A `Vertical` header mates
@@ -328,14 +491,20 @@ it. Then decide, from the part's function and its datasheet:
   not 12.70, and the module no longer fits a breadboard.
 - **How far an edge receptacle reaches past the edge.** The seat puts a
   receptacle flush with the low end of its `overhang_mm` band, which the
-  emitter writes as 0. Where the datasheet's PCB-layout drawing puts the
+  emitter writes as 0 -- unless the part's own 3D model has body at board
+  depth (an edge-mount jack the board slides into), when it writes the
+  overhang that keeps that body off the board (`derived_default`, #1603;
+  check_assembly gates such a body inside the outline). Where the
+  datasheet's PCB-layout drawing puts the
   board edge inside the body (a USB-C or barrel jack's shell past the edge),
   write that distance as `overhang_mm.min`, `max` at or above it. Seated
   flush instead, ch32v003_usb's USB-C J1 sat 0.88 mm deeper than its drawing
   and the board routed with about 15 mm more copper a seed. The band is
   read at zero margin, on the drawn body or else the courtyard (#1301): an
-  overhang of x reads x, so write the distance the part reaches past the
-  edge and never add the board's edge margin to it. check_floorplan's
+  overhang of x reads x past the DECLARED edge (one distance along that
+  edge's normal; what the part does past another edge is reported on its own
+  and bounded by the band's maximum, #1403), so write the distance the part reaches past the edge and never add
+  the board's edge margin to it. check_floorplan's
   `overhang_basis` says which of the two it read.
 
 Write these into the intent's `edge_connectors[]` entries, the rows into
@@ -346,6 +515,145 @@ wrong with `place_pose ... set ... lock` as in §3.1. Run check_floorplan again:
 no `edge_connector` error, and no `edge_oversubscribed` warning (an edge
 declared more connectors than fit on it together: move one to another edge,
 drop a declaration, or widen a band now, before placing).
+
+### 3.4b Covers (your judgement)
+
+A card in a socket (M.2, mini-PCIe), a module on a mezzanine or stacking
+connector (a compute module) or a shield on headers stands over the board.
+Parts may go under it only where they fit, and the board does not say how
+low it reaches, so declare it. Without a declaration nothing judges the area
+under a card, and a tall part can be placed there.
+
+1. **Find each socket or stacking connector that takes a card or module**,
+   from its footprint, value and datasheet, and run:
+   ```bash
+   python3 -X utf8 py_tools/cover_facts.py wk/<run>/fixed.kicad_pcb --refs J3
+   ```
+   Without `--refs` it lists every connector of ten pads or more and every
+   part whose models raise a body. Per connector it prints its height, each 3D model it names that does not
+   resolve, what its resolved models raise over the board (a card or module
+   model) with that model's underside, the standoffs and mounting holes on
+   its axes (distance along the axis and off it), and the parts under the
+   raised extent now. Facts, not decisions. On a pile (a from-scratch
+   run's `fixed.kicad_pcb`) it says so first and withholds the standoff
+   distances and the parts under the extent unless both parts are locked:
+   staging poses decide nothing, so read the standoff's distance off the
+   connector's datasheet or drawing (step 3).
+2. **The underside, from the datasheets.** The card's lowest point above the
+   board is the socket's card height (or the stacking height) less what
+   hangs below the card: nothing for a single-sided card, its bottom-side
+   height for a double-sided one. A measured card model draws ONE card
+   type: weigh its underside against the datasheets, never take it as the
+   answer. When it cannot be established, declare the conservative value
+   (the lowest card the socket takes) and say so in the hand-back.
+3. **Choose the standoff for each card length** the board takes (the facts
+   list each with its distance), and the card's width and reach.
+4. **Write the row** into the design brief's `covers[]`
+   (`<board>.design-brief.json` beside the board, which travels with it and
+   compiles into the intent on every emit; re-emit, §3.2): `connector`, `side`,
+   `axis_deg` (the facts' axis), `width_mm`, `underside_mm`, `length_mm`
+   (how far the body reaches from the connector's origin), `offset_mm` (the
+   standoff's "off" when the card's centre line misses the connector's
+   origin), `standoffs` (each `ref` with `length_mm`, the facts' distance
+   along, and `off_mm` when it is off the centre line -- a module screwed
+   down at two far corners), `removable` and `source` (the datasheets and
+   figures). From the same drawings give `top_mm` (the body's own top, so a
+   card under a module is judged against it) and, for a card that goes in
+   at an angle (SO-DIMM, M.2), `insertion` (`angle_deg`, and `travel_mm`
+   when it slides in before it turns down). A module screwed down through
+   its own holes, with no standoff on the board yet, gives `holes` (each
+   `length_mm`, `off_mm` and `diameter_mm`, from its drawing) so
+   `mountable` checks what stands at each hole site. The emitted intent then carries
+   it with `min_reader` 15 (21 with any of these three, 22 with `holes`). **`removable`, case by case:** true when the body comes
+   off in service -- a card in its socket, a module on a connector it can be
+   pulled from -- so a test point under it can still be probed with it out;
+   false when it stays (soldered, glued, a fixed shield or one the enclosure
+   holds down). Say which and why in the row's `source`.
+5. **Run check_floorplan again** (§3.4): no `cover`, `cover_unresolved`
+   or `mountable` warning. A `cover` warning names a standoff not where the
+   row puts it: fix the row, or move the standoff. A `mountable` warning
+   names why a body cannot go on (a standoff off the board, a part too tall
+   under it, another body in its way, a part, pad or track at one of its
+   hole sites); check_assembly prints the same per
+   cover, with the order the cards go in.
+
+`place_simple` then holds each standoff at its length from the connector.
+A standoff that cannot move (a locked boss, one at a declared pose) holds
+the connector instead: each seed seats it at the next legal quarter turn
+that puts the standoff at its length, and refuses before placing when no
+turn is legal. The `cover` rule is a warning unless the intent's `severity`
+makes it an error. `place_simple` also
+admits a part under the body only when its height is known and its top is
+0.5 mm or more under the underside; check_assembly gates one that is not. A
+part whose height nothing gives (no 3D model, no IPC-7351 name) is never put
+under it: declare its height in the brief's `heights[]` (`ref`,
+`height_mm`, `source`) only from its datasheet, never a guess. A module whose 3D model is drawn
+solid down to the board takes its datasheet's underside the same way
+(`underside_mm`). An enclosure's height limit over an area is a keep-out
+with `max_height_mm`. A connector, switch or test point is reached from
+above and never goes under a cover, whatever its height; when the design
+stacks one under a body on purpose (an M.2 socket under an SO-DIMM module),
+add `"under_cover": true` to its `heights[]` row, with its datasheet
+`height_mm`, and say why in its `source`.
+
+### 3.4c Regions the user gives (only then)
+
+Groups place a board, not regions (`references/placement-lessons.md`), so
+draw no region of your own. When the USER gives one -- "these parts go
+inside this shield can", "only the power stage may sit outside the
+enclosure", "keep this corner for the antenna" -- declare it in the intent,
+in the vocabulary of `docs/floorplan-intent.md`:
+
+- **Parts held to an area:** a `blocks[]` entry with `name`, `refs` (the
+  parts; globs work), `zone` (`[x0, y0, x1, y1]`, board mm), `tolerance_mm`,
+  and `exclusive: true` when no other part may enter it (the inside of a
+  can). List `refs`: a block's `group` names a KiCad group or schematic
+  sheet the board derives (`render_placement.py --list-groups` lists them),
+  not a group of `groups.json`, and a groups-file name there resolves to
+  nothing (`block_unresolved`).
+- **A shield can:** declare it once in the design brief's `cans[]`
+  (`docs/design-brief.md`, "`cans[]`"): its `zone`, face,
+  `interior_height_mm` from the can's datasheet with its `source`, the can's
+  `ref` when it is drawn (else `wall_mm`), and per face the parts `in` it and
+  those that may be `either` side. `--emit-intent` compiles it into the
+  block, keep-outs and height below on every emit, so it is not lost when
+  you emit again. The bullets below are the hand-written rows it compiles
+  to; write them by hand only for a region that is not a can.
+- **A shield can's wall:** `fence_mm` on that block keeps a band that wide
+  round its `zone` clear of every part, members too, for the wall (the
+  can's outline less its interior; `min_reader` 16).
+- **An area only some parts may enter** (a keep-in for everyone else): a
+  `keepouts[]` entry whose `allow` names the parts that may. A pattern that
+  matches no part is a WARN, and the part it meant is pushed out.
+- **Write them after the last `--emit-intent`**, which writes a new file;
+  add them again if you emit again.
+- **Make an overfull zone an error:** declare `legality_budget`
+  (`{"overlap_area": 0.0, "oob_count": 0}`). Without it, a zone too small
+  for its members is only a WARN.
+- **Check the plan before placing**, on the pile (no pose is needed):
+
+  ```bash
+  python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --intent wk/<run>/intent.json --plan-only
+  ```
+
+  Exit 4 is a plan ERROR no placement can meet (a member with no pose in its
+  zone clear of another block's exclusive zone, a locked member outside its
+  zone, an overfull zone): fix the plan, not the seeds. `place_simple` runs
+  the same check before it seeds and refuses its ERRORs.
+- **Look at the plan:**
+
+  ```bash
+  python3 -X utf8 py_tools/render_placement.py wk/<run>/fixed.kicad_pcb --intent wk/<run>/intent.json \
+      --view X0,Y0,X1,Y1 -o wk/<run>/plan.png
+  ```
+
+  It draws each zone with its members' names and each keep-out. On a pile
+  the frame crops to the pile, so give `--view` the intent's
+  `envelope.rect`.
+- **To see where the groups go before writing a region:** `place_simple.py
+  ... --preview` places one seed and draws each group's box over it (with
+  `--draft-zones` written as draft `blocks[]`, never applied). It is a
+  review, not a step: the groups place the board.
 
 ### 3.5 Datasheet layouts (your judgement)
 
@@ -389,7 +697,8 @@ leaving that pose expensive.
      `wk/<run>/datasheets/<part>/`, one folder per part: a download is data,
      not code. Delete the folder before you hand back (§3.3). WebFetch
      mangles a PDF, so download it (`curl -sSL -o <folder>/<part>.pdf <url>`)
-     and open it with the Read tool and `pages`, a few at a time.
+     and read it with `py_tools/pdf_text.py` (below), not the Read tool's
+     `pages`: that needs poppler, which many machines lack (#1417).
 
    You need three things from it:
    - the **layout guidelines**. They say what matters most and sometimes
@@ -415,14 +724,19 @@ leaving that pose expensive.
      fetched. A reference design's pick-and-place file gives each part's
      centre and turn exactly (Altium's in mils, +y up). Use it to read the
      arrangement, then fit as below; never copy its coordinates.
-   - **Finding the pages.** The table of contents names them. Where poppler
-     is installed:
-     - `pdftotext -layout -f N -l N <pdf> -` prints page N, to grep for the
-       headings;
-     - `pdftoppm -r 300 -f N -l N -png <pdf> <prefix>` renders a figure too
-       small to read: crop it and Read the crop;
-     - `pdfimages -j` extracts a figure the PDF holds as an embedded image,
-       which rendering cannot sharpen.
+   - **Finding the pages.** `py_tools/pdf_text.py` uses whatever the
+     machine has -- poppler, pypdf, PyMuPDF, or on macOS the system's own
+     PDFKit, so it needs no install there -- and names the backend it used:
+     - `python3 py_tools/pdf_text.py <pdf> --find "layout example" "typical application"`
+       prints `page N: <line>` for each heading (the table of contents
+       lists them too);
+     - `python3 py_tools/pdf_text.py <pdf> --pages N` prints page N's text;
+     - `python3 py_tools/pdf_text.py <pdf> --render N --out <folder>/pN.png --dpi 200`
+       renders the figure; Read the PNG, and render at a higher `--dpi`
+       (300) and crop when it is too small to read.
+     Exit 3 means no backend is present: install poppler or `pip install
+     pypdf`. Where poppler is installed, `pdfimages -j` extracts a figure
+     the PDF holds as an embedded image, which rendering cannot sharpen.
 3. **Match the drawing to the board, by net and pin function, never by
    designator.** The datasheet's C1 is not the board's C1: a bitaxe agent
    found Q1, Q2, R4, R10 and C1 naming different parts in the two, so
@@ -670,7 +984,11 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   by one big IC those route clearly better, on others the scattered ones do,
   and the judge takes whichever routes best.
   The run is 500 moves per movable part by default (`--moves N` sets the
-  total), roughly 2 s for 25 parts.
+  total), roughly 2 s for 25 parts. A seed may anneal several times
+  (restarts, the courtyard fallback, the face pass): place_simple names the
+  worst case up front, prints an estimate after each anneal's first tenth,
+  and its last line counts every anneal that ran -- read those before
+  waiting on a large board.
 - **Place 12 seeds (6 scattered, 6 clustered); judge the 6 the objective
   rates best.** place_simple ends by naming them: printed, and written to
   `wk/<run>/judge.json` (`judge`, in judging order; a seed that left a part
@@ -708,27 +1026,40 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   widen a band -- and place again. Exit 2 if any failed outright.
 - A run that leaves a part with no legal pose anneals again from a fresh
   start, up to two more times (`runs` in the `--json` report). Exit 4 names
-  parts still left illegal; exit 2 a face or pose the inputs contradict.
+  parts still left illegal, each with the check it fails (`illegal_why`:
+  the part it overlaps, the keep-out it is in, or how far outside its
+  block's zone it is); exit 2 a face or pose the inputs contradict.
   Read the `cost` line: `hints` and `groups` say which group or hint the
   result could not satisfy.
 - **Check and LOOK** at each judged seed:
   `python3 -X utf8 py_tools/check_assembly.py <placed> --baseline wk/<run>/fixed.kicad_pcb`
   (read `buildable`),
   `python3 -X utf8 py_tools/check_floorplan.py <placed> --intent wk/<run>/intent.json`
-  (0 errors; the seed's `floorplan` line already counts them) and
+  (0 errors, and read every `proximity` warning; a crystal or load cap past
+  twice its limit is a defect to fix before judging, whatever the judge's
+  rank. The seed's `floorplan` line already counts the errors, and its log
+  names each claim still past its limit, `WARNING: claim ...`; read every
+  `link` warning too: a link is priced, not held, so a seed can end far past
+  its `max_mm` and still be the cheapest, and the run's output names each
+  link past its limit and the seeds that break it, `WARNING: link ...`; the
+  judge ranks by a link only when the intent promotes it,
+  `severity: {"link": "error"}`) and
   `python3 -X utf8 py_tools/render_placement.py <placed> -o <placed>.png`.
   Check the render against `references/placement-lessons.md`: the power
   stage between its entry and its loads, a regulator's caps tight around it,
   parts on the side of the chip where their pins are, connectors' partners
   right behind them. A judged seed that is NOT BUILDABLE, or that carries a
   floorplan error, cannot be DONE as placed: fast-route only the ones that
-  are clean (name them to `judge_seeds.py`, e.g. `--seeds 3,4`, §3.7), and
-  go on to the next block when none is.
+  are clean (§3.7's command skips the others, reading judge.json's
+  `floorplan` and `assembly` counts), and go on to the next block when none
+  is (the command then refuses, routing nothing).
 - **When no seed can be judged.** Three cases; in each, what to do depends
   on whether the cause is the same in every seed (below):
   - **`judge.json` names no seed** (`judge` empty; `judge_seeds.py` refuses
     it, exit 2): every seed left a part illegal (`illegal` in judge.json and
-    each `s<S>.json`) or failed outright (exit 2, its `s<S>.log`). A
+    each `s<S>.json`, with the reason per part in `illegal_why`; a part
+    illegal in every seed is WARNED once and listed in judge.json's
+    `illegal_every_seed`) or failed outright (exit 2, its `s<S>.log`). A
     declared pose that is not legal no longer empties it, nor does an edge
     declared more connectors than it holds: they are listed under `refused`
     and `oversubscribed`, and the seeds are still judged (fix the intent, as
@@ -754,12 +1085,20 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
      placement can meet (a decap pin limit on a rail with one cap far from
      the pin). Change that input -- move or unlock the fixed part
      (`place_pose`), correct the declared pose or the intent row -- and
-     place again (§3.6, the default seeds).
+     place again (§3.6, the default seeds). One exception: a member left
+     OUTSIDE its block's zone in every seed (`illegal_why` says by how
+     much) when the zone has room for it (the input board grades it inside)
+     is the anneal's miss, not the input's: repair the best seed as in case
+     2, aiming it inside the zone (`place_pose --intent`), or declare its
+     pose in `fixed_poses[]`.
   2. **A different part or pair in each seed** is the anneal's miss on a
      crowded board. Take the seed with the fewest illegal parts (in the
      other two cases, the first seed `judge.json` names: fewest floorplan
      errors, then cheapest) and repair it by hand: `place_pose.py <seed> <seed> set REF
-     --near X Y` (it snaps to the nearest legal pose; `rotate`, `face` for
+     --near X Y` (it snaps to the nearest pose within `--radius` that
+     grades legal; a part aimed at its own pose on its own courtyard pair
+     tries every pose in reach, and a stderr `note:` says when none cleared
+     it -- then raise `--radius`; `rotate`, `face` for
      the rest), until `check_assembly` says buildable and `check_floorplan
      --intent` reports 0 errors. Then judge it on its own:
      `judge_seeds.py wk/<run>/judge.json --seeds S --chain ...`.
@@ -781,11 +1120,40 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    (a trailing `\` continues it), each naming its boards by placeholder:
    `{in}` the board the step reads, `{out}` the one it writes, `{dir}` the
    seed's route folder (`--json-out {dir}/route.json`), `{run}` this folder
-   (`--intent {run}/intent.json`).
+   (`--intent {run}/intent.json`). A step's env knobs stay its
+   `NAME=value` prefix, as plan-pcb-routing writes them: they reach that
+   step alone. No `cd` line: the judge runs each line from the repo root,
+   with no shell. This is not plan-pcb-routing's `<board>_plan.sh` (boards
+   by path, `cd` first), but the same commands, and the same checker proves
+   it before any seed is routed:
+   `python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py
+   wk/<run>/judge_chain.txt --board <board>` (it reads the file as a chain,
+   and does not ask it for the plan's `cd`, #1592). The same file routes one
+   seed at the full level, with per-step boards, `chain.log` and that
+   route's own `redo_commands.sh` in `s<S>_full_route/`:
+   `judge_seeds.py wk/<run>/judge.json --chain wk/<run>/judge_chain.txt --seeds S --full`.
    ```text
    python3 -X utf8 py_router/route_planes.py {in} {out} --nets GND --plane-layers B.Cu
    python3 -X utf8 py_router/route.py {in} {out} --nets '*' --json-out {dir}/route.json
    ```
+   When `python3 -X utf8 py_router/list_nets.py <board> --diff-pairs` finds
+   pairs, the chain carries a `route_diff.py` step before `route.py`: the one
+   `identify-diff-pairs` / `plan-pcb-routing` give the board. Without it
+   `route.py` routes each pair as two single nets and the seeds are ranked
+   without their pairs; `judge_seeds` WARNs, naming the pair count.
+   The chain is ONE arm of the routing recipe, and the arms can pick different
+   seeds. Where `plan-pcb-routing` prescribes two arms for the board's class
+   (a 2-layer through-hole board without buses: its defaults, and
+   `--layer-costs 1.0 1.0 --via-cost 600`), write one chain per arm
+   (`judge_chain_A.txt`, `judge_chain_B.txt`), judge the seeds under each, and
+   keep a seed that wins under the arm the final route will use; where both
+   arms will be routed, one that ranks first or second under both. Any other
+   board has one chain: the recipe `plan-pcb-routing` prescribes for it.
+   Where that skill leaves a perimeter fanout to compare (Step 3, "Does this
+   part actually BENEFIT from fanout?", rule 3), the chains with and without
+   it are arms too: judge the seeds under each, and settle them with
+   `--confirm`, since a level-2 gap between them did not survive the full
+   route on the boards measured there.
 2. **Fast-route and score the seeds `wk/<run>/judge.json` names** (the
    `--judge` legal seeds, buildable and floorplan-clean first, then lowest
    `final.cost`; place_simple grades each seed with `check_assembly
@@ -795,6 +1163,12 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    python3 -X utf8 py_placer/judge_seeds.py wk/<run>/judge.json \
        --chain wk/<run>/judge_chain.txt --intent wk/<run>/intent.json
    ```
+   With no `--seeds` it skips, and names, every seed judge.json grades with
+   a floorplan error or NOT BUILDABLE (`floorplan` / `assembly` above 0):
+   such a seed cannot be DONE as placed and ranks last whatever its route.
+   When every named seed is one it routes nothing and points at §3.6's
+   "When no seed can be judged". `--seeds` routes exactly what it names,
+   an unclean seed included (one repaired by hand, case 2 there).
    It runs the SAME chain on every seed, so they compare, with `route.py`
    and every `route_diff.py` step at `--quick 2` (added when a line has
    none). Level 2 skips the recovery tail (net rescue, terminal escalation,
@@ -818,7 +1192,18 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    which say nothing about the placement.) It ends by ranking the seeds
    and naming the best. `--jobs N` routes N seeds at once: a judging route
    takes up to about 1.3 GB on a small board and 5 GB on a 350-part one.
-   Never ship a `--quick` board.
+   Never ship a `--quick` board. Level 2 is a screen, not a verdict: its
+   copper reads -2% to +8% off the full route's per seed, and when every seed
+   routes its blocking is decided by one open net. Seeds that lie within that
+   spread of the best (the same defects, blocking within 1, copper within 10%)
+   are NOTEd; settle them with `--confirm close`, which routes those seeds
+   again at the full level (`--quick` off every route step, into
+   `s<S>_full.kicad_pcb` and `s<S>_full.score.json`) and names the best of
+   them by the same key (`--confirm K` confirms the K best instead).
+   `--confirm close` takes at most 4 seeds, the best of the close ones; when
+   more are close, the NOTE and the confirming run name the seeds it leaves
+   out and print the `--seeds <the close seeds> --confirm K` that confirms
+   every one. Run that when a left-out seed could be the one to keep.
 3. **Keep the best** by the placement's own defects first (floorplan errors
    plus the assembly count), then blocking, then `joins_needed`, then vias,
    copper_mm, segments (`quick_score.judge_key`): every seed whose floorplan
@@ -860,18 +1245,22 @@ Routing Completes): run them once, here, not again inside the routing.
    KiCad's own silk classes:
    ```bash
    python3 -X utf8 py_placer/beautify_labels.py <board> wk/<run>/labelled.kicad_pcb
-   kicad-cli pcb drc <board> --severity-all --format json -o wk/<run>/silk_before.json
-   kicad-cli pcb drc wk/<run>/labelled.kicad_pcb --severity-all --format json -o wk/<run>/silk_after.json
+   KCLI=$(python3 py_tools/kicad_cli_path.py)
+   "$KCLI" pcb drc <board> --severity-all --format json -o wk/<run>/silk_before.json
+   "$KCLI" pcb drc wk/<run>/labelled.kicad_pcb --severity-all --format json -o wk/<run>/silk_after.json
    python3 -c "import json,sys,collections;[print(f,dict(collections.Counter(x['type'] for x in json.load(open(f))['violations'] if x['type'].startswith('silk')))) for f in sys.argv[1:]]" wk/<run>/silk_before.json wk/<run>/silk_after.json
    ```
    `beautify_labels` moves reference labels clear of pads, holes, the edge
    and each other and touches nothing else (copper byte for byte, siblings
-   copied). It does not see drawn silk, a part's own outline included, so
+   copied). Its exit 4 is not a failure: the board is written, and the labels
+   it found no legal spot for are named and left as they were. It does not see drawn silk, a part's own outline included, so
    it can trade one overlap for another: one board went from 4 KiCad silk
    errors to 0, another from 54 to 76. Keep `labelled.kicad_pcb` as the
    board only when its silk count is lower, and put both counts in
-   REPORT.md. Without `kicad-cli`, keep the board as it was and say the
-   silk is ungraded.
+   REPORT.md. `kicad-cli` is often not on PATH (macOS keeps it in the app
+   bundle), which is why the block resolves it with `kicad_cli_path.py`, the
+   tools' own lookup (#1418). Only when THAT exits 1 is there no
+   `kicad-cli`: then keep the board as it was and say the silk is ungraded.
 2. **`full` mode: deliver a filled copy, last (#910).** A routed board
    carries its zones as outlines with no fill: KiCad shows the planes empty
    until they are refilled (press B), and a DRC that does not refill reads
@@ -896,6 +1285,9 @@ Routing Completes): run them once, here, not again inside the routing.
 - **Repeated sheet instances (channel strips, one buffer per bank): arrange
   ONE, then copy it**:
   `python3 -X utf8 py_placer/place_pose.py <in> <out> replicate --from CH1 --to CH2 --to CH3 --anchor J1`
+  (copies drawn inside ONE sheet: `check_floorplan.py <board> --suggest-channels`
+  proposes them, and `replicate --channel U1,C1,C2 --channel U2,C3,C4` copies
+  the first onto the others)
   (#1211). It matches parts by schematic symbol and refuses unless the
   instances are wired alike, naming the pads (`--allow-net-mismatch REF.PAD`
   waives one by design). Lock the copies before placing the rest.
@@ -913,6 +1305,12 @@ Routing Completes): run them once, here, not again inside the routing.
   brief's `keepouts[]` grades and places only; no routing step reads it:
   `python3 -X utf8 py_router/add_rule_area.py <in> <out> --name ANT_KEEPOUT --ref U1 --rect X0 Y0 X1 Y1`
   (#1200).
+- **A mounting hole's screw head needs its ring WRITTEN too (#1442).** KiCad
+  checks a hole's own clearance only, so a route runs up to it. Before routing,
+  `python3 -X utf8 py_router/add_rule_area.py <in> <out> --name MOUNT --mounting-holes`
+  writes the head ring (0.4 x the drill past the edge) as a keep-out the
+  router honours, and `python3 -X utf8 py_tools/check_mounting_holes.py <board> --ring MM`
+  names any other-net copper left inside it.
 - **Re-placing strands routed copper.** Strip the copper and re-route.
 
 **Routing**
@@ -922,15 +1320,22 @@ Routing Completes): run them once, here, not again inside the routing.
   - Geometry already at the floor, failures clustered at one part's escape
     face, or `py_tools/check_reachability.py --pad REF.PAD` says CAGED:
     placement. Itemise it in the report with that measurement (§6). A finer
-    grid alone never widens a gap.
+    grid alone never widens a gap. First, if that part is a fine-pitch
+    perimeter part and the chain fanned nothing out for it, route that arm
+    (plan-pcb-routing Step 3, rule 3): it costs one route, and re-placing
+    costs a whole pass.
 - **`route.py`'s failure tally covers only the nets that step owns** (#1069).
   Count the board's open nets with `check_connected` or `board_score`.
 - **`route.py` finishes the planes; a repair step does not (#562, #1112).**
   Pour first (`route_planes.py`), then route with the plane nets inside
   `--nets` (`'*'` covers them). Do not end on `repair_planes.py`.
 - **Widths are requests.** After each route, read
-  `power_widths.<net>.under_mm`; grade power widths with
-  `board_score --net-min-widths`.
+  `power_widths.<net>.under_mm`. The widths `route.py` was asked for
+  (`--power-nets-widths`) are recorded with the board, and `board_score`
+  measures them with no flag (`net_widths.requested_under`, a pad neck at the
+  pad's own width excused) and reports them without counting them. A width a
+  net MUST have goes in `--net-min-widths`, which is graded. A board's
+  net-class `track_width` is not graded (the router discloses copper under it).
 - **Around a 0.8 mm BGA, the router can run out of lanes:** finer tracks and
   vias, a cheaper ground-plane layer cost (`--layer-costs`). Both go below
   the board's authored floors, so disclose that (§6). On later steps of a
@@ -940,9 +1345,11 @@ Routing Completes): run them once, here, not again inside the routing.
   On `CLEAN` (exit 0), `<out>` is the board plus that join, siblings
   copied: continue from it. No tool here locks a track or via, so the join
   stays rippable, and a later route step may rip its net and route it
-  again. Write joins after the last route step, re-run `check_connected`
-  and `check_drc` on the result (new copper changes how the pours fill),
-  and list each join in REPORT.md.
+  again. Write joins after the last route step (the closing `route.py`;
+  plan-pcb-routing, "End every chain on route.py", gives the order with a
+  late `route_diff.py`), re-run `check_connected` and `check_drc` on the
+  result (new copper changes how the pours fill), and list each join in
+  REPORT.md.
 
 ## 5. Rules
 
@@ -955,8 +1362,8 @@ Routing Completes): run them once, here, not again inside the routing.
    - **Watch long jobs.** Never leave a background job unwatched for more than
      20 minutes.
    - **If DONE will not come:** after three consecutive DIFFERENT approaches
-     that each fail to lower `unrouted` + `broken` (then the rest of
-     `blocking`), measured, stop and ship the best board (by `blocking`,
+     that each fail to lower `blocking`, then `joins_needed` (§1),
+     measured, stop and ship the best board (by `blocking`,
      then `joins_needed`, §1) with every remaining blocker itemised with its
      measurement.
    - **Hard cap:** 10 hours of wall clock, unless the user sets another.
@@ -993,6 +1400,11 @@ Routing Completes): run them once, here, not again inside the routing.
    - **the result first:** a table of the mode's DONE conditions with measured
      values, the `blocking_by` breakdown, and vias / copper_mm / segments;
    - **the groups and every judgement call** in them, with its reason;
+   - **the user's placement instructions** (§2): each one, how it was
+     written for the placer, and where it differed from a prior, which was
+     followed;
+   - **covers and declared heights** (§3.4b): each row and its source, and
+     any value declared conservatively because it could not be established;
    - **which stop rule fired**, and every remaining blocker BY NAME with its
      measurement;
    - **floors:** where the run went below the board's authored or fab floors
@@ -1010,7 +1422,9 @@ Routing Completes): run them once, here, not again inside the routing.
    python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py <board> --baseline <input> --intent <i> --mode <mode>
    python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/measure.py --self --evidence wk/<run>
    ```
-   Add `--spec <name>=<value>` to `grade.py` for each spec flag the board
-   declares. `measure.py` must run from your own shell; if it refuses (exit
+   In `full` mode, add `--spec <name>=<value>` to `grade.py` for each spec
+   flag the board declares, spelled as board_score spells it
+   (`min-track-width=0.09`); a name it or check_complete would refuse, or a
+   spec in `place` mode, exits 2 before anything runs. `measure.py` must run from your own shell; if it refuses (exit
    3), quote the refusal.
 4. The datasheet folder deleted (`rm -rf wk/<run>/datasheets`).

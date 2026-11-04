@@ -405,6 +405,40 @@ def identify_target_pads(
     return target_pads
 
 
+def _foreign_filled_graphic_interiors(pcb_data: PCBData, coord: GridCoord,
+                                      exclude_net_id: int):
+    """``[(layer, gx, gy)]``: the interior cells of every FILLED copper
+    graphic foreign to ``exclude_net_id`` (#1545), as the routing map stamps
+    them (#1181, `obstacle_map.build_base_obstacle_map`).
+
+    The perimeter is stamped with the other segments; the interior was free
+    to these maps, so a tap or last-resort via landed wholly inside a filled
+    graphic of another net. A shape is the net's own copper when it carries
+    that net, or when its owner's own pads lift it for that net
+    (`check_drc.filled_graphic_lift_nets`).
+    """
+    from check_drc import (filled_graphic_shapes, filled_graphic_lift_nets,
+                           graphic_own_pad_nets)
+    from obstacle_map import filled_graphic_interior_cells
+    shapes = filled_graphic_shapes(pcb_data)
+    if not shapes:
+        return []
+    fps = getattr(pcb_data, 'footprints', None) or {}
+    own = (graphic_own_pad_nets(pcb_data)
+           if any(sh.owner_ref for sh in shapes) else {})
+    clip = getattr(pcb_data.board_info, 'board_bounds', None)
+    out = []
+    for sh in shapes:
+        if sh.net_id and sh.net_id == exclude_net_id:
+            continue
+        if own and exclude_net_id in filled_graphic_lift_nets(sh, own, fps):
+            continue
+        gx, gy = filled_graphic_interior_cells(pcb_data, coord, sh, clip)
+        if len(gx):
+            out.append((sh.layer, gx, gy))
+    return out
+
+
 def build_via_obstacle_map(
     pcb_data: PCBData,
     config: GridRouteConfig,
@@ -421,6 +455,8 @@ def build_via_obstacle_map(
     - Tracks on all layers (except target net)
     - Board edge clearance
     - Through-hole pad drills (hole-to-hole clearance)
+    - Via copper off NPTH holes at the declared copper-to-hole floor and any
+      NPTH pad clearance override (#1038/#505, held here since #1514)
 
     Args:
         same_net_pad_clearance: If >= 0, also block target-net pads as via obstacles
@@ -475,7 +511,8 @@ def build_via_obstacle_map(
     for via in pcb_data.vias:
         _clr = (config.clearance if via.net_id == exclude_net_id
                 else config.obstacle_clearance(via.net_id))
-        _clr = config.stack_clearance(_clr)  # #498: barrels meet on every layer
+        _clr = config.stack_clearance(  # #498: barrels meet on every layer
+            _clr, None if via.net_id == exclude_net_id else via.net_id)
         centers_by_size.setdefault((via.size, _clr), []).append(coord.to_grid(via.x, via.y))
     for (vsize, _clr), via_centers in centers_by_size.items():
         via_via_expansion_mm = vsize / 2 + config.via_size / 2 + _clr + grid_cushion
@@ -500,7 +537,7 @@ def build_via_obstacle_map(
         # netclass clearance (#434 cross-class).
         seg_expansion_mm = (config.via_size / 2 + seg.width / 2
                             + config.layer_clearance(  # #498: meet on seg.layer
-                                seg.layer, config.obstacle_clearance(seg.net_id))
+                                seg.layer, config.obstacle_clearance(seg.net_id), seg.net_id)
                             + grid_cushion)
         # FFI batching (2026-08-14): accumulate the memoized capsule arrays
         # and stamp once after the loop -- concatenation preserves the exact
@@ -524,6 +561,14 @@ def build_via_obstacle_map(
                  else _seg_via_arrs[0])
         obstacles.add_blocked_via_spans_batch(
             np.ascontiguousarray(_vall.astype(np.int32)))
+    # #1545: a filled graphic's interior; a via spans the stack, so a shape
+    # on any copper layer blocks it.
+    from obstacle_map import filled_graphic_interior_spans
+    for _layer, _gx, _gy in _foreign_filled_graphic_interiors(
+            pcb_data, coord, exclude_net_id):
+        if _layer.endswith('.Cu'):
+            obstacles.add_blocked_via_spans_batch(
+                filled_graphic_interior_spans(_gx, _gy))
     if verbose:
         print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
 
@@ -623,7 +668,7 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     half_height = pad.size_y / 2
     # Add half grid step buffer to account for grid quantization errors.
     # Foreign pads are priced at their net's netclass clearance (#434).
-    clearance = (config.obstacle_clearance(pad.net_id)
+    clearance = (config.pad_obstacle_clearance(pad)             # #1491
                  if clearance_override is None else clearance_override)
     # #498: a via barrel meets the pad's copper on each layer the pad carries
     # it -> max over the per-layer resolution ('*.Cu' = the whole stack).
@@ -632,9 +677,9 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     if clearance_override is None and getattr(config, 'layer_clearances', None):
         _pls = [l for l in (pad.layers or []) if l.endswith('.Cu') and l != '*.Cu']
         if '*.Cu' in (pad.layers or []) or not _pls:
-            clearance = config.stack_clearance(clearance)
+            clearance = config.stack_clearance(clearance, pad=pad)
         else:
-            clearance = max(config.layer_clearance(l, clearance) for l in _pls)
+            clearance = max(config.layer_clearance(l, clearance, pad=pad) for l in _pls)
     # Honor a per-pad local clearance override (fiducial keep-clear rings etc.)
     # unless an explicit same-net override was supplied.
     if clearance_override is None:
@@ -950,9 +995,12 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
     else:
         # Rectangular board - simple bounding box band, vectorized.
+        # Measured from the EXACT edge, not the grid-rounded one (#1519).
         gx_flat, gy_flat = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
-        mask = ((gx_flat < gmin_x + via_expand) | (gx_flat > gmax_x - via_expand) |
-                (gy_flat < gmin_y + via_expand) | (gy_flat > gmax_y - via_expand))
+        lo_x, hi_x = coord.edge_band_limits(min_x, max_x, via_edge_clearance, True)
+        lo_y, hi_y = coord.edge_band_limits(min_y, max_y, via_edge_clearance, True)
+        mask = ((gx_flat <= lo_x) | (gx_flat >= hi_x) |
+                (gy_flat <= lo_y) | (gy_flat >= hi_y))
         if mask.any():
             obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[mask], gy_flat[mask]]))
 
@@ -1023,12 +1071,37 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         gx_flat, gy_flat, cell_mask = _board_edge_cell_mask_cached(
             pcb_data, coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y,
             grid_margin, track_edge_clearance)
+        # A make_local_window copy keeps a polygonal board's outline, which
+        # blocks only what lies outside the BOARD: a window side inside the
+        # board stays open, and past this band the map holds nothing at all,
+        # so a trace search walks out of the window into copper the window
+        # never loaded (a rescue tap's via->pad trace crossed a foreign track
+        # that way). Fence every such side with the rectangular branch's band;
+        # a side the window shares with the board's own bounds is the
+        # outline's. The cached mask is shared, so it is never edited in place.
+        parent = getattr(pcb_data.board_info, 'parent_board_bounds', None)
+        if parent:
+            lo_x, hi_x = coord.edge_band_limits(min_x, max_x, track_edge_clearance, True)
+            lo_y, hi_y = coord.edge_band_limits(min_y, max_y, track_edge_clearance, True)
+            fence = np.zeros_like(cell_mask)
+            if min_x > parent[0]:
+                fence |= gx_flat <= lo_x
+            if min_y > parent[1]:
+                fence |= gy_flat <= lo_y
+            if max_x < parent[2]:
+                fence |= gx_flat >= hi_x
+            if max_y < parent[3]:
+                fence |= gy_flat >= hi_y
+            cell_mask = cell_mask | fence
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, cell_mask, [layer_idx])
     else:
         # Rectangular board - simple bounding box band, vectorized.
+        # Measured from the EXACT edge, not the grid-rounded one (#1519).
         gx_flat, gy_flat = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
-        mask = ((gx_flat < gmin_x + track_expand) | (gx_flat > gmax_x - track_expand) |
-                (gy_flat < gmin_y + track_expand) | (gy_flat > gmax_y - track_expand))
+        lo_x, hi_x = coord.edge_band_limits(min_x, max_x, track_edge_clearance, True)
+        lo_y, hi_y = coord.edge_band_limits(min_y, max_y, track_edge_clearance, True)
+        mask = ((gx_flat <= lo_x) | (gx_flat >= hi_x) |
+                (gy_flat <= lo_y) | (gy_flat >= hi_y))
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, mask, [layer_idx])
 
     # Block tracks inside board cutouts
@@ -1056,7 +1129,20 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 
 def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                     config: GridRouteConfig, exclude_net_id: int):
-    """Block via placement near existing drill holes."""
+    """Block via placement near existing drill holes: the hole-to-hole DRILL
+    minimum around every drill, then the via-COPPER arms around no-copper holes
+    (#1038 declared copper-to-hole floor, #505 NPTH pad override) that the
+    signal map and ``plane_region_connector``'s map stamp through the same
+    helper. Without them the via map behind plane taps and the net-rescue
+    bare-ball escape admitted a via whose drill cleared an NPTH at h2h while
+    its annulus sat inside the board's declared floor (#1514)."""
+    from obstacle_map import (block_via_cells_near_npth_floors,
+                              resolve_hole_clearance, via_floor_npth_holes)
+    block_via_cells_near_npth_floors(
+        obstacles, pcb_data, via_floor_npth_holes(pcb_data, {exclude_net_id}),
+        config.via_size, config.via_drill, config.clearance,
+        config.hole_to_hole_clearance, resolve_hole_clearance(pcb_data, config),
+        config.grid_step)
     if config.hole_to_hole_clearance <= 0:
         return
 
@@ -1191,7 +1277,8 @@ def build_routing_obstacle_map(
                     # required clearance (no-net fiducial DRC, upduino #146).
                     pad_clr = config.pad_override_clearance(
                         config.layer_clearance(  # #498: on route_layer
-                            route_layer, config.obstacle_clearance(net_id)),
+                            route_layer, config.pad_obstacle_clearance(pad),  # #1491
+                            pad=pad),
                         pad)
                     # Half-grid discretization cushion, matching this file's own
                     # VIA stamps and build_base_obstacles (#173) -- the segment
@@ -1257,7 +1344,7 @@ def build_routing_obstacle_map(
                             + config.track_obstacle_clearance(
                                 seg.net_id, config.layer_clearance(
                                     route_layer,
-                                    config.obstacle_clearance(seg.net_id))))
+                                    config.obstacle_clearance(seg.net_id), seg.net_id)))
         # FFI batching (2026-08-14): same pattern as the via loop above --
         # accumulate, then one Rust call for the whole (single-layer) set.
         # #815: SPAN form (789,803 calls / 10.4% on glasgow_revC). Same
@@ -1275,6 +1362,13 @@ def build_routing_obstacle_map(
         _rows[:, :3] = _call
         _rows[:, 3] = layer_idx
         obstacles.add_blocked_cell_spans_batch(np.ascontiguousarray(_rows))
+    # #1545: a filled graphic's interior on this layer.
+    from obstacle_map import filled_graphic_interior_spans
+    for _layer, _gx, _gy in _foreign_filled_graphic_interiors(
+            pcb_data, coord, exclude_net_id):
+        if _layer == route_layer:
+            obstacles.add_blocked_cell_spans_batch(
+                filled_graphic_interior_spans(_gx, _gy, layer_idx))
     if verbose:
         print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
 
@@ -1292,7 +1386,7 @@ def build_routing_obstacle_map(
         # to ~half a cell on the via side.
         r_mm = (via.size / 2 + route_track_w / 2
                 + config.layer_clearance(  # #498: the route meets it on route_layer
-                    route_layer, config.obstacle_clearance(via.net_id))
+                    route_layer, config.obstacle_clearance(via.net_id), via.net_id)
                 + config.grid_step / 2)
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = (r_mm - GRID_TIE_EPS) ** 2   # tie -> OPEN; twin in obstacle_cache
