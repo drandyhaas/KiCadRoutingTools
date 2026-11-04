@@ -4574,6 +4574,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Runs BEFORE the summary counts so recovered nets grade as routed, and
     # before the cleanup pipeline so rescue copper is swept like all other
     # copper. KICAD_NET_RESCUE=0 disables it for A/B debugging.
+    # #1618: a net the whole pipeline left failed or open on a call whose
+    # routed nets do not all share one clearance requirement gets one
+    # whole-net retry with foreign copper priced at ITS OWN requirement (its
+    # class, how the scoped .kicad_dru rules read it) -- the call's shared map
+    # prices every obstacle at the widest requirement over its routed nets.
+    # Before the rescue, which narrows: a net that fits at full width once
+    # its own clearance is honoured routes at full width. Inert when every
+    # routed net shares one requirement. Engine-side, so the GUI inherits it.
+    from net_rescue import own_requirement_retry
+    own_requirement_summary = None if (_ckpt_stop or quick) else \
+        own_requirement_retry(
+            state, single_ended_nets, net_clearances=net_clearances,
+            progress_callback=progress_callback, cancel_check=cancel_check)
     if progress_callback:
         progress_callback(0, 0, "Rescuing failed nets...")
     from net_rescue import rescue_failed_nets
@@ -6169,6 +6182,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # #331/#371 rescue pass outcome (key absent when nothing was rescued,
         # so pre-rescue JSON_SUMMARY consumers/diffs are unaffected).
         summary['rescue'] = rescue_summary
+    if own_requirement_summary:
+        # #1618: {net: 'recovered' | 'unrecovered'} for the nets retried at
+        # their own clearance requirement (key absent when none was).
+        summary['own_requirement_retry'] = own_requirement_summary['nets']
     if terminal_escalation_summary:
         # Terminal geometry escalation outcome per net: "recovered at WxS/D"
         # or "unrecovered" (key absent when nothing was attempted).
