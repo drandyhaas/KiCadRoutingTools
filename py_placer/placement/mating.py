@@ -51,6 +51,20 @@ corrects it is a declared `mating_face`, which OUTRANKS a weak reading in the
 seat and in the grade (`face_with_declaration`); a strong reading still
 outranks a declaration, and either way a disagreement is said.
 
+A face belongs to ONE DRAWING's frame, not to the part (#1652): `+y` names a
+side of the footprint as drawn, and a library copy of the same part -- a
+vendor or importer drawing, often turned 180 degrees from KiCad's -- opens
+on the opposite side of its own frame. So every face this module names for
+a stock footprint (the jacks above) is a face of THAT drawing, a face read
+off a datasheet holds only for a footprint drawn in the datasheet's frame,
+and a declaration must be read off the footprint on the board (its own
+drawing against its pads, or its 3D model). A declared face that a weak
+reading agrees with is NOT confirmed by it: the turned copy reads the wrong
+face weakly, and an author reasoning from the same pads can declare that
+same wrong face. `face_evidence` therefore counts only a strong reading or
+the PCB-edge marker below as evidence; the grade prints any other declared
+face `unverified`, whichever way the weak reading agrees.
+
 A THIRD source, since #1245: the "PCB Edge" marker many footprints draw, a
 text beside a line where the board edge goes (`marker_face_local`, carried
 on `body.BodyGeometry.edge_marker`). It reads the LINE, never the text's
@@ -230,8 +244,12 @@ def face_with_declaration(lf: LocalFace, declared) -> Tuple[Optional[str], str, 
     author has read the datasheet, and a weak face is read off where the
     body sits on its pads, which the pad layout can set wrong (KiCad 10's
     RJ45_Amphenol_RJHSE5380 reads +y, 0.69 mm, where its twin with four LED
-    pads reads -y; both jacks open at -y). A STRONG reading outranks a
-    declaration. `source` is 'declared' or 'body' ('' when there is no face);
+    pads reads -y; both stock drawings open at -y, and a copy of either drawn
+    turned 180 degrees opens at +y -- a face is a fact of one drawing, not of
+    the part). A STRONG reading outranks a
+    declaration. A declaration the weak reading agrees with is no better
+    evidenced than one it overrules (`face_evidence`, #1652).
+    `source` is 'declared' or 'body' ('' when there is no face);
     `disagreement` words a declared face the body reads otherwise, whichever
     won, '' when they agree or either is silent."""
     if declared not in _UNIT:
@@ -250,6 +268,37 @@ def face_with_declaration(lf: LocalFace, declared) -> Tuple[Optional[str], str, 
                 f"{reading} overrules the declared mating_face {declared}: check "
                 f"the datasheet, and drop or correct the declaration")
     return face, source, said
+
+
+#: `face_evidence`'s answers (#1652): what the graded face rests on.
+EVIDENCE_STRONG = 'strong'          # a strong body reading (or marker-confirmed)
+EVIDENCE_WEAK = 'weak'              # a weak body reading, nothing declared
+EVIDENCE_MARKER = 'marker'          # a declaration its PCB-edge marker confirms
+EVIDENCE_UNVERIFIED = 'unverified'  # a declaration nothing independent confirms
+
+
+def face_evidence(lf: LocalFace, face: Optional[str], source: str) -> str:
+    """What the face `face_with_declaration` chose rests on (#1652), '' when
+    there is no face.
+
+    Independent of the SEVERITY (`strong` on the graded face: a declared face
+    fails at ERROR): a declaration says what the author believes, and a
+    weak reading agreeing with it adds nothing, since a library copy drawn
+    turned 180 degrees reads the wrong face weakly and an author reasoning
+    from the drawing can declare the same wrong face. Only a strong body
+    reading or the footprint's PCB-edge marker (#1245) is evidence from
+    outside the author: `strong` / `weak` for the body's own reading,
+    `marker` for a declaration the marker confirms (the body abstained), and
+    `unverified` for any other declared face -- agreeing with a weak reading,
+    overruling one, or where the body names no face."""
+    if not face:
+        return ''
+    if source != 'declared':
+        return EVIDENCE_STRONG if lf.strong else EVIDENCE_WEAK
+    mk = lf.marker
+    if mk is not None and mk.face == face:
+        return EVIDENCE_MARKER
+    return EVIDENCE_UNVERIFIED
 
 
 def marker_face_local(fp, geom) -> Optional[MarkerFace]:

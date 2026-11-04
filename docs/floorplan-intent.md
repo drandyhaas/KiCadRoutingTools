@@ -596,10 +596,21 @@ points west, not out of the east edge
   plug, a `Vertical` footprint name and a pose near a diagonal; the
   evidence row says so (`facing.disposition: abstained`, with the reason).
 - The evidence row carries `facing` (`{edge, facing, local_face, basis,
-  offset_mm, strong, policy, reason, disposition, declared_face, body_face,
-  body_strong, disagreement}`) and the text line ends
+  offset_mm, strong, evidence, policy, reason, disposition, declared_face,
+  body_face, body_strong, disagreement}`) and the text line ends
   `; facing west [courtyard+fab+marker, strong] FAIL`. The violation's `measured`
   has no `edge` key: the nearest-edge violation owns that one.
+- **`strong` is the severity; the clause's second word is the evidence**
+  (#1652). `strong` on the row says a wrong turn fails at ERROR, which a
+  declared face does too. The bracket's second word is `evidence`, what the
+  face rests on: `strong` or `weak` for the body's own reading, `marker` for
+  a declared face the PCB-edge marker confirms where the body abstains, and
+  `unverified` for every other declared face -- one a weak reading agrees
+  with (`[courtyard+fab+declared, unverified]`) as much as one it overrules
+  (`[declared, unverified]`). Only a strong reading or the marker is
+  evidence from outside the author: a library copy drawn turned 180 degrees
+  reads its wrong face weakly, and an author can declare that same wrong
+  face.
 - The facing conjunct leaves the nearest-edge identity, `edge_seat_rect` and
   the default bands as they are. `check_assembly` evaluates no intent clause,
   so a
@@ -631,7 +642,18 @@ body's reading disagree, whichever wins, `check_floorplan` says so at WARN
 (`J1's mating face: its declared mating_face -y outranks the +y face its
 body reads weakly ...`, or `... overrules the declared mating_face -y: check
 the datasheet ...`), the facing clause adds `(declared -y over the body's
-weak +y)`, and place_simple's seat note carries the same sentence.
+weak +y)`, and place_simple's seat note carries the same sentence. Where
+the body abstains and its PCB-edge marker names the other side, that is said
+at WARN too (`its declared mating_face +y is against its PCB-edge marker
+...`). A declared face prints `unverified` in the facing clause unless the
+marker confirms it, whichever way a weak reading agrees (#1652, above).
+
+**A face belongs to one drawing's frame.** `+y` is a side of the footprint
+as drawn, and a copy of the same part -- a vendor's or importer's drawing,
+often turned 180 degrees from KiCad's -- opens on the opposite side of its
+own frame. So read the face off the footprint on the board (its drawing
+against its pads, or its 3D model), and trust a datasheet's PCB-layout
+drawing only once its pads match the footprint's in the same orientation.
 A `Vertical` header names no face either, and for one `mating_face` is the
 side its cable leaves -- a 2xN ribbon off a long side -- so the seat lays it
 with its long side along the edge (tigard's J5 `+x`).

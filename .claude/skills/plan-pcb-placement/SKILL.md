@@ -470,9 +470,18 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   the body sits on its pads, and the pad layout can set it wrong -- KiCad
   10's RJ45_Amphenol_RJHSE5380 reads its mouth into the board): find the
   side its opening is on in the datasheet's PCB-layout drawing and write
-  `mating_face` (`+x`/`-x`/`+y`/`-y`, the footprint's own frame). A declared
+  `mating_face` (`+x`/`-x`/`+y`/`-y`, the footprint's own frame). A face
+  belongs to one drawing's frame: a library copy of the part (a vendor or
+  importer drawing) is often turned 180 degrees from KiCad's, so match the
+  drawing's pads to the footprint's on this board before reading a side off
+  it, or read the opening off the footprint's 3D model. A declared
   face outranks a weak reading (never a strong one), and the grade warns
-  where the two disagree. The side of its solder tabs, away from the
+  where the two disagree. The grade prints a declared face `unverified`
+  (`facing north [courtyard+fab+declared, unverified] pass`) even where the
+  weak reading agrees: a turned copy reads its wrong face weakly, so the
+  agreement is no check -- only a `strong` reading or a footprint's PCB-edge
+  marker (`marker`) is. A wrong turn of a declared face still fails at
+  ERROR. The side of its solder tabs, away from the
   contact row, is a hint to check against the drawing, not a rule: it is
   wrong on 3 of 50 side-entry connectors in the corpus.
 - **The side a vertical header's cable leaves.** A `Vertical` header mates

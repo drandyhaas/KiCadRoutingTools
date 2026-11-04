@@ -4587,22 +4587,27 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
     `<body basis>+declared` where the weak reading agrees with it), and the
     entry is graded whatever its class; a STRONG reading outranks a
     declaration (`mating.face_with_declaration`). Returns `{policy, facing,
-    local_face, basis, offset_mm, strong, reason, fails, declared_face,
-    body_face, body_strong, disagreement}`, the last naming a declared face
-    the body reads otherwise, whichever won ('' when none). `fails` is True only when the policy grades the
-    entry, the face is decisive at that rotation, and it is not the declared
-    edge. `strong` (the face's offset reaches `mating.FACE_STRONG_OFFSET_MM`)
-    decides the severity: a strong failure is an ERROR, a weak one a WARN --
-    the tiering chosen after the phase verifier found stock receptacles whose
-    weak face is wrong (`placement.mating`'s docstring).
+    local_face, basis, offset_mm, strong, evidence, reason, fails,
+    declared_face, body_face, body_strong, disagreement}`, the last naming a
+    declared face the body (or, where the body abstains, its PCB-edge marker)
+    reads otherwise, whichever won ('' when none). `fails` is True only when
+    the policy grades the entry, the face is decisive at that rotation, and
+    it is not the declared edge. `strong` (the face's offset reaches
+    `mating.FACE_STRONG_OFFSET_MM`, or the face is declared) decides the
+    severity: a strong failure is an ERROR, a weak one a WARN -- the tiering
+    chosen after the phase verifier found stock receptacles whose weak face
+    is wrong (`placement.mating`'s docstring). `evidence`
+    (`mating.face_evidence`, #1652) is what the face RESTS on, which the
+    severity is not: `unverified` for a declared face nothing independent
+    confirms, a weak reading agreeing with it included.
 
     THE predicate the rule calls, so every reader asks one answer for which
     way a part faces. A wrong WEAK face (`placement.mating`) reads as a
     pass unless the entry declares the face. A footprint's own "PCB Edge" marker
     (#1245) confirms a face (strong) or vetoes it (an abstention) where it
     draws one, through `mating_face_local`."""
-    from .mating import (LocalFace, face_with_declaration, facing_edge,
-                         mating_face_local)
+    from .mating import (LocalFace, face_evidence, face_with_declaration,
+                         facing_edge, mating_face_local)
     policy = edge_facing_policy(entry, fp)
     lf = (mating_face_local(fp, geom) if geom is not None
           else LocalFace(None, 0.0, '', 'no body geometry'))
@@ -4610,14 +4615,24 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
     declared = (entry.get('mating_face')
                 if entry.get('mating_face') in MATING_FACES else None)
     face, source, disagreement = face_with_declaration(lf, declared)
+    evidence = face_evidence(lf, face, source)
     if source == 'declared':
         # The body names no face, or a weak one; the intent declares one
-        # (#1586: only the author has read the datasheet). A declaration is
-        # no weaker than a strong body reading: a wrong turn fails at ERROR.
+        # (#1586: only the author has read the datasheet). A wrong turn of a
+        # declared face fails at ERROR (`strong`, the SEVERITY) -- which is
+        # not evidence that the face is right (#1652: `evidence` says that).
         lf = (lf._replace(basis=lf.basis + '+declared', strong=True)
               if lf.face == face else
               LocalFace(face, 0.0, 'declared', '', lf.votes, strong=True,
                         marker=lf.marker))
+        mk = body.marker
+        if mk is not None and mk.face and mk.face != face:
+            # Only on an abstaining body: a weak face the marker contradicts
+            # abstains, one it confirms is strong and outranks the
+            # declaration (`mating_face_local`).
+            disagreement = (f"its declared mating_face {face} is against its "
+                            f"PCB-edge marker, which puts the board edge on "
+                            f"its {mk.face} side")
     rot = (fp.rotation or 0.0) if rotation is None else rotation
     facing = facing_edge(lf.face, rot)
     edge = entry.get('edge')
@@ -4626,7 +4641,8 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
                            'turn, so the face names no edge')
     return {'policy': policy, 'facing': facing, 'local_face': lf.face,
             'basis': lf.basis, 'offset_mm': lf.offset_mm,
-            'strong': bool(lf.strong and facing), 'reason': reason,
+            'strong': bool(lf.strong and facing), 'evidence': evidence,
+            'reason': reason,
             'fails': bool(policy == 'graded' and edge and facing
                           and facing != edge),
             'declared_face': declared, 'body_face': body.face,
@@ -6042,6 +6058,7 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             'edge': edge, 'facing': _ef['facing'],
             'local_face': _ef['local_face'], 'basis': _ef['basis'],
             'offset_mm': _ef['offset_mm'], 'strong': _ef['strong'],
+            'evidence': _ef['evidence'],
             'policy': _ef['policy'], 'reason': _ef['reason'],
             'disposition': ('exempt' if _ef['policy'] != 'graded'
                             else 'no_edge' if not edge
@@ -6245,8 +6262,11 @@ def _facing_tail(f) -> str:
                 f"{f['body_face']})" if 'declared' in str(f.get('basis'))
                 else f" (the body's strong {f['body_face']} over the declared "
                      f"{f['declared_face']})")
+    # #1652: the second word is what the face rests on (`mating.
+    # face_evidence`), not the severity: a declared face fails at ERROR and
+    # reads `unverified` unless its marker confirms it.
     return (f"; facing {f['facing']} [{f['basis']}, "
-            f"{'strong' if f['strong'] else 'weak'}] "
+            f"{f['evidence']}] "
             f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}"
             + said)
 
