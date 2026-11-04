@@ -12,6 +12,12 @@ held, not carried.
 The issue's own reproduction: tigard piled, a synthetic cover on J6 built
 from tigard's J6/H3 geometry, the four holes declared at a pose.
 
+What is pinned is the cover, not one anneal's legality (#1644): a seed may
+exit 4 for a pair its anneal left illegal -- where that happens depends on
+the part heights, which kicad-cli reads from 3D models and a host without it
+guesses from IPC names -- so a seed passes when it ran to the end and
+reported its reason, J6 sits at the seat it announced, and H3 is on the line.
+
     python3 tests/test_1507_cover_fixed_standoff.py
 """
 import json
@@ -78,6 +84,39 @@ def place(d, pile, intent, seed):
     return r, out
 
 
+#: place_simple's seat line: `J6 seated where its cover puts H3, which cannot
+#: move: at (X, Y) ROT, legal pose K of N`
+SEAT = re.compile(r'J6 seated where its cover puts H3, which cannot move: '
+                  r'at \(([-\d.]+), ([-\d.]+)\) ([-\d.]+), legal pose (\d+) of (\d+)')
+
+
+def placed(label, r, out):
+    """place_simple ran to the end: exit 0, or 4 for parts its anneal left
+    illegal, which it names (its reason is on STDOUT). Returns the seat it
+    announced, (x, y, rot, k, n), or None."""
+    m = re.search(r'^JSON_SUMMARY: (\{.*\})$', r.stdout, re.M)
+    summary = json.loads(m.group(1)) if m else {}
+    illegal_only = (r.returncode == 4 and summary.get('illegal')
+                    and not summary.get('refused') and not summary.get('oversubscribed'))
+    reasons = '; '.join(l.strip() for l in r.stdout.splitlines() if 'is left illegal' in l)
+    check(f'{label}: place_simple ran to the end (exit 0, or 4 naming what it left illegal)',
+          r.returncode == 0 or bool(illegal_only),
+          f'rc {r.returncode}: {reasons or r.stdout[-400:]} {r.stderr[-300:]}')
+    if r.returncode == 4 and illegal_only:
+        print(f'      (exit 4, the anneal\'s, not the cover\'s: {reasons})')
+    run_utils.evidence(out, 'the placed board')
+    s = SEAT.search(r.stdout)
+    check(f'{label}: J6 is seated where its cover puts H3', bool(s), r.stdout[-600:])
+    if not s:
+        return None
+    seat = tuple(float(v) for v in s.groups()[:3]) + (int(s.group(4)), int(s.group(5)))
+    x, y, rot = j6_pose(out)
+    check(f'{label}: ...and held there', (abs(x - seat[0]) < 0.01 and abs(y - seat[1]) < 0.01
+                                           and abs((rot - seat[2]) % 360) < 0.1),
+          f'seated {seat[:3]}, placed {(x, y, rot)}')
+    return seat
+
+
 #: the grade's line for H3 at its length on the line (a zero offset may print as -0.00)
 ON_LINE = re.compile(r'H3 15\.95mm along \(declared 15\.95\), [+-]0\.00mm off the line')
 
@@ -101,10 +140,9 @@ def main():
         print('1. a standoff in the corner: one turn is legal')
         d, pile, intent = setup(td, 'corner', brief())
         r, out = place(d, pile, intent, 0)
-        check('place_simple places it', r.returncode == 0, r.stderr[-400:])
-        check('...and says J6 is seated where its cover puts H3',
-              'J6 seated where its cover puts H3, which cannot move: at (48.95, 70.51) 270, '
-              'legal pose 1 of 1' in r.stdout, r.stdout[-600:])
+        seat = placed('seed 0', r, out)
+        check('...at the one turn that reaches H3', seat == (48.95, 70.51, 270.0, 1, 1),
+              f'{seat}')
         check('...and that H3 is held, not carried',
               'template J6: H3 cannot move: the anchor is held where they are' in r.stdout
               and 'H3 seated as drawn' not in r.stdout)
@@ -114,16 +152,16 @@ def main():
 
         print('2. a standoff in the middle: the seeds take the turns in turn')
         d, pile, intent = setup(td, 'middle', brief(h3=(53.0, 53.0)))
-        poses = []
+        seats = []
         for s in (0, 1):
             r, out = place(d, pile, intent, s)
-            check(f'seed {s} places it', r.returncode == 0, r.stderr[-400:])
-            poses.append(j6_pose(out))
+            seats.append(placed(f'seed {s}', r, out))
             g = graded(out, intent)
             check(f'seed {s}: H3 at its length, on the line',
                   bool(ON_LINE.search(g)), g[-600:])
-        check('the two seeds seat J6 at two different turns', poses[0][2] != poses[1][2],
-              f'{poses}')
+        check('the two seeds seat J6 at two different turns, the next legal one each',
+              None not in seats and seats[0][2] != seats[1][2] and seats[0][4] > 1
+              and [t[3] for t in seats] == [1, 2], f'{seats}')
 
         print('3. two fixed standoffs the cover cannot both reach: refused')
         d, pile, intent = setup(td, 'disagree', brief(standoffs=(
