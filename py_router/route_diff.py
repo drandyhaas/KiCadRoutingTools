@@ -87,7 +87,6 @@ from layer_swap_optimization import apply_diff_pair_layer_swaps
 from routing_context import (
     build_diff_pair_obstacles,
     record_diff_pair_success,
-    restore_ripped_net
 )
 from routing_state import RoutingState, create_routing_state
 from memory_debug import (

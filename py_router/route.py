@@ -80,7 +80,6 @@ from layer_swap_optimization import apply_single_ended_layer_swaps
 from routing_context import (
     build_single_ended_obstacles,
     record_single_ended_success,
-    restore_ripped_net
 )
 from routing_state import RoutingState, create_routing_state, print_failed_net_histories
 from memory_debug import (

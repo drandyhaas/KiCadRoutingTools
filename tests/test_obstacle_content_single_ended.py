@@ -105,8 +105,6 @@ ALLOWLIST = {
         'MEASURED CLEAR: #444 seam re-ask fired 2x on cparti route_diff, audit 0/0/0',
     'py_router/routing_context.py:record_single_ended_success':
         'BY DESIGN: this IS the recorder; its callers own the refresh',
-    'py_router/routing_context.py:restore_ripped_net':
-        'BY DESIGN: delegates to restore_net, which refreshes',
     'py_router/rip_up_reroute.py:restore_net':
         'UNVERIFIED: partial_leg_rip arm; not yet exercised by a measured run',
     'py_router/layer_swap_fallback.py:try_fallback_layer_swap':

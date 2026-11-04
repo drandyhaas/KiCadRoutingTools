@@ -30,8 +30,7 @@ from diff_pair_multipoint import (
     leg_electrically_short, pair_leg_electrically_short,
     diff_pair_min_coupled_length,
 )
-from routing_context import (build_diff_pair_obstacles, build_diff_pair_leg_obstacles,
-                             restore_ripped_net)
+from routing_context import build_diff_pair_obstacles, build_diff_pair_leg_obstacles
 from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
                                record_pair_diag,
                                blocker_names as custody_blocker_names)
@@ -458,12 +457,19 @@ def route_diff_pairs(
                         reroute_queue.append(('single', net.name if net else f"Net {gnet}", gnet))
                         queued_net_ids.add(gnet)
             else:
-                # rip-up didn't produce a clean route -> restore the ripped net(s)
+                # rip-up didn't produce a clean route -> restore the ripped net(s).
+                # #1651: every undo of a rip_up_net goes through restore_net, its
+                # inverse, which puts back what the rip took: the routed paths
+                # blocker analysis reads, the working-map entry and the
+                # registry entries.
                 for gnet, _sr, _ri, was_in_results, _gp in reversed(graze_ripped_items):
-                    restore_ripped_net(
-                        pcb_data, _sr, _ri, was_in_results,
-                        routed_net_ids, remaining_net_ids, routed_results, results,
-                        config, track_proximity_cache, layer_map)
+                    restore_net(gnet, _sr, _ri, was_in_results,
+                                pcb_data, routed_net_ids, routed_net_paths,
+                                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                results, config, track_proximity_cache, layer_map,
+                                state.working_obstacles, state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                refused_sink=state.collision_refused_net_ids)
 
         # Handle probe_blocked: try progressive rip-up before full route
         probe_ripup_attempts = 0
@@ -504,11 +510,14 @@ def route_diff_pairs(
                 if probe_ripped_items:
                     print(f"    Restoring {len(probe_ripped_items)} previously ripped net(s)")
                     for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                        restore_ripped_net(
-                            pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
-                            routed_net_ids, remaining_net_ids, routed_results, results,
-                            config, track_proximity_cache, layer_map
-                        )
+                        restore_net(ripped_blocker.net_id, ripped_saved, ripped_ids_item,
+                                    ripped_was_in_results,
+                                    pcb_data, routed_net_ids, routed_net_paths,
+                                    routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                    results, config, track_proximity_cache, layer_map,
+                                    state.working_obstacles, state.net_obstacles_cache,
+                                    state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                    refused_sink=state.collision_refused_net_ids)
                     probe_ripped_items.clear()
                 # Convert to failed result so normal failure handling takes over
                 result = {
@@ -579,11 +588,14 @@ def route_diff_pairs(
                 # Route failed completely - restore ALL ripped nets
                 print(f"    Probe rip-up didn't help, restoring {len(probe_ripped_items)} net(s)")
                 for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                    restore_ripped_net(
-                        pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
-                        routed_net_ids, remaining_net_ids, routed_results, results,
-                        config, track_proximity_cache, layer_map
-                    )
+                    restore_net(ripped_blocker.net_id, ripped_saved, ripped_ids_item,
+                                ripped_was_in_results,
+                                pcb_data, routed_net_ids, routed_net_paths,
+                                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                results, config, track_proximity_cache, layer_map,
+                                state.working_obstacles, state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                refused_sink=state.collision_refused_net_ids)
                 probe_ripped_items.clear()
                 break
 
@@ -591,11 +603,14 @@ def route_diff_pairs(
         if result and result.get('probe_blocked'):
             print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), trying full route...")
             for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                restore_ripped_net(
-                    pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
-                    routed_net_ids, remaining_net_ids, routed_results, results,
-                    config, track_proximity_cache, layer_map
-                )
+                restore_net(ripped_blocker.net_id, ripped_saved, ripped_ids_item,
+                            ripped_was_in_results,
+                            pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, diff_pair_by_net_id, remaining_net_ids,
+                            results, config, track_proximity_cache, layer_map,
+                            state.working_obstacles, state.net_obstacles_cache,
+                            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                            refused_sink=state.collision_refused_net_ids)
             result = {
                 'failed': True,
                 'iterations': result.get('iterations', 0),
