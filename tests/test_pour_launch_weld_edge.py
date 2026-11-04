@@ -17,7 +17,13 @@ region memo's keys, since a per-net power config changes it.
 
 The board (built here): a 20x16 mm 2-layer outline, a B.Cu GND pour that is
 a 0.5 mm strip along the left edge (x 0.3-0.8, as on a ring board's rim), a
-GND pad on it and two F.Cu GND pads 2 mm in from the edge beside it.
+GND pad on it and two F.Cu GND pads 2 mm in from the edge beside it. Its
+project declares a 0.1 mm copper-to-edge rule, under the run's 0.5 mm edge
+clearance, as a sub-fab board rule is under the fab-edge pin: KiCad's fill
+is kept the declared rule alone from the edge (#1643), so it reaches the
+zone's own outline at 0.3, inside the run's band. (With no project KiCad
+keeps the fill pcbnew's factory 0.5 off the edge, its welds start past the
+band, and the precondition in B has nothing to show.)
 
 Checks:
   A. track_edge_point_test: the band is edge clearance + width/2, exact at a
@@ -33,6 +39,7 @@ Checks:
 """
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -47,6 +54,7 @@ from run_utils import evidence                          # noqa: E402
 FAILS = []
 LAYERS = ['F.Cu', 'B.Cu']
 EDGE, WIDTH = 0.5, 0.2
+BOARD_EDGE_RULE = 0.1   # the project's declared rule, under the run's EDGE
 STRIP = 0.8          # the pour's inner edge; its outer edge is 0.3 off the outline
 SX = 2.0             # the beside-the-pour pads
 
@@ -210,6 +218,9 @@ if __name__ == '__main__':
         board = os.path.join(d, 'strip.kicad_pcb')
         with open(board, 'w', encoding='utf-8', newline='\n') as f:
             f.write(board_text())
+        with open(os.path.splitext(board)[0] + '.kicad_pro', 'w', encoding='utf-8') as f:
+            json.dump({'board': {'design_settings': {'rules': {
+                'min_copper_edge_clearance': BOARD_EDGE_RULE}}}}, f)
         pcb = quiet(parse_kicad_pcb, evidence(board, 'staged board'))
         net_id = next(n for n, net in pcb.nets.items() if net.name == 'GND')
         t_point_test(pcb)
