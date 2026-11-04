@@ -296,5 +296,97 @@ _same = all(K.footprint_at_match(b[2]).group(0)
 check('on a KiCad-written board the own (at ...) IS the first one, for every footprint',
       _same)
 
+# ==========================================================================
+# 4. the (transform ...) pose of board format 20260616 and later
+# ==========================================================================
+print('4. (transform ...) pose')
+
+
+def as_transform(m):
+    return (f'(transform\n\t\t\t(translate {m.group(1)} {m.group(2)})\n'
+            f'\t\t\t(rotate {m.group(3) or 0})\n\t\t\t(scale 1 1)\n\t\t)')
+
+
+_parts = []
+_tail = 0
+for _s, _e, _blk, _r, _k in iter_footprint_blocks(BASE):
+    _m = K.footprint_at_match(_blk)
+    _parts += [BASE[_tail:_s], _blk[:_m.start()], as_transform(_m), _blk[_m.end():]]
+    _tail = _e
+TRS = ''.join(_parts) + BASE[_tail:]
+
+
+def _all_pads(pcb):
+    return {ref: (pose(fp), sorted((p.pad_number, round(p.global_x, 4),
+                                    round(p.global_y, 4)) for p in fp.pads))
+            for ref, fp in pcb.footprints.items()}
+
+
+pcb10, err10 = parse(save(TRS))
+check('fixture: every footprint carries a (transform ...) pose',
+      '(at 144.78 31.75 -90)' not in TRS and TRS.count('(transform') == len(BASE_PCB.footprints))
+check('a (transform ...) board reads every part and pad where the (at ...) board does',
+      _all_pads(pcb10) == _all_pads(BASE_PCB) and 'WARNING' not in err10, err10[-200:])
+
+_scaled = block_of(TRS)[2].replace('(scale 1 1)', '(scale 2 2)', 1)
+pcb11, err11 = parse(save(with_block(TRS, _scaled)))
+check('a scaled footprint, whose children are not modelled at scale, is named and skipped',
+      'C3' not in pcb11.footprints and 'C3 has an (at ...) that does not parse' in err11,
+      err11[-200:])
+
+p12 = os.path.join(tempfile.mkdtemp(prefix='fpat_w12_'), 'w12.kicad_pcb')
+quiet(write_placed_output, save(TRS), p12, [{'reference': 'C3', 'new_x': 120.0,
+                                             'new_y': 40.0, 'new_rotation': 90.0}])
+with open(p12, encoding='utf-8') as fh:
+    w12 = fh.read()
+check('the writer keeps the (transform ...) spelling',
+      (own_at(w12) or '').startswith('(transform (translate 120.000000 40.000000) (rotate 90)'),
+      str(own_at(w12)))
+pcb12, _e = parse(p12)
+check('...and the part reads back where it was put, pads turned as on an (at ...) board',
+      pose(pcb12.footprints['C3']) == (120.0, 40.0, 90.0)
+      and _pads(pcb12.footprints['C3']) == _pads(_pref.footprints['C3']),
+      str(pose(pcb12.footprints['C3'])))
+
+# A footprint zone's outline is in BOARD coordinates under (at ...) and in the
+# footprint's own frame under (transform ...) (pcbnew 10.99 `pcb upgrade`).
+_local = [(1.0, -0.5), (2.5, -0.5), (2.5, 0.5), (1.0, 0.5)]
+_board = [K.local_to_global(144.78, 31.75, -90.0, x, y) for x, y in _local]
+
+
+def with_keepout(text, pts):
+    zone = ('(zone (layers "F.Cu") (uuid "fpat-keepout") (hatch edge 0.5) '
+            '(keepout (tracks not_allowed) (vias not_allowed) (pads allowed) '
+            '(copperpour allowed) (footprints allowed)) (polygon (pts '
+            + ' '.join(f'(xy {K._fmt_mm(x)} {K._fmt_mm(y)})' for x, y in pts)
+            + ')))\n\t\t')
+    blk = block_of(text)[2]
+    i = blk.index('(pad ')
+    return with_block(text, blk[:i] + zone + blk[i:])
+
+
+def keepout_polygon(text):
+    ko = [k for k in K.extract_keepouts(text) if k['owner'] == 'C3']
+    return [tuple(round(c, 4) for c in p) for p in ko[0]['polygon']] if len(ko) == 1 else ko
+
+
+_want = [tuple(round(c, 4) for c in p) for p in _board]
+check('a footprint keep-out under (at ...) is read in board coordinates',
+      keepout_polygon(with_keepout(BASE, _board)) == _want,
+      str(keepout_polygon(with_keepout(BASE, _board))))
+check('...and under (transform ...) is carried from the footprint frame to the same place',
+      keepout_polygon(with_keepout(TRS, _local)) == _want,
+      str(keepout_polygon(with_keepout(TRS, _local))))
+
+p13 = os.path.join(tempfile.mkdtemp(prefix='fpat_w13_'), 'w13.kicad_pcb')
+quiet(write_placed_output, save(with_keepout(TRS, _local)), p13,
+      [{'reference': 'C3', 'new_x': 120.0, 'new_y': 40.0, 'new_rotation': 90.0}])
+with open(p13, encoding='utf-8') as fh:
+    w13 = fh.read()
+_moved = [tuple(round(c, 4) for c in K.local_to_global(120.0, 40.0, 90.0, x, y))
+          for x, y in _local]
+check('a moved (transform ...) part keeps its zone in its own frame, so the zone moves with it',
+      keepout_polygon(w13) == _moved, str(keepout_polygon(w13)))
+
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)
