@@ -54,7 +54,11 @@ PLAN_RESULT_SCHEMA = (
     'order. Take the routing order and step composition from the skill you '
     'just ran; do not re-derive them here. '
     'Use only these actions; omit any parameter you have no recommendation for; '
-    'all params are optional.'
+    'all params are optional. '
+    'If the checks prevent a routing plan, instead return '
+    '{"status": "blocked", "reason": "<measured reason planning cannot proceed>", '
+    '"next_action": "<what the user should do before retrying>", "steps": []}. '
+    'Report the actual check finding; a blocked response has no executable steps.'
 )
 
 # NOTE: this string is the GUI's MACHINE CONTRACT only -- the RESULT= line, the
@@ -97,6 +101,18 @@ def parse_plan_result(value):
         return None, [f"plan is not valid JSON: {e}"]
     if not isinstance(data, dict) or not isinstance(data.get("steps"), list):
         return None, ['plan JSON has no "steps" list']
+    if "status" in data and data["status"] not in ("ready", "blocked"):
+        return None, ['plan status must be "ready" or "blocked"']
+    if data.get("status") == "blocked":
+        for field in ("reason", "next_action"):
+            if not isinstance(data.get(field), str) or not data[field].strip():
+                errors.append(f'blocked plan "{field}" must be a non-empty string')
+        if data["steps"]:
+            errors.append("a blocked plan must have no executable steps")
+        if errors:
+            return None, errors
+        return None, [f"Planning blocked: {data['reason'].strip()}",
+                      f"Next action: {data['next_action'].strip()}"]
     steps = []
     for i, step in enumerate(data["steps"]):
         if not isinstance(step, dict):

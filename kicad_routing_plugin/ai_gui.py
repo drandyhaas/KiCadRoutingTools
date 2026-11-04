@@ -839,62 +839,8 @@ class AITab(wx.Panel):
     def _on_done(self, result_text, error):
         if not self:  # dialog destroyed while the run finished
             return
-        self._elapsed_timer.Stop()
-        self.gauge.SetValue(0)
-        self.plan_btn.Enable(self.routing_dialog is not None)
-        self.review_btn.Enable()
-        self.diagnose_btn.Enable()
-        self.run_plan_btn.Enable(bool(self._plan_steps))
-        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
-        self.cancel_btn.Disable()
-        kind, self._pending_kind = self._pending_kind, None
-
-        if error:
-            # The CLI often streams the failure text (e.g. 'Not logged in')
-            # as an assistant message before the error result repeats it -
-            # don't print the same line twice.
-            backend = self._runner.backend if self._runner else self._current_backend()
-            hint = backend.auth_hint(error)
-            if self.output_ctrl.GetValue().rstrip().endswith(error.strip()):
-                appended = hint
-            else:
-                appended = f"\n{error}{hint}"
-            if appended:
-                self.output_ctrl.AppendText(appended + "\n")
-            self._log(f"{backend.label}: {error}")
-            return
-
-        # The streamed transcript already shows the full report; just close out.
-        self.output_ctrl.AppendText(f"\n--- done in {self.elapsed_label.GetLabel()} ---\n")
-        parsed = extract_result_line(result_text)
-        if parsed is not None:
-            self.parsed_ctrl.SetValue(parsed if len(parsed) < 200 else parsed[:200] + "...")
-            self._log(f"AI: done in {self._elapsed_seconds}s")
-        else:
-            self.parsed_ctrl.SetValue("(no RESULT= line found)")
-            self._log(f"AI: done in {self._elapsed_seconds}s, no RESULT= line")
-        if kind == "plan":
-            self._handle_plan_result(parsed)
-
-    # ------------------------------------------------------------- planning
-
-    def _handle_plan_result(self, value):
-        """Parse the plan JSON, fill the tabs, and populate the step list."""
-        from .ai_plan import parse_plan_result, step_label, \
-            apply_step_params, apply_step_selection
-
-        if value is None:
-            self.output_ctrl.AppendText("\nNo RESULT= plan line found - nothing to apply.\n")
-            return
-        steps, errors = parse_plan_result(value)
-        for message in errors:
-            self.output_ctrl.AppendText(f"plan: {message}\n")
-            self._log(f"AI plan: {message}")
-        if steps is None:
-            self.output_ctrl.AppendText("\nPlan was unusable - nothing applied.\n")
-            return
-
-        self._install_plan_steps(steps)
+        from .ai_run_feedback import finish_ai_run
+        finish_ai_run(self, result_text, error)
 
     def _install_plan_steps(self, steps):
         """Adopt a validated step list (from a fresh plan OR a loaded plan
