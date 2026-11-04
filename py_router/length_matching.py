@@ -4057,11 +4057,9 @@ def apply_intra_pair_length_matching(
     # sums above read P 12.00 < N 13.08 and the meander went on P, while the
     # board had P 21.31 > N 16.82 -- skew 4.51 -> 5.20 mm. The pair's copper
     # is on the board by now (each route is committed as it is found), so
-    # net_signal_length reads what the cleanup will leave of it. The result
-    # sums stay the fallback while a member's pads are not joined. It is a
-    # path measure, not KiCad's: where a track ends inside a via off its
-    # centre the shipped skew KiCad grades can differ by up to a via barrel
-    # (net_signal_length's docstring, #1583).
+    # net_signal_length reads what the cleanup will leave of it, measured as
+    # KiCad measures that copper (#1623). The result sums stay the fallback
+    # while a member's pads are not joined.
     _board = None
     if pcb_data is not None:
         from net_queries import net_signal_length
