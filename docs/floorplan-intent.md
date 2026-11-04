@@ -203,9 +203,9 @@ findings raised outside the rule loop: `intent_zone_outside_envelope`, `intent_z
 `mechanical_drift` (raised only when a `mechanical.json` is read, and
 settable to `error` only -- `warn` is refused, since the pose is a recorded
 fact),
-the sixteen `plan_check` findings (`plan_zone_exclusive_unsatisfiable`,
+the seventeen `plan_check` findings (`plan_zone_exclusive_unsatisfiable`,
 `block_glob_literal`, `plan_fixed_outside_zone`,
-`plan_fixed_in_exclusive_zone`, `plan_fixed_pose_conflict`,
+`plan_fixed_in_exclusive_zone`, `plan_zone_on_fixed`, `plan_fixed_pose_conflict`,
 `plan_zone_overfull`,
 `plan_zone_crowded`, `plan_zone_member_oversized`, `plan_zone_utilisation`
 (settable to `warn` only -- `error` is refused, because it is a heuristic),
@@ -1731,6 +1731,7 @@ plan. The WARN is the same quantity with a margin.
 | `block_glob_literal` | a real reference used as a glob over-matches a block into a second, disjoint zone | a stray over-match with no such conflict is a WARN; one the same list also names (an intended over-match) is no finding |
 | `plan_fixed_outside_zone` | a FILE-locked member is already outside its zone; or (WARN) a `fixed_poses[]` entry's declared pose is outside its own block's zone | |
 | `plan_fixed_in_exclusive_zone` | a FILE-locked non-member is already inside an exclusive zone, or a `fixed_poses[]` non-member's declared pose is; the zone's own `zone_exclusive` severity unless this one is set. A container is no stranger | |
+| `plan_zone_on_fixed` | a zone member has no pose in its zone, on its face, clear of the courtyards of the parts the placer never moves -- a `fixed_poses[]` entry at its declared pose and face, a FILE-locked part at its pose (`zone_pose_feasibility`, each fixed courtyard as a keep-out) -- AND a declared `legality_budget.overlap_area` is short of the overlap that forces on the budget's geometry: the member's graded outline less the zone area the fixed parts' outlines leave free (`measured.forced_overlap_mm2`). The zone's and `legality`'s own severity unless this one is set. A container, a waived pair and a pair with a height cover are not judged | WARN without a budget, or when the member is anchor-graded or its zone open-sided |
 | `plan_zone_overfull` / `_crowded` | per face, the members' areas exceed the zone by more than the declared `legality_budget.overlap_area`. Fitting area A into zone Z forces at least A - Z of courtyard overlap; the ERROR sums the members' graded OUTLINES and far-side clusters (the geometry the budget is measured on), the WARN their rects. `measured.zones[]` carries both (`members_outline_area_mm2`, `members_area_mm2`) | the WARN applies without a budget, on a project that waives courtyard overlap, or past a crowding margin |
 | `plan_zone_member_oversized` | | a member larger than its zone at a rotation it may take: the grade holds only its CENTRE in the zone (an anchor), so it is named, and the zone area it still covers -- at least half its extent, or the whole zone, on each axis -- is charged to the zone's WARN sums (`measured.zones[].anchor_members`). Not to the ERROR's outline sum, which a rect bound would overstate |
 | `plan_zone_utilisation` | never | the members' courtyards cover `options.ZONE_FIT_UTILISATION` (50%) of the zone or more, and no bound above fired. A heuristic, labelled so: zones of 0603-class parts at 57-77% failed to seat every member and zones at 41-50% seated them all, but area is necessary, not sufficient -- a zone over the ratio can fit and one under it can fail |

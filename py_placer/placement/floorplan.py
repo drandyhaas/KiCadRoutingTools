@@ -8597,6 +8597,10 @@ _NON_RULE_SEVERITIES = frozenset({
     # #1463: a FIXED stranger (a file lock, or a declared pose) already
     # inside an exclusive zone, which every seed then carries.
     'plan_fixed_in_exclusive_zone',
+    # #1631: a member with no pose in its zone clear of a fixed or locked
+    # part's courtyard. WARN unless a declared overlap budget is short of
+    # the overlap it is forced into.
+    'plan_zone_on_fixed',
     # #1468, beside the zone bounds: a member larger than its zone (graded
     # on its centre, charged the area it still covers), WARN unless set; and
     # the zone utilisation heuristic, settable only DOWN like
@@ -9972,6 +9976,169 @@ def _fixed_pose_grade_rect(part, f):
     return part.grade_rect(fx_, fy_, rot), rot
 
 
+def _zone_on_fixed_findings(intent: Intent, ctx, state, blocks, zparts
+                            ) -> List[Violation]:
+    """`plan_zone_on_fixed` (#1631): a zone member with no pose in its zone
+    that clears the courtyards of the parts that will not move -- a
+    `fixed_poses[]` entry at its declared pose and face, a FILE-locked part
+    at its pose. The placer seats neither anywhere else, so every seed ends
+    with that member against it.
+
+    Each fixed courtyard is handed to `zone_pose_feasibility` as a keep-out
+    on its own face, the question `intent_zone_in_keepout` asks of a
+    declared keep-out. A rect search, so the finding is a WARN; it is an
+    ERROR (the zone's and `legality`'s own severity unless this one is set)
+    only when a declared `legality_budget.overlap_area` is short of the
+    overlap the member is forced into on the budget's own geometry: its
+    graded outline must lie in the zone with its tolerance (an anchor-graded
+    or open-sided member is never an ERROR), and the fixed parts' graded
+    outlines cover C of that zone's area Z, so it overlaps them by at least
+    `outline - (Z - C)`.
+
+    Not judged: a fixed part that is a container (no stranger, as in the
+    grade), a pair with a courtyard waiver, a pair either part of which is
+    a height cover (one may sit under the other, #1443), and a project
+    that waives courtyard overlap (the grade prices none)."""
+    out: List[Violation] = []
+    if getattr(state, 'courtyards_ignored', False):
+        return out
+    zoned = [z for z in intent.blocks if z.rect is not None
+             and blocks.get(z.name)]
+    if not zoned:
+        return out
+    fx = {str(f['ref']): f for f in intent.fixed_poses}
+    cont = set(getattr(state, 'container_refs', ()) or ())
+    # what will not move, on the face it will be on: (ref, face, rect, pose)
+    fixed = []
+    for ref, part in sorted(zparts.items()):
+        if ref in cont:
+            continue
+        if ref in fx:
+            f = fx[ref]
+            r, rot = _fixed_pose_grade_rect(part, f)
+            face = f.get('side') if f.get('side') in ('F', 'B') else part.side
+            pose = ((float(f['x']), float(f['y']), rot)
+                    if face == part.side else None)
+            fixed.append((ref, face, r, pose, True))
+        elif ref in ctx.locked:
+            fixed.append((ref, part.side, tuple(part.rect()),
+                          (part.x, part.y, part.rot), False))
+    if not fixed:
+        return out
+    pinned = {f[0] for f in fixed}
+    waived = {frozenset(p_) for p_ in intent.courtyard_waiver_pairs()}
+    planned = _planned_sides(intent, blocks)
+    bounds = getattr(getattr(ctx.pcb, 'board_info', None), 'board_bounds',
+                     None)
+    claimed = claimed_edges(intent)
+    budget = (intent.legality_budget or {}).get('overlap_area')
+    census = None
+    covers = ()
+    for z in zoned:
+        tol = intent.zone_tolerance(z)
+        zr = _inflate(z.rect, tol)
+        for ref in blocks.get(z.name, ()):
+            part = zparts.get(ref)
+            if part is None or ref in pinned or ref in cont:
+                continue
+            face = planned.get(ref, part.side)
+            if census is None:
+                census = _ctx_census(ctx)
+                covers = set(getattr(census.heights, 'covers', None) or ())
+            bound = [{'name': f_ref, 'rect': fr, 'sides': (f_face,),
+                      'allow': ()}
+                     for f_ref, f_face, fr, _pose, _decl in fixed
+                     if f_ref != ref and f_face == face
+                     and frozenset((ref, f_ref)) not in waived
+                     and ref not in covers and f_ref not in covers
+                     and legality.rect_overlap_area(fr, zr) > legality.EPS]
+            if not bound:
+                continue
+            local0 = part.grade_by_rot[0.0]
+            if face != part.side:
+                # the declared face: the courtyard mirrored as the writer
+                # flips it (local y -> -y), as `_fixed_pose_grade_rect` does
+                local0 = (local0[0], -local0[3], local0[2], -local0[1])
+            opened = zone_open_sides(z.rect, bounds, claimed.get(ref))
+            fp = (ctx.pcb.footprints or {}).get(ref)
+            v = None
+            for base in sorted({((fp.rotation if fp is not None else 0.0)
+                                 or 0.0) % 360.0, 0.0}):
+                v = zone_pose_feasibility(z.rect, tol,
+                                          _LocalPart(base, local0, None),
+                                          bound, open_sides=opened)
+                if v['feasible']:
+                    break
+            if v is None or v['feasible']:
+                continue
+            names = list(v['keepouts_freeing'] or v['keepouts_joint']
+                         or v['bound'])
+            forced = None
+            anchor = zone_is_anchor(z.rect, _LocalPart(0.0, local0, None),
+                                    tol)
+            if budget is not None and not anchor and not opened:
+                forced = _forced_fixed_overlap(ctx, census, ref, zr,
+                                               [f_ for f_ in fixed
+                                                if f_[0] in names])
+            over = (forced is not None
+                    and forced > float(budget) + legality.EPS)
+            sev = (_plan_severity(intent, 'plan_zone_on_fixed',
+                                  ('zone_containment', 'legality'))
+                   if over else intent.severity_of('plan_zone_on_fixed',
+                                                   WARN))
+            kinds = ', '.join(
+                f"{n} ({'fixed_poses[]' if n in fx else 'locked'})"
+                for n in names)
+            out.append(Violation(
+                rule='plan_zone_on_fixed', severity=sev, ref=ref,
+                block=z.name,
+                message=(f"block {z.name!r} member {ref} has no pose inside "
+                         f"its zone (tolerance {tol:g}mm), at any of "
+                         f"{len(v['rotations'])} rotations, on {face}.Cu "
+                         f"that clears the courtyard of {kinds}, which the "
+                         f"placer never moves -- so every seed leaves {ref} "
+                         f"against it"
+                         + (f". Fitting it forces at least {forced:.2f}mm2 "
+                            f"of courtyard overlap, over the declared "
+                            f"legality_budget.overlap_area {float(budget):g}"
+                            if over else '')
+                         + ". Move the zone, the fixed pose or the lock"),
+                measured={'zone': list(z.rect), 'tolerance_mm': tol,
+                          'face': face, 'fixed': names,
+                          'reason': v['reason'],
+                          'rotations': [round(r_, 3) for r_ in v['rotations']],
+                          'forced_overlap_mm2': (None if forced is None
+                                                 else round(forced, 4))},
+                expected={'legal_poses': '>= 1'}))
+    return out
+
+
+def _forced_fixed_overlap(ctx, census, ref, zone_rect, fixed):
+    """The courtyard overlap, on the overlap budget's geometry, that member
+    `ref` cannot avoid with the fixed parts `fixed` (`(ref, face, rect,
+    pose, declared)` rows) while its graded outline stays inside
+    `zone_rect`: its outline area less the zone area their outlines leave
+    free. None when either side is not in the budget's universe, or a fixed
+    part is declared on a face other than its board face (its outline there
+    is not measured)."""
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+    mine = _budget_outline_areas(ctx, [ref]).get(ref)
+    if mine is None:
+        return None
+    if any(f_[3] is None for f_ in fixed):
+        return None
+    graded, _x = legality.courtyard_budget_universe(
+        census, [f_[0] for f_ in fixed], {f_[0]: f_[3] for f_ in fixed})
+    if len(graded) != len(fixed):
+        return None
+    zb = box(*zone_rect)
+    shapes = [(g.poly if g.poly is not None else box(*g.rect)).intersection(zb)
+              for g in graded.values()]
+    covered = unary_union(shapes).area if shapes else 0.0
+    return mine[1] - (zb.area - covered)
+
+
 def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                group_sources: Sequence[str] = (),
                clearance: Optional[float] = None,
@@ -10004,6 +10171,9 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
           set, #1463): a FILE-locked non-member already inside an exclusive
           zone, or a `fixed_poses[]` non-member declared inside one. Every
           seed carries it; a container is no stranger.
+      4e. `plan_zone_on_fixed` (#1631, WARN; ERROR past a declared overlap
+          budget): a member with no pose in its zone clear of a fixed or
+          file-locked part's courtyard on its face (`_zone_on_fixed_findings`).
       8. `plan_fixed_overlap` (WARN, per pair) / `plan_fixed_overlap_budget`
          (ERROR): two FILE-locked parts whose courtyards overlap on a shared
          face overlap in every placement. The grade counts courtyard overlap
@@ -10199,6 +10369,10 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 measured={'overlap_area_mm2': round(area, 4),
                           'pose': [float(f['x']), float(f['y']), rot]},
                 expected={'zone': list(z.rect), 'overlap_area_mm2': 0.0}))
+
+    # 4e. #1631: a member with no pose in its zone clear of what will not
+    #     move -- a fixed pose or a file lock -- on the member's face.
+    out.extend(_zone_on_fixed_findings(intent, ctx, state, blocks, _zparts))
 
     # 8. two FILE-locked parts overlapping -- in every placement there is.
     # #1162: on the reading the budget is graded in (check_assembly's drawn
