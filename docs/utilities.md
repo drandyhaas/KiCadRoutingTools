@@ -2998,7 +2998,13 @@ gap -- no ground beside it, or a gap off the declaration -- over more than
 Is this pad reachable at all, or is the router being blamed for the geometry?
 It measures the widest track that can get from the pad to the rest of its
 net (a distance transform plus an exact widest path), at the clearances the
-board would actually route at (its net classes, pinned up to the fab floor).
+board would actually route at: each foreign track, via and pad is held to the
+value its PAIR with the routed net's track gets, through check_drc's resolver
+(both net classes, the sibling `.kicad_dru`'s class/type-scoped and layer
+rules, a pad override; #1625), pinned up to the fab floor. The knobs line
+names a rule or class that set a pair's value (`pairs priced by rule
+'<name>': 0.1mm`), and `--json` carries it as `clearance_sources`. A via's
+legality is judged at the same track pricing.
 
 ```bash
 python3 py_tools/check_reachability.py board.kicad_pcb --pad U3.23
