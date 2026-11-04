@@ -13,8 +13,9 @@ single-row part by name.
 Checks:
   1. glasgow U1, stub mode: tracks and no vias; the via and hole floors are
      the input's, and the track floor (copper it did draw) was written.
-  2. A run whose net filter matches nothing writes the board through with
-     the input's project byte-identical.
+  2. A run whose net filter selects no pad of the part (a real net with no
+     pad on U1; a net the board lacks is refused since #1641) writes the
+     board through with the input's project byte-identical.
   3. interf_u BUS1 exits 1 naming it "not a QFN/QFP", and writes nothing.
 
     python3 tests/test_1195_qfn_floors_and_single_row.py
@@ -84,12 +85,27 @@ def main():
               (after.get('min_track_width') or 9) < (before.get('min_track_width') or 0),
               f"{before.get('min_track_width')} -> {after.get('min_track_width')}")
 
-        # 2. No copper, no writeback.
+        # 2. No copper, no writeback. The filter names a real net with no pad
+        # on U1, so the run selects nothing and draws nothing.
+        from kicad_parser import parse_kicad_pcb
+        with contextlib.redirect_stdout(io.StringIO()):
+            pcb = parse_kicad_pcb(g)
+        on_u1 = {p.net_id for p in pcb.footprints['U1'].pads}
+        off_u1 = sorted(n.name for i, n in pcb.nets.items()
+                        if i and i not in on_u1 and n.name
+                        and len(pcb.pads_by_net.get(i, [])) >= 2
+                        and not n.name.startswith('unconnected-'))[0]
         out2 = os.path.join(tmp, 'g_none.kicad_pcb')
-        rc, log = fan(g, out2, '--component', 'U1', '--nets', '/NO_SUCH_NET_1195')
-        with open(g[:-len('.kicad_pcb')] + '.kicad_pro', 'rb') as a, \
-                open(out2[:-len('.kicad_pcb')] + '.kicad_pro', 'rb') as b:
-            same = a.read() == b.read()
+        rc, log = fan(g, out2, '--component', 'U1', '--nets', off_u1)
+        check(f'--nets {off_u1!r} selects no pad of U1 (not_on_part)',
+              rc == 0 and '"reason": "not_on_part"' in log,
+              log.strip().splitlines()[-1][:200] if log else '')
+        pro2 = out2[:-len('.kicad_pcb')] + '.kicad_pro'
+        same = False
+        if os.path.isfile(pro2):
+            with open(g[:-len('.kicad_pcb')] + '.kicad_pro', 'rb') as a, \
+                    open(pro2, 'rb') as b:
+                same = a.read() == b.read()
         check('a run that drew nothing carries the project byte-identical',
               rc == 0 and 'No fanout tracks generated' in log and same,
               f'rc={rc} same={same}')
