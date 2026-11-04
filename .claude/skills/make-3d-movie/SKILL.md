@@ -72,7 +72,11 @@ You end with `wk/<run>/fixed.kicad_pcb`, `wk/<run>/intent.json` and
 ## Step 3: Find the missing 3D models
 
 A part whose model the installed library lacks is drawn as a box in its
-group's colour. List those models:
+group's colour. A model the board file itself carries (`kicad-embed://NAME`,
+with NAME in the board's or the footprint's embedded files) is drawn from the
+board, is never listed and is never replaced by a recorded answer; a
+`kicad-embed://` reference to a file the board does not carry is listed like
+any other. List those models:
 
 ```bash
 python3 movie3d/find_models.py missing wk/<run>/fixed.kicad_pcb

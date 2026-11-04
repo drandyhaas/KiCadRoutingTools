@@ -116,17 +116,20 @@ def _models(text, board, refs):
     """The model references each footprint in `refs` names, and whether
     each resolves (as the height measurement stages them)."""
     from kicad_parser import iter_footprint_blocks
-    from model_export import _locate, model_dirs, resolve_cli
+    from model_export import (_locate, board_embedded_names, embedded_names,
+                              model_dirs, resolve_cli)
     cli, _ = resolve_cli()
     board_dir = os.path.dirname(os.path.abspath(board))
     dirs = model_dirs(cli, board_dir) if cli else {'KIPRJMOD': board_dir}
+    board_embedded = board_embedded_names(text)     # #1639
     out = {}
     for _s, _e, fp, _raw, k in iter_footprint_blocks(text):
         if k not in refs:
             continue
         rows = []
+        embedded = board_embedded | embedded_names(fp)
         for m in re.finditer(r'\(model\s+"([^"]+)"', fp):
-            real, _how = _locate(m.group(1), dirs, board_dir)
+            real, _how = _locate(m.group(1), dirs, board_dir, embedded)
             rows.append({'path': m.group(1), 'resolved': bool(real)})
         out[k] = rows
     return out
