@@ -427,7 +427,13 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
   `refused`: the declared poses that are not legal, and `oversubscribed`:
   the edges that cannot seat all their declared parts together -- both the
   same in every seed, so they do not keep a seed from the judge, and each
-  printed once as a WARNING).
+  printed once as a WARNING -- and `links`: each seed's intent links, every
+  row with its gap, `max_mm`, `past` and graded `severity`). A link is
+  priced, not held, and graded a WARN unless the intent's `severity.link`
+  promotes it, so the judge does not rank by it: each link a seed leaves
+  past its `max_mm` is named on that seed's line and in one WARNING (the
+  seeds past it, the seeds holding it, and whether the first judged seed
+  breaks a link another holds, #1632).
   Judging all 12 default seeds instead of the 6 cheapest shipped worse.
 - **Output.** The placed board with its siblings, a `JSON_SUMMARY:` line
   (final cost, moves, seed, `start` -- `scattered`, `clustered` or `anchored` -- parts

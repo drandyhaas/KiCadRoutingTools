@@ -1038,7 +1038,12 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   (0 errors, and read every `proximity` warning; a crystal or load cap past
   twice its limit is a defect to fix before judging, whatever the judge's
   rank. The seed's `floorplan` line already counts the errors, and its log
-  names each claim still past its limit, `WARNING: claim ...`) and
+  names each claim still past its limit, `WARNING: claim ...`; read every
+  `link` warning too: a link is priced, not held, so a seed can end far past
+  its `max_mm` and still be the cheapest, and the run's output names each
+  link past its limit and the seeds that break it, `WARNING: link ...`; the
+  judge ranks by a link only when the intent promotes it,
+  `severity: {"link": "error"}`) and
   `python3 -X utf8 py_tools/render_placement.py <placed> -o <placed>.png`.
   Check the render against `references/placement-lessons.md`: the power
   stage between its entry and its loads, a regulator's caps tight around it,

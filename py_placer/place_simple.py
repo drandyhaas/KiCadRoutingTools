@@ -710,11 +710,7 @@ def _many_seeds(ap, a):
             ill = summary.get('illegal') or []
             why = summary.get('illegal_why') or {}
             start = summary.get('start')
-            fpt = ', '.join(t for t in (_fp_text(summary.get('floorplan')),
-                                        _asm_text(summary.get('assembly')),
-                                        *(f"{r['outer']} {r['face']} part(s) in {r['bga']}'s "
-                                          f"outer rows" for r in summary.get('bga_field') or ()
-                                          if r['outer'])) if t)
+            fpt = seed_findings(summary)
             print(f"  seed {s}{f' ({start})' if start in ('clustered', 'anchored') else ''}: "
                   f"cost {fin['cost']:.1f}, {summary['moves']} moves in "
                   f"{summary['seconds']['anneal']} s"
@@ -774,6 +770,62 @@ def judge_order(reports):
     return sorted((s for s, r in reports.items() if not r.get('illegal')), key=rank)
 
 
+def links_past(report):
+    """The intent links (#1477) `report` (a seed's summary or `--json`
+    report) leaves past their `max_mm`: its `links` rows, in order. A row
+    written before `past` was recorded is read off its rounded gap."""
+    return [ln for ln in report.get('links') or ()
+            if ln.get('past', ln['gap_mm'] > ln['max_mm'] + 1e-9)]
+
+
+def seed_findings(summary):
+    """What a run of several seeds prints of one seed's own findings on its
+    line: its floorplan errors, its assembly, its far-face parts in a ball
+    grid's outer rows and each intent link it leaves past its `max_mm`
+    (#1632); '' when there are none."""
+    return ', '.join(t for t in (
+        _fp_text(summary.get('floorplan')), _asm_text(summary.get('assembly')),
+        *(f"{r['outer']} {r['face']} part(s) in {r['bga']}'s outer rows"
+          for r in summary.get('bga_field') or () if r['outer']),
+        *(f"link {ln['link']} {ln['gap_mm']:.2f} mm, past its {ln['max_mm']:g} mm"
+          for ln in links_past(summary))) if t)
+
+
+def link_warnings(seeds, summaries, judge):
+    """One line per intent link a reporting seed leaves past its `max_mm`
+    (#1632): the seeds past it with their gaps, the seeds holding it, and
+    whether a judged seed breaks a link another seed holds. A link is priced,
+    not held, and check_floorplan grades it a WARN unless the intent's
+    `severity.link` promotes it, so without these lines the run's output
+    never names it and the judge ranks a seed past it no lower."""
+    done = [s for s in seeds if s in summaries]
+    rows = {}                               # link -> {seed: row}
+    for s in done:
+        for ln in summaries[s].get('links') or ():
+            rows.setdefault(ln['link'], {})[s] = ln
+    out = []
+    for name, per in rows.items():
+        past = [s for s in done if s in per and per[s] in links_past(summaries[s])]
+        if not past:
+            continue
+        held = [s for s in done if s in per and s not in past]
+        lim = per[past[0]]['max_mm']
+        line = (f"link {name} is past its {lim:g} mm in seed(s) "
+                + ', '.join(f"{s} ({per[s]['gap_mm']:.2f} mm)" for s in past)
+                + (f"; held in seed(s) {', '.join(map(str, held))}" if held else
+                   "; no seed holds it"))
+        if judge and judge[0] in past and held:
+            line += f"; the first judged seed, {judge[0]}, breaks it while another holds it"
+        if per[past[0]].get('severity', 'warn') == 'error':
+            out.append(line + "; the intent's `severity.link` makes it a floorplan error, "
+                       "which the judge ranks by")
+        else:
+            out.append(line + "; check_floorplan grades a link a WARN unless the intent's "
+                       "`severity.link` promotes it, so the judge ranks a seed no lower "
+                       "for it")
+    return out
+
+
 def _illegal_every_seed(seeds, summaries):
     """`{ref: {seed: reason}}`: the parts every seed that reported left
     illegal (#1540), each with its reason per seed. Empty when a seed
@@ -801,7 +853,10 @@ def _name_judged(a, seeds, summaries):
     `fold` the parts that follow a claim into their partner's group and the
     groups that emptied, likewise said once,
     `floorplan` each seed's
-    floorplan errors, `assembly` its check_assembly blocking count, and
+    floorplan errors, `assembly` its check_assembly blocking count, `links`
+    its intent links (each one's gap, `max_mm`, `past` and graded
+    `severity`; a link past its limit is WARNED once, naming its seeds,
+    #1632), and
     `baseline` the board the seeds were placed from, which judge_seeds hands
     quick_score so the fast route's score grades assembly the same way)."""
     judge = judge_order({s: summaries[s] for s in seeds if s in summaries})[:a.judge]
@@ -851,6 +906,10 @@ def _name_judged(a, seeds, summaries):
            # each placed seed's far-face parts under a ball field (#1425)
            'bga_field': {str(s): summaries[s].get('bga_field') or []
                          for s in seeds if s in summaries},
+           # each placed seed's intent links, every row with its gap and
+           # whether it is past its max_mm (#1632)
+           'links': {str(s): summaries[s].get('links') or []
+                     for s in seeds if s in summaries},
            'baseline': (os.path.abspath(a.board) if getattr(a, 'board', None)
                         else None)}
     path = os.path.join(os.path.dirname(a.out.format(seed=seeds[0])), 'judge.json')
@@ -874,6 +933,8 @@ def _name_judged(a, seeds, summaries):
         elif fp and fp.get('errors') is None:
             print(f"  WARNING: seed {s} is judged with its {_fp_text(fp)}: grade it with "
                   f"check_floorplan --intent before keeping it")
+    for line in link_warnings(seeds, summaries, judge):
+        print(f"  WARNING: {line}")
     for rec in doc['claim_arity']:
         print(f"  WARNING: {arity_text(rec)}")
     note = next((summaries[s]['pad_overhang_note'] for s in seeds
@@ -1627,8 +1688,13 @@ def main(argv=None):
     for h in model.hints:
         if h['kind'] == 'within':
             gap = model._hint_full(h)[0]
-            links.append({'link': h['link'], 'gap_mm': round(gap, 3), 'max_mm': h['max_mm']})
-            if gap > h['max_mm'] + 1e-9:
+            past = gap > h['max_mm'] + 1e-9
+            # `severity`: what check_floorplan grades the row past its limit,
+            # and so whether the judge reads it (#1632)
+            links.append({'link': h['link'], 'gap_mm': round(gap, 3), 'max_mm': h['max_mm'],
+                          'past': past,
+                          'severity': intent.severity_of('link', floorplan.WARN)})
+            if past:
                 print(f"  link {h['link']}: {gap:.2f} mm, past its {h['max_mm']:g} mm")
     # an edge-seated part's coordinate along its edge is rounded into its
     # seat's stretch, so a part clamped onto a band's end is not written past

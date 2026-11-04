@@ -121,6 +121,11 @@ def test_place(td):
         return
     gap = links['auto_by_usb']['gap_mm']
     ok('the anneal holds it within max_mm', gap <= 1.0 + 1e-6, gap)
+    # #1632: the row says whether it is past its max_mm and how it is graded,
+    # which a run of several seeds reads
+    ok('the row carries past and severity',
+       links['auto_by_usb'].get('past') is False
+       and links['auto_by_usb'].get('severity') == fp.WARN, links['auto_by_usb'])
     names = [g if isinstance(g, str) else (g.get('name') if isinstance(g, dict) else g[0])
              for g in rep.get('groups') or ()]
     ok('the groups are not merged', 'auto' in names and 'usb' in names, names)

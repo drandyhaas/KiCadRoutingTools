@@ -1084,7 +1084,7 @@ reading.
 | `replicate` | yes | — | `place_pose replicate --intent` applies the declaration; an anneal after it may move a copied part, and the grade then reports it |
 | `template` | yes | **seated, carried and priced**: each member starts at its template pose round its chip, moves rigidly with every move of the chip, and its mean pad distance from that pose costs `--template-weight` (default 100) per mm; a member's `jump` goes back to its pose, and a member joins the chip's group and is not priced as a decap | the final legality step can still nudge a member to its nearest legal pose; the grade then reports the drift |
 | `keep_away` | yes | **priced** whenever the intent declares a row (#1476): each part pair's shortfall below GAP, pad edge to pad edge as the grade measures it (the rule's own sides, `_keep_away_gaps` on `legality.pad_rect` rects, two pads of one net or one part never measured), costs `KEEP_AWAY_WEIGHT` (500) per mm -- a declared separation, so it outweighs the wire a breach saves | a soft term, so a crowded board can still end a seed inside a gap, which the grade then reports; the routers price it again once there are tracks |
-| `link` | yes | **priced**: a `within` term on the link's two sets of parts, nothing while their nearest courtyards are within `max_mm`, `LINK_WEIGHT` (50) per mm past it; the groups the parts are in are never merged, unlike a `proximity` row across groups; the anchored start pulls the two sets together as a groups-file `near` does. `place_simple` prints each link past its `max_mm`, and `links` in its `--json` holds every link's gap | a soft term, so a seed that cannot meet `max_mm` ends past it, which the grade then reports |
+| `link` | yes | **priced**: a `within` term on the link's two sets of parts, nothing while their nearest courtyards are within `max_mm`, `LINK_WEIGHT` (50) per mm past it; the groups the parts are in are never merged, unlike a `proximity` row across groups; the anchored start pulls the two sets together as a groups-file `near` does. `place_simple` prints each link past its `max_mm`, and `links` in its `--json` holds every link's gap (`past`, and the `severity` the grade gives it); a run of several seeds names each link a seed leaves past it on that seed's line and in one WARNING (the seeds past it, the seeds holding it, and whether the first judged seed breaks a link another holds), and carries every seed's rows in `judge.json`'s `links` (#1632) | a soft term, so a seed that cannot meet `max_mm` ends past it, which the grade then reports -- at **warn**, which the judge does not rank by; `severity: {"link": "error"}` makes it a floorplan error, which it does |
 | `pins_to_edge` | yes | — | always-WARN advice for a reviewer |
 | `array_formation` | yes | — | graded only. A group in the groups file keeps its parts together, not in a row |
 
@@ -1267,7 +1267,13 @@ of the next.
 `link` grades each one at **warn** (a side matching no part is
 `link_unresolved`). `place_simple` prices the same gap as a `within` term:
 nothing inside `max_mm`, `LINK_WEIGHT` (50) per mm past it -- strong enough
-to hold a declared distance (at the `near` weight, 2, it was noise), and it
+to hold a declared distance on the board it was measured on (21 parts, one
+link within 1 mm, 6 seeds: at the `near` weight, 2, no seed met it, at 50 and
+at 500 all six did). It is a fixed price per mm, not scaled to the rest of
+the objective, so on a board whose seeds cost thousands a seed can end many
+mm past a link and still be the cheapest: `place_simple` names each seed
+that leaves a link past it (the `link` row above), and `severity.link: error`
+makes the judge rank such a seed below one that holds the link. The term
 stops pulling once the parts are close enough, so a regulator linked to its
 filter and its loads may sit anywhere that keeps both links, and its wiring
 decides where.
