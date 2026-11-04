@@ -901,6 +901,16 @@ def run_reroute_loop(
 
                 reroute_succeeded = False
                 ripped_items = []
+                # #1650: bound on EVERY pass, before the branch below that
+                # fills them. routed_net_paths can be empty here (a routed
+                # pair whose result carries no p_path/n_path -- a direct
+                # hybrid -- never enters it), and the setback fallback after
+                # the rip ladder reads both: unbound they raised
+                # UnboundLocalError, bound once per loop they handed this
+                # pair an EARLIER pair's blocked cells. Empty matches the
+                # main diff-pair loop, whose setback fallback also runs only
+                # inside its routed_net_paths branch.
+                fwd_cells = bwd_cells = []
                 if routed_net_paths and result:
                     # Find blocked cells from the failed route
                     # Pop to free memory from result dict (cells kept in local vars for fallback)
@@ -1197,7 +1207,8 @@ def run_reroute_loop(
                                     successful += 1
 
                 # Fallback layer swap for setback failures in reroute (after rip-up fails)
-                # Note: fwd_cells and bwd_cells already extracted above
+                # Note: fwd_cells and bwd_cells already extracted above ([] when
+                # routed_net_paths was empty, #1650)
                 if not reroute_succeeded and enable_layer_switch and result:
                     fwd_iters = result.get('iterations_forward', 0)
                     bwd_iters = result.get('iterations_backward', 0)
