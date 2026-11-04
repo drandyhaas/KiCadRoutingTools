@@ -36,11 +36,13 @@ or `--ring MM` -- named `<name>_<ref>` and forbidding tracks and vias (the pour
 stays allowed). A hole whose pad carries a net (a ground ring under a plated
 hole) gets none: its own copper has to reach it. KiCad's `unconnected-*` net of
 a pin left unconnected is not such a net, so that hole gets its area (pads stay
-allowed in it). A closed Edge.Cuts circle of 2 mm or more that is not the
-board's outline is a hole too (#1502), named `CUT1`, `CUT2` ..., and its ring
-is 0.4 x its diameter at any size (a 20 mm round window gets an 8 mm ring).
-`--skip HOLE ...` leaves the named holes (as the run prints them) without a
-ring: a round window, or a hole that takes no screw (#1648).
+allowed in it). A closed Edge.Cuts circle of 2 to 7 mm that is not the
+board's outline is a hole too (#1502), named `CUT1`, `CUT2` ...; a wider one
+is a window (a lens, a tube, a cable cut-out), not a screw hole, and gets no
+ring (#1648: 7 mm is ISO 273's coarse clearance hole for M6,
+`mounting_holes.EDGE_CUT_MAX_SCREW_DIAMETER`). `--skip HOLE ...` leaves the
+named holes (as the run prints them) without a ring: a hole that takes no
+screw, such as an alignment or test-fixture hole.
 `check_mounting_holes.py` grades the result. With no hole to ring (none on the
 board, every one carries a net, or every one is skipped) the output is the
 input, copied unchanged.
@@ -159,8 +161,8 @@ def main():
     p.add_argument('--skip', nargs='+', default=None, metavar='HOLE',
                    help='with --mounting-holes: leave these holes without a ring, '
                         'by the names the run prints (a footprint reference, or '
-                        'CUT1, CUT2 ... for an Edge.Cuts circle), e.g. a round '
-                        'window or an alignment hole that takes no screw')
+                        'CUT1, CUT2 ... for an Edge.Cuts circle), e.g. an '
+                        'alignment hole that takes no screw')
     p.add_argument('--ring', type=float, default=None, metavar='MM',
                    help='with --mounting-holes: how far past the hole edge '
                         'the screw head reaches (default 0.4 x the drill)')

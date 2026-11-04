@@ -934,13 +934,16 @@ a round drill of 2.0 mm or wider, every other pad that hole drawn again (front
 and back pads) or a small plated stitching via inside its pad (KiCad's
 `_Pad_Via`), none on a signal net (a milled slot, or a part of several holes
 such as a keyboard stabilizer, is not one). A hole drawn with the outline -- an
-Edge.Cuts circle of 2.0 mm or more that is not the board's own outline -- is one
-too, named `CUT1`, `CUT2` ... in file order (#1502). The ring is 0.4 x the
-drill at any size, so a large round window drawn on Edge.Cuts gets a ring to
-match (a 20 mm circle, 8 mm). `--skip HOLE ...` leaves the named holes, by the
-names the run prints, without a ring: a round window, or a hole that takes no
-screw (#1648); a name that is not one of the board's mounting holes is exit 2,
-nothing written. A hole whose pad carries a net (a
+Edge.Cuts circle of 2.0 to 7.0 mm that is not the board's own outline -- is one
+too, named `CUT1`, `CUT2` ... in file order (#1502). A wider Edge.Cuts circle
+is a window (a lens, a tube, a cable cut-out), not a screw hole: it is no
+mounting hole and gets no ring (#1648). 7.0 mm is ISO 273's coarse-series
+clearance hole for M6, the widest clearance any series gives the screws the
+ring is derived for (`mounting_holes.EDGE_CUT_MAX_SCREW_DIAMETER`); a footprint
+hole has no such limit. `--skip HOLE ...` leaves the named holes, by the
+names the run prints, without a ring: a hole that takes no screw, such as an
+alignment or test-fixture hole; a name that is not one of the board's mounting
+holes is exit 2, nothing written. A hole whose pad carries a net (a
 ground ring) gets no area, since its own copper has to reach it; an
 `unconnected-*` pin net is not such a net. The router and the plane
 steps honour the areas like any other; [`check_mounting_holes.py`](#mounting-hole-copper-check_mounting_holespy)
