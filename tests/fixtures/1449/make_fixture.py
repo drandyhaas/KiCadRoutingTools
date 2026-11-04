@@ -2,17 +2,21 @@
 """Build tests/fixtures/1449/edge_neck.kicad_pcb + .kicad_pro (needs KiCad's pcbnew).
 
 40x30 mm, 2 layers, one F.Cu GND pour, split by a 1 mm pad of net WALL except
-for a neck of width GAP between the wall's end and the bottom board edge. With
-the project's min_copper_edge_clearance at EDGE the neck is GAP - EDGE - 0.2
-(the zone clearance to the wall) wide: 0.35 mm at the fixture's 0.05 edge,
-which survives the 0.25 min thickness, and 0.20 mm at the 0.2 fab-edge pin,
-which does not. From the #1449 report.
+for a neck of width GAP between the wall's end and the bottom board edge. The
+zone's and the Default class's clearance is CLEARANCE, the project's
+min_copper_edge_clearance EDGE. The neck is GAP - (edge gap) - CLEARANCE wide,
+and the fill model's edge gap is max(CLEARANCE, edge rule) (#1564), so the
+defaults (0.5, 0.05, 0.1) give 0.30 mm at the project's rule, over the 0.25
+min thickness, and 0.20 mm at the 0.2 fab-edge pin, under it. CLEARANCE must
+stay under the pin, or the model's gap is the same at both and the neck reads
+split before routing (#1643). From the #1449 report.
 
-usage: make_fixture.py OUTDIR [GAP_MM] [EDGE_MM]
+usage: make_fixture.py OUTDIR [GAP_MM] [EDGE_MM] [CLEARANCE_MM]
 """
 import sys, json, os, pcbnew
 from pcbnew import FromMM as mm, VECTOR2I as V
-out = sys.argv[1]; gap = float(sys.argv[2]) if len(sys.argv) > 2 else 0.6; edge = float(sys.argv[3]) if len(sys.argv) > 3 else 0.05
+out = sys.argv[1]; gap = float(sys.argv[2]) if len(sys.argv) > 2 else 0.5; edge = float(sys.argv[3]) if len(sys.argv) > 3 else 0.05
+clr = float(sys.argv[4]) if len(sys.argv) > 4 else 0.1
 os.makedirs(out, exist_ok=True)
 b = pcbnew.BOARD()
 ds = b.GetDesignSettings()
@@ -41,7 +45,7 @@ fp("R2", 8, 22, [("1", 0, 0, 1.0, 1.0, "SIG")])
 y0, y1 = 0.3, H - gap
 fp("W1", 20, (y0+y1)/2, [("1", 0, 0, 1.0, y1-y0, "WALL")])
 z = pcbnew.ZONE(b); z.SetLayer(pcbnew.F_Cu); z.SetNet(net("GND"))
-z.SetLocalClearance(mm(0.2)); z.SetMinThickness(mm(0.25))
+z.SetLocalClearance(mm(clr)); z.SetMinThickness(mm(0.25))
 z.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
 z.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_NEVER)  # keep islands, so fills do not hide the split
 ol = z.Outline(); ol.NewOutline()
@@ -49,5 +53,5 @@ for x, y in [(0,0),(W,0),(W,H),(0,H)]: ol.Append(mm(x), mm(y))
 b.Add(z)
 b.BuildConnectivity()
 b.Save(os.path.join(out, "edge_neck.kicad_pcb"))
-pro = {"meta": {"filename": "edge_neck.kicad_pro", "version": 3}, "board": {"design_settings": {"rules": {"min_copper_edge_clearance": edge}}}, "net_settings": {"classes": [{"name":"Default","clearance":0.2,"track_width":0.2,"via_diameter":0.6,"via_drill":0.3}], "meta":{"version":4}}}
+pro = {"meta": {"filename": "edge_neck.kicad_pro", "version": 3}, "board": {"design_settings": {"rules": {"min_copper_edge_clearance": edge}}}, "net_settings": {"classes": [{"name":"Default","clearance":clr,"track_width":0.2,"via_diameter":0.6,"via_drill":0.3}], "meta":{"version":4}}}
 json.dump(pro, open(os.path.join(out, "edge_neck.kicad_pro"), "w"), indent=2)

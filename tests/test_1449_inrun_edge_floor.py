@@ -13,9 +13,22 @@ edge too, the way the writeback does (raised, never lowered).
   1. apply_routed_floors raises a sub-fab edge rule to the run's edge
      clearance, keeps a board rule above it, and leaves the edge alone when no
      edge clearance is given;
-  2. (kicad-cli present) routing the fixture -- a GND pour whose only path is
-     a neck that closes at the pin -- straps GND in the oracle and ships a
-     connected board.
+  2. routing the fixture -- a GND pour whose only path is a neck that closes
+     at the pin -- raises the edge in the in-run sync, and GND reaches the
+     audit unrouted: the neck is whole at the project's rule in the fill
+     model too, so the split the pin makes is the oracle's to find;
+  3. (kicad-cli present) the oracle straps GND and the board ships connected.
+     Without kicad-cli the file exits 77 after 1 and 2: the half that is
+     #1449's own verdict did not run, which is a skip, not a pass.
+
+The fixture's zone and class clearance are 0.1, under the pin (#1643). At
+0.2 the fill model's edge gap, max(zone clearance, edge rule) since #1564,
+was 0.2 at the project's 0.05 rule as at the pin, so the model read the neck
+split before routing, route.py routed GND in its main loop, and the oracle
+had nothing to strap. At 0.1 the neck (0.5 mm between the wall pad's end and
+the edge) is 0.5 - 0.1 - 0.1 = 0.30 in the model at the project's rule, over
+the 0.25 min thickness, and 0.5 - 0.2 - 0.1 = 0.20 at the pin, under it.
+`make_fixture.py OUTDIR` rebuilds it.
 
     python3 tests/test_1449_inrun_edge_floor.py
 """
@@ -41,7 +54,7 @@ failures = []
 
 
 def check(label, ok, detail=''):
-    print(f"  [{'ok' if ok else 'FAIL'}] {label}{(': ' + detail) if detail else ''}")
+    print(f"  [{'ok' if ok else 'FAIL'}] {label}{(': ' + detail) if detail and not ok else ''}")
     if not ok:
         failures.append(label)
 
@@ -95,10 +108,8 @@ def unit(tmp):
 
 
 def routed(tmp):
-    if not find_kicad_cli(warn=False):
-        print('  [skip] kicad-cli not present: the routed leg (oracle refill) '
-              'not run')
-        return
+    """Returns the reason the oracle half did not run, or None."""
+    cli = find_kicad_cli(warn=False)
     pcb = copy_fixture(tmp, 'in')
     out = os.path.join(tmp, 'out.kicad_pcb')
     r = subprocess.run([sys.executable, '-X', 'utf8', 'py_router/route.py', pcb, out,
@@ -109,11 +120,18 @@ def routed(tmp):
     run_utils.evidence(out, 'the routed board')
     m = re.search(r'^JSON_ORACLE: (\{.*\})$', log, re.M)
     oracle = json.loads(m.group(1)) if m else {}
-    check('the oracle ran', oracle.get('available') is True, str(oracle)[:200])
+    if cli:
+        check('the oracle ran', oracle.get('available') is True, str(oracle)[:200])
     check('the in-run sync raised the edge before the audit',
           bool(re.search(r'In-run DRC floors.*\n(?:\s+rules\.\S+.*\n)*\s+rules\.'
                          r'min_copper_edge_clearance: 0\.05 -> ', log)),
           '' if 'In-run DRC floors' in log else 'no in-run floor sync in the log')
+    check('GND reaches the audit unrouted: the neck is whole at the project rule '
+          '(non-vacuity: else the oracle has nothing to strap)',
+          not re.search(r'\] Routing GND \(id=', log),
+          'route.py routed GND in its main loop')
+    if not cli:
+        return 'kicad-cli not present: the oracle refill at the pinned edge did not run'
     check('the oracle straps the pour split at the pinned edge',
           oracle.get('links_routed', 0) >= 1 and oracle.get('remaining') == 0,
           f"links_routed {oracle.get('links_routed')}, "
@@ -124,17 +142,24 @@ def routed(tmp):
     check('check_connected (with its KiCad refill cross-check) passes the output',
           c.returncode == 0 and 'ALL NETS FULLY CONNECTED' in c.stdout,
           (c.stdout + c.stderr)[-300:])
+    return None
 
 
 def main():
     tmp = tempfile.mkdtemp(prefix='t1449_')
     try:
         unit(tmp)
-        routed(tmp)
+        skipped = routed(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print('FAILED: ' + ', '.join(failures) if failures else 'PASS')
-    return 1 if failures else 0
+    if failures:
+        print('FAILED: ' + ', '.join(failures))
+        return 1
+    if skipped:
+        print(f'SKIP: {skipped}')
+        return 77
+    print('PASS')
+    return 0
 
 
 if __name__ == '__main__':

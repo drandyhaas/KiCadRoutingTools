@@ -14,7 +14,7 @@
     "classes": [
       {
         "name": "Default",
-        "clearance": 0.2,
+        "clearance": 0.1,
         "track_width": 0.2,
         "via_diameter": 0.6,
         "via_drill": 0.3
