@@ -1606,6 +1606,14 @@ forbidden, the pour allowed):
 python3 -X utf8 py_router/add_rule_area.py board.kicad_pcb board_step0.kicad_pcb \
     --name MOUNT --mounting-holes 2>&1 | tee /tmp/step0_mount.txt
 
+When placement left a floorplan intent whose `covers[]` rows declare `holes[]`
+(where a module over a connector is screwed down), add `--intent <intent.json>`:
+each such site gets the same ring, named `MOUNT_<connector>_H<n>`, where
+check_assembly's `mountable` grades it (#1636). Nothing else keeps copper off a
+cover's hole site, and one track through it turns the cover from mountable to
+not after the route. A site where the board's own hole is fitted is left to
+that hole.
+
 A mounting hole here is a footprint that is one round drill of 2 mm or more
 with no signal net, or a closed Edge.Cuts circle of 2 to 7 mm that is not the
 board's outline (written as `<name>_CUT1`, `<name>_CUT2` ...). A wider

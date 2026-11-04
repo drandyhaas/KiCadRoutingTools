@@ -956,6 +956,18 @@ ground ring) gets no area, since its own copper has to reach it; an
 steps honour the areas like any other; [`check_mounting_holes.py`](#mounting-hole-copper-check_mounting_holespy)
 grades the result.
 
+**Cover hole sites (#1636).** With `--intent <intent.json>`, `--mounting-holes`
+also rings each site a floorplan intent's `covers[].holes[]` declare -- where a
+module covering a connector is screwed down -- at the same screw-head ring
+(`--ring` applies), centred where check_assembly's `mountable` grades the site,
+its connector at its pose on this board, named `<name>_<connector>_H<n>`.
+Nothing else keeps copper off such a site before routing, so a track through
+it turned a cover from mountable to not after the route. A site where the
+board's own mounting hole is fitted is left to that hole; a cover row whose
+connector the board lacks, or has on the other face, writes nothing.
+`--intent` without `--mounting-holes`, or an intent that cannot be loaded,
+exits 2.
+
 ## Mounting-Hole Copper (`check_mounting_holes.py`)
 
 KiCad checks a mounting hole against the ordinary hole clearance only; the

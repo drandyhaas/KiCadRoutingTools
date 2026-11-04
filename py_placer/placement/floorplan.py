@@ -8159,6 +8159,53 @@ def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, objec
     return rows
 
 
+def _cover_site_xy(c, hole, pose) -> Tuple[float, float]:
+    """Where `covers[]` row `c` puts its `holes[]` entry `hole` on the board,
+    its connector at `pose`."""
+    from .heights import standoff_at, to_board
+    return tuple(to_board((*standoff_at(c, hole),) * 2, pose)[:2])
+
+
+def _cover_site_standoff(mounts, x, y):
+    """The board's own mounting hole (of `mounts`) fitted at a cover's hole
+    site (x, y) -- within `COVER_STANDOFF_TOLERANCE_MM`, the nearest -- or
+    None."""
+    return min((m for m in mounts if math.hypot(m.x - x, m.y - y)
+                <= COVER_STANDOFF_TOLERANCE_MM + legality.EPS),
+               key=lambda m: math.hypot(m.x - x, m.y - y), default=None)
+
+
+def cover_hole_sites(intent, pcb) -> List[Dict[str, object]]:
+    """#1636: every declared cover's `holes[]` site on this board, where
+    `mount_report` grades it: `{connector, index (0-based), at (x, y),
+    diameter_mm, standoff}` -- `standoff` the board's own mounting hole
+    fitted there (its ref), else None. A row whose connector the board lacks,
+    or has on the other face, is left out (`mount_report` calls it
+    unresolved). For a step that keeps copper off the sites BEFORE routing
+    (`add_rule_area --mounting-holes --intent`), so the router is given the
+    ring the grade then reads."""
+    import mounting_holes as mh
+    fps = pcb.footprints or {}
+    mounts = None
+    out = []
+    for c in intent.covers or ():
+        con = c['connector']
+        fp = fps.get(con)
+        if fp is None or legality.footprint_side(fp) != c['side'] \
+                or not c.get('holes'):
+            continue
+        if mounts is None:
+            mounts = mh.mounting_holes(pcb)
+        pose = (fp.x, fp.y, fp.rotation or 0.0)
+        for k, hl in enumerate(c['holes']):
+            x, y = _cover_site_xy(c, hl, pose)
+            st = _cover_site_standoff(mounts, x, y)
+            out.append({'connector': con, 'index': k, 'at': (x, y),
+                        'diameter_mm': float(hl['diameter_mm']),
+                        'standoff': st.ref if st is not None else None})
+    return out
+
+
 def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, object]]:
     """#1537: each of a cover's own mounting holes (`holes[]`), where the row
     puts it -- `length_mm` along the axis, `off_mm` to the left of the centre
@@ -8179,17 +8226,15 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
     `connector` (`{ref, gap_mm, pads}`), else None -- a row whose site lands
     on its own connector is the declaration to read again."""
     import mounting_holes as mh
-    from .heights import standoff_at, to_board, to_local
+    from .heights import to_local
     mounts = mh.mounting_holes(pcb)
     con = c['connector']
     out = []
     for k, hl in enumerate(c['holes']):
-        x, y = to_board((*standoff_at(c, hl),) * 2, pose)[:2]
+        x, y = _cover_site_xy(c, hl, pose)
         d = hl['diameter_mm']
         far = mh.reach(d)
-        st = min((m for m in mounts if math.hypot(m.x - x, m.y - y)
-                  <= COVER_STANDOFF_TOLERANCE_MM + legality.EPS),
-                 key=lambda m: math.hypot(m.x - x, m.y - y), default=None)
+        st = _cover_site_standoff(mounts, x, y)
         own = {st.ref} if st is not None else set()
         parts, con_gap = [], None
         for r, g in sorted(geo.items()):

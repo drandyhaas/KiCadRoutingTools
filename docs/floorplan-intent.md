@@ -1558,6 +1558,9 @@ drawing gives, and one rule grades whether it can go on:
   cover NOT mountable and is named in the finding; a clear site with no
   standoff yet is reported (`standoff: null`), not judged, and so is a site
   past the outline. Report only: `place_simple` does not price the sites.
+  Before routing, `add_rule_area.py --mounting-holes --intent <this intent>`
+  writes each site's ring as a tracks-and-vias keep-out, so the router keeps
+  copper out of it (#1636, `docs/utilities.md`).
   A site may sit behind the connector's origin (`length_mm` below 0, #1589,
   `min_reader` 23), so a module with holes on both sides of its connector
   declares all of them in one row. The cover's own connector is reported at
