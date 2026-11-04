@@ -1149,6 +1149,11 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    keep a seed that wins under the arm the final route will use; where both
    arms will be routed, one that ranks first or second under both. Any other
    board has one chain: the recipe `plan-pcb-routing` prescribes for it.
+   Where that skill leaves a perimeter fanout to compare (Step 3, "Does this
+   part actually BENEFIT from fanout?", rule 3), the chains with and without
+   it are arms too: judge the seeds under each, and settle them with
+   `--confirm`, since a level-2 gap between them did not survive the full
+   route on the boards measured there.
 2. **Fast-route and score the seeds `wk/<run>/judge.json` names** (the
    `--judge` legal seeds, buildable and floorplan-clean first, then lowest
    `final.cost`; place_simple grades each seed with `check_assembly
@@ -1315,7 +1320,10 @@ Routing Completes): run them once, here, not again inside the routing.
   - Geometry already at the floor, failures clustered at one part's escape
     face, or `py_tools/check_reachability.py --pad REF.PAD` says CAGED:
     placement. Itemise it in the report with that measurement (§6). A finer
-    grid alone never widens a gap.
+    grid alone never widens a gap. First, if that part is a fine-pitch
+    perimeter part and the chain fanned nothing out for it, route that arm
+    (plan-pcb-routing Step 3, rule 3): it costs one route, and re-placing
+    costs a whole pass.
 - **`route.py`'s failure tally covers only the nets that step owns** (#1069).
   Count the board's open nets with `check_connected` or `board_score`.
 - **`route.py` finishes the planes; a repair step does not (#562, #1112).**

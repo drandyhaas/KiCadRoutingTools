@@ -242,14 +242,21 @@ step, confirm the geometry actually has that problem:
    handles it.
 3. **Interior pads at fine pitch (<=0.6mm)?** → Yes, fanout is needed: those
    pads are boxed in, and ordinary routing cannot reach them (Step
-   5a-tuned-ii). **A perimeter at <=0.65mm with many pads (QFN/QFP)?** → A
-   candidate only. Every perimeter pad faces outward, so the router can
-   reach it without a fanout; the stubs only commit each escape in advance,
-   and that can cost more than it saves. On one board an LQFP-48 at 0.5 mm
-   routed worse with `qfn_fanout.py` than without, the chain otherwise the
-   same (blocking 30 vs 25, vias 77 vs 70). Route the chain with and without
-   the perimeter fanout and keep it only when it routes better (blocking,
-   then vias); one board is not enough to say which way it usually goes.
+   5a-tuned-ii). **A perimeter at <=0.65mm with many pads (QFN/QFP), or a
+   2-row SMD connector or socket at <=0.65mm?** → A candidate: compare it.
+   Every perimeter pad faces outward, so the router can reach it without a
+   fanout; the stubs commit each escape in advance, which can cost or save.
+   The chain otherwise the same, an LQFP-48 at 0.5 mm routed worse with
+   `qfn_fanout.py` than without (blocking 30 vs 25, vias 77 vs 70). On three
+   corpus boards (same sizes on both arms) `--quick 2` moved blocking both
+   ways (4 to 1, 8 to 4, 2 to 6) and the full route tied all three (blocking
+   0/0, 1/1, 0/0; vias +6, +9 and -2 with the fanout), so a level-2 gap alone
+   does not decide it. Make the comparison when you first route the board,
+   not after the retries: it costs one more route. Keep the fanout only when
+   the FULL route is better (blocking, then joins_needed, then vias). These
+   boards finish at the full level either way, so they do not show what a
+   fanout does on a board that does not; one board is not enough to say
+   which way it usually goes.
    **"Fine-pitch" is not one number in this file, and no sentence should be read
    as if it were.** It is the FANOUT trigger at <=0.6 mm interior / <=0.65 mm
    perimeter — the predicate in the code block above, the only executable one —
@@ -260,6 +267,9 @@ step, confirm the geometry actually has that problem:
    "fine-pitch" with no number means this trigger.
    Dense 2-row mezzanine/card-edge connectors at 0.4mm (CM4/CM5, 200+ pads)
    DO benefit -- use `qfn_fanout.py --escape-method underpad --allow-via-in-pad`.
+   The same shape at a coarser pitch (a 2-row socket at 0.5 mm) has no
+   measurement here: it is a candidate under the perimeter rule above, so
+   compare it.
 4. **Unsure?** The fanout tools now refuse or warn on wrong shapes
    (staggered arrays, non-arrays). Trust a refusal: if the tool says the part
    is not an array and the geometry checks above say the pins are reachable,
@@ -277,6 +287,7 @@ step, confirm the geometry actually has that problem:
 | DIP/SOIC (through-hole/SMD rows) | None needed | Standard routing handles these |
 | PLCC (SMD J-lead or THT socket) | None needed | Perimeter part; the THT socket's pins reach every layer. Never a BGA (#513 item 16) |
 | Sockets / headers / backplane connectors (THT) | None needed | All-layer reachable; pad count alone is not a fanout signal |
+| 2-row SMD connector or socket at <=0.65 mm | `qfn_fanout.py`, compared (rule 3 above) | Step 3's predicate flags it above 40 pads; route with and without |
 
 ### When to Use Fanout for BGA/PGA/LGA
 
