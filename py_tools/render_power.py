@@ -71,7 +71,9 @@ def chain_nets(manifest):
                 if x.startswith('--'):
                     break
                 if flag == '--nets':
-                    planes.add(x)
+                    # #1495: a split layer's '|' group pours each of its nets
+                    from plane_groups import split_plane_group
+                    planes.update(split_plane_group(x))
                 elif x not in power:
                     power.append(x)
     return power, planes

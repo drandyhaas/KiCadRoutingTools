@@ -69,6 +69,30 @@ def _get_net_classes_from_board(pcb_data):
     return net_to_class, sorted_classes
 
 
+def live_net_clearances(pcb_data):
+    """{net_id: class clearance} for every net of ``pcb_data`` in a NON-Default
+    class -- the twin of list_nets.net_clearance_map_by_id, which reads the
+    file. Both fanouts price their escape at these (#1529). IPC: the classes
+    come from ``pcb_data`` (build_pcb_data_from_board reads the sibling
+    .kicad_pro), which is where this front's writeback puts an earlier step's
+    floors -- kipy exposes no per-class settings on the live board."""
+    net_to_class, class_names = _get_net_classes_from_board(pcb_data)
+    params_by_class = getattr(pcb_data, 'netclass_params', None) or {}
+    clr = {}
+    for cname in class_names:
+        if cname == 'Default':
+            continue
+        v = (params_by_class.get(cname) or {}).get('clearance')
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            clr[cname] = float(v)
+    out = {}
+    for nid, net in pcb_data.nets.items():
+        cname = net_to_class.get(net.name, 'Default')
+        if cname in clr:
+            out[nid] = clr[cname]
+    return out
+
+
 #: #1067: how `_optimize_decoupling_caps` says it refused to run, which
 #: `run_cap_optimization` reads to skip the post-pass a run would owe.
 CAP_NOT_RUN = "Cap optimization NOT run"
@@ -121,6 +145,11 @@ def cap_optimization_summary(result):
     if regrazed:
         summary += (f"; {len(regrazed)} re-grazed by this pass's own "
                     f"connector copper: {', '.join(sorted(regrazed))}")
+    # #1563: of the unresolved, the ones still SHORTED (copper in contact).
+    shorted = result.get('shorted') or []
+    if shorted:
+        summary += (f"; {len(shorted)} SHORTED to foreign copper (no pose "
+                    f"apart from it): {', '.join(sorted(shorted))}")
     # #1067: only when the step carried an intent (the key is absent else).
     decap = result.get('decap') or {}
     decap_broken = sorted(decap.get('broken') or {})
@@ -985,7 +1014,9 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         options_sizer.Add(self.check_previous, 0, wx.ALL, 5)
 
         self.no_inner_top = wx.CheckBox(self, label="No inner pads on top layer")
-        self.no_inner_top.SetToolTip("Prevent inner pads from using F.Cu")
+        self.no_inner_top.SetToolTip("Prevent inner pads from using F.Cu. Automatic "
+                                     "when the gap between balls cannot hold the "
+                                     "track at clearance (#1518)")
         options_sizer.Add(self.no_inner_top, 0, wx.LEFT | wx.BOTTOM, 5)
 
         esc_method_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -1039,6 +1070,25 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             "(matches the CLI --plane-net-layers).")
         pnl_row.Add(self.plane_net_layers_ctrl, 1)
         options_sizer.Add(pnl_row, 0,
+                          wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        # #1521: bga_fanout --immovable-refs. Named after the engine param so
+        # the plan executor's generic loop fills it; empty = None.
+        hold_row = wx.BoxSizer(wx.HORIZONTAL)
+        hold_row.Add(wx.StaticText(self, label="Hold parts:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.immovable_refs = wx.TextCtrl(self, value="")
+        self.immovable_refs.SetToolTip(
+            "References (space or comma separated, e.g. 'C12 R4' or "
+            "'C12, R4'; a part not on the board is refused) of parts the fanout "
+            "keeps its vias and escapes off, as if they were locked. By "
+            "default it may lay copper on an unlocked 2-pad C/R/FB part, "
+            "which the cap placement pass then moves; name a part that pass "
+            "could not clear and re-run the fanout, which then drops a ball "
+            "it cannot escape instead. Empty = none (matches the CLI "
+            "--immovable-refs).")
+        hold_row.Add(self.immovable_refs, 1)
+        options_sizer.Add(hold_row, 0,
                           wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
@@ -1236,6 +1286,11 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             # (space separated), parsed at the call site like the CLI main.
             'plane_net_layers': self.plane_net_layers_ctrl.GetValue().split()
                                 or None,
+            # #1521: parts held immovable, [] -> None when empty.
+            # #1562: commas separate too, as the CLI reads them (the engine
+            # checks every ref is on the board).
+            'immovable_refs': self.immovable_refs.GetValue().replace(
+                ',', ' ').split() or None,
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
@@ -1886,6 +1941,7 @@ class FanoutTab(wx.Panel):
             # #424 plane-ball drops -- checkbox bool -> engine token, same
             # default (on/'auto') as the CLI's --plane-drop.
             plane_drop=('auto' if config.get('plane_drop', True) else 'off'),
+            immovable_refs=config.get('immovable_refs'),        # #1521
             # Same NET:LAYER[,...] spec parse as bga_fanout's main()
             # (review parity finding 5: this kwarg was CLI-only).
             plane_net_layers=(
@@ -1897,6 +1953,10 @@ class FanoutTab(wx.Panel):
             # Shared Basic-tab per-layer costs (issue #288), same values the
             # route/diff tabs use; None when the control is empty/invalid.
             layer_costs=shared.get('layer_costs') or None,
+            # #1529: the live board's net classes, capped at the Clearance
+            # ceiling (bga_fanout.py reads the file's, under --clearance-ceiling).
+            net_clearances=live_net_clearances(self.pcb_data),
+            clearance_ceiling=shared.get('clearance_ceiling'),
             # Per-ball progress into the status line. Safe from the worker:
             # ui_thread_status marshals off-thread callers with CallAfter.
             # Only the counted x/N lines reach the status feed -- the
@@ -1944,6 +2004,10 @@ class FanoutTab(wx.Panel):
                                                shared.get('clamp_netclasses', False)),
                 'clearance_ceiling': shared.get('placement_clearance_ceiling',
                                                 shared.get('clearance_ceiling')),
+                # #1529: the ROUTING Clearance ceiling the classes are written
+                # back at (kept without one), as bga_fanout.py's
+                # --clearance-ceiling -- not the placement ceiling above.
+                'class_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -2030,6 +2094,10 @@ class FanoutTab(wx.Panel):
             # #1318: the route tab's power nets (qfn_fanout.py --power-nets).
             power_nets=shared.get('power_nets'),
             power_nets_widths=shared.get('power_nets_widths'),
+            # #1529: the live board's net classes, capped at the Clearance
+            # ceiling (qfn_fanout.py reads the file's, under --clearance-ceiling).
+            net_clearances=live_net_clearances(self.pcb_data),
+            clearance_ceiling=shared.get('clearance_ceiling'),
             # See the BGA path: safe from the worker via ui_thread_status.
             # Only the counted x/N lines reach the status feed -- the
             # uncounted phase chatter (gridding, staging, ...) is log-only.
@@ -2048,6 +2116,10 @@ class FanoutTab(wx.Panel):
                 'clearance': clearance,
                 'via_size': via_size,
                 'via_drill': via_drill,
+                # #1529: the classes are written back as the escape priced
+                # them -- kept, or capped at this ceiling when it is set.
+                'clearance_ceiling': shared.get('clearance_ceiling'),
+                'class_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -2066,6 +2138,13 @@ class FanoutTab(wx.Panel):
             daemon=True)
         self._fanout_thread.start()
         self._poll_operation(apply_kw, 'qfn')
+
+    def _held_hole_clearance(self, board, tracks, vias, clearance):
+        """#1568: :func:`gui_utils.held_hole_clearance_live` for this tab's
+        fanout copper (track and via dicts)."""
+        from .gui_utils import held_hole_clearance_dicts
+        return held_hole_clearance_dicts(self.pcb_data, board, tracks, vias,
+                                         clearance)
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga',
@@ -2224,22 +2303,42 @@ class FanoutTab(wx.Panel):
         # decision both fronts read (fix_kicad_drc_settings.fanout_fix_kwargs):
         # #1195 -- a QFN run with no copper writes none, one with no via leaves
         # the via and hole floors alone -- and the routed clearance (which also
-        # sets the copper-to-hole floor), every class clamped to it, no
-        # hole-to-hole and no edge setting beyond the fab pin. Into the sibling
-        # .kicad_pro through apply_drc_settings_fix, not the SWIG front's live
-        # apply_fix_to_board: kipy cannot write live design settings. That
-        # helper carries #693's "Fix DRC settings after routing" gate and
-        # records #581's same-net pad clearance, as bga_fanout's main does.
+        # sets the copper-to-hole floor), the classes (kept, or capped at the
+        # routing Clearance ceiling, #1529), no hole-to-hole and no edge
+        # setting beyond the fab pin. Into the sibling .kicad_pro through
+        # apply_drc_settings_fix, not the SWIG front's live apply_fix_to_board:
+        # kipy cannot write live design settings. That helper carries #693's
+        # "Fix DRC settings after routing" gate and records #581's same-net pad
+        # clearance, as bga_fanout's main does.
         _fcfg = fanout_config or {}
         import clearance_ledger as _cl
         from fix_kicad_drc_settings import fanout_fix_kwargs
         _fclr = _fcfg.get('clearance')
+        # #1529: the classes kept, or capped at the routing ceiling; and #782,
+        # the cap pass's writeback: when that pass RAN (and did not refuse) it
+        # priced every class at min(class, placement ceiling), so those
+        # classes are lowered to it too, as place_fanout_clearance.py writes
+        # them. The SWIG front makes the second clamp a separate live update
+        # (update_live_drc_floors' nondefault_clamp_mm); here both are the one
+        # project writeback, at the tighter of the two. A fanout with no cap
+        # pass, or one the pass refused, keeps the classes, as bga_fanout.py
+        # does without --clearance-ceiling.
+        _cap_ceiling = (_fcfg.get('clearance_ceiling')
+                        if cap_summary is not None
+                        and not cap_summary.startswith(CAP_NOT_RUN) else None)
+        _ceilings = [c for c in (_fcfg.get('class_ceiling'), _cap_ceiling)
+                     if c is not None]
         _fix_kw = fanout_fix_kwargs(
             fanout_kind, tracks, vias,
             clearance=_cl.effective(_fclr) if _fclr is not None else None,
             track_width=_fcfg.get('track_width'),
-            via_size=_fcfg.get('via_size'), via_drill=_fcfg.get('via_drill'))
+            via_size=_fcfg.get('via_size'), via_drill=_fcfg.get('via_drill'),
+            clearance_ceiling=min(_ceilings) if _ceilings else None)
         if _fix_kw is not None:
+            # #1568: the copper-to-hole floor this step HELD, lowered only to
+            # what its own copper needs -- the CLI fanouts' step_hole_clearance
+            _fix_kw['hole_clearance'] = self._held_hole_clearance(
+                board, tracks, vias, _fix_kw['clearance'])
             from .gui_utils import apply_drc_settings_fix
             apply_drc_settings_fix(_fcfg, fix_kwargs=_fix_kw)
 
@@ -2567,20 +2666,22 @@ class FanoutTab(wx.Panel):
             # KNOWN IPC GAP (#782, standalone button): the SWIG front follows
             # this with clamp_nondefault_netclasses_on_board(), lowering each
             # NON-Default class's clearance to the #768 ceiling this pass priced
-            # at. That helper writes a LIVE pcbnew board, which kipy cannot do,
-            # and the obvious .kicad_pro substitute overshoots: this button lays
-            # no escape copper, and #782 pointedly leaves the DEFAULT class
-            # alone, whereas fix_project_for_output(clearance=ceiling) would
-            # lower it too. So the clamp is deliberately NOT ported here rather
-            # than ported wrong. Consequence, and it is narrow: on a board with
-            # non-Default classes, pressing the STANDALONE cap button with the
+            # at (gated on "Fix DRC settings after routing" since #1578). That
+            # helper writes a LIVE pcbnew board, which kipy cannot do, and the
+            # .kicad_pro substitute is not the same clamp: measured, both
+            # fix_project_for_output(clearance=ceiling) and the ceiling-only
+            # form (clearance=None, class_ceiling=ceiling, which leaves a
+            # positive Default alone) rewrite a Default class of 0 to KiCad's
+            # 0.2 -- the class #782 pointedly leaves alone. So the clamp is
+            # deliberately NOT ported here rather than ported wrong.
+            # Consequence, and it is narrow: on a board with non-Default
+            # classes, pressing the STANDALONE cap button with the
             # Min-Clearance override ticked prices pairs at min(class, ceiling)
             # and leaves the class declaring the wider value. The INLINE path is
             # unaffected -- it records its floors through apply_drc_settings_fix
             # -- as is any plan run, covered by ai_plan's end-of-run writeback.
             # Closing this wants a non-Default-only project clamp in
-            # fix_kicad_drc_settings, which is a change to shared code and
-            # belongs to whoever wants it, not to a sync merge.
+            # fix_kicad_drc_settings that never touches the Default class.
             #
             # No refill_all_zones / pcbnew.Refresh here either: KiCad refills
             # and repaints server-side on each IPC commit.

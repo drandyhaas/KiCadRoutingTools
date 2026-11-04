@@ -191,6 +191,28 @@ the routing pipeline applies both so the model and the output file agree.
 > free. A 0.5 mm csBGA's GND ball lost its 0.33 mm tail that way in
 > every route step. `tests/test_graze_prune_fill_island.py` pins it.
 
+> **#1581 -- a pour-only join must be one KiCad's fill makes.** A removal
+> that SPLITS the net's copper (the net's copper-only graph gains a
+> component) leaves one side joined to the rest only by the pour, and both
+> grades above read that join off the fill MODEL, a raster of KiCad's fill
+> (since #1608 it keeps the hole clearance and opens at min_thickness as
+> KiCad does, but it is still sampled, and its probe is widened). So such a
+> removal is graded a third time, with the zone credit taken from
+> `plane_fill_model.trusted_zone_model` (passed as
+> `check_net_connectivity(..., fill_model_for=...)`): KiCad's own fill when
+> it is installed, else a CONSERVATIVE `ZoneFillModel` whose free cells are
+> cores at clearance + min_thickness/2 (+ half a cell) from every foreign
+> edge, the zone outline and the board edge, with every foreign drill kept
+> at the board's hole clearance (`fill_hole_clearance`: the declared rule,
+> else pcbnew's factory 0.25), queried at the point's own cell. A path of
+> such cores is fill KiCad pours. Measured before #1608: a GND pad ringed
+> by four via-in-pad pins lost its only stub through a 0.086 mm gap and
+> shipped open. Removals that keep a copper path never reach this grade, and the
+> conservative model is never published to the shared caches.
+> `tests/test_1581_graze_prune_pour_only_join.py` pins it, and
+> `tests/test_1581_route_keeps_pour_only_join_kicad.py` grades route.py's
+> output with KiCad.
+
 > **#1227 -- a dead-end prune never splits copper.** Every gated dead-end pass
 > (`add_route_to_pcb_data`'s per-commit prune, `sweep_dead_ends`,
 > `trim_net_stub_debris`, `cleanup_plane_taps_grazing`) removes through

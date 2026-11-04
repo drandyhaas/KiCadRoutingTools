@@ -119,6 +119,26 @@ _IGNORE_SEVERITIES = [
 ]
 
 
+_CLI_VERSION_CACHE = {}
+
+
+def kicad_cli_version(cli: Optional[str] = None) -> Optional[str]:
+    """The version string `kicad-cli version` prints (e.g. '10.0.7'), or None
+    when no kicad-cli is found or it does not answer. Cached per binary."""
+    cli = cli or find_kicad_cli(warn=False)
+    if not cli:
+        return None
+    if cli not in _CLI_VERSION_CACHE:
+        try:
+            r = subprocess.run([cli, 'version'], capture_output=True, text=True,
+                               timeout=30)
+            m = re.search(r'\d+\.\d+\.\d+', r.stdout or '')
+            _CLI_VERSION_CACHE[cli] = m.group(0) if m else None
+        except Exception:                                    # noqa: BLE001
+            _CLI_VERSION_CACHE[cli] = None
+    return _CLI_VERSION_CACHE[cli]
+
+
 def find_kicad_cli(warn: bool = True) -> Optional[str]:
     # `warn=False` resolves SILENTLY, for a module that looks kicad-cli up at
     # IMPORT and says the not-found warning itself later -- a CLI whose output
@@ -211,8 +231,9 @@ def _fast_connectivity_project(board_file: str):
     still reports the ratsnest opens the oracle consumes.
 
     The staged project preserves the real board's design rules and net
-    classes (only severities are flipped), so `--refill-zones` produces the
-    same fill geometry -- the connectivity result is identical, just fast.
+    classes (only severities are flipped), and the board's .kicad_dru is
+    staged beside it (#1494), so `--refill-zones` produces the same fill
+    geometry -- the connectivity result is identical, just fast.
     When the board has no sibling .kicad_pro yet (mid-chain, before the
     project is written), a minimal ignore-only project is synthesized, which
     matches kicad-cli's own default-rule fill it would have used anyway.
@@ -241,6 +262,12 @@ def _fast_connectivity_project(board_file: str):
         shutil.copyfile(board_file, staged_pcb)
         with open(staged_pro, 'w', encoding='utf-8') as f:
             json.dump(proj, f, indent=2)
+        # #1494: the board's custom rules move the pour `--refill-zones`
+        # makes, so they are staged too, or the opens are read off a fill
+        # the board will not ship with
+        sib_dru = os.path.splitext(board_file)[0] + '.kicad_dru'
+        if os.path.isfile(sib_dru):
+            shutil.copyfile(sib_dru, os.path.join(tmpdir, stem + '.kicad_dru'))
         return staged_pcb, tmpdir
     except Exception:
         return board_file, None
@@ -921,6 +948,38 @@ def _merge_collinear(route_points, keep=frozenset()):
     return out
 
 
+def _fold_close_via_hop(route_points, keep_xy, drop_xy):
+    """Drop the layer change at `drop_xy` by moving the hop that joins it to
+    the link's previous layer change at `keep_xy` onto the layer the path
+    leaves `drop_xy` on: in -> mid (keep), a run on mid, mid -> out (drop)
+    becomes in -> out at `keep_xy` and the run on out, so the dropped hole is
+    never drilled. A #340 connector on `out` would join the same points but
+    leave the run on mid as a stub hanging off the kept via.
+
+    Returns (route_points, keep_still_changes_layer) -- False when in == out,
+    so the hop was a dip and `keep_xy` needs no hole either -- or None when
+    another layer change lies between the two (the caller bridges instead).
+    """
+    def _at(p, xy):
+        return abs(p[0] - xy[0]) < 1e-6 and abs(p[1] - xy[1]) < 1e-6
+    changes = [i for i in range(len(route_points) - 1)
+               if route_points[i][2] != route_points[i + 1][2]
+               and _at(route_points[i], route_points[i + 1])]
+    jd = next((i for i in changes if _at(route_points[i], drop_xy)), None)
+    before = [i for i in changes if jd is not None and i < jd]
+    if not before or not _at(route_points[before[-1]], keep_xy):
+        return None
+    ik = before[-1]
+    out_l = route_points[jd + 1][2]
+    pts = (list(route_points[:ik + 1])
+           + [(x, y, out_l) for x, y, _l in route_points[ik + 1:jd + 1]]
+           + list(route_points[jd + 2:]))
+    if pts[ik][2] == out_l:
+        del pts[ik + 1]
+        return pts, False
+    return pts, True
+
+
 def clamp_emitted_width(route_points, extra_conn, used_width, nominal_width,
                         pcb_data, net_id, config, ladder=(0.2, 0.4, 0.8)):
     """The widest width <= `used_width` at which the copper ABOUT TO BE WRITTEN
@@ -1235,6 +1294,32 @@ def seeds_clear_of_edge(seeds, pcb_data, edge_clearance, track_half):
     return [p for p, dd in zip(seeds, d) if dd >= need]
 
 
+def _end_cluster(clusters, end, containing, tol=0.1):
+    """Index into `clusters` (exact_clusters' list) of the cluster a link end
+    lies on, or None. A zone end is its island's cluster; a pad, track or via
+    end is the cluster holding a pad centre, track end or via within `tol` of
+    it on its layer (a via point, layer None, matches any layer)."""
+    import math as _m
+    x, y, layer, kind = end
+    if kind == 'zone':
+        ii, _ = containing(x, y, layer)
+        if ii is None:
+            return None
+        for k, c in enumerate(clusters):
+            if ii in c['islands']:
+                return k
+        return None
+    best = None
+    for k, c in enumerate(clusters):
+        for px, py, pl in c['points']:
+            if layer and pl and pl != layer and '*' not in pl:
+                continue
+            d = _m.hypot(px - x, py - y)
+            if d <= tol and (best is None or d < best[0]):
+                best = (d, k)
+    return best[1] if best else None
+
+
 def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
                           track_half=0.1, edge_clearance=0.0):
     """Strap endpoints from KiCad's EXACT fill (kicad_exact_fill): the two
@@ -1322,6 +1407,17 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
         return (min(cand)[1], False) if cand else (None, False)
 
     same_pt = abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6
+    # A ZONE end that no island holds is kicad-cli's stand-in anchor too
+    # (#1564): it names the zone outline's first corner, which on a
+    # non-rectangular board lies outside the outline, so containment names
+    # nothing and the strap had no side to start from. The OTHER end is real
+    # copper; `_real_end` keeps it to pick its cluster below.
+    _real_end = None
+    if not same_pt:
+        for _E, _O in ((A, B), (B, A)):
+            if _E[3] == 'zone' and _containing(_E[0], _E[1], _E[2])[0] is None:
+                _real_end = _O
+                break
 
     def _island_outline(idx):
         s = _samples(idx)
@@ -1340,7 +1436,7 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
     # deterministic; later rounds pick up any remaining orphans).
     a_pts = b_pts = None
     _pref_pair = None
-    if same_pt:
+    if same_pt or _real_end is not None:
         try:
             from kicad_exact_fill import exact_clusters
             _cl = exact_clusters(pcb_data, net_id, islands)
@@ -1348,7 +1444,11 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
             _cl = None
         if _cl and len(_cl) >= 2:
             def _tagged(c):
-                pts = [(x, y, l, None) for x, y, l in c['points']]
+                # each island by its own index (its interior seeds the
+                # strap); untagged, only the copper -- the cluster's
+                # `points` repeat the islands' EDGE samples, and tagged
+                # None they won the nearest approach and became seeds
+                pts = [(x, y, l, None) for x, y, l in c['copper_points']]
                 for ii in c['islands']:
                     pts += [(x, y, l, ii) for x, y, l in _samples(ii)]
                 return pts
@@ -1356,7 +1456,15 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
             _main_pts = _tagged(_cl[0])
             _mt = _KD(np.asarray([(p[0], p[1]) for p in _main_pts]))
             _best = None
-            for _sc in _cl[1:]:
+            _cands = _cl[1:]
+            if _real_end is not None:
+                # The real end's own cluster is the orphan when it is not
+                # the main one; on the main one (or matched nowhere) the
+                # orphan is unnamed, and the smallest gap decides as above.
+                _k = _end_cluster(_cl, _real_end, _containing)
+                if _k:
+                    _cands = [_cl[_k]]
+            for _sc in _cands:
                 _sp = _tagged(_sc)
                 if not _sp:
                     continue
@@ -1396,6 +1504,8 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
                 if _lay_best is not None and _lay_best[0] <= 3.0:
                     _pref_pair = (_lay_best[1], _lay_best[2])
 
+    if a_pts is None and _real_end is not None:
+        return None  # exact clusters show no split to strap
     ia, ina = _containing(ax, ay, al) if a_pts is None else (None, False)
     ib, inb = (None, False) if (same_pt or a_pts is not None) \
         else _containing(bx, by, bl)
@@ -1496,23 +1606,36 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
     _win = (min(pa[0], pb[0]) - 8.0, min(pa[1], pb[1]) - 8.0,
             max(pa[0], pb[0]) + 8.0, max(pa[1], pb[1]) + 8.0)
 
+    def _interior(ii):
+        layer, poly = islands[ii]
+        return [(x, y, layer) for x, y in rasterize_interior(
+            poly, _win, 0.25, inset=track_half + 0.05,
+            edge_samples=_samples(ii))][:1500]
+
+    def _in_win(x, y):
+        return _win[0] <= x <= _win[2] and _win[1] <= y <= _win[3]
+
     def _side_seeds(pt, pts):
         origin = pt[3]
         if origin is not None:
-            layer, poly = islands[origin]
-            cells = rasterize_interior(
-                poly, _win, 0.25, inset=track_half + 0.05,
-                edge_samples=_samples(origin))
+            cells = _interior(origin)
             if cells:
-                return [(x, y, layer) for x, y in cells][:1500]
+                return cells
             # Sliver island with no interior at track width: edge samples.
             return [(x, y, l) for x, y, l in _samples(origin)
-                    if _win[0] <= x <= _win[2]
-                    and _win[1] <= y <= _win[3]][:400]
-        return [(px, py, pl) if pl else (px, py)
-                for px, py, pl, _o in pts
-                if _win[0] <= px <= _win[2]
-                and _win[1] <= py <= _win[3]][:400]
+                    if _in_win(x, y)][:400]
+        # The nearest approach is track, pad or via copper: seed the side's
+        # copper points, and each of its islands by its INTERIOR -- the
+        # side's island points are edge samples, the illegal starts above
+        # (one GND strap ended on such a point, 0.032 mm inside a foreign
+        # track's clearance, because a seed overrides the obstacle map).
+        seeds = [(px, py, pl) if pl else (px, py)
+                 for px, py, pl, _o in pts
+                 if _o is None and _in_win(px, py)][:400]
+        for ii in sorted({p[3] for p in pts if p[3] is not None
+                          and _in_win(p[0], p[1])}):
+            seeds += _interior(ii)
+        return seeds
 
     # #1168: never a seed the run's own edge floor forbids.
     src = seeds_clear_of_edge(_side_seeds(pa, a_pts), pcb_data,
@@ -1645,8 +1768,34 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
     # join pad; a weld never lands on or crosses it.
     from sense_branch import terminal_sense_dist
     if terminal_sense_dist(pcb_data, net_id, x1, y1, x2, y2, layer, w / 2.0) \
-            < reach + config.layer_clearance(layer, config.obstacle_clearance(net_id)):
+            < reach + config.layer_clearance(layer, config.obstacle_clearance(net_id), net_id):
         return None
+    # The board edge and milled slots, as the router's edge keep-out prices
+    # them (board_edge_clearance, else the track clearance) and from the
+    # geometry check_drc grades with: the weld is a straight shot, not an
+    # A* path, so nothing else keeps it out of the band (a GND weld ended
+    # 0.048 mm inside it).
+    from check_drc import (board_edge_geometry, _point_on_board,
+                           _segment_to_rings_distance, npth_slot_capsules,
+                           segment_to_npth_slots_distance)
+    edge_clr = getattr(config, 'board_edge_clearance', 0.0) or clr
+    need = edge_clr + w / 2.0 - 1e-4
+    if segment_to_npth_slots_distance(npth_slot_capsules(pcb_data),
+                                      x1, y1, x2, y2) < need:
+        return None
+    rings, outer, cutouts = board_edge_geometry(pcb_data.board_info)
+    if rings:
+        if not _point_on_board(x1, y1, outer, cutouts) \
+                or not _point_on_board(x2, y2, outer, cutouts) \
+                or _segment_to_rings_distance(x1, y1, x2, y2, rings) < need:
+            return None
+    elif pcb_data.board_info.board_bounds:
+        # A plain rectangle reaches no rings; inside it the segment's nearest
+        # approach to the boundary is at an endpoint.
+        bx0, by0, bx1, by1 = pcb_data.board_info.board_bounds
+        if any(min(px - bx0, bx1 - px, py - by0, by1 - py) < need
+               for px, py in ((x1, y1), (x2, y2))):
+            return None
     return Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
                    width=w, layer=layer, net_id=net_id)
 
@@ -2013,10 +2162,15 @@ def oracle_reconnect(board_file: str, net_names, config,
     # refill stages it -- a GUI staged save has no .kicad_dru sibling) and
     # resolved on each parse below, so the map is keyed by THAT board's ids
     # whichever front staged it. No rules file: nothing is installed.
+    # #1602: the same install carries the class/type-scoped rules (#1491),
+    # so a board whose .kicad_dru has only those installs it too -- the
+    # callers' configs are fresh, and their welds used to route blind to it.
     _track_src = project_from or board_file
     try:
-        from kicad_dru import read_board_track_clearances
-        _track_live = bool(read_board_track_clearances(_track_src)[0])
+        from kicad_dru import (read_board_track_clearances,
+                               board_has_scoped_clearance_rules)
+        _track_live = (bool(read_board_track_clearances(_track_src)[0])
+                       or board_has_scoped_clearance_rules(_track_src))
     except Exception:                                       # noqa: BLE001
         _track_live = False
 
@@ -2085,6 +2239,10 @@ def oracle_reconnect(board_file: str, net_names, config,
     # net on EVERY run -- with rip authority. Record their keys and filter
     # them out of remaining_links.
     exempt_keys = set()
+    # #1544: links with an end OUTSIDE the outline, exempt the same way (the
+    # test is built once, on the first parse: pads and outline never move here)
+    off_board_links = 0
+    _off_board_end = None
 
     def _link_key(l):
         """The same (net, rounded endpoints) key `attempted` uses."""
@@ -2242,18 +2400,54 @@ def oracle_reconnect(board_file: str, net_names, config,
             break
         ours = [l for l in links if l[0] in names]
         remaining = len(ours)
+        if ours:
+            pcb_data = parse_kicad_pcb(board_file)
+            name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
+            _install_net_maps(pcb_data)
+            # #1544: KiCad's links know nothing of the outline, so they
+            # include links to and between the pads #291 drops from every
+            # routing endpoint set; copper drawn to one ships off the board.
+            # Exempt them as the cross-board links are: still counted in
+            # `remaining` (the net IS open), never welded, and kept out of
+            # remaining_links, so no custody or #572 forced edge routes them.
+            if _off_board_end is None:
+                from connectivity import make_off_board_link_end_test
+                _off_board_end = (make_off_board_link_end_test(pcb_data)
+                                  or False)
+            if _off_board_end:
+                # A ZONE end is never off the board: the fill is clipped to
+                # the outline, and kicad-cli anchors a zone end at the zone
+                # outline's first corner, which on a non-rectangular board
+                # can lie outside the outline although every island of the
+                # fill is inside it. Only a pad, track or via end says where
+                # copper would have to be drawn.
+                def _end_off(nid, end):
+                    return (end[3] != 'zone'
+                            and _off_board_end(nid, end[0], end[1]))
+                _on_board = []
+                for l in ours:
+                    _lnid = name_to_id.get(l[0])
+                    if _lnid is not None and (
+                            _end_off(_lnid, l[1]) or _end_off(_lnid, l[2])):
+                        if _link_key(l) not in exempt_keys:
+                            exempt_keys.add(_link_key(l))
+                            off_board_links += 1
+                        continue
+                    _on_board.append(l)
+                if len(_on_board) < len(ours):
+                    print(f"  KiCad-oracle recheck round {rnd + 1}: "
+                          f"{len(ours) - len(_on_board)} link(s) end OUTSIDE "
+                          f"the board outline -- exempt, no copper is drawn "
+                          f"to an off-board pad (#291)")
+                ours = _on_board
         if not ours:
-            if rnd == 0:
+            if rnd == 0 and not remaining:
                 print("  KiCad-oracle recheck: KiCad reports all processed "
                       "nets complete")
             break
         rounds += 1
         print(f"  KiCad-oracle recheck round {rnd + 1}: KiCad reports "
               f"{len(ours)} missing link(s) on processed nets")
-
-        pcb_data = parse_kicad_pcb(board_file)
-        name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
-        _install_net_maps(pcb_data)
         routing_layers = pcb_data.board_info.copper_layers
         layer_map = {name: i for i, name in enumerate(routing_layers)}
 
@@ -2399,6 +2593,19 @@ def oracle_reconnect(board_file: str, net_names, config,
             collapsed_dups += _collapsed
         work = _deduped
 
+        # #1564: links with a zone end off the board (kicad-cli's outline-
+        # corner stand-in) go LAST: cluster mode rebinds each to its real
+        # split, which is often one an exact-source link of this round
+        # already names, and the loop skips a split it has already taken.
+        def _off_zone_end(w):
+            _nid = name_to_id.get(w[0])
+            return bool(_off_board_end) and _nid is not None and any(
+                e[3] == 'zone' and _off_board_end(_nid, e[0], e[1])
+                for e in (w[1], w[2]))
+        work = ([w for w in work if not _off_zone_end(w)]
+                + [w for w in work if _off_zone_end(w)])
+        _round_keys = set()
+
         # Obstacle-map memo (#499). The base map is a pure function of
         # (net_id, the board's copper, config) and route_plane_connection_wide
         # CLONES it (`clone_fresh`) rather than mutating, so it is reusable
@@ -2447,7 +2654,20 @@ def oracle_reconnect(board_file: str, net_names, config,
                 failed += 1
                 continue
             attempted[_key] = _attempt + 1
+            _round_keys.add(_key)
             force_raw = _attempt == 1  # smart expansion didn't satisfy KiCad
+            # #1564: a zone end off the outline is kicad-cli's outline-corner
+            # stand-in, as a coincident zone|zone anchor is -- no fill and no
+            # copper can lie there, so the link takes cluster mode below and
+            # never a raw retry toward that point.
+            _stand_in = _off_zone_end((net_name, (ax, ay, al, akind),
+                                       (bx, by, bl, bkind)))
+            if force_raw and _stand_in:
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                      f"<->({bx:.2f},{by:.2f})  zone end off the board "
+                      f"-- skipping the raw retry (#1564)")
+                failed += 1
+                continue
             if force_raw and abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6:
                 # A raw retry of a COINCIDENT link is a zero-length bridge at
                 # an artifact anchor -- meaningless copper (#648). The smart
@@ -2719,7 +2939,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                 # split must be fill-side. Fall back to the raw points.
                 src = [(ax, ay, al)] if al else [(ax, ay)]
                 tgt = [(bx, by, bl)] if bl else [(bx, by)]
-            if abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6 and not force_raw:
+            if (_stand_in or (abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6)) \
+                    and not force_raw:
                 # Zone|Zone items carry ONE ratsnest position for both ends
                 # (the isolated island). Target copper provably in the MAIN
                 # cluster: the net's largest track+via component, graded
@@ -2773,6 +2994,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                     print(f"    {net_name}: cluster mode: true gap "
                           f"({ax:.2f},{ay:.2f})[{al}] <-> "
                           f"({bx:.2f},{by:.2f})[{bl}]")
+                    _rk = (net_name, round(ax, 2), round(ay, 2),
+                           round(bx, 2), round(by, 2))
+                    if _stand_in and (
+                            _rk in _round_keys
+                            or (_rk[0], *_rk[3:], *_rk[1:3]) in _round_keys):
+                        print(f"    {net_name}: that gap is a link this "
+                              f"round already took -- not welded twice "
+                              f"(#1564)")
+                        continue
                     # src/tgt are the cluster seeds; the anchor-seeded
                     # derivation in the else-branch is skipped entirely.
                 else:
@@ -3280,7 +3510,8 @@ def oracle_reconnect(board_file: str, net_names, config,
             # hole-to-hole of an existing same-net via (0.355mm overlaps on
             # splitflap GND). Reuse the existing via instead: skip the new
             # hole and bridge to the existing barrel with short connectors
-            # on the two layers the path changes between (#340 style).
+            # on the two layers the path changes between (#340 style). The
+            # link's own new vias are held to the same floor below.
             _own_vias = [v for v in pcb_data.vias if v.net_id == net_id]
             # #479 reuse-audit gap 1: same-net PAD barrels are drill holes
             # too -- a new via within hole-to-hole of one is the same #282
@@ -3305,6 +3536,25 @@ def oracle_reconnect(board_file: str, net_names, config,
                     if math.hypot(vx - _ev.x, vy - _ev.y) < _lim:
                         _near = _ev
                         break
+                if _near is None:
+                    # The link's OWN new holes keep the same floor: the
+                    # search never spaces its own drills (via_exclusion_radius
+                    # 0), and a 0.8mm upgrade route shipped two GND vias one
+                    # diagonal cell apart. A later hole too close to a kept
+                    # one is folded into it, or bridged to it like a barrel.
+                    for _kx, _ky in _kept_vias:
+                        if math.hypot(vx - _kx, vy - _ky) < \
+                                used_via_drill + hole_to_hole_clearance:
+                            _near = _SN(x=_kx, y=_ky)
+                            break
+                    if _near is not None:
+                        _fold = _fold_close_via_hop(
+                            route_points, (_near.x, _near.y), (vx, vy))
+                        if _fold is not None:
+                            route_points, _k_still = _fold
+                            if not _k_still:
+                                _kept_vias.remove((_near.x, _near.y))
+                            continue
                 if _near is None or (abs(_near.x - vx) < 1e-6
                                      and abs(_near.y - vy) < 1e-6):
                     _kept_vias.append((vx, vy))
@@ -3525,7 +3775,11 @@ def oracle_reconnect(board_file: str, net_names, config,
             if _content2 is None:
                 with open(board_file, 'r', encoding='utf-8') as f:
                     _content2 = f.read()
-            _nm_map = {_lnid: _lnet} if v10 else None
+                # The dialect of the file this sweep edits, read off that
+                # file (#1549): the rounds loop's `v10` is bound only in a
+                # round that RAN, so the round-0 exit died on it here.
+                _name_nets2 = board_uses_name_nets(_content2)
+            _nm_map = {_lnid: _lnet} if _name_nets2 else None
             _content2, _n1 = remove_segments_from_content(
                 _content2, _dsegs, net_id_to_name=_nm_map)
             if _dvias:
@@ -3580,8 +3834,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                   f"item(s) whose net the caller's board does not carry -- "
                   f"dropped from the result, not shipped on a guessed net")
 
-    if rounds and remaining > 0:
-        _xb = f" ({cross_board} cross-board exempt)" if cross_board else ""
+    if remaining > 0 and (rounds or off_board_links):
+        _xb = ", ".join(
+            ([f"{cross_board} cross-board exempt"] if cross_board else [])
+            + ([f"{off_board_links} off-board exempt"]
+               if off_board_links else []))
+        _xb = f" ({_xb})" if _xb else ""
         print(f"  KiCad-oracle recheck: {remaining} link(s) still "
               f"unconnected per KiCad after {rounds} round(s){_xb}")
     return {'available': True,
@@ -3609,6 +3867,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                                  and id(l) not in _debris_resolved
                                  and _link_key(l) not in exempt_keys]),
             'cross_board': cross_board,
+            'off_board': off_board_links,
             'new_segments': emitted_segments, 'new_vias': emitted_vias,
             # #508 finding 15: stranded-fragment copper deleted from the
             # file/pcb_data; a live-board caller must delete it too.

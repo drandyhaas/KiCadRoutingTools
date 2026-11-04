@@ -913,6 +913,11 @@ def repair_planes(
     # #562 finalize forwards its run's, as it does layer_clearances, because
     # the output's .kicad_dru sibling does not exist yet mid-run.
     track_clearances: Optional[dict] = None,
+    # #1602: the class/type-scoped .kicad_dru rules (#1491) the #562
+    # finalize's run resolved (kicad_dru.ScopedClearanceRules), forwarded
+    # like the maps above and on into the reconnect sub-runs. None = read
+    # the board's own.
+    scoped_clearance_rules: Optional[object] = None,
     # The route step's own search / soft-cost / keepout / keep-away knobs
     # ({batch_route kwarg: value}), forwarded into the nested batch_route
     # sub-runs that reconnect rip casualties and join regions, under each
@@ -1141,7 +1146,15 @@ def repair_planes(
     # on seg-vs-seg pairs; the effective map over the plane nets this run
     # repairs). Same precedence as the layer map above.
     install_track_clearances(config, track_clearances, input_file, pcb_data,
-                             routed_net_ids=net_ids)
+                             routed_net_ids=net_ids,
+                             scoped_rules=scoped_clearance_rules)
+    # #1602: the reconnect / region-join batch_route sub-runs below take the
+    # same scoped rules: they route the file this run is writing, whose
+    # .kicad_dru is a carry, not the rules' source.
+    _sc1602 = getattr(getattr(config, 'scoped_clearance', None), 'sc', None)
+    if _sc1602 is not None:
+        route_knobs = dict(route_knobs or {})
+        route_knobs.setdefault('scoped_clearance_rules', _sc1602)
 
     # Cross-class clearance (#434): the repair step's own copper (region joins,
     # pad taps) and its ripped-blocker reconnects were priced at the uniform
@@ -1173,8 +1186,11 @@ def repair_planes(
         # as given, as batch_route and create_plane do. The map propagates to
         # the reconnect sub-runs below (they reuse it).
         if net_clearances and clamp_netclasses and clearance_ceiling is not None:
-            net_clearances = {nid: min(c, clearance_ceiling)
-                              for nid, c in net_clearances.items()}
+            from fab_tiers import cap_net_clearances
+            net_clearances = cap_net_clearances(
+                net_clearances, clearance_ceiling,
+                net_names={nid: n.name for nid, n in pcb_data.nets.items()},
+                board_path=input_file)
     # The plane nets this call repairs set the floor every foreign obstacle is
     # priced from, as batch_route's routed nets do: obstacle_clearance() is
     # max(floor, the OBSTACLE's class), so without it a Power_Bulk (0.25) GND
@@ -1354,10 +1370,12 @@ def repair_planes(
     # locked copper included -- a candidate blocker. If protection cannot be
     # read, say so and rip nothing this run (the tap fails over its other
     # candidates, as it does for a protected blocker).
-    from protected_nets import protection_map
+    # The effective set (#1395): a net the route step's main pass made
+    # rippable by naming it EXACTLY stays rippable for this finalize.
+    from protected_nets import effective_protection_map
     _protection_read = True
     try:
-        _prot_names = protection_map(pcb_data)
+        _prot_names = effective_protection_map(pcb_data)
     except Exception as e:
         _protection_read = False
         _prot_names = {}
@@ -3200,6 +3218,7 @@ def repair_planes(
             # list against the exact/kicad oracle before printing; entries the
             # oracle proves connected are reported separately, not as opens.
             _confirmed, _cleared = list(failed_repair_pads), []
+            _open_links_left: Dict[str, int] = {}
             try:
                 if _gate_oracle_links[0] is None:
                     _q = _gate_oracle_query()
@@ -3228,6 +3247,24 @@ def repair_planes(
                                   if _pad_open_per_oracle(e)]
                     _cleared = [e for e in failed_repair_pads
                                 if e not in _confirmed]
+                    # #1374: clearing the listed pads does not clear their
+                    # NET. KiCad anchors an island's link at the island's
+                    # nearest approach, which is rarely at the pad the fill
+                    # model blamed, so a net the oracle still calls split is
+                    # not "confirmed connected" by the absence of a link
+                    # endpoint at a listed pad.
+                    _listed_nets = set()
+                    for _e in failed_repair_pads:
+                        _sp = _e.split(' ', 1)
+                        if (len(_sp) == 2 and _sp[1].startswith('(')
+                                and _sp[1].endswith(')')):
+                            # one wrapping pair: a net named '+3V3(A)' keeps
+                            # its own ')'
+                            _listed_nets.add(_sp[1][1:-1])
+                    for _lk in _olinks:
+                        if _lk[0] in _listed_nets:
+                            _open_links_left[_lk[0]] = \
+                                _open_links_left.get(_lk[0], 0) + 1
             except Exception:
                 pass    # incl. NameError when the gate closure never built
             if _cleared:
@@ -3236,6 +3273,12 @@ def repair_planes(
                       f"{', '.join(_cleared)}")
             if _confirmed:
                 print(f"  Pads still unconnected: {', '.join(_confirmed)}")
+            elif _open_links_left:
+                print("  Pads still unconnected: none of the listed pads "
+                      "sit at a KiCad link, but KiCad's exact fill still "
+                      "reports the net(s) split: "
+                      + ", ".join(f"{_n} ({_k} link(s))" for _n, _k
+                                  in sorted(_open_links_left.items())))
             else:
                 print("  Pads still unconnected: none (all model-only; "
                       "confirmed connected by the oracle)")
@@ -4005,12 +4048,19 @@ Examples:
                       f"(below nominal {args.clearance:.4g}; fine-pitch taps) - "
                       f"grading at this floor")
             from fix_kicad_drc_settings import (fix_project_for_output, drc_fix_kwargs,
-                                                read_project_edge_clearance)
+                                                read_project_edge_clearance,
+                                                step_hole_clearance)
+            # #1577: the copper-to-hole floor this step HELD, lowered only to
+            # what its own copper needs (route.py's #1493 writeback) -- not the
+            # copper clearance
+            _hole_clr = step_hole_clearance(args.input_file, args.output_file,
+                                            eff_clearance)
             # #338: record the PROJECT's edge rule, not the plane-zone inset
             # (see route_planes.py -- openstint 0.3-design/0.5-recorded).
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
-                clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
+                clearance=eff_clearance, hole_clearance=_hole_clr,
+                hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=read_project_edge_clearance(args.input_file),
                 track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,

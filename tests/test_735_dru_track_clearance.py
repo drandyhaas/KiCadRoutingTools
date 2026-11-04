@@ -69,7 +69,8 @@ def test_residue_and_malformed_shapes_are_skipped_with_the_note():
     for cond in bad:
         rules, notes = parse_dru_track_clearances(_rule(cond))
         assert rules == [], (cond, rules)
-        assert any('skipped' in n for n in notes), (cond, notes)
+        # a shape only class/type terms build is the scoped channel's (#1491)
+        assert any('skipped' in n or 'scoped channel' in n for n in notes), (cond, notes)
     print(f"  PASS: {len(bad)} out-of-subset shapes skipped, note kept")
 
 

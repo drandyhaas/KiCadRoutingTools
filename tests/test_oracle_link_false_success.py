@@ -86,14 +86,17 @@ def test_a_forced_link_to_a_via_routes_on_its_span():
     pcb = NS(vias=[_via(10, 11)], pads_by_net={})
     cfg = GridRouteConfig(layers=list(LAYERS), grid_step=0.05)
     link = ((10.0, 10.0, 'F.Cu', 'pad'), (10.0, 11.0, None, 'zone'))
-    saved = ser.route_net_with_obstacles
+    # The fake result carries no geometry, so the link's graze test
+    # (test_oracle_link_graze_declined.py) is not what this case measures.
+    saved = ser.route_net_with_obstacles, ser._forced_link_graze
     ser.route_net_with_obstacles = fake_route
+    ser._forced_link_graze = lambda *a, **k: None
     try:
         log = io.StringIO()
         with contextlib.redirect_stdout(log):
             r = ser.route_oracle_links(pcb, 1, cfg, None, [link])
     finally:
-        ser.route_net_with_obstacles = saved
+        ser.route_net_with_obstacles, ser._forced_link_graze = saved
     assert 'not in the routing stack' not in log.getvalue(), log.getvalue()
     assert r and not r.get('failed'), r
     (src, tgt), = seen

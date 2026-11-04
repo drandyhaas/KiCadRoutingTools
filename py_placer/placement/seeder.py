@@ -73,8 +73,7 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # #962: and the copper the footprint draws (a tab, an antenna), for the
     # parts whose drawn copper reaches past the courtyard by more than the
     # margin -- the same cached compare, then the grade's own measure.
-    if (_graphic_copper_overhang(state, ref) > state.edge_gate.margin
-            and _graphic_copper_off_board(state, ref, x, y, rot) > 1e-6):
+    if graphic_copper_past(state, ref, x, y, rot) > 1e-6:
         return False
     # BOTH rects, because `rule_keepout` grades both: a through-hole part's
     # leads pass through a keep-out even when its body sits on the far side,
@@ -85,7 +84,16 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # inherit: placing from scratch has no incumbent worth improving on, and
     # "no worse than where you already are" would admit a part whose current
     # pose is fully inside a keep-out. One loop, two policies, both named.
-    if not state.keepout_clear(ref, (r, tht)):
+    # #1588: and the pad copper reaching past the grade rect, which
+    # `rule_keepout` grades beside the courtyard -- the same cached compare
+    # for every part whose pads lie within it.
+    rects = (r, tht)
+    if state.keepouts_for and state.keepouts_for.get(ref) \
+            and _pad_copper_overhang(state, ref) > 1e-6:
+        from .floorplan import pad_copper_rects
+        rects = rects + tuple(pad_copper_rects(state.pcb_data.footprints[ref],
+                                               (x, y, rot), copper_only=True))
+    if not state.keepout_clear(ref, rects):
         return False
     # #797, the FOURTH conjunct: without it a search could seat an unrelated
     # part in the middle of a region the intent reserved, and
@@ -272,6 +280,32 @@ def _graphic_copper_off_board(state, ref: str, x: float, y: float,
     return worst
 
 
+def graphic_copper_past(state, ref: str, x: float, y: float,
+                        rot: float) -> float:
+    """How far `ref`'s graphic copper reaches past the outline at `(x, y,
+    rot)` (`_graphic_copper_off_board`, the census's own measure), for every
+    seat path that asks: `pose_ok`, a declared pose (`_fixed_pose_check`,
+    the edge seat's legality) and the search (`QuenchState.
+    _graphic_copper_past`).
+
+    `_graphic_copper_overhang`'s cached bound skips the measurement only
+    where it proves something: copper reaching no further than the margin
+    past a courtyard that lies inside the margin-gated outline is on the
+    board. A courtyard PAST the outline -- an edge part's overhang, which a
+    declared pose may have, or a part coming home from off the board --
+    proves nothing, so its copper is measured. Read without that guard, an
+    edge seat put a part's F.Cu tab 1.955 mm off the board whenever its
+    estimated courtyard enclosed the tab (#962, #1531). A part that draws
+    no copper answers 0.0 off one cached lookup, as before."""
+    if not _graphic_copper_shapes(state, ref):
+        return 0.0
+    if _graphic_copper_overhang(state, ref) <= state.edge_gate.margin:
+        r = state.parts[ref].grade_rect(x, y, rot)
+        if state.edge_gate.rect_outside_amount(r) <= 1e-9:
+            return 0.0
+    return _graphic_copper_off_board(state, ref, x, y, rot)
+
+
 def _materialise_rotation(part, rot: float) -> float:
     """Make `part.bounds_by_rot` (and `tht_by_rot`) hold an entry for `rot`.
 
@@ -406,7 +440,7 @@ def _holes_outside(state, gate, ref: str, x: float, y: float,
     straddles the outline, as check_assembly's copper gate exempts its pad
     (`legality.pad_copper_overrun_mm`; #1297: rp2350's Teensy U8, 33)."""
     from kicad_parser import pad_drill_capsule
-    from .legality import _on_board, footprint_at_pose
+    from .legality import _on_board, _pad_has_no_copper, footprint_at_pose
     fp = (state.pcb_data.footprints or {}).get(ref)
     if fp is None:
         return 0, 0
@@ -418,7 +452,16 @@ def _holes_outside(state, gate, ref: str, x: float, y: float,
         (x1, y1), (x2, y2), r = pad_drill_capsule(p)
         pts = [(cx + r * math.cos(k * math.pi / 8), cy + r * math.sin(k * math.pi / 8))
                for cx, cy in {(x1, y1), (x2, y2)} for k in range(16)]
-        if getattr(p, 'castellated', False) and any(
+        # A castellated half-hole, or a copper-less NPTH drill (a mouse-bite
+        # perforation, a tooling hole cut into the edge): its centre lies ON
+        # the outline by design, so it straddles it while still touching the
+        # board (#1413). One verdict for every such drill: the same 0.5 mm hole
+        # on a slot's contour (a milled ring, on-board inside) and on the outer
+        # edge used to be judged differently. A hole wholly off the board is
+        # still past it.
+        if (getattr(p, 'castellated', False)
+                or (getattr(p, 'pad_type', '') == 'np_thru_hole'
+                    and _pad_has_no_copper(p))) and any(
                 _on_board(gate, px, py) for px, py in pts):
             continue
         if gate.points_overrun_mm(pts) > 1e-9:
@@ -617,8 +660,9 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
     * `'contained'`: inside the outline, and nothing above fails.
     * `'overhang'`: the courtyard leaves the outline -- a connector or a
       mounting part may overhang by design, which is stage 1's exemption --
-      accepted only when every pad's copper is on the board at zero margin
-      and every drill hole (NPTH included) too, and a part with neither is
+      accepted only when every pad's copper is on the board at zero margin,
+      every drill hole (NPTH included) too, and the copper the footprint
+      draws (#962, `graphic_copper_past`), and a part with no pad or hole is
       judged by its courtyard at zero margin (the pad test is vacuous for a
       part with no copper).
 
@@ -641,7 +685,7 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
     # against the obstacles at THEIR poses, and, like a courtyard overlap,
     # recorded instead of refused when the pair's overlap is declared: the
     # grader waives an intent-declared pin pair (`intent_declared`) too.
-    if getattr(state, 'pin_frame_refs', None):
+    if getattr(state, 'frame_refs', None):
         for _hit in state._pin_hits_at(
                 ref, *pose, poses={o: tuple(p) for o, p in obstacles.items()
                                    if o != ref}):
@@ -655,6 +699,8 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
                         _hit.pins)
                 continue
             conflicts[_other] = (
+                f"overlaps {_other}'s drawn courtyard (courtyards_overlap)"
+                if _hit.kind == 'courtyard' else
                 f"sits on {_other}'s pin(s) {_pins} (pin_in_courtyard)"
                 if _other in state.pin_frame_refs else
                 f"pin(s) {_pins} under {_other}'s courtyard "
@@ -663,7 +709,25 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
         if other == ref or other not in state.parts:
             continue
         opose = obstacles[other]
-        if ref not in containers and other not in containers:
+        # #1443: a pair the heights judge -- one part under the other's body
+        # -- is judged on them, at zero clearance as the courtyards are here;
+        # its holes still bind
+        hv = None
+        covers = getattr(state, 'covers', None)
+        if covers and (ref in covers or other in covers) \
+                and ref not in containers and other not in containers:
+            o = state.parts[other]
+            hv = state.heights.pair(ref, tuple(pose), part.bounds_by_rot[0.0], part.side,
+                                    other, tuple(opose), o.bounds_by_rot[0.0], o.side)
+        if hv is not None:
+            if hv > 0.0 and frozenset((ref, other)) not in waived:
+                conflicts[other] = (f"under {other}'s body, or {other} under its, "
+                                    f"too low ({hv:.3f}mm2)")
+            else:
+                _dh = _drill_conflict(state, ref, pose, other, opose)
+                if _dh:
+                    conflicts[other] = _dh
+        elif ref not in containers and other not in containers:
             area, w, h = _courtyard_overlap(state, ref, pose, other, opose)
             if area > FIXED_OVERLAP_EPS_MM2:
                 if frozenset((ref, other)) in waived:
@@ -756,6 +820,11 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
         if holes_out:
             reasons.append(f"{holes_out} of {n_holes} drill hole(s) past "
                            f"the outline")
+        # #962: and the copper the footprint DRAWS (a tab, an antenna): the
+        # overhang licenses the courtyard, never copper
+        goff = graphic_copper_past(state, ref, x, y, rot)
+        if goff > 1e-6:
+            reasons.append(f"graphic copper {goff:.3f}mm past the outline")
         return (None if reasons else 'overhang'), reasons, conflicts
     # #1257: a CONTAINED courtyard proves nothing about a pad that reaches
     # past it, so such a part's copper is asked too, by check_assembly's gate
@@ -766,10 +835,9 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
         off = _pad_copper_off_board(state, ref, x, y, rot)
         if off > 1e-6:
             reasons.append(f"pad copper {off:.3f}mm past the outline")
-    if _graphic_copper_overhang(state, ref) > state.edge_gate.margin:
-        off = _graphic_copper_off_board(state, ref, x, y, rot)
-        if off > 1e-6:
-            reasons.append(f"graphic copper {off:.3f}mm past the outline")
+    off = graphic_copper_past(state, ref, x, y, rot)
+    if off > 1e-6:
+        reasons.append(f"graphic copper {off:.3f}mm past the outline")
     return (None if reasons else 'contained'), reasons, conflicts
 
 
@@ -899,7 +967,9 @@ def stamp_unlocked(board_file: str, refs: Sequence[str]) -> int:
     blocks, so nothing here can reach them.
     """
     from kicad_parser import iter_footprint_blocks
-    with open(board_file, 'r', encoding='utf-8') as f:
+    # newline='' both ways: only text is removed, so the board keeps its own
+    # line endings (make_unplaced verifies its output byte-for-byte nearby).
+    with open(board_file, 'r', encoding='utf-8', newline='') as f:
         content = f.read()
     want = set(refs)
     count = 0
@@ -920,6 +990,6 @@ def stamp_unlocked(board_file: str, refs: Sequence[str]) -> int:
             continue
         content = content[:start] + new_head + tail + content[end:]
         count += 1
-    with open(board_file, 'w', encoding='utf-8') as f:
+    with open(board_file, 'w', encoding='utf-8', newline='') as f:
         f.write(content)
     return count

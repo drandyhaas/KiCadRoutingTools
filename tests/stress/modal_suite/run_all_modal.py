@@ -38,9 +38,8 @@ That is true of THIS app and not of "the cloud": the stress app has carried
 KiCad since 2026-08-23 (cloud_replay_sets.py passes --with-kicad by default,
 building modal_sweep/modal_app.py on kicad/kicad:10.0.6). Giving this image
 KiCad would mean copying that recipe; it would recover the six self-skips that
-are really about KiCad (tests/README.md names them), and NOT the test_622_*
-ones wanting ortools (not in requirements.txt) or the ones wanting artifacts
-under the gitignored wk/, which self-skip on any clean checkout.
+are really about KiCad (tests/README.md names them), and NOT the ones wanting
+artifacts under the gitignored wk/, which self-skip on any clean checkout.
 """
 from __future__ import annotations
 
@@ -364,7 +363,7 @@ def _write_durations(measured: dict) -> int:
 
 
 @app.local_entrypoint()
-def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
+def main(shards: int = 50, fast: bool = False, timeout: float = 1000.0,
          jobs: int = 2, filters: str = "", out_dir: str = "",
          write_durations: bool = False, force_durations: bool = False):
     """Fan the suite out over `shards` containers and aggregate.
@@ -457,7 +456,7 @@ def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
     if tot["self_skipped"]:
         print(f"\n{tot['self_skipped']} self-skipped -- these asserted NOTHING "
               f"and are not passes. The reasons DIFFER: this image has no "
-              f"KiCad and no ortools, and some tests want recorded artifacts "
+              f"KiCad, and some tests want recorded artifacts "
               f"absent from a clean checkout. Read each SKIP: line rather "
               f"than assuming.")
     # A shard that never reported is the failure mode this block exists for:

@@ -339,16 +339,23 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
     contradiction). A row whose mechanical value lost ANOTHER row's
     contradiction does not name mechanical its winner.
     """
+    from .floorplan import _EDGE_LETTERS
+
+    def _edge(e):
+        return _EDGE_LETTERS.get(e, e) if isinstance(e, str) else e
+
     geo = _Geometry(pcb, board_path, floors_used)
     bounds = pcb.board_info.board_bounds if pcb.board_info else None
     brief_entries = {str(c.get('ref')): c
                      for c in (brief_fragment or {}).get('edge_connectors')
                      or [] if c.get('ref') and c.get('edge')}
-    brief_edges = {r: c.get('edge') for r, c in brief_entries.items()}
+    # an edge letter is read as the edge it names, as the intent loader reads
+    # it, or `S` against the board's `south` is a DRIFT on a part where it sits
+    brief_edges = {r: _edge(c.get('edge')) for r, c in brief_entries.items()}
     intent_entries = {str(c.get('ref')): c
                       for c in (intent_doc or {}).get('edge_connectors')
                       or [] if c.get('ref') and c.get('edge')}
-    intent_edges = {r: c.get('edge') for r, c in intent_entries.items()}
+    intent_edges = {r: _edge(c.get('edge')) for r, c in intent_entries.items()}
     brief_auth = 'declared'
     if brief_source and os.path.isfile(brief_source):
         brief_source = f"{brief_source} (sha256 {_sha256(brief_source)})"
@@ -357,6 +364,27 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
     mech_src = (f"{mech.get('path')} (sha256 {mech.get('sha256')})"
                 if mech else None)
     rows: List[Dict[str, object]] = []
+    # #1533: on a PILE no unlocked part's pose is a claim (#1103, #1353,
+    # #1508), so the board value an edge or pose row reads off it is staging
+    # noise -- withheld, and said once (the `pile` report row below). A
+    # KiCad-locked part's pose IS a decision and keeps its value. Assessed
+    # only when a row would read a board value.
+    pile: List[object] = []
+    withheld: List[str] = []
+
+    def _board_withheld(ref) -> bool:
+        if not pile:
+            try:
+                from .placement_state import assess_placement
+                st = assess_placement(pcb, board_path)
+            except Exception:                               # noqa: BLE001
+                st = None
+            pile.append(st if st is not None and st.pile else None)
+        fp = pcb.footprints.get(ref)
+        if pile[0] is None or getattr(fp, 'locked', False):
+            return False
+        withheld.append(ref)
+        return True
 
     def _row(ref, field, values, same, why=''):
         kind = _kind(values, same)
@@ -399,9 +427,10 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
                 'authority': (brief_auth if brief_edges.get(ref) == ie
                               else 'hypothesis'),
                 'source': intent_source}
-        values['board'] = {'value': _edge_of(geo.seat_rect(ref, entry),
-                                             bounds, geo, ref),
-                           'authority': 'inferred', 'source': board_path}
+        if not _board_withheld(ref):
+            values['board'] = {'value': _edge_of(geo.seat_rect(ref, entry),
+                                                 bounds, geo, ref),
+                               'authority': 'inferred', 'source': board_path}
         _row(ref, 'edge', values, lambda a, b: a == b,
              'the edge each channel puts this part on, read off the rect the '
              'edge-connector rule reads (`edge_seat_rect`)')
@@ -425,9 +454,10 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
         board_auth = 'hypothesis' if locked else 'inferred'
         values = {
             'mechanical': {'value': (p['x'], p['y'], p['rot']),
-                           'authority': mech_auth, 'source': mech_src},
-            'board': {'value': cur, 'authority': board_auth,
-                      'source': board_path}}
+                           'authority': mech_auth, 'source': mech_src}}
+        if not _board_withheld(ref):
+            values['board'] = {'value': cur, 'authority': board_auth,
+                               'source': board_path}
         if ref in brief_poses:
             values['brief'] = {'value': fixed_pose_tuple(brief_poses[ref]),
                                'authority': brief_auth,
@@ -539,6 +569,18 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
             r['why'] = (f"{r['why']} -- the mechanical value lost "
                         f"{r['ref']}'s contradiction elsewhere, so it wins "
                         f"nothing here")
+    if withheld:
+        # #1533: said once, in every caller (the printed rows and the
+        # emitted `context.reconciliation`); a `report`, so no ledger row
+        refs = sorted(set(withheld))
+        reasons = '; '.join(list(getattr(pile[0], 'reasons', ()) or ())[:2])
+        rows.append({
+            'id': 'board:pile', 'ref': None, 'field': 'pile', 'values': {},
+            'kind': 'report', 'winner': None, 'withheld': refs,
+            'why': (f"the board is a pile ({reasons}): staging poses are not "
+                    f"claims -- the board's edge/pose value withheld for "
+                    f"{', '.join(refs)} (unlocked; a KiCad-locked part keeps "
+                    f"its own)")})
     return rows
 
 
@@ -561,6 +603,9 @@ def format_rows(rows) -> List[str]:
     for r in rows:
         if r['kind'] in ('agree', 'single'):
             continue
+        if r.get('field') == 'pile':
+            lines.append(f"  PILE {r['why']}")
+            continue
         vals = '; '.join(
             f"{ch} {v['value']!r} [{v['authority']}]"
             for ch, v in r['values'].items() if v['value'] is not None)
@@ -581,7 +626,9 @@ def anchor_blocks(pcb, board_path: str, mechanical: Dict, *,
     label a zone of its own as one.
 
     The zone is the GRADER's own rect for the part at its declared pose --
-    `_Part.rect`, which is what `rule_zone_containment` tests -- unioned with
+    `_Part.rect` on the zone basis (`floorplan.zone_parts`: the estimated
+    courtyard for a part that draws none), which is what
+    `rule_zone_containment` tests -- unioned with
     the exactly rotated rect (the grader falls back to its 0-degree bounds
     off the 90-degree lattice), rounded outward; over every rotation the part
     may take when the declaration gives none. So a part sitting at its
@@ -606,15 +653,20 @@ def anchor_blocks(pcb, board_path: str, mechanical: Dict, *,
     passes `fixed:` and the entry's own basis, so a brief-declared pose is
     graded by exactly this geometry and never by a second copy of it.
     """
+    from .floorplan import zone_parts
     from .legality import rotate_local_bounds
     blocks, skipped = [], {}
     if state is None:
         import pose_score
         state = pose_score.make_state(pcb, board_path)
-    # `state.parts` holds the `_Part` objects -- the ones whose `.rect(x, y,
-    # rot)` the grader's own rects come from -- not the frozen-pose records
-    # `graded_parts()` returns.
-    parts = state.parts
+    # The `_Part` objects -- the ones whose `.rect(x, y, rot)` the grader's
+    # own rects come from -- not the frozen-pose records `graded_parts()`
+    # returns. On the ZONE basis (`floorplan.zone_parts`), which is what
+    # `rule_zone_containment` grades the anchor on (#1530): a part that
+    # draws no courtyard is measured on its estimated courtyard there, so an
+    # anchor built on its pad box was smaller than the part it held, and the
+    # part failed it at exactly its declared pose.
+    parts = zone_parts(state, pcb, board_path)
     for ref, p in sorted((mechanical.get('poses') or {}).items()):
         fp = pcb.footprints.get(ref)
         if fp is None:

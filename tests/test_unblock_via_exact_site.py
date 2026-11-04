@@ -21,7 +21,8 @@ Rows:
      the cell, and a later search out of the pocket changes layer there;
   2. conversion: a path that changes layer on a cell with a registered
      site drills the via at the site, and the refit judges the site; a cell
-     with no site is drilled at its centre (control);
+     with no site is drilled at its centre (control), and so is a cell whose
+     site and size another net registered (the registries are per net);
   3. source: _register_unblock_via adds the free via, the unblock records a
      site with every size it registers, and both emission sites drill
      through _emit_via_site.
@@ -160,8 +161,8 @@ def rows_conversion():
     print('2. conversion drills a claimed cell at its checked site')
     site = (10.025, 9.975)
     pcb = board()
-    pcb._unblock_via_sizes = {T: (0.25, 0.15)}
-    pcb._unblock_via_sites = {T: site}
+    pcb._unblock_via_sizes = {(1,) + T: (0.25, 0.15)}
+    pcb._unblock_via_sites = {(1,) + T: site}
     vias, seen, centre = convert(pcb, T)
     got = [(round(v.x, 4), round(v.y, 4), v.size) for v in vias]
     check('the via is drilled at the registered site, at its registered size',
@@ -173,6 +174,18 @@ def rows_conversion():
     got = [(round(v.x, 4), round(v.y, 4)) for v in vias]
     check('control: a cell with no site is drilled at its centre',
           got == [(round(centre[0], 4), round(centre[1], 4))], f'vias {got}')
+    # Another net's registration on the same cell is not this net's: its site
+    # was checked against copper foreign to THAT net, and its size was never
+    # searched by this path.
+    pcb = board()
+    pcb._unblock_via_sizes = {(2,) + T: (0.4, 0.25)}
+    pcb._unblock_via_sites = {(2,) + T: site}
+    vias, seen, centre = convert(pcb, T)
+    got = [(round(v.x, 4), round(v.y, 4), v.size) for v in vias]
+    check("another net's site and size on the cell are not used: the via is "
+          "drilled at the centre at the configured size",
+          got == [(round(centre[0], 4), round(centre[1], 4), CFG['via_size'])],
+          f'vias {got}')
 
 
 def row_source():
@@ -188,8 +201,8 @@ def row_source():
           len(calls('_register_unblock_via', 'add_free_via')) == 1)
     src = ast.unparse(fns['_place_shrunk_via_in_pad_impl'])
     check('the unblock records a site with the size it registers',
-          "sizes[vgx, vgy] = (v['size'], v['drill'])" in src
-          and "sites[vgx, vgy] = (v['x'], v['y'])" in src)
+          "sizes[net_id, vgx, vgy] = (v['size'], v['drill'])" in src
+          and "sites[net_id, vgx, vgy] = (v['x'], v['y'])" in src)
     for fn in ('_route_net_with_obstacles_impl', '_path_to_segments_vias'):
         check(f'{fn} drills through _emit_via_site',
               len(calls(fn, '_emit_via_site')) == 1)

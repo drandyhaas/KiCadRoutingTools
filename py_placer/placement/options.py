@@ -38,6 +38,15 @@ from typing import Dict, Mapping, Optional
 # see the module docstring on why nothing here refuses.
 CROWDED_UTILISATION = 0.55
 
+# A declared ZONE whose members' courtyards cover this much of it gets an
+# advisory (`plan_zone_utilisation`, #1468). Read off measured zones of
+# 0603-class parts: every zone seen failing to seat all its members was at
+# 57% or more (57% in 2 of 12 seeds, 60% and 77% in every seed, 69% in every
+# seed of two rounds), and zones at about 41% and 50% seated every member.
+# 0.50 flags each failure seen; a zone at 72% that fitted is flagged too.
+# A heuristic, never an error: area is necessary, not sufficient.
+ZONE_FIT_UTILISATION = 0.50
+
 
 def _skip(reason: str) -> Dict:
     return {'ran': False, 'reason': reason}

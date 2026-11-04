@@ -74,6 +74,19 @@ AXES = ('auto', 'x', 'y')
 PITCH_WORDS = ('auto',)
 
 
+def graded_only_warning(rows) -> Optional[str]:
+    """The one line every reader prints when an intent declares `arrays[]`
+    (#1479), or None when it declares none: the rows are graded, never acted
+    on. Seating a declared row rigidly was tried three ways and routed worse
+    on every one, so no engine forms rows; check_floorplan grades them as
+    `array_formation` after placement."""
+    if not rows:
+        return None
+    return (f"arrays[]: {len(rows)} declared row(s) are graded only -- placement "
+            f"does not seat rows, so check_floorplan grades whatever the placement "
+            f"left (array_formation)")
+
+
 def natural_key(pad_number) -> Tuple:
     """Sort key for pad numbers: '2' < '10', 'A2' < 'A10' < 'B1'.
 

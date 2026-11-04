@@ -16,8 +16,11 @@ then the fewest such defects, each lot by lowest cost.
 `--seeds LIST` places the seeds it lists instead, and names the judged ones
 the same way.
 
-1. GROUPS: the groups file (`check_groups.py`), a crystal and its load caps
-   folded into their IC's group. A group is a set of parts kept together:
+1. GROUPS: the groups file (`check_groups.py`), each claimed part (a
+   crystal and its load caps, an intent `proximity[]` subject, a template
+   member) folded into its partner's group -- a whole group when its anchor
+   is claimed, and a group so emptied is dropped with its own hints, said
+   once per run and in judge.json's `fold`. A group is a set of parts kept together:
    the objective's group term keeps it in one piece, whatever shape the
    free space gives it. A group's `near`,
    `apart` and `edge` hints are soft terms of the objective; its `side`, and
@@ -25,7 +28,10 @@ the same way.
 2. The parts the file locks stay put (connectors on their edges, mounting
    holes: whatever the enclosure or a mating part decides), and so does
    every part the intent seats at a declared pose (`fixed_poses[]`, from
-   the design brief or mechanical.json), written there first; every other
+   the design brief or mechanical.json), written there first -- and so does
+   a cover's connector whose standoff cannot move, seated where it puts the
+   standoff at its length, at the seed's turn among the legal ones (#1507,
+   `Intent.cover_connector_poses`); every other
    part starts at a random place on the board, or, for a seed named in
    `--clustered-seeds`, with each group's members gathered round one random
    point. An unlocked edge part (a
@@ -60,8 +66,24 @@ the same way.
    is left illegal that a shove frees; when no run is legal, the one that
    left the fewest parts illegal is kept, the earlier on a tie. On
    ch32v003_usb (22 movable parts) the whole run takes about 2.5 s.
+   The intent's decap limits are a soft term, so a seed can end a fraction
+   of a mm past one: each limit still broken is WARNED (rail, cap, pin, the
+   distance against the limit; none with `--decap-limit-weight 0`, which
+   leaves the limits to check_floorplan) and carried in the report as `decap_residual`,
+   and `--repair-decaps` first moves each such cap to the nearest legal pose
+   inside its limit that worsens no other limit, naming the cap no legal pose
+   frees (`placement/decap_repair.py`). A BGA's far-face parts under its ball
+   field are counted too (`bga_field`), and a `proximity` claim that names no
+   pads but a limit is WARNED, being priced over legs the grade does not read
+   (`claim_arity`).
 
-Exit codes: 0 placed, 2 unreadable input, a part in two groups, or a face the
+Before any seed, the intent's plan is checked once (`floorplan.plan_check`,
+what `check_floorplan --plan-only` runs; in the parent of a `--seeds` run):
+its WARNs are printed once, and an ERROR -- a plan no arrangement can
+satisfy, an unresolved block among them -- refuses the run (#1468).
+
+Exit codes: 0 placed, 2 unreadable input, a part in two groups, a plan ERROR,
+or a face the
 board cannot take (two declarations disagree, or a KiCad-locked part is
 declared on the other face or at another pose), 4 placed with parts left
 illegal, or with a declared pose that is not legal (`refused`) or an edge
@@ -81,6 +103,11 @@ import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 MOVES_PER_PART = 500
 #: Further anneals, each from a fresh start, when one leaves parts illegal.
 RESTARTS = 2
+#: mm a part's courtyard may come within of a neighbour's when no run gives it
+#: a legal pose at the board clearance: the part is then legal at that
+#: closeness (reported as `tight`), and only then -- the board clearance is
+#: broken only where it is the one thing between the board and buildable.
+TIGHT_CLEARANCE_MM = 0.01
 #: The default seeds (an OUT carrying {seed}, no seed named): how many are
 #: placed with each start, and how many of the legal ones of lowest
 #: `final.cost` are named for a judging route. Over 11 boards, 6 scattered + 6
@@ -90,6 +117,13 @@ RESTARTS = 2
 SCATTERED_SEEDS = 6
 CLUSTERED_SEEDS = 6
 JUDGED_SEEDS = 6
+#: A part whose pad copper reaches further than this (mm) past its drawn
+#: courtyard is named before the anneal (#1386), for information only: a
+#: courtyard pair is graded courtyard on courtyard, as KiCad grades it
+#: (#1588), so such a pad gates nothing by itself. It is held out of
+#: keep-outs, and a neighbour may stand over it. KLC's courtyard margin is
+#: 0.25 mm, so a reach past this is more than a drawing's rounding.
+PAD_REACH_NOTE_MM = 0.3
 #: Anchored seeds (`--anchored`) are opt-in, numbered after the clustered ones.
 #: Over 10 boards, 6 scattered + 6 anchored routed better than the default
 #: seeds on two (covg blocking 3.1 -> 0.1, bitaxe) and worse on three (tigard,
@@ -123,10 +157,14 @@ def face_targets(intent, blocks, doc, pcb):
     return floorplan.declared_sides(claims)
 
 
-def hints(doc, state, movable, args):
+def hints(doc, state, movable, args, intent=None):
     """The groups file's `near`, `apart` and `edge` hints as cost-model
     terms, each over every member the board has (fixed members included);
-    a hint whose members are all fixed is a constant and is left out."""
+    a hint whose members are all fixed is a constant and is left out. And
+    the intent's `links[]` / `chains[]` (#1477), each a `within` term on its
+    two sets of parts: nothing within its `max_mm`, `LINK_WEIGHT` per mm
+    past it, the two groups never merged."""
+    from placement.simple import LINK_WEIGHT
     members = {g['name']: [r for r in g['refs'] if r in state.parts] for g in doc['groups']}
     mov = set(movable)
     out, seen = [], set()
@@ -146,6 +184,15 @@ def hints(doc, state, movable, args):
                 seen.add(pair)
                 out.append({'key': f"{kind}:{pair[1]}:{pair[2]}", 'kind': kind, 'a': a,
                             'b': b, 'edge': None, 'weight': w})
+    import fnmatch
+    names = sorted(state.parts)
+    for ln in (intent.links if intent is not None else ()):
+        a, b = ([r for r in names if any(fnmatch.fnmatchcase(r, p) for p in ln[k])]
+                for k in ('a', 'b'))
+        if a and b and any(r in mov for r in a + b):
+            out.append({'key': f"link:{ln['name']}", 'kind': 'within', 'a': a, 'b': b,
+                        'edge': None, 'weight': LINK_WEIGHT,
+                        'max_mm': float(ln['max_mm']), 'link': ln['name']})
     return out
 
 
@@ -158,7 +205,7 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
     from placement import floorplan as fp
     from placement.edge_seat import seat_state
     from placement.grouping import (BoardView, claim_rows, decap_conflicts,
-                                    fold_followers, group_of, is_ground)
+                                    fold_groups, fold_text, group_of, is_ground)
     from placement.simple import Model
     notes = []
     clearance, edge, _ = board_floor_knobs(board)
@@ -173,23 +220,34 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
     # datasheet templates (`placement.templates`): each member joins its
     # chip's group, as a claimed part joins its partner's
     from placement.templates import validate as validate_templates
-    tmpls = (list(intent.templates) if intent is not None
+    # ... and each declared cover's standoffs, held at their lengths from
+    # its connector the same way (#1443, `Intent.cover_templates`)
+    tmpls = (list(intent.templates) + intent.cover_templates() if intent is not None
              else validate_templates(base.get('templates')))
     tmembers = {m['ref'] for t in tmpls for m in t['members']}
     for t in tmpls:
-        notes.append(f"template {t['anchor']}: {', '.join(m['ref'] for m in t['members'])} "
-                     f"seated as drawn and carried with it")
-    doc, folded = fold_followers(doc, rows + [{'ref': m['ref'], 'near': t['anchor']}
-                                              for t in tmpls for m in t['members']])
-    if folded:
-        notes.append("in their IC's group: " + ', '.join(
-            f"{r} ({a} -> {b})" for r, (a, b) in sorted(folded.items())))
+        refs = [m['ref'] for m in t['members'] if m['ref'] in state.parts]
+        mv = [r for r in refs if r in movable]
+        held = [r for r in refs if r not in movable]
+        if mv:
+            notes.append(f"template {t['anchor']}: {', '.join(mv)} seated as drawn and "
+                         f"carried with it")
+        if held:
+            # a member that cannot move is neither seated nor carried (#1507)
+            notes.append(f"template {t['anchor']}: {', '.join(held)} cannot move: "
+                         + ("the anchor is held where they are" if t['anchor'] not in movable
+                            else "the anchor is pulled toward them by the template cost "
+                                 "alone, never seated there"))
+    fold = fold_groups(doc, rows, tmpls)
+    doc = fold['doc']
+    moved_line, dissolved_lines = fold_text(fold)
+    notes += ([moved_line] if moved_line else []) + dissolved_lines
     groups = []
     for g in doc['groups']:
         members = [r for r in g['refs'] if r in state.parts]
         if len(members) >= 2 and any(r in movable for r in members):
             groups.append((g['name'], members))
-    claims, limits = [], []
+    claims, limits, padless = [], [], []
     for c in rows:
         s, p = str(c['ref']), str(c['near'])
         if s not in pcb.footprints or p not in pcb.footprints:
@@ -207,6 +265,8 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
             claims.append((s, p, legs))
             m = c.get('max_mm')
             limits.append(float(m) if isinstance(m, (int, float)) else None)
+            if isinstance(m, (int, float)) and not pads.get(s) and len(legs) > 1:
+                padless.append((s, p, float(m), legs))
     # decaps: each cap from a supply rail to ground, matched to that rail's
     # supply pins (`simple.Model._sites`) by the rule check_groups reports by
     # (`BoardView.decaps`) -- not a claimed part, and not a cap whose IC is in
@@ -236,10 +296,53 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
                      + '|'.join(pcb.nets[n].name for n in view.decap_rails()[r]) + " serves "
                      + ', '.join(sorted({ic for ic, _n in pins}))
                      + (" (no IC of its group is on its rail)" if r in foreign else ""))
+    # a claim with a limit and no `pads` is priced over every shared-net pad,
+    # while check_floorplan grades the ONE closest pad pair (#1426)
+    model_arity = []
+    rail_names = {pcb.nets[i].name for i in view.rails}
+    for s, p, m, legs in padless:
+        nets = sorted({q.net_name for q in pcb.footprints[s].pads
+                       if q.net_id and str(q.pad_number) in {l[0] for l in legs}})
+        model_arity.append({'ref': s, 'near': p, 'max_mm': m, 'legs': len(legs),
+                            'nets': nets,
+                            'rails': [n for n in nets if n in rail_names]})
     # congestion counts every net that is routed as tracks: all but ground,
     # which is poured as a plane
     cnets = sorted(n for n in state.net_refs if n and not is_ground(pcb.nets[n].name))
-    model = Model(state, pcb, rails=view.rails, claims=claims,
+    # the intent's keep_away[] rules (#1476), their sides resolved as the
+    # grade resolves them (`floorplan.rule_keep_away`)
+    ka_rules = []
+    if intent is not None and intent.keep_away:
+        from keep_away import parse_keep_away_rules, resolve_rule_sides
+        from placement.simple import KEEP_AWAY_WEIGHT
+        for entry in intent.keep_away:
+            rule = parse_keep_away_rules(entry['rule'])[0]
+            (agg, vic, _g), = resolve_rule_sides(pcb, (rule,))[0]
+            if agg and vic:
+                ka_rules.append((float(rule.gap), set(agg), set(vic)))
+    # the intent's declared rails (#1478): supplies priced as rails whatever
+    # their fan-out, beside the ones the fan-out rule finds
+    declared_rails = set()
+    if intent is not None and intent.rails:
+        import fnmatch
+        named = {nid: n.name for nid, n in pcb.nets.items() if nid and n.name}
+        for row in intent.rails:
+            for pat in row['nets']:
+                hit = {nid for nid, nm in named.items() if fnmatch.fnmatchcase(nm, pat)}
+                if not hit:
+                    print(f"  WARNING: {row['source']}: {pat!r} matches no net on this "
+                          f"board, so it prices nothing")
+                declared_rails |= hit
+        added = sorted(named[n] for n in declared_rails - set(view.rails))
+        if added:
+            notes.append(f"rails declared: {', '.join(added)} priced as rails "
+                         f"(--rail-weight {args.rail_weight:g}) whatever their fan-out")
+    # the intent's arrays[] rows are graded, never seated (#1479)
+    from placement.arrays import graded_only_warning
+    _rows = graded_only_warning(intent.arrays if intent is not None else None)
+    if _rows:
+        print(f"  WARNING: {_rows}")
+    model = Model(state, pcb, rails=set(view.rails) | declared_rails, claims=claims,
                   decaps=decaps, supply=supply, decap_pins=decap_pins,
                   groups=groups, congestion_weight=args.congestion_weight,
                   track_pitch=args.track_pitch, congestion_nets=cnets,
@@ -248,10 +351,20 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
                   ground_weight=args.ground_weight, pad_weight=args.pad_weight,
                   crossing_weight=args.crossing_weight, claim_weight=args.claim_weight,
                   decap_weight=args.decap_weight, group_weight=args.group_weight,
-                  hints=hints(doc, state, movable, args),
+                  hints=hints(doc, state, movable, args, intent),
                   halo_coef=args.halo_coef, halo_weight=args.halo_weight,
                   claim_limits=limits, claim_limit_weight=args.claim_limit_weight,
-                  templates=tmpls, template_weight=args.template_weight)
+                  templates=tmpls, template_weight=args.template_weight,
+                  keep_away=ka_rules)
+    if model.ka:
+        notes.append(f"keep_away priced: {len(model.ka)} rule(s) over "
+                     f"{len(model._ka_parts)} part(s), {KEEP_AWAY_WEIGHT:g} per mm short "
+                     f"of each gap")
+    model.claim_arity = model_arity
+    # the fold, as data: the same in every seed, reported once per run (#1467)
+    model.fold = ({'moved': {r: list(ft) for r, ft in sorted(fold['moved'].items())},
+                   'dissolved': fold['dissolved']} if fold['moved'] else {})
+    model.tmpl_tolerance = {t['anchor']: t.get('tolerance_mm') for t in tmpls}
     # the unlocked parts the intent declares on an edge, seated there; an
     # edge that cannot hold all its declared parts together seats the most
     # that fit and records itself (`edge_oversubscribed`)
@@ -336,12 +449,157 @@ def _asm_text(asm):
     return f"NOT BUILDABLE ({', '.join(asm.get('fired') or ()) or 'check_assembly'})"
 
 
+def arity_text(rec):
+    """One WARNING body for a `proximity` claim with a limit and no `pads`
+    (`build`'s `claim_arity` rows, #1426)."""
+    rails = f" (rail nets: {', '.join(rec['rails'])})" if rec['rails'] else ''
+    return (f"proximity {rec['ref']} near {rec['near']} (max {rec['max_mm']:g} mm) names no "
+            f"pads: it is priced over {rec['legs']} shared-net pad legs on "
+            f"{', '.join(rec['nets'])}{rails}, but check_floorplan grades the ONE closest "
+            f"pad pair, so the objective can call it broken while the grade passes it; "
+            f"name the facing pads in `pads` so both read the same ones")
+
+
+def settled(pcb, state, model, movable):
+    """The run place_simple keeps, once it is chosen: a no-op the placement
+    movie hooks (`placement_story.install`), since the kept run may be one
+    built before the last."""
+
+
+def _face_board(base, pcb, choice, out_dir, tag, board):
+    """`base` written to `out_dir` with each part of `choice` ({ref: why}) on
+    the other face of the one it has in `pcb` (the writer's flip, at its
+    pose), the board's siblings beside it; the new path."""
+    from placement.faces import face_of, other
+    from placement.portfolio import copy_siblings
+    from placement.writer import write_placed_output
+    out = os.path.join(out_dir, f"{tag}_{os.path.basename(base)}")
+    fps = pcb.footprints
+    write_placed_output(base, out, [
+        {'reference': r, 'new_x': round(fps[r].x, 6), 'new_y': round(fps[r].y, 6),
+         'new_rotation': (fps[r].rotation or 0.0) % 360.0, 'new_side': other(face_of(fps[r]))}
+        for r in sorted(choice)])
+    copy_siblings(board, out)
+    return out
+
+
+def _bga_field(path):
+    """`placement.escape.ball_field_census` of the placed board at `path`:
+    the far-face parts under each ball grid's field (#1425); [] when none, or
+    when the board cannot be read back."""
+    from placement.escape import ball_field_census
+    try:
+        return ball_field_census(parse_kicad_pcb(path))
+    except (OSError, ValueError):
+        return []
+
+
+def _field_text(rec):
+    """'U1 (17x17 balls at 0.8 mm): 40 B.Cu part(s) centred under its ball
+    field, 26 in its outer 4 rows'."""
+    from placement.escape import ESCAPE_RINGS
+    return (f"{rec['bga']} ({rec['balls']} balls at {rec['pitch']:g} mm): {rec['parts']} "
+            f"{rec['face']} part(s) centred under its ball field, {rec['outer']} in its "
+            f"outer {ESCAPE_RINGS} rows (the rows a fan-out escapes through)")
+
+
 def _fp_text(fp):
     """'3 floorplan error(s) (decap_pin_distance)', '' when clean or absent."""
     e = (fp or {}).get('errors')
     if e is None and fp:
         return f"floorplan not graded ({fp.get('reason')})"
     return f"{e} floorplan error(s) ({', '.join(fp.get('rules') or ())})" if e else ''
+
+
+def illegal_reason(st, model, r):
+    """Why part `r` is illegal where it stands (#1540): the first check that
+    fails, in the order `ok` asks them -- its edge seat, the seat predicate
+    (`seeder.pose_ok`: the outline, a keep-out, an exclusive zone, then
+    `candidate_valid`'s neighbours), then the intent's claims on it, with the
+    distance or the area past each claim's own threshold. A part only
+    "no legal pose found" for used to be all a log said, while it was, say,
+    15 mm outside its block's zone."""
+    from placement.legality import BOARD_TOL
+    from placement.simple import legal
+    p = st.parts[r]
+    pose = (p.x, p.y, p.rot)
+    rects = p.grade_rects(*pose)
+    if r in model.edge_seats:
+        from placement.edge_seat import legal_on_edge
+        if not legal_on_edge(st, r, pose):
+            return 'no legal seat on its declared edge'
+    elif not legal(st, r, *pose):
+        if st.edge_gate.rect_outside_amount(rects[0]) > BOARD_TOL:
+            return 'its courtyard is off the board'
+        ko = st.keepout_blockers(r, rects)
+        if ko:
+            return 'inside keep-out ' + ', '.join(repr(k) for k in ko)
+        ex = st.exclusive_blockers(r, rects)
+        if ex:
+            return 'inside the exclusive zone of block(s) ' + ', '.join(repr(z) for z in ex)
+        veto = st.candidate_veto(r, *pose)
+        if veto is not None:
+            return '%s%s' % (veto[0], f' vs {veto[1]}' if veto[1] else '')
+        return 'its pad or drawn copper reaches past the outline'
+    spec = st.intent_spec_for(r)
+    out = []
+    for v, t in zip(st.intent_terms(r, rects) if spec else (), spec or ()):
+        if v <= t.threshold:
+            continue
+        if t.rule == 'zone_containment':
+            out.append(f"outside the zone of block {t.name!r} by {v:.2f} mm "
+                       f"(tolerance {t.threshold:g} mm)")
+        elif t.rule == 'zone_exclusive':
+            out.append(f"{v:.2f} mm2 inside the exclusive zone of block {t.name!r}")
+        else:
+            out.append(f"inside keep-out {t.name!r}")
+    return '; '.join(out) or 'no legal pose'
+
+
+def plan_refusal(board, intent_path, groups_doc):
+    """#1468: `floorplan.plan_check` once per run, before any seed is
+    placed -- in the parent of a `--seeds` run, never per seed. Its WARNs
+    are printed here, once; its ERRORs refuse the run, since each is a plan
+    no arrangement can satisfy (`plan_check`'s contract) and placing seeds
+    against one only spends their time to learn it. Returns 2, the code of
+    every input this script refuses before writing anything, or None to go
+    on.
+
+    A `block_unresolved` block whose `group` names a group of the groups
+    file (`blocks[].group` takes the board's own groups only, #1469) is
+    answered with that group's refs, ready to paste into the block's
+    `refs`."""
+    from placement import floorplan
+    from placement.groups import parse_sources
+    try:
+        intent = floorplan.load_intent(intent_path)
+        pcb = parse_kicad_pcb(board)
+        clearance, edge = floorplan.resolved_floors(board)
+        found, _measured = floorplan.plan_check(
+            intent, pcb, board, group_sources=parse_sources('auto'),
+            clearance=clearance, board_edge_clearance=edge)
+    except floorplan.UntrustworthyOutline:
+        return None         # the seeds' own state refuses such an outline
+    errors = [v for v in found if v.severity == floorplan.ERROR]
+    for v in found:
+        if v.severity != floorplan.ERROR:
+            print(f"  PLAN [warn] {v.rule}: {v.message}")
+    if not errors:
+        return None
+    file_groups = {g['name']: g['refs'] for g in (groups_doc or {}).get('groups', ())}
+    for v in errors:
+        print(f"  PLAN [ERROR] {v.rule}: {v.message}", file=sys.stderr)
+        g = (v.measured or {}).get('group')
+        if v.rule == 'block_unresolved' and g in file_groups:
+            print(f"    {g!r} is a group of the groups file: write its parts as "
+                  f"the refs of block {v.block!r} -- \"refs\": "
+                  f"{json.dumps(list(file_groups[g]))}", file=sys.stderr)
+    print(f"place_simple: the plan is refused before any seed is placed -- "
+          f"{len(errors)} plan error(s), each one no placement can satisfy. "
+          f"Fix the intent; "
+          f"`check_floorplan.py {board} --intent {intent_path} --plan-only` "
+          f"checks it without placing. Nothing was written.", file=sys.stderr)
+    return 2
 
 
 def _seed_list(spec):
@@ -355,6 +613,15 @@ def _seed_list(spec):
         elif part:
             out.append(int(part))
     return out
+
+
+def start_lists(scattered, clustered, anchored):
+    """(--clustered-seeds, --anchored-seeds) of a run of these start counts,
+    numbered as the default seeds are: the scattered seeds from 0, then the
+    clustered, then the anchored; None for a count of 0."""
+    c0 = scattered + clustered
+    return (f'{scattered}-{c0 - 1}' if clustered else None,
+            f'{c0}-{c0 + anchored - 1}' if anchored else None)
 
 
 def _many_seeds(ap, a):
@@ -378,13 +645,16 @@ def _many_seeds(ap, a):
               file=sys.stderr)
         return 2
     skip = {'help', 'board', 'out', 'seed', 'seeds', 'jobs', 'json',
-            'scattered', 'clustered', 'anchored', 'judge'}
+            'scattered', 'clustered', 'anchored', 'judge', 'plan_checked'}
     passed = []
     for act in ap._actions:
         if act.dest in skip or not act.option_strings:
             continue
         val = getattr(a, act.dest)
-        if val is not None:
+        if act.nargs == 0:      # a switch: its name alone
+            if val:
+                passed.append(act.option_strings[0])
+        elif val is not None:
             passed += [act.option_strings[0], str(val)]
     jobs = max(1, a.jobs or min(len(seeds), 4))
     runs = []
@@ -394,9 +664,24 @@ def _many_seeds(ap, a):
         for p in (out, js):
             if p and os.path.dirname(p):
                 os.makedirs(os.path.dirname(p), exist_ok=True)
-        cmd = ([sys.executable, '-X', 'utf8', os.path.abspath(__file__), a.board, out]
-               + passed + ['--seed', str(s)] + (['--json', js] if js else []))
+        # -u (#1541): the seed's stdout is its s<S>.log, block-buffered
+        # otherwise, so the anneal's progress and estimate lines would reach
+        # the file only when 8 kB had piled up or the seed exited
+        cmd = ([sys.executable, '-u', '-X', 'utf8', os.path.abspath(__file__), a.board, out]
+               + passed + ['--seed', str(s), '--plan-checked']
+               + (['--json', js] if js else []))
         runs.append((s, out, cmd))
+    # #1443: measure the parts' heights once, here, so the seeds read the
+    # cached measurement instead of each exporting the board at once
+    try:
+        import contextlib
+        import io
+        from kicad_parser import parse_kicad_pcb
+        from placement import heights
+        with contextlib.redirect_stdout(io.StringIO()):
+            heights.for_board(parse_kicad_pcb(a.board), a.board)
+    except Exception:                                        # noqa: BLE001
+        pass
     print(f"place_simple: seeds {', '.join(map(str, seeds))} ({jobs} at a time)")
     live, done, summaries = [], {}, {}
     pending = list(runs)
@@ -423,19 +708,40 @@ def _many_seeds(ap, a):
             summaries[s] = summary
             fin = summary['final']
             ill = summary.get('illegal') or []
+            why = summary.get('illegal_why') or {}
             start = summary.get('start')
             fpt = ', '.join(t for t in (_fp_text(summary.get('floorplan')),
-                                        _asm_text(summary.get('assembly'))) if t)
+                                        _asm_text(summary.get('assembly')),
+                                        *(f"{r['outer']} {r['face']} part(s) in {r['bga']}'s "
+                                          f"outer rows" for r in summary.get('bga_field') or ()
+                                          if r['outer'])) if t)
             print(f"  seed {s}{f' ({start})' if start in ('clustered', 'anchored') else ''}: "
                   f"cost {fin['cost']:.1f}, {summary['moves']} moves in "
                   f"{summary['seconds']['anneal']} s"
-                  + (f", no legal pose for {', '.join(ill)}" if ill else '')
+                  + (", illegal: " + ', '.join(f"{r} ({why[r]})" if r in why else r
+                                                for r in ill) if ill else '')
                   + (f", {fpt}" if fpt else '') + f" -> {out}")
         else:
             print(f"  seed {s}: exit {rc}, no summary (see {os.path.splitext(out)[0]}.log)")
     _name_judged(a, seeds, summaries)
     rcs = set(done.values())
     return 2 if rcs - {0, 4} else (4 if 4 in rcs else 0)
+
+
+def pad_reach_text(wide, locked=()):
+    """The pre-flight line for `wide` ({ref: mm}), the parts whose pad copper
+    reaches more than `PAD_REACH_NOTE_MM` past their drawn courtyard (#1386);
+    None when there are none. Information, not a prediction: a seed prints
+    it, and a run of several seeds prints it once."""
+    if not wide:
+        return None
+    return (f"pad copper reaches more than {PAD_REACH_NOTE_MM:g} mm past the drawn "
+            "courtyard: " + ', '.join(
+                f"{r} {v:.2f} mm" + (' (locked)' if r in locked else '')
+                for r, v in sorted(wide.items()))
+            + "; courtyards are graded as drawn, as KiCad grades them, so a "
+              "neighbour may stand over such a pad; keep-outs hold the copper "
+              "(#1588)")
 
 
 def judge_order(reports):
@@ -468,13 +774,33 @@ def judge_order(reports):
     return sorted((s for s, r in reports.items() if not r.get('illegal')), key=rank)
 
 
+def _illegal_every_seed(seeds, summaries):
+    """`{ref: {seed: reason}}`: the parts every seed that reported left
+    illegal (#1540), each with its reason per seed. Empty when a seed
+    reported none of them, or fewer than two seeds reported."""
+    done = [s for s in seeds if s in summaries]
+    if len(done) < 2:
+        return {}
+    common = set(summaries[done[0]].get('illegal') or ())
+    for s in done[1:]:
+        common &= set(summaries[s].get('illegal') or ())
+    return {r: {str(s): (summaries[s].get('illegal_why') or {}).get(r) for s in done}
+            for r in sorted(common)}
+
+
 def _name_judged(a, seeds, summaries):
     """A run of several seeds' last step: the `--judge` legal seeds to judge
     (`judge_order`), printed and written to `judge.json` beside the seeds'
     boards (`judge` in judging order; `scattered`, `clustered`, `anchored` and
-    `illegal` list the seeds by start and verdict, `refused` and
+    `illegal` list the seeds by start and verdict, `illegal_why` each illegal
+    seed's parts with the check each fails and `illegal_every_seed` the parts
+    illegal in every seed, WARNED once (#1540), `refused` and
     `oversubscribed` the intent's own faults, the same in every seed and
-    each WARNED once, `floorplan` each seed's
+    each WARNED once, `pad_overhang` the parts whose pad copper reaches past
+    their drawn courtyard (#1386), the same in every seed and said once,
+    `fold` the parts that follow a claim into their partner's group and the
+    groups that emptied, likewise said once,
+    `floorplan` each seed's
     floorplan errors, `assembly` its check_assembly blocking count, and
     `baseline` the board the seeds were placed from, which judge_seeds hands
     quick_score so the fast route's score grades assembly the same way)."""
@@ -485,6 +811,13 @@ def _name_judged(a, seeds, summaries):
            'clustered': [s for s in seeds if summaries.get(s, {}).get('start') == 'clustered'],
            'anchored': [s for s in seeds if summaries.get(s, {}).get('start') == 'anchored'],
            'illegal': [s for s in seeds if summaries.get(s, {}).get('illegal')],
+           # #1540: each illegal seed's parts and why, keyed by seed
+           'illegal_why': {str(s): summaries[s].get('illegal_why')
+                           or {r: None for r in summaries[s]['illegal']}
+                           for s in seeds if summaries.get(s, {}).get('illegal')},
+           # ...and the parts illegal in EVERY seed that reported, said once:
+           # the same part in every seed is a finding about the run, not a seed
+           'illegal_every_seed': _illegal_every_seed(seeds, summaries),
            # the declared poses refused, the same in every seed: the
            # intent's to fix, not a seed's
            'refused': next((summaries[s]['refused'] for s in seeds
@@ -493,6 +826,17 @@ def _name_judged(a, seeds, summaries):
            # together, likewise
            'oversubscribed': next((summaries[s]['oversubscribed'] for s in seeds
                                    if summaries.get(s, {}).get('oversubscribed')), []),
+           # the parts whose pad copper reaches past their drawn courtyard,
+           # likewise ({ref: mm}, #1386)
+           'pad_overhang': next((summaries[s]['pad_overhang'] for s in seeds
+                                 if summaries.get(s, {}).get('pad_overhang')), {}),
+           # the claims priced over legs the grade does not read, likewise (#1426)
+           'claim_arity': next((summaries[s]['claim_arity'] for s in seeds
+                                if summaries.get(s, {}).get('claim_arity')), []),
+           # the parts that follow a claim into their partner's group and the
+           # groups that emptied, likewise (#1467)
+           'fold': next((summaries[s]['fold'] for s in seeds
+                         if summaries.get(s, {}).get('fold')), {}),
            # each placed seed's check_floorplan --intent errors (None: not
            # graded), keyed by seed as JSON keys must be
            'floorplan': {str(s): (summaries[s].get('floorplan') or {}).get('errors')
@@ -501,6 +845,12 @@ def _name_judged(a, seeds, summaries):
            # None not graded) against the board it was placed from
            'assembly': {str(s): (summaries[s].get('assembly') or {}).get('blocking')
                         for s in seeds if s in summaries},
+           # each placed seed's template members past their tolerance (#1387)
+           'template_off': {str(s): summaries[s].get('template_off') or []
+                            for s in seeds if s in summaries},
+           # each placed seed's far-face parts under a ball field (#1425)
+           'bga_field': {str(s): summaries[s].get('bga_field') or []
+                         for s in seeds if s in summaries},
            'baseline': (os.path.abspath(a.board) if getattr(a, 'board', None)
                         else None)}
     path = os.path.join(os.path.dirname(a.out.format(seed=seeds[0])), 'judge.json')
@@ -524,15 +874,31 @@ def _name_judged(a, seeds, summaries):
         elif fp and fp.get('errors') is None:
             print(f"  WARNING: seed {s} is judged with its {_fp_text(fp)}: grade it with "
                   f"check_floorplan --intent before keeping it")
+    for rec in doc['claim_arity']:
+        print(f"  WARNING: {arity_text(rec)}")
+    note = next((summaries[s]['pad_overhang_note'] for s in seeds
+                 if summaries.get(s, {}).get('pad_overhang_note')), None)
+    if note:
+        print(f"  NOTE: (every seed) {note}")
+    if doc['fold']:
+        from placement.grouping import fold_text
+        moved_line, dissolved_lines = fold_text(doc['fold'])
+        print(f"  NOTE: (every seed) {moved_line}")
+        for line in dissolved_lines:
+            print(f"  WARNING: {line}")
     for r, why in sorted(doc['refused'].items()):
         print(f"  WARNING: {r}'s declared pose is not legal, in every seed: "
               f"{'; '.join(why)}")
+    for r, per in sorted(doc['illegal_every_seed'].items()):
+        print(f"  WARNING: {r} is illegal in every seed: "
+              + '; '.join(f"seed {s}: {w or 'no reason recorded'}" for s, w in per.items()))
     from placement.edge_seat import crowding_text
     for rec in doc['oversubscribed']:
         print(f"  WARNING: {crowding_text(rec)}")
 
 
-def main(argv=None):
+def build_parser():
+    """The command line, also the one place the weights' defaults live."""
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('board', help='the board; the parts it locks stay put')
     ap.add_argument('out', help='the placed board to write')
@@ -563,6 +929,11 @@ def main(argv=None):
                     help='per mm past an intent decap limit it grades at error '
                          '(decaps.max_distance_mm, max_pin_distance_mm), measured as the '
                          'grade measures it (default 10; 0 leaves the limits unpriced)')
+    ap.add_argument('--repair-decaps', action='store_true', default=None,
+                    help='after the anneal, move each cap still past an intent decap limit to '
+                         'the nearest legal pose inside it, when that makes no other limit '
+                         'worse (default: off). Either way a limit still broken is WARNED, '
+                         'naming the rail, cap, pin and the distance reached')
     ap.add_argument('--group-weight', type=float, default=5.0,
                     help='per mm of gap in a group\'s tree over its members\' '
                          'courtyards (default 5)')
@@ -633,7 +1004,130 @@ def main(argv=None):
                     help='with several seeds, how many run at once (default: one per '
                          'seed, at most 4)')
     ap.add_argument('--json', help='write the report here')
+    ap.add_argument('--preview', action='store_true',
+                    help='preview where each group goes (#1481): place ONE seed (--seed, '
+                         'default 0, from the anchored start) in a scratch directory, '
+                         'print each group\'s box and centre there, and draw OUT, a PNG '
+                         'of that board with the boxes as draft zones. Non-binding: no '
+                         'board is written and the intent is not changed')
+    ap.add_argument('--draft-zones', metavar='JSON', default=None,
+                    help='with --preview: also write those boxes as draft blocks[] '
+                         'to JSON, for the author to edit, check with check_floorplan '
+                         '--plan-only and paste into the intent; never applied')
+    ap.add_argument('--plan-checked', action='store_true',
+                    help='skip the plan check made before any seed: the plan was '
+                         'checked already (a --seeds run checks it once and passes '
+                         'this to its seeds)')
+    return ap
+
+
+def _preview(a, argv) -> int:
+    """`--preview` (#1481): place ONE seed -- `--seed` (default 0) from the
+    anchored start, what place_simple itself does -- into a scratch
+    directory, and report where each group of the groups file landed: its
+    box over its members' courtyards, on the basis a zone measures them
+    (`floorplan.zone_parts`), as the seed packed it -- `check_floorplan
+    --plan-only` then says which are tighter than a zone should be -- and
+    its centre. Printed, drawn (the seed's
+    board with the boxes as draft zones) to OUT, and with `--draft-zones`
+    written as draft `blocks[]`. Nothing else is written, and nothing reads
+    the draft back unless an author pastes it."""
+    import subprocess
+    import pose_score
+    from placement import floorplan
+    seed = 0 if a.seed is None else a.seed
+    groups = json.load(open(a.groups, encoding='utf-8'))['groups']
+    base = json.load(open(a.intent, encoding='utf-8'))
+    with tempfile.TemporaryDirectory() as td:
+        placed = os.path.join(td, 'preview.kicad_pcb')
+        # the same call, OUT the scratch board, one anchored seed
+        rest, skip, out_done = [], {'--preview': 0, '--draft-zones': 1, '--seed': 1,
+                                    '--json': 1, '--anchored-seeds': 1,
+                                    '--clustered-seeds': 1}, False
+        it = iter(argv)
+        for tok in it:
+            if tok in skip:
+                for _ in range(skip[tok]):
+                    next(it, None)
+            elif any(tok.startswith(k + '=') for k in skip):
+                continue
+            elif tok == a.out and not out_done:
+                rest.append(placed)
+                out_done = True
+            else:
+                rest.append(tok)
+        code = main(rest + ['--seed', str(seed), '--anchored-seeds', str(seed)])
+        if not os.path.exists(placed):
+            return code or 1
+        pcb = parse_kicad_pcb(placed)
+        parts = floorplan.zone_parts(pose_score.make_state(pcb, placed), pcb, placed)
+        blocks = []
+        print(f"place_simple --preview: where each group landed in seed {seed} "
+              f"(anchored start), non-binding")
+        for g in groups:
+            rs = [parts[r].rect() for r in g['refs'] if r in parts]
+            if not rs:
+                continue
+            x0, y0 = min(q[0] for q in rs), min(q[1] for q in rs)
+            x1, y1 = max(q[2] for q in rs), max(q[3] for q in rs)
+            zone = [round(v, 2) for v in (x0, y0, x1, y1)]
+            print(f"  {g['name']:16s} {len(rs):3d} part(s)  centre "
+                  f"({(zone[0] + zone[2]) / 2:.1f}, {(zone[1] + zone[3]) / 2:.1f})  "
+                  f"box {zone}")
+            blocks.append({'name': f"draft_{g['name']}", 'refs': list(g['refs']),
+                           'zone': zone,
+                           'why': f"draft from place_simple --preview: where seed {seed} "
+                                  f"put the group"})
+        if a.draft_zones:
+            with open(a.draft_zones, 'w', encoding='utf-8') as fh:
+                json.dump({'draft': True, 'source': f'place_simple --preview, seed {seed}',
+                           'blocks': blocks}, fh, indent=1)
+            print(f"  draft blocks[] -> {a.draft_zones} (not applied; edit, check with "
+                  f"check_floorplan.py --plan-only, then paste into the intent)")
+        doc = dict(base)
+        doc['blocks'] = list(base.get('blocks') or ()) + blocks
+        ipath = os.path.join(td, 'preview_intent.json')
+        json.dump(doc, open(ipath, 'w', encoding='utf-8'))
+        r = subprocess.run(
+            [sys.executable, '-X', 'utf8',
+             os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'py_tools',
+                          'render_placement.py'),
+             placed, '--intent', ipath, '--flat', '-o', a.out],
+            capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(a.out):
+        print(f"place_simple: the preview render failed: {(r.stderr or r.stdout)[-400:]}",
+              file=sys.stderr)
+        return 1
+    print(f"  preview -> {a.out}")
+    return 0
+
+
+def _pass_counts(passes):
+    """[(pass label, anneals)] in the order the passes ran."""
+    out = {}
+    for p in passes:
+        out[p['pass']] = out.get(p['pass'], 0) + 1
+    return list(out.items())
+
+
+def main(argv=None):
+    ap = build_parser()
     a = ap.parse_args(argv)
+    if not a.plan_checked and not a.preview:
+        # the placement record (#1486): the run, not its seed children
+        from placement import run_record
+        run_record.record('place_simple', argv, boards=[a.board])
+    if a.draft_zones and not a.preview:
+        print("place_simple: --draft-zones is a --preview output", file=sys.stderr)
+        return 2
+    if a.preview:
+        if (a.seeds or '{seed}' in a.out or a.scattered is not None
+                or a.clustered is not None or a.anchored is not None):
+            print("place_simple: --preview places ONE seed (--seed, default 0, from the "
+                  "anchored start): OUT is the PNG to draw, and --seeds, {seed} and the "
+                  "start counts do not apply", file=sys.stderr)
+            return 2
+        return _preview(a, list(sys.argv[1:] if argv is None else argv))
     starts = [f for f, v in (('--scattered', a.scattered), ('--clustered', a.clustered),
                              ('--anchored', a.anchored)) if v is not None]
     if a.seed is None and not a.seeds and '{seed}' in a.out:
@@ -650,8 +1144,7 @@ def main(argv=None):
                   "with at least one seed", file=sys.stderr)
             return 2
         a.seeds = f'0-{n - 1}'
-        a.clustered_seeds = f'{sc}-{sc + cl - 1}' if cl else None
-        a.anchored_seeds = f'{sc + cl}-{n - 1}' if an else None
+        a.clustered_seeds, a.anchored_seeds = start_lists(sc, cl, an)
     elif starts:
         print(f"place_simple: {', '.join(starts)} set the default seeds of an OUT carrying "
               "{seed}; with --seed or --seeds, list the starts with --clustered-seeds and "
@@ -673,6 +1166,18 @@ def main(argv=None):
         print(f"place_simple: --clustered-seeds {a.clustered_seeds!r} or --anchored-seeds "
               f"{a.anchored_seeds!r} is not a list like 0-3 or 0,1,2,3", file=sys.stderr)
         return 2
+    if not a.plan_checked:
+        try:
+            groups_doc = json.load(open(a.groups, encoding='utf-8'))
+        except (OSError, ValueError):
+            groups_doc = None   # load_groups below names what is wrong
+        try:
+            code = plan_refusal(a.board, a.intent, groups_doc)
+        except (OSError, ValueError) as ex:
+            print(f"place_simple: {ex}", file=sys.stderr)
+            return 2
+        if code:
+            return code
     if a.seeds:
         return _many_seeds(ap, a)
     t0 = time.time()
@@ -738,9 +1243,66 @@ def main(argv=None):
             f"{f['reference']}" + (f" -> {f['new_side']}" if 'new_side' in f else
                                    f" at ({f['new_x']:g}, {f['new_y']:g}) {f['new_rotation']:g}")
             for f in flips))
+    # ... and a cover whose standoff cannot move fixes its connector, at one
+    # pose per quarter turn (#1507): each seed takes the next legal one and
+    # holds it, as a declared pose, so the seeds between them try every turn
+    seats = intent.cover_connector_poses(pcb, set(fixed) | extract_locked_refs(src))
+    if seats:
+        from list_nets import board_floor_knobs
+        from placement.edge_seat import seat_state
+        from placement.seeder import _fixed_pose_check
+        clearance, edge, _ = board_floor_knobs(src)
+        st0 = seat_state(pcb, src, intent, blocks, clearance, edge, set(fixed),
+                         estimate_courtyards=True)
+        waived = frozenset(frozenset(p) for p in intent.courtyard_waiver_pairs())
+        stay = {r: (p.x, p.y, p.rot) for r, p in st0.parts.items() if p.locked}
+        moves = []
+        for s in seats:
+            j, why = s['connector'], []
+            legal_at = []
+            for pose in s['poses']:
+                how, reasons, _c = _fixed_pose_check(
+                    st0, j, pose, {o: q for o, q in stay.items() if o != j}, waived=waived)
+                if how is None:
+                    why.append(f"{pose[2]:g} deg: {'; '.join(reasons)}")
+                else:
+                    legal_at.append(pose)
+            if not legal_at:
+                print(f"place_simple: the cover on {j} holds it to {', '.join(s['standoffs'])}, "
+                      f"which cannot move, and no pose that does so is legal ("
+                      + ('; '.join(why) or 'its standoffs disagree at every quarter turn')
+                      + "). Nothing was written.", file=sys.stderr)
+                if tmp:
+                    shutil.rmtree(tmp, ignore_errors=True)
+                return 2
+            x, y, rot = legal_at[(a.seed or 0) % len(legal_at)]
+            stay[j] = (x, y, rot)           # a later cover is judged against it
+            fixed[j] = {'ref': j, 'x': x, 'y': y, 'rot': rot, 'source': f'cover on {j}'}
+            moves.append({'reference': j, 'new_x': x, 'new_y': y, 'new_rotation': rot})
+            print(f"  NOTE: {j} seated where its cover puts {', '.join(s['standoffs'])}, which "
+                  f"cannot move: at ({x:g}, {y:g}) {rot:g}, legal pose "
+                  f"{(a.seed or 0) % len(legal_at) + 1} of {len(legal_at)}")
+        tmp = tmp or tempfile.mkdtemp(prefix='place_simple_')
+        os.makedirs(os.path.join(tmp, 'cover'), exist_ok=True)
+        seated = os.path.join(tmp, 'cover', os.path.basename(a.board))
+        write_placed_output(src, seated, moves)
+        copy_siblings(src, seated)
+        src, pcb = seated, parse_kicad_pcb(seated)
+        blocks, _problems = floorplan.resolve_blocks(intent, pcb, sources)
     from placement import simple_anneal
     from placement.simple import legal
     state, model, movable, notes = build(pcb, src, doc, base, a, intent, blocks, set(fixed))
+    # FACES the groups file leaves open (`flippable`, placement/faces.py): a
+    # part keeps its face unless the front has no room for it (after the
+    # anneal, below)
+    from placement import faces
+    flip_ok, face_notes = faces.flippable_refs(doc, movable, sides, intent.assembly_sides())
+    for r, why in sorted(faces.flip_refusals(src, flip_ok).items() if flip_ok else ()):
+        face_notes.append(f"{r} is flippable but stays: {why}")
+        flip_ok.discard(r)
+    face_src, face_pcb = src, pcb       # the board before any face of our choosing
+    for n in face_notes:
+        print(f"  NOTE: {n}")
     for n in notes:
         print(f"  NOTE: {n}")
     for r, why in sorted(model.edge_unseated.items()):
@@ -749,6 +1311,8 @@ def main(argv=None):
     from placement.edge_seat import crowding_text
     for rec in model.edge_oversubscribed:
         print(f"  WARNING: {crowding_text(rec)}")
+    for rec in model.claim_arity:
+        print(f"  WARNING: {arity_text(rec)}")
     print(f"place_simple: {len(movable)} movable part(s), fixed: "
           f"{', '.join(sorted(r for r in state.parts if r not in movable)) or 'none'}")
     for name, members in model.groups:
@@ -776,6 +1340,16 @@ def main(argv=None):
             too_big.add(r)
             print(f"  WARNING: {r} ({w:.2f} x {h:.2f} mm) does not fit in the usable area "
                   f"({ux1 - ux0:.2f} x {uy1 - uy0:.2f} mm) at either quarter turn")
+    # a part whose pad copper reaches past its drawn courtyard (#1386): said,
+    # not priced -- courtyards are graded as drawn (#1588). Not a container:
+    # check_assembly grades a container on its pins (#1465).
+    from placement.seeder import _pad_copper_overhang
+    wide = {r: round(_pad_copper_overhang(state, r), 2) for r in sorted(state.parts)
+            if r not in state.container_refs
+            and _pad_copper_overhang(state, r) > PAD_REACH_NOTE_MM}
+    wide_note = pad_reach_text(wide, set(state.parts) - set(movable))
+    if wide_note:
+        print(f"  NOTE: {wide_note}")
     t1 = time.time()
     moves = a.moves or MOVES_PER_PART * len(movable)
 
@@ -789,7 +1363,33 @@ def main(argv=None):
             fits = legal(st, r, p.x, p.y, p.rot)
         return fits and st.intent_clear(r, p.grade_rects(p.x, p.y, p.rot))
 
-    def runs(st, mdl):
+    def tight_ok(r, st=None, mdl=None):
+        """`ok` with the seat's courtyard clearance down to TIGHT_CLEARANCE_MM."""
+        st = st or state
+        was = st.clearance
+        if was <= TIGHT_CLEARANCE_MM:
+            return False
+        st.clearance = TIGHT_CLEARANCE_MM
+        try:
+            return ok(r, st, mdl)
+        finally:
+            st.clearance = was
+
+    def settle(st, mdl, kp):
+        """`kp` with its poses applied and its parts that are legal only
+        closer than the board clearance (`tight_ok`) no longer illegal."""
+        for r, pose in kp[1].items():
+            st.parts[r].ensure_rotation(pose[2])
+            st.apply_move(r, *pose)
+        mdl.reprice_all()
+        close = [r for r in kp[0] if r not in too_big and tight_ok(r, st, mdl)]
+        return ([r for r in kp[0] if r not in close],) + tuple(kp[1:])
+
+    # every anneal this seed runs, kept or not (#1483): the log line and the
+    # report count them all, not only the kept run's
+    passes = []
+
+    def runs(st, mdl, label='front'):
         """The restarts on one state: `(kept, k)`, the run that left the
         fewest parts illegal -- (illegal refs, poses, res), the earlier on a
         tie -- and the last run's index."""
@@ -802,13 +1402,16 @@ def main(argv=None):
             res = simple_anneal.anneal(mdl, movable, moves=moves, seed=seed,
                                        log=lambda s: print(f"  {s}"),
                                        repair=k == RESTARTS, seats=mdl.edge_seats)
+            passes.append({'pass': label, 'run': k + 1, 'moves': res['moves'],
+                           'seconds': res['seconds']})
             illegal = [r for r in movable if not ok(r, st, mdl)]
             if kept is None or len(illegal) < len(kept[0]):
                 kept = (illegal, {r: (st.parts[r].x, st.parts[r].y, st.parts[r].rot)
                                   for r in movable}, res)
             if set(illegal) <= too_big:
                 break
-            print(f"  NOTE: run {k + 1} left no legal pose for {', '.join(illegal)}"
+            print(f"  NOTE: run {k + 1} left illegal: "
+                  + ', '.join(f"{r} ({illegal_reason(st, mdl, r)})" for r in illegal)
                   + ("; annealing again from a fresh start" if k < RESTARTS else ""))
         return kept, k
     fallback = []           # parts seated on what the board draws instead (#1300)
@@ -816,6 +1419,12 @@ def main(argv=None):
         print("place_simple: nothing to place; the board is written as it is")
         k, kept = -1, ([], {}, {'moves': 0, 'reseated': [], 'stats': {}})
     else:
+        est = set(state.courtyard_estimates)
+        worst = (RESTARTS + 1) * (1 + (2 if est else 0)
+                                  + (faces.FACE_ROUNDS if flip_ok else 0))
+        print(f"place_simple: {moves} moves per anneal, {RESTARTS + 1} anneal(s) per pass "
+              f"until one is legal; up to {worst} anneal(s) in all (the #1300 courtyard "
+              f"fallback{' and the face pass' if flip_ok else ''} included)")
         kept, k = runs(state, model)
         # #1300: an ESTIMATED courtyard is ours, not the board's. When the
         # runs leave a part no legal pose on the estimates, the part itself
@@ -835,15 +1444,87 @@ def main(argv=None):
                   f"the board draws (#1300)")
             st2, mdl2, _m2, _n2 = build(pcb, src, doc, base, a, intent, blocks,
                                         set(fixed), estimate_skip=skip)
-            kept2, k2 = runs(st2, mdl2)
+            kept2, k2 = runs(st2, mdl2, 'fallback')
             if len(kept2[0]) < len(kept[0]):
                 state, model, kept, k, fallback = st2, mdl2, kept2, k2, sorted(skip)
+    # a flippable part the front had no room for goes to the back, or makes
+    # room by sending the flippable parts of its group nearest where it wants
+    # to be there (#1482), and the board is annealed again, up to
+    # FACE_ROUNDS times: kept only when it leaves fewer parts without room (no
+    # legal pose, then decap limits, then claim limits), never for cost
+    # alone -- a part stays on its face unless the other face is needed
+    from placement import decap_repair
+    face_report = {'flippable': sorted(flip_ok), 'needed': {},
+                   'needed_kept': None}
+
+    def outcome(st, mdl, kp):
+        """Rank of a run (its poses applied): parts without a legal pose
+        (a tight one counts as legal), decap limits, claim limits, cost."""
+        for r, pose in kp[1].items():
+            st.parts[r].ensure_rotation(pose[2])
+            st.apply_move(r, *pose)
+        mdl.reprice_all()
+        # total() FIRST: it resyncs the breakdowns the limit counts read,
+        # which otherwise still hold the last restart's poses, not this
+        # run's (#1485)
+        cost = mdl.total()['cost']
+        return (len(set(kp[0]) - too_big), len(decap_repair.residual(mdl)),
+                mdl.claims_broken(), cost)
+    if movable:
+        kept = settle(state, model, kept)
+    if flip_ok and movable:
+        before = outcome(state, model, kept)
+        flipped = {}        # every flip the kept runs carry
+        for _round in range(faces.FACE_ROUNDS):
+            want = faces.needed_flips(faces.needs(model, set(kept[0]) - too_big),
+                                      flip_ok, doc, set(flipped), model)
+            if not want:
+                break
+            face_report['needed'].update(want)
+            print("  NOTE: no room on their face, annealing again with them on the other: "
+                  + ', '.join(f"{r} ({why})" for r, why in sorted(want.items())))
+            tmp = tmp or tempfile.mkdtemp(prefix='place_simple_')
+            src2 = _face_board(face_src, face_pcb, {**flipped, **want}, tmp,
+                               f'needed{_round}', a.board)
+            pcb2 = parse_kicad_pcb(src2)
+            blocks2, _problems = floorplan.resolve_blocks(intent, pcb2, sources)
+            st2, mdl2, _m2, _n2 = build(pcb2, src2, doc, base, a, intent, blocks2, set(fixed))
+            kept2, k2 = runs(st2, mdl2, 'face')
+            kept2 = settle(st2, mdl2, kept2)
+            after = outcome(st2, mdl2, kept2)
+            better = after[:3] < before[:3]
+            face_report['needed_kept'] = bool(face_report['needed_kept']) or better
+            print(f"  NOTE: with them flipped: {after[0]} part(s) without a legal pose, "
+                  f"{after[1]} decap limit(s), {after[2]} claim limit(s) broken, cost "
+                  f"{after[3]:.1f}, against {before[0]}, {before[1]}, {before[2]}, "
+                  f"{before[3]:.1f}; {'kept' if better else 'not kept: no part gained room'}")
+            if not better:
+                outcome(state, model, kept)
+                break
+            state, model, kept, k, src, pcb = st2, mdl2, kept2, k2, src2, pcb2
+            blocks, fallback = blocks2, []
+            flipped.update(want)
+            before = after
+    settled(pcb, state, model, movable)
     _ill, poses, res = kept
     for r, pose in poses.items():
         state.parts[r].ensure_rotation(pose[2])
         state.apply_move(r, *pose)
     model.reprice_all()
     final = model.total()
+    # the intent's decap limits are a soft term, so the anneal can stop a
+    # fraction of a mm past one; --repair-decaps then moves each cap to the
+    # nearest legal pose inside its limit (#1382)
+    from placement import decap_repair
+    mended = None
+    if a.repair_decaps and movable:
+        def legal_at(r, x, y, rot):
+            if r in model.edge_seats:
+                return False
+            return (legal(state, r, x, y, rot)
+                    and state.intent_clear(r, state.parts[r].grade_rects(x, y, rot)))
+        mended = decap_repair.repair(model, movable, legal_at, seats=model.edge_seats)
+        final = model.total()
     t2 = time.time()
     # each template member's drift from its template pose, worst pad
     from placement.templates import pad_deviation
@@ -851,20 +1532,84 @@ def main(argv=None):
     for i, (anc, m) in enumerate(model.tmpl):
         P = state.parts[m['ref']]
         _mean, worst = pad_deviation(P, (P.x, P.y, P.rot), model.template_target(i))
-        drift.append({'anchor': anc, 'ref': m['ref'], 'worst_mm': round(worst, 3)})
+        drift.append({'anchor': anc, 'ref': m['ref'], 'worst_mm': round(worst, 3),
+                      'tolerance_mm': model.tmpl_tolerance.get(anc)})
     # a refused declared pose is the intent's, the same in every seed: it is
     # reported apart (`refused`), not counted against the seed (#1297)
     illegal = [r for r in movable if not ok(r)]
-    print(f"place_simple: annealed {res['moves']} moves in {t2 - t1:.1f} s; {_line(final)}")
+    # closer than the board clearance only where no run found it a legal pose
+    # (TIGHT_CLEARANCE_MM): legal, and named with the gap it stands at
+    from placement.simple import rect_gap
+    tight = {}
+    for r in [r for r in illegal if r not in too_big and tight_ok(r)]:
+        P = state.parts[r]
+        gap, near = min(((rect_gap(P.rect(), q.rect()), o) for o, q in state.parts.items()
+                         if o != r and P.sides & q.sides), default=(None, None))
+        tight[r] = {'gap_mm': None if gap is None else round(gap, 4), 'neighbour': near}
+    illegal = [r for r in illegal if r not in tight]
+    # #1540: why each is illegal, by the first check it fails
+    illegal_why = {r: illegal_reason(state, model, r) for r in illegal}
+    print(f"place_simple: annealed {res['moves']} moves in {t2 - t1:.1f} s "
+          f"({len(passes)} anneal(s), {sum(p['moves'] for p in passes)} moves in all"
+          + (f", {', '.join(f'{n} {lab}' for lab, n in _pass_counts(passes))}"
+             if len(passes) > 1 else '') + f"); {_line(final)}")
     if res.get('repaired'):
         print("  NOTE: the last run never came clean; its overlaps were shoved apart where it stood")
     if res['reseated']:
         print(f"  NOTE: moved to the nearest legal pose after the anneal: {', '.join(res['reseated'])}")
-    if illegal:
-        print(f"  WARNING: no legal pose found for: {', '.join(illegal)}")
+    for r, t in sorted(tight.items()):
+        print(f"  NOTE: {r} has no legal pose at the board clearance "
+              f"({state.clearance:g} mm); seated {t['gap_mm']:g} mm from {t['neighbour']}, "
+              f"legal down to {TIGHT_CLEARANCE_MM:g} mm because nothing else seats it")
+    for r in illegal:
+        print(f"  WARNING: {r} is left illegal: {illegal_why[r]}")
+    if mended is not None:
+        for m in mended['moved']:
+            print(f"  NOTE: decap {m['ref']} ({m['rail']}) moved {m['mm']:.2f} mm to "
+                  f"({m['to'][0]:g}, {m['to'][1]:g}, {m['to'][2]:g}) to meet its limit")
+        print(f"  decap repair: {mended['before']} limit(s) broken -> {mended['after']} "
+              f"({mended['seconds']} s)")
+    # what is still past an intent decap limit, named: rail, cap, pin, the
+    # distance reached against the limit (#1382, #1423)
+    resid = mended['stuck'] if mended is not None else decap_repair.residual(model)
+    for r in resid:
+        print(f"  WARNING: {decap_repair.residual_text(r)}"
+              + (decap_repair.stuck_text(r) if mended is not None else ''))
+    # each claim still past its limit, named as the decaps are (#1600). A
+    # claim is priced, not held, and one the toolchain derives (a crystal at
+    # its IC's pins, a load cap at its crystal) is graded WARN, which the
+    # judge does not rank: say so here, where the seed is read
+    authored = {(str(c.get('ref')), str(c.get('near')))
+                for c in base.get('proximity') or () if not floorplan.derived_claim(c)}
+    claims_left = model.broken_claims()
+    for b in claims_left:
+        b['derived'] = (b['ref'], b['near']) not in authored
+        print(f"  WARNING: claim {b['ref']} near {b['near']}: {b['ref']} pad {b['pad']} is "
+              f"{b['gap_mm']:.2f} mm from {b['near']}, past its "
+              + (f"derived {b['max_mm']:g} mm limit; check_floorplan grades a derived "
+                 f"claim a WARN whatever `severity.proximity` says, so the judge ranks "
+                 f"the seed no lower for it" if b['derived'] else
+                 f"{b['max_mm']:g} mm limit"))
     if drift:
         print("  template drift (worst pad, mm): " + ', '.join(
             f"{d['ref']} {d['worst_mm']:.2f}" for d in drift))
+    # a member left past its template's tolerance is check_floorplan's
+    # `template` WARN, which does not move the judge: say so here (#1387)
+    off = [d for d in drift if d['tolerance_mm'] is not None
+           and d['worst_mm'] > d['tolerance_mm'] + 1e-6]
+    if off:
+        print("  WARNING: off its datasheet template past the tolerance: " + ', '.join(
+            f"{d['ref']} ({d['anchor']}) {d['worst_mm']:.2f} mm > {d['tolerance_mm']:g}"
+            for d in off) + "; check_floorplan grades this a WARN (unless the intent's "
+            "`severity` promotes `template`), so the judge ranks the seed no lower for it")
+    # a keep-out that binds a template member but not its chip forbids the
+    # template pose where the chip stands (#1387)
+    tk = [f for f in floorplan.template_keepout_findings(
+        intent, state.parts, lambda r: (state.parts[r].x, state.parts[r].y, state.parts[r].rot),
+        state.heights.height)
+        if f['forced']]
+    for f in tk:
+        print(f"  WARNING: {floorplan.template_keepout_text(f)}")
     # an `apart` hint whose groups still touch prices the least gap over all
     # their member pairs, 0 at any pose where they touch: a flat
     # weight x APART_MM that steered nothing (#1330)
@@ -876,6 +1621,15 @@ def main(argv=None):
               f"saturated value (weight x {APART_MM:g} mm wherever they still "
               f"touch) and steered nothing; separate them with a zone or keep-out, "
               f"or drop the hint")
+    # the intent's links (#1477): each one's gap, and the ones past their
+    # max_mm, which the grade reports at warn
+    links = []
+    for h in model.hints:
+        if h['kind'] == 'within':
+            gap = model._hint_full(h)[0]
+            links.append({'link': h['link'], 'gap_mm': round(gap, 3), 'max_mm': h['max_mm']})
+            if gap > h['max_mm'] + 1e-9:
+                print(f"  link {h['link']}: {gap:.2f} mm, past its {h['max_mm']:g} mm")
     placements = [{'reference': r, 'new_x': round(state.parts[r].x, 4),
                    'new_y': round(state.parts[r].y, 4),
                    'new_rotation': state.parts[r].rot % 360.0}
@@ -891,6 +1645,12 @@ def main(argv=None):
     # and its assembly, against the board it was placed from: report only
     asm = _assembly(a.out, a.board, a.intent)
     print(f"  assembly: {_asm_text(asm) or 'buildable'} (check_assembly --baseline)")
+    # the parts the placement stood on the far face of a ball grid, under its
+    # ball field (#1425): the rows a fan-out escapes through are the ones to
+    # count. Report only.
+    bga_field = _bga_field(a.out)
+    for rec in bga_field:
+        print(f"  {_field_text(rec)}")
     final.pop('per_group', None)
     final.pop('per_hint', None)
     report = {'final': final, 'moves': res['moves'], 'seed': a.seed,
@@ -898,18 +1658,27 @@ def main(argv=None):
                         else 'scattered'), 'runs': k + 1,
               'declared': sorted(f['reference'] for f in flips),
               'reseated': res['reseated'], 'repaired': bool(res.get('repaired')),
-              'illegal': illegal, 'refused': refused, 'estimate_fallback': fallback,
-              'oversubscribed': model.edge_oversubscribed, 'floorplan': fp, 'assembly': asm,
-              'unseated': model.edge_unseated, 'notes': notes,
+              'illegal': illegal, 'illegal_why': illegal_why,
+              'tight': tight, 'refused': refused, 'estimate_fallback': fallback,
+              'oversubscribed': model.edge_oversubscribed, 'claim_arity': model.claim_arity,
+              'floorplan': fp, 'assembly': asm, 'bga_field': bga_field,
+              'decap_residual': resid, 'decap_repair': mended, 'claims_left': claims_left,
+              'unseated': model.edge_unseated, 'notes': notes, 'fold': model.fold,
+              'links': links,
               'groups': model.groups, 'stats': res['stats'], 'templates': drift,
-              'hints_saturated': saturated,
-              'seconds': {'setup': round(t1 - t0, 1), 'anneal': round(t2 - t1, 1)}}
+              'hints_saturated': saturated, 'template_keepout': tk, 'pad_overhang': wide,
+              'pad_overhang_note': wide_note,
+              'template_off': off, 'faces': face_report,
+              'seconds': {'setup': round(t1 - t0, 1), 'anneal': round(t2 - t1, 1)},
+              'anneals': passes, 'moves_total': sum(p['moves'] for p in passes)}
     if a.json:
         json.dump(report, open(a.json, 'w', encoding='utf-8'), indent=1)
     print('JSON_SUMMARY: ' + json.dumps({k: report[k] for k in
                                           ('final', 'moves', 'seed', 'start', 'reseated', 'illegal',
-                                           'refused', 'oversubscribed', 'floorplan', 'assembly',
-                                           'hints_saturated', 'estimate_fallback', 'seconds')}))
+                                           'illegal_why', 'tight',
+                                           'refused', 'oversubscribed', 'claim_arity', 'floorplan',
+                                           'assembly', 'bga_field', 'template_off', 'decap_residual', 'claims_left', 'hints_saturated', 'estimate_fallback',
+                                           'pad_overhang', 'pad_overhang_note', 'faces', 'fold', 'links', 'moves_total', 'seconds')}))
     return 4 if illegal or refused or model.edge_oversubscribed else 0
 
 

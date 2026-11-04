@@ -54,7 +54,7 @@ def main():
     populated = [r for r in refs if r != dnp_ref]
     stub = types.ModuleType('models')
     stub.export = lambda *a, **k: ({'matched': populated, 'path': 'x.glb', 'found': [], 'missing': [],
-                                    'cached': True, 'note': ''}, None)
+                                    'unreadable': [], 'cached': True, 'note': ''}, None)
     sys.modules['models'] = stub
     rec = SimpleNamespace(scene={'parts': parts}, model_src=(BOARD, None, BOARD), refs=refs)
     a = SimpleNamespace(tint=0.5, no_models=False, kicad_cli=None)

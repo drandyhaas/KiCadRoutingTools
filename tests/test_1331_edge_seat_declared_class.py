@@ -14,10 +14,12 @@ inferred one -- the order `floorplan.edge_facing_policy` reads them in.
 Checks, on a small board built here:
   1. a part-number-named receptacle with a declared `edge_receptacle` is
      seated on its edge;
-  2. the same row without a class is not, and the note says why;
+  2. the same row without a class is seated too (#1384: the grade fails
+     every declared row's edge, so the seat holds every one), and the note
+     says it is not an edge part by class;
   3. a declared class outranks the inferred one the other way too: a
-     `USB_C_Receptacle` declared `fiducial` is not seated, and the note
-     names the declared class.
+     `USB_C_Receptacle` declared `fiducial` is named by that declared class
+     in the note (and seated as declared, #1384).
 
     python3 tests/test_1331_edge_seat_declared_class.py
 """
@@ -88,15 +90,15 @@ def main():
               f'{sorted(out)} {unseated}')
 
         out, notes, _unseated = seat(path, [{'ref': 'J501', 'edge': 'south'}])
-        check('without the class it is not',
-              'J501' not in out
+        check('without the class it is seated as declared, and the note says why',
+              'J501' in out and out['J501'].edge == 'south'
               and any('J501' in n and 'no part class' in n for n in notes),
               str(notes))
 
         out, notes, _unseated = seat(path, [
             {'ref': 'J2', 'edge': 'north', 'class': 'fiducial'}])
-        check('a declared class outranks an inferred receptacle',
-              'J2' not in out
+        check('a declared class outranks an inferred receptacle in the note',
+              'J2' in out
               and any('J2' in n and 'declared class fiducial' in n for n in notes),
               str(notes))
     finally:

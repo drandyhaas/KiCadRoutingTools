@@ -73,6 +73,8 @@ ARM_WITH = {
                                  'max_mm': 2.0}]},
     # #1253: a declared keep-away arms its grade.
     'keep_away': {'keep_away': [{'rule': 'SW:FB:0.5'}]},
+    # #1477: a declared link arms its grade.
+    'link': {'links': [{'a': ['U1'], 'b': ['C1'], 'max_mm': 5.0}]},
     'must_lock': {'must_lock': ['U1']},
     'legality': {'legality_budget': {'oob_count': 0}},
     'pins_to_edge': {'edge_connectors': [{'ref': 'J1', 'edge': 'west'}]},
@@ -82,6 +84,14 @@ ARM_WITH = {
     # #1211: a declared channel copy arms its grade.
     'replicate': {'replicate': [{'from': 'CH1', 'to': ['CH2']}]},
     'template': {'templates': [{'anchor': 'U1', 'members': [{'ref': 'C1', 'at': [1.0, 0.0], 'rot': 0}]}]},
+    # #1443: a declared cover arms its standoff check.
+    'cover': {'covers': [{'connector': 'J1', 'side': 'F', 'axis_deg': 0, 'width_mm': 22,
+                          'underside_mm': 1.5, 'standoffs': [{'ref': 'H1', 'length_mm': 42}],
+                          'removable': True, 'source': 'socket datasheet'}]},
+    # #1504: the same declaration arms whether its body can be mounted.
+    'mountable': {'covers': [{'connector': 'J1', 'side': 'F', 'axis_deg': 0, 'width_mm': 22,
+                              'underside_mm': 1.5, 'standoffs': [{'ref': 'H1', 'length_mm': 42}],
+                              'removable': True, 'source': 'socket datasheet'}]},
 }
 
 

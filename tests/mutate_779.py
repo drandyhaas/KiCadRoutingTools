@@ -108,11 +108,10 @@ ROWS = [
     # arm here reaches it -- recorded as an expected survivor with the reason
     # rather than deleted, which is what makes it a change detector for the day
     # a fixture starts exercising that path.
+    # Single-line anchor: the FLAT loop's swap is the only one indented 24.
     ('drop-the-swap-in-the-FLAT-loop', 'fc',
-     "                    if at is not None:\n"
-     "                        vx, vy = at[j]\n"
-     "                    d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))\n",
-     "                    d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))\n",
+     "                        vx, vy = at[j]\n",
+     "                        pass\n",
      (T779, T725), 'SURVIVED'),
 
     # ---- the carry-forward, which only a second hop can see ----------------

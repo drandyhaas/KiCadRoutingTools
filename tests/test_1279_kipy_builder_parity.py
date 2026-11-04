@@ -32,6 +32,12 @@ board, so each is ported there and graded here:
   J.        a custom pad's copper drawn to one side of its anchor carries
             Pad.copper_box, read off the rendered polygon; one drawn about
             its anchor carries none
+  K.        main's round since 83646c8b: #1450 a chamfered-rect pad carries
+            its cut-corner outline in Pad.polygons; #1409 a footprint's closed
+            Edge.Cuts window that spares its own pads is carried at ANY pose
+            (here off the board, where containment alone calls it
+            structural); #1404 an Edge.Cuts circle is linearised at
+            EDGE_CHORD_EPS, the text parser's vertex for vertex
 
 WHY A HAND-BUILT kipy BOARD. The builder reaches a RUNNING KiCad over a
 socket, and `fake_ipc_board` serves reads by re-parsing the file, which would
@@ -786,6 +792,119 @@ def test_custom_pad_copper_box(tmp):
           "the fixture is the case: pad 1 offset, pad 2 drawn about its anchor")
 
 
+ROUND_BOARD = '''(kicad_pcb (version 20260206) (generator "pcbnew")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "") (net 1 "GND") (net 2 "SIG")
+  (footprint "lib:C" (layer "F.Cu") (at 10 10)
+    (property "Reference" "C1" (at 0 0) (layer "F.Cu"))
+    (pad "1" smd roundrect (at 0 0 30) (size 2 1) (layers "F.Cu")
+      (roundrect_rratio 0.25) (chamfer_ratio 0.2) (chamfer top_left bottom_right)
+      (net 2 "SIG")))
+  (footprint "lib:W" (layer "F.Cu") (at 60 20 30)
+    (property "Reference" "W1" (at 0 0) (layer "F.Cu"))
+    (pad "1" smd rect (at 0 0 30) (size 1 1) (layers "F.Cu") (net 2 "SIG"))
+    (fp_rect (start 2 -1) (end 4 1) (stroke (width 0.1) (type solid)) (fill none)
+      (layer "Edge.Cuts")))
+  (gr_line (start 0 0) (end 50 0) (stroke (width 0.1) (type solid)) (layer "Edge.Cuts"))
+  (gr_line (start 50 0) (end 50 40) (stroke (width 0.1) (type solid)) (layer "Edge.Cuts"))
+  (gr_line (start 50 40) (end 0 40) (stroke (width 0.1) (type solid)) (layer "Edge.Cuts"))
+  (gr_line (start 0 40) (end 0 0) (stroke (width 0.1) (type solid)) (layer "Edge.Cuts"))
+  (gr_circle (center 25 20) (end 28 20) (stroke (width 0.1) (type solid)) (fill none)
+    (layer "Edge.Cuts"))
+)
+'''
+
+
+def build_round_board():
+    b = FakeBoard()
+    for a, c in (((0, 0), (50, 0)), ((50, 0), (50, 40)), ((50, 40), (0, 40)),
+                 ((0, 40), (0, 0))):
+        b.shapes.append(seg_shape(a, c, bt.BL_Edge_Cuts))
+    b.shapes.append(circle_shape((25, 20), (28, 20), bt.BL_Edge_Cuts, 0.1, False))
+
+    c1 = FootprintInstance()
+    c1.position = vec(10, 10)
+    c1.layer = bt.BL_F_Cu
+    c1.reference_field.text.value = 'C1'
+    p = make_pad('1', (10, 10), bt.PT_SMD, 'SIG', [bt.BL_F_Cu],
+                 bt.PSS_CHAMFEREDRECT, (2, 1))
+    cl = p.padstack.proto.copper_layers[0]
+    cl.corner_rounding_ratio = 0.25
+    cl.chamfer_ratio = 0.2
+    cl.chamfered_corners.top_left = True
+    cl.chamfered_corners.bottom_right = True
+    p.padstack.proto.angle.value_degrees = 30
+    c1.definition.add_item(p)
+    c1.definition._pack()
+    b.fps.append(c1)
+
+    fx, fy, fr = 60, 20, 30
+    w1 = FootprintInstance()
+    w1.position = vec(fx, fy)
+    w1.proto.orientation.value_degrees = fr
+    w1.layer = bt.BL_F_Cu
+    w1.reference_field.text.value = 'W1'
+    wp = make_pad('1', g(fx, fy, fr, 0, 0), bt.PT_SMD, 'SIG', [bt.BL_F_Cu],
+                  bt.PSS_RECTANGLE, (1, 1))
+    wp.padstack.proto.angle.value_degrees = fr
+    w1.definition.add_item(wp)
+    corners = [g(fx, fy, fr, x, y) for x, y in ((2, -1), (4, -1), (4, 1), (2, 1))]
+    for a, c in zip(corners, corners[1:] + corners[:1]):
+        w1.definition.add_item(seg_shape(a, c, bt.BL_Edge_Cuts))
+    w1.definition._pack()
+    b.fps.append(w1)
+    return b
+
+
+def test_main_round_ports(tmp):
+    path = os.path.join(tmp, 'round.kicad_pcb')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(ROUND_BOARD)
+    txt = kp.parse_kicad_pcb(path)
+    orig = adapter.get_board_full_path
+    adapter.get_board_full_path = lambda *a, **k: path
+    try:
+        ipc = kp.build_pcb_data_from_board(build_round_board())
+    finally:
+        adapter.get_board_full_path = orig
+
+    tp = txt.footprints['C1'].pads[0]
+    ip = ipc.footprints['C1'].pads[0]
+    check(bool(tp.polygons), "#1450: the text parse gives the chamfered pad an "
+          "outline (the arm tests something)")
+
+    def rings(pad):
+        return [[(r6(x), r6(y)) for x, y in ring] for ring in (pad.polygons or [])]
+    check(rings(ip) == rings(tp),
+          f"#1450: the kipy pad's outline is the text parser's "
+          f"({len((ip.polygons or [[]])[0])} vs {len(tp.polygons[0])} vertices)")
+    check(ip.shape == tp.shape == 'roundrect',
+          f"#1450: shape {ip.shape!r} == text {tp.shape!r}")
+
+    tw, iw = txt.footprints['W1'], ipc.footprints['W1']
+    check(tw.owns_edge_cuts and iw.owns_edge_cuts,
+          "#1409: W1 draws Edge.Cuts on both paths")
+    check(tw.owns_board_outline is False,
+          "#1409: the text parse carries W1's window off the board "
+          "(the arm tests something)")
+    check(iw.owns_board_outline == tw.owns_board_outline,
+          f"#1409: owns_board_outline kipy={iw.owns_board_outline} == "
+          f"text={tw.owns_board_outline}")
+
+    def cut_rings(pcb):
+        return sorted(len(r) for r in (pcb.board_info.board_cutouts or []))
+    check(cut_rings(txt) and cut_rings(ipc) == cut_rings(txt),
+          f"#1404: the round cut-out has the text parser's vertex count "
+          f"(kipy {cut_rings(ipc)}, text {cut_rings(txt)})")
+    tr = next((r for r in txt.board_info.board_cutouts or [] if len(r) > 64), None)
+    ir = next((r for r in ipc.board_info.board_cutouts or [] if len(r) > 64), None)
+    check(tr is not None and ir is not None and ring_set(ir) == ring_set(tr),
+          "#1404: at EDGE_CHORD_EPS (more than the old 64 chords), vertex for "
+          "vertex")
+
+
 def test_negative_controls(b):
     """The old readers' failures, reproduced, so a passing check above is the
     port and not the fixture."""
@@ -823,6 +942,8 @@ def main():
         test_dialog_resync(b, ipc)
         print("J. a custom pad's copper box (Pad.copper_box)")
         test_custom_pad_copper_box(tmp)
+        print("K. chamfered pads (#1450), carried windows (#1409), edge arcs (#1404)")
+        test_main_round_ports(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILS:
@@ -830,7 +951,7 @@ def main():
         return 1
     print("\nPASS  kipy builder parity with the text parser (#1268 #1279 #1164 "
           "#967 #1248 #1211 #481 #304 #829 #337 #908 #1329, zone_connect, "
-          "copper_box)")
+          "copper_box, #1450 #1409 #1404)")
     return 0
 
 

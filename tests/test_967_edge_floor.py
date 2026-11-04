@@ -248,22 +248,35 @@ class EdgeFloor(unittest.TestCase):
                 self.assertFalse(s['legal'])
                 self.assertEqual(digest(board), before)
 
-    def test_custom_edge_requirements_are_explicitly_unmeasured(self):
+    def test_custom_edge_requirements_are_graded(self):
+        # #1615: an edge_clearance rule is graded at the pads it binds, as
+        # KiCad grades it -- this pose clears the scalar .55 but not .75
         board = self.fixture()
         dru = board.with_suffix('.kicad_dru')
         dru.write_text('(version 1)\n(rule "edge floor" '
                        '(constraint edge_clearance (min 0.75mm)))\n', encoding='utf-8')
         identity = digest(dru)
         s, out = self.cli(board, 'set', 'Y1', '124.7', '103.15', '--rot', '270')
-        self.assertTrue(s['no_worse'])
         self.assertFalse(s['legal'])
-        self.assertEqual(s['pad_edge_conflicts_after'], 0)  # scalar .55 only
-        self.assertFalse(s['pad_edge_after']['complete'])
-        missing = s['pad_edge_after']['rules_unmeasured']
-        self.assertEqual(missing[0]['rule'], 'edge floor')
-        self.assertEqual(missing[0]['declared'], {'min': .75})
-        self.assertIn('not evaluated', missing[0]['reason'])
+        self.assertEqual(s['pad_edge_conflicts_after'], 2)
+        edge = s['pad_edge_after']
+        self.assertEqual({(f['required_mm'], f['rule']) for f in edge['findings']},
+                         {(.75, 'edge floor')})
+        self.assertEqual(edge['rules_unmeasured'], [])
+        self.assertEqual([r['rule'] for r in edge['rules_applied']], ['edge floor'])
         self.assertEqual(digest(out.with_suffix('.kicad_dru')), identity)
+        # A rule whose condition is not modelled MAY bind: named, never read
+        # as a pass, and the pad it may bind is not refused for it either.
+        dru.write_text('(version 1)\n(rule "maybe" (condition '
+                       '"A.memberOfSheet(\'/power/\')") '
+                       '(constraint edge_clearance (min 0.75mm)))\n', encoding='utf-8')
+        s, out = self.cli(board, 'set', 'Y1', '124.7', '103.15', '--rot', '270')
+        edge = s['pad_edge_after']
+        self.assertEqual(s['pad_edge_conflicts_after'], 0)
+        self.assertFalse(edge['complete'])
+        self.assertEqual(edge['rules_unmeasured'][0]['rule'], 'maybe')
+        self.assertIn('not modelled', edge['rules_unmeasured'][0]['reason'])
+        self.assertTrue(any('may require 0.75 mm' in u['reason'] for u in edge['unmeasured']))
         before = digest(out)
         self.cli(out, 'rotate', 'Y1', '0', '--relative', expected=4,
                  extra=('--strict-legal',), output=out)

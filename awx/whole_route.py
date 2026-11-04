@@ -895,6 +895,24 @@ def count_open(conn_log):
     return n
 
 
+# the rows of a board's .kicad_dru length rules, which check_drc grades as KiCad does (#1313, #1303): a net's length,
+# and how much shorter it is than its group's longest. Meeting them is a length tuner's work, and the bus step lays
+# its lanes untuned (#1363), so they are named apart and never counted against a route or a bus
+LENGTH_ROWS = ('length-out-of-range', 'skew-out-of-range')
+
+
+def drc_count(json_path):
+    """(violations, length rows) of check_drc's --json: the violations less the rows of the board's length rules
+    (LENGTH_ROWS), and those rows; (None, 0) when it wrote none"""
+    try:
+        with open(json_path, encoding='utf-8') as f:
+            J = json.load(f)
+    except (OSError, ValueError):
+        return None, 0
+    n = sum(int((J.get('by_type') or {}).get(t, 0)) for t in LENGTH_ROWS)
+    return int(J.get('violations', 0)) - n, n
+
+
 def open_nets(conn_log):
     """the nets (short names) check_connected's log finds open: unrouted, or in pieces"""
     out, mode = set(), None
@@ -1315,8 +1333,14 @@ def chain(K, o, R=3, base=None, dest=None, settings=None):
         checker = lambda name: os.path.join('..', 'py_router', name)
         cc = run([checker('check_connected.py'), seq, '--nets'] + pats, env,
                  log_path=os.path.join(d, f'conn{tag}.log'), own_process=True)[0]
-        dc = run([checker('check_drc.py'), seq, '--nets'] + pats + ['--clearance-margin', '0.1'], env,
+        dj = os.path.join(d, f'drc{tag}.json')
+        if os.path.exists(dj):
+            os.remove(dj)
+        dc = run([checker('check_drc.py'), seq, '--nets'] + pats + ['--clearance-margin', '0.1', '--json', dj], env,
                  log_path=os.path.join(d, f'drc{tag}.log'), own_process=True)[0]
+        dv = drc_count(dj)[0]
+        if dv is not None:
+            dc = int(dv > 0)            # (a round's lanes, laid untuned, are not judged by their lengths: LENGTH_ROWS)
         nopen = 0 if cc == 0 else max(1, count_open(os.path.join(d, f'conn{tag}.log')))
         lanes = '\n'.join(m.split(' ')[0] for m in re.findall(r'[0-9]+/[0-9]+ in band', sm))
         v, c = grade_counts(seq, set(nets_all))
@@ -1626,8 +1650,12 @@ def chain(K, o, R=3, base=None, dest=None, settings=None):
         g = f"WHOLE K={K} round={r} lanes=0/0 vias=0 copper=0mm connected=0 drc=0 secs={secs()} open={len(nets_all)}"
         say(g)
         return 2, g
-    # the best round's board, where a caller finds it (route_bus, modal_whole): OUTDIR/best.kicad_pcb
-    for ext in ('.kicad_pcb', '.kicad_pro'):
+    # the best round's board, where a caller finds it (route_bus, modal_whole): OUTDIR/best.kicad_pcb, with every
+    # sibling the round's board has (copy_board.SIBLING_EXTS) -- the .kicad_dru's rules and the brief too, which the
+    # board route_bus grades and hands on would otherwise go without (#1316)
+    sys.path.insert(0, PYR)
+    from copy_board import SIBLING_EXTS
+    for ext in ('.kicad_pcb',) + tuple(SIBLING_EXTS):
         src_ = best['board'][:-len('.kicad_pcb')] + ext
         if os.path.isfile(src_):
             shutil.copyfile(src_, os.path.join(o, 'best' + ext))
@@ -1647,6 +1675,15 @@ def main():
     ap.add_argument('--inproc', action='store_true',
                     help='every stage in this process rather than each in its own')
     a = ap.parse_args()
+    # (before the run is spent: its solves and fanouts plan with ortools, each stage failing in a log of its own
+    # without it, #1355)
+    sys.path.insert(0, PYR)
+    from startup_checks import StartupCheckError, check_bus_dependencies
+    try:
+        check_bus_dependencies()
+    except StartupCheckError as e:
+        print(f'whole_route: {e}', file=sys.stderr)
+        sys.exit(2)
     global INPROC
     INPROC = a.inproc
     if a.loop:

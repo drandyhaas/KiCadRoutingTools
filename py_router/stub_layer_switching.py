@@ -6,6 +6,7 @@ source and target stubs are on different layers.
 """
 from __future__ import annotations
 
+import copy
 import math
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
@@ -232,13 +233,20 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
     return stub
 
 
-def forbidden_destination(config, dest_layer: str) -> bool:
+def forbidden_destination(config, dest_layer: str, pcb_data=None,
+                          net_ids=()) -> bool:
     """True when `dest_layer` is in config.layers at FORBIDDEN (negative)
     cost -- an unrequested copper layer a --layers subset run appends as an
-    obstacle. No stub may be moved onto one. Candidate lists draw from
-    config.routable_layers(), but several swaps take their destination from
-    the OTHER endpoint's current layer, which can itself be forbidden; the
-    validators refuse such a destination for every caller."""
+    obstacle -- or a .kicad_dru track ban forbids it to one of `net_ids`
+    (#1527, `net_keepouts.banned_layers`). No stub may be moved onto one.
+    Candidate lists draw from config.routable_layers(), but several swaps
+    take their destination from the OTHER endpoint's current layer, which can
+    itself be forbidden; the validators refuse such a destination for every
+    caller."""
+    if pcb_data is not None and net_ids:
+        from net_keepouts import banned_layers
+        if dest_layer in banned_layers(pcb_data, net_ids):
+            return True
     routable = getattr(config, 'routable_layers', None)
     if routable is None or dest_layer not in (getattr(config, 'layers', None) or ()):
         return False
@@ -541,6 +549,38 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
     for via in new_vias:
         if via in pcb_data.vias:
             pcb_data.vias.remove(via)
+
+
+def swap_channel_mark(state) -> Tuple[int, int]:
+    """Where the run's stub-switch write channel stands now: the lengths of
+    state.all_segment_modifications and state.all_swap_vias. Hand it to
+    rewind_swap_channel to undo every switch committed after it."""
+    return (len(state.all_segment_modifications), len(state.all_swap_vias))
+
+
+def rewind_swap_channel(pcb_data: 'PCBData', state, mark) -> int:
+    """Undo every stub layer switch committed to the run's write channel since
+    `mark` (swap_channel_mark), for a caller that DISCARDS a route attempt and
+    puts back the copper the net had before it.
+
+    A switch is committed with the route it rescued -- route_multipoint_main's
+    main-edge switch extends state.all_segment_modifications / all_swap_vias
+    the moment its retry routes -- so ripping that route leaves the moved stub
+    and its pad via behind, and the writer ships them beside the restored
+    tree. The tree's own via-in-pad was ripped first, so the switch's pad via
+    sized itself to the freed pad: two same-net barrels of different sizes at
+    one point. The copper goes back on pcb_data (revert_stub_layer_switch,
+    newest first) and the entries leave the channel. The channel only grows
+    while an attempt runs. Returns the number of entries undone."""
+    n_mods, n_vias = mark
+    mods = state.all_segment_modifications[n_mods:]
+    vias = state.all_swap_vias[n_vias:]
+    if not mods and not vias:
+        return 0
+    revert_stub_layer_switch(pcb_data, list(reversed(mods)), vias)
+    del state.all_segment_modifications[n_mods:]
+    del state.all_swap_vias[n_vias:]
+    return len(mods) + len(vias)
 
 
 def check_segments_overlap(segments: List[Segment], other_segments: List[Segment],
@@ -864,6 +904,13 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
                 nm = net.name if net else f"net {pnid}"
                 return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
                                f"{nm} pad {pad.component_ref}.{pad.pad_number} (gap {d:.3f}mm)")
+    # A keep-out rule area forbidding vias, as check_drc grades it.
+    from check_drc import keepout_refusal
+    why = keepout_refusal(pcb_data, vias=[Via(
+        x=pad_x, y=pad_y, size=2 * via_r, drill=config.via_drill,
+        layers=['F.Cu', 'B.Cu'], net_id=net_id)])
+    if why:
+        return False, f"pad via at ({pad_x:.2f},{pad_y:.2f}): {why}"
     return True, ""
 
 
@@ -1059,6 +1106,18 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
                     nm = net.name if net else f"net {pnid}"
                     return False, (f"stub on {dest_layer} would graze {nm} pad "
                                    f"{pad.component_ref}.{pad.pad_number} (gap {best:.3f}mm)")
+    # A keep-out rule area forbidding tracks on dest_layer, as check_drc grades it.
+    from check_drc import keepout_refusal
+    moved = []
+    for seg in segments:
+        m = copy.copy(seg)
+        m.layer = dest_layer
+        if not (getattr(m, 'width', 0) and m.width > 0):
+            m.width = config.track_width
+        moved.append(m)
+    why = keepout_refusal(pcb_data, segments=moved)
+    if why:
+        return False, f"stub: {why}"
     return True, ""
 
 
@@ -1214,8 +1273,9 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
         if getattr(stub, 'locked', False):
             return False, "stub carries KiCad-locked copper (#1261)"
 
-    if forbidden_destination(config, dest_layer):
-        return False, f"{dest_layer} is a forbidden layer (negative cost)"
+    if forbidden_destination(config, dest_layer, pcb_data,
+                             (stub_p.net_id, stub_n.net_id)):
+        return False, f"{dest_layer} is a forbidden layer (negative cost or a .kicad_dru track ban)"
 
     # #581: an active (> 0) same-net pad via clearance forbids pad-centre vias.
     if getattr(config, 'same_net_pad_clearance', -1.0) > 0:
@@ -1554,8 +1614,8 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
     if getattr(stub, 'locked', False):
         return False, "stub carries KiCad-locked copper (#1261)"
 
-    if forbidden_destination(config, dest_layer):
-        return False, f"{dest_layer} is a forbidden layer (negative cost)"
+    if forbidden_destination(config, dest_layer, pcb_data, (stub.net_id,)):
+        return False, f"{dest_layer} is a forbidden layer (negative cost or a .kicad_dru track ban)"
 
     # #581: an active (> 0) same-net pad via clearance forbids the pad-centre
     # via this switch would drill -- decline the swap instead.

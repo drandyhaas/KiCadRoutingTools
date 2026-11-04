@@ -92,43 +92,90 @@ def consume_inner_strips(rdata, all_new_segments, all_new_vias, pcb_data,
     caller's per-segment strip channel (``file_strip_segments``/``_vias``,
     which the CLI writer and the GUI applier both honor).
 
+    A stripped VALUE the inner run still holds is not removed copper (#1516):
+    ``merge_collinear_segments`` rebuilds a whole chain as new objects,
+    pieces that did not change included, and strips every original, so an
+    unchanged piece's value sits both in the strip channel and in the inner
+    run's own output -- which the caller has already appended to the write
+    list. Such a value keeps exactly as many copies as that output holds
+    (the inner run's own objects in pcb_data, the LAST-appended dicts in the
+    write list, i.e. the ones the caller just emitted from it); any further
+    copy -- the stale emission of the stripped original, a partial-restore
+    duplicate -- goes, as every copy of a value nobody re-created does.
+
     Returns the number of write-list pieces dropped.
     """
+    from collections import Counter
     rs = rdata.get('segments_to_remove') or []
     rv = rdata.get('vias_to_remove') or []
     if not rs and not rv:
         return 0
     file_strip_segments.extend(rs)
     file_strip_vias.extend(rv)
-    skeys = set()
-    for s in rs:
-        a = (round(s.start_x, 3), round(s.start_y, 3))
-        b = (round(s.end_x, 3), round(s.end_y, 3))
-        skeys.add((a, b, s.layer, s.net_id))
-        skeys.add((b, a, s.layer, s.net_id))
-    vkeys = {(round(v.x, 3), round(v.y, 3), v.net_id) for v in rv}
+
+    def seg_key(a, b, layer, net_id):
+        a = (round(a[0], 3), round(a[1], 3))
+        b = (round(b[0], 3), round(b[1], 3))
+        return (min(a, b), max(a, b), layer, net_id)
+
+    def obj_skey(s):
+        return seg_key((s.start_x, s.start_y), (s.end_x, s.end_y),
+                       s.layer, s.net_id)
+
+    def dict_skey(d):
+        return seg_key(d['start'], d['end'], d['layer'], d['net_id'])
+
+    def obj_vkey(v):
+        return (round(v.x, 3), round(v.y, 3), v.net_id)
+
+    def dict_vkey(d):
+        return (round(d['x'], 3), round(d['y'], 3), d['net_id'])
+
+    # The inner run's own output, exactly what the callers append to the
+    # write list from it: every result's new copper plus the swap channels.
+    live_s = [s for r in rdata.get('results') or []
+              for s in (r.get('new_segments') or [])]
+    live_s += list(rdata.get('all_swap_segments') or [])
+    live_v = [v for r in rdata.get('results') or []
+              for v in (r.get('new_vias') or [])]
+    live_v += list(rdata.get('all_swap_vias') or [])
+
+    def consume(items, key_of, stripped, live_keys, live_ids, prefer_live_ids):
+        """Drop items keyed in `stripped`, keeping per key at most as many
+        as `live_keys` holds -- the inner run's own objects first when
+        `prefer_live_ids`, else the last-appended ones."""
+        quota = Counter(k for k in live_keys if k in stripped)
+        keep = set()
+        if prefer_live_ids:
+            for i, it in enumerate(items):
+                k = key_of(it)
+                if k in stripped and id(it) in live_ids and quota[k] > 0:
+                    keep.add(i)
+                    quota[k] -= 1
+        for i in range(len(items) - 1, -1, -1):
+            k = key_of(items[i])
+            if k in stripped and i not in keep and quota[k] > 0:
+                keep.add(i)
+                quota[k] -= 1
+        items[:] = [it for i, it in enumerate(items)
+                    if key_of(it) not in stripped or i in keep]
+
+    skeys = {obj_skey(s) for s in rs}
+    vkeys = {obj_vkey(v) for v in rv}
+    live_skeys = [obj_skey(s) for s in live_s]
+    live_vkeys = [obj_vkey(v) for v in live_v]
+    live_ids = {id(x) for x in live_s} | {id(x) for x in live_v}
     n0 = len(all_new_segments) + len(all_new_vias)
     if skeys:
-        all_new_segments[:] = [
-            d for d in all_new_segments
-            if ((round(d['start'][0], 3), round(d['start'][1], 3)),
-                (round(d['end'][0], 3), round(d['end'][1], 3)),
-                d['layer'], d['net_id']) not in skeys]
+        consume(all_new_segments, dict_skey, skeys, live_skeys, live_ids, False)
     if vkeys:
-        all_new_vias[:] = [
-            d for d in all_new_vias
-            if (round(d['x'], 3), round(d['y'], 3),
-                d['net_id']) not in vkeys]
+        consume(all_new_vias, dict_vkey, vkeys, live_vkeys, live_ids, False)
     # mirror out of pcb_data too (inner cleanup already removed its own
     # objects; kept-piece duplicates re-added via partial_restores may remain)
-    pcb_data.segments[:] = [
-        s for s in pcb_data.segments
-        if ((round(s.start_x, 3), round(s.start_y, 3)),
-            (round(s.end_x, 3), round(s.end_y, 3)),
-            s.layer, s.net_id) not in skeys]
-    pcb_data.vias[:] = [
-        v for v in pcb_data.vias
-        if (round(v.x, 3), round(v.y, 3), v.net_id) not in vkeys]
+    if skeys:
+        consume(pcb_data.segments, obj_skey, skeys, live_skeys, live_ids, True)
+    if vkeys:
+        consume(pcb_data.vias, obj_vkey, vkeys, live_vkeys, live_ids, True)
     n1 = len(all_new_segments) + len(all_new_vias)
     if n0 != n1:
         print(f"  {label}: consumed inner strip channel -- dropped "

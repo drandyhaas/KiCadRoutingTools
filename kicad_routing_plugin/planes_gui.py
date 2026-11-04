@@ -1050,8 +1050,11 @@ class PlanesTab(wx.Panel):
                 _plane_net_clearances[net.net_id] = class_clearance_cache.get(
                     cname, _plane_clearance)
             if _plane_clamp:
-                _plane_net_clearances = {nid: min(clr, _plane_clearance)
-                                         for nid, clr in _plane_net_clearances.items()}
+                from fab_tiers import cap_net_clearances  # #1561 discloses
+                _plane_net_clearances = cap_net_clearances(
+                    _plane_net_clearances, _plane_clearance,
+                    net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
+                    class_of=all_net_to_class)
         except Exception as e:
             print(f"Warning: Could not get net class clearances: {e}")
             _plane_net_clearances = None
@@ -1213,9 +1216,15 @@ class PlanesTab(wx.Panel):
                     # #498: the board's .kicad_dru per-layer clearance rules, read
                     # from the live board's own project file as create_plane does
                     # above -- CLI parity with route_planes main.
-                    from kicad_dru import install_layer_clearances
+                    from kicad_dru import (install_layer_clearances,
+                                           install_track_clearances)
                     install_layer_clearances(gnd_config, None, self.board_filename,
                                              self.pcb_data)
+                    # #1602: and the track/scoped channels, as the CLI does
+                    install_track_clearances(
+                        gnd_config, None, self.board_filename, self.pcb_data,
+                        routed_net_ids=[nid for nid, n in self.pcb_data.nets.items()
+                                        if n.name == gnd_via_net] or None)
                     coord = GridCoord(gnd_config.grid_step)
 
                     # Build obstacle map from PCB data (excluding no nets since we want all obstacles)
@@ -1232,7 +1241,8 @@ class PlanesTab(wx.Panel):
                         gnd_via_distance,
                         gnd_config,
                         obstacles,
-                        coord
+                        coord,
+                        net_clearances=_plane_net_clearances
                     )
 
                     # Add to new vias list
@@ -1443,6 +1453,14 @@ class PlanesTab(wx.Panel):
         with redirect_prints_to_log(self.append_log):
             return self._apply_results_to_board_body()
 
+    def _held_hole_clearance(self, board, tracks, vias, clearance):
+        """#1577: :func:`gui_utils.held_hole_clearance_live` for this tab's
+        plane copper (track and via dicts) -- route_planes' main writes the
+        same floor with step_hole_clearance."""
+        from .gui_utils import held_hole_clearance_dicts
+        return held_hole_clearance_dicts(self.pcb_data, board, tracks, vias,
+                                         clearance)
+
     def _apply_results_to_board_body(self):
         from kicad_ipc_adapter import (apply_planes_results, get_board,
                                         move_copper_graphics_to_silkscreen)
@@ -1455,14 +1473,27 @@ class PlanesTab(wx.Panel):
         new_vias = list(getattr(self, "_new_vias", []) or [])
         new_segments = list(getattr(self, "_new_segments", []) or [])
         new_zones = list(getattr(self, "_new_zones", []) or [])
+        # #508 finding 1: input copper the step's finalize passes withdrew
+        # from pcb_data -- the applier deletes these individually (the
+        # whole-net delete only covers ripped nets).
+        strips = list(getattr(self, "_strip_segments", []) or [])
 
-        # Clear the buffers so the user can re-run without stale state.
+        # Clear the buffers so the user can re-run without stale state
+        # (#508 finding 19: _strip_segments too).
         self._new_vias = []
         self._new_segments = []
         self._new_zones = []
+        self._strip_segments = []
 
-        if not (new_vias or new_segments or new_zones):
+        if not (new_vias or new_segments or new_zones or strips):
             return
+
+        # The copper this step drew, for its DRC floors (#1319): every via
+        # and track but the soft-joint bridges, which join copper the board
+        # already carried (#1577) -- route_planes' main leaves the same out.
+        from fix_kicad_drc_settings import plane_floor_segments
+        _floor_vias = list(new_vias)
+        _floor_segs = plane_floor_segments(new_segments)
 
         board = get_board()
         if board is None:
@@ -1496,6 +1527,7 @@ class PlanesTab(wx.Panel):
                 # segment layer mods can touch NON-ripped nets' copper, which
                 # the whole-net delete above does not cover.
                 swap_data=getattr(self, '_reconnect_swap_data', None),
+                strip_segments=strips,
                 message="KiCadRoutingTools: planes",
             )
         except Exception as e:
@@ -1504,6 +1536,9 @@ class PlanesTab(wx.Panel):
                 "Apply error", wx.OK | wx.ICON_ERROR,
             )
             return
+
+        if counts.get("stripped"):
+            print(f"Removed {counts['stripped']} cleanup-stripped segment(s)/via(s)")
 
         if counts["zones_skipped"]:
             for net_name, layer in counts.get("_skipped_keys", []):
@@ -1547,22 +1582,38 @@ class PlanesTab(wx.Panel):
             from fix_kicad_drc_settings import plane_fix_kwargs
             _pcfg = getattr(self, "_plane_drc_config", None) or {}
             _pclr = _pcfg.get('clearance')
+            _eff_pclr = clearance_ledger.effective(_pclr) if _pclr else _pclr
             _pkw = plane_fix_kwargs(
-                counts['tracks'], counts['vias'],
-                clearance=clearance_ledger.effective(_pclr) if _pclr else _pclr,
+                len(_floor_segs), len(_floor_vias),
+                clearance=_eff_pclr,
                 hole_to_hole=_pcfg.get('hole_to_hole_clearance'),
                 track_width=_pcfg.get('track_width'),
                 via_size=_pcfg.get('via_size'), via_drill=_pcfg.get('via_drill'))
-            if not (counts['tracks'] or counts['vias']):
+            if not (_floor_segs or _floor_vias):
                 print("  Bare pour (no track or via drawn): writing the copper "
                       "clearance only -- no size or copper-to-hole floor (#1319)")
+            # #1577: the copper-to-hole floor the step HELD, lowered only to
+            # what its own copper needs -- route_planes' main writes it with
+            # step_hole_clearance. None for a bare pour (#1319).
+            _hole_clr = (self._held_hole_clearance(board, _floor_segs,
+                                                   _floor_vias, _eff_pclr)
+                         if _pkw['copper_holes'] else None)
             apply_drc_settings_fix(
                 getattr(self, "_plane_drc_config", None),
                 fix_kwargs=dict(
                     _pkw, edge_clearance=_pcfg.get('board_edge_clearance'),
                     keep_thermal=_pcfg.get('keep_thermal', False),
+                    hole_clearance=_hole_clr,
                     clamp_nondefault_netclasses=bool(
-                        _pcfg.get('clamp_netclasses', False))))
+                        _pcfg.get('clamp_netclasses', False)),
+                    # #1492: the classes land at min(class, ceiling)
+                    class_ceiling=_pcfg.get('clearance_ceiling')))
+        # The tool records are not DRC floors: written whatever the gate or
+        # the copper count says (#1415).
+        from .gui_utils import persist_live_tool_records
+        persist_live_tool_records(
+            None, (getattr(self, "_plane_drc_config", None) or {}).get(
+                'same_net_pad_clearance'))
 
         # Plane-copper cleanup (CLI/GUI parity): dead-end trims, stub-gap snaps,
         # micro-shift / soft-joint connectors, applied to the live board via the

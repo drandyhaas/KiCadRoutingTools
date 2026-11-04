@@ -17,7 +17,12 @@ verified against the 9.0 and master sources on 2026-09-03:
                                                  (SetMin); track_width / via /
                                                  drill / diff_pair_* are SetOpt
                                                  -- the size KiCad DRAWS, never
-                                                 a floor
+                                                 a floor -- except that a class
+                                                 diff_pair_gap below the class
+                                                 clearance is ALSO the clearance
+                                                 between a pair's P and N
+                                                 ("(diff pair)" rule, #1542;
+                                                 pair_gap_clearance)
          + [.kicad_dru rules, file order]        each matching rule overwrites
                                                  the fields it sets
     3  zone local clearance: max(result, zone clearance)
@@ -102,14 +107,45 @@ SIZE_KINDS = frozenset({
 # consumed". WIDER than what is read today: the resolver's callers ask only
 # for track_width / via_diameter / hole_size (draw_size, floor), copper
 # clearance reaches the router only through kicad_dru's layer- and
-# track-scoped subsets, and `disallow` through net_keepouts. A rule built only on the other kinds listed here is
-# reported neither "NOT honoured" nor "not consumed".
+# track-scoped subsets, and `disallow` through net_keepouts (a rule area's
+# keep-out, or a track ban's forbidden layers -- whatever of a `disallow`
+# rule no step honours is named by `Rule.router_unhonoured`, #1527). A rule
+# built only on the other kinds listed here is reported neither "NOT
+# honoured" nor "not consumed".
 CONSUMED_KINDS = CLEARANCE_KINDS | SIZE_KINDS | {'disallow', 'via_count'}
 # Kinds no routing step honours but a grader does: check_drc grades every
 # `length` window (kicad_dru.read_board_length_rules, #1313) and every
 # diff-pair `skew` / `diff_pair_uncoupled` rule through the same channel
 # (#1303).
 GRADED_ONLY_KINDS = frozenset({'length', 'skew', 'diff_pair_uncoupled'})
+# Kinds the resolver models but no routing step sizes copper by (#1490): a
+# via's ring follows from via_diameter and hole_size alone, so a rule
+# declaring one is reported NOT honoured -- in route.py's
+# `design_rules.unsupported_rules` -- rather than passing as consumed.
+ROUTER_UNHONOURED_KINDS = frozenset({'annular_width'})
+# `disallow` item tokens (#1527). The router lays tracks and THROUGH vias
+# only, so a rule forbidding only blind, buried or micro vias asks nothing of
+# it. A track ban is honoured by the steps that derive it (route.py and
+# route_diff.py, `net_keepouts.derive_layer_bans`: the bound nets' forbidden
+# layers); every other token is not honoured by any routing step and is
+# reported NOT honoured -- check_drc grades the track and via ones.
+DISALLOW_NOT_LAID = frozenset({'micro_via', 'blind_via', 'buried_via'})
+DISALLOW_GRADED = frozenset({'track', 'via', 'through_via'}) | DISALLOW_NOT_LAID
+
+
+def disallow_router_reason(tokens, honoured_tokens=frozenset()) -> Optional[str]:
+    """Why a routing step does not honour a scope-evaluable `disallow` rule
+    forbidding ``tokens`` (None when it asks nothing more of the router than
+    ``honoured_tokens`` covers)."""
+    left = sorted(set(tokens) - DISALLOW_NOT_LAID - set(honoured_tokens))
+    if not left:
+        return None
+    graded = [t for t in left if t in DISALLOW_GRADED]
+    return (f"disallow {', '.join(left)}: this step does not keep the bound "
+            f"nets' {', '.join(left)} off"
+            + ("; route.py and route_diff.py keep a net's tracks off the "
+               "layers the rule forbids" if 'track' in left else '')
+            + (f"; check_drc grades {', '.join(graded)}" if graded else ''))
 
 # Spellings a caller may use for a kind.
 KIND_ALIASES = {
@@ -228,6 +264,12 @@ class Rule:
     # set by net_keepouts.derive_area_keepouts when the router honours the
     # rule as a net-filtered keep-out: what it honours, for the report
     honoured: Optional[str] = None
+    # #1527: a `disallow` rule the resolver EVALUATES (its condition parses,
+    # no rule area) but the routing step does not honour, and why --
+    # `unsupported()` lists it while `unsupported` stays None, so check_drc's
+    # resolve('disallow') still grades it. net_keepouts.derive_layer_bans
+    # rewrites it for the track bans route.py / route_diff.py honour.
+    router_unhonoured: Optional[str] = None
     # the condition ANDs in AB.isCoupledDiffPair() (#1293): the rule binds a
     # diff pair's P against its own N
     coupled: bool = False
@@ -397,6 +439,11 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                 rule.unsupported = f"layer clause {lc!r} (non-copper)"
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
+        if 'disallow' in rule.constraints and rule.unsupported is None:
+            # #1527: evaluable, so nothing of it is "consumed" until a step
+            # honours it -- it used to pass silently as consumed
+            rule.router_unhonoured = disallow_router_reason(
+                rule.constraints['disallow'].get('disallow', ()))
         rules.append(rule)
     return rules, notes
 
@@ -468,11 +515,36 @@ def _tokens(src: str):
     return out
 
 
+_NUMERIC_OPS = ('<', '>', '<=', '>=', '+', '-', '*', '/')
+
+
 class _Parser:
-    def __init__(self, src: str, areas: bool = False):
+    def __init__(self, src: str, areas: bool = False, unknown: bool = False):
         self.toks = _tokens(src)
         self.i = 0
         self.areas = areas
+        # parse_condition_maybe: a construct outside the modelled subset
+        # becomes an ('unknown',) leaf instead of raising
+        self.unknown = unknown
+
+    def _unmodelled(self, why: str):
+        if self.unknown:
+            return ('unknown',)
+        raise Unsupported(why)
+
+    def _skip_args(self):
+        """Consume a call's argument list up to its closing ')' (the '(' is
+        already taken)."""
+        depth = 1
+        while depth:
+            k, v = self.peek()
+            if k is None:
+                raise Unsupported("unclosed argument list")
+            self.i += 1
+            if (k, v) == ('op', '('):
+                depth += 1
+            elif (k, v) == ('op', ')'):
+                depth -= 1
 
     def peek(self):
         return self.toks[self.i] if self.i < len(self.toks) else (None, None)
@@ -524,9 +596,16 @@ class _Parser:
         if k == 'op' and v in ('==', '!='):
             self.take()
             rhs = self.term()
+            if 'unknown' in (lhs[0], rhs[0]):
+                return ('unknown',)
             return ('cmp', v, lhs, rhs)
-        if k == 'op' and v in ('<', '>', '<=', '>=', '+', '-', '*', '/'):
-            raise Unsupported(f"numeric comparison/arithmetic ({v})")
+        if k == 'op' and v in _NUMERIC_OPS:
+            if not self.unknown:
+                raise Unsupported(f"numeric comparison/arithmetic ({v})")
+            while self.peek()[0] == 'op' and self.peek()[1] in _NUMERIC_OPS + ('==', '!='):
+                self.take()
+                self.term()
+            return ('unknown',)
         return lhs
 
     def term(self):
@@ -536,17 +615,20 @@ class _Parser:
             return ('lit', v[1:-1])
         if k == 'num':
             self.take()
-            raise Unsupported("numeric literal outside a supported comparison")
+            return self._unmodelled("numeric literal outside a supported comparison")
         if k == 'name':
             self.take()
             if '.' not in v:
                 if v == 'L':
                     return ('L',)
-                raise Unsupported(f"bare identifier {v!r}")
+                return self._unmodelled(f"bare identifier {v!r}")
             item, name = v.split('.', 1)
             item_u = item.upper()
             if item_u not in ('A', 'B', 'AB'):
-                raise Unsupported(f"item {item!r}")
+                if self.unknown and self.peek() == ('op', '('):
+                    self.take()
+                    self._skip_args()
+                return self._unmodelled(f"item {item!r}")
             lname = name.lower()
             if self.peek() == ('op', '('):
                 self.take()
@@ -558,6 +640,9 @@ class _Parser:
                         self.take()
                     elif ak == 'comma':
                         self.take()
+                    elif self.unknown:
+                        self._skip_args()
+                        return ('unknown',)
                     else:
                         raise Unsupported(f"argument {av!r} to {name}()")
                 self.take('op', ')')
@@ -568,16 +653,16 @@ class _Parser:
                         raise Unsupported(f"{name}() with {len(args)} arguments")
                     return ('area', item_u, lname, args[0])
                 if lname in _KNOWN_UNSUPPORTED_FUNCS or lname not in _SUPPORTED_FUNCS:
-                    raise Unsupported(f"predicate {name}() not modelled")
+                    return self._unmodelled(f"predicate {name}() not modelled")
                 if lname == 'indiffpair' and (item_u == 'AB' or len(args) != 1
                                               or not args[0]):
                     # KiCad reports "Missing diff-pair name argument" and the
                     # term is false; AB has no single net to test.
-                    raise Unsupported(f"{item}.{name}() needs one diff-pair "
-                                      f"name pattern on A or B")
+                    return self._unmodelled(f"{item}.{name}() needs one diff-pair "
+                                            f"name pattern on A or B")
                 return ('call', item_u, lname, tuple(args))
             if lname not in _SUPPORTED_PROPS:
-                raise Unsupported(f"property {name} not modelled")
+                return self._unmodelled(f"property {name} not modelled")
             return ('prop', item_u, lname)
         raise Unsupported(f"unexpected token {v!r}")
 
@@ -600,6 +685,69 @@ def parse_condition(src: str, areas: bool = False):
         raise Unsupported("AB.isCoupledDiffPair() is modelled only as a "
                           "term ANDed into the condition, or its negation")
     return node
+
+
+def parse_condition_maybe(src: Optional[str]):
+    """AST for ANY rule condition, for a three-valued reading (`_eval3`):
+    the constructs `parse_condition` refuses (insideCourtyard(), getField(),
+    numeric comparisons, ...) become ('unknown',) leaves, and a condition
+    that does not even tokenize is ('unknown',) as a whole. None for an
+    unconditioned rule."""
+    if src is None:
+        return None
+    try:
+        return _Parser(src, unknown=True).parse()
+    except Unsupported:
+        return ('unknown',)
+
+
+def _eval3(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
+           ctx=None) -> Optional[bool]:
+    """Kleene's three-valued `_eval`: True, False, or None when an unknown
+    leaf decides the answer (it may hold for some items and not others)."""
+    op = node[0]
+    if op == 'unknown':
+        return None
+    if op in ('and', 'or'):
+        l, r = (_eval3(node[1], a, b, layer, ctx), _eval3(node[2], a, b, layer, ctx))
+        if op == 'and':
+            return False if False in (l, r) else (True if l and r else None)
+        return True if True in (l, r) else (False if l is False and r is False else None)
+    if op == 'not':
+        v = _eval3(node[1], a, b, layer, ctx)
+        return None if v is None else not v
+    try:
+        return bool(_eval(node, a, b, layer, ctx))
+    except Unsupported:
+        return None
+
+
+def rule_may_match(rule: 'Rule', ast, a: RuleItem, b: Optional[RuleItem],
+                   layer: Optional[str], copper_layers: Sequence[str],
+                   ctx=None) -> Optional[bool]:
+    """`_rule_matches` in three values over a `parse_condition_maybe` AST:
+    True when the rule binds the pair, False when it cannot, None when an
+    unmodelled term decides it (or the pair's layer is not known and the rule
+    names layers). Commutative, as KiCad's EvaluateFor is."""
+    lay = rule.layers_for(copper_layers)
+    unsure = False
+    if lay is not None:
+        if layer is None:
+            if not lay:
+                return False
+            unsure = True
+        elif layer not in lay:
+            return False
+    if ast is None:
+        return None if unsure else True
+    best = False
+    for x, y in ((a, b), (b, a)) if b is not None else ((a, b),):
+        v = _eval3(ast, x, y, layer, ctx)
+        if v is True:
+            return None if unsure else True
+        if v is None:
+            best = None
+    return best
 
 
 def _contains_coupled(node) -> bool:
@@ -707,6 +855,16 @@ def _in_diff_pair(it: 'RuleItem', pattern: str, ctx) -> bool:
     return base.endswith('_') and _wx_matches(pattern, base[:base.rfind('_')])
 
 
+class _Undefined:
+    """A property the item does not have (KiCad's VT_UNDEFINED value)."""
+
+    def __repr__(self):
+        return 'UNDEFINED'
+
+
+_UNDEFINED = _Undefined()
+
+
 def _norm_type(t: Optional[str]) -> str:
     return (t or '').lower().replace('-', '_').replace(' ', '_')
 
@@ -736,10 +894,14 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
         _, cop, lhs, rhs = node
         lv = _value(lhs, a, b, layer, ctx)
         rv = _value(rhs, a, b, layer, ctx)
+        if lv is _UNDEFINED or rv is _UNDEFINED:
+            # KiCad's VALUE::EqualTo and NotEqualTo are BOTH false when either
+            # side is undefined (a property the item does not have)
+            return False
         if lhs[0] == 'prop' and rhs[0] == 'prop' and lhs[2] == 'net' and rhs[2] == 'net':
             eq = (lv == rv)
         elif isinstance(lv, str) and isinstance(rv, str):
-            eq = _cmp_strings(lhs, lv, rv)
+            eq = _cmp_strings(lhs, lv, rv, rhs)
         else:
             eq = (lv == rv)
         return eq if cop == '==' else not eq
@@ -750,7 +912,7 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
         return it is not None and node[3] in it.areas
     if op == 'prop':
         v = _value(node, a, b, layer)
-        return bool(v)
+        return v is not _UNDEFINED and bool(v)
     if op == 'lit':
         return bool(node[1])
     if op == 'L':
@@ -758,10 +920,13 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
     raise Unsupported(f"node {op}")
 
 
-def _cmp_strings(lhs_node, lv: str, rv: str) -> bool:
+def _cmp_strings(lhs_node, lv: str, rv: str, rhs_node=None) -> bool:
     prop = lhs_node[2] if lhs_node[0] == 'prop' else None
     if prop in ('type', 'pad_type', 'via_type'):
         return _norm_type(lv) == _norm_type(rv)
+    if prop == 'netname':
+        return netname_matches(lv, rv, wildcard=rhs_node is not None
+                               and rhs_node[0] == 'lit')
     if prop == 'netclass':
         # NetClass == 'X' is true for any class the net is a member of (its
         # aggregate class included); this is the lenient reading and agrees
@@ -771,6 +936,17 @@ def _cmp_strings(lhs_node, lv: str, rv: str) -> bool:
         # KiCad accepts wildcards in layer names ('*.Cu').
         return fnmatch.fnmatchcase(lv, rv) if any(ch in rv for ch in '*?[') else lv == rv
     return lv == rv
+
+
+def netname_matches(name: str, pattern: str, wildcard: bool = True) -> bool:
+    """KiCad's string ``==`` for ``A.NetName == 'pattern'``: case-insensitive,
+    and a literal carrying '*' or '?' is a wildcard (VALUE::EqualTo:
+    WildCompareString / IsSameAs(.., false)). Measured on kicad-cli 10.0.6:
+    ``A.NetName == '/clk'`` binds /CLK, ``A.NetName == '/CLK*'`` binds
+    /CLK-, /CLK_N and /CLK+."""
+    if wildcard and any(ch in pattern for ch in '*?'):
+        return _wx_matches(pattern.lower(), name.lower())
+    return name.lower() == pattern.lower()
 
 
 def _item(which: str, a: RuleItem, b: Optional[RuleItem]) -> Optional[RuleItem]:
@@ -804,6 +980,13 @@ def _value(node, a, b, layer, ctx=None):
         if name == 'type':
             return it.type
         if name == 'layer':
+            if it.type == 'via':
+                # PCB_VIA masks the Layer property (it has Layer Top/Bottom
+                # instead), so KiCad reads A.Layer of a via as undefined:
+                # measured on kicad-cli 10.0.6, a `disallow via` rule on
+                # `A.Layer != 'F.Cu'` and one on `A.Layer == 'F.Cu'` both
+                # flag no via
+                return _UNDEFINED
             if layer:
                 return layer
             return next(iter(it.layers)) if len(it.layers) == 1 else ''
@@ -1213,6 +1396,7 @@ class DesignRules:
             source = 'board minimum'
 
         # 2b. net-class implicit rules.
+        implicit_rule = None
         if kind == 'clearance':
             vals = [self.class_value(x.net_id, 'clearance') for x in (a, b) if x is not None]
             vals = [v for v in vals if v is not None]
@@ -1221,6 +1405,10 @@ class DesignRules:
                 cur['min'] = v
                 names = sorted({self.effective_class(x.net_id) for x in (a, b) if x is not None})
                 source = 'netclass ' + '/'.join(names)
+            dp = self.pair_gap_clearance(a, b)
+            if dp is not None:
+                cur['min'], implicit_rule = dp
+                source = implicit_rule
         elif kind in NETCLASS_OPT_KEYS:
             v = self.class_value(a.net_id, NETCLASS_OPT_KEYS[kind])
             # KiCad's "netclass (diff pair)" implicit rule, conditioned on
@@ -1269,6 +1457,7 @@ class DesignRules:
                         source = 'zone clearance'
                         min_from_rule = False
                         min_rule = None
+                        implicit_rule = None
 
         # 4. the ONLY post-loop board floors KiCad applies -- and MEASURED on
         # KiCad 10.0.0 (tests/oracle/constraint_agreement.py rows
@@ -1281,11 +1470,66 @@ class DesignRules:
                 cur['min'] = board_min_clr
                 source = 'board minimum'
 
+        if min_rule is not None:
+            rule_name, rule_coupled = min_rule.name, bool(min_rule.coupled)
+        elif implicit_rule is not None:
+            # the class "(diff pair)" rule still sets the value (floored at
+            # the board minimum, as KiCad floors it): no custom rule or zone
+            # clearance replaced it
+            rule_name, rule_coupled = implicit_rule, True
+        else:
+            rule_name, rule_coupled = None, False
         c = Constraint(kind, min=cur['min'], opt=cur['opt'], max=cur['max'],
                        source=source, kicad_min=cur['min'],
-                       min_rule=min_rule.name if min_rule is not None else None,
-                       min_rule_coupled=bool(min_rule is not None and min_rule.coupled))
+                       min_rule=rule_name, min_rule_coupled=rule_coupled)
         return self._fab(kind, c)
+
+    def pair_gap_clearance(self, a: Optional[RuleItem], b: Optional[RuleItem]
+                           ) -> Optional[Tuple[float, str]]:
+        """KiCad's implicit "netclass '<class>' (diff pair)" clearance rule
+        (#1542): (the class diff_pair_gap, the rule's name) when ``a`` and
+        ``b`` are the two nets of one pair (MatchDpSuffix on the names) and
+        the class of either has ``0 < diff_pair_gap < clearance``, else None.
+
+        KiCad adds it per net class as ``A.NetClass == '<class>' &&
+        AB.isCoupledDiffPair()`` with the gap as the clearance minimum, after
+        the class clearance rules and before every custom rule, for every item
+        kind. Measured on kicad-cli 10.0.6: a pair class at clearance 0.25 with
+        gap 0.15 grades 0.15 copper clean, at gap 0.20 it reports
+        "netclass 'HS' (diff pair) clearance 0.2000 mm", a class that sets no
+        gap of its own takes Default's (``class_value``), and the board
+        minimum clearance still floors it (step 4). Where both classes carry
+        one, the wider is taken."""
+        if a is None or b is None or not a.net_name or not b.net_name:
+            return None
+        if a.net_id == b.net_id or not _is_coupled(a, b, None):
+            return None
+        best = None
+        for x in (a, b):
+            gap = self.class_value(x.net_id, 'diff_pair_gap')
+            clr = self.class_value(x.net_id, 'clearance')
+            if gap is None or clr is None or gap >= clr - 1e-9:
+                continue
+            if best is None or gap > best[0]:
+                best = (gap, f"netclass '{self.effective_class(x.net_id)}' (diff pair)")
+        return best
+
+    def has_pair_gap_classes(self) -> bool:
+        """A net class (aggregate, as ``class_value`` reads it) whose
+        diff_pair_gap is below its clearance: KiCad's implicit "(diff pair)"
+        rule (#1542) can then bind some pair's P against its N."""
+        h = self._cache.get('_has_pair_gap_classes')
+        if h is None:
+            nids = set(self.memberships) | {0}
+            h = False
+            for nid in nids:
+                gap = self.class_value(nid, 'diff_pair_gap')
+                clr = self.class_value(nid, 'clearance')
+                if gap is not None and clr is not None and gap < clr - 1e-9:
+                    h = True
+                    break
+            self._cache['_has_pair_gap_classes'] = h
+        return h
 
     def _fab(self, kind: str, c: Constraint) -> Constraint:
         """5. this tool's fab-profile floor, raise-only and disclosed."""
@@ -1321,7 +1565,7 @@ class DesignRules:
         its own value. ``types`` are the two items' KiCad types (a rule may
         scope itself with ``A.Type == 'track'``). ``min`` carries the fab
         floor, ``kicad_min`` what KiCad accepts."""
-        if not self.has_coupled_rules():
+        if not (self.has_coupled_rules() or self.has_pair_gap_classes()):
             return None
         a = self.item_for_net(p_net_id, types[0], layer)
         b = self.item_for_net(n_net_id, types[1], layer)
@@ -1376,8 +1620,20 @@ class DesignRules:
     # ---------------- disclosure ----------------
 
     def unsupported(self) -> List[Tuple[str, str]]:
-        return [(r.name, r.unsupported) for r in self.rules
-                if r.unsupported and not r.honoured]
+        out = [(r.name, r.unsupported) for r in self.rules
+               if r.unsupported and not r.honoured]
+        named = {n for n, _w in out}
+        for r in self.rules:
+            if r.router_unhonoured and not r.unsupported:
+                out.append((r.name, r.router_unhonoured))
+                named.add(r.name)
+        for r in self.rules:
+            kinds = sorted(k for k in r.constraints if k in ROUTER_UNHONOURED_KINDS)
+            if kinds and r.name not in named and not r.honoured:
+                out.append((r.name, f"{', '.join(kinds)}: no routing step sizes "
+                                    f"a via by it (via_diameter and hole_size "
+                                    f"alone); check_drc grades it"))
+        return out
 
     def honoured_rules(self) -> List[Tuple[str, str]]:
         """Rules the resolver does not evaluate but another consumer honours
@@ -1404,7 +1660,8 @@ class DesignRules:
                            f"has no consumer in this tool yet")
             if graded:
                 out.append(f".kicad_dru rule '{name}': {', '.join(graded)} is not "
-                           f"routed to; check_drc grades it")
+                           f"routed to (a --length-match-group aims its target "
+                           f"into a length window); check_drc grades it")
         out.extend(self.notes)
         return out
 
@@ -1421,7 +1678,7 @@ class DesignRules:
                                 for k, v in sorted(r.constraints.items())},
                 'layer': r.layer_clause, 'condition': r.condition_src,
                 'severity': r.severity, 'unsupported': r.unsupported,
-                'honoured': r.honoured,
+                'honoured': r.honoured, 'router_unhonoured': r.router_unhonoured,
                 'unconsumed': list(r.unconsumed_kinds),
             } for r in self.rules],
             'fab_floor': dict(sorted(self.fab_floor.items())),
@@ -1486,6 +1743,135 @@ def board_min_clearance_cached(pcb_data) -> float:
         except Exception:                                      # noqa: BLE001
             pass
     return v
+
+
+def _edge_item_unknown(node):
+    """`node` with every term that reads B as ('unknown',). An edge
+    clearance is evaluated with B the Edge.Cuts shape it is measured to,
+    which no RuleItem models."""
+    if not isinstance(node, tuple) or not node:
+        return node
+    op = node[0]
+    if op in ('prop', 'call', 'area'):
+        return ('unknown',) if node[1] in ('B', 'AB') else node
+    if op == 'coupled':
+        return ('unknown',)
+    if op == 'cmp':
+        lhs, rhs = _edge_item_unknown(node[2]), _edge_item_unknown(node[3])
+        return ('unknown',) if 'unknown' in (lhs[0], rhs[0]) else node
+    if op in ('and', 'or', 'not'):
+        return (op,) + tuple(_edge_item_unknown(c) for c in node[1:])
+    return node
+
+
+#: A.insideCourtyard('X') / A.intersectsCourtyard('X') on an edge rule
+_COURTYARD_TERM = re.compile(
+    r"\bA\.(?:insideCourtyard|intersectsCourtyard)\(\s*('[^']*'|\"[^\"]*\")\s*\)",
+    re.IGNORECASE)
+
+
+def _has_unknown(node) -> bool:
+    if not isinstance(node, tuple) or not node:
+        return False
+    return node[0] == 'unknown' or any(_has_unknown(c) for c in node[1:])
+
+
+class PadEdgeRules:
+    """The board-edge clearance each pad is graded at (#1615): the floor
+    the caller passes, replaced by every `.kicad_dru` `edge_clearance` rule
+    that binds the pad, in file order, the last winning. That is KiCad's
+    order, and an explicit rule binds below the Board Setup minimum too.
+    Edge-launch connectors rely on that: their land runs to the edge.
+
+    A pad's `A.insideCourtyard('X')` / `A.intersectsCourtyard('X')` is read
+    as `A.memberOfFootprint('X')`, and `notes` says so: placement keeps
+    courtyards apart, so the only pads in X's courtyard are X's own. (An
+    edge-connector rule is often written that way.)
+
+    A rule whose condition this resolver cannot evaluate for a pad (an
+    unmodelled predicate, or a term on B, the edge item) MAY bind it, so
+    `for_pad` returns a RANGE: `(lo, hi, rule)`, lo == hi when every rule
+    decided. A grader fails a pad only short of `lo` and passes it at
+    `hi`, and between the two says it could not tell. `rule` names the
+    rule that set the decided value, '' for the caller's floor.
+
+    `active` is False on a board with no edge rule, where every pad reads
+    `(base, base, '')`."""
+
+    def __init__(self, pcb_data, board_path: Optional[str] = None):
+        path = board_path or getattr(pcb_data, 'source_path', '') or ''
+        self.rules: List[tuple] = []
+        #: [{'rule', 'reason'}] for each rule whose condition is not modelled
+        self.unmodelled: List[dict] = []
+        #: {rule name: how its condition was read}, for a courtyard term
+        self.notes: Dict[str, str] = {}
+        self.dr = None
+        self._cache: Dict[tuple, tuple] = {}
+        dru = os.path.splitext(path)[0] + '.kicad_dru' if path else ''
+        if not dru or not os.path.isfile(dru):
+            return
+        dr = DesignRules.from_project(pcb_data, path)
+        for rule in dr.rules:
+            spec = rule.constraints.get('edge_clearance') or {}
+            if spec.get('min') is None:
+                continue
+            if rule.unsupported and not rule.unsupported.startswith('condition'):
+                # a severity, a value or a layer clause the resolver does not
+                # read: not evaluated, and said so
+                self.unmodelled.append({'rule': rule.name, 'reason': rule.unsupported})
+                continue
+            src = rule.condition_src
+            if src is not None and _COURTYARD_TERM.search(src):
+                src = _COURTYARD_TERM.sub(r'A.memberOfFootprint(\1)', src)
+                self.notes[rule.name] = ('a courtyard term read as the pads of '
+                                         'that footprint')
+            ast = _edge_item_unknown(parse_condition_maybe(src))
+            self.rules.append((rule, ast, float(spec['min'])))
+            if _has_unknown(ast):
+                self.unmodelled.append({
+                    'rule': rule.name,
+                    'reason': ('condition not modelled for an edge clearance: '
+                               + (rule.unsupported or 'it reads B, the edge item'))})
+        if self.rules:
+            self.dr = dr
+
+    @property
+    def active(self) -> bool:
+        return bool(self.rules)
+
+    def for_pad(self, pad, base: float) -> Tuple[float, float, str]:
+        if not self.rules:
+            return base, base, ''
+        key = (getattr(pad, 'component_ref', None), getattr(pad, 'pad_number', None),
+               getattr(pad, 'net_id', None), getattr(pad, 'pad_type', None),
+               tuple(getattr(pad, 'layers', None) or ()), base)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        from check_drc import pad_copper_layers
+        dr = self.dr
+        item = dr.item_for_pad(pad)
+        ctx = ('edge_clearance', dr._net_name_set())
+        lo = hi = None
+        decided = ''
+        for layer in sorted(pad_copper_layers(pad, dr.copper_layers)) or [None]:
+            # the values this layer may resolve to, walked in file order
+            values, rule_name = {base}, ''
+            for rule, ast, value in self.rules:
+                m = rule_may_match(rule, ast, item, None, layer, dr.copper_layers, ctx)
+                if m is True:
+                    values, rule_name = {value}, rule.name
+                elif m is None:
+                    values = values | {value}
+            # a pad is clear only when every layer's copper is
+            if lo is None or min(values) > lo:
+                lo = min(values)
+            if hi is None or max(values) > hi:
+                hi = max(values)
+                decided = rule_name
+        out = (lo, hi, decided if lo == hi else '')
+        self._cache[key] = out
+        return out
 
 
 def _netclass_dict(nc) -> dict:
@@ -1554,8 +1940,10 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
     # raises into the engine either.
     if net_keepouts and pcb_data is not None:
         try:
-            from net_keepouts import derive_area_keepouts
-            rules.net_keepouts = derive_area_keepouts(rules, pcb_data)
+            from net_keepouts import derive_area_keepouts, derive_layer_bans
+            # #1527: and the track bans of the rules scoped without an area
+            rules.net_keepouts = (derive_area_keepouts(rules, pcb_data)
+                                  + derive_layer_bans(rules, pcb_data))
         except Exception as e:                                 # noqa: BLE001
             rules.net_keepouts = []
             rules.notes.append(f"net-filtered keep-outs not derived ({e})")
@@ -1564,7 +1952,8 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
     except Exception:                                          # noqa: BLE001
         pass
     key = (os.path.abspath(rules.source) if rules.source else '',
-           tuple((r.name, r.unsupported, r.honoured) for r in rules.rules))
+           tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
+                 for r in rules.rules))
     if key not in _ANNOUNCED:
         _ANNOUNCED.add(key)
         for line in rules.report_lines():

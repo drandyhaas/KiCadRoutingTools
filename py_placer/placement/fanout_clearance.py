@@ -517,6 +517,12 @@ _point_to_seg_dist = point_to_seg_dist
 VIA_WEIGHT = 50.0
 ATTRACT_WEIGHT = 1.0
 DISPLACEMENT_WEIGHT = 0.3
+#: The candidate pitch of the via-clear fallback and the #1563 apart rung, at
+#: most: they search once per stuck cap over the whole displacement cap, where
+#: the descent's `step` (0.2) steps past the gaps of a dense ball field.
+#: Measured at 0.1 against 0.2 on three BGA boards: shorted parts 4 -> 3 on
+#: one, cap grazes 35 -> 23 and 15 -> 13 on two, none worse, for +5..8 s.
+FALLBACK_STEP = 0.1
 
 
 def _point_to_rect_dist(px, py, rect):
@@ -526,7 +532,8 @@ def _point_to_rect_dist(px, py, rect):
     return math.hypot(dx, dy)
 
 
-def _pad_pair_shortfall(pads_a, pads_b, clearance, effs=None):
+def _pad_pair_shortfall(pads_a, pads_b, clearance, effs=None,
+                        frames_a=None, frames_b=None):
     """Sum of different-net pad clearance shortfalls between two movable parts'
     pad rects (#275) -- the mover-vs-mover analogue of pad_penalty. Same-net
     pad pairs are fine (shared rail copper may touch).
@@ -535,15 +542,25 @@ def _pad_pair_shortfall(pads_a, pads_b, clearance, effs=None):
     with pads_a x pads_b -- a pad override / netclass / .kicad_dru layer rule
     can put a pair's requirement above (or, for a relaxing rule, below) the
     flat scalar. None keeps the flat path, which is what a board declaring
-    none of them takes."""
+    none of them takes.
+
+    `frames_a` / `frames_b` (#1520) are the parts' `pad_frames`, aligned with
+    the rects; a tilted or round-cornered pad is measured on its frame
+    (`_pad_gap`) when the boxes say the pair is inside the keep-out."""
     pen = 0.0
     for ia, (ax0, ay0, ax1, ay1, anet) in enumerate(pads_a):
         row = None if effs is None else effs[ia]
+        fa = None if frames_a is None else frames_a[ia]
         for ib, (bx0, by0, bx1, by1, bnet) in enumerate(pads_b):
             if anet == bnet:
                 continue
             gap = _rect_gap((ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1))
             clr = clearance if row is None else row[ib]
+            if gap < clr - EPS:
+                fb = None if frames_b is None else frames_b[ib]
+                if fa is not None or fb is not None:
+                    gap = _pad_gap((ax0, ay0, ax1, ay1), fa,
+                                   (bx0, by0, bx1, by1), fb)
             if gap < clr - EPS:
                 pen += (clr - gap)
     return pen
@@ -583,6 +600,149 @@ def _seg_to_rect_dist(x1, y1, x2, y2, rect):
                    _point_to_seg_dist(ex1, ey1, x1, y1, x2, y2),
                    _point_to_seg_dist(ex2, ey2, x1, y1, x2, y2))
     return best
+
+
+# --- pad shapes: tilt (#1520) and rounded corners -----------------------------
+# A pad on a non-orthogonal angle is a ROTATED rectangle, and a roundrect,
+# circle or oval pad has ROUND corners. Its axis-aligned box
+# (`pad_copper_box`) over-states either by a different amount in every
+# direction, so a no-worse gate that compares a box-priced seed with a
+# box-priced candidate compares two different errors: a tilted 0402 whose
+# real seed graze on a via was 0.085 mm priced 0.215 (the via centre fell in
+# the box's empty corner), and a turn that put the pad's real face on the via
+# at 0.215 passed as "no worse". A roundrect pad's corner does the same on an
+# orthogonal part: a via off the corner arc priced 0.227 that check_drc
+# measures at 0.277 when the part moves to face it.
+#
+# Such a pad carries a FRAME, (cx, cy, hx, hy, c, s, r): its centre, its half
+# sizes in its own frame, the cos/sin of its tilt -- the convention of
+# check_drc's `_into_pad_frame`, R(-tilt) into the pad -- and its corner
+# radius, `check_drc.pad_corner_radius`. The copper is check_drc's
+# `_pad_copper_core`: the inner rectangle (hx - r, hy - r) grown by r, so every
+# distance to the pad is the distance to that inner rectangle, in the frame,
+# less r -- exactly what check_drc measures. A sharp pad on an orthogonal angle
+# carries None and keeps the box, which is then exact.
+
+def _tilt_frame(cx, cy, hx, hy, tilt_deg, r=0.0):
+    """The FRAME of a pad of half sizes (hx, hy) tilted `tilt_deg` with corner
+    radius `r`, or None when its box is exact: a multiple of 90 degrees and
+    sharp corners. An orthogonal round-cornered pad's frame is axis-aligned
+    (c = 1, s = 0) with its half sizes in the board frame."""
+    if abs((tilt_deg + 45.0) % 90.0 - 45.0) <= 1e-6:
+        if r <= 0.0:
+            return None
+        if abs((tilt_deg + 45.0) % 180.0 - 135.0) <= 1e-6:
+            hx, hy = hy, hx   # a quarter turn: the sides swap
+        return (cx, cy, hx, hy, 1.0, 0.0, r)
+    t = math.radians(tilt_deg)
+    return (cx, cy, hx, hy, math.cos(t), math.sin(t), r)
+
+
+def _pad_frame(p):
+    """A board pad's FRAME (`_tilt_frame`), or None when its box is exact. A
+    custom pad whose copper is a box to one side of it (Pad.copper_box) is
+    that box: None."""
+    if getattr(p, 'copper_box', None) is not None:
+        return None
+    from check_drc import pad_corner_radius
+    hx, hy = p.size_x / 2.0, p.size_y / 2.0
+    return _tilt_frame(p.global_x, p.global_y, hx, hy,
+                       getattr(p, 'rect_rotation', 0.0) or 0.0,
+                       min(pad_corner_radius(p), hx, hy))
+
+
+def _into_frame(px, py, fr):
+    dx, dy = px - fr[0], py - fr[1]
+    return dx * fr[4] + dy * fr[5], -dx * fr[5] + dy * fr[4]
+
+
+def _pad_point_dist(px, py, rect, fr):
+    """Distance from a point to a pad: its box `rect`, or its FRAME `fr`
+    (the inner rectangle's distance less the corner radius, 0 inside).
+    The gate's hottest call, so both branches are written out in full."""
+    if fr is None:
+        return math.hypot(max(rect[0] - px, px - rect[2], 0.0),
+                          max(rect[1] - py, py - rect[3], 0.0))
+    dx, dy = px - fr[0], py - fr[1]
+    c, s, r = fr[4], fr[5], fr[6]
+    ex = abs(dx * c + dy * s) - fr[2] + r
+    ey = abs(dy * c - dx * s) - fr[3] + r
+    d = math.hypot(ex if ex > 0.0 else 0.0, ey if ey > 0.0 else 0.0)
+    return d - r if d > r else 0.0
+
+
+def _pad_seg_dist(x1, y1, x2, y2, rect, fr):
+    """Distance from a segment to a pad: its box `rect`, or its FRAME `fr`."""
+    if fr is None:
+        return _seg_to_rect_dist(x1, y1, x2, y2, rect)
+    ax, ay = _into_frame(x1, y1, fr)
+    bx, by = _into_frame(x2, y2, fr)
+    r = fr[6]
+    ix, iy = fr[2] - r, fr[3] - r
+    d = _seg_to_rect_dist(ax, ay, bx, by, (-ix, -iy, ix, iy))
+    return d - r if d > r else 0.0
+
+
+def _pad_corners_axes(rect, fr):
+    """The corners of a pad's INNER rectangle (the box itself for None) and
+    its two axes."""
+    if fr is None:
+        x0, y0, x1, y1 = rect[:4]
+        return ([(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+                ((1.0, 0.0), (0.0, 1.0)))
+    cx, cy, hx, hy, c, s, r = fr
+    hx, hy = hx - r, hy - r
+    pts = [(cx + lx * c - ly * s, cy + lx * s + ly * c)
+           for lx, ly in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))]
+    return pts, ((c, s), (-s, c))
+
+
+def _pad_gap(ra, fa, rb, fb):
+    """`rect_gap` between two pads, each a box or a FRAME: the distance
+    between them when apart, else minus the smallest overlap over the
+    separating axes -- which is what `rect_gap` returns for two boxes, and
+    exactly `rect_gap` when neither pad is tilted or rounded. A round-cornered
+    pad is its inner rectangle grown by its radius, so the gap is the inner
+    rectangles' less both radii."""
+    if fa is None and fb is None:
+        return _rect_gap(ra[:4], rb[:4])
+    rad = (0.0 if fa is None else fa[6]) + (0.0 if fb is None else fb[6])
+    if (fa is None or fa[5] == 0.0) and (fb is None or fb[5] == 0.0):
+        # both axis-aligned: the inner boxes' rect_gap
+        if fa is not None:
+            cx, cy, hx, hy, _c, _s, r = fa
+            ra = (cx - hx + r, cy - hy + r, cx + hx - r, cy + hy - r)
+        if fb is not None:
+            cx, cy, hx, hy, _c, _s, r = fb
+            rb = (cx - hx + r, cy - hy + r, cx + hx - r, cy + hy - r)
+        return _rect_gap(ra[:4], rb[:4]) - rad
+    pa, axa = _pad_corners_axes(ra, fa)
+    pb, axb = _pad_corners_axes(rb, fb)
+    overlap = float('inf')
+    for ux, uy in axa + axb:
+        da = [x * ux + y * uy for x, y in pa]
+        db = [x * ux + y * uy for x, y in pb]
+        o = min(max(da), max(db)) - max(min(da), min(db))
+        if o < 0.0:
+            overlap = None
+            break
+        overlap = min(overlap, o)
+    if overlap is not None:
+        return -overlap - rad
+    best = float('inf')
+    for p, q in ((pa, pb), (pb, pa)):
+        for x, y in p:
+            for k in range(4):
+                (x1, y1), (x2, y2) = q[k], q[(k + 1) % 4]
+                best = min(best, _point_to_seg_dist(x, y, x1, y1, x2, y2))
+    return best - rad
+
+
+def _frames_of(cap, x, y, rot):
+    """`cap.pad_frames` at a pose, or None (no tilted pad, or a duck-typed cap
+    a test built without one)."""
+    fn = getattr(cap, 'pad_frames', None)
+    return None if fn is None else fn(x, y, rot)
 
 
 DEFAULT_NEAR_MARGIN = 1.0       # (mm) the CLI's --near-margin, the GUI's cap_near_margin
@@ -685,7 +845,10 @@ class _Cap:
     Pad offsets and board-resolved half-sizes are captured at the seed
     placement; an additional 90-degree rotation rotates the offsets and swaps
     the half-extents, which is exact for axis-aligned pads (the normal case
-    for decoupling caps).
+    for decoupling caps). Every pad also keeps its own shape (`pad_geom`), so
+    any turn re-derives its box, and every distance to a pad on a
+    non-orthogonal angle or with round corners is measured on its FRAME
+    (`pad_frames`, #1520) -- the shape check_drc grades.
     """
 
     #: Read by quench's `tether_terms_for` through `TetherGateView` (#1067).
@@ -741,13 +904,26 @@ class _Cap:
         # so a caller passing a model and nothing else still resolves layers.
         _cu = list(board_copper if board_copper is not None
                    else (getattr(model, 'board_copper', None) or ()))
-        from check_drc import pad_copper_layers
+        from check_drc import pad_copper_layers, pad_corner_radius
         self.pad_layers = []
+        # #1520: each pad's own shape, index-aligned with self.pads --
+        # (half_x, half_y, tilt, corner radius) in the board frame at the
+        # seed: the parser's size_x/size_y and rect_rotation, and the radius
+        # check_drc grades its corners at. A turn of the part by `delta` tilts
+        # the pad to `tilt - delta` (_pad_cache_for). None for a custom pad
+        # whose copper is a box to one side of it (Pad.copper_box): its box is
+        # all this pass knows of it, and it turns as a box.
+        self.pad_geom = []
         for p in fp.pads:
             if not any(str(l).endswith('.Cu') for l in p.layers):
                 continue  # paste/mask-only aperture, not copper
             cx, cy, half_x, half_y = pad_copper_box(p)
             self.pads.append((cx - fp.x, cy - fp.y, half_x, half_y, p.net_id))
+            _hx, _hy = p.size_x / 2.0, p.size_y / 2.0
+            self.pad_geom.append(
+                None if getattr(p, 'copper_box', None) is not None else
+                (_hx, _hy, getattr(p, 'rect_rotation', 0.0) or 0.0,
+                 min(pad_corner_radius(p), _hx, _hy)))
             # The GEOMETRY filter above stays loose on purpose (see the
             # comment), but a FLOOR must not: PadClearanceModel.pad_floor
             # reads local_clearance unconditionally, and an np_thru_hole
@@ -782,6 +958,9 @@ class _Cap:
         self._rect_cache: Dict[float, Tuple[float, float, float, float]] = {}
         self._pad_cache: Dict[float, list] = {}
         self._pad_bbox_cache: Dict[float, Tuple[float, float, float, float]] = {}
+        # #1520: per angle, each pad's (half_x, half_y, cos, sin, radius) in
+        # its own frame, or None when every pad's box is exact at that angle
+        self._frame_cache: Dict[float, Optional[list]] = {}
         # One-slot POSE memos: cost() and the shortfall helpers each rebuild
         # the same translated geometry for the same candidate 4-6 times in a
         # row (5.7M pad_rects calls on mez_rx); remember the last pose.
@@ -789,6 +968,8 @@ class _Cap:
         self._pr_out: list = []
         self._rc_key = None
         self._rc_out: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._pf_key = None
+        self._pf_out: Optional[list] = None
 
     def rect(self, x=None, y=None, rot=None):
         x = self.x if x is None else x
@@ -818,13 +999,38 @@ class _Cap:
             rad = math.radians(-delta)
             c, s = math.cos(rad), math.sin(rad)
             swap = round(delta) % 180 == 90
+            # #1520: a turn OFF the quarter-turn lattice (an undeclared part
+            # seeded at 110 offered the absolute ROTATIONS) is no half-extent
+            # swap -- each pad's box is re-derived from its own rectangle at
+            # its new tilt. On the lattice the seed box is exact as it was.
+            on_lattice = abs((delta + 45.0) % 90.0 - 45.0) <= 1e-6
+            geom = getattr(self, 'pad_geom', None)
+            if geom is not None and len(geom) != len(self.pads):
+                geom = None   # pads replaced wholesale (a test rig): boxes only
             cache = []
-            for off_x, off_y, hx, hy, net in self.pads:
+            frames = []
+            for i, (off_x, off_y, hx, hy, net) in enumerate(self.pads):
                 ox = off_x * c - off_y * s
                 oy = off_x * s + off_y * c
-                HX, HY = (hy, hx) if swap else (hx, hy)
+                g = None if geom is None else geom[i]
+                if g is not None:
+                    fr = _tilt_frame(0.0, 0.0, g[0], g[1], g[2] - delta, g[3])
+                    frames.append(None if fr is None else fr[2:])
+                else:
+                    frames.append(None)
+                if on_lattice:
+                    HX, HY = (hy, hx) if swap else (hx, hy)
+                elif g is not None:
+                    t = math.radians(g[2] - delta)
+                    ac, as_ = abs(math.cos(t)), abs(math.sin(t))
+                    HX, HY = g[0] * ac + g[1] * as_, g[0] * as_ + g[1] * ac
+                else:
+                    ac, as_ = abs(c), abs(s)
+                    HX, HY = hx * ac + hy * as_, hx * as_ + hy * ac
                 cache.append((ox, oy, HX, HY, net))
             self._pad_cache[key] = cache
+            self._frame_cache[key] = (frames if any(f is not None for f in frames)
+                                      else None)
             if cache:
                 self._pad_bbox_cache[key] = (
                     min(ox - HX for ox, oy, HX, HY, net in cache),
@@ -848,6 +1054,24 @@ class _Cap:
             cx, cy = x + ox, y + oy
             out.append((cx - HX, cy - HY, cx + HX, cy + HY, net))
         self._pr_key, self._pr_out = pose, out
+        return out
+
+    def pad_frames(self, x=None, y=None, rot=None):
+        """#1520: each pad's FRAME at a pose, index-aligned with pad_rects --
+        None for a pad whose box is exact (no tilt at this angle, sharp
+        corners) -- or None outright when every pad's box is exact there."""
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rot = self.rot if rot is None else rot
+        pose = (x, y, rot)
+        if pose == getattr(self, '_pf_key', None):
+            return self._pf_out
+        key, cache = self._pad_cache_for(rot)
+        fr = self._frame_cache.get(key)
+        out = (None if fr is None else
+               [None if f is None else (x + o[0], y + o[1]) + f
+                for f, o in zip(fr, cache)])
+        self._pf_key, self._pf_out = pose, out
         return out
 
     def stays_beneath(self, x, y, rot) -> bool:
@@ -1272,6 +1496,8 @@ class _Repair:
         # about survives the gain. self.foreign_pads is unchanged.
         self.foreign_pad_floors: List[Optional[PadFloor]] = []
         self.foreign_pad_mf: List[float] = []
+        # #1520: {id(foreign pad tuple): FRAME} for the tilted ones
+        self._fp_frame_by_id: Dict[int, Tuple] = {}
         self.caps: Dict[str, _Cap] = {}
         self.static_rects: List[Tuple[Tuple[float, float, float, float], str]] = []
         from kicad_parser import non_aperture_pads
@@ -1336,8 +1562,11 @@ class _Repair:
                         grow = max(0.0, max(self.npth_floor, lc) - clearance)
                         for hx, hy, hd in pad_drill_circles(p):
                             hr = hd / 2.0 + grow
-                            self.foreign_pads.append(
-                                (hx - hr, hy - hr, hx + hr, hy + hr, -1, None))
+                            _t = (hx - hr, hy - hr, hx + hr, hy + hr, -1, None)
+                            self.foreign_pads.append(_t)
+                            # #1520: the hole is a circle, not its box
+                            self._fp_frame_by_id[id(_t)] = (
+                                hx, hy, hr, hr, 1.0, 0.0, hr)
                             self.foreign_pad_floors.append(None)
                             self.foreign_pad_mf.append(0.0)
                     continue
@@ -1346,7 +1575,13 @@ class _Repair:
                 through = (p.drill or 0) > 0
                 pside = None if through else (
                     'B' if any(str(l).startswith('B') for l in copper) else 'F')
-                self.foreign_pads.append((*pad_rect(p), p.net_id, pside))
+                _t = (*pad_rect(p), p.net_id, pside)
+                self.foreign_pads.append(_t)
+                # #1520: a tilted or round-cornered pad is measured on its
+                # own shape, keyed by the tuple's id like the floors below
+                _fr = _pad_frame(p)
+                if _fr is not None:
+                    self._fp_frame_by_id[id(_t)] = _fr
                 _fl = None if self._floors is None else self._floors.pad_floor(p)
                 self.foreign_pad_floors.append(_fl)
                 self.foreign_pad_mf.append(
@@ -1540,7 +1775,9 @@ class _Repair:
                     # why the test asserts the CURRENCY and not a count.
                     self.base_cap_pad[key] = _pad_pair_shortfall(
                         seed_pads, self.caps[oref].pad_rects(), self.clearance,
-                        self._pair_effs(ref, cap, oref, self.caps[oref]))
+                        self._pair_effs(ref, cap, oref, self.caps[oref]),
+                        _frames_of(cap, cap.x, cap.y, cap.rot),
+                        _frames_of(self.caps[oref], None, None, None))
 
     def _cap_may_reach_edge(self, ref, cap):
         """Cached prune for the real-outline gate (#370 B2): a cap moves at
@@ -1601,8 +1838,9 @@ class _Repair:
             return None
         f = self._via_floor.get(net_id)
         if f is None:
-            f = PadFloor(self._floors.net_floor.get(net_id or 0, 0.0), 0.0,
-                         self._all_cu if self._floors.layer_rules else None)
+            # #1575: with the via's identity, so a class/type-scoped rule or
+            # a P/N rule binds the pair as check_drc's pad-via grade binds it
+            f = self._floors.item_floor(net_id, 'via', self._all_cu)
             self._via_floor[net_id] = f
         return f
 
@@ -1616,8 +1854,7 @@ class _Repair:
         key = (net_id, layer)
         f = self._seg_floor.get(key)
         if f is None:
-            f = PadFloor(self._floors.net_floor.get(net_id or 0, 0.0), 0.0,
-                         frozenset({layer}) if self._floors.layer_rules else None)
+            f = self._floors.item_floor(net_id, 'track', frozenset({layer}))
             self._seg_floor[key] = f
         return f
 
@@ -2663,11 +2900,16 @@ class _Repair:
                 effs = self._pair_effs(ref, cap, oref, other)
                 # seed pose OR final pose, for the reason `both` gives above
                 now = _pad_pair_shortfall(cand, other.pad_rects(),
-                                          self.clearance, effs)
+                                          self.clearance, effs,
+                                          _frames_of(cap, x, y, rot),
+                                          _frames_of(other, None, None, None))
                 was = _pad_pair_shortfall(
                     seed, other.pad_rects(other.seed_x, other.seed_y,
                                           other.seed_rot),
-                    self.clearance, effs)
+                    self.clearance, effs,
+                    _frames_of(cap, sx, sy, srot),
+                    _frames_of(other, other.seed_x, other.seed_y,
+                               other.seed_rot))
                 if now <= EPS and was <= EPS:
                     continue
                 mm, src = 0.0, ''
@@ -2708,6 +2950,7 @@ class _Repair:
         the whole-board `vias` default is for anyway."""
         vias = self.vias if vias is None else vias
         effs = None if ref is None else self._via_effs(ref, cap, vias)
+        frames = _frames_of(cap, x, y, rot)
         pen = 0.0
         if effs is None:
             # The tuple's slot is the prune OVER-reach, not a requirement, so
@@ -2717,14 +2960,16 @@ class _Repair:
             # is what this path documents. A tuple absent from the map -- one a
             # test assigned wholesale -- is graded exactly as injected.
             by_id = self._via_radius_by_id
-            for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+            for i, (bx0, by0, bx1, by1, net) in enumerate(
+                    cap.pad_rects(x, y, rot)):
+                fr = None if frames is None else frames[i]
                 for v in vias:
                     vx, vy, vnet, keepout = v
                     if vnet == net:
                         continue
                     rec = by_id.get(id(v))
                     ko = keepout if rec is None else rec[1] + self.clearance
-                    d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
+                    d = _pad_point_dist(vx, vy, (bx0, by0, bx1, by1), fr)
                     if d < ko - EPS:
                         pen += (ko - d)
             return pen
@@ -2733,11 +2978,12 @@ class _Repair:
         # the prune over-reach and is not the requirement.
         for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
             row = effs[i]
+            fr = None if frames is None else frames[i]
             for j, (vx, vy, vnet, _ko) in enumerate(vias):
                 if vnet == net:
                     continue
                 ko = row[j]
-                d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
+                d = _pad_point_dist(vx, vy, (bx0, by0, bx1, by1), fr)
                 if d < ko - EPS:
                     pen += (ko - d)
         return pen
@@ -2796,26 +3042,30 @@ class _Repair:
             at = [_sx[id(t)][1:] if id(t) in _sx else (t[0], t[1])
                   for t in vias]
         effs = self._via_effs(ref, cap, vias)
+        frames = _frames_of(cap, x, y, rot)
         if effs is None:
-            for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+            for i, (bx0, by0, bx1, by1, net) in enumerate(
+                    cap.pad_rects(x, y, rot)):
+                fr = None if frames is None else frames[i]
                 for j, (vx, vy, vnet, keepout) in enumerate(vias):
                     if vnet == net:
                         continue
                     if at is not None:
                         vx, vy = at[j]
-                    d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
+                    d = _pad_point_dist(vx, vy, (bx0, by0, bx1, by1), fr)
                     if d < keepout - EPS:
                         by_net[vnet] = by_net.get(vnet, 0.0) + (keepout - d)
             return by_net
         for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
             row = effs[i]
+            fr = None if frames is None else frames[i]
             for j, (vx, vy, vnet, _ko) in enumerate(vias):
                 if vnet == net:
                     continue
                 if at is not None:
                     vx, vy = at[j]
                 keepout = row[j]
-                d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
+                d = _pad_point_dist(vx, vy, (bx0, by0, bx1, by1), fr)
                 if d < keepout - EPS:
                     by_net[vnet] = by_net.get(vnet, 0.0) + (keepout - d)
         return by_net
@@ -2842,13 +3092,16 @@ class _Repair:
         if upto is not None:
             segs = segs[:upto]
         effs = self._seg_effs(ref, cap)
+        frames = _frames_of(cap, x, y, rot)
         if effs is None:
             # No matrix: a duck-typed cap, or a real _Cap with no copper pad
             # at all (cap detection admits n_copper == 0, e.g. a paste-only
             # C-prefixed part -- whose pad_rects is empty, so this loop does
             # nothing either way). There is no layer to gate on here, and an
             # injected tuple grades exactly as injected.
-            for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+            for i, (bx0, by0, bx1, by1, net) in enumerate(
+                    cap.pad_rects(x, y, rot)):
+                fr = None if frames is None else frames[i]
                 for x1, y1, x2, y2, snet, halfw, _layer in segs:
                     if snet == net:
                         continue
@@ -2857,7 +3110,7 @@ class _Repair:
                             or min(y1, y2) > by1 + halfw
                             or max(y1, y2) < by0 - halfw):
                         continue
-                    d = _seg_to_rect_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1))
+                    d = _pad_seg_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1), fr)
                     if d < halfw - EPS:
                         by_net[snet] = by_net.get(snet, 0.0) + (halfw - d)
             return by_net
@@ -2868,6 +3121,7 @@ class _Repair:
         # reject is what makes that free.
         for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
             row = effs[i]
+            fr = None if frames is None else frames[i]
             for j, (x1, y1, x2, y2, snet, _hw, _layer) in enumerate(segs):
                 if snet == net:
                     continue
@@ -2875,7 +3129,7 @@ class _Repair:
                 if (min(x1, x2) > bx1 + halfw or max(x1, x2) < bx0 - halfw or
                         min(y1, y2) > by1 + halfw or max(y1, y2) < by0 - halfw):
                     continue
-                d = _seg_to_rect_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1))
+                d = _pad_seg_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1), fr)
                 if d < halfw - EPS:
                     by_net[snet] = by_net.get(snet, 0.0) + (halfw - d)
         return by_net
@@ -2885,6 +3139,23 @@ class _Repair:
         term / graze report). See _seg_shortfalls for the per-net breakdown the
         accept gate uses."""
         return sum(self._seg_shortfalls(ref, cap, x, y, rot).values())
+
+    def _foreign_frames(self, ref, fpads):
+        """#1520: the FRAMES of `fpads` (the cap's foreign pads), index-aligned,
+        or None when every one of them is an exact box. Memoised per cap on
+        the list's identity and length, since a test may inject a list."""
+        ffr = self._fp_frame_by_id
+        if not ffr:
+            return None
+        memo = self.__dict__.setdefault('_fpf_memo', {})
+        hit = memo.get(ref)
+        if hit is not None and hit[0] is fpads and hit[1] == len(fpads):
+            return hit[2]
+        fpf = [ffr.get(id(t)) for t in fpads]
+        if not any(f is not None for f in fpf):
+            fpf = None
+        memo[ref] = (fpads, len(fpads), fpf)
+        return fpf
 
     def _pad_shortfalls(self, ref, cap, x, y, rot):
         """PER-FOREIGN-NET component-pad clearance shortfall (#235), keyed by the
@@ -2896,19 +3167,32 @@ class _Repair:
         by_net: Dict[int, float] = {}
         fpads = self.cap_foreign_pads[ref]
         effs = self._pad_effs(ref, cap)
+        # #1520: a tilted or round-cornered pad on EITHER side is measured on
+        # its frame -- only for a pair whose BOXES are inside the keep-out,
+        # since a pad lies within its box and so is never nearer than it
+        frames = _frames_of(cap, x, y, rot)
+        fpf = self._foreign_frames(ref, fpads)
         if effs is None:
-            for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-                for (px0, py0, px1, py1, pnet, pside) in fpads:
+            for i, (bx0, by0, bx1, by1, net) in enumerate(
+                    cap.pad_rects(x, y, rot)):
+                fa = None if frames is None else frames[i]
+                for j, (px0, py0, px1, py1, pnet, pside) in enumerate(fpads):
                     if pnet == net:
                         continue
                     if pside is not None and pside != cap.side:
                         continue  # SMD pad on the other side
                     gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
                     if gap < self.clearance - EPS:
+                        fb = None if fpf is None else fpf[j]
+                        if fa is not None or fb is not None:
+                            gap = _pad_gap((bx0, by0, bx1, by1), fa,
+                                           (px0, py0, px1, py1), fb)
+                    if gap < self.clearance - EPS:
                         by_net[pnet] = by_net.get(pnet, 0.0) + (self.clearance - gap)
             return by_net
         for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
             row = effs[i]
+            fa = None if frames is None else frames[i]
             for j, (px0, py0, px1, py1, pnet, pside) in enumerate(fpads):
                 if pnet == net:
                     continue
@@ -2916,6 +3200,11 @@ class _Repair:
                     continue  # SMD pad on the other side
                 eff = row[j]
                 gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
+                if gap < eff - EPS:
+                    fb = None if fpf is None else fpf[j]
+                    if fa is not None or fb is not None:
+                        gap = _pad_gap((bx0, by0, bx1, by1), fa,
+                                       (px0, py0, px1, py1), fb)
                 if gap < eff - EPS:
                     by_net[pnet] = by_net.get(pnet, 0.0) + (eff - gap)
         return by_net
@@ -2997,7 +3286,9 @@ class _Repair:
                 cand_pads = cap.pad_rects(x, y, rot)
             if _pad_pair_shortfall(cand_pads, other.pad_rects(),
                                    self.clearance,
-                                   self._pair_effs(ref, cap, other_ref, other)) > \
+                                   self._pair_effs(ref, cap, other_ref, other),
+                                   _frames_of(cap, x, y, rot),
+                                   _frames_of(other, None, None, None)) > \
                     self.base_cap_pad.get(pair, 0.0) + EPS:
                 return True
         return False
@@ -3031,6 +3322,60 @@ class _Repair:
         return (self.via_penalty(cap, x, y, rot, self.cap_vias[ref], ref=ref)
                 + self.seg_penalty(ref, cap, x, y, rot)
                 + self.pad_penalty(ref, cap, x, y, rot))
+
+    def contact_depth(self, ref, cap, x, y, rot):
+        """How far the cap's pads OVERLAP foreign copper at a placement -- a
+        short, where graze_penalty is any shortfall of the clearance (#1563).
+        The same items graze_penalty reads (the cap's pruned vias, the tracks
+        it shares a copper layer with, the foreign pads on its side), each at
+        its bare copper: a via's radius, a track's half width, a pad's edge.
+        0 for a placement that touches no foreign copper."""
+        depth = 0.0
+        frames = _frames_of(cap, x, y, rot)
+        rects = cap.pad_rects(x, y, rot)
+        by_id = self._via_radius_by_id
+        for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
+            fr = None if frames is None else frames[i]
+            for v in self.cap_vias[ref]:
+                if v[2] == net:
+                    continue
+                rec = by_id.get(id(v))
+                rad = rec[1] if rec is not None else v[3] - self.clearance
+                d = _pad_point_dist(v[0], v[1], (bx0, by0, bx1, by1), fr)
+                if d < rad - EPS:
+                    depth += rad - d
+        segs = self.cap_segs[ref]
+        effs = self._seg_effs(ref, cap)
+        floors = self._seg_floor_by_id
+        for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
+            fr = None if frames is None else frames[i]
+            for j, t in enumerate(segs):
+                if t[4] == net or (effs is not None and effs[i][j] == _OFF_LAYER):
+                    continue
+                half = t[5] - self._item_reach(floors.get(id(t)))
+                x1, y1, x2, y2 = t[0], t[1], t[2], t[3]
+                if (min(x1, x2) > bx1 + half or max(x1, x2) < bx0 - half or
+                        min(y1, y2) > by1 + half or max(y1, y2) < by0 - half):
+                    continue
+                d = _pad_seg_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1), fr)
+                if d < half - EPS:
+                    depth += half - d
+        fpads = self.cap_foreign_pads[ref]
+        fpf = self._foreign_frames(ref, fpads)
+        for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
+            fa = None if frames is None else frames[i]
+            for j, (px0, py0, px1, py1, pnet, pside) in enumerate(fpads):
+                if pnet == net or (pside is not None and pside != cap.side):
+                    continue
+                gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
+                if gap < -EPS:
+                    fb = None if fpf is None else fpf[j]
+                    if fa is not None or fb is not None:
+                        gap = _pad_gap((bx0, by0, bx1, by1), fa,
+                                       (px0, py0, px1, py1), fb)
+                if gap < -EPS:
+                    depth -= gap
+        return depth
 
     def cost(self, ref, cap, x, y, rot):
         if self._tethers is not None:
@@ -3118,12 +3463,45 @@ def declared_cap_rotations(intent, pcb_data, report: bool = False) -> Dict:
 
 
 def _on_cap_lattice(cap, rot) -> bool:
-    """`_Cap` prices its pads only at quarter turns from its seed angle
-    (`_pad_cache_for` swaps half-extents), so a DECLARED angle off that
-    lattice cannot be priced here and is not offered. (An undeclared cap
-    is offered the absolute `ROTATIONS` as before #1122, on its lattice or
-    not.)"""
+    """A DECLARED angle off the cap's quarter-turn lattice from its seed is
+    not offered (#1122). That rule was written when `_Cap` could price its
+    pads only on that lattice; since #1520 it prices every angle (each pad
+    turned as the rectangle it is), so the rule now stands as #1122's
+    contract alone. (An undeclared cap is offered the absolute `ROTATIONS`
+    as before #1122, on its lattice or not.)"""
     return abs((rot - cap.seed_rot + 45.0) % 90.0 - 45.0) <= 1e-6
+
+
+def _best_apart(st, ref, cap, rots, max_disp, step, grid_step):
+    """#1563: the pose within `max_disp` whose pads touch no foreign copper
+    (contact_depth 0), least graze first, then attraction and displacement as
+    cost() weighs them; None when every pose touches something. Returns
+    (best (cost, x, y, rot) or None, the decap claims it breaks or None).
+    The decap gate holds unless no apart pose keeps it -- then the pose
+    breaking fewest claims, by least excess, is taken and its failures are
+    returned, as the via-clear fallback's #1067 ladder does."""
+    tg = st._tethers
+    found, key0 = None, None
+    for cx, cy in _candidate_positions(cap, max_disp, step, grid_step):
+        for rot in rots:
+            if not cap.stays_beneath(cx, cy, rot) or \
+                    st._blocked_geom(ref, cap, cx, cy, rot) or \
+                    st.contact_depth(ref, cap, cx, cy, rot) > EPS:
+                continue
+            fails = ()
+            if tg is not None and ref in tg._tethers_of:
+                fails = tg.tether_failures({ref: (cx, cy, rot)}) or ()
+            soft = (ATTRACT_WEIGHT * st.attraction(cap, cx, cy, rot)
+                    + DISPLACEMENT_WEIGHT * math.hypot(cx - cap.seed_x,
+                                                       cy - cap.seed_y))
+            key = (len(fails), round(sum(f[2] - f[3] for f in fails), 4),
+                   st.graze_penalty(ref, cap, cx, cy, rot), soft)
+            if key0 is None or key < key0:
+                found, key0 = (soft, cx, cy, rot), key
+    if found is None:
+        return None, None
+    broke = (tg.tether_failures({ref: found[1:]}) if key0[0] else None)
+    return found, broke
 
 
 def _cap_rotations(cap, claim, allow_rotations, rotate) -> List[float]:
@@ -3551,7 +3929,10 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
             # by (sqrt(2)-1)*half along the board axes -- 0.14mm on glasgow's
             # 45-degree R9. Converting the clearance term and leaving the shape
             # would be exactly the half-conversion this change is about.
+            # (#1520: and, like them, a tilted or round-cornered pad is
+            # measured on its FRAME, the shape check_drc grades.)
             rect = pad_rect(p)
+            frame = _pad_frame(p)
             # Graded at the pair's REAL requirement, like everything else.
             # `keepout` is the prune over-reach, so re-form the pair's keep-out
             # from the via's radius. A locked fiducial's keep-clear override is
@@ -3575,7 +3956,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                 _rec = _radii.get(id(t))
                 ko = (keepout if _rec is None
                       else _rec[1] + st.via_required(pfl, vnet))
-                if _point_to_rect_dist(vx, vy, rect) < ko - EPS:
+                if _pad_point_dist(vx, vy, rect, frame) < ko - EPS:
                     locked_hits.append((ref, p.pad_number, vx, vy))
     if locked_hits:
         print(f"WARNING: {len(locked_hits)} foreign via(s) inside LOCKED parts' pad "
@@ -3588,6 +3969,8 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
 
     budget = {r: max_displacement for r in st.caps}
     rotate = {r: False for r in st.caps}
+    # #1563: caps the fallback moved off a short to a pose that only grazes
+    parted: List[str] = []
     # process worst violators first
     order = sorted(st.caps, key=lambda r: st.graze_penalty(
         r, st.caps[r], st.caps[r].x, st.caps[r].y, st.caps[r].rot),
@@ -3686,6 +4069,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                      if st.graze_penalty(r, st.caps[r], st.caps[r].x,
                                          st.caps[r].y,
                                          st.caps[r].rot) > EPS]
+            _fb_step = min(step, FALLBACK_STEP)
             for _fi, ref in enumerate(stuck):
                 if progress_callback:
                     progress_callback(
@@ -3703,7 +4087,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                     the least excess -- and only then by cost."""
                     found, gated, fkey = None, False, None
                     for cx, cy in _candidate_positions(
-                            cap, max_displacement_cap, step, grid_step):
+                            cap, max_displacement_cap, _fb_step, grid_step):
                         for rot in rots:
                             if not cap.stays_beneath(cx, cy, rot) or \
                                     st.graze_penalty(ref, cap, cx, cy, rot) > EPS:
@@ -3743,6 +4127,30 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                     if best is not None:
                         st.tether_broken[ref] = _tg.tether_failures(
                             {ref: (best[1], best[2], best[3])})
+                if best is None and st.contact_depth(
+                        ref, cap, cap.x, cap.y, cap.rot) > EPS:
+                    # #1563: no pose clears the cap, and where it stands its
+                    # copper TOUCHES a foreign net's -- a short. A graze is a
+                    # clearance violation; a short is a different net in
+                    # contact. So take the pose that touches nothing, least
+                    # graze first, then the usual soft cost. cost()'s per-net
+                    # gate (#441) cannot judge this: it refuses any net
+                    # grazed more than at the seed, and a pose apart from
+                    # every foreign copper of a field this dense grazes some
+                    # net the short did not. That gate exists so a move
+                    # cannot buy one net's relief with a NEW short on
+                    # another; a pose in contact with nothing cannot short
+                    # any. The hard gates still hold (_blocked_geom: edge,
+                    # courtyards, mover pads), and so does the decap gate,
+                    # broken only when nothing else parts the copper (the
+                    # #1067 ladder above, same reason).
+                    best, broke = _best_apart(st, ref, cap, rots,
+                                              max_displacement_cap, _fb_step,
+                                              grid_step)
+                    if best is not None:
+                        parted.append(ref)
+                        if broke:
+                            st.tether_broken[ref] = broke
                 if best is not None:
                     st.apply_pose(ref, best[1], best[2], best[3])
                     disp = math.hypot(cap.x - cap.seed_x, cap.y - cap.seed_y)
@@ -3899,6 +4307,18 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
     if regrazed:
         print(f"  Re-grazed by this pass's own connector copper: "
               f"{', '.join(sorted(regrazed))}")
+    # #1563: of the unresolved, the ones whose copper still TOUCHES a foreign
+    # net's (a short, not a graze), and the ones moved off a short to graze.
+    shorted = [r for r in unresolved
+               if st.contact_depth(r, st.caps[r], st.caps[r].x, st.caps[r].y,
+                                   st.caps[r].rot) > EPS]
+    if parted:
+        print(f"  Moved off a short to a pose that only grazes (none clears "
+              f"within the displacement cap): {', '.join(sorted(parted))}")
+    if shorted:
+        print(f"  SHORTED, copper in contact with a foreign net's via, track "
+              f"or pad (no pose within the displacement cap is apart from "
+              f"it): {', '.join(sorted(shorted))}")
     # #725: disclose what was graded ABOVE the flat --clearance, and why.
     # Printed from the ENGINE so the CLI and the GUI plugin both inherit it.
     required = st.required_rows({n.net_id: n.name for n in pcb_data.nets.values()})
@@ -3912,6 +4332,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
            'unresolved': unresolved, 'bga_refs': st.bga_refs,
            'via_moves': via_moves, 'new_segments': new_segs,
            'via_resolved': via_resolved, 'regrazed': regrazed,
+           'parted': parted, 'shorted': shorted,
            'required': required, 'clearance_notes': list(st.clearance_notes)}
     if claims1122:
         out['declared_rotations'] = {
@@ -4498,16 +4919,19 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             return list(pf)
         return [f if pl[i] else None for i, f in enumerate(pf)]
 
-    # `all_cap_rects` is function-local, so it CAN carry the pad's floor.
+    # `all_cap_rects` is function-local, so it CAN carry the pad's floor --
+    # and (#1520) its FRAME, so a landing is gated on the pad the grader sees.
     all_cap_rects = []
     for ref, cap in st.caps.items():
         fp = pcb_data.footprints.get(ref)
         cl = getattr(fp, 'layer', 'F.Cu') if fp is not None else 'F.Cu'
         _rects = cap.pad_rects(cap.x, cap.y, cap.rot)
         pf = cap_floors_of(cap, _rects)
+        _frs = _frames_of(cap, cap.x, cap.y, cap.rot)
         for i, (bx0, by0, bx1, by1, net) in enumerate(_rects):
             all_cap_rects.append((bx0, by0, bx1, by1, net, cl,
-                                  None if pf is None else pf[i]))
+                                  None if pf is None else pf[i],
+                                  None if _frs is None else _frs[i]))
 
     # Flatten the board's pads ONCE, in pads_by_net iteration order, resolving
     # each pad's floor and drill capsule here instead of inside the 16-angle x
@@ -4682,10 +5106,10 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         if override_holes and override_hole_gap(
                 v.net_id, nx, ny, nx, ny) < vr - 1e-4:
             return False
-        for (bx0, by0, bx1, by1, net, _cl, pfl) in all_cap_rects:
+        for (bx0, by0, bx1, by1, net, _cl, pfl, cfr) in all_cap_rects:
             # via barrel spans all layers: no layer gate here
-            if net != v.net_id and _point_to_rect_dist(
-                    nx, ny, (bx0, by0, bx1, by1)) < vr + via_req(pfl, v.net_id):
+            if net != v.net_id and _pad_point_dist(
+                    nx, ny, (bx0, by0, bx1, by1), cfr) < vr + via_req(pfl, v.net_id):
                 return False
         for p, pfl, has_cu, cap_ in board_pads:
             # rotation/shape-aware pad copper distance (#370 B3, #356
@@ -4759,11 +5183,11 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         if override_holes and override_hole_gap(
                 net_id, sx, sy, ex, ey) < hw - 1e-4:
             return False
-        for (bx0, by0, bx1, by1, net, cl, pfl) in all_cap_rects:
+        for (bx0, by0, bx1, by1, net, cl, pfl, cfr) in all_cap_rects:
             if cl != layer:
                 continue  # cap pads only exist on the cap's own side
-            if net != net_id and _seg_to_rect_dist(
-                    sx, sy, ex, ey, (bx0, by0, bx1, by1)) < hw + req(pfl, cfl):
+            if net != net_id and _pad_seg_dist(
+                    sx, sy, ex, ey, (bx0, by0, bx1, by1), cfr) < hw + req(pfl, cfl):
                 return False
         for p, pfl, has_cu, _cap in board_pads:
             if p.net_id == net_id:
@@ -4813,12 +5237,14 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # raised via would yield an EMPTY offender list -- the pass would print
         # nothing and report the cap unresolved forever.
         pfls = cap_floors_of(cap, rects)
+        frs = _frames_of(cap, cap.x, cap.y, cap.rot)
         offenders = []
         for v in pcb_data.vias:
             vr = via_rad(v)
             for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
-                if v.net_id != net and _point_to_rect_dist(
-                        v.x, v.y, (bx0, by0, bx1, by1)) < vr + via_req(
+                if v.net_id != net and _pad_point_dist(
+                        v.x, v.y, (bx0, by0, bx1, by1),
+                        None if frs is None else frs[i]) < vr + via_req(
                             None if pfls is None else pfls[i], v.net_id) - EPS:
                     offenders.append(v)
                     break

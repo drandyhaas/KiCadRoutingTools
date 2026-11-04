@@ -250,6 +250,86 @@ def _rows():
         cl(), lambda v: dict(segments=_pair_tracks(v)),
         'net A matches P1 (priority 0) and P2 (priority 1): the aggregate takes P1')
 
+    # -- class/type-scoped rows (#1491): resolved by the router's and the
+    # grader's own channel (kicad_dru.ScopedClearanceRules), with the class
+    # value where it binds nothing ---------------------------------------------
+    def scoped(a=1, b=2, ta='track', tb='track', ptb=None):
+        def f(dr):
+            from kicad_dru import ScopedClearanceRules, is_scoped_clearance_rule
+            sc = ScopedClearanceRules(dr, [r for r in dr.rules if is_scoped_clearance_rule(r)])
+            got = sc.pair_value(a, ta, b, tb, None, ptb)
+            if got is not None:
+                return got[0]
+            ia = dr.item_for_net(a, ta, 'F.Cu')
+            ib = dr.item_for_net(b, tb, 'F.Cu', **({'pad_type': ptb} if ptb else {}))
+            return dr.resolve('clearance', ia, ib, 'F.Cu').min
+        return f
+
+    _csi = dict(classes=[{'name': 'CSI', 'clearance': 0.2, 'priority': 0}],
+                patterns=[('A', 'CSI'), ('B', 'CSI')],
+                dru='(rule "csi gap" (constraint clearance (min 0.3mm)) '
+                    '(condition "A.NetClass == \'CSI\' && B.NetClass == \'CSI\'"))')
+    add('scoped_class_pair_tightens', 'clearance', _csi,
+        scoped(), lambda v: dict(segments=_pair_tracks(v)),
+        'class-pair rule 0.3 over the CSI class 0.2 (#1491)')
+    _hs = dict(classes=[{'name': 'HS', 'clearance': 0.5, 'priority': 0}],
+               patterns=[('B', 'HS')], rules={'min_clearance': 0.05},
+               dru='(rule "hs pad escape" (constraint clearance (min 0.2mm)) '
+                   '(condition "A.NetClass == \'HS\' && B.Type == \'Pad\'"))')
+
+    def _hs_pad(v):
+        fps, segs = _pad_and_track(v, None)
+        return dict(footprints=fps, segments=segs)
+    add('scoped_type_pad_relaxes', 'clearance', _hs,
+        scoped(2, 1, 'track', 'pad', 'smd'), _hs_pad,
+        'an HS track (class 0.5) against a pad: the Type-scoped rule relaxes it to 0.2 (#1491)')
+    add('scoped_type_pad_not_track', 'clearance', _hs,
+        scoped(2, 1), lambda v: dict(segments=_pair_tracks(v, nets=(2, 1))),
+        'the same rule does not bind two tracks: the HS class 0.5 holds (#1491)')
+
+    # -- a layer rule (#498) against a scoped rule: KiCad's last match in FILE
+    # order, through the very calls check_drc composes (resolve_pair, then
+    # apply_layer_rules over the layer channel's own map) ----------------------
+    def ordered(a=1, b=2, ta='track', tb='track', ptb=None, layer='F.Cu'):
+        def f(dr):
+            from kicad_dru import (ScopedClearanceRules, apply_layer_rules,
+                                   read_board_layer_clearances)
+            pcb = pcb_data_for(dr._board)
+            lcl, _ = read_board_layer_clearances(dr._board, pcb.board_info.copper_layers)
+            sc = ScopedClearanceRules.for_board(pcb, dr._board)
+            base = max(dr.class_value(a, 'clearance') or 0.0,
+                       dr.class_value(b, 'clearance') or 0.0)
+            if sc is not None:
+                base, lcl = sc.resolve_pair(a, ta, b, tb, None, ptb, base, lcl)
+            return apply_layer_rules(base, lcl, layer=layer)
+        return f
+
+    _layer_f = '(rule "f" (layer "F.Cu") (constraint clearance (min {}mm)))'
+    _csi_rule = ('(rule "csi gap" (constraint clearance (min 0.3mm)) '
+                 '(condition "A.NetClass == \'CSI\' && B.NetClass == \'CSI\'"))')
+    _hs_rule = ('(rule "hs pad escape" (constraint clearance (min 0.2mm)) '
+                '(condition "A.NetClass == \'HS\' && B.Type == \'Pad\'"))')
+
+    def _csi_dru(dru):
+        return dict(_csi, rules={'min_clearance': 0.05}, dru=dru)
+
+    add('layer_rule_then_scoped_rule', 'clearance',
+        _csi_dru(f'{_layer_f.format(0.15)} {_csi_rule}'),
+        ordered(), lambda v: dict(segments=_pair_tracks(v)),
+        'F.Cu rule 0.15, then the CSI class-pair rule 0.3: the later scoped rule wins (#1491)')
+    add('scoped_rule_then_layer_rule', 'clearance',
+        _csi_dru(f'{_csi_rule} {_layer_f.format(0.15)}'),
+        ordered(), lambda v: dict(segments=_pair_tracks(v)),
+        'the CSI class-pair rule 0.3, then the F.Cu rule 0.15: the later layer rule wins (#1491)')
+    add('layer_rule_then_scoped_pad_rule', 'clearance',
+        dict(_hs, dru=f'{_layer_f.format(0.4)} {_hs_rule}'),
+        ordered(2, 1, 'track', 'pad', 'smd'), _hs_pad,
+        'F.Cu rule 0.4, then the HS pad rule 0.2: an HS track to a pad relaxes to 0.2 (#1491)')
+    add('scoped_pad_rule_then_layer_rule', 'clearance',
+        dict(_hs, dru=f'{_hs_rule} {_layer_f.format(0.4)}'),
+        ordered(2, 1, 'track', 'pad', 'smd'), _hs_pad,
+        'the HS pad rule 0.2, then the F.Cu rule 0.4: the later layer rule wins (#1491)')
+
     # -- pad override rows (KiCad returns before rules) ---------------------
     def cl_pad(dr):
         return dr.resolve('clearance',
@@ -336,6 +416,7 @@ def run_row(row, cli, workdir, keep=False):
     write_board(board, **kw)
     dr = DesignRules.from_project(pcb_data_for(board), board)
     dr._pad_clr = pad_clr
+    dr._board = board
     krt = row.krt_fn(dr)
     result = {'row': row.name, 'kind': row.kind, 'krt': krt, 'note': row.note}
     if krt is None:

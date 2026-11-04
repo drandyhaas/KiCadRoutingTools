@@ -1014,8 +1014,11 @@ class DifferentialTab(wx.Panel):
                     net_clearances[net.net_id] = class_clearance_cache.get(
                         cname, _diff_clearance)
                 if config.get('clamp_netclasses', False):
-                    net_clearances = {nid: min(clr, _diff_clearance)
-                                      for nid, clr in net_clearances.items()}
+                    from fab_tiers import cap_net_clearances  # #1561 discloses
+                    net_clearances = cap_net_clearances(
+                        net_clearances, _diff_clearance,
+                        net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
+                        class_of=all_net_to_class)
             except Exception as e:
                 print(f"Warning: Could not get net class clearances: {e}")
                 net_clearances = None
@@ -1138,6 +1141,7 @@ class DifferentialTab(wx.Panel):
                 length_match_groups=config.get('length_match_groups'),
                 length_match_tolerance=config.get('length_match_tolerance',
                                                   defaults.LENGTH_MATCH_TOLERANCE),
+                intra_pair_tolerance=config.get('intra_pair_tolerance'),
                 meander_amplitude=config.get('meander_amplitude', defaults.MEANDER_AMPLITUDE),
                 meander_spacing=config.get('meander_spacing', defaults.MEANDER_SPACING),
                 time_matching=config.get('time_matching', False),
@@ -1149,6 +1153,12 @@ class DifferentialTab(wx.Panel):
                 mps_segment_intersection=config.get('mps_segment_intersection', False),
                 schematic_dir=config.get('schematic_dir'),
                 add_teardrops=config.get('add_teardrops', False),
+                # #1399: the shared "Force re-route selected nets" box, here
+                # re-routing the selected pairs AS pairs. The raw patterns are
+                # the #521 exact-name override (None = interactive selection,
+                # which names its nets exactly), as the signal tab passes.
+                force_reroute=config.get('force_reroute', False),
+                net_name_patterns=config.get('net_name_patterns'),
                 skip_routing=config.get('skip_routing', False),
                 debug_memory=config.get('debug_memory', False),
                 return_results=True,
@@ -1273,8 +1283,9 @@ class DifferentialTab(wx.Panel):
             _kept = sorted(r['pair'] for r in results_data.get('pair_reports') or []
                            if r.get('outcome') == 'uncoupled' and r.get('protected'))
             msg += (f"Not coupled: {len(uncoupled_pairs)} "
-                    f"(routed, but no coupled run on the board - not counted "
-                    f"as routed): {', '.join(uncoupled_pairs)}\n")
+                    f"(routed, but the board carries no coupled run over "
+                    f"enough of the pair's length - not counted as routed): "
+                    f"{', '.join(uncoupled_pairs)}\n")
             if _kept:
                 msg += (f"  still alongside, so protected: {', '.join(_kept)}\n")
         # Companion GND return vias with no legal site (the CLI prints the
@@ -1372,14 +1383,33 @@ class DifferentialTab(wx.Panel):
         # values, including the Default net class's diff-pair gap/width (issue
         # #160), mirroring route_diff.py's auto-fix. Edits .kicad_pro on disk;
         # the user must reload the project. Best-effort.
+        _dcfg = getattr(self, "_diff_drc_config", None)
         if counts["tracks"] > 0:
             from .gui_utils import apply_drc_settings_fix
-            apply_drc_settings_fix(getattr(self, "_diff_drc_config", None),
-                                   diff_pair=True)
+            import clearance_ledger
+            _clr = (_dcfg or {}).get('clearance')
+            # #1369: the copper-to-hole floor this step HELD, lowered only
+            # to what the copper it just drew needs -- route_diff.py's
+            # step_hole_clearance, from the tab's applied lists.
+            apply_drc_settings_fix(
+                _dcfg, diff_pair=True,
+                hole_clearance=self._held_hole_clearance(
+                    None, results_data,
+                    clearance_ledger.effective(_clr) if _clr else _clr))
+        # The tool records (protected pairs, impedance, #1503's matched skews,
+        # same-net pad clearance) at this step boundary, whatever the floors
+        # did (#1415, as route_diff.py --no-fix-drc-settings).
+        from .gui_utils import persist_live_tool_records
+        persist_live_tool_records(None, (_dcfg or {}).get('same_net_pad_clearance'))
 
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
         return counts["tracks"], counts["vias"]
+
+    def _held_hole_clearance(self, board, results_data, clearance):
+        """#1369: :func:`gui_utils.held_hole_clearance_live` for this tab."""
+        from .gui_utils import held_hole_clearance_live
+        return held_hole_clearance_live(self.pcb_data, board, results_data, clearance)
 
     def get_polarity_swap_nets(self):
         """Parse the polarity-swap allowlist field into a pattern list (#279).

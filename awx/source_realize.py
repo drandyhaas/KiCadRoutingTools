@@ -489,7 +489,8 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
         pcb.footprints[sref], pcb, net_filter=full, layers=list(pcb.board_info.copper_layers),
         track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
-        exit_margin=0.5, escape_method='jointescape', plane_drop='off', escape_dir_hints=hints, bus=spec)
+        exit_margin=0.5, escape_method='jointescape', plane_drop='off', escape_dir_hints=hints, bus=spec,
+        net_clearances={})   # the joint plan is laid at FAN_CLEAR, class-blind (#1529)
     tracks, vias_add, gated = _je.keep_pair_gates(pcb, sref, hints, tracks, vias_add)
     if gated:
         log(f'  source realize (joint plan of {sref}): left out, through a planned pair\'s gate: '
@@ -592,7 +593,7 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
             track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE,
             via_drill=te.VIA_DRILL,
             exit_margin=0.5, escape_method='underpad', plane_drop='off',
-            escape_dir_hints=hints)
+            escape_dir_hints=hints, net_clearances={})   # class-blind, as the plan (#1529)
     got = {t['net_id'] for t in tracks}
     ok = [nm for nm in names if byname[nm][0] in got]
     restored = [nm for nm in names if nm not in ok]

@@ -82,11 +82,11 @@ _WINDOW = ("        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n"
 ROWS = [
     # --- the defect itself: the pair test ----------------------------------
     ('pair-test-never-consulted', 'bga',
-     '                _v, _detail = _pending.verdict(pad_x, pad_y, v_size, '
+     '        _v, _detail = _pending.verdict(pad_x, pad_y, v_size, '
      'v_drill,\n'
-     '                                               route.net_id, _bulges,\n'
-     '                                               track_width=track_width)',
-     "                _v, _detail = 'clear', None",
+     '                                       route.net_id, _bulges,\n'
+     '                                       track_width=track_width)',
+     "        _v, _detail = 'clear', None",
      (T620,), 'KILLED'),
 
     ('verdict-always-clear', 'geo',
@@ -98,9 +98,9 @@ ROWS = [
      (T620,), 'KILLED'),
 
     ('pending-never-records-the-committed-via', 'bga',
-     '                _pending.add(pad_x, pad_y, v_size, v_drill, '
-     'route.net_id,\n                             _bulges)',
-     '                pass',
+     '        _pending.add(pad_x, pad_y, v_size, v_drill, '
+     'route.net_id,\n                     _bulges)',
+     '        pass',
      (T620,), 'KILLED'),
 
     # --- the DRILL arm ------------------------------------------------------
@@ -136,13 +136,13 @@ ROWS = [
      (T620,), 'KILLED'),
 
     ('bulge-flag-hardwired-false', 'bga',
-     "                _bulges = status == 'floor'",
-     '                _bulges = False',
+     "        _bulges = status == 'floor'",
+     '        _bulges = False',
      (T620,), 'KILLED'),
 
     ('bulge-flag-hardwired-true', 'bga',
-     "                _bulges = status == 'floor'",
-     '                _bulges = True',
+     "        _bulges = status == 'floor'",
+     '        _bulges = True',
      (T620,), 'KILLED'),
 
     # --- THE BROAD PHASE. The rows an earlier test could not kill. ----------
@@ -242,26 +242,26 @@ ROWS = [
     # tightened. Impossible under the old pad-BOX rule (a box does not depend
     # on via size), so this row exists because the rule changed.
     ('post-tighten-reach-recheck-deleted', 'bga',
-     '                    if not via_anchors_route(_tx, _ty, min(_ts, v_size),\n'
-     "                                             (pad_x, pad_y), track_width):\n"
-     "                        _v = 'clear'\n"
-     '                    else:',
-     '                    if False:\n'
-     "                        _v = 'clear'\n"
-     '                    else:',
+     '            if not via_anchors_route(_tx, _ty, min(_ts, v_size),\n'
+     "                                     (pad_x, pad_y), track_width):\n"
+     "                _v = 'clear'\n"
+     '            else:',
+     '            if False:\n'
+     "                _v = 'clear'\n"
+     '            else:',
      (T620,), 'KILLED'),
 
     # Both anchors sit one indent deeper since the post-tighten reach re-check
     # put the branch body inside an `else:`. Re-pointed after that landed, not
     # when written -- the file's own rule, and it caught these two.
     ('twin-appends-a-second-via-anyway', 'bga',
-     "                        _twin_shared += 1\n                        continue",
-     '                        _twin_shared += 1',
+     "                _twin_shared += 1\n                return True",
+     '                _twin_shared += 1',
      (T620,), 'KILLED'),
 
     ('twin-keeps-the-FIRST-via-not-the-tighter', 'bga',
-     '                        if _pending.tighten(_tx, _ty, v_size, v_drill):',
-     '                        if False:',
+     '                if _pending.tighten(_tx, _ty, v_size, v_drill):',
+     '                if False:',
      (T620,), 'KILLED'),
 
     # --- THE LADDER ---------------------------------------------------------
@@ -272,13 +272,13 @@ ROWS = [
     # is not silently killing everything. `ladder-refuses-immediately` is the
     # row that actually removes the ladder.
     ('control-semantically-inert-edit', 'bga',
-     '                    _thin = thin_drill_to_clear(',
-     '                    _thin = None or thin_drill_to_clear(',
+     '            _thin = thin_drill_to_clear(',
+     '            _thin = None or thin_drill_to_clear(',
      (T620,), 'SURVIVED'),
 
     ('ladder-refuses-immediately', 'bga',
-     '                    if _thin is None:',
-     '                    if True:',
+     '            if _thin is None:',
+     '            if True:',
      (T620,), 'KILLED'),
 
     ('ladder-returns-the-thinnest-rung', 'geo',
@@ -305,9 +305,9 @@ ROWS = [
      (T620,), 'SURVIVED'),
 
     ('thinned-drill-not-applied', 'bga',
-     '                    _thinned.append((v_drill, _thin))\n'
-     '                    v_drill = _thin',
-     '                    _thinned.append((v_drill, _thin))',
+     '            _thinned.append((v_drill, _thin))\n'
+     '            v_drill = _thin',
+     '            _thinned.append((v_drill, _thin))',
      (T620,), 'KILLED'),
 
     # --- the second guard's bookkeeping (#620's other half) -----------------
@@ -315,17 +315,17 @@ ROWS = [
     # not restore the old drop-via/keep-route shape. Both are live mutations
     # worth having, so the second one is now its own row below.
     ('ring-guard-refusal-deleted', 'bga',
-     '                if would_overlap_existing_via(pad_x, pad_y, v_size):',
-     '                if False and would_overlap_existing_via(pad_x, pad_y, '
+     '        if would_overlap_existing_via(pad_x, pad_y, v_size):',
+     '        if False and would_overlap_existing_via(pad_x, pad_y, '
      'v_size):',
      (T620,), 'KILLED'),
 
     # The actual pre-#620 shape: the via is dropped and the ROUTE is kept, so
     # an inner-layer track ships with nothing connecting it to the ball.
     ('silent-skip-restored', 'bga',
-     '                if would_overlap_existing_via(pad_x, pad_y, v_size):\n',
-     '                if would_overlap_existing_via(pad_x, pad_y, v_size):\n'
-     '                    continue\n',
+     '        if would_overlap_existing_via(pad_x, pad_y, v_size):\n',
+     '        if would_overlap_existing_via(pad_x, pad_y, v_size):\n'
+     '            return True\n',
      (T620,), 'KILLED'),
 
     # --- the disclosures ----------------------------------------------------

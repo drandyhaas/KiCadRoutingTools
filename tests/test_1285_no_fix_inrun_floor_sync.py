@@ -18,9 +18,10 @@ Checks:
   1. --no-fix-drc-settings, the sync knob at its default: the net routes,
      the run says nothing about in-run floors, and the output .kicad_pro is
      the input's, every key
-  2. control, the writeback on: the in-run sync fires and lowers
-     min_hole_clearance on this board, and the shipped project carries
-     0.2 -- so check 1 measured a writer that exists
+  2. control, the writeback on, routed at --clearance 0.15: the in-run
+     sync fires and lowers min_clearance 0.2 -> 0.15 -- so check 1
+     measured a writer that exists -- and (#1493) the copper-to-hole floor
+     stays at the 0.25 the step held, since none of its copper needs less
   3. every apply_routed_floors call in route.py sits under a test of
      fix_drc_settings (the staged-board one runs only with
      KICAD_ORACLE_SUMMARY=1 and kicad-cli, so check 1 cannot reach it), and
@@ -44,7 +45,7 @@ from run_utils import check as run_check, evidence, tool        # noqa: E402
 from synth import RoutingBoard                                  # noqa: E402
 
 FAILS = []
-SYNC_LINE = 'In-run DRC floors (#650): lowered'
+SYNC_LINE = 'In-run DRC floors (#650): set'
 
 
 def check(name, cond, detail=''):
@@ -125,14 +126,14 @@ def t_writeback_on(tmp):
     os.makedirs(d)
     inp = stage(d)
     out = os.path.join(d, 'out.kicad_pcb')
-    log = route(inp, out, [])
+    log = route(inp, out, ['--clearance', '0.15'])
     sync = [l.strip() for l in log.splitlines() if SYNC_LINE in l]
     check('control: the in-run sync fires with the writeback on', bool(sync),
           sync[0] if sync else 'no sync line')
-    check('control: it lowers min_hole_clearance on this board',
-          'rules.min_hole_clearance: 0.25 -> 0.2' in log)
-    check('control: the shipped project carries 0.2',
-          hole_clearance(read_pro(out)) == 0.2,
+    check('control: it lowers min_clearance on this board',
+          'rules.min_clearance: 0.2 -> 0.15' in log)
+    check('control: the shipped hole floor is the 0.25 held (#1493)',
+          hole_clearance(read_pro(out)) == 0.25,
           f'got {hole_clearance(read_pro(out))}')
 
 

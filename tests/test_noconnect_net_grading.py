@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Regression test for issue #479 (ch32v003_usb / ch32v006_dev shield nets).
+"""Issue #479 (ch32v003_usb / ch32v006_dev shield nets), as #1405 amended it.
 
 KiCad auto-names no-connect nets 'unconnected-(...)'; a USB connector's shield
-tabs share ONE such net across several pads (joined mechanically by the
-connector shell). Wildcard routing skips these nets (net_queries.
-expand_net_patterns) and human-routed reference boards leave them unrouted,
-but check_connected.py used to grade them as "Unrouted nets" -- so a board
-whose only "failure" was a shield net could never reach 100% completion.
+tabs share ONE such net across several pads. #479 had check_connected skip
+them (joined mechanically by the connector shell). KiCad's own DRC reports
+every such net unconnected unless the footprint DECLARES its same-number pads
+jumpered, so #1405 made default grading count them OPEN -- and skip only the
+ones a footprint declares joined.
 
-Default grading must skip multi-pad 'unconnected-*' nets; an explicit --nets
-pattern must still check them.
+Default grading must report a multi-pad 'unconnected-*' net with no copper,
+except where the footprint declares the pads jumpered; an explicit --nets
+pattern always checks them.
 
     python3 tests/test_noconnect_net_grading.py
 """
@@ -48,11 +49,13 @@ def main():
 
     results = []
     try:
-        # Default grading: the 2-pad shield no-connect net must NOT be
-        # reported (the routed SIG net is connected, so no issues at all).
+        # Default grading: the 2-pad shield no-connect net is OPEN, as KiCad
+        # counts it (#1405); the routed SIG net is connected.
         issues = run_connectivity_check(path, quiet=True)
-        results.append(("default grading skips multi-pad 'unconnected-*' net",
-                        not issues))
+        results.append(("default grading counts a multi-pad 'unconnected-*' "
+                        "net open",
+                        [i['net_name'] for i in issues if i.get('unrouted')]
+                        == ['unconnected-(J1-SHIELD-PadS1)']))
 
         # Explicit --nets pattern still checks it (override).
         issues = run_connectivity_check(path, net_patterns=['unconnected-*'],

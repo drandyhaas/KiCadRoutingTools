@@ -44,7 +44,7 @@ for p in (ROOT, _TESTS, os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_
 from synth import make_pad, make_seg, make_via, make_pcb, make_net
 from kicad_parser import parse_kicad_pcb
 from check_connected import check_net_connectivity
-from check_weird import check_weird
+from check_weird import check_weird, blocking_findings
 from pcb_modification import collapse_strict_redundant, prune_redundant_cycles
 from run_utils import tool, tool_env, evidence
 
@@ -67,7 +67,9 @@ def _board(segs, vias, pads):
 
 
 def _cats(pcb, **kw):
-    f, _ = check_weird(pcb, **kw)
+    # what the exit code (and so check_complete) counts: #1235's advisory
+    # off-centre-via-end is reported apart and blocks nothing
+    f = blocking_findings(check_weird(pcb, **kw)[0])
     return collections.Counter(x['category'] for x in f), f
 
 

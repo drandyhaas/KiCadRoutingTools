@@ -32,6 +32,10 @@ Key fields:
   It is censused before the plane finalize; route.py's end-of-run dedup (#162)
   then removes exact same-span copies, so read `check_weird` on the output for
   what shipped.
+- `close_same_net_vias` (#1414): same-net via pairs this run laid under the drill
+  hole-to-hole floor (check_drc `VIA-DRILL-HOLE`); `different_net_crossings` (#1375):
+  different-net tracks crossing on one layer among the run's copper (a short;
+  check_drc `SEGMENT-CROSSING`). Both ship despite `failed 0`: say so.
 - `failed_multipoint`: nets with unconnected pads, including pad coordinates
 - `blockers`: per still-failed net, the run's LAST frontier blocking analysis
   (#409): `{net, stage, blocked_by: [{net, blocked_count, unique_cells,
@@ -108,6 +112,51 @@ pre-existing blocking copper, a static box-in, a fanout-dropped ball or a
 
 Note: the final `JSON_SUMMARY` carries the same attribution structured — `blockers` (#409), `boxed_in`, `fanout_dropped` and `sealed_by_snpc` hold each still-failed net's last verdict. Prefer them for final-state diagnosis; the greps above remain useful for transient mid-run analyses (blockers of nets that later routed).
 
+### route_diff runs: the pair keys
+
+A `route_diff.py` step's `JSON_SUMMARY` (parse it as above, or read its
+`--json-out FILE`) has none of route.py's `failed_single` / `blockers`. It puts
+each pair it was given in one bucket:
+
+- `routed_diff_pairs`: coupled, and credited.
+- `failed_diff_pairs`: no coupled route, and not deferred: the pair is not routed.
+- `single_ended_diff_pairs`: the whole pair was left for single-ended routing.
+  **A 2-terminal pair whose coupled route fails lands here, not in
+  `failed_diff_pairs`** (#289), so an empty `failed_diff_pairs` does not make
+  the step clean. Only `failure_reason` `electrically-short` is by design (every leg is below
+  the coupled floor, so coupling buys nothing); any other reason is a pair that
+  should be coupled shipping single-ended. `single_ended_fallback`, and per pair
+  `se_fallback` (`p`, `n`: `routed` / `partial` / `failed` / `already-connected`),
+  say how its members came out when route_diff routed them single-ended itself.
+- `partial_diff_pairs`: the member audit took the credit back: a claimed coupled
+  route left a member pad open (`outcome` `incomplete`), or a `partial` pair kept
+  no coupled trunk (`no_coupled_trunk`).
+- `uncoupled_diff_pairs` (#1303): both members routed, but the copper is not
+  coupled; `pair_reports[].copper` (`layers_p`, `layers_n`, `coupled_mm`,
+  `coupled_share`, `gap_mm`) says what ships.
+- `skipped_bad_fanout`: never attempted, because the fanout's stubs overlap
+  themselves (#242).
+
+And across the buckets:
+
+- `member_incomplete_pairs`: every pair with a member pad still open at the end
+  of the step. Expected only when the pair's members are in
+  `single_ended_followup_nets`, left for the next `route.py` by design (a
+  `partial` pair's peeled far terminals, or an `electrically-short` pair's
+  members); open copper for any other.
+- `polarity_swap_denied_pairs`: a P/N mismatch the run was not allowed to
+  resolve by a swap (#279); `polarity_swapped_pairs` lists the swaps it made.
+- `casualty_reconcile`: nets this step ripped whose reroute failed
+  (`restored`, `rerouted`, `partial`, `unrecovered`).
+
+`pair_reports[]` has one record per pair: `pair`, `p_net`, `n_net`, `outcome`
+(`coupled`, `partial`, `deferred`, `failed`, `skipped`, `uncoupled`,
+`incomplete`), `failure_reason` and `failure_stage` (set only for `failed` and
+`deferred`; the stage is `pre-route`, `initial-route`, `multipoint`, `reroute`
+or `casualty-reconcile`), `incomplete_members`, and when they apply
+`blocking_nets`, `casualty`, `se_fallback` and `copper`. Classify each
+`failure_reason` with the pair table in Step 3.
+
 ## Step 2: Correlate Failures Spatially
 
 Load the board and map failures to regions and components:
@@ -150,6 +199,29 @@ Work through the failure modes most-targeted-first. Do not jump straight to glob
 | `check_reachability` says PASSABLE, and its `routed` line says ROUTED COPPER cages the pad (#1347) | Congestion: the copper already laid walls the pad in | A routing finding, NOT a placement one: rip up and reroute the nets named at that throat (`--rip-existing-nets`), or reorder; do not re-place |
 | Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: reduce `--clearance`/`--track-width` toward fab minimums → add routing layers. Do NOT raise `--max-ripup` past ~5 (measured worse: deep rip chains strand their victims) |
 
+**Pair failures** (a `route_diff.py` step), by `pair_reports[].failure_reason`.
+The shrink below means `--track-width`, `--diff-pair-gap` and
+`--via-size`/`--via-drill` stepped toward, never below, the fab floors, keeping
+`--impedance`; the gap is floored at the clearance (#441), so it shrinks only
+as far as the clearance does. It is the fix for a pair the geometry crowds out,
+and for none of the polarity or graze codes.
+
+| `failure_reason` | What it means | Fix |
+|------------------|---------------|-----|
+| `electrically-short` | Every leg is shorter than the coupled floor | None: single-ended by design. Check that its members closed (`se_fallback`, or the next `route.py`) |
+| `congestion` | Copper of nets this run routed walls the coupled route (`blocking_nets` names them), and the step's own rip ladder did not clear it | The shrink; or route the pair in an earlier step, before the nets that wall it |
+| `no-escape-path` | An endpoint's escape is blocked: the search never launched | The shrink, or a shorter `--diff-pair-centerline-setback` / wider `--max-setback-angle`; on a BGA or QFN the escape is the fanout's |
+| `needs-fanout` (#764) | A single track launches at the terminal, the coupled pair does not; the step skips its rip ladder, since no freed copper helps | A coupled fanout before the pair step (`bga_fanout.py ... --diff-pairs P N`); for a terminal on a pad array the step's log prints that command with the run's own numbers |
+| `pose-router-failure` (#346), `multipoint-leg-failure` | The coupled search ran and was exhausted (for a multipoint pair, on one of its legs) | Capacity: the shrink, more `--layers`, a finer `--grid-step` |
+| `coupled-route-failed` | A multipoint pair no coupled chain could route, left whole for single-ended | It ships single-ended: a failure if the interface needs coupling; retry it as `pose-router-failure` |
+| `connector-graze` (#165/#246) | A route was found, then rejected: a connector, setback or offset segment grazes foreign copper by check_drc's measure. The step rips a grazed net it routed itself and retries; an earlier step's copper and every pad stay | The step's log names the grazed pad, via or track. Route the pair before that copper (an earlier step), or move the terminal join: a narrower track or smaller via there, or a fanout that lands the pair clear |
+| `polarity-swap-denied` (the pair is also in `polarity_swap_denied_pairs`) | P and N land on the wrong sides, and the swap that resolves it is not allowed for this pair | Only when the pair's endpoints tolerate a swap (plan-pcb-routing's polarity-swap policy; `/identify-diff-pairs` gives `polarity_swappable`): add it to `--polarity-swap-nets`. Otherwise no router flag fixes it: it is a pin swap in the schematic, or the pair routes single-ended |
+| `polarity-mismatch`, `pn-crossing` | A swap was tried and could not resolve the mismatch / P and N must cross and untangling failed. A `pn-crossing` pair can be in `polarity_swap_denied_pairs` too | The same policy question first; a `pn-crossing` pair may also clear on another layer pair (`--layers`) |
+| `no-route` | Failed with no iterations and no blocked cells. An **intra-pair clearance** rejection reports this code too (no code of its own): P and N would sit closer than the clearance between them, after necking; the step's log says `intra-pair clearance` | For intra-pair: the terminal's geometry (its pads or fanout stubs), not a smaller gap, which is floored at the clearance |
+| `endpoint-resolution-failure` | The router found no usable endpoints for the pair | Check that the pair's pads (or fanout stubs) exist on the routed `--layers` |
+| `ripped-not-restored` (stage `casualty-reconcile`) | Another pair's route ripped it, and neither its reroute nor its restore landed (`casualty`) | Re-run route_diff on this pair alone (`--nets P N`) |
+| `fanout-self-overlap` (`outcome` `skipped`) | The fanout's stubs overlap themselves (#242) | Fix the fanout, then re-run the pair step |
+
 ## Step 4: Output the Retry Command
 
 Produce one command that retries **only the failed nets** with the targeted fixes, and explain each parameter change in one line:
@@ -162,6 +234,35 @@ python3 -X utf8 py_router/route.py board_routed.kicad_pcb board_retry.kicad_pcb 
     2>&1 | tee /tmp/route_retry.txt
 ```
 
+**Keep the run's rule decision.** "Toward the fab floor" in the tables above
+holds where the project's rules are aspirational stock. When they are the
+user's own product rules (`/plan-pcb-routing` Step 4, "Whose rules does the
+project hold?"), the floor is the board's own Board Setup minimums: the retry
+carries the failing step's `--escalation board` (or `off`) and
+`--no-fix-drc-settings`, shrinks no size below those minimums, and names any
+shrink below them as a decision for the user rather than proposing it as the
+fix.
+
 Routing only the failed nets preserves the successful routes (already in the input file) and is much faster than a full re-run. **On a board with pours, add the poured nets to `--nets` too** (#1032): the retry's copper can cut a pour, and its in-run plane finalize repairs only the poured nets inside its scope. A broken poured net is retried the same way, with `route.py`, never a standalone `repair_planes.py` (#1112). After the retry, re-check with `check_connected.py`, and if nets still fail, repeat the diagnosis on the new log — the failure mode often changes after the first fix.
+
+**For a pair step, the retry is a `route_diff.py` call** on the failing pairs'
+members only, from that step's output, with the step's own flags verbatim
+except the change the pair table names:
+
+```bash
+python3 -X utf8 py_router/route_diff.py board_diff.kicad_pcb board_diff_retry.kicad_pcb \
+    --nets "/USB_D+" "/USB_D-" \
+    --track-width 0.1 --diff-pair-gap 0.1 --via-size 0.3 --via-drill 0.2 \
+    --force-reroute --json-out /tmp/route_diff_retry.json \
+    2>&1 | tee /tmp/route_diff_retry.txt
+```
+
+`--force-reroute` rips the members and routes them again AS A PAIR; it is
+needed when they already carry copper (routed single-ended, or a `partial` /
+`uncoupled` pair). A pair that should be coupled is retried with `route_diff.py`,
+never `route.py`, which routes single-ended and would de-pair it (#1399); the
+members in `single_ended_followup_nets` are the exception, closed by the next
+`route.py` by design. Read the retry's `pair_reports` the same way before the
+next step.
 
 If the retry log prints `IMPROVEMENT GATE: ... -- REJECTED` (#600, on by default), the retry broke more than it connected (or raised the disconnected-pad count), so route.py wrote a copy of the INPUT board to the output path (the verdict is also on the `JSON_IMPROVEMENT_GATE:` line). More rip authority cannot help: change the approach (thinner track, finer grid, other layers) or report the nets as open. When the gate says its verdict rests on zone nets outside `--nets`, add those nets to `--nets` and retry.

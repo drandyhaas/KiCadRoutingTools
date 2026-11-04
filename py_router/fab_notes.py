@@ -360,6 +360,88 @@ def ship_via_protection_file(output_file: str, input_snapshot, context: str = ''
     return record
 
 
+def migrated_via_protection_drops(input_pcb, output_pcb) -> Dict[str, List[str]]:
+    """{via uuid: [token, ...]} the explicit protection tokens a RE-SAVE of the
+    board wrote onto vias that carried none, and that say nothing new (#1367).
+
+    A pcbnew save of a board older than KiCad 10 migrates it: every via gains
+    `(capping no) (covering ...) (plugging ...) (filling no)`, which are the
+    values the input already fabricated with. To `via_protection_stamps` those
+    read as a DECISION ("own spec kept"), so Type VII could never be stamped on
+    the vias that need it. A token is listed here only when the input via did
+    not carry it AND removing it changes nothing: its value equals what the
+    input fabricated that via with (`effective_via_protection` on the input's
+    setup) and what the output's own setup gives it. Matching is by uuid."""
+    in_setup = getattr(getattr(input_pcb, 'board_info', None),
+                       'via_protection_setup', None) or {}
+    out_setup = getattr(getattr(output_pcb, 'board_info', None),
+                        'via_protection_setup', None) or {}
+    in_by_uuid = {v.uuid: v for v in input_pcb.vias if getattr(v, 'uuid', '')}
+    drops: Dict[str, List[str]] = {}
+    for v in output_pcb.vias:
+        iv = in_by_uuid.get(getattr(v, 'uuid', ''))
+        if iv is None:
+            continue
+        own = v.tenting_attrs or {}
+        in_spec = iv.tenting_attrs or {}
+        in_eff = effective_via_protection(in_spec, in_setup)
+        out_eff = effective_via_protection({}, out_setup)
+        for tok, inner in own.items():
+            if tok in in_spec:
+                continue
+            val = ' '.join(str(inner).split())
+            if val == in_eff.get(tok) == out_eff.get(tok):
+                drops.setdefault(v.uuid, []).append(tok)
+    return drops
+
+
+def reconcile_resaved_via_protection(input_file: str, output_file: str,
+                                     baseline_file: Optional[str] = None,
+                                     quiet: bool = False):
+    """After a pcbnew re-save wrote ``output_file`` from ``input_file`` (#1367).
+
+    When the re-save moved a board whose format could not declare per-via
+    capping/filling to one that can, the vias under solder that check_drc had
+    accepted as `undeclarable` become violations, and the migration's own
+    explicit `no` tokens hide them from the Type VII stamp. This undoes the
+    tokens that say nothing new, then declares Type VII on the vias in a pad
+    or paste opening exactly as the route step would have on a KiCad 10 file:
+    all of them, except those ``baseline_file`` (the board BEFORE the routing
+    that produced the input) already had under solder, which keep what that
+    board had. Returns the record `{format_in, format_out, migrated, stripped,
+    ship}`, or None when nothing was migrated (the format did not change
+    across the line, or the input could already declare)."""
+    from kicad_parser import parse_kicad_pcb
+    from kicad_writer import strip_via_protection_in_content
+    src = parse_kicad_pcb(input_file)
+    dst = parse_kicad_pcb(output_file)
+    v_in = getattr(src, 'kicad_version', 0) or 0
+    v_out = getattr(dst, 'kicad_version', 0) or 0
+    if not v_in or v_in >= PER_VIA_PROTECTION_MIN_VERSION \
+            or v_out < PER_VIA_PROTECTION_MIN_VERSION:
+        return None
+    drops = migrated_via_protection_drops(src, dst)
+    n_stripped = 0
+    if drops:
+        with open(output_file, 'r', encoding='utf-8') as fh:
+            content = fh.read()
+        content, n_stripped = strip_via_protection_in_content(content, drops)
+        with open(output_file, 'w', encoding='utf-8', newline='') as fh:
+            fh.write(content)
+    snapshot = []
+    if baseline_file:
+        base = parse_kicad_pcb(baseline_file)
+        names = {n.name: nid for nid, n in dst.nets.items()}
+        for ent in via_snapshot(base.vias, base):
+            bn = base.nets.get(ent[0])
+            nid = names.get(bn.name) if bn is not None else None
+            if nid is not None:
+                snapshot.append((nid,) + tuple(ent[1:]))
+    ship = ship_via_protection_file(output_file, snapshot, quiet=quiet)
+    return {'format_in': v_in, 'format_out': v_out,
+            'migrated': len(drops), 'stripped': n_stripped, 'ship': ship}
+
+
 def print_via_protection_record(record, context: str = '', quiet: bool = False):
     """One FAB NOTE line for the run, when it shipped any via-in-pad/paste."""
     if quiet or not record or not record.get('count'):

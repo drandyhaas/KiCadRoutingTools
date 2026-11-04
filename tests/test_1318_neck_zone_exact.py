@@ -167,6 +167,41 @@ check("the exact check stands aside",
       not ser._neck_zone_exact_fits(FREE, board(bounds=(0.0, 0.0, X0 + 0.39, 20.0)),
                                     1, cfg))
 
+print("6. negative control: foreign in-flight copper within reach (#1488)")
+# A phase-3 rip-up retry's tap copper is stamped in the routing map but not
+# yet in pcb_data (plane_pad_tap.push_inflight_copper) while the nets it
+# ripped re-route. A foreign 0.1 mm track 0.17 mm off the 0.3 rail (rule
+# 0.19), beside the pad-entry zone and clear of the pins: the grid refuses the
+# rail there, and the exact check -- which reads pcb_data alone -- must not
+# overrule it. open_weather_station's +3V3 shipped 0.0275 mm under the rule
+# beside Net-(U8-CRS_DV/MODE2)'s retry tap that way.
+from obstacle_map import add_segments_list_as_obstacles            # noqa: E402
+from plane_pad_tap import push_inflight_copper, pop_inflight_copper  # noqa: E402
+X_IN = X0 + NET_W / 2 + 0.17 + 0.05
+INFLIGHT = make_seg(X_IN, 8.6, X_IN, 9.1, width=0.1, net_id=4)
+pcb6 = board()
+check("without in-flight copper the exact check admits the zone piece",
+      ser._neck_zone_exact_fits(make_seg(X0, 8.5, X0, 9.2, width=NET_W, net_id=1),
+                                pcb6, 1, cfg))
+tok = push_inflight_copper(pcb6, [INFLIGHT], [])
+try:
+    check("with it the exact check stands aside",
+          not ser._neck_zone_exact_fits(make_seg(X0, 8.5, X0, 9.2, width=NET_W, net_id=1),
+                                        pcb6, 1, cfg))
+    obs6 = build_base_obstacle_map(pcb6, cfg, nets_to_route=[1])
+    add_segments_list_as_obstacles(obs6, [INFLIGHT], cfg)
+    out6 = ser._assign_wide_route_widths(
+        rail(), cfg, 1, obs6, coord, ['F.Cu'], MARGIN, False, NARROW,
+        neck_start=False, pcb_data=pcb6)
+finally:
+    pop_inflight_copper(pcb6, tok)
+check("beside the in-flight track the rail necks", width_at(out6, 8.85) == NARROW,
+      [(round(s.start_y, 3), round(s.end_y, 3), s.width) for s in out6])
+worst6 = min(abs(X_IN - X0) - s.width / 2 - 0.05 - CLR for s in out6
+             if min(s.start_y, s.end_y) < 9.1 and max(s.start_y, s.end_y) > 8.6)
+check("no shipped piece is within the rule of the in-flight track", worst6 >= -1e-6,
+      f"worst slack {worst6 * 1000:.1f} um")
+
 if fails:
     print(f"\nFAILED: {fails}")
     sys.exit(1)

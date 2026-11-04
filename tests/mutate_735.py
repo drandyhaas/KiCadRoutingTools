@@ -147,9 +147,8 @@ ROWS = [
      (T735, T735E), 'KILLED'),
 
     ('active-absorbs-the-track-channel', 'leg',
-     '        self.active = bool(self.net_floor or self.layer_rules or has_overrides)',
-     '        self.active = bool(self.net_floor or self.layer_rules\n'
-     '                           or has_overrides or self.track_rules)',
+     '                           or self.channels is not None)',
+     '                           or self.channels is not None or self.track_rules)',
      (T735,), 'KILLED'),
 
     ('the-model-forgets-the-memberships', 'leg',

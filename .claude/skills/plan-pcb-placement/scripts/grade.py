@@ -150,8 +150,10 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
                   or {}).get('assembly') or {}).get('courtyard_gating_armed'))
         rc, log = _run(['py_router/check_connected.py', board])
         out['check_connected_rc'] = rc
-        rc, log = _run(['py_router/check_drc.py', board, '--baseline', baseline,
-                        '--clearance-margin', '0.1'])
+        # At check_drc's own default margin, the one board_score's `drc`
+        # grades at: a wider margin recorded check_drc_rc 0 beside drc 1 on
+        # a track 7% inside the clearance (#1595).
+        rc, log = _run(['py_router/check_drc.py', board, '--baseline', baseline])
         out['check_drc_rc'] = rc
         done = done and out['blocking'] == 0 and out['check_complete'] == 'DONE' \
             and out['check_connected_rc'] == 0 and out['check_drc_rc'] == 0

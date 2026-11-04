@@ -31,6 +31,7 @@ function that already owns it, and the ones that matter say so on the sheet:
     decap partner          placement.groups (_elect_tethers / decap_populations)
     emc roles + legs       placement.emc_roles (#1254)
     diff pairs             list_nets.find_differential_pairs (resonator-safe)
+    sheets, drawn blocks   placement.schematic (the project's .kicad_sch)
     net classes            list_nets.net_class_memberships
     floors                 list_nets.board_floor_knobs
 
@@ -249,8 +250,13 @@ def serves_map(pcb_data) -> dict:
 
 
 def build_context(pcb_data, pcb_file: str, *, clearance: float,
-                  track_width: float, brief=None) -> Dict[str, object]:
-    """The whole document, as data. `format_md` renders it."""
+                  track_width: float, brief=None,
+                  schematic=None) -> Dict[str, object]:
+    """The whole document, as data. `format_md` renders it.
+
+    `schematic`: None finds the project's root `.kicad_sch` beside the board
+    (`placement.schematic.discover`), a path reads that one, and False reads
+    none."""
     from placement.body import board_bodies
     from placement.legality import footprint_side, rotate_local_bounds
     from placement.part_class import classify_part
@@ -312,6 +318,17 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
         every one of them is locked."""
         return pile is None or all(r in _locked for r in refs if r)
 
+    # The drawing is pose-independent, so a pile withholds nothing here.
+    if schematic is False:
+        sch = {'found': False, 'skipped': 'by --no-schematic'}
+    else:
+        from placement.schematic import section as schematic_section
+        try:
+            sch = schematic_section(pcb_data, pcb_file, schematic or None)
+        except Exception as exc:                             # noqa: BLE001
+            sch = {'found': True, 'error': f'{type(exc).__name__}: {exc}'}
+    sch_parts = sch.get('parts') or {}
+
     parts = []
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         geom = bodies.get(ref)
@@ -370,6 +387,7 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
             'dnp': bool(getattr(fp, 'dnp', False)),
             'pads_by_face': side_pads,
             'partners': [{'ref': r, 'shared_nets': n} for n, r in partners],
+            'schematic': sch_parts.get(ref),
             'mating': faces_out.get(ref) if _claim(ref) else None,
             'serves': ({'ref': tethers[ref][0],
                         'distance_mm': round(tethers[ref][1], 3)}
@@ -400,6 +418,10 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
         'diff_pairs': [list(t) for t in sorted(pairs or ())],
         'parts': parts,
         'pin_order': po,
+        # The project's schematic: sheets, drawn blocks and their notes, and
+        # the designer's layout notes. `parts[].schematic` is each part's
+        # sheet and block; the per-part map is not repeated here.
+        'schematic': {k: v for k, v in sch.items() if k != 'parts'},
         # #1254: converters, crystals, oscillators and ESD arrays, each leg
         # measured and a ready `proximity[]` row beside it. Report only.
         'emc_roles': emc,
@@ -420,6 +442,17 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
                          'default gap, measured by check_floorplan\'s own '
                          'keep_away grade',
             'body_mm / body_source': 'placement.body.board_bodies (#896)',
+            'schematic': 'placement.schematic: the root .kicad_sch beside '
+                         'the board (or --schematic), its sheet tree, and '
+                         'each footprint matched to its symbol by the uuids '
+                         'of its (path ...). A block is the parts drawn '
+                         'together on one sheet: average linkage on the gap '
+                         'between their symbols\' drawn boxes, cut at '
+                         'BLOCK_CUT_MM. A note is a short text beside a '
+                         'block. A layout note\'s rows name both parts in '
+                         'the note\'s own words and are checked against '
+                         'the netlist (STALE when the named part is not on '
+                         'the pin\'s net); max_mm is the author\'s',
             'pads_by_face': 'placement.escape.assign_faces (#850)',
             'pin_order': 'placement.pair_order.pair_metrics; a pair through '
                          'per-leg series parts (#1251): the junctions of '
@@ -1049,6 +1082,91 @@ def mating_line(m) -> str:
                'explain' if m['interior'] else ''))
 
 
+def _schematic_md(sec) -> List[str]:
+    """The `## Schematic` section: each sheet's drawn blocks with the notes
+    beside them, then the designer's layout notes."""
+    L = ['## Schematic', '']
+    if sec.get('skipped'):
+        return L + [f"Not read ({sec['skipped']}).", '']
+    if sec.get('error'):
+        return L + [f"NOT READ ({sec['error']}) -- this sheet cannot say how "
+                    f"the parts are drawn.", '']
+    if not sec.get('found'):
+        return L + ['No schematic beside the board (looked for '
+                    + ', '.join(f"`{os.path.basename(p)}`"
+                                for p in sec.get('looked_for') or ())
+                    + '; `--schematic PATH` names one).', '']
+    L.append(f"Read `{sec['root']}` ({sec['files']} file(s), "
+             f"{sec['sheet_instances']} sheet instance(s)): "
+             f"{sec['matched']} of {sec['board_parts']} board parts matched "
+             f"to their symbols by the uuids of their `(path ...)`.")
+    if sec.get('missing_files'):
+        L.append('Sheet files NOT FOUND: '
+                 + ', '.join(f"`{m}`" for m in sec['missing_files'])
+                 + ' -- their parts read as not on the schematic.')
+    if sec.get('not_on_schematic'):
+        miss = sec['not_on_schematic']
+        L.append(f"Not on the schematic ({len(miss)}): "
+                 + ', '.join(miss[:30]) + (' ...' if len(miss) > 30 else '')
+                 + ('. Fewer than 80% matched: the schematic and the board '
+                    'disagree, so read the blocks as a stale drawing.'
+                    if sec['matched'] < 0.8 * max(1, sec['board_parts'])
+                    else '.'))
+    L.append('')
+    L.append('A **block** is the parts drawn together on one sheet (average '
+             f"drawn gap within {sec['block_cut_mm']} mm). On the human "
+             'boards a drawn block sits as tight as a functional group: '
+             'blocks are evidence for which group a part joins, sheets for '
+             'the groups themselves. Quoted text is a note drawn beside the '
+             'block.')
+    L.append('')
+    for sh in sec.get('sheets') or ():
+        L.append(f"### Sheet `{sh['sheet'] or '<root>'}` -- {sh['file']}, "
+                 f"{sh['parts']} part(s)")
+        L.append('')
+        for b in sh['blocks']:
+            notes = ''.join(f' "{n}"' for n in b['notes'][:4])
+            L.append(f"- **{b['id']}** {' '.join(b['refs'])}"
+                     + (f" --{notes}" if notes else ''))
+        if sh['single']:
+            L.append(f"- drawn on their own: {' '.join(sh['single'])}")
+        if sh['notes']:
+            L.append('- other notes: '
+                     + '; '.join(f'"{n}"' for n in sh['notes'][:8]))
+        L.append('')
+    notes = sec.get('layout_notes') or ()
+    if notes:
+        L.append('### Layout notes')
+        L.append('')
+        L.append('The designer\'s own placement instructions. A row names '
+                 'both parts in the note\'s words and was checked against '
+                 'the netlist; `max_mm` is null because the limit is the '
+                 'author\'s. A STALE row names a part that is not on the '
+                 'named pin\'s net (the note predates a renumbering): never '
+                 'use it. Where the note does not name its subject, the '
+                 'parts drawn nearest it are listed: read the note, and '
+                 'decide.')
+        L.append('')
+        for n in notes:
+            L.append(f"- \"{n['text']}\" (sheet `{n['sheet'] or '<root>'}`)"
+                     + (f"; names {', '.join(n['named'])}" if n['named']
+                        else '')
+                     + (f"; pin {', '.join(n['pins'])} read as "
+                        f"{', '.join(n['pin_owner'])}'s (the part drawn "
+                        f"nearest with that pad)" if n.get('pin_owner')
+                        else '')
+                     + (f"; drawn nearest {', '.join(n['drawn_nearest'])}"
+                        if n['drawn_nearest'] else ''))
+            for r in n['rows']:
+                L.append('  - row `' + json.dumps(
+                    {k: v for k, v in r.items() if k != 'why'},
+                    sort_keys=True) + '`')
+            for r in n.get('stale') or ():
+                L.append(f"  - STALE: {r['stale']}")
+        L.append('')
+    return L
+
+
 def format_md(doc) -> str:
     """The sheet, for a reader. Markdown because the audience is a model and a
     human reading the same page, and a table is how a pin row reads."""
@@ -1099,6 +1217,9 @@ def format_md(doc) -> str:
              'looked and could not tell, which is not the same as absent. '
              'See the SOURCES section at the end.')
     L.append('')
+
+    if doc.get('schematic') is not None:
+        L.extend(_schematic_md(doc['schematic']))
 
     po = doc['pin_order']
     L.append('## Pin-order agreement')
@@ -1186,6 +1307,12 @@ def format_md(doc) -> str:
                  f"pose ({p['at'][0]}, {p['at'][1]}, {p['at'][2]}deg)"
                  + ('  LOCKED' if p['locked'] else '')
                  + ('  DNP' if p['dnp'] else ''))
+        if p.get('schematic'):
+            ps = p['schematic']
+            L.append('')
+            L.append(f"Schematic: sheet `{ps['sheet'] or '<root>'}`, "
+                     + (f"block {ps['block']}." if ps['block']
+                        else 'drawn on its own.'))
         if p.get('panel'):
             L.append('')
             L.append(f"![{p['ref']}]({os.path.basename(p['panel'])})")
@@ -1284,6 +1411,13 @@ def build_parser():
                    help="override the board's own clearance floor")
     p.add_argument('--track-width', type=float, default=None,
                    help="override the board's own track width")
+    sch = p.add_mutually_exclusive_group()
+    sch.add_argument('--schematic', metavar='PATH',
+                     help="the project's root .kicad_sch (default: "
+                          "<board>.kicad_sch beside the board, else the one "
+                          ".kicad_pro's)")
+    sch.add_argument('--no-schematic', action='store_true',
+                     help='read no schematic')
     p.add_argument('--panels', metavar='DIR',
                    help='write one cropped PNG per part into DIR and '
                         'reference them from the sheet')
@@ -1326,7 +1460,9 @@ def main(argv=None):
     # it just is not part of the document.
     with contextlib.redirect_stdout(sys.stderr):
         doc = build_context(pcb, args.board, clearance=clr, track_width=tw,
-                            brief=brief)
+                            brief=brief,
+                            schematic=(False if args.no_schematic
+                                       else args.schematic))
     if args.panels:
         try:
             with contextlib.redirect_stdout(sys.stderr):

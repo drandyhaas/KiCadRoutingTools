@@ -62,8 +62,14 @@ a list of exclusions only implies `*`. A pattern without a sheet path (`GND`,
 `VCC*`) also matches the last path component of a hierarchical net (`/GND`),
 so the plain spelling works on a sheet-qualified board. A `!`-name that is
 itself a net on the board is that net (an active-low signal), and `\!` escapes
-the `!`. `unconnected-*` nets are left out of a wildcard; name one to route
-it.
+the `!`. A single-pad `unconnected-*` net is left out of a wildcard. A
+multi-pad one on ONE footprint (a connector's shield or mounting tabs, a
+reversible footprint's doubled pins) is an open net to `check_connected` and
+`board_score` until it is routed, as KiCad counts it, so the wildcard routes it,
+after every named net (#1405) -- unless the footprint declares those pads
+jumpered. One whose pads lie on SEVERAL footprints (separate no-connect pins
+sharing an auto-name, as on a panel of copies) is neither routed nor counted
+open; name it to route it.
 
 **Placement blocks** (`route.py` only) route the nets of one block -- a
 schematic sheet, a KiCad group, an IC and its decaps:
@@ -142,6 +148,16 @@ Safety rails:
 python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-reroute
 ```
 
+`route_diff.py --force-reroute` is the same for differential pairs: both
+members of every selected pair are stripped and the pair is routed again AS a
+coupled pair (`route.py` routes single-ended and would de-pair it). A pair is
+re-routed together or not at all: if one member is protected or plane-owning
+the other stays too. A routed pair is protected, so name both members exactly:
+
+```bash
+python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS_N" --force-reroute
+```
+
 ### Geometry Options
 
 | Option | Default | Description |
@@ -152,7 +168,7 @@ python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-rero
 | `--coplanar-nets` | (every net) | `route.py` only: limit `--coplanar-gap` to the nets these patterns match; the rest stay microstrip |
 | `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance of the **Default net class** for this run, in mm; nets in other classes route at their own class clearance (pairwise `max`, as KiCad's DRC does). **Omitted** → the board's own Default class from the sibling `.kicad_pro`. Given below the board's Default class, the DRC writeback lowers the output project's Default class to it (it never raises a class). Since #530 this no longer caps the other classes; use `--net-clearances <json>` for explicit per-net values |
 | `--net-clearances JSON` | (auto-read) | A JSON object mapping net name → that net's class clearance (mm), used as given instead of the map auto-read from the sibling `.kicad_pro`'s non-Default classes. `route.py`, `route_diff.py`, `route_planes.py`. See [cross-class clearance](api-routing-config.md#cross-class-clearance-kicad-maxclassa-classb) |
-| `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). **This is the flag for a chained run**: on a project an earlier step already lowered, the run stays at that lower floor instead of routing wider, which is what the recorded corpus chains and the routing skills use. GUI: the **Clearance ceiling** checkbox next to Min Clearance |
+| `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). **This is the flag for a chained run**: on a project an earlier step already lowered, the run stays at that lower floor instead of routing wider, which is what the recorded corpus chains and the routing skills use. GUI: the **Clearance ceiling** checkbox next to Min Clearance. A non-Default class the ceiling lowers by more than 2x (a 0.6 mm high-voltage class under 0.1) is named with a WARNING on the console and in `JSON_SUMMARY.design_rules.ceiling_lowered_classes` (class, clearance, capped value, nets); a clearance that must hold belongs in a `.kicad_dru` rule, which the ceiling never lowers (#1561) |
 | `--via-size` | Default net-class via (else 0.5) | Via outer diameter in mm. **Given** → every net's vias are this size. **Omitted** → each net's vias are drawn at its **own** net class / `.kicad_dru` `via_diameter` (#530 decision 4): the router carries one via-legality map per distinct via geometry on the board (`grid_router` 0.22.0+; an older binary routes every net at the Default class size and says so) |
 | `--via-drill` | Default net-class drill (else 0.3) | Via drill diameter in mm; per-net exactly like `--via-size` |
 | `--grid-step` | 0.1 | Grid resolution in mm |
@@ -175,7 +191,7 @@ the Route tab). The defaults (`auto`, `fab`) live in `routing_defaults.py`
 |--------|---------|-------------|
 | `--fab-tier` | `auto` | `auto` (the standard floor, escalating to advanced when a fine-pitch fan-out, plane tap or last-resort via cannot fit; warned and counted), `standard` (no extra fab cost, **hard**) or `advanced` (tighter, "more costly", **hard**) |
 | `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
-| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums; an unset key falls back to the fab tier floor, except clearance, which falls back to the Default net class's clearance, #1160; with `--no-fix-drc-settings` descents stop at what KiCad grades the unchanged project at: a rule it leaves out at KiCad's factory value, #1287, and clearance at the Default class floored at `min_clearance`, #1262), `off` (never; the net fails and is reported -- except a wide power/impedance net's pad-entry neck of at most 2 mm of path, `routing_defaults.PAD_ENTRY_NECK_MM`) |
+| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums; an unset key falls back to the fab tier floor, except clearance, which falls back to the Default net class's clearance, #1160; a `min_clearance` the writeback lowered to a pad clearance override is not read as the board's own minimum: the value it replaced is recorded in `kicad_routing_tools.pad_override_min_clearance` and read instead while the rule still holds the capped value, #1369; with `--no-fix-drc-settings` descents stop at what KiCad grades the unchanged project at: a rule it leaves out at KiCad's factory value, #1287, and clearance at the Default class floored at `min_clearance`, #1262), `off` (never; the net fails and is reported -- except a wide power/impedance net's pad-entry neck of at most 2 mm of path, `routing_defaults.PAD_ENTRY_NECK_MM`) |
 | `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired -- on every routing CLI that takes it (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`); an exit code the run already had for its own reason wins. For a net with its own width -- `--power-nets`, an impedance width, a wider net class -- this means copper that SHIPS under width (one `design_rules` row per net), not every narrower routing attempt: a power net on `route.py` is measured over the whole net (#1033); an impedance- or class-width net, and `repair_planes.py`'s `--power-nets` taps, over the copper the run laid, so a fanout stub an earlier step drew at its own width is not counted |
 
 The tier is a **floor ladder**:
@@ -206,6 +222,12 @@ Under `board`, a descent stops at the board's own `rules.min_*` (Board Setup >
 Constraints); a minimum the board leaves unset (KiCad writes 0) falls back to the
 fab tier floor for that key, except `min_clearance`, which falls back to the
 Default class (#1160). Non-Default nets never descend below their own class.
+The annular ring (`min_via_annular_width`) bounds the via rather than a key of
+its own: a rung's diameter is raised to its drill plus that ring each side, as
+the working via is sized (#1349), so no descended via rings below it (#1579;
+on a board declaring ring 0.12, via 0.25 and hole 0.15 the 0.30/0.15 and
+0.25/0.15 rungs both become 0.39/0.15). Where every rung is then larger than
+the request, a via-in-pad that cannot fit its pad keeps the requested via.
 Whether KiCad then accepts the copper depends on the DRC-settings writeback:
 
 - **With it** (the default), a clearance descent below the Default class lowers
@@ -237,9 +259,11 @@ request is never pinned up to a board minimum, only to the fab floor. Under
 `off` nothing is narrowed and a net that cannot complete at the requested
 geometry fails and is reported, with one bounded exception: a wide (power or
 impedance) net may neck below its width for at most 2 mm of routed path
-(`routing_defaults.PAD_ENTRY_NECK_MM`) on one edge or one via-to-pad tap --
-the pad-entry stretch a wide rail cannot keep into a narrow pin. A longer neck
-fails the edge. A power net's under-width copper is recorded like any other
+(`routing_defaults.PAD_ENTRY_NECK_MM`) at a pad entry -- the stretch a wide
+rail cannot keep into a narrow pin: a whole edge that short, the last stretch
+into the pin of a longer edge whose rest keeps the net's width (#1452), or one
+via-to-pad tap. A longer neck fails the edge, and the failure names the
+allowance and the edge's span rather than advising a smaller track. A power net's under-width copper is recorded like any other
 narrowing (below), so `--strict-sizes` still sees it.
 
 **Net-filtered keep-outs.** A KiCad rule area has no net dimension, so a
@@ -266,6 +290,24 @@ inside a region (from a path that does not stamp the region, such as the plane
 finalize's taps and joins, or already in the input) is printed and reported as
 `net_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (`[]` =
 clean; absent when the board has no such rule).
+
+**Track bans.** A `disallow track` rule scoped without a rule area -- the usual
+way to keep a class on some layers, e.g.
+`(rule "hs_layers" (constraint disallow track) (condition "A.NetClass == 'HS' && A.Layer != 'F.Cu'"))`
+or the same with a `(layer B.Cu)` clause -- is honoured by route.py and
+route_diff.py the same way (no flag): each net it binds (its condition
+evaluated per net and copper layer) routes with those layers FORBIDDEN, so it
+lays no track there while through vias may still span them, which is what
+KiCad grades (`items_not_allowed` per track, never per via). The console says
+`.kicad_dru rule 'hs_layers': honoured as forbidden layers: N of M net(s) route
+no track on B.Cu`, stub layer switches refuse those layers for those nets, and
+the shipped-board audit above counts any bound-net track left on one. A net
+that cannot reach its pads within its allowed layers fails, as it would by
+hand. A `disallow via` (or `through_via`) rule is not honoured by any routing
+step and is listed NOT honoured in `design_rules.unsupported_rules`, as is any
+other token (`pad`, `zone`, `hole`, ...); a `micro_via`, `blind_via` or
+`buried_via` ban asks nothing of the router, which lays through vias only.
+check_drc grades every track and via token (`items-not-allowed`).
 
 **Disclosure.** Every descent is recorded and reported three ways: the
 `JSON_SUMMARY` block `design_rules` (policy, tier, the board floors read, every
@@ -359,7 +401,7 @@ live board via the pcbnew API.
 |--------|---------|-------------|
 | `--power-nets` | - | Glob patterns for power nets (e.g., `"*GND*" "*VCC*"`) |
 | `--power-nets-widths` | - | Track widths in mm for each power-net pattern (must match `--power-nets` length) |
-| `--neckdown-length` | 2.5 | Length in mm of the pad-entry zone at each pad end of a neck-down route (a failed wide power route retried at the default width): the power width capped at the pad's short side where it fits, the default width only where it does not (#1318) |
+| `--neckdown-length` | 2.5 | Length in mm of the pad-entry zone at each pad end of a neck-down route (a failed wide power route retried at the default width): the power width capped at the pad's short side where it fits, the default width only where it does not (#1318). Under `--escalation off` capped at 2 mm less the taper (#1452) |
 | `--neckdown-taper-length` | 0.5 | Narrow-to-wide width taper length in mm (0 = abrupt) |
 | `--no-power-tap-neckdown` | off | Disable the neck-down retry of failed wide power routes |
 
@@ -740,7 +782,7 @@ See [Length Matching](length-matching.md#time-matching) for how propagation dela
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--json-out FILE` | - | Also write the run's `JSON_SUMMARY` to FILE. This is the merged tally: when the end-of-run reconciliation fires, stdout carries a second, subset-scoped summary, and scraping either one alone is wrong. Prefer this over parsing stdout |
+| `--json-out FILE` | - | Also write the run's `JSON_SUMMARY` to FILE. This is the merged tally: when the end-of-run reconciliation fires, stdout carries a second, subset-scoped summary, and scraping either one alone is wrong. Prefer this over parsing stdout. `route_diff.py` takes it too, with the same meaning (#1421). A run with nothing to route still writes the file, with a `status` saying why |
 | `--write-fill` | off | After writing the board, fill its zones with KiCad's own zone filler so the file carries `(filled_polygon ...)` blocks (#910); without it the board ships zone outlines only. Needs KiCad's bundled python |
 | `--capabilities` | off | Print this clone's module and flag inventory as JSON and exit (see `krt_capabilities.py --require`) |
 

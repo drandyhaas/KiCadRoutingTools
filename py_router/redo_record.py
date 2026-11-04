@@ -20,6 +20,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -97,6 +98,32 @@ def env_prefix_tokens(knobs: dict) -> list:
     return [f"{k}={shlex.quote(v)}" for k, v in knobs.items()]
 
 
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def split_env_prefix(argv):
+    """(env, argv): the command's leading `NAME=value` assignments, and the
+    command that follows them (#1302).
+
+    The recorder writes the env knobs a step ran with as that prefix -- the
+    shell's own spelling, so `bash redo_commands.sh` applies them -- and an
+    agent may type one by hand. A replayer must apply them as the child's
+    ENVIRONMENT: handed to Popen as argv, `KICAD_PLANE_FRAGILITY_COST=0` was
+    run as a program (PermissionError / FileNotFoundError), and a replayer
+    that dropped them routed the step at the defaults instead. The parsed
+    manifest keeps the prefix in argv, so every reader sees what was run;
+    the analysis helpers (board_io, is_check_cmd, the pruner) are blind to
+    it by construction, and anything that EXECUTES or converts a command
+    splits it here."""
+    env = {}
+    i = 0
+    while i < len(argv) and _ENV_ASSIGN.match(argv[i]):
+        k, v = argv[i].split("=", 1)
+        env[k] = v
+        i += 1
+    return env, list(argv[i:])
+
+
 def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
     """Append this process's invocation to the manifest named by manifest_env.
 
@@ -126,17 +153,27 @@ def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
             return
         cmd = ["python3", "-u", "-X", "utf8"] + argv
         knobs = _replay_knobs()
-        quoted = " ".join(env_prefix_tokens(knobs)
-                          + [shlex.quote(a) for a in cmd])
-        header = ""
-        if not os.path.exists(manifest) or os.path.getsize(manifest) == 0:
-            header = ("#!/bin/bash\n"
-                      "# Auto-recorded stress-test command manifest (issue #132).\n"
-                      "# Replay with redo_stress_test.py.\n"
-                      "set -e\n")
         cwd = os.getcwd()
-        with open(manifest, "a", encoding="utf-8") as f:
-            f.write(f"{header}# cwd={shlex.quote(cwd)}\n{quoted}\n")
+        write_record(manifest, cmd, cwd, knobs)
         _register_timing(manifest, cmd, cwd, knobs)
     except Exception:
         pass
+
+
+def write_record(manifest: str, cmd: list, cwd: str, knobs: dict) -> None:
+    """Append ONE command to `manifest` in the recorded format: the header
+    when the file is new, the `# cwd=` line, then the shell-quoted command
+    led by its env knobs as `NAME=value`. The one writer of the format:
+    `record_invocation` uses it, and so does a runner that records the steps
+    it runs into a manifest of their own (judge_seeds' route folders, #1592).
+    Raises on an unwritable path; the caller decides whether that matters."""
+    quoted = " ".join(env_prefix_tokens(knobs)
+                      + [shlex.quote(a) for a in cmd])
+    header = ""
+    if not os.path.exists(manifest) or os.path.getsize(manifest) == 0:
+        header = ("#!/bin/bash\n"
+                  "# Auto-recorded stress-test command manifest (issue #132).\n"
+                  "# Replay with redo_stress_test.py.\n"
+                  "set -e\n")
+    with open(manifest, "a", encoding="utf-8") as f:
+        f.write(f"{header}# cwd={shlex.quote(cwd)}\n{quoted}\n")

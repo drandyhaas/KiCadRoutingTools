@@ -303,9 +303,18 @@ class TestBothInteractiveFanoutPathsPassTheCeiling(unittest.TestCase):
         fn = _func_src(self.src, '_apply_fanout_results')
         self.assertIn('apply_drc_settings_fix(', fn,
                       'the inline path must record its floors somewhere')
-        self.assertIn('fanout_config', fn,
-                      'and it must hand that helper the fanout config, which '
-                      'is what carries clamp_netclasses + clearance_ceiling')
+        # The ceiling, and only when the cap pass ran and did not refuse:
+        # without the pass bga_fanout.py keeps the classes (#1529), which
+        # test_fanout_floor_parity_gui's no-cap-pass arm grades. On this
+        # branch it rides the same project writeback as the routing ceiling.
+        flat = ''.join(fn.split())
+        self.assertIn("_cap_ceiling=(_fcfg.get('clearance_ceiling')"
+                      "ifcap_summaryisnotNone"
+                      "andnotcap_summary.startswith(CAP_NOT_RUN)elseNone)", flat,
+                      'the inline path must clamp to the ceiling, when its cap '
+                      'pass ran')
+        self.assertIn("clearance_ceiling=min(_ceilings)if_ceilingselseNone", flat,
+                      'and hand that ceiling to the writeback')
 
     def test_the_standalone_path_clamps_too(self):
         fn = _func_src(self.src, 'run_cap_optimization')

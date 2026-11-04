@@ -123,9 +123,8 @@ def _stamp_rules(doc: Dict, min_clearance_used, design_rules) -> None:
         # `unsupported_rules` is per summary (its own run's config); the rest
         # of the block is the process-wide fab_tiers ledger.
         _old = doc.get('design_rules')
-        _keep = ({'unsupported_rules': _old['unsupported_rules']}
-                 if isinstance(_old, dict) and 'unsupported_rules' in _old
-                 else {})
+        _keep = ({k: _old[k] for k in ('unsupported_rules', 'scoped_clearance')
+                  if k in _old} if isinstance(_old, dict) else {})
         doc['design_rules'] = dict(design_rules, **_keep)
 
 

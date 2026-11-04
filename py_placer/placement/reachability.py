@@ -196,14 +196,42 @@ def _pad_on_layer(pad, layer) -> bool:
     return layer in layers or any(l in ('*.Cu',) for l in layers)
 
 
+def outline_edges(pcb):
+    """`[((x0, y0), (x1, y1)), ...]`: every Edge.Cuts edge copper must keep
+    away from (#1402) -- the outline's rings, every cutout and slot, and a
+    milled inner contour -- in the DRC's own reading (`check_drc.
+    board_edge_geometry`). A plain rectangle has no ring in the parser (its
+    bounds ARE the outline), so its four sides are returned from the bounds."""
+    from check_drc import board_edge_geometry
+    rings, _outer, _cut = board_edge_geometry(pcb.board_info)
+    edges = []
+    for ring in rings:
+        pts = list(ring)
+        for a, b in zip(pts, pts[1:] + pts[:1]):
+            edges.append((tuple(a), tuple(b)))
+    if not rings:
+        bb = getattr(pcb.board_info, 'board_bounds', None)
+        if bb:
+            x0, y0, x1, y1 = bb
+            c = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            edges.extend(zip(c, c[1:] + c[:1]))
+    return edges
+
+
 def slack_field(pcb, target_net_id, layer, view, base_clearance,
-                net_clearances=None, step=0.01):
+                net_clearances=None, step=0.01, edge_clearance=None):
     """(slack, own, D) for one layer.
 
     `net_clearances` is {net_id: clearance_mm} -- the per-net map the routing
     config already resolves from netclasses and `.kicad_dru`, so this grades at
     what the board would actually route at rather than at one guessed number.
     Nets absent from it use `base_clearance`.
+
+    `edge_clearance` (#1402) is the copper-to-Edge.Cuts floor: when given, the
+    outline, every cutout and slot (a mouse-bite row's drilled webs included)
+    is an obstacle at that clearance, so a lane the outline closes reads
+    closed. NPTH holes are obstacles either way, at the base clearance.
+    None keeps the field copper-only, as before.
     """
     ndimage = _require_scipy()
     w = int(math.ceil((view[2] - view[0]) / step))
@@ -230,14 +258,31 @@ def slack_field(pcb, target_net_id, layer, view, base_clearance,
     for fp in pcb.footprints.values():
         for p in fp.pads:
             if getattr(p, 'pad_type', '') == 'np_thru_hole':
-                # NPTH has no copper: only its hole matters, and that is a
-                # drill constraint, not a clearance one.
+                # NPTH has no copper: only its hole matters (#1402: an
+                # obstacle at the base clearance, on every layer).
+                if (p.drill or 0) > 0:
+                    from kicad_parser import pad_drill_capsule
+                    p1, p2, r = pad_drill_capsule(p)
+                    _capsule(grid_for(None), p1[0], p1[1], p2[0], p2[1], r,
+                             view, step)
                 continue
             if not _pad_on_layer(p, layer):
                 continue
             g = own if p.net_id == target_net_id else grid_for(p.net_id)
             _rect(g, p.global_x, p.global_y, p.size_x, p.size_y, view, step,
                   getattr(p, 'rect_rotation', 0.0) or 0.0)
+    # #1402: the outline, cutouts and slots, at the copper-to-edge floor. A
+    # line drawn at least one cell thick cannot be stepped across.
+    if edge_clearance is not None and edge_clearance > 0:
+        eg = per_class.setdefault(round(float(edge_clearance), 4),
+                                  np.zeros((h, w), dtype=bool))
+        for (ax, ay), (bx, by) in outline_edges(pcb):
+            if (max(ax, bx) < view[0] - edge_clearance
+                    or min(ax, bx) > view[2] + edge_clearance
+                    or max(ay, by) < view[1] - edge_clearance
+                    or min(ay, by) > view[3] + edge_clearance):
+                continue
+            _capsule(eg, ax, ay, bx, by, step, view, step)
     # #1031: a rule area forbidding tracks on this layer is an obstacle at the
     # base clearance, exactly as the router prices it (clearance +
     # track_width/2 from the region), so a pad seated in the band no longer
@@ -849,7 +894,7 @@ def without_routed_copper(pcb):
 def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
                      layers=None, view=None, track_mm=0.15, via_mm=0.6,
                      base_clearance=0.15, net_clearances=None, step=0.01,
-                     margin_mm=4.0) -> Reachability:
+                     margin_mm=4.0, edge_clearance=None) -> Reachability:
     """Can a track of `track_mm` get from `seed_xy` to the rest of its net?
 
     `view` defaults to a `margin_mm` box around the seed, because the answer is
@@ -877,7 +922,8 @@ def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
     slacks, owns, Ds = [], [], []
     for layer in layers:
         s, o, D = slack_field(pcb, net_id, layer, view, base_clearance,
-                              net_clearances, step)
+                              net_clearances, step,
+                              edge_clearance=edge_clearance)
         slacks.append(s)
         owns.append(o)
         Ds.append(D)

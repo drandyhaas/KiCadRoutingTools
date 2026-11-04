@@ -154,11 +154,13 @@ its load caps show `clock`, the group the placer folds into `core`.*
 | `why`, `note` | free text; `why` is where the judgement is recorded |
 | `templates` | the group's template candidates, `[{"chip", "kind", "why"}]`: a chip whose datasheet layout the skill copies into an intent `templates[]` row ([Datasheet layouts](#datasheet-layouts-templates)). `kind` is `switching stage` (anything switching current through an inductor, transformer, flying or bootstrap cap, or a motor) or `rf front end` (the parts between a radio chip's RF pins and its antenna). The placer does not read it |
 
-**How to group:** by function, not by schematic sheet or net count. The power
-entry and its conditioning, the core and its decaps, its clock, each interface
-with its protection and series parts, the user interface (LEDs with their
-resistors, buttons). A decoupling cap belongs with the IC whose supply pin it
-decouples; a load or RC cap belongs with the part it loads. Do not send the
+**How to group:** by function, never by net count. The power entry and its
+conditioning, the core and its decaps, its clock, each interface with its
+protection and series parts, the user interface (LEDs with their resistors,
+buttons). Where the project has a schematic, start from it (`board_context`'s
+`## Schematic`): its sheets are the first cut, and each block drawn together on
+a sheet goes into one group. A decoupling cap belongs with the IC whose supply
+pin it decouples; a load or RC cap belongs with the part it loads. Do not send the
 power group to an edge: say `near` its power entry's group.
 
 **Crystals are claimed for you.** `check_floorplan --emit-intent` finds each
@@ -167,7 +169,8 @@ nets (`crystals.py`) and writes them into the intent as proximity claims
 (graded as warnings; `place_simple` derives the same rows itself when an intent
 lacks them): each crystal leg within 8.1 mm of its pin and each load
 cap within 2.2 mm of the crystal, pad edge to pad edge (three human boards in
-four do at least that well). A leg that reaches its pin through a series
+four do at least that well), each plus the size of the crystal pad it measures
+from (#1613: a through-hole can's big pads keep its caps further off). A leg that reaches its pin through a series
 resistor (the RP2040's XOUT, an STM32's) is claimed link by link: the crystal
 at the resistor, the resistor at the pin. Every claim's subject is then moved into the group of the
 part its claims end at: the load caps follow the crystal and the crystal
@@ -184,11 +187,11 @@ emptied `clock` group is dropped, and `near` entries that named it point at
 | term | what it costs | flag (default) |
 |---|---|---|
 | signal wire | the Manhattan spanning tree of each signal net's pads, per mm | 1 (fixed) |
-| supply rails | the same tree for a rail (a net reaching more than a quarter of the parts, and more than 6 of them), per mm | `--rail-weight` (0.3) |
+| supply rails | the same tree for a rail (a net reaching more than a quarter of the parts, and more than 6 of them, or one the intent's `rails[]` declares), per mm | `--rail-weight` (0.3) |
 | ground | the same tree for ground: a plane, each pad only drops a via | `--ground-weight` (0.02) |
 | crossings | each crossing among the signal trees' edges, in mm of wire | `--crossing-weight` (2) |
 | claims | each claimed pad's distance to its partner's pad, per mm (intent `proximity[]`, crystals) | `--claim-weight` (1) |
-| claim limits | each claimed pad past its claim's `max_mm`, pad edge to the nearest partner pad on its net as `check_floorplan` grades it (a crystal leg past 8.1 mm of its pin, a load cap past 2.2 mm of its crystal), per mm | `--claim-limit-weight` (10) |
+| claim limits | each claimed pad past its claim's `max_mm`, pad edge to the nearest partner pad on its net as `check_floorplan` grades it (a crystal leg past 8.1 mm of its pin, a load cap past 2.2 mm of its crystal, each plus the crystal pad's size), per mm | `--claim-limit-weight` (10) |
 | decaps | each decap's distance to the supply-pin site it is matched to, per mm. A decap is a cap from ground to a rail some chip other than a connector (or the board's own contacts, a part whose pads span half the board) has a supply pin on, or between two rails that each carry a supply pin of one chip (a stacked domain), the rule `check_groups` reports by and `check_floorplan` grades by (`BoardView.decaps`); a chip's supply pins include its pins on a rail named as one, or named as one on a net local to it (`BoardView.rail_pins`). A rail's decaps are matched to its pin sites (an IC's supply pins within 1.5 mm of each other) at the least total distance, every site taking one decap before any takes two, so decaps spread over the pins; a decap goes to the sites of the chips in its own group when one is on its rail (an LDO's output cap at the LDO, not at the MCU's VDD pin). A decap none of whose chips is in its group (a load or RC cap the groups file put elsewhere, which `check_groups` WARNs) is left out of this term | `--decap-weight` (2) |
 | group contiguity | the spanning tree over a group's courtyards, priced by the gap between neighbours: zero while the group is one contiguous piece, whatever its shape | `--group-weight` (5) |
 | `near` / `apart` / `edge` | the groups file's hints (above) | `--near-weight` (2), `--apart-weight` (5), `--edge-weight` (2) |
@@ -265,8 +268,8 @@ overlaps, the movable parts in its way pushed aside in turn.
 
 ## Judging seeds by routing
 
-A placement is judged by routing it: blocking nets first (unrouted, then
-broken), then the joins the open nets still need (`joins_needed`: a
+A placement is judged by routing it: blocking nets first, then the joins
+the open nets still need (`joins_needed`: a
 missing 17-pad rail is 16, one stranded pad 1, and the rail-less board has
 fewer vias because the rail is missing), then vias, copper length and
 segment count. The objective's cost,
@@ -358,7 +361,7 @@ of it; `check_floorplan --intent` grades all of it.
 | `edge_connectors[]` with an `edge` | applied to an unlocked edge part (connector, receptacle, switch, test pad; a cap the emitter declared because it overhangs is not): held to that edge where every edge-connector conjunct holds (band, edge read, pad copper clear of the outline), sliding along it | yes |
 | `decaps` limits (`max_distance_mm`, `max_pin_distance_mm`) | priced where graded at error: the decap-limit term | yes |
 | `blocks[].rotation`, `rotation_candidates` | not read (`place_fanout_clearance --intent` holds them) | no rule checks a part's angle; the plan check bounds a zone on the declared angles, and `array_conflict` flags a row whose rotation contradicts them |
-| `arrays[]` | not read | yes (`array_formation`, `array_conflict`) |
+| `arrays[]` | not read: `place_simple` warns that the rows are graded only | yes (`array_formation`, `array_conflict`) |
 | `keep_away[]` | not read | yes (pad edge to pad edge, WARN unless its severity is raised); `route.py` reads the design brief's `keep_away` itself |
 | `replicate[]` | not read (`place_pose replicate --intent` applies it) | yes |
 | `templates[]` | applied and priced: each member seated at its template pose round its chip at the start, carried with every move of the chip, its drift priced (`--template-weight`, default 100 per mm); it joins the chip's group and is not priced as a decap | yes (`template`, WARN) |
@@ -533,6 +536,7 @@ after a QFN fanout, as tigard's does. See
 | `floorplan.py` | The floorplan intent: emit it, grade a board against it |
 | `design_brief.py`, `reconcile.py` | The design brief and `mechanical.json`, compiled into the intent |
 | `groups.py` | Placement blocks (KiCad groups, sheets) for intent zones and `route.py --group` |
+| `schematic.py` | The project's `.kicad_sch` tree, read for grouping: each part's sheet, the drawn blocks with their notes, the designer's layout notes as netlist-checked `proximity` rows (`board_context`'s `## Schematic`) |
 | `mating.py`, `connector_geometry.py`, `edge_facing.py` | Which way a connector opens; its drawn envelope against its edge; pad rows facing the outline |
 | `edge_seat.py` | An unlocked declared edge connector held to its edge: its turns, its distance, the stretches of the edge it may slide along, the end-of-run push apart |
 | `arrays.py` | Declared `arrays[]`: the formation and the pin order, graded |
@@ -577,23 +581,39 @@ gate, `place_pose` and the graders:
 - **Containers.** A large outline-only part (an e-paper panel's frame) or a
   pin-frame module (a Teensy) is graded by its holes, not as a body. The
   anneal's overlap prices it the same way: a courtyard over a pin frame's
-  drilled holes, on either face, and nothing for the frame's rect.
+  drilled holes, on either face, and nothing for the frame's rect -- nor
+  does an exclusive zone, which treats a container as no stranger. A drawn
+  courtyard makes such a part a body only when it covers at least half of
+  its frame (`legality.FRAME_COURTYARD_COVER`): rings round an enclosure's
+  posts, or a placeholder point, leave it a frame, and the placer names the
+  decision beside its container line. Those islands are still courtyards:
+  check_assembly grades a part on one as a courtyard pair
+  (`frame_courtyard`, courtyards_overlap's severity), the seat refuses it
+  through the same census it asks about pins, and the anneal prices each
+  island's box as it prices a hole.
 - **Bodies.** A footprint without a courtyard is graded by its fab drawing,
   else its silk, else its pad box (`body.py`); the fallback is named in the
   output.
 - **Estimated courtyards (#1300).** The placer, the seat gate and the
   renderer seat such a part on an ESTIMATED courtyard
   (`body.estimated_courtyards`, `QuenchState(estimate_courtyards=True)`):
-  the graded body above, united with the pads, grown by the courtyard
-  excess KiCad's libraries use -- 0.25 mm, 0.15 mm for a body under 2 mm,
-  0.5 mm on a connector, 1.0 mm on a BGA, which over 1014 corpus footprints
-  that draw both puts every side within 0.05 mm of the drawn courtyard on
-  61% of them. It contains what `check_assembly` grades, so a legal seed
-  keeps those bodies apart; before it, multichannel_mixer's radial caps (a
-  5 mm body on a 4 x 1.5 mm pad box) were packed into each other and every
-  seed graded NOT BUILDABLE. It is an input, not a grade: the graders, and
+  the graded body above, united with the pads, and no more. A library
+  courtyard stands a margin off its body, a spacing the board itself never
+  declared, so the estimate adds none. It is what `check_assembly` grades,
+  so a legal seed keeps those bodies apart; before it, multichannel_mixer's
+  radial caps (a 5 mm body on a 4 x 1.5 mm pad box) were packed into each
+  other and every seed graded NOT BUILDABLE. It is an input, not a grade: the graders, and
   two declared or locked poses judged against each other
   (`_Part.drawn_rect`), still read what the board draws.
+- **Pad copper past a drawn courtyard (#1588).** A courtyard pair is
+  graded courtyard on courtyard, as KiCad's `courtyards_overlap` grades it
+  (`legality.occupancy_shape`: a drawn courtyard as drawn, the occupancy box
+  only for a part that draws none), so a neighbour may stand over a pad that
+  reaches past its own courtyard, and the placer seats on the drawn
+  courtyard. place_simple names such parts (more than `PAD_REACH_NOTE_MM`)
+  once, as information (`pad_overhang`, in each seed's report and in
+  `judge.json`). A keep-out is physical, so it reads pad copper beside the
+  courtyard, in the grade (`rule_keepout`) and the seat (`pose_ok`).
 
 [docs/floorplan-intent.md](../../docs/floorplan-intent.md) has the intent's
 rules, and [docs/utilities.md](../../docs/utilities.md) each tool's full
@@ -634,3 +654,7 @@ contract.
   can is solid: on thunderscope, where the human board puts 354 parts under
   four cans and a heatsink, the placer ended with 6 and 16 parts illegal, and
   placed cleanly only with the cans removed.
+- **Rows formed after placement.** A declared `arrays[]` row is graded only.
+  A pass after the anneal could line a row's members up inside the space
+  they already took, keeping their order, pitch and one rotation, and keep
+  the change only where the board then routes no worse.

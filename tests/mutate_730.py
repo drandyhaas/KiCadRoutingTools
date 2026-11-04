@@ -211,11 +211,11 @@ ROWS = [
      '            override_holes.append((_h1[0], _h1[1], _h2[0], _h2[1], _hr,',
      '            override_holes.append((_h1[0], _h1[1], _h1[0], _h1[1], _hr,',
      (T730,), 'KILLED'),
+    # the hole's box and its circle (#1520) both centre on (hx, hy)
     ('site-A-rect-centred-on-the-PAD-not-the-circle', 'fc',
-     '                                (hx - hr, hy - hr, hx + hr, hy + hr, -1, None))',
-     '                                (p.global_x - hr, p.global_y - hr,'
-     '\n                                 p.global_x + hr, p.global_y + hr,'
-     ' -1, None))',
+     '                            hr = hd / 2.0 + grow\n',
+     '                            hr = hd / 2.0 + grow\n'
+     '                            hx, hy = p.global_x, p.global_y\n',
      (T730,), 'KILLED'),
     ('site-E-long-axis-drill', 'leg',
      '                            (hx - fp.x, hy - fp.y, hd / 2.0 + npth_grow))',

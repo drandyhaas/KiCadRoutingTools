@@ -71,6 +71,9 @@ _ALLOWED = {
     '_UNCONNECTED_MEMO': 'keyed on the board BYTES, so it cannot answer for a '
                          'different board',
     '_NET_RE': 'a compiled regex', '_LAYER_RE': 'a compiled regex',
+    '_CLI_VERSION_CACHE': 'the version string a kicad-cli BINARY prints, keyed '
+                          'on its path (#1432) -- a fact about the install, '
+                          'never about a board',
 }
 _unregistered = sorted(set(_globals) - set(_ALLOWED))
 check("every module-global container is registered with a reason",

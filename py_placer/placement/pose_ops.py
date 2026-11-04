@@ -78,7 +78,9 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
                  'graphic_pad_conflicts', 'graphic_pad_stack_count',
                  'pad_stack_count',
                  # #1306: one footprint's own pads touching on two nets.
-                 'own_pad_short_count')
+                 'own_pad_short_count',
+                 # #1451: a pad or footprint in a rule area forbidding it.
+                 'rule_area_item_count')
 
 #: The MAGNITUDES, and they are not a nicety: a count arm alone accepts a
 #: request that keeps the tally and deepens the damage. Measured on the
@@ -98,16 +100,28 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
 #: BUILDABLE. The pairs are measured by check_assembly's own function.
 #: #1266: a `[pad part, copper owner]` pair against footprint graphic copper.
 #: #1306: a `["U1.1", "U1.2"]` pair of one footprint's pads shorted.
+#: #1385: `[a, b]` courtyard pairs KiCad reports as errors, when the project
+#: declares `courtyards_overlap` an error (`courtyard_error_pairs`).
+#: #1451: `[ref, area]`, a part with a pad or its courtyard in a rule area
+#: that forbids it (`rule_area_item_pairs`).
+#: #1443: `[a, b]`, a part under a cover the intent declares, where it does
+#: not fit (`height_pairs`; only with an intent that declares one).
+#: #1535: `[ref, keep-out]`, a part inside one of the intent's `keepouts[]`
+#: (check_floorplan's `keepout` rule; only with an intent that declares one
+#: at ERROR severity), with its depth in `intent_keepout_amount`.
 PAIR_KEYS = ('pad_conflict_pairs', 'hole_conflict_pairs',
              'graphic_pad_conflict_pairs', 'graphic_pad_stack_pairs',
-             'pad_stack_pairs', 'own_pad_short_pairs')
+             'pad_stack_pairs', 'own_pad_short_pairs',
+             'courtyard_error_pairs', 'rule_area_item_pairs', 'height_pairs',
+             'intent_keepout_pairs')
 
 MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall',
                   'oob_keepout_copper_amount',
                   'oob_graphic_copper_amount',
                   'mating_keepout_amount',
                   'graphic_pad_shortfall',
-                  'pad_stack_area')
+                  'pad_stack_area',
+                  'intent_keepout_amount')
 
 #: What `legal` does and does NOT cover, published with every summary (#962
 #: follow-up item 4). A partial claim must read as partial.
@@ -123,7 +137,16 @@ LEGAL_SCOPE = ('pad-pad clearance', 'hole-hole clearance', 'pad copper vs the '
                "two parts' pad copper overlapping on a shared side, ANY net "
                "-- a pad stack, check_assembly's pad_intersection (#1064)",
                "one footprint's own pads touching on two different real nets "
-               "(KiCad's shorting_items; #1306)")
+               "(KiCad's shorting_items; #1306)",
+               "a NEW courtyard overlap pair, when the project declares "
+               "courtyards_overlap an error (#1385)",
+               "pads and courtyards inside a rule area, board-level or "
+               "footprint-owned, whose (pads not_allowed) / (footprints "
+               "not_allowed) forbids them (KiCad's items_not_allowed; #1451)",
+               "with --intent, a part inside one of the intent's keepouts[] "
+               "(fence keep-outs compiled from blocks[].fence_mm and cans[] "
+               "included), as check_floorplan's keepout rule grades it, when "
+               "that rule is at ERROR severity (#1535)")
 LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     '(disclosed as graphic_edge_shortfall_refs, not gated)',
                     'footprint copper the parser does not model: pad-less '
@@ -132,10 +155,11 @@ LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     'footprint graphic copper on a board with no outline, and '
                     'on a part that changed side in memory (listed as '
                     'no-outline / moved-side in oob_graphic_copper_unmeasured)',
-                    'rule areas a footprint owns (listed in '
-                    'keepout_copper_unmeasured)',
-                    'solder paste and mask openings', 'component bodies / '
-                    'courtyards', 'routing', 'zone fill',
+                    'the track band of rule areas a footprint owns (listed '
+                    'in keepout_copper_unmeasured)',
+                    'solder paste and mask openings', 'component bodies, and '
+                    'courtyards unless the project declares courtyards_overlap '
+                    'an error', 'routing', 'zone fill',
                     "parts sharing an origin whose pads do not intersect "
                     "(check_assembly's coincident_origins)")
 MAGNITUDE_EPS = 1e-6
@@ -159,7 +183,8 @@ SUMMARY_LISTS = ('pad_clearance_required', 'worst',
                  'keepout_copper_unmeasured_after', 'pad_stack_pairs_after',
                  'graphic_pad_conflict_pairs_after',
                  'graphic_pad_stack_pairs_after', 'graphic_pad_rows_after',
-                 'graphic_pad_unmeasured_after', 'own_pad_short_pairs_after')
+                 'graphic_pad_unmeasured_after', 'own_pad_short_pairs_after',
+                 'rule_area_items_after')
 
 #: ...and the lists inside each pad-edge grade (`pad_edge_before/_after`).
 PAD_EDGE_LISTS = ('findings', 'unmeasured', 'rules_unmeasured')
@@ -431,7 +456,8 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
                 pcb_data, op['from'], op['to'],
                 anchor=op.get('anchor'), offset=op.get('offset'),
                 allow_net_mismatch=op.get('allow_net_mismatch') or (),
-                only=op.get('only') or (), skip=op.get('skip') or ())
+                only=op.get('only') or (), skip=op.get('skip') or (),
+                channels=op.get('channels'))
             for r in report['source_refs']:
                 sources.setdefault(r, report['from']['as_given'])
             if reports is not None:
@@ -572,7 +598,8 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
 # ---------------------------------------------------------------------------
 
 def grade(pcb_data, board_path: str, clearance: float,
-          board_edge_clearance=None, declared_keepouts=()) -> Dict:
+          board_edge_clearance=None, declared_keepouts=(), waivers=((), ()),
+          declared_heights=None, intent_keepouts=None) -> Dict:
     """`grade_pad_legality` at this board's own poses -- never a re-derivation.
 
     `pcb_file` is passed so `PadClearanceModel` can read the netclasses, the
@@ -581,16 +608,105 @@ def grade(pcb_data, board_path: str, clearance: float,
     would, and one that declares them is graded the way check_drc will.
     `declared_keepouts` is the intent's keep-outs (#1098): a declared
     `mating:<ref>` replaces the derived plug region, as in the seeder.
+    `waivers` is the intent's (`waiver_pairs()`, `fixed_pose_courtyard_waivers()`),
+    which check_assembly hands its courtyard grade too (`intent_waivers`).
+    `declared_heights` is the intent's declared covers and part heights
+    (#1443, `Intent.height_declarations`), which that grade reads too.
     #1064: plus `pad_stack_census`, check_assembly's own pad_intersection
     channel, because `grade_pad_legality` skips a same-net pad pair before it
     measures anything and so never sees two parts' pads stacked on one net.
+    `intent_keepouts` (#1535) is `intent_keepout_gate`'s answer: the intent's
+    `keepouts[]` that check_floorplan's `keepout` rule gates, measured here as
+    that rule measures them.
     """
     from placement.legality import grade_pad_legality, pad_stack_census
     g = grade_pad_legality(pcb_data, clearance, pcb_file=board_path,
                            edge_margin=board_edge_clearance,
                            declared_keepouts=declared_keepouts)
     g.update(pad_stack_census(pcb_data, clearance))
+    g['courtyard_error_pairs'] = courtyard_error_pairs(pcb_data, board_path,
+                                                       waivers, declared_heights)
+    if declared_heights:
+        g['height_pairs'] = height_pairs(pcb_data, board_path, waivers,
+                                         declared_heights)
+    if intent_keepouts:
+        from placement.floorplan import keepout_findings
+        found = keepout_findings(pcb_data, board_path, intent_keepouts['keepouts'],
+                                 height_of=intent_keepouts['height_of'],
+                                 containers=intent_keepouts['containers'])
+        g['intent_keepout_refs'] = found
+        g['intent_keepout_pairs'] = sorted([f['ref'], f['keepout']] for f in found)
+        g['intent_keepout_amount'] = round(sum(f['area_mm2'] for f in found), 4)
     return g
+
+
+def intent_keepout_gate(intent, pcb_data, board_path: str) -> Optional[Dict]:
+    """The intent's `keepouts[]` this verb gates a move on (#1535), or None.
+
+    check_floorplan's `keepout` rule grades every part against them, and a
+    `set` or a `--near` snap used to land a part inside one with exit 0:
+    only the zones (#998) and the `mating:` regions (#1098, graded by
+    `grade_pad_legality` with the declared entry replacing the derived one)
+    reached this verb. The fence keep-outs `blocks[].fence_mm` and `cans[]`
+    compile to are in `intent.keepouts` already.
+
+    Gated only at ERROR severity, as `zone_check` gates zones: an author who
+    demoted `keepout` said the keep-outs are advisory. The part heights
+    (when a keep-out has a `max_height_mm`) and the containers are read once
+    here, from the input board -- both are properties of the part, not of
+    its pose -- so a snap re-grades each candidate without re-measuring."""
+    if intent is None:
+        return None
+    from placement import floorplan as _fp
+    from placement import legality as _lg
+    ks = tuple(k for k in (getattr(intent, 'keepouts', None) or ())
+               if not str(k.get('name', '')).startswith(_fp.MATING_PREFIX))
+    if not ks:
+        return None
+    severity = intent.severity_of('keepout')
+    height_of = None
+    if any(k.get('max_height_mm') is not None for k in ks):
+        from placement import heights as _h
+        with contextlib.redirect_stdout(io.StringIO()):
+            height_of = _h.for_board(pcb_data, board_path,
+                                     intent.height_declarations()).height
+    return {'keepouts': ks, 'severity': severity,
+            'gated': severity == _fp.ERROR,
+            'height_of': height_of,
+            'containers': frozenset(_lg.container_refs(pcb_data,
+                                                       pcb_file=board_path))}
+
+
+def height_pairs(pcb_data, board_path: str, waivers=((), ()),
+                 declared_heights=None) -> List[List[str]]:
+    """`[[a, b], ...]`: the pairs check_assembly's courtyard grade blocks on
+    the heights (#1443) -- a part under a declared cover, or a raised body,
+    where it does not fit. KiCad sees none of them (a card draws no
+    courtyard), so `courtyard_error_pairs` cannot either."""
+    from placement.legality import CourtyardCensus
+    with contextlib.redirect_stdout(io.StringIO()):
+        g = CourtyardCensus(pcb_data, board_path, intent_waivers=waivers[0],
+                            courtyard_waivers=waivers[1],
+                            declared_heights=declared_heights).grade()
+    return sorted([q.a, q.b] for q in g.blocking if getattr(q, 'kind', None) == 'height')
+
+
+def courtyard_error_pairs(pcb_data, board_path: str,
+                          waivers=((), ()), declared_heights=None) -> List[List[str]]:
+    """`[[a, b], ...]`: the courtyard pairs KiCad reports as ERRORS on this
+    board (#1385) -- every real, unwaived pair, whatever its size -- when its
+    project declares `courtyards_overlap` an error; `[]` otherwise (the
+    census is not even built then). This verb used to grade pads and holes
+    only, so a `--near` pose could sit in a neighbour's courtyard and report
+    legal on a project whose own DRC fails it."""
+    from placement.legality import CourtyardCensus, courtyard_severity_of
+    if courtyard_severity_of(board_path)[0] != 'error':
+        return []
+    with contextlib.redirect_stdout(io.StringIO()):
+        pairs = CourtyardCensus(pcb_data, board_path, intent_waivers=waivers[0],
+                                courtyard_waivers=waivers[1],
+                                declared_heights=declared_heights).grade().error_pairs
+    return sorted([q.a, q.b] for q in pairs)
 
 
 def worsened(before: Dict, after: Dict) -> List[str]:
@@ -649,7 +765,8 @@ PAIR_OF = {'pad_conflicts': 'pad_conflict_pairs',
            'graphic_pad_conflicts': 'graphic_pad_conflict_pairs',
            'graphic_pad_stack_count': 'graphic_pad_stack_pairs',
            'pad_stack_count': 'pad_stack_pairs',
-           'own_pad_short_count': 'own_pad_short_pairs'}
+           'own_pad_short_count': 'own_pad_short_pairs',
+           'rule_area_item_count': 'rule_area_item_pairs'}
 
 
 def regrade_refusal(before: Dict, after: Dict, bad: List[str],
@@ -689,6 +806,22 @@ def regrade_refusal(before: Dict, after: Dict, bad: List[str],
             (bool(after.get('mating_keepout_error')), 'mating_keepout_error')):
         if dirty:
             out[label + ' (--strict-legal)'] = []
+    return out
+
+
+def own_pairs(report: Dict, ref: str) -> Dict[str, List]:
+    """`{key: pairs}`: the gating pairs (`PAIR_KEYS`) part `ref` is itself in
+    -- a pair naming it, or one of its pads (`U1.1`). What a snap judges a
+    candidate on (#1506): the moved part's own legality, never another
+    part's damage the board already had."""
+    def mine(pr):
+        return any(isinstance(x, str) and (x == ref or x.startswith(ref + '.'))
+                   for x in (pr if isinstance(pr, (list, tuple)) else (pr,)))
+    out = {}
+    for k in PAIR_KEYS:
+        got = [pr for pr in report.get(k) or () if mine(pr)]
+        if got:
+            out[k] = got
     return out
 
 
@@ -736,6 +869,19 @@ def _legality_row(before: Dict, after: Dict) -> Dict:
     # #1306: which of one footprint's own pads are shorted together.
     row['own_pad_short_pairs_after'] = after.get('own_pad_short_pairs')
     row['own_pad_basis'] = after.get('own_pad_basis')
+    # #1451: which pads and footprints sit in a rule area forbidding them.
+    row['rule_area_items_after'] = after.get('rule_area_items')
+    # #1385: courtyard pairs KiCad reports as errors (project severity error).
+    row['courtyard_error_pairs_before'] = before.get('courtyard_error_pairs')
+    row['courtyard_error_pairs_after'] = after.get('courtyard_error_pairs')
+    # #1443: parts under a declared cover where they do not fit.
+    if 'height_pairs' in after:
+        row['height_pairs_before'] = before.get('height_pairs')
+        row['height_pairs_after'] = after.get('height_pairs')
+    # #1535: parts inside one of the intent's keepouts[].
+    if 'intent_keepout_pairs' in after:
+        row['intent_keepout_pairs_before'] = before.get('intent_keepout_pairs')
+        row['intent_keepout_pairs_after'] = after.get('intent_keepout_pairs')
     return row
 
 
@@ -744,7 +890,8 @@ def _legality_row(before: Dict, after: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 def _ranker_state(pcb, board_path: str, ref: str, at, *, clearance: float,
-                  board_edge_clearance: float):
+                  board_edge_clearance: float, declared_heights=None,
+                  keepouts=None):
     """The ranker's state for `ref`, judged from the INPUT board.
 
     `pcb` / `board_path` are the board the caller's re-grade compares
@@ -761,10 +908,16 @@ def _ranker_state(pcb, board_path: str, ref: str, at, *, clearance: float,
     to the input pose too (`QuenchState.incumbent_at`), before the move, so
     that branch admits only poses less off the board than the INPUT, not
     than the request.
+
+    `keepouts` is the intent's `keepouts[]` (#1535), which the seat gate
+    prices as it does in the seeder, so the ranked rung does not offer a
+    pose inside one.
     """
     import pose_score
     st = pose_score.make_state(pcb, board_path, clearance=clearance,
-                               board_edge_clearance=board_edge_clearance)
+                               board_edge_clearance=board_edge_clearance,
+                               declared_heights=declared_heights,
+                               keepouts=keepouts)
     part = st.parts.get(ref) if (at is not None
                                  and hasattr(st, 'parts')) else None
     if part is not None:
@@ -823,7 +976,8 @@ def _pose_key(p: Dict) -> Tuple[float, float, float]:
 
 def nearest_legal(board_path: str, ref: str, *, clearance: float,
                   board_edge_clearance: float, radius: float, step: float,
-                  rotations=None, limit: int = 12, pcb_data=None, at=None):
+                  rotations=None, limit: int = 12, pcb_data=None, at=None,
+                  declared_heights=None, keepouts=None):
     """The ranked legal poses for `ref` on the board at `board_path`.
 
     `pose_score.rank_poses`, unchanged: this only resolves the knobs from the
@@ -843,7 +997,8 @@ def nearest_legal(board_path: str, ref: str, *, clearance: float,
     from kicad_parser import parse_kicad_pcb
     pcb = pcb_data if pcb_data is not None else parse_kicad_pcb(board_path)
     st = _ranker_state(pcb, board_path, ref, at, clearance=clearance,
-                       board_edge_clearance=board_edge_clearance)
+                       board_edge_clearance=board_edge_clearance,
+                       declared_heights=declared_heights, keepouts=keepouts)
     kw = {} if rotations is None else {'rotations': tuple(rotations)}
     on_board, ranked, diag = _rank(pcb, board_path, ref, st, radius=radius,
                                    step=step, limit=limit + 1, **kw)
@@ -861,7 +1016,8 @@ def nearest_legal(board_path: str, ref: str, *, clearance: float,
 
 def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
                     board_edge_clearance: float, radius: float, step: float,
-                    pcb_data=None, at=None):
+                    pcb_data=None, at=None, declared_heights=None,
+                    keepouts=None):
     """Poses to TRY for a snap, nearest-first, from TWO rungs. (list, census)
 
     `board_path` / `pcb_data` are the INPUT board -- the one the caller's
@@ -901,7 +1057,8 @@ def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
     pcb = pcb_data if pcb_data is not None else parse_kicad_pcb(board_path)
     request = None if at is None else (float(at[0]), float(at[1]), rot)
     st = _ranker_state(pcb, board_path, ref, request, clearance=clearance,
-                       board_edge_clearance=board_edge_clearance)
+                       board_edge_clearance=board_edge_clearance,
+                       declared_heights=declared_heights, keepouts=keepouts)
     # "The knobs veto even staying put" (run-7 S4) is a fact about the part's
     # pose on the INPUT board, where the re-grade is no-worse by definition:
     # a veto THERE means the ranker's gates are stricter than the board. The
@@ -1047,7 +1204,9 @@ def shift_rows(pcb_data, rows: Sequence[Dict], dx: float, dy: float) -> List[Dic
 def search_replicate(board_path: str, pcb, cand: str, before: Dict,
                      placements: Sequence[Dict], targets: Sequence[Dict], *,
                      clearance: float, board_edge_clearance, declared_keepouts,
-                     strict: bool, guarded) -> Tuple[Optional[List[Dict]], List[Dict]]:
+                     strict: bool, guarded, waivers=((), ()),
+                     declared_heights=None, intent_keepouts=None
+                     ) -> Tuple[Optional[List[Dict]], List[Dict]]:
     """`replicate --search MM` (#1211): fit each searched target's copy
     nearest its default offset. `(placements, census)`; `placements` is None
     when some target found no accepted offset.
@@ -1088,7 +1247,9 @@ def search_replicate(board_path: str, pcb, cand: str, before: Dict,
             with contextlib.redirect_stdout(io.StringIO()):
                 base = grade(_without(parse_kicad_pcb(board_path), later),
                              board_path, clearance, board_edge_clearance,
-                             declared_keepouts)
+                             declared_keepouts, waivers,
+                             declared_heights=declared_heights,
+                             intent_keepouts=intent_keepouts)
         else:
             base = before
         lattice = search_offsets(t['radius'], t['step'])
@@ -1124,7 +1285,9 @@ def search_replicate(board_path: str, pcb, cand: str, before: Dict,
                     continue
                 copy_siblings(board_path, cand)
                 g = grade(_without(parse_kicad_pcb(cand), later), cand,
-                          clearance, board_edge_clearance, declared_keepouts)
+                          clearance, board_edge_clearance, declared_keepouts,
+                          waivers, declared_heights=declared_heights,
+                          intent_keepouts=intent_keepouts)
             b = worsened(base, g)
             if not b and (not strict or is_clean(g)):
                 found = shifted
@@ -1245,6 +1408,16 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
     # #1098: the intent's keep-outs reach every grade below, so a declared
     # `mating:<ref>` is the region this verb holds a move to.
     declared_keepouts = tuple(getattr(intent, 'keepouts', None) or ())
+    # ...and its courtyard waivers, as check_assembly grades them (#1385).
+    cy_waivers = ((intent.waiver_pairs(), intent.fixed_pose_courtyard_waivers())
+                  if intent is not None else ((), ()))
+    # ...and its declared covers and part heights (#1443), which every grade
+    # and the ranker judge parts under a cover by.
+    decl_h = intent.height_declarations() if intent is not None else None
+    # ...and its ordinary keep-outs (#1535), check_floorplan's `keepout`
+    # rule, gated (`ko_grade`) when that rule is at ERROR severity.
+    ko_gate = intent_keepout_gate(intent, pcb, board_path)
+    ko_grade = ko_gate if ko_gate and ko_gate['gated'] else None
 
     # A KiCad lock is a DECISION someone recorded in the file -- the seeder
     # stamps the intent's must_lock refs there, and run 25 stamped its rotation
@@ -1326,7 +1499,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         summary['replicate'] = replicated
 
     before = grade(pcb, board_path, clearance, board_edge_clearance,
-                   declared_keepouts)
+                   declared_keepouts, cy_waivers,
+                   declared_heights=decl_h, intent_keepouts=ko_grade)
     stage = tempfile.TemporaryDirectory(prefix='place_pose_')
     try:
         cand = os.path.join(stage.name, 'candidate.kicad_pcb')
@@ -1347,7 +1521,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         copy_siblings(board_path, cand)
         cand_pcb = parse_kicad_pcb(cand)
         after = grade(cand_pcb, cand, clearance, board_edge_clearance,
-                      declared_keepouts)
+                      declared_keepouts, cy_waivers,
+                      declared_heights=decl_h, intent_keepouts=ko_grade)
         bad = worsened(before, after)
         snap_ran = False
         search_finding = None
@@ -1375,7 +1550,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 board_path, pcb, cand, before, placements, search_targets,
                 clearance=clearance, board_edge_clearance=board_edge_clearance,
                 declared_keepouts=declared_keepouts, strict=strict,
-                guarded=guarded)
+                guarded=guarded, waivers=cy_waivers, declared_heights=decl_h,
+                intent_keepouts=ko_grade)
             for t, c in zip(search_targets, census):
                 t['report']['search'] = c
             for t in search_targets[len(census):]:
@@ -1403,7 +1579,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 copy_siblings(board_path, cand)
                 cand_pcb = parse_kicad_pcb(cand)
                 after = grade(cand_pcb, cand, clearance, board_edge_clearance,
-                              declared_keepouts)
+                              declared_keepouts, cy_waivers,
+                              declared_heights=decl_h, intent_keepouts=ko_grade)
                 bad = worsened(before, after)
             else:
                 miss = census[-1]
@@ -1438,7 +1615,15 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             summary['snap_census'] = {
                 'skipped': 'snap applies to exactly one pose op; this call '
                            'carries %d' % len(placements)}
-        if ((bad or (strict and not is_clean(after))) and snap
+        # #1506: a snap also runs when the MOVED part is itself in a gating
+        # pair at the requested pose, even one the board already had: "the
+        # nearest legal pose" is the part's own legality, judged on its own
+        # pairs (`own_pairs`), never refused for another part's damage.
+        mine = (own_pairs(after, placements[0]['reference'])
+                if snap and len(placements) == 1 and not replicated else {})
+        if mine:
+            summary['snap_own_pairs'] = mine
+        if ((bad or (strict and not is_clean(after)) or mine) and snap
                 and len(placements) == 1 and not replicated):
             # Rank around the REQUESTED point, not the part's old one, and
             # judge the part against its pose on the INPUT board (#1256):
@@ -1465,7 +1650,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                     board_path, ref, rot=want_rot, clearance=clearance,
                     board_edge_clearance=board_edge_clearance,
                     radius=snap_radius, step=snap_step, pcb_data=pcb,
-                    at=(placements[0]['new_x'], placements[0]['new_y']))
+                    at=(placements[0]['new_x'], placements[0]['new_y']),
+                    declared_heights=decl_h, keepouts=declared_keepouts)
             except PoseRefusal as exc:
                 # The refusal rides in the SAME summary every other refusal
                 # here carries -- ops, knobs and lock intent included -- so a
@@ -1498,7 +1684,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 copy_siblings(board_path, cand)
                 pcb_c = parse_kicad_pcb(cand)
                 g = grade(pcb_c, cand, clearance, board_edge_clearance,
-                          declared_keepouts)
+                          declared_keepouts, cy_waivers,
+                          declared_heights=decl_h, intent_keepouts=ko_grade)
                 b = worsened(before, g)
                 if b or (strict and not is_clean(g)):
                     for k, pairs in regrade_refusal(before, g, b,
@@ -1537,15 +1724,37 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             # worse than ITS answer too, not only no worse than the input:
             # from an input off the board, "no worse than the input" admits
             # pad copper still past the outline.
+            #
+            # An OWN-PAIR snap (#1506) -- the request itself passed, and the
+            # snap runs only because the part is in a gating pair there --
+            # has no budget (#1536): the fallback writes the part at the
+            # request, so stopping at `--snap-tries` wrote it unmoved on a
+            # pair a pose 0.79 mm away clears. Every candidate within
+            # `--radius` is walked, nearest first, until one passes.
+            own_only = bool(mine) and not bad and not (strict and not is_clean(after))
+            budget = None if own_only else snap_tries
+            summary['snap_census']['budget'] = (
+                'every candidate within --radius (an own-pair snap, #1536)'
+                if own_only else '--snap-tries %d per rung' % snap_tries)
             chosen = None
             graded = set()
 
             def _walk(cands, floor=None):
                 for cp in [p for p in cands
-                           if _pose_key(p) not in graded][:snap_tries]:
+                           if _pose_key(p) not in graded][:budget]:
                     graded.add(_pose_key(cp))
                     trial, pcb_c, g, b = _grade_pose(cp)
-                    if (not b and (not strict or is_clean(g))
+                    ok = not b and (not strict or is_clean(g))
+                    mine = own_pairs(g, ref) if ok else {}
+                    if mine:
+                        # refused for the part's own pairs alone (#1506)
+                        refused_by['own_pairs'] = refused_by.get('own_pairs', 0) + 1
+                        bucket = refused_pairs.setdefault('own_pairs', {})
+                        for prs in mine.values():
+                            for pr in prs:
+                                k = '/'.join(str(x) for x in pr)
+                                bucket[k] = bucket.get(k, 0) + 1
+                    if (ok and not mine
                             and (floor is None or not worsened(floor, g))):
                         return (cp, trial, pcb_c, g, b)
                 return None
@@ -1623,8 +1832,28 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 copy_siblings(board_path, cand)
                 cand_pcb = parse_kicad_pcb(cand)
                 after = grade(cand_pcb, cand, clearance, board_edge_clearance,
-                              declared_keepouts)
+                              declared_keepouts, cy_waivers,
+                              declared_heights=decl_h, intent_keepouts=ko_grade)
                 bad = worsened(before, after)
+                if own_only and not bad:
+                    # #1536: the fallback writes the part at the request, so
+                    # its note says what the snap looked at -- every
+                    # candidate it re-graded, what refused them, and any it
+                    # did not reach -- as the refusal path does (#1209).
+                    sc = summary['snap_census']
+                    note = ("--snap/--near found no pose clearing %s's own "
+                            "pair(s) at the requested pose (%s); written there, "
+                            "no worse than the board."
+                            % (ref, '; '.join(
+                                '%s %s' % (k, ', '.join('/'.join(str(x) for x in pr)
+                                                        for pr in v))
+                                for k, v in mine.items()))
+                            + _snap_census_sentence(sc))
+                    if not sc.get('untried') and not sc.get('nearest_beyond_radius'):
+                        note += (" Every pose within --radius %g mm was re-graded: "
+                                 "a larger --radius looks further."
+                                 % (sc.get('radius_mm') or 0.0))
+                    summary['snap_note'] = note
 
         # A `face` op's rotation is PREDICTED (FACE_CYCLE) and then MEASURED on
         # the board that was actually written, because the prediction is a
@@ -1759,6 +1988,22 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 'refs': [], 'rows': [], 'worse': [],
                 'skipped': 'no op in this call moves a part, so no zone '
                            'can get worse'}
+        if ko_gate is not None:
+            # #1535: which keep-outs this call graded, and whether they gate.
+            # A demoted `keepout` rule is reported for the moved parts, never
+            # refused, as a WARN zone row is.
+            kc = {'keepouts': [k.get('name') for k in ko_gate['keepouts']],
+                  'severity': ko_gate['severity'], 'gated': ko_gate['gated']}
+            if not ko_gate['gated'] and placements:
+                from placement.floorplan import keepout_findings
+                moved_refs = {p_['reference'] for p_ in placements}
+                kc['inside_after'] = [
+                    f for f in keepout_findings(
+                        cand_pcb, cand, ko_gate['keepouts'],
+                        height_of=ko_gate['height_of'],
+                        containers=ko_gate['containers'])
+                    if f['ref'] in moved_refs]
+            summary['keepout_check'] = kc
         if intent is not None and placements:
             zc = zone_check(intent, pcb, board_path, cand_pcb, cand,
                             [p_['reference'] for p_ in placements],
@@ -1793,7 +2038,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                         rotations=(placements[0]['new_rotation'],),
                         pcb_data=pcb,
                         at=(placements[0]['new_x'], placements[0]['new_y'],
-                            placements[0]['new_rotation']))
+                            placements[0]['new_rotation']),
+                        declared_heights=decl_h, keepouts=declared_keepouts)
                     summary['nearest_legal'] = poses[0] if poses else None
                     summary['nearest_legal_basis'] = (
                         'pose_score.rank_poses / QuenchState.candidate_valid '
@@ -2059,6 +2305,10 @@ def _refusal_reason(bad, strict, before, after, summary) -> str:
                        "a shared side, whatever the nets (check_assembly's "
                        "pad_intersection, never waivable); check_assembly "
                        "grades a board with one NOT BUILDABLE.")
+        if any(k.startswith('intent_keepout_') for k in bad):
+            reason += (" An intent_keepout pair is a part inside one of the "
+                       "intent's keepouts[] (part/keep-out), which "
+                       "check_floorplan's keepout rule fails.")
     else:
         reason = ("--strict-legal was asked for and the board is not clean at "
                   "this pose (%s)" % ', '.join(

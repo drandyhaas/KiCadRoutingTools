@@ -38,6 +38,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tests" / "stress"))
 import manifest_to_plan as m2p  # noqa: E402
+from cli_argv_check import long_form  # noqa: E402
 from redo_stress_test import (  # noqa: E402
     parse_manifest, is_check_cmd)
 
@@ -142,6 +143,8 @@ LIST_FLAGS = {
     '--layer-costs': 'layer_costs',
     # bga_fanout's coupled-pair patterns: the BGA panel's Coupled pairs field.
     '--diff-pairs': 'diff_pair_patterns_ctrl',
+    # bga_fanout's held parts (#1521): the BGA panel's Hold parts field.
+    '--immovable-refs': 'immovable_refs',
 }
 # Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
 # --track-width, but its GUI home is the diff tab's diff_pair_width control (not
@@ -201,7 +204,10 @@ def _plan_pairs(manifest):
                     step['assignments'] = [dict(a) for a in prev['assignments']]
                     break
         steps.append(step)
-        pairs.append((argv, step, base))
+        # #1460: graded in its LONG spelling, by the tool's own parser -- every
+        # table here is keyed by long options, so a recorded `-c U2` was
+        # checked by nothing and its loss reported no mismatch.
+        pairs.append((long_form(argv), step, base))
     return pairs
 
 
@@ -442,6 +448,31 @@ def check_pair(argv, step, base=None):
             if not named and step.get('nets'):
                 bad.append(('--component', f"a component-only step must carry "
                                            f"nets [], got {step.get('nets')}"))
+
+    # #1460: a fanout step's component and nets. The plan loader drops a
+    # fanout with no component, and the nets are the last --nets list exactly
+    # (no option or value taken into it), else every net.
+    if step.get('action') == 'fanout':
+        want_ref = None
+        want_nets = None
+        for i, a in enumerate(argv):
+            if a == '--component' and i + 1 < len(argv):
+                want_ref = argv[i + 1]
+            elif a == '--nets':
+                want_nets = []
+                for b in argv[i + 1:]:
+                    if b.startswith('--'):
+                        break
+                    want_nets.append(b)
+        n += 1
+        if step.get('component') != want_ref:
+            bad.append(('--component', f"want {want_ref!r} got "
+                                       f"{step.get('component')!r}"))
+        want_nets = [str(_num(x)) for x in (want_nets or ['*'])]
+        got_nets = [str(_num(x)) for x in (step.get('nets') or [])]
+        n += 1
+        if got_nets != want_nets:
+            bad.append(('--nets', f"want {want_nets} got {got_nets}"))
 
     # --plane-layers must survive as the assignment layers
     pl = _plane_layers(argv)
@@ -852,7 +883,8 @@ _PROBE_VALUE = 'PROBE_VALUE'
 # the flag means the same thing there (the shared registrars and the file /
 # diagnostic flags); the rest are the tool's own.
 _SAME_AS_ROUTE = ('--debug-lines', '--debug-memory', '--enable-used-layers',
-                  '--keep-thermal', '--output', '--overwrite', '--quick',
+                  '--json-out', '--keep-thermal', '--output', '--overwrite',
+                  '--quick',
                   '--schematic-dir', '--strict-sizes', '--verbose')
 
 DIFF_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in _SAME_AS_ROUTE}
@@ -1446,7 +1478,7 @@ def check_cap_flags():
             '--max-passes', '7', '--cap-prefix', 'C',
             '--grid-step', '0.05', '--clearance', '0.1',
             '--default-via-size', '0.42', '--no-rotate',
-            '--intent', 'x.intent.json']
+            '--intent', 'x.intent.json', '--no-fix-drc-settings']
     step = m2p.cap_optimization_step(argv)
     if step.get('action') != 'optimize_caps':
         return [('(step)', f"action is {step.get('action')!r}")]
@@ -1468,7 +1500,8 @@ def check_cap_flags():
             ('--clearance', 'clearance', 0.1),
             ('--default-via-size', 'cap_default_via_size', 0.42),
             ('--intent', 'cap_intent_path', 'x.intent.json'),
-            ('--no-rotate', 'cap_allow_rotation', False)):
+            ('--no-rotate', 'cap_allow_rotation', False),
+            ('--no-fix-drc-settings', 'fix_drc_check', False)):
         if params.get(key) != want:
             bad.append((flag, f"-> {key}={params.get(key)!r}, expected {want!r}"))
     # #742 CHANGE DETECTOR, same shape as the --board-edge-clearance one below.
@@ -1498,7 +1531,8 @@ def check_cap_flags():
     bare = m2p.cap_optimization_step(
         ['python3', 'py_placer/place_fanout_clearance.py', 'in.kicad_pcb'])
     for _k in ('cap_board_edge_clearance', 'board_edge_clearance',
-               'cap_default_via_size', 'via_size', 'cap_intent_path'):
+               'cap_default_via_size', 'via_size', 'cap_intent_path',
+               'fix_drc_check'):
         if _k in (bare.get('params') or {}):
             bad.append(('(omitted)',
                         f'an unset flag was materialised into the plan as {_k}'))
@@ -1542,6 +1576,64 @@ def check_group_flags():
             bad.append((flag, f"NOT refused -- converted to {step!r}. A replayed "
                               f"{flag} step would route these nets instead."))
     return bad
+
+
+#: #1460: recorded short spellings, each beside its long one. The first three
+#: are the issue's rows (the third once took '-c U2 -w 0.15' into --nets).
+SHORT_OPTION_CASES = (
+    ('qfn_fanout.py', ['-o', 'out.kicad_pcb', '-c', 'U2', '-w', '0.15', '--nets', '*'],
+     ['--output', 'out.kicad_pcb', '--component', 'U2', '--width', '0.15', '--nets', '*']),
+    ('qfn_fanout.py', ['-o', 'out.kicad_pcb', '--nets', '*', '-c', 'U2', '-w', '0.15'],
+     ['--output', 'out.kicad_pcb', '--nets', '*', '--component', 'U2', '--width', '0.15']),
+    ('qfn_fanout.py', ['-oout.kicad_pcb', '-cU2', '-w=0.15', '-n', '*', '!GND'],
+     ['--output', 'out.kicad_pcb', '--component', 'U2', '--width', '0.15',
+      '--nets', '*', '!GND']),
+    ('bga_fanout.py', ['-o', 'out.kicad_pcb', '-c', 'U1', '-w', '0.1', '-l', 'F.Cu', 'In1.Cu'],
+     ['--output', 'out.kicad_pcb', '--component', 'U1', '--track-width', '0.1',
+      '--layers', 'F.Cu', 'In1.Cu']),
+    ('route.py', ['out.kicad_pcb', '-n', 'X', '-BATT', '-C', 'U3', '-l', 'F.Cu', 'B.Cu'],
+     ['out.kicad_pcb', '--nets', 'X', '-BATT', '--component', 'U3',
+      '--layers', 'F.Cu', 'B.Cu']),
+    ('route_planes.py', ['out.kicad_pcb', '-n', 'GND', '-p', 'B.Cu'],
+     ['out.kicad_pcb', '--nets', 'GND', '--plane-layers', 'B.Cu']),
+)
+
+
+def check_short_options():
+    """#1460: a short option converts the same as its long spelling.
+
+    The converter's tables are keyed by long options, so a recorded
+    `qfn_fanout.py ... -c U2 -w 0.15` became a fanout step with no component
+    (which the plan loader then drops) and no width, while the converter
+    reported the step written and this gate reported no mismatch. Each case
+    must convert to the step its long spelling does and pass check_pair; the
+    negative control converts the short spellings WITHOUT the respelling and
+    must be reported. Returns (bad, control_caught)."""
+    bad = []
+    for tool, short, long_ in SHORT_OPTION_CASES:
+        head = ['python3', tool, 'in.kicad_pcb']
+        got, want = m2p.parse_command(head + short), m2p.parse_command(head + long_)
+        if got != want:
+            bad.append((f"{tool} {' '.join(short)}",
+                        f"converts to {got!r}, its long spelling to {want!r}"))
+            continue
+        n, why = check_pair(long_form(head + short), got)
+        if not n or why:
+            bad.append((f"{tool} {' '.join(short)}",
+                        f"check_pair: {why or 'checked nothing'}"))
+    real = m2p._long_form
+    m2p._long_form = list
+    try:
+        caught = all(check_pair(long_form(['python3', tool, 'in.kicad_pcb'] + short),
+                                m2p.parse_command(['python3', tool, 'in.kicad_pcb']
+                                                  + short))[1]
+                     for tool, short, _ in SHORT_OPTION_CASES[:2])
+    finally:
+        m2p._long_form = real
+    if not caught:
+        bad.append(('negative control', "a fanout converted without the "
+                                        "respelling was NOT reported"))
+    return bad, caught
 
 
 def check_rejected_steps():
@@ -1785,6 +1877,10 @@ _POST_PARSE_WITNESSES = (
     ('_output_twice', 'route.py a.kicad_pcb b.kicad_pcb --output b.kicad_pcb',
      None),
     ('_route_group_empty', "route.py a.kicad_pcb --group ' '", 'empty name'),
+    ('_diff_force_reroute_unscoped', 'route_diff.py a.kicad_pcb b.kicad_pcb '
+     '--force-reroute', 'explicit net scope'),
+    ('_diff_force_reroute_unscoped', 'route_diff.py a.kicad_pcb b.kicad_pcb '
+     '--force-reroute --nets X_P X_N', None),
     ('_keep_away', 'route.py a.kicad_pcb b.kicad_pcb --nets X --keep-away A:B:x',
      '--keep-away'),
     ('_route_force_reroute_unscoped', 'route.py a.kicad_pcb b.kicad_pcb '
@@ -1805,6 +1901,11 @@ _POST_PARSE_WITNESSES = (
      '--power-nets GND +3V3 --power-nets-widths 0.3', 'must have the same length'),
     ('_power_nets_count_mismatch', 'qfn_fanout.py a.kicad_pcb --output b.kicad_pcb '
      '--power-nets GND +3V3 --power-nets-widths 0.3 0.3', None),
+    ('_route_power_nets_count_mismatch', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --power-nets GND +3V3 --power-nets-widths 0.3',
+     'must have the same length'),
+    ('_route_power_nets_count_mismatch', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --power-nets GND +3V3', None),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '
      '--clearance nan', 'finite number'),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '
@@ -2122,6 +2223,14 @@ def main():
     for f, why in reg_bad:
         print(f"    {f}: {why}")
 
+    short_bad, short_caught = check_short_options()
+    print(f"Short options: {'OK' if not short_bad else 'FAILED'} "
+          f"({len(SHORT_OPTION_CASES)} recorded short spellings convert as "
+          f"their long ones; negative control: without the respelling "
+          f"{'reported' if short_caught else 'MISSED'}).")
+    for f, why in short_bad:
+        print(f"    {f}: {why}")
+
     rej_bad = check_rejected_steps()
     print(f"Refused commands: {'OK' if not rej_bad else 'FAILED'} "
           f"(at argparse or after it: never plan steps; the board binds to "
@@ -2138,7 +2247,8 @@ def main():
         print(f"    {f}: {why}")
 
     return 1 if (total_bad or res_bad or cap_bad or own_bad or flag_bad
-                 or grp_bad or ref_bad or reg_bad or rej_bad or inv_bad) else 0
+                 or grp_bad or ref_bad or reg_bad or short_bad or rej_bad
+                 or inv_bad) else 0
 
 
 if __name__ == "__main__":

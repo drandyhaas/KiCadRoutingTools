@@ -138,6 +138,7 @@ def get_dialog_settings(dialog):
 
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
+        'length_match_tolerance_check': dialog.length_match_tolerance_check.GetValue(),
         'meander_amplitude': dialog.meander_amplitude.GetValue(),
         'meander_spacing': dialog.meander_spacing.GetValue(),
         'time_matching_check': dialog.time_matching_check.GetValue(),
@@ -205,6 +206,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_escape_method': dialog.fanout_tab.bga_options.get_escape_method(),
         'fanout_bga_plane_drop': dialog.fanout_tab.bga_options.plane_drop.GetValue(),
         'fanout_bga_plane_net_layers': dialog.fanout_tab.bga_options.plane_net_layers_ctrl.GetValue(),
+        'fanout_bga_immovable_refs': dialog.fanout_tab.bga_options.immovable_refs.GetValue(),  # #1521
         'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
         'fanout_bga_cap_capture_radius': dialog.fanout_tab.bga_options.cap_capture_radius.GetValue(),
         'fanout_bga_cap_near_margin': dialog.fanout_tab.bga_options.cap_near_margin.GetValue(),
@@ -536,6 +538,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.length_match_groups_ctrl.SetValue(settings['length_match_groups'])
     if 'length_match_tolerance' in settings:
         dialog.length_match_tolerance.SetValue(settings['length_match_tolerance'])
+    if 'length_match_tolerance_check' in settings:
+        dialog.length_match_tolerance_check.SetValue(settings['length_match_tolerance_check'])
     if 'meander_amplitude' in settings:
         dialog.meander_amplitude.SetValue(settings['meander_amplitude'])
     if 'meander_spacing' in settings:
@@ -702,6 +706,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.set_escape_method(settings['fanout_bga_escape_method'])
     if 'fanout_bga_plane_drop' in settings:
         dialog.fanout_tab.bga_options.plane_drop.SetValue(bool(settings['fanout_bga_plane_drop']))
+    if 'fanout_bga_immovable_refs' in settings:   # #1521
+        dialog.fanout_tab.bga_options.immovable_refs.SetValue(
+            str(settings['fanout_bga_immovable_refs'] or ''))
     if 'fanout_bga_plane_net_layers' in settings:
         dialog.fanout_tab.bga_options.plane_net_layers_ctrl.SetValue(
             str(settings['fanout_bga_plane_net_layers']))

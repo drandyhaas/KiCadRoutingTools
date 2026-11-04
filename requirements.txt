@@ -67,3 +67,27 @@ pyobjc-framework-Cocoa; sys_platform == 'darwin'
 # dependency declaration, where "the version at which the intended path works"
 # would then have been false.)
 Pillow>=9.2.0
+
+# The bus step: awx/route_bus.py and the whole route behind it plan with
+# Google OR-Tools' CP-SAT -- its fanout's joint escape, the ends model and the
+# whole solve import `ortools.sat.python.cp_model` (#1355). Without it the step
+# used to run for minutes and lay nothing, the ModuleNotFoundError left in a
+# stage log. ROUTING does not need it -- route.py and the other routing CLIs
+# never import it -- and neither does the GUI plugin, so, like Pillow, it is in
+# `deps_check.OPTIONAL_PACKAGES` and has a gate of its own,
+# `startup_checks.check_bus_dependencies`, which route_bus.py and
+# whole_route.py call before they start. 9.15 is the version the bus step is
+# run and measured on (awx/modal_whole.py pins 9.15.6755): it sets recent
+# CP-SAT parameters (max_num_deterministic_batches, share_glue_clauses), and
+# CP-SAT's plans move between versions.
+#
+# NOT LISTED ON ipc-migration: it cannot share an environment with
+# kicad-python. ortools 9.15 requires protobuf>=6.33.1 and every kicad-python
+# release (0.7.x, 0.8.0) protobuf<6, so pip refuses the whole file
+# (ResolutionImpossible) -- and KiCad provisions the plugin's venv from this
+# file, so listing it broke the plugin's install, not just the bus step. The
+# bus step is a CLI step the plugin never runs; install it into a separate
+# environment (`pip install "ortools>=9.15"`), which its gate names when it is
+# missing. tests/test_887_small_items.py counts it as declared through
+# BUS_PACKAGES on this branch.
+

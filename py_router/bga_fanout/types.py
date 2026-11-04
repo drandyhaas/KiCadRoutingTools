@@ -64,6 +64,9 @@ class FanoutRoute:
     pair_id: Optional[str] = None  # Differential pair base name if part of a pair
     is_p: bool = True  # True for P, False for N in differential pair
     neighbor_connection: bool = False  # True if this connects directly to adjacent same-net pad
+    # The ball a neighbour link ends on (its exit_pos). Off the top layer the
+    # link reaches that ball through a via there, which manage_vias places.
+    neighbor_pad: Optional['Pad'] = None
 
     @property
     def net_id(self) -> int:
@@ -126,3 +129,13 @@ def create_track(
     if route_uid is not None:
         d['route_uid'] = route_uid
     return d
+
+
+def top_layer_barred(no_inner_top_layer, net_id) -> bool:
+    """Is an inner ball of `net_id` kept off the top layer? `no_inner_top_layer`
+    is the --no-inner-top-layer bool (every inner ball), or the set of net ids
+    whose OWN class cannot fit the gap between the balls (#1529: the #1518 gap
+    test at the pair clearance a ball's class sets)."""
+    if isinstance(no_inner_top_layer, (set, frozenset)):
+        return net_id in no_inner_top_layer
+    return bool(no_inner_top_layer)

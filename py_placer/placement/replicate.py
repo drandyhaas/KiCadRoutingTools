@@ -22,6 +22,14 @@ This module
 4. returns the target poses: the source's poses translated by one offset,
    same rotation, same side.
 
+Channels drawn as copies INSIDE one sheet (three line drivers, an I/Q pair)
+share no instance prefix, so nothing pairs them by path. For those the
+caller names the correspondence (#1480): `channels`, ordered lists of refs,
+the first the source and each other a target matched to it index for index
+(`channel_members`). Every check below runs on them unchanged -- the same
+parts, footprints and pads, THE NET RULE, one translation -- with each
+channel standing in for a sheet instance. `suggest_channels` proposes them.
+
 It moves nothing and grades nothing. `pose_ops.resolve_ops` turns its rows
 into the writer's placements, and `apply_poses` grades them with the verdict
 every other `place_pose` verb gets -- the AI declares the structure, the
@@ -217,6 +225,56 @@ def members(pcb, prefix: str) -> Dict[str, str]:
     return out
 
 
+#: The prefix of a channel named by its refs (#1480), standing in for a
+#: sheet instance's path in every message and report.
+CHANNEL_PREFIX = 'channel:'
+
+
+def channel_members(pcb, channels: Sequence[Sequence[str]]
+                    ) -> Tuple[str, List[str], Dict[str, Dict[str, str]],
+                               Dict[str, Dict]]:
+    """`(source, targets, members, instances)` for channels named by their
+    refs (#1480): each channel a pseudo-instance `channel:<first ref>`, its
+    members keyed by POSITION, so the parts at one index correspond. Refused
+    (exit 2) unless there are two or more channels, each the same length,
+    every ref on the board and in one channel only."""
+    chans = [[str(r) for r in c] for c in (channels or ())]
+    if len(chans) < 2:
+        raise PoseRefusal('channels: name two or more channels (the first is '
+                          'the source, the others copies of it)', code=2)
+    if len({len(c) for c in chans}) != 1 or not chans[0]:
+        raise PoseRefusal('channels: every channel lists its parts in the same '
+                          'order, so they must be the same length; got %s' % (
+                              ', '.join(str(len(c)) for c in chans)), code=2)
+    fps = pcb.footprints
+    missing = sorted({r for c in chans for r in c if r not in fps}, key=natural_key)
+    if missing:
+        raise PoseRefusal('channels: not on this board: %s' % ', '.join(
+            missing[:NAMED * 2]), code=2, missing=missing)
+    seen: Dict[str, int] = {}
+    twice = []
+    for i, c in enumerate(chans):
+        for r in c:
+            if r in seen and r not in twice:
+                twice.append(r)
+            seen.setdefault(r, i)
+    if twice:
+        raise PoseRefusal('channels: a part is in one channel only; named more '
+                          'than once: %s' % ', '.join(twice[:NAMED * 2]), code=2)
+    names = [CHANNEL_PREFIX + c[0] for c in chans]
+    mem = {n: {str(k): r for k, r in enumerate(c)} for n, c in zip(names, chans)}
+    inst = {n: {'names': [n], 'files': [], 'refs': sorted(c, key=natural_key)}
+            for n, c in zip(names, chans)}
+    return names[0], names[1:], mem, inst
+
+
+def _mem(pcb, prefix: str, chan=None) -> Dict[str, str]:
+    """A sheet instance's members (`members`), or a named channel's."""
+    if chan is not None and prefix in chan:
+        return chan[prefix]
+    return members(pcb, prefix)
+
+
 def net_map(votes: Dict[Tuple[int, int], int],
             rank: Dict[Tuple[int, int], int]) -> List[Tuple[int, int]]:
     """The source -> target net map THE NET RULE judges pads against (#1277):
@@ -297,7 +355,7 @@ def _first_best(edges: List[Tuple[int, int]],
 
 def correspond(pcb, src: str, dst: str, *,
                waive: Optional[Dict[Tuple[str, str], str]] = None,
-               keys: Optional[Set[str]] = None
+               keys: Optional[Set[str]] = None, chan=None
                ) -> Tuple[List[Tuple[str, str]], Dict]:
     """`([(source ref, target ref), ...], nets)`, or a refusal (exit 4).
 
@@ -323,7 +381,7 @@ def correspond(pcb, src: str, dst: str, *,
     rail into a channel-local net."""
     waive = waive or {}
     fps = pcb.footprints
-    sm, tm = members(pcb, src), members(pcb, dst)
+    sm, tm = _mem(pcb, src, chan), _mem(pcb, dst, chan)
     sel = set(sm) | set(tm) if keys is None else set(keys)
     only_s = sorted((sm[k] for k in sm.keys() - tm.keys() if k in sel),
                     key=natural_key)
@@ -474,12 +532,12 @@ def _anchor_rank(fp) -> Tuple:
 
 
 def _locate_ref(pcb, ref: str, src: str, dsts: Sequence[str],
-                flag: str) -> Tuple[str, List[str]]:
+                flag: str, chan=None) -> Tuple[str, List[str]]:
     """`(symbol key, [the target instances it applies to])` for a ref named
     on the SOURCE instance (every target) or on one TARGET instance (that
     one only), else a refusal (exit 2) listing where it looked."""
     for prefix in [src] + list(dsts):
-        hit = [k for k, r in members(pcb, prefix).items() if r == ref]
+        hit = [k for k, r in _mem(pcb, prefix, chan).items() if r == ref]
         if hit:
             return hit[0], (list(dsts) if prefix == src else [prefix])
     raise PoseRefusal(
@@ -489,7 +547,8 @@ def _locate_ref(pcb, ref: str, src: str, dsts: Sequence[str],
 
 
 def resolve_waivers(pcb, tokens: Sequence[str], src: str,
-                    dsts: Sequence[str]) -> Dict[str, Dict[Tuple[str, str], str]]:
+                    dsts: Sequence[str], chan=None
+                    ) -> Dict[str, Dict[Tuple[str, str], str]]:
     """`--allow-net-mismatch REF.PAD ...` -> `{target prefix: {(symbol key,
     pad number): token}}`.
 
@@ -507,7 +566,7 @@ def resolve_waivers(pcb, tokens: Sequence[str], src: str,
                 '--allow-net-mismatch %r: expected REF.PAD, one pad per flag '
                 '(e.g. U19.2)' % tok, code=2)
         key, applies = _locate_ref(pcb, ref, src, dsts,
-                                   '--allow-net-mismatch')
+                                   '--allow-net-mismatch', chan)
         numbers = [p.pad_number for p in pcb.footprints[ref].pads or ()]
         if pad not in numbers:
             raise PoseRefusal(
@@ -521,7 +580,7 @@ def resolve_waivers(pcb, tokens: Sequence[str], src: str,
 
 
 def resolve_selection(pcb, only: Sequence[str], skip: Sequence[str],
-                      src: str, dsts: Sequence[str]
+                      src: str, dsts: Sequence[str], chan=None
                       ) -> Dict[str, Optional[Set[str]]]:
     """`--only` / `--skip` -> `{target prefix: the symbol keys it copies}`,
     None meaning every one.
@@ -540,19 +599,20 @@ def resolve_selection(pcb, only: Sequence[str], skip: Sequence[str],
         return {d: None for d in dsts}
     named: Dict[str, Set[str]] = {d: set() for d in dsts}
     for ref in refs:
-        key, applies = _locate_ref(pcb, ref, src, dsts, flag)
+        key, applies = _locate_ref(pcb, ref, src, dsts, flag, chan)
         for d in applies:
             named[d].add(key)
     if flag == '--only':
         return named
-    sm = set(members(pcb, src))
-    return {d: (sm | set(members(pcb, d))) - named[d] for d in dsts}
+    sm = set(_mem(pcb, src, chan))
+    return {d: (sm | set(_mem(pcb, d, chan))) - named[d] for d in dsts}
 
 
 def plan(pcb, src_token: str, dst_tokens: Sequence[str], *, anchor: Optional[str] = None,
          offset: Optional[Sequence[float]] = None,
          allow_net_mismatch: Sequence[str] = (),
-         only: Sequence[str] = (), skip: Sequence[str] = ()
+         only: Sequence[str] = (), skip: Sequence[str] = (),
+         channels: Optional[Sequence[Sequence[str]]] = None
          ) -> Tuple[List[Dict], Dict]:
     """`(rows, report)` for one `replicate` op.
 
@@ -577,10 +637,18 @@ def plan(pcb, src_token: str, dst_tokens: Sequence[str], *, anchor: Optional[str
     default anchor is then the largest source part copied into EVERY target
     (else present in every target); an explicit `anchor` may be one that is
     left out, and still fixes the offset.
+
+    `channels` (#1480): the instances named by their refs instead
+    (`channel_members`); `src_token` and `dst_tokens` are then ignored.
     """
-    inst = sheet_instances(pcb)
-    src = resolve_sheet(pcb, src_token, '--from', inst)
-    dsts = [resolve_sheet(pcb, t, '--to', inst) for t in dst_tokens]
+    chan = None
+    if channels is not None:
+        src, dsts, chan, inst = channel_members(pcb, channels)
+        src_token, dst_tokens = src, list(dsts)
+    else:
+        inst = sheet_instances(pcb)
+        src = resolve_sheet(pcb, src_token, '--from', inst)
+        dsts = [resolve_sheet(pcb, t, '--to', inst) for t in dst_tokens]
     for t, d in zip(dst_tokens, dsts):
         if d == src:
             raise PoseRefusal('--to %r is the --from sheet itself (/%s); a '
@@ -605,7 +673,7 @@ def plan(pcb, src_token: str, dst_tokens: Sequence[str], *, anchor: Optional[str
     anchor_key = None
     if anchor is not None and offset is None:
         for prefix in [src] + dsts:
-            hit = [k for k, r in members(pcb, prefix).items() if r == anchor]
+            hit = [k for k, r in _mem(pcb, prefix, chan).items() if r == anchor]
             if hit:
                 anchor_key = hit[0]
                 break
@@ -615,12 +683,12 @@ def plan(pcb, src_token: str, dst_tokens: Sequence[str], *, anchor: Optional[str
                 '(%s)' % (anchor, ', '.join('/' + p for p in [src] + dsts)),
                 code=2)
 
-    waivers = resolve_waivers(pcb, allow_net_mismatch, src, dsts)
-    selected = resolve_selection(pcb, only, skip, src, dsts)
+    waivers = resolve_waivers(pcb, allow_net_mismatch, src, dsts, chan)
+    selected = resolve_selection(pcb, only, skip, src, dsts, chan)
     rows: List[Dict] = []
     targets = []
-    src_members = members(pcb, src)
-    dst_members = {d: members(pcb, d) for d in dsts}
+    src_members = _mem(pcb, src, chan)
+    dst_members = {d: _mem(pcb, d, chan) for d in dsts}
     if offset is None and anchor_key is None:
         everywhere = [k for k in src_members
                       if all(k in dst_members[d] for d in dsts)]
@@ -638,7 +706,7 @@ def plan(pcb, src_token: str, dst_tokens: Sequence[str], *, anchor: Optional[str
             natural_key(src_members[k])))
     for token, dst in zip(dst_tokens, dsts):
         pairs, nets = correspond(pcb, src, dst, waive=waivers[dst],
-                                 keys=selected[dst])
+                                 keys=selected[dst], chan=chan)
         if not pairs:
             raise PoseRefusal(
                 '%s leaves nothing to copy into /%s' % (
@@ -721,8 +789,9 @@ def declared_op(decl: Dict) -> Dict:
     """The `place_pose` op one `replicate[]` declaration stands for -- the
     same dict `place_pose replicate` builds from its flags, so a declaration
     and a command line take one path through `pose_ops.resolve_ops`."""
-    return {'kind': 'replicate', 'from': decl['from'],
-            'to': list(decl['to']), 'anchor': decl.get('anchor'),
+    return {'kind': 'replicate', 'from': decl.get('from'),
+            'to': list(decl.get('to') or ()), 'anchor': decl.get('anchor'),
+            'channels': decl.get('channels'),
             'offset': None,
             'allow_net_mismatch': list(decl.get('allow_net_mismatch') or ()),
             'only': list(decl.get('only') or ()),
@@ -751,11 +820,12 @@ def measure_declared(pcb, decl: Dict) -> List[Dict]:
     rotation or a side that differs from its source is reported apart: a
     translation cannot fix it. Parts the declaration leaves out are not
     measured."""
-    rows, report = plan(pcb, decl['from'], decl['to'],
+    rows, report = plan(pcb, decl.get('from'), decl.get('to') or (),
                         anchor=decl.get('anchor'),
                         allow_net_mismatch=decl.get('allow_net_mismatch') or (),
                         only=decl.get('only') or (),
-                        skip=decl.get('skip') or ())
+                        skip=decl.get('skip') or (),
+                        channels=decl.get('channels'))
     from placement.legality import footprint_side
     fps = pcb.footprints
     out = []
@@ -794,3 +864,89 @@ def measure_declared(pcb, decl: Dict) -> List[Dict]:
     return out
 
 
+
+
+# ---------------------------------------------------------------------------
+# channels inside one sheet, proposed (#1480)
+# ---------------------------------------------------------------------------
+
+#: A channel's chip has at least this many connected pads: a line driver, an
+#: op-amp, a mixer -- what a channel is built round.
+CHIP_MIN_PADS = 5
+
+
+def _part_sig(fp, chip_pad_of) -> Tuple:
+    """What a chip's neighbour IS in its channel: its footprint, its value,
+    and per pad (in pad order) the chip pad it shares a net with -- the same
+    in every channel when the channel is a copy."""
+    return (fp.footprint_name, fp.value or '',
+            tuple(chip_pad_of.get(p.net_id) for p in fp.pads or ()))
+
+
+def suggest_channels(pcb, declined: Optional[List[Dict]] = None) -> List[Dict]:
+    """Copies of one channel drawn inside ONE sheet, proposed with their
+    correspondence (#1480), pose-blind: for every footprint + value that
+    appears as a chip (`CHIP_MIN_PADS` connected pads) two or more times in
+    one sheet, each chip's channel is the parts on its LOCAL nets (no rail,
+    no net that reaches another of the chips), one hop; a part is matched
+    across the chips by its footprint, value and the chip pads its pads
+    share nets with (`_part_sig`). A part whose signature is not unique in
+    every channel is left out and named. A proposal is kept only when
+    `plan` accepts it -- the same parts, footprints, pads and THE NET RULE --
+    else appended to `declined` with `plan`'s reason, as a chip group with no
+    matched part is. Each kept one carries the ready `replicate[]` row."""
+    from placement.grouping import BoardView
+    fps = pcb.footprints
+    rails = set(BoardView(pcb).rails)
+    by: Dict[Tuple, List[str]] = {}
+    for ref, fp in fps.items():
+        conn = [p for p in fp.pads or () if p.net_id]
+        if len(conn) >= CHIP_MIN_PADS:
+            by.setdefault((_sheet_of(fp), fp.footprint_name, fp.value or ''),
+                          []).append(ref)
+    out = []
+    for (sheet, name, value), chips in sorted(by.items()):
+        if len(chips) < 2:
+            continue
+        chips = sorted(chips, key=natural_key)
+        net_chips: Dict[int, Set[str]] = {}
+        for c in chips:
+            for p in fps[c].pads or ():
+                if p.net_id:
+                    net_chips.setdefault(p.net_id, set()).add(c)
+        chans: Dict[str, Dict[Tuple, List[str]]] = {}
+        for c in chips:
+            local = {p.net_id: p.pad_number for p in fps[c].pads or ()
+                     if p.net_id and p.net_id not in rails
+                     and net_chips.get(p.net_id) == {c}}
+            sigs: Dict[Tuple, List[str]] = {}
+            for ref, fp in fps.items():
+                if ref in chips or not any(p.net_id in local for p in fp.pads or ()):
+                    continue
+                sigs.setdefault(_part_sig(fp, local), []).append(ref)
+            chans[c] = sigs
+        common = set.intersection(*(set(s) for s in chans.values()))
+        keep = sorted((k for k in common
+                       if all(len(chans[c][k]) == 1 for c in chips)), key=repr)
+        left = {c: sorted((r for k, rs in chans[c].items() if k not in keep for r in rs),
+                          key=natural_key) for c in chips}
+        channels = [[c] + [chans[c][k][0] for k in keep] for c in chips]
+        rec = {'sheet': '/' + sheet if sheet else '/', 'chip': name, 'value': value,
+               'chips': chips, 'channels': channels,
+               'left_out': {c: rs for c, rs in left.items() if rs}}
+        if not keep:
+            rec['refused'] = 'no part of a channel has a counterpart in every other'
+        else:
+            try:
+                plan(pcb, None, (), channels=channels)
+                rec['row'] = {'channels': channels,
+                              'why': f"{len(chips)} copies of the {value or name} "
+                                     f"channel ({', '.join(chips)}), matched by footprint, "
+                                     f"value and chip pin"}
+            except PoseRefusal as e:
+                rec['refused'] = str(e)
+        if 'row' in rec:
+            out.append(rec)
+        elif declined is not None:
+            declined.append(rec)
+    return out

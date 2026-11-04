@@ -1782,3 +1782,49 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
     # `deficit_floor` is not necessarily first, and can be truncated away.
     out.sort(key=lambda p: (-(p.worst.deficit if p.worst else 0), p.ref))
     return out
+
+
+#: Rings in from a ball field's edge that a fan-out escapes through (#1425).
+ESCAPE_RINGS = 4
+
+
+def ball_field_census(pcb_data, rings: int = ESCAPE_RINGS) -> List[Dict]:
+    """The parts standing on the FAR face of each ball-grid part, centred
+    inside its ball field (#1425): `[{'bga': ref, 'balls': 'RxC', 'pitch': mm,
+    'face': layer, 'parts': N, 'outer': M, 'rings': [count per ring], 'refs':
+    [...]}]`, one record per ball grid with at least one such part.
+
+    A ring is how many ball pitches in from the field's edge the part's
+    centre lies (0 = under the outermost row). The outer `rings` rings are the
+    rows a fan-out escapes through, so a part there takes a via or a track
+    lane the fan-out wanted; `outer` counts them. A ball grid is the
+    parser's own (`_is_ball_grid`, `bga_fanout.grid.analyze_bga_grid`)."""
+    from kicad_parser import _is_ball_grid
+    from bga_fanout.grid import analyze_bga_grid
+    out = []
+    for ref, u in sorted(pcb_data.footprints.items()):
+        if not _is_ball_grid(u.pads):
+            continue
+        g = analyze_bga_grid(u)
+        if g is None:
+            continue
+        pitch = min(g.pitch_x, g.pitch_y)
+        x0, x1, y0, y1 = g.cols[0], g.cols[-1], g.rows[0], g.rows[-1]
+        far = 'B.Cu' if u.layer == 'F.Cu' else 'F.Cu'
+        hit = {}
+        for r, f in pcb_data.footprints.items():
+            if r == ref or f.layer != far or not f.pads:
+                continue
+            if x0 <= f.x <= x1 and y0 <= f.y <= y1:
+                hit[r] = int(math.floor(
+                    min(f.x - x0, x1 - f.x, f.y - y0, y1 - f.y) / pitch + 0.5))
+        if not hit:
+            continue
+        counts = [0] * (max(hit.values()) + 1)
+        for k in hit.values():
+            counts[k] += 1
+        out.append({'bga': ref, 'balls': f"{len(g.cols)}x{len(g.rows)}",
+                    'pitch': round(pitch, 3), 'face': far, 'parts': len(hit),
+                    'outer': sum(1 for k in hit.values() if k < rings),
+                    'rings': counts, 'refs': sorted(hit)})
+    return out

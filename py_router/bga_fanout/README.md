@@ -33,8 +33,8 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 - **Board rules honoured** - the board's per-layer `.kicad_dru` clearance rules (#498: the
   escape clearance is floored at the largest rule on the escape layers), the project's
   same-net-pad record (#581), and the fab floors and escalation policy every routing step
-  shares (`--fab-tier` / `--escalation`, below). Net classes are not read: the escape runs
-  at `--clearance` throughout
+  shares (`--fab-tier` / `--escalation`, below); net classes (#1529) and the `.kicad_dru`
+  clearance rules scoped by net class or item type and the track-scoped ones (#1565), below
 - **Staggered packages refused** - a staggered no-lead array (AQFN and friends) is not a
   ball grid: its rows read at half the real pitch. bga_fanout stops in a second and prints
   the `qfn_fanout.py ... --escape-method underpad --allow-via-in-pad` command that handles
@@ -95,7 +95,7 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--force-escape-direction` | Only use primary direction | False |
 | `--rebalance-escape` | Rebalance escape directions | False |
 | `--check-for-previous` | Skip existing fanouts | False |
-| `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
+| `--no-inner-top-layer` | Prevent inner pads from using F.Cu (automatic when the ball gap cannot hold the track at clearance, #1518) | False |
 | `--escape-method` | `auto`, `channel`, `underpad` (dense arrays) or `dogbone` (gap vias); see [Escape methods](#escape-methods) | auto |
 | `--plane-drop` | `auto` = drop a via for every excluded plane-net ball after the signal escape (#424); `off` disables. `KICAD_FANOUT_PLANE_DROP=0/1` overrides either | auto |
 | `--plane-net-layers` | The future plane plan, `NET:LAYER[,LAYER...]` per plane net (e.g. `GND:In1.Cu,In4.Cu P3.3V:In2.Cu`): a ball the declared pour will reach on its own layer gets no drop via (see [Plane-ball drops](#plane-ball-drops-424)) | none |
@@ -131,6 +131,71 @@ clean** (pair with `--via-drill 0.25` to keep a 0.1 mm annular ring). When hande
 infeasible params, `bga_fanout` prints a `WARNING: escape via ... busts the
 half-pitch budget` with the recommended maximum. The `plan-pcb-routing` skill
 computes this automatically.
+
+On the **top layer** (the balls' own layer) the channel runs between two rows of
+balls instead of vias, so it needs `ball gap ≥ track_width + 2·clearance`, where
+the ball gap is the pitch minus the ball size. When it does not hold (0.5 mm
+pitch with 0.35 mm balls leaves 0.15 mm), the channel engine keeps inner balls
+off the top layer on its own, as `--no-inner-top-layer` does, and says so; edge
+balls exit outward across no gap and keep it (#1518).
+
+## Net classes: spaced pairwise, and kept (#1529)
+
+`--clearance` is the Default class for the run. Every other net class is read
+from the board's `.kicad_pro` (the GUI reads the live board's), as `route.py`
+reads it, capped at `--clearance-ceiling` when one is given, and every pair of
+the escape is spaced at KiCad's `max(clearance, class A, class B)`, which a
+`.kicad_dru` rule on the layer replaces. The run prints `Netclass clearances
+for N net(s) ...` when the board has any.
+
+The escape engines space a run at one clearance, so the pair is priced from
+both sides:
+
+- **the obstacle's class** in the engines: the channel engine's obstacle map
+  stamps a foreign track or via at its class and its pad map holds a pad at
+  its class, and its foreign-pad trim keeps each escape at the pair's class;
+  the under-pad engine stamps the part's own balls, the board's tracks, vias
+  and pads, and its exact via/stub checks at the obstacle's class;
+- **the escaping ball's class** after the escape (`class_clearance.py`): every
+  pair of this run's copper is graded at its class with check_drc's own
+  primitives. The escape of each ball whose copper sets a pair below its class
+  (or that sits below a class of copper already on the board) is taken off,
+  and those balls -- with any ball of a wider class the escape left bare --
+  are escaped again with their class as the run clearance (the under-pad
+  engine, against everything kept), lowest class first. What still falls short
+  is taken off and reported unescaped. The run says so: `Net classes (#1529):
+  N pair(s) ... re-escaping M ball(s) at their class`.
+
+The #1518 top-layer gap test reads the class too: a ball whose own class
+cannot fit the gap between the balls keeps its escape off the top layer, the
+others keep it. No rescue rung lowers a classed ball's clearance below its
+class. Plane drops are laid one class at a time, lowest first, each at its
+class. A diff pair's P against its own N is spaced at `--diff-pair-gap` and
+not re-graded here (`drc_grazes` still reports it).
+
+## Class- and type-scoped `.kicad_dru` rules (#1565)
+
+A `.kicad_dru` clearance rule scoped by net class or item type (the #1491
+channel, e.g. `A.NetClass == 'HV' && B.NetClass == 'HV'`) and a track-scoped
+class rule (#735) are held the way the route steps hold them, through the same
+readers (`kicad_dru.install_pair_rule_channels`): the obstacle map stamps a
+foreign track, via or pad at the rule, and `class_clearance.py` grades every
+pair a rule binds -- at any clearance it was laid at, since a rescue rung can
+lay copper below the run clearance -- and re-escapes the balls that fall short.
+Balls alike to every rule re-escape together at the value a rule sets between
+two of them, and a rule between such groups is held on the obstacle side, as a
+class is; plane drops hold it the same way. What still falls short is reported
+unescaped. The run prints `.kicad_dru: N class/type-scoped ... clearance
+rule(s) held by this escape (#1565)`. A board with no such rule is unchanged.
+
+The writeback treats the classes as `route.py` does: kept without
+`--clearance-ceiling`, each capped at `min(class, ceiling)` with it -- so a
+class whose nets the part does not touch keeps its value. It used to lower
+every class to the run clearance (#439), which hid copper laid below a class.
+`drc_grazes` is graded at the written project's classes. In a chain pass
+`--clearance-ceiling <floor>`, as on the route steps: under a ceiling at the
+run clearance every class is at it and the escape is the one-clearance escape
+it always was.
 
 ## Plane-ball drops (#424)
 
@@ -373,4 +438,8 @@ step and `check_drc` grade at it.
 6. **Track Generation** - Create 45° stubs, channel segments, and exit jogs
 7. **Collision Resolution** - Reassign layers or reroute to resolve conflicts
 8. **Layer Rebalancing** - Even out route distribution across layers
-9. **Via Management** - Add vias for SMD pads on non-top layers
+9. **Via Management** - Add vias for SMD pads on non-top layers. A neighbour
+   link off the top layer gets a via in BOTH balls it joins, since the layer
+   passes move it and its anchor ball's route independently; a link refused
+   either via is dropped, and dropping an escape takes off only the vias no
+   kept escape still reaches its ball through

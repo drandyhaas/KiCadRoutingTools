@@ -302,15 +302,20 @@ def main():
     # routing_dialog is this branch's swig_gui (renamed by the IPC port).
     from kicad_routing_plugin.routing_dialog import RoutingDialog
 
-    for ticked, label, want in ((True, "override CHECKED", CEILING),
-                                (False, "override unchecked", WIDE_DECLARED)):
-        print(f"\n-- {'3' if ticked else '4'}. standalone run_cap_optimization,"
-              f" {label} --")
+    # 5 (#1578): the ceiling given but "Fix DRC settings after routing"
+    # unticked -- the CLI's --no-fix-drc-settings -- writes no class (#693).
+    for arm, ticked, fixdrc, label, want in (
+            ('3', True, True, "override CHECKED", CEILING),
+            ('4', False, True, "override unchecked", WIDE_DECLARED),
+            ('5', True, False, "override CHECKED, Fix DRC unticked",
+             WIDE_DECLARED)):
+        print(f"\n-- {arm}. standalone run_cap_optimization, {label} --")
         dlg = RoutingDialog(None, parse_kicad_pcb(board_path), board_path)
         tab = dlg.fanout_tab
         dlg.clearance_check.SetValue(ticked)
         dlg.clearance.SetValue(CEILING)
-        live = fresh_board('arm3_checked' if ticked else 'arm4_unchecked')
+        dlg.fix_drc_check.SetValue(fixdrc)
+        live = fresh_board(f'arm{arm}')
         seen_cfg = {}
 
         def _stub(_board, _pcbnew_mod, cfg):

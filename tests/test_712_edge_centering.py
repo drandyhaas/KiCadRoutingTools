@@ -432,8 +432,20 @@ def test_the_loader_refuses_every_malformed_along_edge_claim():
     # claim the emitter derives, graded at warn. 13: `templates[]`, a chip's
     # datasheet layout that place_simple seats and carries. 14: a template
     # row's `kind` and `ground_return_mm`, a switching stage's caps' ground
-    # return graded at warn.
-    assert fp.READER_VERSION == 14, (
+    # return graded at warn. 15 since #1443: `covers[]`, a body a connector
+    # carries; `heights[]`, declared part heights; a keep-out's
+    # `max_height_mm`. 16 since #1475: `blocks[].fence_mm`, a band round a
+    # zone no part may use. 17 since #1477: `links[]` and `chains[]`, two
+    # sets of parts within a distance, their groups unmerged. 18 since
+    # #1478: `rails[]`, supplies priced as rails whatever their fan-out. 19
+    # since #1480: `replicate[].channels`, copies inside one sheet. 20 since
+    # #1500: `heights[].under_cover`, a part reached from above judged
+    # under a cover by its declared height. 21 since #1504: a cover's
+    # `top_mm`, its `insertion` path and a standoff's `off_mm`, graded by
+    # `mountable`. 22 since #1537: a cover's own `holes[]`, the sites
+    # `mountable` names what stands at. 23 since #1589: a cover's
+    # `start_mm` and a hole or standoff behind the connector's origin.
+    assert fp.READER_VERSION == 23, (
         f"{fp.READER_VERSION}: the field vocabulary grew. Re-state this "
         f"literal and say which field arrived, the way #712, #837, #902, "
         f"#893, #959 and #1051 did")

@@ -661,16 +661,12 @@ def _fence_window(obstacles, window, cfg):
     from routing_config import GridCoord
 
     coord = GridCoord(cfg.grid_step)
-    min_x, min_y, max_x, max_y = bi.board_bounds
     edge_clearance = (cfg.board_edge_clearance if cfg.board_edge_clearance > 0
                       else cfg.clearance)
-    track_expand = coord.to_grid_dist(edge_clearance + cfg.track_width / 2)
-    via_expand = coord.to_grid_dist_safe(edge_clearance + cfg.via_size / 2)
-    gmin_x, gmin_y = coord.to_grid(min_x, min_y)
-    gmax_x, gmax_y = coord.to_grid(max_x, max_y)
     _add_rectangular_edge_obstacles(obstacles, coord, len(cfg.layers),
-                                    gmin_x, gmin_y, gmax_x, gmax_y,
-                                    track_expand, via_expand)
+                                    bi.board_bounds,
+                                    edge_clearance + cfg.track_width / 2,
+                                    edge_clearance + cfg.via_size / 2)
 
 
 def seed_rows(points, cfg, window):
@@ -1334,11 +1330,15 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     for s in pcb_data.segments)
                 if not _bare:
                     continue
-                if not escape_has_routable_layer(_pad, config):
+                # the net's own view: a .kicad_dru track ban forbids it
+                # layers the run routes for others (#1527)
+                from net_keepouts import config_for_nets
+                if not escape_has_routable_layer(
+                        _pad, config_for_nets(pcb_data, (net_id,), config)):
                     print(f"    bare-ball escape: {_pad.component_ref}."
                           f"{_pad.pad_number} skipped (no routable layer "
                           f"for its via to reach besides the pad's own; "
-                          f"the rest are outside --layers)")
+                          f"the rest are outside --layers or banned to the net)")
                     continue
                 _cu = [l for l in _pad.layers if l.endswith('.Cu')]
                 try:
@@ -1389,7 +1389,11 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                     # #1070: THIS run's drill floor, not
                                     # the board's min_hole_to_hole.
                                     hole_to_hole_clearance=(
-                                        config.hole_to_hole_clearance))
+                                        config.hole_to_hole_clearance),
+                                    # #1529: the route step's own class
+                                    # map (ceiling-capped), not the file's.
+                                    net_clearances=dict(
+                                        config.net_clearances or {}))
                             finally:
                                 pcb_data._fanout_all_foreign_immovable = \
                                     False
@@ -1430,7 +1434,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                         config, 'layer_costs', None),
                                     plane_drop='off',
                                     hole_to_hole_clearance=(
-                                        config.hole_to_hole_clearance))
+                                        config.hole_to_hole_clearance),
+                                    net_clearances=dict(
+                                        config.net_clearances or {}))
                             except Exception:
                                 _ft, _fv = [], []
                             if _ft or _fv:

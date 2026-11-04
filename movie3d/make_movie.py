@@ -5,13 +5,24 @@
         --groups groups.json --intent intent.json --seed 0 [--movie OUT_3d.mp4]
     python3 -X utf8 movie3d/make_movie.py BOARD OUT.kicad_pcb \\
         --groups groups.json --intent intent.json --route NAME:SET
+    python3 -X utf8 movie3d/make_movie.py BOARD OUT.kicad_pcb \\
+        --groups groups.json --intent intent.json --route-chain judge_chain.txt
 
 BOARD and OUT come first; every argument but this tool's own is
-place_simple.py's. Three steps, each printed with its time:
+place_simple.py's. Without --route or --route-chain, --seed S is filmed from
+the start seed S has in a place_simple run of --scattered/--clustered/
+--anchored (its default seeds when none is given): the counts become the
+--clustered-seeds and --anchored-seeds lists that run numbers its seeds by,
+so OUT is that run's placement of seed S exactly, and a `make_movie:` line
+names the start. Lists given instead are kept; beside a count that starts the
+seed otherwise, they are refused (exit 2). Three steps, each printed with its
+time:
 
   1. record  (record.py)   place_simple runs in-process with read-only hooks
                            and writes scene.json + timeline.json to --work;
-                           with --route BOARD:SET, place_movie's flow runs
+                           with --route BOARD:SET (a corpus board's recorded
+                           chain) or --route-chain FILE (a placement run's
+                           judge_chain.txt), place_movie's flow runs
                            first (its `run_flow`: the round's seeds placed,
                            the cheapest fast-routed, the best routed in full,
                            in --route-work, which a 2D flow run's work dir
@@ -47,30 +58,27 @@ KRT_TOOL = {'scope': [], 'kind': 'actor'}
 
 
 def flow(a, rest):
-    """place_movie's flow (--route), filmed in 3D: run_flow places the
-    round's seeds, fast-routes the judged ones and routes the best in full
-    (reusing what --route-work holds); the best seed's placement is then
-    recorded and its routes played on the 3D board. Returns what
+    """place_movie's flow (--route or --route-chain), filmed in 3D: run_flow
+    places the round's seeds, fast-routes the judged ones and routes the best
+    in full (reusing what --route-work holds); the best seed's placement is
+    then recorded and its routes played on the 3D board. Returns what
     record.record does."""
     import place_movie
     from route3d import film_routes
-    if ':' not in a.route:
+    if a.route and ':' not in a.route:
         sys.exit('make_movie: --route NAME:SET, a stress-corpus board and its set number')
     board, out = rest[0], rest[1]
     work = os.path.abspath(a.route_work or os.path.splitext(os.path.abspath(out))[0] + '_work')
     opts = place_movie._strip(rest[2:], '--seed', '--json', '--seeds', '--jobs', '--clustered-seeds',
                               '--anchored-seeds')
-    c0 = a.scattered + a.clustered
-    n = c0 + a.anchored
-    if min(a.scattered, a.clustered, a.anchored) < 0 or n < 1 or a.judge < 1:
+    if min(a.scattered, a.clustered, a.anchored) < 0 or a.scattered + a.clustered + a.anchored < 1 \
+            or a.judge < 1:
         sys.exit('make_movie: --scattered, --clustered and --anchored of 0 or more, at least one seed, '
                  '--judge 1 or more')
-    if a.clustered:
-        opts += ['--clustered-seeds', f'{a.scattered}-{c0 - 1}']
-    if a.anchored:
-        opts += ['--anchored-seeds', f'{c0}-{n - 1}']
-    fa = argparse.Namespace(route=a.route, fresh=a.fresh, scattered=a.scattered, clustered=a.clustered,
-                            anchored=a.anchored, judge=a.judge, jobs=a.jobs, route_jobs=a.route_jobs)
+    opts += place_movie.start_opts(a.scattered, a.clustered, a.anchored)
+    fa = argparse.Namespace(route=a.route, route_chain=a.route_chain, fresh=a.fresh,
+                            scattered=a.scattered, clustered=a.clustered, anchored=a.anchored,
+                            judge=a.judge, jobs=a.jobs, route_jobs=a.route_jobs)
     got = place_movie.run_flow(fa, board, out, opts, work)
     if got is None:
         return 2, None
@@ -85,11 +93,13 @@ def flow(a, rest):
     if rec.scene is None:
         return rc or 2, None
     rec.placed(rc, rec.hold)
-    film_routes(rec, work, judged, scores, best, full, filmed, budget=a.route_frames)
+    film_routes(rec, work, judged, scores, best, full, filmed, budget=a.route_frames,
+                chain=a.route_chain)
     rec.turn_over(rec.copper_shot)
     subprocess.run([sys.executable, os.path.join(record.REPO, 'py_router', 'copy_board.py'),
                     os.path.join(work, f's{best}.kicad_pcb'), out], check=False, capture_output=True)
-    print(f"make_movie: {out} = seed {best}; its full route in {os.path.join(work, f'full_s{best}', 'out')}")
+    print(f"make_movie: {out} = seed {best}; its full route in "
+          f"{place_movie.routed_where(work, best, a.route_chain)}")
     return rc, record.write(a, rec)
 
 
@@ -120,24 +130,32 @@ def main(argv=None):
                                         "place_simple.py's (--groups, --intent, --seed, ...).")
     record.own_args(ap, work_required=False)
     from place_simple import ANCHORED_SEEDS, CLUSTERED_SEEDS, JUDGED_SEEDS, SCATTERED_SEEDS
-    ap.add_argument('--route', metavar='BOARD:SET',
-                    help="run and film place_movie's placement flow, routing with this "
-                         "stress-corpus board's recorded chain (NAME:SET: the board and its set number)")
-    ap.add_argument('--scattered', type=int, default=SCATTERED_SEEDS,
-                    help=f'with --route, the seeds started scattered (default {SCATTERED_SEEDS})')
-    ap.add_argument('--clustered', type=int, default=CLUSTERED_SEEDS,
-                    help=f'with --route, the seeds started clustered (default {CLUSTERED_SEEDS})')
-    ap.add_argument('--anchored', type=int, default=ANCHORED_SEEDS,
-                    help=f'with --route, the seeds started anchored (default {ANCHORED_SEEDS}: opt-in)')
+    how = ap.add_mutually_exclusive_group()
+    how.add_argument('--route', metavar='BOARD:SET',
+                     help="run and film place_movie's placement flow, routing with this "
+                          "stress-corpus board's recorded chain (NAME:SET: the board and its set number)")
+    how.add_argument('--route-chain', metavar='FILE',
+                     help="run and film place_movie's placement flow, routing with this chain file "
+                          "(judge_seeds.py --chain's format: the placement run's judge_chain.txt), "
+                          "run as judge_seeds runs it, from the current folder (the repo root)")
+    ap.add_argument('--scattered', type=int,
+                    help=f'the seeds started scattered (default {SCATTERED_SEEDS}): in the flow, '
+                         f'the seeds placed; without, the run whose --seed is filmed, from the '
+                         f'start that run gives it')
+    ap.add_argument('--clustered', type=int,
+                    help=f'the seeds started clustered, after the scattered ones (default {CLUSTERED_SEEDS})')
+    ap.add_argument('--anchored', type=int,
+                    help=f'the seeds started anchored, after the clustered ones (default {ANCHORED_SEEDS}: '
+                         f'opt-in)')
     ap.add_argument('--judge', type=int, default=JUDGED_SEEDS,
-                    help=f'with --route, the cheapest legal seeds fast-routed (default {JUDGED_SEEDS})')
-    ap.add_argument('--jobs', type=int, default=4, help='with --route, placements and routes at once (default 4)')
-    ap.add_argument('--route-jobs', type=int, default=0, help='with --route, fast routes at once (default --jobs)')
-    ap.add_argument('--fresh', action='store_true', help='with --route, empty --route-work first')
-    ap.add_argument('--route-work', help="with --route, the flow's work dir (default: OUT's name + _work, "
+                    help=f'in the flow, the cheapest legal seeds fast-routed (default {JUDGED_SEEDS})')
+    ap.add_argument('--jobs', type=int, default=4, help='in the flow, placements and routes at once (default 4)')
+    ap.add_argument('--route-jobs', type=int, default=0, help='in the flow, fast routes at once (default --jobs)')
+    ap.add_argument('--fresh', action='store_true', help='in the flow, empty --route-work first')
+    ap.add_argument('--route-work', help="the flow's work dir (default: OUT's name + _work, "
                                          "place_movie's own default, so a 2D flow run's work is reused)")
     ap.add_argument('--route-frames', type=int, default=240,
-                    help='with --route, past this many router events in a chain, several share a '
+                    help='in the flow, past this many router events in a chain, several share a '
                          'frame (default 240; 0 = one frame each)')
     ap.add_argument('--movie', help="the movie to write (default: OUT's name + _3d.mp4)")
     ap.add_argument('--browser', default=os.environ.get('MOVIE3D_CHROMIUM'),
@@ -163,11 +181,19 @@ def main(argv=None):
         sys.exit('make_movie: no `ffmpeg` on PATH')
 
     # 1. record
+    import place_movie
+    given = place_movie.start_counts(a)
     t0 = time.time()
-    if a.route:
+    if a.route or a.route_chain:
         rc, got = flow(a, rest)
     else:
-        rc, got = record.record(a, rest)
+        opts, line = place_movie.seed_starts('make_movie', given, rest[2:], rest[1])
+        if opts is None:
+            print(line, file=sys.stderr)
+            return 2
+        if line:
+            print(line)
+        rc, got = record.record(a, rest[:2] + opts)
     t_rec = time.time() - t0
     if not got:
         print('make_movie: place_simple did not get as far as a placement', file=sys.stderr)
@@ -233,7 +259,7 @@ def main(argv=None):
     anneal = [i for i, lab in enumerate(labels) if lab.startswith('anneal')]
     stills = {'start': 0, 'anneal': anneal[len(anneal) // 2] if anneal else len(labels) // 2}
     placed = [i for i, lab in enumerate(labels) if lab.startswith('placed: ')]
-    if a.route and placed:
+    if (a.route or a.route_chain) and placed:
         stills['placed'] = placed[-1]
         fast = [i for i, lab in enumerate(labels) if lab.startswith('fast route, seed')]
         if fast:

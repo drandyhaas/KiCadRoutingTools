@@ -34,7 +34,10 @@ SRC_BOARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 # #1342: the fixture's nets exist only on U1, and the fanouts skip a
 # single-pad (NC) net; main() fans a copy where each has a partner pad.
 BOARD = SRC_BOARD
-VIA_SIZE, VIA_DRILL, CLEARANCE, GRID = 0.45, 0.2, 0.12, 0.05
+# A 0.5 mm via (#1568): at 0.45 the leg the nearest-first greedy dropped was
+# refused only by the via-vs-pad test's square-cornered box, and the exact pad
+# test escapes it without the search.
+VIA_SIZE, VIA_DRILL, CLEARANCE, GRID = 0.5, 0.25, 0.12, 0.05
 N_LEGS = 8
 
 

@@ -757,9 +757,20 @@ class TestTheOneRealBoardArmWhereTheRegistrarRUNS(unittest.TestCase):
     # Everything else is unchanged -- 9 barrels relocated, 17 connectors, the
     # same three caps credited -- which is what says this is the cap being
     # honoured rather than the via nudger regressing.
-    N_MOVES = 9
-    N_CONNECTORS = 17
-    N_UNRESOLVED = 11
+    #
+    # #1520 moved three more, for the opposite reason: the pass now prices a
+    # round-cornered pad as check_drc grades it, not as its box. One of the
+    # nine barrels (an L2 via off C7's corner arc) and C67's whole seed graze
+    # were phantoms of the box corner -- check_drc measures both clear -- so
+    #
+    #   N_MOVES        9 -> 8
+    #   N_CONNECTORS  17 -> 15
+    #   N_UNRESOLVED  11 -> 10
+    #
+    # and the same three caps are credited.
+    N_MOVES = 8
+    N_CONNECTORS = 15
+    N_UNRESOLVED = 10
     N_PLACEMENTS = 0
     VIA_FREED = ['C19', 'C44', 'C45']
 
@@ -770,7 +781,7 @@ class TestTheOneRealBoardArmWhereTheRegistrarRUNS(unittest.TestCase):
             r = repair_fanout_clearance(pcb, BOARD, **self.BOXED)
         return pcb, r, buf.getvalue()
 
-    def test_the_whole_pass_relocates_nine_vias_and_credits_three_caps(self):
+    def test_the_whole_pass_relocates_eight_vias_and_credits_three_caps(self):
         pcb, r, out = self._run()
         self.assertEqual(len(r['via_moves']), self.N_MOVES)
         self.assertEqual(len(r['new_segments']), self.N_CONNECTORS)

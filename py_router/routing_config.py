@@ -262,6 +262,13 @@ class GridRouteConfig:
     meander_spacing: float = 2.0  # arm pitch as a multiple of net track width
     diff_chamfer_extra: float = 1.5  # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
     diff_pair_intra_match: bool = False  # Enable intra-pair P/N length matching (meander shorter track)
+    # #1503: {P net id: tolerance mm} for the pairs matched P to N this run --
+    # every pair under diff_pair_intra_match, else those a .kicad_dru P/N skew
+    # rule binds; None: none (`length_matching.intra_pair_on`)
+    intra_pair_tolerances: Optional[Dict[int, float]] = None
+    # P and N of those same pairs: the nets whose shipped skew is graded, so
+    # the post-route cleanup lays them a via-centre bridge (#1583)
+    skew_graded_net_ids: FrozenSet[int] = frozenset()
     ac_couple_match: bool = False  # End-to-end length-match AC-coupled pairs split by series caps (#196)
     # Hybrid escape: when a coupled pair's terminal connector can't clear foreign
     # copper (#165 graze), keep the coupled middle and defer each terminal leg to
@@ -394,6 +401,12 @@ class GridRouteConfig:
     # frozenset({P, N}) -> mm, which pair_clearance reads instead of that map.
     # Engine-computed (kicad_dru.install_track_clearances); empty = inert.
     track_partner_clearances: Dict[FrozenSet[int], float] = field(default_factory=dict)
+    # #1491: the board's .kicad_dru clearance rules scoped by net class or
+    # item type, installed for this call's routed set
+    # (kicad_dru.install_scoped_clearances, from install_track_clearances).
+    # obstacle_clearance / pad_obstacle_clearance / pair_clearance read it;
+    # None (no such rule) leaves every value as it was.
+    scoped_clearance: Optional[object] = None
     # #530: the board's design rules resolved in KiCad's order
     # (design_rules.DesignRules), installed engine-side by
     # kicad_dru.install_layer_clearances for both fronts. None until then.
@@ -421,12 +434,15 @@ class GridRouteConfig:
     # for shipping (cleanup_pipeline, the seam re-asks, the plane-fragility
     # field). Read by the engines from here so both fronts see one value.
     quick: int = 0
-    # #1293: the P<->N clearance of each diff pair a .kicad_dru coupled-pair
-    # rule (AB.isCoupledDiffPair()) sets, keyed frozenset({P, N}) ->
+    # #1293: the P<->N clearance of each diff pair a rule binding the pair
+    # sets -- a .kicad_dru coupled-pair rule (AB.isCoupledDiffPair()), the
+    # class's implicit "(diff pair)" rule (#1542) or a class-scoped rule
+    # (#1526) -- keyed frozenset({P, N}) ->
     # {'track': {layer: mm}, 'layer': {layer: mm}, 'stack': mm or None}, the
     # pair_clearance kinds. A layer is listed only where that rule is what
     # KiCad grades the pair at. Engine-computed (route_diff); no CLI flag and
-    # no GUI control -- the rules file is the source. Empty = inert.
+    # no GUI control -- the project and rules files are the source. Empty =
+    # inert.
     coupled_pair_clearances: Dict[FrozenSet[int], dict] = field(default_factory=dict)
 
     def net_via(self, net_id: int) -> Tuple[float, float]:
@@ -500,27 +516,48 @@ class GridRouteConfig:
         v = self.track_clearances.get(net_id)
         return resolved if v is None or v <= resolved else v
 
-    def layer_clearance(self, layer: str, fallback: float) -> float:
+    def layer_clearance(self, layer: str, fallback: float,
+                        net_id: Optional[int] = None, pad=None) -> float:
         """#498 pair clearance on `layer`: the .kicad_dru rule value when the
         layer is ruled (replacement -- may be below `fallback`), else
         `fallback` (the caller's net/class-resolved value). Single-layer
         copper (segments, SMD pads) resolves through this; stack-spanning
-        copper uses stack_clearance()."""
+        copper uses stack_clearance().
+
+        A stamp names its obstacle (`net_id`, or the foreign `pad`) so a
+        class/type-scoped rule LATER in the file than the layer's rule wins
+        over it for the routed nets it binds (#1491, KiCad's last match);
+        without one, or with no such rule, the layer rule replaces as
+        before."""
         if self.layer_clearances:
             v = self.layer_clearances.get(layer)
             if v is not None:
+                if self.scoped_clearance is not None and (
+                        net_id is not None or pad is not None):
+                    s = self.scoped_clearance.stamp_on_layer(
+                        int((net_id if net_id is not None
+                             else getattr(pad, 'net_id', 0)) or 0),
+                        (getattr(pad, 'pad_type', None) or 'smd')
+                        if pad is not None else None, layer, v)
+                    if s is not None:
+                        return s
                 return v
         return fallback
 
-    def stack_clearance(self, fallback: float) -> float:
+    def stack_clearance(self, fallback: float, net_id: Optional[int] = None,
+                        pad=None) -> float:
         """#498 clearance for STACK-SPANNING pairs (via barrels, TH drills):
         KiCad evaluates the pair on every layer both coppers exist on, so the
         requirement is the max over the stack. max(fallback, all rule values)
         -- conservatively keeps `fallback` even when every routed layer is
         ruled lower, since the board may have copper on layers outside
-        config.layers."""
+        config.layers. `net_id` / `pad` order each layer's rule against the
+        scoped channel as `layer_clearance` does."""
         if not self.layer_clearances:
             return fallback
+        if self.scoped_clearance is not None and (net_id is not None or pad is not None):
+            return max([fallback] + [self.layer_clearance(l, fallback, net_id, pad)
+                                     for l in self.layer_clearances])
         return max([fallback] + list(self.layer_clearances.values()))
 
     def obstacle_clearance(self, net_id: int) -> float:
@@ -535,7 +572,38 @@ class GridRouteConfig:
         and REMOVE paths derive an identical per-obstacle value (ref-count
         symmetry, issue #208/#309)."""
         floor = self.net_clearance_floor if self.net_clearance_floor is not None else self.clearance
-        return max(floor, self.net_clearances.get(net_id, self.clearance))
+        base = max(floor, self.net_clearances.get(net_id, self.clearance))
+        if self.scoped_clearance is None:
+            return base
+        return self.scoped_stamp(net_id, None, base)
+
+    def scoped_stamp(self, net_id: int, pad_type, default: float) -> float:
+        """#1491: the scoped channel's stamp for an obstacle of `net_id` (a
+        track or via, or a pad of `pad_type`), or `default` when no class/type-
+        scoped .kicad_dru rule binds it against a routed net. A builder that
+        prices obstacles by its own formula (build_base_obstacle_map) passes
+        its value as `default`."""
+        s = self.scoped_clearance
+        if s is not None:
+            v = s.stamp(net_id, pad_type, self)
+            if v is not None:
+                return v
+        return default
+
+    def pad_obstacle_clearance(self, pad, default: Optional[float] = None) -> float:
+        """The stamp clearance of a foreign PAD (#1491): the scoped channel's
+        pad value for its net and pad type, else `default` (the class-resolved
+        value; `obstacle_clearance` without the scoped channel when None). A
+        relaxed track/via stamp never reaches a pad: a rule that binds tracks
+        does not bind pads."""
+        nid = int(getattr(pad, 'net_id', 0) or 0)
+        if default is None:
+            floor = (self.net_clearance_floor if self.net_clearance_floor is not None
+                     else self.clearance)
+            default = max(floor, self.net_clearances.get(nid, self.clearance))
+        if self.scoped_clearance is None:
+            return default
+        return self.scoped_stamp(nid, getattr(pad, 'pad_type', None) or 'smd', default)
 
     def set_net_clearances(self, net_clearances, routed_net_ids) -> None:
         """Install the cross-class clearance map and compute the routing-side
@@ -562,9 +630,38 @@ class GridRouteConfig:
     # a verdict at the stamp value would refuse legal copper whenever a wider
     # class is routed anywhere in the call.
 
+    def _class_pair_clearance(self, net_a: int, net_b: int,
+                              base: Optional[float] = None) -> float:
+        """`max(base or clearance, class A, class B)`: the pair before any
+        .kicad_dru rule."""
+        clr = self.clearance if base is None else base
+        nc = self.net_clearances
+        if nc:
+            a = nc.get(net_a)
+            if a is not None and a > clr:
+                clr = a
+            b = nc.get(net_b)
+            if b is not None and b > clr:
+                clr = b
+        return clr
+
+    def coupled_pair_value(self, net_a: int, net_b: int, kind: str,
+                           layer: Optional[str] = None) -> Optional[float]:
+        """The clearance a rule binding a diff pair's P against its own N sets
+        (`coupled_pair_clearances`: #1293, #1526, #1542) for ``kind`` --
+        'track', 'layer' (track vs track or via), 'pad' (track vs pad) or
+        'stack' -- on ``layer``; None where no such rule governs."""
+        if not self.coupled_pair_clearances or net_a == net_b:
+            return None
+        cp = self.coupled_pair_clearances.get(frozenset((net_a, net_b)))
+        if cp is None:
+            return None
+        return (cp.get('stack') if kind == 'stack'
+                else (cp.get(kind) or {}).get(layer))
+
     def pair_clearance(self, net_a: int, net_b: int,
                        layer: Optional[str] = None, *, kind: str = 'layer',
-                       base: Optional[float] = None) -> float:
+                       base: Optional[float] = None, types=None) -> float:
         """check_drc's clearance between copper of `net_a` and `net_b`.
 
         `base` is the floor the pair starts from (`self.clearance` when None;
@@ -585,35 +682,36 @@ class GridRouteConfig:
         * 'stack' -- via vs via, which meet on every layer: the max over the
           stack (check_drc's `_stack_cl`). `layer` is ignored.
 
-        A diff pair's P against its own N, where a coupled-pair rule sets it
-        (`coupled_pair_clearances`, #1293), is that rule's value: KiCad's
-        last matching rule replaces the classes and the base.
+        A diff pair's P against its own N, where a rule binding the pair sets
+        it (`coupled_pair_clearances`: #1293, #1526, #1542), is that rule's
+        value: it replaces the classes and the base, as in KiCad.
 
         With no class map, no layer rule and no track rule it returns `base`
         unchanged, so a site that swaps its flat term for this call is
         byte-identical on such a board."""
-        if self.coupled_pair_clearances and net_a != net_b:
-            cp = self.coupled_pair_clearances.get(frozenset((net_a, net_b)))
-            if cp is not None:
-                v = (cp.get('stack') if kind == 'stack'
-                     else (cp.get(kind) or {}).get(layer))
-                if v is not None:
-                    return v
-        clr = self.clearance if base is None else base
-        nc = self.net_clearances
-        if nc:
-            a = nc.get(net_a)
-            if a is not None and a > clr:
-                clr = a
-            b = nc.get(net_b)
-            if b is not None and b > clr:
-                clr = b
-        if kind == 'stack':
-            return self.stack_clearance(clr)
-        if kind != 'layer' and kind != 'track':
+        v = self.coupled_pair_value(net_a, net_b, kind, layer)
+        if v is not None:
+            return v
+        clr = self._class_pair_clearance(net_a, net_b, base)
+        if kind not in ('layer', 'track', 'stack'):
             raise ValueError(f"pair_clearance kind {kind!r}: expected "
                              f"'layer', 'track' or 'stack'")
-        if layer is not None:
+        if self.scoped_clearance is not None and net_a != net_b:
+            # #1491: a class/type-scoped rule REPLACES the class value for each
+            # item combination it binds, and the layer rule replaces it in turn
+            # only where it comes later in the file (kicad_dru.resolve_pair)
+            types = (types if types is not None else
+                     (('via',), ('via',)) if kind == 'stack' else
+                     (('track',), ('track',)) if kind == 'track' else
+                     (('track', 'via'), ('track', 'via')))
+            clr = self.scoped_clearance.pair(
+                net_a, net_b, types[0], types[1], clr, self.layer_clearances,
+                layer=layer if kind != 'stack' else None, stack=kind == 'stack')
+            if kind == 'stack':
+                return clr
+        elif kind == 'stack':
+            return self.stack_clearance(clr)
+        elif layer is not None:
             clr = self.layer_clearance(layer, clr)
         if kind == 'track' and self.track_clearances:
             tp = (self.track_partner_clearances.get(frozenset((net_a, net_b)))
@@ -630,13 +728,15 @@ class GridRouteConfig:
 
     def pad_pair_clearance(self, pad, other_net: int,
                            layer: Optional[str] = None, *, other_pad=None,
-                           base: Optional[float] = None) -> float:
+                           base: Optional[float] = None,
+                           other_type: Optional[str] = None) -> float:
         """check_drc's clearance between `pad` and copper of `other_net`
         (`_pad_pair_cl`): `pad_pair_clearance_before_override`, then a pad /
         footprint clearance OVERRIDE, which replaces the value."""
         return self.pad_override_clearance(
             self.pad_pair_clearance_before_override(
-                pad, other_net, layer, other_pad=other_pad, base=base),
+                pad, other_net, layer, other_pad=other_pad, base=base,
+                other_type=other_type),
             pad, other_pad)
 
     def max_pair_clearance(self, base: Optional[float] = None) -> float:
@@ -652,43 +752,68 @@ class GridRouteConfig:
                     v = mv
         for cp in (self.coupled_pair_clearances or {}).values():
             for mv in ([cp.get('stack')] + list((cp.get('track') or {}).values())
-                       + list((cp.get('layer') or {}).values())):
+                       + list((cp.get('layer') or {}).values())
+                       + list((cp.get('pad') or {}).values())):
                 if mv is not None and mv > v:
                     v = mv
+        if self.scoped_clearance is not None:
+            v = max(v, self.scoped_clearance.max_value)
         return v
 
     def pair_clearance_inert(self) -> bool:
         """True when no channel can move a pair off the floor it is given: no
         class map, no .kicad_dru layer rule, no track rule, no coupled-pair
-        rule. A hot loop may then keep its flat term instead of pricing every
-        item."""
+        rule, no class/type-scoped rule. A hot loop may then keep its flat
+        term instead of pricing every item."""
         return not (self.net_clearances or self.layer_clearances
-                    or self.track_clearances or self.coupled_pair_clearances)
+                    or self.track_clearances or self.coupled_pair_clearances
+                    or self.scoped_clearance is not None)
 
     def pad_pair_clearance_before_override(self, pad, other_net: int,
                                            layer: Optional[str] = None, *,
                                            other_pad=None,
-                                           base: Optional[float] = None
+                                           base: Optional[float] = None,
+                                           other_type: Optional[str] = None
                                            ) -> float:
         """`pad_pair_clearance` short of its last step, the pad / footprint
         override: the pair's classes, then the .kicad_dru rule on `layer` (a
         track) or over the copper the two share (a via, or `other_pad`).
 
+        `other_type` ('track' or 'via') names the copper `other_net` lays
+        when the site knows it, so a class/type-scoped rule for the other
+        type does not price it (#1574: a via-to-pad rule is not a track's);
+        None prices the max over both, as before.
+
         For a site that keeps its own override handling (#1136 converts the
         class and rule term only, so a board that declares neither is
         unchanged whatever its pads carry). `pad_pair_clearance` is
         `pad_override_clearance(<this>, pad, other_pad)`."""
-        eff = self.pair_clearance(getattr(pad, 'net_id', 0) or 0, other_net,
-                                  base=base)
+        pad_net = getattr(pad, 'net_id', 0) or 0
+        shared = None
+        if layer is None and self.layer_clearances:
+            from check_drc import pad_copper_layers
+            cu = list(self.board_copper_layers or self.layers)
+            shared = (pad_copper_layers(pad, cu),
+                      pad_copper_layers(other_pad, cu) if other_pad is not None
+                      else None)
+        if self.scoped_clearance is not None and pad_net != other_net:
+            # #1491: per item combination, the scoped rule and the layer rules
+            # in file order (kicad_dru.resolve_pair), as pair_clearance
+            _pt = ('pad', getattr(pad, 'pad_type', None) or 'smd')
+            _ot = ((('pad', getattr(other_pad, 'pad_type', None) or 'smd'),)
+                   if other_pad is not None
+                   else (other_type,) if other_type is not None
+                   else ('track', 'via'))
+            return self.scoped_clearance.pair(
+                pad_net, other_net, (_pt,), _ot,
+                self._class_pair_clearance(pad_net, other_net, base),
+                self.layer_clearances, layer=layer, pad_layers=shared)
+        eff = self.pair_clearance(pad_net, other_net, base=base)
         if layer is not None:
             return self.layer_clearance(layer, eff)
-        if self.layer_clearances:
-            from check_drc import pads_shared_layer_clearance, pad_copper_layers
-            cu = list(self.board_copper_layers or self.layers)
-            eff = pads_shared_layer_clearance(
-                eff, self.layer_clearances, pad_copper_layers(pad, cu),
-                pad_copper_layers(other_pad, cu) if other_pad is not None
-                else None)
+        if shared is not None:
+            from check_drc import pads_shared_layer_clearance
+            eff = pads_shared_layer_clearance(eff, self.layer_clearances, *shared)
         return eff
 
     def net_clearances_by_name(self, nets) -> Dict[str, float]:
@@ -1060,3 +1185,47 @@ class GridCoord:
     def to_grid_dist_safe(self, dist_mm: float) -> int:
         """Convert a distance in mm to grid units, rounding up for safety."""
         return math.ceil(dist_mm * self.inv_step)
+
+    def edge_band_limits(self, lo_mm: float, hi_mm: float, reach_mm: float,
+                         strict: bool) -> Tuple[int, int]:
+        """Cell limits of a straight edge keep-out along ONE axis (#1519).
+
+        ``lo_mm``/``hi_mm`` are the two edges (a rectangle's min and max on
+        this axis) and ``reach_mm`` the keep-out reach from each. Returns
+        ``(lo, hi)``: a cell ``g`` is in the band iff ``g <= lo`` or
+        ``g >= hi``. The band is measured from the EXACT edge, so an edge
+        between grid lines blocks every cell whose centre lies within the
+        reach. ``strict`` picks the tie rule: True blocks a cell nearer than
+        the reach (the band of ``to_grid_dist_safe``), False also blocks a
+        cell exactly at it (the band of ``to_grid_dist``). On an on-grid edge
+        the result is exactly ``to_grid(edge) -/+ expand``, the band the
+        rectangle was stamped with before -- including that expand's own
+        float rounding -- so only an off-grid edge changes.
+        """
+        r = reach_mm * self.inv_step
+        if strict:
+            k = self.to_grid_dist_safe(reach_mm)     # cells: dist < reach
+            b = k - r                                # in [0, 1)
+        else:
+            k = self.to_grid_dist(reach_mm)          # cells: dist <= reach
+            b = r - k                                # in [0, 1)
+
+        def _split(edge_mm):
+            e = edge_mm * self.inv_step
+            n = round(e)
+            if abs(e - n) < 1e-6:                    # on the grid
+                return n, 0.0
+            n = math.floor(e)
+            return n, e - n
+
+        lo_n, lo_a = _split(lo_mm)
+        hi_n, hi_a = _split(hi_mm)
+        if strict:
+            # g - lo_e < r  and  hi_e - g < r, with r = k - b
+            lo = lo_n + k + math.ceil(lo_a - b) - 1
+            hi = hi_n - k + math.floor(hi_a + b) + 1
+        else:
+            # g - lo_e <= r  and  hi_e - g <= r, with r = k + b
+            lo = lo_n + k + math.floor(lo_a + b)
+            hi = hi_n - k + math.ceil(hi_a - b)
+        return lo, hi

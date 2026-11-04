@@ -125,6 +125,11 @@ REFUSED_TOOLS = {
         'writes a copper keep-out rule area that every later route step obeys '
         '(#1200); the plan format has no step for it. Run it on the CLI and '
         'start the plan from its output'),
+    'autoplan.py': (
+        'builds its OWN chain of plane, fanout, decap, diff-pair and route '
+        'steps from the board and runs it; the plan format has no step that '
+        're-derives a chain. Run it on the CLI and start the plan from its '
+        'output (the steps it ran are in <output>.autoplan/plan.json)'),
     # Every board-writing KRT_TOOL (krt_registry `kind` actor or conditional)
     # is mapped, refused here, or in NOOP_TOOLS below: the parity gate reads
     # the registry and fails on one that is none of the three (#937).
@@ -556,7 +561,10 @@ TOOL_FLAG_PARAMS = {
 # as in the CLI, where an empty list is falsy -- so it is not an
 # optional-list flag with a True for bare.
 TOOL_LIST_FLAGS = {
-    'bga_fanout.py': {'--diff-pairs': 'diff_pair_patterns_ctrl'},
+    'bga_fanout.py': {'--diff-pairs': 'diff_pair_patterns_ctrl',
+                      # #1521: the parts held immovable -> the BGA panel's
+                      # Hold parts field, space-joined.
+                      '--immovable-refs': 'immovable_refs'},
 }
 
 # Per-tool flags taking an OPTIONAL list (argparse nargs='*'). route.py and
@@ -592,6 +600,19 @@ def _num(v):
 PATH_PARAMS = {'net_clearances_path', 'fab_overrides_path'}
 
 
+def _long_form(argv):
+    """#1460: the command with each short option respelled as its long one,
+    by the tool's own parser (cli_argv_check.long_form). Every table here is
+    keyed by long spellings, so a recorded `qfn_fanout.py ... -c U2 -w 0.15`
+    lost its component and width, and after `--nets '*'` the two short
+    options and their values were taken into the net list."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from cli_argv_check import long_form
+    return long_form(argv)
+
+
 def parse_command(argv, cwd=None):
     tool = None
     for a in argv:
@@ -606,6 +627,7 @@ def parse_command(argv, cwd=None):
             return {'_noop': f"{base}: {NOOP_TOOLS[base]}"}
     if tool is None:
         return None
+    argv = _long_form(argv)
     # A `--help` invocation (the agent inspecting a tool during the run) is not a
     # routing step -- skip it so the plan doesn't carry no-op `help: true` steps.
     if '--help' in argv or '-h' in argv:
@@ -789,14 +811,21 @@ def parse_command(argv, cwd=None):
     elif action in ('route_planes', 'repair_planes'):
         layers = [str(l) for l in lists.get('--plane-layers', [])]
         net_names = [str(n) for n in nets]
+        # #1495: a split layer's quoted '|' group is ONE assignment of its
+        # nets on that layer -- the GUI plane tab knows no net called '+3V3|+5V'
+        _rd = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), 'py_router')
+        if _rd not in sys.path:
+            sys.path.insert(0, _rd)
+        from plane_groups import plane_net_names, split_plane_group
         if net_names and layers:
             step['assignments'] = [
-                {'nets': [n], 'layer': layers[min(k, len(layers) - 1)]}
+                {'nets': split_plane_group(n), 'layer': layers[min(k, len(layers) - 1)]}
                 for k, n in enumerate(net_names)]
         elif net_names and action == 'route_planes':
             # No --plane-layers (route_planes auto-detects zones): emit a
             # layer-less assignment; the GUI plane tab resolves the layer.
-            step['assignments'] = [{'nets': net_names, 'layer': ''}]
+            step['assignments'] = [{'nets': plane_net_names(net_names), 'layer': ''}]
         # repair_planes with no --plane-layers: emit NO assignments, so the
         # post-pass below inherits the preceding route_planes step's REAL
         # layers. route_disconnected_planes auto-detects zones on the CLI, but
@@ -884,13 +913,18 @@ CAP_FLAG_PARAMS = {
 #   --lock              nargs='+' extra locked refs; the GUI has no control.
 #   --verbose           console verbosity, not a routing parameter.
 CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False),  # inverted sense
-                  '--beneath-only': ('cap_beneath_only', True)}
+                  '--beneath-only': ('cap_beneath_only', True),
+                  # #1578: the shared "Fix DRC settings after routing" box,
+                  # which gates the cap step's writeback as the flag does
+                  # the CLI's (INVERTED_BOOL_FLAGS' route-step spelling).
+                  '--no-fix-drc-settings': ('fix_drc_check', False)}
 
 
 def cap_optimization_step(argv, cwd=None):
     """A place_fanout_clearance.py invocation -> a standalone `optimize_caps` plan
     step (matching ai_plan.py's live format), carrying the non-default cap_*
     knobs so a loaded plan optimizes caps the way the recorded run did."""
+    argv = _long_form(argv)
     params = {}
     i = 0
     while i < len(argv):

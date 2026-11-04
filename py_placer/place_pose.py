@@ -9,6 +9,7 @@
     place_pose.py BOARD OUT unlock U1
     place_pose.py BOARD OUT set U1 129.9 98.3 --rot 270 rotate CON2 180 lock U1
     place_pose.py BOARD OUT replicate --from CH1 --to CH2 --to CH3   # #1211
+    place_pose.py BOARD OUT replicate --channel U1,C1,C2 --channel U2,C3,C4  # #1480
 
 Every verb writes through `placement.writer.write_placed_output` -- the same
 writer `place_simple` uses -- and carries the sibling `.kicad_pro` /
@@ -67,6 +68,12 @@ finding) is refused at exit 4 with nothing written, and `JSON_SUMMARY.
 zone_check` names the block, the zone and the overrun. Relative, like the
 legality verdict, so a move that brings a part from the pile toward its zone
 is never refused for not arriving. `--force` writes anyway and says so.
+The intent's `keepouts[]` (#1535) are graded the same way, as check_floorplan's
+`keepout` rule measures them: a pose that puts a moved part inside one it was
+not in is refused at exit 4 (`intent_keepout_pairs`), a `--near` snap ranks and
+re-grades its candidates against them, and `JSON_SUMMARY.keepout_check` names
+the keep-outs graded; with the rule demoted to warn they are reported, not
+refused.
 
 There is no `--allow-unplaced`: this tool has no unplaced gate, because placing
 the parts of a pile one decision at a time is what it is for. An unplaced board
@@ -107,6 +114,8 @@ exact points given -- so --near / --snap need a call with ONE pose op):
   lock REF [REF ...]
   unlock REF [REF ...]       the only way to move a KiCad-locked part
   replicate --from SHEET --to SHEET [--to SHEET] [--anchor REF] [--offset DX DY]
+  replicate --channel REF,REF,... --channel REF,REF,... [...]   channels inside one
+                           sheet named by their parts, matched index for index
             [--allow-net-mismatch REF.PAD ...] [--only REFS | --skip REFS]
             [--search MM [--search-step MM]]
             copy one placed instance of a hierarchical sheet onto its
@@ -188,8 +197,10 @@ def build_parser(with_verbs=True):
                    help="Track width the FACE rule prices a lane at. "
                         "Omitted, the board's Default netclass width")
     p.add_argument('--snap', action='store_true',
-                   help="If the requested pose is refused, take the nearest "
-                        "legal pose within --radius instead (ranked by "
+                   help="If the requested pose is refused, or the part itself "
+                        "is in a gating pair there (one the board already had "
+                        "included), take the nearest pose within --radius "
+                        "where it is in none instead (ranked by "
                         "pose_score, then RE-GRADED here -- the ranker's "
                         "legality is an AABB gate and this verb's verdict is "
                         "exact geometry, so a candidate is verified, never "
@@ -220,8 +231,9 @@ def build_parser(with_verbs=True):
     p.add_argument('--intent', default=None, metavar='PATH',
                    help="a floorplan intent: refuse a pose that leaves a "
                         "moved part further outside its block's zone (an "
-                        "ERROR zone_containment) than it was; --force "
-                        "writes anyway (#959)")
+                        "ERROR zone_containment) than it was, or inside one "
+                        "of its keepouts[] it was not in (an ERROR keepout, "
+                        "#1535); --force writes anyway (#959)")
     p.add_argument('--allow-routed', action='store_true',
                    help="Run even when the board already carries copper. Off "
                         "by default: placement moves FOOTPRINTS and not "
@@ -277,8 +289,13 @@ def _verb_parsers(sub=None):
     q.add_argument('--near', nargs=2, type=float, metavar=('X', 'Y'),
                    help='the same coordinates read as APPROXIMATE: implies '
                         '--snap, so the engine seats the part at the nearest '
-                        'legal pose to the point you aimed at. One pose op '
-                        'per call: with a second one it is refused (exit 2)')
+                        'pose within --radius its re-grade passes. A refused '
+                        'request tries --snap-tries poses per rung; a part '
+                        'already in a gating pair of its own at the request '
+                        'tries every pose within --radius, and when none '
+                        'clears it, it is written as asked with a note '
+                        '(#1536). One pose op per call: with a second one it '
+                        'is refused (exit 2)')
     q.add_argument('--rot', type=float, default=None,
                    help='absolute rotation in degrees; omitted, the part '
                         'keeps the rotation it has')
@@ -313,6 +330,14 @@ def _verb_parsers(sub=None):
     q.add_argument('--to', dest='to_sheets', action='append', default=[],
                    metavar='SHEET',
                    help='an instance to arrange like it; repeat for several')
+    q.add_argument('--channel', dest='channels', action='append', default=[],
+                   metavar='REF,REF,...',
+                   help='a channel named by its parts, in order, instead of '
+                        '--from/--to (#1480): the first --channel is the '
+                        'source, each other one a copy of it, the parts at '
+                        'one position corresponding; for channels drawn '
+                        'inside one sheet. check_floorplan.py '
+                        '--suggest-channels proposes them')
     q.add_argument('--anchor', default=None, metavar='REF',
                    help='the part that keeps its place in each target; '
                         'default: the source part with the most pads')
@@ -414,7 +439,15 @@ def parse_segments(segments, parsers, error):
         elif verb == 'unlock':
             unlocks.extend(a.refs)
         elif verb == 'replicate':
-            if a.from_sheet is None and not a.to_sheets:
+            chans = [[r for r in tok.split(',') if r] for tok in a.channels]
+            if chans and (a.from_sheet is not None or a.to_sheets):
+                error("`replicate` was given --channel and --from/--to: name "
+                      "the copies by their parts (--channel) or by their "
+                      "sheets (--from/--to), not both")
+            if chans and len(chans) < 2:
+                error("`replicate --channel` needs two or more channels: the "
+                      "first is the source, each other one a copy of it")
+            if a.from_sheet is None and not a.to_sheets and not chans:
                 # #1211: the intent's `replicate[]` declarations, expanded in
                 # main() once the intent is read. The declaration carries the
                 # anchor, waivers, selection and search, so a flag here would
@@ -433,16 +466,16 @@ def parse_segments(segments, parsers, error):
                           "--from and --to" % ', '.join(given))
                 ops.append({'kind': 'replicate', 'declared': True})
                 continue
-            if a.from_sheet is None or not a.to_sheets:
+            if not chans and (a.from_sheet is None or not a.to_sheets):
                 error("`replicate` needs both --from and --to (or neither, "
                       "to apply the --intent file's replicate[] "
                       "declarations)")
-            if a.offset is not None and len(a.to_sheets) > 1:
+            if a.offset is not None and max(len(a.to_sheets), len(chans) - 1) > 1:
                 error("`replicate --offset` puts ONE copy at the source poses "
                       "+ (DX, DY), and this one names %d --to sheets, which "
                       "would all land on that spot. Issue one replicate per "
                       "target, or drop --offset to keep each target's anchor "
-                      "in place" % len(a.to_sheets))
+                      "in place" % max(len(a.to_sheets), len(chans) - 1))
             if a.offset is not None and a.anchor is not None:
                 error("`replicate` was given both --offset and --anchor: "
                       "--offset fixes the translation, --anchor chooses the "
@@ -463,6 +496,7 @@ def parse_segments(segments, parsers, error):
                       "which this call does not ask for")
             ops.append({'kind': 'replicate', 'from': a.from_sheet,
                         'to': list(a.to_sheets), 'anchor': a.anchor,
+                        'channels': chans or None,
                         'offset': a.offset,
                         'allow_net_mismatch': list(a.allow_net_mismatch),
                         'only': only, 'skip': skip,
@@ -490,6 +524,9 @@ def parse_segments(segments, parsers, error):
 def main(argv=None):
     p = build_parser(with_verbs=False)
     args, rest = p.parse_known_args(argv)
+    if not args.dry_run:
+        from placement import run_record          # the placement record (#1486)
+        run_record.record('place_pose', argv, boards=[args.input_file])
     # BEFORE the split, or the verb this swallowed makes the NEXT token look
     # like the error ("'C3' comes before any verb"), which sends the caller
     # looking at the wrong end of their command line.
@@ -756,6 +793,18 @@ def _report(summary):
              summary.get('own_pad_short_count_after')))
     for a, b in (summary.get('own_pad_short_pairs_after') or [])[:5]:
         print("  %s/%s" % (a, b))
+    # #1385/#1506: courtyard pairs the project grades as errors -- in the
+    # text, not only the JSON, inherited ones included.
+    cb = summary.get('courtyard_error_pairs_before')
+    ca = summary.get('courtyard_error_pairs_after')
+    if cb or ca:
+        print("courtyard overlaps the project grades as errors: %d -> %d"
+              % (len(cb or ()), len(ca or ())))
+        for pr in (ca or [])[:5]:
+            print("  %s" % '/'.join(str(x) for x in pr))
+    # #1536: the engine's own note, with what the snap re-graded and refused
+    if summary.get('snap_note') and not summary.get('snapped'):
+        print("note: %s" % summary['snap_note'], file=sys.stderr)
     # #1266: a pad on another part's footprint graphic copper (a SOT-89 tab).
     print("pads on another part's graphic copper (touching, any net): "
           "%s -> %s; short of clearance: %s -> %s"

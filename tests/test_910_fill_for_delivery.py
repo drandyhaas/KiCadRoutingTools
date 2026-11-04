@@ -18,6 +18,11 @@ Invariants gated here:
      in-memory view and deletes every non-Default class.
   5. The CLI refuses (exit 1) and removes its output if a class went missing,
      rather than shipping a board graded against rules it no longer carries.
+  6. The fill honours the board's `.kicad_dru` (#1494): a custom rule above
+     the class clearance (copper 0.8 mm from any zone) is staged with the
+     board, so KiCad grades the delivered pour clean against it. Staged with
+     the `.kicad_pro` alone, flat_hierarchy's fill shipped 202 pad-to-zone
+     errors against that rule while KiCad's own refill gave none.
 
 Arms 3-5 need KiCad's bundled python. Without it the file exits 77 (SKIP),
 which `run_all` counts apart from a pass -- it does NOT quietly report green.
@@ -77,6 +82,21 @@ def _classes(pcb):
         doc = json.load(fh)
     return {c.get('name')
             for c in (doc.get('net_settings') or {}).get('classes') or []}
+
+
+def _rule_errors(pcb_path, rule):
+    """How many errors kicad-cli's DRC (no refill) names `rule` on, or
+    None without kicad-cli."""
+    import subprocess
+    from kicad_unconnected import find_kicad_cli
+    cli = find_kicad_cli()
+    if cli is None:
+        return None
+    out = pcb_path + '.drc.json'
+    subprocess.run([cli, 'pcb', 'drc', '--format', 'json', '--severity-error',
+                    '-o', out, pcb_path], capture_output=True, text=True, timeout=600)
+    with open(out, encoding='utf-8') as fh:
+        return fh.read().count(f"rule '{rule}'")
 
 
 def main():
@@ -192,6 +212,27 @@ def main():
         ck('the refusal leaves no board behind', not os.path.exists(out3))
         ck('the refusal leaves no orphan project behind',
            not os.path.exists(os.path.splitext(out3)[0] + '.kicad_pro'))
+
+        # --- 6: the .kicad_dru is staged with the board (#1494) ----------
+        dru_in = os.path.join(tmp, 'dru', 'in.kicad_pcb')
+        os.makedirs(os.path.dirname(dru_in))
+        from copy_board import copy_board
+        copy_board(os.path.join(ROOT_DIR, 'kicad_files', 'flat_hierarchy.kicad_pcb'),
+                   dru_in)
+        with open(os.path.splitext(dru_in)[0] + '.kicad_dru', 'w') as fh:
+            fh.write("(version 1)\n(rule \"pour_gap\"\n"
+                     "  (condition \"A.Type == 'Zone' || B.Type == 'Zone'\")\n"
+                     "  (constraint clearance (min 0.8mm)))\n")
+        dru_out = os.path.join(tmp, 'dru', 'out.kicad_pcb')
+        r6 = check([sys.executable, tool('fill_for_delivery.py'), dru_in, '-o', dru_out],
+                   accept=True, timeout=900)
+        ck('the CLI fills a board carrying a .kicad_dru', r6.returncode == 0)
+        n6 = _rule_errors(dru_out, 'pour_gap') if os.path.isfile(dru_out) else None
+        if n6 is None:
+            print("  (kicad-cli unavailable: skipping the .kicad_dru grade)")
+        else:
+            ck("the delivered pour honours the .kicad_dru's 0.8 mm zone rule",
+               n6 == 0, f'{n6} pour_gap error(s)')
 
         # --- the same-file guard -------------------------------------------
         r4 = check([sys.executable, tool('fill_for_delivery.py'),

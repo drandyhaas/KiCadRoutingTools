@@ -8,8 +8,9 @@ item dying at it is drawn red, and gone from the next. This is the removed
 stage3d timeline's copper-lifetime idea (#1081), on a tick per frame rather
 than per op, so a frame is one number.
 
-`play_chain` plays a route_placed.py chain the way `route_movie.play_chain`
-plays it in 2D, and with its own helpers: each step's router events
+`play_chain` plays a route_placed.py or judge_seeds.py chain the way
+`route_movie.play_chain` plays it in 2D, and with its own helpers: each
+step's router events
 (`<board>_routetrace.json`, written under KICAD_ROUTE_TRACE=1), one per
 frame -- a rip shown red for RIP_HOLD frames before it goes, then what the
 event laid -- and then whatever else the step changed (a pour, a fanout, a
@@ -216,17 +217,18 @@ def play_chain(rec, cop, boards, first=None, *, prefix='', first_label='input', 
 ZOOM = 14          # frames of the camera pulling back to the seeds, and flying back in
 
 
-def film_routes(rec, work, judged, scores, best, full, filmed, budget=0):
+def film_routes(rec, work, judged, scores, best, full, filmed, budget=0, chain=None):
     """The routing half of the flow movie, after the placement of seed
     `filmed` (one the judge did not pick, when there is one): its fast
     route; the camera pulling back to every judged seed's fast-routed board
     side by side, each labelled with its score; the best one framed and the
     camera flying in to it; its fast route cleared and its full route played
     -- place_movie's `film_routes`, on the 3D board, from the same work dir
-    (place_movie's `run_flow`)."""
+    (place_movie's `run_flow`; `chain` its --route-chain file, whose routes
+    lie in judge_seeds' folders, `place_movie.route_dir`)."""
     import render_theme
     from kicad_parser import parse_kicad_pcb
-    from place_movie import _chain, _score_text
+    from place_movie import _chain, _score_text, route_dir
     from placement_story import _ease
     th = render_theme.theme('dark', strict=False)
     layers = list(rec.pcb.board_info.copper_layers)
@@ -239,7 +241,7 @@ def film_routes(rec, work, judged, scores, best, full, filmed, budget=0):
     rec.cop = cop
     hold = rec.hold
     rec.copper_shot(f"seed {filmed} placed: routing it", times=hold)
-    first, boards = _chain(work, f'fast_s{filmed}')
+    first, boards = _chain(route_dir(work, filmed, chain=chain))
     play_chain(rec, cop, boards, first, prefix='fast route | ',
                first_label=f'placed, seed {filmed}', budget=budget)
     cop.next()          # a hold lights nothing: its copper was all laid before it
@@ -249,7 +251,7 @@ def film_routes(rec, work, judged, scores, best, full, filmed, budget=0):
     cells = []
     for s in seeds:
         placed = parse_kicad_pcb(os.path.join(work, f's{s}.kicad_pcb'))
-        _f, bs = _chain(work, f'fast_s{s}')
+        _f, bs = _chain(route_dir(work, s, chain=chain))
         routed = parse_kicad_pcb(bs[-1])
         c = Copper(layers, rec.scene['outline'], rec.scene['cutouts'])
         segs, vias = _board_copper(routed)
@@ -291,7 +293,7 @@ def film_routes(rec, work, judged, scores, best, full, filmed, budget=0):
             cop.rm_s(k)
         for k in list(cop.live_v):
             cop.rm_v(k)
-        _f, bs = _chain(work, f'fast_s{best}')
+        _f, bs = _chain(route_dir(work, best, chain=chain))
         routed = parse_kicad_pcb(bs[-1])
         segs, vias = _board_copper(routed)
         for o in segs.values():
@@ -307,7 +309,7 @@ def film_routes(rec, work, judged, scores, best, full, filmed, budget=0):
     # other seeds' boards would hang at the edges of the frame
     rec.extra = {'ro': bi, 'gv': ['in', 1.0]}
     cop.clear(rec, f"clearing the fast route of seed {best}")
-    first, boards = _chain(work, f'full_s{best}')
+    first, boards = _chain(route_dir(work, best, True, chain))
     play_chain(rec, cop, boards, first, prefix='full route | ',
                first_label=f'seed {best}, cleared', budget=budget)
     cop.next()

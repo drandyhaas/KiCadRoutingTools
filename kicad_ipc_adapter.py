@@ -1061,6 +1061,40 @@ def _report_unmatched_strip(kind, leftovers, limit=6):
         print(f"    ... {len(leftovers) - limit} more")
 
 
+def strip_listed_tracks(commit, board, segments, net_name_for):
+    """Remove the live board's tracks a strip list names, as the CLI writer's
+    strip does (kicad_writer.match_stack_members, #1556): matched by span,
+    layer and net, COUNTED, and the listed width first. A set of endpoint
+    keys removed EVERY member of a same-span stack, the keeper too, and some
+    sites matched across layers. The IPC twin of main's
+    gui_utils.remove_listed_segments, for every strip site in this adapter.
+
+    Arc tracks are not candidates (a strip list names straight segments), as
+    on main. Returns ``(removed, [listed segments left unmatched])``."""
+    if not segments:
+        return 0, []
+    from routing_utils import pos_key
+    from kicad_writer import match_stack_members
+
+    def _span(a, b, layer, net):
+        return (frozenset((a, b)), layer, net)
+    targets = [(_span(pos_key(s.start_x, s.start_y), pos_key(s.end_x, s.end_y),
+                      layer_id_for(s.layer), net_name_for(s.net_id)), s.width)
+               for s in segments]
+    tracks = [t for t in board.get_tracks() if type(t).__name__ != "ArcTrack"]
+    items = []
+    for t in tracks:
+        sx, sy = _vec_xy_mm(t.start)
+        ex, ey = _vec_xy_mm(t.end)
+        tname = (getattr(t.net, "name", "") or "") if t.net is not None else ""
+        items.append((_span(pos_key(sx, sy), pos_key(ex, ey), t.layer, tname),
+                      _nm_to_mm(getattr(t, "width", 0))))
+    gone, unmatched = match_stack_members(targets, items)
+    for i in sorted(gone):
+        commit.remove(tracks[i])
+    return len(gone), [segments[i] for i in unmatched]
+
+
 def apply_routing_results(board, results_data: dict, *,
                           pcb_data=None,
                           add_debug_lines: bool = False,
@@ -1098,25 +1132,12 @@ def apply_routing_results(board, results_data: dict, *,
         # layer, and net, then delete it as part of this commit.
         segs_to_remove = results_data.get("segments_to_remove") or []
         if segs_to_remove:
-            remove_keys = {}
-            for s in segs_to_remove:
-                a = pos_key(s.start_x, s.start_y)
-                b = pos_key(s.end_x, s.end_y)
-                remove_keys[(frozenset((a, b)), layer_id_for(s.layer),
-                             net_name_for(s.net_id))] = s
-            hit = set()
-            for t in board.get_tracks():
-                sx, sy = _vec_xy_mm(t.start)
-                ex, ey = _vec_xy_mm(t.end)
-                tname = (getattr(t.net, "name", "") or "") if t.net is not None else ""
-                key = (frozenset((pos_key(sx, sy), pos_key(ex, ey))), t.layer, tname)
-                if key in remove_keys:
-                    commit.remove(t)
-                    hit.add(key)
-                    counts["removed"] += 1
-            counts["segments_unmatched"] = len(remove_keys) - len(hit)
-            _report_unmatched_strip(
-                "segment", [remove_keys[k] for k in remove_keys if k not in hit])
+            # Counted and width-preferring, as the CLI writer's strip (#1556).
+            _n, _left = strip_listed_tracks(commit, board, segs_to_remove,
+                                            net_name_for)
+            counts["removed"] += _n
+            counts["segments_unmatched"] = len(_left)
+            _report_unmatched_strip("segment", _left)
 
         # Remove original-board VIAS the pipeline flagged (#508 finding 11:
         # route_diff returns vias_to_remove alongside segments_to_remove).
@@ -1188,6 +1209,7 @@ def apply_routing_results(board, results_data: dict, *,
 def apply_planes_results(board, *, pcb_data,
                          new_vias=None, new_segments=None, new_zones=None,
                          ripped_net_ids=None, swap_data=None,
+                         strip_segments=None,
                          message: str = "KiCadRoutingTools: planes") -> dict:
     """Apply planes-tab results (zones + stitch vias + tracks) in one commit.
 
@@ -1198,6 +1220,13 @@ def apply_planes_results(board, *, pcb_data,
     ripped_net_ids: nets whose existing tracks/vias were ripped to clear a
     blocked pad repair - their old copper is deleted in this same commit before
     the re-routed copper (in new_segments/new_vias) is added (issue #112).
+
+    strip_segments: input copper the step's finalize passes withdrew from
+    pcb_data (create_plane's `reconnect_strips`, #508 findings 1-2) --
+    Segments and Vias, deleted individually before anything else: segments
+    counted and width-preferring (`strip_listed_tracks`, #1556), vias by
+    position and net. The SWIG tab has always applied these; this applier
+    did not take them, so the stripped copper stayed on the live board.
 
     swap_data: the in-memory ripped-net reconnect's swap/modification channels
     (#484 H3). A target swap exchanges stubs between two nets, so it can touch
@@ -1229,6 +1258,24 @@ def apply_planes_results(board, *, pcb_data,
     removed_zone_ids: set = set()
 
     with begin_commit(board, message) as commit:
+        strips = list(strip_segments or ())
+        if strips:
+            from routing_utils import pos_key
+            _n, _left = strip_listed_tracks(
+                commit, board, [x for x in strips if hasattr(x, 'start_x')],
+                name_for)
+            _vkeys = {(pos_key(x.x, x.y), name_for(x.net_id))
+                      for x in strips if not hasattr(x, 'start_x')}
+            for vv in (board.get_vias() if _vkeys else ()):
+                vname = ((getattr(vv.net, "name", "") or "")
+                         if vv.net is not None else "")
+                vx, vy = _vec_xy_mm(vv.position)
+                if (pos_key(vx, vy), vname) in _vkeys:
+                    commit.remove(vv)
+                    _n += 1
+            counts["removed"] += _n
+            counts["stripped"] = _n
+            _report_unmatched_strip("segment", _left)
         # Delete the ripped nets' existing copper before adding the re-routed
         # copper, so it is one undo step and the repair trace can't short the
         # still-present blocker (issue #112).
@@ -1438,19 +1485,9 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
             # copper. Delete it FIRST, so a new emission at the same position is
             # never collateral damage of the removal pass.
             if removed_segments:
-                _seg_keys = set()
-                for s in removed_segments:
-                    a = pos_key(s.start_x, s.start_y)
-                    b = pos_key(s.end_x, s.end_y)
-                    _seg_keys.add((frozenset((a, b)), name_for(s.net_id) or ''))
-                for t in board.get_tracks():
-                    sx, sy = _vec_xy_mm(t.start)
-                    ex, ey = _vec_xy_mm(t.end)
-                    tname = ((getattr(t.net, "name", "") or "")
-                             if t.net is not None else "")
-                    if (frozenset((pos_key(sx, sy), pos_key(ex, ey))),
-                            tname) in _seg_keys:
-                        commit.remove(t)
+                # Counted, layer-keyed and width-preferring (#1556).
+                strip_listed_tracks(commit, board, removed_segments,
+                                    lambda nid: name_for(nid) or '')
             if removed_vias:
                 _via_keys = {(pos_key(v.x, v.y), name_for(v.net_id) or '')
                              for v in removed_vias}
@@ -1506,25 +1543,16 @@ def apply_plane_copper_cleanup(board, *, net_names, clearance, grid_step,
         n = pcb.nets.get(net_id)
         return (n.name if n is not None else "") or ""
 
-    seg_keys = set()
-    for s in delta.segments_to_remove:
-        seg_keys.add((frozenset((pos_key(s.start_x, s.start_y),
-                                 pos_key(s.end_x, s.end_y))), name_for(s.net_id)))
     via_keys = set()
     for v in delta.vias_to_remove:
         via_keys.add((pos_key(v.x, v.y), name_for(v.net_id)))
 
     removed = added = 0
     with begin_commit(board, message) as commit:
-        if seg_keys:
-            for t in board.get_tracks():
-                tname = (getattr(t.net, "name", "") or "") if t.net is not None else ""
-                sx, sy = _vec_xy_mm(t.start)
-                ex, ey = _vec_xy_mm(t.end)
-                key = (frozenset((pos_key(sx, sy), pos_key(ex, ey))), tname)
-                if key in seg_keys:
-                    commit.remove(t)
-                    removed += 1
+        # Counted, layer-keyed and width-preferring, as clean_plane_copper's
+        # file strip (#1556).
+        removed += strip_listed_tracks(commit, board, delta.segments_to_remove,
+                                       name_for)[0]
         if via_keys:
             for vi in board.get_vias():
                 vname = (getattr(vi.net, "name", "") or "") if vi.net is not None else ""
@@ -1621,7 +1649,8 @@ def write_drc_settings_to_project(board, *, clearance=None, hole_to_hole=None,
                                   keep_thermal=False, diff_pair_gap=None,
                                   diff_pair_width=None,
                                   clamp_nondefault_netclasses=False,
-                                  copper_holes=True
+                                  copper_holes=True, hole_clearance=None,
+                                  class_ceiling=None
                                   ) -> Optional[str]:
     """Loosen the open project's `.kicad_pro` DRC floors to the routed values.
 
@@ -1642,6 +1671,14 @@ def write_drc_settings_to_project(board, *, clearance=None, hole_to_hole=None,
 
     `copper_holes` False keeps the board's copper-to-hole floor: a bare pour
     step drew no track or via near a hole (#1319, plane_fix_kwargs).
+
+    `hole_clearance` is the copper-to-hole floor the step HELD, lowered only
+    to what its own copper needs (#1369/#1493/#1568/#1577, the CLI mains'
+    step_hole_clearance); None writes the copper clearance, as before.
+    `class_ceiling` is the raw Clearance ceiling the clamped classes land at,
+    min(class, ceiling) (#1492). Both are fix_project_for_output's own, which
+    the fanout's shared fanout_fix_kwargs now returns: without them here every
+    fanout writeback raised TypeError into the except below.
     """
     from fix_kicad_drc_settings import fix_project_for_output
 
@@ -1657,7 +1694,8 @@ def write_drc_settings_to_project(board, *, clearance=None, hole_to_hole=None,
             diff_pair_gap=diff_pair_gap, diff_pair_width=diff_pair_width,
             keep_thermal=keep_thermal,
             clamp_nondefault_netclasses=clamp_nondefault_netclasses,
-            copper_holes=copper_holes,
+            copper_holes=copper_holes, hole_clearance=hole_clearance,
+            class_ceiling=class_ceiling,
             verbose=True)
     except Exception as e:
         print(f"(skipped DRC-settings write-back: {e})")

@@ -27,6 +27,14 @@ is what the adapter would hand KiCad over the socket:
      instead of recreating it, so a `sense:` group keeps its members (#1279)
   F. the dialog's re-sync patches footprint and pad poses IN PLACE (#362),
      keeping the Pad objects pads_by_net shares
+  G. #1556: every strip in the adapter is counted, layer-keyed and
+     width-preferring (`strip_listed_tracks`, kicad_writer.match_stack_members)
+     -- the routing apply, and the Planes apply's finalize strips, which it
+     used to drop on the floor; no endpoint-SET strip is left in the adapter
+  H. the project writeback takes every keyword the shared writeback
+     deciders hand it (fanout_fix_kwargs' `class_ceiling` / `hole_clearance`,
+     #1529/#1568, and plane_fix_kwargs'): a missing one is a TypeError the
+     writeback's own except swallows, so the floors are silently never written
 
 The SWIG gates for C/C2/E (test_skip_existing_zones_gui,
 test_1299_multilayer_zone_replace_gui, test_placement_apply_locks) drive
@@ -522,10 +530,93 @@ def test_pose_sync():
           "3. the pads follow the footprint they belong to")
 
 
+def _track(board, x0, y0, x1, y1, w, layer, net):
+    t = Track()
+    t.start, t.end = vec(x0, y0), vec(x1, y1)
+    t.width = nm(w)
+    t.layer = layer
+    t.net = board.net(net)
+    return t
+
+
+def test_live_strip_counted():
+    print("G. #1556: the adapter's strips are counted and width-preferring")
+    from kicad_parser import Segment, Via as PVia
+    F, B = BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu
+    pcb = SimpleNamespace(nets={1: SimpleNamespace(name='N')})
+
+    def seg(w, layer='F.Cu', x1=12.0):
+        return Segment(start_x=10.0, start_y=10.0, end_x=x1, end_y=10.0,
+                       width=w, layer=layer, net_id=1)
+
+    b = Board(nets=('N',))
+    thin = _track(b, 10, 10, 12, 10, 0.0762, F, 'N')
+    wide = _track(b, 12, 10, 10, 10, 0.1, F, 'N')
+    back = _track(b, 10, 10, 12, 10, 0.1, B, 'N')
+    b.tracks = [thin, wide, back]
+    c = A.apply_routing_results(b, {'segments_to_remove': [seg(0.1)]},
+                                pcb_data=pcb)
+    check(c['removed'] == 1 and is_in(wide, b.removed),
+          "a same-span stack loses the LISTED member (0.1), not the first",
+          f"{c} removed={len(b.removed)}")
+    check(not is_in(thin, b.removed) and not is_in(back, b.removed),
+          "the 0.0762 keeper and the same span on B.Cu stay")
+
+    b = Board(nets=('N',))
+    t1 = _track(b, 10, 10, 12, 10, 0.1, F, 'N')
+    t2 = _track(b, 10, 10, 12, 10, 0.1, F, 'N')
+    b.tracks = [t1, t2]
+    c = A.apply_routing_results(b, {'segments_to_remove': [seg(0.1), seg(0.1, x1=13)]},
+                                pcb_data=pcb)
+    check(c['removed'] == 1 and c['segments_unmatched'] == 1,
+          "counted: one listing of a two-member stack removes one; a listing "
+          "with no member removes nothing and is reported", f"{c}")
+
+    b = Board(nets=('N',))
+    keep = _track(b, 10, 10, 12, 10, 0.0762, F, 'N')
+    gone = _track(b, 10, 10, 12, 10, 0.1, F, 'N')
+    v = Via()
+    v.position = vec(20, 20)
+    v.net = b.net('N')
+    b.tracks, b.vias = [keep, gone], [v]
+    c = A.apply_planes_results(
+        b, pcb_data=pcb,
+        strip_segments=[seg(0.1), PVia(x=20.0, y=20.0, size=0.6, drill=0.3,
+                                       layers=['F.Cu', 'B.Cu'], net_id=1)])
+    check(c.get('stripped') == 2 and is_in(gone, b.removed) and is_in(v, b.removed)
+          and not is_in(keep, b.removed),
+          "the Planes apply deletes the finalize's strips (segment by width, "
+          "via by position), which it used to ignore", f"{c}")
+
+    src = open(os.path.join(ROOT, 'kicad_ipc_adapter.py'), encoding='utf-8').read()
+    body = src[src.index('def strip_listed_tracks'):]
+    check(body.count('commit.remove(t)') == 0,
+          "no adapter strip matches tracks by a set of endpoint keys any more")
+
+
+def test_writeback_takes_shared_keywords():
+    print("H. the project writeback takes the shared deciders' keywords")
+    import inspect
+    from fix_kicad_drc_settings import fanout_fix_kwargs, plane_fix_kwargs
+    params = set(inspect.signature(A.write_drc_settings_to_project).parameters)
+    fan = fanout_fix_kwargs('bga', [{}], [{}], clearance=0.15, track_width=0.15,
+                            via_size=0.3, via_drill=0.2, clearance_ceiling=0.15,
+                            hole_clearance=0.2)
+    pln = plane_fix_kwargs([{}], [{}], clearance=0.15, hole_to_hole=0.25,
+                           track_width=0.15, via_size=0.3, via_drill=0.2)
+    # What the tabs add on top: the Planes tab's edge / thermal / class keys.
+    extra = {'edge_clearance', 'keep_thermal', 'clamp_nondefault_netclasses',
+             'class_ceiling', 'hole_clearance'}
+    missing = (set(fan) | set(pln) | extra) - params
+    check(not missing, "write_drc_settings_to_project accepts every keyword",
+          f"missing {sorted(missing)}")
+
+
 def main():
     for t in (test_via_types, test_set_item_locked, test_planes_apply,
               test_planes_multilayer_replace, test_footprint_moves,
-              test_placement_apply, test_pose_sync):
+              test_placement_apply, test_pose_sync, test_live_strip_counted,
+              test_writeback_takes_shared_keywords):
         t()
     if FAILS:
         print(f"\n{len(FAILS)} check(s) FAILED")

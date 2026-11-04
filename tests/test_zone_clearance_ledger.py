@@ -23,7 +23,8 @@ from route_planes import _resolve_zone_clearance  # noqa: E402
 def bga_board(via_size_in_field=0.3, pitch=0.65):
     """4-layer board with one BGA (grid pads at `pitch`) whose field holds
     plane-net vias of `via_size_in_field` -> lattice gap = pitch - via."""
-    pads = [SimpleNamespace(global_x=10 + i * pitch, global_y=10 + j * pitch)
+    pads = [SimpleNamespace(global_x=10 + i * pitch, global_y=10 + j * pitch,
+                            local_x=i * pitch, local_y=j * pitch)
             for i in range(4) for j in range(4)]
     fp = SimpleNamespace(footprint_name='pkg:BGA-16', pads=pads,
                          reference='U1')

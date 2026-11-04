@@ -1,17 +1,24 @@
 ---
 name: make-3d-movie
-description: Makes the 3D movie of a board being placed, and with a recorded routing chain routed (movie3d/make_movie.py). It prepares the board the way plan-pcb-placement does (fixed parts locked, the rest piled, intent, groups), finds on the web the 3D models of parts the installed KiCad library lacks so they are drawn as parts rather than boxes, then makes the movie. This is the one way to make the 3D movie. Use it to make or remake a 3D placement or flow movie, or to fill in a board's missing 3D models.
+description: Makes the 3D movie of a board being placed, and with a recorded routing chain or a placement run's own judge_chain.txt routed (movie3d/make_movie.py). It prepares the board the way plan-pcb-placement does (fixed parts locked, the rest piled, intent, groups), finds on the web the 3D models of parts the installed KiCad library lacks so they are drawn as parts rather than boxes, then makes the movie. This is the one way to make the 3D movie. Use it to make or remake a 3D placement or flow movie, or to fill in a board's missing 3D models.
 ---
 
 # Make a 3D movie
 
-Invocation: `/make-3d-movie <board.kicad_pcb> [--route BOARD:SET] [--seed N]
-[groups.json] [intent.json]`.
+Invocation: `/make-3d-movie <board.kicad_pcb> [--route BOARD:SET |
+--route-chain judge_chain.txt] [--seed N] [groups.json] [intent.json]`.
 - `--route` films the whole flow: the seeds placed, the judged ones
   fast-routed, the best one routed in full. BOARD:SET names the
   stress-corpus board whose recorded chain routes it, as its name and
   set number.
-- `--seed` picks the seed of a placement-only movie (default 0).
+- `--route-chain` films the same flow, routed with a placement run's own
+  chain: its `judge_chain.txt` (the `judge_seeds.py --chain` file that
+  `/plan-pcb-placement` §3.7 writes). The seeds are routed and judged as
+  judge_seeds routes and judges them, so the movie picks the seed that run
+  kept. Use it for a board a `/plan-pcb-placement` run placed. Pass one of
+  `--route` and `--route-chain`, not both.
+- `--seed` picks the seed of a placement-only movie (default 0). A kept
+  seed is filmed with its start (Step 4).
 - A given groups or intent file is used in place of writing one.
 
 `movie3d/README.md` says what the movie shows and how it is made.
@@ -121,7 +128,9 @@ python3 movie3d/find_models.py none KEY --note "<what you tried>"
 - **`add`** downloads the file and checks it:
   - https only, at most 40 MB;
   - a zip is read in memory and only its model taken;
-  - the file is kept only if it really is a STEP or VRML model.
+  - the file is kept only if it really is a STEP or VRML model;
+  - a VRML `Switch` is rewritten as the `Group` of the choice it shows, since
+    kicad-cli's GLB export cannot read one and then draws every part as a box.
 
   A refusal prints the reason. "An HTML page" means you gave a page, not the
   file: give its raw-file URL. If one candidate is refused, try the next.
@@ -143,10 +152,36 @@ python3 -X utf8 movie3d/make_movie.py wk/<run>/fixed.kicad_pcb wk/<run>/placed.k
     --groups wk/<run>/groups.json --intent wk/<run>/intent.json --seed 0
 ```
 
+A seed kept from a placement run is filmed with its start: pass that run's
+`--scattered`/`--clustered`/`--anchored` counts (none, for a default run),
+or its start list, `--clustered-seeds N` or `--anchored-seeds N` (the run's
+`s<N>.json` records its `"start"`). make_movie turns the counts into those
+lists and prints `make_movie: filming seed N from a ... start`; check that it
+names the kept seed's start, or the film is another placement.
+
 With `--route BOARD:SET`, add it to that command. Every argument other than
 make_movie's own is passed to `place_simple`. The movie goes to
 `wk/<run>/placed_3d.mp4`, with stills beside it. A small board takes a
 minute or two; `--route` takes longer.
+
+For a board a `/plan-pcb-placement` run placed, route the flow with that
+run's own chain instead, with that run's `fixed.kicad_pcb`, `groups.json`,
+`intent.json` and seed counts:
+
+```bash
+python3 -X utf8 movie3d/make_movie.py wk/<run>/fixed.kicad_pcb wk/<run>/placed.kicad_pcb \
+    --groups wk/<run>/groups.json --intent wk/<run>/intent.json \
+    --route-chain wk/<run>/judge_chain.txt --jobs 2
+```
+
+Run it from the repo root: the chain's commands run from the current folder,
+as judge_seeds runs them. Its fast routes run route.py / route_diff.py at
+`--quick 2`, and the best seed's full route without `--quick`. Each route is
+scored by quick_score and the seeds ranked by `quick_score.judge_key`. The
+routes go to `wk/<run>/placed_work/` under judge_seeds' names: `s<S>_route/`,
+`s<S>_fast.score.json`, `s<S>_full_route/` and `s<S>_full.score.json`. Check
+that the `place_movie: the best fast route is seed N` line names the seed the
+run kept.
 
 ## Step 5: Check it
 

@@ -14,6 +14,7 @@ from routing_config import DiffPairNet
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_costs import compute_track_proximity_for_net
 from net_queries import calculate_route_length
+from length_matching import intra_pair_on  # #1503
 from pcb_modification import add_route_to_pcb_data
 from dataclasses import replace
 from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
@@ -649,7 +650,7 @@ def route_diff_pairs(
             result['p_routed_length'] = p_routed_length
             result['n_routed_length'] = n_routed_length
             # For inter-pair matching: use max(P,N) total if intra-pair will equalize them, else use average
-            if config.diff_pair_intra_match:
+            if intra_pair_on(config, pair.p_net_id):
                 p_total = p_routed_length + p_stub_length
                 n_total = n_routed_length + n_stub_length
                 result['route_length'] = max(p_total, n_total)
@@ -705,12 +706,20 @@ def route_diff_pairs(
             if result and result.get('polarity_swap_denied'):
                 polarity_swap_denied_pairs.add(pair_name)
             if polarity_skip:
-                # Intentionally skipped: polarity mismatch with swaps not
-                # allowed for this pair (--polarity-swap-nets, #279) and no
-                # opposite-side connector option. Rip-up and layer swaps
-                # cannot resolve polarity, so skip the rescue machinery.
-                print(f"  {RED}SKIPPED - polarity swap needed but not allowed "
-                      f"for this pair (--polarity-swap-nets){RESET}")
+                # The coupled route gave up on a polarity mismatch: every
+                # candidate of the ladder failed (its verdict line above says
+                # which ran and why). Rip-up and layer swaps cannot resolve
+                # polarity, so the rescue machinery is skipped; the hybrid
+                # escape, whose terminal legs resolve polarity at the pads,
+                # runs next, then the single-ended follow-up (#1576: this
+                # said "SKIPPED - ... not allowed" whatever the policy was).
+                _why = ("polarity swap needed but not allowed for this pair "
+                        "(--polarity-swap-nets), and no other candidate routed clean"
+                        if result.get('polarity_swap_denied') else
+                        "polarity mismatch, and no candidate routed clean")
+                _next = ("trying the hybrid escape" if config.diff_pair_hybrid_escape
+                         else "deferring to the single-ended follow-up")
+                print(f"  {RED}COUPLED ROUTE FAILED - {_why}; {_next}{RESET}")
             else:
                 print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             total_iterations += iterations
@@ -956,7 +965,7 @@ def route_diff_pairs(
                             retry_result['p_routed_length'] = p_routed_length
                             retry_result['n_routed_length'] = n_routed_length
                             # For inter-pair matching: use max(P,N) total if intra-pair will equalize them
-                            if config.diff_pair_intra_match:
+                            if intra_pair_on(config, pair.p_net_id):
                                 p_total = p_routed_length + p_stub_length
                                 n_total = n_routed_length + n_stub_length
                                 retry_result['route_length'] = max(p_total, n_total)
@@ -1103,7 +1112,7 @@ def route_diff_pairs(
                         swap_result['p_routed_length'] = p_routed_length
                         swap_result['n_routed_length'] = n_routed_length
                         # For inter-pair matching: use max(P,N) total if intra-pair will equalize them
-                        if config.diff_pair_intra_match:
+                        if intra_pair_on(config, pair.p_net_id):
                             p_total = p_routed_length + p_stub_length
                             n_total = n_routed_length + n_stub_length
                             swap_result['route_length'] = max(p_total, n_total)

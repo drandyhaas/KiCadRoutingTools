@@ -32,3 +32,53 @@ def pin_dash_digit_values(parser):
     if hasattr(parser, "_negative_number_matcher"):
         parser._negative_number_matcher = _DASH_DIGIT
     return parser
+
+
+def _string_values(value):
+    """Every str inside a parsed argument value (a str, or a list/tuple of
+    them, nested to any depth)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _string_values(item)
+
+
+def refuse_joined_option_words(parser, args):
+    """Refuse an argument that is an option and its values fused into ONE word.
+
+    A shell (or a copied command) can hand over ``--layer-costs 1.0 1.5`` as a
+    single argv entry. argparse cannot tell it from a net name, since a net
+    may contain spaces, so ``--nets`` swallowed it, the router warned the net
+    "does not exist" and then routed at the default layer costs and exited 0
+    (#1410). A token that contains whitespace AND whose first word is one of
+    this parser's own option strings (or an unambiguous abbreviation of a
+    long one) is that mistake, never a net name; a dash-digit net such as
+    ``-3V3`` has no whitespace and stays legal (#597).
+    """
+    options = list(getattr(parser, '_option_string_actions', {}))
+    for dest, value in sorted(vars(args).items()):
+        for tok in _string_values(value):
+            words = tok.split()
+            if len(words) < 2 or not words[0].startswith('-'):
+                continue
+            first = words[0]
+            if first in options or (
+                    first.startswith('--') and len(first) > 2
+                    and any(o.startswith(first) for o in options)):
+                parser.error(
+                    f"argument value {tok!r} is the option {first} and its "
+                    f"value(s) joined into one word; pass them as separate "
+                    f"arguments (quote only the net names that need it)")
+
+
+def refuse_unusable_inputs(parser, args):
+    """The usage errors a routing CLI can name before it touches anything:
+    an input board that is not a file, and a joined option word (#1410).
+    Exit 2 with a one-line message, instead of the project banner followed
+    by a traceback from deep inside the parser."""
+    import os
+    path = getattr(args, 'input_file', None)
+    if path is not None and not os.path.isfile(path):
+        parser.error(f"input board {path!r} does not exist (or is not a file)")
+    refuse_joined_option_words(parser, args)

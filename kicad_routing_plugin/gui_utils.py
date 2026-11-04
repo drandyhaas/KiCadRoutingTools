@@ -228,7 +228,8 @@ def redirect_prints_to_log(append_log):
         sys.stdout = original
 
 
-def apply_drc_settings_fix(cfg, *, diff_pair=False, fix_kwargs=None):
+def apply_drc_settings_fix(cfg, *, diff_pair=False, fix_kwargs=None,
+                           hole_clearance=None):
     """Loosen the open project's DRC floors to the routed values (issue #160).
 
     The IPC counterpart of the CLI route auto-fix. Shared by every routing tab
@@ -253,16 +254,29 @@ def apply_drc_settings_fix(cfg, *, diff_pair=False, fix_kwargs=None):
     still goes through this one choke point (#693). The Planes tab's come
     from fix_kicad_drc_settings.plane_fix_kwargs (#1319), as route_planes'
     main writes them.
+
+    `hole_clearance` (cfg-built floors only) is the copper-to-hole floor the
+    step HELD (`held_hole_clearance_live`, #1369/#1493); a `fix_kwargs`
+    caller puts it in its own dict.
+
+    The step's tool records are persisted whatever the gate says
+    (`persist_live_tool_records`, #1415): they are not DRC floors.
     """
+    _snpc_rec = (cfg or {}).get('same_net_pad_clearance')
     if not (cfg and cfg.get('fix_drc_settings', True)):
+        persist_live_tool_records(None, _snpc_rec)
         return None
     try:
         from kicad_ipc_adapter import write_drc_settings_to_project, get_board
         board = get_board()
         if board is None:
             return None
+        import clearance_ledger
+        _clr = cfg.get('clearance')
         kwargs = dict(fix_kwargs) if fix_kwargs is not None else dict(
-            clearance=cfg.get('clearance'),
+            # Graded at the smallest clearance any step actually routed at,
+            # as route.py / route_diff.py write it and the SWIG tabs do.
+            clearance=clearance_ledger.effective(_clr) if _clr else _clr,
             hole_to_hole=cfg.get('hole_to_hole_clearance'),
             edge_clearance=cfg.get('board_edge_clearance'),
             track_width=cfg.get('track_width'),
@@ -285,6 +299,10 @@ def apply_drc_settings_fix(cfg, *, diff_pair=False, fix_kwargs=None):
             # planes and fanout all set it off self.clearance_check); the
             # False default matches "the operator never ticked the override".
             clamp_nondefault_netclasses=bool(cfg.get('clamp_netclasses', False)),
+            # #1492: the raw ceiling the clamped classes land at, None when
+            # the box is unticked
+            class_ceiling=cfg.get('clearance_ceiling'),
+            hole_clearance=hole_clearance,
         )
         if diff_pair and fix_kwargs is None:
             kwargs['diff_pair_gap'] = cfg.get('diff_pair_gap')
@@ -295,17 +313,132 @@ def apply_drc_settings_fix(cfg, *, diff_pair=False, fix_kwargs=None):
             print("  NOTE: reload the project (close & reopen, or File - "
                   "Revert) so KiCad picks up the new DRC rules -- the IPC API "
                   "cannot change them in the live editor.")
-            # #581: an active same-net pad via clearance is recorded as
-            # route.py / route_diff.py / route_planes.py record it, inside the
-            # same fix gate, so later steps keep their vias off same-net pads.
-            _snpc = cfg.get('same_net_pad_clearance')
-            if _snpc is not None and _snpc > 0:
-                from protected_nets import persist_same_net_pad_clearance
-                persist_same_net_pad_clearance(proj, _snpc)
+        # The tool records, after the floors, as the CLI writes them (#521,
+        # #581, #678, #1379, #1503), and whatever the write did (#1415).
+        persist_live_tool_records(None, _snpc_rec)
         return proj
     except Exception as e:
         print(f"(skipped DRC-settings write-back: {e})")
+        persist_live_tool_records(None, _snpc_rec)
         return None
+
+
+def persist_live_tool_records(board=None, same_net_pad_clearance=None):
+    """Record the step's tool records -- protected nets, impedance
+    declarations, the P/N skews matched (#1503), the power widths asked for
+    (#1379), pour-served balls (#678) and an active same-net pad via
+    clearance (#581) -- the IPC twin of main's helper of the same name, and
+    INDEPENDENT of the DRC-floor writeback: "Fix DRC settings after routing"
+    unchecked keeps the floors where they are, it must not void the step's
+    records (#1415).
+
+    Into the board's records through protected_nets (tool_records): the
+    project AND the board file. kipy cannot write the live board's
+    properties, so `board` is unused (main's tabs pass theirs) and the path
+    comes from the adapter; KiCad shows the board-file copy only after a
+    reload, the known IPC gap. Each consume empties its queue, so calling
+    this twice records nothing twice. Best-effort: never raises."""
+    try:
+        from protected_nets import (consume_protection_candidates,
+                                    consume_impedance_specs,
+                                    consume_pour_served_pads,
+                                    consume_intra_pair_tolerances,
+                                    consume_power_widths,
+                                    persist_protected_nets,
+                                    persist_impedance_specs,
+                                    persist_pour_served_pads,
+                                    persist_intra_pair_tolerances,
+                                    persist_power_widths,
+                                    persist_same_net_pad_clearance,
+                                    pro_path_for_board)
+        from kicad_ipc_adapter import get_board_full_path
+        _bf = get_board_full_path()
+        if not _bf:
+            return
+        _pro = pro_path_for_board(_bf)
+        persist_protected_nets(_pro, consume_protection_candidates())
+        persist_impedance_specs(_pro, consume_impedance_specs())
+        persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances())
+        persist_power_widths(_pro, consume_power_widths())
+        persist_pour_served_pads(_pro, consume_pour_served_pads())
+        if same_net_pad_clearance is not None and same_net_pad_clearance > 0:
+            persist_same_net_pad_clearance(_pro, same_net_pad_clearance)
+    except Exception:
+        pass
+
+
+def held_hole_clearance_live(pcb_data, board, results_data, clearance):
+    """The copper-to-hole floor to write for this step (#1369): the board's
+    declared hole clearance the engine held
+    (``obstacle_map.declared_hole_clearance`` on the PCBData it routed),
+    lowered only to what the copper this step drew needs
+    (``fix_kicad_drc_settings.step_copper_to_hole``) -- the GUI twin of
+    route_diff.py's ``step_hole_clearance``, shared by the differential and
+    route tabs (#1493). None (write the copper clearance, as before) when
+    the board declares none. The IPC twin of main's helper: the board path
+    comes from the adapter, so `board` is unused."""
+    try:
+        from obstacle_map import declared_hole_clearance
+        from fix_kicad_drc_settings import (step_copper_to_hole,
+                                            held_hole_clearance)
+        from kicad_ipc_adapter import get_board_full_path
+        held, _src = declared_hole_clearance(pcb_data,
+                                             get_board_full_path() or None)
+        if not held or clearance is None or held <= clearance:
+            return None
+        segs, vias = [], []
+        for result in results_data.get('results', []):
+            segs.extend(result.get('new_segments', []))
+            vias.extend(result.get('new_vias', []))
+        segs.extend(results_data.get('all_swap_segments', []))
+        vias.extend(results_data.get('all_swap_vias', []))
+        # The board the copper was drawn on: the routed PCBData without the
+        # copper this step removed.
+        from types import SimpleNamespace
+
+        def _sk(s):
+            a = (round(s.start_x, 4), round(s.start_y, 4))
+            b = (round(s.end_x, 4), round(s.end_y, 4))
+            return (min(a, b), max(a, b), s.layer, s.net_id)
+
+        def _vk(v):
+            return (round(v.x, 4), round(v.y, 4), v.net_id)
+        _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
+        _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
+        pcb = SimpleNamespace(
+            segments=[s for s in pcb_data.segments if _sk(s) not in _gone_s],
+            vias=[v for v in pcb_data.vias if _vk(v) not in _gone_v],
+            footprints=pcb_data.footprints,
+            board_info=pcb_data.board_info)
+        step_min = step_copper_to_hole(pcb, segs, vias, held, clearance)
+        v = held_hole_clearance(held, clearance, step_min)
+        # #1493: a floor written under the one held is ledgered, as the CLI's
+        # step_hole_clearance ledgers it
+        if v is not None and v < float(held) - 1e-6:
+            from fab_tiers import note_narrowing
+            note_narrowing(None, 'hole_clearance', float(held), v,
+                           "copper-to-hole floor written under the board's own: "
+                           "this step's copper sits closer to a foreign hole")
+        return v
+    except Exception as e:                                  # noqa: BLE001
+        print(f"(copper-to-hole floor: {e}; following the copper clearance)")
+        return None
+
+
+def held_hole_clearance_dicts(pcb_data, board, tracks, vias, clearance):
+    """:func:`held_hole_clearance_live` for a tab whose copper is the
+    engine's track and via DICTS (the fanout tab, #1568; the Planes tab,
+    #1577) rather than routing results."""
+    from kicad_parser import Segment, Via
+    segs = [Segment(start_x=t['start'][0], start_y=t['start'][1],
+                    end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
+                    layer=t['layer'], net_id=t['net_id']) for t in tracks]
+    new_vias = [Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                    layers=list(v.get('layers') or ['F.Cu', 'B.Cu']),
+                    net_id=v['net_id']) for v in vias]
+    return held_hole_clearance_live(
+        pcb_data, board,
+        {'results': [{'new_segments': segs, 'new_vias': new_vias}]}, clearance)
 
 
 class StdoutRedirector:

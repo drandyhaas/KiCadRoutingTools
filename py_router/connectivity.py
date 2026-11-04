@@ -214,6 +214,35 @@ def lands_on_interior(t: float, seg_len_sq: float,
     return t * length > band and (1.0 - t) * length > band
 
 
+def span_endpoint_degree(segs, group=lambda s: s.layer) -> Dict:
+    """How many DISTINCT spans meet at each segment end: {(group(s), (x, y)
+    rounded to 1 um): count}, the endpoint degree the soft-joint detectors
+    read to tell a free end (degree 1) from a shared vertex.
+
+    A span is a segment's (group, unordered rounded ends), counted once
+    however many same-net copies are stacked on it (#1550). Two pad taps
+    laid along one corridor stack every segment of it twice, and counted
+    per COPY the end of a cut stacked run reads degree 2 -- a shared vertex
+    -- so a removal that left two such ends touching by their caps alone
+    created a soft joint no detector saw. The copies conduct as one track,
+    and the end-of-run dedup (#162) ships one, so the degree is the span's.
+    """
+    from collections import defaultdict
+    deg = defaultdict(int)
+    seen = set()
+    for s in segs:
+        a = (round(s.start_x, 3), round(s.start_y, 3))
+        b = (round(s.end_x, 3), round(s.end_y, 3))
+        g = group(s)
+        span = (g, a, b) if a <= b else (g, b, a)
+        if span in seen:
+            continue
+        seen.add(span)
+        deg[(g, a)] += 1
+        deg[(g, b)] += 1
+    return deg
+
+
 def endpoint_reaches_pad(x, y, radius, layers, pad, unflashed_hole_only=False) -> set:
     """Which of `layers` a disc of copper -- centre (x, y), radius `radius` --
     both SHARES with `pad`'s copper and physically OVERLAPS. Empty set = no
@@ -375,6 +404,69 @@ def endpoint_reaches_via(x, y, radius, via, layers, copper_layers=None) -> bool:
                                                    COINCIDENCE_TOL)
 
 
+#: A track end this close to a via's centre IS on it (#1235): a millionth of
+#: a millimetre, KiCad's own unit, so only an end the board itself places
+#: elsewhere reads off-centre.
+VIA_CENTRE_TOL = 1e-6
+
+
+def off_centre_via_ends(segments, vias, copper_layers=None):
+    """Track ends that lie inside a same-net via's copper but not on its
+    centre (#1235): ``[(segment, end, via, offset_mm)]``, ``end`` 0 for the
+    segment's start and 1 for its end, one row per (end, via) pair.
+
+    The definition is #1235's: the same net, the via carries copper on the
+    track's layer (`via_copper_layers`), and ``0 < offset <= via radius``.
+    Such an end is connected -- the barrel holds it -- so no connectivity or
+    DRC check sees it, but KiCad's length measure joins a via only to the
+    tracks ending at its centre before 10.0.4 and from 10.0.4 cuts the run
+    at the via pad and measures it to the centre, so the routed copper and
+    KiCad's length disagree there (#1583).
+
+    An end that a segment on its layer carries on to the via's centre (a
+    via-centre bridge, `close_soft_joints`) is not off-centre: the copper
+    reaches the centre, which is where KiCad measures it to.
+
+    Graphic (footprint / board art) copper and net 0 are skipped."""
+    from collections import defaultdict
+    vias = [v for v in vias if v.net_id]
+    at_vertex = defaultdict(list)     # (net, layer, end point) -> the far ends
+    for s in segments:
+        if not s.net_id or getattr(s, 'graphic', False):
+            continue
+        for (x, y), far in (((s.start_x, s.start_y), (s.end_x, s.end_y)),
+                            ((s.end_x, s.end_y), (s.start_x, s.start_y))):
+            at_vertex[(s.net_id, s.layer, round(x, 4), round(y, 4))].append(far)
+    cell = max([1.0] + [getattr(v, 'size', 0.0) or 0.0 for v in vias])
+    grid = defaultdict(list)          # (net, cx, cy) -> vias
+    for v in vias:
+        grid[(v.net_id, math.floor(v.x / cell), math.floor(v.y / cell))].append(v)
+    spans = {}
+    out = []
+    for s in segments:
+        if not s.net_id or getattr(s, 'graphic', False):
+            continue
+        for end, (x, y) in enumerate(((s.start_x, s.start_y),
+                                      (s.end_x, s.end_y))):
+            cx, cy = math.floor(x / cell), math.floor(y / cell)
+            cand = [v for i in (-1, 0, 1) for j in (-1, 0, 1)
+                    for v in grid.get((s.net_id, cx + i, cy + j), ())]
+            for v in cand:
+                r = (getattr(v, 'size', 0.0) or 0.0) / 2.0
+                d = math.hypot(x - v.x, y - v.y)
+                if not (VIA_CENTRE_TOL < d <= r + 1e-9):
+                    continue
+                if any(math.hypot(fx - v.x, fy - v.y) <= VIA_CENTRE_TOL for fx, fy in
+                       at_vertex[(s.net_id, s.layer, round(x, 4), round(y, 4))]):
+                    continue
+                span = spans.get(id(v))
+                if span is None:
+                    span = spans[id(v)] = via_copper_layers(v, copper_layers)
+                if s.layer in span:
+                    out.append((s, end, v, d))
+    return out
+
+
 
 def strict_joint_roots(segments, vias=(), pads=(), copper_layers=None) -> Dict[int, object]:
     """{id(segment): root} for ONE net's segments, joined only where they
@@ -429,8 +521,12 @@ _CLUSTER_MEMO_CAP = 4096
 def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
     """Union-find clustering of (x, y, layer) points by endpoint coincidence.
 
-    Two points join when |dx| < tol and |dy| < tol on the SAME layer (pass a
-    shared sentinel layer for layer-agnostic clustering). O(n) via spatial
+    Two points join when their DISTANCE is below tol on the SAME layer (pass
+    a shared sentinel layer for layer-agnostic clustering). A distance, not
+    an |dx|, |dy| box: check_drc measures a soft joint's gap with hypot, and a
+    box reaching tol * sqrt(2) along a diagonal clustered ends that check_drc
+    then flagged, so a cleanup pass deleted a short diagonal connector as a
+    self-loop and left the gap it had closed (#1513). O(n) via spatial
     hashing. Returns a list of cluster root indices, one per input point --
     the ONE shared implementation behind every coincidence consumer (#320).
 
@@ -459,6 +555,7 @@ def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
             parent[ra] = rb
 
     inv = 1.0 / tol
+    tol_sq = tol * tol
     buckets: Dict[Tuple[int, int], List[int]] = {}
     for i, (x, y, _layer) in enumerate(points):
         buckets.setdefault((int(x * inv), int(y * inv)), []).append(i)
@@ -470,7 +567,7 @@ def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
                     if j <= i:
                         continue
                     ox, oy, olayer = points[j]
-                    if olayer == layer and abs(x - ox) < tol and abs(y - oy) < tol:
+                    if olayer == layer and (x - ox) ** 2 + (y - oy) ** 2 < tol_sq:
                         union(i, j)
     roots = [find(i) for i in range(n)]
     _CLUSTER_MEMO[_key] = tuple(roots)
@@ -1157,6 +1254,38 @@ def drop_off_board_pads(pcb_data: PCBData, pads: List[Pad]) -> List[Pad]:
     return [p for p in pads if not off_board(p.global_x, p.global_y)]
 
 
+def make_off_board_link_end_test(pcb_data: PCBData):
+    """Return f(net_id, x, y) -> True when a reported unconnected-link end is
+    OFF the board (#1544), or None when the board has no outline to test.
+
+    KiCad's connectivity knows nothing of the outline, so its unconnected
+    links -- kicad-cli's and the exact-fill source's alike -- include links
+    to and between the pads drop_off_board_pads (#291) takes out of every
+    routing endpoint set. An end is off the board when the point itself is
+    clearly outside the outline (make_off_board_test), or when it lies on a
+    pad of its net that drop_off_board_pads drops: a nearest-approach anchor
+    sits on the pad's copper, which can reach nearer the edge than the pad
+    centre the #291 test reads. Copper drawn to such an end can only end
+    outside the outline."""
+    from check_drc import make_off_board_test
+    from check_connected import _point_in_pad
+    off_board = make_off_board_test(pcb_data.board_info)
+    if off_board is None:
+        return None
+    off_pads = {}
+    for nid, pads in pcb_data.pads_by_net.items():
+        dropped = [p for p in pads if off_board(p.global_x, p.global_y)]
+        if dropped:
+            off_pads[nid] = dropped
+
+    def test(net_id: int, x: float, y: float) -> bool:
+        if off_board(x, y):
+            return True
+        return any(_point_in_pad(x, y, p, margin=0.05)
+                   for p in off_pads.get(net_id, ()))
+    return test
+
+
 def routable(items) -> list:
     """`items` (a net's segments, vias or pads) without the protected Kelvin
     sense copper and sense pads (#1279, sense_branch.py): a net's new copper
@@ -1164,6 +1293,37 @@ def routable(items) -> list:
     and terminal derivations below never offer the branch as a place to
     attach. The join pad is not tagged and stays an ordinary terminal."""
     return [x for x in items if not getattr(x, 'sense', '')]
+
+
+def segment_end_rows(seg, coord, layer_idx) -> List[Tuple]:
+    """A segment's endpoint rows ``(gx, gy, layer_idx, x, y)``, one per grid
+    cell: both ends when they snap to different cells; else the START, unless
+    only the END lies exactly on the shared cell's grid point (#1556).
+
+    The row's original point is where a route launching from that cell welds,
+    by a connector from the grid point. A fanout stub ends in a short
+    grid-snap connector from its off-grid tip to the grid point; keeping its
+    START offered only the off-grid tip, so every route from the stub re-laid
+    that connector at its own width on top of the existing one -- a same-span
+    twin that a later strip could take both copies of. An end exactly on the
+    grid point needs no connector at all.
+    """
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+    if (gx1, gy1) != (gx2, gy2):
+        return [(gx1, gy1, layer_idx, seg.start_x, seg.start_y),
+                (gx2, gy2, layer_idx, seg.end_x, seg.end_y)]
+    if (on_grid_point(seg.end_x, seg.end_y, gx1, gy1, coord)
+            and not on_grid_point(seg.start_x, seg.start_y, gx1, gy1, coord)):
+        return [(gx1, gy1, layer_idx, seg.end_x, seg.end_y)]
+    return [(gx1, gy1, layer_idx, seg.start_x, seg.start_y)]
+
+
+def on_grid_point(x, y, gx, gy, coord, tol: float = 1e-6) -> bool:
+    """Whether (x, y) IS cell (gx, gy)'s grid point (to 1 nm, KiCad's
+    resolution): a weld there needs no connector."""
+    fx, fy = coord.to_float(gx, gy)
+    return abs(x - fx) <= tol and abs(y - fy) <= tol
 
 
 def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
@@ -1222,11 +1382,8 @@ def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        _add(seg.start_x, seg.start_y, layer_idx, gx1, gy1)
-        if (gx1, gy1) != (gx2, gy2):
-            _add(seg.end_x, seg.end_y, layer_idx, gx2, gy2)
+        for gx, gy, _li, x, y in segment_end_rows(seg, coord, layer_idx):
+            _add(x, y, layer_idx, gx, gy)
     for pad in routable(drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, []))):
         gx, gy = coord.to_grid(pad.global_x, pad.global_y)
         for layer in expand_pad_layers(pad.layers, config.layers):
@@ -1433,34 +1590,21 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                     for seg in _segs_fb:
                         layer_idx = layer_map.get(seg.layer)
                         if layer_idx is not None:
-                            gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                            gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                            _side.append((gx1, gy1, layer_idx,
-                                          seg.start_x, seg.start_y))
-                            if (gx1, gy1) != (gx2, gy2):
-                                _side.append((gx2, gy2, layer_idx,
-                                              seg.end_x, seg.end_y))
+                            _side.extend(segment_end_rows(seg, coord,
+                                                          layer_idx))
             else:
                 # For single-ended: use all segment endpoints
                 sources = []
                 for seg in source_segs:
                     layer_idx = layer_map.get(seg.layer)
                     if layer_idx is not None:
-                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                        sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                        if (gx1, gy1) != (gx2, gy2):
-                            sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+                        sources.extend(segment_end_rows(seg, coord, layer_idx))
 
                 targets = []
                 for seg in target_segs:
                     layer_idx = layer_map.get(seg.layer)
                     if layer_idx is not None:
-                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                        targets.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                        if (gx1, gy1) != (gx2, gy2):
-                            targets.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+                        targets.extend(segment_end_rows(seg, coord, layer_idx))
 
                 # Each group's VIAS are route terminals on every routing layer
                 # (PR #534): a via spans the stack, and Case 2 below has
@@ -1550,11 +1694,8 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                     for seg in seg_group:
                         layer_idx = layer_map.get(seg.layer)
                         if layer_idx is not None:
-                            gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                            gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                            sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                            if (gx1, gy1) != (gx2, gy2):
-                                sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+                            sources.extend(segment_end_rows(seg, coord,
+                                                            layer_idx))
 
                 targets = []
                 for pad in unconnected_pads:

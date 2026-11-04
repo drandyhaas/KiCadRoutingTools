@@ -27,6 +27,11 @@ Needs KiCad's pcbnew; self-skips if absent.
 # to the semantics). PRE-EXISTING: it has exited 1 on this branch since it
 # arrived.
 #
+# SINCE CLOSED: the kipy builder now fills both fields through
+# `kipy_footprint_outline_owners` (the shared `classify_outline_owners`, with
+# #1409's own-pad rule), graded in tests/test_1279_kipy_builder_parity.py (F,
+# K). The original finding, kept for the history:
+#
 # THE GAP IT WOULD HAVE FOUND. The kipy builder fills NEITHER
 # `owns_edge_cuts` NOR `owns_board_outline` -- grep the builder, there is no
 # assignment at all, so every footprint reads `owns_board_outline=False` on the
@@ -48,8 +53,8 @@ import sys
 
 if __name__ == '__main__':
     print("SKIP: build_pcb_data_from_board is the kipy builder here and "
-          "cannot take a pcbnew BOARD. NOTE the gap this gate cannot cover: "
-          "the kipy builder fills neither owns_edge_cuts nor "
-          "owns_board_outline, so #829's move guard is absent on the IPC "
-          "front.")
+          "cannot take a pcbnew BOARD. The kipy builder's outline ownership "
+          "(kipy_footprint_outline_owners, #829, and #1409's carried window) "
+          "is graded in tests/test_1279_kipy_builder_parity.py (F, K); a live "
+          "KiCad's footprint-shape serialization is NOT covered.")
     sys.exit(77)

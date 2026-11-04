@@ -25,7 +25,11 @@ Two pitfalls #1254 measured are designed out:
   is read off a net name (`is_ground_net_name`, which has no such
   alternative); every other role is read off PIN FUNCTIONS, and a part whose
   pins carry none is `unknown` -- a pin number is never guessed at (ulx3s's
-  three TLV62569 bucks).
+  three TLV62569 bucks). The one net-name reading past ground is a
+  crystal-role part's SUPPLY pin (#1605, `_rail`): the decap rule's
+  rail-shaped name AND a decoupling cap to ground, a digit-led name counting
+  only when voltage-shaped (`arrays._rail_by_name`), so `/32K_P` is still a
+  load net and fomu U7's `+3V3` is not.
 
 It also PROPOSES keep-away rules (#1253): each crystal's or oscillator's clock
 nets against the board's switch nodes, in route.py's own `--keep-away`
@@ -246,7 +250,13 @@ def _converters(b: _Board, out: List[Dict]) -> None:
     its return (PGND, else GND, else a pad on a ground net). Topology from
     where the inductor's other end goes. A part an inductor shares a net
     with -- the only part on that net a loop forms at -- whose pads carry no
-    pin function at all is `unknown`."""
+    pin function at all is `unknown`.
+
+    A part `_Board.connector` calls a connector is neither (#1590): a coax
+    jack named by its part number has no part class, so `big` keeps it, but
+    the inductor on its centre pin is a bias tee's, not a converter's. It
+    still counts as a part on the net, so the pin-less part beside it is no
+    candidate either."""
     cands: Dict[str, List] = {}
     for L in sorted(b.fps, key=_nkey):
         if not b.inductor(L):
@@ -258,8 +268,9 @@ def _converters(b: _Board, out: List[Dict]) -> None:
             bigs = sorted((r for r in b.net_parts.get(n, ())
                            if r != L and b.big(r)), key=_nkey)
             sw_ics = [r for r in bigs
-                      if any(q.net_id == n and _fn_is(q, _SW_FN)
-                             for q in b.copper[r])]
+                      if not b.connector(r)
+                      and any(q.net_id == n and _fn_is(q, _SW_FN)
+                              for q in b.copper[r])]
             for r in sw_ics:
                 cands.setdefault(r, []).append((L, lp))
             # The pin-less arm: one part on the net, and the net is not
@@ -267,6 +278,7 @@ def _converters(b: _Board, out: List[Dict]) -> None:
             # while an LC filter's output does (ulx3s U8, an ADC whose
             # /analog/ADC3V3 comes through an inductor, is not a candidate).
             if (not sw_ics and len(bigs) == 1
+                    and not b.connector(bigs[0])
                     and not b.has_functions(bigs[0])
                     and not b.decoupled(n)):
                 cands.setdefault(bigs[0], []).append((L, lp))
@@ -352,36 +364,76 @@ def _converters(b: _Board, out: List[Dict]) -> None:
             out.append(rec)
 
 
-def _signal_pads(b: _Board, x) -> List:
-    """A crystal-role part's SIGNAL pads: on a non-ground net that reaches
-    another part, and not a supply pin (an oscillator's VDD is on a rail, not
-    a load net). A passive crystal has two, on two nets (its load nets)."""
-    from net_queries import is_power_pin
+def _rail(b: _Board, nid) -> bool:
+    """A supply rail by NET, for a crystal-role part's pads (#1605): the
+    decap pin rule's rail-net reading (`floorplan.supply_pins`' channel 3, a
+    rail-shaped name that a decoupling cap carries), with the name read as
+    the array detector reads it (`arrays._rail_by_name`: a digit-led leaf is
+    a rail only when it is voltage-shaped, so watchy's `/32K_P` and `/40M_N`
+    stay load nets)."""
+    from .arrays import _rail_by_name
+    return (nid > 0 and not b.ground(nid) and _rail_by_name(b.net(nid))
+            and b.decoupled(nid))
+
+
+def _live_pads(b: _Board, x) -> List:
+    """A crystal-role part's pads on a non-ground net that reaches another
+    part: its signal pads and its supply pins."""
     return [p for p in b.copper[x] if p.net_id > 0
             and not b.ground(p.net_id)
-            and not is_power_pin(p.pinfunction or '', p.pintype or '')
             and b.net_parts.get(p.net_id, set()) - {x}]
+
+
+def _supply_why(b: _Board, p) -> str:
+    """Why a crystal-role part's pad is a supply pin, or '' when it is not:
+    its pin type or function says so (`net_queries.is_power_pin`), or it is
+    on a rail (`_rail`). The net reading is what finds fomu U7's `+3V3` pin,
+    whose pads carry no pin metadata (#1605), and it holds whatever a pad's
+    metadata says: a load net is never a rail."""
+    from net_queries import is_power_pin
+    if is_power_pin(p.pinfunction or '', p.pintype or ''):
+        return (f"typed or named a supply pin "
+                f"({pin_function_name(p) or p.pintype})")
+    if _rail(b, p.net_id):
+        return (f"on {b.net(p.net_id)}, a rail (a rail-shaped name a "
+                f"decoupling cap ties to ground)")
+    return ''
+
+
+def _signal_pads(b: _Board, x) -> List:
+    """A crystal-role part's SIGNAL pads: on a non-ground net that reaches
+    another part, and not a supply pin (`_supply_why`: an oscillator's VDD is
+    on a rail, not a load net). A passive crystal has two, on two nets (its
+    load nets)."""
+    return [p for p in _live_pads(b, x) if not _supply_why(b, p)]
 
 
 def _crystals(b: _Board, out: List[Dict]) -> None:
     """A crystal (`roles.infer_role` says so) and the IC its two load nets
     reach. A PASSIVE crystal has exactly two signal pads -- pads on a
-    non-ground net that reaches another part -- on two distinct nets, and no
-    output. Anything else in the crystal role (an active oscillator: a supply
-    pin, a tie, an enable) is read only through a pad typed `output` or named
-    OUT / CLK, and is `unknown` without one -- read FIRST, because an
-    oscillator with an enable pin also has two signal pads (enable and
-    output) once its supply pin is set aside."""
+    non-ground net that reaches another part -- on two distinct nets, no
+    output and no supply pin (`_supply_why`). Anything else in the crystal
+    role (an active oscillator: a supply pin, a tie, an enable) is read only
+    through a pad typed `output` or named OUT / CLK, and is `unknown` without
+    one -- read FIRST, because an oscillator with an enable pin also has two
+    signal pads (enable and output) once its supply pin is set aside. The
+    supply pin itself says the part is not passive: fomu U7, an oscillator
+    whose pads carry no pin metadata, has one signal pad and a `+3V3` pin,
+    and was read as a crystal whose load caps were every `+3V3` decap
+    (#1605)."""
     for x in sorted(b.fps, key=_nkey):
         if b.role[x]['role'] != 'crystal':
             continue
         sig = _signal_pads(b, x)
+        sup = [(p, _supply_why(b, p)) for p in _live_pads(b, x)]
+        sup = [(p, why) for p, why in sup if why]
         ev = [f"{x} is in the role table's crystal row: "
               + '; '.join(b.role[x]['evidence'])]
         outs = [p for p in b.copper[x]
                 if 'output' in str(getattr(p, 'pintype', '') or '').split('+')
                 or _fn_is(p, _OSC_OUT_FN)]
-        if not outs and len(sig) == 2 and len({p.net_id for p in sig}) == 2:
+        if (not outs and not sup and len(sig) == 2
+                and len({p.net_id for p in sig}) == 2):
             votes: Dict[str, int] = {}
             for p in sig:
                 for r in b.net_parts.get(p.net_id, ()):
@@ -424,9 +476,13 @@ def _crystals(b: _Board, out: List[Dict]) -> None:
                 'role': 'unknown', 'candidate': 'crystal or oscillator',
                 'part': x, 'value': b.value(x),
                 'evidence': ev + [
+                    f"{x} pad {p.pad_number} is a supply pin: {why}"
+                    for p, why in sorted(sup, key=lambda t: _nkey(
+                        t[0].pad_number))] + [
                     f"{len(sig)} signal pad(s) on "
-                    f"{len({p.net_id for p in sig})} non-ground net(s) -- "
-                    f"not the two load nets of a passive crystal"],
+                    f"{len({p.net_id for p in sig})} non-ground net(s)"
+                    + (" and a supply pin" if sup else "")
+                    + " -- not the two load nets of a passive crystal"],
                 'why': ('no pad is typed output or named OUT / CLK, so which '
                         'pad is the clock is not read -- pin numbers are '
                         'never guessed'),

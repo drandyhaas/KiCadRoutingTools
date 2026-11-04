@@ -242,12 +242,12 @@ def row_rung_retry(pcb):
     class _P:
         pass
     p0, p2 = _P(), _P()
-    _register_rung_path_vias(p0, m, path, 0.25, 0.15)
-    _register_rung_path_vias(p2, m, path, 0.25, 0.15, own_rung=2)
+    _register_rung_path_vias(p0, m, path, 0.25, 0.15, net_id=2)
+    _register_rung_path_vias(p2, m, path, 0.25, 0.15, own_rung=2, net_id=2)
     check('registration at rung 0 misses a cell only the net\'s own via is blocked on',
-          (5, 5) not in p0._unblock_via_sizes)
+          (2, 5, 5) not in p0._unblock_via_sizes)
     check('registration at the net\'s own rung ships the small via there',
-          p2._unblock_via_sizes.get((5, 5)) == (0.25, 0.15))
+          p2._unblock_via_sizes.get((2, 5, 5)) == (0.25, 0.15))
 
 
 def _band_shorts(result):

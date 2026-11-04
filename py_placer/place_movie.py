@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """Make a movie of a placement: place_simple's run, step by step, and with
---route the placement skill's whole flow.
+--route or --route-chain the placement skill's whole flow.
 
     python3 -X utf8 py_placer/place_movie.py board.kicad_pcb placed.kicad_pcb \\
         --groups groups.json --intent intent.json [--seed 0] [--movie placed.mp4]
     python3 -X utf8 py_placer/place_movie.py board.kicad_pcb placed.kicad_pcb \\
         --groups groups.json --intent intent.json --route ch32v003_usb:6 [--scattered 6 --clustered 6 --judge 6]
+    python3 -X utf8 py_placer/place_movie.py board.kicad_pcb placed.kicad_pcb \\
+        --groups groups.json --intent intent.json --route-chain wk/<run>/judge_chain.txt
 
 BOARD and OUT come first; every other argument but this tool's own is
 place_simple.py's (see `place_simple.py --help`). The placement is exactly
-place_simple's for the same seed.
+place_simple's for the same seed and start: --seed S is filmed from the start
+seed S has in a run of --scattered/--clustered/--anchored (place_simple's
+default seeds when none is given), whose counts become the --clustered-seeds
+and --anchored-seeds lists that run numbers its seeds by, and a `place_movie:`
+line names it. Lists given instead are kept; beside a count that starts the
+seed otherwise, they are refused (exit 2).
 
 Each placement frame is the board with every part's pads and courtyard
 (movable parts tinted by group, fixed parts dim), the airwires the objective
@@ -41,8 +48,24 @@ the opt-in --anchored started anchored, as place_simple's default seeds), the
 --judge legal seeds place_simple names (`judge_order`: buildable and floorplan-clean first,
 then the objective's cheapest) are fast-routed (the chain
 with `--quick 2`) and scored by quick_score, the best (`quick_score.judge_key`)
-is routed in full. The movie films that seed's
-placement -- the one routed in full -- and goes on:
+is routed in full.
+
+With --route-chain FILE instead (the chain a placement run routes its seeds
+with, `judge_chain.txt`: one command per line, its boards named by {in} {out}
+{dir} {seed} {run}, in judge_seeds.py --chain's format), the same flow routes
+each seed with that chain the way judge_seeds.py routes it, by its own
+`judge_seed`: the fast routes with every route.py / route_diff.py step at
+`--quick 2`, the best seed's full route with `--quick` taken off, each scored
+by quick_score with place_simple's --intent and BOARD as the baseline, and the
+best picked by the same `quick_score.judge_key`. The routes land where
+judge_seeds puts them, in --work as its run folder (`s<S>_route/`,
+`s<S>_fast.score.json`, `s<S>_full_route/`, `s<S>_full.score.json`), and the
+chain's commands run from the current folder, as judge_seeds runs them (the
+repo root): the movie routes and picks as the run's judge does. --route and
+--route-chain are exclusive.
+
+The movie films the best seed's placement -- the one routed in full -- and
+goes on:
 
   8. its fast route, played as the routing movie plays a run;
   9. a zoom out to the judged seeds' fast routes side by side, a box round
@@ -52,7 +75,8 @@ placement -- the one routed in full -- and goes on:
 OUT is then the best seed's placement; the work (placed seeds, routes,
 scores) is in --work. The movie is an .mp4 through `ffmpeg` when it is on
 PATH, else a GIF beside it. Exit codes are place_simple's (2 also when a
---route step fails).
+--route step fails, a --route-chain file cannot route a seed, or no route
+finishes).
 """
 #: #937 registry: which door(s) show this tool, and whether it changes
 #: the board. Read by krt_registry.py -- by AST, never imported.
@@ -275,6 +299,90 @@ def _mst(pts):
     return out
 
 
+# -- the seeds and their starts ------------------------------------------------
+
+def _with_defaults(given):
+    """The start counts `given` (None where not given), place_simple's
+    defaults filled in."""
+    from place_simple import ANCHORED_SEEDS, CLUSTERED_SEEDS, SCATTERED_SEEDS
+    return tuple(d if v is None else v for v, d in zip(
+        given, (SCATTERED_SEEDS, CLUSTERED_SEEDS, ANCHORED_SEEDS)))
+
+
+def start_counts(a):
+    """(--scattered, --clustered, --anchored) as given, None where not, with
+    `a`'s own counts set to place_simple's defaults where not given."""
+    given = (a.scattered, a.clustered, a.anchored)
+    a.scattered, a.clustered, a.anchored = _with_defaults(given)
+    return given
+
+
+def start_opts(scattered, clustered, anchored):
+    """The --clustered-seeds and --anchored-seeds options of a run of these
+    start counts (place_simple's `start_lists`)."""
+    from place_simple import start_lists
+    return [x for f, v in zip(('--clustered-seeds', '--anchored-seeds'),
+                              start_lists(scattered, clustered, anchored)) if v for x in (f, v)]
+
+
+def seed_starts(tool, given, opts, out):
+    """place_simple's options for the film of one seed without --route: the
+    start counts (`given`, as start_counts returns them; place_simple's
+    defaults where None) become the --clustered-seeds and --anchored-seeds
+    lists a run of those counts numbers its seeds by (`start_lists`), so
+    `--seed S` films seed S of that run -- of a default run when no count is
+    given -- from the start it had there. Lists already in `opts` are kept;
+    beside a count, they must give the seed the start the count does. Several
+    seeds (--seeds, or an OUT carrying {seed} and no --seed) are place_simple's
+    own business, the counts passed on. Returns (opts, the line naming the seed
+    and its start), or (None, why it is refused)."""
+    from place_simple import _seed_list, start_lists
+    counts = [(f, str(v)) for f, v in zip(('--scattered', '--clustered', '--anchored'), given)
+              if v is not None]
+    named = [' '.join(c) for c in counts]
+    p = argparse.ArgumentParser(prog=tool, add_help=False, allow_abbrev=False)
+    p.add_argument('--seed', type=int)
+    for f in ('--seeds', '--clustered-seeds', '--anchored-seeds'):
+        p.add_argument(f)
+    k, _ = p.parse_known_args(opts)
+    if k.seeds or (k.seed is None and '{seed}' in out):
+        return opts + [x for c in counts for x in c], None
+    sc, cl, an = _with_defaults(given)
+    n, seed = sc + cl + an, (0 if k.seed is None else k.seed)
+    if min(sc, cl, an) < 0 or n < 1:
+        return None, f'{tool}: --scattered, --clustered and --anchored of 0 or more, at least one seed'
+
+    def start(clustered, anchored):
+        return ('anchored' if seed in _seed_list(anchored or '') else
+                'clustered' if seed in _seed_list(clustered or '') else 'scattered')
+    counted = start_lists(sc, cl, an)
+    run = ' '.join(named) if named else f'a default run ({sc} scattered, {cl} clustered, {an} anchored)'
+    if named and seed >= n:
+        return None, (f'{tool}: seed {seed} is not one of the {n} seeds {run} numbers (0-{n - 1}); '
+                      f'without a count, --clustered-seeds and --anchored-seeds give its start')
+    if k.clustered_seeds or k.anchored_seeds:
+        try:
+            listed = start(k.clustered_seeds, k.anchored_seeds)
+        except ValueError:
+            return None, (f'{tool}: --clustered-seeds {k.clustered_seeds!r} or --anchored-seeds '
+                          f'{k.anchored_seeds!r} is not a list like 0-3 or 0,1,2,3')
+        lists = ' '.join(f'{f} {v}' for f, v in (('--clustered-seeds', k.clustered_seeds),
+                                                ('--anchored-seeds', k.anchored_seeds)) if v)
+        if named and listed != start(*counted):
+            return None, (f'{tool}: seed {seed} starts {listed} by {lists} but {start(*counted)} '
+                          f'by {run}; give the lists or the counts, not both')
+        return opts, f"{tool}: filming seed {seed} from {_a(listed)} start ({lists})"
+    add = start_opts(sc, cl, an)
+    if seed >= n:
+        return opts + add, (f"{tool}: filming seed {seed} from a scattered start (past the {n} "
+                            f"seeds of {run})")
+    return opts + add, (f"{tool}: filming seed {seed} from {_a(start(*counted))} start, as {run} "
+                        f"starts it ({' '.join(add) or 'no clustered or anchored seed'})")
+
+
+def _a(start):
+    return ('an ' if start[0] in 'aeiou' else 'a ') + start
+
 
 # -- the flow (--route) ---------------------------------------------------------
 
@@ -308,18 +416,79 @@ def _route(placed, name, set_, out, quick):
     return json.load(open(sc)) if r.returncode == 0 and os.path.isfile(sc) else None
 
 
-def _done(work, key):
-    """The score of a route route_placed.py already finished in `work/key`."""
-    p = os.path.join(work, key, 'score.json')
+def _done(d):
+    """The score of a route route_placed.py already finished in folder `d`."""
+    p = os.path.join(d, 'score.json')
     return json.load(open(p)) if os.path.isfile(p) else None
+
+
+def route_dir(work, s, full=False, chain=None):
+    """The folder in `work` a route of seed `s` lands in: route_placed.py's
+    `fast_s<S>` / `full_s<S>` (--route), or with a `chain` file judge_seeds'
+    `s<S>_route` / `s<S>_full_route` (--route-chain)."""
+    if chain:
+        return os.path.join(work, f's{s}_full_route' if full else f's{s}_route')
+    return os.path.join(work, f"{'full' if full else 'fast'}_s{s}")
+
+
+def chain_steps(path):
+    """(the commands of a --route-chain file, None), read and checked by
+    judge_seeds' own `read_chain` / `chain_problems`, or (None, why not)."""
+    from judge_seeds import chain_problems, read_chain
+    try:
+        steps = read_chain(path)
+    except OSError as ex:
+        return None, f'cannot read --route-chain {path}: {ex}'
+    bad = chain_problems(steps)
+    return (None, 'the chain cannot route a seed: ' + '; '.join(bad)) if bad else (steps, None)
+
+
+def _chain_router(steps, board, opts, work):
+    """route(seed, full) -> score or None, for --route-chain: judge_seeds'
+    own `judge_seed` routes the seed by the chain in `work` (its run folder)
+    -- route.py / route_diff.py steps at --quick 2, or with `full` at the full
+    level -- and scores it with quick_score, with the intent place_simple is
+    given and the board the seeds were placed from as the baseline, as
+    judge_seeds grades them. Each step runs traced (KICAD_ROUTE_TRACE=1, the
+    step's own env), so the film can play its router events. A seed whose
+    score is already there (`s<S>_fast.score.json`, `s<S>_full.score.json`)
+    is reused."""
+    import threading
+    from judge_seeds import judge_seed
+    p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    p.add_argument('--intent')
+    intent = p.parse_known_args(opts)[0].intent
+    baseline = os.path.abspath(board)          # what place_simple writes to judge.json
+    traced = ['KICAD_ROUTE_TRACE=1 ' + s for s in steps]
+    lock = threading.Lock()
+
+    def route(s, full):
+        sc = os.path.join(work, f"s{s}_{'full' if full else 'fast'}.score.json")
+        if os.path.isfile(sc) and os.path.isdir(route_dir(work, s, full, chain=True)):
+            return json.load(open(sc))
+        return judge_seed(work, s, traced, intent, lock, baseline, full=full).get('score')
+    return route
 
 
 def run_flow(a, board, out, opts, work):
     """Place every seed, fast-route the judged ones, route the best in full,
     reusing what `work` already holds (a placed seed, a finished route), so a
-    second run only films. Returns (judged, scores, best, full score) or
-    None."""
-    name, _, set_ = a.route.partition(':')
+    second run only films. The routes are route_placed.py's (--route
+    NAME:SET) or the --route-chain file's, run by judge_seeds. Returns
+    (judged, scores, best, full score) or None."""
+    chain = getattr(a, 'route_chain', None)
+    if chain:
+        steps, why = chain_steps(chain)
+        if steps is None:
+            print(f'place_movie: {why}. Nothing was placed or routed.', file=sys.stderr)
+            return None
+        route = _chain_router(steps, board, opts, work)
+    else:
+        name, _, set_ = a.route.partition(':')
+
+        def route(s, full):
+            d = route_dir(work, s, full)
+            return _done(d) or _route(os.path.join(work, f's{s}.kicad_pcb'), name, set_, d, not full)
     if a.fresh:
         shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work, exist_ok=True)
@@ -343,33 +512,40 @@ def run_flow(a, board, out, opts, work):
         return None
     print(f"place_movie: fast-routing the {len(judged)} legal seeds the judge names: {judged}")
     with ThreadPoolExecutor(max_workers=max(1, a.route_jobs or a.jobs)) as pool:
-        got = list(pool.map(lambda s: _done(work, f'fast_s{s}') or _route(
-            os.path.join(work, f's{s}.kicad_pcb'), name, set_, os.path.join(work, f'fast_s{s}'), True),
-            judged))
+        got = list(pool.map(lambda s: route(s, False), judged))
     scores = {s: sc for s, sc in zip(judged, got) if sc}
     if not scores:
         print("place_movie: no fast route finished", file=sys.stderr)
         return None
     best = min(scores, key=lambda s: _score_key(scores[s]))
     print(f"place_movie: the best fast route is seed {best}; routing it in full")
-    full = _done(work, f'full_s{best}') or _route(os.path.join(work, f's{best}.kicad_pcb'), name,
-                                                    set_, os.path.join(work, f'full_s{best}'), False)
+    full = route(best, True)
     if full is None:
         return None
     return judged, scores, best, full
 
 
-def _chain(work, key):
+def _chain(d):
     """(the board the chain started from, its boards in order) of a route
-    route_placed.py left in `work/key`."""
+    in folder `d` (`route_dir`): route_placed.py's (in/, out/,
+    manifest/redo_commands.sh) or judge_seeds' (in.kicad_pcb, each step's
+    board and the route's own redo_commands.sh, side by side)."""
     from route_movie import run_boards
-    d = os.path.join(work, key)
-    first = [os.path.join(d, 'in', f) for f in os.listdir(os.path.join(d, 'in'))
-             if f.endswith('.kicad_pcb')][0]
-    boards = [b for b in run_boards(os.path.join(d, 'out'),
-                                    os.path.join(d, 'manifest', 'redo_commands.sh'))
+    if os.path.isdir(os.path.join(d, 'in')):
+        first = [os.path.join(d, 'in', f) for f in os.listdir(os.path.join(d, 'in'))
+                 if f.endswith('.kicad_pcb')][0]
+        run, manifest = os.path.join(d, 'out'), os.path.join(d, 'manifest', 'redo_commands.sh')
+    else:
+        first, run, manifest = os.path.join(d, 'in.kicad_pcb'), d, os.path.join(d, 'redo_commands.sh')
+    boards = [b for b in run_boards(run, manifest)
               if os.path.basename(b) != os.path.basename(first)]
     return first, boards
+
+
+def routed_where(work, best, chain=None):
+    """Where the best seed's full route's boards are, for the last line."""
+    d = route_dir(work, best, True, chain)
+    return d if chain else os.path.join(d, 'out')
 
 
 def _score_text(sc):
@@ -400,8 +576,9 @@ def film_routes(a, movie, work, judged, scores, best, full, filmed):
     kw = dict(size=a.size, theme=a.theme)
     rkw = dict(kw, zone_tint=ZONE_TINT)
     hold = max(1, int(round(STEP_HOLD * a.fps)))
+    chain = getattr(a, 'route_chain', None)
     # 8. the filmed seed's fast route
-    first, boards = _chain(work, f'fast_s{filmed}')
+    first, boards = _chain(route_dir(work, filmed, chain=chain))
     r, live_s, live_v = play_chain(movie, boards, first, prefix='fast route | ',
                                    first_label=f'placed, seed {filmed}', **kw)
     shoot(movie, r, live_s, live_v, f"fast route, seed {filmed}: {_score_text(scores[filmed])}",
@@ -417,7 +594,7 @@ def film_routes(a, movie, work, judged, scores, best, full, filmed):
     font = load_font(LABEL_PX - 4)
     cells = {}
     for i, s in enumerate(sorted(scores)):
-        _f, bs = _chain(work, f'fast_s{s}')
+        _f, bs = _chain(route_dir(work, s, chain=chain))
         rr = BoardRenderer(parse_kicad_pcb(bs[-1]), supersample=1, **rkw)
         img = rr.render()
         if img.size != (W, H):
@@ -468,7 +645,7 @@ def film_routes(a, movie, work, judged, scores, best, full, filmed):
     for i in range(ZOOM - 1, -1, -1):
         zoom(full_img[best], cells[best], _ease(i / ZOOM), pick)
     # 10. its fast route cleared, net by net, then its full route
-    _f, bs = _chain(work, f'fast_s{best}')
+    _f, bs = _chain(route_dir(work, best, chain=chain))
     pcb = parse_kicad_pcb(bs[-1])
     r = BoardRenderer(pcb, supersample=1, **rkw)
     live_s, live_v = _board_copper(pcb)
@@ -480,7 +657,7 @@ def film_routes(a, movie, work, judged, scores, best, full, filmed):
         shoot(movie, r, live_s, live_v, f"clearing the fast route of seed {best}", rips=gone)
         live_s = {k: o for k, o in live_s.items() if o.net_id not in part}
         live_v = {k: o for k, o in live_v.items() if o.net_id not in part}
-    first, boards = _chain(work, f'full_s{best}')
+    first, boards = _chain(route_dir(work, best, True, chain))
     r, live_s, live_v = play_chain(movie, boards, first, prefix='full route | ',
                                    first_label=f'seed {best}, cleared', **kw)
     shoot(movie, r, live_s, live_v, f"full route, seed {best}: {_score_text(full)}", times=hold)
@@ -503,60 +680,72 @@ def main(argv=None):
     ap.add_argument('--size', type=int, default=SIZE, help=f'longest frame side, px (default {SIZE})')
     ap.add_argument('--fps', type=float, default=FPS, help=f'frames per second (default {FPS:g})')
     ap.add_argument('--theme', default='dark', help='render theme: dark (default) or light')
-    ap.add_argument('--route', metavar='BOARD:SET',
-                    help='run and film the placement flow, routing with this stress-corpus '
-                         "board's recorded chain (e.g. ch32v003_usb:6)")
-    ap.add_argument('--scattered', type=int, default=SCATTERED_SEEDS,
-                    help=f'with --route, the seeds started scattered (default {SCATTERED_SEEDS})')
-    ap.add_argument('--clustered', type=int, default=CLUSTERED_SEEDS,
-                    help=f'with --route, the seeds started clustered, numbered after the '
-                         f'scattered ones (default {CLUSTERED_SEEDS})')
-    ap.add_argument('--anchored', type=int, default=ANCHORED_SEEDS,
-                    help=f'with --route, the seeds started anchored, numbered after the '
-                         f'clustered ones (default {ANCHORED_SEEDS}: opt-in)')
+    how = ap.add_mutually_exclusive_group()
+    how.add_argument('--route', metavar='BOARD:SET',
+                     help='run and film the placement flow, routing with this stress-corpus '
+                          "board's recorded chain (e.g. ch32v003_usb:6)")
+    how.add_argument('--route-chain', metavar='FILE',
+                     help="run and film the placement flow, routing with this chain file "
+                          "(judge_seeds.py --chain's format: the placement run's "
+                          "judge_chain.txt), run as judge_seeds runs it, from the current "
+                          "folder (the repo root)")
+    ap.add_argument('--scattered', type=int,
+                    help=f'the seeds started scattered (default {SCATTERED_SEEDS}): in the flow, '
+                         f'the seeds placed; without, the run whose --seed is filmed, from the '
+                         f'start that run gives it')
+    ap.add_argument('--clustered', type=int,
+                    help=f'the seeds started clustered, numbered after the scattered ones '
+                         f'(default {CLUSTERED_SEEDS})')
+    ap.add_argument('--anchored', type=int,
+                    help=f'the seeds started anchored, numbered after the clustered ones '
+                         f'(default {ANCHORED_SEEDS}: opt-in)')
     ap.add_argument('--judge', type=int, default=JUDGED_SEEDS,
-                    help=f'with --route, how many of the cheapest legal seeds are fast-routed '
+                    help=f'in the flow, how many of the cheapest legal seeds are fast-routed '
                          f'(default {JUDGED_SEEDS})')
     ap.add_argument('--jobs', type=int, default=4,
-                    help='with --route, placements and fast routes run at once (default 4)')
+                    help='in the flow, placements and fast routes run at once (default 4)')
     ap.add_argument('--route-jobs', type=int, default=0,
-                    help='with --route, fast routes run at once, when it should differ from '
+                    help='in the flow, fast routes run at once, when it should differ from '
                          '--jobs (a big board\'s route can take 5 GB: 1 runs them one at a time)')
     ap.add_argument('--fresh', action='store_true',
-                    help='with --route, empty --work first: place and route every seed again '
+                    help='in the flow, empty --work first: place and route every seed again '
                          '(otherwise a placed seed or finished route there is reused, so a '
                          'second run only films)')
-    ap.add_argument('--work', help="with --route, the work directory (default: OUT's name + _work)")
+    ap.add_argument('--work', help="in the flow, the work directory (default: OUT's name + _work)")
     a, rest = ap.parse_known_args(argv)
     if len(rest) < 2 or rest[0].startswith('-') or rest[1].startswith('-'):
         ap.error('BOARD and OUT come first')
     board, out, opts = rest[0], rest[1], rest[2:]
     movie_path = a.movie or os.path.splitext(out)[0] + '.mp4'
-    if not a.route:
+    given = start_counts(a)
+    if not (a.route or a.route_chain):
+        opts, line = seed_starts('place_movie', given, opts, out)
+        if opts is None:
+            print(line, file=sys.stderr)
+            return 2
+        if line:
+            print(line)
         movie = MovieWriter(movie_path, a.fps)
         film = Film(a, movie)
         install(film)
         import place_simple
-        rc = place_simple.main(rest)
+        rc = place_simple.main([board, out, *opts])
         if hasattr(film, 'state'):
             film.placed(rc, 1)
         path = movie.close(hold=END_HOLD)
         print(f"place_movie: {path} ({movie.n} frames, {movie.n / a.fps:.0f} s)")
         return rc
-    if ':' not in a.route:
+    if a.route and ':' not in a.route:
         ap.error('--route BOARD:SET, e.g. ch32v003_usb:6')
     work = os.path.abspath(a.work or os.path.splitext(out)[0] + '_work')
     opts = _strip(opts, '--seed', '--json', '--seeds', '--jobs', '--clustered-seeds',
                   '--anchored-seeds')
-    c0 = a.scattered + a.clustered
-    n = c0 + a.anchored
-    if min(a.scattered, a.clustered, a.anchored) < 0 or n < 1 or a.judge < 1:
+    if min(a.scattered, a.clustered, a.anchored) < 0 or a.scattered + a.clustered + a.anchored < 1 \
+            or a.judge < 1:
         ap.error('--scattered, --clustered and --anchored of 0 or more, at least one seed, '
                  '--judge 1 or more')
-    if a.clustered:             # the round's clustered seeds, for the placing and the filming
-        opts += ['--clustered-seeds', f'{a.scattered}-{c0 - 1}']
-    if a.anchored:
-        opts += ['--anchored-seeds', f'{c0}-{n - 1}']
+    # the round's clustered and anchored seeds, for the placing and the filming
+    opts += start_opts(a.scattered, a.clustered, a.anchored)
     got = run_flow(a, board, out, opts, work)
     if got is None:
         return 2
@@ -575,7 +764,7 @@ def main(argv=None):
     subprocess.run([sys.executable, os.path.join(REPO, 'py_router', 'copy_board.py'),
                     os.path.join(work, f's{best}.kicad_pcb'), out], check=False, capture_output=True)
     print(f"place_movie: {path} ({movie.n} frames, {movie.n / a.fps:.0f} s); "
-          f"{out} = seed {best}; full route in {os.path.join(work, f'full_s{best}', 'out')}")
+          f"{out} = seed {best}; full route in {routed_where(work, best, a.route_chain)}")
     return 0
 
 

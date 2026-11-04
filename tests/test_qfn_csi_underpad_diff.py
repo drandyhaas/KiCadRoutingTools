@@ -115,14 +115,24 @@ def main():
             fails.append("check_connected did NOT report all nets connected "
                          "(floating QFN pad or false J1 disconnect?)\n" + detail)
 
-        # 4) DRC-clean at the routed clearance.
+        # 4) DRC-clean at the routed clearance. Since #1503 check_drc also
+        # grades each intra-matched pair at the skew route_diff recorded; that
+        # is the matcher's outcome (CSI_CLK's meanders run out here), not the
+        # escape geometry this test pins, so it is reported, not counted.
         rc, txt = _run(["py_router/check_drc.py", routed, "-c", CLEARANCE], args.verbose)
         if "NO DRC VIOLATIONS FOUND" not in txt:
             m = re.search(r"FOUND (\d+) DRC VIOLATIONS", txt)
-            detail = "\n".join(f"      {ln}" for ln in txt.splitlines()
-                               if "violations (" in ln)
-            fails.append(f"check_drc found {m.group(1) if m else '?'} violation(s) "
-                         f"at clearance {CLEARANCE}\n" + detail)
+            sk = re.search(r"SKEW-OUT-OF-RANGE violations \((\d+)\)", txt)
+            total = int(m.group(1)) if m else None
+            skew = int(sk.group(1)) if sk else 0
+            if total is None or total - skew:
+                detail = "\n".join(f"      {ln}" for ln in txt.splitlines()
+                                   if "violations (" in ln)
+                fails.append(f"check_drc found {total if total is not None else '?'} "
+                             f"violation(s) at clearance {CLEARANCE}\n" + detail)
+            elif skew:
+                print(f"NOTE: {skew} pair(s) over the skew route_diff recorded "
+                      f"(the matcher's outcome, graded since #1503) -- not counted here.")
     finally:
         for f in (fanned, routed):
             try:

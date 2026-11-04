@@ -91,10 +91,12 @@ identical, which makes it impossible to cleanly A/B an engine change.
 
 To fix this, each board-mutating tool (`route.py`, `route_diff.py`,
 `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`,
-`copy_board.py`, `add_rule_area.py`, `fill_for_delivery.py`, and the placement
-steps `place_fanout_clearance.py`, `place_pose.py`, `beautify_labels.py`)
-**self-records** its invocation (fully quoted argv + cwd) to a manifest via
-`redo_record.record_invocation()` at the top of `main()`. Recording is gated on
+`copy_board.py`, `add_rule_area.py`, `fill_for_delivery.py`, `autoplan.py`, and
+the placement steps `place_fanout_clearance.py`, `place_pose.py`,
+`beautify_labels.py`) **self-records** its invocation (fully quoted argv + cwd)
+to a manifest via `redo_record.record_invocation()` at the top of `main()`.
+`autoplan.py` records as ONE step: the tools it runs see no `REDO_MANIFEST`, so
+replaying its line re-derives and reruns the whole chain. Recording is gated on
 the `REDO_MANIFEST` env var (a no-op when unset); `run_board.sh` sets it to
 `<run-dir>/redo_commands.sh` for every board run. Self-recording is reliable even
 when a command isn't routed through `run_limited.sh` — which the agent does

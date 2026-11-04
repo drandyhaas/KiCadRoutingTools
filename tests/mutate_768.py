@@ -134,17 +134,18 @@ _PLAN_UNTICK = """            _p = step.get("params") or {}
 
 ROWS = [
     # ---- the cap itself, in for_board's netclass admission map ----------
+    # (fab_tiers.cap_net_clearances since #1561; the arms bypass the call)
     ('cap-is-assignment-not-min', 'leg',
-     '                    by_name = {n: min(v, ceiling) for n, v in by_name.items()}',
-     '                    by_name = {n: ceiling for n, v in by_name.items()}',
+     '                    by_name = cap_net_clearances(',
+     '                    by_name = {n: ceiling for n in by_name} if True else cap_net_clearances(',
      (T768,), 'KILLED'),
     ('cap-is-max-not-min', 'leg',
-     '                    by_name = {n: min(v, ceiling) for n, v in by_name.items()}',
-     '                    by_name = {n: max(v, ceiling) for n, v in by_name.items()}',
+     '                    by_name = cap_net_clearances(',
+     '                    by_name = {n: max(v, ceiling) for n, v in by_name.items()} if True else cap_net_clearances(',
      (T768,), 'KILLED'),
     ('cap-removed', 'leg',
-     '                    by_name = {n: min(v, ceiling) for n, v in by_name.items()}',
-     '                    pass',
+     '                    by_name = cap_net_clearances(',
+     '                    by_name = by_name if True else cap_net_clearances(',
      (T768,), 'KILLED'),
     # Inverting the guard, NOT deleting it: deleting it leaves `ceiling` unbound
     # in the None case only by luck of the comparison order. Inverted, the
@@ -301,9 +302,14 @@ ROWS = [
      "'clearance_ceiling')),\n",
      '',
      (TDLG,), 'KILLED'),
+    # Two lines since #1492: the signal and diff tabs now export the raw
+    # ceiling too, so the first line alone matched three sites; the fanout
+    # tab's is the one whose condition stands on its own line.
     ('fanout-tab-exports-the-RESOLVED-clearance-as-the-ceiling', 'swig',
-     "                'clearance_ceiling': (self.clearance.GetValue()",
-     "                'clearance_ceiling': (self._effective_clearance()",
+     "                'clearance_ceiling': (self.clearance.GetValue()\n"
+     "                                      if self._ceiling_on()\n",
+     "                'clearance_ceiling': (self._effective_clearance()\n"
+     "                                      if self._ceiling_on()\n",
      (T768, TDLG), 'KILLED'),
     # Anchored on the #768 comment above the row, not the row itself:
     # `clamp_netclasses` is exported by the signal, planes and now fanout

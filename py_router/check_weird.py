@@ -81,6 +81,20 @@ Categories:
                      KiCad's own grade -- and with NO size, since KiCad warns
                      at any length. Measured on six routed boards: every
                      finding is one of KiCad's track_dangling warnings.
+  off-centre-via-end a track end inside a same-net via's copper on a layer
+                     the via carries, but not on its centre (#1235): 0 <
+                     offset <= the via's radius. Connected -- the barrel
+                     holds it -- so neither DRC nor connectivity sees it, but
+                     KiCad's length measure and ours read it differently
+                     (before 10.0.4 a via joins only the tracks ending at its
+                     centre; from 10.0.4 the run is cut at the via pad and
+                     measured to the centre), so a matched pair can ship
+                     skewed (#1583). An end that is also a pad's terminal
+                     names the pad in the detail. ADVISORY: reported, with no size
+                     (KiCad treats any offset alike), but not counted in the
+                     headline or the exit code -- an end on a pad is how a
+                     via-in-pad is drawn, and a human-routed board carries
+                     many.
 
 This script NEVER modifies the board (read-only; nothing is written back).
 Net 0 (unconnected) copper is skipped -- "same-net" semantics do not apply.
@@ -89,7 +103,7 @@ Usage:
     python3 check_weird.py board.kicad_pcb [--nets PATTERN ...] [--thorough]
                                            [--max-print N]
 
-Exit code 0 when clean, 1 when any findings.
+Exit code 0 when clean, 1 when any findings (advisory categories aside).
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -109,7 +123,8 @@ from check_connected import (matches_any_pattern, check_net_connectivity,
 from check_drc import point_to_pad_distance
 from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad, strict_joint_roots,
                           endpoint_reaches_via, lands_on_interior,
-                          via_copper_layers)
+                          off_centre_via_ends,
+                          span_endpoint_degree, via_copper_layers)
 from routing_constants import SOFT_JOINT_MIN_GAP
 from pcb_modification import (_point_anchored, _prune_net_cycles, _pt_seg_dist,
                               _restore_soft_joint_bridges,
@@ -119,7 +134,10 @@ from pcb_modification import (_point_anchored, _prune_net_cycles, _pt_seg_dist,
 CATEGORIES = ['dangling-end', 'soft-joint', 'redundant-cycle',
               'removable-segment', 'stacked-copper', 'unsupported-via',
               'dangling-via', 'orphan-island', 'narrow-pad-joint',
-              'kicad-dangling']
+              'kicad-dangling', 'off-centre-via-end']
+# Reported, but not counted in the headline or the exit code (see the module
+# docstring): check_complete blocks DONE on that exit code.
+ADVISORY_CATEGORIES = frozenset({'off-centre-via-end'})
 # Cost cap for the removable scan (skip unless --thorough): the removal pass's
 # own cap (#1063), so the checker never grades a net the pass may not clean.
 MAX_SEGS_PER_NET = STRICT_REMOVAL_MAX_SEGS
@@ -197,16 +215,16 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
     def rk(x, y):
         return (round(x, 3), round(y, 3))
 
-    ep_count = defaultdict(int)
-    for s in net_segs:
-        ep_count[(s.layer, rk(s.start_x, s.start_y))] += 1
-        ep_count[(s.layer, rk(s.end_x, s.end_y))] += 1
+    ep_count = span_endpoint_degree(net_segs)  # stacked copies once (#1550)
 
     dangles = defaultdict(list)  # layer -> [(x, y, width)]
+    seen_end = set()   # a stacked copy's end is the same free end (#1550)
     for s in net_segs:
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
-            if ep_count[(s.layer, rk(x, y))] != 1:
+            ek = (s.layer, rk(x, y))
+            if ep_count.get(ek) != 1 or ek in seen_end:
                 continue  # shared vertex = clean joint
+            seen_end.add(ek)
             if at_anchor(x, y, s.layer, s.width):
             # A soft joint is a PAIR. Dropping a copper-layer GRAPHIC as a
             # candidate drops the TRACK end paired with it, and nothing
@@ -259,6 +277,32 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
                     soft_pts.add(k1)
                     soft_pts.add(k2)
     return soft_pts
+
+
+def _end_cap_on_track(fx, fy, s, seg_index) -> bool:
+    """Does the end cap of ``s`` at (fx, fy) overlap the copper of another
+    same-net track of ``s``'s layer that is not ``s``'s own chain (shares no
+    vertex with it)? The cap radius is half of ``s``'s width and the other
+    track's copper is its body at half its width, the overlap test
+    ``_check_soft_joints`` uses for two ends (#1373)."""
+    cx0, cy0 = int(fx // _CELL), int(fy // _CELL)
+    own = ((round(s.start_x, 3), round(s.start_y, 3)),
+           (round(s.end_x, 3), round(s.end_y, 3)))
+    seen = set()
+    for ncx in (cx0 - 1, cx0, cx0 + 1):
+        for ncy in (cy0 - 1, cy0, cy0 + 1):
+            for o in seg_index.get((s.layer, ncx, ncy), ()):
+                if o is s or id(o) in seen or getattr(o, 'graphic', False):
+                    continue
+                seen.add(id(o))
+                if ((round(o.start_x, 3), round(o.start_y, 3)) in own
+                        or (round(o.end_x, 3), round(o.end_y, 3)) in own):
+                    continue
+                if (_pt_seg_dist(fx, fy, o.start_x, o.start_y,
+                                 o.end_x, o.end_y)
+                        < (s.width + o.width) / 2.0 - 1e-6):
+                    return True
+    return False
 
 
 def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
@@ -349,6 +393,14 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
             if any(point_in_polygon(fx, fy, z.polygon)
                    for z in zones_by_layer.get(s.layer, ())):
                 continue  # lands in a same-net zone fill outline
+            # The end CAP overlapping another same-net track's copper (its
+            # body or its end cap) is a joint -- KiCad and check_orphan_stubs
+            # both call it connected (#1373); only a vertex, an interior T or
+            # a <=0.1mm gap used to be credited. A segment sharing a vertex
+            # with this one is its own chain: a sharp fold back onto it is a
+            # dead-end stub, not a joint, so it gives no credit here.
+            if _end_cap_on_track(fx, fy, s, seg_index):
+                continue
             # Two long tracks whose ends miss each other by a few um (a
             # nudge/micro-shift split pair) are OFF BY that microgap, not by
             # their segment lengths: within join_tol they are connected
@@ -642,6 +694,31 @@ def _check_stacked(net_id, name, net_segs, net_vias, findings):
                             size=getattr(v, 'size', None)))
 
 
+def _check_off_centre_via_ends(name, net_segs, net_vias, net_pads,
+                               copper_layers, findings):
+    """#1235: track ends inside a same-net via's copper, off its centre
+    (connectivity.off_centre_via_ends). One finding per (end, via); no
+    size."""
+    seen = set()
+    for s, end, v, d in off_centre_via_ends(net_segs, net_vias, copper_layers):
+        x, y = (s.start_x, s.start_y) if end == 0 else (s.end_x, s.end_y)
+        key = (s.layer, round(x, 4), round(y, 4), round(v.x, 4), round(v.y, 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        half = (s.width or 0.0) / 2.0
+        on_pad = [p for p in net_pads
+                  if endpoint_reaches_pad(x, y, half, (s.layer,), p)]
+        note = ''
+        if on_pad:
+            note = (f"; also on pad {on_pad[0].component_ref}."
+                    f"{on_pad[0].pad_number}")
+        findings.append(_finding(
+            'off-centre-via-end', name, s.layer, x, y,
+            f"track end {d:.4f}mm off the centre of the via at "
+            f"({v.x:.4f}, {v.y:.4f}){note}"))
+
+
 def stacked_copper_over_model(segs_by_net, vias_by_net, net_name):
     """The stacked-copper check over a per-net write model (run-7 E3).
 
@@ -656,6 +733,122 @@ def stacked_copper_over_model(segs_by_net, vias_by_net, net_name):
         _check_stacked(nid, net_name(nid), segs_by_net.get(nid, []),
                        vias_by_net.get(nid, []), findings)
     return findings
+
+
+def different_net_crossings(segs_by_net, is_new, net_name, cell: float = 1.0):
+    """Same-layer segment pairs of DIFFERENT nets whose centre lines meet,
+    where at least one segment is new this run (#1375).
+
+    Two such tracks are a short, whatever the clearance rule says: KiCad
+    reports tracks_crossing and check_drc a SEGMENT-CROSSING. A router that
+    retries a leg after a via-in-pad unblock searched the board without
+    some committed copper and laid a detour through it, and the run still
+    reported success. This audit runs on the copper about to be written, so
+    the pair is named before it ships. `is_new(segment)` says whether the run
+    laid it; `net_name` is a net_id -> str callable. Graphic copper is
+    immutable art and is skipped. Returns one dict per pair: the two nets,
+    the layer and a point on the first centre line."""
+    from collections import defaultdict
+    from geometry_utils import segment_to_segment_distance
+    items = []
+    boxes = []
+    isnew = []
+    buckets = defaultdict(list)
+    for nid, segs in segs_by_net.items():
+        for s in segs:
+            if getattr(s, 'graphic', False):
+                continue
+            i = len(items)
+            items.append((nid, s))
+            x0, x1 = sorted((s.start_x, s.end_x))
+            y0, y1 = sorted((s.start_y, s.end_y))
+            boxes.append((x0, x1, y0, y1))
+            isnew.append(bool(is_new(s)))
+            for cx in range(int(x0 // cell), int(x1 // cell) + 1):
+                for cy in range(int(y0 // cell), int(y1 // cell) + 1):
+                    buckets[(s.layer, cx, cy)].append(i)
+    out, seen = [], set()
+    for idx in buckets.values():
+        if len(idx) < 2:
+            continue
+        for a in range(len(idx)):
+            na, sa = items[idx[a]]
+            for b in range(a + 1, len(idx)):
+                nb, sb = items[idx[b]]
+                if na == nb or not (isnew[idx[a]] or isnew[idx[b]]):
+                    continue
+                ba, bb = boxes[idx[a]], boxes[idx[b]]
+                if (ba[1] < bb[0] - 1e-9 or bb[1] < ba[0] - 1e-9
+                        or ba[3] < bb[2] - 1e-9 or bb[3] < ba[2] - 1e-9):
+                    continue
+                key = (min(idx[a], idx[b]), max(idx[a], idx[b]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if segment_to_segment_distance(
+                        sa.start_x, sa.start_y, sa.end_x, sa.end_y,
+                        sb.start_x, sb.start_y, sb.end_x, sb.end_y) > 1e-9:
+                    continue
+                # Where the centre lines meet; a parallel touch reports the
+                # first segment's start.
+                px, py = sa.start_x, sa.start_y
+                d1x, d1y = sa.end_x - sa.start_x, sa.end_y - sa.start_y
+                d2x, d2y = sb.end_x - sb.start_x, sb.end_y - sb.start_y
+                den = d1x * d2y - d1y * d2x
+                if abs(den) > 1e-12:
+                    t = ((sb.start_x - sa.start_x) * d2y
+                         - (sb.start_y - sa.start_y) * d2x) / den
+                    if -1e-9 <= t <= 1 + 1e-9:
+                        px, py = sa.start_x + t * d1x, sa.start_y + t * d1y
+                out.append({'net_a': net_name(na), 'net_b': net_name(nb),
+                            'layer': sa.layer,
+                            'at': [round(px, 4), round(py, 4)]})
+    out.sort(key=lambda d: (d['net_a'], d['net_b'], d['at']))
+    return out
+
+
+def close_same_net_via_pairs(vias_by_net, is_new, hole_to_hole, net_name):
+    """Same-net via pairs whose drills sit closer than `hole_to_hole` (edge to
+    edge) where at least one via is new this run (#1414).
+
+    A route's own vias are not spaced from one another when the guarded
+    re-route (#230) cannot connect, and the flawed path used to ship with
+    nothing said. check_drc grades the pair as VIA-DRILL-HOLE and KiCad
+    grades hole-to-hole; this names it before the write. `is_new(via)` says
+    whether the run laid the via; `net_name` is a net_id -> str callable.
+    Returns dicts with net, the two centres, sizes/drills, centre distance,
+    the drill gap and the floor."""
+    out = []
+    if not hole_to_hole or hole_to_hole <= 0:
+        return out
+    from bisect import bisect_right
+    for nid in sorted(vias_by_net):
+        vs = vias_by_net[nid]
+        new = [is_new(v) for v in vs]
+        new_idx = [k for k, f in enumerate(new) if f]
+        if not new_idx:
+            continue
+        for i in range(len(vs)):
+            a = vs[i]
+            # a new via meets every later one; an old one only the later new
+            # ones -- the same pairs, in the same order, without the all-pairs
+            # scan of a stitched net's input vias
+            later = (range(i + 1, len(vs)) if new[i]
+                     else new_idx[bisect_right(new_idx, i):])
+            for j in later:
+                b = vs[j]
+                cc = math.hypot(a.x - b.x, a.y - b.y)
+                gap = cc - (a.drill or 0.0) / 2.0 - (b.drill or 0.0) / 2.0
+                if gap < hole_to_hole - 1e-6:
+                    out.append({'net': net_name(nid),
+                                'via_a': [round(a.x, 4), round(a.y, 4)],
+                                'via_b': [round(b.x, 4), round(b.y, 4)],
+                                'size_drill_a': [a.size, a.drill],
+                                'size_drill_b': [b.size, b.drill],
+                                'centre_distance_mm': round(cc, 4),
+                                'drill_gap_mm': round(gap, 4),
+                                'floor_mm': hole_to_hole})
+    return out
 
 
 def via_support_parts(v, net_segs, net_pads, net_zones, copper_layers):
@@ -936,6 +1129,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                       findings, removable)
         _check_removable(net_id, name, net_segs, removable, findings)
         _check_stacked(net_id, name, net_segs, net_vias, findings)
+        _check_off_centre_via_ends(name, net_segs, net_vias, net_pads,
+                                   copper_layers, findings)
         _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
                               net_zones, copper_layers, findings)
         _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
@@ -949,13 +1144,32 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
     return findings, skipped_nets
 
 
+def blocking_findings(findings: List[Dict]) -> List[Dict]:
+    """The findings the headline and the exit code count: all of them but
+    the ADVISORY_CATEGORIES."""
+    return [f for f in findings if f['category'] not in ADVISORY_CATEGORIES]
+
+
 def print_report(findings: List[Dict], skipped_nets: List[Tuple[str, int]],
                  max_print: int = 20) -> None:
     by_cat = defaultdict(list)
     for f in findings:
         by_cat[f['category']].append(f)
-    if findings:
-        print(f"\nFOUND {len(findings)} WEIRD THINGS:\n")
+    limit_all = max_print is not None and max_print <= 0
+
+    def print_items(cat, indent):
+        items = by_cat.get(cat, [])
+        limit = len(items) if limit_all else max_print
+        for f in items[:limit]:
+            print(f"{indent}net {f['net']} ({f['layer']}) at "
+                  f"({f['x']:.3f}, {f['y']:.3f}): {f['detail']}")
+        if len(items) > limit:
+            print(f"{indent}... and {len(items) - limit} more "
+                  f"(use --max-print 0 to show all)")
+
+    counted = blocking_findings(findings)
+    if counted:
+        print(f"\nFOUND {len(counted)} WEIRD THINGS:\n")
         # CATEGORIES is hand-maintained, so a check whose category was
         # never registered would print NOTHING while still counting toward the
         # headline and the exit code (#696: that shipped, and blocked DONE with
@@ -963,18 +1177,16 @@ def print_report(findings: List[Dict], skipped_nets: List[Tuple[str, int]],
         # registered ones, so a future omission can only ever cost ordering.
         unregistered = [c for c in sorted(by_cat) if c not in CATEGORIES]
         for cat in CATEGORIES + unregistered:
-            items = by_cat.get(cat, [])
-            print(f"  {cat}: {len(items)}")
-            limit = len(items) if (max_print is not None and max_print <= 0) \
-                else max_print
-            for f in items[:limit]:
-                print(f"    net {f['net']} ({f['layer']}) at "
-                      f"({f['x']:.3f}, {f['y']:.3f}): {f['detail']}")
-            if len(items) > limit:
-                print(f"    ... and {len(items) - limit} more "
-                      f"(use --max-print 0 to show all)")
+            if cat in ADVISORY_CATEGORIES:
+                continue
+            print(f"  {cat}: {len(by_cat.get(cat, []))}")
+            print_items(cat, '    ')
     else:
         print("\nNO WEIRD THINGS FOUND!")
+    for cat in sorted(ADVISORY_CATEGORIES):
+        if by_cat.get(cat):
+            print(f"\n  advisory, not counted: {cat} x{len(by_cat[cat])}")
+            print_items(cat, '      ')
     if skipped_nets:
         print(f"\n  removable-segment: skipped {len(skipped_nets)} net(s) "
               f"with >{MAX_SEGS_PER_NET} segments "
@@ -1003,9 +1215,10 @@ def main():
                              'gap, duplicated-copper length, via diameter); '
                              'smaller findings are dropped. Default 0.1; use '
                              '0 to report everything. soft-joint, '
-                             'narrow-pad-joint and kicad-dangling carry no '
-                             'size and are ALWAYS reported -- smaller is '
-                             'worse, or KiCad warns at any length.')
+                             'narrow-pad-joint, kicad-dangling and '
+                             'off-centre-via-end carry no size and are ALWAYS '
+                             'reported -- smaller is worse, or KiCad treats '
+                             'any amount alike.')
     parser.add_argument('--max-print', type=int, default=20,
                         help='Max findings printed per category '
                              '(<=0 prints all; default 20)')
@@ -1017,7 +1230,7 @@ def main():
                                           tolerance=args.tolerance,
                                          thorough=args.thorough, quiet=False)
     print_report(findings, skipped_nets, max_print=args.max_print)
-    sys.exit(1 if findings else 0)
+    sys.exit(1 if blocking_findings(findings) else 0)
 
 
 if __name__ == '__main__':
