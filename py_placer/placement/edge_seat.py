@@ -451,13 +451,8 @@ def _setback_flush(probe, entry, edge, pose, inner, out):
     body its courtyard margin inside: 1.00 mm for a courtyard drawn 1.00 mm
     past its body, a pose the grade then refused at its 0.50 mm seat
     tolerance."""
-    from .connector_geometry import edge_setback
-    from .floorplan import edge_setback_rule
-    if edge_setback_rule(entry)[0] is None:
-        return inner
-    rect, basis = probe.seat_rect(entry, pose(inner))
-    inside = (edge_setback(probe.pcb.board_info.board_bounds, rect, edge) or 0.0
-              if basis != 'courtyard' else 0.0)
+    got = _setback_inside(probe, entry, edge, pose(inner))
+    inside = got[0] if got is not None else 0.0
     if inside <= EPS:
         return inner
     ref = entry['ref']
@@ -483,18 +478,44 @@ def _pose_across(axis, along, coord, rot):
 
 
 def _setback_inside(probe, entry, edge, pose) -> Optional[Tuple[float, str]]:
-    """`(mm, basis)`: how far inside `edge` the shape `entry`'s armed setback
-    reads (`_Probe.seat_rect`) stands at `pose`, the shape the seat puts
-    flush (#1653); None when no setback is armed or it reads the
-    courtyard."""
-    from .connector_geometry import edge_setback
+    """`(mm, basis)`: how far the shape `entry`'s armed setback reads
+    (`_Probe.seat_rect`) can move out across `edge` at `pose` before it meets
+    the OUTLINE (`connector_geometry.courtyard_overhang_past`, which reads
+    the board's rings), the shape the seat puts flush (#1653); None when no
+    setback is armed or it reads the courtyard. Never past the bounds' line
+    on that side, and on an outline whose corners stand out past its
+    straight edge (ears), short of it: measured from the bounds alone, the
+    seat put a body 1.2 mm past a straight edge between two such ears."""
+    from .connector_geometry import courtyard_overhang_past, edge_setback
     from .floorplan import edge_setback_rule
     if entry is None or edge_setback_rule(entry)[0] is None:
         return None
     rect, basis = probe.seat_rect(entry, pose)
     if basis == 'courtyard':
         return None
-    return (edge_setback(probe.pcb.board_info.board_bounds, rect, edge) or 0.0), basis
+    most = edge_setback(probe.pcb.board_info.board_bounds, rect, edge) or 0.0
+    if most <= EPS:
+        return 0.0, basis
+    axis = 0 if edge in ('north', 'south') else 1
+    out = -1.0 if edge in ('north', 'west') else 1.0
+
+    def past(shift):
+        p = list(pose)
+        p[1 - axis] += out * shift
+        return courtyard_overhang_past(
+            probe.geo, probe.seat_rect(entry, tuple(p))[0], edge)[0]
+    if past(0.0) > EPS:
+        return 0.0, basis
+    if past(most) <= EPS:
+        return most, basis
+    good, bad = 0.0, most
+    while bad - good > REFINE_MM / 4.0:
+        mid = (good + bad) / 2.0
+        if past(mid) <= EPS:
+            good = mid
+        else:
+            bad = mid
+    return good, basis
 
 
 def _inside_mm(probe, ref, edge, pose, entry=None) -> Tuple[float, str]:

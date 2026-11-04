@@ -15,6 +15,8 @@ draw).
      names nothing, and under `legality_budget {oob_count: 0}` the part's
      courtyard past the edge is exempt; with no class the seat is unchanged
      (courtyard flush);
+     on an outline whose corners stand out past its straight edge, the body
+     meets that edge, not the bounds' line;
   2. a declared `overhang_mm.max` that keeps the body further in than the
      tolerance leaves the part unseated with the setback named, rather than
      seated where its grade fails it; one that keeps it within the
@@ -91,13 +93,24 @@ ARMS = {
 }
 
 
+#: an outline whose two north corners are arcs standing 1.91 mm out past its
+#: straight north edge (y 2.6), so the bounds' north line (y 0.69) is not
+#: the edge a part on it meets
+EARS = (((4.7, 2.6), (75.3, 2.6)), ((75.3, 2.6), (79.91, 0.69), (78, 5.3)),
+        ((78, 5.3), (78, 60)), ((78, 60), (2, 60)), ((2, 60), (2, 5.3)),
+        ((2, 5.3), (0.09, 0.69), (4.7, 2.6)))
+RECT = (((0, 0), (80, 0)), ((80, 0), (80, 60)), ((80, 60), (0, 60)), ((0, 60), (0, 0)))
+
+
 def board(path, body, y=30.0,
-          name='Connector_Power:Receptacle_2Barrel_Horizontal'):
+          name='Connector_Power:Receptacle_2Barrel_Horizontal', outline=RECT):
+    st = '(stroke (width 0.05) (type default)) (layer "Edge.Cuts"))\n'
     cuts = ''.join(
-        f'  (gr_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) '
-        f'(stroke (width 0.05) (type default)) (layer "Edge.Cuts"))\n'
-        for a, b in (((0, 0), (80, 0)), ((80, 0), (80, 60)),
-                     ((80, 60), (0, 60)), ((0, 60), (0, 0))))
+        f'  (gr_line (start {g[0][0]} {g[0][1]}) (end {g[1][0]} {g[1][1]}) {st}'
+        if len(g) == 2 else
+        f'  (gr_arc (start {g[0][0]} {g[0][1]}) (mid {g[1][0]} {g[1][1]}) '
+        f'(end {g[2][0]} {g[2][1]}) {st}'
+        for g in outline)
     chips = ''.join(
         f'  (footprint "P:C" (layer "F.Cu") (at {cx} 50)\n'
         f'    (property "Reference" "{r}" (at 0 0) (layer "F.SilkS") (hide yes))\n'
@@ -183,7 +196,19 @@ def main():
             check(f'{arm} no class: still seated with its courtyard flush',
                   y0 is not None and abs(y0 + cy_front) < 0.01, f'origin y {y0}')
 
+        # 1b. on an outline with ears the body meets the straight edge, not
+        # the bounds' line 1.91 mm past it
         body, fab, _cy = ARMS['B']
+        p = board(os.path.join(tmp, 'ears.kicad_pcb'), body, outline=EARS)
+        y, note = seat(p, intent(**{'class': 'edge_receptacle'}))
+        check('B receptacle, ears: its F.Fab body meets the straight north edge (y 2.6)',
+              y is not None and abs((y + fab[1]) - 2.6) < 0.02, f'origin y {y}, note {note}')
+        if y is not None:
+            g = board(os.path.join(tmp, 'gears.kicad_pcb'), body, y=round(y, 4), outline=EARS)
+            res, line = grade(g, intent(**{'class': 'edge_receptacle'}))
+            check('...and its grade names nothing at that pose',
+                  not [v for v in res.violations if v.ref == 'J1'],
+                  str([v.message for v in res.violations if v.ref == 'J1']))
         p = board(os.path.join(tmp, 'sB.kicad_pcb'), body)
         # 2. a band max the body cannot reach its tolerance under: unseated, named
         y, why = seat(p, intent(**{'class': 'edge_receptacle',
