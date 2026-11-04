@@ -1226,6 +1226,24 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    `--quick` board) to `wk/<run>/final.kicad_pcb` with `copy_board.py`. A
    kept seed is not finished while its `floorplan` or `assembly` is above 0,
    whatever its route.
+4. **Look at each edge part's opening from outside its edge** (#1652): every
+   edge connector whose facing clause reads anything but `strong` or
+   `marker` (`weak`, `unverified`, `sourced`, abstained, exempt). No grade
+   reads where the opening is, and `render_placement`'s plan view cannot
+   show a mouth. One render per edge, a few seconds each:
+   ```bash
+   KCLI=$(python3 py_tools/kicad_cli_path.py)
+   "$KCLI" pcb render wk/<run>/final.kicad_pcb --side back -w 2400 -h 900 -o wk/<run>/edge_north.png
+   ```
+   `--side` is where you stand: `back` outside the north edge, `front` the
+   south, `left` the west, `right` the east (from the north, west is on the
+   right). The edge's parts are nearest the camera: a jack's or USB socket's
+   mouth must face you; its back wall means it opens into the board. Fix the
+   declaration (`mating_face`, and the source you read it off) and place
+   again. A part drawn as a bare footprint (no body) has no model that
+   resolved, and the render shows nothing about it: say so in REPORT.md
+   rather than counting it checked. List each part and what you saw in
+   REPORT.md.
 
 In `place` mode that placement is the result. Run
 `python3 -X utf8 py_tools/route_review.py wk/<run>/s<S>_fast.kicad_pcb --json wk/<run>/review.json`
