@@ -839,8 +839,90 @@ class AITab(wx.Panel):
     def _on_done(self, result_text, error):
         if not self:  # dialog destroyed while the run finished
             return
-        from .ai_run_feedback import finish_ai_run
-        finish_ai_run(self, result_text, error)
+        self._elapsed_timer.Stop()
+        self.gauge.SetValue(0)
+        self.plan_btn.Enable(self.routing_dialog is not None)
+        self.review_btn.Enable()
+        self.diagnose_btn.Enable()
+        self.run_plan_btn.Enable(bool(self._plan_steps))
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
+        self.cancel_btn.Disable()
+        kind, self._pending_kind = self._pending_kind, None
+        took = self.elapsed_label.GetLabel()
+
+        if error:
+            # The CLI often streams the failure text (e.g. 'Not logged in')
+            # as an assistant message before the error result repeats it -
+            # don't print the same line twice.
+            backend = self._runner.backend if self._runner else self._current_backend()
+            hint = backend.auth_hint(error)
+            if self.output_ctrl.GetValue().rstrip().endswith(error.strip()):
+                appended = hint
+            else:
+                appended = f"\n{error}{hint}"
+            if appended:
+                self.output_ctrl.AppendText(appended + "\n")
+            self._log(f"{backend.label}: {error}")
+            # The label keeps the outcome, not just the time (#1655).
+            self.elapsed_label.SetLabel(
+                f"{'Cancelled' if error == 'Cancelled.' else 'Failed'} ({took})")
+            self.Layout()
+            return
+
+        # The streamed transcript normally shows the full report. A report
+        # that arrived only in the final result (#1655) is appended, judged
+        # line by line: opencode's result joins its text parts without the
+        # tool lines streamed between them, so it is never one substring.
+        transcript = self.output_ctrl.GetValue()
+        if any(line.strip() not in transcript
+               for line in (result_text or "").splitlines()):
+            self.output_ctrl.AppendText(f"\n{result_text.strip()}\n")
+        parsed = extract_result_line(result_text)
+        if parsed is not None:
+            self.parsed_ctrl.SetValue(parsed if len(parsed) < 200 else parsed[:200] + "...")
+        else:
+            self.parsed_ctrl.SetValue("(no RESULT= line found)")
+        # A plan run succeeds only when it leaves a plan, so the outcome is
+        # reported after the plan is validated, never before (#1655).
+        if kind == "plan":
+            steps = self._handle_plan_result(parsed)
+            outcome = (f"plan ready, {len(steps)} step(s)" if steps
+                       else "no routing plan generated")
+        else:
+            outcome = "done"
+        self.output_ctrl.AppendText(f"\n--- {outcome} in {took} ---\n")
+        self.elapsed_label.SetLabel(f"{outcome[0].upper()}{outcome[1:]} ({took})")
+        self.Layout()
+        self._log(f"AI: {outcome} in {self._elapsed_seconds}s"
+                  + ("" if parsed is not None else ", no RESULT= line"))
+
+    # ------------------------------------------------------------- planning
+
+    def _handle_plan_result(self, value):
+        """Parse the plan JSON, fill the tabs, and populate the step list.
+        Returns the installed steps, or None when there is no usable plan."""
+        from .ai_plan import parse_plan_result
+
+        if value is None:
+            steps, errors = None, ["no RESULT= plan line found"]
+        else:
+            steps, errors = parse_plan_result(value)
+        for message in errors:
+            self.output_ctrl.AppendText(f"plan: {message}\n")
+            self._log(f"AI plan: {message}")
+        if steps is None:
+            self.output_ctrl.AppendText("\nPlan was unusable - nothing applied.\n")
+            # A refusal (e.g. the placement gate) ends in an empty plan; say
+            # so where it cannot be missed, and point at the report (#1655).
+            wx.MessageBox(
+                "No routing plan was generated:\n\n" + "\n".join(errors)
+                + "\n\nThe transcript in this tab has the full report, "
+                  "including any check that stopped planning.",
+                "Plan Routing", wx.OK | wx.ICON_WARNING)
+            return None
+
+        self._install_plan_steps(steps)
+        return steps
 
     def _install_plan_steps(self, steps):
         """Adopt a validated step list (from a fresh plan OR a loaded plan

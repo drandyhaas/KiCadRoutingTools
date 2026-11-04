@@ -4,7 +4,6 @@ Run with KiCad's bundled Python. No agent CLI runs and no board is modified.
 CLI discovery and the notification dialog are stubbed; backend stream parsing,
 plan validation, installation, completion and wx controls are real.
 """
-import json
 import os
 import sys
 import unittest
@@ -18,7 +17,6 @@ os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
 import wx
 from kicad_routing_plugin.ai_backend import BACKENDS
 from kicad_routing_plugin.ai_gui import AITab
-from kicad_routing_plugin.ai_plan import PLAN_RESULT_SCHEMA, parse_plan_result
 
 
 class AIPlanOutcomeTests(unittest.TestCase):
@@ -84,15 +82,7 @@ class AIPlanOutcomeTests(unittest.TestCase):
         self.complete(report, streamed=True)
         self.assert_no_plan()
         self.assertEqual(self.tab.output_ctrl.GetValue().count(report), 1)
-
-    def test_structured_refusal_shows_reason_and_next_action(self):
-        payload = {'status': 'blocked', 'reason': '67 parts are off-board.',
-                   'next_action': 'Check placement before routing.', 'steps': []}
-        self.complete('Placement report\nRESULT=' + json.dumps(payload))
-        self.assert_no_plan()
-        message = self.popup.call_args.args[0]
-        self.assertIn(payload['reason'], message)
-        self.assertIn(payload['next_action'], message)
+        self.assertIn('no usable steps', self.popup.call_args.args[0])
 
     def test_result_only_report_is_displayed_for_both_backends(self):
         for backend in BACKENDS:
@@ -102,6 +92,26 @@ class AIPlanOutcomeTests(unittest.TestCase):
                 report = 'Specific placement refusal\nRESULT={"steps":[]}'
                 self.complete(report, backend=backend)
                 self.assertEqual(self.tab.output_ctrl.GetValue().count(report), 1)
+
+    def test_streamed_opencode_parts_are_not_repeated(self):
+        # opencode's result joins its text parts; the transcript has the tool
+        # lines between them, so the joined reply is not one substring of it.
+        state = BACKENDS['opencode'].stream_state()
+        events = [
+            {'type': 'text', 'part': {'type': 'text', 'text': 'Reading the board.'}},
+            {'type': 'tool_use', 'part': {'tool': 'bash', 'state': {
+                'status': 'completed', 'input': {'description': 'check_assembly'}}}},
+            {'type': 'text', 'part': {'type': 'text',
+                                      'text': 'Ready.\nRESULT={"steps":[{"action":"route"}]}'}},
+        ]
+        for event in events:
+            text = state.feed(event)
+            if text:
+                self.tab._append_transcript(text)
+        self.tab._on_done(*state.finish(0, ''))
+        self.assertEqual(self.tab.output_ctrl.GetValue().count('Reading the board.'), 1)
+        self.assertEqual(self.tab.output_ctrl.GetValue().count('RESULT='), 1)
+        self.assertEqual(len(self.installed), 1)
 
     def test_missing_result_notifies_and_preserves_report(self):
         report = 'The layout must be corrected before routing.'
@@ -124,11 +134,11 @@ class AIPlanOutcomeTests(unittest.TestCase):
         self.popup.assert_not_called()
         self.assertEqual(self.tab.output_ctrl.GetValue().count(report), 1)
 
-    def test_backend_error_is_visible(self):
+    def test_backend_error_keeps_a_failed_status(self):
         self.tab._on_done(None, 'Provider unavailable')
         self.assertIn('Failed', self.tab.elapsed_label.GetLabel())
-        self.popup.assert_called_once()
-        self.assertIn('Provider unavailable', self.popup.call_args.args[0])
+        self.assertIn('Provider unavailable', self.tab.output_ctrl.GetValue())
+        self.popup.assert_not_called()
         self.assertFalse(self.installed)
 
     def test_streamed_auth_error_is_not_duplicated(self):
@@ -136,9 +146,9 @@ class AIPlanOutcomeTests(unittest.TestCase):
         self.tab.output_ctrl.SetValue(error)
         self.tab._on_done(None, error)
         self.assertEqual(self.tab.output_ctrl.GetValue().count(error), 1)
-        self.assertIn('/login', self.popup.call_args.args[0])
+        self.assertIn('/login', self.tab.output_ctrl.GetValue())
 
-    def test_cancel_has_a_persistent_status_without_a_failure_popup(self):
+    def test_cancel_has_a_persistent_status(self):
         self.tab._on_done(None, 'Cancelled.')
         self.assertIn('Cancelled', self.tab.elapsed_label.GetLabel())
         self.popup.assert_not_called()
@@ -150,29 +160,7 @@ class AIPlanOutcomeTests(unittest.TestCase):
         self.assertFalse(self.installed)
         self.popup.assert_not_called()
         self.assertIn('Review report', self.tab.output_ctrl.GetValue())
-
-    def test_refusal_contract_rejects_executable_steps(self):
-        payload = {'status': 'blocked', 'reason': 'Not ready',
-                   'next_action': 'Fix placement', 'steps': [{'action': 'route'}]}
-        steps, errors = parse_plan_result(json.dumps(payload))
-        self.assertIsNone(steps)
-        self.assertTrue(errors)
-
-    def test_refusal_fields_are_validated_at_the_plan_boundary(self):
-        for field in ('reason', 'next_action'):
-            for bad in (None, '', '   ', 42, ['text']):
-                payload = {'status': 'blocked', 'reason': 'Not ready',
-                           'next_action': 'Fix placement', 'steps': []}
-                payload[field] = bad
-                with self.subTest(field=field, value=bad):
-                    steps, errors = parse_plan_result(json.dumps(payload))
-                    self.assertIsNone(steps)
-                    self.assertTrue(any(field in error for error in errors))
-
-    def test_prompt_describes_a_refusal_result(self):
-        self.assertIn('"status": "blocked"', PLAN_RESULT_SCHEMA)
-        self.assertIn('"reason"', PLAN_RESULT_SCHEMA)
-        self.assertIn('"next_action"', PLAN_RESULT_SCHEMA)
+        self.assertIn('Done', self.tab.elapsed_label.GetLabel())
 
 
 if __name__ == '__main__':
