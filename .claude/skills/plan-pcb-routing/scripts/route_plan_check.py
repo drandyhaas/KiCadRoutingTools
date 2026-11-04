@@ -140,10 +140,17 @@ def scalar(argv, flag):
         return None
 
 
+def is_kept_join(argv):
+    """`check_join.py ... --keep-staged <out>`: the one `check_*` tool that
+    writes a board, the hand join a chain continues from (#1397, #1646)."""
+    return tool_of(argv) == 'check_join.py' and '--keep-staged' in argv
+
+
 def is_check(argv):
-    """A read-only grader, by the repo's own convention (`check_*`)."""
+    """A read-only grader, by the repo's own convention (`check_*`) -- not
+    a kept join, which writes a board."""
     t = tool_of(argv)
-    return bool(t and t.startswith('check_'))
+    return bool(t and t.startswith('check_')) and not is_kept_join(argv)
 
 
 def boards_in(argv, chain=False):
@@ -245,29 +252,48 @@ def r_verification_is_commented(p):
     and a plan with no verification are the same file.
     """
     bad = []
-    for n, ln in enumerate(p.lines, 1):
-        s = ln.strip()
+    lines = p.lines
+    n = 0
+    while n < len(lines):
+        first, s = n + 1, lines[n].strip()
+        while not s.startswith('#') and s.endswith('\\') and n + 1 < len(lines):
+            n += 1
+            s = s[:-1] + ' ' + lines[n].strip()
+        n += 1
         if not s or s.startswith('#'):
             continue
-        t = tool_of(s.split())
-        if t and t.startswith('check_'):
-            bad.append(f'line {n} runs {t} as an EXECUTABLE line; its exit '
+        argv = s.split()
+        if is_check(argv):
+            bad.append(f'line {first} runs {tool_of(argv)} as an EXECUTABLE line; its exit '
                        f'code becomes the chain verdict. Comment it out.')
     return bad
 
 
 def r_ends_on_route(p):
-    """SKILL.md :2282 and :2562 -- the last board-mutating command is
-    `route.py`. Only route.py finalizes planes, so a chain ending on a bare
-    re-pour or a diff step writes a final board no weld/oracle pass ever
-    verified. That is a PLAN ERROR, not a tuning choice."""
-    if not p.mutating:
+    """SKILL.md "End every chain on route.py" -- the last board-mutating
+    command is `route.py`. Only route.py finalizes planes, so a chain ending
+    on a bare re-pour or a diff step writes a final board no weld/oracle pass
+    ever verified. That is a PLAN ERROR, not a tuning choice.
+
+    The one exception: hand joins (`check_join.py --keep-staged`) FOLLOW the
+    final route.py, since a route step after a join may rip its net (#1360,
+    #1646). They are the only commands that may come after it."""
+    muts = list(p.mutating)
+    if not muts:
         return ['the plan has no board-mutating command at all']
-    last = tool_of(p.mutating[-1])
+    while muts and is_kept_join(muts[-1]):
+        muts.pop()
+    if not muts:
+        return ['the plan writes no board but by hand joins: no route.py '
+                'finalizes it']
+    last = tool_of(muts[-1])
     if last != 'route.py':
-        return [f'the last board-mutating command is {last}, not route.py. '
+        after = (' (the hand joins after it do not change that)'
+                 if len(muts) < len(p.mutating) else '')
+        return [f'the last board-mutating command is {last}, not route.py{after}. '
                 f'Only route.py finalizes planes, so this ships a board whose '
-                f'welds and taps nothing verified.']
+                f'welds and taps nothing verified. Only a hand join '
+                f'(check_join.py --keep-staged) may follow the final route.py.']
     return []
 
 
@@ -649,7 +675,8 @@ RULES = (
     ('R02', 'no pipes', 'Step 10 rule 5', r_no_pipes),
     ('R03', 'verification is commented, not executable', 'Step 9',
      r_verification_is_commented),
-    ('R04', 'the chain ends on route.py', 'End every chain on route.py', r_ends_on_route),
+    ('R04', 'the chain ends on route.py (hand joins after it)', 'End every chain on route.py',
+     r_ends_on_route),
     ('R05', 'the three verification commands are present', 'Important Notes 4',
      r_checkers_are_present),
     ('R06', 'diff-pair gap is not below clearance', 'Step 4 diff pairs',

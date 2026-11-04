@@ -1337,9 +1337,11 @@ Routing Completes): run them once, here, not again inside the routing.
   On `CLEAN` (exit 0), `<out>` is the board plus that join, siblings
   copied: continue from it. No tool here locks a track or via, so the join
   stays rippable, and a later route step may rip its net and route it
-  again. Write joins after the last route step, re-run `check_connected`
-  and `check_drc` on the result (new copper changes how the pours fill),
-  and list each join in REPORT.md.
+  again. Write joins after the last route step (the closing `route.py`;
+  plan-pcb-routing, "End every chain on route.py", gives the order with a
+  late `route_diff.py`), re-run `check_connected` and `check_drc` on the
+  result (new copper changes how the pours fill), and list each join in
+  REPORT.md.
 
 ## 5. Rules
 

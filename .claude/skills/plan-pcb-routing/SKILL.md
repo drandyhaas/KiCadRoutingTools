@@ -28,8 +28,10 @@ the engine moves underneath them.
 
 **In the routing half, YOU PLAN and the scripts EXECUTE.** You choose the
 chain, the nets and the parameters, and you read the failures; `route.py` and
-its siblings lay the copper. You do not hand-place copper, and you do not work
-around a checker that refuses.
+its siblings lay the copper. You do not hand-place copper -- the one exception
+is a hand join checked by `check_join.py --keep-staged` after the closing
+`route.py` ("End every chain on route.py") -- and you do not work around a
+checker that refuses.
 
 That is the opposite of placement (`/plan-pcb-placement place`), where YOU DECIDE
 -- which parts move, where, and why -- and the scripts legalize and measure. The test for
@@ -3322,6 +3324,23 @@ step has nothing else to route). That closing `route.py` is the repair step;
 a standalone `repair_planes.py` is not, because it cannot read the sizes the
 chain routed at.
 
+**Hand joins are the one exception: they come AFTER the closing `route.py`.**
+A join written by hand and checked with
+`python3 -X utf8 py_tools/check_join.py <board> <NET> x,y,layer x,y,layer [via:x,y] --keep-staged <out>`
+is copper no route step owns, and no tool here locks it, so a later route
+step may rip its net and route it again (#1360). The order is: every route
+step, a late `route_diff.py` (a skew fix, say) included; then the closing
+`route.py`; then the joins, each reading the board the last one kept;
+nothing routes after them. Run `check_connected` and `check_drc` again on the
+last joined board, since new copper changes how the pours fill. If a route
+step has to run after the joins, apply the joins again after it.
+`route_plan_check` accepts `check_join.py ... --keep-staged` lines after the
+final `route.py` and only there (R03, R04); a `check_join.py` without
+`--keep-staged` writes nothing, and goes in as a commented verification line
+like the other checks. The GUI plan form carries no join: `manifest_to_plan`
+drops every `check_*` command, so in the GUI apply the joins after the plan
+runs.
+
 ### Retrying a failed net
 
 Re-enter at the FAILING STEP rather than re-running the chain, and read the
@@ -3667,7 +3686,8 @@ next to the board, so the exact tuned choices replay with no LLM:
    wrong relative path) makes a chain whose `final.kicad_pcb` is perfectly
    good report as failed (measured: half the 15-board wave reported
    rc≠0 from exactly this). The last executable line must be the final
-   `route.py`.
+   `route.py`, or a hand join after it (`check_join.py ... --keep-staged`,
+   the one exception in "End every chain on route.py").
 2. **`<board>_plan.json`** — the GUI AI-tab form:
 
    ```bash
