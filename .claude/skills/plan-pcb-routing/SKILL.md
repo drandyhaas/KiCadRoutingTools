@@ -3421,8 +3421,8 @@ step has to run after the joins, apply the joins again after it.
 final `route.py` and only there (R03, R04); a `check_join.py` without
 `--keep-staged` writes nothing, and goes in as a commented verification line
 like the other checks. The GUI plan form carries no join: `manifest_to_plan`
-drops every `check_*` command, so in the GUI apply the joins after the plan
-runs.
+refuses a kept join by name, so in the GUI apply the joins after the plan
+runs. A manifest replay (`redo_stress_test`) runs it as the copper step it is.
 
 ### Retrying a failed net
 

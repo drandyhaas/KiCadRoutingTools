@@ -376,7 +376,8 @@ Validate routed boards against the *real* spec, with the right checker — most
     genuinely KiCad-gated self-skips: `test_910_fill_for_delivery` and the two
     `test_1279_*_pcbnew` tests (each wants KiCad's bundled python), and the three whose pcbnew/wx half re-runs under
     KiCad's python and exits 77 without one -- `test_505_min_connection_clamp`,
-    `test_505_gui_half_runs` and `test_engine_kwarg_parity_launch`.
+    `test_505_gui_half_runs` and `test_engine_kwarg_parity_launch` -- plus
+    `test_1449_inrun_edge_floor`, whose oracle leg wants kicad-cli.
     The env-level default is OFF because a new base image is
     a NEW BASELINE ERA that voids cross-wave numeric comparisons -- a reason
     that does NOT apply to the pass/fail suite, which compares no numbers
