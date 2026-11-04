@@ -24,6 +24,7 @@ MAP=(
   "osm_l_bmc_som|osm_l_bmc_som"
   "polarfire_som|polarfire_som"
   "smartprint_h7x|smartprint_h7x"
+  "spartan6_4layer|spartan6_4layer"
   "stm32h7_hdmi|stm32h7_hdmi"
 )
 
