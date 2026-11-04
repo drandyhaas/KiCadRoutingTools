@@ -2197,6 +2197,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     cleanup_input_strip_vias = list(
         getattr(_dp_cleanup, 'input_strip_vias', None) or []) + force_stale_vias
 
+    # #1622: the cleanup changes lengths with no regard to the match (a
+    # graze re-bend took 1.378 mm out of a member matched to 0.089 mm), so a
+    # pair it left over its tolerance is matched again on the shipped copper,
+    # kept only where KiCad's skew goes down. Engine-side, so the GUI diff tab
+    # inherits it.
+    if intra_pair_reports:
+        from length_matching import rematch_intra_pairs_on_shipped_copper
+        rematch_intra_pairs_on_shipped_copper(
+            intra_pair_reports, diff_pair_ids_to_route, routed_results,
+            config, pcb_data)
+
     # Build summary data
     import json
     # Member audit: verify BOTH members' connectivity claims against the actual

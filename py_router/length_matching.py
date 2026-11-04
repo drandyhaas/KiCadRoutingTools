@@ -4059,7 +4059,10 @@ def apply_intra_pair_length_matching(
     # is on the board by now (each route is committed as it is found), so
     # net_signal_length reads what the cleanup will leave of it, measured as
     # KiCad measures that copper (#1623). The result sums stay the fallback
-    # while a member's pads are not joined.
+    # while a member's pads are not joined. What it cannot see is what the
+    # cleanup then changes (a graze re-bend, a collapsed loop): the pairs the
+    # cleanup moves out of tolerance are matched again on the shipped copper
+    # (rematch_intra_pairs_on_shipped_copper, #1622).
     _board = None
     if pcb_data is not None:
         from net_queries import net_signal_length
@@ -4323,6 +4326,103 @@ def regrade_intra_pair_reports(reports, pair_copper, pcb_data, diff_pair_ids,
             if st in ('matched', 'within-tolerance') or not rec.get('reason'):
                 rec['reason'] = 'copper-skew-over-tolerance'
     return reports
+
+
+def rematch_intra_pairs_on_shipped_copper(reports, diff_pair_ids, routed_results,
+                                          config, pcb_data):
+    """Match again, on the copper the post-route cleanup left, every pair the
+    cleanup moved out of its tolerance (#1622).
+
+    `run_intra_pair_matching` meanders before the cleanup, and the cleanup
+    then changes lengths with no regard to the match: a re-bend that clears
+    a graze, a pruned spur, a collapsed loop. A pair matched to 0.089 mm
+    shipped at 1.466 mm against 0.127 mm because the octolinear re-bend took
+    1.378 mm out of the meandered member. So for each pair whose matcher had
+    a single coupled result to meander, the shipped skew
+    (`net_queries.diff_pair_skew`, KiCad's measure) is read; a pair over its
+    tolerance gets `apply_intra_pair_length_matching` once more on the shipped
+    copper, and the new meander is kept only when it lowers that skew --
+    otherwise the copper goes back exactly as it was.
+
+    Fills `rec['rematch']` = {'skew_before_mm', 'skew_after_mm', 'kept'} on
+    every pair it tried, and on a kept one takes the second pass's status as
+    the matcher's (the regrade then decides it from the copper). Changes
+    `routed_results` and `pcb_data.segments` in place. Returns the number of
+    pairs whose re-match was kept."""
+    import copy
+    from net_queries import diff_pair_skew
+    by_name = dict(diff_pair_ids)
+    tried = []
+    for rec in reports:
+        if rec.get('status') in ('not-matchable', 'skipped'):
+            continue
+        pair = by_name.get(rec['pair'])
+        if pair is None:
+            continue
+        result = routed_results.get(pair.p_net_id)
+        if result is None or result is not routed_results.get(pair.n_net_id):
+            continue
+        tol = rec.get('tolerance_mm')
+        if tol is None:
+            tol = config.length_match_tolerance
+        before = diff_pair_skew(pcb_data, pair.p_net_id, pair.n_net_id)['skew_mm']
+        if before is None or before <= tol + 1e-9:
+            continue
+        tried.append((rec, pair, result, tol, before))
+    if not tried:
+        return 0
+    from pcb_modification import bump_copper_epoch
+    print("\n" + "=" * 60)
+    print("Intra-pair P/N re-match on the shipped copper (#1622)")
+    print("=" * 60)
+    kept = 0
+    for rec, pair, result, tol, before in tried:
+        print(f"\n{rec['pair']}: the post-route cleanup left the skew at "
+              f"{before:.3f}mm, over its {tol}mm tolerance")
+        cfg = copy.copy(config)
+        cfg.length_match_tolerance = tol
+        old_segments = list(result.get('new_segments') or [])
+        old_legs = [(lr, list(lr.get('new_segments') or []))
+                    for lr in (result.get('leg_results') or [])]
+        old_lengths = {k: result[k] for k in ('p_routed_length', 'n_routed_length')
+                       if k in result}
+        status = {}
+        apply_intra_pair_length_matching(
+            result, cfg, pcb_data, p_net_id=pair.p_net_id,
+            n_net_id=pair.n_net_id, status=status)
+        new_segments = list(result.get('new_segments') or [])
+        old_ids = {id(s) for s in old_segments}
+        new_ids = {id(s) for s in new_segments}
+        after = before
+        if old_ids != new_ids:
+            board_before = pcb_data.segments
+            pcb_data.segments = ([s for s in board_before
+                                  if id(s) not in old_ids - new_ids]
+                                 + [s for s in new_segments if id(s) not in old_ids])
+            bump_copper_epoch(pcb_data)
+            after = diff_pair_skew(pcb_data, pair.p_net_id, pair.n_net_id)['skew_mm']
+            if after is None or after >= before - 1e-9:
+                # no better on the copper KiCad grades: put it all back
+                pcb_data.segments = board_before
+                bump_copper_epoch(pcb_data)
+                result['new_segments'] = old_segments
+                for lr, segs in old_legs:
+                    lr['new_segments'] = segs
+                result.update(old_lengths)
+                after = before
+        ok = after < before - 1e-9
+        rec['rematch'] = {'skew_before_mm': round(before, 4),
+                          'skew_after_mm': round(after, 4), 'kept': ok}
+        if ok:
+            kept += 1
+            rec.update(status=status.get('status'), reason=status.get('reason'),
+                       delta_mm=status.get('delta_mm'))
+            print(f"    P/N intra-pair: re-match kept, shipped skew "
+                  f"{before:.3f} -> {after:.3f}mm")
+        else:
+            print(f"    P/N intra-pair: re-match did not lower the shipped skew "
+                  f"({before:.3f}mm); the copper is left as the cleanup left it")
+    return kept
 
 
 def run_intra_pair_matching(diff_pair_ids, routed_results, config, pcb_data,

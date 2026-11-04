@@ -148,6 +148,16 @@ And across the buckets:
   resolve by a swap (#279); `polarity_swapped_pairs` lists the swaps it made.
 - `casualty_reconcile`: nets this step ripped whose reroute failed
   (`restored`, `rerouted`, `partial`, `unrecovered`).
+- `intra_pair_matching` (a step that matches P to N): one record per matched
+  pair, its `status` and `delta_mm` read off the shipped copper as KiCad's skew
+  DRC measures it, against `tolerance_mm`. An `unmatched` pair's `reason`:
+  `no-room-for-meanders` (no bump fits beside the shorter leg),
+  `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),
+  `copper-skew-over-tolerance` (the matcher reached the tolerance and the
+  copper that ships does not), `not-measured` (a member's pads are not joined
+  by track copper). A pair the post-route cleanup moved out of its tolerance
+  has been matched once more on the shipped copper (#1622); `rematch`
+  (`skew_before_mm`, `skew_after_mm`, `kept`) says whether that helped.
 
 `pair_reports[]` has one record per pair: `pair`, `p_net`, `n_net`, `outcome`
 (`coupled`, `partial`, `deferred`, `failed`, `skipped`, `uncoupled`,

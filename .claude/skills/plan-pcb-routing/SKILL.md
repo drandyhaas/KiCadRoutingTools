@@ -3804,11 +3804,20 @@ board), and every `route_diff.py` step runs before it. So run the chain
 
 - `failed_diff_pairs`, `single_ended_diff_pairs` and `member_incomplete_pairs`;
 - for each pair they name, `pair_reports[].failure_reason` (with
-  `failure_stage` and `blocking_nets`).
+  `failure_stage` and `blocking_nets`);
+- on a step that matches P to N (`--diff-pair-intra-match`, or a `.kicad_dru`
+  skew rule binding the pair), each pair's `intra_pair_matching[].status`,
+  read off the shipped copper (#1622).
 
 A pair is ready for the all-nets step when it is in `routed_diff_pairs`, or
 in `single_ended_diff_pairs` with `failure_reason` `electrically-short` (too
-short for coupling to buy anything). A `member_incomplete_pairs` entry is
+short for coupling to buy anything) -- and, on a matching step, when its
+`intra_pair_matching` status is `matched` or `within-tolerance`. An
+`unmatched` pair is a skew the board ships out of its tolerance (`check_drc`
+grades it, `board_score` counts it): the step has already matched it again on
+the copper its cleanup left (the record's `rematch`), so `reason` and
+`delta_mm` say what is left; `/diagnose-routing-failures` ("route_diff runs")
+says what each reason means. A `member_incomplete_pairs` entry is
 expected only when the pair's members are in `single_ended_followup_nets` (a
 `partial` pair's peeled far terminals, or an `electrically-short` pair's
 members): the all-nets step closes them, and `check_connected` after it says

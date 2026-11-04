@@ -902,6 +902,16 @@ When enabled:
    joined). `matcher_status` / `matcher_delta_mm` keep what the matcher reported;
    `delta_before_mm` stays the matcher's estimate. The `Intra-pair (shipped
    copper)` console line prints the regraded verdict
+7. **A pair the cleanup moved out of its tolerance is matched again** (#1622),
+   before the regrade, on the copper the cleanup left
+   (`length_matching.rematch_intra_pairs_on_shipped_copper`): a graze re-bend
+   took 1.378 mm out of a member matched to 0.089 mm, and the pair shipped at
+   1.466 mm against 0.127 mm. Every pair with a single coupled result whose
+   shipped skew (`diff_pair_skew`) is over its tolerance is meandered once more,
+   and the new copper is kept only when that skew goes down; otherwise the
+   copper is left exactly as the cleanup left it. The record's `rematch` says
+   what happened (`skew_before_mm`, `skew_after_mm`, `kept`), and on a kept one
+   `matcher_status` / `matcher_delta_mm` are the second pass's
 
 ```bash
 # Enable intra-pair matching
