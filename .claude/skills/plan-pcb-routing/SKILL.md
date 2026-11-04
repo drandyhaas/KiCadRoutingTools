@@ -1107,7 +1107,18 @@ python3 py_tools/check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
   `check_impedance.py` audit (item 3 above) reports how much of each net
   actually achieved it; the length over the net's OWN pads (and the pour's
   clearance step past them) is listed as `at its own pad` and never breaks
-  the declaration (#1582).
+  the declaration (#1582). It reads the gap on KiCad's own fill (#1624): the
+  fill stored in the board, else a KiCad refill, else the fill model, which
+  its JSON names as `gap_source`.
+- **When G is larger than the chain's routed clearance**, this meets the pour
+  step's rule never to pour wider than the routed clearance (Step 1 of the
+  example chain). KiCad fills a pour at
+  the larger of its zone clearance and each item's net-class clearance, so if
+  the coplanar nets are in a net class whose clearance is G, pour at the
+  chain's clearance: those nets get G and every other net the chain's
+  clearance. With no such class, `--zone-clearance G` is the only way to get
+  G -- the one exception to that rule, and it holds every other net's pour
+  off by G as well.
 
 **Report to the user** which nets you declared coplanar, the gap, and the plane
 step it is tied to — this is a coupled choice they may want to override. If the
@@ -1675,7 +1686,8 @@ old pour under the new zone. Read that line, and re-run with the layers it
 names.
 
 **Zone clearance is a MINIMUM-ALLOWED, not a target — never pass a
-`--zone-clearance` larger than the routed clearance.** The default already
+`--zone-clearance` larger than the routed clearance** (the one exception is a
+coplanar gap with no net class to carry it, Step 2b-i). The default already
 follows `--clearance` and auto-steps down to the fab floor when the pour
 can't thread the densest BGA via lattice; a larger value only stops pours
 from penetrating between balls/vias (human boards pour at ~0.1 for exactly

@@ -34,6 +34,11 @@ audit section names those nets. Samples over the net's own pad, or within the
 pour's clearance of it, are reported apart and never counted (#1582). Exit 0
 otherwise, so it can gate a build the way check_drc.py does. ``--exit-zero``
 suppresses that.
+
+The coplanar gap is read on KiCad's own fill at exact distance (#1624): the
+(filled_polygon ...) KiCad stored in the board, else -- when a declared gap
+is audited -- a KiCad refill, else the fill model at the project's net-class
+clearances. The report's ``gap_source`` names which.
 """
 
 from __future__ import annotations
@@ -77,7 +82,7 @@ DEFAULT_SAMPLE_STEP = 0.15
 DEFAULT_MIN_VOID_LENGTH = 0.30
 
 # How far a measured coplanar gap may stray from the declared one before the
-# declaration counts as broken. The pour rasterizes at 0.04-0.08mm and KiCad's
+# declaration counts as broken. The fill model rasterizes at 0.04-0.08mm and KiCad's
 # filler rounds its own outline, so a few hundredths is measurement noise.
 DEFAULT_GAP_TOLERANCE = 0.05
 
@@ -175,6 +180,10 @@ class BoardImpedanceReport:
     ratio_limit: float = CPWG_GAP_RATIO_LIMIT
     declared_gap: float = 0.0
     gap_tolerance: float = 0.0
+    # #1624: whose fill the coplanar gaps were read on -- 'stored' (the
+    # (filled_polygon ...) KiCad wrote into the board), 'refill' (a KiCad
+    # refill of it), 'model' (the fill model alone) or '' (no gap measured).
+    gap_source: str = ''
 
     # --- board-level rollups (the acceptance-criteria numbers) ---
     @property
@@ -278,6 +287,77 @@ def _overlapping_components(ma, mb) -> List[Tuple[int, int]]:
     return [(b, a) for a, b in out] if swap else out
 
 
+class ExactFill:
+    """KiCad's own fill of one layer's pours, for the coplanar gap (#1624).
+
+    Built from (filled_polygon ...) islands -- the ones KiCad stored in the
+    board, or a KiCad refill's -- keyed by net. The gap is the EXACT distance
+    from a point of the trace's centreline to the nearest foreign fill, less
+    the half-width: a reading of KiCad's copper, not of a grid. (The fill
+    model's reading moves by up to a cell with where its grid falls under the
+    track, and a correct 0.20 mm gap read 0.15.) Nearest distance rather than
+    a perpendicular probe: a pour cut back by a clearance is that far from
+    EVERY point of the track, so the nearest fill is the clearance itself,
+    also at a bend or beside the net's own via, where a perpendicular can
+    pass through the copper's rounded clearance and read wide.
+
+    A point inside the fill, or fill closer than the half-width, is fill over
+    the trace: KiCad never fills there, so the stored fill predates the
+    copper (or is a short). It reads 0 -- a broken promise -- and is counted
+    in `overlaps`, so the report can say to refill.
+    """
+
+    def __init__(self, polys_by_net: Dict[int, List]):
+        import numpy as np
+        import shapely
+        from shapely.geometry import Polygon
+        self.nets: Dict[int, Tuple[object, object]] = {}
+        self.overlaps: set = set()
+        for nid, polys in polys_by_net.items():
+            # buffer(0) turns KiCad's fractured outline (a hole reached by a
+            # zero-width slit) into a polygon with a true hole.
+            parts = [Polygon(p).buffer(0) for p in polys if len(p) >= 3]
+            geom = shapely.unary_union([g for g in parts if not g.is_empty])
+            if geom.is_empty:
+                continue
+            shapely.prepare(geom)
+            segs = []
+            for ring in shapely.get_parts(shapely.boundary(geom)):
+                c = np.asarray(ring.coords)
+                if len(c) >= 2:
+                    segs.append(np.stack([c[:-1], c[1:]], axis=1))
+            if not segs:
+                continue
+            lines = shapely.linestrings(np.concatenate(segs))
+            self.nets[nid] = (geom, shapely.STRtree(lines))
+
+    def gap(self, x: float, y: float, half_width: float, max_probe: float,
+            exclude_net: int) -> Optional[float]:
+        """Edge-to-edge gap from the trace at (x, y) to the nearest foreign
+        fill within `max_probe`, else None."""
+        import shapely
+        best: Optional[float] = None
+        pt = None
+        for nid, (geom, tree) in self.nets.items():
+            if nid == exclude_net:
+                continue
+            if shapely.contains_xy(geom, x, y):
+                self.overlaps.add((round(x, 4), round(y, 4)))
+                return 0.0
+            if pt is None:
+                pt = shapely.Point(x, y)
+            idx, dist = tree.query_nearest(pt, max_distance=half_width + max_probe,
+                                           return_distance=True)
+            if len(dist):
+                g = float(dist.min()) - half_width
+                if g < -1e-6:
+                    self.overlaps.add((round(x, 4), round(y, 4)))
+                g = max(0.0, g)
+                if best is None or g < best:
+                    best = g
+        return best
+
+
 class LayerCopper:
     """Filled-pour occupancy for one copper layer.
 
@@ -295,13 +375,21 @@ class LayerCopper:
     same-net pour, and none once the stale pour was deleted.
     """
 
-    def __init__(self, pcb, layer: str):
+    def __init__(self, pcb, layer: str,
+                 exact_polys: Optional[Dict[int, List]] = None):
         self.layer = layer
         self.entries: List[Tuple[int, int, object]] = []   # (idx, net_id, model)
-        # Rasterization pitch of the coarsest model on this layer. Occupancy is
-        # tested at CELL CENTRES, so a distance probe first reports copper half
-        # a cell late on average; callers de-bias with this.
+        # Rasterization pitch of the coarsest model on this layer: how far a
+        # model's fill edge can sit from the true one (half a cell either way).
         self.cell: float = 0.0
+        # #1624: KiCad's OWN fill of the pours of these nets on this layer
+        # (stored or refilled polygons; an empty list is a pour KiCad filled
+        # with nothing). The side gap to them is measured at exact distance,
+        # and the model is not asked about them for it.
+        self.exact_nets = set(exact_polys or ())
+        self.exact: Optional[ExactFill] = (
+            ExactFill(exact_polys) if any((exact_polys or {}).values())
+            else None)
         # (zone index, component) -> the key of the copper it belongs to; only
         # components merged with another pour's are listed.
         self._same_copper: Dict[Tuple[int, int], Tuple[int, int]] = {}
@@ -352,7 +440,11 @@ class LayerCopper:
         self._same_copper = {k: find(k) for k in parent}
 
     def __bool__(self) -> bool:
-        return bool(self.entries)
+        return bool(self.entries) or bool(self.exact_nets)
+
+    def model_only_nets(self) -> set:
+        """Nets with a pour here whose side gap the fill model answers."""
+        return {n for _i, n, _m in self.entries} - self.exact_nets
 
     def key_at(self, x: float, y: float) -> Optional[Tuple[int, int]]:
         """(zone index, fill component) of the copper covering (x, y), else
@@ -372,9 +464,10 @@ class LayerCopper:
                        exclude_net: int) -> Optional[Tuple[int, int]]:
         """Same as key_at but ignoring pours belonging to `exclude_net` -- used
         for the coplanar-ground probe, where the trace's own net's pour is not
-        a coplanar ground, it is the trace."""
+        a coplanar ground, it is the trace. Pours whose KiCad fill is known
+        (`exact_nets`) are measured by `ExactFill` instead and skipped here."""
         for idx, net_id, model in self.entries:
-            if net_id == exclude_net:
+            if net_id == exclude_net or net_id in self.exact_nets:
                 continue
             if model.query_component(x, y):
                 return (idx, net_id)
@@ -469,16 +562,24 @@ def measure_side_gap(copper: LayerCopper, x: float, y: float,
     gap (the tighter side dominates the coupling). None means no coplanar
     ground within `max_probe` -- i.e. microstrip governs and there is no CPW
     correction to make.
+
+    Pours whose KiCad fill is known (`copper.exact`) are measured exactly
+    (#1624, see `ExactFill`); the rest are probed on the fill model, and the
+    smaller of the two is the gap.
     """
     if not copper:
         return None
+    best: Optional[float] = None
+    if copper.exact is not None:
+        best = copper.exact.gap(x, y, half_width, max_probe, exclude_net)
+    if not copper.model_only_nets() - {exclude_net}:
+        return best             # every foreign pour here was measured exactly
     # Unit normal to the trace direction.
     norm = math.hypot(dx, dy)
     if norm <= 0:
-        return None
+        return best
     nx, ny = -dy / norm, dx / norm
 
-    best: Optional[float] = None
     steps = int(max_probe / probe_step) + 1
     for sign in (1.0, -1.0):
         d = half_width
@@ -488,19 +589,27 @@ def measure_side_gap(copper: LayerCopper, x: float, y: float,
                 break
             if copper.foreign_key_at(x + nx * sign * d, y + ny * sign * d,
                                      exclude_net):
-                gap = d - half_width
+                # #1624: find the model's fill edge between the last miss and
+                # this hit, rather than de-biasing the step. The model's edge
+                # is unbiased (a cell is fill when its centre is, so its edge
+                # sits within half a cell either side of the true one:
+                # 0.176-0.221 for a true 0.200 at a 0.05 cell); the old
+                # `cell/2 + step/2` de-bias read a correct 0.20 as 0.15 or
+                # 0.20 by where the grid fell, the 0.15 a tolerance miss.
+                lo = max(half_width, d - probe_step)
+                hi = d
+                for _b in range(6):
+                    mid = (lo + hi) / 2.0
+                    if copper.foreign_key_at(x + nx * sign * mid,
+                                             y + ny * sign * mid, exclude_net):
+                        hi = mid
+                    else:
+                        lo = mid
+                gap = (lo + hi) / 2.0 - half_width
                 if best is None or gap < best:
                     best = gap
                 break
-    if best is None:
-        return None
-    # De-bias the rasterization: the pour is detected at the first CELL CENTRE
-    # that carries fill, which sits on average half a cell beyond the true
-    # copper edge (plus half a probe step of search granularity). Without this
-    # every measured gap reads ~one cell wide -- a 0.20mm declared gap
-    # measured 0.25mm and the audit called a correct pour off-target.
-    bias = copper.cell / 2.0 + probe_step / 2.0
-    return max(0.0, best - bias)
+    return None if best is None else max(0.0, best)
 
 
 def _nominal_z0(pcb, layer: str, width: float, coplanar_gap: float = 0.0) -> float:
@@ -529,6 +638,110 @@ def _nominal_z0(pcb, layer: str, width: float, coplanar_gap: float = 0.0) -> flo
                         params.copper_thickness, params.dielectric_constant)
 
 
+def publish_class_clearances(pcb) -> None:
+    """Give the fill model the clearances KiCad fills at (#1624).
+
+    KiCad fills a pour at max(zone clearance, the net class of each item);
+    the fill model stamps at the zone's own clearance unless the board's
+    class map is published, which only the plane steps did. A class at 0.2
+    with the pour's zone at 0.12 then read 0.10 where KiCad leaves 0.20.
+    Published from the sibling project, a Default-only net at the Default
+    class; a map a caller already published is kept."""
+    try:
+        from plane_fill_model import _NC_ATTR, set_board_net_clearances
+        from list_nets import (board_default_netclass_clearance,
+                               net_clearance_map_by_id)
+    except Exception:                                           # noqa: BLE001
+        return
+    path = getattr(pcb, 'source_path', '') or ''
+    if getattr(pcb, _NC_ATTR, None) or not path or not os.path.isfile(path):
+        return
+    names = {nid: n.name for nid, n in (pcb.nets or {}).items()
+             if nid and getattr(n, 'name', '')}
+    try:
+        nc = dict(net_clearance_map_by_id(path, names) or {})
+        default = board_default_netclass_clearance(path)
+    except Exception:                                           # noqa: BLE001
+        return
+    if default:
+        for nid in names:
+            nc.setdefault(nid, float(default))
+    set_board_net_clearances(pcb, nc)
+
+
+#: How `analyze_impedance` finds KiCad's fill for the coplanar gap (#1624).
+FILL_SOURCES = ('auto', 'stored', 'model')
+
+
+def kicad_fill_islands(pcb, fill_source: str = 'auto', refill: bool = True
+                       ) -> Tuple[Optional[Dict[Tuple[str, str], List]], str, str]:
+    """(islands, source, why) -- KiCad's fill of the board, for the gap.
+
+    'stored' is the (filled_polygon ...) KiCad wrote into the board file: what
+    KiCad shows, plots and grades without a refill. With none stored and
+    `refill`, KiCad refills the board ('refill': the PCBData's own provider,
+    else a pcbnew subprocess at the project's rules). Otherwise None and
+    'model', with `why` naming the reason. `fill_source='stored'` never
+    refills; 'model' reads no fill at all."""
+    if fill_source == 'model':
+        return None, 'model', 'fill_source=model'
+    path = getattr(pcb, 'source_path', '') or ''
+    if path and os.path.isfile(path):
+        try:
+            from kicad_parser import read_board_text
+            from kicad_exact_fill import parse_filled_islands
+            text = read_board_text(path)
+            if '(filled_polygon' in text:
+                got = parse_filled_islands(text)
+                if got:
+                    return got, 'stored', ''
+        except Exception:                                       # noqa: BLE001
+            pass
+    if fill_source == 'stored' or not refill:
+        return None, 'model', 'the board stores no fill'
+    provider = getattr(pcb, 'exact_fill_provider', None)
+    if callable(provider):
+        try:
+            got = provider()
+        except Exception:                                       # noqa: BLE001
+            got = None
+        if got is not None:
+            return got, 'refill', ''
+    if not path or not os.path.isfile(path):
+        return None, 'model', 'the board stores no fill and has no file to refill'
+    try:
+        from kicad_exact_fill import refill_islands_ex
+        got, st = refill_islands_ex(path)
+    except Exception as e:                                      # noqa: BLE001
+        return None, 'model', f'the KiCad refill could not be attempted ({e})'
+    if st.ok and got is not None:
+        return got, 'refill', ''
+    return None, 'model', st.why()
+
+
+def _exact_polys_by_layer(pcb, islands, source: str
+                          ) -> Dict[str, Dict[int, List]]:
+    """{layer: {net_id: [polygon, ...]}} for every pour KiCad's fill covers.
+    A refill fills every pour, so a pour it left out poured nothing (an
+    empty list); a stored fill covers only the pours it carries."""
+    if not islands:
+        return {}
+    ids: Dict[str, int] = {}
+    for nid, n in (pcb.nets or {}).items():
+        if nid and getattr(n, 'name', ''):
+            ids.setdefault(n.name, nid)
+    out: Dict[str, Dict[int, List]] = {}
+    for (name, layer), polys in islands.items():
+        nid = ids.get(name)
+        if nid:
+            out.setdefault(layer, {}).setdefault(nid, []).extend(polys)
+    if source == 'refill':
+        for z in getattr(pcb, 'zones', None) or ():
+            if z.net_id and z.polygon:
+                out.setdefault(z.layer, {}).setdefault(z.net_id, [])
+    return out
+
+
 def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                       sample_step: float = DEFAULT_SAMPLE_STEP,
                       min_void_length: float = DEFAULT_MIN_VOID_LENGTH,
@@ -537,7 +750,8 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                       coplanar_gap: float = 0.0,
                       gap_tolerance: float = DEFAULT_GAP_TOLERANCE,
                       board_name: str = "",
-                      net_declared_gaps: Optional[Dict[int, float]] = None) -> BoardImpedanceReport:
+                      net_declared_gaps: Optional[Dict[int, float]] = None,
+                      fill_source: str = 'auto') -> BoardImpedanceReport:
     """Walk every routed segment and measure what the pre-route model assumed.
 
     Args:
@@ -564,10 +778,22 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             (#521). A net with an entry audits at ITS declared gap (0 = that
             net was declared non-coplanar); nets without one fall back to
             ``coplanar_gap``.
+        fill_source: Whose fill the coplanar gap is read on (#1624).
+            'auto': the fill KiCad stored in the board, else -- when a
+            declared gap is being audited -- a KiCad refill, else the fill
+            model. 'stored': never refill. 'model': the fill model only.
+            KiCad's fill is read at exact distance; the model to within half
+            a cell. The reference-plane continuity check reads the model
+            either way.
 
     Returns:
-        BoardImpedanceReport. Diagnostic only; pcb is not modified.
+        BoardImpedanceReport. Diagnostic only; pcb's copper is not modified
+        (the project's class clearances are published to its fill model,
+        `publish_class_clearances`).
     """
+    if fill_source not in FILL_SOURCES:
+        raise ValueError(f"fill_source must be one of {FILL_SOURCES}, "
+                         f"not {fill_source!r}")
     report = BoardImpedanceReport(board=board_name, sample_step=sample_step,
                                   ratio_limit=ratio_limit,
                                   declared_gap=coplanar_gap,
@@ -626,6 +852,29 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
         report.notes.append("No routed nets matched the filter.")
         return report
 
+    # #1624: the model stamps at the clearances KiCad fills at, and the
+    # coplanar gap is read on KiCad's own fill wherever it can be had. A
+    # refill is a pcbnew run, so it is asked for only when a declared gap is
+    # being audited.
+    publish_class_clearances(pcb)
+    auditing = any((net_declared_gaps or {}).get(nid, coplanar_gap) > 0
+                   for nid, _nm in selected)
+    islands, source, why = kicad_fill_islands(pcb, fill_source,
+                                              refill=auditing)
+    exact_by_layer = _exact_polys_by_layer(pcb, islands, source)
+    report.gap_source = source
+    if source == 'model' and auditing:
+        report.notes.append(
+            f"Coplanar gaps read on the fill MODEL, not KiCad's fill ({why}): "
+            f"within half a model cell of KiCad's, and the model does not "
+            f"read .kicad_dru rules. Fill the board (fill_for_delivery.py) "
+            f"to grade on KiCad's own fill.")
+    elif source in ('stored', 'refill'):
+        report.notes.append(
+            "Coplanar gaps read at exact distance on " +
+            ("the fill KiCad stored in the board." if source == 'stored'
+             else "a KiCad refill of the board."))
+
     # Lazily-built copper occupancy, one model set per layer (expensive to
     # rasterize, so shared across every net that references it).
     copper_cache: Dict[str, LayerCopper] = {}
@@ -633,7 +882,7 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
     def copper_for(layer: str) -> LayerCopper:
         got = copper_cache.get(layer)
         if got is None:
-            got = LayerCopper(pcb, layer)
+            got = LayerCopper(pcb, layer, exact_by_layer.get(layer))
             copper_cache[layer] = got
         return got
 
@@ -902,6 +1151,15 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
         if result.routed_length_mm > 0:
             report.nets.append(result)
 
+    over = sum(len(c.exact.overlaps) for c in copper_cache.values()
+               if c.exact is not None)
+    if over:
+        report.notes.append(
+            f"{over} sample(s) of a trace lie under KiCad's {source} fill of "
+            f"another net, which KiCad never fills: the fill predates the "
+            f"copper (or the board is shorted). Read as gap 0; refill "
+            f"(fill_for_delivery.py) and grade again.")
+
     runs = sum(n.own_via_antipad_runs for n in report.nets)
     if runs:
         report.notes.append(
@@ -1062,6 +1320,7 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
         'board': report.board,
         'sample_step_mm': report.sample_step,
         'ratio_limit': report.ratio_limit,
+        'gap_source': report.gap_source,
         'notes': report.notes,
         'totals': {
             'nets_analyzed': len(report.nets),

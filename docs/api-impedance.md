@@ -125,6 +125,13 @@ reads a wider gap over the pad and just past it, where the pour keeps its
 clearance from the PAD; that length is reported as `at its own pad` and does
 not break the declaration (#1582), while a pad with no pour beside it does.
 
+KiCad fills a pour at the larger of its zone clearance and the net class of
+each item it clears, so a line whose net class is the declared gap gets that
+gap from a pour whose zone clearance is below it. Step 3 reads the gap on
+KiCad's own fill at exact distance (#1624): the fill stored in the board (as
+`fill_for_delivery.py` writes it), else a KiCad refill, else the fill model at
+the project's class clearances, to within half a model cell.
+
 ## Width for a target impedance
 
 Bisection solvers over the formulas above (search range 0.05–5.0 mm; return

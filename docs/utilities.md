@@ -2985,7 +2985,15 @@ read from the track misses the declaration on any pad wider than the track
 (the conductor there is the pad); that length is reported as `at its own pad`
 (`length_at_own_pad_mm`) and never counted, the way the net's own via antipad
 is never a crossing (#1582). A pad with no pour beside it at all still counts
-as no ground. Plane nets are skipped unless `--include-plane-nets`. Exit 1
+as no ground. The gap is read on KiCad's own fill, at exact distance (#1624):
+the `(filled_polygon ...)` KiCad stored in the board when it carries one,
+else -- when a declared gap is audited -- a KiCad refill (one pcbnew run, at
+the project's rules), else the fill model, to within half its cell and at the
+project's net-class clearances, which KiCad fills at whatever the pour's own
+zone clearance says. The JSON's `gap_source` (`stored`, `refill`, `model`)
+and a note name which one; a stored fill lying over the trace reads gap 0 and
+says to refill. The reference-plane check reads the fill model either way.
+Plane nets are skipped unless `--include-plane-nets`. Exit 1
 when any reference-plane crossing is found, or when a net misses its declared
 gap -- no ground beside it, or a gap off the declaration -- over more than
 0.01 mm of its outer-layer length (`promise_broken`, the rule `board_score
