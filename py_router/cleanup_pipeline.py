@@ -105,8 +105,11 @@ def _smooth_skip_net_ids(pcb_data):
     import protected_nets as _pn
     names = set(_pn.protection_map(pcb_data))
     names |= set(_pn._notes.get(_pn.PRO_KEY, {}) or {})
-    names |= set(_pn.read_impedance_for_pcb_data(pcb_data))
-    names |= set(_pn._notes.get(_pn.IMPEDANCE_KEY, {}) or {})
+    # A DECLARE-ONLY record (#1630) changes no copper decision, this one
+    # included: the copper is the project's, routed as without --impedance.
+    for _imp in (_pn.read_impedance_for_pcb_data(pcb_data),
+                 _pn._notes.get(_pn.IMPEDANCE_KEY, {}) or {}):
+        names |= {nm for nm, sp in _imp.items() if _pn.impedance_reapplies(sp)}
     return {nid for nid, net in pcb_data.nets.items()
             if getattr(net, 'name', None) in names}
 

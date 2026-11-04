@@ -669,9 +669,11 @@ manifest routes.
     #1630). `--impedance` would replace the class width with this tool's
     closed-form solve at that gap, which can differ from the project's own
     solver by several percent: pass it only when the user wants this tool's
-    width, and say so. With it omitted nothing in this toolchain reads the
-    pair's ohms -- `check_impedance.py` compares only a declaration an
-    `--impedance` step recorded -- so say that in the report.
+    width, and say so. To keep the class geometry AND have the ohms graded,
+    pass `--impedance <target> --impedance-declare-only`: the target is
+    recorded (`declare_only`) and no copper changes, now or in a later step,
+    and `check_impedance.py` (and `board_score`'s disclosure) then reads the
+    shipped pair against it and names a pair more than 10% off.
   - Every descent is a DECISION for the user, not one the run makes. Each one
     is a `design_rules` row in the step's `JSON_SUMMARY` (net, kind,
     requested, delivered, site) and in the `Design rules [...]` line; report

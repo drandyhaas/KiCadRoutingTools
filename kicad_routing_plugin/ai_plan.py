@@ -30,6 +30,8 @@ PLAN_RESULT_SCHEMA = (
     '"params": {"diff_pair_width": <mm>, "diff_pair_gap": <mm>, '
     '"impedance": <target differential ohms, optional - when set, per-layer '
     'trace width is derived from the stackup and overrides diff_pair_width>, '
+    '"impedance_declare_only": <true to RECORD the impedance target for '
+    'check_impedance without changing the pair geometry, optional>, '
     '"layer_costs": [<per-copper-layer cost multiplier, in board layer order>, ...]}} | '
     '{"action": "route", "nets": ["<glob>", ...], '
     '"params": {"track_width": <mm>, "clearance": <mm>, "via_size": <mm>, '

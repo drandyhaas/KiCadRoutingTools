@@ -383,6 +383,14 @@ because two of them were silently wrong on real boards.
   differential targets on strongly asymmetric stacks as ~5% figures, and
   confirm against your fab's coupon data when the window is tight.
 
+A project that sized its controlled-impedance class itself (a fab or field
+solver's width and gap) can keep that copper and still have it graded:
+`--impedance <ohms> --impedance-declare-only` on `route.py` / `route_diff.py`
+records the target (a `declare_only` net_impedance record, with each pair's
+built gap) and changes no copper, and no later step recomputes widths from
+it (#1630). `check_impedance.py` then reads the ohms back off the shipped
+copper on this module's formulas and names a net more than 10% off.
+
 Post-route verification lives in `check_impedance.py`:
 
 ```bash

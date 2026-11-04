@@ -507,6 +507,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 disable_bga_zones: Optional[List[str]] = None,
                 track_width: float = defaults.TRACK_WIDTH,
                 impedance: Optional[float] = None,
+                impedance_declare_only: bool = False,
                 coplanar_gap: float = 0.0,
                 clearance: float = defaults.CLEARANCE,
                 via_size: float = defaults.VIA_SIZE,
@@ -625,6 +626,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_gap: Gap between P and N traces of differential pairs in mm (default: 0.101)
         diff_pair_centerline_setback: Distance in front of stubs to start centerline (default: 2x P-N spacing)
         min_turning_radius: Minimum turning radius for pose-based routing in mm (default: 0.2)
+        impedance_declare_only: with `impedance`, RECORD the target ohms (with
+            the gap each pair is built at) as a ``declare_only`` net_impedance
+            record and change nothing else: the pairs route exactly as without
+            `impedance`, at their own class geometry, and check_impedance reads
+            the ohms back off the copper. Never reapplied by a later step (#1630).
         polarity_swap_nets: Glob patterns naming the pairs ALLOWED to resolve a
             P/N mismatch by swapping pad net assignments (#279). None/empty =
             no swaps ever (deny by default - a swap is only harmless when an
@@ -709,6 +715,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 return 0, 0, 0.0, {'results': [], 'segments_to_remove': [],
                                    'vias_to_remove': []}
             return 0, 0, 0.0
+
+    # #1630 declare-only: the ohms are RECORDED and nothing else -- every
+    # copper decision below runs as without --impedance (the project's own
+    # pair geometry), so the target is held aside until the record is written.
+    _declared_impedance = None
+    if impedance_declare_only and impedance is not None:
+        _declared_impedance, impedance = impedance, None
+    elif impedance_declare_only:
+        print("WARNING: --impedance-declare-only without --impedance "
+              "has no target to record; nothing is declared.")
 
     # Board-setup copper-to-edge rule (#338): route to at least the sibling
     # .kicad_pro's min_copper_edge_clearance (engine-side, so the GUI and plan
@@ -1047,7 +1063,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     impedance_width_clamped = {}
     layer_widths = {}
     _imp_unsolved = []          # #906: layers the model could not solve
-    if impedance is None and coplanar_gap:
+    if impedance is None and coplanar_gap and _declared_impedance is None:
         # See route.py: the gap only selects the impedance model (#486).
         print("WARNING: --coplanar-gap given without --impedance; it only "
               "selects the impedance model, so it has NO effect here. Add "
@@ -1135,15 +1151,36 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                   'coplanar_gap': coplanar_gap or 0.0,
                   'applied': _applied}
             for _nm, _nid in _targets})
+    elif _declared_impedance is not None:
+        # #1630 declare-only: the target is recorded at the gap the pairs are
+        # built at (each pair's own one is re-noted after the per-pair
+        # geometry below); `applied` False (no width was solved), `declare_only`
+        # True: check_impedance grades it, and no later step reapplies it.
+        _applied = False
+        print(f"  Declaring {_declared_impedance:g} ohm differential impedance on "
+              f"{len(_targets)} net(s) WITHOUT changing their geometry "
+              f"(--impedance-declare-only): recorded for check_impedance, never "
+              f"reapplied (#1630)")
+        from protected_nets import note_impedance_specs
+        note_impedance_specs({
+            _nm: {'ohms': _declared_impedance, 'differential': True,
+                  'pair_gap': diff_pair_gap,
+                  'coplanar_gap': coplanar_gap or 0.0,
+                  'applied': False, 'declare_only': True}
+            for _nm, _nid in _targets})
     elif pcb_data.board_info.stackup and _targets:
-        from protected_nets import read_impedance_for_pcb_data
+        from protected_nets import read_impedance_for_pcb_data, impedance_reapplies
         _stored = read_impedance_for_pcb_data(pcb_data, input_file)
+        # #1630: a declare-only record never sets a width -- its nets count as
+        # uncovered, so no call-level reapply happens over them
         _specs = {(float(sp.get('ohms', 0) or 0), float(sp.get('pair_gap', 0) or 0),
                    float(sp.get('coplanar_gap', 0) or 0))
                   for nm, _nid in _targets
-                  for sp in [_stored.get(nm)] if sp and sp.get('differential')}
+                  for sp in [_stored.get(nm)]
+                  if sp and sp.get('differential') and impedance_reapplies(sp)}
         _uncovered = [nm for nm, _nid in _targets
-                      if not (_stored.get(nm) or {}).get('differential')]
+                      if not ((_stored.get(nm) or {}).get('differential')
+                              and impedance_reapplies(_stored.get(nm)))]
         if len(_specs) == 1 and not _uncovered:
             _ohms, _pgap, _cgap = next(iter(_specs))
             if _ohms:
@@ -1835,7 +1872,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             if len(set(pair_diff_geom.values())) > 1:
                 print(f"  #435: {len(diff_pair_base_obstacles_by_geom)} distinct diff-pair "
                       f"geometries across {len(pair_diff_geom)} pair(s).")
-            if impedance is not None and pair_diff_geom:
+            _rec_ohms = impedance if impedance is not None else _declared_impedance
+            if _rec_ohms is not None and pair_diff_geom:
                 # #1630: the declaration records the gap each pair is BUILT at
                 from protected_nets import note_impedance_specs
                 _built_specs = {}
@@ -1844,10 +1882,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                     if _geom is not None and abs(_geom[1] - diff_pair_gap) > 1e-9:
                         for _nm in (_pair.p_net_name, _pair.n_net_name):
                             _built_specs[_nm] = {
-                                'ohms': impedance, 'differential': True,
+                                'ohms': _rec_ohms, 'differential': True,
                                 'pair_gap': _geom[1],
                                 'coplanar_gap': coplanar_gap or 0.0,
                                 'applied': _applied}
+                            if impedance is None:
+                                _built_specs[_nm]['declare_only'] = True
                 if _built_specs:
                     note_impedance_specs(_built_specs)
 
@@ -2958,6 +2998,14 @@ Examples:
                              "width can only widen it), not ignored.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target differential impedance in ohms (e.g., 100). Calculates track width per layer from board stackup using --diff-pair-gap as spacing.")
+    parser.add_argument("--impedance-declare-only", action="store_true",
+                        help="With --impedance: RECORD the target ohms for these nets in the "
+                             "project (net_impedance, declare_only) and change NOTHING "
+                             "else -- the nets route as without --impedance, at the "
+                             "project's own pair width and gap. check_impedance.py then grades the "
+                             "shipped copper against the ohms; a later step never "
+                             "recomputes widths from such a record (#1630). For a "
+                             "pair class the project sized itself.")
     parser.add_argument("--coplanar-gap", type=float, default=defaults.COPLANAR_GAP,
                         help="Declare that the pairs in this call run through a ground "
                              "pour on their OWN layer, this far (mm) from each trace's "
@@ -3470,6 +3518,7 @@ Examples:
                 layer_costs=args.layer_costs,
                 track_width=args.track_width,
                 impedance=args.impedance,
+                impedance_declare_only=args.impedance_declare_only,
                 coplanar_gap=args.coplanar_gap,
                 clearance=args.clearance,
                 via_size=args.via_size,

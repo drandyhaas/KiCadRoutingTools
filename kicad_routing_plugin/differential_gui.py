@@ -529,6 +529,19 @@ class DifferentialTab(wx.Panel):
             "Gap as spacing, overriding Pair Width. 0 = off (use Pair Width).")
         param_grid.Add(self.diff_impedance, 0, wx.EXPAND)
 
+        # #1630: declare the ohms without changing the pair geometry; named
+        # after the engine param, so a plan step reaches it
+        param_grid.Add(wx.StaticText(self, label="Declare Only:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.impedance_declare_only = wx.CheckBox(self, label="")
+        self.impedance_declare_only.SetValue(False)
+        self.impedance_declare_only.SetToolTip(
+            "#1630: with Diff Impedance > 0, RECORD the target ohms for these nets and "
+            "change nothing else -- they route at the project's own pair width and gap, as "
+            "without Diff Impedance, and check_impedance.py grades the copper against "
+            "the ohms. For a pair class the project sized itself; a later step never "
+            "recomputes widths from the record. (CLI: --impedance-declare-only)")
+        param_grid.Add(self.impedance_declare_only, 0, wx.EXPAND)
+
         # Min turning radius
         param_grid.Add(wx.StaticText(self, label="Min Turn Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['diff_pair_min_turning_radius']
@@ -1030,6 +1043,7 @@ class DifferentialTab(wx.Panel):
                 layer_costs=config.get('layer_costs') or None,  # per-layer bias (#193); None -> all 1.0
                 track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),
                 impedance=config.get('impedance'),  # when set, overrides per-layer width
+                impedance_declare_only=config.get('impedance_declare_only', False),
                 # #486: CPW-over-ground vs microstrip. route_diff.py passes
                 # args.coplanar_gap here; without it the shared Coplanar Gap
                 # control is honoured for single-ended routing but silently
@@ -1591,6 +1605,7 @@ class DifferentialTab(wx.Panel):
             'diff_pair_width_from_class': not self.diff_pair_width_check.GetValue(),
             'diff_pair_gap_from_class': not self.diff_pair_gap_check.GetValue(),
             'impedance': self.diff_impedance.GetValue() or None,  # 0 = off
+            'impedance_declare_only': self.impedance_declare_only.GetValue(),
             'min_turning_radius': self.min_turning_radius.GetValue(),
             'max_setback_angle': self.max_setback_angle.GetValue(),
             'max_turn_angle': self.max_turn_angle.GetValue(),

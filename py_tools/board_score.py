@@ -1091,13 +1091,16 @@ def declared_impedance_nets(board: str) -> list:
     sibling project's ``net_impedance`` records (``route.py --impedance``),
     minus the ones recorded ``applied: false`` -- no width was solved for those,
     so their copper carries no impedance promise (check_impedance skips them
-    the same way). [] when there are none or the records cannot be read."""
+    the same way) -- unless the record is ``declare_only`` (#1630), which the
+    project sized itself and declared. [] when there are none or the records
+    cannot be read."""
     try:
-        from protected_nets import read_impedance_specs, pro_path_for_board
+        from protected_nets import (impedance_graded, read_impedance_specs,
+                                    pro_path_for_board)
         specs = read_impedance_specs(pro_path_for_board(board))
     except Exception:                                        # noqa: BLE001
         return []
-    return sorted(nm for nm, sp in specs.items() if sp.get('applied') is not False)
+    return sorted(nm for nm, sp in specs.items() if impedance_graded(sp))
 
 
 def _glob_literal(name: str) -> str:

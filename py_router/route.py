@@ -2163,6 +2163,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 track_width: float = defaults.TRACK_WIDTH,
                 track_width_from_class: bool = False,
                 impedance: Optional[float] = None,
+                impedance_declare_only: bool = False,
                 coplanar_gap: float = 0.0,
                 coplanar_nets: Optional[List[str]] = None,
                 power_nets: Optional[List[str]] = None,
@@ -2376,6 +2377,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             impedance, each net then routes at its OWN netclass width (#435);
             with impedance, solved widths floor at the fab tier instead of
             track_width (#610).
+        impedance_declare_only: with `impedance`, RECORD the target ohms in
+            the project's net_impedance records (``declare_only``) and change
+            nothing else: the nets route exactly as without `impedance`, at
+            the project's own widths, and check_impedance reads the ohms back
+            off the copper. A later step never reapplies widths from such a
+            record (#1630).
         clearance: Clearance between tracks in mm (default: defaults.CLEARANCE, 0.25)
         via_size: Via outer diameter in mm (default: defaults.VIA_SIZE, 0.5)
         via_drill: Via drill size in mm (default: defaults.VIA_DRILL, 0.3)
@@ -2462,6 +2469,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # read (a GUI process routes many runs).
         from single_ended_routing import _PAD_ENTRY_REFUSALS
         _PAD_ENTRY_REFUSALS.clear()
+    # #1630 declare-only: the ohms are RECORDED and nothing else -- every
+    # copper decision below runs as without --impedance (the project's own
+    # widths), so the target is held aside until the record is written.
+    _declared_impedance = None
+    if impedance_declare_only and impedance is not None:
+        _declared_impedance, impedance = impedance, None
+    elif impedance_declare_only:
+        print("WARNING: --impedance-declare-only without --impedance "
+              "has no target to record; nothing is declared.")
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
         # CLI front (argparse->main) and the GUI front (plan setters->tab
@@ -2835,7 +2851,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     layer_widths = {}
     coplanar_layer_widths = {}
     coplanar_net_ids = set()
-    if impedance is None and coplanar_gap:
+    if impedance is None and coplanar_gap and _declared_impedance is None:
         # The coplanar gap only changes which IMPEDANCE formula picks the width.
         # With no target it has nothing to act on, and silently ignoring it
         # would leave the caller believing they routed a CPW (#486).
@@ -2946,10 +2962,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                    else 0.0),
                   'applied': _applied}
             for _nm, _nid in _targets})
+    elif _declared_impedance is not None:
+        # #1630 declare-only: the target is recorded and the copper is the
+        # project's. `applied` False (no width was solved), `declare_only`
+        # True: check_impedance grades it, and no later step reapplies it.
+        _cop_ids = ({nid for _nm, nid in resolve_net_ids(pcb_data, coplanar_nets)}
+                    if coplanar_nets else None)
+        print(f"  Declaring {_declared_impedance:g} ohm single-ended impedance on "
+              f"{len(_targets)} net(s) WITHOUT changing their widths "
+              f"(--impedance-declare-only): recorded for check_impedance, never "
+              f"reapplied (#1630)")
+        from protected_nets import note_impedance_specs
+        note_impedance_specs({
+            _nm: {'ohms': _declared_impedance, 'differential': False,
+                  'coplanar_gap': (coplanar_gap if (coplanar_gap and coplanar_gap > 0
+                                   and (_cop_ids is None or _nid in _cop_ids))
+                                   else 0.0),
+                  'applied': False, 'declare_only': True}
+            for _nm, _nid in _targets})
     elif pcb_data.board_info.stackup:
-        from protected_nets import read_impedance_for_pcb_data
+        from protected_nets import read_impedance_for_pcb_data, impedance_reapplies
         _stored = read_impedance_for_pcb_data(pcb_data, input_file)
-        _redo = [(nm, nid, _stored[nm]) for nm, nid in _targets if nm in _stored]
+        # #1630: a declare-only record never sets a width
+        _redo = [(nm, nid, _stored[nm]) for nm, nid in _targets
+                 if nm in _stored and impedance_reapplies(_stored[nm])]
         if _redo:
             # One width map per distinct declaration; per-net application via
             # config.net_layer_widths (single-ended engine margins ride
@@ -9688,6 +9724,14 @@ For differential pair routing, use route_diff.py:
                              "Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target single-ended impedance in ohms (e.g., 50). Calculates track width per layer from board stackup.")
+    parser.add_argument("--impedance-declare-only", action="store_true",
+                        help="With --impedance: RECORD the target ohms for these nets in the "
+                             "project (net_impedance, declare_only) and change NOTHING "
+                             "else -- the nets route as without --impedance, at the "
+                             "project's own widths. check_impedance.py then grades the "
+                             "shipped copper against the ohms; a later step never "
+                             "recomputes widths from such a record (#1630). For a "
+                             "net class the project sized itself.")
     parser.add_argument("--coplanar-gap", type=float, default=defaults.COPLANAR_GAP,
                         help="Declare that impedance-controlled traces run through a "
                              "ground pour on their OWN layer, this far (mm, trace edge "
@@ -10510,6 +10554,7 @@ For differential pair routing, use route_diff.py:
                 track_width_from_class=not _tw_explicit,
                 via_from_class=not _vs_explicit,
                 impedance=args.impedance,
+                impedance_declare_only=args.impedance_declare_only,
                 coplanar_gap=args.coplanar_gap,
                 coplanar_nets=args.coplanar_nets,
                 power_nets=args.power_nets,

@@ -173,6 +173,7 @@ class NetImpedance:
     # reading of the shipped width -- and, for a pair, the shipped P<->N gap.
     declared_ohms: float = 0.0
     declared_differential: bool = False
+    declare_only: bool = False          # the record changed no width (#1630)
     shipped_ohms: float = 0.0           # length-weighted over `ohms_length_mm`
     ohms_length_mm: float = 0.0         # length the reading covers (a pair: coupled)
 
@@ -1214,6 +1215,7 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
         if spec and float(spec.get('ohms') or 0) > 0:
             result.declared_ohms = float(spec['ohms'])
             result.declared_differential = bool(spec.get('differential'))
+            result.declare_only = bool(spec.get('declare_only'))
             mates = (segments_by_net.get(partners.get(net_id), [])
                      if result.declared_differential else [])
             result.shipped_ohms, result.ohms_length_mm = shipped_impedance(
@@ -1375,6 +1377,8 @@ def format_report(report: BoardImpedanceReport, verbose: bool = False,
                 off += 1
                 continue
             flag = '  OFF TARGET' if abs(pct) > DECLARED_OHMS_TOLERANCE_PCT else ''
+            if n.declare_only:
+                flag += '  (declare-only: the project sized it)'
             off += bool(flag)
             lines.append(f"  {n.net_name[:28]:<28} {n.declared_ohms:>7.1f}{unit[:1]:<2}"
                          f" {n.shipped_ohms:>9.1f} {pct:>+7.1f}% {n.ohms_length_mm:>13.1f}{flag}")
@@ -1477,6 +1481,7 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 'z0_error_pct': round(n.z0_error_pct, 3),
                 'declared_ohms': n.declared_ohms,
                 'declared_differential': n.declared_differential,
+                'declare_only': n.declare_only,
                 'shipped_ohms': round(n.shipped_ohms, 3),
                 'ohms_length_mm': round(n.ohms_length_mm, 4),
                 'ohms_off_pct': (None if n.ohms_off_pct is None
@@ -1566,11 +1571,14 @@ def main() -> int:
             # run never made. The record is kept so a later step with a usable
             # stackup can recompute it; this audit skips it. A record written
             # before #906 has no `applied` key at all and is treated as applied,
-            # which is what it meant then.
+            # which is what it meant then. A DECLARE-ONLY record (#1630) is
+            # graded: the project sized that copper itself and declared the
+            # ohms it was sized for.
+            from protected_nets import impedance_graded
             _unapplied = sorted(nm for nm, sp in _specs.items()
-                                if sp.get('applied') is False)
+                                if not impedance_graded(sp))
             _specs = {nm: sp for nm, sp in _specs.items()
-                      if sp.get('applied') is not False}
+                      if impedance_graded(sp)}
             _n2i = {n.name: nid for nid, n in pcb.nets.items() if n.name}
             net_declared_gaps = {
                 _n2i[nm]: float(sp.get('coplanar_gap', 0) or 0)

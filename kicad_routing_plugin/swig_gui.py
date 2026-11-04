@@ -1089,6 +1089,16 @@ class RoutingDialog(wx.Dialog):
         impedance_sizer.Add(self.impedance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         impedance_sizer.Add(self.impedance_value, 1, wx.EXPAND)
         impedance_sizer.Add(wx.StaticText(parent, label="\u03A9"), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 3)
+        # #1630: named after the engine param, so a plan step reaches it
+        self.impedance_declare_only = wx.CheckBox(parent, label="declare only")
+        self.impedance_declare_only.SetValue(False)
+        self.impedance_declare_only.SetToolTip(
+            "#1630: with Impedance ticked, RECORD the target ohms for these nets and "
+            "change nothing else -- they route at the project's own widths, as "
+            "without Impedance, and check_impedance.py grades the copper against "
+            "the ohms. For a net class the project sized itself; a later step never "
+            "recomputes widths from the record. (CLI: --impedance-declare-only)")
+        impedance_sizer.Add(self.impedance_declare_only, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
         grid.Add(impedance_sizer, 0, wx.EXPAND)
 
         # Integer parameters
@@ -2910,6 +2920,7 @@ class RoutingDialog(wx.Dialog):
         # abandoned every reset from this line onward -- every control below
         # kept the previous step's value. Use the control's own default.
         self.impedance_value.SetValue(defaults.IMPEDANCE_DEFAULT)
+        self.impedance_declare_only.SetValue(False)
         self.coplanar_gap.SetValue(defaults.COPLANAR_GAP)
         self.coplanar_nets_ctrl.SetValue("")
         self.max_iterations.SetValue(defaults.MAX_ITERATIONS)
@@ -3090,6 +3101,7 @@ class RoutingDialog(wx.Dialog):
         # a silent SI regression, since a manifest records nothing when ON.
         self.differential_tab.gnd_via_check.SetValue(True)
         self.differential_tab.intra_match_check.SetValue(False)
+        self.differential_tab.impedance_declare_only.SetValue(False)
         self.differential_tab.ac_couple_check.SetValue(False)
 
         # Reset fanout tab
@@ -3287,6 +3299,7 @@ class RoutingDialog(wx.Dialog):
             'debug_lines': self.debug_lines_check.GetValue(),
             # Impedance routing
             'impedance': self.impedance_value.GetValue() if self.impedance_check.GetValue() else None,
+            'impedance_declare_only': self.impedance_declare_only.GetValue(),
             'coplanar_gap': self.coplanar_gap.GetValue(),
             'coplanar_nets': _split_net_list(self.coplanar_nets_ctrl.GetValue()) or None,
             # Advanced parameters
@@ -3861,6 +3874,7 @@ class RoutingDialog(wx.Dialog):
                     grid_step=config['grid_step'],
                     via_cost=config['via_cost'],
                     impedance=config.get('impedance'),
+                    impedance_declare_only=config.get('impedance_declare_only', False),
                     coplanar_gap=config.get('coplanar_gap', 0.0),
                     coplanar_nets=config.get('coplanar_nets'),
                     max_iterations=config['max_iterations'],

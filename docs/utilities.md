@@ -2997,7 +2997,10 @@ A net carrying a recorded declaration also reports its declared ohms against
 the model's reading of the shipped copper -- the width, and for a pair the
 measured P/N gap where the two run coupled -- and names a net more than 10%
 off (`nets_ohms_off_target`, `ohms_off_pct`; #1630). That is disclosure:
-neither the exit code nor `board_score`'s count includes it.
+neither the exit code nor `board_score`'s count includes it. A record a
+step wrote with `--impedance-declare-only` (`declare_only`: the copper is
+the project's, only the ohms were recorded) is graded the same way and
+marked declare-only; any other record left `applied: false` is skipped.
 Plane nets are skipped unless `--include-plane-nets`. Exit 1
 when any reference-plane crossing is found, or when a net misses its declared
 gap -- no ground beside it, or a gap off the declaration -- over more than

@@ -401,6 +401,10 @@ BOOL_FLAGS = {
     # (--no-smoothing is in INVERTED_BOOL_FLAGS below: it used to be here as
     # `no_smoothing`, a name no control or alias matched.)
     '--add-gnd-vias': 'add_gnd_vias',
+    # #1630: route.py / route_diff.py record the --impedance target without
+    # solving widths (a checkbox of the same name on each tab). A switch, so
+    # here and not in FLAG_PARAMS, which would consume the next argument.
+    '--impedance-declare-only': 'impedance_declare_only',
     # #485: route_planes area via stitching toggles (planes-tab checkboxes
     # stitch_vias / stitch_edge_fence, applied by the plan executor's
     # generic loop).

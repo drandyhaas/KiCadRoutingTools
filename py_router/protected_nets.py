@@ -91,6 +91,22 @@ def note_impedance_specs(mapping: Dict[str, dict]) -> None:
     _note(IMPEDANCE_KEY, mapping)
 
 
+def impedance_reapplies(spec) -> bool:
+    """May a later step recompute widths from this net_impedance record?
+    Not from a DECLARE-ONLY one (#1630: `--impedance-declare-only` recorded
+    the target ohms of copper the project sized itself, so its widths are the
+    project's, never this tool's solve)."""
+    return isinstance(spec, dict) and not spec.get('declare_only')
+
+
+def impedance_graded(spec) -> bool:
+    """Does this record carry an impedance promise the shipped copper should
+    keep? A solved one (`applied` not False, #906) or a declare-only one
+    (#1630); an unapplied plain declaration is intent only."""
+    return isinstance(spec, dict) and bool(
+        spec.get('declare_only') or spec.get('applied') is not False)
+
+
 def consume_impedance_specs() -> Dict[str, dict]:
     return _consume(IMPEDANCE_KEY)
 

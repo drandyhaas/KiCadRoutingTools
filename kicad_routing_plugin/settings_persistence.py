@@ -60,6 +60,7 @@ def get_dialog_settings(dialog):
         # Advanced parameters
         'impedance_check': dialog.impedance_check.GetValue(),
         'impedance_value': dialog.impedance_value.GetValue(),
+        'impedance_declare_only': dialog.impedance_declare_only.GetValue(),
         'coplanar_gap': dialog.coplanar_gap.GetValue(),
         'coplanar_nets': dialog.coplanar_nets_ctrl.GetValue(),
         'max_iterations': dialog.max_iterations.GetValue(),
@@ -179,6 +180,8 @@ def get_dialog_settings(dialog):
         'diff_pair_width': dialog.differential_tab.diff_pair_width.GetValue(),
         'diff_pair_gap': dialog.differential_tab.diff_pair_gap.GetValue(),
         'diff_impedance': dialog.differential_tab.diff_impedance.GetValue(),
+        'diff_impedance_declare_only':
+            dialog.differential_tab.impedance_declare_only.GetValue(),
         'min_turning_radius': dialog.differential_tab.min_turning_radius.GetValue(),
         'max_setback_angle': dialog.differential_tab.max_setback_angle.GetValue(),
         'max_turn_angle': dialog.differential_tab.max_turn_angle.GetValue(),
@@ -390,6 +393,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.impedance_check.SetValue(settings['impedance_check'])
     if 'impedance_value' in settings:
         dialog.impedance_value.SetValue(settings['impedance_value'])
+    if 'impedance_declare_only' in settings:
+        dialog.impedance_declare_only.SetValue(bool(settings['impedance_declare_only']))
     if 'coplanar_gap' in settings:
         dialog.coplanar_gap.SetValue(settings['coplanar_gap'])
     if 'coplanar_nets' in settings:
@@ -627,6 +632,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.diff_pair_gap.SetValue(settings['diff_pair_gap'])
     if 'diff_impedance' in settings:
         dialog.differential_tab.diff_impedance.SetValue(settings['diff_impedance'])
+    if 'diff_impedance_declare_only' in settings:
+        dialog.differential_tab.impedance_declare_only.SetValue(
+            bool(settings['diff_impedance_declare_only']))
     # Restore the diff-pair width/gap override checkboxes and sync spinctrl enable
     if 'diff_pair_width_override' in settings:
         dialog.differential_tab.diff_pair_width_check.SetValue(settings['diff_pair_width_override'])
