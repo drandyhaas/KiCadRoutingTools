@@ -2038,15 +2038,17 @@ def board_writing_tools():
 def tool_dispositions(rows, mapped, refused, noop):
     """[(path, why)] for every board-writing tool without EXACTLY ONE
     disposition. A `conditional` named check_* is the fourth: is_check_cmd
-    drops it before conversion (what it may write is a debug or staged copy).
-    An ACTOR named check_* gets no such pass -- is_check_cmd would drop the
-    board it writes without a word."""
+    drops it before conversion (what it may write is a debug copy) -- unless
+    the board it writes is one a chain continues from (check_join
+    --keep-staged, #1637), when it is not a check and its table entry is
+    its disposition. An ACTOR named check_* gets no such pass --
+    is_check_cmd would drop the board it writes without a word."""
     bad = []
     for rel, kind in rows:
         base = os.path.basename(rel)
         disp = [name for name, table in (('mapped', mapped), ('refused', refused),
                                          ('no-op', noop)) if base in table]
-        if kind == 'conditional' and base.startswith('check_'):
+        if kind == 'conditional' and base.startswith('check_') and not disp:
             disp.append('check')
         if not disp:
             bad.append((rel, f"a board-writing KRT_TOOL ({kind}) that "

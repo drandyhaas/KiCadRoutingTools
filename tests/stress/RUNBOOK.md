@@ -741,7 +741,9 @@ flags. Extend its table when a future flag goes.
   `--workdir` runs every command in the fresh dir (relative outputs chain there;
   the absolute source board still resolves) — prefer it over bare `--remap` so a
   recorded `# cwd=` can't overwrite the original run. `--skip-checks` drops the
-  `check_*` steps (grade the final yourself); `--verbatim` replays superseded
+  `check_*` steps (grade the final yourself) -- but not a `check_join
+  --keep-staged`, which writes a board the chain continues from and is a copper
+  step to every manifest reader (#1637); `--verbatim` replays superseded
   retries too (default prunes to the file-dependency chain). A command its tool
   refused writes nothing and is not kept in the manifest (#1640: the recorder
   takes back a command that wrote nothing); an older manifest's refused command

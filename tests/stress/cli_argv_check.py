@@ -44,8 +44,11 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-#: The tools manifest_to_plan converts, by basename -> path under the repo.
+#: The tools manifest_to_plan converts, by basename -> path under the repo,
+#: and check_join, whose --keep-staged command is a copper step (#1637) that
+#: lineage_scope scopes and the pruner may find refused.
 TOOL_PATHS = {
+    'check_join.py': 'py_tools/check_join.py',
     'route.py': 'py_router/route.py',
     'route_diff.py': 'py_router/route_diff.py',
     'route_planes.py': 'py_router/route_planes.py',

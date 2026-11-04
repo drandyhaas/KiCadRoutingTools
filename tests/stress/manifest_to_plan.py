@@ -125,6 +125,13 @@ REFUSED_TOOLS = {
         'writes a copper keep-out rule area that every later route step obeys '
         '(#1200); the plan format has no step for it. Run it on the CLI and '
         'start the plan from its output'),
+    # A pure check_join is a check and never reaches this table; with
+    # --keep-staged it is a copper step a chain continues from (#1637).
+    'check_join.py': (
+        'with --keep-staged, lays a hand-drawn join (a polyline and its vias) '
+        'that it verified, and the chain continues from that board; the plan '
+        'format has no hand-join step. Run it on the CLI and start the plan '
+        'from its output'),
     'autoplan.py': (
         'builds its OWN chain of plane, fanout, decap, diff-pair and route '
         'steps from the board and runs it; the plan format has no step that '

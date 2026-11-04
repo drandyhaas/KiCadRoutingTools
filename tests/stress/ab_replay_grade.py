@@ -67,13 +67,17 @@ def final_output_name(manifest_txt):
     ...), so detect it from the manifest rather than globbing a fixed pattern.
     For route*.py the output is the 2nd positional and for fanout it is --output;
     in both, the LAST .kicad_pcb token on the line is the produced board.
+    A check is the pruner's (`redo_stress_test.is_check_cmd`): a
+    `check_join --keep-staged OUT` writes a board, so it is not one (#1637).
     """
+    from redo_stress_test import is_check_cmd
     last = None
     for line in manifest_txt.splitlines():
         line = line.strip()
-        if not line or line.startswith("#") or "check_" in line:
+        words = [t.strip("'\"") for t in line.split()]
+        if not line or line.startswith("#") or is_check_cmd(words):
             continue
-        toks = [t.strip("'\"") for t in line.split() if t.strip("'\"").endswith(".kicad_pcb")]
+        toks = [t for t in words if t.endswith(".kicad_pcb")]
         if toks:
             last = toks[-1]
     return os.path.basename(last) if last else None

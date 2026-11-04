@@ -372,8 +372,32 @@ def apply_remaps(argv, remaps):
     return out
 
 
-def is_check_cmd(argv):
+#: The write flag that makes a check_* tool's command a COPPER step: it writes
+#: a board a chain continues from, and records itself (#1397). Matched with
+#: argparse's own rule that an unambiguous prefix of a long option is it.
+CHECK_WRITE_FLAGS = ("--keep-staged",)
+
+
+def _writes_board(argv):
+    for a in argv:
+        name = a.split("=", 1)[0]
+        if len(name) > 2 and name.startswith("--") and any(
+                f.startswith(name) for f in CHECK_WRITE_FLAGS):
+            return True
+    return False
+
+
+def _is_check_tool(argv):
     return any(os.path.basename(a).startswith("check_") for a in argv)
+
+
+def is_check_cmd(argv):
+    """A check: a check_* tool that reads boards and writes none. A check_*
+    command with a write flag (`check_join --keep-staged OUT`, #1637) is a
+    copper step to every reader of a manifest -- the pruner, contamination,
+    seeding, the clobber guard, --skip-checks, the plan converters --
+    because a chain continues from the board it writes."""
+    return _is_check_tool(argv) and not _writes_board(argv)
 
 
 def mirror_project_sibling(argv, cwd):
@@ -786,7 +810,8 @@ def main():
                          "that cwd isn't covered by --remap. The source board (absolute "
                          "path) still resolves either way.")
     ap.add_argument("--skip-checks", action="store_true",
-                    help="Skip check_*.py commands (they do not mutate the board)")
+                    help="Skip check_*.py commands (they do not mutate the board; a "
+                         "check_join --keep-staged writes one, and is replayed)")
     ap.add_argument("--verbatim", action="store_true",
                     help="Replay EVERY recorded command in order, including the agent's "
                          "superseded retries and dead-end branches. By default the replay "
@@ -1010,8 +1035,21 @@ def main():
         if rc != 0 or timed_out:
             failures += 1
             # check tools return non-zero when they find issues -- not a real error;
-            # a timeout is always a real (non-termination) failure.
+            # a timeout is always a real (non-termination) failure. A check
+            # tool that WRITES a board (check_join --keep-staged, #1637)
+            # still writes it on a finding, so it failed only when its board
+            # was not written.
             real = timed_out or not is_check_cmd(argv)
+            if real and not timed_out and _is_check_tool(argv):
+                _out = board_io(argv)[1]
+                _vals = [a.split("=", 1)[1] if a.startswith("-") and "=" in a else a
+                         for a in run_argv]
+                _tok = next((v for v in reversed(_vals)
+                             if _out and os.path.basename(v) == _out), None)
+                _res = (_tok if not _tok or os.path.isabs(_tok)
+                        else os.path.join(cwd or ".", _tok))
+                real = not (_res and os.path.isfile(_res)
+                            and os.path.getmtime(_res) >= cmd_t0 - 1)
             if real:
                 print("    (timed out)" if timed_out else "    (non-check command failed)")
             if real and not args.continue_on_error:
