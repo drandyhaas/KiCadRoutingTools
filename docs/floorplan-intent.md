@@ -135,7 +135,8 @@ lists the ones that were accepted:
 
 ```
 edge_connectors[0]: unknown key(s) max_setback. Known: along_edge_band,
-center_on_edge, class, context, edge, mating_face, max_setback_mm, note,
+center_on_edge, class, context, edge, mating_face, mating_face_source,
+max_setback_mm, note,
 observed_overhang_mm, overhang_capped, overhang_mm, reason, ref, side, source,
 suspect, suspect_reason, why
 ```
@@ -147,7 +148,7 @@ suspect, suspect_reason, why
 | `defaults` | `zone_tolerance_mm` |
 | `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `rotation`, `rotation_candidates`, `fence_mm` (a band that wide round `zone` no part may use, members included; see "`fence_mm`" below; needs `min_reader` 16), `why` (or `note` / `reason`), `context`. `rigid` is refused by name: its only reader, the retired quench engine, is gone, and `place_simple` moves each group of the groups file together |
 | `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `max_height_mm` (a part whose height is KNOWN and no more than this may stand in it; see "`covers[]` and `heights[]`" below; needs `min_reader` 15), `why` (or `note` / `reason`), `context` |
-| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `side` (`F`/`B`, the connector's face, graded as the advisory `edge_connector_side`; needs `min_reader` 6), `mating_face` (`+x`/`-x`/`+y`/`-y`, see "Which way it opens" below), `class`, `why` (or `note` / `reason`), `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
+| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `side` (`F`/`B`, the connector's face, graded as the advisory `edge_connector_side`; needs `min_reader` 6), `mating_face` (`+x`/`-x`/`+y`/`-y`, see "Which way it opens" below), `mating_face_source` (free text: what that face was read off), `class`, `why` (or `note` / `reason`), `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
 | `edge_connectors[].overhang_mm` | `min`, `max` |
 | `edge_connectors[].center_on_edge` | `tolerance_mm` (required — see below) |
 | `edge_connectors[].along_edge_band` | `from`, `to` |
@@ -610,7 +611,8 @@ points west, not out of the east edge
   (`[declared, unverified]`). Only a strong reading or the marker is
   evidence from outside the author: a library copy drawn turned 180 degrees
   reads its wrong face weakly, and an author can declare that same wrong
-  face.
+  face. A declared face whose entry records what it was read off
+  (`mating_face_source`, below) reads `sourced`.
 - The facing conjunct leaves the nearest-edge identity, `edge_seat_rect` and
   the default bands as they are. `check_assembly` evaluates no intent clause,
   so a
@@ -647,6 +649,20 @@ the body abstains and its PCB-edge marker names the other side, that is said
 at WARN too (`its declared mating_face +y is against its PCB-edge marker
 ...`). A declared face prints `unverified` in the facing clause unless the
 marker confirms it, whichever way a weak reading agrees (#1652, above).
+
+**Say what the face was read off: `mating_face_source`.** Free text beside
+`mating_face`, naming the drawing and its page, or the 3D model, the side was
+read off (`"mating_face_source": "datasheet p.4 PCB layout, pads matched"`).
+Without it, an `unverified` face on a graded entry with an edge is said at
+WARN (`J1's mating face: its declared mating_face -y is unverified: the
+body's weak -y agrees, which is no check ...`), folded into the disagreement
+WARN where there is one. With it the clause reads `sourced` and the WARN is
+silenced -- including the disagreement with a WEAK reading, since a recorded
+source is the author saying which of the two was read. It never silences a
+STRONG reading overruling the declaration, nor a PCB-edge marker against it:
+those are evidence, a source is the author's word, which nothing here checks.
+It is refused without a `mating_face`, or empty. A design brief's
+`interfaces[]` carries it the same way.
 
 **A face belongs to one drawing's frame.** `+y` is a side of the footprint
 as drawn, and a copy of the same part -- a vendor's or importer's drawing,

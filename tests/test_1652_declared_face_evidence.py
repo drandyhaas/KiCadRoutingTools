@@ -128,6 +128,59 @@ def main():
               clause(text) == 'facing north [declared, unverified] pass', clause(text))
         check('...and is said at WARN',
               any(s == 'warn' and 'against its PCB-edge marker' in m for s, m in said), str(said))
+
+        # 6. an unverified face is said at WARN until `mating_face_source`
+        #    records what it was read off
+        src = {'mating_face_source': "the footprint's 3D model"}
+        f, said, text = grade(at0, intent(mating_face='-y'))
+        check('declared -y, no source: a WARN says it is unverified and asks for the source',
+              [s for s, m in said] == ['warn'] and 'is unverified' in said[0][1]
+              and 'mating_face_source' in said[0][1], str(said))
+        f, said, text = grade(at0, intent(mating_face='-y', **src))
+        check('...with a source: sourced, and nothing said',
+              clause(text) == 'facing north [courtyard+fab+declared, sourced] pass'
+              and not said and f.get('declared_source') == src['mating_face_source'],
+              f'{clause(text)} {said}')
+        f, said, text = grade(at180, intent(mating_face='-y', **src))
+        check('...a wrong turn of a sourced face still fails at ERROR',
+              any(s == 'error' and 'points south' in m for s, m in said), str(said))
+        f, said, text = grade(at180, intent(mating_face='+y'))
+        check('declared +y over the weak -y, no source: ONE WARN, the disagreement and the ask',
+              [s for s, m in said] == ['warn'] and 'outranks' in said[0][1]
+              and 'mating_face_source' in said[0][1], str(said))
+        f, said, text = grade(at180, intent(mating_face='+y', **src))
+        check('...with a source: nothing said, the clause still names both faces',
+              not said and clause(text) == ("facing north [declared, sourced] pass "
+                                            "(declared +y over the body's weak -y)"),
+              f'{clause(text)} {said}')
+        f, said, text = grade(shell, intent(mating_face='-y', **src))
+        check('a source does not silence a STRONG reading overruling the declaration',
+              any(s == 'warn' and 'overrules the declared mating_face -y' in m
+                  for s, m in said), str(said))
+        f, said, text = grade(board(os.path.join(tmp, 'm180b.kicad_pcb'), 'Marked', MARKED,
+                                    rot=180), intent(mating_face='+y', **src))
+        check('...nor the PCB-edge marker against it',
+              any(s == 'warn' and 'against its PCB-edge marker' in m for s, m in said), str(said))
+        f, said, text = grade(marked, intent(mating_face='-y'))
+        check('a marker-confirmed face needs no source', not said, str(said))
+
+        # 7. the field's contract
+        for bad, why in (({'mating_face_source': 'model'}, 'without a mating_face'),
+                         ({'mating_face': '-y', 'mating_face_source': ' '}, 'non-empty string')):
+            try:
+                intent(**bad)
+                check(f'refused: {bad}', False, 'accepted')
+            except T.floorplan.IntentError as exc:
+                check(f'refused: {bad}', why in str(exc), str(exc))
+        from placement import design_brief
+        brief = design_brief.brief_from_dict({
+            'schema': design_brief.SCHEMA_VERSION, 'kind': design_brief.KIND,
+            'interfaces': [{'ref': 'J1', 'edge': 'north', 'mating_face': '+y',
+                            'mating_face_source': 'drawing p.3'}]})
+        frag, _rep = design_brief.compile_brief(brief, board_refs=('J1',))
+        e = (frag.get('edge_connectors') or [{}])[0]
+        check('a brief carries mating_face_source into the compiled entry',
+              e.get('mating_face') == '+y' and e.get('mating_face_source') == 'drawing p.3', str(e))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('FAILED: ' + ', '.join(failures) if failures else 'PASS')

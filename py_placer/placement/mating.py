@@ -275,9 +275,11 @@ EVIDENCE_STRONG = 'strong'          # a strong body reading (or marker-confirmed
 EVIDENCE_WEAK = 'weak'              # a weak body reading, nothing declared
 EVIDENCE_MARKER = 'marker'          # a declaration its PCB-edge marker confirms
 EVIDENCE_UNVERIFIED = 'unverified'  # a declaration nothing independent confirms
+EVIDENCE_SOURCED = 'sourced'        # ... whose author recorded what was read
 
 
-def face_evidence(lf: LocalFace, face: Optional[str], source: str) -> str:
+def face_evidence(lf: LocalFace, face: Optional[str], source: str,
+                  recorded: bool = False) -> str:
     """What the face `face_with_declaration` chose rests on (#1652), '' when
     there is no face.
 
@@ -290,7 +292,10 @@ def face_evidence(lf: LocalFace, face: Optional[str], source: str) -> str:
     outside the author: `strong` / `weak` for the body's own reading,
     `marker` for a declaration the marker confirms (the body abstained), and
     `unverified` for any other declared face -- agreeing with a weak reading,
-    overruling one, or where the body names no face."""
+    overruling one, or where the body names no face -- and `sourced` for one
+    whose entry `recorded` what it was read off (`mating_face_source`): the
+    author's word, said to rest on a drawing or a model, which nothing here
+    can check."""
     if not face:
         return ''
     if source != 'declared':
@@ -298,7 +303,7 @@ def face_evidence(lf: LocalFace, face: Optional[str], source: str) -> str:
     mk = lf.marker
     if mk is not None and mk.face == face:
         return EVIDENCE_MARKER
-    return EVIDENCE_UNVERIFIED
+    return EVIDENCE_SOURCED if recorded else EVIDENCE_UNVERIFIED
 
 
 def marker_face_local(fp, geom) -> Optional[MarkerFace]:

@@ -481,12 +481,17 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   weak reading agrees: a turned copy reads its wrong face weakly, so the
   agreement is no check -- only a `strong` reading or a footprint's PCB-edge
   marker (`marker`) is. A wrong turn of a declared face still fails at
-  ERROR. The side of its solder tabs, away from the
+  ERROR. Write what you read the face off in `mating_face_source` (the
+  drawing and its page, or "3D model"); an `unverified` face without one is
+  a WARN, and with one the clause reads `sourced`. Write it only for what you
+  actually read: a guess from the footprint's pads or pegs is not a source.
+  The side of its solder tabs, away from the
   contact row, is a hint to check against the drawing, not a rule: it is
   wrong on 3 of 50 side-entry connectors in the corpus.
 - **The side a vertical header's cable leaves.** A `Vertical` header mates
   off the board and names no face, but its cable leaves on one side: a
-  2xN ribbon off a long side. Write that side as its `mating_face`, so the
+  2xN ribbon off a long side. Write that side as its `mating_face` (and
+  the cable's drawing or the 3D model as its `mating_face_source`), so the
   seat lays the header with its long side along the edge and the cable runs
   off the board. Without it, a 2x05 header lay across its edge on most
   seeds, its cable along the edge.

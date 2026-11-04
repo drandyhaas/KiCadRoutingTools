@@ -445,11 +445,14 @@ _EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
                         'class', 'source', 'suspect', 'suspect_reason',
                         'overhang_capped', 'observed_overhang_mm', 'context',
                         'center_on_edge', 'along_edge_band', 'side',
-                        'mating_face'} | _FREE_TEXT_KEYS
+                        'mating_face', 'mating_face_source'} | _FREE_TEXT_KEYS
 #: `edge_connectors[].mating_face`: the side of the footprint, in its OWN
 #: unrotated frame, its mating face opens on -- declared for a part whose body
 #: names none (`mating.mating_face_local` abstains: a side-entry JST drawn
-#: symmetric about its pads). Never emitted.
+#: symmetric about its pads). Never emitted. `mating_face_source` (#1652):
+#: free text naming what the face was read off (a drawing and its page, the
+#: 3D model); without it a face nothing independent confirms is graded
+#: `unverified` and said at WARN.
 MATING_FACES = ('+x', '-x', '+y', '-y')
 #: #959 (#1000): mount modes where a connector stands OFF a face, so its mating
 #: face points away from the board and reaching the edge is not what makes it
@@ -2108,6 +2111,19 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                 f"{c['mating_face']!r}, expected one of "
                 f"{', '.join(MATING_FACES)} (the side, in the footprint's own "
                 f"frame, its mating face opens on)")
+        if c.get('mating_face_source') is not None:
+            if not isinstance(c['mating_face_source'], str) \
+                    or not c['mating_face_source'].strip():
+                raise IntentError(
+                    f"edge_connectors[{i}] ({c['ref']}): mating_face_source "
+                    f"{c['mating_face_source']!r}, expected a non-empty string "
+                    f"naming what the face was read off (a drawing and its "
+                    f"page, or the 3D model)")
+            if c.get('mating_face') is None:
+                raise IntentError(
+                    f"edge_connectors[{i}] ({c['ref']}): mating_face_source "
+                    f"without a mating_face -- it records what a declared "
+                    f"face was read off")
         conns.append(c)
 
     proximity = _proximity_claims(raw)
@@ -4588,7 +4604,8 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
     entry is graded whatever its class; a STRONG reading outranks a
     declaration (`mating.face_with_declaration`). Returns `{policy, facing,
     local_face, basis, offset_mm, strong, evidence, reason, fails,
-    declared_face, body_face, body_strong, disagreement}`, the last naming a
+    declared_face, declared_source, body_face, body_strong, disagreement}`
+    (`declared_source` the entry's `mating_face_source`, ''), the last naming a
     declared face the body (or, where the body abstains, its PCB-edge marker)
     reads otherwise, whichever won ('' when none). `fails` is True only when
     the policy grades the entry, the face is decisive at that rotation, and
@@ -4599,7 +4616,8 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
     is wrong (`placement.mating`'s docstring). `evidence`
     (`mating.face_evidence`, #1652) is what the face RESTS on, which the
     severity is not: `unverified` for a declared face nothing independent
-    confirms, a weak reading agreeing with it included.
+    confirms, a weak reading agreeing with it included, and `sourced` for
+    one whose `mating_face_source` says what it was read off.
 
     THE predicate the rule calls, so every reader asks one answer for which
     way a part faces. A wrong WEAK face (`placement.mating`) reads as a
@@ -4615,7 +4633,8 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
     declared = (entry.get('mating_face')
                 if entry.get('mating_face') in MATING_FACES else None)
     face, source, disagreement = face_with_declaration(lf, declared)
-    evidence = face_evidence(lf, face, source)
+    recorded = (entry.get('mating_face_source') or '').strip()
+    evidence = face_evidence(lf, face, source, recorded=bool(recorded))
     if source == 'declared':
         # The body names no face, or a weak one; the intent declares one
         # (#1586: only the author has read the datasheet). A wrong turn of a
@@ -4645,7 +4664,8 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
             'reason': reason,
             'fails': bool(policy == 'graded' and edge and facing
                           and facing != edge),
-            'declared_face': declared, 'body_face': body.face,
+            'declared_face': declared, 'declared_source': recorded,
+            'body_face': body.face,
             'body_strong': bool(body.strong), 'disagreement': disagreement}
 
 
@@ -6065,22 +6085,48 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                             else 'abstained' if not _ef['facing']
                             else 'fail' if _ef['fails'] else 'pass'),
             'declared_face': _ef['declared_face'],
+            'declared_source': _ef['declared_source'],
             'body_face': _ef['body_face'],
             'body_strong': _ef['body_strong'],
             'disagreement': _ef['disagreement']}
-        if _ef['disagreement']:
-            # #1586: a declared face the body reads otherwise is SAID,
-            # whichever won -- a weak reading the declaration outranks (KiCad
-            # 10's RJHSE5380 reads its mouth into the board) or a strong one
-            # that overrules the declaration. A WARN: one of the two is wrong,
-            # and only the datasheet says which.
+        # #1586: a declared face the body reads otherwise is SAID, whichever
+        # won -- a weak reading the declaration outranks (KiCad 10's
+        # RJHSE5380 reads its mouth into the board) or a strong one that
+        # overrules the declaration. A WARN: one of the two is wrong, and only
+        # the datasheet says which -- so a declaration that records what it
+        # was read off (`mating_face_source`, #1652) silences the WARN over a
+        # weak reading. Never over a strong one, nor against the PCB-edge
+        # marker: those are evidence, a recorded source is the author's word.
+        from .mating import EVIDENCE_SOURCED, EVIDENCE_UNVERIFIED
+        said = _ef['disagreement']
+        if said and _ef['evidence'] == EVIDENCE_SOURCED and _ef['body_face']:
+            said = ''
+        if _ef['evidence'] == EVIDENCE_UNVERIFIED and edge:
+            # #1652: a declared face nothing independent confirms, whichever
+            # way a weak reading agrees -- a copy of a jack drawn turned 180
+            # degrees reads its wrong face weakly, and an author can declare
+            # that same wrong face. Said, not failed.
+            ask = ("no mating_face_source records what it was read off -- "
+                   "read the opening off this footprint's own drawing (its "
+                   "pads matched to the datasheet's) or its 3D model, and "
+                   "record which")
+            said = (f"{said}; {ask}" if said else
+                    f"its declared mating_face {_ef['declared_face']} is "
+                    f"unverified: "
+                    + (f"the body's weak {_ef['body_face']} agrees, which "
+                       f"is no check (a footprint drawn turned 180 degrees "
+                       f"reads its wrong face weakly)"
+                       if _ef['body_face'] else "its body names no face")
+                    + f", and {ask}")
+        if said:
             yield Violation(
                 rule='edge_connector', severity=WARN, ref=ref,
-                message=f"{ref}'s mating face: {_ef['disagreement']}",
+                message=f"{ref}'s mating face: {said}",
                 measured={'declared_face': _ef['declared_face'],
                           'body_face': _ef['body_face'],
                           'body_strong': _ef['body_strong'],
-                          'facing_basis': _ef['basis']},
+                          'facing_basis': _ef['basis'],
+                          'facing_evidence': _ef['evidence']},
                 expected={'mating_face': _ef['declared_face']})
         if _ef['fails']:
             yield Violation(
