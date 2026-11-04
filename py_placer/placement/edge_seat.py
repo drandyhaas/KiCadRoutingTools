@@ -19,7 +19,10 @@ The seat is read with the grade's own measurements (`rule_edge_connector`):
   of the entry's `overhang_mm` band as the grade reads it
   (`connector_geometry.band_amount`: the drawn body, else the courtyard, at
   zero margin, #1301) -- flush, without one, and a hair inside a positive
-  minimum -- and no nearer the edge than keeps every pad's copper (the
+  minimum -- then, where the entry arms a setback that reads a drawn body
+  the band does not (`floorplan.edge_setback_rule`, `edge_seat_rect`), out
+  until that body is flush, within a declared `max` (#1653: a seat must not
+  be the pose its own grade refuses) -- and no nearer the edge than keeps every pad's copper (the
   pads on a copper layer, not a silk-drawn pin) the board's edge clearance
   inside the outline where the part stands, not its bounding box (#1325).
   That depth is read at several places along the edge (a notch or an
@@ -30,7 +33,8 @@ The seat is read with the grade's own measurements (`rule_edge_connector`):
   holds -- the band (a corner adds the side it crosses), the pad copper's
   edge clearance against the true outline (a rounded corner), the edge the
   grade reads it on (`floorplan._nearest_edge` on the rule's own seat rect),
-  a declared `along_edge_band` / `center_on_edge` -- and a declared pose's
+  an armed setback that is not advisory, on that rect (#1653), a declared
+  `along_edge_band` / `center_on_edge` -- and a declared pose's
   check passes against every part the anneal does not move. Each turn's
   stretches are read by testing poses every SCAN_STEP_MM and at every
   position where the part's courtyard or pad copper just meets a fixed
@@ -298,15 +302,46 @@ class _Probe:
                 return False
         return True
 
+    def seat_rect(self, entry, pose):
+        """`(rect, basis)` at `pose` on which the grade asks where `entry`'s
+        mating face is, its nearest-edge and setback conjuncts
+        (`floorplan.edge_seat_rect`): the drawn body for an edge receptacle
+        or an `edge_mount` row whose library drew one, else the courtyard."""
+        from .floorplan import drawn_body_rect, edge_seat_rect
+        ref = entry['ref']
+        x, y, rot = pose
+        proxy = SimpleNamespace(x=x, y=y, rotation=rot)
+        return edge_seat_rect(entry, self.state.parts[ref].rect(x, y, rot),
+                              lambda: drawn_body_rect(self.bodies.get(ref), proxy))
+
+    def setback_short(self, entry, edge, seat_rect) -> Optional[float]:
+        """#1653: the edge clearance on which `rule_edge_connector`'s setback
+        conjunct fails `seat_rect` -- no overhang past `edge`, and further
+        from the nearest edge than `floorplan.edge_setback_rule` allows --
+        else None: it holds, asks nothing, or is advisory (a WARN refuses
+        no seat)."""
+        from . import legality
+        from .connector_geometry import courtyard_overhang_past
+        from .floorplan import edge_setback_rule
+        limit, advisory = edge_setback_rule(entry)
+        if limit is None or advisory:
+            return None
+        clr = self.state.edge_gate.edge_clearance(seat_rect)
+        if clr <= limit + legality.EPS:
+            return None
+        if courtyard_overhang_past(self.geo, seat_rect, edge)[0] > legality.EPS:
+            return None
+        return clr
+
     def why(self, entry, edge, pose, obstacles) -> Tuple[str, object]:
         """`('', None)` when every conjunct `rule_edge_connector` and check_drc
         put on the part at `pose` holds, and a declared pose's check against
         `obstacles` passes; else the first that fails and what it read:
         `('band_min', amount)`, `('band_max', amount)`, `('copper', None)`,
-        `('edge', the edge it reads nearest)` or `('fixed', [the parts in
-        the way, else the declared-pose check's reasons])`."""
-        from .floorplan import (_nearest_edge, drawn_body_rect, edge_reach_mm,
-                                edge_seat_rect)
+        `('edge', the edge it reads nearest)`, `('setback', (its edge
+        clearance, basis))` (#1653) or `('fixed', [the parts in the way,
+        else the declared-pose check's reasons])`."""
+        from .floorplan import _nearest_edge, edge_reach_mm
         from .mating import facing_edge
         from .seeder import _fixed_pose_check
         st, ref = self.state, entry['ref']
@@ -319,15 +354,15 @@ class _Probe:
             return 'band_max', band
         if not self.copper_clear(ref, pose):
             return 'copper', None
-        proxy = SimpleNamespace(x=x, y=y, rotation=rot)
-        seat_rect, _basis = edge_seat_rect(
-            entry, st.parts[ref].rect(x, y, rot),
-            lambda: drawn_body_rect(self.bodies.get(ref), proxy))
+        seat_rect, basis = self.seat_rect(entry, pose)
         face = self.faces.get(ref)
         near = _nearest_edge(seat_rect, self.bounds, edge_reach_mm(st),
                              facing=facing_edge(face, rot) if face else None)
         if near != edge:
             return 'edge', near
+        short = self.setback_short(entry, edge, seat_rect)
+        if short is not None:
+            return 'setback', (short, basis)
         how, reasons, conflicts = _fixed_pose_check(st, ref, pose, obstacles)
         if how is None:
             return 'fixed', sorted(conflicts) or list(reasons)[:1]
@@ -347,14 +382,17 @@ def _near(state, ref, pose, pool):
     return out
 
 
-def _seat_coord(probe, ref, edge, rot, axis, along, target):
+def _seat_coord(probe, ref, edge, rot, axis, along, target, entry=None):
     """`(coord, floor)`: the origin's coordinate across `edge` that puts
-    `ref` `target` past the outline as the grade reads it, held back so
-    every pad's copper is the board's edge clearance inside the outline AT
-    THE SEAT; `floor` is the least overhang the part reads on the line (its
-    reading centred across the board). `coord` is None when even `floor` is
-    past `target`: sonde_xilinx's DB25 J1, 54.1 mm along a 43.18 mm edge,
-    reads 11.43 mm wherever it stands (#1325)."""
+    `ref` `target` past the outline as the grade reads it -- and, for an
+    `entry` whose setback is armed (`floorplan.edge_setback_rule`), further
+    out until the shape that setback reads (`_Probe.seat_rect`) is flush
+    with the edge, no further than the band's declared `max` (#1653) --
+    held back so every pad's copper is the board's edge clearance inside
+    the outline AT THE SEAT; `floor` is the least overhang the part reads
+    on the line (its reading centred across the board). `coord` is None
+    when even `floor` is past `target`: sonde_xilinx's DB25 J1, 54.1 mm
+    along a 43.18 mm edge, reads 11.43 mm wherever it stands (#1325)."""
     state, pcb = probe.state, probe.pcb
     part = state.parts[ref]
     bounds = pcb.board_info.board_bounds
@@ -377,6 +415,8 @@ def _seat_coord(probe, ref, edge, rot, axis, along, target):
             inner = mid
         else:
             outer = mid
+    if entry is not None:
+        inner = _setback_flush(probe, entry, edge, pose, inner, out)
     # The copper limit, read on the OUTLINE where the part stands, by the
     # very check `_Probe.why` makes: the bounding box is not the edge on a
     # board with ears. CM5_MINIMA's east bounds are its corner ears at
@@ -394,15 +434,79 @@ def _seat_coord(probe, ref, edge, rot, axis, along, target):
     return good, floor
 
 
+def _setback_flush(probe, entry, edge, pose, inner, out):
+    """#1653: `inner` moved out across `edge` until the shape `entry`'s armed
+    setback reads (`_Probe.seat_rect`) is flush with it, no further than
+    keeps the band BAND_SLACK_MM under a declared `max`; `inner` itself when
+    no setback is armed, it reads the courtyard, or that shape already
+    reaches the edge.
+
+    The band and the setback can read two different shapes: the band reads
+    the drawn body where `connector_geometry` can measure it, else the
+    courtyard (#1301); the setback of an edge receptacle reads the drawn
+    body `body.board_bodies` finds (`floorplan.edge_seat_rect`). Where only
+    the second reads one -- a body drawn in front of its pins, whose
+    envelope `connector_geometry` refuses as a marker for not enclosing
+    them -- a seat made on the band alone put the courtyard flush and the
+    body its courtyard margin inside: 1.00 mm for a courtyard drawn 1.00 mm
+    past its body, a pose the grade then refused at its 0.50 mm seat
+    tolerance."""
+    from .connector_geometry import edge_setback
+    from .floorplan import edge_setback_rule
+    if edge_setback_rule(entry)[0] is None:
+        return inner
+    rect, basis = probe.seat_rect(entry, pose(inner))
+    inside = (edge_setback(probe.pcb.board_info.board_bounds, rect, edge) or 0.0
+              if basis != 'courtyard' else 0.0)
+    if inside <= EPS:
+        return inner
+    ref = entry['ref']
+    far = inner + out * inside
+    hi = (entry.get('overhang_mm') or {}).get('max')
+    if hi is not None and probe.band(ref, edge, pose(far)) > float(hi) - BAND_SLACK_MM + EPS:
+        cap = float(hi) - BAND_SLACK_MM
+        if probe.band(ref, edge, pose(inner)) > cap + EPS:
+            return inner
+        good, bad = inner, far
+        for _ in range(50):
+            mid = (good + bad) / 2.0
+            if probe.band(ref, edge, pose(mid)) <= cap + EPS:
+                good = mid
+            else:
+                bad = mid
+        far = good
+    return far
+
+
 def _pose_across(axis, along, coord, rot):
     return (along, coord, rot) if axis == 0 else (coord, along, rot)
 
 
-def _inside_mm(probe, ref, edge, pose) -> Tuple[float, str]:
-    """`(mm, basis)`: how far `ref` stands inside `edge` at `pose`, on the
-    basis its band is read on -- the drawn body where it can be measured,
-    else the courtyard the band reads (`connector_geometry.edge_setback`)."""
+def _setback_inside(probe, entry, edge, pose) -> Optional[Tuple[float, str]]:
+    """`(mm, basis)`: how far inside `edge` the shape `entry`'s armed setback
+    reads (`_Probe.seat_rect`) stands at `pose`, the shape the seat puts
+    flush (#1653); None when no setback is armed or it reads the
+    courtyard."""
     from .connector_geometry import edge_setback
+    from .floorplan import edge_setback_rule
+    if entry is None or edge_setback_rule(entry)[0] is None:
+        return None
+    rect, basis = probe.seat_rect(entry, pose)
+    if basis == 'courtyard':
+        return None
+    return (edge_setback(probe.pcb.board_info.board_bounds, rect, edge) or 0.0), basis
+
+
+def _inside_mm(probe, ref, edge, pose, entry=None) -> Tuple[float, str]:
+    """`(mm, basis)`: how far `ref` stands inside `edge` at `pose`, on the
+    basis it is seated on -- the shape an armed setback reads
+    (`_setback_inside`, #1653), else the basis its band is read on: the
+    drawn body where it can be measured, else the courtyard the band reads
+    (`connector_geometry.edge_setback`)."""
+    from .connector_geometry import edge_setback
+    got = _setback_inside(probe, entry, edge, pose)
+    if got is not None:
+        return got
     row = probe.geo.measure(ref, edge, pose)
     if row.get('body_measured'):
         return float(row['body_setback_mm']), 'body:' + str(row['body_layer'])
@@ -425,13 +529,39 @@ def _deeper_text(edge, deeper) -> str:
     return "; only an inboard line has room: seated " + '; '.join(each)
 
 
-def _courtyard_seat_text(probe, ref, edge, pose) -> str:
+def _courtyard_seat_text(probe, ref, edge, pose, entry=None) -> str:
     """The note's clause for a part the library drew a body for that is
     seated on its courtyard because the outline under it cannot be read as
     its edge (#1585): why, and how far inside the edge its body stands. ''
-    when the body is the seat's basis or the part draws none."""
+    when the body is the seat's basis or the part draws none.
+
+    A part seated on the shape its armed setback reads (#1653,
+    `_setback_inside`) says that instead where its band reads its
+    courtyard, and, when that shape still stands inside the edge, what
+    holds it there: the band's declared `max` or its pad copper."""
     from .connector_geometry import edge_setback
     row = probe.geo.measure(ref, edge, pose)
+    got = _setback_inside(probe, entry, edge, pose)
+    if got is not None:
+        inside, basis = got
+        if inside <= BAND_SLACK_MM:
+            return ('' if row.get('body_measured') else
+                    f"; seated with its drawn body ({basis}) on the edge, the "
+                    f"shape its setback is graded on; its band reads its "
+                    f"courtyard ({row.get('body_unmeasured_reason')})")
+        axis = 0 if edge in ('north', 'south') else 1
+        flush = list(pose)
+        flush[1 - axis] += (-1.0 if edge in ('north', 'west') else 1.0) * inside
+        flush = tuple(flush)
+        hi = (entry.get('overhang_mm') or {}).get('max')
+        held = (f"its declared overhang_mm.max {float(hi):.2f}mm"
+                if hi is not None and probe.band(ref, edge, flush)
+                > float(hi) - BAND_SLACK_MM + EPS
+                else "its pad copper's edge clearance"
+                if not probe.copper_clear(ref, flush) else '')
+        return (f"; its drawn body ({basis}), the shape its setback is graded "
+                f"on, stands {inside:.2f}mm inside the {edge} edge"
+                + (f": {held} holds it there" if held else ''))
     if row.get('body_measured'):
         return ''
     body = probe.geo.rect(ref, pose)[0]
@@ -565,6 +695,14 @@ def _unseated_reason(probe, entry, edge, axis, target, e, floors, spans, tally,
                             f"the declared maximum {float(lim['max']):.2f}mm")
             elif kind == 'edge':
                 said.append(f"{n} reading nearest the {'/'.join(sorted(set(reads)))} edge")
+            elif kind == 'setback':
+                from .floorplan import edge_setback_rule
+                said.append(f"{n} with its {reads[0][1]} at least "
+                            f"{min(r[0] for r in reads):.2f}mm from the nearest edge, "
+                            f"past its setback limit "
+                            f"{edge_setback_rule(entry)[0]:.2f}mm (declare a larger "
+                            f"max_setback_mm, or an overhang_mm.max that lets it reach "
+                            f"the edge)")
             else:
                 seen = []
                 for r in reads:
@@ -673,7 +811,8 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
             if hi < lo - EPS:
                 spans[rot] = pb[axis + 2] - pb[axis]
                 continue
-            coord, floor = _seat_coord(probe, ref, edge, rot, axis, (lo + hi) / 2.0, aim)
+            coord, floor = _seat_coord(probe, ref, edge, rot, axis, (lo + hi) / 2.0, aim,
+                                       entry=c)
             if coord is None:
                 floors[rot] = floor
                 continue
@@ -709,7 +848,7 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
             for k in range(DEPTH_SAMPLES):
                 alt, _f = _seat_coord(probe, ref, edge, rot, axis,
                                       lo + (hi - lo) * k / (DEPTH_SAMPLES - 1),
-                                      aim)
+                                      aim, entry=c)
                 if alt is not None and round(alt, 3) not in depths:
                     depths[round(alt, 3)] = [alt, None]
             order = sorted(depths.values(), key=lambda d: -outward * d[0])
@@ -724,15 +863,22 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
                 lines[rot] = Line(coord, tuple(free))
                 # Only an inboard line has room at this turn -- it stands
                 # inside the edge, and not because its pad copper holds it
-                # there -- said, with how far inside it stands and how far a
-                # nearer line it passed over does.
+                # there, nor (#1653) its band's declared `max` the shape its
+                # setback reads (`_courtyard_seat_text` says that) -- said,
+                # with how far inside it stands and how far a nearer line it
+                # passed over does.
                 at = sum(max(free, key=lambda f: f[1] - f[0])) / 2.0
-                inside = _inside_mm(probe, ref, edge, _pose_across(axis, at, coord, rot))
-                if inside[0] > DEEPER_MM and probe.copper_clear(
-                        ref, _pose_across(axis, at, coord + outward * DEEPER_MM, rot)):
+                inside = _inside_mm(probe, ref, edge, _pose_across(axis, at, coord, rot), c)
+                nudged = _pose_across(axis, at, coord + outward * DEEPER_MM, rot)
+                band_hi = (c.get('overhang_mm') or {}).get('max')
+                band_held = (band_hi is not None
+                             and _setback_inside(probe, c, edge, nudged) is not None
+                             and probe.band(ref, edge, nudged) > float(band_hi) + EPS)
+                if inside[0] > DEEPER_MM and probe.copper_clear(ref, nudged) \
+                        and not band_held:
                     nearer = order[0][0]
                     deeper[rot] = (inside, (
-                        _inside_mm(probe, ref, edge, _pose_across(axis, at, nearer, rot))
+                        _inside_mm(probe, ref, edge, _pose_across(axis, at, nearer, rot), c)
                         if outward * (nearer - coord) > DEEPER_MM else None))
         if not lines:
             part.ensure_rotation(part.rot)
@@ -748,7 +894,7 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
                         f", no mating face: {len(lines)} turn(s) seat there")
                      + (f" ({disagree})" if disagree else '')
                      + _deeper_text(edge, {r: d for r, d in deeper.items() if r in lines})
-                     + _courtyard_seat_text(probe, ref, edge, (part.x, part.y, part.rot)))
+                     + _courtyard_seat_text(probe, ref, edge, (part.x, part.y, part.rot), c))
         notes.append(said[ref])
     # What a part seated on one edge covers wherever it stands is a wall on
     # every other edge's line (`_corners`), and then the parts on one edge

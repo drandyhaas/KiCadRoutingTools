@@ -39,7 +39,8 @@ the same way.
    its inferred one) the intent declares on an edge
    (`edge_connectors[]` with an `edge`) is held to that edge
    (`placement/edge_seat.py`): its mating face out, flush with the low
-   end of its overhang band, and the anneal only slides it along the edge
+   end of its overhang band (and, where an armed setback reads its drawn
+   body, that body flush), and the anneal only slides it along the edge
    (and turns it, when it has no mating face). Parts declared on one edge
    that cannot all stand there together keep the most that fit, the
    earlier declared on a tie; the rest are placed as any other part, and

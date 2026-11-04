@@ -4195,7 +4195,10 @@ class _Ctx:
         would exempt any overhang whatever (the run-10 160 mm case). A pin
         header seated flush by its body has its courtyard past the edge by
         design, and counted, it failed every seed of a run that declared
-        `oob_count: 0`. Only a part actually off the board qualifies (an
+        `oob_count: 0`. A part whose armed setback reads a drawn body its
+        band does not read (`edge_setback_rule`, #1653) is seated with that
+        body flush, so with no `max` it is also exempt there. Only a part
+        actually off the board qualifies (an
         interior connector is not "exempt" from anything). A part outside
         its band is NOT exempt: it stays in the count AND `rule_edge_connector`
         names it, two rules reporting one fact.
@@ -4248,8 +4251,24 @@ class _Ctx:
                 # (`seeder.graphic_copper_past`), as a datum's is below
                 if amt > legality.EPS and ref in self._graphic_copper_off_board():
                     copper_ok = False
-                if (amt > legality.EPS and copper_ok
-                        and lo - legality.EPS <= band <= hi + legality.EPS):
+                in_band = lo - legality.EPS <= band <= hi + legality.EPS
+                if (not in_band and lim.get('max') is None
+                        and c.get('edge') in _EDGE_AXIS
+                        and band >= lo - legality.EPS
+                        and edge_setback_rule(c)[0] is not None):
+                    # #1653: where an armed setback reads a drawn body the
+                    # band does not, the seat holds the part with that body
+                    # flush (`edge_seat._seat_coord`), so a band with no
+                    # `max` ends there too: its courtyard past the edge by
+                    # what it reaches past that body.
+                    seat_rect, seat_basis = edge_seat_rect(
+                        c, part.rect, lambda: self.body_rect(ref))
+                    in_band = (seat_basis != 'courtyard'
+                               and courtyard_overhang_past(
+                                   geometry_for(self, self.pcb, self.pcb_file),
+                                   seat_rect, c.get('edge'))[0]
+                               <= BAND_SLACK_MM + legality.EPS)
+                if amt > legality.EPS and copper_ok and in_band:
                     out[ref] = float(band)
                     self._oob_exempt_census[ref] = float(amt)
             out.update(self._mechanical_pose_exempt())
@@ -4542,6 +4561,40 @@ def edge_seat_rect(entry: Dict, part_rect, body_rect):
         if brect is not None and src in ('fab', 'silk'):
             return brect, f'body:{src}'
     return part_rect, 'courtyard'
+
+
+def edge_setback_rule(entry: Dict) -> Tuple[Optional[float], bool]:
+    """`(limit, advisory)` of `rule_edge_connector`'s setback conjunct for
+    `entry`: the most its part may stand from the nearest edge, with no
+    overhang, on `edge_seat_rect`'s basis, and whether a failure is a WARN
+    whatever the rule's configured severity. `(None, False)` when the
+    conjunct asks nothing.
+
+    Shared with the edge seat (#1653), which seats the part on this rule's
+    own basis, so a seat cannot produce the pose its own grade refuses.
+
+    A declared `max_setback_mm` is the limit at the configured severity; an
+    `edge_receptacle` that does not stand off a face (#959/#1000: a vertical
+    mount is not held to the receptacle seat; its declared edge and overhang
+    still grade it) is held to `part_class.SEAT_TOL_MM`; a
+    `connector_affinity` row to `part_class.INTERIOR_AFFINITY_MM`, advisory
+    (run-23: the weak class -- an INTERIOR generic connector is a flag for
+    the boundary review, never an error, since legitimately-interior
+    connectors exist; an author upgrades by writing
+    max_setback_mm, and an `edge` adds the edge conjuncts but leaves this
+    flag a WARN)."""
+    setback = entry.get('max_setback_mm')
+    if setback is not None:
+        return float(setback), False
+    vertical = ((entry.get('context') or {}).get('mount_mode')
+                in VERTICAL_MOUNTS)
+    if entry.get('class') == 'edge_receptacle' and not vertical:
+        from .part_class import SEAT_TOL_MM
+        return float(SEAT_TOL_MM), False
+    if entry.get('class') == 'connector_affinity':
+        from .part_class import INTERIOR_AFFINITY_MM
+        return float(INTERIOR_AFFINITY_MM), True
+    return None, False
 
 
 #: #1155: the mount modes whose mating face must point at the declared edge.
@@ -6154,32 +6207,62 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                           'facing_strong': _ef['strong'],
                           'local_face': _ef['local_face']},
                 expected={'facing': edge})
+        # #1653: where the part's own 3D model resolves, where it ENDS across
+        # the declared edge, disclosed beside the overhang on every row: a
+        # courtyard reading flush says nothing about the body, and a
+        # horizontal power connector whose courtyard ran 2.07 mm past its
+        # model's barrel tips was seated with all of its barrels over the
+        # board, graded `overhang 0.0000mm [legacy_occupancy@margin=0] pass`.
+        # A WARN (never the configured severity) when a part whose band reads
+        # its courtyard, graded as reaching its edge, has an in-plane mating
+        # face (not a vertical mount) and a model stopping short by more
+        # than its seat tolerance: the courtyard, the drawing or the model is
+        # wrong, and only the datasheet says which.
+        _model_end = None
+        if edge in _EDGE_AXIS and ctx.outline_bounds:
+            from .heights import model_past_edge
+            _sp = (getattr(ctx.state, 'parts', None) or {}).get(ref)
+            _model_end = model_past_edge(
+                getattr(ctx.state, 'heights', None), ctx.pcb, ref, edge,
+                pose=((_sp.x, _sp.y, _sp.rot) if _sp is not None else None),
+                bounds=ctx.outline_bounds)
+        evidence['model_end_mm'] = (None if _model_end is None
+                                    else round(_model_end, 4))
+        if (_model_end is not None and _ef['local_face']
+                and overhang_basis.startswith('legacy_occupancy')
+                and (c.get('context') or {}).get('mount_mode')
+                not in VERTICAL_MOUNTS):
+            from .part_class import SEAT_TOL_MM
+            _tol = float(SEAT_TOL_MM if c.get('max_setback_mm') is None
+                         else c['max_setback_mm'])
+            # graded as reaching the edge: overhanging it, or standing
+            # within its tolerance of it on its seat basis (a part further
+            # in is the setback's to report)
+            _reaches = (band > legality.EPS
+                        or (_setback is not None
+                            and _setback <= _tol + legality.EPS))
+            if _reaches and _model_end < -_tol - legality.EPS:
+                yield Violation(
+                    rule='edge_connector', severity=WARN, ref=ref,
+                    message=(f"{ref}'s 3D model stops {-_model_end:.2f}mm "
+                             f"short of the {edge} edge where its courtyard "
+                             f"reads {band:.2f}mm overhang ({overhang_basis}; "
+                             f"seat tolerance {_tol:.2f}mm) -- a mate plugged "
+                             f"in across the edge may not reach it: check the "
+                             f"model against the datasheet, and declare the "
+                             f"overhang the mate needs as overhang_mm.min"),
+                    measured={'model_end_mm': round(_model_end, 4),
+                              'overhang_mm': round(band, 4),
+                              'overhang_basis': overhang_basis},
+                    expected={'model_end_mm': -_tol})
         # Run-4 A: the missing PROXIMITY conjunct. The rule used to grade only
         # the overhang band and the nearest-edge identity, so a receptacle
         # 15.8 mm INTERIOR passed ("nearest west, declared west" is satisfied
         # anywhere on the board). For entries carrying the edge_receptacle
         # class (or an explicit max_setback_mm), no overhang AND off-seat is
         # a violation.
-        setback = c.get('max_setback_mm')
-        _sev = ctx.sev('edge_connector')
-        # #959 (#1000): a connector standing off a face is not held to the
-        # receptacle seat -- its declared edge and overhang still grade it.
-        vertical = ((c.get('context') or {}).get('mount_mode')
-                    in VERTICAL_MOUNTS)
-        if setback is None and c.get('class') == 'edge_receptacle' \
-                and not vertical:
-            from .part_class import SEAT_TOL_MM
-            setback = SEAT_TOL_MM
-        if setback is None and c.get('class') == 'connector_affinity':
-            # run-23: the weak class. An INTERIOR generic connector is a flag
-            # for the boundary review, never an error -- legitimately-interior
-            # connectors exist (tigard J7), so this fires at WARN whatever the
-            # rule's configured severity. An author upgrades by writing
-            # max_setback_mm (then the configured severity applies); an
-            # `edge` adds the edge conjuncts but leaves this flag a WARN.
-            from .part_class import INTERIOR_AFFINITY_MM
-            setback = INTERIOR_AFFINITY_MM
-            _sev = WARN
+        setback, _advisory = edge_setback_rule(c)
+        _sev = WARN if _advisory else ctx.sev('edge_connector')
         if setback is not None:
             evidence['setback_limit_mm'] = float(setback)
         # #1585: "no overhang" is read on the shape the setback is measured
@@ -12775,7 +12858,10 @@ def format_text(r: GradeResult) -> str:
             lines.append(
                 f"    {e['ref']} {e.get('edge') or '(no edge)'}: overhang "
                 f"{e['overhang_mm']:.4f}mm [{e['overhang_basis']}] "
-                f"{e['overhang_disposition']}" + _setback_tail(e) + "; pad copper "
+                f"{e['overhang_disposition']}"
+                + (f"; model end {e['model_end_mm']:+.2f}mm"
+                   if e.get('model_end_mm') is not None else '')
+                + _setback_tail(e) + "; pad copper "
                 + (f"{gap:.4f}mm" if gap is not None else 'unmeasured')
                 + f" vs {cu.get('required_mm')}mm {cu.get('disposition')}"
                 + _facing_tail(e.get('facing')))

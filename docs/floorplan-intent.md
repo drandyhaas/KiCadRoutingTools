@@ -811,6 +811,28 @@ body stands. On the body path on a non-rectangular outline, where the pad
 edge grader samples and reports no gap, a pad's copper past the outline is
 read by its box's distance from the board.
 
+**The seat is made on the shape the setback is graded on (#1653).** One
+part can be read on two shapes: its band on the drawn body where that body
+can be measured, else on its courtyard (above); the setback of an
+`edge_receptacle` or `edge_mount` entry on the drawn body the body ladder
+finds (`floorplan.edge_seat_rect`). A horizontal power receptacle draws its
+body in FRONT of its pins, so the band refuses that envelope as a marker and
+reads the courtyard while the setback reads the body. Seated on the band
+alone, its courtyard was flush and its body the courtyard's margin inside:
+1.00 mm for a courtyard drawn 1.00 mm past the body, a pose the grade then
+refused at the 0.50 mm seat tolerance. The seat now asks the setback as well,
+by the grade's own rule (`floorplan.edge_setback_rule`): where an armed
+setback (a declared `max_setback_mm`, or a non-vertical `edge_receptacle`'s
+seat tolerance) reads a drawn body that stands inside the edge with the band
+at its `min`, the part moves out until that body is flush, no further than
+keeps the band under a declared `max`. A position whose setback the grade
+fails is not a seat, so a `max` that holds the body further in than its
+tolerance leaves the part unseated with the setback named, and one that holds
+it inside within the tolerance is seated and its note says what holds it
+there. With no `max`, `_Ctx.oob_exempt` exempts the courtyard such a seat
+puts past the edge, as it does a body-flush part's. A `connector_affinity`
+row's advisory limit reads its courtyard, so it is seated as before.
+
 **The band takes no margin (#1301).** The courtyard reading used to be the
 occupancy reading at the gate's margin, `max(clearance, board edge
 clearance)`: `overhang + margin` outside the board. Every routing step's DRC
@@ -871,6 +893,23 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
   [courtyard; no limit declared]` for a part that does not reach its edge
   (and the body's own setback beside a courtyard reading), so a classless
   header seated 10 mm inside its edge never reads as a bare `pass`;
+- `model_end_mm` (#1653): where the part's own 3D model ends across its
+  declared edge, from that edge's line, positive past it and negative short
+  of it (the outer side of the model's farthest raised cell,
+  `heights.model_past_edge`, so to the raster's 0.25 mm and never short of
+  the model), `null` when no model was read (no kicad-cli, or none resolves)
+  or the export's frame is a guess (one modelled part on the board fits a
+  mirrored frame as well, as #1603's depth reading also refuses);
+  the text line adds `; model end -1.00mm`. A courtyard says nothing about
+  where the body ends: a horizontal power connector whose courtyard ran
+  2.07 mm past its model's barrel tips was seated with all its barrels over
+  the board, reading `overhang 0.0000mm [legacy_occupancy@margin=0] pass`.
+  So an `edge_connector` WARN (fixed, never the configured severity) names a
+  part whose band reads its courtyard, graded as reaching its edge
+  (overhanging it, or within its seat tolerance of it on its seat basis),
+  with an in-plane mating face and no vertical `mount_mode`, whose model
+  stops short of the edge by more than its seat tolerance
+  (`max_setback_mm`, else 0.5 mm);
 - `pad_copper_edge`: the part's pad-copper edge clearance from
   `grade_pad_edge_clearance`, at the floor `grade_pad_legality` resolves, or
   at a `.kicad_dru` `edge_clearance` rule binding the part's pads (#1615,

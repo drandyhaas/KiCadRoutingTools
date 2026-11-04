@@ -362,8 +362,13 @@ class Heights:
     for the parts with room under them. Empty when nothing was measured."""
 
     def __init__(self, top=None, covers=None, note='', reached=(), bodies=None,
-                 set_aside=None, notices=(), depth=None, depth_note=None):
+                 set_aside=None, notices=(), depth=None, depth_note=None,
+                 frame_sure=True):
         self.top: Dict[str, Tuple[float, str]] = dict(top or {})
+        #: #1653: False when the export fit more than one frame to the parts'
+        #: poses (`frame_fits`), so which way a body faces in its own frame is
+        #: a guess: one resolved model fits a mirrored frame as well
+        self.frame_sure = bool(frame_sure)
         #: #1603: each modelled part's body at BOARD DEPTH, strictly between
         #: the board's two faces (`DEPTH_FACE_MM` in from each), outside its
         #: own pads and drilled holes: the cell centres (n, 2), local frame.
@@ -927,7 +932,7 @@ def with_declared(h: Heights, declared, pcb_data, pcb_file=None) -> Heights:
     notices += lift_notices + unresolved
     out = Heights(top, covers, note=note, reached=why or reached, bodies=bodies,
                   set_aside=set_aside, notices=notices, depth=h.depth,
-                  depth_note=h.depth_note)
+                  depth_note=h.depth_note, frame_sure=h.frame_sure)
     if len(_DECL_MEMO) > 64:
         _DECL_MEMO.clear()
     _DECL_MEMO[key] = out
@@ -1548,6 +1553,7 @@ def _load(raw, pcb_data, pcb_file, names) -> Heights:
                                      f'{n_room} part(s) with room under them',
                    reached=reached, bodies=_bodies(raw.get('bodies') or {}, top),
                    set_aside=set_aside, notices=_set_aside_notices(set_aside),
+                   frame_sure=int(raw.get('frame_fits') or 0) == 1,
                    **_depths(raw, pcb_data))
 
 
@@ -1736,6 +1742,35 @@ def depth_past_edge(h, pcb_data, ref, edge, pose=None) -> Optional[float]:
     past = {'east': bx - b[2], 'west': b[0] - bx,
             'north': b[1] - by, 'south': by - b[3]}.get(edge)
     return None if past is None else float(past.min()) + CELL_MM / 2.0
+
+
+def model_past_edge(h, pcb_data, ref, edge, pose=None, bounds=None) -> Optional[float]:
+    """#1653: how far `ref`'s own 3D model reaches past the compass `edge`
+    at `pose` (its board pose by default): the outer side of its farthest
+    raised cell (`Heights.bodies`), mm along the edge's outward normal from
+    the bounds' line on that side (`bounds`, else the board's) -- positive
+    past it, negative when the model stops short of it. To the raster's
+    `CELL_MM`, and never short of the model: a cell the model enters counts
+    whole. None when no model of it was read, when the export's frame is a
+    guess (`Heights.frame_sure`: which way the model faces is then unknown),
+    or when the edge or the bounds are unknown."""
+    if not getattr(h, 'frame_sure', True):
+        return None
+    body = (getattr(h, 'bodies', None) or {}).get(ref)
+    b = bounds or getattr(pcb_data.board_info, 'board_bounds', None)
+    fp = (pcb_data.footprints or {}).get(ref)
+    if body is None or not len(body[0]) or not b or fp is None \
+            or edge not in ('north', 'south', 'east', 'west'):
+        return None
+    pts = body[0]
+    x, y, rot = pose or (fp.x, fp.y, fp.rotation or 0.0)
+    a = math.radians(-(rot % 360))
+    c, s = math.cos(a), math.sin(a)
+    bx = x + pts[:, 0] * c - pts[:, 1] * s
+    by = y + pts[:, 0] * s + pts[:, 1] * c
+    half = CELL_MM / 2.0
+    return float({'east': bx.max() + half - b[2], 'west': b[0] - bx.min() + half,
+                  'north': b[1] - by.min() + half, 'south': by.max() + half - b[3]}[edge])
 
 
 def _bodies(raw, top):

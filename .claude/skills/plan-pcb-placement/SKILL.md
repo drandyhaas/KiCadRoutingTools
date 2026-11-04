@@ -519,7 +519,33 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   edge's normal; what the part does past another edge is reported on its own
   and bounded by the band's maximum, #1403), so write the distance the part reaches past the edge and never add
   the board's edge margin to it. check_floorplan's
-  `overhang_basis` says which of the two it read.
+  `overhang_basis` says which of the two it read. A receptacle's seat
+  tolerance is read on its drawn body, and the seat puts that body flush
+  even where the band reads the courtyard (#1653), so its courtyard can
+  stand past the edge.
+- **Where the part's own model ends.** Where a 3D model resolves,
+  check_floorplan's line says `model end -2.07mm` beside the overhang (from
+  the edge's line, negative short of it) and warns when the courtyard reads
+  the part as reaching its edge but the model stops short by more than the
+  seat tolerance. A courtyard says nothing about the body: read the model end
+  for every connector a mate plugs into across the edge, and when it is
+  short, check the body's mating face on the datasheet's drawing; if it must
+  reach the edge, write as `overhang_mm.min` the overhang, in the band's own
+  reading (`overhang_basis`), that brings it there (on a courtyard reading,
+  the courtyard's overhang plus the model's shortfall).
+- **A mate that wraps the body.** Some mates are a shell that slides over
+  the receptacle's body rather than a plug into an opening in it (the
+  XT-series power connectors' plug sleeves both barrels). Find the mate's
+  outer height on its datasheet and the height above the board of the body
+  section it wraps (the datasheet, or the 3D model). If the mated shell's
+  lowest point is below the board's top face (for a shell centred on the
+  body: half its outer height is more than the height of the body's centre
+  above the board), the board edge stops it, so the length it slides over
+  the body must stand past the edge: write as `overhang_mm.min` (`max` at or
+  above it) the overhang, in the band's reading, that puts that length of
+  the body past the edge, and say in the report where the numbers came
+  from. The seat cannot ask this for you: nothing on the board says how the
+  mate is shaped.
 
 Write these into the intent's `edge_connectors[]` entries, the rows into
 `fixed_poses[]` instead (a ref in both is refused), or into the brief,
