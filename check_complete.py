@@ -285,6 +285,15 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     the floors in place. Without it, say the check did not run rather than
     implying it passed.
 
+    With ``authored_from``, a size floor is judged per object (#1627): each
+    track, via and hole against the floor that binds IT in the authored
+    project -- the Board Setup minimum, or the minimum an authored
+    ``.kicad_dru`` rule sets for it (resolved as check_drc resolves it) -- so
+    copper a scoped rule allows is not counted, and is reported under
+    ``measured_kept`` with ``held_by_rule`` and the rules. Against the
+    recorded ``fab_floor_origin`` there are no authored rules on disk, and the
+    count stays against the one origin value.
+
     The original board is also the REFERENCE (#1198): a floor its own copper
     breaks, at least as badly as this board does, is ``reference_too`` --
     reported, not counted against this board. A board that breaks it worse,
@@ -354,6 +363,15 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     below = count_below_floors(board, _sizes) if _sizes else {}
     ref_below = (count_below_floors(authored_from, _sizes)
                  if (_sizes and authored_from) else {})
+    # #1627: with the authored board in hand, each object is compared with
+    # the floor that binds IT in the authored project -- Board Setup, then the
+    # authored .kicad_dru (never the graded board's: a rule a chain added
+    # cannot excuse its own copper) -- as check_drc resolves it.
+    per_obj = ref_obj = {}
+    if _sizes and authored_from:
+        from fix_kicad_drc_settings import size_values_below_authored
+        per_obj = size_values_below_authored(board, _sizes, authored_from)
+        ref_obj = size_values_below_authored(authored_from, _sizes, authored_from)
     relaxed = []
     unmeasured = []
     vacuous = []
@@ -378,6 +396,34 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
                 vacuous.append({'key': key, 'label': label, 'authored': was,
                                 'why': f'no {_FLOOR_OBJECT.get(key, "object")} '
                                        f'on the board'})
+            elif key in per_obj:
+                # #1627: the objects below their OWN authored floor
+                po = per_obj[key]
+                rv = (ref_obj.get(key) or {}).get('below') or []
+                if not po['below']:
+                    if po['held_by_rule']:
+                        measured_kept.append({
+                            'key': key, 'label': label, 'authored': was,
+                            'on_board': is_,
+                            'measured_by': 'authored .kicad_dru rules',
+                            'violations': 0,
+                            'held_by_rule': po['held_by_rule'],
+                            'rules': po['rules']})
+                    continue
+                worst = min(po['below'])
+                row = {'key': key, 'label': label, 'authored': was,
+                       'on_board': worst,
+                       'measured_by': 'authored floor per object',
+                       'violations': len(po['below'])}
+                if po['held_by_rule']:
+                    row['held_by_rule'] = po['held_by_rule']
+                    row['rules'] = po['rules']
+                if rv and worst >= min(rv) - _MIN_TOL:
+                    row['reference'] = min(rv)
+                    row['reference_violations'] = len(rv)
+                    reference_too.append(row)
+                else:
+                    relaxed.append(row)
             elif is_ < was - 1e-9:
                 ref = ref_min.get(key)
                 row = {'key': key, 'label': label, 'authored': was,

@@ -1195,7 +1195,14 @@ before the first routing step lowered anything) and copper below them is
 DISCLOSED in the reason, not graded, and `fab_floors` is named unexamined
 when the project records none. A relaxed size floor names its smallest
 object and carries a count (`violations`: the tracks, vias or holes below the
-authored value; `reference_violations` on the reference). The
+authored value; `reference_violations` on the reference). With
+`--authored-from` each object is held to the floor that binds IT in the
+authored project (#1627): the Board Setup minimum, unless a rule of the
+authored `.kicad_dru` sets its minimum (resolved as `check_drc` resolves a
+size floor; the graded board's own `.kicad_dru` is not read, so a rule a chain
+added cannot excuse its copper). Copper below Board Setup that such a rule
+allows is not counted; it is listed under `measured_kept` with
+`held_by_rule` and the rule names. The
 copper-to-hole floor is graded by `kicad-cli` on the fill as shipped, and the
 reference excuses only the kinds of pair it also breaks, at least as badly.
 `--baseline` is handed to
