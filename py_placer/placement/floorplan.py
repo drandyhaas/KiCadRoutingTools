@@ -6507,12 +6507,20 @@ def _grade_along_edge(ctx, c, ref, part, sev) -> Iterator[Violation]:
     # 200mm one.
     past = max(f0 * span - (centre - lo), (centre - lo) - f1 * span)
     if past > legality.EPS:
+        # the percentages in as many decimals as tell the part's from the
+        # nearer end's, and `past` in the unit it reads in: a part 40 nm past
+        # a band end read "at 18% ... band 17%-18% (0.00mm past)" (#1633)
+        end = f0 if (centre - lo) < f0 * span else f1
+        nd = next((k for k in range(7)
+                   if f"{100.0 * frac:.{k}f}" != f"{100.0 * end:.{k}f}"), 7)
+        far = (f"{past:.2f}mm" if past >= 0.01 else f"{past:.3f}mm" if past >= 0.001
+               else f"{past * 1e6:.0f}nm")
         yield Violation(
             rule='edge_connector', severity=sev, ref=ref,
-            message=(f"{ref} sits at {100.0 * frac:.0f}% along the "
+            message=(f"{ref} sits at {100.0 * frac:.{nd}f}% along the "
                      f"{span:.2f}mm {edge} edge, outside the declared band "
-                     f"{100.0 * f0:.0f}%-{100.0 * f1:.0f}% "
-                     f"({past:.2f}mm past its nearer end)"),
+                     f"{100.0 * f0:.{nd}f}%-{100.0 * f1:.{nd}f}% "
+                     f"({far} past its nearer end)"),
             measured={'along_edge_fraction': round(frac, 4),
                       'along_edge_offset_mm': round(offset, 4),
                       'along_edge_offset_pct': round(100.0 * offset / span, 2),

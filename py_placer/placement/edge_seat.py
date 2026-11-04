@@ -1145,6 +1145,30 @@ def project(seat: EdgeSeat, pose, rot_now=None) -> Tuple[float, float, float]:
     return (a, line.coord, rot) if seat.axis == 0 else (line.coord, a, rot)
 
 
+def written_pose(seat: EdgeSeat, x, y, rot, ndigits=4) -> Tuple[float, float]:
+    """`(x, y)` rounded to `ndigits` as the placement writes them, the
+    coordinate along `seat`'s edge rounded INTO the free stretch the pose
+    stands in (#1633). `project` clamps a part pulled past a stretch's end
+    onto that end exactly -- a declared `along_edge_band`'s end, say -- and
+    rounding to the nearest step then lands outward half the time, by under
+    half a step: check_floorplan, which measures at 1 nm, failed the seat's
+    own band by under 50 nm. A coordinate that rounds inside its stretch is
+    rounded to the nearest step, as before."""
+    rx, ry = round(x, ndigits), round(y, ndigits)
+    line = seat.lines.get(rot_key(rot))
+    if line is None:
+        return rx, ry
+    a, ra = (x, rx) if seat.axis == 0 else (y, ry)
+    step = 10.0 ** -ndigits
+    for f0, f1 in line.free:
+        if f0 - EPS <= a <= f1 + EPS and not f0 <= ra <= f1:
+            inward = round(ra + step if ra < f0 else ra - step, ndigits)
+            if f0 <= inward <= f1:      # a stretch narrower than a step keeps the nearest
+                ra = inward
+            break
+    return (ra, ry) if seat.axis == 0 else (rx, ra)
+
+
 def legal_on_edge(state, ref, pose) -> bool:
     """A declared pose's legality (`seeder._fixed_pose_check`) against every
     other part where it is."""

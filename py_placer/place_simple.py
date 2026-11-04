@@ -1630,10 +1630,17 @@ def main(argv=None):
             links.append({'link': h['link'], 'gap_mm': round(gap, 3), 'max_mm': h['max_mm']})
             if gap > h['max_mm'] + 1e-9:
                 print(f"  link {h['link']}: {gap:.2f} mm, past its {h['max_mm']:g} mm")
-    placements = [{'reference': r, 'new_x': round(state.parts[r].x, 4),
-                   'new_y': round(state.parts[r].y, 4),
-                   'new_rotation': state.parts[r].rot % 360.0}
-                  for r in movable]
+    # an edge-seated part's coordinate along its edge is rounded into its
+    # seat's stretch, so a part clamped onto a band's end is not written past
+    # it (#1633)
+    from placement.edge_seat import written_pose
+    placements = []
+    for r in movable:
+        p = state.parts[r]
+        x, y = (written_pose(model.edge_seats[r], p.x, p.y, p.rot)
+                if r in model.edge_seats else (round(p.x, 4), round(p.y, 4)))
+        placements.append({'reference': r, 'new_x': x, 'new_y': y,
+                           'new_rotation': p.rot % 360.0})
     write_placed_output(src, a.out, placements)
     copy_siblings(a.board, a.out)
     if tmp:
