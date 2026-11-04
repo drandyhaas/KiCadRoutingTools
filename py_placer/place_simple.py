@@ -922,14 +922,16 @@ def _name_judged(a, seeds, summaries):
         asm = summaries[s].get('assembly') or {}
         if asm.get('blocking'):
             print(f"  WARNING: seed {s} is judged {_asm_text(asm)}: it cannot be DONE as "
-                  f"placed (fewer than {a.judge} legal seeds are buildable and clean)")
+                  f"placed (fewer than {a.judge} legal seeds are buildable and clean); "
+                  f"judge_seeds skips it unless --seeds names it")
         elif asm and asm.get('blocking') is None:
             print(f"  WARNING: seed {s} is judged with its {_asm_text(asm)}: grade it with "
                   f"check_assembly --baseline before keeping it")
         fp = summaries[s].get('floorplan') or {}
         if fp.get('errors'):
             print(f"  WARNING: seed {s} is judged with {_fp_text(fp)}: it cannot be DONE "
-                  f"as placed (fewer than {a.judge} legal seeds grade clean)")
+                  f"as placed (fewer than {a.judge} legal seeds grade clean); judge_seeds "
+                  f"skips it unless --seeds names it")
         elif fp and fp.get('errors') is None:
             print(f"  WARNING: seed {s} is judged with its {_fp_text(fp)}: grade it with "
                   f"check_floorplan --intent before keeping it")

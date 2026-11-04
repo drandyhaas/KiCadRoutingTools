@@ -665,16 +665,32 @@ def _seed_defaults():
         return 6, 6, 6
 
 
+def _placement_defects(doc, named):
+    """judge_seeds' seeds it skips with no `--seeds` (#1645): the named seeds
+    judge.json grades with a floorplan error or a NOT BUILDABLE assembly.
+    judge_seeds is the authority; the import is guarded like `_seed_defaults`
+    and the fallback is a copy."""
+    try:
+        from judge_seeds import placement_defects
+        return set(placement_defects(doc, named))
+    except Exception:                                      # noqa: BLE001
+        fp, asm = doc.get("floorplan") or {}, doc.get("assembly") or {}
+        return {s for s in named if fp.get(str(s)) or asm.get(str(s))}
+
+
 def _named_judged(rows):
     """The seeds `judge.json` names (place_simple writes it beside the seeds'
-    boards once every seed is placed), else None."""
+    boards once every seed is placed) that judge_seeds will route with no
+    `--seeds` -- not one it grades with a placement defect (#1645) -- else
+    None."""
     for r in rows:
         if r["placed"]:
             try:
                 with open(os.path.join(os.path.dirname(r["placed"]), "judge.json"),
                           encoding="utf-8") as fh:
                     doc = json.load(fh)
-                return {int(s) for s in doc.get("judge") or ()}
+                named = [int(s) for s in doc.get("judge") or ()]
+                return set(named) - _placement_defects(doc, named)
             except (OSError, ValueError, TypeError, AttributeError):
                 return None
     return None

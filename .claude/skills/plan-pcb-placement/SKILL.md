@@ -1050,8 +1050,9 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   parts on the side of the chip where their pins are, connectors' partners
   right behind them. A judged seed that is NOT BUILDABLE, or that carries a
   floorplan error, cannot be DONE as placed: fast-route only the ones that
-  are clean (name them to `judge_seeds.py`, e.g. `--seeds 3,4`, §3.7), and
-  go on to the next block when none is.
+  are clean (§3.7's command skips the others, reading judge.json's
+  `floorplan` and `assembly` counts), and go on to the next block when none
+  is (the command then refuses, routing nothing).
 - **When no seed can be judged.** Three cases; in each, what to do depends
   on whether the cause is the same in every seed (below):
   - **`judge.json` names no seed** (`judge` empty; `judge_seeds.py` refuses
@@ -1157,6 +1158,12 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    python3 -X utf8 py_placer/judge_seeds.py wk/<run>/judge.json \
        --chain wk/<run>/judge_chain.txt --intent wk/<run>/intent.json
    ```
+   With no `--seeds` it skips, and names, every seed judge.json grades with
+   a floorplan error or NOT BUILDABLE (`floorplan` / `assembly` above 0):
+   such a seed cannot be DONE as placed and ranks last whatever its route.
+   When every named seed is one it routes nothing and points at §3.6's
+   "When no seed can be judged". `--seeds` routes exactly what it names,
+   an unclean seed included (one repaired by hand, case 2 there).
    It runs the SAME chain on every seed, so they compare, with `route.py`
    and every `route_diff.py` step at `--quick 2` (added when a line has
    none). Level 2 skips the recovery tail (net rescue, terminal escalation,

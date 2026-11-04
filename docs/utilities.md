@@ -1310,6 +1310,14 @@ python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_
   the names the skill and the GUI's candidates table read. A step's non-zero
   exit is logged and the chain goes on; a step whose `{out}` was not written
   stops that seed.
+- With no `--seeds`, a seed `judge.json` grades with a floorplan error or a
+  NOT BUILDABLE assembly (its `floorplan` / `assembly` count above 0) is
+  skipped and named, since no route clears either (#1645); `judge.json`
+  still names it, ranked last (#1296). When every named seed is such a
+  seed, nothing is routed (exit 2, pointing at the skill's "When no seed can
+  be judged"). `--seeds` routes exactly the seeds it names, an unclean one
+  included (a seed repaired by hand, say). A seed `judge.json` did not grade
+  is routed.
 - At the end the seeds are ranked by `quick_score.judge_key` and the best
   named; keeping it (its placement, never the `--quick` board) is the
   skill's step. `JSON_SUMMARY:` carries every seed's score and the ranking.
@@ -1333,7 +1341,8 @@ python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_
 
 Exit 0 every seed scored; 4 a seed's chain wrote no board or its score could
 not be read (named); 2 nothing run: `judge.json` unreadable or naming no
-seed, a seed's placement missing, `--full` with `--confirm`, or a chain that
+seed (or, with no `--seeds`, naming only seeds with a floorplan error or a NOT
+BUILDABLE assembly), a seed's placement missing, `--full` with `--confirm`, or a chain that
 reads no `{in}`, writes no `{out}`, names an unknown placeholder (`~{...}`,
 KiCad's overbar in a net name, is not one) or carries a shell builtin.
 
