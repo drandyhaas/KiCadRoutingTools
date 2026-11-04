@@ -1572,11 +1572,17 @@ python3 -X utf8 py_router/add_rule_area.py board.kicad_pcb board_step0.kicad_pcb
     --name MOUNT --mounting-holes 2>&1 | tee /tmp/step0_mount.txt
 
 A mounting hole here is a footprint that is one round drill of 2 mm or more
-with no signal net; a hole whose pad carries a net (a ground ring) gets no area,
-since its own copper has to reach it. The ring reaches 0.4 x the drill past the
-hole's edge (an ISO 7380 head); pass `--ring MM` for a wider washer or standoff.
-Read the list it prints: a hole that takes no screw (a test-fixture or alignment
-hole) needs no ring -- leave the step out then. When it writes nothing ("no
+with no signal net, or a closed Edge.Cuts circle of 2 mm or more that is not the
+board's outline (written as `<name>_CUT1`, `<name>_CUT2` ...); a hole whose pad
+carries a net (a ground ring) gets no area, since its own copper has to reach
+it. The ring reaches 0.4 x the drill past the hole's edge (an ISO 7380 head),
+at any size; pass `--ring MM` for a wider washer or standoff.
+Read the list it prints, one line per ring with its drill and its width: a hole
+that takes no screw (a test-fixture or alignment hole) needs no ring, and
+neither does an Edge.Cuts circle that is a round window or a cable cut-out
+rather than a screw hole -- its ring scales with its diameter (a 20 mm window
+gets an 8 mm keep-out). Leave such a hole out by the name the run prints:
+`--skip CUT2 H5`. When it writes nothing ("no
 mounting hole to write a ring for"), go on from `board.kicad_pcb`; otherwise
 every later step reads `board_step0.kicad_pcb` in its place, and check_drc
 grades the areas like any keep-out (`keepout`). Measured over the corpus's
