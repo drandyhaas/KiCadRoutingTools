@@ -1121,8 +1121,9 @@ python3 py_tools/check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
   actually achieved it; the length over the net's OWN pads (and the pour's
   clearance step past them) is listed as `at its own pad` and never breaks
   the declaration (#1582). It reads the gap on KiCad's own fill (#1624): the
-  fill stored in the board, else a KiCad refill, else the fill model, which
-  its JSON names as `gap_source`.
+  fill stored in the board, else the fill model, which its JSON names as
+  `gap_source`; it runs no refill, so grade a `fill_for_delivery.py` copy to
+  read KiCad's own fill.
 - **When G is larger than the chain's routed clearance**, this meets the pour
   step's rule never to pour wider than the routed clearance (Step 1 of the
   example chain). KiCad fills a pour at

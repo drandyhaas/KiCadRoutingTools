@@ -15,11 +15,10 @@ declared 0.2, the line set where the old read-off gave 0.15:
      at exact distance, source 'stored'; the promise holds.
   B. A stored fill at 0.10 still breaks the promise (a wrong gap fails).
   C. A stored fill over the trace reads 0 and the report says to refill.
-  D. No stored fill and no refill: the model, at the project's class, reads
-     within half a cell of 0.2 at two grid offsets; the promise holds.
-  E. No stored fill, KiCad available: a KiCad refill, read exactly (skipped
-     without a KiCad python).
-  F. The CLI exits 0 on A and 1 on B, naming the net.
+  D. No stored fill: the fill model (gap_source 'model', and a note saying
+     so; no refill is run), at the project's class, reads within half a cell
+     of 0.2 at two grid offsets; the promise holds.
+  E. The CLI exits 0 on A and 1 on B, naming the net.
 
     python3 tests/test_1624_coplanar_gap_kicad_fill.py
 """
@@ -163,8 +162,8 @@ def main():
         # D. the model alone, at two grid offsets
         for tag, oy in (('d0', 100.0), ('d1', 100.02)):
             d = build(os.path.join(tmp, tag), outline_y=oy)
-            rep, n = measure(d, fill_source='stored')
-            check(f'D[{oy}]: no fill stored, no refill -> the model',
+            rep, n = measure(d)
+            check(f'D[{oy}]: no fill stored -> the model, never a refill',
                   rep.gap_source == 'model', rep.gap_source)
             check(f'D[{oy}]: the model reads within half a cell of 0.2',
                   bool(n.gap_samples) and all(abs(g - GAP) <= 0.026 for g in n.gap_samples),
@@ -174,27 +173,14 @@ def main():
             check(f'D[{oy}]: the report says the model was read',
                   any('fill MODEL' in s for s in rep.notes), str(rep.notes))
 
-        # E. a KiCad refill
-        from kicad_exact_fill import find_kicad_python
-        if find_kicad_python() is None:
-            print('  [skip] E: no KiCad python, no refill to read')
-        else:
-            e = build(os.path.join(tmp, 'e'))
-            rep, n = measure(e)
-            check('E: no fill stored -> a KiCad refill', rep.gap_source == 'refill',
-                  f'{rep.gap_source} {rep.notes}')
-            check('E: the refill reads 0.200 at the class, not the zone',
-                  bool(n.gap_samples) and all(abs(g - GAP) < 0.002 for g in n.gap_samples),
-                  f'{min(n.gap_samples or [0]):.4f}..{max(n.gap_samples or [0]):.4f}')
-
-        # F. the CLI
+        # E. the CLI
         tool = os.path.join(ROOT, 'py_tools', 'check_impedance.py')
         run_check([sys.executable, '-X', 'utf8', tool, a, '--coplanar-gap', '0.2',
                    '--nets', '/RF'], accept=True)
-        check('F: the CLI accepts A', True)
+        check('E: the CLI accepts A', True)
         run_check([sys.executable, '-X', 'utf8', tool, b, '--coplanar-gap', '0.2',
                    '--nets', '/RF'], code=1, refuse='Nets whose declared gap was NOT achieved')
-        check('F: the CLI refuses B for the gap', True)
+        check('E: the CLI refuses B for the gap', True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:

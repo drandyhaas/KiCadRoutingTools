@@ -36,9 +36,9 @@ otherwise, so it can gate a build the way check_drc.py does. ``--exit-zero``
 suppresses that.
 
 The coplanar gap is read on KiCad's own fill at exact distance (#1624): the
-(filled_polygon ...) KiCad stored in the board, else -- when a declared gap
-is audited -- a KiCad refill, else the fill model at the project's net-class
-clearances. The report's ``gap_source`` names which.
+(filled_polygon ...) KiCad stored in the board, else the fill model at the
+project's net-class clearances (no refill is run). The report's
+``gap_source`` names which.
 """
 
 from __future__ import annotations
@@ -206,8 +206,8 @@ class BoardImpedanceReport:
     declared_gap: float = 0.0
     gap_tolerance: float = 0.0
     # #1624: whose fill the coplanar gaps were read on -- 'stored' (the
-    # (filled_polygon ...) KiCad wrote into the board), 'refill' (a KiCad
-    # refill of it), 'model' (the fill model alone) or '' (no gap measured).
+    # (filled_polygon ...) KiCad wrote into the board), 'model' (the fill
+    # model) or '' (no gap measured).
     gap_source: str = ''
 
     # --- board-level rollups (the acceptance-criteria numbers) ---
@@ -315,8 +315,8 @@ def _overlapping_components(ma, mb) -> List[Tuple[int, int]]:
 class ExactFill:
     """KiCad's own fill of one layer's pours, for the coplanar gap (#1624).
 
-    Built from (filled_polygon ...) islands -- the ones KiCad stored in the
-    board, or a KiCad refill's -- keyed by net. The gap is the EXACT distance
+    Built from the (filled_polygon ...) islands KiCad stored in the board,
+    keyed by net. The gap is the EXACT distance
     from a point of the trace's centreline to the nearest foreign fill, less
     the half-width: a reading of KiCad's copper, not of a grid. (The fill
     model's reading moves by up to a cell with where its grid falls under the
@@ -408,8 +408,7 @@ class LayerCopper:
         # model's fill edge can sit from the true one (half a cell either way).
         self.cell: float = 0.0
         # #1624: KiCad's OWN fill of the pours of these nets on this layer
-        # (stored or refilled polygons; an empty list is a pour KiCad filled
-        # with nothing). The side gap to them is measured at exact distance,
+        # (its stored polygons). The side gap to them is measured at exact distance,
         # and the model is not asked about them for it.
         self.exact_nets = set(exact_polys or ())
         self.exact: Optional[ExactFill] = (
@@ -753,20 +752,20 @@ def publish_class_clearances(pcb) -> None:
     set_board_net_clearances(pcb, nc)
 
 
-#: How `analyze_impedance` finds KiCad's fill for the coplanar gap (#1624).
-FILL_SOURCES = ('auto', 'stored', 'model')
+#: How `analyze_impedance` finds KiCad's fill for the coplanar gap (#1624):
+#: 'auto' reads the fill stored in the board, else the fill model; 'model'
+#: reads the fill model only.
+FILL_SOURCES = ('auto', 'model')
 
 
-def kicad_fill_islands(pcb, fill_source: str = 'auto', refill: bool = True
+def kicad_fill_islands(pcb, fill_source: str = 'auto'
                        ) -> Tuple[Optional[Dict[Tuple[str, str], List]], str, str]:
     """(islands, source, why) -- KiCad's fill of the board, for the gap.
 
     'stored' is the (filled_polygon ...) KiCad wrote into the board file: what
-    KiCad shows, plots and grades without a refill. With none stored and
-    `refill`, KiCad refills the board ('refill': the PCBData's own provider,
-    else a pcbnew subprocess at the project's rules). Otherwise None and
-    'model', with `why` naming the reason. `fill_source='stored'` never
-    refills; 'model' reads no fill at all."""
+    KiCad shows, plots and grades without a refill. With none stored, None and
+    'model', with `why` naming the reason. No refill is run: the audit grades
+    the fill the board carries, or says it read the model."""
     if fill_source == 'model':
         return None, 'model', 'fill_source=model'
     path = getattr(pcb, 'source_path', '') or ''
@@ -781,33 +780,12 @@ def kicad_fill_islands(pcb, fill_source: str = 'auto', refill: bool = True
                     return got, 'stored', ''
         except Exception:                                       # noqa: BLE001
             pass
-    if fill_source == 'stored' or not refill:
-        return None, 'model', 'the board stores no fill'
-    provider = getattr(pcb, 'exact_fill_provider', None)
-    if callable(provider):
-        try:
-            got = provider()
-        except Exception:                                       # noqa: BLE001
-            got = None
-        if got is not None:
-            return got, 'refill', ''
-    if not path or not os.path.isfile(path):
-        return None, 'model', 'the board stores no fill and has no file to refill'
-    try:
-        from kicad_exact_fill import refill_islands_ex
-        got, st = refill_islands_ex(path)
-    except Exception as e:                                      # noqa: BLE001
-        return None, 'model', f'the KiCad refill could not be attempted ({e})'
-    if st.ok and got is not None:
-        return got, 'refill', ''
-    return None, 'model', st.why()
+    return None, 'model', 'the board stores no fill'
 
 
-def _exact_polys_by_layer(pcb, islands, source: str
-                          ) -> Dict[str, Dict[int, List]]:
-    """{layer: {net_id: [polygon, ...]}} for every pour KiCad's fill covers.
-    A refill fills every pour, so a pour it left out poured nothing (an
-    empty list); a stored fill covers only the pours it carries."""
+def _exact_polys_by_layer(pcb, islands) -> Dict[str, Dict[int, List]]:
+    """{layer: {net_id: [polygon, ...]}} for every pour the stored fill
+    covers; a pour it does not carry is left to the fill model."""
     if not islands:
         return {}
     ids: Dict[str, int] = {}
@@ -819,10 +797,6 @@ def _exact_polys_by_layer(pcb, islands, source: str
         nid = ids.get(name)
         if nid:
             out.setdefault(layer, {}).setdefault(nid, []).extend(polys)
-    if source == 'refill':
-        for z in getattr(pcb, 'zones', None) or ():
-            if z.net_id and z.polygon:
-                out.setdefault(z.layer, {}).setdefault(z.net_id, [])
     return out
 
 
@@ -865,9 +839,8 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             net was declared non-coplanar); nets without one fall back to
             ``coplanar_gap``.
         fill_source: Whose fill the coplanar gap is read on (#1624).
-            'auto': the fill KiCad stored in the board, else -- when a
-            declared gap is being audited -- a KiCad refill, else the fill
-            model. 'stored': never refill. 'model': the fill model only.
+            'auto': the fill KiCad stored in the board, else the fill model
+            (no refill is run). 'model': the fill model only.
             KiCad's fill is read at exact distance; the model to within half
             a cell. The reference-plane continuity check reads the model
             either way.
@@ -944,15 +917,13 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
         return report
 
     # #1624: the model stamps at the clearances KiCad fills at, and the
-    # coplanar gap is read on KiCad's own fill wherever it can be had. A
-    # refill is a pcbnew run, so it is asked for only when a declared gap is
-    # being audited.
+    # coplanar gap is read on the fill KiCad stored in the board when it
+    # carries one.
     publish_class_clearances(pcb)
     auditing = any((net_declared_gaps or {}).get(nid, coplanar_gap) > 0
                    for nid, _nm in selected)
-    islands, source, why = kicad_fill_islands(pcb, fill_source,
-                                              refill=auditing)
-    exact_by_layer = _exact_polys_by_layer(pcb, islands, source)
+    islands, source, why = kicad_fill_islands(pcb, fill_source)
+    exact_by_layer = _exact_polys_by_layer(pcb, islands)
     report.gap_source = source
     if source == 'model' and auditing:
         report.notes.append(
@@ -960,11 +931,10 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             f"within half a model cell of KiCad's, and the model does not "
             f"read .kicad_dru rules. Fill the board (fill_for_delivery.py) "
             f"to grade on KiCad's own fill.")
-    elif source in ('stored', 'refill'):
+    elif source == 'stored':
         report.notes.append(
-            "Coplanar gaps read at exact distance on " +
-            ("the fill KiCad stored in the board." if source == 'stored'
-             else "a KiCad refill of the board."))
+            "Coplanar gaps read at exact distance on the fill KiCad stored in "
+            "the board.")
 
     # Lazily-built copper occupancy, one model set per layer (expensive to
     # rasterize, so shared across every net that references it).

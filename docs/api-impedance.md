@@ -127,10 +127,11 @@ not break the declaration (#1582), while a pad with no pour beside it does.
 
 KiCad fills a pour at the larger of its zone clearance and the net class of
 each item it clears, so a line whose net class is the declared gap gets that
-gap from a pour whose zone clearance is below it. Step 3 reads the gap on
-KiCad's own fill at exact distance (#1624): the fill stored in the board (as
-`fill_for_delivery.py` writes it), else a KiCad refill, else the fill model at
-the project's class clearances, to within half a model cell.
+gap from a pour whose zone clearance is below it. Step 3 reads the gap at exact
+distance on the fill stored in the board (#1624), as `fill_for_delivery.py`
+writes it; on a board with no stored fill it reads the fill model at the
+project's class clearances, to within half a model cell, and says so. It runs
+no refill: fill the board first to grade on KiCad's own fill.
 
 ## Width for a target impedance
 

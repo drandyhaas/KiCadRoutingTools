@@ -2987,11 +2987,11 @@ read from the track misses the declaration on any pad wider than the track
 is never a crossing (#1582). A pad with no pour beside it at all still counts
 as no ground. The gap is read on KiCad's own fill, at exact distance (#1624):
 the `(filled_polygon ...)` KiCad stored in the board when it carries one,
-else -- when a declared gap is audited -- a KiCad refill (one pcbnew run, at
-the project's rules), else the fill model, to within half its cell and at the
-project's net-class clearances, which KiCad fills at whatever the pour's own
-zone clearance says. The JSON's `gap_source` (`stored`, `refill`, `model`)
-and a note name which one; a stored fill lying over the trace reads gap 0 and
+else the fill model, to within half its cell and at the project's net-class
+clearances, which KiCad fills at whatever the pour's own zone clearance says.
+No refill is run: fill the board (`fill_for_delivery.py`) to grade on KiCad's
+own fill. The JSON's `gap_source` (`stored`, `model`) and a note name which
+one; a stored fill lying over the trace reads gap 0 and
 says to refill. The reference-plane check reads the fill model either way.
 A net carrying a recorded declaration also reports its declared ohms against
 the model's reading of the shipped copper -- the width, and for a pair the
