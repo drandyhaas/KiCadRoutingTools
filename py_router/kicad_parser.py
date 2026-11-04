@@ -4834,10 +4834,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
         # the first one in the block, in any number spelling KiCad writes.
         _pose = footprint_pose(fp_text)
         if _pose is None:
-            # KiCad refuses to load such a file; the part is dropped with its
+            # KiCad refuses to load a malformed pose, and a scaled
+            # (transform ...) is not modelled; the part is dropped with its
             # pads, and that must not happen in silence.
             print("WARNING: footprint %s has an (at ...) that does not parse; "
-                  "the footprint and its pads are skipped" % _block_key,
+                  "the footprint and its pads are skipped (a scaled "
+                  "(transform ...) pose reads as one)" % _block_key,
                   file=sys.stderr)
             continue
         fp_x, fp_y, fp_rotation = _pose
