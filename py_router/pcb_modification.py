@@ -4616,9 +4616,14 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                            clearance: float = 0.1,
                            check_foreign_segments: bool = False,
                            keep_input_copper: bool = False,
-                           net_clearances=None) -> Tuple[int, int, List[Segment]]:
+                           net_clearances=None,
+                           config=None) -> Tuple[int, int, List[Segment]]:
     """Drop a segment that grazes a FOREIGN pad/via below clearance when the net
     stays fully connected without it (issue #224).
+
+    `config` (#1619): its class/type-scoped .kicad_dru rules (#1491) price a
+    foreign pad or via pair-exact, as check_drc grades it, so a segment a
+    rule allows is not a candidate; None prices at the classes alone.
 
     With ``check_foreign_segments`` (diff-pair cleanup, #215) a segment that grazes
     another NET's track below clearance is also a candidate -- e.g. a redundant P
@@ -4691,10 +4696,12 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         thr = eff + s.width / 2.0 - 1e-4
         if (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                   s.end_x, s.end_y, s.layer,
-                                  base_clearance=eff, net_clearances=net_clearances) < thr or
+                                  base_clearance=eff, net_clearances=net_clearances,
+                                  config=config) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
-                                      base_clearance=eff, net_clearances=net_clearances) < thr):
+                                      base_clearance=eff, net_clearances=net_clearances,
+                                      config=config) < thr):
             return True
         if check_foreign_segments:
             slo_x, shi_x = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
@@ -4806,7 +4813,9 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         cu_graph = trust = None
 
         def _trusted_model(z):
-            return trusted_zone_model(pcb_data, z, _trusted_models)
+            # #1619: carved at each foreign item's class, as KiCad refills
+            return trusted_zone_model(pcb_data, z, _trusted_models,
+                                      net_clearances=net_clearances)
         seg_pos = {id(s): i for i, s in enumerate(net_segs)}
         _verify = _PRUNE_CONN_VERIFY
         dropped = []

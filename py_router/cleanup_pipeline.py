@@ -325,7 +325,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _gz_segs, _gz_nets, _gz_strip = prune_grazing_segments(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             check_foreign_segments=True, keep_input_copper=keep_input_copper,
-            net_clearances=_nc)
+            net_clearances=_nc,
+            config=config)  # #1619: scoped .kicad_dru rules
         counts['graze_pruned'] = _gz_segs
         _trace('graze')
         strip.extend(_gz_strip)

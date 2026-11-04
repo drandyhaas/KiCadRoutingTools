@@ -1443,7 +1443,7 @@ def fill_hole_clearance(pcb_data) -> float:
     return float(v) if src and v > 0 else KICAD_FACTORY_HOLE_CLEARANCE
 
 
-def trusted_zone_model(pcb_data, zone, cache):
+def trusted_zone_model(pcb_data, zone, cache, net_clearances=None):
     """A fill model whose component joins KiCad's fill is sure to make (#1581),
     for a REMOVAL pass that would leave copper joined to its net only by the
     pour.
@@ -1454,7 +1454,15 @@ def trusted_zone_model(pcb_data, zone, cache):
     into the caller's `cache` dict and never published to the shared caches:
     a grader reading it would grade every marginal channel open. When the
     conservative model cannot be built (an oversize zone) the default model
-    answers, as it does for every other reader."""
+    answers, as it does for every other reader.
+
+    `net_clearances` ({net_id: class clearance}, the caller's map) carves
+    each foreign item at max(zone clearance, its class), as KiCad's refill
+    does (#1619): a caller that holds the map but never published it on the
+    board (route.py's cleanup) otherwise got a model carved at the zone's
+    clearance alone, which pours onto a pad that a high-clearance class's
+    neighbours keep KiCad's fill well away from. None reads the board's
+    published map, as every other model does."""
     m = cache.get(id(zone))
     if m is not None:
         return m
@@ -1462,7 +1470,15 @@ def trusted_zone_model(pcb_data, zone, cache):
     if isinstance(std, IslandFillModel):
         m = std
     else:
-        c = ZoneFillModel(pcb_data, zone, conservative=True,
+        if net_clearances:
+            _given = net_clearances
+            net_clearances = dict(getattr(pcb_data, _NC_ATTR, None) or {})
+            net_clearances.update({int(k): float(v)
+                                   for k, v in _given.items() if v})
+        else:
+            net_clearances = None
+        c = ZoneFillModel(pcb_data, zone, net_clearances=net_clearances,
+                          conservative=True,
                           hole_clearance=fill_hole_clearance(pcb_data))
         m = c if c.ok else std
     cache[id(zone)] = m

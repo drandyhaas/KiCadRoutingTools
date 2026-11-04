@@ -212,6 +212,18 @@ the routing pipeline applies both so the model and the output file agree.
 > `tests/test_1581_graze_prune_pour_only_join.py` pins it, and
 > `tests/test_1581_route_keeps_pour_only_join_kicad.py` grades route.py's
 > output with KiCad.
+>
+> **#1619 -- at the classes KiCad fills at.** The conservative model carves
+> each foreign item at max(zone clearance, its net class), as KiCad's refill
+> does, from the prune's own `net_clearances` (`trusted_zone_model(...,
+> net_clearances=)`) -- route.py's cleanup holds the class map but does not
+> publish it on the board, so the model used to carve at the zone's clearance
+> alone and pour onto a pad that the 0.5 mm class pads beside it keep KiCad's
+> fill 0.36 mm away from. And a segment is a candidate only when it grazes at
+> the pair's real clearance: with `config` the prune reads the
+> class/type-scoped `.kicad_dru` rules (#1491) pair-exact, as check_drc does
+> and as the nudges do since #1561, so a stub a rule allows is not removed.
+> `tests/test_1619_graze_prune_class_fill.py` pins both.
 
 > **#1227 -- a dead-end prune never splits copper.** Every gated dead-end pass
 > (`add_route_to_pcb_data`'s per-commit prune, `sweep_dead_ends`,
