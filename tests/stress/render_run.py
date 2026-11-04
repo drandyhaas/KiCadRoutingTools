@@ -36,9 +36,10 @@ sys.path.insert(0, os.path.join(_REPO, 'py_tools'))  # #522
 
 def final_board_of(run_dir):
     """The run dir's final board: an explicit ``final*`` board when there is
-    one, else the chain's last board, in route_movie's chain order (the order
-    redo_commands.sh writes them; without one, step-numbered order, else
-    write-time order). None when there is no board at all."""
+    one, else the chain's last board, in route_movie's chain order (the
+    final board's lineage in the order redo_commands.sh writes it, #1638;
+    without one, step-numbered order, else write-time order). None when
+    there is no board at all."""
     from route_movie import run_boards
     boards = run_boards(run_dir)
     final = boards[-1] if boards else None

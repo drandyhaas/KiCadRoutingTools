@@ -2,12 +2,18 @@
 """Make a movie of a routing run: each step's copper, in the order it was laid
 (#482).
 
-    python3 py_router/route_movie.py RUNDIR [-o RUNDIR/routing.mp4]
+    python3 py_router/route_movie.py RUNDIR [--final KEPT.kicad_pcb] [-o RUNDIR/routing.mp4]
     python3 py_router/route_movie.py a.kicad_pcb b.kicad_pcb ... -o out.mp4
 
-A run dir's boards play in chain order (the order its redo_commands.sh writes
-them; without one, `stepN` in the name, else the order they were written, a
-`final*` board last), from the chain's input board -- the
+A run dir plays the LINEAGE of its final board, in the order its
+redo_commands.sh writes it (#1638): the boards a replay of the chain would
+make, without the tries the run went back from or the branches nothing went
+on from. The final board is `--final` when given, else the last board the
+chain writes whose name says `final`, else the last board it writes -- the
+manifest cannot say which board the run kept, so a run whose last try was
+rejected names its kept board. Without a manifest, a run dir plays `stepN` in
+the name, else the order the boards were written, a `final*` board last. Play
+starts from the chain's input board -- the
 first board `redo_commands.sh` reads -- when it can be found. Where a step left
 a `<board>_routetrace.json` (route.py / route_diff.py run with
 KICAD_ROUTE_TRACE=1), its copper plays one router event per frame: new copper
@@ -152,40 +158,63 @@ def _step_key(path):
     return (int(m.group(1)) if m else 9999, m.group(2) if m else '', b)
 
 
-def chain_order(manifest, run_dir):
-    """The boards `manifest` (a redo_commands.sh) writes, in the order its
-    commands write them, that are in `run_dir` (matched by name: a manifest
-    may name the recording machine's paths). [] when it names none."""
+def _manifest_reader():
+    """redo_stress_test's manifest reading (parse, check test, prune), the
+    one every replay runs; it lives with the replay harness."""
+    stress = os.path.join(os.path.dirname(_HERE), 'tests', 'stress')
+    if stress not in sys.path:
+        sys.path.insert(0, stress)
+    import redo_stress_test
+    return redo_stress_test
+
+
+def chain_order(manifest, run_dir, final=None):
+    """The boards of the final board's LINEAGE, in the order `manifest` (a
+    redo_commands.sh) writes them, that are in `run_dir` (matched by name: a
+    manifest may name the recording machine's paths). [] when it names none.
+
+    The lineage is the one a replay runs (`redo_stress_test.
+    compute_prune_keep`): a try the run went back from, and a branch nothing
+    went on from, are not in it (#1638). The final board is `final` when
+    given, else the last board the chain writes whose name says `final`,
+    else the last board it writes -- a manifest records which boards were
+    written, not which one the run KEPT, so a run whose last try was
+    rejected names its kept board with `final` (`--final`, or a `final*`
+    copy at the end)."""
+    R = _manifest_reader()
+    cmds = R.parse_manifest(manifest)
+    outs = [R.board_io(argv)[1] for _cwd, argv in cmds
+            if not R.is_check_cmd(argv)]
+    outs = [o for o in outs if o]
+    if final is None:
+        final = next((o for o in reversed(outs) if 'final' in o.lower()), None)
+    keep, info = R.compute_prune_keep(
+        cmds, final_board=os.path.basename(final) if final else None)
+    if final and info.get('final_board') != os.path.basename(final):
+        raise ValueError(f"no command in {manifest} writes {os.path.basename(final)}")
     out = []
-    for line in open(manifest, encoding='utf-8', errors='replace'):
-        if line.lstrip().startswith('#') or '.kicad_pcb' not in line or '--help' in line:
+    for i in sorted(keep):
+        if R.is_check_cmd(cmds[i][1]):
             continue
-        try:
-            toks = shlex.split(line)
-        except ValueError:
-            continue
-        flag = next((f for f in ('--output', '-o') if f in toks[:-1]), None)
-        if flag:
-            board = toks[toks.index(flag) + 1]
-        else:
-            pcbs = [t for t in toks if t.endswith('.kicad_pcb') and not t.startswith('-')]
-            board = pcbs[1] if len(pcbs) > 1 else None
+        board = R.board_io(cmds[i][1])[1]
         if board:
-            path = os.path.join(run_dir, os.path.basename(board))
+            path = os.path.join(run_dir, board)
             if os.path.isfile(path) and path not in out:
                 out.append(path)
     return out
 
 
-def run_boards(run_dir, manifest=None):
-    """The run dir's boards in chain order: the order the chain's manifest
-    (`manifest`, default the dir's redo_commands.sh) writes them -- a name
-    cannot say it: tigard's chain writes step2a_diffpairs before step2_route.
-    Without a manifest, step-numbered boards by step, then `final*` boards by
-    write time; with no step numbers, write-time order."""
+def run_boards(run_dir, manifest=None, final=None):
+    """The run dir's boards in chain order: the boards of the final board's
+    lineage in the order the chain's manifest (`manifest`, default the dir's
+    redo_commands.sh) writes them (`chain_order`; `final` names the kept
+    board) -- a name cannot say it: tigard's chain writes step2a_diffpairs
+    before step2_route. Without a manifest, step-numbered boards by step,
+    then `final*` boards by write time; with no step numbers, write-time
+    order."""
     manifest = manifest or os.path.join(run_dir, 'redo_commands.sh')
     if os.path.isfile(manifest):
-        got = chain_order(manifest, run_dir)
+        got = chain_order(manifest, run_dir, final)
         if got:
             return got
     all_pcb = glob.glob(os.path.join(run_dir, '*.kicad_pcb'))
@@ -323,13 +352,14 @@ def play_chain(movie, boards, first=None, *, size=SIZE, theme='dark', max_frames
 
 
 def make_movie(inputs, out=None, size=SIZE, fps=FPS, theme='dark', max_frames=MAX_FRAMES,
-               quiet=False):
+               quiet=False, final=None):
     """Write the movie of a run dir (one entry) or of a board sequence; returns
-    its path, or None when there is no board."""
+    its path, or None when there is no board. `final` names a run dir's kept
+    board (see `chain_order`)."""
     say = (lambda *a: None) if quiet else print
     if len(inputs) == 1 and os.path.isdir(inputs[0]):
         run_dir = inputs[0]
-        boards, first = run_boards(run_dir), chain_input(run_dir)
+        boards, first = run_boards(run_dir, final=final), chain_input(run_dir)
         out = out or os.path.join(run_dir, 'routing.mp4')
     else:
         boards, first = [os.path.abspath(b) for b in inputs], None
@@ -358,9 +388,18 @@ def main(argv=None):
     ap.add_argument('--max-frames', type=int, default=MAX_FRAMES,
                     help=f'past this many router events, several share a frame (default '
                          f'{MAX_FRAMES}; 0 = one frame each)')
+    ap.add_argument('--final', metavar='BOARD',
+                    help='a run dir\'s KEPT board (a name or path): the movie plays its '
+                         'lineage and ends on it. Default: the last board the chain '
+                         'writes whose name says final, else the last board it writes')
     a = ap.parse_args(argv)
-    path = make_movie(a.inputs, out=a.output, size=a.size, fps=a.fps, theme=a.theme,
-                      max_frames=a.max_frames)
+    if a.final and not (len(a.inputs) == 1 and os.path.isdir(a.inputs[0])):
+        ap.error('--final names a board of a run dir; give the run dir')
+    try:
+        path = make_movie(a.inputs, out=a.output, size=a.size, fps=a.fps, theme=a.theme,
+                          max_frames=a.max_frames, final=a.final)
+    except ValueError as e:
+        ap.error(str(e))
     return 0 if path else 1
 
 

@@ -17,6 +17,10 @@ Invocation: `/make-3d-movie <board.kicad_pcb> [--route BOARD:SET |
   judge_seeds routes and judges them, so the movie picks the seed that run
   kept. Use it for a board a `/plan-pcb-placement` run placed. Pass one of
   `--route` and `--route-chain`, not both.
+- Either way the routes are routed afresh by that chain: the full route
+  in the movie is the chain's route of the best seed, NOT the route a
+  `/plan-pcb-routing` run shipped. To film a routing run itself, use
+  `py_router/route_movie.py RUNDIR --final <the kept board>` (2D).
 - `--seed` picks the seed of a placement-only movie (default 0). A kept
   seed is filmed with its start (Step 4).
 - A given groups or intent file is used in place of writing one.

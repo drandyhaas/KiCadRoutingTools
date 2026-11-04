@@ -1691,12 +1691,19 @@ and the net. Every stress run makes one (`<rundir>/routing.mp4`, through
 
 ```bash
 python3 py_router/route_movie.py RUNDIR                       # RUNDIR/routing.mp4
+python3 py_router/route_movie.py RUNDIR --final kept.kicad_pcb # the lineage of the board the run kept
 python3 py_router/route_movie.py step1.kicad_pcb step2.kicad_pcb final.kicad_pcb -o run.mp4
 ```
 
-- A run dir's boards play in chain order -- the order its `redo_commands.sh`
-  writes them (without one: `stepN` in the name, else the order they were
-  written, a `final*` board last) -- and the movie ends on the last. The first
+- A run dir plays the LINEAGE of its final board -- the boards a replay of its
+  `redo_commands.sh` makes (the pruner's chain, `redo_stress_test.
+  compute_prune_keep`), in the order it writes them -- and ends on the final
+  board. A try the run went back from, and a branch nothing went on from, are
+  not played. The final board is `--final` when given (a name or path), else
+  the last board the chain writes whose name says `final`, else the last board
+  it writes: the manifest records what was written, not what was kept, so a run
+  whose last try was rejected names its kept board. Without a manifest: `stepN`
+  in the name, else the order they were written, a `final*` board last. The first
   frame is the chain's input board, the first board `redo_commands.sh` reads,
   when it can be found. Pours are drawn faint, so a track over a plane on its
   own layer still reads.

@@ -507,7 +507,7 @@ def refused_commands(cmds, manifest=None):
     return out
 
 
-def compute_prune_keep(cmds, refused=None):
+def compute_prune_keep(cmds, refused=None, final_board=None):
     """Indices (0-based) of the commands needed to reproduce the final board.
 
     Builds the file-dependency DAG (issue #231) and keeps only the transitive
@@ -537,7 +537,11 @@ def compute_prune_keep(cmds, refused=None):
     replay fails. A command its tool REFUSES is never recorded since #1640
     (redo_record takes the record back); for an older manifest, `refused`
     ({index: why}, `refused_commands`) names the ones the tool's own parser
-    refuses, and they are pruned as if they were not in the manifest."""
+    refuses, and they are pruned as if they were not in the manifest.
+
+    `final_board` (a basename) is the board to reproduce, when the run kept
+    one that is not the last board written (#1638: a rejected last try); its
+    LAST writer is the final command. Default: the last board written."""
     n = len(cmds)
     refused = refused or {}
     producer = {}
@@ -556,7 +560,8 @@ def compute_prune_keep(cmds, refused=None):
         deps[i] = {producer[b] for b in ins if b in producer}
         if out is not None:
             producer[out] = i
-            final = i
+            if final_board is None or out == os.path.basename(final_board):
+                final = i
 
     if final is None:
         return (set(range(n)) - set(refused),
