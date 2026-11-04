@@ -23,7 +23,12 @@ draw).
      raster cells over the F.Fab extent) the grade's line says
      `model end -1.00mm` / `-0.50mm`, and WARNs when the courtyard reads
      flush and the model stops short by more than the seat tolerance;
-     without a model, or with the export's frame a guess, nothing is said.
+     without a model, or with the export's frame a guess, nothing is said;
+  4. the emit roster's OWED line (`floorplan.model_short_owed`): a part
+     classed connector_affinity (an XT30-style name) with an in-plane face
+     whose model stops more than 0.50 mm short of its courtyard is named,
+     until an edge_connectors entry answers it; 0.50 mm short, no model, or
+     a guessed export frame says nothing.
 
     python3 tests/test_1653_edge_seat_setback_datum.py
 """
@@ -86,7 +91,8 @@ ARMS = {
 }
 
 
-def board(path, body, y=30.0):
+def board(path, body, y=30.0,
+          name='Connector_Power:Receptacle_2Barrel_Horizontal'):
     cuts = ''.join(
         f'  (gr_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) '
         f'(stroke (width 0.05) (type default)) (layer "Edge.Cuts"))\n'
@@ -101,7 +107,7 @@ def board(path, body, y=30.0):
         for r, cx in (('U1', 20), ('U2', 60)))
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write('(kicad_pcb (version 20241229) (generator "t1653")\n  (net 0 "")\n' + cuts
-                 + f'  (footprint "Connector_Power:Receptacle_2Barrel_Horizontal" '
+                 + f'  (footprint "{name}" '
                    f'(layer "F.Cu") (at 30 {y})\n'
                    '    (property "Reference" "J1" (at 0 -18) (layer "F.SilkS"))\n'
                  + body + PADS + '  )\n' + chips + ')\n')
@@ -234,6 +240,37 @@ def main():
                 check('B with the export frame a guess: no model end and no warning',
                       'model end' not in line
                       and not [v for v in res.violations if '3D model' in v.message], line)
+        # 4. the emit roster asks about such a part
+        xt = 'Connector_AMASS:AMASS_XT30PW-F_1x02_P2.50mm_Horizontal'
+        for arm, owes in (('A', False), ('B', True)):
+            body, fab, _cy = ARMS[arm]
+            p = board(os.path.join(tmp, f'o{arm}.kicad_pcb'), body, name=xt)
+            pcb = quiet(parse_kicad_pcb, p)
+            empty = floorplan.intent_from_dict(
+                {'schema': floorplan.SCHEMA_VERSION, 'kind': floorplan.KIND,
+                 'units': 'mm'}, source_path='t')
+            got = floorplan.model_short_owed(empty, pcb, p, model(fab))
+            check(f'{arm} OWED: {"named" if owes else "silent"} (model '
+                  f'{1.0 if owes else 0.5:.2f}mm short of its courtyard)',
+                  bool(got) == owes
+                  and all('J1 (' in g and 'connector_affinity' in g for g in got)
+                  and (not owes or 'stops 1.00mm short of its courtyard' in got[0]),
+                  str(got))
+            if not owes:
+                continue
+            lines = floorplan.format_roster([], (), got)
+            check('...printed as an OWED: line by the roster',
+                  any(ln.startswith('    OWED: J1 (') for ln in lines), str(lines))
+            answered = floorplan.intent_from_dict(
+                {'schema': floorplan.SCHEMA_VERSION, 'kind': floorplan.KIND,
+                 'units': 'mm', 'edge_connectors': [
+                     {'ref': 'J1', 'why': 'mated inboard, by a cable'}]},
+                source_path='t')
+            check('...answered by an edge_connectors entry naming it',
+                  floorplan.model_short_owed(answered, pcb, p, model(fab)) == [])
+            check('...silent with the export frame a guess, or no model',
+                  floorplan.model_short_owed(empty, pcb, p, model(fab, frame_sure=False)) == []
+                  and floorplan.model_short_owed(empty, pcb, p, heights.Heights()) == [])
     finally:
         heights.for_board = real
         shutil.rmtree(tmp, ignore_errors=True)

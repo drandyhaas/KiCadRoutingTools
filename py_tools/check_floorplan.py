@@ -333,6 +333,15 @@ def intent_doc_for_drift(path):
         return {}
 
 
+def _model_short_owed(intent, pcb, board):
+    """#1653: `floorplan.model_short_owed` on the board's 3D models
+    (`heights.for_board`, read once per board and cached); [] when none
+    resolve."""
+    from placement import heights as _heights
+    from placement.floorplan import model_short_owed
+    return model_short_owed(intent, pcb, board, _heights.for_board(pcb, board))
+
+
 def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
                mech=None, brief_report=None):
     """`--plan-only` (#959, #998): the plan, checked before any pose.
@@ -379,7 +388,8 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
         for v in found:
             print(f"    [{'ERROR' if v.severity == 'error' else 'warn '}] "
                   f"{v.rule}: {v.message}")
-        for line in format_roster(rows, stale):
+        for line in format_roster(rows, stale,
+                                  _model_short_owed(intent, pcb, args.board)):
             print(line)
         for line in _rc.format_rows(recon):
             print(line)
@@ -877,7 +887,9 @@ def main(argv=None):
                     clearance=_c, board_edge_clearance=_e,
                     brief_fragment=brief_fragment or None)
                 for line in format_roster(_rows,
-                                          stale_dispositions(_it, _rows)):
+                                          stale_dispositions(_it, _rows),
+                                          _model_short_owed(_it, pcb,
+                                                            args.board)):
                     print(line)
             except (IntentError, UntrustworthyOutline) as exc:
                 print(f"  rule roster not computed: {exc}")

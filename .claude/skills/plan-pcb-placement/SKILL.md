@@ -532,7 +532,13 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   short, check the body's mating face on the datasheet's drawing; if it must
   reach the edge, write as `overhang_mm.min` the overhang, in the band's own
   reading (`overhang_basis`), that brings it there (on a courtyard reading,
-  the courtyard's overhang plus the model's shortfall).
+  the courtyard's overhang plus the model's shortfall). A connector the
+  intent does not declare is asked about at emit time instead: an `OWED:`
+  line names each `connector_affinity` part with an in-plane face whose
+  model stops more than 0.5 mm short of its courtyard. Answer it with an
+  `edge_connectors[]` entry: its `edge`, `class: edge_receptacle` and an
+  `overhang_mm.min` from the datasheet when a mate plugs in across that
+  edge, else just a `why` saying it is not mated across an edge.
 - **A mate that wraps the body.** Some mates are a shell that slides over
   the receptacle's body rather than a plug into an opening in it (the
   XT-series power connectors' plug sleeves both barrels). Find the mate's

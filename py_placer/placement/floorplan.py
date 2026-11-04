@@ -4597,6 +4597,70 @@ def edge_setback_rule(entry: Dict) -> Tuple[Optional[float], bool]:
     return None, False
 
 
+def model_short_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
+    """#1653: one `OWED:` line per `connector_affinity` part (by
+    `part_class.classify_part`) with an in-plane mating face
+    (`mating.mating_face_local`) whose own 3D model stops more than
+    `part_class.SEAT_TOL_MM` short of its courtyard on that face, and that
+    the intent does not yet answer -- no `edge_connectors[]` entry names it.
+
+    That class makes no edge claim, so nothing seats or grades such a part
+    on an edge unless the plan says so, and its courtyard says nothing about
+    where its body ends: a horizontal power connector whose courtyard ran
+    2.07 mm past its model's barrel tips was seated with every barrel over
+    the board. Disclosure only: the line asks the question, an entry answers
+    it (an `edge` the grade then reads its model end against, or a `why`
+    saying it is not mated across an edge). Read in the part's own frame,
+    so a pile's staging poses do not matter. Empty when `heights` has no
+    model for the part or its frame is a guess (`Heights.frame_sure`)."""
+    if heights is None or not getattr(heights, 'frame_sure', True):
+        return []
+    bodies = getattr(heights, 'bodies', None) or {}
+    if not bodies:
+        return []
+    from .body import SOURCE_COURTYARD, board_bodies
+    from .heights import CELL_MM
+    from .mating import mating_face_local
+    from .part_class import SEAT_TOL_MM, classify_part
+    named = {str(c.get('ref')) for c in (intent.edge_connectors or ())}
+    try:
+        geoms = board_bodies(pcb_data, pcb_file)
+    except Exception:                                       # noqa: BLE001
+        return []
+    out = []
+    for ref, fp in sorted((pcb_data.footprints or {}).items()):
+        b = bodies.get(ref)
+        g = geoms.get(ref)
+        if (ref in named or b is None or not len(b[0]) or g is None
+                or g.source != SOURCE_COURTYARD or g.body_local is None):
+            continue
+        if classify_part(fp, ref).name != 'connector_affinity':
+            continue
+        face = mating_face_local(fp, g).face
+        if not face:
+            continue
+        pts, half, cy = b[0], CELL_MM / 2.0, g.body_local
+        model, court = {
+            '+x': (float(pts[:, 0].max()) + half, cy[2]),
+            '-x': (-(float(pts[:, 0].min()) - half), -cy[0]),
+            '+y': (float(pts[:, 1].max()) + half, cy[3]),
+            '-y': (-(float(pts[:, 1].min()) - half), -cy[1])}[face]
+        short = court - model
+        if short <= SEAT_TOL_MM + legality.EPS:
+            continue
+        out.append(
+            f"{ref} ({fp.footprint_name}): a connector_affinity part whose "
+            f"mating face ({face}) is in the board's plane, and whose 3D "
+            f"model stops {short:.2f}mm short of its courtyard on that face, "
+            f"so a seat on its courtyard leaves its body that far inside the "
+            f"edge. If a mate plugs into it across a board edge, declare its "
+            f"edge_connectors entry with that `edge`, `class: "
+            f"edge_receptacle` and the `overhang_mm.min` its datasheet "
+            f"needs; if it is not mated across an edge, write an "
+            f"edge_connectors entry for it with a `why` saying so")
+    return out
+
+
 #: #1155: the mount modes whose mating face must point at the declared edge.
 FACING_MOUNTS = ('edge_mount', 'through_edge')
 
@@ -12997,10 +13061,12 @@ def format_text(r: GradeResult) -> str:
     return '\n'.join(lines)
 
 
-def format_roster(rows, stale=()) -> List[str]:
+def format_roster(rows, stale=(), owed_parts=()) -> List[str]:
     """The roster as report lines: armed / dark-with-reason / dispositioned,
     and what a plan still owes. Shared by the grade report and the emit path,
-    so both print the same thing."""
+    so both print the same thing. `owed_parts`: per-part questions the plan
+    owes an answer to (`model_short_owed`, #1653), printed as `OWED:` lines
+    after the rules'."""
     armed = [r['rule'] for r in rows if r['state'] == 'armed']
     owed = roster_refusal_lines(rows)
     n_owed = sum(1 for r in rows if r['needs_disposition'])
@@ -13031,7 +13097,7 @@ def format_roster(rows, stale=()) -> List[str]:
                or '; '.join(f"`{k}` withheld: {v}"
                             for k, v in r['withheld'].items()))
         lines.append(f"    [{tag}] {r['rule']}: {why}")
-    for line in owed:
+    for line in list(owed) + list(owed_parts):
         lines.append(f"    OWED: {line}")
     for s in stale:
         lines.append(f"    STALE: {s}; remove it")

@@ -909,7 +909,16 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
   (overhanging it, or within its seat tolerance of it on its seat basis),
   with an in-plane mating face and no vertical `mount_mode`, whose model
   stops short of the edge by more than its seat tolerance
-  (`max_setback_mm`, else 0.5 mm);
+  (`max_setback_mm`, else 0.5 mm). A part nothing declares is asked about
+  before placing instead: the rule roster that `--emit-intent` and
+  `--plan-only` print carries an `OWED:` line
+  (`floorplan.model_short_owed`) for each `connector_affinity` part with an
+  in-plane mating face whose model stops more than 0.5 mm short of its
+  courtyard on that face (read in the part's own frame, so a pile's staging
+  poses do not matter), until an `edge_connectors[]` entry names it -- with
+  an `edge` (and `class: edge_receptacle`, `overhang_mm.min` from the
+  datasheet) when a mate plugs into it across an edge, else with a `why`.
+  Silent where no model resolves or the export's frame is a guess;
 - `pad_copper_edge`: the part's pad-copper edge clearance from
   `grade_pad_edge_clearance`, at the floor `grade_pad_legality` resolves, or
   at a `.kicad_dru` `edge_clearance` rule binding the part's pads (#1615,
