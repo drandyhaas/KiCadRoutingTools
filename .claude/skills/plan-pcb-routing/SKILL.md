@@ -3417,7 +3417,7 @@ step, a late `route_diff.py` (a skew fix, say) included; then the closing
 nothing routes after them. Run `check_connected` and `check_drc` again on the
 last joined board, since new copper changes how the pours fill. If a route
 step has to run after the joins, apply the joins again after it.
-`route_plan_check` accepts `check_join.py ... --keep-staged` lines after the
+`route_plan_check` accepts `check_join.py ... --keep-staged OUT.kicad_pcb` lines after the
 final `route.py` and only there (R03, R04); a `check_join.py` without
 `--keep-staged` writes nothing, and goes in as a commented verification line
 like the other checks. The GUI plan form carries no join: `manifest_to_plan`
@@ -3769,7 +3769,7 @@ next to the board, so the exact tuned choices replay with no LLM:
    wrong relative path) makes a chain whose `final.kicad_pcb` is perfectly
    good report as failed (measured: half the 15-board wave reported
    rc≠0 from exactly this). The last executable line must be the final
-   `route.py`, or a hand join after it (`check_join.py ... --keep-staged`,
+   `route.py`, or a hand join after it (`check_join.py ... --keep-staged OUT.kicad_pcb`,
    the one exception in "End every chain on route.py").
 2. **`<board>_plan.json`** — the GUI AI-tab form:
 
