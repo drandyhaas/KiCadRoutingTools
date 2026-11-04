@@ -184,8 +184,18 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
     trace actually denied every good via site (Net-(C63-Pad1), 0.325mm from
     the best spot) was never identified. Vote find_via_position_blocker over a
     coarse ring of sites within the search radius and return the most common
-    non-protected, not-yet-ripped net."""
+    non-protected, not-yet-ripped net.
+
+    A site whose nearest net is a never-rip POUR casts no vote. #1620 made
+    every poured net never-rip, and the vote then handed such a site to the
+    runner-up behind the pour, whose rip frees none of them: on a board with
+    a second pour that elected a different blocker for a plane-pad tap than
+    before #1620, and the step ended with more open nets. Sites held by any other never-rip net
+    (a routed diff pair, locked copper) vote as they always have."""
     from collections import Counter
+    from kicad_parser import pour_zones
+    pours = {z.net_id for z in pour_zones(getattr(pcb_data, 'zones', None) or [])
+             if z.net_id and z.net_id != net_id and z.net_id in protected_net_ids}
     votes = Counter()
     step = max(blocker_config.grid_step * 4, 0.2)
     # Vote only the NEAR band: distant sites belong to other neighborhoods and
@@ -199,9 +209,15 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
             d = math.hypot(i, j) * step
             if d < 0.2 or d > r:
                 continue
+            x, y = pad.global_x + i * step, pad.global_y + j * step
             b = find_via_position_blocker(
-                pad.global_x + i * step, pad.global_y + j * step,
-                pcb_data, blocker_config, net_id, protected_net_ids, quiet=True)
+                x, y, pcb_data, blocker_config, net_id, None, quiet=True)
+            if b in pours:
+                continue
+            if b in protected_net_ids:
+                b = find_via_position_blocker(
+                    x, y, pcb_data, blocker_config, net_id, protected_net_ids,
+                    quiet=True)
             if b is not None and b not in protected_net_ids and b not in exclude_net_ids:
                 votes[b] += 1.0 / (0.3 + d)
     return votes.most_common(1)[0][0] if votes else None
