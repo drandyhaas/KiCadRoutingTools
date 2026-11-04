@@ -719,6 +719,20 @@ labelled `derived_default` in `context.basis`
 body (a USB receptacle's shell lip) keeps `min` 0. Measured: KiCad's stock
 `SMA_Amphenol_132289_EdgeMount`, emitted at the pose its footprint draws,
 reads 11.93 mm and gets `min` 11.719.
+Such a part is given its edge, and so this floor, **whatever its class**
+(#1634): a name with no part class (the same jack as `RF:132289`) no longer
+loses them, and its note says the edge came from its model.
+
+**The emitter reads an overhang as a distance (#1634).** Whether an observed
+overhang is a band or damage (past the sanity cap, `overhang_capped`), and an
+edged row's `max`, are read on the courtyard's farthest reach past the
+outline along the normal of its edge and of the others
+(`courtyard_overhang_past`, the grade's reading), never on
+`courtyard_overhang`'s ranking sum, which adds each off-board corner of a
+non-rectangular outline: a 2 mm chamfer at the far corner read that jack's
+11.93 mm as 35.79, called it damage and dropped its edge. An edge-less row's
+band is still written on the summed reading, because the grade reads an
+entry that declares no edge on it.
 
 **The band is never negative (#1532).** It is how far the part reaches
 PAST its edge, and a body inside the board reads 0, so a negative `min` or

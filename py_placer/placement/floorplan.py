@@ -11693,13 +11693,30 @@ def emit_intent(pcb_data, pcb_file: str, *,
     from .heights import depth_past_edge
     for ref in sorted(parts):
         near = _at_edge_gate.rect_outside_amount(parts[ref].rect)
-        # the overhang the grade reads its band on, at zero margin (#1301)
-        amt = courtyard_overhang(_overhang_geo, erect[ref])
         if _pile and ref not in _pile_locked:
             if near > legality.EPS:
                 _pose_withheld.append(ref)
             continue
         if near > legality.EPS:
+            # #1634: the overhang is a DISTANCE -- the courtyard's farthest
+            # reach past the outline, along the normal of the edge the part
+            # sits on and of the others (`courtyard_overhang_past`, the
+            # reading #1403 gave the grade), at zero margin (#1301) -- never
+            # `courtyard_overhang`'s ranking sum, which adds each off-board
+            # corner of a non-rectangular outline and read a jack 11.93 mm
+            # past the edge as 35.79 once the far corner was chamfered.
+            edge0 = (_nearest_edge(
+                parts[ref].rect, bounds, edge_reach_mm(state),
+                facing=lambda: _part_facing(pcb_data, pcb_file, ref,
+                                            _emit_bodies))
+                if bounds else None)
+            _cy0, _cy0_others = courtyard_overhang_past(
+                _overhang_geo, erect[ref], edge0)
+            amt = max([_cy0] + list(_cy0_others.values()))
+            # An entry declaring NO edge is graded on the summed reading
+            # (`courtyard_overhang_past` with no edge), so its band is read
+            # in that currency: the board it was read off grades it clean.
+            amt_edgeless = courtyard_overhang(_overhang_geo, erect[ref])
             # An OBSERVED overhang above the sanity cap is not a band. Emitting
             # it as one launders the damage into the spec that is supposed to
             # gate the damage's repair -- see EDGE_BAND_SANITY_MM.
@@ -11709,6 +11726,13 @@ def emit_intent(pcb_data, pcb_file: str, *,
             if fp is not None:
                 from .part_class import classify_part, default_band
                 pc = classify_part(fp, ref)
+            # #1634: a part whose own 3D model has body at board depth past
+            # its edge is an edge-mount part whatever its name says: it is
+            # given that edge (and so #1603's floor below), as a class would.
+            _depth_edged = (
+                not over_cap and (pc is None or pc.name not in SEATED_CLASSES)
+                and (depth_past_edge(state.heights, pcb_data, ref, edge0)
+                     or 0.0) > legality.EPS)
             if pc is not None and pc.name == 'mount_hole':
                 # Run-5: never bless a mounting hole's overhang -- the
                 # pattern fit owns hole positions, and an observation entry
@@ -11736,7 +11760,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
                     # that is plausible (under the sanity cap): a suspect
                     # pose's edge is withheld, but a card's fingers 1.7 mm
                     # past the edge are not damage (pcie_backplane J2)
-                    band = default_band(pc.name, fp, 0.0 if over_cap else amt)
+                    band = default_band(pc.name, fp,
+                                        0.0 if over_cap else amt_edgeless)
                     entry['overhang_mm'] = band
                     if band == default_band(pc.name, fp):
                         band_default.add(ref)
@@ -11751,8 +11776,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
                         f'plausible band ({_band_cap(ref):.3f}mm) and is '
                         f'treated as DAMAGE, not an allowance')
                 else:
-                    entry['overhang_mm'] = {'min': 0.0,
-                                            'max': round(amt + 0.5, 3)}
+                    entry['overhang_mm'] = {
+                        'min': 0.0, 'max': round(amt_edgeless + 0.5, 3)}
                 conns.append(entry)
                 declared.add(ref)
                 continue
@@ -11776,7 +11801,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
                                   f'how a 160mm displacement became a 160mm '
                                   f'spec allowance (run 10)')}
                 band_default.add(ref)
-            elif pc is None or pc.name not in SEATED_CLASSES:
+            elif (pc is None or pc.name not in SEATED_CLASSES) \
+                    and not _depth_edged:
                 # Only an edge part claims an edge: the placer seats only
                 # those (`edge_seat.SEATED_CLASSES`), so a cap or a solder
                 # jumper the designer put by the edge, declared on it, failed
@@ -11784,35 +11810,34 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 # The band stays, so the observed pose still grades clean.
                 entry = {'ref': ref,
                          'overhang_mm': {'min': 0.0,
-                                         'max': round(amt + 0.5, 3)},
+                                         'max': round(amt_edgeless + 0.5, 3)},
                          'note': (f'overhang observed at {amt:.3f}mm; not an '
                                   f'edge part '
                                   f'({(pc and pc.name) or "no part class"}),'
                                   f' so no edge is claimed')}
             else:
-                entry = {'ref': ref, 'edge': _nearest_edge(
-                             parts[ref].rect, bounds, edge_reach_mm(state),
-                             facing=lambda: _part_facing(
-                                 pcb_data, pcb_file, ref, _emit_bodies)),
+                entry = {'ref': ref, 'edge': edge0,
                          'overhang_mm': {'min': 0.0,
                                          'max': round(amt + 0.5, 3)}}
+                if _depth_edged:
+                    entry['note'] = (
+                        f"an edge part by its 3D model, which has body at "
+                        f"board depth past the {edge0} edge "
+                        f"({(pc and pc.name) or 'no part class'})")
                 # #961/#1607: an edged entry's band is GRADED on the number
                 # `rule_edge_connector` reads -- the drawn body when one can
                 # be measured, else the courtyard's distance past the
                 # DECLARED edge (`courtyard_overhang_past`, #1403) -- and the
                 # other edges' overhang against the same `max`. `amt` is the
-                # summed ranking reading, which can come out narrower than
-                # either: a pad-box courtyard 1.6 mm inboard of a flush body
-                # is esp_prog's USB1, and crkbd's J1, hanging into the milled
-                # gap past a notch, read 1.80 summed and 4.63 past its edge.
-                # Widen to the grade's reading in that case alone, and say
-                # so: where it is no more than `amt` the emitted band is
+                # courtyard's reading (#1634), which a drawn body can exceed:
+                # a pad-box courtyard 1.6 mm inboard of a flush body. Widen
+                # to the grade's reading in that case alone, and say so:
+                # where it is no more than `amt` the emitted band is
                 # unchanged. Either way `max` is at least every number the
                 # rule grades against it plus 0.5, so an edged entry grades
                 # its band clean on the board it was read off by
                 # construction.
-                _cy, _cy_others = courtyard_overhang_past(
-                    _overhang_geo, erect[ref], entry['edge'])
+                _cy, _cy_others = _cy0, _cy0_others
                 graded, _gbasis, body = band_amount(
                     _overhang_geo, ref, entry['edge'], _cy, 0.0)
                 _gothers = (body.get('other_body_edge_overhang_mm')
@@ -11827,8 +11852,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
                         f"band max from the courtyard's {need:.3f}mm "
                         f"overhang past the outline (the reading the grade "
                         f"takes, #1403), ") + (
-                        f"wider than the occupancy reading {amt:.3f}mm it "
-                        f"would otherwise use")
+                        f"wider than the courtyard's {amt:.3f}mm it would "
+                        f"otherwise use")
                 # #1603: a part whose own 3D model has body at board depth
                 # (an edge-mount jack the board slides into) must overhang
                 # far enough to keep that body off the board. The band's
