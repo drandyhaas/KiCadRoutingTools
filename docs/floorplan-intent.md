@@ -715,8 +715,10 @@ the seat then puts it where its body clears the board. It is never above the
 observed reading, so the board it was read off grades it clean, and it is
 labelled `derived_default` in `context.basis`
 (`edge_connectors[<ref>].overhang_mm.min`) beside the band's own
-`observed_baseline`. A part with less than the gate's `DEPTH_MIN_MM2` of such
-body (a USB receptacle's shell lip) keeps `min` 0. Measured: KiCad's stock
+`observed_baseline`. A part with too little such body for the gate ever to
+read it (under `DEPTH_MIN_MM2` in area and `DEPTH_MIN_SPAN_MM` in length)
+keeps `min` 0; a micro-B receptacle's 5.25 mm front lip is long enough, so it
+gets a floor (#1635). Measured: KiCad's stock
 `SMA_Amphenol_132289_EdgeMount`, emitted at the pose its footprint draws,
 reads 11.93 mm and gets `min` 11.719.
 Such a part is given its edge, and so this floor, **whatever its class**

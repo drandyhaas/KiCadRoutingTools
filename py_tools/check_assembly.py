@@ -1119,11 +1119,12 @@ def main():
               + (" -- NOT BUILDABLE" if through_gating else ''))
         for r in through['rows']:
             b = r['box']
-            print(f"    {r['ref']} {r['area_mm2']}mm2 at x {b[0]}..{b[2]}, "
-                  f"y {b[1]}..{b[3]}"
+            print(f"    {r['ref']} {r['area_mm2']}mm2 over {r['span_mm']:g}mm, "
+                  f"{r['inside_mm']:g}mm inside the outline, at x "
+                  f"{b[0]}..{b[2]}, y {b[1]}..{b[3]}"
                   + ('' if r['gates'] else
-                     f"  [under {_heights.DEPTH_MIN_MM2:g}mm2: a model drawn "
-                     f"low, never gates]"))
+                     f"  [under {_heights.DEPTH_MIN_MM2:g}mm2 and "
+                     f"{_heights.DEPTH_MIN_SPAN_MM:g}mm long: does not gate]"))
     elif through['unmeasured']:
         print(f"  body through the board: not measured ({through['unmeasured']})")
     # #1250, the NINTH: a test point a move left under another part's body

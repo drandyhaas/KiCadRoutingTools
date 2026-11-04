@@ -811,10 +811,15 @@ from each, `heights.DEPTH_FACE_MM`), read as the model's surfaces in that
 slab and its cross-section half way through the board. A right-angle or
 edge-mount jack whose board slides into its slot is seated past the edge by
 the slot's depth; placed wholly on the board, its housing is in the
-laminate. Such a part is NOT BUILDABLE, absolutely and lock or not, when at
-least `DEPTH_MIN_MM2` (4 mm^2) of that body lies on 0.25 mm cells wholly
-inside the outline (`BODY THROUGH THE BOARD`, JSON `body_in_board_count`,
-`body_in_board` rows with `area_mm2`, `box` and `gates`). What lies on the
+laminate. Such a part is NOT BUILDABLE, absolutely and lock or not, when the
+part of that body on 0.25 mm cells wholly inside the outline is at least
+`DEPTH_MIN_MM2` (4 mm^2) in area OR at least `DEPTH_MIN_SPAN_MM` (3 mm) long
+-- the longest side of its box in the part's own frame (#1635): by area
+alone, the stock edge-mount SMA jack 0.7 mm in, its body 0.74 mm inside the
+edge across 6.5 mm, read 2.0 mm^2 and passed (`BODY THROUGH THE BOARD`, JSON
+`body_in_board_count`, `body_in_board` rows with `area_mm2`, `span_mm`,
+`inside_mm` -- how far the deepest such cell lies inside the outline --
+`box` and `gates`; a row under the gate prints what it measured). What lies on the
 part's own pads and drilled holes is left out (a header's pins in their
 holes), a cutout is not the board (a mid-mount part over its slot reads
 nothing), and a body that starts on the edge reads nothing. A board whose
@@ -822,8 +827,10 @@ models were not read (no kicad-cli, an export whose frame is a guess, as on
 a board with one resolved model) reports `body_in_board_count` null with
 `body_in_board_unmeasured`, and does not gate. Measured on the 22 tracked
 boards: the only bodies inside an outline are SOT models drawn 1.0-1.45 mm
-low, at most 0.94 mm^2 (esp_prog Q1/Q2, glasgow_revC U7), listed and never
-gating.
+low, at most 0.94 mm^2 (esp_prog Q1/Q2, glasgow_revC U7) and 2.5 mm long,
+listed and not gating. A micro-B receptacle's front lip at board depth
+(5.25 x 0.5 mm, past the edge as drawn) gates once it is inside the outline,
+so `--emit-intent` gives such a receptacle a band floor too.
 
 Exit 0 buildable; 2 usage or load error; 4 not buildable.
 

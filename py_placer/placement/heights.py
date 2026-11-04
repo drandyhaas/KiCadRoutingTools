@@ -130,6 +130,16 @@ DEPTH_FACE_MM = 0.2
 #: (ulx3s US1/US2, watchy J2). KiCad's stock edge-mount SMA jack seated
 #: wholly on the board reads 76 mm^2
 DEPTH_MIN_MM2 = 4.0
+#: ...or from this LONG a slice, mm: the longest side of that body's box in
+#: the part's own frame (#1635). Area alone let a thin slice along a body's
+#: front stand inside the edge however far along it ran: the stock SMA jack
+#: 0.7 mm in, its body 0.74 mm inside the edge across 6.5 mm, read 2.0 mm^2.
+#: Measured on the 22 tracked boards at their own poses: the longest such
+#: body inside an outline is 2.5 mm (a SOT-143 drawn low),
+#: against 6 mm for that jack's first row of cells; a micro-B receptacle's
+#: front lip, past the edge as drawn, is 5.25 mm long, so placed inside the
+#: outline it gates too
+DEPTH_MIN_SPAN_MM = 3.0
 #: the thickness of a board whose file says none, mm (KiCad's default)
 _THICKNESS_MM = 1.6
 #: kicad-cli's export, a hang guard (a 500-part board takes under a minute)
@@ -1618,22 +1628,26 @@ def body_in_board(h, pcb_data, poses=None) -> Dict[str, object]:
     A cell counts when it lies WHOLLY inside the outline (all four corners on
     the board), so a body that starts on the edge, as the designer seats an
     edge-mount part, reads nothing. `poses` {ref: (x, y, rot)} overrides the
-    parts' board poses. `{'rows': [{'ref', 'area_mm2', 'box', 'gates'}],
-    'gating_refs', 'count', 'unmeasured', 'basis'}` -- `rows` every part
-    with any such cell, `gates` from `DEPTH_MIN_MM2`; `unmeasured` says why
+    parts' board poses. `{'rows': [{'ref', 'area_mm2', 'span_mm',
+    'inside_mm', 'box', 'gates'}], 'gating_refs', 'count', 'unmeasured',
+    'basis'}` -- `rows` every part with any such cell; `span_mm` the longest
+    side of those cells' box in the part's own frame, `inside_mm` how far
+    the deepest of them lies inside the outline; `gates` from `DEPTH_MIN_MM2`
+    of area or a `DEPTH_MIN_SPAN_MM` span (#1635); `unmeasured` says why
     nothing could be read (None when it was)."""
     import numpy as np
     basis = (f'the part\'s own 3D model (one kicad-cli GLB export) strictly between '
              f'the board\'s faces, {DEPTH_FACE_MM:g} mm in from each, its own pads '
              f'and drilled holes left out, on {CELL_MM:g} mm cells wholly inside '
-             f'the outline; gates from {DEPTH_MIN_MM2:g} mm^2')
+             f'the outline; gates from {DEPTH_MIN_MM2:g} mm^2, or from a '
+             f'{DEPTH_MIN_SPAN_MM:g} mm long slice')
     note = getattr(h, 'depth_note', 'no heights')
     depth = getattr(h, 'depth', None) or {}
     out = {'rows': [], 'gating_refs': [], 'count': 0, 'unmeasured': note,
            'basis': basis}
     if note is not None or not depth:
         return out
-    from shapely import contains_xy, prepare
+    from shapely import contains_xy, distance, points, prepare
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     from check_drc import board_edge_geometry
@@ -1668,15 +1682,32 @@ def body_in_board(h, pcb_data, poses=None) -> Dict[str, object]:
         p = pts[inside]
         bx, by = x + p[:, 0] * c - p[:, 1] * s, y + p[:, 0] * s + p[:, 1] * c
         area = round(float(inside.sum()) * CELL_MM * CELL_MM, 4)
-        out['rows'].append({'ref': ref, 'area_mm2': area,
+        span = round(_cells_span(p), 4)
+        deep = round(float(distance(region.boundary, points(bx, by)).max())
+                     + half, 3)
+        out['rows'].append({'ref': ref, 'area_mm2': area, 'span_mm': span,
+                            'inside_mm': deep,
                             'box': [round(float(bx.min()) - half, 3),
                                     round(float(by.min()) - half, 3),
                                     round(float(bx.max()) + half, 3),
                                     round(float(by.max()) + half, 3)],
-                            'gates': area >= DEPTH_MIN_MM2})
+                            'gates': _gates(area, span)})
     out['gating_refs'] = [r['ref'] for r in out['rows'] if r['gates']]
     out['count'] = len(out['gating_refs'])
     return out
+
+
+def _cells_span(pts) -> float:
+    """The longest side, mm, of the box of the cells centred at `pts`
+    (n, 2), in the frame they are given in (the part's own)."""
+    return max(float(pts[:, 0].max() - pts[:, 0].min()),
+               float(pts[:, 1].max() - pts[:, 1].min())) + CELL_MM
+
+
+def _gates(area: float, span: float) -> bool:
+    """Does a body at board depth this large inside the outline gate?"""
+    return (area >= DEPTH_MIN_MM2 - 1e-9
+            or span >= DEPTH_MIN_SPAN_MM - 1e-9)
 
 
 def depth_past_edge(h, pcb_data, ref, edge, pose=None) -> Optional[float]:
@@ -1687,14 +1718,15 @@ def depth_past_edge(h, pcb_data, ref, edge, pose=None) -> Optional[float]:
     reads: the innermost cell's far side, mm along the edge's outward
     normal; negative when such a cell already does. None when no body of it
     is at board depth, or none was read, or too little for any pose to gate
-    (under `DEPTH_MIN_MM2` in all).
+    (under `DEPTH_MIN_MM2` and `DEPTH_MIN_SPAN_MM` in all).
 
     So a part that must overhang to keep its body out of the laminate needs
     an `overhang_mm` of at least (its band reading here) minus this."""
     pts = (getattr(h, 'depth', None) or {}).get(ref)
     b = getattr(pcb_data.board_info, 'board_bounds', None)
     fp = (pcb_data.footprints or {}).get(ref)
-    if pts is None or len(pts) * CELL_MM * CELL_MM < DEPTH_MIN_MM2 or not b or fp is None:
+    if (pts is None or not len(pts) or not b or fp is None
+            or not _gates(len(pts) * CELL_MM * CELL_MM, _cells_span(pts))):
         return None
     x, y, rot = pose or (fp.x, fp.y, fp.rotation or 0.0)
     a = math.radians(-(rot % 360))
