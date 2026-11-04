@@ -13,9 +13,9 @@ both parts the whole route does not admit. On tracked boards this pins:
    pass through, the connector J1 named and not taken;
 3. ulx3s: U1 -> U2 (an SDRAM in a TSOP) not taken -- no bus taken;
 4. a pair is laid whole or not at all: a leg whose partner is on a third part as well is refused, both legs of a
-   point-to-point pair kept, and a base name that is a net of its own is no pair; a net whose name's last part is
-   another net's too is refused (the whole route names a net by it); the K-ladder keeps a pair's two legs in one
-   river, so no prefix K runs a leg alone;
+   point-to-point pair kept, and a base name that is a net of its own is no pair; two nets whose names end in one
+   part are each named by the full name, a net alone of its kind by its last part (coherent_nets.net_keys); the
+   K-ladder keeps a pair's two legs in one river, so no prefix K runs a leg alone;
 5. a board with no bus: route_buses hands the board on as it came, exit 1, the summary saying none was found.
 """
 import contextlib
@@ -83,12 +83,15 @@ def main():
     if sorted(got) != ['A_P'] or 'A_N' not in got['A_P'] or 'R9' not in got['A_P']:
         fails.append(f'half pairs {got}, want A_P alone (its A_N on R9 as well); B whole, C no pair, DP no pair '
                      f'(D is a net of its own)')
-    # ...and a net whose name's last part is another's too is refused (the zynq's ENABLE and TEST/ENABLE)
+    # ...and two nets whose names end in one part are named apart, each by its full name, where a net alone of its kind
+    # is named by its last part (coherent_nets.net_keys: ENABLE and TEST/ENABLE, once one net to the whole route)
+    from coherent_nets import net_keys
     pcb = NS(nets={i: n for i, n in enumerate([
         net('ENABLE', 'U1', 'U5'), net('TEST/ENABLE', 'U1', 'U5', 'RX5'), net('/X', 'U1', 'U5'), net('/s/Y', 'U1')])})
-    got = rb.name_clashes(pcb, ['ENABLE', '/X'])
-    if sorted(got) != ['ENABLE'] or 'TEST/ENABLE' not in got['ENABLE']:
-        fails.append(f'name clashes {got}, want ENABLE alone, naming TEST/ENABLE')
+    got = net_keys(pcb)
+    want = {'ENABLE': 'ENABLE', 'TEST/ENABLE': 'TEST/ENABLE', '/X': 'X', '/s/Y': 'Y'}
+    if got != want:
+        fails.append(f'net keys {got}, want {want}')
     # ...and the K-ladder keeps a pair's two legs in one river, the earlier leg's, side by side (make_bench.pairs_whole):
     # a prefix K that took one leg ran it alone, as a single (the zynq LVDS bus's RX_D3_N in its second river, RX_D3_P in
     # its fourth); a river a leg leaves empty goes
@@ -130,8 +133,8 @@ def main():
     if fails:
         return 1
     print('PASS: ball arrays told from row parts; the DDR3 bus taken, its resistor-pack nets and the connector left '
-          'named; a TSOP at one end not taken; a pair whole or not at all, and in one river of the ladder; a clashing '
-          'name refused; no bus, the board as it came')
+          'named; a TSOP at one end not taken; a pair whole or not at all, and in one river of the ladder; two nets of '
+          'one last part named apart; no bus, the board as it came')
     return 0
 
 
