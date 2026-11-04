@@ -620,14 +620,29 @@ manifest routes.
     then ships the input's project as authored, and under `board` a descent
     stops at what KiCad grades that unchanged project at. (GUI: the Route
     tab's Escalation choice, and "Fix DRC settings after routing" unticked.)
-  - Request no size below the board's minimums. `--track-width`,
+  - Request no size below the minimum that binds the net. `--track-width`,
     `--via-size` / `--via-drill` come from the Board Setup constraints that
-    `list_nets.py --design-rules` prints, not from the fab floor; leave
+    `list_nets.py --design-rules` prints, not from the fab floor. The
+    project's own `.kicad_dru` may relax one of them for named nets (a
+    smaller via ring on two RF nets, say); `--design-rules` lists such rules
+    under the Board Constraints ("Rules in ... that RELAX a Board
+    Constraint"), with the condition each binds. Give those nets a step of
+    their own, `--nets <those nets> --via-size V --via-drill D`: an explicit
+    size applies to every net of its step, so a net the rule does not cover
+    ships below the board minimum (`check_drc`: VIA-ANNULAR). Leave
     `--clearance` / `--clearance-ceiling` (and the cap pass's `--clearance`)
     OMITTED so each class routes at its own clearance, as the project grades
     it; leave `--hole-to-hole-clearance` / `--board-edge-clearance` omitted
     too (they then read the board's own). Neither flag above stops an explicit
     request: it is drawn as asked, floored only at the physical fab floor.
+  - A rule with an `annular_width` constraint prints `.kicad_dru rule '<name>':
+    NOT honoured (annular_width ...)` at the start of a routing step, whatever
+    the vias are: no routing step sizes a via by it, so the line is a disclosure
+    that no chain removes. Whether the vias meet it is the line `route.py` and
+    `route_diff.py` print when they end, `.kicad_dru rule '<name>'
+    (annular_width min X mm): this step's N via(s) it binds meet it` or
+    `... K BELOW it` (`JSON_SUMMARY.design_rules.annular_rules`), and
+    `check_drc` for the whole board.
   - Every descent is a DECISION for the user, not one the run makes. Each one
     is a `design_rules` row in the step's `JSON_SUMMARY` (net, kind,
     requested, delivered, site) and in the `Design rules [...]` line; report

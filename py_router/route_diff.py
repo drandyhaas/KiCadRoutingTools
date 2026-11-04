@@ -2576,6 +2576,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     _dr857 = narrowed_summary()
     if _dr857 is not None:
         summary['design_rules'] = _dr857
+    # #1649: whether this call's vias meet each annular_width rule the "NOT
+    # honoured" line (printed before routing) names -- route.py's key
+    _rules1649 = getattr(config, 'rules', None)
+    if _rules1649 is not None:
+        try:
+            from design_rules import annular_grade_lines
+            _ag = _rules1649.annular_grade(
+                [_v for _r in results for _v in (_r.get('new_vias') or [])])
+            if _ag:
+                summary.setdefault('design_rules', {})['annular_rules'] = _ag
+                for _line in annular_grade_lines(_ag):
+                    print(f"  {_line}")
+        except Exception as _age:                               # noqa: BLE001
+            print(f"  (annular_width grade skipped: {_age})")
     # #1491: the class/type-scoped rules this call honoured, and each relaxing
     # one another routed pair held at its class value
     if getattr(config, 'scoped_clearance', None) is not None:

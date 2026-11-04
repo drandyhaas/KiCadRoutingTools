@@ -852,6 +852,34 @@ def net_clearance_map(pcb_path, net_names, rules=None):
     return out
 
 
+def _print_relaxing_dru_rules(pcb_path, constraints):
+    """#1649: the sibling `.kicad_dru` rules that relax a Board Constraint
+    printed above, for the nets (or items) their condition names. A size
+    below the board minimum is legal only there, so it belongs on a step of
+    its own whose --nets are those nets."""
+    dru = os.path.splitext(pcb_path)[0] + '.kicad_dru'
+    if not os.path.isfile(dru):
+        return
+    try:
+        from design_rules import parse_dru, relaxing_rules
+        rows = relaxing_rules(parse_dru(open(dru, encoding='utf-8').read())[0], constraints)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  (.kicad_dru rules not read: {e})")
+        return
+    if not rows:
+        return
+    print(f"Rules in {os.path.basename(dru)} that RELAX a Board Constraint above, for "
+          f"the items their condition names only:")
+    for r in rows:
+        where = (f" if {r['condition']}" if r['condition'] else ' (no condition: every item)')
+        layer = f" on {r['layer']}" if r['layer'] else ''
+        print(f"  - '{r['rule']}': {r['kind']} min {r['min']:g} "
+              f"(board {r['board_key']} {r['board']:g}){layer}{where}")
+    print("  A size below the board minimum is legal only on those items: request it on a "
+          "step of its own whose --nets are the nets the rule names; on any other net it "
+          "ships below the board minimum (check_drc grades it).")
+
+
 def print_design_rules(pcb_path):
     """Human + skill-friendly dump of the board's net-class design rules."""
     dr = read_design_rules(pcb_path)
@@ -882,6 +910,7 @@ def print_design_rules(pcb_path):
     if dr['constraints']:
         cons = "  ".join(f"{k}={v}" for k, v in dr['constraints'].items())
         print(f"\nBoard Constraints (DRC-enforced minima, {dr['copper_layers']}-layer): {cons}")
+        _print_relaxing_dru_rules(pcb_path, dr['constraints'])
     _tier, _ovr = get_default_fab_tier()
     _tier_desc = f"{_tier}" + (f" + overrides({','.join(sorted(_ovr))})" if _ovr else "")
     print(f"Manufacturing floor (active fab tier: {_tier_desc}; Constraint or JLC fab "

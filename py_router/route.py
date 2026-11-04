@@ -6092,6 +6092,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _rules = getattr(config, 'rules', None)
         if _rules is not None:
             _dr['unsupported_rules'] = [n for n, _why in _rules.unsupported()]
+            # #1649: whether this step's vias meet each annular_width rule the
+            # "NOT honoured" line (printed before routing) names
+            _ag = _rules.annular_grade(
+                [_v for _r in results for _v in (_r.get('new_vias') or [])])
+            if _ag:
+                from design_rules import annular_grade_lines
+                _dr['annular_rules'] = _ag
+                for _line in annular_grade_lines(_ag):
+                    print(f"  {_line}")
         # #1491: the class/type-scoped rules this call honoured, and each
         # relaxing one another routed net held at its class value
         _sc = getattr(config, 'scoped_clearance', None)

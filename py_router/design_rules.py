@@ -1632,8 +1632,45 @@ class DesignRules:
             if kinds and r.name not in named and not r.honoured:
                 out.append((r.name, f"{', '.join(kinds)}: no routing step sizes "
                                     f"a via by it (via_diameter and hole_size "
-                                    f"alone); check_drc grades it"))
+                                    f"alone), so this line is printed whatever "
+                                    f"the vias are; route.py and route_diff.py "
+                                    f"grade their own vias against it when they "
+                                    f"end, check_drc the board"))
         return out
+
+    def annular_grade(self, vias) -> List[dict]:
+        """#1649: the vias of one step graded against each `annular_width`
+        rule no routing step sizes a via by (`ROUTER_UNHONOURED_KINDS`) -- the
+        answer the "NOT honoured" line, printed before the step, cannot give.
+        One row per rule that sets the ring of at least one of ``vias``:
+        ``{rule, min, vias, below, smallest_ring}``, ``min`` KiCad's value
+        (before this tool's fab-profile raise, as check_drc grades it) and
+        ``below`` the vias whose ring, (size - drill) / 2, falls short of it.
+        A via the rule does not bind (another rule, a class, the board
+        minimum set its ring) is not counted. [] when no such rule binds."""
+        rows: Dict[str, dict] = {}
+        for v in vias or ():
+            size, drill = getattr(v, 'size', 0) or 0, getattr(v, 'drill', 0) or 0
+            if not size or not drill:
+                continue
+            c = self.resolve('annular_width',
+                             self.item_for_net(int(getattr(v, 'net_id', 0) or 0), 'via'),
+                             None, None)
+            if c.min_rule is None:          # a class or the board minimum set it
+                continue
+            need = c.kicad_min if c.fab_bound else c.min
+            if need is None:
+                continue
+            ring = (size - drill) / 2.0
+            row = rows.setdefault(c.min_rule, {'rule': c.min_rule, 'min': need, 'vias': 0,
+                                               'below': 0, 'smallest_ring': ring})
+            row['vias'] += 1
+            row['smallest_ring'] = min(row['smallest_ring'], ring)
+            if ring < need - 1e-6:
+                row['below'] += 1
+        for row in rows.values():
+            row['smallest_ring'] = round(row['smallest_ring'], 4)
+        return [rows[k] for k in sorted(rows)]
 
     def honoured_rules(self) -> List[Tuple[str, str]]:
         """Rules the resolver does not evaluate but another consumer honours
@@ -1684,6 +1721,44 @@ class DesignRules:
             'fab_floor': dict(sorted(self.fab_floor.items())),
             'cli': dict(sorted(self.cli.items())),
         }
+
+
+def relaxing_rules(rules, board_min) -> List[dict]:
+    """#1649: the `.kicad_dru` rules that set a minimum BELOW the board-wide
+    one Board Setup declares for the same kind (``board_min``: the
+    ``min_*`` keys of `BOARD_MIN_KEYS`), each ``{rule, kind, min, board,
+    board_key, condition, layer}``. Such a rule licenses a smaller size only on the
+    items its condition binds, so a request below the board minimum belongs
+    on a step scoped to them. In file order."""
+    out = []
+    for r in rules or ():
+        if r.unsupported:
+            continue
+        for kind, spec in sorted(r.constraints.items()):
+            key = BOARD_MIN_KEYS.get(kind)
+            v, b = spec.get('min'), (board_min or {}).get(key)
+            if key and isinstance(v, (int, float)) and isinstance(b, (int, float)) \
+                    and v < b - 1e-9:
+                out.append({'rule': r.name, 'kind': kind, 'min': v, 'board': b,
+                            'board_key': key, 'condition': r.condition_src,
+                            'layer': r.layer_clause})
+    return out
+
+
+def annular_grade_lines(rows) -> List[str]:
+    """One end-of-step line per `DesignRules.annular_grade` row (#1649):
+    whether this step's vias on the nets the rule binds meet its ring."""
+    out = []
+    for r in rows:
+        head = (f".kicad_dru rule '{r['rule']}' (annular_width min {r['min']:g} mm): "
+                f"this step's {r['vias']} via(s) it binds")
+        if r['below']:
+            out.append(f"{head}: {r['below']} BELOW it (smallest ring "
+                       f"{r['smallest_ring']:g} mm); KiCad flags them (annular_width), "
+                       f"check_drc VIA-ANNULAR")
+        else:
+            out.append(f"{head} meet it (smallest ring {r['smallest_ring']:g} mm)")
+    return out
 
 
 def override_clearance(base, board_min_clearance, *pads):

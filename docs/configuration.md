@@ -309,6 +309,18 @@ other token (`pad`, `zone`, `hole`, ...); a `micro_via`, `blind_via` or
 `buried_via` ban asks nothing of the router, which lays through vias only.
 check_drc grades every track and via token (`items-not-allowed`).
 
+**Annular rings.** No routing step sizes a via by an `annular_width` rule (a
+via's ring follows from its diameter and drill), so such a rule is listed NOT
+honoured at the start of every step that reads the rules, whatever the vias
+are (#1490). Whether the step's vias meet it is said when route.py or
+route_diff.py ends (#1649): `.kicad_dru rule 'rf ring' (annular_width min 0.07
+mm): this step's 7 via(s) it binds meet it (smallest ring 0.075 mm)`, or
+`... 7 BELOW it`, and `design_rules.annular_rules` in `JSON_SUMMARY` carries
+each rule's `min`, `vias`, `below` and `smallest_ring`. A via counts for the
+rule that sets its ring (the last matching rule, as KiCad resolves it), over
+the vias the step laid. `list_nets.py --design-rules` lists the rules that set
+a minimum below the Board Setup one, with the condition each binds.
+
 **Disclosure.** Every descent is recorded and reported three ways: the
 `JSON_SUMMARY` block `design_rules` (policy, tier, the board floors read, every
 narrowing with net / kind / requested / delivered / site, the fab-tier escalation
