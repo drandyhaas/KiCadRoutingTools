@@ -924,6 +924,10 @@ def repair_planes(
     # sub-run's own explicit settings. The #562 finalize passes its run's;
     # None (the standalone CLI) = batch_route's defaults.
     route_knobs: Optional[dict] = None,
+    # #1621: net names the calling route step's --nets negates ('!/RF'),
+    # never ripped as a tap blocker here nor by the sub-runs below. The #562
+    # finalize passes its step's set; None (the standalone CLI) = none.
+    hands_off_nets: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -1358,7 +1362,36 @@ def repair_planes(
 
     # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
+    # EVERY net that pours on this board, not only the ones this call repairs
+    # (#1620): a rip takes the whole net, and a poured net's fanout stubs and
+    # taps come back from nothing -- the reconnect sees its pads credited by
+    # the fill model ("Already fully connected") whether or not KiCad's fill
+    # joins them, so a stub that was a pad's real connection stayed gone.
     plane_net_ids = set(unique_nets.keys())
+    from kicad_parser import pour_zones as _pour_zones1620
+    _other_pours = ({z.net_id for z in _pour_zones1620(
+        getattr(pcb_data, 'zones', None) or []) if z.net_id}
+        - plane_net_ids)
+    if _other_pours and rip_blocker_nets:
+        _ex = sorted(pcb_data.nets[i].name for i in _other_pours
+                     if i in pcb_data.nets)[:4]
+        print(f"  {len(_other_pours)} other poured net(s) excluded from "
+              f"blocker rip-up ({', '.join(_ex)}"
+              f"{'...' if len(_other_pours) > 4 else ''})")
+    plane_net_ids |= _other_pours
+    # #1621: the nets the calling step's --nets negates, handed over or
+    # stashed on this board by it; stashed here too, so the reconnect
+    # sub-runs that share this board leave them alone as well.
+    from protected_nets import stash_hands_off
+    _off_names = stash_hands_off(pcb_data, hands_off_nets)
+    _off_ids = ({nid for nid, n in pcb_data.nets.items() if n.name in _off_names}
+                - plane_net_ids)
+    if _off_ids and rip_blocker_nets:
+        _ex = sorted(pcb_data.nets[i].name for i in _off_ids)[:4]
+        print(f"  {len(_off_ids)} net(s) the step's --nets excludes kept out "
+              f"of blocker rip-up ({', '.join(_ex)}"
+              f"{'...' if len(_off_ids) > 4 else ''})")
+    plane_net_ids |= _off_ids
     # #521: nets protected in the sibling .kicad_pro (length-matched groups,
     # routed diff pairs) and nets with KiCad-LOCKED copper join the never-rip
     # set -- a blocker rip here strips the net for a later generic route.py

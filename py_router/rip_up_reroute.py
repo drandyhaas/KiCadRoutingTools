@@ -30,14 +30,15 @@ if TYPE_CHECKING:
 
 
 # Run-scoped ledgers kept on pcb_data: rip victims and their saved copper,
-# #134 refusals, #666 queued cap moves, exact-name rip overrides, via-unblock
+# #134 refusals, #666 queued cap moves, exact-name rip overrides, the nets
+# --nets negates (#1621), via-unblock
 # blame, #189 shrunk-via sizes and #1156's rip authority. The CLI parses a fresh board per step, so
 # they start empty; the GUI keeps ONE PCBData across runs, where an earlier
 # run's entries would be read as this run's (a stale victim pulled into the
 # escalation and stale-strip scope, a shrunk via size emitted at a cell where
 # a full via now fits). Nested sub-runs share the outer run's ledgers.
 RUN_LEDGERS = ('_preexisting_rips', '_rip_saved', '_refused_saved_134',
-               '_pending_cap_moves', '_rip_override_names',
+               '_pending_cap_moves', '_rip_override_names', '_hands_off_names',
                '_via_unblock_blame', '_unblock_via_sizes', '_unblock_via_sites',
                '_rip_authority_ids')
 

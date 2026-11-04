@@ -778,7 +778,9 @@ a short trace to an adjacent same-net pad (a connector GND pin to its shield
 pad). With `--rip-blocker-nets`, the repair does the same: when no via fits and
 no same-net via is within the close-reuse radius, it routes a trace to the
 nearest same-net pad/via reachable on the pad's layer. If a signal net crosses
-that corridor, it is **ripped** (up to `--max-rip-nets`), the pad connected, and
+that corridor, it is **ripped** (up to `--max-rip-nets`; never a net that pours
+anywhere on the board, a protected or locked net, or -- in a route step's
+finalize -- a net the step's `--nets` negates, #1620/#1621), the pad connected, and
 the ripped net reconnected in the same run: restore-first, then an end-of-run
 reconnect pass, with custody restore of its original copper if that fails
 (#517). Pass `--power-nets`/`--power-nets-widths` so the reconnect routes

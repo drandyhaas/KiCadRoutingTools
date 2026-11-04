@@ -2547,6 +2547,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _rpm666 = sys.modules.get('repair_planes')
         if _rpm666 is not None and hasattr(_rpm666, 'repair_planes'):
             _rpm666.repair_planes.handed_back_cap_moves = []
+    # #1621: a net this step's --nets negates ('!/RF') is hands-off for every
+    # pass of the run that picks a net to rip -- the main pass's candidacy,
+    # the plane finalize's blocker rip-up and the sub-runs sharing this
+    # board. A run ledger, so a nested sub-run keeps the outer run's set.
+    from protected_nets import negated_net_names, stash_hands_off
+    stash_hands_off(pcb_data, negated_net_names(
+        net_name_patterns if net_name_patterns is not None else net_names,
+        [n.name for n in pcb_data.nets.values()]))
     if final_reconcile or not _pcb_in_memory:
         # #980: the copper this run was handed. A nested in-memory sub-run
         # keeps its parent's mark, as it keeps the parent's ledgers.
@@ -3887,6 +3895,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _pe_via_count[_v.net_id] = _pe_via_count.get(_v.net_id, 0) + 1
         _pe_caller_pats = list(net_name_patterns if net_name_patterns is not None
                                else (net_names or []))
+        # #1621: and the nets an ENCLOSING step negated (a plane-finalize
+        # reconnect sub-run is handed only the nets it reroutes)
+        from protected_nets import hands_off_names as _pe_hands_off
+        _pe_off = _pe_hands_off(pcb_data)
         _pe_auto: List[int] = []
         for _nid in sorted(_pe_seg_count):
             if (_nid == 0 or _nid in _pe_to_route or _nid in _pe_seen
@@ -3901,7 +3913,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # (split_net_patterns keeps active-low literals like '!RESET'
             # selectable by name, so those don't read as negations here).
             _, _pe_exc = split_net_patterns(_pe_caller_pats, {_pe_net.name})
-            if any(net_pattern_matches(_pe_net.name, _p) for _p in _pe_exc):
+            if (_pe_net.name in _pe_off
+                    or any(net_pattern_matches(_pe_net.name, _p) for _p in _pe_exc)):
                 continue
             _pe_auto.append(_nid)
         if _pe_auto:
@@ -7143,6 +7156,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _dsc1063(+1)
             from repair_planes import (
                 repair_planes as _rdp_engine, auto_detect_zones as _adz)
+            from protected_nets import hands_off_names as _hands_off9
             _gui9 = bool(return_results)
             if _gui9:
                 # No written file to detect zones from: derive the (net,
@@ -7328,6 +7342,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # custody-restores casualties; KICAD_FINALIZE_RIP=0
                         # reverts for A/B.
                         rip_blocker_nets=_finalize_rip9,
+                        # #1621: never a net this step's --nets negates
+                        hands_off_nets=sorted(_hands_off9(pcb_data)),
                         power_nets=power_nets,
                         power_nets_widths=power_nets_widths,
                         # #658: the chain's layer economics reach the
@@ -7418,6 +7434,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if config.same_net_pad_clearance > 0 else None),
                         # Same rip-authority restoration as the GUI leg above.
                         rip_blocker_nets=_finalize_rip9,
+                        # #1621: the board below may be a fresh parse, which
+                        # carries no stash -- hand the set over explicitly
+                        hands_off_nets=sorted(_hands_off9(pcb_data)),
                         power_nets=power_nets,
                         power_nets_widths=power_nets_widths,
                         # #658: same layer economics as the GUI leg above.
