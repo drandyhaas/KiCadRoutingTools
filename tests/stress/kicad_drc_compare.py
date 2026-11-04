@@ -371,6 +371,11 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = True,
     # check_drc's accepted-edge publications (pad-covered, quantization-margin,
     # #448 npth-slot) never happen, so the reconciler can't subtract them.
     kw["respect_edge_severity"] = False
+    # #1626: check_drc grades at the board's own severities, and _staged_copy
+    # stages every copper class at "error" on the kicad-cli side (#526). Grade
+    # this side at the same staged severities; a .kicad_dru rule's own
+    # (severity ...) is left as authored on both sides.
+    kw["severity_overrides"] = {k: "error" for k in KICAD_COPPER_TYPES}
     try:
         from fix_kicad_drc_settings import read_project_edge_clearance
         edge = read_project_edge_clearance(board)

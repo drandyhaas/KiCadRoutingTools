@@ -205,13 +205,22 @@ def part2(tmp):
        'check_drc=2 ' in line and 'matched=2 kicad_only=0 checkdrc_only=0' in line
        and line.rstrip().endswith('CONSISTENT'), line or r.stdout[-800:])
 
-    # control: the list before this fix reproduces the defect on this board
+    # control: the list before this fix reproduces the defect on this board.
+    # check_drc now grades at the project's severities (#1626), and the
+    # fixture project says `warning` for the drill pair, so with the old list
+    # (which no longer stages it at error) it would agree with KiCad for a
+    # different reason; the control grades it as check_drc did then, reading
+    # no project severity.
+    import check_drc as _cd
     full = kdc.KICAD_COPPER_TYPES
+    _sev = _cd.project_rule_severities
     kdc.KICAD_COPPER_TYPES = full - HOLE_TYPES
+    _cd.project_rule_severities = lambda _f: {}
     try:
         old = kdc.compare_board_data(pcb)
     finally:
         kdc.KICAD_COPPER_TYPES = full
+        _cd.project_rule_severities = _sev
     ok('control: with the old list the same pairs read checkdrc_only=2, matched=0',
        old and old.get('checkdrc_only') == 2 and old.get('matched') == 0
        and old.get('kicad') == 0,

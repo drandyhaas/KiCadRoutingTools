@@ -662,6 +662,18 @@ def _grade(a, doc):
             notes.append(f'{_name}: the board DECLARES it '
                            f'({", ".join(sorted(_c["declared"]))}) and nothing '
                            f'grades it -- {_c.get("reason")}')
+    # #1626: what the board's own severities make KiCad warnings, or a check
+    # KiCad does not run -- check_drc lists them and does not count them.
+    _drc_c = _comps.get('drc') or {}
+    if _drc_c.get('severity_warnings'):
+        notes.append(f"{_drc_c['severity_warnings']} DRC finding(s) KiCad reports "
+                     f"as WARNINGS at the board's own severities (a .kicad_dru "
+                     f"rule's (severity warning) or the project's "
+                     f"rule_severities) -- check_drc lists them under WARNINGS")
+    if _drc_c.get('severity_ignored'):
+        notes.append(f"{_drc_c['severity_ignored']} DRC finding(s) in a check the "
+                     f"project's rule_severities set to ignore, which KiCad "
+                     f"does not run")
     # ONE rule for what a `blocking` is (`converge.blocking_defect`, #1075):
     # `false` is falsy, so it used to read as a clean board and exit DONE.
     from converge import blocking_defect

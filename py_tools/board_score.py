@@ -809,6 +809,7 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     _unv = re.search(r'UNVERIFIED \(clearance\): (\d+) violation', out)
     if _unv:
         _clr_extra['unverified'] = int(_unv.group(1))
+    _clr_extra.update(_drc_disclosures(out))
     if 'NO DRC VIOLATIONS FOUND' in out:
         return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out),
                  'graphic_grazes_unverified': _unverified_grazes(out), **_clr_extra,
@@ -857,6 +858,20 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
             {'ran': True, 'count': sum(size.values()), 'by_type': size,
              **_size_extra},
             {'ran': True, 'count': sum(rule.values()), 'by_type': rule})
+
+
+def _drc_disclosures(out: str) -> dict:
+    """What check_drc reports and does not count, read off its console
+    (#1626): the findings the board's own severities make KiCad WARNINGS
+    (`severity_warnings`) and the ones a project `ignore` drops
+    (`severity_ignored`). Keys are present only when non-zero."""
+    d = {}
+    for key, pat in (('severity_warnings', r'SEVERITY WARNING: (\d+) finding'),
+                     ('severity_ignored', r'SEVERITY IGNORE: (\d+) finding')):
+        m = re.search(pat, out)
+        if m and int(m.group(1)):
+            d[key] = int(m.group(1))
+    return d
 
 
 def _undeclarable_vias(out: str) -> int:
@@ -1857,6 +1872,18 @@ def main():
     _adv_bits = ' '.join(f'{k}={v}' for k, v in score['advisory'].items() if v)
     if _adv_bits:
         print(f"ADVISORY (floor-governed, not blocking): {_adv_bits}")
+    # #1626: findings KiCad itself reports as warnings, or does not check, at
+    # the board's own severities -- disclosed, never counted.
+    _drc_c = score['components'].get('drc') or {}
+    if _drc_c.get('severity_warnings') or _drc_c.get('severity_ignored'):
+        print("KICAD SEVERITY (disclosed, not blocking): "
+              + ', '.join(f"{n} {what}" for n, what in (
+                  (_drc_c.get('severity_warnings'),
+                   "finding(s) the board's own severities make KiCad warnings"),
+                  (_drc_c.get('severity_ignored'),
+                   "finding(s) in a check the project sets to ignore"))
+                  if n)
+              + " -- see check_drc's WARNINGS")
     # #1303: what each pair's copper delivers, whether or not a rule grades it.
     _dp = score['components'].get('diff_pairs') or {}
     if _dp.get('pairs'):
