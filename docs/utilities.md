@@ -2506,6 +2506,21 @@ Options:
                      pattern, or the run is refused before any step (exit 2).
                      The analysis states each routed net they give a width
                      (`net_widths`).
+  --nets PATTERN [...]
+                     Route only the nets the patterns select, read as
+                     route.py's own --nets reads them (wildcards, a sheet's
+                     last component, a leading `!` excluding): every fanout
+                     and route step is given the patterns in place of `*`,
+                     the diff-pair step and step 2 only the pairs and planes
+                     among those nets, and a pour, power net or pair outside
+                     them is left as the board has it. The analysis states
+                     the nets they select (`nets`); patterns that together
+                     select none are refused before any step (exit 2).
+  --track-width MM   route.py's --track-width for every route step, in place
+                     of the fab track floor; the fanout and diff-pair steps
+                     keep the floor their escapes need.
+  --quick LEVEL      route.py's --quick LEVEL (1 or 2) for every route step:
+                     a chain to judge a placement by, not to ship.
   --json-out FILE    Also write FILE: `status`, `shipped_step` (the step whose
                      board ships, `input` for the input under --finish),
                      `shipped_board`, `route_summary` -- the object route.py's
@@ -2537,7 +2552,9 @@ tools' own selectors, which also match a pattern's last sheet component and
 read a leading `!` as an exclusion: `GND` is passed as `GN[D/]`, `-BATT` as
 `[--]BAT[T/]`, `!RESET` as `[ -!]RESE[T/]`, and a sheet-qualified name as
 written. Each pattern is checked against the board's nets; a net no pattern
-isolates is left out of the power, exclusion and pair lists, and named.
+isolates is left out of the power, exclusion and pair lists, and named. The
+caller's `--nets` and `--power-nets` are patterns already and reach the steps
+as given.
 
 ### Example
 

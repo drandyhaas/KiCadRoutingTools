@@ -45,6 +45,16 @@ them autoplan runs the chain it ran before they existed.
    the file by a relative path, the route step's own parser read it (its
    unknown-key warning, in that step's log), route.py's own summary reports
    the tier and policy, and every track is at least the file's width.
+6. --nets, --track-width, --quick: every fanout and route step is given the
+   caller's patterns as typed in place of every net, and analyze states the
+   nets they select as route.py's own --nets reads them (a wildcard, a
+   sheet's last component, a leading '!' excluding) and drops the planes,
+   power nets, pairs and widths outside them; every route step routes signals
+   at the caller's width as given and runs at route.py's quick level, and
+   every other step is the default chain's. Patterns that select no net are
+   refused before any step. On a routed splitflap_driver only the selected
+   nets carry copper, a signal of them is drawn at the caller's width, and
+   route.py's own summary reports the quick level.
 """
 import json
 import os
@@ -706,10 +716,103 @@ def test_fab_run():
     assert len(FAILS) == n, FAILS[n:]
 
 
+def _scoped(golden, patterns):
+    return golden.replace('--nets * ', '--nets ' + ' '.join(patterns) + ' ')
+
+
+def test_scope_width_quick_steps():
+    print("--nets, --track-width, --quick: the steps each one changes")
+    n = len(FAILS)
+    patterns = ['D_*', 'VBUS', '!/S/*', 'SIG']
+    a = dict(A, nets=['D_N', 'D_P', 'SIG', 'VBUS'], net_patterns=patterns)
+    got = [(c, k, t, ' '.join(args)) for c, k, t, args in chain_runs(a)
+           + chain_runs(a, finish=True)]
+    want = [(c, k, t, _scoped(g, patterns)) for c, k, t, g in GOLDEN]
+    expect(got == want, "every fanout and route step is given the caller's patterns "
+                        "as typed in place of every net, and nothing else changes")
+    widened = [(c, k, t, ' '.join(args)) for c, k, t, args
+               in chain_runs(dict(A, route_track=0.25))]
+    expect(widened == [(c, k, t, g.replace('--track-width 0.1', '--track-width 0.25')
+                        if k == 'route' else g)
+                       for c, k, t, g in GOLDEN if c == 'full'],
+           "every route step routes at the caller's width; the fanouts and pairs at "
+           "the floor")
+    quick = [(c, k, t, ' '.join(args)) for c, k, t, args
+             in chain_runs(dict(A), quick=2) + chain_runs(dict(A), finish=True, quick=2)]
+    expect(quick == [(c, k, t, g.replace(' --layers', ' --quick 2 --layers', 1)
+                      if k == 'route' else g) for c, k, t, g in GOLDEN],
+           "every route step runs at the quick level, and no other step does")
+    assert len(FAILS) == n, FAILS[n:]
+
+
+def test_scope_analysis():
+    print("--nets on splitflap_driver: the analysis keeps only the caller's nets")
+    n = len(FAILS)
+    full = AP.analyze(BOARD)
+    patterns = ['/CLOCK_IN', '/LED_*', '!/LED_F', '+12V']
+    a = AP.analyze(BOARD, only=patterns, route_track=0.25,
+                   caller_power=[('/CLOCK_IN', 0.4), ('/LED_F', 0.5)])
+    nets = sorted(['+12V', '/CLOCK_IN'] + [f'/LED_{x}' for x in 'ABCDE'])
+    expect(a['nets'] == nets and a['net_patterns'] == patterns and a['route_track'] == 0.25,
+           f"the analysis carries the selected nets, the patterns and the width "
+           f"({a.get('nets')}, {a.get('route_track')})")
+    expect(a['net_widths'] == {'/CLOCK_IN': 0.4},
+           f"a width for a net outside them is not stated ({a.get('net_widths')})")
+    expect('GND' in full['power_nets'] and a['power_nets'] == ['+12V'],
+           f"GND and the other rails are left out of the power nets ({a['power_nets']})")
+    expect(a['layer_costs'] == full['layer_costs'], "the layer costs are unchanged")
+    glasgow = os.path.join(ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb')
+    plain = AP.analyze(glasgow)
+    expect('nets' not in plain and plain == AP.analyze(glasgow, only=()),
+           "on a 4-layer board with planes, no --nets is no scope")
+    sheeted = AP.analyze(SHEETED, only=['GND'])
+    expect(sheeted['nets'] == ['/GND'],
+           f"'GND' selects the board's '/GND', as route.py's --nets reads it "
+           f"({sheeted['nets']})")
+    thin = AP.analyze(BOARD, route_track=0.05)
+    expect(thin['route_track'] == 0.05 and thin['track'] > 0.05,
+           f"a width under the floor is passed as given, as route.py takes it "
+           f"({thin['route_track']}, floor {thin['track']})")
+    for argv in (('NOPE',), ('/CLOCK_IN', '!/CLOCK_IN')):
+        check([sys.executable, '-X', 'utf8', SCRIPT, BOARD, os.devnull + '.kicad_pcb',
+               '--dry-run', '--nets', *argv],
+              refuse='AUTOPLAN: refused: --nets: the patterns select no net', code=2)
+        expect(True, f"--nets {' '.join(argv)}: refused, selecting no net")
+    assert len(FAILS) == n, FAILS[n:]
+
+
+def test_scope_width_quick_run():
+    print("a real run: splitflap_driver, --nets /CLOCK_IN /LED_A +12V "
+          "--track-width 0.25 --quick 2")
+    n = len(FAILS)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, 'routed.kicad_pcb')
+        js = os.path.join(tmp, 'autoplan.json')
+        r = _autoplan(BOARD, out, '--nets', '/CLOCK_IN', '/LED_A', '+12V',
+                      '--track-width', '0.25', '--quick', '2', '--json-out', js)
+        expect(r.returncode == 0, f"autoplan exits 0 (rc={r.returncode})")
+        if r.returncode:
+            print(r.stdout[-3000:], r.stderr[-3000:])
+            raise AssertionError('autoplan failed')
+        pcb = parse_kicad_pcb(evidence(out, 'routed board'))
+        drawn = {pcb.nets[s.net_id].name for s in pcb.segments} \
+            | {pcb.nets[v.net_id].name for v in pcb.vias}
+        expect(drawn and drawn <= {'/CLOCK_IN', '/LED_A', '+12V'},
+               f"only the named nets carry copper ({sorted(drawn)})")
+        led = {s.width for s in pcb.segments if pcb.nets[s.net_id].name == '/LED_A'}
+        expect(led == {0.25}, f"/LED_A is drawn at 0.25 ({sorted(led)})")
+        doc = json.load(open(evidence(js, '--json-out document')))
+        level = ((doc.get('route_summary') or {}).get('quick') or {}).get('level')
+        expect(level == 2, f"route.py's summary reports quick level 2 ({level})")
+    assert len(FAILS) == n, FAILS[n:]
+
+
 def main():
     for t in (test_defaults, test_power_nets_steps, test_power_nets_refused,
               test_keep_pours_plan, test_keep_pours_run, test_shipped_record, test_run,
-              test_fab_floors, test_fab_steps, test_fab_run):
+              test_fab_floors, test_fab_steps, test_fab_run,
+              test_scope_width_quick_steps, test_scope_analysis,
+              test_scope_width_quick_run):
         before = len(FAILS)
         try:
             t()
