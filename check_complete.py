@@ -757,7 +757,7 @@ def _grade(a, doc):
     return code_out
 
 
-def main(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -787,7 +787,11 @@ def main(argv=None):
                     help='per-instrument wall clock (default 3600). A timeout '
                          'is recorded as exit 124, never raised')
     ap.add_argument('--json', default=None, metavar='PATH')
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
 
     if not os.path.isfile(a.board):
         print(f'no such board: {a.board}', file=sys.stderr)

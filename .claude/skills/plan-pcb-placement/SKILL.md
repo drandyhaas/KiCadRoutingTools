@@ -1400,7 +1400,9 @@ Routing Completes): run them once, here, not again inside the routing.
    python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py <board> --baseline <input> --intent <i> --mode <mode>
    python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/measure.py --self --evidence wk/<run>
    ```
-   Add `--spec <name>=<value>` to `grade.py` for each spec flag the board
-   declares. `measure.py` must run from your own shell; if it refuses (exit
+   In `full` mode, add `--spec <name>=<value>` to `grade.py` for each spec
+   flag the board declares, spelled as board_score spells it
+   (`min-track-width=0.09`); a name it or check_complete would refuse, or a
+   spec in `place` mode, exits 2 before anything runs. `measure.py` must run from your own shell; if it refuses (exit
    3), quote the refusal.
 4. The datasheet folder deleted (`rm -rf wk/<run>/datasheets`).
