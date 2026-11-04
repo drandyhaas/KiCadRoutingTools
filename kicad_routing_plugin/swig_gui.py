@@ -2873,6 +2873,11 @@ class RoutingDialog(wx.Dialog):
                 _dt.diff_pair_width.SetValue(defaults.DIFF_PAIR_WIDTH)
             if hasattr(_dt, 'diff_pair_gap'):
                 _dt.diff_pair_gap.SetValue(defaults.DIFF_PAIR_GAP)
+            # route_diff.py without --impedance: 0 = off
+            if hasattr(_dt, 'diff_impedance'):
+                _dt.diff_impedance.SetValue(0.0)
+            if hasattr(_dt, 'impedance_declare_only'):
+                _dt.impedance_declare_only.SetValue(False)
         except Exception:
             pass
         # Reset basic parameters to defaults

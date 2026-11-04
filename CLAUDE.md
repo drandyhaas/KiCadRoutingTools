@@ -266,7 +266,9 @@ Validate routed boards against the *real* spec, with the right checker — most
   impedance nets stay rippable, but a later step touching them without
   `--impedance` recomputes the same widths from the stackup and applies them
   per-net (config `net_layer_widths`; route_diff reapplies call-level, one
-  spec only). **Pour-served balls (#678)** persist the same way
+  spec only). A `declare_only` record (`--impedance-declare-only`, #1630) is the
+  exception: it records the target for `check_impedance` to grade and changes
+  no copper, in its own step or any later one. **Pour-served balls (#678)** persist the same way
   (`pour_served_pads` key: `"REF.PAD"` -> net/layer/how): the BGA fanout's
   pour-direct promises a ball will be served by fill contact instead of a
   drop via, and the route step's in-run plane finalize audits every promise

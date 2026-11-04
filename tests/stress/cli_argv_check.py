@@ -408,6 +408,7 @@ REFUSAL_SITES = {
             ('board', "the board's footprint references (#1562)"),
         'if _stagger_why and (not env_knobs.ALLOW_STAGGERED_BGA)':
             ('board', "the part's pad lattice (#500)"),
+        'if _refusal': ('board', "which nets the --nets patterns name (#1641)"),
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'qfn_fanout.py': {
@@ -417,6 +418,7 @@ REFUSAL_SITES = {
         'if args.component not in pcb_data.footprints':
             ('board', "the board's footprint references"),
         'if _single': ('board', "the part's pads (#1195: not a QFN/QFP)"),
+        'if _refusal': ('board', "which nets the --nets patterns name (#1641)"),
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'place_fanout_clearance.py': {
