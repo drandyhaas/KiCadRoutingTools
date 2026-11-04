@@ -85,7 +85,14 @@ conjuncts that verdict is made of, so a board unbuildable through a
 coincident-origin stack, a containment or pad copper off the outline reads
 `blocking` 0 and is still NOT BUILDABLE. `board_score` decides NOTHING here —
 record its `unrouted` and `broken` counts as the BASELINE you will compare the
-routed board against at the end of the chain.
+routed board against at the end of the chain. One line of it to act on now: a
+`LIBRARY PAD GAPS` line (`components.drc.library_pad_gaps`) counts pairs of
+ONE footprint's pads closer than their clearance, which KiCad's DRC reports as
+`clearance` errors on every layout of the board and no route can clear. Tell
+the user before routing; `check_drc`'s WARNINGS name the pairs and gaps, and
+what clears them is the board's to decide (a `.kicad_dru` clearance rule
+scoped by net class, item type or net name, a pad or footprint `(clearance)`
+override, or a net tie).
 
 Classify from the JSON fields, not from exit status: `check_assembly` exits 4
 for any of its conjuncts, and the lines above its VERDICT name which one fired.

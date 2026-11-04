@@ -52,6 +52,12 @@ carry them. Reported as kicad_track_dangling with the net and position, never
 matched against check_drc and never part of the CONSISTENT verdict or the exit
 code.
 
+Its own channel too (#1628): KiCad `clearance` items on two pads of ONE
+footprint closer than their clearance without touching. check_drc measures
+them and does not grade them (library geometry, #1306), and publishes each as
+an accepted `own-footprint-gap` row; the matching KiCad item is dropped and
+counted as kicad_library_pad_gaps, not listed as a check_drc false negative.
+
 Usage:
   python3 tests/stress/kicad_drc_compare.py <board.kicad_pcb> [...]
   python3 tests/stress/kicad_drc_compare.py --wave <wave_dir>   # summary.json
@@ -440,6 +446,9 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = True,
         # on as a false negative. Carry the flag through for the reconciler.
         if v.get("accepted"):
             item["accepted"] = v["accepted"]
+        if v.get("pad_loc2"):
+            # #1628: a pad pair is anchored by KiCad on either pad
+            item["pos2"] = (float(v["pad_loc2"][0]), float(v["pad_loc2"][1]))
         if v.get("owner"):
             item["owner"] = v["owner"]     # #995 footprint-own-copper
         # The part whose graphic copper the row names ("Polygon(U2)"), so
@@ -711,6 +720,42 @@ def _drop_kicad_own_copper(kicad, cd_own):
                 dropped += 1
                 continue
         keep.append(kv)
+    return keep, dropped
+
+
+#: how far KiCad's anchor for a pad pair may sit from either pad (#1628): it
+#: anchors the item on one of the two pads, and both belong to one part
+LIBRARY_GAP_MATCH_RADIUS_MM = 2.0
+
+
+def _drop_kicad_library_gaps(kicad, cd_gaps):
+    """Drop the KiCad `clearance` items check_drc published as
+    `own-footprint-gap` (#1628): two pads of ONE footprint on different nets,
+    closer than their clearance without touching. Library geometry no step
+    changes, so check_drc does not grade them (#1306) -- but it measured them,
+    so they are not its false negatives: they get their own channel. Matched
+    by net pair and by KiCad's anchor lying on or beside either pad. Returns
+    (remaining_kicad, n_dropped)."""
+    if not cd_gaps:
+        return kicad, 0
+    left = list(cd_gaps)
+    keep, dropped = [], 0
+    for kv in kicad:
+        hit = None
+        if kv.get("type") == "clearance":
+            for i, c in enumerate(left):
+                if c["nets"] != kv.get("nets"):
+                    continue
+                if any(p and math.hypot(kv["pos"][0] - p[0], kv["pos"][1] - p[1])
+                       <= LIBRARY_GAP_MATCH_RADIUS_MM
+                       for p in (c.get("pos"), c.get("pos2"))):
+                    hit = i
+                    break
+        if hit is None:
+            keep.append(kv)
+        else:
+            left.pop(hit)
+            dropped += 1
     return keep, dropped
 
 
@@ -1126,6 +1171,10 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     cd_own_pads_pre = sum(1 for c in cd
                           if c.get("accepted") == "inherited-own-pad-contact")
     cd = [c for c in cd if c.get("accepted") != "inherited-own-pad-contact"]
+    # #1628: one footprint's pads closer than their clearance -- measured by
+    # check_drc and not graded, its own channel (never a false negative)
+    cd_gaps = [c for c in cd if c.get("accepted") == "own-footprint-gap"]
+    cd = [c for c in cd if c.get("accepted") != "own-footprint-gap"]
     cd_accepted = [c for c in cd if c.get("accepted")]
     cd = [c for c in cd if not c.get("accepted")]
     # Symmetric baseline subtraction (#405): drop the input's own check_drc
@@ -1182,6 +1231,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
         kicad_intentional += k_tie
         checkdrc_intentional += c_tie
     kicad, kicad_own = _drop_kicad_own_copper(kicad, cd_own)
+    kicad, kicad_gaps = _drop_kicad_library_gaps(kicad, cd_gaps)
     matched, kicad_only, cd_only = match(kicad, cd)
     # Part B: collapse the board-edge anchor double-count (same edge violation
     # anchored differently by each engine). One-sided edge divergence survives.
@@ -1221,6 +1271,10 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             # and the check_drc contacts that accepted them
             "kicad_own_copper": kicad_own,
             "checkdrc_own_copper": len(cd_own),
+            # #1628: KiCad clearance items on one footprint's own pad pairs,
+            # and the gaps check_drc measured and published (not graded)
+            "kicad_library_pad_gaps": kicad_gaps,
+            "checkdrc_library_pad_gaps": len(cd_gaps),
             "matched": n_matched, "kicad_only": len(kicad_only),
             "checkdrc_only": len(cd_only),
             "pairs_both": len(kpairs & cpairs),
@@ -1256,6 +1310,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
 _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "kicad_intentional_edge", "checkdrc_intentional_edge",
                  "kicad_own_copper", "checkdrc_own_copper",
+                 "kicad_library_pad_gaps", "checkdrc_library_pad_gaps",
                  "matched", "kicad_only", "checkdrc_only",
                  "pairs_kicad_only", "pairs_checkdrc_only",
                  "kicad_connection_width", "connection_width_min",
@@ -1282,6 +1337,10 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     if data.get("kicad_own_copper") or data.get("checkdrc_own_copper"):
         ie_note += (f" [#995: -{data.get('kicad_own_copper', 0)} kicad / "
                     f"-{data.get('checkdrc_own_copper', 0)} check_drc footprint own copper]")
+    if data.get("kicad_library_pad_gaps") or data.get("checkdrc_library_pad_gaps"):
+        ie_note += (f" [#1628: -{data.get('kicad_library_pad_gaps', 0)} kicad / "
+                    f"-{data.get('checkdrc_library_pad_gaps', 0)} check_drc "
+                    f"library pad gaps (one footprint's pads, not graded)]")
     # #406 min copper web: separate class, not matched against check_drc.
     cw = data.get("kicad_connection_width")
     cw_min = data.get("connection_width_min")

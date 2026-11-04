@@ -864,10 +864,14 @@ def _drc_disclosures(out: str) -> dict:
     """What check_drc reports and does not count, read off its console
     (#1626): the findings the board's own severities make KiCad WARNINGS
     (`severity_warnings`) and the ones a project `ignore` drops
-    (`severity_ignored`). Keys are present only when non-zero."""
+    (`severity_ignored`), and the pairs of one footprint's pads closer than
+    their clearance (`library_pad_gaps`, #1628), library geometry KiCad
+    reports as `clearance` and no routing step can clear. Keys are present
+    only when non-zero."""
     d = {}
     for key, pat in (('severity_warnings', r'SEVERITY WARNING: (\d+) finding'),
-                     ('severity_ignored', r'SEVERITY IGNORE: (\d+) finding')):
+                     ('severity_ignored', r'SEVERITY IGNORE: (\d+) finding'),
+                     ('library_pad_gaps', r'LIBRARY PAD GAPS: (\d+) pair')):
         m = re.search(pat, out)
         if m and int(m.group(1)):
             d[key] = int(m.group(1))
@@ -1884,6 +1888,14 @@ def main():
                    "finding(s) in a check the project sets to ignore"))
                   if n)
               + " -- see check_drc's WARNINGS")
+    # #1628: said before routing too -- no route can clear these
+    if _drc_c.get('library_pad_gaps'):
+        print(f"LIBRARY PAD GAPS (disclosed, not blocking): KiCad will report "
+              f"{_drc_c['library_pad_gaps']} clearance finding(s) on pairs of one "
+              f"footprint's own pads, which no placement or routing step "
+              f"changes -- a .kicad_dru clearance rule, a pad/footprint "
+              f"(clearance) override or a net tie clears them; check_drc's "
+              f"WARNINGS name the pairs")
     # #1303: what each pair's copper delivers, whether or not a rule grades it.
     _dp = score['components'].get('diff_pairs') or {}
     if _dp.get('pairs'):

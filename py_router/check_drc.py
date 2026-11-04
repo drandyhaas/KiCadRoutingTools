@@ -6921,9 +6921,34 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 routing_layers=routing_layers)['rows']}
     _own_gaps = 0
     _own_counts = {'violation': 0, 'inherited': 0}
+    # #1628: the gaps are not graded (no placement or routing step changes
+    # library pad geometry), but each one is a `clearance` ERROR in KiCad's
+    # own DRC, so it is published: an accepted row per pair (WARNINGS below,
+    # a --json count, board_score's and check_complete's disclosure, and its
+    # own channel in kicad_drc_compare), at KiCad's severity for the check.
+    _own_gap_rows = []
+    _own_proj_sev = project_rule_severities(pcb_file)
+    if severity_overrides:
+        _own_proj_sev = dict(_own_proj_sev, **severity_overrides)
+    _own_gap_sev = effective_severity('clearance', None, _own_proj_sev)
     for r in _own:
         if not r['contact']:
             _own_gaps += 1
+            if _own_gap_sev != 'ignore':
+                _own_gap_rows.append({
+                    'type': 'pad-pad', 'own_footprint': True,
+                    'accepted': 'own-footprint-gap',
+                    'kicad_severity': _own_gap_sev,
+                    'net1': r['net_a'] or f"net_{r['net_id_a']}",
+                    'net2': r['net_b'] or f"net_{r['net_id_b']}",
+                    'no_net': r['no_net'], 'layer': r['layer'],
+                    'overlap_mm': r['overlap_mm'],
+                    'required_mm': r['required_mm'],
+                    'gap_mm': round(r['required_mm'] - r['overlap_mm'], 4),
+                    'pad_ref': f"{r['ref']}.{r['pad_a']}",
+                    'pad_ref2': f"{r['ref']}.{r['pad_b']}",
+                    'pad_loc': r['pad_loc_a'], 'pad_loc2': r['pad_loc_b'],
+                    'closest_pt': r['closest_pt']})
             continue
         _v = _mark_required({
             'type': 'pad-pad',
@@ -6946,12 +6971,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         else:
             violations.append(_v)
             _own_counts['violation'] += 1
+    _accepted_edge.extend(_own_gap_rows)
     if not quiet and (_own_gaps or any(_own_counts.values())):
         print("Pads of one footprint (#1306): %d in contact on different nets "
               "(violations), %d inherited from --baseline (accepted); %d "
               "pair(s) closer than clearance without touching -- library pad "
-              "geometry KiCad reports as `clearance`, not graded here%s"
+              "geometry KiCad reports as `clearance`, not graded here%s%s"
               % (_own_counts['violation'], _own_counts['inherited'], _own_gaps,
+                 ' (listed under WARNINGS)' if _own_gap_rows else '',
                  '; pass --baseline <input board> to accept the contacts its '
                  'footprints already had' if _own_counts['violation']
                  and _baseline_pd is None else ''))
@@ -7028,9 +7055,31 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                   if a.get('accepted') == 'footprint-own-copper']
 
     def _warn_note():
-        if warnings or own_copper or _sev_warn:
-            print(f"\nWARNINGS ({len(warnings) + len(own_copper) + len(_sev_warn)}, "
+        if warnings or own_copper or _sev_warn or _own_gap_rows:
+            print(f"\nWARNINGS ({len(warnings) + len(own_copper) + len(_sev_warn) + len(_own_gap_rows)}, "
                   f"not DRC failures):")
+            if _own_gap_rows:
+                # #1628: the count line is what board_score reads.
+                _ng = sum(1 for r in _own_gap_rows if r['kicad_severity'] == 'error')
+                print(f"  LIBRARY PAD GAPS: {len(_own_gap_rows)} pair(s) of one "
+                      f"footprint's pads on different nets closer than their "
+                      f"clearance without touching -- KiCad reports each as a "
+                      f"`clearance` {'error' if _ng else 'warning'}, and no "
+                      f"placement or routing step can clear it. What can: a "
+                      f".kicad_dru clearance rule check_drc models (conditioned "
+                      f"on A.NetClass, A.Type / A.Pad_Type or A.NetName; a "
+                      f"footprint scope such as memberOfFootprint() is not "
+                      f"modelled here), a pad or footprint (clearance) "
+                      f"override, or a net-tie pad group:")
+                _lim = (len(_own_gap_rows) if max_print is None or max_print <= 0
+                        else max_print)
+                for r in _own_gap_rows[:_lim]:
+                    print(f"    {r['pad_ref']} [{r['net1']}] | {r['pad_ref2']} "
+                          f"[{r['net2']}] on {r['layer'] or '?'}: gap "
+                          f"{r['gap_mm']:.4f}mm < {r['required_mm']:.4f}mm")
+                if len(_own_gap_rows) > _lim:
+                    print(f"    ... and {len(_own_gap_rows) - _lim} more "
+                          f"(use --max-print 0 to show all)")
             if _sev_warn:
                 # #1626: KiCad reports these as warnings, at the board's own
                 # severity. The count line is what board_score reads.
@@ -7097,7 +7146,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     + ([f"{len(own_copper)} footprint own-copper contact(s) KiCad reports"]
                        if own_copper else []) \
                     + ([f"{len(_sev_warn)} finding(s) KiCad reports as warnings "
-                        f"(the board's own severities)"] if _sev_warn else [])
+                        f"(the board's own severities)"] if _sev_warn else []) \
+                    + ([f"{len(_own_gap_rows)} library pad pair(s) of one footprint "
+                        f"KiCad reports as clearance"] if _own_gap_rows else [])
                 print("OK" + (f" ({'; '.join(_notes)})" if _notes else ""))
             return violations + _accepted_edge
 
@@ -7764,6 +7815,11 @@ if __name__ == "__main__":
             # ... and the ones a project `ignore` drops: KiCad runs no such check
             'severity_ignored': sum(
                 1 for v in violations if v.get('accepted') == 'severity-ignore'),
+            # #1628: pairs of ONE footprint's pads closer than their clearance
+            # without touching -- library geometry, not graded, each one a
+            # KiCad `clearance` finding (`kicad_severity` on the item)
+            'own_footprint_gaps': sum(
+                1 for v in violations if v.get('accepted') == 'own-footprint-gap'),
             # #1528: of `violations`, the ones an unmodelled .kicad_dru
             # clearance rule may make legal (each names its `unverified_rule`)
             'unverified': sum(1 for v in _real if v.get('unverified_rule')),

@@ -670,6 +670,15 @@ def _grade(a, doc):
                      f"as WARNINGS at the board's own severities (a .kicad_dru "
                      f"rule's (severity warning) or the project's "
                      f"rule_severities) -- check_drc lists them under WARNINGS")
+    if _drc_c.get('library_pad_gaps'):
+        # #1628: library geometry, not graded (#1306) -- but KiCad's DRC of
+        # this board will show them, so a DONE says so
+        notes.append(f"KiCad will report {_drc_c['library_pad_gaps']} clearance "
+                     f"finding(s) on library pads (pairs of one footprint's "
+                     f"pads closer than their clearance; no route can clear "
+                     f"them -- a .kicad_dru rule, a pad/footprint clearance "
+                     f"override or a net tie can; check_drc's WARNINGS name "
+                     f"the pairs)")
     if _drc_c.get('severity_ignored'):
         notes.append(f"{_drc_c['severity_ignored']} DRC finding(s) in a check the "
                      f"project's rule_severities set to ignore, which KiCad "
