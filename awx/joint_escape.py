@@ -756,12 +756,12 @@ def _drops(pcb, grid, p, obs, sz, foot=None, rays=(), regions=None, fine=False):
 
 
 def reserve_ball_vias(pcb, spec=None):
-    """The joint fanout's promise to the arrays' OTHER nets, kept by the bus's own fanout: each of their balls keeps
-    the via in its own pad. `spec` the joint spec ({"arrays": [{"ref", "others", "drops"}]}), else the file
-    FANOUT_JOINT names; neither -- no joint fanout -- does nothing. A stand-in via, of the size the engine lays in that
-    pad and locked, is added to `pcb.vias` for each ball, so the bus's menus and the fanout engine leave the site as
-    they leave any via; nothing writes it (a fanout writes the board it read plus its own copper). Without it the bus's
-    fanout may run a track on B under a ball of another net and wall it in (zynq U1: DDR3_A4 under DDR3_CK_N's M2,
+    """The whole-array fanout's promise to the arrays' OTHER nets, kept by the bus's own fanout: each of their balls
+    keeps the via in its own pad. `spec` the joint spec ({"arrays": [{"ref", "others", "drops"}]}), else the file
+    FANOUT_JOINT names; neither -- no whole-array fanout -- does nothing. A stand-in via, of the size the engine lays in
+    that pad and locked, is added to `pcb.vias` for each ball, so the bus's menus and the fanout engine leave the site
+    as they leave any via; nothing writes it (a fanout writes the board it read plus its own copper). Without it the
+    bus's fanout may run a track on B under a ball of another net and wall it in (zynq U1: DDR3_A4 under DDR3_CK_N's M2,
     the A0/A2/A3 teeth round it on F -- no escape at any rung). A PLANE ball's (`drops`: a plane's, a rail's) is not
     kept: it has a way down besides its pad -- a gap's via, a strap to its neighbour -- and kept, the zynq U2's 39 of
     them walled the bus's berths in, its ends crossing 260 times to the chain's 202. Returns the number added."""
@@ -1382,7 +1382,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     along a gap or the ball's own line, up to `climb` pitches (None: the whole array), before it leaves -- and the
     STREET dog-bones (a via in an empty band of the array, `street` sites along a lane; the whole route's 2). The
     escapes' conflicts are the whole route's own (pages_first._conflicts as its ends take them: strict, an F exit
-    stacked over a B one allowed). `exit_rays` (the whole route's joint plans: the source realize's and the
+    stacked over a B one allowed). `exit_rays` (the whole route's whole-array plans: the source realize's and the
     destination's, fanout_from_plan): a plane ball's drop is held out of the bus's teeth's and berths' ways out
     (exit_ray_conflicts), each gap site offering a finer via too.
 
@@ -1422,8 +1422,9 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                                   {n: tuple(g['tooth']) for n, g in (prefer or {}).items()}, far_ang=far_ang)
     avoid_r = max(bm.grid.pitch_x, bm.grid.pitch_y)          # (an exit this near a crowded tooth: C_AVOID)
     if hold:
-        log(f'  joint escape of {ref}: teeth held -- {sum(1 for k in bm.items if bm.items[k][0] in hold)} bus ball(s) '
-            f'asked, {len(bm.unheld)} with no escape at their tooth' + (f': {bm.unheld}' if bm.unheld else ''))
+        log(f'  whole-array escape of {ref}: teeth held -- {sum(1 for k in bm.items if bm.items[k][0] in hold)} '
+            f'bus ball(s) asked, {len(bm.unheld)} with no escape at their tooth'
+            + (f': {bm.unheld}' if bm.unheld else ''))
         # a held tooth's run is as good as laid: every other ball's run on RUN gives up each layer it would meet one
         # on (track + clearance) -- the capacity rows count a lane group's runs per layer, and a run they let through
         # had no layer left at the colouring (zynq U1: ENABLE pushed onto B.Cu by held In1/In2 teeth in another group,
@@ -1467,8 +1468,8 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                 keep.append((kind, o, pc))
             bm.opts[k] = keep
             bm.menu[k] = [o for kind, o, _pc in keep if kind == 'escape']
-        log(f'  joint escape of {ref}: held teeth -- {n_cut} other run(s) lose a layer to them, {n_gone} lose every '
-            f'layer' + (f'; their runs held free on {sum(len(v) for v in free_legs.values())} run leg-layers, '
+        log(f'  whole-array escape of {ref}: held teeth -- {n_cut} other run(s) lose a layer to them, {n_gone} lose '
+            f'every layer' + (f'; their runs held free on {sum(len(v) for v in free_legs.values())} run leg-layers, '
                         f'{n_free} other option(s) left out there' if free_legs else ''))
     planes_ = set(plane_layers(pcb))             # (a leg on one priced: C_PLANE_LAYER)
     rls = run_layers()                # (more routing layers than two: the via moves' runs on RUN)
@@ -1556,7 +1557,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                                     bus_of=escape_to if isinstance(escape_to, dict) and len(set(escape_to.values())) > 1
                                     else None)
     t_geo = time.time() - t1
-    log(f'  joint escape of {ref}: {len(items)} balls ({sum(1 for k in items if items[k][0] in bus_s)} bus, '
+    log(f'  whole-array escape of {ref}: {len(items)} balls ({sum(1 for k in items if items[k][0] in bus_s)} bus, '
         f'{sum(1 for k in items if items[k][0] in drop_s)} plane), {n_moves} moves, '
         f'{sum(len(v) for v in straps.values())} straps, {sum(len(v) for v in dmenu.values())} drops, '
         f'{len(groups)} conflict cliques + {len(bigroups)} bicliques + {len(pairs)} pairs, {time.time() - t0:.0f} s '
@@ -2277,8 +2278,8 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                         repaired.append(key)
                         break
             if repaired:
-                log(f'  joint escape of {ref}: {len(repaired)} uncoloured ball(s) given an option that stands with the '
-                    f'plan: {sorted(repaired)}')
+                log(f'  whole-array escape of {ref}: {len(repaired)} uncoloured ball(s) given an option that stands '
+                    f'with the plan: {sorted(repaired)}')
         # the choice against the laid geometry, apart from the lane model the pairs came from: two chosen options of two
         # balls whose copper the engine could not both lay (the lane model does not see, e.g., two plain moves crossing)
         clashes = []
@@ -2351,7 +2352,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
             rep['debug'] = dict(items=items, opts=opts, pairs=pairs, groups=groups, bigroups=bigroups, chosen=chosen, cost=cost, sizes=sz,
                                 objective=obj_orig if chosen else None, bound=ans['bound'],
                                 wall=ans['wall'], branches=ans['branches'], conflicts_cp=ans['conflicts_cp'])
-        log(f'  joint escape of {ref}: {rep["status"]} -- bus {rep["bus_escaped"]}/{rep["bus_balls"]}, others '
+        log(f'  whole-array escape of {ref}: {rep["status"]} -- bus {rep["bus_escaped"]}/{rep["bus_balls"]}, others '
             f'{rep["others_escaped"]} escaped + {rep["others_strapped"]} strapped'
             + (f' + {rep["others_stubbed"]} dog-boned alone' if rep['others_stubbed'] else '')
             + f' of {rep["others_balls"]}, plane '
@@ -2465,10 +2466,10 @@ def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane
         layers=list(pcb.board_info.copper_layers), track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR,
         via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method='jointescape',
         plane_drop=plane_drop, escape_dir_hints=hints, bus=spec,
-        net_clearances={}, **extra)   # the joint plan is laid at FAN_CLEAR, class-blind (#1529)
+        net_clearances={}, **extra)   # the whole-array plan is laid at FAN_CLEAR, class-blind (#1529)
     tracks, vias_add, gated = keep_pair_gates(pcb, ref, hints, tracks, vias_add)
     if gated:
-        print(f'  joint escape of {ref}: left out, an escape through a planned pair\'s gate: '
+        print(f'  whole-array escape of {ref}: left out, an escape through a planned pair\'s gate: '
               + ', '.join(sorted(namer(pcb)(pcb.nets[i].name) for i in gated)))
     if tracks or vias_add:
         add_tracks_and_vias_to_pcb(board, out, tracks, vias_add, vias_rm,
@@ -2842,14 +2843,14 @@ def fan_array(board, out, ref, bus, others, other_layers, far=None, prefer=None,
                                 pairs_escaped=rep.get('pairs_escaped'), tiers=rep.get('phase1_tiers'),
                                 hands_held=rep.get('hands_held'), hands_free=rep.get('hands_free'),
                                 chosen=chosen_))
-            log(f'  joint escape of {ref} at track {r.fan_track} / via {r.via_size}/{r.via_drill}: {len(bare)} bare '
-                f'ball(s){" " + str(bare) if bare else ""}, {undropped} plane ball(s) undropped'
+            log(f'  whole-array escape of {ref} at track {r.fan_track} / via {r.via_size}/{r.via_drill}: {len(bare)} '
+                f'bare ball(s){" " + str(bare) if bare else ""}, {undropped} plane ball(s) undropped'
                 + (f' {und}' if und else ''))
             if best is not None and (len(bare), undropped) >= best[0]:
                 # (a rung that serves no more than the one above it: what is left is no matter of size -- the
                 # zynq DDR's U1 GND R20, ringed by other nets' escapes, undropped at every rung, three whole plans
                 # of the array more for nothing)
-                log(f'  joint escape of {ref}: the rung serves no more than the one above it -- the ladder stops')
+                log(f'  whole-array escape of {ref}: the rung serves no more than the one above it -- the ladder stops')
                 break
             best = ((len(bare), undropped), laid, r)
             if not bare and not undropped:

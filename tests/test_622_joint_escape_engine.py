@@ -3,8 +3,8 @@
 
   python3 tests/test_622_joint_escape_engine.py
 
-generate_bga_fanout(escape_method='jointescape') is how awx's joint fanout
-(route_bus --joint-fanout, awx/joint_escape.py) lays its plan: the under-pad
+generate_bga_fanout(escape_method='jointescape') is how awx's whole-array fanout
+(route_bus --whole-array, awx/joint_escape.py) lays its plan: the under-pad
 engine with `joint` on, the plan's plane-ball drops laid before anything else
 (part 0), and the bus's nets held to their layers (`bus` -> net_layers). This
 pins both on kicad_files/ulx3s.kicad_pcb U1, with one signal net fanned

@@ -6751,7 +6751,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     from coherent_nets import by_key
     pcb = parse_kicad_pcb(board)
     if awx_settings.get('JOINT_FOREIGN'):
-        # (buses routed at once off one shared array: the other buses' lanes as they publish them, copper of their own
+        # (negotiated buses off one shared array: the other buses' lanes as they publish them, copper of their own
         # nets -- joint_lanes.foreign)
         import joint_lanes
         joint_lanes.foreign(pcb)

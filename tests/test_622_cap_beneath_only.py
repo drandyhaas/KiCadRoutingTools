@@ -4,8 +4,8 @@ BENEATH a BGA's package, and only to poses that keep it beneath.
 
   python3 tests/test_622_cap_beneath_only.py
 
-awx's joint fanout runs the cap step once, after its first round's fanout, and the whole route then holds the parts
-where it left them; nudged freely, the zynq's C160, C161 and R6 -- beside U2, in the channel -- went 1.2 mm under
+awx's whole-array fanout runs the cap step once, after its first round's fanout, and the whole route then holds the
+parts where it left them; nudged freely, the zynq's C160, C161 and R6 -- beside U2, in the channel -- went 1.2 mm under
 U2's edge column, across the DDR bus's berths, and every round after met them there. On kicad_files/
 orangecrab_ext_pll.kicad_pcb at --clearance 0.1 (the tracked board the step moves 18 parts on):
 

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""whole_joint.py DIR KEY -- the JOINT solve of several buses off one shared array (route_bus JOINT_DIR): a round's first
-plans (KEY the round) or a loop's re-solves (KEY ROUND.LOOP.I: every re-solve of the loops of the buses, in step).
+"""whole_joint.py DIR KEY -- the COUPLED solve of several buses off one shared array (route_bus JOINT_DIR): a round's
+first plans (KEY the round) or a loop's re-solves (KEY ROUND.LOOP.I: every re-solve of the loops of the buses, in step).
 
 Each bus's whole route solves its round's first plan alone (whole_solve), writes it and every variable of its model
-(SOLVE.vals.json) and asks for the joint solve (DIR/rROUND/BUS.req.json: the settings it solved under, its solve's path,
-its flow frame's turn). Here every bus's model is built again into ONE model -- the very model it solved alone, every
-variable started from its own plan -- and the buses are COUPLED where their lanes cross: two lanes of two buses whose
-reference paths (their taut paths, turned back into the board's frame) cross stand on different layers there, each
+(SOLVE.vals.json) and asks for the coupled solve (DIR/rROUND/BUS.req.json: the settings it solved under, its solve's
+path, its flow frame's turn). Here every bus's model is built again into ONE model -- the very model it solved alone,
+every variable started from its own plan -- and the buses are COUPLED where their lanes cross: two lanes of two buses
+whose reference paths (their taut paths, turned back into the board's frame) cross stand on different layers there, each
 one's changes a via's room off the place -- or the crossing is BROKEN, at a price above a net over two vias (W_CROSS).
 Two lanes of two buses that come within a lane's pitch of each other are coupled alike, at each one's nearest point: on
-one layer there, they would crowd -- a conflict the two buses settle together, as a crossing.
-The plans the buses found alone are the joint solve's warm start, laid out whole (each broken coupling of theirs
-priced), and the search mends them. Each bus's plan is written over its solve.json (its own kept beside it,
-.solo.json), and DIR/rROUND/BUS.joint.json says it is there. Couplings, and the broken ones, on stdout."""
+one layer there, they would crowd -- a conflict the two buses settle together, as a crossing. The plans the buses found
+alone are the coupled solve's warm start, laid out whole (each broken coupling of theirs priced), and the search mends
+them. Each bus's plan is written over its solve.json (its own kept beside it, .solo.json), and DIR/rROUND/BUS.joint.json
+says it is there. Couplings, and the broken ones, on stdout."""
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 
 import contextlib
@@ -205,7 +205,7 @@ def main():
                         lits.append((pa, La, pb, Lb))
                         cpl.append((A, a, round(ua, 3), B, b, round(ub, 3), [round(X[0], 3), round(X[1], 3)]))
     print(f'  couplings: {len(cpl)} crossings and near misses (within {NEAR:.3f} mm) of two buses\' lanes, '
-          f'{nvia} of them within a via\'s reach alone ({NEAR_V:.3f} mm)')
+          f'{nvia} of them within a via\'s reach ({NEAR_V:.3f} mm)')
     OBJ = sum(p.OBJ for p in parts.values()) + W_CROSS * W_V * sum(brk)
     m.Minimize(OBJ)
     # the buses' own plans laid out whole: every hinted variable held, the couplings' literals completed
@@ -217,14 +217,14 @@ def main():
     ok = (cp_model.OPTIMAL, cp_model.FEASIBLE)
     if st_h in ok:
         n_b0 = sum(sh.Value(k_) for k_ in brk)
-        print(f'  the buses\' own plans together: [{sh.StatusName(st_h)}] {sh.ObjectiveValue() / W_V:.1f} vias-worth, '
-              f'{n_b0} of {len(brk)} couplings broken')
+        print(f'  the buses\' own plans side by side: [{sh.StatusName(st_h)}] {sh.ObjectiveValue() / W_V:.1f} '
+              f'vias-worth, {n_b0} of {len(brk)} couplings broken')
         vals_h = [sh.Value(m.GetIntVarFromProtoIndex(i_)) for i_ in range(len(m.Proto().variables))]
         m.ClearHints()
         for i_, v_ in enumerate(vals_h):
             m.AddHint(m.GetIntVarFromProtoIndex(i_), v_)
     else:
-        print(f'  the buses\' own plans together: [{sh.StatusName(st_h)}] -- the search from their hints alone')
+        print(f'  the buses\' own plans side by side: [{sh.StatusName(st_h)}] -- the search from their hints only')
     s_ = cp_seed.solver()
     s_.parameters.num_workers = WORKERS
     s_.parameters.subsolvers.extend(ws.FALLBACK)
@@ -235,17 +235,17 @@ def main():
     st = s_.Solve(m)
     secs = time.time() - t0
     if st not in ok:
-        print(f'  joint search: [{s_.StatusName(st)}] {secs:.0f}s -- no plan: every bus keeps its own')
+        print(f'  coupled search: [{s_.StatusName(st)}] {secs:.0f}s -- no plan: every bus keeps its own')
         sv = sh if st_h in ok else None
     else:
         sv = s_
-        print(f'  joint search: [{s_.StatusName(st)}] {secs:.0f}s, {s_.ObjectiveValue() / W_V:.1f} vias-worth '
+        print(f'  coupled search: [{s_.StatusName(st)}] {secs:.0f}s, {s_.ObjectiveValue() / W_V:.1f} vias-worth '
               f'(bound {s_.BestObjectiveBound() / W_V:.1f}), {sum(s_.Value(k_) for k_ in brk)} of {len(brk)} '
               f'couplings broken')
     rep = {'round': rnd, 'couplings': len(cpl), 'secs': round(secs, 1), 'all': cpl,
            'broken_alone': [c for c, k_ in zip(cpl, brk) if st_h in ok and sh.Value(k_)]}
     for c in rep['broken_alone']:
-        print(f'    broken alone: {c[0]}:{c[1]} u {c[2]} x {c[3]}:{c[4]} u {c[5]} at {c[6]}')
+        print(f'    broken by their own plans: {c[0]}:{c[1]} u {c[2]} x {c[3]}:{c[4]} u {c[5]} at {c[6]}')
     if sv is not None:
         rep['broken'] = [c for c, k_ in zip(cpl, brk) if sv.Value(k_)]
         for c in rep['broken'][:40]:
@@ -264,7 +264,7 @@ def main():
                 continue                # (a coupling of vias alone holds no layer: nothing to cut)
             pa, La, pb, Lb = lt_
             phys = {'a': phys_of(sv, pa, La), 'b': phys_of(sv, pb, Lb)}
-            # (only the couplings the joint solve SETTLED: broken in the buses' own plans, or a lane's layer there
+            # (only the couplings the coupled solve SETTLED: broken in the buses' own plans, or a lane's layer there
             # moved off its own plan's -- elsewhere each bus's own re-solve has no reason to leave the layers it
             # chose, and a cut at every crossing held a bus of 11 lanes to 181 of them, its loop out of room)
             if st_h in ok and not sh.Value(k_) and phys['a'] == phys_of(sh, pa, La) and \
@@ -283,7 +283,7 @@ def main():
         if sv is not None:
             st_ = st if sv is s_ else st_h
             with awx_settings.given(p.req['env']):
-                # (proved where the joint search proved its whole objective: an unproved plan is kept as the round's
+                # (proved where the coupled search proved its whole objective: an unproved plan is kept as the round's
                 # first solve keeps one, SOLVE_UNPROVED)
                 J = p.finish(sv, st_, st_ == cp_model.OPTIMAL, secs)
         if J is not None:

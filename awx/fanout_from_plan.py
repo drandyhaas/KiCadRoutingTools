@@ -262,7 +262,8 @@ def plan_state(pcb, names, banned=frozenset()):
     if _nol:
         raise SystemExit(f'fanout: ROUTE_LAYERS names {", ".join(_nol)}, which the board has not (its copper layers: '
                          f'{", ".join(pcb.board_info.copper_layers or ())})')
-    # the joint fanout (FANOUT_JOINT): the arrays' other balls keep their own via sites, which the menus leave free
+    # the whole-array fanout (FANOUT_JOINT): the arrays' other balls keep their own via sites, which the menus leave
+    # free
     import joint_escape as _je
     _je.reserve_ball_vias(pcb)
     from coherent_nets import by_key
@@ -598,13 +599,14 @@ def plan_state(pcb, names, banned=frozenset()):
                         for ref, fp in pcb.footprints.items()}})
 
 
-# THE DESTINATION'S BERTHS HELD (the joint fanout): {net: Move} -- the berths a joint plan of the destination array
-# places nearest the ends model's first choice, every ball of the array served and every pair whole (joint_berths),
-# held through the fanout's plan: each plan state carries them in its menu, held (`held`), so the ends model chooses
-# the teeth against berths the destination will lay, and the joint destination, preferring them, lays them. The ends
-# model's own berth menu (no climbs) has no conflict-free choice on the zynq's U5 for the AD9364's LVDS bus (33 lanes,
-# CP-SAT infeasible); chosen there, 17 of its berths conflicted, the joint destination moved 23 of 47, RX_D1's from the
-# up face to the left, 3.7 mm from U1, and the solve found no room for the crossover its plan needed
+# THE DESTINATION'S BERTHS HELD (the whole-array fanout): {net: Move} -- the berths a whole-array plan of the
+# destination array places nearest the ends model's first choice, every ball of the array served and every pair whole
+# (joint_berths), held through the fanout's plan: each plan state carries them in its menu, held (`held`), so the ends
+# model chooses the teeth against berths the destination will lay, and the whole-array destination, preferring them,
+# lays them. The ends model's own berth menu (no climbs) has no conflict-free choice on the zynq's U5 for the AD9364's
+# LVDS bus (33 lanes, CP-SAT infeasible); chosen there, 17 of its berths conflicted, the whole-array destination moved
+# 23 of 47, RX_D1's from the up face to the left, 3.7 mm from U1, and the solve found no room for the crossover its plan
+# needed
 _HELD = {}
 
 
@@ -672,8 +674,8 @@ def berth_hands(choice):
 
 
 def joint_berths(st, board, choice, log=print):
-    """{net: Move}: the destination array planned jointly (joint_escape.plan_array: its bus, other nets and plane
-    balls, as the joint destination plans them) on `board`, the bus preferring `choice` (the ends model's berths), each
+    """{net: Move}: the destination array planned jointly (joint_escape.plan_array: its bus, other nets and plane balls,
+    as the whole-array destination plans them) on `board`, the bus preferring `choice` (the ends model's berths), each
     pair arriving with the hand its teeth leave by (teeth_hands) -- the berth each bus net gets"""
     import joint_escape as je
     from coherent_nets import namer
@@ -726,16 +728,17 @@ def joint_berths(st, board, choice, log=print):
     out = {k.split('#')[0]: o for k, (kind, o) in (rep.get('debug', {}).get('chosen') or {}).items()
            if kind == 'escape' and k.split('#')[0] in choice}
     same = sum(1 for nm, o in out.items() if sr.move_sig(o) == sr.move_sig(choice[nm]))
-    log(f'  berths held (joint plan of {dref}, preferring the ends model\'s): {len(out)}/{len(choice)} placed, '
+    log(f'  berths held (whole-array plan of {dref}, preferring the ends model\'s): {len(out)}/{len(choice)} placed, '
         f'{same} the ends model\'s own; pairs {rep.get("pairs_escaped")}/{rep.get("pairs")}, held to their teeth\'s '
         f'hand {len(rep.get("hands_held") or ())}/{len(rep.get("hands_held") or ()) + len(rep.get("hands_free") or ())}'
         + (f' (NO berth pair of it: {rep["hands_free"]})' if rep.get('hands_free') else '')
         + f', phase 1 {rep.get("phase1_tiers")}')
-    # (each berth the joint plan placed elsewhere than the ends model's, named: the ends are chosen again on these)
+    # (each berth the whole-array plan placed elsewhere than the ends model's, named: the ends are chosen again on
+    # these)
     desc = lambda m_: f'{m_.kind}/{m_.direction}/{m_.layer}@({m_.exit_pt[0]:.2f},{m_.exit_pt[1]:.2f})'
     moved = [nm for nm in choice if nm not in out or sr.move_sig(out[nm]) != sr.move_sig(choice[nm])]
     if moved:
-        log(f'  berths the joint plan moved: ' + '; '.join(
+        log(f'  berths the whole-array plan moved: ' + '; '.join(
             f'{sn(nm)} {desc(choice[nm])} -> {desc(out[nm]) if nm in out else "none"}' for nm in moved))
     return out
 
@@ -1223,8 +1226,8 @@ def plan(base, names, work):
         if not dst_choice:
             print(f'  round {r}: no destination choice'); break
         if PLAN_JUDGE == 'ends' and awx_settings.get('FANOUT_JOINT') and not _HELD:
-            # the joint fanout: the berths the destination's joint plan places nearest these, held from here on --
-            # and the ends chosen again on them (_HELD)
+            # the whole-array fanout: the berths the destination's whole-array plan places nearest these, held from here
+            # on -- and the ends chosen again on them (_HELD)
             _HELD.update(joint_berths(st, board, dst_choice))
             if _HELD:
                 _hold_berths(st)
@@ -1284,7 +1287,7 @@ def plan(base, names, work):
                 joint_ = bool(res_r.get('joint'))
                 if not joint_:
                     ban_moves(banned, moves, misses, names)
-                how_ = "the joint plan's" if joint_ else 'banned'
+                how_ = "the whole-array plan's" if joint_ else 'banned'
                 line = (f'  round {r}: source residue move(s) realized: {sorted(moves)}'
                         + (f'; not laid as asked ({how_}): {misses}' if misses else '')
                         + (f'; REJECTED ({res_r["rejected"]})' if res_r['rejected'] else ''))
@@ -1665,10 +1668,10 @@ def main():
     print('planning (source realized every round)...')
     work = out_path[:-len('.kicad_pcb')] if out_path.endswith('.kicad_pcb') else out_path
     choice, dst_pad, dref, byname, board, realized, banned = plan(base, names, work)
-    # the joint fanout's destination from the array's JOINT plan with more routing layers than two (the zynq U5's
-    # LVDS berths: the ends model's own held 7 conflicts and 3 split pairs); on two the bus's berths are laid as the
-    # chain lays them and the array's other balls planned round them after (joint_others) -- the joint plan of the
-    # whole array chose berths for every ball's sake, and the zynq DDR's ends crossed 260 times to the chain's 202
+    # the whole-array fanout's destination from the array's WHOLE-ARRAY plan with more routing layers than two (the zynq
+    # U5's LVDS berths: the ends model's own held 7 conflicts and 3 split pairs); on two the bus's berths are laid as
+    # the chain lays them and the array's other balls planned round them after (joint_others) -- the whole-array plan of
+    # the whole array chose berths for every ball's sake, and the zynq DDR's ends crossed 260 times to the chain's 202
     joint_dest = bool(awx_settings.get('FANOUT_JOINT')) and len(route_layers.layers()) > 2
     spec_ = None
     try:
@@ -1701,15 +1704,16 @@ def _after_destination(out_path, names, dref, rc, joint_dest):
 
 
 def joint_destination(out_path, names, choice, dref, byname, board, banned, log=print):
-    """FANOUT_JOINT (route_bus --joint-fanout): the destination's WHOLE array laid from one joint plan
+    """FANOUT_JOINT (route_bus --whole-array): the destination's WHOLE array laid from one whole-array plan
     (joint_escape.fan_array) -- every ball of it: the bus's berths, each PREFERRING the ends model's choice for it
-    (`choice`: its exit, face, layer and kind, joint_escape's deviation costs) and moved only where those cannot all
-    be laid together (two in conflict, a pair split: the plan holds a pair's two legs on one face and layer, their exits
+    (`choice`: its exit, face, layer and kind, joint_escape's deviation costs) and moved only where those cannot all be
+    laid together (two in conflict, a pair split: the plan holds a pair's two legs on one face and layer, their exits
     neighbours), the other nets' escapes and straps, and the plane balls' drops -- laid exactly as planned. The ends
     model chooses berths ball by ball and repairs pairs after; on the zynq's U5 for the AD9364's LVDS bus its first
     choice already held 7 conflicting berths and 3 split pairs (the TX pairs, staircased on diagonal balls), and eight
-    engine passes left 8 to 20 of them not as asked, round after round refused; the joint plan places all 47 berths,
-    every pair whole. The plan sidecar is written from the berths laid. Returns 0, or 1 where a bus ball is left bare."""
+    engine passes left 8 to 20 of them not as asked, round after round refused; the whole-array plan places all 47
+    berths, every pair whole. The plan sidecar is written from the berths laid. Returns 0, or 1 where a bus ball is left
+    bare."""
     import joint_escape as je
     from coherent_nets import namer
     sn = namer(byname)
@@ -1722,7 +1726,7 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
     # the source board, named as fanout_destination names it: the whole route's next round starts from it
     # (whole_route.advance). Unnamed, every round after the first started again from the bench's own source fanout,
     # its pairs split as that pair-blind fanout left them (zynq LVDS on four layers: 11 pairs split at U1, every round 2)
-    log(f'\nplan (joint destination {dref}): {len(choice)} berth(s)  (source board: {os.path.basename(board)}, '
+    log(f'\nplan (whole-array destination {dref}): {len(choice)} berth(s)  (source board: {os.path.basename(board)}, '
         f'{len(banned)} banned move(s))')
     pcb = parse_kicad_pcb(board)
     hands = teeth_hands(pcb, list(names), byname, sref) if sref in pcb.footprints else {}
@@ -1740,8 +1744,9 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
         o.direction != prefer[nm]['direction'] or o.layer != prefer[nm]['layer']
         or math.hypot(o.exit_pt[0] - prefer[nm]['tooth'][0], o.exit_pt[1] - prefer[nm]['tooth'][1]) > sr.GAP_TOL))
     bare_bus = sorted(nm for nm in bus_s if nm not in laid)
-    log(f'  joint destination {dref}: {len(laid)}/{len(bus_s)} berths planned and laid ({len(laid) - len(moved)} as the '
-        f'ends model chose them, {len(moved)} moved: {moved}), pairs {kept.get("pairs_escaped")}/{kept.get("pairs")}, '
+    log(f'  whole-array destination {dref}: {len(laid)}/{len(bus_s)} berths planned and laid '
+        f'({len(laid) - len(moved)} as the ends model chose them, {len(moved)} moved: {moved}), '
+        f'pairs {kept.get("pairs_escaped")}/{kept.get("pairs")}, '
         f'others {kept["planned_others"]}/{len(a["others"])} planned, plane drops {kept["planned_drops"]}; '
         f'{len(kept["bare"])} ball(s) bare, {kept["undropped"]} plane ball(s) undropped; phase 1 {kept.get("tiers")}'
         + (f'; pairs held to their teeth\'s hand {len(kept.get("hands_held") or ())}/'
@@ -1772,7 +1777,7 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
     try:
         explain_plan(ch_laid, st, names, out_path, out_path, achieved=achieved)
     except Exception as e:
-        log(f'  joint destination: the plan sidecar NOT written ({type(e).__name__}: {e})')
+        log(f'  whole-array destination: the plan sidecar NOT written ({type(e).__name__}: {e})')
     # the TIE VIAS plan_state promised (a ball with a pad of its own net under it gets no via-in-pad berth: a via at
     # the ball serves the pad, tie_vias_under), on the shipped board as fanout_destination adds them -- the joint path
     # left those pads open
@@ -1787,7 +1792,7 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
             os.replace(tmp, out_path)
             _drop_tie_siblings(tmp)
             ship_vias.stamp(out_path, 'fanout ties', log)
-            log(f'  joint destination: {len(ties)} tie via(s) for pads under balls')
+            log(f'  whole-array destination: {len(ties)} tie via(s) for pads under balls')
     except Exception as e:      # a tie must not lose the board
         log(f'  tie vias NOT added: {e}')
     return 1 if bare_bus else 0
@@ -1805,9 +1810,9 @@ def _joint_held():
 
 
 def speculate_others(board, skip):
-    """joint_others' first plan -- the source's other balls and plane balls, at the chain's own sizes -- asked BESIDE the
-    destination's joint plan: its model built now, on the board as it stands before the destination's copper is laid,
-    its solve run on another thread (a joint_escape._Deferred, whose wait() ends with the solve; None where
+    """joint_others' first plan -- the source's other balls and plane balls, at the chain's own sizes -- asked BESIDE
+    the destination's whole-array plan: its model built now, on the board as it stands before the destination's copper
+    is laid, its solve run on another thread (a joint_escape._Deferred, whose wait() ends with the solve; None where
     joint_others plans nothing so). joint_escape keeps each model's answer: joint_others' own call finds it where that
     copper left the source's model as it was, and solves its own where it did not -- the same plan either way
     (joint_escape._SOLVED)"""
@@ -1835,7 +1840,7 @@ def speculate_others(board, skip):
 
 
 def joint_others(out_path, log=print, skip=()):
-    """FANOUT_JOINT (route_bus --joint-fanout): a JSON file naming the arrays whose OTHER nets and plane balls are
+    """FANOUT_JOINT (route_bus --whole-array): a JSON file naming the arrays whose OTHER nets and plane balls are
     fanned with the bus's -- {"layers": [the others' layers], "arrays": [{"ref", "others", "drops"}, ...]}. The bus
     is laid at both arrays first, by the bus-only engine call above, exactly as without it; then the others.
 
@@ -1869,7 +1874,7 @@ def joint_others(out_path, log=print, skip=()):
             rung, reps = je.fan_array(cur, nxt, ref, [], a['others'], spec['layers'], drops=a['drops'], log=log)
             last = next(r for r in reps if (r['track'], r['via'], r['drill']) ==
                         (rung.fan_track, rung.via_size, rung.via_drill))
-            log(f'  joint fanout of {ref}: {len(a["others"])} other nets and the plane balls of '
+            log(f'  whole-array fanout of {ref}: {len(a["others"])} other nets and the plane balls of '
                 f'{len(a["drops"])} nets at track {rung.fan_track} / via {rung.via_size}/{rung.via_drill}: '
                 f'{len(last["bare"])} ball(s) bare, {last["undropped"]} plane ball(s) undropped')
         kept[ref] = held[ref] if rung is None else \
@@ -1896,7 +1901,7 @@ def hold_array(prev_board, cur, nxt, a, size, layers, stem, why, log=print, in_p
     rung = dataclasses.replace(_rules.active(), fan_track=size['track'], via_size=size['via'], via_drill=size['drill'])
     carried = f'{stem}carried_{ref}.kicad_pcb'
     again, n_kept, n_moved = je.carry(prev_board, cur, carried, ref, a['others'], a['drops'], in_place=in_place)
-    log(f'  joint fanout of {ref}, {why}: {n_kept} piece(s) stand, {n_moved} moved; '
+    log(f'  whole-array fanout of {ref}, {why}: {n_kept} piece(s) stand, {n_moved} moved; '
         f'{len(again)} ball(s) to plan again at track {rung.fan_track} / via {rung.via_size}/{rung.via_drill}'
         + (f': {again}' if again and len(again) <= 12 else ''))
     if not again:
@@ -1924,7 +1929,7 @@ def hold_array(prev_board, cur, nxt, a, size, layers, stem, why, log=print, in_p
     replan(carried, nxt, again)
     left = unserved(nxt)
     stuck = [k for k in left if k in set(again)]
-    log(f'  joint fanout of {ref}, planned again: {len(left)} ball(s) unserved' + (f' {left}' if left else ''))
+    log(f'  whole-array fanout of {ref}, planned again: {len(left)} ball(s) unserved' + (f' {left}' if left else ''))
     if stuck:
         # once more with the stuck balls' neighbours released from their held copper, the neighbourhood planned
         # together -- kept only if it serves more
@@ -1933,7 +1938,7 @@ def hold_array(prev_board, cur, nxt, a, size, layers, stem, why, log=print, in_p
                                   in_place=in_place)
         replan(carried2, nxt2, again2)
         left2 = unserved(nxt2)
-        log(f'  joint fanout of {ref}, {stuck} with their neighbours released ({len(again2)} ball(s) planned '
+        log(f'  whole-array fanout of {ref}, {stuck} with their neighbours released ({len(again2)} ball(s) planned '
             f'together): {len(left2)} unserved' + (f' {left2}' if left2 else '')
             + (' -- kept' if len(left2) < len(left) else ' -- not kept'))
         if len(left2) < len(left):
@@ -1942,8 +1947,8 @@ def hold_array(prev_board, cur, nxt, a, size, layers, stem, why, log=print, in_p
 
 
 def joint_hold(board, log=print):
-    """FANOUT_JOINT, the first round's copper HELD to the passives its cap step has just put back over it: the cap
-    step nudges the movable passives off the joint fanout's copper (whole_route: --beneath-only, so a part beneath a
+    """FANOUT_JOINT, the first round's copper HELD to the passives its cap step has just put back over it: the cap step
+    nudges the movable passives off the whole-array fanout's copper (whole_route: --beneath-only, so a part beneath a
     BGA stays beneath it), and the passives stand from then on (FANOUT_PASSIVES_FIXED, which the caller sets); a part
     with nowhere beneath its BGA to go is left on copper it cannot clear -- the zynq's decoupling caps under U1, on B.Cu
     across the others' escapes there. Each array's other nets and plane balls are held on BOARD as a later round holds
@@ -1954,7 +1959,7 @@ def joint_hold(board, log=print):
     stem = board[:-len('.kicad_pcb')] if board.endswith('.kicad_pcb') else board
     side = f'{stem}.joint.json'
     if not path or not os.path.isfile(side):
-        log('  joint hold: no joint fanout to hold')
+        log('  whole-array hold: no whole-array fanout to hold')
         return
     spec, sizes = json.load(open(path)), json.load(open(side))
     cur = board
@@ -2031,7 +2036,7 @@ def pair_exit_clear(pcb, nid, other, m, reach=None, free=(), layer=None):
 
 def tie_stand_ins(pcb, names, byname, dst_pad):
     """the TIE VIAS' sites (tie_vias_under: a ball with a pad of its own net under it is tied by a via at the ball once
-    its berth is laid) as stand-in vias, each its net's, for a joint plan of the destination (joint_berths,
+    its berth is laid) as stand-in vias, each its net's, for a whole-array plan of the destination (joint_berths,
     joint_destination: joint_escape.fan_array's `stand_in`) -- the other nets' escapes go round each as round any via.
     Unknown to the plans, the zynq7020's DDR_CK_P escaped by a via in its pad and a run along its ball row across
     DDR_CK_N's ball, the tie via was laid on that run, and the bus handed on a short"""
@@ -2519,7 +2524,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     # via must clear.
     pcb._fanout_all_foreign_immovable = True
     import joint_escape as _je
-    _je.reserve_ball_vias(pcb)          # the joint fanout: the other balls' own via sites stay free
+    _je.reserve_ball_vias(pcb)          # the whole-array fanout: the other balls' own via sites stay free
     tracks, vias_add, vias_rm, failed = [], [], [], []
     for r_ in [dref] + sorted({dof(nm) for nm in targets} - {dref}):
         tg_ = [nm for nm in targets if dof(nm) == r_]

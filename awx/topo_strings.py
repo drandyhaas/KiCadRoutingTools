@@ -85,7 +85,7 @@ class _Overlay:
     excluded items touch, rewritten (None: the cell left empty), in front
     of the base model's dict -- read as the copy of the base with those
     cells rewritten would be. A copy per derived model was three
-    whole-board dicts, ~1.5 MB each on the zynq: a joint plan of U1's 297
+    whole-board dicts, ~1.5 MB each on the zynq: a whole-array plan of U1's 297
     balls on three layers derives 538 models and held 800 MB in them."""
     __slots__ = ('base', 'over')
 

@@ -3,9 +3,9 @@
 
   python3 tests/test_622_walled_balls.py
 
-Under the joint fanout the whole route's ends price a state that leaves a plane ball no way down (WALLED): each ball's
-ways are its drops and its straps, and each end option kills the ways its copper, its via, its lane past its exit or
--- a pair's -- its pocket stands on. Unmeasured, the zynq DDR's ends ran the bus over every way down three of U1's
+Under the whole-array fanout the whole route's ends price a state that leaves a plane ball no way down (WALLED): each
+ball's ways are its drops and its straps, and each end option kills the ways its copper, its via, its lane past its exit
+or -- a pair's -- its pocket stands on. Unmeasured, the zynq DDR's ends ran the bus over every way down three of U1's
 VCC_1V5 balls had.
 
 walled_balls, on hand-made ways and kills:

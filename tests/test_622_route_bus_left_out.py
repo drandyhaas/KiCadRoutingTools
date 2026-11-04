@@ -4,13 +4,14 @@
   python3 tests/test_622_route_bus_left_out.py
 
 sdi_mipi_conv's DDR3 bus: the source fanout dropped DDR3_A2's ball (U11.L11), so the net was in no ladder and no run --
-and, a bus net, not among the array's other nets either: no round's joint plan planned its ball, the step put it back
-as it came (none), and route.py found no way out of the field the bus left it.
+and, a bus net, not among the array's other nets either: no round's whole-array plan planned its ball, the step put it
+back as it came (none), and route.py found no way out of the field the bus left it.
 
 1. others_left_out puts each net of the bus the run leaves out among the others of every array it has a ball of, and
    no net the run routes, no net of a zone (a plane's balls are the drops'), and none an array has no ball of;
-2. escapes_kept keeps the joint plan's escapes of such a net only where the board as it came had no copper of its own
-   on it: a net of its own copper is put back as it came, and a net the joint plan never took is put back too.
+2. escapes_kept keeps the whole-array plan's escapes of such a net only where the board as it came had no copper of its
+own
+   on it: a net of its own copper is put back as it came, and a net the whole-array plan never took is put back too.
 """
 import os
 import sys
@@ -69,7 +70,7 @@ pcb.segments = [types.SimpleNamespace(net_id=4)]
 check(rb.escapes_kept(pcb, back, left) == [NETS[3]], f'A3 had a track: put back {rb.escapes_kept(pcb, back, left)}')
 pcb.segments, pcb.vias = [], [types.SimpleNamespace(net_id=3)]
 check(rb.escapes_kept(pcb, back, left) == [NETS[4]], f'A2 had a via: put back {rb.escapes_kept(pcb, back, left)}')
-check(rb.escapes_kept(pcb, back, set()) == [], 'none the joint plan took: every one put back')
+check(rb.escapes_kept(pcb, back, set()) == [], 'none the whole-array plan took: every one put back')
 
 if fails:
     print(f'FAIL: {len(fails)} check(s)')

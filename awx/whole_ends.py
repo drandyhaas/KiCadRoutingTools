@@ -243,8 +243,8 @@ AWAY_FACE = 5.0           # a tooth on a side face of the source's other half fr
 #                           destination nor on the ball's own half (joint_escape's esc_faces, an escape bus's rule):
 #                           its escape runs under the array through the other half's balls' way out, each leg so
 POCKET_ROW = 0.01         # (plane_ways) a pair's pocket starts this much short of the outer ball row's centres
-WALLED = 1000.0           # a plane ball of the arrays its ends leave no way down (the joint fanout: plane_ways) -- past
-#                           any via count, yet no refusal
+WALLED = 1000.0           # a plane ball of the arrays its ends leave no way down (the whole-array fanout: plane_ways)
+#                           -- past any via count, yet no refusal
 FAR = {'left': (-1, 0), 'right': (1, 0), 'up': (0, -1), 'down': (0, 1)}
 
 
@@ -576,7 +576,7 @@ class Ends:
                 by_net_[sg.net_id] += math.hypot(sg.end_x - sg.start_x, sg.end_y - sg.start_y)
         self._laid_len = {leg: by_net_.get(st['byname'][leg][0], 0.0) for leg, m in cur.items()
                           if m is not None and not m.legs and leg in st['byname']}
-        # (the joint fanout's plane balls of the arrays, each kept a way down: plane_ways)
+        # (the whole-array fanout's plane balls of the arrays, each kept a way down: plane_ways)
         self.pw = plane_ways(st, self.lanes, self.T, self.B, cur)
         # a TIE VIA at the ball where a pad of the net's own lies under it on the other layer (fanout_from_plan.
         # tie_vias_under): one more via on that leg whatever its escapes
@@ -2446,7 +2446,7 @@ def choose(st, log=print, src_free=True, fixed=None, seed=None, learned=None, fr
     parts_ = pF if (E2 is not None and vF < vL - TOOTH_GAIN) else pL
     # (asked of an ESCAPE's ends and a GROUP's, where the ends model's route and the solve part: lanes leaving the
     # source's near face, a group's ways in. A single destination's fanout ends the solve takes as they come -- asked
-    # of a DDR bus's joint fanout four times, 260 s, the state stood each time)
+    # of a DDR bus's whole-array fanout four times, 260 s, the state stood each time)
     if (st.get('escape') or len(st.get('dests') or ()) > 1) and (awx_settings.get('ENDS_SOLVE_CHECK') or '1') == '1':
         Ef, sf, pf_ = (E2, sF, pF) if (E2 is not None and vF < vL - TOOTH_GAIN) else (E, sL, pL)
         sf = checked(Ef, sf, pf_, log=log)
@@ -2866,9 +2866,9 @@ def _front(pcb, nid, m, kids):
 
 
 def plane_ways(st, lanes, T, B, cur):
-    """The joint fanout's PLANE balls kept a way down by the ends (FANOUT_JOINT; None without it). Each plane ball of
-    the two arrays (the spec's `drops`) has its WAYS: its drops as the joint escape plans them (joint_escape._drops: a
-    via behind a stub in a diagonal gap or straight off an edge, at the rung's via or a finer rung's, or a via in its
+    """The whole-array fanout's PLANE balls kept a way down by the ends (FANOUT_JOINT; None without it). Each plane ball
+    of the two arrays (the spec's `drops`) has its WAYS: its drops as the joint escape plans them (joint_escape._drops:
+    a via behind a stub in a diagonal gap or straight off an edge, at the rung's via or a finer rung's, or a via in its
     pad), measured on the board without the run's copper, and its straps to a neighbouring ball of its net
     (joint_escape._straps), which serve it while that ball has a way of its own. Each end option KILLS the ways its
     copper stands on -- its legs at the fan track (a laid tooth's: its net's copper at the array), its via, and its

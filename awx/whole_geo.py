@@ -346,7 +346,7 @@ for v_ in ctx.base_vias:
         VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), whole_ctx.joint_via_island(ctx, v_)
                       or 'svia ' + (own_ or whole_ctx.copper_name(ctx, v_)), own_))
     elif v_.net_id not in NET_LANE and whole_ctx.joint_via_island(ctx, v_):
-        # ...and every via of ANOTHER BUS routed at once, wherever it stands: an island of its own whose side the loop
+        # ...and every via of ANOTHER negotiated BUS, wherever it stands: an island of its own whose side the loop
         # may flip (whole_ctx.joint_via_island) -- beyond the field it was no island at all, and a lane laid through
         # it was found only by the audit, which no cut answers
         r = max(v_.size / 2, _pairs.svia_reach(ctx.cfg, v_.x, v_.y, v_.size)) \

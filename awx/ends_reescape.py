@@ -5,7 +5,7 @@ its source menu (fanout_from_plan.plan_state): one whose first stretch past its 
 copper on its layer by a lane's clearance and a margin, on the same face and within a millimetre of the old tooth (the
 solve's order was solved for that tooth: one moved further, or onto another face, crowded its neighbours there in
 turn), off LAYER when given, nearest the old tooth, on its layer where it can, fewest vias. Laid by
-source_realize.realize alone -- the joint plan of that one ball; every other ball, the bus's other teeth and every
+source_realize.realize alone -- the whole-array plan of that one ball; every other ball, the bus's other teeth and every
 earlier step's copper stay as they are, and the lane's copper not joined to its ball (its berth's stub) is put back.
 Writes OUT and its plan sidecar (the bench's, the tooth re-measured). Exit 0 laid; 2 no escape clears; 3 none laid."""
 import json

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The layers the joint fanout's other nets escape on only where they must (awx/joint_escape.py: plane_layers,
+"""The layers the whole-array fanout's other nets escape on only where they must (awx/joint_escape.py: plane_layers,
 C_PLANE_LAYER).
 
   python3 tests/test_622_plane_layers.py

@@ -1751,7 +1751,7 @@ an LVDS bus off the same array), on the poured board:
 ```bash
 python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
     --rounds 2 --inproc \
-    --bus U1:U2:joint:F.Cu,B.Cu,In1.Cu,In2.Cu \
+    --bus U1:U2:whole-array:F.Cu,B.Cu,In1.Cu,In2.Cu \
     --clearance-ceiling 0.1 --track-width 0.1 --fanout-track-width 0.0975 \
     --via-size 0.35 --via-drill 0.15 \
     2>&1 | tee /tmp/step1a_bus.txt
@@ -1764,42 +1764,53 @@ python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
   pull-ups block on F.Cu, which the inner layers relieve. The step prices a
   run on a plane's layer (a via per run), so lanes take a pour's layer only
   where it saves one.
-- **MODE:** `joint` for a bus between two arrays (the default choice: each
-  round plans the arrays' other nets and plane drops round the bus, so the
-  later fanouts leave those arrays alone -- do NOT run `bga_fanout.py` on
-  them). `escape` dog-bones both arrays the human's way: use it for a second
-  bus on an array an earlier bus already fanned (the zynq's LVDS after its
-  DDR); on h616_lpddr4's LPDDR4 alone it handed on 23 of 45 nets against
-  joint's 45. `plain` for a bus to a row part (a QFN), and for one source
-  with several ends, `--bus U1:U4+U3:plain:...` (two buses that interleave on
-  one face, routed as one).
+- **MODE:** `whole-array` for a bus between two arrays (the default choice:
+  each round plans the arrays' other nets and plane drops round the bus, so
+  the later fanouts leave those arrays as they are -- do NOT run
+  `bga_fanout.py` on them). `escape` dog-bones both arrays the human's way:
+  use it for a second bus on an array an earlier bus already fanned out (an
+  LVDS bus after a DDR bus); on a memory bus by itself it handed on 23 of 45
+  nets against whole-array's 45. `plain` for a bus to a row part (a QFN), and
+  for a **group bus**, one source with several ends, `--bus U1:U4+U3:plain:...`
+  (two buses that interleave on one face, routed as one bus in one frame).
+- **Buses off one array are routed NEGOTIATED by default:** a solo run of
+  each, then the array's escapes planned once for all of them (the shared
+  field), then every bus at the same time, each in its own frame, their plans
+  one coupled solve, and the boards merged (a conflict between two buses is
+  named in `OUT.bus/conflicts.json`). The first may be `whole-array`, the
+  rest `plain`. Otherwise -- an escape bus among them, a group bus, different
+  LAYERS -- and with `--sequential`, they are routed SEQUENTIALLY, one after
+  another in the order given, and the log says why (`route_bus: the N buses
+  off U1 routed sequentially, not negotiated -- ...`).
 - **Every ball of a bus array must leave the step served -- the rule that
   decides the rest of the chain.** A ball is served when it has an escape
   (a dog-bone via or stub), is dropped to its plane, or is strapped. `route.py`
   cannot reach a ball that has none: the pad sits inside the pad field with no
   stub, no rip or retry authority applies, and the net fails as "boxed in by
   static obstacles". A fanout run AFTER the bus step cannot repair it either:
-  the bus's lanes and dog-bones already fill the field (on sdi_mipi_conv,
-  fanning U11 out after the bus step left MORE nets open, 43 against 35). So
-  the fanout of a bus's arrays is the bus step's own, planned with the bus (on
-  the zynq, every other ball of U1 was served: 98 escaped, 12 strapped, 5
-  dog-boned alone of 115), and the parts no bus touches are fanned out whole
-  with `bga_fanout.py` before `route.py` (Step 1b), never left for the router.
-  - The step's log says what it served: `joint field of U1: FEASIBLE -- bus
-    a/b, others N escaped + M strapped + K dog-boned alone of T, plane P
+  the bus's lanes and dog-bones already fill the field (on one board,
+  fanning the shared array out after the bus step left MORE nets open, 43
+  against 35). So the fanout of a bus's arrays is the bus step's own, planned
+  with the bus (on one board every other ball of the source was served: 98
+  escaped, 12 strapped, 5 dog-boned alone of 115), and the parts no bus
+  touches are fanned out whole with `bga_fanout.py` before `route.py` (Step
+  1b), never left for the router.
+  - The step's log says what it served: `whole-array field of U1: FEASIBLE --
+    bus a/b, others N escaped + M strapped + K dog-boned alone of T, plane P
     dropped`. Read it, then check the BOARD it hands on: count each bus
     array's signal balls that carry no stub, via, plane link or strap. Every
     ball counted is a net `route.py` will leave open.
   - `escape` on a shared array does plan the array's other balls with the bus,
-    but on sdi_mipi_conv (DDR3 joint, then SDI escape on U11) the board it
-    handed on still had 25 bare U11 balls; the same two buses both `joint`
-    left none (U11 248 of 248 served, U12 90 of 90). After `escape` or
+    but on one board (a DDR3 bus `whole-array`, then an SDI bus `escape` off
+    the same array) the board it handed on still had 25 bare balls on that
+    array; the same two buses both `whole-array` left none. After `escape` or
     `plain`, make the count above before going on, and fan the bare balls out
     only if the bus left room.
-  - Both-`joint` is not free: on that board the fanout audit then refused
-    every SDI lane (their balls sit on U11's far side from U15), so the bus
-    laid 2 lanes and `route.py` finished the rest -- 27 nets open against 29
-    with the escape bus and 37 with no bus step (one run each).
+  - Both-`whole-array` is not free: on that board the fanout audit then
+    refused every SDI lane (their balls sit on the array's far side from the
+    SDI part), so the bus laid 2 lanes and `route.py` finished the rest -- 27
+    nets open against 29 with the escape bus and 37 with no bus step (one run
+    each).
 - **Sizes:** the chain's own (Step 4's design rules), with
   `--clearance-ceiling` as everywhere in a chain; `--fanout-track-width` the
   escapes' track under the arrays.

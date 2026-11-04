@@ -9,7 +9,7 @@ derives each net's from it. On kicad_files/routed_output.kicad_pcb, on every cop
 1. Obstacles.exclude({net}) -- the rewritten cells over the base's (an overlay) -- against a full build of the same
    items less the net's: every cell's candidates, every cell's geometry pack, point_violation (with and without a
    pad) and seg_clear at fixed random points and segments, and signature(). The derived model holds the rewritten
-   cells alone: a copy of the base's cells per derived model held 800 MB over zynq U1's joint plan.
+   cells alone: a copy of the base's cells per derived model held 800 MB over zynq U1's whole-array plan.
 2. A model derived from a derived one: without both nets' items.
 3. build_obstacles with an excluded set larger than the net (pair_exit_clear's {leg, partner}; the braid's group):
    its base DERIVED from the base without any (less the set's segments) against the base built in full without them,

@@ -63,8 +63,8 @@ check(left3 == [['DQSP', 'DQSN']] and [nm for nm, _m in kept3] == ['D1'],
       f'3b. a pair\'s own legs within the rule: left out whole, the next lane kept -- {left3}')
 tr = ep.run_tracks(kept, byname, R)
 check(not [f for i, t in enumerate(tr) for f in ep.run_faults([t], tr[i + 1:], R)], '4. the kept moves: no fault')
-# 5. a joint field laid without the lanes it leaves no way to their ends (escape_plan.run, partial): a missed leg takes
-#    its pair's other leg out with it, and a lane counts as ended only with every leg's both ends (lanes_ended)
+# 5. a whole-array field laid without the lanes it leaves no way to their ends (escape_plan.run, partial): a missed leg
+# takes its pair's other leg out with it, and a lane counts as ended only with every leg's both ends (lanes_ended)
 T5 = {nm: nm for nm in names}
 B5 = {nm: nm for nm in names if nm != 'D4'}
 t5, b5 = ep.without_lanes(names, T5, B5, ['DQSN', 'D3'])

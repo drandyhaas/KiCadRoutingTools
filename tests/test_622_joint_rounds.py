@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""The joint fanout on more routing layers than two: a round hands the next its source, and a source re-fan keeps every
-pair whole.
+"""The whole-array fanout on more routing layers than two: a round hands the next its source, and a source re-fan keeps
+every pair whole.
 
   python3 tests/test_622_joint_rounds.py
 
-The zynq LVDS bus on four layers (route_bus --joint-fanout) had its fanout REFUSED by the fanout audit -- pairs split
+The zynq LVDS bus on four layers (route_bus --whole-array) had its fanout REFUSED by the fanout audit -- pairs split
 at U1's teeth -- in every round after the first, on the Mac as on Linux, and in round 1 on Linux. Two defects:
 
 1. the joint destination never NAMED its source board, which whole_route.advance reads off the round's fo.log
    ('source board: NAME,', as fanout_destination prints it on two layers): every later round started again from the
    bench's own pair-blind source fanout -- 11 pairs split, the same 11 every round 2. Pinned: joint_destination's
    line, cut off before it fans anything out, read back by whole_route.source_board_named as the board it ran on;
-2. a source realize stripped only the nets asked to move: the joint plan holds a pair's legs together with no other
+2. a source realize stripped only the nets asked to move: the whole-array plan holds a pair's legs together with no
+other
    exit between them, but only among the balls it plans -- RX_D4_N asked alone was re-planned beside a partner and a
    neighbouring pair left on the board as obstacles, and laid between RX_D0's legs. Pinned on a generated bus, the
-   joint plan and the engine stubbed out to see what the realize asks of them: with four routing layers every run net
-   at the source is planned in the one call, each unasked one preferring its tooth as measured; with two, the realize
-   is as it was (only the asked net, nothing kept);
-3. the joint plan on four routing layers is the same in every process: two of its row loops (a pair's legs' runs in
+   whole-array plan and the engine stubbed out to see what the realize asks of them: with four routing layers every run
+   net at the source is planned in the one call, each unasked one preferring its tooth as measured; with two, the
+   realize is as it was (only the asked net, nothing kept);
+3. the whole-array plan on four routing layers is the same in every process: two of its row loops (a pair's legs' runs
+in
    one capacity group, the run colouring's clauses) walked SETS of ball and layer names, in the string hash's order,
    and CP-SAT's answer follows the order its rows come in -- zynq U1's realize, the same ask under two hash seeds,
    laid 26 of its 47 teeth the same. Pinned on a generated four-copper bus: the plan's every model, fingerprinted as it
@@ -44,7 +46,8 @@ sys.path.insert(0, AWX)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
 if os.environ.get('_JOINT_ROUNDS_PLAN') == '1':
-    # (check 3's child: the source array's joint plan of the board given, every model fingerprinted as it is solved)
+    # (check 3's child: the source array's whole-array plan of the board given, every model fingerprinted as it is
+    # solved)
     from ortools.sat.python import cp_model
     shas = []
     _solve = cp_model.CpSolver.Solve
@@ -134,8 +137,8 @@ def synth_board(tmp):
 
 
 def realize_asks(board, tmp, route_layers, tag):
-    """realize() of ONE asked net under the joint fanout, the joint plan and the engine stubbed: (the bus the plan was
-    asked for, its preferences, the realize's result) -- the plan None when the realize never asked one"""
+    """realize() of ONE asked net under the whole-array fanout, the whole-array plan and the engine stubbed: (the bus
+    the plan was asked for, its preferences, the realize's result) -- the plan None when the realize never asked one"""
     with contextlib.redirect_stdout(io.StringIO()):
         pcb = parse_kicad_pcb(board)
     byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
@@ -182,11 +185,12 @@ def realize_asks(board, tmp, route_layers, tag):
 
 
 def check_bus_replanned(tmp):
-    print('2. a source realize under the joint fanout plans the whole bus, each unasked tooth preferred where it is')
+    print('2. a source realize under the whole-array fanout plans the whole bus, each unasked tooth preferred where '
+          'it is')
     board = synth_board(tmp)
     asked, names, bus, prefer, res = realize_asks(board, tmp, 'F.Cu,B.Cu,In1.Cu,In2.Cu', 'four')
     full = sorted(n.split('/')[-1] for n in (bus or []))
-    check(bus is not None, 'four routing layers: the realize asks the joint plan')
+    check(bus is not None, 'four routing layers: the realize asks the whole-array plan')
     check(full == names, f'every run net at the source is planned in the one call ({len(full)} of {len(names)})')
     check(sorted(res.get('kept') or []) == sorted(n for n in names if n != asked),
           f'the realize reports the {len(names) - 1} unasked nets as kept')
@@ -198,12 +202,13 @@ def check_bus_replanned(tmp):
           if prefer else False, 'the asked net prefers its ask')
     print('   two routing layers: as before')
     _a, _n, bus2, _p2, res2 = realize_asks(board, tmp, 'F.Cu,B.Cu', 'two')
-    check(bus2 is None, 'two routing layers: no joint plan is asked (the asked teeth are laid as the chain lays them)')
+    check(bus2 is None, 'two routing layers: no whole-array plan is asked (the asked teeth are laid as the chain lays '
+          'them)')
     check(not res2.get('kept'), 'two routing layers: nothing kept -- only the asked net is stripped')
 
 
 def check_plan_reproducible(tmp):
-    print('3. the joint plan on four routing layers is the same in every process (two string-hash seeds)')
+    print('3. the whole-array plan on four routing layers is the same in every process (two string-hash seeds)')
     raw = os.path.join(tmp, 'bus4.kicad_pcb')
     r = subprocess.run([sys.executable, 'synth_bus.py', raw, '--copper', '4', '--k', '24', '--pairs', '10', '--depth',
                         '4', '--pattern', 'shuffle', '--seed', '2'], cwd=AWX, capture_output=True, text=True)
@@ -239,7 +244,7 @@ def check_carry_once(tmp):
     balls = sorted((p for p in pcb.footprints['SU1'].pads if p.net_id), key=lambda p: p.pad_number)[:3]
     if len(balls) < 3:
         raise SystemExit(f'BROKEN TEST: the generated bus has {len(balls)} netted balls at SU1')
-    # each ball's piece: a 0.4 mm dog-bone leg on F to a via, as a joint field lays an other net's ball
+    # each ball's piece: a 0.4 mm dog-bone leg on F to a via, as a whole-array field lays an other net's ball
     tracks = [{'start': (p.global_x, p.global_y), 'end': (p.global_x + 0.4, p.global_y + 0.4), 'width': 0.12,
                'layer': 'F.Cu', 'net_id': p.net_id} for p in balls]
     vias = [{'x': p.global_x + 0.4, 'y': p.global_y + 0.4, 'size': 0.45, 'drill': 0.2, 'layers': ['F.Cu', 'B.Cu'],
@@ -283,14 +288,14 @@ def _pad_xy(board, names):
 
 def main():
     print('=' * 60)
-    print('the joint fanout\'s rounds: the source handed on, every pair re-planned whole')
+    print('the whole-array fanout\'s rounds: the source handed on, every pair re-planned whole')
     print('=' * 60)
     with tempfile.TemporaryDirectory() as tmp:
         check_source_board_named(tmp)
         check_bus_replanned(tmp)
         check_carry_once(tmp)
         try:
-            import ortools  # noqa: F401  (check 3's joint plan is a CP-SAT solve)
+            import ortools  # noqa: F401  (check 3's whole-array plan is a CP-SAT solve)
         except ImportError as exc:
             if BAD:
                 for f in BAD:
@@ -304,7 +309,7 @@ def main():
             print(f'  FAIL: {f}')
         sys.exit(1)
     print('PASS: the next round starts from the source the round realized; a source re-fan plans every pair whole; '
-          'the joint plan is the same in every process; a carried piece is laid once')
+          'the whole-array plan is the same in every process; a carried piece is laid once')
 
 
 if __name__ == '__main__':

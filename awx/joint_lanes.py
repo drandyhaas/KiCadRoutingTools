@@ -1,5 +1,5 @@
-"""joint_lanes.py -- the lanes of buses routed AT ONCE off one shared array (route_bus JOINT_DIR, each bus its own whole
-route in a process of its own), each bus's in sight of the others at every stage.
+"""joint_lanes.py -- the lanes of buses off one shared array routed NEGOTIATED (route_bus JOINT_DIR, each bus its own
+whole route in its own frame and a process of its own), each bus's in sight of the others at every stage.
 
 publish(...): a bus's lanes as its loop has them now -- a plan's (whole_geo, whole_polish, whole_snap: each lane's
 pieces on their layers, its vias) or a laid board's (its own nets' tracks and vias) -- turned back into the BOARD's
@@ -68,7 +68,7 @@ def publish(plan_path, stage):
     # ...and its ENDS as its bench has them: the stubs and vias of its own nets there (the destination's berths, which
     # this bus's fanout lays each round and no other bus's bench has), at their own widths -- the plan's lanes run to
     # the berths' ends, and another bus ran its lane across a berth's stub, the berth crowded every round. Kept apart
-    # ('bench'): copper for the other buses' stages (foreign), never a lane the joint solve couples (whole_joint)
+    # ('bench'): copper for the other buses' stages (foreign), never a lane the coupled solve couples (whole_joint)
     kids = getattr(ctx, 'kids', set()) or set()
     pcs_b, vs_b = _bench_copper(awx_settings.get('BENCH'),
                                 {nm for nm, v in (getattr(ctx, 'byname', None) or {}).items() if v[0] in kids},
@@ -136,7 +136,7 @@ def publish_board(board, nets, stage):
 def foreign(pcb):
     """every other bus's published lanes put on `pcb` (this bus's flow frame) as copper of their own nets; the count.
     Only under JOINT_FOREIGN: 'all' every other bus's, 'finished' only a bus's whose whole route has ended (its laid
-    copper final: a round's first solve, which the joint solve builds again, and the joint solve itself -- the buses
+    copper final: a round's first solve, which the coupled solve builds again, and the coupled solve itself -- the buses
     still routing are coupled there, not copper)"""
     me = _me()
     mode = awx_settings.get('JOINT_FOREIGN')
@@ -146,8 +146,8 @@ def foreign(pcb):
     d = os.path.join(jd, 'lanes')
     if not os.path.isdir(d):
         return 0
-    # (JOINT_FINISHED: the buses ended when a round's first solve read them -- the joint solve builds that solve's model
-    # again, and a bus ending between the two made it another model)
+    # (JOINT_FINISHED: the buses ended when a round's first solve read them -- the coupled solve builds that solve's
+    # model again, and a bus ending between the two made it another model)
     fin = awx_settings.get('JOINT_FINISHED')
     fin = None if fin is None else {b_ for b_ in fin.split(',') if b_}
     from kicad_parser import Segment, Via

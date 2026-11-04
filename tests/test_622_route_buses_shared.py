@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""The buses of one board routed in turn, each with its own fanout (route_bus --bus, route_buses).
+"""The buses of one board routed sequentially, each with its own fanout (route_bus --bus, route_buses).
 
   python3 tests/test_622_route_buses_shared.py
 
 With the step itself stood in for (no routing: each bus 'handed on' as its input), this pins:
 
-1. parse_bus: SRC:DEST[:MODE[:LAYERS]] -- MODE joint, escape or plain, LAYERS the bus's ROUTE_LAYERS; anything else
-   named;
-2. route_buses runs the buses in the order given, each with its own fanout (joint_fanout / escape) and its own
+1. parse_bus: SRC:DEST[:MODE[:LAYERS]] -- MODE plain, whole-array or escape, LAYERS the bus's ROUTE_LAYERS; anything
+   else named (the old name of whole-array, joint, among them);
+2. route_buses runs the buses in the order given, each with its own fanout (whole_array / escape) and its own
    routing layers (settings ROUTE_LAYERS), the other buses none;
 3. a SHARED ARRAY: an escape bus on an array an earlier bus was handed on through gets that array planned whole
    (ESCAPE_JOINT) and its ends on the board as it was before that earlier bus (ESCAPE_JOINT_ENDS); an escape bus on
-   arrays nothing went through, and one after an earlier bus that was not handed on, get neither; a plain or joint
-   bus from such an array gets neither either, and no SOURCE_SHARED set on it;
-3b. keeps_source_escapes: a PLAIN bus keeps the escapes an earlier step laid its nets at its source by default, a joint
-   or an escape bus does not; SOURCE_SHARED=0 keeps none; SOURCE_SHARED=REF,.. a plain or joint bus from those
-   sources, never an escape bus;
+   arrays nothing went through, and one after an earlier bus that was not handed on, get neither; a plain or
+   whole-array bus from such an array gets neither either, and no SOURCE_SHARED set on it;
+3b. keeps_source_escapes: a PLAIN bus keeps the escapes an earlier step laid its nets at its source by default, a
+   whole-array or an escape bus does not; SOURCE_SHARED=0 keeps none; SOURCE_SHARED=REF,.. a plain or whole-array bus
+   from those sources, never an escape bus;
 4. step_policy lays a step's settings over the environment, the step's own policy over both.
 """
 import os
@@ -41,7 +41,8 @@ def check(cond, msg):
 check(rb.parse_bus('U1:U2') == ('U1', 'U2', None, None), '1: SRC:DEST')
 check(rb.parse_bus('U1:U5:escape:F.Cu,B.Cu,In1.Cu') == ('U1', 'U5', 'escape', 'F.Cu,B.Cu,In1.Cu'),
       '1: SRC:DEST:MODE:LAYERS')
-for bad in ('U1', 'U1:U2:fast', ':U2', 'U1:U2:joint:F.Cu:x'):
+check(rb.parse_bus('U1:U2:whole-array') == ('U1', 'U2', 'whole-array', None), '1: the whole-array mode')
+for bad in ('U1', 'U1:U2:fast', ':U2', 'U1:U2:joint', 'U1:U2:whole-array:F.Cu:x'):
     try:
         rb.parse_bus(bad)
         check(False, f'1: {bad!r} refused')
@@ -53,8 +54,8 @@ for bad in ('U1', 'U1:U2:fast', ':U2', 'U1:U2:joint:F.Cu:x'):
 def run(buses, fail=()):
     calls = []
 
-    def step(board, out, src, dest, *a, joint_fanout=False, escape=False, settings=None, **kw):
-        calls.append(dict(board=board, src=src, dest=dest, joint=joint_fanout, escape=escape,
+    def step(board, out, src, dest, *a, whole_array=False, escape=False, settings=None, **kw):
+        calls.append(dict(board=board, src=src, dest=dest, whole_array=whole_array, escape=escape,
                           settings=dict(settings or {})))
         shutil.copy(board, out)
         shutil.copy(board[:-len('.kicad_pcb')] + '.kicad_pro', out[:-len('.kicad_pcb')] + '.kicad_pro')
@@ -73,35 +74,38 @@ def run(buses, fail=()):
 
 
 L4 = 'F.Cu,B.Cu,In1.Cu,In2.Cu'
-code, calls, b0, work = run([('U1', 'U2', 'joint', None), ('U1', 'U5', 'escape', L4), ('U7', 'U8', 'escape', None)])
+code, calls, b0, work = run([('U1', 'U2', 'whole-array', None), ('U1', 'U5', 'escape', L4),
+                             ('U7', 'U8', 'escape', None)])
 check(code == 0 and [(c['src'], c['dest']) for c in calls] == [('U1', 'U2'), ('U1', 'U5'), ('U7', 'U8')],
       f'2: the buses in the order given: {[(c["src"], c["dest"]) for c in calls]}')
-check(calls[0]['joint'] and not calls[0]['escape'] and calls[0]['settings'] == {}, f'2: U1-U2 joint: {calls[0]}')
-check(calls[1]['escape'] and not calls[1]['joint'], f'2: U1-U5 escape: {calls[1]}')
+check(calls[0]['whole_array'] and not calls[0]['escape'] and calls[0]['settings'] == {},
+      f'2: U1-U2 whole-array: {calls[0]}')
+check(calls[1]['escape'] and not calls[1]['whole_array'], f'2: U1-U5 escape: {calls[1]}')
 check(calls[1]['board'] == os.path.join(work, 'U1-U2.kicad_pcb'), '2: U1-U5 on the board U1-U2 handed on')
 check(calls[1]['settings'] == {'ROUTE_LAYERS': L4, 'ESCAPE_JOINT': 'U1', 'ESCAPE_JOINT_ENDS': b0},
       f'3: U1-U5: its layers, U1 shared, its ends on the board before U1-U2: {calls[1]["settings"]}')
 check(calls[2]['escape'] and calls[2]['settings'] == {}, f'3: U7-U8: nothing shared: {calls[2]["settings"]}')
-_c, calls, _b, _w = run([('U1', 'U2', 'joint', None), ('U1', 'U5', 'escape', None)], fail={('U1', 'U2')})
+_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', None), ('U1', 'U5', 'escape', None)], fail={('U1', 'U2')})
 check('ESCAPE_JOINT' not in calls[1]['settings'], f'3: after a bus left as it came, nothing shared: {calls[1]}')
-_c, calls, _b, _w = run([('U1', 'U2', 'joint', None), ('U1', 'U5', 'joint', None)])
-check(calls[1]['settings'] == {}, f'3: a joint bus on a shared array: no ESCAPE_JOINT, no SOURCE_SHARED: {calls[1]}')
+_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', None), ('U1', 'U5', 'whole-array', None)])
+check(calls[1]['settings'] == {},
+      f'3: a whole-array bus on a shared array: no ESCAPE_JOINT, no SOURCE_SHARED: {calls[1]}')
 # (the zynq's four: the DDR3, the LVDS round it, then its USB and Ethernet buses to their QFNs)
-_c, calls, _b, _w = run([('U1', 'U2', 'joint', None), ('U1', 'U5', 'escape', L4), ('U1', 'U4', 'plain', L4),
+_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', None), ('U1', 'U5', 'escape', L4), ('U1', 'U4', 'plain', L4),
                          ('U1', 'U3', 'plain', L4), ('U7', 'U8', 'plain', None)])
 check([c['settings'].get('SOURCE_SHARED') for c in calls] == [None] * 5,
       f'3: SOURCE_SHARED is the environment\'s to opt into, set on no bus: {[c["settings"] for c in calls]}')
-check(calls[2]['settings'] == {'ROUTE_LAYERS': L4} and not calls[2]['escape'] and not calls[2]['joint'],
+check(calls[2]['settings'] == {'ROUTE_LAYERS': L4} and not calls[2]['escape'] and not calls[2]['whole_array'],
       f'3: U1-U4: its layers, plain: {calls[2]}')
 
-# 3b. keeps_source_escapes (src, escape, joint_fanout, SOURCE_SHARED)
+# 3b. keeps_source_escapes (src, escape, whole_array, SOURCE_SHARED)
 ks = rb.keeps_source_escapes
 check(ks('U1', False, False, None) and ks('U1', False, False, '  '), '3b: a plain bus keeps them by default')
-check(not ks('U1', False, True, None), '3b: a joint bus does not by default')
+check(not ks('U1', False, True, None), '3b: a whole-array bus does not by default')
 check(not ks('U1', True, False, None) and not ks('U1', True, False, 'U1'), '3b: an escape bus never')
 check(not ks('U1', False, False, '0'), '3b: SOURCE_SHARED=0 keeps none')
 check(ks('U1', False, True, 'U7,U1') and not ks('U1', False, False, 'U7'),
-      '3b: SOURCE_SHARED=REF,..: a plain or joint bus from those sources alone')
+      '3b: SOURCE_SHARED=REF,..: a plain or whole-array bus from those sources only')
 
 # 4. step_policy: the step's settings over the environment, its policy over both
 import awx_settings  # noqa: E402

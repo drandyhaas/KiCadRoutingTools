@@ -145,7 +145,7 @@ check(rb.parse_bus('U1:U4+U3:plain:F.Cu,B.Cu') == ('U1', 'U4+U3', 'plain', 'F.Cu
 calls = []
 
 
-def step(board, out, src, dest, *a, joint_fanout=False, escape=False, settings=None, **kw):
+def step(board, out, src, dest, *a, whole_array=False, escape=False, settings=None, **kw):
     calls.append(dict(src=src, dest=dest, escape=escape, settings=dict(settings or {})))
     shutil.copy(board, out)
     shutil.copy(board[:-len('.kicad_pcb')] + '.kicad_pro', out[:-len('.kicad_pcb')] + '.kicad_pro')

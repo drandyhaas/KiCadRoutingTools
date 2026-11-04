@@ -6,10 +6,10 @@ whole_geo.lay_u).
 
 whole_geo draws a ring lane in two pieces, its trunk to the ring's handoff (HK) and its ring after it, and a layer
 change's via in the piece its place falls in: the trunk's up to HK, the ring's after. Each piece's columns read the
-lane's layer at their place along it, u; but a ring piece starts where its trunk ENDS, which may be short of the
-ring's origin, and its first columns' u short of HK. On the zynq DDR's six-rail bench, the joint fanout on all four
-layers, DQ1's changes stood at u 29.097 and 33.284, its ring's handoff at 34.509, and its ring piece started at about
-u 33.1: read there, the ring took the trunk's last change again -- drawn F, B for 0.18 mm, F, two vias 0.15 mm apart,
+lane's layer at their place along it, u; but a ring piece starts where its trunk ENDS, which may be short of the ring's
+origin, and its first columns' u short of HK. On the zynq DDR's six-rail bench, the whole-array fanout on all four
+layers, DQ1's changes stood at u 29.097 and 33.284, its ring's handoff at 34.509, and its ring piece started at about u
+33.1: read there, the ring took the trunk's last change again -- drawn F, B for 0.18 mm, F, two vias 0.15 mm apart,
 their drills overlapping.
 
 On those numbers, the lane starting on F.Cu, its trunk's columns every 0.4 mm to u 34.6 (a column past the handoff,

@@ -11,10 +11,10 @@ bench's rules (via 0.45/0.3), a GND ball's drops with a laid lane passing one of
 
 1. LIVENESS: with no lane the site takes the rung's via, and the ladder has finer vias than the rung's (sz['drop_vias'],
    largest first); else the checks below test nothing (BROKEN TEST);
-2. a lane the rung's via misses but the next rung's clears: the site takes the next rung's via, at that rung's drill;
-3. a lane only the finest rung's via clears: it takes that one;
-4. a lane no via of the ladder clears: the site is not offered at all;
-5. no lane, `fine` (the destination's joint plan): the site offers the rung's via and the next rung's -- a berth the
+2. a lane the rung's via misses but the next rung's clears: the site takes the next rung's via, at that rung's drill; 3.
+a lane only the finest rung's via clears: it takes that one; 4. a lane no via of the ladder clears: the site is not
+offered at all; 5. no lane, `fine` (the destination's whole-array plan): the site offers the rung's via and the next
+rung's -- a berth the
    same plan lays has no lane yet; without `fine`, the rung's alone;
 6. exit_ray_conflicts: a drop's via short of a BUS escape's bar along its way out (its exit ray, LANE_REACH straight
    out) conflicts with that escape; a finer via clearing the bar, a via behind the exit or past the ray's reach, and
@@ -118,8 +118,8 @@ check(d is not None and abs(d.r - r2) < 1e-9 and abs(d.dr - dr2) < 1e-9,
 # 4. none does
 d = at_site(bar + r2 / 2)
 check(d is None, f'a lane no via of the ladder clears: the site is not offered ({d})')
-# 5. with no lane and `fine` (the destination's joint plan) the site offers the rung's via AND the next rung's: a berth
-# the same plan lays has no lane yet; without it, the rung's alone
+# 5. with no lane and `fine` (the destination's whole-array plan) the site offers the rung's via AND the next rung's: a
+# berth the same plan lays has no lane yet; without it, the rung's alone
 at_ = lambda fine: sorted(round(d.r, 4) for d in drops(ball, fine=fine)
                           if abs(d.site[0] - site[0]) < 1e-9 and abs(d.site[1] - site[1]) < 1e-9)
 here, plain = at_(True), at_(False)

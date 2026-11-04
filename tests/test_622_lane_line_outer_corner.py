@@ -5,7 +5,7 @@ offset there, every column drawn, and two lanes in order at every column are dra
   python3 tests/test_622_lane_line_outer_corner.py
 
 The zynq DDR bus (U1 -> U2, two routing layers) round the north ring's first corner (36.5 degrees), as whole_geo laid
-it once the joint fanout's other-net stubs stood on U2's facing face: RAS 3.8 mm outside the corner and moving in
+it once the whole-array fanout's other-net stubs stood on U2's facing face: RAS 3.8 mm outside the corner and moving in
 0.07 mm a column, ODT a pitch inside it moving in 0.02 to 0.04. Joined where each lane's OWN two lines cross -- the rule
 for a lane inside a corner -- RAS's met its other leg 2.3 mm along it, its three columns there were left out, and the
 line drawn to that point crossed ODT's twice on F, though ODT stood inside it at every column: two nets open after the
