@@ -1,40 +1,42 @@
-"""ends_kernel -- the ends model's estimate (whole_ends.Ends._score: two routing layers or more, one destination)
-scored in Rust (grid_router.EndsKernel). The ends search scores some 400 000 states a choice -- zynq7020_som's first,
-200 of its 240 CPU seconds at half a millisecond each in Python, its four threads taking turns at the GIL.
+"""ends_kernel -- the ends model's estimate (whole_ends.Ends.score) and the ends search's loop (Ends.search), in Rust
+(grid_router.EndsKernel) and nowhere else: two routing layers or more, one destination or a GROUP of them, a plane's
+routing layer priced (route_layers.plane_kinds). The ends search scores some 400 000 states a choice.
 
 `build` reads every table the score reads per state off the model, once: each option's point, layer, layer domain
-(Ends.end_domain), legs, conflict keys (Ends.conf), hand, far face and fence; each tooth and berth's ride together
-(Ends.ride, wound_ride's turns, the far face's ride); each pair of options' stacked exits (_stacks), their runs met
-(_runs_meet, _meet_nbrs); the plane ways each option kills (plane_ways); the feedback's tables. The kernel forms the
-objective from them with the same operations in the same order as the Python (rust_router/src/ends_kernel.rs), so the
-same doubles.
+(Ends.end_domain), legs, conflict keys (Ends.conf) and their lanes, hand, far face and fence; each tooth and berth's
+ride together (Ends.ride, wound_ride's turns, the far face's ride) and the lane's length (its tooth's exit to its
+berth's, what a plane's layer prices it); each pair of options' stacked exits, their runs met (_runs_meet,
+_meet_nbrs); the plane ways each option kills (plane_ways); the feedback's tables; a GROUP's walk (whole_frame.Group)
+and each berth option's way in -- its place on the walk, the pins its leg passes, the pocket options it cannot be laid
+with -- with each part's copper box. The route EXACT on a state's orders is CP-SAT (Ends.exact_route_nl,
+exact_route): the kernel calls it back where the estimate would stand (Handle.parts).
 
-ENDS_KERNEL: '1' (default) the kernel where it reaches -- Ends.objective, the search's question; the parts of a state
-kept (Ends.score) are still the Python's -- '0' the Python alone, 'check' both on every state, a difference raised
-with the two sets of terms. On two routing layers it scores _score_at's own route (the cover, the settling, the
-coupling); it does not reach a branched bus, the risk price (ENDS_CORNER) or the exact route: the Python scores those."""
+A binary without the kernel is refused: rebuild it (python3 build_router.py)."""
 import collections
 import math
 import os
 import sys
 
-import awx_settings
 import pairs as _pairs
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 try:
     from grid_router import EndsKernel as _EndsKernel
-except ImportError:          # (an older binary: the Python scores)
-    _EndsKernel = None
+except ImportError as exc:
+    raise SystemExit(f'ends_kernel: grid_router has no EndsKernel ({exc}) -- rebuild it: python3 build_router.py')
+if not hasattr(_EndsKernel, 'parts'):
+    raise SystemExit('ends_kernel: grid_router\'s EndsKernel is older than this awx (no parts) -- rebuild it: '
+                     'python3 build_router.py')
 
-MODE = awx_settings.get('ENDS_KERNEL') or '1'
-TERMS = ('objective', 'fan', 'route', 'over', 'ride', 'cong', 'feedback', 'crossings', 'conflicts', 'splits', 'refused',
-         'stacks', 'front', 'walled', 'learned', 'far', 'fence')
 
-
-def reaches(E):
-    import whole_ends as we
-    return _EndsKernel is not None and MODE != '0' and E.NL >= 2 and not E.multi and not we.CORNER_ON
+def _wcut(E):
+    """the model's winding cut as the kernel reads it: None, or (face, coordinate) -- a far-face cut, a bare y, on 'E'"""
+    w_ = E.wcut
+    if w_ is None:
+        return None
+    if isinstance(w_, (int, float)):
+        return ('E', float(w_))
+    return (str(w_[0]), float(w_[1]))
 
 
 class Handle:
@@ -44,34 +46,68 @@ class Handle:
         self.k, self.lanes, self.fp = kern, lanes, None
 
     def sync(self, E):
-        fp = (len(E.x_learned), len(E.opp_learned), sum(E.x_learned.values()), sum(E.opp_learned.values()))
+        fp = (len(E.x_learned), len(E.opp_learned), len(E.end_learned), sum(E.x_learned.values()),
+              sum(E.opp_learned.values()), sum(E.end_learned.values()))
         if fp != self.fp:
             li = {l_: i for i, l_ in enumerate(self.lanes)}
             x = [(li[a], li[b], float(v)) for k, v in E.x_learned.items() for a, b in [tuple(k)]
                  if a in li and b in li]
             self.k.set_learned(x, [(li[l_], float(v)) for l_, v in E.opp_learned.items() if l_ in li],
-                               bool(E.x_learned), bool(E.opp_learned))
+                               bool(E.x_learned), bool(E.opp_learned),
+                               [(li[l_], float(v)) for l_, v in E.end_learned.items() if l_ in li],
+                               bool(E.end_learned))
             self.fp = fp
 
     def objective(self, E, state):
         self.sync(E)
         return self.k.objective([state[l_] for l_ in self.lanes],
-                                None if E.wcut is None else (str(E.wcut[0]), float(E.wcut[1])))
+                                _wcut(E))
 
     def search(self, E, state, sweeps, tabu):
         """Ends.search in the kernel: (state, objective, [(each sweep's best, its state)])"""
         self.sync(E)
         li = {l_: i for i, l_ in enumerate(self.lanes)}
         st, best, sweeps_ = self.k.search([state[l_] for l_ in self.lanes], sweeps,
-                                          None if E.wcut is None else (str(E.wcut[0]), float(E.wcut[1])),
+                                          _wcut(E),
                                           [(li[l_], e_, i_) for l_, e_, i_ in tabu])
         back = lambda s_: {l_: tuple(s_[i]) for i, l_ in enumerate(self.lanes)}
         return back(st), best, [(b_, back(s_)) for b_, s_ in sweeps_]
 
-    def terms(self, E, state):
+    def parts(self, E, state, exact=None):
+        """(objective, the kernel's parts by lane index) of `state`; `exact` the exact route's callback"""
         self.sync(E)
-        return self.k.terms([state[l_] for l_ in self.lanes],
-                            None if E.wcut is None else (str(E.wcut[0]), float(E.wcut[1])))
+        return self.k.parts([state[l_] for l_ in self.lanes],
+                            _wcut(E), exact)
+
+
+def stacked_exits(lanes, opts):
+    """{(lane index, option): [(later lane index, its option, weight)]}: the STACKED exits at one end of the lanes
+    `lanes` [(lane, legs)] with their options `opts` {lane: options} -- two lanes' moves within DUP_TOL on different
+    layers, a weight each pair of options (two where either lane is a pair), the later lane's option listed under the
+    earlier's. The kernel counts a stack where either lane changes layer (on an escape state, every stack)"""
+    import whole_ends as we
+    li = {l_: i for i, (l_, _lg) in enumerate(lanes)}
+    npair = [len(lg) for _l, lg in lanes]
+    cells = collections.defaultdict(list)
+    for la, _lga in lanes:
+        for ia, oa in enumerate(opts[la]):
+            for m in oa[0]:
+                cells[(int(math.floor(m.exit_pt[0] / 0.25)), int(math.floor(m.exit_pt[1] / 0.25)))].append(
+                    (li[la], ia, m))
+    w_ = collections.Counter()
+    for (cx, cy), here in cells.items():
+        near = [e for dx in (-1, 0, 1) for dy in (-1, 0, 1) for e in cells.get((cx + dx, cy + dy), ())]
+        for a, ia, ma in here:
+            for b, ib, mb in near:
+                if b <= a or ma.layer == mb.layer:
+                    continue
+                if math.hypot(ma.exit_pt[0] - mb.exit_pt[0], ma.exit_pt[1] - mb.exit_pt[1]) > we.DUP_TOL:
+                    continue
+                w_[(a, ia, b, ib)] += 2 if npair[a] > 1 or npair[b] > 1 else 1
+    out = collections.defaultdict(list)
+    for (a, ia, b, ib), w in sorted(w_.items()):
+        out[(a, ia)].append((b, ib, w))
+    return out
 
 
 def build(E):
@@ -79,6 +115,8 @@ def build(E):
     import rules as _rules
     import select_moves as _sm
     import whole_ends as we
+    import whole_frame as _wf
+    import route_layers as _rl
     import braid as _bd
     t0_ = __import__('time').time()
     lanes = [l_ for l_, _lg in E.lanes]
@@ -129,28 +167,8 @@ def build(E):
                             continue
                         if E._runs_meet(oa[0], ob[0], E.RL[q]):
                             meet[k].append((li[la], ia, li[lb], ib))
-    # the stacked exits (_stacks): two lanes' moves within DUP_TOL on different layers, a weight each pair (two where
-    # either lane is a pair), per pair of options -- the later lane's option listed under the earlier's
-    stack_of = {0: collections.defaultdict(list), 1: collections.defaultdict(list)}
-    for k, opts in ((0, E.T), (1, E.B)):
-        cells = collections.defaultdict(list)
-        for la, lga in E.lanes:
-            for ia, oa in enumerate(opts[la]):
-                for m in oa[0]:
-                    cells[(int(math.floor(m.exit_pt[0] / 0.25)), int(math.floor(m.exit_pt[1] / 0.25)))].append(
-                        (li[la], ia, m))
-        w_ = collections.Counter()
-        for (cx, cy), here in cells.items():
-            near = [e for dx in (-1, 0, 1) for dy in (-1, 0, 1) for e in cells.get((cx + dx, cy + dy), ())]
-            for a, ia, ma in here:
-                for b, ib, mb in near:
-                    if b <= a or ma.layer == mb.layer:
-                        continue
-                    if math.hypot(ma.exit_pt[0] - mb.exit_pt[0], ma.exit_pt[1] - mb.exit_pt[1]) > we.DUP_TOL:
-                        continue
-                    w_[(a, ia, b, ib)] += 2 if npair[a] > 1 or npair[b] > 1 else 1
-        for (a, ia, b, ib), w in sorted(w_.items()):
-            stack_of[k][(a, ia)].append((b, ib, w))
+    # the stacked exits: two lanes' moves within DUP_TOL on different layers (stacked_exits)
+    stack_of = {k: stacked_exits(E.lanes, opts) for k, opts in ((0, E.T), (1, E.B))}
     # the plane ways (plane_ways): each option's kills, each ball's drops and straps
     pw = E.pw
     bkeys = {}
@@ -209,13 +227,46 @@ def build(E):
                        for s in ('N', 'S')]
                 if to_[0][0].direction == E.far_dir:
                     a, b = to_[1], bo_[1]
-                    for c in ((sb[0] - pad, sb[1] - pad), (sb[0] - pad, sb[3] + pad)):
+                    # (and the laid lanes of another bus that side of the cut passes, FENCE_LAID each, as ride)
+                    for c, nx in zip(((sb[0] - pad, sb[1] - pad), (sb[0] - pad, sb[3] + pad)), E.laid_x[la][ti]):
                         f_.append(math.hypot(c[0] - a[0], c[1] - a[1]) + pe.sm.around_box(c, b, sb)
-                                  - pe.sm.around_box(a, b, sb))
+                                  - pe.sm.around_box(a, b, sb) + we.FENCE_LAID * we.VIA_MM * nx)
                 else:
                     f_ += [0.0, 0.0]
         ride.append(r_); nturn.append(t_); farx.append(f_)
+    lane_of_leg = {leg: li[l_] for l_, lg in E.lanes for leg in lg}
+    key_lane = [0] * len(keys)
+    for (leg, _mid), kid in keys.items():
+        key_lane[kid] = lane_of_leg[leg]
+    # a destination GROUP (whole_frame.Group): its walk, and each berth option's way in
+    G = E.group
+    parts_ = sorted({E.dest_of[l_] for l_ in lanes}) if G is not None else []
+    gspec = dict(g_on=False, g_len=0.0, g_f0=0.0, g_f1=0.0, g_bbox=(0.0, 0.0, 0.0, 0.0), g_s=[], g_pass=[], g_pconf=[],
+                 g_part=[], g_pbox=[], g_leg_w=0.0)
+    if G is not None:
+        gspec = dict(
+            g_on=True, g_len=float(G.L), g_f0=float(G.f0), g_f1=float(G.f1), g_bbox=tuple(map(float, G.bbox)),
+            g_s=[[float(o[5][1]) for o in E.B[l_]] for l_ in lanes],
+            g_pass=[[int(o[5][5]) for o in E.B[l_]] for l_ in lanes],
+            g_pconf=[[sorted((li[o_], j_) for o_, j_ in E.pconf.get((l_, i), ())) for i in range(len(E.B[l_]))]
+                     for l_ in lanes],
+            g_part=[parts_.index(E.dest_of[l_]) for l_ in lanes],
+            g_pbox=[tuple(map(float, _wf.box_of(E.st['pcb'], r_))) for r_ in parts_],
+            g_leg_w=float(_wf.GROUP_LEG_PASS))
     dense = lambda l_, k, ix: [float(ix.get(i, 0.0)) for i in range(len((E.T if k == 0 else E.B)[l_]))]
+    # (the fronts, a side-face tooth's laid lanes of another bus, FENCE_LAID each, and its legs out of the array's other
+    # half, AWAY_FACE each: one more price per option)
+    front = dict(E.front)
+    for l_, lg in E.lanes:
+        lx_ = {i: we.FENCE_LAID * len(lg) * n_ for i, (n_, _n) in E.laid_x[l_].items()
+               if n_ and not we._far_opt(E, E.T[l_][i])}
+        for i, n_ in (E.away.get(l_) or {}).items():
+            lx_[i] = lx_.get(i, 0.0) + we.AWAY_FACE * n_
+        if lx_:
+            fr_ = dict(front.get((l_, 0)) or {})
+            for i, v_ in lx_.items():
+                fr_[i] = fr_.get(i, 0.0) + v_
+            front[(l_, 0)] = fr_
     spec = dict(
         nl=E.NL, nlanes=len(lanes), npair=npair,
         tie=[sum(E.tie[g] for g in lg) for _l, lg in E.lanes],
@@ -226,29 +277,17 @@ def build(E):
         has_pw=bool(pw is not None and pw.balls),
         fb_avoid=[(li[l_], k, dense(l_, k, ix)) for (l_, k), ix in E.fb_avoid.items()],
         fb_pairs=[(li[a], li[b], k, dense(a, k, ia), dense(b, k, ib)) for a, b, k, ia, ib in E.fb_pairs],
-        front=[(li[l_], k, dense(l_, k, c_)) for (l_, k), c_ in E.front.items()],
+        front=[(li[l_], k, dense(l_, k, c_)) for (l_, k), c_ in front.items()],
+        far_w=[float(E.far_w[l_]) for l_ in lanes],
         sbox=tuple(map(float, E.sbox)), dbox=tuple(map(float, E.dbox)),
         fence=(len(fence.get('N', ())), len(fence.get('S', ()))), escape=bool(E.st.get('escape')),
         neumaier=sys.version_info >= (3, 12),   # (sum() of floats compensated: the kernel sums as this Python does)
+        pk=[{'-': 0, 'pwr': 1, 'gnd': 2}[k_] for k_ in E.PK], p_gnd=float(_rl.gnd_run_vias(E.inner_signal)),
+        p_pwr=float(_rl.run_price('pwr', E.inner_signal)), key_lane=key_lane, **gspec,
         consts=[we.W_OVER, we.VIA_PREF, we.STACK_COST, we.VIA_MM, we.LOAD_OK, we.W_CONG, we.X_TRUNK, we.FB_AVOID,
-                we.FB_PAIR, we.EPS_X, we.BIG, we.WALLED, we.FAR_TOOTH, we.FENCE_VIAS, we.OPP_DIVE, we.CORNER,
+                we.FB_PAIR, we.EPS_X, we.BIG, we.WALLED, we.FENCE_VIAS, we.OPP_DIVE,
                 we._LANE_PITCH, we._CHG_ROOM, _bd.LPITCH, we.TIE_MM])
     h = Handle(_EndsKernel(spec), lanes)
+    h.lid_name = {v: k for k, v in lids.items()}     # (a layer id's name: the two-layer exact route reads names)
     h.secs = __import__('time').time() - t0_
     return h
-
-
-def check(E, state, v_py, parts):
-    """ENDS_KERNEL=check: the kernel's objective of `state` against the Python's `v_py` (its `parts`), exactly"""
-    t = E._kh.terms(E, state)
-    if t[0] == v_py:
-        return
-    py = dict(objective=v_py, fan=parts.get('fan'), route=parts.get('route'), over=parts.get('over'),
-              ride=parts.get('ride'), cong=parts.get('cong'), feedback=parts.get('feedback'),
-              crossings=parts.get('crossings'), conflicts=parts.get('conflicts'), splits=parts.get('splits'),
-              refused=parts.get('refused'), stacks=parts.get('stacks'), front=parts.get('front'),
-              walled=len(parts.get('walled') or ()), learned=parts.get('learned'), far=parts.get('far'),
-              fence=parts.get('fence'))
-    rows = '; '.join(f'{n} {py[n]!r} vs {t[i]!r}' for i, n in enumerate(TERMS))
-    raise SystemExit(f'ends_kernel: the kernel scored {t[0]!r} where the Python scored {v_py!r} (wcut {E.wcut}, '
-                     f'state {state}): {rows}')

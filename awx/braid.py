@@ -4309,9 +4309,10 @@ class Corridor:
         return out
 
     # ------------------------------------------------------------ routing
-    def route_lane(self, nm, virt, virt_vias=None):
+    def route_lane(self, nm, virt, virt_vias=None, free=False):
         """Route one lane tooth -> stub: ONE connect() search inside its
-        band by default.
+        band by default (`free`: in no band, the free swimmers' window,
+        as route_lanes.lift_walls routes a lane again round a ball's way).
         between its planned waypoints instead (the end of its join leg,
         the start of its exit leg), each short and local -- measured on
         the K ladder it routed nothing the single search did not and
@@ -4338,7 +4339,7 @@ class Corridor:
         # lines plus reserved diamonds still protect every lane routed
         # after. Pages stay banded: their rigidity is what makes them
         # cheap.
-        free_swim = swim
+        free_swim = swim or free
         if free_swim:
             # window size is a completion constraint (measured K35: a
             # corridor-wide window closed 4 open -> 1 at +22 vias and
@@ -6855,7 +6856,10 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     ctx.dest_cut = None
     if plan and plan.get('dest_cut') is not None:
         dc_ = plan['dest_cut']
-        if isinstance(dc_, (list, tuple)):
+        if isinstance(dc_, (list, tuple)) and dc_[0] == 'P':
+            # (a GROUP's cut: the point on its walk, whole_frame.Group -- turned over, its y mirrored)
+            ctx.dest_cut = ('P', float(dc_[1]), (2.0 * CY - float(dc_[2])) if chi < 0 else float(dc_[2]))
+        elif isinstance(dc_, (list, tuple)):
             # (a cut off the far face, whole_ends' winding: (face, its coordinate) -- turned over, north and south swap)
             f_, v_ = dc_[0], float(dc_[1])
             if chi < 0:
@@ -6863,6 +6867,11 @@ def setup(board, names, dest, log, plan=None, pairs=False):
             ctx.dest_cut = (f_, v_)
         else:
             ctx.dest_cut = (2.0 * CY - float(dc_)) if chi < 0 else float(dc_)
+    # ...and a GROUP's ways in (whole_frame.Group: each lane's place on its walk, a point), mirrored the same
+    ctx.dest_entry = None
+    if plan and plan.get('dest_entry'):
+        ctx.dest_entry = {nm: (float(p_[0]), (2.0 * CY - float(p_[1])) if chi < 0 else float(p_[1]))
+                          for nm, p_ in plan['dest_entry'].items()}
     # ...and the source's far-face cut (whole_frame.src_cut: which side a far-face tooth goes round), mirrored the same
     ctx.src_cut = None
     if plan and plan.get('src_cut') is not None:

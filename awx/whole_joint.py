@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""whole_joint.py DIR ROUND -- the JOINT solve of a round of several buses off one shared array (route_bus JOINT_DIR).
+"""whole_joint.py DIR KEY -- the JOINT solve of several buses off one shared array (route_bus JOINT_DIR): a round's first
+plans (KEY the round) or a loop's re-solves (KEY ROUND.LOOP.I: every re-solve of the loops of the buses, in step).
 
 Each bus's whole route solves its round's first plan alone (whole_solve), writes it and every variable of its model
 (SOLVE.vals.json) and asks for the joint solve (DIR/rROUND/BUS.req.json: the settings it solved under, its solve's path,
@@ -7,6 +8,8 @@ its flow frame's turn). Here every bus's model is built again into ONE model -- 
 variable started from its own plan -- and the buses are COUPLED where their lanes cross: two lanes of two buses whose
 reference paths (their taut paths, turned back into the board's frame) cross stand on different layers there, each
 one's changes a via's room off the place -- or the crossing is BROKEN, at a price above a net over two vias (W_CROSS).
+Two lanes of two buses that come within a lane's pitch of each other are coupled alike, at each one's nearest point: on
+one layer there, they would crowd -- a conflict the two buses settle together, as a crossing.
 The plans the buses found alone are the joint solve's warm start, laid out whole (each broken coupling of theirs
 priced), and the search mends them. Each bus's plan is written over its solve.json (its own kept beside it,
 .solo.json), and DIR/rROUND/BUS.joint.json says it is there. Couplings, and the broken ones, on stdout."""
@@ -58,8 +61,41 @@ def crossings(pa, pb):
     return out
 
 
+def near_points(pa, pb, near):
+    """[(xa, xb, d)]: where the pieces pa and pb ([(a, b)] segments) cross (xa = xb, d 0), and where a segment of each
+    comes within `near` of the other's without crossing -- each one's nearest point and their distance, one pair a pair
+    of segments"""
+    out = [(x, x, 0.0) for x in crossings(pa, pb)]
+    if near <= 0:
+        return out
+    def seg_pt(c, u, v):
+        ux, uy = v[0] - u[0], v[1] - u[1]
+        L2 = ux * ux + uy * uy
+        t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((c[0] - u[0]) * ux + (c[1] - u[1]) * uy) / L2))
+        q = (u[0] + t * ux, u[1] + t * uy)
+        return math.hypot(c[0] - q[0], c[1] - q[1]), q
+    hit = {(round(x[0], 3), round(x[1], 3)) for x, _x, _d in out}
+    for a0, a1 in pa:
+        for b0, b1 in pb:
+            if max(a0[0], a1[0]) + near < min(b0[0], b1[0]) or max(b0[0], b1[0]) + near < min(a0[0], a1[0]) or \
+                    max(a0[1], a1[1]) + near < min(b0[1], b1[1]) or max(b0[1], b1[1]) + near < min(a0[1], a1[1]):
+                continue
+            if crossings([(a0, a1)], [(b0, b1)]):
+                continue
+            best = min([(seg_pt(a0, b0, b1)[0], a0, seg_pt(a0, b0, b1)[1]),
+                        (seg_pt(a1, b0, b1)[0], a1, seg_pt(a1, b0, b1)[1]),
+                        (seg_pt(b0, a0, a1)[0], seg_pt(b0, a0, a1)[1], b0),
+                        (seg_pt(b1, a0, a1)[0], seg_pt(b1, a0, a1)[1], b1)], key=lambda t_: t_[0])
+            if best[0] < near:
+                k_ = (round(best[1][0], 3), round(best[1][1], 3))
+                if k_ not in hit:
+                    hit.add(k_)
+                    out.append((best[1], best[2], best[0]))
+    return out
+
+
 def main():
-    d, rnd = sys.argv[1], int(sys.argv[2])
+    d, rnd = sys.argv[1], sys.argv[2]
     rd = os.path.join(d, f'r{rnd}')
     reqs = {}
     for f in sorted(os.listdir(rd)):
@@ -115,7 +151,15 @@ def main():
     # the couplings: two lanes of two buses whose paths cross -- their layers there differ, each change a via's room
     # off the place, or the coupling is broken
     W_V = ws.W_V
+    # (a near miss: two lanes closer than a lane's pitch -- the braid's track and clearance, as each bus plans them)
+    import braid as te
+    NEAR = te.TRACK + te.CLEAR - 1e-3
+    # ...and two lanes closer than a VIA's reach -- a via of either there stands on the other's track whatever their
+    # layers: coupled for their changes alone, each kept a via's room off the place (the joint loop's audits found a
+    # lane run through another bus's via at 0.25 mm, beyond the pitch: no coupling had held the via off it)
+    NEAR_V = te.VIA_SIZE / 2 + te.TRACK / 2 + te.CLEAR - 1e-3
     brk, cpl, cost, lits = [], [], [], []
+    nvia = 0
     G = ws.G
 
     def bits_at(p, n, u, k_):
@@ -138,20 +182,30 @@ def main():
             pa, pb = parts[A], parts[B]
             for a, ra in pa.board_segs.items():
                 for b, rb in pb.board_segs.items():
-                    for X in crossings(ra, rb):
-                        ua = pa.u_of(a, pa.mir(*turn(X, pa.q, pa.cx, pa.cy)))
-                        ub = pb.u_of(b, pb.mir(*turn(X, pb.q, pb.cx, pb.cy)))
+                    for Xa, Xb, d_ in near_points(ra, rb, max(NEAR, NEAR_V)):
+                        X = Xa
+                        ua = pa.u_of(a, pa.mir(*turn(Xa, pa.q, pa.cx, pa.cy)))
+                        ub = pb.u_of(b, pb.mir(*turn(Xb, pb.q, pb.cx, pb.cy)))
                         ua = min(max(ua, pa.entry[a]), pa.end[a])
                         ub = min(max(ub, pb.entry[b]), pb.end[b])
                         k_ = m.NewBoolVar('')
-                        La = pa.layer_lits(a, bits_at(pa, a, ua, k_))
-                        Lb = pb.layer_lits(b, bits_at(pb, b, ub, k_))
+                        ba_, bb_ = bits_at(pa, a, ua, k_), bits_at(pb, b, ub, k_)
+                        if d_ >= NEAR:
+                            # (within a via's reach alone: the changes kept off, the layers free)
+                            nvia += 1
+                            brk.append(k_)
+                            lits.append(None)
+                            cpl.append((A, a, round(ua, 3), B, b, round(ub, 3), [round(X[0], 3), round(X[1], 3)]))
+                            continue
+                        La = pa.layer_lits(a, ba_)
+                        Lb = pb.layer_lits(b, bb_)
                         for l_ in range(len(pa.LAYN)):          # (each physical layer: each bus's index of it)
                             m.AddBoolOr([La[pa.lix[l_]].Not(), Lb[pb.lix[l_]].Not(), k_])
                         brk.append(k_)
                         lits.append((pa, La, pb, Lb))
                         cpl.append((A, a, round(ua, 3), B, b, round(ub, 3), [round(X[0], 3), round(X[1], 3)]))
-    print(f'  couplings: {len(cpl)} crossings of two buses\' lanes')
+    print(f'  couplings: {len(cpl)} crossings and near misses (within {NEAR:.3f} mm) of two buses\' lanes, '
+          f'{nvia} of them within a via\'s reach alone ({NEAR_V:.3f} mm)')
     OBJ = sum(p.OBJ for p in parts.values()) + W_CROSS * W_V * sum(brk)
     m.Minimize(OBJ)
     # the buses' own plans laid out whole: every hinted variable held, the couplings' literals completed
@@ -205,9 +259,10 @@ def main():
         R_ = float(awx_settings.get('JOINT_CUT_R') or '0.35')
         def phys_of(sol, p_, L_):
             return next((l_ for l_ in range(len(p_.LAYN)) if sol.Value(L_[p_.lix[l_]])), None)
-        for (A, a, ua, B, b, ub, X), (pa, La, pb, Lb), k_ in zip(cpl, lits, brk):
-            if sv.Value(k_):
-                continue
+        for (A, a, ua, B, b, ub, X), lt_, k_ in zip(cpl, lits, brk):
+            if lt_ is None or sv.Value(k_):
+                continue                # (a coupling of vias alone holds no layer: nothing to cut)
+            pa, La, pb, Lb = lt_
             phys = {'a': phys_of(sv, pa, La), 'b': phys_of(sv, pb, Lb)}
             # (only the couplings the joint solve SETTLED: broken in the buses' own plans, or a lane's layer there
             # moved off its own plan's -- elsewhere each bus's own re-solve has no reason to leave the layers it

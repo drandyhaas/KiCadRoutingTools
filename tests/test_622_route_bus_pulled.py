@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""A bus net with a PULL or a TERMINATION beside its two ends (route_bus.pulled_nets, unpull, repull).
+"""A bus net with OTHER PADS beside its two ends (route_bus.pulled_nets, unpull, repull).
 
   python3 tests/test_622_route_bus_pulled.py
 
-1. pulled_nets: a net with one pad on each of the bus's two parts whose every other pad is a two-pad part's, the
-   part's other pad on a plane's net (one that owns a zone), is pulled; one already among the bus's nets, one whose
-   extra part's other pad is a signal (a series part), one with a third pad on a part carrying another signal, one
-   with two pads on an end, and a plane's own net, are not;
-1b. a fly-by bus's terminations: the nets on a resistor ARRAY whose other pads are a rail's -- a net on more parts than
-   LEFT_PARTS, no zone needed (a Vtt) -- and a pair whose legs a part joins (a clock pair's termination) are pulled;
-   two nets a part joins that are no pair are not, nor the array's once its rail is on few parts;
+1. pulled_nets: a net with one pad on each of the bus's two parts and any other pads is pulled, each other pad a stub
+   -- a pull to a plane, a series part's, a pad on a part carrying other signals, a test point's; one already among the
+   bus's nets, one with two pads on an end, and a rail -- a plane's own net (one that owns a zone), a net on more parts
+   than LEFT_PARTS -- are not;
+1b. a fly-by bus's terminations: the nets on a resistor ARRAY to a Vtt, a pair whose legs a part joins (a clock pair's
+   termination) and two nets a part joins that are no pair are pulled, and still are once the Vtt is on few parts;
 2. unpull takes the pull pad off its net (its (net ...) token, and nothing else) and returns the token; repull puts it
    back after the pad's (layers ...), the text as it was; a pad not found is named.
 """
@@ -36,24 +35,30 @@ def pad(ref, num, nid):
     return types.SimpleNamespace(component_ref=ref, pad_number=num, net_id=nid)
 
 
-NETS = {1: 'GND', 2: 'PULLED', 3: 'BUS', 4: 'SERIES', 5: 'MID', 6: 'MULTI', 7: 'TWICE', 8: 'OTHER'}
+NETS = {1: 'GND', 2: 'PULLED', 3: 'BUS', 4: 'SERIES', 5: 'MID', 6: 'MULTI', 7: 'TWICE', 8: 'OTHER', 9: 'TP'}
 PADS = [pad('U1', 'A1', 2), pad('U5', 'B1', 2), pad('RA', '2', 2), pad('RA', '1', 1),       # PULLED: RA to GND
         pad('U1', 'A2', 3), pad('U5', 'B2', 3), pad('RB', '2', 3), pad('RB', '1', 1),       # BUS: in names already
         pad('U1', 'A3', 4), pad('U5', 'B3', 4), pad('RC', '2', 4), pad('RC', '1', 5),       # SERIES: RC to a signal
         pad('U1', 'A4', 6), pad('U5', 'B4', 6), pad('U9', '1', 6), pad('U9', '2', 1),       # MULTI: U9 not two-pad
         pad('U9', '3', 8), pad('U9', '4', 8),
         pad('U1', 'A5', 7), pad('U1', 'A6', 7), pad('U5', 'B5', 7), pad('RD', '2', 7), pad('RD', '1', 1),  # TWICE
-        pad('U1', 'A7', 1), pad('U5', 'B7', 1)]                                              # GND: the plane's own
+        pad('U1', 'A7', 1), pad('U5', 'B7', 1),                                              # GND: the plane's own
+        pad('U1', 'A8', 9), pad('U5', 'B8', 9), pad('TP1', '1', 9)]                          # TP: a test point
 nets = {i: types.SimpleNamespace(net_id=i, name=n, pads=[p for p in PADS if p.net_id == i]) for i, n in NETS.items()}
 fps = {}
 for p in PADS:
     fps.setdefault(p.component_ref, types.SimpleNamespace(pads=[])).pads.append(p)
 pcb = types.SimpleNamespace(nets=nets, footprints=fps, zones=[types.SimpleNamespace(net_id=1)])
 got = rb.pulled_nets(pcb, 'U1', 'U5', ['BUS'])
-check(sorted(got) == ['PULLED'], f'1: PULLED alone: {sorted(got)}')
+check(sorted(got) == ['MULTI', 'PULLED', 'SERIES', 'TP'], f'1: PULLED, SERIES, MULTI and TP: {sorted(got)}')
 check([(p.component_ref, p.pad_number) for p in got.get('PULLED', ())] == [('RA', '2')], f'1: its pull pad: {got}')
-pcb.zones = []
-check(rb.pulled_nets(pcb, 'U1', 'U5', ['BUS']) == {}, '1: no plane, no pull')
+check([(p.component_ref, p.pad_number) for p in got.get('TP', ())] == [('TP1', '1')], f'1: the test point: {got}')
+check([(p.component_ref, p.pad_number) for p in got.get('MULTI', ())] == [('U9', '1')], f'1: MULTI\'s stub: {got}')
+for k in range(rb.LEFT_PARTS):          # (TP's net on more parts than LEFT_PARTS: a rail)
+    tp_ = pad(f'TQ{k}', '1', 9)
+    nets[9].pads.append(tp_)
+    fps[tp_.component_ref] = types.SimpleNamespace(pads=[tp_])
+check('TP' not in rb.pulled_nets(pcb, 'U1', 'U5', ['BUS']), '1: a net on more parts than LEFT_PARTS is a rail')
 
 # 1b. TERMINATIONS (a fly-by DDR3 bus's address nets): RN a four-element array, two of its pads on bus-to-be nets
 #     A0/A1, the others on VTT -- a rail by the parts it is on (no zone); RT across the pair CK_P/CK_N; RX across two
@@ -73,12 +78,14 @@ for p in PADS2:
     fps2.setdefault(p.component_ref, types.SimpleNamespace(pads=[])).pads.append(p)
 pcb2 = types.SimpleNamespace(nets=nets2, footprints=fps2, zones=[])
 got = rb.pulled_nets(pcb2, 'U1', 'U5', [])
-check(sorted(got) == ['A0', 'A1', 'CK_N', 'CK_P'], f'1b: the array\'s two nets and the pair across RT: {sorted(got)}')
+check(sorted(got) == ['A0', 'A1', 'CK_N', 'CK_P', 'X0', 'X1'], f'1b: the array\'s, the pair\'s across RT, RX\'s: '
+      f'{sorted(got)}')
 check([(p.component_ref, p.pad_number) for p in got.get('A1', ())] == [('RN', '2')], f'1b: A1\'s stub pad: {got}')
 for p in [p for p in PADS2 if p.component_ref.startswith('C')]:
     fps2.pop(p.component_ref, None)
     nets2[1].pads.remove(p)
-check(sorted(rb.pulled_nets(pcb2, 'U1', 'U5', [])) == ['CK_N', 'CK_P'], '1b: VTT on few parts and no zone, no rail')
+check(sorted(rb.pulled_nets(pcb2, 'U1', 'U5', [])) == ['A0', 'A1', 'CK_N', 'CK_P', 'X0', 'X1'],
+      '1b: the Vtt on few parts, the array\'s nets pulled still')
 
 # 2. unpull and repull on a board's text
 TXT = '''(kicad_pcb
@@ -117,6 +124,6 @@ check(missed == ['RZ.2'], f'2: a pad not found is named: {missed}')
 t4, held4 = rb.unpull(TXT, [pad('RQ', '1', 1)])
 check(t4 == TXT and held4 == [], '2: a pad not on the board: nothing taken')
 
-print('route_bus pulled: ' + ('FAIL' if fails else 'PASS: a pulled net found; its pull pad off its net and back, '
-                                                  'the text as it was'))
+print('route_bus pulled: ' + ('FAIL' if fails else 'PASS: the nets with other pads found; a stub pad off its net '
+                                                  'and back, the text as it was'))
 sys.exit(1 if fails else 0)

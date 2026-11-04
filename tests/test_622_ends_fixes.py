@@ -6,8 +6,8 @@
 whole_ends chooses every net's tooth and berth (fanout_from_plan under PLAN_JUDGE=ends), and the rest of the whole
 route is only as good as those ends. This pins the rules it prices and bans by, without a bench to route:
 
-1. stacking (whole_ends._stacks): two lanes' ends at one point on different layers count only where either lane
-   changes layer, a pair's twice; two ends on one layer, or apart, are no stack;
+1. stacking (ends_kernel.stacked_exits, the table the kernel counts where either lane changes layer): two lanes' ends
+   at one point on different layers stack, a pair's twice; two ends on one layer, or apart, are no stack;
 2. a move's class (source_realize.move_class): every leg variant of one exit is one class, and another exit another;
 3. bans by class (fanout_from_plan.ban_moves): under the ends judge a refused berth bans its class as well as its
    signature, and a pair's two legs are banned jointly -- and under the braid's judges by signature alone;
@@ -32,6 +32,7 @@ sys.path.insert(0, AWX)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
 import whole_ends as we  # noqa: E402
+import ends_kernel as ek  # noqa: E402
 import source_realize as sr  # noqa: E402
 import fanout_from_plan as ffp  # noqa: E402
 
@@ -65,21 +66,17 @@ def main():
     fails = []
 
     # 1. stacking
-    far = {'A': opt(mv(0, 0, 'F.Cu')), 'B': opt(mv(5, 0, 'F.Cu')), 'P': opt(mv(10, 0, 'F.Cu'), mv(10.5, 0, 'F.Cu'))}
     lanes = [('A', ('A',)), ('B', ('B',))]
-    stacked = {'A': opt(mv(1, 1, 'F.Cu')), 'B': opt(mv(1, 1, 'B.Cu'))}
     cases = [
-        ('a stack where A changes layer', lanes, stacked, {'A': 1, 'B': 0}, 1),
-        ('no stack where neither changes layer', lanes, stacked, {'A': 0, 'B': 0}, 0),
-        ('no stack on ONE layer', lanes, {'A': opt(mv(1, 1, 'F.Cu')), 'B': opt(mv(1, 1, 'F.Cu'))}, {'A': 1}, 0),
+        ('a stack', lanes, {'A': opt(mv(1, 1, 'F.Cu')), 'B': opt(mv(1, 1, 'B.Cu'))}, 1),
+        ('no stack on ONE layer', lanes, {'A': opt(mv(1, 1, 'F.Cu')), 'B': opt(mv(1, 1, 'F.Cu'))}, 0),
         ('no stack where the ends stand apart', lanes,
-         {'A': opt(mv(1, 1, 'F.Cu')), 'B': opt(mv(1 + 4 * we.DUP_TOL, 1, 'B.Cu'))}, {'A': 1}, 0),
+         {'A': opt(mv(1, 1, 'F.Cu')), 'B': opt(mv(1 + 4 * we.DUP_TOL, 1, 'B.Cu'))}, 0),
         ('a PAIR over a single counts twice', [('A', ('A',)), ('P', ('Pp', 'Pn'))],
-         {'A': opt(mv(1, 1, 'F.Cu')), 'P': opt(mv(1, 1, 'B.Cu'), mv(1.5, 1, 'B.Cu'))}, {'A': 1}, 2),
+         {'A': opt(mv(1, 1, 'F.Cu')), 'P': opt(mv(1, 1, 'B.Cu'), mv(1.5, 1, 'B.Cu'))}, 2),
     ]
-    for what, ln, bo, chg, want in cases:
-        to = {l_: far[l_] if l_ in far else far['P'] for l_, _lg in ln}
-        got = we._stacks(ln, to, bo, chg)
+    for what, ln, bo, want in cases:
+        got = sum(w for row in ek.stacked_exits(ln, {l_: [o] for l_, o in bo.items()}).values() for _b, _i, w in row)
         if got != want:
             fails.append(f'stacking, {what}: {got}, want {want}')
 
@@ -154,7 +151,7 @@ def main():
     # (best_exact routes the candidates at once, each on a copy: the memo it keys by the lanes, the cut and the prices)
     fake = NS(pool={k: v[0] for k, v in parts.items()},
               score=lambda s, exact=False: parts[tuple(sorted(s.items()))],
-              lanes=[('A', ('A',))], wcut=None, unpriced=None, _memo={}, _parts={},
+              lanes=[('A', ('A',))], wcut=None, _memo={}, _parts={},
               _keep_parts=lambda key, p: None)
     we._fmt = lambda p: str(p)         # (its log line formats a whole parts record; these carry one key)
     got = we.Ends.best_exact(fake, dict(s_fail), log=lambda *a: None)[0]

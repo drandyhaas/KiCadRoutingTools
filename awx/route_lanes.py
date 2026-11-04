@@ -58,6 +58,89 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 import braid as bd  # noqa: E402
 import connect as cn  # noqa: E402
 from plan_audit import plan, read_nets, dseg  # noqa: E402
+# WALL_LIFT=1: a ball of the bus's parts on no bus net that the lay WALLED IN (the step's own cage test,
+# route_bus.walls_made) has the lanes walling it lifted and routed again round its way kept -- the via site it escapes
+# by with them gone, reserved as a lane's line is (lift_walls). 0 = no test
+WALL_LIFT = (awx_settings.get('WALL_LIFT') or '1') == '1'
+
+
+def lift_walls(ctx, laid, routed, board, names, dest, base_s, base_v):
+    """The balls of the source and `dest`'s parts on no bus net the lay walled in, against the bench as it came
+    (`base_s`, `base_v`): each one's walling lanes (`laid`'s singles) lifted, the ball's way -- the via site its layer
+    reaches with their lanes gone and their fanout standing, route_bus.ball_way -- reserved as a line from the ball and
+    a via, and they routed again,
+    in their order, round it. Kept when every one of them routes and the ball is reached, else all as it was. A two-row
+    connector's ball between a neighbour's lane run along the row's outer ends and an along-strip lane between the
+    rows was reached from nowhere, and its net shipped open"""
+    import copy
+    import route_bus as rb
+    from coherent_nets import by_key
+    byk = by_key(ctx.pcb)
+    full = {n: byk[n][1].name for n in names if n in byk}
+    short = {v: k for k, v in full.items()}
+    refs = sorted(set(getattr(ctx, 'src_ref', {}).values()) | set(dest.split('+')))
+    before = copy.copy(ctx.pcb)
+    before.segments, before.vias = list(base_s), list(base_v)
+    walls = rb.walls_made(before, ctx.pcb, refs, list(full.values()), [full[m] for m in laid if m in full],
+                          project=board)
+    rung = rb._cage_rung(ctx.pcb)
+    for k, who in walls.items():
+        lanes = [short[x] for x in who if short.get(x) in laid]
+        r, n = k.split('.', 1)
+        pad = next(p for p in ctx.pcb.footprints[r].pads if p.pad_number == n)
+        if not lanes or len(lanes) < len(who):
+            print(f'{k} WALLED IN by {", ".join(who) or "no lane alone"}: not lifted (not every one is a laid single)')
+            continue
+        fixed = rb._fixed_nets(ctx.pcb, board, full.values())
+        # (the way on the board as the lanes are routed again on it: their lane copper gone, their fanout's -- which
+        # stays -- still a wall; with the whole net gone, a ball took a site under the walling lane's own escape on an
+        # inner layer, which no lane routed again could clear)
+        drop_ = {id(o) for m in lanes for o in laid[m][1] + laid[m][2]}
+        gone = copy.copy(ctx.pcb)
+        gone.segments = [s for s in ctx.pcb.segments if id(s) not in drop_]
+        gone.vias = [v for v in ctx.pcb.vias if id(v) not in drop_]
+        way = rb.ball_way(gone, pad, fixed, rung)
+        if way is None:
+            print(f'{k} WALLED IN by {", ".join(lanes)}: no via site reached with them gone either')
+            continue
+        (sx, sy), home = way
+        vline = [((pad.global_x, pad.global_y), (sx, sy), home)] if math.hypot(sx - pad.global_x,
+                                                                              sy - pad.global_y) > 1e-6 else []
+        keep_s, keep_v = list(ctx.pcb.segments), list(ctx.pcb.vias)
+        ctx.pcb.segments = [s for s in keep_s if id(s) not in drop_]
+        ctx.pcb.vias = [v for v in keep_v if id(v) not in drop_]
+        routed.difference_update(lanes)
+        got, ok_, how = {}, True, []
+        for m in lanes:
+            cm = laid[m][0]
+            later = [om for om in cm.members if om != m and om not in routed]
+            # (in its band, else in none: a band that hugs a row's ends has no room round a via site off them)
+            r_ = None
+            for free_ in (False, True):
+                try:
+                    r_ = cm.route_lane(m, list(cm.virtual_of(later)) + vline,
+                                       list(cm.virtual_vias_of(later) or []) + [(sx, sy)], free=free_)
+                except Exception:
+                    r_ = None
+                if r_ is not None:
+                    how.append(f'{m} {"free" if free_ else "in band"}')
+                    break
+            if r_ is None:
+                ok_ = False
+                break
+            got[m] = r_
+            routed.add(m)
+        if ok_ and not rb._caged_on(ctx.pcb, {r: [n]}, rb._fixed_nets(ctx.pcb, board, full.values()), rung):
+            for m in lanes:
+                laid[m] = (laid[m][0], list(got[m][0]), list(got[m][1]))
+            print(f'{k} WALLED IN by {", ".join(lanes)}: lifted and routed again round its via site '
+                  f'({sx:.3f},{sy:.3f}) -- reached ({", ".join(how)})')
+        else:
+            ctx.pcb.segments, ctx.pcb.vias = keep_s, keep_v
+            routed.update(lanes)
+            print(f'{k} WALLED IN by {", ".join(lanes)}: ' + ('routed again round its via site, still walled'
+                                                             if ok_ else 'not routed again round its via site')
+                  + f' ({sx:.3f},{sy:.3f} on {home}) -- left as laid')
 
 
 def along(w, P):
@@ -270,6 +353,7 @@ def main(argv=None):
     routed = set()
     n_ok = n_free = v_tot = v_plan = 0
     errors = []                 # lanes whose routing RAISED: a crash, not a routing result
+    laid = {}                   # (a plan's singles, seq: each laid lane's corridor and copper -- lift_walls')
     print(f'{a.mode}: {len(chosen)} lane(s), branch={bd.BRANCH}')
     # (a whole-route PLAN: every lane in its own band first -- a pair by its band rungs alone -- and a pair refused there
     # tried in a WIDER band, then FREE of the plan, only after them, round what they laid. Free in its turn, ahead of the
@@ -388,6 +472,10 @@ def main(argv=None):
                     probe_at(ctx, cl, *pt)
         if a.png and calls:
             render(ctx, c, nm, calls[-1], segs_nm, vias_nm, os.path.join(a.png, f'{nm}.png'), box)
+        if a.plan and a.mode == 'seq' and kind != 'pair' and res is not None:
+            laid[nm] = (c, list(segs_nm), list(vias_nm))
+    if a.plan and a.mode == 'seq' and laid and WALL_LIFT:
+        lift_walls(ctx, laid, routed, a.board, read_nets(a.nets), a.dest, base_s, base_v)
     print(f'SUMMARY {a.mode}: {n_ok}/{len(chosen)} in band' + (f' (+{n_free} free)' if n_free else '')
           + f', {v_tot} vias (plan {v_plan} for those)' + (f'; {len(errors)} ERROR(S): {errors}' if errors else ''))
     if a.write:

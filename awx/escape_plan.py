@@ -782,14 +782,32 @@ def run(out_path, K, base, log=print):
             # (the bus's own field's sites need not be the shared array's: the same teeth, each ball's dog-bone where
             # the joint plan finds room)
             got = joint_try(st, teeth, berths, False)
-        if got[3] and ends_base:
+        kept_ = None
+        if got[3] and ends_base and set(got[3]) <= set(field_free[0]):
+            # (a field that escaped every lane it left no way to its chosen end: those lanes given the teeth it escaped
+            # them to (free_ends), every other lane's ends as chosen -- kept where that ends every lane. Chosen again
+            # on the dog-boned field instead, an SDI bus after a DDR3 bus on its shared array went from a field that
+            # escaped all 41 balls, one lane off its chosen tooth, to one that left three balls no escape)
+            part_ = partial(got, read, cut)
+            if part_ is not None and \
+                    lanes_ended(part_[0]['launch'], part_[1], part_[2]) >= len(lanes_of(st['launch'])):
+                log(f'  joint field of {sref}: the bus\'s own ends not left by it for {got[3]} -- those lanes ended at '
+                    f'the teeth the field escaped them to')
+                kept_ = part_
+        if kept_ is not None:
+            st, teeth, berths, read, cut = kept_
+            base, joint_laid = got[4], True
+            got = None
+        elif got[3] and ends_base:
             # (the bus-alone's ends do not stand on the shared array: the ends chosen on its own dog-boned field, as
             # with no bus-alone field given)
             log(f'  joint field of {sref}: the bus\'s own ends not left by it for {got[3]} -- the ends chosen again '
                 f'on {os.path.basename(base)}')
             st, berths, teeth, read, cut = choose_on(base)
             got = joint_try(st, teeth, berths, True) if teeth else got
-        if got[3]:
+        if got is None:
+            pass
+        elif got[3]:
             # (never worse than the escape fanout of the bus alone: a joint field that does not leave the bus an end
             # is laid without those lanes when, with the lanes the ends gave none given its own escapes, it leaves
             # at least as many lanes their ends as the dog-boned field does -- else this round's field is given up,
@@ -877,6 +895,69 @@ def run(out_path, K, base, log=print):
             # (the round as first laid stands: its copper is the board's to grade, the bus step's to put back)
             log(f'  joint field of {sref}: round the held parts the bus\'s ends are not left for {got[3]} -- the '
                 f'round as first laid')
+    # NO BALL WALLED IN (fanout_from_plan.SRC_WALLS, as the source realize and the destination pass hold it): a ball of
+    # either array on no bus net that the round's ends wall in (route_bus.walls_made, the step's own cage test) has the
+    # lane walling it -- the nearest whose copper alone frees it -- given another end there: the walling move left out
+    # of that lane's menu (a pair's with it), the ends chosen again with every other lane's held, and the round laid
+    # again, up to WALL_RETRIES times; a lane with no other end keeps the round as it was. (A tooth on a joint field
+    # stands: the field was planned round it.) A BGA's berths' runs round an RF ground ball, its every way out taken
+    import fanout_from_plan as _ffp
+    if ok and _ffp.SRC_WALLS:
+        import pairs as _pairs
+        import route_bus as _rb
+        import source_realize as _sr
+        sig_ = lambda m: json.dumps(_sr.move_sig(m))
+        full_ = {n: byname[n][1].name for n in names if n in byname}
+        short_ = {v: k for k, v in full_.items()}
+        partner_ = {}
+        for pn_, nn_ in _pairs.pair_names(list(names)).values():
+            partner_[pn_], partner_[nn_] = nn_, pn_
+        for _try in range(_ffp.WALL_RETRIES):
+            laid_ = [n for n in st['launch'] if n in teeth or n in berths]
+            walls_ = _rb.walls_made(base, out_path, [sref, dref], list(full_.values()),
+                                    [full_[n] for n in laid_ if n in full_])
+            if not walls_:
+                break
+            why_, free_ = [], {}
+            for ball_, nets_ in sorted(walls_.items()):
+                own_ = [short_[x] for x in nets_ if short_.get(x) in laid_]
+                if len(own_) != 1:
+                    why_.append(f'{ball_} ({"/".join(own_) or "no lane of the round alone"})')
+                    continue
+                end_ = 0 if ball_.split('.', 1)[0] == sref else 1
+                if end_ == 0 and joint_laid:
+                    why_.append(f'{ball_} ({own_[0]}\'s tooth on the joint field)')
+                    continue
+                for nm_ in (own_[0], partner_.get(own_[0])):
+                    if nm_ is not None:
+                        free_.setdefault(nm_, set()).add(end_)
+                why_.append(f'{ball_} ({own_[0]}\'s {"tooth" if end_ == 0 else "berth"})')
+            log(f'  WALLS IN {", ".join(why_)}' + (f' -- ends chosen again for {sorted(free_)}' if free_ else ''))
+            if not free_:
+                break
+            st_w = dict(st)
+            st_w['smenu'], st_w['dmenu'] = dict(st['smenu']), dict(st['dmenu'])
+            for nm_ in st['launch']:
+                ends_ = free_.get(nm_, set())
+                if nm_ in teeth:
+                    st_w['smenu'][nm_] = ([m for m in st['smenu'].get(nm_, ()) if sig_(m) != sig_(teeth[nm_])]
+                                          if 0 in ends_ else [teeth[nm_]])
+                if 1 in ends_ and nm_ in berths:
+                    st_w['dmenu'][nm_] = [m for m in st['dmenu'].get(nm_, ()) if sig_(m) != sig_(berths[nm_])]
+            fixed_w = {nm_: _sr.move_sig(b) for nm_, b in berths.items() if 1 not in free_.get(nm_, set())}
+            b_w, t_w = whole_ends.choose(st_w, log=log, src_free=True, fixed=fixed_w)
+            if not all(nm_ in t_w and nm_ in b_w for nm_ in free_ if nm_ in teeth and nm_ in berths):
+                log(f'  WALLS IN: no other end for {sorted(n_ for n_ in free_ if n_ not in t_w or n_ not in b_w)} -- '
+                    f'the round as laid')
+                break
+            ok_w, faults_w, moves_w, stuck_w = lay_round(st_w, base, dict(t_w), dict(b_w))
+            if not ok_w:
+                log('  WALLS IN: the round laid again did not write -- the round as laid')
+                ok, faults, moves, stuck = lay_round(st, base, teeth, berths)
+                break
+            st, teeth, berths, ok, faults, moves, stuck = st_w, dict(t_w), dict(b_w), ok_w, faults_w, moves_w, stuck_w
+            read, cut = getattr(whole_ends.choose, 'last', None) or read, (getattr(whole_ends.choose, 'last', None)
+                                                                           or {}).get('cut', cut)
     att_ = [tuple(h.split('.', 1)) + ('',) for h in (awx_settings.get('BUS_ATTACHED') or '').split(',') if h]
     if ok and joint_laid and att_:
         # (the pulls the bus step joined to their lanes beside the source, route_bus.attach_pulls: the joint field took

@@ -239,6 +239,14 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
         keep = same_net_pad_via_keepout_cells(pcb, _oid, cfg)
         if len(keep):
             obstacles.add_blocked_vias_batch(keep)
+    if virtual:
+        # a VIA kept off a reserved line by the ring the line's own lane will meet it at: a via laid now blocks that
+        # lane's track cells to its ring (pairs.via_ring: the clearance rounded up to whole cells and a quarter), where
+        # the line, stamped as a track, keeps a via off by the bare clearance -- a lane laid first took a via site 0.3005
+        # mm from the next lane's planned line, legal by 0.29, and that lane, its ring 0.306, was left open
+        vc_ = _virtual_via_cells(virtual, cfg, v_track)
+        if len(vc_):
+            obstacles.add_blocked_vias_batch(vc_)
     _m('fence, free vias, keepouts')
     if band is not None and (isinstance(band, dict) or callable(band)
                              or band[0] is not None or band[1] is not None):
@@ -774,6 +782,30 @@ def _cross_slides(poly, a_layer, b_layer, keep):
         if len(before) >= 2 and len(after) >= 2:
             yield f'slid to ({D[0]:.2f},{D[1]:.2f}), {dist:.2f} mm before the berth', \
                 [(a_layer, before), (b_layer, after)]
+
+
+def _virtual_via_cells(virtual, cfg, v_track):
+    """(N, 2) grid cells a via may not stand on beside the reserved lines `virtual`: within the via ring a track of
+    width `v_track` keeps from a via (pairs.via_ring), on every layer -- a via's barrel is"""
+    import numpy as np
+    import pairs as _pairs_v
+    g = cfg.grid_step
+    R = _pairs_v.via_ring(cfg) + (v_track - cfg.track_width) / 2
+    out = []
+    for (p, q, _L) in virtual:
+        x0, x1 = min(p[0], q[0]) - R, max(p[0], q[0]) + R
+        y0, y1 = min(p[1], q[1]) - R, max(p[1], q[1]) + R
+        gx = np.arange(int(math.floor(x0 / g)), int(math.ceil(x1 / g)) + 1)
+        gy = np.arange(int(math.floor(y0 / g)), int(math.ceil(y1 / g)) + 1)
+        X, Y = np.meshgrid(gx * g, gy * g, indexing='ij')
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        L2 = dx * dx + dy * dy
+        t = np.clip(((X - p[0]) * dx + (Y - p[1]) * dy) / L2, 0.0, 1.0) if L2 > 1e-12 else np.zeros_like(X)
+        d = np.hypot(p[0] + t * dx - X, p[1] + t * dy - Y)
+        ii, jj = np.nonzero(d < R - 1e-9)
+        if len(ii):
+            out.append(np.stack([gx[ii], gy[jj]], axis=1))
+    return np.unique(np.concatenate(out), axis=0).astype(np.int32) if out else np.empty((0, 2), dtype=np.int32)
 
 
 def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None, virt_tol=0.0, vias=()):

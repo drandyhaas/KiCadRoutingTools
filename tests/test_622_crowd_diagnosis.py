@@ -122,7 +122,9 @@ def main():
         # (the bench and its round as a shell makes them, four routing layers throughout: whole_route sets its own
         # stage policy as it starts its stages)
         e = {k: v for k, v in os.environ.items() if not k.startswith('_CROWD')}
-        e.update(ROUTE_LAYERS=LAYERS)
+        # (the source's menu the bench crowds under: no climbs, no inner runs -- with the step's own, six-pitch climbs
+        # on the inner layers, the ends find this bench room, and the check has nothing to diagnose)
+        e.update(ROUTE_LAYERS=LAYERS, SRC_CLIMB='0', SRC_RUN_INNER='0', DST_ALONG='0')
         for cmd in (['synth_bus.py', raw, '--k', '16', '--gap', '2.5', '--pattern', 'shuffle', '--seed', '1',
                      '--copper', '4'], ['make_bench.py', raw, 'SU1', 'SD1', bench0]):
             r = subprocess.run([sys.executable] + cmd, cwd=AWX, capture_output=True, text=True, timeout=600, env=e)

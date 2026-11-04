@@ -22,11 +22,10 @@ decisions (the braid's corridors, branches, launch offsets or planned paths) ent
              corner on its side of that cut: straight out of the face, along it and round the corner, nested in its
              side's launch order, to a START beside the side face, where the trunk takes it as a side face's lane
   reference  each lane's taut path in the trunk frame: the side of each island it passes, until the geometry flips it
-  branches   (DEST naming several parts, 'U4+U3': one source, several ends) the trunk runs to the first; each other
-             part's lanes are a class of their own, a BRANCH, stacked outside the first's ring on its side and leaving
-             the trunk at its Hk, along the trunk to a corner then straight on to the part, landing off it in their
-             order round it. The final order is the parts' ranks across the trunk (dest_ranks), each part's lanes in
-             their order round it -- so a branch's lanes cross the others on the trunk alone, as a ring's do
+  group      (DEST naming several parts, 'J1+U3+U5': one source, several ends) ONE destination: the parts' copper
+             boxes joined into one outline, its order a walk round it, its front the hull's edges facing the source,
+             a lane's place where it enters the group -- out of a pocket's mouth, under a part, or on the outline
+             (Group); the trunk runs to the group, its rings round all of it
 
 A far-face tooth still INSIDE the source's array (a ball's via, its lane not yet out of the field) has no way round
 the source, and is refused by name."""
@@ -77,6 +76,16 @@ def grown(b, pts):
     n = len(d)
     m = (d[n // 2] if n % 2 else (d[n // 2 - 1] + d[n // 2]) / 2) if n else 0.0
     return (b[0] - m, b[1] - m, b[2] + m, b[3] + m)
+
+
+def via_in_box(v, b):
+    """via `v` stands in box `b` (an array's pad box grown to its stub ends' line): its barrel reaching the box. A
+    dog-bone's via at its stub's end stands ON that line, and the box is grown by the MEDIAN of the stubs' standoffs --
+    a face whose stubs end a hair short of it (the board's coordinates written to a tenth of a micron) left its berths'
+    vias outside by that hair, read as no via ends: the solve held those lanes to the stub's layer there, and each via
+    laid joined nothing"""
+    r = (getattr(v, 'size', 0.0) or 0.0) / 2
+    return b[0] - r <= v.x <= b[2] + r and b[1] - r <= v.y <= b[3] + r
 
 
 def face(p, b):
@@ -396,43 +405,408 @@ def lead_ins(F, far, scut, width, SB, obst=(), layer=None):
     return out
 
 
-def dest_ranks(pcb, sref, dests):
-    """{destination part: its RANK across the trunk, north first}: the trunk's destination (the first of `dests`) 0, a
-    BRANCH's -1, -2, .. north of the trunk (the farthest north lowest), 1, 2, .. south of it -- by its pad box's centre
-    off the line from the source's to the trunk destination's. The lanes' final order is the ranks', each destination's
-    own lanes in their order round it (build's F.final; whole_ends' the same, by RANK_MM), so a branch's lanes all
-    leave the trunk on its side"""
-    sb, pb = box_of(pcb, sref), box_of(pcb, dests[0])
-    ca = ((sb[0] + sb[2]) / 2, (sb[1] + sb[3]) / 2)
-    cb = ((pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2)
-    L = math.hypot(cb[0] - ca[0], cb[1] - ca[1]) or 1.0
-    nx, ny = (cb[1] - ca[1]) / L, -(cb[0] - ca[0]) / L          # (the trunk's normal toward the north: -y at +x)
-    lat = {}
-    for r in dests:
-        b = box_of(pcb, r)
-        lat[r] = 0.0 if r == dests[0] else ((b[0] + b[2]) / 2 - ca[0]) * nx + ((b[1] + b[3]) / 2 - ca[1]) * ny
-    order = sorted(dests, key=lambda r: (-lat[r], dests.index(r)))
-    i0 = order.index(dests[0])
-    return {r: i - i0 for i, r in enumerate(order)}
-
-
-def branch_side(rank):
-    """the side of the trunk a branch of that rank leaves on: 'N' or 'S'"""
-    return 'N' if rank < 0 else 'S'
-
-
-def dest_box_cut(pcb, ref, berths):
-    """(the grown box, the far-face cut) of a BRANCH's destination `ref`, its lanes' berths `berths`: grown and cut as
-    the trunk's own (grown, cut) -- a branch's berths face the source (fanout_from_plan), so its far face holds none
-    and the cut stands in its middle"""
-    B = grown(box_of(pcb, ref), berths)
-    return B, cut([p[1] for p in berths if face(p, B) == 'E'], B[1], B[3])
-
-
 def between(lo, hi, v, whole):
     """v lies between a pair's two tips lo <= hi, the short way round a box of perimeter `whole` (the tips either
     side of the cut: round the far way)"""
     return lo < v < hi if hi - lo <= whole / 2 else (v > hi or v < lo)
+
+
+# ---- the destination GROUP: DEST naming several parts, one source and several ends, taken as ONE destination. Its
+# shape is the parts' copper boxes joined into one outline -- the strips between them that must close for the parts
+# to make one shape closed (POCKETS), the wider ones left open (NOTCHES) -- and its order is one WALK round that
+# outline: a lane's place is where it enters the outline, a lane ending in a notch entering its mouth in its berth's
+# order along the notch's walls. The FRONT is the stretch of the walk under the convex hull's edges that face the
+# source (a face itself, or a notch opening to it): its lanes end from the trunk, as a single destination's facing
+# face's do, and the rest ride the rings round the hull, unrolled at a cut anywhere but the front. A lane may enter
+# the group more than one way -- out of either mouth of its pocket, straight under the part in front of it on a
+# layer that part leaves open, or under its own part from the side turned from the source -- each way an OPTION
+# with its own place; the group's orders are its lanes' options' places, chosen with the cut (Group.arrange)
+GROUP_OPTIONS = int(awx_settings.get('GROUP_OPTIONS') or 3)     # each lane's ways in searched, the shortest first
+FRONT_COS = math.sqrt(0.5)      # a hull edge faces the source within 45 degrees of it: its lanes reach it head on
+GROUP_TOL = 0.05                # a berth this near the outline is on it
+GROUP_EPS = 0.02                # mm of walk per mm of depth: lanes leaving one mouth, the shallowest nearest its wall
+GROUP_LEG_PASS = float(awx_settings.get('GROUP_LEG_PASS') or 1.0)   # vias for each pin a pocket lane's leg passes
+                                # (berths a pin pitch apart a hundredth of a mm or more: past TIE_MM, never a stack)
+
+
+def copper_box(pcb, ref):
+    """the box of part `ref`'s pads' copper (an NPTH: its hole)"""
+    xs0, ys0, xs1, ys1 = [], [], [], []
+    for p in pcb.footprints[ref].pads:
+        hx, hy = (p.size_x or 0.0) / 2, (p.size_y or 0.0) / 2
+        if p.pad_type == 'np_thru_hole':
+            hx = hy = (p.drill or 0.0) / 2
+        xs0.append(p.global_x - hx)
+        ys0.append(p.global_y - hy)
+        xs1.append(p.global_x + hx)
+        ys1.append(p.global_y + hy)
+    return (min(xs0), min(ys0), max(xs1), max(ys1))
+
+
+def open_layers(pcb, ref):
+    """the routing layers no pad of part `ref` stands on (a drilled pad, or copper on every layer, stands on all)"""
+    import route_layers
+    RL = route_layers.layers()
+    used = set()
+    for p in pcb.footprints[ref].pads:
+        if (p.drill or 0) > 0 or '*.Cu' in p.layers:
+            return frozenset()
+        used |= {L for L in p.layers if L in RL}
+    return frozenset(L for L in RL if L not in used)
+
+
+def bridge_of(boxes, pitch):
+    """the width of strip the group's outline closes: its parts joined by their nearest gaps (the longest edge of the
+    tree that joins every part by the shortest gaps between their boxes), and a lane's pitch more -- a strip that
+    narrow closed, its lanes entering it from its ends; any wider left open, a notch whose walls the walk follows"""
+    ks = list(boxes)
+    gap = lambda a, b: math.hypot(max(0.0, b[0] - a[2], a[0] - b[2]), max(0.0, b[1] - a[3], a[1] - b[3]))
+    inn, far = {ks[0]}, 0.0
+    while len(inn) < len(ks):
+        g, k = min((gap(boxes[a], boxes[b]), b) for a in inn for b in ks if b not in inn)
+        inn.add(k)
+        far = max(far, g)
+    return far + pitch
+
+
+class Group:
+    """the destination GROUP's shape and walk (see above): parts `refs` of `pcb`, the source's centre `sc`. The walk's
+    coordinate s runs round the outline in perim_d's sense -- along the front from north to south"""
+
+    def __init__(self, pcb, refs, sc):
+        from shapely.geometry import LinearRing, MultiPoint, Polygon, box as _box
+        from shapely.ops import unary_union
+        self.pcb, self.refs = pcb, list(refs)
+        self.boxes = {r: copper_box(pcb, r) for r in self.refs}
+        self.open = {r: open_layers(pcb, r) for r in self.refs}
+        xs = [v for b in self.boxes.values() for v in (b[0], b[2])]
+        ys = [v for b in self.boxes.values() for v in (b[1], b[3])]
+        self.bbox = (min(xs), min(ys), max(xs), max(ys))
+        gc = ((self.bbox[0] + self.bbox[2]) / 2, (self.bbox[1] + self.bbox[3]) / 2)
+        dl = math.hypot(gc[0] - sc[0], gc[1] - sc[1]) or 1.0
+        self.d = ((gc[0] - sc[0]) / dl, (gc[1] - sc[1]) / dl)          # from the source toward the group
+        self.bridge = bridge_of(self.boxes, bd.LPITCH)
+        U = unary_union([_box(*b) for b in self.boxes.values()]).buffer(self.bridge / 2, join_style=2) \
+            .buffer(-self.bridge / 2, join_style=2)
+        if U.geom_type != 'Polygon':
+            raise SystemExit(f'whole route: the destination group {"+".join(self.refs)} makes no one outline')
+        cs = list(U.exterior.coords)
+        if Polygon(cs).exterior.is_ccw:
+            cs = cs[::-1]               # (perim_d's sense: on the board's axes, north along the far face, south the front)
+        self.E = LinearRing(cs)
+        self.U = Polygon(cs)            # (a hole -- copper the parts enclose -- is no lane's)
+        self.L = self.E.length
+        self.parts_u = unary_union([_box(*b) for b in self.boxes.values()])
+        self.hull = MultiPoint([c for b in self.boxes.values()
+                                for c in ((b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3]))]).convex_hull
+        # the FRONT: the walk under the hull's edges facing the source, from its north end f0 to its south end f1
+        hv = sorted({(round(x, 9), round(y, 9)) for x, y in self.hull.exterior.coords[:-1]}, key=self.s)
+        best, front = None, []
+        for i, a in enumerate(hv):
+            b = hv[(i + 1) % len(hv)]
+            el = math.hypot(b[0] - a[0], b[1] - a[1]) or 1.0
+            nx, ny = -(b[1] - a[1]) / el, (b[0] - a[0]) / el                  # (outward, in the walk's sense)
+            f = -(nx * self.d[0] + ny * self.d[1])
+            if f >= FRONT_COS - 1e-9:
+                front.append((self.s(a), self.s(b)))
+            if best is None or f > best[0]:
+                best = (f, (self.s(a), self.s(b)))
+        front = front or [best[1]]
+        # (the hull's front edges are consecutive round it, their stretches one: it starts at the edge no other ends at)
+        ends = {round(b, 6) for _a, b in front}
+        self.f0 = next((a for a, _b in front if round(a, 6) not in ends), front[0][0])
+        self.f1 = max((b for _a, b in front), key=lambda b: (b - self.f0) % self.L)
+        self._opt, self._pk = {}, None
+
+    def s(self, p):
+        """the walk's coordinate of the outline's point nearest p"""
+        from shapely.geometry import Point
+        return float(self.E.project(Point(p)))
+
+    def pt(self, s):
+        q = self.E.interpolate(s % self.L)
+        return (float(q.x), float(q.y))
+
+    def in_front(self, s):
+        return (s - self.f0) % self.L <= (self.f1 - self.f0) % self.L + 1e-9
+
+    def unroll(self, s, c):
+        """s unrolled at the cut c"""
+        return (s - c) % self.L
+
+    def side(self, s, c):
+        """the class of a lane entering at s with the cut at c: 'W' on the front (the trunk's), 'N' before it (round
+        the north), 'S' after it"""
+        if self.in_front(s):
+            return 'W'
+        return 'N' if self.unroll(s, c) < self.unroll(self.f0, c) else 'S'
+
+    def far_cut(self, c):
+        """the cut stands under a hull edge turned away from the source: the rings meet behind the group, each going
+        round its own side, as a single destination's far-face cut"""
+        from shapely.geometry import LineString, Point
+        p = Point(self.pt(c))
+        hc = list(self.hull.exterior.coords)
+        best = min(range(len(hc) - 1), key=lambda i: LineString([hc[i], hc[i + 1]]).distance(p))
+        a, b = hc[best], hc[best + 1]
+        el = math.hypot(b[0] - a[0], b[1] - a[1]) or 1.0
+        # (the hull ring's own sense may be either: its outward normal is the one pointing away from the hull's centre)
+        nx, ny = -(b[1] - a[1]) / el, (b[0] - a[0]) / el
+        c_ = self.hull.centroid
+        if nx * ((a[0] + b[0]) / 2 - c_.x) + ny * ((a[1] + b[1]) / 2 - c_.y) < 0:
+            nx, ny = -nx, -ny
+        return nx * self.d[0] + ny * self.d[1] >= FRONT_COS - 1e-9
+
+    def _ray(self, p, sd):
+        """where a berth at p outside the outline meets it: the ray from it back along its stub `sd` (toward its pad)
+        -- a berth beside a corner is on the face its stub leaves -- else its nearest point"""
+        from shapely.geometry import LineString, Point
+        if sd is not None:
+            k = math.hypot(*sd)
+            if k > 1e-9:
+                far = 4.0 * max(self.bridge, 1.0)
+                hit = LineString([p, (p[0] - far * sd[0] / k, p[1] - far * sd[1] / k)]).intersection(self.E)
+                pts = [hit] if hit.geom_type == 'Point' else \
+                    [g for g in getattr(hit, 'geoms', []) if g.geom_type == 'Point']
+                if pts:
+                    q = min(pts, key=lambda g: g.distance(Point(p)))
+                    return float(self.E.project(q))
+        return self.s(p)
+
+    def _crossed(self, a, b):
+        """the parts the straight a-b crosses"""
+        from shapely.geometry import LineString, box as _box
+        seg = LineString([a, b])
+        return [r for r, bx in self.boxes.items() if seg.intersection(_box(*bx)).length > 1e-6]
+
+    def _straight(self, p):
+        """(exit point, the parts crossed) of the straight from p toward the source through the outline: its first
+        stretch inside it -- from p, or from where it enters just past p (a berth on a far face, outside the outline) --
+        out to where it leaves"""
+        from shapely.geometry import LineString, Point
+        far = 2.0 * math.hypot(self.bbox[2] - self.bbox[0], self.bbox[3] - self.bbox[1]) + 1.0
+        seg = LineString([p, (p[0] - far * self.d[0], p[1] - far * self.d[1])])
+        ins = seg.intersection(self.U)
+        parts = [ins] if ins.geom_type == 'LineString' else [g for g in getattr(ins, 'geoms', [])
+                                                             if g.geom_type == 'LineString']
+        P = Point(p)
+        piece = min(parts, key=lambda g: g.distance(P)) if parts else None
+        if piece is None or piece.length < 1e-6:
+            return tuple(p), []
+        cs = list(piece.coords)
+        q = max(cs, key=lambda c: math.hypot(c[0] - p[0], c[1] - p[1]))
+        return (float(q[0]), float(q[1])), self._crossed(p, q)
+
+    def options(self, p, sd, part, layer, via):
+        """[(way, place s, its mouth (a, b) or None, its length, its pocket (its mouths) or None, the pins its leg
+        passes)] -- the ways a lane whose berth stands at p (its stub `sd` out of its pad on part
+        `part`, on `layer`, `via` whether it carries one) enters the group, the shortest first, GROUP_OPTIONS of them.
+        'on': its berth on the outline (s where its stub meets it); 'under': straight under its own part from the side
+        turned from the source, out where that straight meets the outline; and a berth in a POCKET -- 'mouth' out of
+        each of the pocket's mouths, its place there the shallowest berth nearest its own wall, and 'straight' under
+        the part in front of it. A way under parts needs a layer open on every part it passes -- the berth's layer, or
+        any with a via at the berth. Its length: from the berth to its place (a mouth's: the berth's depth from it);
+        a mouth's leg runs along the part's row, past the pins between its berth and the mouth (GROUP_LEG_PASS each, in
+        the ends model: deep in a strip a lane's leg past its neighbours' stubs and vias met them, where straight under
+        the part in front -- a via at the pin, as a human takes them -- runs clear)"""
+        key = (round(p[0], 6), round(p[1], 6), None if sd is None else (round(sd[0], 6), round(sd[1], 6)), part,
+               layer, bool(via))
+        if key in self._opt:
+            return self._opt[key]
+        from shapely.geometry import LineString, Point
+        P = Point(p)
+        out = []
+
+        def under_ok(parts):
+            if not parts:
+                return True
+            op = frozenset.intersection(*[self.open[r] for r in parts])
+            return bool(op) and (via or layer in op)
+        if not (self.U.contains(P) and self.E.distance(P) > GROUP_TOL):
+            out.append(('on', self._ray(p, sd), None, 0.0, None, 0))
+            if sd is not None and math.hypot(*sd) > 1e-9:
+                k = math.hypot(*sd)
+                if (sd[0] * self.d[0] + sd[1] * self.d[1]) / k >= FRONT_COS:
+                    q, crossed = self._straight(p)
+                    if part in crossed and under_ok(crossed):
+                        qs = self.s(q)
+                        # (out into the open: a notch's wall or the front -- not a pocket behind another part)
+                        if self.E.distance(Point(q)) <= GROUP_TOL:
+                            out.append(('under', qs, None, math.hypot(q[0] - p[0], q[1] - p[1]), None, 0))
+        else:
+            # (a berth inside the outline: its stub ends in a pocket, or on its own part's copper -- marched out of
+            # the copper along the stub to where it stands)
+            q0 = p
+            if self.parts_u.contains(P) and sd is not None and math.hypot(*sd) > 1e-9:
+                k = math.hypot(*sd)
+                for i in range(1, 200):
+                    t = (sd[0] / k * 0.05 * i, sd[1] / k * 0.05 * i)
+                    if not self.parts_u.contains(Point(p[0] + t[0], p[1] + t[1])):
+                        q0 = (p[0] + t[0], p[1] + t[1])
+                        break
+            Q0 = Point(q0)
+            if not (self.U.contains(Q0) and self.E.distance(Q0) > GROUP_TOL):
+                out.append(('on', self.s(q0), None, 0.0, None, 0))
+            else:
+                if self._pk is None:
+                    pocket = self.U.difference(self.parts_u)
+                    self._pk = [pocket] if pocket.geom_type == 'Polygon' else \
+                        [g for g in getattr(pocket, 'geoms', []) if g.geom_type == 'Polygon']
+                pk = next((g for g in self._pk if g.distance(Q0) < 1e-6), None)
+                if pk is None:
+                    out.append(('on', self.s(q0), None, 0.0, None, 0))
+                else:
+                    from shapely.ops import linemerge
+                    edge = pk.boundary.intersection(self.E.buffer(1e-6))
+                    segs = [edge] if edge.geom_type == 'LineString' else \
+                        [g for g in getattr(edge, 'geoms', []) if g.geom_type == 'LineString']
+                    if len(segs) > 1:
+                        m_ = linemerge(segs)
+                        segs = [m_] if m_.geom_type == 'LineString' else list(m_.geoms)
+                    own = self.boxes[part]
+                    mouths = []
+                    for m in segs:
+                        if m.length < GROUP_TOL:
+                            continue
+                        a, b = m.coords[0], m.coords[-1]
+                        sa, sb = self.s(a), self.s(b)
+                        if (sb - sa) % self.L > self.L / 2:
+                            a, b, sa, sb = b, a, sb, sa
+                        mouths.append(((float(a[0]), float(a[1])), (float(b[0]), float(b[1])), sa, sb, m))
+                    pkey = tuple(sorted((a, b) for a, b, _sa, _sb, _m in mouths))     # (the pocket: its mouths)
+                    # (a mouth's leg runs along its part's row at the stub ends, past its neighbours' escapes: the pins
+                    # it passes, each a pad of the part within a stub's length of it -- its own the nearest)
+                    pads_ = [(pd.global_x, pd.global_y) for pd in self.pcb.footprints[part].pads]
+                    own_pad = min(pads_, key=lambda c: math.hypot(c[0] - p[0], c[1] - p[1]))
+                    stub_ = math.hypot(own_pad[0] - p[0], own_pad[1] - p[1])
+                    for a, b, sa, sb, m in mouths:
+                        depth = float(m.distance(Q0))
+                        dbox = lambda c: math.hypot(max(0.0, own[0] - c[0], c[0] - own[2]),
+                                                    max(0.0, own[1] - c[1], c[1] - own[3]))
+                        s_ = (sa + GROUP_EPS * depth) if dbox(a) <= dbox(b) else (sb - GROUP_EPS * depth)
+                        mp = m.interpolate(m.project(Q0))
+                        leg = LineString([p, (mp.x, mp.y)])
+                        passes = sum(1 for c in pads_ if c != own_pad and leg.distance(Point(c)) <= stub_ + 0.05)
+                        out.append(('mouth', s_ % self.L, (a, b), depth, pkey, passes))
+                    q, crossed = self._straight(q0)
+                    if crossed and under_ok(crossed) and self.E.distance(Point(q)) <= GROUP_TOL:
+                        out.append(('straight', self.s(q), None, math.hypot(q[0] - p[0], q[1] - p[1]), pkey, 0))
+        out.sort(key=lambda o: (o[3] + 2.0 * GROUP_LEG_PASS * o[5], o[0]))
+        self._opt[key] = out[:max(1, GROUP_OPTIONS)]
+        return self._opt[key]
+
+    def cuts(self, places):
+        """[(index into the sorted places, the cut's s)]: for each gap between two neighbouring places round the
+        walk, the middle of its longest stretch off the front (none: no cut there)"""
+        vs = sorted(places)
+        n, out = len(vs), []
+        gl = (self.f0 - self.f1) % self.L           # (off the front: from f1 on round to f0)
+        for i in range(n):
+            a, b = vs[i - 1] if i else vs[-1] - self.L, vs[i]
+            best = None
+            for k in (-2, -1, 0, 1):
+                x0, x1 = max(a, self.f1 + k * self.L), min(b, self.f1 + gl + k * self.L)
+                if x1 - x0 > 1e-9 and (best is None or x1 - x0 > best[1] - best[0]):
+                    best = (x0, x1)
+            if best is not None:
+                out.append((i, ((best[0] + best[1]) / 2) % self.L))
+        return out
+
+
+    def units(self, opts, lanes):
+        """the units Group.arrange searches, each a list of alternatives ({lane: its option's index}): each POCKET's
+        lanes together -- in their order along it, the ones nearest its first mouth out of it, the ones nearest the
+        other out of that, the rest straight under, every such split (a lane leaving by a mouth past one going straight
+        under would cross it in the pocket, which no place on the walk shows) -- and each other lane with more than one
+        way alone"""
+        pockets = collections.defaultdict(list)
+        single = []
+        for l_ in lanes:
+            pk = next((o[4] for o in opts[l_] if o[4] is not None), None)
+            if pk is not None:
+                pockets[pk].append(l_)
+            elif len(opts[l_]) > 1:
+                single.append(l_)
+        units = []
+        for _key, mem in sorted(pockets.items()):
+            mouths = list(_key)
+            # (along the pocket: by depth from its first mouth -- a lane without a way out of it the deepest)
+            dep = lambda l_: next((o[3] for o in opts[l_] if o[0] == 'mouth' and o[2] == mouths[0]), math.inf)
+            mem = sorted(mem, key=lambda l_: (dep(l_), l_))
+            alts, k = [], len(mem)
+            for g in range(k + 1):
+                for o_ in range(k - g + 1):
+                    ch = {}
+                    for j, l_ in enumerate(mem):
+                        want = mouths[0] if j < g else (mouths[-1] if j >= k - o_ else None)
+                        idx = next((i for i, o in enumerate(opts[l_]) if (o[0] == 'straight' if want is None else
+                                                                          o[0] == 'mouth' and o[2] == want)), None)
+                        if idx is None:
+                            break
+                        ch[l_] = idx
+                    else:
+                        alts.append(ch)
+            units.append(alts)
+        for l_ in single:
+            units.append([{l_: i} for i in range(len(opts[l_]))])
+        return units
+
+    def score(self, opts, rank, ch):
+        """(crossings, the cut s): the lanes' places with each its option `ch` [lane], unrolled at the cut off the
+        front that crosses the fewest against the launch order (`rank` {lane: its index in it}; a tie of places in
+        that order). Every cut at once: moving the first lane of an unrolling to its end changes its crossings by the
+        lanes launched after it less those launched before"""
+        import numpy as np
+        lanes = sorted(rank, key=rank.get)
+        n = len(lanes)
+        pl = {l_: opts[l_][ch[l_]][1] for l_ in lanes}
+        order = sorted(lanes, key=lambda l_: (pl[l_], rank[l_]))
+        a = np.array([rank[l_] for l_ in order])
+        cuts = self.cuts([pl[l_] for l_ in order])
+        if not cuts:
+            return (math.inf, None)
+        inv0 = int(np.triu(a[:, None] > a[None, :], 1).sum())
+        cum = np.concatenate(([0], np.cumsum(n - 1 - 2 * a)))
+        best = min(cuts, key=lambda ic: (inv0 + int(cum[ic[0]]), ic[0]))
+        return (inv0 + int(cum[best[0]]), best[1])
+
+    def best_cut(self, opts, lkey, ch):
+        """the cut s that crosses the fewest with the lanes' options `ch` (Group.score)"""
+        lanes = sorted(opts, key=lambda l_: lkey[l_])
+        return self.score(opts, {l_: i for i, l_ in enumerate(lanes)}, ch)[1]
+
+    def arrange(self, opts, lkey, start=None):
+        """(choice {lane: its option's index}, the cut s, crossings): the lanes' ways in and the cut that cross the
+        fewest lanes against the launch order (`lkey` {lane: its sort key round the source}) -- `opts` {lane: its
+        options, Group.options}. The search: from each lane's shortest way -- a pocket's shortest split (or `start`) --
+        each POCKET's lanes taken
+        together (in their order along it: the ones nearest one mouth out of it, the ones nearest the other out of
+        that, the rest straight under, every split) and each other lane with more than one way alone, in turn, a
+        change kept when it crosses fewer, until none does"""
+        lanes = sorted(opts, key=lambda l_: lkey[l_])
+        rank = {l_: i for i, l_ in enumerate(lanes)}
+        choice = dict(start or {l_: 0 for l_ in lanes})
+        evaluate = lambda ch: self.score(opts, rank, ch)
+        units = self.units(opts, lanes)
+        if start is None:
+            # (each pocket from its shortest split: a lane's own shortest way may cross another's in the pocket)
+            for alts in units:
+                if alts and len(alts[0]) > 1:
+                    choice.update(min(alts, key=lambda a_: sum(opts[l_][i][3] for l_, i in a_.items())))
+        best = evaluate(choice)
+        for _pass in range(8):
+            moved = False
+            for alts in units:
+                for alt in alts:
+                    c2 = {**choice, **alt}
+                    if c2 == choice:
+                        continue
+                    v = evaluate(c2)
+                    if v[0] < best[0]:
+                        best, choice, moved = v, c2, True
+            if not moved:
+                break
+        return choice, best[1], best[0]
 
 
 def build(ctx, dest, _trunk=frozenset()):
@@ -446,9 +820,7 @@ def build(ctx, dest, _trunk=frozenset()):
     pcb = ctx.pcb
     # in the NETS order (setup's own, which tooth_layer keeps): ctx.paths lists the taut memo's hits first, so a
     # lane order read off it changed with the memo's state, and the solve's model with it
-    # (DEST may name several parts, one source and several ends: the trunk runs to the first, and each other's lanes
-    # leave it on a BRANCH, a class of their own -- their berths face the source, fanout_from_plan -- landing off it in
-    # their order round their part; the lanes' final order is the parts' ranks across the trunk, dest_ranks)
+    # (DEST may name several parts, one source and several ends: ONE destination, the GROUP of them -- Group)
     dests, dest_all = bd.dest_refs(dest), dest
     dest = dests[0]
     lanes = [n for n in ctx.tooth_layer if n in ctx.paths and ctx.ends[n][2] in dests]
@@ -460,13 +832,14 @@ def build(ctx, dest, _trunk=frozenset()):
     F.tooth = {n: tuple(map(float, ctx.ends[n][0])) for n in F.M}
     F.bend = {n: tuple(map(float, ctx.ends[n][1])) for n in F.M}
     SB = grown(box_of(pcb, src), F.tooth.values())
-    DB = grown(box_of(pcb, dest), [F.bend[n] for n in F.M if F.dest_of[n] == dest])
+    # (each destination part's pad box grown by its own lanes' berths; a GROUP of them, one destination: its box the
+    # parts' copper's, its shape and order the group's walk -- Group)
+    F.DBs = {r: grown(box_of(pcb, r), [F.bend[n] for n in F.M if F.dest_of[n] == r]) for r in dests}
+    _sraw = box_of(pcb, src)
+    F.group = Group(pcb, dests, ((_sraw[0] + _sraw[2]) / 2, (_sraw[1] + _sraw[3]) / 2)) if len(dests) > 1 else None
+    DB = F.group.bbox if F.group else F.DBs[dest]
     F.SB, F.DB = SB, DB                     # the arrays' pad boxes, grown to the line their stubs end on
-    F.rank = dest_ranks(pcb, src, dests) if len(dests) > 1 else {dest: 0}
-    F.DBs, F.bcut = {dest: DB}, {}
-    for b_ in dests[1:]:
-        F.DBs[b_], F.bcut[b_] = dest_box_cut(pcb, b_, [F.bend[n] for n in F.M if F.dest_of[n] == b_])
-    F.branch = {'B:' + b_: b_ for b_ in dests[1:]}         # each branch's class: its part
+    F.dpads = [(p.global_x, p.global_y) for r in dests for p in pcb.footprints[r].pads]   # the destination's pads
     # ---- the source side: the face each tooth leaves by (its escape's: tooth_face). A tooth on the far (west) face
     # goes round the source on a LEAD-IN to a start beside the side face of its side of the far face's cut (lead_ins,
     # below); one standing inside the array (a ball's via whose lane has not left it) has no way round, and is refused
@@ -478,7 +851,6 @@ def build(ctx, dest, _trunk=frozenset()):
         if 'W' in (f_, tf[n]):
             tf[n] = f_
     far = sorted(n for n in F.M if tf[n] == 'W')
-    _sraw = box_of(pcb, src)
     far_in = [n for n in far if F.tooth[n][0] >= _sraw[0] - 1e-6]
     if far_in:
         raise FarFace(far_in, f'whole route: {", ".join(far_in)} launch from the source\'s far face inside the array '
@@ -489,44 +861,87 @@ def build(ctx, dest, _trunk=frozenset()):
     d = (cb - ca) / np.hypot(*(cb - ca))
     back = math.hypot(SB[2] - SB[0], SB[3] - SB[1]) / 2 + bd.LPITCH
     fwd = math.hypot(DB[2] - DB[0], DB[3] - DB[1]) / 2 + bd.LPITCH
+    if F.group:
+        # (a GROUP's square to the source's face toward it: the flow frame's own axis. The group's centre stands in
+        # the space between its parts, and a trunk to it leant 11 degrees off that face: the lanes from the face to
+        # the parts beside the trunk then crossed it at slopes to 4.9, past the 4 a sweep may take -- square, 2.4)
+        d = np.array([1.0, 0.0])
+        cb = np.array([DB[2], ca[1]])
+        fwd = bd.LPITCH
     F.spine = cr.Spine([tuple(ca - d * back), tuple(cb + d * fwd)])
     F.mid = {n: in_frame(F.spine, ctx.paths[n]) for n in F.M}
     # ---- the destination side: classes, the far face's cut, the berths' order
     x0, y0, x1, y1 = DB
-    PM = [n for n in F.M if F.dest_of[n] == dest]           # (the trunk's own lanes: its destination's)
-    bf = {n: face(F.bend[n], DB) for n in PM}
-    dcut = cut([F.bend[n][1] for n in PM if bf[n] == 'E'], y0, y1)
-    if getattr(ctx, 'dest_cut', None) is not None:
-        # the ends model's own cut (braid.setup, from the plan sidecar): recomputed here from the laid stubs, which
-        # stand a hair off the menu's exits, two near-equal gaps could split the far face the other way, and the solve
-        # would face crossings the model never priced (zynq K44: 176 crossings planned, 344 solved, no plan proved).
-        # A cut off the far face (whole_ends' WINDING) sends the berths past it round the other side
-        dcut = ctx.dest_cut
-    F.dcut = dcut
-    F.cls = {}
-    for n in PM:
-        f_ = ring_side(F.bend[n], DB, dcut) or 'W'
-        if f_ in ('N', 'S') and n not in _trunk:
-            F.cls[n] = f_
-    for n in F.M:
-        if F.dest_of[n] != dest:
-            F.cls[n] = 'B:' + F.dest_of[n]                  # (a branch's lane: its branch, whole)
+    F.PM = PM = list(F.M)                   # (the lanes round the destination: every lane, a group's too)
+    prs = getattr(ctx, 'pairs', None) or {}
+    F.gland = {}                            # a group lane's landing short of its berth: the mouth of its pocket
+    if F.group:
+        G = F.group
+
+        def _via_at_berth(n_):
+            B_ = F.DBs[F.dest_of[n_]]
+            return all(any(v.net_id == ctx.byname[leg][0] and via_in_box(v, B_) for v in ctx.base_vias)
+                       for leg in (prs[n_] if n_ in prs else (n_,)))
+        opts = {n: G.options(F.bend[n], ctx.stub_dir.get(n), F.dest_of[n], ctx.dest_layer.get(n), _via_at_berth(n))
+                for n in F.M}
+        lkey = {n: (perim_s(F.tooth[n], SB, getattr(ctx, 'src_cut', None)), F.M.index(n)) for n in F.M}
+        # the ends model's ways in and cut (braid.setup, from the plan sidecar: each lane's place, the cut's point),
+        # each taken as the option nearest it; else the group's own arrangement
+        ent, dc_ = getattr(ctx, 'dest_entry', None) or {}, getattr(ctx, 'dest_cut', None)
+        if ent and all(n in ent for n in F.M):
+            ch = {n: min(range(len(opts[n])), key=lambda i, n=n: math.dist(G.pt(opts[n][i][1]), ent[n])) for n in F.M}
+        else:
+            ch = G.arrange(opts, lkey)[0]
+        dcut = G.s(dc_[1:]) if isinstance(dc_, (tuple, list)) and dc_[0] == 'P' else G.best_cut(opts, lkey, ch)
+        F.way = {n: opts[n][ch[n]] for n in F.M}
+        F.dcut = dcut
+        F.cls = {}
+        for n in F.M:
+            f_ = G.side(F.way[n][1], dcut)
+            if f_ in ('N', 'S') and n not in _trunk:
+                F.cls[n] = f_
+        F.P = {n: G.unroll(F.way[n][1], dcut) for n in F.M}
+        # (the lanes leaving one mouth land across it in their order along the walk, a lane's room apart at most)
+        by_m = collections.defaultdict(list)
+        for n in F.M:
+            if F.way[n][0] == 'mouth':
+                by_m[F.way[n][2]].append(n)
+        for (a, b), mem in by_m.items():
+            mem.sort(key=lambda n: (F.P[n], F.M.index(n)))
+            k_ = len(mem)
+            for i, n in enumerate(mem):
+                t = (i + 1) / (k_ + 1)
+                F.gland[n] = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        F.pcut = {r: cut([F.bend[n][1] for n in F.M if F.dest_of[n] == r and face(F.bend[n], F.DBs[r]) == 'E'],
+                         F.DBs[r][1], F.DBs[r][3]) for r in dests}
+    else:
+        bf = {n: face(F.bend[n], DB) for n in PM}
+        dcut = cut([F.bend[n][1] for n in PM if bf[n] == 'E'], y0, y1)
+        if getattr(ctx, 'dest_cut', None) is not None:
+            # the ends model's own cut (braid.setup, from the plan sidecar): recomputed here from the laid stubs, which
+            # stand a hair off the menu's exits, two near-equal gaps could split the far face the other way, and the
+            # solve would face crossings the model never priced (a K44 bus: 176 crossings planned, 344 solved, no plan
+            # proved). A cut off the far face (whole_ends' WINDING) sends the berths past it round the other side
+            dcut = ctx.dest_cut
+        F.dcut = dcut
+        F.cls = {}
+        for n in PM:
+            f_ = ring_side(F.bend[n], DB, dcut) or 'W'
+            if f_ in ('N', 'S') and n not in _trunk:
+                F.cls[n] = f_
+        F.P = {n: perim_c(F.bend[n], DB, dcut) for n in F.M}
+        F.pcut = {dest: dcut}
     near = [n for n in PM if n not in F.cls]
-    perim_dst = lambda p: perim_c(p, DB, dcut)
 
     def perim_berth(n_, p):
-        """where berth point p of lane n_ lies round its destination's box, unrolled at that box's cut (a branch's
-        round its own part)"""
+        """where berth point p of lane n_ lies round its own part's box, unrolled at that box's cut (a pair's tips
+        stand on one part)"""
         b_ = F.dest_of[n_]
-        return perim_dst(p) if b_ == dest else perim_c(p, F.DBs[b_], F.bcut[b_])
-    F.P = {n: perim_berth(n, F.bend[n]) for n in F.M}
-    # (north to south: the destinations' ranks across the trunk, each one's lanes in their order round it; a stack at a
-    # berth -- a tie, tie_rank -- in its lanes' order at the source, round the source's box unrolled at its middle: the
-    # far face's cut is not known yet, and the order within one stack is all it decides)
-    _pb = {n: (F.rank[F.dest_of[n]], F.P[n]) for n in F.M}
-    _bt = {}
-    for r_ in set(v_[0] for v_ in _pb.values()):
-        _bt.update({n: (r_, k_) for n, k_ in tie_rank({n: v_[1] for n, v_ in _pb.items() if v_[0] == r_}).items()})
+        return perim_c(p, F.DBs[b_], F.pcut[b_])
+    # (north to south round the destination; a stack at a berth -- a tie, tie_rank -- in its lanes' order at the
+    # source, round the source's box unrolled at its middle: the far face's cut is not known yet, and the order within
+    # one stack is all it decides)
+    _bt = tie_rank(F.P)
     F.final = sorted(F.M, key=lambda n: (_bt[n], perim_s(F.tooth[n], SB), F.M.index(n)))
     # the source's far face's CUT (src_cut): the ends model's (the plan sidecar's, as the destination's), else the gap
     # between its teeth that makes the fewest crossings with the berths' order
@@ -569,8 +984,7 @@ def build(ctx, dest, _trunk=frozenset()):
         elif tf[n] in ('N', 'S'):
             side['src'] = tf[n]
         if n in F.cls:
-            # (a branch's lane passes the trunk's destination on its branch's side)
-            side['dst'] = F.cls[n] if n in PM else branch_side(F.rank[F.dest_of[n]])
+            side['dst'] = F.cls[n]          # (a ring's lane passes the destination on its ring's side)
         if not side and n not in F.lead:
             continue
         pts = []
@@ -582,7 +996,7 @@ def build(ctx, dest, _trunk=frozenset()):
                     y = b_[1] - bd.LPITCH if side[key_] == 'N' else b_[3] + bd.LPITCH
             pts.append((x, y))
         F.mid[n] = in_frame(F.spine, pts)
-    F.se = {n: tuple(map(float, F.spine.project_pt(F.bend[n]))) for n in near}
+    F.se = {n: tuple(map(float, F.spine.project_pt(F.gland.get(n, F.bend[n])))) for n in near}
     F.H0 = (min(F.se[n][0] for n in near) if near else float(F.spine.project_pt((x0, (y0 + y1) / 2))[0]))
     W_, H_ = x1 - x0, y1 - y0
     sW, sH = SB[2] - SB[0], SB[3] - SB[1]
@@ -604,8 +1018,7 @@ def build(ctx, dest, _trunk=frozenset()):
         box = F.SB if k_ == 0 else F.DBs[F.dest_of[n_]]
         for leg in (prs[n_] if n_ in prs else (n_,)):
             nid = ctx.byname[leg][0]
-            if not any(v.net_id == nid and box[0] - 1e-6 <= v.x <= box[2] + 1e-6 and box[1] - 1e-6 <= v.y <= box[3] + 1e-6
-                       for v in ctx.base_vias):
+            if not any(v.net_id == nid and via_in_box(v, box) for v in ctx.base_vias):
                 return False
         return True
     # every lane with an end between a pair's two tips, whatever its layer there: a solve that chooses ends' layers
@@ -647,6 +1060,7 @@ def build(ctx, dest, _trunk=frozenset()):
     # The same for a pair ending from the TRUNK on a face across it (a berth just round the destination's corner): it
     # arrived along the trunk and hooked into its tips with no end run (K35 SDQS0 at DU1's south face)
     F.land = dict(F.bend)
+    F.land.update(F.gland)
     td = tuple(float(v) for v in F.spine.d[-1])
     for n in [n for n in prs if n in F.M]:
         e = ctx.stub_dir.get(n)
@@ -684,7 +1098,7 @@ def build(ctx, dest, _trunk=frozenset()):
     _fi = {n: i for i, n in enumerate(F.final)}
     F.launch = sorted(F.M, key=lambda n: (_ti[n], _fi[n]))
     # ---- the rings
-    dpads = [(p.global_x, p.global_y) for p in pcb.footprints[dest].pads]
+    dpads = F.dpads
     cen = (sum(p[0] for p in dpads) / len(dpads), sum(p[1] for p in dpads) / len(dpads))
     north = 1.0 if F.spine.xy(F.H0, 1.0)[1] < F.spine.xy(F.H0, 0.0)[1] else -1.0   # the sign of o toward the north
     width = lambda n: bd.LANE_MIN + (_pairs.pitch(bd.TRACK) if n in (getattr(ctx, 'pairs', None) or {}) else 0.0)
@@ -694,7 +1108,7 @@ def build(ctx, dest, _trunk=frozenset()):
     # pad within a lane pitch and two lanes' room of the hull is one more thing the ring goes round, its corners in it
     base = dpads + [F.bend[n] for n in PM] + tails
     for ref_, fp_ in pcb.footprints.items():
-        if ref_ in (src, dest):
+        if ref_ in (src, *dests):
             continue
         for p_ in fp_.pads:
             if _rings_round(p_) and _inside((p_.global_x, p_.global_y), base, bd.LPITCH + 2 * bd.LANE_MIN):
@@ -725,11 +1139,8 @@ def build(ctx, dest, _trunk=frozenset()):
                 acted = True
         if not acted:
             break
-    _branches(F, ctx, pcb, dpads, near, tails, north, width)
     short = set()
     for k, ring in F.rings.items():
-        if k in F.branch:
-            continue                                    # (a branch's lanes land off it: none ends from the trunk)
         mem = [n for n in F.M if F.cls.get(n) == k]
         entry = max(ring.project_pt(F.spine.xy(F.Hk[k], F.o_h[n]))[0] for n in mem) + 2 * bd.LANE_MIN
         short |= {n for n in mem if ring.project_pt(F.land[n])[0] < entry}
@@ -832,16 +1243,16 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
     parts (none in the hull) whose copper lies on a ring's stack -- within a clearance of its outermost lane's copper,
     on the handoff line from the ring's start out; room {ring: (the destination's copper's farthest offset on that
     side, the facing face's lanes' edge, the ring's lanes' width)}"""
-    PM = [n for n in F.M if F.dest_of[n] == dest]           # (the trunk destination's lanes: a branch's are not round it)
+    PM = F.PM
     hull = dpads + [F.bend[n] for n in PM] + tails
-    rpad = max((max(p.size_x or 0.0, p.size_y or 0.0) / 2 for p in pcb.footprints[dest].pads), default=0.0)
+    rpad = max((max(p.size_x or 0.0, p.size_y or 0.0) / 2 for r in F.dests for p in pcb.footprints[r].pads),
+               default=0.0)
     # each ring lane's offset on the handoff line, from the ORDER (the berths', north to south), stacked innermost first
     # a lane apart OUTSIDE its ring's own edge: beyond the outermost near-face berth, and beyond the hull on that side
     # by the ring's margin -- so the ring starts outside the destination's corner and leaves the trunk along it, every
     # lane crossing the handoff line onto the ring where it stands (stacked from the near-face berths alone, K51's south
     # ring began inside the corner, ran down its west face, and its lanes met it up to 2 mm apart)
     edge = {}
-    F.stack_out = {}
     for k in ('N', 'S'):
         sg = north if k == 'N' else -north
         # (the outermost near-face lane's own room outside its centre: a pair's is half its pitch more)
@@ -853,12 +1264,12 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         for n in (mem[::-1] if k == 'N' else mem):
             F.o_h[n] = sg * (at + width(n) / 2 + bd.LANE_MIN / 2)
             at += width(n)
-        F.stack_out[k] = at                             # (the stack's outer edge on that side: a branch's starts past it)
     F.rings, F.Hk = {}, {}
-    for k in sorted(set(F.cls.values()) - set(F.branch)):
+    wound = not (F.group.far_cut(F.dcut) if F.group else far_cut(F.dcut))
+    for k in sorted(set(F.cls.values())):
         mem = [n for n in F.M if F.cls.get(n) == k]
         sg = north if k == 'N' else -north
-        stubs = [F.bend[n] for n in mem]
+        stubs = [F.gland.get(n, F.bend[n]) for n in mem]
         # the ring's lead-in runs taut from its start to where it grazes the hull (corridor.build_wrap_spine), so the
         # start stands OUTSIDE the hull: a lane pitch inside the innermost ring lane on the arrival line, moved back
         # along the trunk until it clears the hull by two lane pitches
@@ -873,16 +1284,18 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
             s_start = _ring_start(F, k, near, s_start, o_start, hull,
                                   side=sg if awx_settings.get('FRAME_RING_START') == '2' else None)
         ccw = sum(bd.sweep_round(ctx.paths[n], cen) for n in mem) > 0
-        if not far_cut(F.dcut):
+        if wound or F.group:
             # (a cut off the far face: a ring's lanes past the far face are WOUND round it, their taut paths the short
-            # way round the other side -- the ring runs the way its class goes, from the facing face round its side)
+            # way round the other side -- the ring runs the way its class goes, from the facing face round its side.
+            # So round a GROUP always: a taut path runs between and through its parts, its sweep round their centre
+            # no side of anything -- the back row's lanes swept the north ring backwards, into a 9 mm hook)
             DB_ = F.DB
             wn = ((DB_[0], (DB_[1] + DB_[3]) / 2), ((DB_[0] + DB_[2]) / 2, DB_[1]), (DB_[2], (DB_[1] + DB_[3]) / 2))
             ccw = (bd.sweep_round(list(wn), cen) > 0) == (k == 'N')
         F.Hk[k] = float(s_start)                         # this ring's lanes leave the trunk here
         _core, F.rings[k] = bd.ring_spine(dpads, [F.spine.xy(s_start, F.o_h[n]) for n in mem], stubs,
                                           F.spine.xy(s_start, o_start), ccw, tuple(float(v) for v in F.spine.d[-1]),
-                                          tails, wrap_side=not far_cut(F.dcut))
+                                          tails, wrap_side=wound)
     hits, room = {}, {}
     for k in F.rings:
         mem = [n for n in F.M if F.cls.get(n) == k]
@@ -897,7 +1310,7 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         b = F.spine.xy(F.Hk[k], F.o_h[out_])                                             # its outermost lane
         reach = (width(out_) - bd.LANE_MIN) / 2 + bd.TRACK / 2 + bd.CLEAR                 # its copper and a clearance
         for ref_, fp_ in pcb.footprints.items():
-            if ref_ in (src, dest) or ref_ in in_hull:
+            if ref_ in (src, *F.dests) or ref_ in in_hull:
                 continue
             rects = [(p_.global_x - (p_.size_x or 0.0) / 2, p_.global_y - (p_.size_y or 0.0) / 2,
                       p_.global_x + (p_.size_x or 0.0) / 2, p_.global_y + (p_.size_y or 0.0) / 2) for p_ in fp_.pads
@@ -907,55 +1320,6 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
                                                                   (r_[2], r_[3])))
                 hits.setdefault(k, []).append((ref_, inner))
     return hits, room
-
-
-BRANCH_DEG = 45.0       # a branch turns off the trunk no steeper than this toward its part's centre
-
-
-def _branches(F, ctx, pcb, dpads, near, tails, north, width):
-    """each BRANCH (DEST naming several parts, the trunk's destination the first): its lanes stacked on the handoff
-    line outside the trunk destination's stack on their side (F.o_h; a nearer branch inside a farther one), and its
-    spine (F.rings): ALONG the trunk from where its lanes leave it (F.Hk) to its CORNER, then straight to the branch's
-    part's centre and past it, its lanes landing off it in their order round the part as the near face's land off the
-    trunk (their berths face the source, fanout_from_plan). The corner stands where that straight leaves the trunk no
-    steeper than BRANCH_DEG, no later than the trunk destination's own ring on that side and outside its hull; the
-    lanes leave the trunk before it by the room their stack turns in. (Along the trunk first: the stack stands square
-    to the trunk, and met at a slant it is a lane pitch times cos 45 apart across the branch.)"""
-    if not F.branch:
-        return
-    hull0 = dpads + [F.bend[n] for n in F.M if F.dest_of[n] == F.dst] + tails
-    for side in ('N', 'S'):
-        sg = north if side == 'N' else -north
-        at = F.stack_out[side]
-        for k in sorted((k_ for k_, b_ in F.branch.items() if branch_side(F.rank[b_]) == side),
-                        key=lambda k_: abs(F.rank[F.branch[k_]])):
-            mem = [n for n in F.final if F.cls.get(n) == k]
-            if not mem:
-                continue
-            for n in (mem[::-1] if side == 'N' else mem):
-                F.o_h[n] = sg * (at + width(n) / 2 + bd.LANE_MIN / 2)
-                at += width(n)
-            o_start = F.o_h[min(mem, key=lambda n: sg * F.o_h[n])] - sg * bd.LPITCH
-            B_ = F.DBs[F.branch[k]]
-            c_ = ((B_[0] + B_[2]) / 2, (B_[1] + B_[3]) / 2)
-            sc_, oc_ = (float(v) for v in F.spine.project_pt(c_))
-            s_cnr = min([F.H0, sc_ - abs(oc_ - o_start) / math.tan(math.radians(BRANCH_DEG))]
-                        + ([F.Hk[side]] if side in F.Hk else []))
-            while _inside(F.spine.xy(s_cnr, o_start), hull0, 2 * bd.LPITCH) and s_cnr > 0:
-                s_cnr -= bd.LANE_MIN / 5
-            # (the lanes leave the trunk before the corner by where their own offset line on the leg along it ends --
-            # the outermost's, its offset across the branch times tan of half the turn -- and two lane pitches: nearer,
-            # the outer lanes' handoffs projected onto the turned leg, at a slant)
-            o_out = max(sg * F.o_h[n] for n in mem) - sg * o_start
-            lead = o_out * math.tan(math.radians(BRANCH_DEG / 2)) + 2 * bd.LPITCH
-            F.Hk[k] = float(max(s_cnr - lead, 0.0))
-            cnr = np.array(F.spine.xy(s_cnr, o_start), dtype=float)
-            d_ = np.array(c_) - cnr
-            d_ /= np.hypot(*d_)
-            fwd = math.hypot(B_[2] - B_[0], B_[3] - B_[1]) / 2 + bd.LPITCH
-            # (from a little behind the handoff points, as ring_spine extends a ring back past them)
-            F.rings[k] = cr.Spine([tuple(F.spine.xy(F.Hk[k] - 0.3, o_start)), tuple(cnr),
-                                   tuple(np.array(c_) + d_ * fwd)])
 
 
 def room_inside(e_, near_e, sum_w, inner, track, clear, lane_min):

@@ -452,6 +452,25 @@ src/
 
 ## Version History
 
+### 0.24.3 (2026-11-04)
+
+- **`EndsKernel` is the only ends estimate**: the Python scorer is gone and
+  `awx/ends_kernel.py` refuses a binary without the kernel. It now scores a
+  destination GROUP (`whole_frame.Group`: each berth option's way in, its place
+  on the group's walk, the cut there that crosses fewest against the teeth's
+  order, pocket conflicts, pair splits per part, a pocket leg's price), a
+  plane's routing layer's price in the layer colouring (per run, a ground
+  plane's and a power plane's each its own), and the fixed ends the
+  solve could not hold (`set_learned(..., end, has_end)`). `parts(state, wcut,
+  exact)` returns every part the whole route reads, the route exact on the
+  orders called back into the Python's CP-SAT where the estimate would stand;
+  `terms` is gone.
+- **The far face's price is the lane's own** (`far_w`, one a lane, in place of
+  the constant `FAR_TOOTH`, whose slot leaves `consts`): `FAR_TOOTH` for a lane
+  with another way out of the source, none for one whose every other way passes
+  another bus's laid lanes (`Ends.far_w`). Summed before it is added, so a model
+  whose every lane pays `FAR_TOOTH` scores as it did.
+
 ### 0.24.2 (2026-11-02)
 
 - **`EndsKernel`: a tie is no crossing**: two lanes whose places round the

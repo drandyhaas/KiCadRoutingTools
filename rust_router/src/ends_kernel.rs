@@ -1,13 +1,16 @@
-//! The whole route's ENDS ESTIMATE (awx/whole_ends.py: Ends._score -> _score_at, its two-layer route or _score_nl
-//! on more routing layers, one destination) scored from tables awx/ends_kernel.py builds once a model: each option's
-//! point, layer, layer domain, legs, conflict keys and hands; the ride of each tooth and berth together (and its wound turns and
-//! far-face ride); each pair of options' stacks and runs met; the plane ways each option kills; the feedback's tables.
-//! The ends search scores some 400 000 states a choice -- half a millisecond each in Python.
+//! The whole route's ENDS ESTIMATE (awx/whole_ends.py: Ends.score) -- the only one: its two-layer route or, on more
+//! routing layers, the crossing graph coloured on the layers (a plane's layer priced, route_layers.plane_kinds); one
+//! destination or a GROUP of them (whole_frame.Group: each berth option's way in, its place on the group's walk) --
+//! scored from tables awx/ends_kernel.py builds once a model: each option's point, layer, layer domain, legs, conflict
+//! keys and hands; the ride of each tooth and berth together (and its wound turns and far-face ride) and the lane's
+//! length; each pair of options' stacks and runs met; the plane ways each option kills; the feedback's tables. The ends
+//! search scores some 400 000 states a choice. The route EXACT on a state's orders is CP-SAT, in the Python: `parts`
+//! calls it back where the estimate would stand.
 //!
-//! EXACT: every term is formed from the same operations in the same order as the Python, so the same doubles -- the
-//! boxes, faces, cuts and places round them are whole_frame's arithmetic (grown, face, cut, cuts_tied, src_cut,
-//! perim_s, perim_c, ring_side), ported; what the Python computes from geometry once an option (the ride, the runs
-//! met) comes in as its value. A Python float `%` is floor-signed, as `pymod`.
+//! The boxes, faces, cuts and places round them are whole_frame's arithmetic (grown, face, cut, cuts_tied, src_cut,
+//! perim_s, perim_c, ring_side, Group.score's cut), ported exactly; what the Python computes from geometry once an
+//! option (the ride, the runs met, a lane's length) comes in as its value. A Python float `%` is floor-signed, as
+//! `pymod`; a Python sum() of floats is PySum.
 //!
 //! search: the ends search's own loop (Ends.search) -- each improving change of one lane's tooth or berth, one other
 //! lane ejected where it is in the way, taken as found, sweep after sweep -- over the same lanes, ends and options in
@@ -23,12 +26,165 @@ const N_: u8 = 1;
 const W_: u8 = 2;
 const S_: u8 = 3;
 
-/// a destination cut: on the far face (its y), or WINDING (whole_frame.cut_point's face and coordinate)
+/// a destination cut: on the far face (its y), or WINDING (whole_frame.cut_point's face and coordinate), or a GROUP's
+/// (its place on the group's walk, whole_frame.Group)
 #[derive(Clone, Copy)]
 enum Cut {
     Far(f64),
     Wind(u8, f64),
+    Grp(f64),
 }
+
+/// a destination GROUP (whole_frame.Group, Ends.group): its walk's length and front, its box, and each berth option's
+/// way in -- its place on the walk, the pins its leg passes, the pocket options it cannot be laid with -- with each
+/// lane's part and each part's copper box (whole_frame.box_of)
+struct GroupK {
+    len: f64,
+    f0: f64,
+    f1: f64,
+    bbox: [f64; 4],
+    s: Vec<Vec<f64>>,
+    pass: Vec<Vec<i64>>,
+    pconf: Vec<Vec<Vec<(u32, u32)>>>,
+    part: Vec<usize>,
+    pbox: Vec<[f64; 4]>,
+    leg_w: f64,
+}
+
+impl GroupK {
+    fn in_front(&self, s: f64) -> bool {
+        pymod(s - self.f0, self.len) <= pymod(self.f1 - self.f0, self.len) + 1e-9
+    }
+
+    /// Group.side: W on the front, N before it (round the north), S after it
+    fn side(&self, s: f64, c: f64) -> u8 {
+        if self.in_front(s) {
+            return W_;
+        }
+        if pymod(s - c, self.len) < pymod(self.f0 - c, self.len) {
+            N_
+        } else {
+            S_
+        }
+    }
+
+    /// Group.cuts: for each gap between neighbouring places (`vs` sorted) the middle of its longest stretch off the
+    /// front, [(index, s)]
+    fn cuts(&self, vs: &[f64]) -> Vec<(usize, f64)> {
+        let n = vs.len();
+        let mut out = Vec::new();
+        let gl = pymod(self.f0 - self.f1, self.len);
+        for i in 0..n {
+            let a = if i > 0 { vs[i - 1] } else { vs[n - 1] - self.len };
+            let b = vs[i];
+            let mut best: Option<(f64, f64)> = None;
+            for k in [-2i64, -1, 0, 1] {
+                let lo = self.f1 + k as f64 * self.len;
+                let hi = self.f1 + gl + k as f64 * self.len;
+                let x0 = if lo > a { lo } else { a };
+                let x1 = if hi < b { hi } else { b };
+                if x1 - x0 > 1e-9 && (best.is_none() || x1 - x0 > best.unwrap().1 - best.unwrap().0) {
+                    best = Some((x0, x1));
+                }
+            }
+            if let Some((x0, x1)) = best {
+                out.push((i, pymod((x0 + x1) / 2.0, self.len)));
+            }
+        }
+        out
+    }
+
+    /// Group.score's cut: the places `pl` unrolled at the cut off the front that crosses the fewest against the
+    /// launch order (`rank` each lane's place in it); None where there is no cut
+    fn best_cut(&self, pl: &[f64], rank: &[i64]) -> Option<f64> {
+        let n = pl.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| pl[a].partial_cmp(&pl[b]).unwrap().then(rank[a].cmp(&rank[b])));
+        let a: Vec<i64> = order.iter().map(|&l| rank[l]).collect();
+        let vs: Vec<f64> = order.iter().map(|&l| pl[l]).collect();
+        let cuts = self.cuts(&vs);
+        if cuts.is_empty() {
+            return None;
+        }
+        let mut inv0: i64 = 0;
+        for i in 0..n {
+            for j in i + 1..n {
+                if a[i] > a[j] {
+                    inv0 += 1;
+                }
+            }
+        }
+        let mut cum: Vec<i64> = vec![0; n + 1];
+        for i in 0..n {
+            cum[i + 1] = cum[i] + (n as i64 - 1 - 2 * a[i]);
+        }
+        let mut best: Option<(i64, usize, f64)> = None;
+        for &(i, s) in &cuts {
+            let key = (inv0 + cum[i], i);
+            if best.is_none() || key < (best.unwrap().0, best.unwrap().1) {
+                best = Some((key.0, key.1, s));
+            }
+        }
+        best.map(|b| b.2)
+    }
+}
+
+/// the PARTS of a state (Ends.score's), the objective's terms and what the whole route reads of them
+#[derive(Default, Clone)]
+struct Parts {
+    obj: f64,
+    fan: i64,
+    parity: i64,
+    crossover: i64,
+    cover: i64,
+    settle: i64,
+    couple: i64,
+    route: i64,
+    route_est: i64,
+    over: i64,
+    plane: f64,
+    cong: f64,
+    feedback: f64,
+    ride: f64,
+    chg: Vec<i64>,
+    crossings: i64,
+    same: i64,
+    conflicts: i64,
+    splits: i64,
+    refused: i64,
+    lane_over: Vec<i64>,
+    lane_load: Vec<f64>,
+    lane_x: Vec<i64>,
+    stacks: i64,
+    exact_failed: bool,
+    cut: (u8, f64), // (0 far face, 1 'N' / 2 'S' winding, 3 a group's walk; its coordinate)
+    front: f64,
+    dropped: i64,
+    walled: Vec<usize>,
+    learned: f64,
+    scut: Option<f64>,
+    far: i64,
+    fence: f64,
+    legs: f64,
+    conf_lanes: Vec<usize>,
+}
+
+/// what a state's route EXACT on its orders reads (Ends.exact_route_nl / exact_route, CP-SAT in the Python): the
+/// orders, each end's layer domain (more layers than two) or layers (two), the stub vias, the crossover pairs, the
+/// via ends whose runs meet, the lanes' lengths
+struct ExactIn {
+    kp: Vec<(f64, usize)>,
+    kd: Vec<(f64, usize)>,
+    ends: Vec<[(i32, i32, u32); 2]>,
+    sv: Vec<i64>,
+    xo: Vec<i64>,
+    sep: Vec<((usize, usize), (usize, usize))>,
+    tl: Vec<i32>,
+    dl: Vec<i32>,
+}
+
+/// ...and its answer: (route, over, changes a lane, drops a lane, plane price); None where it found no plan
+type ExactOut = Option<(i64, i64, Vec<i64>, Vec<i64>, f64)>;
 
 #[derive(Clone)]
 struct Opt {
@@ -57,11 +213,6 @@ struct Ball {
     key: u32,
     dw: Vec<u32>,
     sw: Vec<(u32, i64)>, // (strap way, the ball key it joins; -1 no ball)
-}
-
-#[derive(Default, Clone)]
-struct Terms {
-    v: [f64; 17],
 }
 
 #[pyclass]
@@ -94,8 +245,19 @@ pub struct EndsKernel {
     dbox: [f64; 4],
     fence_n: usize,
     fence_s: usize,
+    far_w: Vec<f64>, // per lane: its far-face tooth's price (Ends.far_w: FAR_TOOTH, or none where its every other way out
+    //                  crosses another bus's laid lanes)
     escape: bool,
     neumaier: bool,
+    // a routing layer's PLANE (route_layers.plane_kinds: 0 a signal layer, 1 a power plane's, 2 a ground plane's) and
+    // a run's price on it, per run whatever its length (route_layers.run_price)
+    pk: Vec<u8>,
+    p_gnd: f64,
+    p_pwr: f64,
+    end_learned: Vec<f64>, // (Ends.end_learned) a lane's fixed end layers the solve could not hold, per fixed end
+    has_end: bool,
+    group: Option<GroupK>,
+    key_lane: Vec<u32>, // each conflict key's lane
     memo: Mutex<FxHashMap<(Vec<u32>, u8, u64), f64>>, // each state scored, at its cut: its objective
     // constants (whole_ends')
     w_over: f64,
@@ -110,10 +272,8 @@ pub struct EndsKernel {
     eps_x: f64,
     big: f64,
     walled_w: f64,
-    far_tooth: f64,
     fence_vias: f64,
     opp_dive: f64,
-    corner: f64,
     lane_pitch: f64,
     chg_room: f64,
     lpitch: f64,
@@ -271,13 +431,14 @@ fn cut_point(c: Cut, db: &[f64; 4]) -> (f64, f64) {
             S_ => (v, db[3]),
             _ => (db[2], v),
         },
+        Cut::Grp(v) => (db[2], v), // (a group's cut is a place on its walk, never round a box: no caller asks)
     }
 }
 
 fn perim_c(x: f64, y: f64, db: &[f64; 4], c: Cut) -> f64 {
     match c {
         Cut::Far(v) => perim_d(x, y, db, v),
-        Cut::Wind(_, _) => {
+        Cut::Wind(_, _) | Cut::Grp(_) => {
             let w = db[2] - db[0];
             let h = db[3] - db[1];
             let (cx, cy) = cut_point(c, db);
@@ -304,7 +465,7 @@ fn ring_side(x: f64, y: f64, db: &[f64; 4], c: Cut) -> u8 {
                 f
             }
         }
-        Cut::Wind(_, _) => {
+        Cut::Wind(_, _) | Cut::Grp(_) => {
             if perim_c(x, y, db, c) < perim_c(db[0], db[1], db, c) {
                 N_
             } else {
@@ -380,8 +541,12 @@ fn cut_key(c: Option<Cut>) -> (u8, u64) {
         None => (0, 0),
         Some(Cut::Far(v)) => (1, v.to_bits()),
         Some(Cut::Wind(f, v)) => (2 + f, v.to_bits()),
+        Some(Cut::Grp(v)) => (10, v.to_bits()),
     }
 }
+
+/// the exact route's callback (Ends: CP-SAT): an ExactIn, its answer
+type ExactFn<'a> = &'a dyn Fn(&ExactIn) -> ExactOut;
 
 impl EndsKernel {
     /// the objective of `st` at the cut, each state scored once (Ends.objective's memo)
@@ -391,7 +556,7 @@ impl EndsKernel {
         if let Some(&v) = self.memo.lock().unwrap().get(&key) {
             return v;
         }
-        let v = self.score(st, wcut, None);
+        let v = self.score(st, wcut, None, None);
         self.memo.lock().unwrap().insert(key, v);
         v
     }
@@ -485,10 +650,20 @@ impl EndsKernel {
         &self.opts[k][l][if k == 0 { st[l].0 } else { st[l].1 }]
     }
 
-    /// Ends._score: at the winding cut, else at the far face's cut -- its tied cuts each, the best
-    fn score(&self, st: &[(usize, usize)], wcut: Option<Cut>, mut terms: Option<&mut Terms>) -> f64 {
+    /// Ends._score: at the winding cut, a GROUP's at its own, else at the far face's cut -- its tied cuts each, the
+    /// best. `exact`: the route exact on the orders (the Python's CP-SAT, called back), else the estimate's
+    fn score(
+        &self,
+        st: &[(usize, usize)],
+        wcut: Option<Cut>,
+        exact: Option<ExactFn>,
+        mut parts: Option<&mut Parts>,
+    ) -> f64 {
         if let Some(c) = wcut {
-            return self.score_at(st, Some(c), true, terms);
+            return self.score_at(st, Some(c), true, exact, parts);
+        }
+        if self.group.is_some() {
+            return self.score_at(st, None, false, exact, parts);
         }
         let mut pts = (0..self.nlanes).map(|l| {
             let o = self.opt(1, l, st);
@@ -502,24 +677,31 @@ impl EndsKernel {
             .collect();
         let cuts = cuts_tied(ys, db[1], db[3], self.lpitch);
         if cuts.len() < 2 {
-            return self.score_at(st, None, false, terms);
+            return self.score_at(st, None, false, exact, parts);
         }
-        let mut best: Option<(f64, Terms)> = None;
+        let mut best: Option<(f64, Parts)> = None;
         for c in cuts {
-            let mut t = Terms::default();
-            let got = self.score_at(st, Some(Cut::Far(c)), false, Some(&mut t));
+            let mut t = Parts::default();
+            let got = self.score_at(st, Some(Cut::Far(c)), false, exact, Some(&mut t));
             if best.is_none() || got < best.as_ref().unwrap().0 - 1e-9 {
                 best = Some((got, t));
             }
         }
         let (v, t) = best.unwrap();
-        if let Some(tt) = terms.as_deref_mut() {
+        if let Some(tt) = parts.as_deref_mut() {
             *tt = t;
         }
         v
     }
 
-    fn score_at(&self, st: &[(usize, usize)], cut_at: Option<Cut>, wound_on: bool, terms: Option<&mut Terms>) -> f64 {
+    fn score_at(
+        &self,
+        st: &[(usize, usize)],
+        cut_at: Option<Cut>,
+        wound_on: bool,
+        exact: Option<ExactFn>,
+        parts: Option<&mut Parts>,
+    ) -> f64 {
         let nl_ = self.nlanes;
         let to = |l: usize| &self.opts[0][l][st[l].0];
         let bo = |l: usize| &self.opts[1][l][st[l].1];
@@ -546,20 +728,64 @@ impl EndsKernel {
                 }
             }
         }
-        let nconf = nc / 2;
+        let mut nconf = nc / 2;
+        if let Some(g) = &self.group {
+            // (a GROUP's lanes in one POCKET out of their order along it: Ends.pconf)
+            let mut pc: i64 = 0;
+            for l in 0..nl_ {
+                for &(o, j) in &g.pconf[l][st[l].1] {
+                    if st[o as usize].1 == j as usize {
+                        pc += 1;
+                    }
+                }
+            }
+            nconf += pc / 2;
+        }
         let nref = (0..nl_).filter(|&l| to(l).refused || bo(l).refused).count() as i64;
+        // (the lanes whose chosen moves conflict: the destination re-plan frees them with their neighbours)
+        let mut conf_lanes: Vec<usize> = Vec::new();
+        if nconf > 0 {
+            for &c in &ck {
+                if self.conf[c as usize].iter().any(|&o| chosen[o as usize]) {
+                    conf_lanes.push(self.key_lane[c as usize] as usize);
+                }
+            }
+            conf_lanes.sort();
+            conf_lanes.dedup();
+        }
         // the orders, as the whole frame reads them
         let sb = grown(&self.sbox, &mut (0..nl_).map(|l| (to(l).x, to(l).y)));
-        let db = grown(&self.dbox, &mut (0..nl_).map(|l| (bo(l).x, bo(l).y)));
+        let db = match &self.group {
+            Some(g) => g.bbox,
+            None => grown(&self.dbox, &mut (0..nl_).map(|l| (bo(l).x, bo(l).y))),
+        };
         let cut = match cut_at {
             Some(c) => c,
-            None => Cut::Far(cut_y(
-                (0..nl_).filter(|&l| face(bo(l).x, bo(l).y, &db) == E_).map(|l| bo(l).y).collect(),
-                db[1],
-                db[3],
-            )),
+            None => match &self.group {
+                // (a GROUP's: the place on its walk where the berths' ways in cross fewest against the teeth's order
+                // round the source -- Group.score)
+                Some(g) => {
+                    let ps0: Vec<f64> = (0..nl_).map(|l| perim_s(to(l).x, to(l).y, &sb, None)).collect();
+                    let mut o: Vec<usize> = (0..nl_).collect();
+                    o.sort_by(|&a, &b| ps0[a].partial_cmp(&ps0[b]).unwrap().then(a.cmp(&b)));
+                    let mut rank = vec![0i64; nl_];
+                    for (i, &l) in o.iter().enumerate() {
+                        rank[l] = i as i64;
+                    }
+                    let pl: Vec<f64> = (0..nl_).map(|l| g.s[l][st[l].1]).collect();
+                    Cut::Grp(g.best_cut(&pl, &rank).unwrap_or(0.0))
+                }
+                None => Cut::Far(cut_y(
+                    (0..nl_).filter(|&l| face(bo(l).x, bo(l).y, &db) == E_).map(|l| bo(l).y).collect(),
+                    db[1],
+                    db[3],
+                )),
+            },
         };
-        let pd: Vec<f64> = (0..nl_).map(|l| perim_c(bo(l).x, bo(l).y, &db, cut)).collect();
+        let pd: Vec<f64> = match (&self.group, cut) {
+            (Some(g), Cut::Grp(c)) => (0..nl_).map(|l| pymod(g.s[l][st[l].1] - c, g.len)).collect(),
+            _ => (0..nl_).map(|l| perim_c(bo(l).x, bo(l).y, &db, cut)).collect(),
+        };
         let kd: Vec<(f64, usize)> = (0..nl_).map(|l| (pd[l], l)).collect();
         let far_l: Vec<usize> = (0..nl_).filter(|&l| to(l).is_far).collect();
         let mut scut: Option<f64> = None;
@@ -607,14 +833,49 @@ impl EndsKernel {
         let mut nsplit: i64 = 0;
         if self.npair.iter().any(|&n| n > 1) {
             for k in 0..2 {
-                let bx = if k == 0 { sb } else { db };
-                let whole = 2.0 * (bx[2] - bx[0] + bx[3] - bx[1]);
+                // (at a GROUP's berths, each lane round its own part's box at that box's own cut, among its own
+                // part's lanes)
+                let grp = if k == 1 { self.group.as_ref() } else { None };
+                let mut pbx: Vec<([f64; 4], f64)> = Vec::new();
+                if let Some(g) = grp {
+                    for (p, b0) in g.pbox.iter().enumerate() {
+                        let ls: Vec<usize> = (0..nl_).filter(|&l| g.part[l] == p).collect();
+                        let b = grown(b0, &mut ls.iter().map(|&l| (bo(l).x, bo(l).y)));
+                        let c = cut_y(
+                            ls.iter().filter(|&&l| face(bo(l).x, bo(l).y, &b) == E_).map(|&l| bo(l).y).collect(),
+                            b[1],
+                            b[3],
+                        );
+                        pbx.push((b, c));
+                    }
+                }
+                let bx_of = |l: usize| -> [f64; 4] {
+                    match grp {
+                        Some(g) => pbx[g.part[l]].0,
+                        None => {
+                            if k == 0 {
+                                sb
+                            } else {
+                                db
+                            }
+                        }
+                    }
+                };
                 let pv: Vec<Vec<f64>> = (0..nl_)
                     .map(|l| {
                         let o = self.opt(k, l, st);
                         o.legs
                             .iter()
-                            .map(|&(x, y, _)| if k == 0 { perim_s(x, y, &sb, scut) } else { perim_c(x, y, &db, cut) })
+                            .map(|&(x, y, _)| {
+                                if k == 0 {
+                                    perim_s(x, y, &sb, scut)
+                                } else if let Some(g) = grp {
+                                    let (b, c) = pbx[g.part[l]];
+                                    perim_c(x, y, &b, Cut::Far(c))
+                                } else {
+                                    perim_c(x, y, &db, cut)
+                                }
+                            })
                             .collect()
                     })
                     .collect();
@@ -622,6 +883,8 @@ impl EndsKernel {
                     if self.npair[l] < 2 {
                         continue;
                     }
+                    let bx = bx_of(l);
+                    let whole = 2.0 * (bx[2] - bx[0] + bx[3] - bx[1]);
                     let ol = self.opt(k, l, st);
                     let (mut a_, mut b_) = (pv[l][0], pv[l][1]);
                     if b_ < a_ {
@@ -631,6 +894,11 @@ impl EndsKernel {
                         let oo = self.opt(k, o, st);
                         if o == l || oo.lid != ol.lid {
                             continue;
+                        }
+                        if let Some(g) = grp {
+                            if g.part[o] != g.part[l] {
+                                continue;
+                            }
                         }
                         if self.nl > 2 && (ol.via_end || oo.via_end) {
                             continue;
@@ -647,26 +915,59 @@ impl EndsKernel {
                 to(l).legs.iter().zip(bo(l).legs.iter()).map(|(t, b)| t.2 + b.2).max().unwrap_or(0)
             })
             .collect();
+        let head = Parts {
+            fan,
+            conflicts: nconf,
+            refused: nref,
+            splits: nsplit,
+            crossings: inv.len() as i64,
+            conf_lanes,
+            scut,
+            far: far_l.len() as i64,
+            ..Default::default()
+        };
         if self.nl == 2 {
             // two routing layers (Ends._score_at's own route: the cover, the settling, the coupling)
-            let (chg, xo) = self.route_two(st, &kp, &kd, &inv, &sv);
+            let (chg, xo, cover, settle, couple) = self.route_two(st, &kp, &kd, &inv, &sv);
+            let flat = |l: usize| to(l).lid == bo(l).lid;
+            let mut h = head;
+            h.parity = (0..nl_).filter(|&l| !flat(l)).map(|l| self.npair[l]).sum();
+            h.crossover = (0..nl_).map(|l| self.npair[l] * xo[l]).sum();
+            h.cover = cover;
+            h.settle = settle;
+            h.couple = couple;
+            h.same = inv
+                .iter()
+                .filter(|&&(a, b)| flat(a) && flat(b) && to(a).lid == to(b).lid && xo[a] == 0 && xo[b] == 0)
+                .count() as i64;
             let opp = vec![false; nl_];
+            let xin = exact.map(|f| {
+                (f, ExactIn {
+                    kp: kp.clone(),
+                    kd: kd.clone(),
+                    ends: Vec::new(),
+                    sv: sv.clone(),
+                    xo: xo.clone(),
+                    sep: Vec::new(),
+                    tl: (0..nl_).map(|l| to(l).lid).collect(),
+                    dl: (0..nl_).map(|l| bo(l).lid).collect(),
+                })
+            });
+            let zero = vec![0i64; nl_];
             return self.tail(
-                st, fan, nconf, nref, nsplit, &kd, &inv, sv, chg, &opp, &xo, cut, &sb, &db, scut, &far_l, wound_on,
-                terms, false,
+                st, h, &kd, &inv, sv, chg, &opp, &xo, cut, &sb, &db, scut, &far_l, wound_on, false, &zero, &zero, xin,
+                parts,
             );
         }
-        self.score_nl(st, fan, nconf, nref, nsplit, &kd, &inv, &sv, cut, &sb, &db, scut, &far_l, wound_on, terms)
+        self.score_nl(st, head, &kp, &kd, &inv, &sv, cut, &sb, &db, scut, &far_l, wound_on, exact, parts)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn score_nl(
         &self,
         st: &[(usize, usize)],
-        mut fan: i64,
-        nconf: i64,
-        nref: i64,
-        nsplit: i64,
+        mut head: Parts,
+        kp: &[(f64, usize)],
         kd: &[(f64, usize)],
         inv: &[(usize, usize)],
         sv: &[i64],
@@ -676,7 +977,8 @@ impl EndsKernel {
         scut: Option<f64>,
         far_l: &[usize],
         wound_on: bool,
-        terms: Option<&mut Terms>,
+        exact: Option<ExactFn>,
+        parts: Option<&mut Parts>,
     ) -> f64 {
         let nl_ = self.nlanes;
         let nl = self.nl as i32;
@@ -715,13 +1017,15 @@ impl EndsKernel {
                 ends[l][k].2 = ok & !lose;
             }
         }
-        // neighbours: the crossings, and (an escape state) two via ends whose runs meet, own layers apart
+        // neighbours: the crossings, and (an escape state) two via ends whose runs meet, own layers apart -- those
+        // pairs (Ends.end_clashes' sep) the exact route reads too
         let mut nb: Vec<Vec<bool>> = vec![vec![false; nl_]; nl_];
         for &(a, b) in inv {
             nb[a][b] = true;
             nb[b][a] = true;
         }
-        if self.escape {
+        let mut sep: Vec<(usize, usize)> = Vec::new();
+        if self.escape || exact.is_some() {
             let mut at: FxHashMap<(usize, usize), usize> = FxHashMap::default();
             for (i, &e) in vend.iter().enumerate() {
                 at.insert(e, i);
@@ -733,12 +1037,16 @@ impl EndsKernel {
                     if let Some(&j) = at.get(&(lb, ka)) {
                         let ib = if ka == 0 { st[lb].0 } else { st[lb].1 } as u32;
                         if j > i && ibs.contains(&ib) && oa.own != self.opt(ka, lb, st).own && la != lb {
-                            nb[la][lb] = true;
-                            nb[lb][la] = true;
+                            sep.push((i, j));
+                            if self.escape {
+                                nb[la][lb] = true;
+                                nb[lb][la] = true;
+                            }
                         }
                     }
                 }
             }
+            sep.sort();
         }
         // the crossing graph coloured on the routing layers (Ends._colour)
         let deg: Vec<usize> = (0..nl_).map(|l| nb[l].iter().filter(|&&v| v).count()).collect();
@@ -747,6 +1055,15 @@ impl EndsKernel {
         let mut col: Vec<Option<i32>> = vec![None; nl_]; // None: not coloured yet; Some(-1): coloured None
         let mut chg: Vec<i64> = vec![0; nl_];
         let mut drp: Vec<i64> = vec![0; nl_];
+        let mut pln: Vec<f64> = vec![0.0; nl_];
+        // (a plane's layer priced per run: route_layers.run_price)
+        let pp = |_l: usize, c: i32| -> f64 {
+            match self.pk[c as usize] {
+                2 => self.p_gnd,
+                1 => self.p_pwr,
+                _ => 0.0,
+            }
+        };
         for &l in &order {
             let mut used: u64 = 0;
             for o in 0..nl_ {
@@ -776,16 +1093,20 @@ impl EndsKernel {
             let cands: Vec<i32> = if free.is_empty() { (0..nl).collect() } else { free.clone() };
             let mut pick = cands[0];
             let mut pk = price(pick);
+            let mut pv = (pk.0 - pk.1) as f64 + pp(l, pick);
             for &c in &cands[1..] {
                 let p = price(c);
-                if p.0 - p.1 < pk.0 - pk.1 {
+                let v = (p.0 - p.1) as f64 + pp(l, c);
+                if v < pv {
                     pick = c;
                     pk = p;
+                    pv = v;
                 }
             }
             col[l] = Some(if free.is_empty() { -1 } else { pick });
             chg[l] = pk.0 + if free.is_empty() { 2 } else { 0 };
             drp[l] = pk.1;
+            pln[l] = pp(l, pick);
         }
         // an OPPOSITE-HANDS pair: a change at least, at its dive
         let mut xo: Vec<i64> = vec![0; nl_];
@@ -805,22 +1126,48 @@ impl EndsKernel {
         for l in 0..nl_ {
             dsum += self.npair[l] * drp[l];
         }
-        fan -= dsum;
+        head.fan -= dsum;
+        head.dropped = dsum;
         let svd: Vec<i64> = (0..nl_).map(|l| (sv[l] - drp[l]).max(0)).collect();
+        let mut ps = PySum::new(self.neumaier);
+        for l in 0..nl_ {
+            ps.add(self.npair[l] as f64 * pln[l]);
+        }
+        head.plane = ps.get();
+        head.parity = (0..nl_)
+            .filter(|&l| ends[l][0].0 >= 0 && ends[l][1].0 >= 0 && ends[l][0].0 != ends[l][1].0)
+            .map(|l| self.npair[l])
+            .sum();
+        head.crossover = (0..nl_).map(|l| self.npair[l] * xo[l]).sum();
+        head.same = inv
+            .iter()
+            .filter(|&&(a, b)| matches!(col[a], Some(c) if c >= 0) && col[a] == col[b])
+            .count() as i64;
+        let nfixed: Vec<i64> = (0..nl_).map(|l| (ends[l][0].0 >= 0) as i64 + (ends[l][1].0 >= 0) as i64).collect();
+        let xin = exact.map(|f| {
+            (f, ExactIn {
+                kp: kp.to_vec(),
+                kd: kd.to_vec(),
+                ends: ends.clone(),
+                sv: svd.clone(),
+                xo: xo.clone(),
+                sep: sep.iter().map(|&(i, j)| (vend[i], vend[j])).collect(),
+                tl: Vec::new(),
+                dl: Vec::new(),
+            })
+        });
         self.tail(
-            st, fan, nconf, nref, nsplit, kd, inv, svd, chg, &opp, &xo, cut, sb, db, scut, far_l, wound_on, terms, true,
+            st, head, kd, inv, svd, chg, &opp, &xo, cut, sb, db, scut, far_l, wound_on, true, &drp, &nfixed, xin, parts,
         )
     }
 
-    /// the objective from a route's changes (`chg`; `svd` each lane's stub vias, its drops off): the nets over two, the
-    /// trunk's crossings and load, the rides, the stacks, the feedback and fronts, the crossings LEARNED (`learned`:
-    /// more routing layers than two, as the Python prices them only there), the walled balls, the far teeth and fences
     /// the route on TWO routing layers (Ends._score_at's own): each lane's changes -- one for ends on two layers, two
     /// for an opposite-hands pair on one layer end to end, two for a lane of each layer's COVER (the least-weight
     /// lanes whose dives leave the rest of that layer uncrossed: the complement of its heaviest chain rising in both
     /// orders); then each lane whose ends differ SETTLES the partners its one change cannot serve (an excursion, or
     /// the fewest of them dive: a minimum cut); then the lanes whose settling shares a choice COUPLE (each conflict
-    /// resolved by its cheapest lane). Returns (changes, crossover changes) a lane
+    /// resolved by its cheapest lane). Returns (changes, crossover changes) a lane, and the cover's, the settling's and
+    /// the coupling's changes
     fn route_two(
         &self,
         st: &[(usize, usize)],
@@ -828,7 +1175,7 @@ impl EndsKernel {
         kd: &[(f64, usize)],
         inv: &[(usize, usize)],
         sv: &[i64],
-    ) -> (Vec<i64>, Vec<i64>) {
+    ) -> (Vec<i64>, Vec<i64>, i64, i64, i64) {
         let n = self.nlanes;
         let to = |l: usize| &self.opts[0][l][st[l].0];
         let bo = |l: usize| &self.opts[1][l][st[l].1];
@@ -894,6 +1241,9 @@ impl EndsKernel {
                 }
             }
         }
+        let cover: i64 = (0..n).filter(|&l| in_cov[l]).map(|l| self.npair[l]).sum();
+        let mut settle: i64 = 0;
+        let mut couple: i64 = 0;
         let mut chg: Vec<i64> =
             (0..n).map(|l| (if flat[l] { 0 } else { 1 }) + xo[l] + if in_cov[l] { 2 } else { 0 }).collect();
         // the settling
@@ -950,9 +1300,11 @@ impl EndsKernel {
             }
             if wo * (ovk(p, chg[p] + 2) - ovk(p, chg[p])) as f64 + (2 * self.npair[p]) as f64 <= dsum {
                 chg[p] += 2;
+                settle += 2 * self.npair[p];
             } else {
                 for &m in &div {
                     chg[m] = 2;
+                    settle += 2 * self.npair[m];
                 }
             }
         }
@@ -1018,23 +1370,28 @@ impl EndsKernel {
             }
             let x = pick.unwrap().1;
             chg[x] = if !flat[x] { chg[x] + 2 } else { 2 };
+            couple += 2 * self.npair[x];
             conflicts.retain(|c| !c.contains(&x));
         }
-        (chg, xo)
+        (chg, xo, cover, settle, couple)
     }
 
+    /// the objective from a route's changes (`chg`; `svd` each lane's stub vias, its drops off) and the parts so far
+    /// (`h`: the fan, the conflicts, splits and refusals, the route's own counts): the nets over two, the trunk's
+    /// crossings and load, the route EXACT on the orders where asked (`exact`: the Python's CP-SAT, called back here
+    /// -- after the trunk's load, which reads the estimate's changes, as the Python's did), the rides, the stacks, the
+    /// feedback and fronts, the crossings LEARNED (`learned`: more routing layers than two, as the Python prices them
+    /// only there; `nfixed` each lane's fixed ends, for its end lesson), the walled balls, the far teeth and fences, a
+    /// group's legs. `drp` each lane's drops (more than two layers: the exact route's own replace them)
     #[allow(clippy::too_many_arguments)]
     fn tail(
         &self,
         st: &[(usize, usize)],
-        fan: i64,
-        nconf: i64,
-        nref: i64,
-        nsplit: i64,
+        mut h: Parts,
         kd: &[(f64, usize)],
         inv: &[(usize, usize)],
         svd: Vec<i64>,
-        chg: Vec<i64>,
+        mut chg: Vec<i64>,
         opp: &[bool],
         xo: &[i64],
         cut: Cut,
@@ -1043,8 +1400,11 @@ impl EndsKernel {
         scut: Option<f64>,
         far_l: &[usize],
         wound_on: bool,
-        terms: Option<&mut Terms>,
         learned: bool,
+        drp: &[i64],
+        nfixed: &[i64],
+        exact: Option<(ExactFn, ExactIn)>,
+        parts: Option<&mut Parts>,
     ) -> f64 {
         let nl_ = self.nlanes;
         let ovk = |l: usize, k: i64| -> i64 { (svd[l] + k - self.via_pref).max(0) };
@@ -1081,6 +1441,11 @@ impl EndsKernel {
                             r
                         }
                     }
+                    // (a GROUP's lane by its way's place on the walk: Group.side)
+                    Cut::Grp(c) => {
+                        let g = self.group.as_ref().unwrap();
+                        g.side(g.s[l][st[l].1], c)
+                    }
                 }
             })
             .collect();
@@ -1101,12 +1466,33 @@ impl EndsKernel {
         }
         let xsum: i64 = xt.iter().sum();
         let mut cong = self.x_trunk * xsum as f64 / 2.0;
+        let mut loads: Vec<f64> = vec![0.0; nl_];
         for l in 0..nl_ {
             let load = (xt[l] as f64 * self.lane_pitch / (self.nl as f64 - 1.0)
                 + (if dcls[l] == W_ { chg[l] } else { 0 }) as f64 * self.chg_room)
                 / gt;
+            loads[l] = load;
             let ov = if load - self.load_ok > 0.0 { load - self.load_ok } else { 0.0 };
             cong += self.npair[l] as f64 * self.w_cong * ov * ov;
+        }
+        // the route EXACT on the orders: its changes, its nets over two, its drops and planes
+        let route_est = route;
+        let mut exact_failed = false;
+        if let Some((f, xin)) = exact {
+            match f(&xin) {
+                Some((r, o, c, drx, p)) => {
+                    route = r;
+                    over = o;
+                    chg = c;
+                    if self.nl > 2 {
+                        for l in 0..nl_ {
+                            h.fan += self.npair[l] * (drp[l] - drx[l]);
+                        }
+                        h.plane = p;
+                    }
+                }
+                None => exact_failed = true,
+            }
         }
         if self.has_fb_over {
             over = 0;
@@ -1204,7 +1590,7 @@ impl EndsKernel {
             fs.add(c[pick(*l, *k)]);
         }
         let front = fs.get();
-        // crossings the whole solve could not place, learned
+        // crossings the whole solve could not place, learned -- and pairs' hands, and fixed ends' layers
         let mut xlearn: f64 = 0.0;
         if learned && self.has_x {
             let mut s = PySum::new(self.neumaier);
@@ -1222,12 +1608,19 @@ impl EndsKernel {
             }
             xlearn += s.get();
         }
+        if learned && self.has_end {
+            let mut s = PySum::new(self.neumaier);
+            for l in 0..nl_ {
+                s.add(self.end_learned[l] * nfixed[l] as f64);
+            }
+            xlearn += s.get();
+        }
         if learned && self.opp_dive != 0.0 {
             let n = (0..nl_).filter(|&l| opp[l] && xo[l] == 0).count();
             xlearn += self.opp_dive * n as f64;
         }
         // the plane balls walled in
-        let mut nwalled: i64 = 0;
+        let mut walled: Vec<usize> = Vec::new();
         if self.has_pw && !self.balls.is_empty() {
             let mut killed = vec![false; self.nways];
             for l in 0..nl_ {
@@ -1241,16 +1634,16 @@ impl EndsKernel {
             for b in &self.balls {
                 alive[b.key as usize] = b.dw.iter().any(|&w| !killed[w as usize]);
             }
-            for b in &self.balls {
+            for (i, b) in self.balls.iter().enumerate() {
                 if !alive[b.key as usize]
                     && !b.sw.iter().any(|&(w, to)| !killed[w as usize] && to >= 0 && alive[to as usize])
                 {
-                    nwalled += 1;
+                    walled.push(i);
                 }
             }
         }
+        let nwalled = walled.len() as i64;
         // the far face's teeth and the fences
-        let nfar = far_l.len() as i64;
         let mut nf: f64 = 0.0;
         for l in 0..nl_ {
             let a = self.opt(0, l, st);
@@ -1267,10 +1660,17 @@ impl EndsKernel {
             }
         }
         let fence = self.fence_vias * nf;
+        // a GROUP's lanes' legs along their pockets (Ends._legs)
+        let legs = match &self.group {
+            Some(g) => g.leg_w * (0..nl_).map(|l| g.pass[l][st[l].1]).sum::<i64>() as f64,
+            None => 0.0,
+        };
         let ninv = inv.len() as i64;
+        let (nconf, nsplit, nref) = (h.conflicts, h.splits, h.refused);
         let mut obj = self.w_over * over as f64;
-        obj += fan as f64;
+        obj += h.fan as f64;
         obj += route as f64;
+        obj += h.plane;
         obj += ride / self.via_mm;
         obj += cong;
         obj += fbk;
@@ -1282,14 +1682,45 @@ impl EndsKernel {
         if learned {
             obj += xlearn;
         }
-        obj += self.corner * 0.0;
-        obj += self.far_tooth * nfar as f64;
+        let mut fw: f64 = 0.0;
+        for &l in far_l {
+            fw += self.far_w[l];
+        }
+        obj += fw;
         obj += fence;
-        if let Some(t) = terms {
-            t.v = [
-                obj, fan as f64, route as f64, over as f64, ride, cong, fbk, ninv as f64, nconf as f64, nsplit as f64,
-                nref as f64, stacks as f64, front, nwalled as f64, xlearn, nfar as f64, fence,
-            ];
+        if self.group.is_some() {
+            obj += legs;
+        }
+        if let Some(p) = parts {
+            h.obj = obj;
+            h.route = route;
+            h.route_est = route_est;
+            h.over = over;
+            h.cong = cong;
+            h.feedback = fbk;
+            h.ride = ride;
+            h.lane_over = (0..nl_).map(|l| ovk(l, chg[l]).max(if self.has_fb_over { self.fb_over[l] } else { 0 })).collect();
+            h.lane_load = loads;
+            let mut lx = vec![0i64; nl_];
+            for &(a, b) in inv {
+                lx[a] += 1;
+                lx[b] += 1;
+            }
+            h.lane_x = lx;
+            h.chg = chg;
+            h.stacks = stacks;
+            h.exact_failed = exact_failed;
+            h.cut = match cut {
+                Cut::Far(v) => (0, v),
+                Cut::Wind(f, v) => (if f == N_ { 1 } else { 2 }, v),
+                Cut::Grp(v) => (3, v),
+            };
+            h.front = front;
+            h.walled = walled;
+            h.learned = xlearn;
+            h.fence = fence;
+            h.legs = legs;
+            *p = h;
         }
         obj
     }
@@ -1412,6 +1843,24 @@ impl EndsKernel {
         let balls_rows: Vec<(u32, Vec<u32>, Vec<(u32, i64)>)> = get_vec(d, "balls")?;
         let c: Vec<f64> = get_vec(d, "consts")?;
         let fence: (usize, usize) = get_vec(d, "fence")?;
+        let group = if get_vec::<bool>(d, "g_on")? {
+            let bb: (f64, f64, f64, f64) = get_vec(d, "g_bbox")?;
+            let pb: Vec<(f64, f64, f64, f64)> = get_vec(d, "g_pbox")?;
+            Some(GroupK {
+                len: get_vec(d, "g_len")?,
+                f0: get_vec(d, "g_f0")?,
+                f1: get_vec(d, "g_f1")?,
+                bbox: [bb.0, bb.1, bb.2, bb.3],
+                s: get_vec(d, "g_s")?,
+                pass: get_vec(d, "g_pass")?,
+                pconf: get_vec(d, "g_pconf")?,
+                part: get_vec(d, "g_part")?,
+                pbox: pb.into_iter().map(|b| [b.0, b.1, b.2, b.3]).collect(),
+                leg_w: get_vec(d, "g_leg_w")?,
+            })
+        } else {
+            None
+        };
         Ok(EndsKernel {
             nl: get_vec(d, "nl")?,
             nlanes,
@@ -1441,8 +1890,16 @@ impl EndsKernel {
             dbox: get_vec(d, "dbox")?,
             fence_n: fence.0,
             fence_s: fence.1,
+            far_w: get_vec(d, "far_w")?,
             escape: get_vec(d, "escape")?,
             neumaier: get_vec(d, "neumaier")?,
+            pk: get_vec(d, "pk")?,
+            p_gnd: get_vec(d, "p_gnd")?,
+            p_pwr: get_vec(d, "p_pwr")?,
+            end_learned: vec![0.0; nlanes],
+            has_end: false,
+            group,
+            key_lane: get_vec(d, "key_lane")?,
             memo: Mutex::new(FxHashMap::default()),
             w_over: c[0],
             via_pref: c[1] as i64,
@@ -1456,20 +1913,29 @@ impl EndsKernel {
             eps_x: c[9],
             big: c[10],
             walled_w: c[11],
-            far_tooth: c[12],
-            fence_vias: c[13],
-            opp_dive: c[14],
-            corner: c[15],
-            lane_pitch: c[16],
-            chg_room: c[17],
-            lpitch: c[18],
-            tie_mm: c[19],
+            fence_vias: c[12],
+            opp_dive: c[13],
+            lane_pitch: c[14],
+            chg_room: c[15],
+            lpitch: c[16],
+            tie_mm: c[17],
         })
     }
 
-    /// the crossings and pairs' hands the whole solve could not place (Ends.x_learned, Ends.opp_learned): as the
-    /// Python holds them now -- `x` [(lane, lane, vias)], `opp` [(lane, vias)], each dict's own emptiness
-    fn set_learned(&mut self, x: Vec<(u32, u32, f64)>, opp: Vec<(usize, f64)>, has_x: bool, has_opp: bool) {
+    /// the crossings, pairs' hands and fixed ends the whole solve could not place (Ends.x_learned, Ends.opp_learned,
+    /// Ends.end_learned): as the Python holds them now -- `x` [(lane, lane, vias)], `opp` and `end` [(lane, vias)],
+    /// each dict's own emptiness
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (x, opp, has_x, has_opp, end=Vec::new(), has_end=false))]
+    fn set_learned(
+        &mut self,
+        x: Vec<(u32, u32, f64)>,
+        opp: Vec<(usize, f64)>,
+        has_x: bool,
+        has_opp: bool,
+        end: Vec<(usize, f64)>,
+        has_end: bool,
+    ) {
         self.x_learned.clear();
         for (a, b, v) in x {
             self.x_learned.insert((a.min(b), a.max(b)), v);
@@ -1478,8 +1944,13 @@ impl EndsKernel {
         for (l, v) in opp {
             self.opp_learned[l] = v;
         }
+        self.end_learned = vec![0.0; self.nlanes];
+        for (l, v) in end {
+            self.end_learned[l] = v;
+        }
         self.has_x = has_x;
         self.has_opp = has_opp;
+        self.has_end = has_end;
         self.memo.lock().unwrap().clear();   // (as checked() clears the Python's: the prices moved)
     }
 
@@ -1507,12 +1978,83 @@ impl EndsKernel {
         py.allow_threads(|| self.search_(&state, sweeps, c, &tb))
     }
 
-    /// ...and its terms, for the check against the Python: [objective, fan, route, over, ride, cong, feedback,
-    /// crossings, conflicts, splits, refused, stacks, front, walled, learned, far teeth, fence]
-    #[pyo3(signature = (state, wcut=None))]
-    fn terms(&self, state: Vec<(usize, usize)>, wcut: Option<(String, f64)>) -> Vec<f64> {
-        let mut t = Terms::default();
-        self.score(&state, parse_cut(wcut), Some(&mut t));
-        t.v.to_vec()
+    /// Ends.score's (objective, parts) of `state` at the winding cut `wcut`: every part the whole route reads, by lane
+    /// index (the Python names them), and the route EXACT on the orders where `exact` is given -- the Python's CP-SAT,
+    /// called back with (kp, kd, ends, sv, xo, sep, tl, dl) as each cut is scored, answering None or (route, over,
+    /// changes, drops, plane)
+    #[pyo3(signature = (state, wcut=None, exact=None))]
+    fn parts<'py>(
+        &self,
+        py: Python<'py>,
+        state: Vec<(usize, usize)>,
+        wcut: Option<(String, f64)>,
+        exact: Option<PyObject>,
+    ) -> PyResult<(f64, Bound<'py, PyDict>)> {
+        let err: std::cell::RefCell<Option<PyErr>> = std::cell::RefCell::new(None);
+        let call = |xin: &ExactIn| -> ExactOut {
+            if err.borrow().is_some() {
+                return None;
+            }
+            let cb = exact.as_ref().unwrap();
+            let ends: Vec<((i32, i32, u32), (i32, i32, u32))> = xin.ends.iter().map(|e| (e[0], e[1])).collect();
+            let got = cb.call1(
+                py,
+                (xin.kp.clone(), xin.kd.clone(), ends, xin.sv.clone(), xin.xo.clone(), xin.sep.clone(),
+                 xin.tl.clone(), xin.dl.clone()),
+            );
+            match got.and_then(|v| v.extract::<Option<(i64, i64, Vec<i64>, Vec<i64>, f64)>>(py)) {
+                Ok(v) => v,
+                Err(e) => {
+                    *err.borrow_mut() = Some(e);
+                    None
+                }
+            }
+        };
+        let mut p = Parts::default();
+        let v = self.score(
+            &state,
+            parse_cut(wcut),
+            if exact.is_some() { Some(&call as ExactFn) } else { None },
+            Some(&mut p),
+        );
+        if let Some(e) = err.into_inner() {
+            return Err(e);
+        }
+        let d = PyDict::new(py);
+        d.set_item("fan", p.fan)?;
+        d.set_item("parity", p.parity)?;
+        d.set_item("crossover", p.crossover)?;
+        d.set_item("cover", p.cover)?;
+        d.set_item("settle", p.settle)?;
+        d.set_item("couple", p.couple)?;
+        d.set_item("route", p.route)?;
+        d.set_item("route_est", p.route_est)?;
+        d.set_item("over", p.over)?;
+        d.set_item("plane", p.plane)?;
+        d.set_item("cong", p.cong)?;
+        d.set_item("feedback", p.feedback)?;
+        d.set_item("ride", p.ride)?;
+        d.set_item("chg", p.chg)?;
+        d.set_item("crossings", p.crossings)?;
+        d.set_item("same", p.same)?;
+        d.set_item("conflicts", p.conflicts)?;
+        d.set_item("splits", p.splits)?;
+        d.set_item("refused", p.refused)?;
+        d.set_item("lane_over", p.lane_over)?;
+        d.set_item("lane_load", p.lane_load)?;
+        d.set_item("lane_x", p.lane_x)?;
+        d.set_item("stacks", p.stacks)?;
+        d.set_item("exact_failed", p.exact_failed)?;
+        d.set_item("cut", p.cut)?;
+        d.set_item("front", p.front)?;
+        d.set_item("dropped", p.dropped)?;
+        d.set_item("walled", p.walled)?;
+        d.set_item("learned", p.learned)?;
+        d.set_item("scut", p.scut)?;
+        d.set_item("far", p.far)?;
+        d.set_item("fence", p.fence)?;
+        d.set_item("legs", p.legs)?;
+        d.set_item("conf_lanes", p.conf_lanes)?;
+        Ok((v, d))
     }
 }

@@ -3054,6 +3054,12 @@ def generate_underpad_escape(footprint: Footprint,
         # plan gave to someone else.
         strict = any(bool(_move_of(p).get('strict')) for p in _planned)
         max_level = 2 if strict else 3
+        # EXACT ONLY (an 'exact_only' key on any planned move): the ladder stops at level 0 -- a ball the plan's own move
+        # cannot be laid for is left unescaped, its caller keeping the copper it had, rather than laid some other way
+        # nobody planned (a bus's source realize under its ends model: one tooth laid a gap off threw away a board of
+        # 44 exact ones)
+        if any(bool(_move_of(p).get('exact_only')) for p in _planned):
+            max_level = 0
 
         def goal_cell(mv):
             """The boundary cell at the asked gap, or None when the asked

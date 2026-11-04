@@ -64,6 +64,8 @@ class Move:
                                     # array before leaving (enumerate_moves climb=)
     street: int = 0                 # 1: a via in an empty band of the array
                                     # (enumerate_moves street=)
+    inner: int = 0                  # 1: a ROW PART's via inside it, between
+                                    # its rows (enumerate_moves row_inward=)
 
     def __repr__(self) -> str:
         s = (f'{self.kind}/{self.direction}/{self.layer[0]} '
@@ -108,6 +110,29 @@ def _row_pads(footprint):
 
 
 TAB_AREA = 4.0
+
+
+@dataclass
+class Inward:
+    """A ROW PART's berths INSIDE it (enumerate_moves `row_inward`): a via in
+    the strip behind its pad's row -- between the two rows of a two-row
+    connector, under an SO's body -- and the lane out of it on another layer,
+    under the row, by the face toward the source. A human's lanes to a
+    two-row connector take such vias, staggered, and come in under the rows;
+    vias at the stubs' outer ends, a pin pitch apart, wall off every layer in
+    front of the row. Copper the strip holds (a QFN's exposed pad) refuses
+    them by the menu's own clearance tests."""
+    face: str                       # the face the lane leaves the part by
+    via_size: float
+    clearance: float
+    track: float
+    run_layers: Sequence[str] = ()  # further layers the run may lie on
+    spread: int = 2                 # pin pitches a via stands off its pad's line
+    columns: int = 2                # via columns behind the row
+    along: int = 0                  # lanes ALONG the strip, on the pad's layer, out of either end of the part
+                                    # (0: none): a human's lanes to a two-row connector also enter between its rows
+                                    # from its end and meet the pads' inner ends
+    along_pitch: float = 0.0        # ...their pitch: the exits' (the route plans lanes no closer at their ends)
 
 
 def row_part(footprint) -> bool:
@@ -171,13 +196,81 @@ LAYERS = ('F.Cu', 'B.Cu')
 # can take them from here instead of keeping its own copy
 
 
+def _row_inward(pad, grid: Grid, d: str, home: str, others: Sequence[str], clear, via_clear, net: str,
+                iw: Inward, edge) -> List[Move]:
+    """A ROW PART pad's berths with a via INSIDE the part (Inward): the via in the strip behind the pad's row, its
+    own half of the strip (to the part's middle across the rows), in `iw.columns` columns a via's room apart and up to
+    `iw.spread` pin pitches to either side of the pad's line -- a pad pitch apart, the lanes out of the next row's
+    vias pass between them. The stub runs on the pad's layer straight in from the pad, and to a via off its line along
+    the row a lane's room past the row's inner ends first, so its legs are axis-aligned lanes the conflict test reads
+    (Move.inner); the run leaves the via on the first of `others`, then `iw.run_layers`, clear to the face
+    `iw.face`, straight along the via's line -- under the rows, which stand on the pad's layer"""
+    px, py = pad.global_x, pad.global_y
+    x0, y0, x1, y1 = grid.bbox
+    di = (-DIRS[d][0], -DIRS[d][1])                     # into the part
+    ax = 0 if di[0] else 1                              # the axis across the rows
+    lat = (0, 1) if ax == 0 else (1, 0)                 # along the row
+    half = max(pad.size_x, pad.size_y) / 2
+    tin = (px + di[0] * half, py + di[1] * half)        # the pad's inner end
+    mid = ((x0 + x1) / 2, (y0 + y1) / 2)[ax]
+    reach = iw.via_size / 2 + iw.clearance              # a via's centre off the row's inner ends
+    lane = iw.track / 2 + iw.clearance + 0.01           # a lateral leg's off them
+    step = iw.via_size + iw.clearance
+    ex = edge(iw.face)
+    fx = DIRS[iw.face][0]
+    vlayers = list(others) + [L for L in iw.run_layers if L not in others and L != home]
+    out: List[Move] = []
+    for k in sorted(range(-iw.spread, iw.spread + 1), key=lambda k: (abs(k), k)):
+        dl = k * grid.pitch_x
+        for c in range(iw.columns):
+            depth = reach + c * step
+            site = (tin[0] + di[0] * depth + lat[0] * dl, tin[1] + di[1] * depth + lat[1] * dl)
+            if (site[ax] - mid) * di[ax] > 1e-9:
+                break                                   # (past the middle: the other row's half)
+            if k:
+                j = (tin[0] + di[0] * lane, tin[1] + di[1] * lane)
+                pts = [(px, py), j, (j[0] + lat[0] * dl, j[1] + lat[1] * dl), site]
+            else:
+                pts = [(px, py), site]
+            stub = [(a, b, home) for a, b in zip(pts, pts[1:])]
+            # (checked from the pad's inner end: over its own copper the stub meets nothing)
+            if not clear(tin, pts[1], home) or not all(clear(a, b, home) for a, b, _L in stub[1:]):
+                continue
+            if not via_clear(site, home):
+                continue
+            e = (ex[0], site[1]) if fx else (site[0], ex[1])
+            got = False
+            for L in vlayers:
+                if got and L not in others:
+                    break                               # (a run layer only where none of the others is clear)
+                if clear(site, e, L):
+                    out.append(Move(net, 'dogbone', iw.face, L, e, 1, stub + [(site, e, L)], site=site, inner=1))
+                    got = True
+    # ...and (`iw.along`) the surface lanes along the strip: in from the pad to a lane a lane's room (and k pitches
+    # more) past the row's inner ends, along it out of either end of the part -- the pads farther from that end on
+    # the deeper lanes, as the conflict test sorts them
+    pitch_l = max(iw.along_pitch, iw.track + iw.clearance + 0.01)
+    for f in ((('up', 'down') if ax == 0 else ('left', 'right')) if iw.along else ()):
+        fe = edge(f)
+        for k in range(iw.along):
+            depth = lane + k * pitch_l
+            j = (tin[0] + di[0] * depth, tin[1] + di[1] * depth)
+            if (j[ax] - mid) * di[ax] > 1e-9:
+                break
+            e = (j[0], fe[1]) if ax == 0 else (fe[0], j[1])
+            if clear(tin, j, home) and clear(j, e, home):
+                out.append(Move(net, 'surface', f, home, e, 0, [((px, py), j, home), (j, e, home)], inner=1))
+    return out
+
+
 def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     clear: Callable[[Pt, Pt, str], bool],
                     via_clear: Callable[[Pt, str], bool] = None,
                     margin: float = 0.0, climb: int = 0,
                     own_line: bool = False, straight: bool = False,
                     street: int = 0, street_pitch: float = 0.0,
-                    street_dirs: Optional[Sequence[str]] = None, net: Optional[str] = None) -> List[Move]:
+                    street_dirs: Optional[Sequence[str]] = None, net: Optional[str] = None,
+                    run_layers: Sequence[str] = (), row_inward: Optional[Inward] = None) -> List[Move]:
     """Every escape move this pad has, each named `net` (the whole route's
     name for the pad's net, coherent_nets.net_keys), else by the last part
     of the pad's net name. `clear(p, q, layer)` says whether
@@ -192,12 +285,20 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
     populated. `street` adds the STREET dog-bones: a via in an empty band
     of the array, on a lane `street_pitch` from the next, at `street`
     sites along it, the run leaving by `street_dirs` (every face when
-    None) -- see the street block."""
+    None) -- see the street block. `run_layers`: further layers a VIA's run
+    may lie on where it cannot on `layers` (a board's inner signal layers):
+    each via move -- in its pad, a dog-bone, a climb -- once, on the first of
+    `layers`' others and then these that its run is clear on. Its layer at
+    the array is the whole route's to choose (a via end); one it can take
+    here is one the human's escapes use under an array whose back layer
+    the passives under it fill. `row_inward` (Inward): a ROW PART's pad
+    also takes a via inside the part, behind its row (_row_inward)."""
     if net is None:
         net = (getattr(pad, 'net_name', '') or '').split('/')[-1]
     px, py = pad.global_x, pad.global_y
     home = next((L for L in layers if L in pad.layers), layers[0])
     others = [L for L in layers if L != home]
+    vlayers = others + [L for L in run_layers if L not in others and L != home]
     x0, y0, x1, y1 = grid.bbox
     hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
     out: List[Move] = []
@@ -214,7 +315,8 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
         # of its neighbours there is no room for a track (zynq U4: 0.22 mm
         # between 0.28 mm pads at 0.5 mm), and a via beside it stands in
         # its neighbours'. The lane changes layer beyond the face, where
-        # the whole route places its vias
+        # the whole route places its vias -- or at the stub's end, a via
+        # there: a via end, its layer the whole route's (below)
         if grid.out:
             d = grid.out
         elif pad.size_x >= pad.size_y:
@@ -230,6 +332,13 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
         tip = (px + DIRS[d][0] * half, py + DIRS[d][1] * half)
         if clear(tip, e, home):
             out.append(Move(net, 'surface', d, home, e, 0, [((px, py), e, home)]))
+            # ...and the same stub with a VIA at its end, the berth on the via: the lane leaves the face on any layer.
+            # Beyond the face a part standing close in front of the source has no room for the change: a human's
+            # lanes to a QFN 4 mm off a ball array take a via at each pin
+            if via_clear is not None and via_clear(e, home):
+                out.append(Move(net, 'dogbone', d, home, e, 1, [((px, py), e, home)], site=e))
+        if row_inward is not None and via_clear is not None:
+            out += _row_inward(pad, grid, d, home, others, clear, via_clear, net, row_inward, edge)
         return out
 
     # --- surface: leave on the pad's own layer along an ADJACENT GAP.
@@ -266,13 +375,15 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                                 [((px, py), e, home)]))
 
     # --- via_in_pad: dive where the pad is, leave on another layer
-    for L in others:
+    vip_faces = set()
+    for L in vlayers:
         if via_clear and not all(via_clear((px, py), lay)
                                  for lay in layers):
             break
         for d in DIRS:
             e = edge(d)
-            if clear((px, py), e, L):
+            if (L in others or d not in vip_faces) and clear((px, py), e, L):
+                vip_faces.add(d)
                 out.append(Move(net, 'via_in_pad', d, L, e, 1,
                                 [((px, py), e, L)], site=(px, py)))
 
@@ -298,11 +409,15 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
             # the run leaves from the SITE, so its exit tracks the
             # site's own row/column, not the pad's
             e = (e[0], site[1]) if DIRS[d][0] else (site[0], e[1])
-            for L in others:
+            got = False
+            for L in vlayers:
+                if got and L not in others:
+                    break           # (a run layer only where none of the others is clear)
                 if clear(site, e, L):
                     out.append(Move(net, 'dogbone', d, L, e, 1,
                                     [((px, py), site, home),
                                      (site, e, L)], site=site))
+                    got = True
 
     # --- CLIMB (2026-09-10): a dog-bone or via-in-pad whose run on the
     # other layer first travels ALONG the array -- up a column gap for a
@@ -329,8 +444,9 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
         if not (via_clear and not all(via_clear((px, py), lay)
                                       for lay in layers)):
             starts.append(('via_in_pad', (px, py), []))
+        climbed = set()
         for kind, site, legs0 in starts:
-            for L in others:
+            for L in vlayers:
                 for d, (dx, dy) in DIRS.items():
                     e0 = edge(d)
                     # the gaps the run may climb along: a dog-bone's site
@@ -385,6 +501,10 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                                     break           # the gap is blocked from here on
                                 if not clear(turn, e, L):
                                     continue        # this row's exit is; the next may not be
+                                gk = (kind, site, d, gx, gy, s, h)
+                                if L not in others and gk in climbed:
+                                    continue        # (a run layer only where none before it is clear)
+                                climbed.add(gk)
                                 out.append(Move(net, kind, d, L, e, 1,
                                                 legs0 + legs_in
                                                 + [((gx, gy), turn, L), (turn, e, L)],

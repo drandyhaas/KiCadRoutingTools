@@ -122,11 +122,68 @@ def part_islands(ctx, skip=(), split=None):
     return out
 
 
+def passive_regions(ctx, skip, boxes, pitch):
+    """([(label, box, layer indices)], {(island label, layer indices): its box}): the PASSIVE REGIONS a bus's lanes
+    pass. Every part's pads but `skip` (the arrays) that stand on some routing layers only -- no hole, not every layer
+    -- outside each of `boxes` (the arrays', grown to their stubs' ends), their islands (part_islands) joined into
+    regions where they stand within `pitch` of each other on a layer they share, in a fixed order. whole_solve prices a
+    lane on a region's layer and caps the lanes it holds there; whole_ends holds the ends to the same regions"""
+    import route_layers
+    LAYN = route_layers.layers()
+    NL = len(LAYN)
+    isl = {}
+    for (ref_, i_), lab_ in part_islands(ctx, skip=tuple(skip)).items():
+        p_ = ctx.pcb.footprints[ref_].pads[i_]
+        if p_.pad_type == 'np_thru_hole' or (p_.drill or 0) > 0 or '*.Cu' in p_.layers:
+            continue
+        ls_ = frozenset(LAYN.index(L_) for L_ in p_.layers if L_ in LAYN)
+        if not ls_ or len(ls_) == NL:
+            continue
+        b_ = isl.setdefault((lab_, ls_), [math.inf, math.inf, -math.inf, -math.inf])
+        b_[0], b_[1] = min(b_[0], p_.global_x - p_.size_x / 2), min(b_[1], p_.global_y - p_.size_y / 2)
+        b_[2], b_[3] = max(b_[2], p_.global_x + p_.size_x / 2), max(b_[3], p_.global_y + p_.size_y / 2)
+    inbox = lambda b_, B_: b_[0] >= B_[0] and b_[2] <= B_[2] and b_[1] >= B_[1] and b_[3] <= B_[3]
+    isl = {k_: b_ for k_, b_ in isl.items() if not any(inbox(b_, B_) for B_ in boxes)}
+    keys = sorted(isl)
+    up = list(range(len(keys)))
+
+    def root(i_):
+        while up[i_] != i_:
+            up[i_] = up[up[i_]]
+            i_ = up[i_]
+        return i_
+    gap = lambda a_, b_: math.hypot(max(0.0, b_[0] - a_[2], a_[0] - b_[2]), max(0.0, b_[1] - a_[3], a_[1] - b_[3]))
+    for i_ in range(len(keys)):
+        for j_ in range(i_ + 1, len(keys)):
+            if keys[i_][1] & keys[j_][1] and gap(isl[keys[i_]], isl[keys[j_]]) < pitch:
+                up[root(i_)] = root(j_)
+    regs = collections.defaultdict(list)
+    for i_ in range(len(keys)):
+        regs[root(i_)].append(keys[i_])
+    out = []
+    for _r, mem_ in sorted(regs.items(), key=lambda kv: kv[1]):
+        bx_ = [min(isl[k_][0] for k_ in mem_), min(isl[k_][1] for k_ in mem_),
+               max(isl[k_][2] for k_ in mem_), max(isl[k_][3] for k_ in mem_)]
+        out.append(('+'.join(sorted({k_[0].split(':')[0] for k_ in mem_}))[:40], bx_,
+                    frozenset().union(*(k_[1] for k_ in mem_))))
+    return out, isl
+
+
 def copper_name(ctx, item):
     """the whole route's name of a base segment's or via's net (ctx.net_key); copper of NO net -- a footprint's own
     copper (#908: net 0, its part in owner_ref), which no board's nets list -- by its part"""
     n_ = ctx.pcb.nets.get(item.net_id) if item.net_id else None
     return ctx.net_key(n_.name) if n_ is not None else (getattr(item, 'owner_ref', '') or 'no net')
+
+
+def joint_via_island(ctx, v):
+    """the island a VIA of another bus is to the geometry and the polish -- 'svia NET X,Y', one per via (buses routed
+    at once: joint_lanes.foreign's, uuid 'joint-...') -- or None for any other via. A via stands on every layer: no
+    layer answers a lane run through it, only a way round it, so each is an island of its own whose side a lane passes
+    the loop can flip"""
+    if not str(getattr(v, 'uuid', '') or '').startswith('joint-'):
+        return None
+    return f'svia {copper_name(ctx, v)} {v.x:.3f},{v.y:.3f}'
 
 
 def foreign_teeth(ctx, M, boxes):
@@ -256,14 +313,13 @@ def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
     pair's at its legs' midpoints), the layers (a pair's its P leg's, its N leg's beside them), the escape directions,
     the source part, the destination's cut, the copper, each lane's taut path -- as setup gives them
     (tests/test_622_candidate_ctx.py holds them to it). So the ends model asks the whole solve of its own ends before
-    any of them is laid (whole_ends.solve_check). None for a plan made in the turned-over pair frame (setup turns such
-    a board over first)"""
+    any of them is laid (whole_ends.solve_check). A plan made in the turned-over pair frame (chi -1) is read on the
+    board turned over as setup turns it -- the candidate's copper with it -- and its plan mirrored there"""
     import copy
     import braid as bd
     import pairs as _pairs
     from kicad_parser import Segment
-    if int(plan.get('chi') or 1) != 1:
-        return None
+    chi = int(plan.get('chi') or 1)
     names = list(names)
     prs = {}
     if bd.PAIRS:
@@ -276,14 +332,50 @@ def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
     pcb2.segments = list(pcb.segments) + [
         Segment(start_x=float(t_['start'][0]), start_y=float(t_['start'][1]), end_x=float(t_['end'][0]),
                 end_y=float(t_['end'][1]), width=float(t_['width']), layer=t_['layer'], net_id=int(t_['net_id']))
-        for t_ in tracks]
+        for t_ in tracks if 'via' not in t_]
+    # (...and the vias its ends carry, {via: (x, y), net_id}: an end's stub on a via is a via end, its layer free --
+    # each once: a via the board already has there, a dog-bone's the end leaves from, is not added again, as the laid
+    # board's writer drops the re-emission)
+    have_ = {(v_.net_id, round(v_.x, 4), round(v_.y, 4)) for v_ in pcb.vias}
+    _vs = [t_ for t_ in tracks if 'via' in t_ and (int(t_['net_id']), round(float(t_['via'][0]), 4),
+                                                    round(float(t_['via'][1]), 4)) not in have_]
+    if _vs:
+        from kicad_parser import Via
+        import route_layers
+        _rl = route_layers.layers()
+        pcb2.vias = list(pcb.vias) + [Via(x=float(t_['via'][0]), y=float(t_['via'][1]), size=bd.VIA_SIZE,
+                                          drill=float(getattr(cfg, 'via_drill', 0.0) or bd.VIA_SIZE / 2),
+                                          layers=[_rl[0], _rl[-1]], net_id=int(t_['net_id'])) for t_ in _vs]
     ctx = bd.Ctx()
-    ctx.chi, ctx.M = 1, None
+    ctx.chi, ctx.M = chi, None
+    CY = 0.0
+    if chi < 0:
+        # (THE PAIR'S FRAME, as setup takes it: the board turned over in memory about the engine's lattice line, the
+        # plan mirrored into it, its cuts and ways in mirrored as setup mirrors them)
+        CY = bd.mirror_axis(pcb2)
+        pcb2, ctx.M = bd.to_front_frame(pcb2, bd.dest_refs(dest)[0])
+        plan = bd.mirror_plan(plan, ctx.M)
+        byname = by_key(pcb2)
+        for b_, (pn_, _nn) in prs.items():
+            byname[b_] = byname[pn_]
+    my_ = (lambda y_: 2.0 * CY - float(y_)) if chi < 0 else float
     ctx.pairs = prs
     ctx.pages_first = bool(plan.get('pages_first'))
     dc_ = plan.get('dest_cut')
-    ctx.dest_cut = None if dc_ is None else ((dc_[0], float(dc_[1])) if isinstance(dc_, (list, tuple)) else float(dc_))
-    ctx.src_cut = None if plan.get('src_cut') is None else float(plan['src_cut'])
+    if dc_ is None:
+        ctx.dest_cut = None
+    elif isinstance(dc_, (list, tuple)) and dc_[0] == 'P':
+        ctx.dest_cut = ('P', float(dc_[1]), my_(dc_[2]))
+    elif isinstance(dc_, (list, tuple)):
+        f_, v_ = dc_[0], float(dc_[1])
+        if chi < 0:
+            f_, v_ = {'N': 'S', 'S': 'N'}.get(f_, f_), (my_(v_) if f_ == 'E' else v_)
+        ctx.dest_cut = (f_, v_)
+    else:
+        ctx.dest_cut = my_(dc_)
+    ctx.dest_entry = {nm: (float(p_[0]), my_(p_[1])) for nm, p_ in plan['dest_entry'].items()} \
+        if plan.get('dest_entry') else None
+    ctx.src_cut = None if plan.get('src_cut') is None else my_(plan['src_cut'])
     pe = plan['ends']
     # (each net's end at the destination part it reaches: DEST may name several, braid.net_dest)
     ends = {nm: (tuple(pe[nm][0]), tuple(pe[nm][1]), bd.net_dest(byname[nm][1], dest)) for nm in names if nm in pe}

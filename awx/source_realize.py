@@ -502,7 +502,7 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
 
 
 def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
-            guard_names=(), free=(), strict=False, clean_base=False, hands=None):
+            guard_names=(), free=(), strict=False, clean_base=False, hands=None, exact_only=False):
     """Strip the chosen nets' source copper, re-fan them in the asked
     faces, write `out_path`, audit every tooth. Returns a dict with the
     per-net audit, `ok` (laid) / `restored` (refused), and `rejected` (a
@@ -521,7 +521,10 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     `strict`: cap the engine's degrade ladder at level 2, so a ball with
     no berth on its asked face is left UNESCAPED (and so restored to its
     original copper, reported) rather than dumped somewhere the plan
-    never asked for and audited as a near-miss."""
+    never asked for and audited as a near-miss. `exact_only`: no ladder at
+    all -- an asked tooth the engine cannot lay on its own legs is left as it
+    stood (restored), never laid some other way (the ends model's realize:
+    every tooth on the board then one it chose or one it had)."""
     pcb = parse_kicad_pcb(board)
     n2n = {i: n.name for i, n in pcb.nets.items()}
     free = [nm for nm in dict.fromkeys(free) if nm not in src_choice]
@@ -584,6 +587,8 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
             fm = full_move(m)
             if strict:
                 fm['strict'] = True
+            if exact_only:
+                fm['exact_only'] = True
             hints[(round(p.global_x, 3), round(p.global_y, 3))] = fm
         # the `free` nets get NO hint on purpose: they are stripped so the
         # engine has their room to give, not so it reproduces their escapes

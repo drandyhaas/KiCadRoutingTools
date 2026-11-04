@@ -287,7 +287,8 @@ for s in ctx.base_segments:
     STATIC.append(('seg', {s.layer}, s.net_id, (s.start_x, s.start_y, s.end_x, s.end_y, s.width / 2), 'copper'))
 for v in ctx.base_vias:
     # (its radius for a via's bar, and its reach for a lane's: the router's ring, SVIA_RING -- pairs.svia_reach)
-    STATIC.append(('circ', set(RL), v.net_id, (v.x, v.y, v.size / 2, _pairs.svia_reach(cfg, v.x, v.y, v.size)), 'via'))
+    STATIC.append(('circ', set(RL), v.net_id, (v.x, v.y, v.size / 2, _pairs.svia_reach(cfg, v.x, v.y, v.size)),
+                   whole_ctx.joint_via_island(ctx, v) or 'via'))
 # a held pair's END LEGS are laid where they are drawn: copper the singles are fitted round -- and a crossed pair's
 # crossover, its legs and its two barrels (in name order: a set's would follow the hash seed, and this order is the
 # static list's and so the LP's rows')
@@ -1364,7 +1365,10 @@ ISLAND = whole_ctx.part_islands(ctx, skip=(_SRC, *_DSTS))
 
 
 def island_of(lab):
-    """the island a static label names ('pad REF.N ...', 'hole REF.N': that pad's, whole_ctx.part_islands), or None"""
+    """the island a static label names ('pad REF.N ...', 'hole REF.N': that pad's, whole_ctx.part_islands; another
+    bus's via, 'svia NET X,Y': its own -- whole_ctx.joint_via_island), or None"""
+    if lab.startswith('svia '):
+        return lab
     for pre in ('pad ', 'hole '):
         if lab.startswith(pre):
             ref, _, num = lab[len(pre):].split(' ')[0].rpartition('.')
@@ -1394,6 +1398,14 @@ for r in bad:
             LCUT.append(c_)
         continue
     if isl_:
+        if isl_.startswith('svia ') and len(isl_.split(' ')) == 3:
+            # (another bus's via moves by hundredths between rounds: a flip of this lane round that net's via within a
+            # via's size is the same flip -- the geometry holds it so, whole_geo.flipped -- not a new one)
+            net_, xy_ = isl_.split(' ')[1], [float(v_) for v_ in isl_.split(' ')[2].split(',')]
+            if any(f_[0] == lane_ and f_[1].startswith(f'svia {net_} ') and len(f_[1].split(' ')) == 3 and
+                   math.hypot(*(a_ - float(b_) for a_, b_ in zip(xy_, f_[1].split(' ')[2].split(','))))
+                   < cfg.via_size for f_ in flips):
+                continue
         flips.add((lane_, isl_))
 # ...and a stub join the polish could not meet: the pad island nearest the lane's end stretch holds its approach off
 # the stub on this side (SCAS ran north of C6 and could only descend into its berth; south of it, up through the

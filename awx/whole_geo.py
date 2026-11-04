@@ -21,7 +21,7 @@ per island and layer, in the lane order, pinned by the lanes' own ends), and a l
 its side is flipped to the other (GEO_FLIPS_FROM=POLISH.json,..: data the polish measured, never typed). What the
 LP had to pay is written as CUTS for the solve (the islands a lane could not be kept off, the changes it could not
 give their room). The bench from BENCH / NETS / DEST (whole_ctx)."""
-import sys, json, math, collections, functools, time
+import sys, json, math, collections, functools, itertools, time
 import awx_settings
 import numpy as np
 from scipy.optimize import linprog
@@ -173,10 +173,14 @@ def layers_at(n, u):
     return {layer_of(n, u)}
 
 
-DST_REF = Fr.dst                # (the trunk's destination; DEST may name several, each other a branch's: Fr.dests)
 SRC_REF = collections.Counter(ctx.src_ref[n] for n in M).most_common(1)[0][0]
-BOX = [Fr.SB, Fr.DB]       # the arrays' pad boxes, grown by how far outside them the terminals sit (whole_frame)
-BOX += [Fr.DBs[b_] for b_ in Fr.dests[1:]]               # ...and each branch's part's, kept as the trunk's is
+# the arrays' pad boxes, grown by how far outside them the terminals sit (whole_frame): the source's, then each
+# destination part's (DEST naming several: a GROUP, one destination of several parts, each part's own box)
+BOX = [Fr.SB] + [Fr.DBs[r_] for r_ in Fr.dests]
+BOXI = {r_: i_ + 1 for i_, r_ in enumerate(Fr.dests)}      # a destination part's index in BOX
+# (a GROUP's part stands on its pads' layers alone: a lane on the layers it leaves open passes under it --
+# whole_frame.Group's ways under a part -- its box no bound there)
+OPEN_I = {r_: {F(L_) for L_ in Fr.group.open[r_]} for r_ in Fr.dests} if Fr.group is not None else {}
 log(f'pad boxes grown by the terminals: {[round(b[2] - b[0], 3) for b in BOX]}')
 
 
@@ -190,8 +194,7 @@ def _pads_box(ref, b):
 
 # ...and by their pads alone: what bounds a lane whose own tooth or berth stands inside its array's grown box (shorter
 # than the median the box is grown by) -- its first or last columns are its stub's room beside the longer stubs
-PADS_BOX = [_pads_box(SRC_REF, BOX[0]), _pads_box(DST_REF, BOX[1])]
-PADS_BOX += [_pads_box(b_, Fr.DBs[b_]) for b_ in Fr.dests[1:]]
+PADS_BOX = [_pads_box(SRC_REF, BOX[0])] + [_pads_box(r_, Fr.DBs[r_]) for r_ in Fr.dests]
 BX0, BY0, BX1, BY1 = ctx.pcb.board_info.board_bounds
 EDGE = (float(getattr(ctx.cfg, 'board_edge_clearance', 0.0) or 0.0) or ctx.cfg.clearance) + TW / 2
 _SPAN = max(BX1 - BX0, BY1 - BY0)
@@ -207,15 +210,16 @@ def spine_xy_vec(sp, s, O):
 _ivc = {}
 
 
-def intervals(ftag, sp, s, margin, own=(False, False)):
+def intervals(ftag, sp, s, margin, own=(False, 0), under=frozenset()):
     """the free intervals of offset on frame `ftag`'s column at s: inside the board, outside the arrays' boxes by
-    `margin` -- the source's (own[0]) or the destination's (own[1]) its pads' box, not its grown one"""
-    key = (ftag, round(s, 4), margin, own)
+    `margin` -- the source's (own[0]) or a destination part's (own[1], its index in BOX) its pads' box, not its grown
+    one; the boxes `under` (their indices in BOX: a GROUP's parts the lane passes under on layers they leave open) none"""
+    key = (ftag, round(s, 4), margin, own, under)
     if key in _ivc:
         return _ivc[key]
     X, Y = spine_xy_vec(sp, s, OS)
     ok = (X >= BX0 + EDGE) & (X <= BX1 - EDGE) & (Y >= BY0 + EDGE) & (Y <= BY1 - EDGE)
-    for b in [PADS_BOX[i] if own[i] else BOX[i] for i in (0, 1)] + BOX[2:]:
+    for b in [PADS_BOX[i] if (own[0] if i == 0 else own[1] == i) else BOX[i] for i in range(len(BOX)) if i not in under]:
         ok &= ~((X > b[0] - margin) & (X < b[2] + margin) & (Y > b[1] - margin) & (Y < b[3] + margin))
     out, i = [], 0
     while i < len(OS):
@@ -339,7 +343,15 @@ for v_ in ctx.base_vias:
         if (awx_settings.get('SVIA_RING') or '1') == '1':
             # (its reach for a lane: the router's ring about the grid point it rounds to -- pairs.svia_reach)
             r = max(r, _pairs.svia_reach(ctx.cfg, v_.x, v_.y, v_.size))
-        VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), 'svia ' + (own_ or whole_ctx.copper_name(ctx, v_)), own_))
+        VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), whole_ctx.joint_via_island(ctx, v_)
+                      or 'svia ' + (own_ or whole_ctx.copper_name(ctx, v_)), own_))
+    elif v_.net_id not in NET_LANE and whole_ctx.joint_via_island(ctx, v_):
+        # ...and every via of ANOTHER BUS routed at once, wherever it stands: an island of its own whose side the loop
+        # may flip (whole_ctx.joint_via_island) -- beyond the field it was no island at all, and a lane laid through
+        # it was found only by the audit, which no cut answers
+        r = max(v_.size / 2, _pairs.svia_reach(ctx.cfg, v_.x, v_.y, v_.size)) \
+            if (awx_settings.get('SVIA_RING') or '1') == '1' else v_.size / 2
+        VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), whole_ctx.joint_via_island(ctx, v_), None))
     elif v_.net_id not in NET_LANE and (min(b[0] for b in BOX) - FIELD_MARGIN <= v_.x <= max(b[2] for b in BOX)
                                         + FIELD_MARGIN and min(b[1] for b in BOX) - FIELD_MARGIN <= v_.y
                                         <= max(b[3] for b in BOX) + FIELD_MARGIN):
@@ -409,7 +421,7 @@ def hold_pair(tips):
 # run and the lanes outside it pass beyond its landing. Hugging the face, the innermost pair stepped out to its landing
 # and back in, and pressed the lanes outside it into each other and the part beside the face (K35 SDQS0 at DU1's south
 # face: SODT0/SODT1 0.141 apart, into C12)
-_dc = [(p_.global_x, p_.global_y) for p_ in ctx.pcb.footprints[DST_REF].pads]
+_dc = Fr.dpads
 DCEN = (sum(x for x, _y in _dc) / len(_dc), sum(y for _x, y in _dc) / len(_dc))
 
 
@@ -420,7 +432,7 @@ def _out_of(sp, o_at):
 
 _depths = []
 for n in M:
-    if n in cls and n in prs and cls[n] not in Fr.branch:
+    if n in cls and n in prs:
         sp_ = ring_sp[cls[n]]
         m_ = _pairs.mid(*ctx.pair_ends[n][1])
         _depths.append(abs(sp_.project_pt(Fr.land[n])[1] - sp_.project_pt(m_)[1]))
@@ -472,11 +484,6 @@ for n in M:
         s_out = sb0 + abs(o_run - ob0)                          # out to the standoff at 45 degrees past the handoff
         rpts = ([(sb0, ob0), (s_out, o_run), (s_run, o_run), (sb1, ob1)] if s_out < s_run else
                 [(sb0, ob0), (s_run, o_run), (sb1, ob1)] if s_run > sb0 + 1e-9 else [(sb0, ob0), (sb1, ob1)])
-        if cls[n] in Fr.branch:
-            # a BRANCH's lane lands off it as the trunk's near face's lanes land off the trunk: straight onto its berth,
-            # held a track's width into it (no ring, no standoff: its berth faces the branch, whole_frame)
-            rpts = [(sb0, ob0), (sb1, ob1)]
-            hold1 = max(hold1, HOLD)
         PIECE[(cls[n], n)] = dict(k0=int(round(sb0 / G)), k1=int(round(sb1 / G)), o0=None, o1=ob1, hold0=0, hold1=hold1,
                                   ex0=0, ex1=max(hold1 + 1, EXC),
                                   ref=(lambda s, P=rpts: float(np.interp(s, [q[0] for q in P], [q[1] for q in P]))),
@@ -490,7 +497,7 @@ for n in M:
                                ex0=max(hold0 + 1, EXC), ex1=max(hold1 + 1, EXC), ref=ref)
     else:
         s1, o1 = Fr.se[n]
-        f1 = face_of(bend_xy[n], BOX[1])
+        f1 = face_of(bend_xy[n], Fr.DBs[Fr.dest_of[n]])
         hold1 = (hold_pair(ctx.pair_ends[n][1]) if n in prs else HOLD) if f1 in ('E', 'W') else 0
         PIECE[('T', n)] = dict(k0=int(round(s0 / G)), k1=int(round(s1 / G)), o0=o0, o1=o1, hold0=hold0, hold1=hold1,
                                ex0=max(hold0 + 1, EXC), ex1=max(hold1 + 1, EXC), ref=ref)
@@ -779,7 +786,8 @@ def build_and_solve(sides, prev=None):
     # (a lane whose tooth -- or a trunk lane whose berth -- stands inside its array's grown box: bounded by the
     # array's pads on the trunk, where it leaves its tooth or reaches its berth)
     _in = lambda p_, b: b[0] + 1e-6 < p_[0] < b[2] - 1e-6 and b[1] + 1e-6 < p_[1] < b[3] - 1e-6
-    OWN = {n: (_in(Fr.tooth[n], BOX[0]), n not in cls and _in(bend_xy[n], BOX[1])) for n in M}
+    OWN = {n: (_in(Fr.tooth[n], BOX[0]), BOXI[Fr.dest_of[n]] if n not in cls and _in(bend_xy[n], Fr.DBs[Fr.dest_of[n]])
+               else 0) for n in M}
     for (f, n, k), j in var.items():
         v = PIECE[(f, n)]
         s_ = k * G
@@ -791,7 +799,11 @@ def build_and_solve(sides, prev=None):
         mg = 0.0 if near_end else B_M
         if (f, n, k) in via_at:
             mg = M_VIA + VX[n]
-        iv = intervals(f, FR[f]['sp'], s_, round(mg, 4), OWN[n] if f == 'T' else (False, False))
+        under_ = frozenset()
+        if OPEN_I:
+            lays_ = layers_at(n, lay_u(f, n, FR[f]['u'](s_)))
+            under_ = frozenset(BOXI[r_] for r_ in Fr.dests if lays_ <= OPEN_I[r_])
+        iv = intervals(f, FR[f]['sp'], s_, round(mg, 4), OWN[n] if f == 'T' else (False, 0), under_)
         if not iv:
             continue
         # (the terminal a SPLIT reads is the one AHEAD -- a box beginning at a column stands between the lane and its
@@ -1121,20 +1133,44 @@ ROOMLESS = {}
 FLIP = set()
 for _f in [x for x in awx_settings.get('GEO_FLIPS_FROM', '').split(',') if x]:
     FLIP |= {tuple(x) for x in json.load(open(_f)).get('flips', [])}
+# ...a flip round ANOTHER BUS's via (whole_ctx.joint_via_island: 'svia NET X,Y') held for that net's via within a via's
+# size of where it was found: the other bus solves again each round and its vias move by hundredths of a millimetre, and
+# a flip held to the exact place was lost at once -- its lane flipped round the same via again and again (35 flips in
+# six rounds, the findings no fewer)
+FLIP_VIA = collections.defaultdict(list)
+for _n, _lab in FLIP:
+    if _lab.startswith('svia ') and len(_lab.split(' ')) == 3:
+        _xy = _lab.split(' ')[2].split(',')
+        FLIP_VIA[(_n, _lab.split(' ')[1])].append((float(_xy[0]), float(_xy[1])))
+
+
+def flipped(n, lab):
+    """lane n passes island `lab` on the other side (FLIP; another bus's via, FLIP_VIA)"""
+    if (n, lab) in FLIP:
+        return True
+    if lab.startswith('svia ') and len(lab.split(' ')) == 3:
+        x_, y_ = (float(v_) for v_ in lab.split(' ')[2].split(','))
+        return any(math.hypot(x_ - a_, y_ - b_) < bd.VIA_SIZE for a_, b_ in FLIP_VIA.get((n, lab.split(' ')[1]), ()))
+    return False
 WIN = 12 * bd.LANE_MIN                  # an island concerns the lanes within this of it (first pass)
 
 
-def island_reach(f, sa, sb, oa, ob):
+def under_on(Ly):
+    """the boxes (their indices in BOX) a lane on layer Ly passes under: a GROUP's parts that leave Ly open"""
+    return frozenset(BOXI[r_] for r_ in Fr.dests if Ly in OPEN_I[r_]) if OPEN_I else frozenset()
+
+
+def island_reach(f, sa, sb, oa, ob, under=frozenset()):
     """[(lo, hi) of the free intervals holding an island, per column] where its sides are measured: its own span -- or,
     where it lies in no free interval there (a stub ending on an array's box line, inside the box's margin), the reach
     of its rows past that span, where the lanes meet it beyond the box (K41: SDQ5's stub on the source's east face;
     judged from the one interval within WIN of it, the north, it forced SCK and SBA0 from the south over 3.7 mm).
-    None when it lies in none either way"""
+    None when it lies in none either way. `under`: the boxes the lanes on its layer pass under (under_on), no wall"""
     gx = LANE_ST + max(hw.values())
     for lo, hi in ((sa, sb), (sa - gx, sb + gx)):
         out = []
         for s_ in np.arange(lo, hi + 1e-9, G):
-            iv = intervals(f, FR[f]['sp'], float(s_), round(B_M, 4))
+            iv = intervals(f, FR[f]['sp'], float(s_), round(B_M, 4), under=under)
             around = [q for q in iv if q[0] <= oa + 1e-6 and q[1] >= ob - 1e-6]
             if around:
                 out.append((min(q[0] for q in around), max(q[1] for q in around)))
@@ -1179,25 +1215,34 @@ def static_sides(sol):
             vboxes[f].append((min(q[0] for q in so), max(q[0] for q in so), min(q[1] for q in so), max(q[1] for q in so), Ls, lab, own))
     ROOMLESS.clear()
     need = 2 * LANE_ST + TW                      # one lane's centre with its clearance each side
+    # (each LAYER of an island its own: a lane on a layer a GROUP's part leaves open passes under that part, and the
+    # part's box is no wall there -- read as one, a GND via of a QFN's exposed pad stood boxed against the QFN's box
+    # edge, its side forced each way by which edge was nearer, and a lane alone on its layer was sent above, below and
+    # above three such vias in 3 mm)
     for f, bl in boxes.items():
         for ii, (sa, sb, oa, ob, Ls, lab, own) in enumerate(bl):
             if own is not None or sb < 0:
                 continue
-            below_ok = above_ok = True
-            reach = island_reach(f, sa, sb, oa, ob)
-            if reach is None:
-                # in no free interval anywhere its rows reach: the intervals within WIN of it
-                reach = []
-                for s_ in np.arange(sa, sb + 1e-9, G):
-                    iv = intervals(f, FR[f]['sp'], float(s_), round(B_M, 4))
-                    around = [q for q in iv if q[1] >= oa - WIN and q[0] <= ob + WIN]
-                    if around:
-                        reach.append((min(q[0] for q in around), max(q[1] for q in around)))
-            for lo_i, hi_i in reach:
-                below_ok &= (oa - lo_i) >= need
-                above_ok &= (hi_i - ob) >= need
-            if below_ok != above_ok:
-                ROOMLESS[(f, ii)] = 1 if not below_ok else -1
+            by_under = collections.defaultdict(list)
+            for Ly in sorted(Ls):
+                by_under[under_on(Ly)].append(Ly)
+            for und_, lys_ in by_under.items():
+                below_ok = above_ok = True
+                reach = island_reach(f, sa, sb, oa, ob, und_)
+                if reach is None:
+                    # in no free interval anywhere its rows reach: the intervals within WIN of it
+                    reach = []
+                    for s_ in np.arange(sa, sb + 1e-9, G):
+                        iv = intervals(f, FR[f]['sp'], float(s_), round(B_M, 4), under=und_)
+                        around = [q for q in iv if q[1] >= oa - WIN and q[0] <= ob + WIN]
+                        if around:
+                            reach.append((min(q[0] for q in around), max(q[1] for q in around)))
+                for lo_i, hi_i in reach:
+                    below_ok &= (oa - lo_i) >= need
+                    above_ok &= (hi_i - ob) >= need
+                if below_ok != above_ok:
+                    for Ly in lys_:
+                        ROOMLESS[(f, ii, Ly)] = 1 if not below_ok else -1
     vcol = collections.defaultdict(set)
     for (f, n, cu, kc) in sol['vias']:
         vcol[(f, n)].add(kc)
@@ -1233,21 +1278,30 @@ def static_sides(sol):
             kmid = ks_[0]
             od = sol['orders'][(f, kmid)]
             um = FR[f]['u'](kmid * G)
-            room = {-1: math.inf, 1: math.inf}
-            span = [-math.inf, math.inf]                    # the free interval the island stands in
-            for lo_i, hi_i in island_reach(f, sa, sb, oa, ob) or ():
-                room[-1] = min(room[-1], oa - lo_i)
-                room[1] = min(room[1], hi_i - ob)
-                span = [max(span[0], lo_i), min(span[1], hi_i)]
-            if f != 'T' and f not in Fr.branch:
-                # on a RING the lanes run the ring's standoff out from the destination's face (its pairs' landings
-                # lie that deep): the room between the island and the face is that much less (K35 C12 at DU1's south
-                # face: four F lanes and a pair kept inside it, the pair pressed onto the face and folded to its landing)
-                room[-int(_out_of(FR[f]['sp'], (oa + ob) / 2))] -= RING_STANDOFF
+            rooms_ = {}
+
+            def room_span(und_):
+                """(room each side, the free interval the island stands in) for the lanes passing under `und_`"""
+                if und_ not in rooms_:
+                    room = {-1: math.inf, 1: math.inf}
+                    span = [-math.inf, math.inf]
+                    for lo_i, hi_i in island_reach(f, sa, sb, oa, ob, und_) or ():
+                        room[-1] = min(room[-1], oa - lo_i)
+                        room[1] = min(room[1], hi_i - ob)
+                        span = [max(span[0], lo_i), min(span[1], hi_i)]
+                    if f != 'T':
+                        # on a RING the lanes run the ring's standoff out from the destination's face (its pairs'
+                        # landings lie that deep): the room between the island and the face is that much less (K35 C12
+                        # at DU1's south face: four F lanes and a pair kept inside it, the pair pressed onto the face
+                        # and folded to its landing)
+                        room[-int(_out_of(FR[f]['sp'], (oa + ob) / 2))] -= RING_STANDOFF
+                    rooms_[und_] = (room, span)
+                return rooms_[und_]
             SPLIT.add((f, ii))
             for Ly in range(NL):
                 if Ly not in Ls:
                     continue
+                room, span = room_span(under_on(Ly))
                 # only the lanes that share the island's free interval can reach it; one in another interval is
                 # kept off it by that interval's own bounds (SA12, 2.6 mm above SVREF's stub, was told to pass below)
                 lanes = [n for n in od if n != own and Ly in layers_at(n, lay_u(f, n, um)) and (f, n, ii) in mean_o
@@ -1278,7 +1332,7 @@ def static_sides(sol):
                         used += (LANE_ST + hw[n]) if prev_ is None else (P_MIN + hw[prev_] + hw[n])
                         prev_ = n
                     return room[side] - used
-                forced = ROOMLESS.get((f, ii))
+                forced = ROOMLESS.get((f, ii, Ly))
                 best = None
                 for j in range(len(lanes) + 1):
                     if forced == 1 and j != 0 or forced == -1 and j != len(lanes):
@@ -1377,9 +1431,9 @@ def static_sides(sol):
                         continue
                     opts = []
                     lo_n, hi_n = mid[0], mid[-1]
-                    if pa_[ia[lo_n]] != 1 and ROOMLESS.get((f, a)) != 1 and (lo_n, a) not in pushed:
+                    if pa_[ia[lo_n]] != 1 and ROOMLESS.get((f, a, Ly)) != 1 and (lo_n, a) not in pushed:
                         opts.append((cba[ia[lo_n]] - caa[ia[lo_n]], a, lo_n, -1))
-                    if pb_[ib[hi_n]] != -1 and ROOMLESS.get((f, b)) != -1 and (hi_n, b) not in pushed:
+                    if pb_[ib[hi_n]] != -1 and ROOMLESS.get((f, b, Ly)) != -1 and (hi_n, b) not in pushed:
                         opts.append((cab[ib[hi_n]] - cbb[ib[hi_n]], b, hi_n, 1))
                     if not opts:
                         continue
@@ -1391,6 +1445,43 @@ def static_sides(sol):
                     moved = True
                 if not moved:
                     break
+    # ...and a ROW of static vias closer together than a lane's room (a part's berth dog-bones along its face, a pin
+    # pitch apart): ONE side of the whole row for every lane that owns none of them. Each via an island of its own, a
+    # lane told above one and below the next crossed the row between them, through a gap no lane fits -- a group bus's
+    # IO lanes across a PHY's north-face dog-bones, 0.06 mm between their rings, static every round. The side the
+    # lane's first pass is on across the row's middle
+    for f, bl in boxes.items():
+        sv_ = [ii for ii in range(len(bl)) if STATIC[ii][5].startswith('svia ') and bl[ii][1] >= 0]
+        par_ = {ii: ii for ii in sv_}
+
+        def root_(x):
+            while par_[x] != x:
+                par_[x] = par_[par_[x]]
+                x = par_[x]
+            return x
+        for a, b in itertools.combinations(sv_, 2):
+            if not (set(bl[a][4]) & set(bl[b][4])) or abs(bl[a][0] - bl[b][0]) > WIN:
+                continue
+            if shape_gap(board_shape(a), board_shape(b)) < 2 * LANE_ST:
+                par_[root_(a)] = root_(b)
+        rows_ = collections.defaultdict(list)
+        for ii in sv_:
+            rows_[root_(ii)].append(ii)
+        for comp in (c_ for c_ in rows_.values() if len(c_) > 1):
+            owners_ = {bl[ii][6] for ii in comp}
+            o_mid = float(np.mean([(bl[ii][2] + bl[ii][3]) / 2 for ii in comp]))
+            for n in sorted({n_ for (f_, n_, ii) in SIDE if f_ == f and ii in comp and n_ not in owners_}):
+                sides_ = {SIDE[(f, n, ii)] for ii in comp if (f, n, ii) in SIDE}
+                if len(sides_) < 2:
+                    continue
+                ms_ = [o_ for ii in comp for o_ in mean_o.get((f, n, ii), ())]
+                sd = -1 if (float(np.mean(ms_)) if ms_ else o_mid) < o_mid else 1
+                for ii in comp:
+                    if (f, n, ii) in SIDE:
+                        SIDE[(f, n, ii)] = sd
+                log(f'  a row of {len(comp)} vias ({", ".join(sorted({bl[ii][5][5:] for ii in comp}))}) no lane passes '
+                    f'through: {n} {"below" if sd < 0 else "above"} the whole row')
+
     def extent(f, s_, ii, g):
         """(lo, hi): where column s_'s offset line in frame f meets part ii's pads grown by g (None: it misses them)"""
         return _cor.line_extent(FR[f]['sp'], s_, RECTS[ii], g)
@@ -1475,9 +1566,9 @@ def static_sides(sol):
                 if side is None:
                     mo_ = mean_o.get((f, n, ii))
                     side = -1 if (float(np.mean(mo_)) if mo_ else o_) < (oa + ob) / 2 else 1
-                if (n, lab) in FLIP:
+                if flipped(n, lab):
                     side = -side          # the polish found no room on this side: the lane passes the island on the other
-                forced = ROOMLESS.get((f, ii))
+                forced = next((ROOMLESS[(f, ii, Ly)] for Ly in sorted(lay & Ls) if (f, ii, Ly) in ROOMLESS), None)
                 pinned = any(ot_ is not None and sa - g <= kt_ * G <= sb + g
                              for kt_, ot_ in ((v['k0'], v['o0']), (v['k1'], v['o1'])))
                 if forced and (f, ii) not in SPLIT and not pinned and not carried:

@@ -1,7 +1,9 @@
 """route_layers.py -- the copper layers the whole route lays its lanes on: ROUTE_LAYERS, F.Cu,B.Cu by default -- F.Cu and
 B.Cu first, then the inner layers it may use, in the order given (F.Cu,B.Cu,In2.Cu). A lane's run between two of its
 changes is on one of them; every via is a through via. Index 0 is F.Cu and 1 B.Cu on every count, as the two-layer
-code reads a layer.
+code reads a layer. A routing layer that carries a plane is priced (plane_kinds): where an inner layer carries none
+(inner_signal), a run on a ground plane's layer by the run (gnd_run_vias), on a power plane's by its length
+(pwr_vias_per_mm); where every inner layer is a plane's, a run on any of them a via (no inner layer to take instead).
 
 Read when asked, never at import: a stage run in another stage's process reads its own setting (awx_settings)."""
 import awx_settings
@@ -37,6 +39,75 @@ def escape_layers(copper=None):
 def index(name):
     """a routing layer's index (F.Cu 0, B.Cu 1, the inner ones after)"""
     return layers().index(name)
+
+
+def plane_kinds(pcb, names=None):
+    """{layer: 'gnd' | 'pwr' | '-'} for the layers `names` (the routing layers by default): an INNER layer is a PLANE's
+    when its pours together cover a quarter of what the most-poured inner layer's do -- a GROUND plane's when the ground
+    family's pours (net_queries) cover the most of it, else a POWER plane's, one supply's or the several the planes step
+    split it among -- and every other layer, F.Cu and B.Cu always, a SIGNAL layer. Every step of the bus prices a run on
+    a plane's layer by its kind (gnd_run_vias, pwr_vias_per_mm): the solve, the ends model, the joint fanout"""
+    from net_queries import is_ground_net_name
+    names = list(layers() if names is None else names)
+
+    def _area(p_):
+        return abs(sum(p_[i][0] * p_[(i + 1) % len(p_)][1] - p_[(i + 1) % len(p_)][0] * p_[i][1]
+                       for i in range(len(p_)))) / 2
+    tot, gnd = {}, {}
+    for z_ in getattr(pcb, 'zones', None) or []:
+        if z_.layer in DEFAULT or not z_.net_name or len(z_.polygon or ()) < 3:
+            continue
+        a_ = _area(z_.polygon)
+        tot[z_.layer] = tot.get(z_.layer, 0.0) + a_
+        if is_ground_net_name(z_.net_name):
+            gnd[z_.layer] = gnd.get(z_.layer, 0.0) + a_
+    big = max(tot.values(), default=0.0)
+    out = {}
+    for L_ in names:
+        if L_ in DEFAULT or big <= 0 or tot.get(L_, 0.0) < 0.25 * big:
+            out[L_] = '-'
+        else:
+            out[L_] = 'gnd' if 2 * gnd.get(L_, 0.0) >= tot[L_] else 'pwr'
+    return out
+
+
+def inner_signal(kinds):
+    """`kinds` (plane_kinds) has an INNER routing layer that carries no plane: a lane kept off a plane has an inner
+    layer to run on. Where it has none -- every inner layer a plane's -- the planes are the board's only inner routing,
+    and a run on one is priced a via, flat (gnd_run_vias, run_price): priced as planes there, a DDR bus's ends left one
+    lane's crossings no room in every round's solve, relaxed or not, and a board's two ground planes left its solve no
+    plan it could prove"""
+    return any(k_ == '-' for L_, k_ in kinds.items() if L_ not in DEFAULT)
+
+
+def gnd_run_vias(inner=True):
+    """PLANE_GND_RUN: a lane's run on a GROUND plane's layer, in vias over the same run on a signal layer (default 10),
+    whatever its length: the run cuts the reference plane under its neighbours, so it is taken only where it saves
+    that many vias. With no inner signal layer (`inner` False: inner_signal), a via"""
+    return float(awx_settings.get('PLANE_GND_RUN') or '10') if inner else 1.0
+
+
+def pwr_vias_per_mm():
+    """PLANE_PWR_X: a POWER plane's layer prices a run's length this many times a signal layer's (default 2) -- the
+    excess, in vias per mm at the one exchange rate (select_moves.VIA_MM): a supply's pour is cut round the run, and its
+    pieces must be joined again. The solve prices each run by its length; the ends model, which ranks ends and lays
+    no run, a run flat at VIA_MM's length (run_price)"""
+    import select_moves
+    return max(0.0, float(awx_settings.get('PLANE_PWR_X') or '2') - 1.0) / select_moves.VIA_MM
+
+
+def run_price(kind, inner=True):
+    """the ENDS model's price of a run on a layer of kind `kind` (plane_kinds), in vias over the same run on a signal
+    layer (the exact route's and the ends kernel's, which know no run's length): a ground plane's gnd_run_vias, a power
+    plane's VIA_MM of run at pwr_vias_per_mm -- with no inner signal layer (`inner` False), a via either"""
+    if kind == 'gnd':
+        return gnd_run_vias(inner)
+    if kind == 'pwr':
+        if not inner:
+            return 1.0
+        import select_moves
+        return pwr_vias_per_mm() * select_moves.VIA_MM
+    return 0.0
 
 
 def escape_vias(end):

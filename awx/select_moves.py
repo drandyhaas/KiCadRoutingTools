@@ -68,7 +68,9 @@ def _lane_spans_compute(m: Move) -> List[Tuple[Tuple, float, float]]:
         # a move synthesized from copper the engine laid (replan.synth_move)
         # carries no legs: it occupies no lane the selector can price
         return []
-    street = getattr(m, 'street', 0)
+    # (a ROW PART's via inside it, escape_moves._row_inward: its stub's legs on the pad's layer, behind the row, run
+    # across the next pads' own stubs there -- lanes as a street's are)
+    street = getattr(m, 'street', 0) or getattr(m, 'inner', 0)
     if not getattr(m, 'climb', 0) and not street:
         return [_lane_span(m)]
     out = []

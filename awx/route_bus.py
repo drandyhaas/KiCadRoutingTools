@@ -27,8 +27,8 @@ where the negotiation takes them (route_buses); --sequential routes every bus in
 route_bus() takes a board as the chain hands it on and writes it back with the bus laid, in the board's own frame,
 at the chain's sizes (resolve_rules: the routing CLIs' flags, an omitted one resolved as route.py resolves it):
 
-1. The bus: every net between SRC and DEST the ladder admits (make_bench.pair_nets) -- and every one a PULL or a
-   TERMINATION alone keeps out (pulled_nets: its other pads on parts to a rail, or across a pair), laid as a lane,
+1. The bus: every net between SRC and DEST the ladder admits (make_bench.pair_nets) -- and every one OTHER PADS
+   alone keep out (pulled_nets: a pull, a termination, a test point, another part's pin; no rail), laid as a lane,
    its stub pads off its net for the step and back on it in OUT, the stub the rest of the chain's to connect.
    Refused: a pair through a termination part between the arrays (the whole route lays no waypoint); and a pair leg
    whose partner is refused or is no lane between the arrays (half_pairs: a pair is laid whole or not at all). The
@@ -98,7 +98,7 @@ def step_policy(run_rules=None, settings=None):
     `settings`: the step's own, over the environment (route_buses: a bus's ROUTE_LAYERS, a shared array's)"""
     import awx_settings
     import whole_route as wr
-    env = dict(os.environ)
+    env = awx_settings.environ()
     env.update(settings or {})
     env.update(STEP_SETTINGS)
     wr.stage_env(env)
@@ -347,14 +347,15 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     for d in dests:
         log(f'  {len(mb.pair_nets(pcb, src, d))} nets between {src} and {d}')
     import awx_settings
-    # the nets a pull or a termination alone keeps out (pulled_nets) laid as lanes, each a place in the bus's order: a
-    # fly-by DDR3 bus's address and command nets, terminated to its Vtt past the memory, are as much the bus's as its
-    # data -- left to the router after it, sdi_mipi_conv's lost 12 of 26 round the lanes laid before them
+    # the nets other pads alone keep out (pulled_nets: a pull, a termination, a test point, another part's pin) laid as
+    # lanes, each a place in the bus's order: a fly-by DDR3 bus's address and command nets, terminated to its Vtt past
+    # the memory, are as much the bus's as its data -- left to the router after it, a board lost 12 of 26 round the
+    # lanes laid before them
     pulled = {k_: v_ for d in dests for k_, v_ in pulled_nets(pcb, src, d, names).items()}
     if pulled:
         names = sorted(set(names) | set(pulled))
-        log(f'  {len(pulled)} more with a PULL or a TERMINATION beside their two ends, laid as lanes, the stub left to the '
-            f'rest of the chain: ' + ', '.join(f'{short(n)} ({", ".join(p.component_ref for p in v)})'
+        log(f'  {len(pulled)} more with other pads beside their two ends (a pull, a termination, a test point, another '
+            f'part\'s), laid as lanes, each stub left to the rest of the chain: ' + ', '.join(f'{short(n)} ({", ".join(p.component_ref for p in v)})'
                                                for n, v in sorted(pulled.items())))
     wps = {leg: part for d in dests for leg, part in waypoint_pairs(pcb, names, src, d).items()}
     refused = {leg: f'passes through {part}, a termination part between the arrays: the whole route lays no waypoint'
@@ -509,7 +510,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         lock_ = je.passives_beyond(fanned, [src, dest], names)
         rcn = wr.run([os.path.join('..', 'py_router', 'place_fanout_clearance.py'), fanned, fanned,
                       '--clearance', str(te.SPEC_CLEARANCE), '--beneath-only'] + (['--lock'] + lock_ if lock_ else []),
-                     dict(os.environ), log_path=os.path.join(work, 'caps.log'), own_process=True)[0]
+                     awx_settings.environ(), log_path=os.path.join(work, 'caps.log'), own_process=True)[0]
         if lock_:
             log(f'  caps: beneath another array, left where they are: {", ".join(lock_)}')
         for ln in wr.grep(os.path.join(work, 'caps.log'), r'^(Moved|Stuck|  Unresolved)'):
@@ -569,7 +570,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             lock_e = je.passives_beyond(fanned_e, [src, dest], names)
             wr.run([os.path.join('..', 'py_router', 'place_fanout_clearance.py'), fanned_e, fanned_e,
                     '--clearance', str(te.SPEC_CLEARANCE), '--beneath-only'] + (['--lock'] + lock_e if lock_e else []),
-                   dict(os.environ), log_path=os.path.join(work, 'caps_ends.log'), own_process=True)
+                   awx_settings.environ(), log_path=os.path.join(work, 'caps_ends.log'), own_process=True)
             att_e = {}
             if attached:
                 # (the pulls the fanout joined to their lanes joined on the bus's own field too, so the ends are chosen
@@ -750,7 +751,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     # ...and so does one the whole route left OPEN (its best round short of every lane, exit 1): the step hands on what
     # it laid connected, never nothing for the sake of a few nets, and the rest of the chain routes those
     if rc != 0:
-        wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + net_patterns(nets, keys), dict(os.environ),
+        wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + net_patterns(nets, keys), awx_settings.environ(),
                log_path=os.path.join(work, 'conn_open.log'), own_process=True)
         opened = sorted(open_nets(os.path.join(work, 'conn_open.log'), keys) & set(nets))
         for n in opened:
@@ -767,6 +768,16 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         left_ = put_back(routed_pcb, board, pcb, back)
         log(f'  put back as they came: {", ".join(sorted(short(n) for n in back))}'
             + (f' -- {left_} piece(s) of their earlier copper left out, no longer clear' if left_ else ''))
+    # (the stubs the step joins itself, in every mode: a stub pad of a routed net near either array, that a short tie
+    # reaches from its net's copper there -- its tooth's or berth's via, else its ball -- joined on the routed board
+    # (attach_pulls); the escape fanout joined its own before the run. The rest stay the chain's)
+    if held and not escape and awx_settings.get('BUS_ATTACH', '1') != '0':
+        pad_net_ = {(p_.component_ref, p_.pad_number): short(p_.net_name) for p_ in pull_pads}
+        mine_ = [h for h in held if pad_net_.get((h[0], h[1])) in set(nets)]
+        if mine_:
+            _rest, att_ = attach_pulls(routed_pcb, mine_, [src] + dests, log)
+            held = [h for h in held if h not in att_]
+            attached = attached + att_
 
     # 6. the grade: every bus net handed on connected, no violation on a bus net, and the whole board no worse than it
     # came (a board the chain hands on carries its earlier steps' violations; each is graded at its own project's floor).
@@ -779,7 +790,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         if os.path.exists(jp):
             os.remove(jp)
         wr.run([checker('check_drc.py'), path, '--clearance-margin', '0.1', '--max-print', '0', '--json', jp, *more],
-               dict(os.environ), log_path=lp, own_process=True)
+               awx_settings.environ(), log_path=lp, own_process=True)
         n, length_rows[tag] = wr.drc_count(jp)
         if n is not None:
             return n
@@ -797,7 +808,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     put_others = set()
     for _ in range(6):
         pats = net_patterns(nets, keys)
-        cc = wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + pats, dict(os.environ),
+        cc = wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + pats, awx_settings.environ(),
                     log_path=os.path.join(work, 'conn.log'), own_process=True)[0]
         d_bus, d_out = drc(routed_pcb, 'bus', '--nets', *pats), drc(routed_pcb, 'board')
         # (joint: the step laid the arrays' whole fanout and moved the passives off it each round -- the chain's cap
@@ -950,57 +961,20 @@ def walled_grade(board, routed, refs, names, log=print):
     up and lays it again elsewhere -- QSPI_SCK, U1.A5 of a DDR3 bus's source, read walled with USR_BTN's B.Cu stub under
     the ball; route.py ripped that stub, dropped a via beside the ball and laid USR_BTN again, both connected.
     {balls, rung, walled: ['REF.PAD'], secs}"""
-    from kicad_parser import parse_kicad_pcb, is_immutable_copper
-    from list_nets import escalation_rungs
-    from protected_nets import read_protected_nets
+    from kicad_parser import parse_kicad_pcb
     t0 = time.time()
     bus = set(names)
     with contextlib.redirect_stdout(io.StringIO()):
         b_out = parse_kicad_pcb(routed)
-    finest = escalation_rungs(len(b_out.board_info.copper_layers or ()) or 4)[-1]
-    rung = (finest['track_width'], finest['via_diameter'], finest['clearance'])
-    asked = {}
-    for r in refs:
-        foot = b_out.footprints.get(r)
-        if foot is None:
-            continue
-        asked[r] = [p.pad_number for p in foot.pads
-                    if p.net_id and p.net_name and p.net_name not in bus and p.pad_type != 'np_thru_hole'
-                    and len(b_out.nets[p.net_id].pads) > 1]
-
-    def fixed_nets(pcb, path):
-        """the nets of `pcb` (the board at `path`) whose copper no later step moves: the bus's, the protected, a pour's"""
-        prot = set(read_protected_nets(os.path.splitext(path)[0] + '.kicad_pro'))
-        return {i for i, nn in pcb.nets.items() if nn.name in bus | prot} | \
-            {z.net_id for z in (pcb.zones or []) if z.net_id}
-
-    def caged_on(pcb, keys, fixed):
-        out = []
-        for r in keys:
-            foot = pcb.footprints.get(r)
-            if foot is None:
-                continue
-            near = _cropped(pcb, foot)
-            by_num = {p.pad_number: p for p in foot.pads}
-            for n in keys[r]:
-                if n not in by_num:
-                    continue
-                # (the ball's own copper, and the walls: the rest of the copper the route step may take up)
-                walls = copy.copy(near)
-                own_ = by_num[n].net_id
-                walls.segments = [s for s in near.segments if s.net_id in fixed or s.net_id == own_
-                                  or is_immutable_copper(s)]
-                walls.vias = [v for v in near.vias if v.net_id in fixed or v.net_id == own_ or is_immutable_copper(v)]
-                if _caged(walls, by_num[n], *rung):
-                    out.append(f'{r}.{n}')
-        return out
-    now = caged_on(b_out, asked, fixed_nets(b_out, routed))
+    rung = _cage_rung(b_out)
+    asked = {r: [p.pad_number for p in pads] for r, pads in _cage_balls(b_out, refs, bus).items()}
+    now = _caged_on(b_out, asked, _fixed_nets(b_out, routed, bus), rung)
     walled = []
     if now:
         with contextlib.redirect_stdout(io.StringIO()):
             b_in = parse_kicad_pcb(board)
-        was = set(caged_on(b_in, {r: [k.split('.', 1)[1] for k in now if k.split('.', 1)[0] == r] for r in asked},
-                           fixed_nets(b_in, board)))
+        was = set(_caged_on(b_in, {r: [k.split('.', 1)[1] for k in now if k.split('.', 1)[0] == r] for r in asked},
+                            _fixed_nets(b_in, board, bus), rung))
         walled = [k for k in now if k not in was]
     out = dict(balls=sum(len(v) for v in asked.values()), rung=list(rung), walled=walled,
                secs=round(time.time() - t0, 1))
@@ -1008,6 +982,122 @@ def walled_grade(board, routed, refs, names, log=print):
         nets_ = {f'{r}.{p.pad_number}': p.net_name for r in asked for p in b_out.footprints[r].pads}
         log(f'  WALLED IN by the step, reached from nowhere at {rung[0]}/{rung[1]}/{rung[2]} (the fab ladder\'s finest): '
             + ', '.join(f'{k} ({nets_.get(k)})' for k in walled) + ' -- each net ships open past the locked lanes')
+    return out
+
+
+def _cage_rung(pcb):
+    """(track, via, clearance) of the fab ladder's finest rung for `pcb`: the widths a cage is tested at"""
+    from list_nets import escalation_rungs
+    finest = escalation_rungs(len(pcb.board_info.copper_layers or ()) or 4)[-1]
+    return finest['track_width'], finest['via_diameter'], finest['clearance']
+
+
+def _cage_balls(pcb, refs, bus):
+    """{ref: [pad]} the balls of `refs` a cage test asks: on a net of none of `bus` (full names) with another pad"""
+    out = {}
+    for r in refs:
+        foot = pcb.footprints.get(r)
+        if foot is not None:
+            out[r] = [p for p in foot.pads if p.net_id and p.net_name and p.net_name not in bus
+                      and p.pad_type != 'np_thru_hole' and len(pcb.nets[p.net_id].pads) > 1]
+    return out
+
+
+def _fixed_nets(pcb, path, bus):
+    """the nets of `pcb` (the board at `path`) whose copper no later step moves: the bus's, the protected, a pour's"""
+    from protected_nets import read_protected_nets
+    prot = set(read_protected_nets(os.path.splitext(path)[0] + '.kicad_pro'))
+    return {i for i, nn in pcb.nets.items() if nn.name in set(bus) | prot} | \
+        {z.net_id for z in (pcb.zones or []) if z.net_id}
+
+
+def _caged_on(pcb, keys, fixed, rung, near=None):
+    """['REF.PAD'] of `keys` ({ref: [pad number]}) caged on `pcb` with `fixed`'s copper the walls (`near`: {ref: the
+    board _cropped round it}, reused)"""
+    from kicad_parser import is_immutable_copper
+    out = []
+    for r in keys:
+        foot = pcb.footprints.get(r)
+        if foot is None:
+            continue
+        crop = near[r] if near and r in near else _cropped(pcb, foot)
+        by_num = {p.pad_number: p for p in foot.pads}
+        for n in keys[r]:
+            if n in by_num and _caged(_walls(crop, fixed, by_num[n].net_id, is_immutable_copper), by_num[n], *rung):
+                out.append(f'{r}.{n}')
+    return out
+
+
+def _walls(crop, fixed, own, immutable):
+    """`crop` with only the ball's own copper and the walls: the rest of the copper the route step may take up"""
+    walls = copy.copy(crop)
+    walls.segments = [s for s in crop.segments if s.net_id in fixed or s.net_id == own or immutable(s)]
+    walls.vias = [v for v in crop.vias if v.net_id in fixed or v.net_id == own or immutable(v)]
+    return walls
+
+
+WALL_NEAR = 1.6         # mm from a ball: copper this near is a candidate wall of it (two pitches of a 0.8 mm array)
+
+
+def walls_made(before, after, refs, bus, moved, project=None):
+    """{'REF.PAD': [net]} the balls of `refs` on no bus net (`bus`, full names) that the board `after` walls in and
+    `before` did not -- walled_grade's test at its finest rung -- each with the nets of `moved` (full names, whose
+    copper is all that differs) that wall it: the nearest whose copper taken away alone frees the ball, else the fewest
+    nearest first; [] when taking all of theirs away leaves it walled. Asked of the balls within WALL_NEAR of a moved
+    net's copper only. A board is a path, or a PCBData with `project` the board path its protected nets are read
+    beside."""
+    from kicad_parser import parse_kicad_pcb, is_immutable_copper
+    with contextlib.redirect_stdout(io.StringIO()):
+        b_out, b_in = (parse_kicad_pcb(b) if isinstance(b, str) else b for b in (after, before))
+    after, before = (b if isinstance(b, str) else project for b in (after, before))
+    rung = _cage_rung(b_out)
+    mv = {i for i, nn in b_out.nets.items() if nn.name in set(moved)}
+    segs = [s for s in b_out.segments if s.net_id in mv]
+    vias = [v for v in b_out.vias if v.net_id in mv]
+
+    def dist(p, s):
+        ax, ay, dx, dy = s.start_x, s.start_y, s.end_x - s.start_x, s.end_y - s.start_y
+        L = dx * dx + dy * dy
+        t = 0.0 if L == 0 else max(0.0, min(1.0, ((p.global_x - ax) * dx + (p.global_y - ay) * dy) / L))
+        return math.hypot(p.global_x - ax - t * dx, p.global_y - ay - t * dy)
+
+    def near_nets(p):
+        """{net id: distance} of the moved nets' copper within WALL_NEAR of ball `p`"""
+        d = {}
+        for s in segs:
+            if abs(s.start_x - p.global_x) < WALL_NEAR + abs(s.end_x - s.start_x) and \
+                    abs(s.start_y - p.global_y) < WALL_NEAR + abs(s.end_y - s.start_y):
+                x = dist(p, s)
+                if x < WALL_NEAR and x < d.get(s.net_id, 9e9):
+                    d[s.net_id] = x
+        for v in vias:
+            x = math.hypot(v.x - p.global_x, v.y - p.global_y)
+            if x < WALL_NEAR and x < d.get(v.net_id, 9e9):
+                d[v.net_id] = x
+        return {k: x for k, x in d.items() if k != p.net_id}
+    fixed = _fixed_nets(b_out, after, bus)
+    cand = {r: {p.pad_number: near_nets(p) for p in pads} for r, pads in _cage_balls(b_out, refs, bus).items()}
+    cand = {r: {n: d for n, d in v.items() if d} for r, v in cand.items()}
+    crops = {r: _cropped(b_out, b_out.footprints[r]) for r in cand if cand[r]}
+    now = _caged_on(b_out, {r: list(v) for r, v in cand.items() if v}, fixed, rung, crops)
+    if not now:
+        return {}
+    was = set(_caged_on(b_in, {r: [k.split('.', 1)[1] for k in now if k.split('.', 1)[0] == r] for r in crops},
+                        _fixed_nets(b_in, before, bus), rung))
+    out = {}
+    for k in now:
+        if k in was:
+            continue
+        r, n = k.split('.', 1)
+        pad = next(p for p in b_out.footprints[r].pads if p.pad_number == n)
+        order = sorted(cand[r][n], key=cand[r][n].get)
+
+        def frees(drop):
+            return not _caged(_walls(crops[r], fixed - set(drop), pad.net_id, is_immutable_copper), pad, *rung)
+        who = next(([i] for i in order if frees([i])), None)
+        if who is None:
+            who = next((order[:j] for j in range(2, len(order) + 1) if frees(order[:j])), [])
+        out[k] = [b_out.nets[i].name for i in who]
     return out
 
 
@@ -1114,6 +1204,41 @@ def _caged(pcb, pad, track, via, clearance):
         return True
     root = ffind(int(flabs[0][sy, sx]))
     return not any(ffind(int(i)) == root for lab, t in zip(flabs, tgt) for i in np.unique(lab[t & (lab > 0)]))
+
+
+def ball_way(pcb, pad, fixed, rung):
+    """((x, y), layer): the via site `pad` escapes by on `pcb`, `fixed`'s copper the walls -- the nearest point its own
+    layer reaches with a track of `rung` where a via of `rung` fits on every layer, one off the pad's copper first (a
+    site in the pad by a millimetre's handicap); None when there is none in the cage's view. _caged's raster."""
+    import numpy as np
+    from scipy import ndimage
+    from kicad_parser import is_immutable_copper
+    if os.path.join(HERE, '..', 'py_placer') not in sys.path:
+        sys.path.insert(0, os.path.join(HERE, '..', 'py_placer'))
+    from placement.reachability import slack_field
+    track, via, clearance = rung
+    walls = _walls(_cropped(pcb, pcb.footprints[pad.component_ref]), fixed, pad.net_id, is_immutable_copper)
+    step = CAGE_STEP
+    view = (pad.global_x - CAGE_VIEW, pad.global_y - CAGE_VIEW, pad.global_x + CAGE_VIEW, pad.global_y + CAGE_VIEW)
+    layers = list(pcb.board_info.copper_layers)
+    home = next((L for L in layers if L in pad.layers), layers[0])
+    free, via_ok = None, None
+    for L in [home] + [L for L in layers if L != home]:
+        s, _o, D = slack_field(walls, pad.net_id, L, view, clearance, None, step)
+        free = s >= track if free is None else free
+        via_ok = (D >= via / 2.0) if via_ok is None else via_ok & (D >= via / 2.0)
+    sy, sx = int((pad.global_y - view[1]) / step), int((pad.global_x - view[0]) / step)
+    lab, _n = ndimage.label(free)
+    if not lab[sy, sx]:
+        return None
+    ys, xs = np.nonzero((lab == lab[sy, sx]) & via_ok)
+    if not len(xs):
+        return None
+    px, py = view[0] + (xs + 0.5) * step, view[1] + (ys + 0.5) * step
+    hw, hh = pad.size_x / 2, pad.size_y / 2
+    in_pad = (np.abs(px - pad.global_x) <= hw) & (np.abs(py - pad.global_y) <= hh)
+    i = int(np.argmin(np.hypot(px - pad.global_x, py - pad.global_y) + in_pad * 1.0))
+    return (float(px[i]), float(py[i])), home
 
 
 def array_others(pcb, ref, names):
@@ -1314,8 +1439,6 @@ def _rules_dict(r):
 MIN_BUS_NETS = 8
 # a net on both of a bus's parts and on no more parts than this is named as left to the router (more: a rail)
 LEFT_PARTS = 6
-# a pull's or a termination's part has no more pads than this (pulled_nets: an eight-element resistor array)
-STUB_PADS = 16
 
 
 def is_array(fp):
@@ -1425,9 +1548,10 @@ def clear_row_escapes(board, ref, names, keep, work, log=print):
     on `board` in place: each of `names`' pads on it has one escape, straight out of its row, and a decoupling cap
     standing across it leaves its lane no end at all. The escapes are laid on a copy as the plan models them -- the
     lane track grown by the braid's clearance past the rule's, as the cap step clears copper at the rule (its
-    --clearance a ceiling) --, the cap step moves the passives near `ref` off them (place_fanout_clearance --near, the
-    parts `keep` locked: a termination's, a pull's) and the poses it leaves are put on `board`. Returns the moved
-    refs"""
+    --clearance a ceiling), and the via the plan may stand at its end (escape_moves: a row pad's stub and a via at its
+    end, the lane leaving it on any layer) --, the cap step moves the passives near `ref` off them
+    (place_fanout_clearance --near, the parts `keep` locked: a termination's, a pull's) and the poses it leaves are put
+    on `board`. Returns the moved refs"""
     import braid as te
     import escape_moves as em
     import route_layers
@@ -1445,17 +1569,23 @@ def clear_row_escapes(board, ref, names, keep, work, log=print):
     want = set(names)
     layers = route_layers.escape_layers(pcb.board_info.copper_layers)
     width = te.TRACK + 2 * max(0.0, te.CLEAR - te.SPEC_CLEARANCE)
-    tracks = []
+    tracks, vias = [], []
     for p in foot.pads:
         if p.net_name in want:
-            for m in em.enumerate_moves(p, grid, layers, lambda a, b, L: True)[:1]:
+            ms = em.enumerate_moves(p, grid, layers, lambda a, b, L: True, lambda q, L: True)
+            for m in ms[:1]:
                 tracks += [{'start': tuple(a), 'end': tuple(b), 'width': width, 'layer': L, 'net_id': p.net_id}
                            for a, b, L in m.legs]
+            # (...and the via at its end: a decap 0.3 mm off a stub's end blocked a via end there -- a group's QFN's
+            # caps straddling its edge, in the strip where its neighbour connector's pins escape)
+            for m in [m_ for m_ in ms if m_.site is not None][:1]:
+                vias.append({'x': m.site[0], 'y': m.site[1], 'size': te.VIA_SIZE, 'drill': te.VIA_DRILL,
+                             'layers': ['F.Cu', 'B.Cu'], 'net_id': p.net_id})
     if not tracks:
         return []
     tmp = os.path.join(work, f'row_escapes_{ref}.kicad_pcb')
     with contextlib.redirect_stdout(sys.stderr):
-        add_tracks_and_vias_to_pcb(board, tmp, tracks, [], [], net_id_to_name={i: n.name for i, n in pcb.nets.items()})
+        add_tracks_and_vias_to_pcb(board, tmp, tracks, vias, [], net_id_to_name={i: n.name for i, n in pcb.nets.items()})
     fp.copy_pro(board, tmp)
     moved_board = tmp[:-len('.kicad_pcb')] + '_capped.kicad_pcb'
     caps_log = os.path.join(work, f'caps_{ref}.log')
@@ -1499,43 +1629,26 @@ def escape_blocks(txt, pcb, ref, names, grow=1.5):
 
 
 def pulled_nets(pcb, src, dest, names):
-    """{net name: [its stub pads]} for the nets between `src` and `dest` that a PULL or a TERMINATION alone keeps out of
-    `names` (make_bench.pair_nets): one pad on each of the two parts, and every other pad on a part (STUB_PADS pads at
-    most, neither end) whose every pad that carries a net is a RAIL's or such a net's -- with a rail among them, or two
-    such nets (a termination across a pair). A rail: a plane's net (one that owns a zone), or a net on more parts than
-    LEFT_PARTS (a termination voltage). So a pull-up or -down to a rail -- the zynq's Ethernet PHY's strap pins ETH_RXD0-3,
-    ETH_RXCTL and ETH_MDIO (R34-R45), the USB PHY's OTG_RESETN (R33, C121) -- a resistor array terminating a fly-by bus
-    to its Vtt (sdi_mipi_conv's DDR3 address and command nets, R44-R50 under U12) and the termination across a clock
-    pair (its CK, R43). A lane between the two parts is the net's run; its pull or termination a stub off it, the
-    router's"""
+    """{net name: [its stub pads]} for the nets between `src` and `dest` that another pad keeps out of `names`
+    (make_bench.pair_nets): one pad on each of the two parts, and any other pads -- a pull or a termination (a PHY's
+    strap pins to their rails, a fly-by DDR3 bus's address and command nets terminated to its Vtt past the memory, the
+    termination across a clock pair), a test point, another part's pin. A lane between the two parts is the net's run;
+    each other pad a stub off it, the router's. Left to the router as they are: a rail (a plane's net, one that owns a
+    zone, or a net on more parts than LEFT_PARTS) -- a termination voltage, a supply -- and a net with more than one pad
+    on either part. Left to the router, a net with a test point between two arrays ran its way through the bus's
+    corridor, and two such were left open there"""
     zone_ids = {z.net_id for z in (pcb.zones or []) if z.net_id}
     rails = zone_ids | {i for i, n in pcb.nets.items() if len({p.component_ref for p in n.pads}) > LEFT_PARTS}
     have = set(names)
-    cand = {}
+    out = {}
     for net in pcb.nets.values():
         if not net.name or net.name in have or net.net_id in rails:
             continue
         on = collections.Counter(p.component_ref for p in net.pads)
         rest = [p for p in net.pads if p.component_ref not in (src, dest)]
         if on.get(src) == 1 and on.get(dest) == 1 and rest:
-            cand[net.net_id] = rest
-
-    import pairs as _pairs
-    from coherent_nets import net_keys
-    keys = net_keys(pcb)
-    short = lambda i: keys[pcb.nets[i].name]
-
-    def stub_part(ref):
-        fp_ = pcb.footprints.get(ref)
-        if fp_ is None or ref in (src, dest) or len(fp_.pads) > STUB_PADS:
-            return False
-        ns = {p.net_id for p in fp_.pads if p.net_id}
-        if not ns or not ns <= rails | set(cand):
-            return False
-        legs = ns & set(cand)
-        return bool(ns & rails) or (len(legs) == 2 and bool(_pairs.pair_names(sorted(short(i) for i in legs),
-                                                                              admit_all=True)))
-    return {pcb.nets[i].name: rest for i, rest in cand.items() if all(stub_part(p.component_ref) for p in rest)}
+            out[net.name] = rest
+    return out
 
 
 def _pad_block(fp_text, number, with_net):
@@ -1558,8 +1671,9 @@ ATTACH_PITCHES = 1.5        # (attach_pulls) a pull pad is joined to its lane by
 
 
 def attach_pulls(path, held, refs, log=print):
-    """THE PULLS IN THE FANOUT (the escape fanout; BUS_ATTACH=0 none): each pull or termination pad `held` took off
-    its net (unpull) that a stub of ATTACH_PITCHES of an array of `refs` reaches from its net's dog-bone via there
+    """THE STUBS THE STEP JOINS (BUS_ATTACH=0 none; the escape fanout's before the run, every other bus's on its routed
+    board after it): each stub pad `held` took off its net (unpull) -- a pull's, a termination's, a test point's, another
+    part's -- that a stub of ATTACH_PITCHES of an array of `refs` reaches from its net's dog-bone via there
     (escape_plan.own_via; the ball itself where it has none and the pad is on its layer) put back on its net in the
     board at `path` and joined to it by that stub, on the pad's layer -- as the human ties zynq TX_FRAME_N's dog-bone
     into its pull RX10 under U1, 1.0 mm: straight, else the shortest way along the array's ball and gap lines, clear
@@ -1588,6 +1702,8 @@ def attach_pulls(path, held, refs, log=print):
         if r_ is not None:
             near.append((h, r_))
     if not near:
+        log(f'  stubs joined: none -- no stub pad within {ATTACH_PITCHES} pitches of {", ".join(sorted(grids))}; '
+            f'{len(held)} left to the rest of the chain')
         return held, []
     txt2, _miss = repull(txt, [h for h, _r in near])
     tmp = path[:-len('.kicad_pcb')] + '.attach.kicad_pcb'
@@ -1682,7 +1798,7 @@ def attach_pulls(path, held, refs, log=print):
         with contextlib.redirect_stdout(sys.stderr):
             add_tracks_and_vias_to_pcb(path, path, tracks, [],
                                        net_id_to_name={i_: n_.name for i_, n_ in pcb.nets.items()})
-    log(f'  pulls in the fanout: {len(attached)} pull pad(s) joined to their lanes'
+    log(f'  stubs joined: {len(attached)} stub pad(s) joined to their lanes'
         + (f' ({", ".join(lens)})' if attached else '')
         + (f'; left to the rest of the chain: {"; ".join(why)}' if why else ''))
     return [h for h in held if h not in attached], attached

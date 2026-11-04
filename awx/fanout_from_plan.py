@@ -48,12 +48,35 @@ from coherent_nets import coherent_nets, net_patterns, net_keys, engine_filter  
 import rules as _rules  # noqa: E402  ONE source for every design rule
 import route_layers  # noqa: E402  the routing layers: the escapes' runs may take any of them
 
-# SRC_CLIMB=k (2026-09-10): the SOURCE menu also offers CLIMBS -- a dog-bone
-# or via-in-pad whose run first travels up to k pitches along a gap under
-# the array and leaves the face at a chosen row or column (the human's
-# north riders at K51; escape_moves.enumerate_moves climb=). 0 = off, the
-# menu byte-identical. replan.py runs with 14.
-SRC_CLIMB = int(awx_settings.get('SRC_CLIMB', '0'))
+# SRC_CLIMB=k: the SOURCE menu also offers CLIMBS -- a dog-bone or via-in-pad
+# whose run first travels up to k pitches along a gap under the array and
+# leaves the face at a chosen row or column (escape_moves.enumerate_moves
+# climb=); 0 = none. With SRC_RUN_INNER, six: a ball in the middle of a
+# shared array whose only ways toward its destination were a surface run
+# out of the far half, through another bus's balls, leaves by a dog-bone and
+# a run on an inner layer under the array, as the human's does. replan.py
+# runs with 14.
+SRC_CLIMB = int(awx_settings.get('SRC_CLIMB', '6'))
+# SRC_RUN_INNER=1 (more routing layers than two): a source via's run -- in its pad, a dog-bone, a climb -- may lie on
+# the board's inner SIGNAL layers where it cannot on B.Cu (escape_moves run_layers): the human's escapes reorder the
+# lanes under the array on the free inner layers, where the back layer holds the passives under it. 0 = the menu
+# as on two layers
+SRC_RUN_INNER = (awx_settings.get('SRC_RUN_INNER') or '1') == '1'
+# DST_INWARD=1 (the whole route's ends): a destination ROW PART's pad also berths on a via INSIDE the part, behind its
+# row -- between a two-row connector's rows -- its lane out under the rows by the face toward the source
+# (escape_moves.Inward). 0 = the menu as before
+DST_INWARD = (awx_settings.get('DST_INWARD') or '1') == '1'
+# DST_ALONG=k: ...and its SURFACE lanes along that strip out of either end of the part, k of them (escape_moves.Inward
+# `along`). 0 = none
+DST_ALONG = int(awx_settings.get('DST_ALONG') or 3)
+# SRC_WALLS=1 (the whole route's ends): a source realize whose teeth WALL IN a ball of the source on no bus net (the
+# step's own cage test, route_bus.walls_made) is not kept -- the move walling it banned, the plan chosen again without
+# it. Two F.Cu runs from an inner via to the face, either side of a row, took every via site of the ball between them,
+# and its net shipped open. And a destination pass whose berths wall in a ball of a destination part likewise: the
+# walling berths re-planned as a berth not laid as asked is (fanout_destination) -- a BGA's berths' inner runs round
+# an RF ground ball, twelve lanes' copper about it on every layer. 0 = no test
+SRC_WALLS = (awx_settings.get('SRC_WALLS') or '1') == '1'
+WALL_RETRIES = 3            # (SRC_WALLS) a walling realize: the rest of its moves realized without the walling ones, so often
 # PLAN_PAGES=1 (2026-09-13): the PAGES-FIRST planner (pages_first.py) chooses
 # BOTH ends and the page of every net in one CP-SAT with hard two-page
 # planarity, so no net needs more than two vias by construction. 0 = the
@@ -270,7 +293,7 @@ def plan_state(pcb, names, banned=frozenset()):
 
     key_of_id = {i: k for k, (i, _n) in byname.items()}
 
-    def menu(pad, grid, nid, own_only=False, climb=0, street=0, street_dirs=None):
+    def menu(pad, grid, nid, own_only=False, climb=0, street=0, street_dirs=None, run_layers=(), row_inward=None):
         # (ends) the straight escape along the ball's own line too (escape_moves `straight`)
         return em.enumerate_moves(
             pad, grid, route_layers.escape_layers(pcb.board_info.copper_layers),
@@ -278,11 +301,34 @@ def plan_state(pcb, names, banned=frozenset()):
             lambda p, L, _n=nid: not any((obs(_n, L_, own_only).point_violation(
                 p, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0] for L_ in (via_layers or (L,))),
             climb=climb, straight=(PLAN_JUDGE == 'ends'),
-            street=street, street_pitch=pe.sm._STACK_PITCH + 1e-4, street_dirs=street_dirs, net=key_of_id.get(nid))
+            street=street, street_pitch=pe.sm._STACK_PITCH + 1e-4, street_dirs=street_dirs, net=key_of_id.get(nid),
+            run_layers=run_layers, row_inward=row_inward)
+    # the inner signal layers a via's run may take, the routing layers no plane fills: a source's (SRC_RUN_INNER), a
+    # row part's via inside it (DST_INWARD)
+    inner_runs = ()
+    if len(route_layers.layers()) > 2:
+        kinds_ = route_layers.plane_kinds(pcb, route_layers.layers())
+        inner_runs = tuple(L for L in route_layers.layers()
+                           if L not in ('F.Cu', 'B.Cu') and kinds_.get(L, '-') == '-')
+    src_runs = inner_runs if SRC_RUN_INNER else ()
+    # ...and a ball with NO via escape on those (another step's copper across every via's run on the outer layers): its
+    # via's run on every inner routing layer, a plane's too -- the solve and the ends price a run there (route_layers.
+    # run_price) -- where its one surface escape runs into copper nothing may move (an earlier bus's locked escape across
+    # the channel at the array's edge)
+    all_inner = tuple(L for L in route_layers.layers() if L not in ('F.Cu', 'B.Cu'))
+
+    def hemmed(nm, moves, again, what):
+        """`moves`, and where none is a via's, the via escapes `again(run_layers)` finds with the run on an inner layer"""
+        if not all_inner or any(m.vias for m in moves):
+            return moves
+        more = [m for m in again(all_inner) if m.vias and any(L in all_inner for _a, _b, L in m.legs)]
+        if more:
+            print(f'  {nm}: no via {what} move on the outer layers -- {len(more)} with the run on an inner layer offered')
+        return moves + more
     dmenu, launch, src_pad, dst_pad = {}, {}, {}, {}
     dref = ends[names[0]][2]
-    # (DEST naming several parts, one source and several ends: the trunk's -- the first -- is the plan's destination
-    # array, and each other a BRANCH off the trunk, whole_frame)
+    # (DEST naming several parts, one source and several ends: ONE destination, the GROUP of them -- whole_frame.Group;
+    # the first is the plan's destination array, each net's berth laid at its own part)
     _dl = te.dest_refs(awx_settings.get('DEST') or '')
     if len(_dl) > 1:
         dref = _dl[0]
@@ -319,16 +365,16 @@ def plan_state(pcb, names, banned=frozenset()):
                   + (p.global_y - by) * (p.global_y - by))
         dst_pad[nm] = pad
         far, toward, _fax, _b, _c = faces_of(ends[nm][2])
-        moves = dedupe_climbs(menu(pad, em.grid_of(fp), nid, climb=DST_CLIMB,
-                                   street=DST_STREET, street_dirs=(toward,)))
-        if PLAN_JUDGE == 'ends' and not far_half(pad):
-            moves = [m for m in moves if m.direction != far]
-        if ends[nm][2] != dref and len(_dl) > 1:
-            # a BRANCH's berths only on the faces turned toward the source: its lanes leave the trunk and land on
-            # them from the branch, which has no way round its part (whole_frame) -- a net whose ball has no such
-            # move has no berth, and the run names it
-            moves = [m for m in moves if em.DIRS[m.direction][0] * (_sc[0] - _c[0])
-                     + em.DIRS[m.direction][1] * (_sc[1] - _c[1]) > 1e-9]
+        # (DST_INWARD: a row part's pad also berths on a via inside the part, its lane out by the face toward the
+        # source)
+        iw_ = em.Inward(toward, te.VIA_SIZE, sr.FAN_CLEAR, sr.FAN_TRACK, inner_runs, along=DST_ALONG,
+                        along_pitch=te.MINP) \
+            if DST_INWARD and PLAN_JUDGE == 'ends' and em.row_part(fp) else None
+        def dst_moves(run_layers=()):
+            ms_ = dedupe_climbs(menu(pad, em.grid_of(fp), nid, climb=DST_CLIMB, street=DST_STREET,
+                                     street_dirs=(toward,), run_layers=run_layers, row_inward=iw_))
+            return ms_ if PLAN_JUDGE != 'ends' or far_half(pad) else [m for m in ms_ if m.direction != far]
+        moves = hemmed(nm, dst_moves(), dst_moves, 'berth')
         dmenu[nm] = unbanned_or_all(nm, moves, banned, 'berth')
         # a pad of this net on the other layer UNDER the ball (a back-side
         # termination resistor under a DDR clock ball) is served by a TIE
@@ -440,9 +486,11 @@ def plan_state(pcb, names, banned=frozenset()):
         # net's laid tooth TRACKS is a conflict with that tooth (sblock, below), not a refusal -- so teeth can swap and
         # rotate (a run net's laid via still refuses it). The other judges keep them priced against the run's laid
         # stubs (own_only)
-        smenu[nm] = unbanned_or_all(
-            nm, [m for m in dedupe_climbs(menu(p, sgrid, byname[nm][0], own_only=(PLAN_JUDGE != 'ends'), climb=SRC_CLIMB))
-                 if far_dir is None or m.direction == near_dir or side_half(p, m.direction)], banned, 'tooth')
+        def src_moves(run_layers):
+            return [m for m in dedupe_climbs(menu(p, sgrid, byname[nm][0], own_only=(PLAN_JUDGE != 'ends'),
+                                                  climb=SRC_CLIMB, run_layers=run_layers))
+                    if far_dir is None or m.direction == near_dir or side_half(p, m.direction)]
+        smenu[nm] = unbanned_or_all(nm, hemmed(nm, src_moves(src_runs), src_moves, 'tooth'), banned, 'tooth')
         _plegs = getattr(plan_state, '_pair_legs', None) or {}
         if nm in _plegs and _plegs[nm] in byname:
             keep = [m for m in smenu[nm] if pair_exit_clear(pcb, byname[nm][0], byname[_plegs[nm]][0], m, free=run_free)]
@@ -543,7 +591,7 @@ def plan_state(pcb, names, banned=frozenset()):
             'dst_pad': dst_pad, 'sref': sref, 'dref': dref, 'sgrid': sgrid,
             'bundle_layer': bundle_layer, 'chi': chi,
             'dgrid': dgrid, 'dboxes': dboxes,
-            # (DEST naming several parts: the trunk's first, each other a branch's -- whole_ends reads each lane's own)
+            # (DEST naming several parts, a GROUP: each lane's own part -- whole_ends reads each lane's own)
             'dests': _dests, 'dgrid_of': _dgrid_of, 'dbox_of': {r_: g_.bbox for r_, g_ in _dgrid_of.items()},
             'buses': buses, 'obs': obs, 'pcb': pcb,
             'pads_of': {ref: [(p.global_x, p.global_y) for p in fp.pads]
@@ -1220,9 +1268,11 @@ def plan(base, names, work):
                 if SRC_REFAN_JOINT:
                     _free = _blockers_for(parse_kicad_pcb(board), moves, st,
                                           set(names) - set(moves), log=print)
+                # (ends) every asked tooth laid on its own legs or left as it stood -- never laid another way
+                # (source_realize exact_only): the board is then one of the plan's teeth and the teeth it had
                 res_r = sr.realize(board, moves, st['src_pad'], st['byname'],
                                    st['sref'], new_board, guard_names=names,
-                                   free=_free, hands=berth_hands(dst_choice))
+                                   free=_free, hands=berth_hands(dst_choice), exact_only=(PLAN_JUDGE == 'ends'))
                 realized.append(res_r)
                 misses = [nm for nm, e in res_r['audit'].items() if not e['exact']]
                 # the JOINT realize (FANOUT_JOINT) plans the asked teeth with every other ball of the array and lays its
@@ -1238,7 +1288,13 @@ def plan(base, names, work):
                 line = (f'  round {r}: source residue move(s) realized: {sorted(moves)}'
                         + (f'; not laid as asked ({how_}): {misses}' if misses else '')
                         + (f'; REJECTED ({res_r["rejected"]})' if res_r['rejected'] else ''))
-                _trial.missed = misses if PLAN_JUDGE == 'ends' and not joint_ else []
+                # (ends) a miss the engine left as it stood is no tooth nobody chose: the board keeps it, its move
+                # banned above; one laid some other way (a ladder the realize did not cap) still throws the board out
+                restored_ = set(res_r.get('restored') or ())
+                if restored_ & set(misses):
+                    line += f'; left as they stood: {sorted(restored_ & set(misses))}'
+                _trial.missed = [nm for nm in misses if nm not in restored_] if PLAN_JUDGE == 'ends' and not joint_ \
+                    else []
                 if _trial.missed and res_r['rejected']:
                     # (ends) the trial is returned unjudged below, so the moves its DRC names are banned here too: a
                     # rejected trial's moves were never banned, and the next round asked them again
@@ -1257,6 +1313,36 @@ def plan(base, names, work):
                                   for n in (drc_line_nets(ln, net_keys(st['byname'])) or ())} & set(moves))
                     ban_moves(banned, moves, hit or list(moves), names)
                     return None, line
+                if SRC_WALLS and PLAN_JUDGE == 'ends':
+                    # (ends) a board whose teeth wall in a ball no bus net is on is not kept: the moves walling one
+                    # banned, as a refusal is, and the plan chosen again without them
+                    import route_bus
+                    full_ = {n: st['byname'][n][1].name for n in names if n in st['byname']}
+                    walls_ = route_bus.walls_made(board, new_board, [st['sref']], list(full_.values()),
+                                                  [full_[n] for n in list(moves) + list(_free) if n in full_])
+                    short_ = {v: k for k, v in full_.items()}
+                    by_ = {k: sorted(short_[x] for x in v if short_.get(x) in moves) for k, v in walls_.items()}
+                    wall_nets = sorted({n for v in by_.values() for n in v})
+                    if walls_:
+                        line += '; WALLS IN ' + ', '.join(f'{k} ({"/".join(v) or "none of its moves alone"})'
+                                                          for k, v in by_.items())
+                    if wall_nets:
+                        # banned, and the REST of the moves realized without them at once -- their teeth left as
+                        # they stood -- rather than the ends searched again for each: a run along a channel walls the
+                        # row beside it with the copper across the row, and one class banned a search was another class
+                        # of the same net's the next (three searches, eleven balls)
+                        ban_moves(banned, moves, wall_nets, names)
+                        sub_ = {nm: m for nm, m in moves.items() if nm not in wall_nets}
+                        depth_ = getattr(_trial, 'depth', 0)
+                        if sub_ and depth_ < WALL_RETRIES:
+                            _trial.depth = depth_ + 1
+                            try:
+                                res_w, line_w = _trial(sub_, new_board.replace('.kicad_pcb', 'w.kicad_pcb'))
+                            finally:
+                                _trial.depth = depth_
+                            return res_w, line + ' -- banned; the rest realized without them:\n' + line_w
+                        _trial.missed = sorted(set(_trial.missed) | set(wall_nets))
+                        return None, line + ' -- banned'
                 st2 = plan_state(parse_kicad_pcb(new_board), names, banned)
                 src2 = {}
                 # the destination re-chosen FROM THE PREVIOUS CHOICE: every
@@ -1518,8 +1604,12 @@ def explain_plan(choice, st, names, out_path=None, board=None, achieved=None):
             plan['ends_model'] = {k: pe_.get('lane_' + k, {}) for k in ('over', 'load', 'x', 'front')}
             if pe_.get('cut') is not None:
                 c_ = pe_['cut']
-                # (a far-face cut its y, as it always was; one off the far face -- winding -- its face and coordinate)
-                plan['dest_cut'] = [c_[0], float(c_[1])] if isinstance(c_, (list, tuple)) else float(c_)
+                # (a far-face cut its y, as it always was; one off the far face -- winding -- its face and coordinate;
+                # a GROUP's ('P', x, y), the point on its walk)
+                plan['dest_cut'] = [c_[0]] + [float(v) for v in c_[1:]] if isinstance(c_, (list, tuple)) else float(c_)
+            if pe_.get('entry'):
+                # (a GROUP's ways in: each lane's place on its walk, whole_frame.Group -- the frame takes the way nearest)
+                plan['dest_entry'] = {l_: [float(v) for v in p_] for l_, p_ in pe_['entry'].items()}
             if pe_.get('scut') is not None:
                 plan['src_cut'] = float(pe_['scut'])       # (the source's far face's: a far-face tooth's side round it)
         with open(side, 'w', encoding='utf-8') as f:
@@ -2099,7 +2189,7 @@ def fanout_audit(board, names, dest):
     import whole_frame
     _d = awx_settings.get('DEST') or ''
     if len(te.dest_refs(_d)) > 1 and te.dest_refs(_d)[0] == dest:
-        dest = _d                       # (DEST naming several parts, `dest` the trunk's: the frame of them all)
+        dest = _d                       # (DEST naming several parts, `dest` the first: the frame of the GROUP)
     with awx_settings.given({**awx_settings.environ(), 'BENCH': board, 'NETS': ','.join(names), 'DEST': dest}):
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -2117,6 +2207,19 @@ def fanout_audit(board, names, dest):
 def _audit_line(splits, far, stops):
     return '; '.join([f'{pr_} split at its {end_} (round {", ".join(ls_)})' for pr_, end_, ls_ in splits]
                      + ([f'{", ".join(far)} launch from the source\'s far face'] if far else []) + stops)
+
+
+def _berth_walls(board, out_path, names, choice, dst_pad, byname):
+    """(SRC_WALLS) {'REF.PAD': [net]}: the balls of the destination parts on no bus net that the pass's berths
+    (`out_path` against `board`, the board it laid them on) wall in -- route_bus.walls_made, the step's own cage test --
+    each with the run's nets of `choice` that wall it, by their short names"""
+    import route_bus
+    full_ = {n: byname[n][1].name for n in names if n in byname}
+    refs = sorted({dst_pad[n].component_ref for n in names if dst_pad.get(n) is not None})
+    walls_ = route_bus.walls_made(board, out_path, refs, list(full_.values()),
+                                  [full_[n] for n in choice if n in full_])
+    short_ = {v: k for k, v in full_.items()}
+    return {k: sorted(short_[x] for x in v if short_.get(x) in choice) for k, v in walls_.items()}
 
 
 def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
@@ -2208,14 +2311,25 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
             legs_ = _split_legs(names)
             bad = sorted({l_ for _pr, end_, lanes_ in sp if end_ == 'berth' for ln in lanes_
                           for l_ in legs_.get(ln, (ln,)) if l_ in choice})
-            if not sp and not far and not stops:
+            walled_ = _berth_walls(board, out_path, names, choice, dst_pad, byname) \
+                if not sp and not far and not stops and SRC_WALLS and PLAN_JUDGE == 'ends' else {}
+            if not sp and not far and not stops and not walled_:
                 print(f'  destination pass {it}: every berth laid as planned')
                 break
-            print(f'  destination pass {it}: every berth laid as planned, but the fanout audit finds: '
-                  + _audit_line(sp, far, stops))
-            if not bad:
-                break
-            misses = bad
+            if walled_:
+                wall_nets = sorted({n_ for v_ in walled_.values() for n_ in v_})
+                print(f'  destination pass {it}: every berth laid as planned, but they WALL IN '
+                      + ', '.join(f'{k_} ({"/".join(v_) or "none of its berths alone"})' for k_, v_ in walled_.items())
+                      + (' -> re-planned' if wall_nets else ''))
+                if not wall_nets:
+                    break
+                misses = wall_nets             # (banned and re-planned below, as a berth not laid as asked)
+            else:
+                print(f'  destination pass {it}: every berth laid as planned, but the fanout audit finds: '
+                      + _audit_line(sp, far, stops))
+                if not bad:
+                    break
+                misses = bad
         if misses:
             ban_moves(banned, choice, misses, names)
             print(f'  destination pass {it}: {len(misses)} berth(s) not laid as asked '

@@ -23,6 +23,10 @@ state's escapes LAID (escape_plan.lay) and its plan sidecar beside it, as the ro
    an all-pair bus's setup once found its member's name in none of the sidecar's keys and dropped the plan, reading
    the escape directions off copper (sdi_mipi_conv's MIPI bus to J4: a south tooth read west, refused every round).
 
+All four on the fixture as drawn (pair chirality +1) and with every ball's row mirrored (-1: setup turns the board over
+in memory and mirrors the plan into it; candidate() must do the same, or the check reads a bus in that frame as
+another board and its verdict is not the round's).
+
 A field setup gains and candidate() does not read is a drift this test sees only where the frame or the solve reads it.
 """
 import contextlib
@@ -63,16 +67,19 @@ N, PITCH, GAP = 5, 0.8, 7.0
 # net: (U1 ball, U5 ball) -- the balls' moment about the source-to-destination axis positive: pair chirality +1; S2
 # leaves the source's top row for the destination's bottom one and S3 the other way, so the lanes cross
 BUS = {'D_P': (18, 16), 'D_N': (23, 21), 'S1': (13, 11), 'S2': (3, 22), 'S3': (24, 1)}
+# ...and every ball's row mirrored: the balls' moment negative, chirality -1 -- a plan made in the turned-over pair frame,
+# which setup reads on the board turned over in memory and candidate() must read the same way
+BUS_TURNED = {nm: tuple((N - 1 - b_ // N) * N + b_ % N for b_ in ab) for nm, ab in BUS.items()}
 
 
-def board():
-    """two dog-boneable arrays, U1 at x 0 and U5 at x GAP + 4 pitches: the bus's balls on BUS's nets, every other ball
-    a net of its own"""
+def board(bus):
+    """two dog-boneable arrays, U1 at x 0 and U5 at x GAP + 4 pitches: the bus's balls on `bus`'s nets, every other
+    ball a net of its own"""
     nets, n_of = ['(net 0 "")'], {}
-    for nm in BUS:
+    for nm in bus:
         n_of[nm] = len(nets)
         nets.append(f'(net {len(nets)} "{nm}")')
-    used = {(ref, b): nm for nm, (a, z) in BUS.items() for ref, b in (('U1', a), ('U5', z))}
+    used = {(ref, b): nm for nm, (a, z) in bus.items() for ref, b in (('U1', a), ('U5', z))}
     pads = {}
     for ref, x0 in (('U1', 0.0), ('U5', GAP + (N - 1) * PITCH)):
         out = []
@@ -111,9 +118,23 @@ def board():
 
 def main():
     fails = []
+    for bus, want in ((BUS, 1), (BUS_TURNED, -1)):
+        case(bus, want, fails)
+    return report(fails)
+
+
+def case(bus, want, fails_all):
+    """the comparisons on the fixture with `bus`'s balls, whose pair reads chirality `want`; each failure into
+    `fails_all`, named by the chirality"""
+    fails = []
+    _case(bus, want, fails)
+    fails_all += [f'(chirality {want:+d}) {f_}' for f_ in fails]
+
+
+def _case(bus, want, fails):
     with tempfile.TemporaryDirectory() as td:
         raw, base, laid = (os.path.join(td, f) for f in ('raw.kicad_pcb', 'base.kicad_pcb', 'laid.kicad_pcb'))
-        open(raw, 'w').write(board())
+        open(raw, 'w').write(board(bus))
         with contextlib.redirect_stdout(io.StringIO()):
             dga.dogbone_file(raw, base, ['U1', 'U5'], log=lambda *a: None)
             pcb = parse_kicad_pcb(base)
@@ -123,8 +144,8 @@ def main():
         E = whole_ends.Ends(st, src_free=True)
         state = E.start()
         plan, tracks, nets = whole_ends.state_plan(E, state)
-        if plan['chi'] != 1:
-            fails.append(f'the fixture reads pair chirality {plan["chi"]}: the test is written for +1')
+        if plan['chi'] != want:
+            fails.append(f'the fixture reads pair chirality {plan["chi"]}, written for {want:+d}')
         moves = []
         for lane, lg in E.lanes:
             for k_, opts in ((0, E.T[lane]), (1, E.B[lane])):
@@ -137,7 +158,7 @@ def main():
         cand = whole_ctx.candidate(pcb, nets, 'U5', plan, tracks, board=base)
         if cand is None:
             fails.append('candidate() gave no bench')
-            return report(fails)
+            return
         # 1. the fields
         r6 = lambda v: tuple(round(float(x), 6) for x in v)
         for f_ in ('pairs', 'tooth_layer', 'dest_layer', 'pair_layers', 'src_ref', 'dest_cut', 'chi'):
@@ -221,9 +242,8 @@ def main():
                 {k: (r6(v[0]), r6(v[1])) for k, v in real1.ends.items() if k in cand1.ends}:
             fails.append('4. the pair alone: ends differ')
         if not fails:
-            print(f'   {len(nets)} nets, {len(E.lanes)} lanes, {len(tracks)} escape runs; check {vc}; frame lanes '
-                  f'{Fc.M}')
-    return report(fails)
+            print(f'   chirality {want:+d}: {len(nets)} nets, {len(E.lanes)} lanes, {len(tracks)} escape runs; check {vc}; '
+                  f'frame lanes {Fc.M}')
 
 
 def report(fails):

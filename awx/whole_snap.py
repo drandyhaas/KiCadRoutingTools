@@ -1516,6 +1516,92 @@ for sw in range(SWEEPS):
     log(f'  sweep {sw + 1}: pieces {nb0} -> {nb1}')
     if nb1 >= nb0 and not relaid:
         break
+
+
+def snapshot(m):
+    """lane m's laid copper as place() takes it back"""
+    keep = res['lanes'][m]
+    return ([(tuple(p_[0:2]), tuple(p_[2:4]), p_[4]) for p_ in keep['pieces']], [tuple(v) for v in keep['vias']],
+            {'ends': keep.get('ends'), 'cross': keep.get('cross')})
+
+
+def _seg_dist(p, a, b):
+    ax, ay = a
+    dx, dy = b[0] - ax, b[1] - ay
+    L2 = dx * dx + dy * dy
+    t_ = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2))
+    return math.hypot(ax + t_ * dx - p[0], ay + t_ * dy - p[1])
+
+
+def blockers(n, at, reach=0.6, most=5):
+    """the laid lanes nearest where lane n got stuck: their copper -- tracks, and vias by their barrels, where a lane's
+    own change cannot stand -- within `reach` of it, the nearest `most`"""
+    near = []
+    for m, L_ in res['lanes'].items():
+        if m == n or m in HELD:
+            continue
+        d_ = min([_seg_dist(at, p_[0:2], p_[2:4]) for p_ in L_['pieces']]
+                 + [math.hypot(v_[0] - at[0], v_[1] - at[1]) - VR for v_ in L_.get('vias') or ()], default=math.inf)
+        if d_ <= reach:
+            near.append((d_, m))
+    return [m for _d, m in sorted(near)[:most]]
+
+
+# A lane the sweeps could not lay: the lanes laid nearest where it got stuck LIFTED, it laid first, and they laid again
+# against its copper -- kept when every one of them is laid again, else all as it was. A lane laid before it in the
+# order and off its smooth line took the room its share left the next, and the sweeps lay the failed lane again against
+# the same copper (a group bus: ETH_PHY_MDIO 0.2 mm from where USB_ULPI_DATA3 stopped, on a smooth plan the audit
+# passed)
+LIFT_ROUNDS = 3             # (a lane stuck again past the lifted lanes: the ones nearest where it stops next, too)
+for n in [n for n in lay if n in failed and n not in prs]:
+    at = STUCK_AT.get(n)
+    near = blockers(n, at) if at is not None else []
+    if not near:
+        continue
+    old = {}
+    out, why, fold_ = None, failed[n], None
+    for _r in range(LIFT_ROUNDS):
+        for m in near:
+            if m not in old:
+                old[m] = snapshot(m)
+                lift(m)
+        UNSHARED.clear()
+        UNSHARED.update((set(failed) - {n}) | set(old))
+        out, why = route_memo(n)
+        fold_ = None
+        if out is None:
+            fold_ = why
+            out, why = route_memo(n, strict=False)
+        if out is not None or STUCK_AT.get(n) is None:
+            break
+        near = [m for m in blockers(n, STUCK_AT[n]) if m not in old]
+        if not near:
+            break
+    near = list(old)
+    UNSHARED.clear()
+    UNSHARED.update(set(failed) - {n})
+    ok_ = out is not None
+    if ok_:
+        place(n, out)
+        for m in near:
+            o2, _w2 = route_memo(m, strict=m not in folded, wide=m in WIDE)
+            if o2 is None:
+                ok_ = False
+                break
+            place(m, o2)
+    UNSHARED.clear()
+    if ok_:
+        if fold_ is not None:
+            folded[n] = fold_
+        del failed[n]
+        log(f'  {n} laid with {", ".join(near)} lifted and laid again round it')
+    else:
+        lift(n)
+        for m in near:
+            lift(m)
+            place(m, old[m])
+        log(f'  {n}: not laid with {", ".join(near)} lifted either ('
+            + (why if out is None else 'they were not all laid again round it') + ')')
 for n, why in failed.items():
     at = list(map(float, STUCK_AT.get(n, LANE[n]['pts'][0])))       # where it got stuck (else its start)
     res['conflicts'].append({'frame': 'snap', 'xy': at, 'lanes': [n],
