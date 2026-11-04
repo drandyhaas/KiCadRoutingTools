@@ -2090,6 +2090,114 @@ def single_pad_net_ids(footprint: Footprint, pcb_data: PCBData) -> Set[int]:
     return nc
 
 
+#: #1641: why a --nets pattern selected no pad to fan out, by
+#: net_filter_misses' `reason`. `no_such_net` is the one a CLI refuses (exit
+#: 2) when every pattern has it, as route.py refuses a net list naming no net.
+FILTER_MISS_TEXT = {
+    'no_such_net': "no net of that name on this board",
+    'not_on_part': "no pad of {part} is on {nets}",
+    'unconnected': "{pads} {are} on a no-connect (unconnected-*) net",
+    'single_pad': ("{pads} {are} on a net with one pad board-wide, nothing "
+                   "to connect to (counted in skipped_nc)"),
+    'interior': ("{pads} {are} interior, which the stub escape skips; "
+                 "--escape-method underpad reaches {them}"),
+}
+
+
+def net_filter_misses(footprint: Footprint, pcb_data: PCBData,
+                      net_filter: Optional[List[str]],
+                      skip_reason=None) -> List[Dict]:
+    """The --nets patterns that select NO pad of FOOTPRINT to fan out (#1641).
+
+    One dict per include pattern that selects nothing -- `pattern`,
+    `reason` (a FILTER_MISS_TEXT key), `part` (the footprint's reference),
+    `nets` (the board nets it names) and `pads` ("U1.33") -- in the
+    filter's order; [] with no filter, or when
+    every pattern selects a pad. A pattern's pads are judged as the fanouts'
+    own loops judge them: a no-connect or single-pad net is skipped, and
+    SKIP_REASON(pad) -> reason-or-None adds an engine's own skip (the QFN
+    stub escape's interior pads). Exclusions only narrow what a pattern
+    names. Without this a filter that selected nothing printed "Found 0 pads"
+    and a summary of `requested: 0, failed: 0`, which reads the same as a
+    part with nothing to do.
+    """
+    from net_queries import split_net_patterns, net_pattern_matches, board_net_names
+    if not net_filter:
+        return []
+    known = frozenset(board_net_names(pcb_data))
+    includes, excludes = split_net_patterns(net_filter, known)
+    nc = single_pad_net_ids(footprint, pcb_data)
+    ref = getattr(footprint, 'reference', '?')
+    misses = []
+    for pat in includes:
+        nets = sorted(n for n in known if net_pattern_matches(n, pat, known)
+                      and not any(net_pattern_matches(n, e, known)
+                                  for e in excludes))
+        if not nets:
+            misses.append({'pattern': pat, 'reason': 'no_such_net',
+                           'part': ref, 'nets': [], 'pads': []})
+            continue
+        named = set(nets)
+        pads = [p for p in footprint.pads if p.net_id and p.net_name in named]
+        if not pads:
+            misses.append({'pattern': pat, 'reason': 'not_on_part',
+                           'part': ref, 'nets': nets, 'pads': []})
+            continue
+        why = []
+        for p in pads:
+            if p.net_name.lower().startswith('unconnected-'):
+                why.append('unconnected')
+            elif p.net_id in nc:
+                why.append('single_pad')
+            else:
+                r = skip_reason(p) if skip_reason else None
+                if r is None:
+                    break                       # this pattern selects a pad
+                why.append(r)
+        else:
+            # the actionable reason first: an engine's own skip, then NC
+            reason = next((r for r in ('interior', 'single_pad', 'unconnected')
+                           if r in why), why[0])
+            misses.append({'pattern': pat, 'reason': reason, 'part': ref,
+                           'nets': nets,
+                           'pads': sorted({f"{ref}.{p.pad_number}" for p in pads})})
+    return misses
+
+
+def filter_miss_lines(misses: List[Dict], flag: str = '--nets ') -> List[str]:
+    """Console lines for net_filter_misses' list, one per pattern; FLAG
+    prefixes the pattern (the GUI passes '', it has no --nets)."""
+    lines = []
+    for m in misses:
+        pads = m['pads']
+        shown = ', '.join(pads[:6]) + (f" (+{len(pads) - 6} more)" if len(pads) > 6 else '')
+        nets = ', '.join(m['nets'][:4]) + (' ...' if len(m['nets']) > 4 else '')
+        text = FILTER_MISS_TEXT.get(m['reason'], m['reason']).format(
+            part=m['part'], nets=nets or '-', pads=f"pad(s) {shown}",
+            are='is' if len(pads) == 1 else 'are',
+            them='it' if len(pads) == 1 else 'them')
+        lines.append(f"  {flag}{m['pattern']!r} selects no pad to fan out: {text}")
+    return lines
+
+
+def refuse_unknown_nets(misses: List[Dict], pcb_data: PCBData,
+                        net_filter) -> Optional[str]:
+    """The CLI's refusal when NOT ONE include pattern names a board net, as
+    route.py refuses a net list that names none (#1641); None otherwise.
+    MISSES is net_filter_misses' list for the same filter."""
+    from net_queries import split_net_patterns, board_net_names
+    if not net_filter:
+        return None
+    includes = split_net_patterns(net_filter, board_net_names(pcb_data))[0]
+    if includes and len(misses) == len(includes) \
+            and all(m['reason'] == 'no_such_net' for m in misses):
+        return (f"None of the {len(includes)} requested --nets pattern(s) "
+                f"names a net on this board -- nothing was fanned out and no "
+                f"board was written. First few: "
+                f"{', '.join(repr(p) for p in includes[:5])}")
+    return None
+
+
 
 def _strap_unescaped_extras(footprint: Footprint, pcb_data: PCBData,
                             balls: List, tracks: List[Dict],
@@ -4656,6 +4764,11 @@ LAST_PLANE_DROP_REPORT: Dict = {}
 # planner (or the user) into a pointless tighter-clearance retry.
 LAST_CANCEL_SKIPPED: List[str] = []
 
+# #1641: the --nets patterns the last generate_bga_fanout call selected no
+# ball with (net_filter_misses' dicts); EMPTY with no filter or when every
+# pattern selected one. JSON_SUMMARY `unmatched` and the fanout tab read it.
+LAST_FILTER_MISSES: List[Dict] = []
+
 
 def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
                           net_filter: Optional[List[str]] = None,
@@ -5163,6 +5276,15 @@ def generate_bga_fanout(footprint: Footprint,
     if progress_callback:
         _nballs = sum(1 for _p in footprint.pads if _p.net_id)
         progress_callback(0, 0, f"BGA fanout {_ref}: escaping {_nballs} ball(s)...")
+    # #1641: each --nets pattern that selects no ball, and why; then every
+    # pattern that spells a board net verbatim is made literal, so a bus
+    # member 'D[3]' fans out itself rather than 'D3' in every pass below.
+    LAST_FILTER_MISSES.clear()
+    LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, net_filter))
+    for _line in filter_miss_lines(LAST_FILTER_MISSES):
+        print(_line)
+    from net_queries import literal_net_patterns, board_net_names
+    net_filter = literal_net_patterns(net_filter, board_net_names(pcb_data))
     # #621: wrap the caller's predicate so we learn whether a cancel actually
     # FIRED, rather than re-asking afterwards -- re-asking would report a run
     # whose loops all completed as cut short if the flag flipped during the
@@ -5650,6 +5772,12 @@ def main():
         # at the ceiling when one was given, as route.py's map is.
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
     )
+    # #1641: a --nets list naming no net on the board is refused, as route.py
+    # refuses one; a pattern naming a net with no ball here is in `unmatched`.
+    _refusal = refuse_unknown_nets(LAST_FILTER_MISSES, pcb_data, args.nets)
+    if _refusal:
+        print(f"Error: {_refusal}")
+        return 2
 
     if tracks:
         print(f"\nWriting {len(tracks)} tracks to {args.output}...")
@@ -5800,6 +5928,8 @@ def main():
         'failed': len(unescaped),
         'unescaped_nets': unescaped,
         'skipped_nc': len(single_pad_net_ids(footprint, pcb_data)),
+        # #1641: each --nets pattern that selected no ball, with its reason
+        'unmatched': list(LAST_FILTER_MISSES),
         'clearance': args.clearance,
         'track_width': args.track_width,
         'layers': list(args.layers) if args.layers else None,

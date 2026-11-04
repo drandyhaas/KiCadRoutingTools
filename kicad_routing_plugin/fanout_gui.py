@@ -1713,19 +1713,22 @@ class FanoutTab(wx.Panel):
                         bga_fanout.generate_bga_fanout(
                             footprint, self.pcb_data, **kwargs)
                     skipped = list(bga_fanout.LAST_CANCEL_SKIPPED)
+                    misses = list(bga_fanout.LAST_FILTER_MISSES)
                 else:
                     import qfn_fanout
                     tracks, vias, failed = qfn_fanout.generate_qfn_fanout(
                         footprint, self.pcb_data, **kwargs)
                     vias_to_remove = None
                     skipped = list(qfn_fanout.LAST_CANCEL_SKIPPED)
+                    misses = list(qfn_fanout.LAST_FILTER_MISSES)
                 # #857: the Design rules line bga_fanout.py / qfn_fanout.py
                 # print (the exit code is the CLI's alone).
                 from fab_tiers import finish_design_rules
                 finish_design_rules(None, 0)
                 self._operation_result = {
                     'tracks': tracks, 'vias': vias, 'failed': failed,
-                    'vias_to_remove': vias_to_remove, 'skipped': skipped}
+                    'vias_to_remove': vias_to_remove, 'skipped': skipped,
+                    'filter_misses': misses}
         except Exception as exc:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -1766,6 +1769,7 @@ class FanoutTab(wx.Panel):
                     res.get('tracks') or [], res.get('vias') or [],
                     failed_nets=res.get('failed'),
                     vias_to_remove=res.get('vias_to_remove'),
+                    filter_misses=res.get('filter_misses'),
                     **apply_kw)
             # The plan executor's "this step produced its result" (gui_utils);
             # the error and cancel returns above produce none.
@@ -2188,7 +2192,8 @@ class FanoutTab(wx.Panel):
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga',
-                              optimize_caps=False, vias_to_remove=None):
+                              optimize_caps=False, vias_to_remove=None,
+                              filter_misses=None):
         """Apply fanout results to the pcbnew board.
 
         Args:
@@ -2207,6 +2212,10 @@ class FanoutTab(wx.Panel):
                 top layer no longer needs its via). The CLI writer strips
                 them from the file; the GUI must delete them from the live
                 board too (#508 finding 17 -- they were silently discarded).
+            filter_misses: the engine's LAST_FILTER_MISSES (#1641) -- each
+                selected net that had no pad to fan out on this part, and why
+                (an interior pad the stub escape skips, ...); listed in the
+                completion message, as the CLI lists them in `unmatched`.
         """
         import pcbnew
         from .swig_gui import _build_layer_mappings
@@ -2428,6 +2437,11 @@ class FanoutTab(wx.Panel):
         msg += f"  {vias_added} vias\n"
         if cap_summary:
             msg += "\n" + cap_summary + "\n"
+        if filter_misses:
+            from bga_fanout import filter_miss_lines
+            msg += self._net_list("Selected nets with no pad to fan out",
+                                  [l.strip() for l in
+                                   filter_miss_lines(filter_misses, flag='')])
         if failed_nets:
             if fanout_kind == 'qfn':
                 unescaped, flagged = self._qfn_failure_split(failed_nets, tracks,

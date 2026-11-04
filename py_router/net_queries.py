@@ -54,8 +54,33 @@ def split_net_patterns(patterns: List[str],
     return include_patterns, exclude_patterns
 
 
-def net_pattern_matches(net_name: str, pattern: str) -> bool:
+def _leaf(name: str) -> str:
+    return name.rsplit('/', 1)[-1]
+
+
+@functools.lru_cache(maxsize=256)
+def _pattern_names_a_net(pattern: str, known: frozenset) -> bool:
+    """True when PATTERN, which holds no '*' or '?', spells a net of KNOWN
+    verbatim: the whole name, or (a pattern with no '/') its last sheet
+    component."""
+    if pattern in known:
+        return True
+    return '/' not in pattern and any(_leaf(n) == pattern for n in known)
+
+
+def net_pattern_matches(net_name: str, pattern: str,
+                        known_net_names=None) -> bool:
     """Match one net name against one fnmatch pattern, sheet-path aware (#493).
+
+    A pattern equal to the net's name -- or, with no '/', to its last sheet
+    component -- always matches, whatever it holds (#1641): KiCad names a bus
+    member 'D[3]', which fnmatch reads as 'D' then a class holding '3', so the
+    net's own name used to select 'D3' and never itself. With
+    KNOWN_NET_NAMES (the board's net names) such a pattern is LITERAL when it
+    holds no '*' or '?' and spells one of them: it then selects only the net
+    it spells -- the rule expand_net_patterns has always applied to a
+    '!'-pattern that names a net (#177). Without it a '[' pattern still
+    globs too ('D[3]' selects 'D3' as well as 'D[3]').
 
     KiCad qualifies a net with the sheet it was declared on, so the board's net
     is '/GND' or '/Management Interface/VSMPS', not 'GND'. A plain
@@ -82,10 +107,19 @@ def net_pattern_matches(net_name: str, pattern: str) -> bool:
     case-folds on Windows only, so `/*PCIE*` selected `/PCIe-M2/FB` there and
     nowhere else.
     """
+    unqualified = '/' not in pattern and '/' in net_name
+    if net_name == pattern or (unqualified and _leaf(net_name) == pattern):
+        return True
+    if '[' in pattern and '*' not in pattern and '?' not in pattern \
+            and known_net_names is not None:
+        if not isinstance(known_net_names, frozenset):
+            known_net_names = frozenset(known_net_names)
+        if _pattern_names_a_net(pattern, known_net_names):
+            return False          # a literal name; equality was tested above
     if fnmatch.fnmatchcase(net_name, pattern):
         return True
-    if '/' not in pattern and '/' in net_name:
-        return fnmatch.fnmatchcase(net_name.rsplit('/', 1)[-1], pattern)
+    if unqualified:
+        return fnmatch.fnmatchcase(_leaf(net_name), pattern)
     return False
 
 
@@ -140,6 +174,53 @@ def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
 
     # No include patterns (only exclusions) and didn't match any exclusion
     return True
+
+
+def board_net_names(pcb_data) -> Set[str]:
+    """Every net name on the board: pcb.nets and the pads' own names (a net
+    only a pad names), as expand_net_patterns collects them."""
+    names = {net.name for net in pcb_data.nets.values() if net.name}
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if pad.net_name:
+                names.add(pad.net_name)
+                break
+    return names
+
+
+def literal_net_patterns(patterns: Optional[List[str]],
+                         known_net_names) -> Optional[List[str]]:
+    """PATTERNS with each one that spells a board net verbatim made literal.
+
+    A pattern with no '*' or '?' that names a net of KNOWN_NET_NAMES (the
+    whole name, or with no '/' its last sheet component) has its '[' written
+    '[[]', so any fnmatch-based matcher selects that net and only it: a bus
+    member 'D[3]' then selects itself and not 'D3' (#1641), as
+    expand_net_patterns reads the same spelling. Every other pattern, and the
+    '!' / '\\!' prefixes split_net_patterns reads, is passed through.
+    """
+    if not patterns:
+        return patterns
+    known = frozenset(known_net_names)
+
+    def lit(core):
+        if '[' in core and '*' not in core and '?' not in core \
+                and _pattern_names_a_net(core, known):
+            return core.replace('[', '[[]')
+        return core
+
+    out = []
+    for p in patterns:
+        if p in known:                       # a literal, '!'-named or not
+            esc = lit(p)
+            out.append(('\\' + esc) if esc != p and p.startswith('!') else esc)
+        elif p.startswith('\\!'):              # the escaped literal '!FOO'
+            out.append('\\' + lit(p[1:]))
+        elif p.startswith('!'):
+            out.append('!' + lit(p[1:]))
+        else:
+            out.append(lit(p))
+    return out
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
@@ -2024,6 +2105,7 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                   f"(#1405, #513 item 7).")
 
     known_net_names = unfiltered_net_names
+    _known_frozen = frozenset(known_net_names)
     all_net_names = list(all_net_names)
 
     # #513 item 19: an exclusion-ONLY pattern list means "everything else".
@@ -2072,7 +2154,8 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
         if is_exclude:
             exclude_pattern = pattern[1:]  # Remove the !
             matches = [name for name in all_net_names
-                       if net_pattern_matches(name, exclude_pattern)]
+                       if net_pattern_matches(name, exclude_pattern,
+                                              _known_frozen)]
             is_wildcard = '*' in exclude_pattern or '?' in exclude_pattern
             if matches:
                 label = (f"Exclusion pattern '!{exclude_pattern}'" if is_wildcard
@@ -2114,7 +2197,7 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                     seen.remove(name)
         else:
             matches = sorted([name for name in all_net_names
-                              if net_pattern_matches(name, pattern)
+                              if net_pattern_matches(name, pattern, _known_frozen)
                               and name not in excluded])
             if '*' in pattern or '?' in pattern:
                 if not matches:

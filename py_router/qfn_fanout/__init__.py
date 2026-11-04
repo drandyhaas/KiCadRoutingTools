@@ -24,8 +24,9 @@ from kicad_parser import parse_kicad_pcb, Footprint, PCBData, find_components_by
 from kicad_writer import add_tracks_and_vias_to_pcb
 from qfn_fanout.types import QFNLayout, PadInfo, FanoutStub
 from bga_fanout.constants import POSITION_TOLERANCE
-from bga_fanout import single_pad_net_ids
-from net_queries import matches_net_filter
+from bga_fanout import (single_pad_net_ids, net_filter_misses,
+                        filter_miss_lines)
+from net_queries import matches_net_filter, literal_net_patterns, board_net_names
 from qfn_fanout.layout import analyze_qfn_layout, analyze_pad, single_line_reason
 from qfn_fanout.geometry import calculate_fanout_stub
 
@@ -70,6 +71,13 @@ LAST_UNDERPAD_REPORT: Dict = {}
 # end-of-run line read; this list is the per-pad view a test or the GUI can
 # read without parsing that.
 LAST_ESCALATED: List[Dict] = []
+
+# #1641: the --nets patterns the last run selected no pad with, one dict per
+# pattern (bga_fanout.net_filter_misses: `pattern`, `reason`, `nets`, `pads`).
+# Refreshed by every generate_qfn_fanout call; EMPTY with no filter or when
+# every pattern selected a pad. The CLI's JSON_SUMMARY `unmatched` and the
+# fanout tab's completion message read it.
+LAST_FILTER_MISSES: List[Dict] = []
 
 
 #: #1565: (board, part) pairs whose held .kicad_dru rules this call named, so
@@ -1776,6 +1784,7 @@ def generate_qfn_fanout(footprint: Footprint,
     """
     LAST_CANCEL_SKIPPED.clear()
     LAST_ESCALATED.clear()          # #1328
+    LAST_FILTER_MISSES.clear()      # #1641
     _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
@@ -1890,6 +1899,11 @@ def generate_qfn_fanout(footprint: Footprint,
         print(f"  Skipping {len(nc_net_ids)} single-pad/NC net(s) "
               f"(nothing to connect to)")
 
+    # #1641: a pattern that spells a board net verbatim selects that net
+    # alone, so a bus member 'D[3]' fans out itself rather than 'D3'.
+    _user_filter = net_filter
+    net_filter = literal_net_patterns(net_filter, board_net_names(pcb_data))
+
     for pad in footprint.pads:
         if not pad.net_name or pad.net_id == 0:
             continue
@@ -1920,6 +1934,15 @@ def generate_qfn_fanout(footprint: Footprint,
     print(f"  Found {len(pad_infos)} pads to fanout:")
     for side, count in sorted(side_counts.items()):
         print(f"    {side}: {count} pads")
+    # #1641: each --nets pattern that selected no pad, and why -- the stub
+    # escape's interior skip above among the reasons.
+    LAST_FILTER_MISSES.extend(net_filter_misses(
+        footprint, pcb_data, _user_filter,
+        skip_reason=(None if escape_method == "underpad" else
+                     lambda p: ('interior' if analyze_pad(p, layout).side
+                                == 'center' else None))))
+    for _line in filter_miss_lines(LAST_FILTER_MISSES):
+        print(_line)
 
     # Show sample pad geometry
     if pad_infos:
@@ -2816,6 +2839,14 @@ def main():
         # at the ceiling when one was given, as route.py's map is.
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
     )
+    # #1641: a --nets list naming no net on the board is an input error (a
+    # typo, a stale list), refused as route.py refuses one; a pattern that
+    # names a net but selects no pad here is disclosed in `unmatched`.
+    from bga_fanout import refuse_unknown_nets
+    _refusal = refuse_unknown_nets(LAST_FILTER_MISSES, pcb_data, args.nets)
+    if _refusal:
+        print(f"Error: {_refusal}")
+        return 2
 
     if tracks or vias:
         # vias can be non-empty with zero tracks: a via-in-pad centred on its
@@ -2950,6 +2981,10 @@ def main():
         'flagged_escaped_nets': flagged_escaped,
         # #1342: single-pad (NC) nets the engine skipped, as bga_fanout's key.
         'skipped_nc': len(single_pad_net_ids(footprint, pcb_data)),
+        # #1641: each --nets pattern that selected no pad, with its reason
+        # (an interior pad the stub escape skips, a net with no pad on the
+        # part, ...): requested counts only the pads a pattern selected.
+        'unmatched': list(LAST_FILTER_MISSES),
         'clearance': args.clearance,
         'track_width': args.width,
         'escape_method': args.escape_method,

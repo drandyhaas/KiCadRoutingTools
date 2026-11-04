@@ -752,8 +752,10 @@ def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
     plane_like = n_pads >= plane_like_pads
     remedy = ("re-create the plane for this net (route_planes.py), or fan it "
               "out explicitly" if plane_like else
-              "re-run the fanout for this net (bga_fanout.py / qfn_fanout.py "
-              "--escape-method underpad, or a smaller --via-size)")
+              "re-run the fanout for this net: bga_fanout.py, or for a "
+              "QFN/QFP pad qfn_fanout.py --escape-method underpad (the stub "
+              "escape skips interior pads, #1641), with a smaller --via-size "
+              "if the via did not fit")
     hint = (f"Hint: pad {where} is a fanout-dropped ball (no escape stub) -- "
             f"it sits inside {ref}'s pad field with no copper of {name} "
             f"attached, so no rip authority or retry can reach it"

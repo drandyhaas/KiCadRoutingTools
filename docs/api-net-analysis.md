@@ -29,7 +29,14 @@ Matching is case-sensitive and sheet-path aware (`net_pattern_matches`,
 component of a hierarchical net, so `GND` matches `/GND` and `/Analog/GND`;
 a pattern with a `/` is matched against the full name only. A `!`-pattern
 that names a net verbatim is that active-low net, not an exclusion (`!RESET`),
-and `\!FOO` is always the literal name `!FOO` (#177).
+and `\!FOO` is always the literal name `!FOO` (#177). A pattern equal to a
+net's name (or, with no `/`, to its last component) always matches it, so a
+bus member `D[3]` selects itself, where fnmatch alone reads `[3]` as a class
+(#1641). `net_pattern_matches(name, pattern, known_net_names)` also makes
+such a pattern -- no `*` or `?`, spelling a net in `known_net_names` --
+select that net only (not `D3`); `literal_net_patterns(patterns,
+board_net_names(pcb))` rewrites a filter that way for any fnmatch matcher
+(the fanouts do), and `expand_net_patterns` applies the same rule.
 
 #### `expand_net_patterns`
 

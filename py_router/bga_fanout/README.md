@@ -73,8 +73,14 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `!GND` | Exclude net named "GND" |
 | `!*VCC*` | Exclude nets containing "VCC" |
 | `"*" "!GND" "!VCC"` | All nets except GND and VCC |
+| `D[3]` | The net named `D[3]` (a pattern that spells a board net is that net, not a `[...]` class, #1641) |
 
 **Note:** Nets starting with "unconnected-" (KiCad pins not connected in schematic) are automatically excluded.
+
+**Selected nothing (#1641):** each `--nets` pattern that selects no ball on the part is printed and listed
+in `JSON_SUMMARY`'s `unmatched`, with its `reason` (`not_on_part`, `single_pad`, `unconnected`, `no_such_net`); `requested` counts only what a
+pattern selected. A `--nets` list none of whose patterns names a net on the board is refused, exit 2, with no
+board written, as `route.py` refuses one.
 
 ## Options
 

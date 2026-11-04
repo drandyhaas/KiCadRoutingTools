@@ -792,7 +792,16 @@ Use the printed flags as-is:
   given-up escape's ball is still served (another route, a strap, a via) has
   escaped. `qfn_fanout.py` lists escaped nets it flagged -- chiefly stub tips that
   end too close to a neighbour's (its `endpoint pairs too close` WARNING) -- as
-  `flagged_escaped_nets`, not as failures. **After every fanout, parse it;
+  `flagged_escaped_nets`, not as failures. `requested` counts only the pads a
+  `--nets` pattern SELECTED, so also read `unmatched` (#1641): one entry per
+  pattern that selected no pad on the part, with its `reason` -- `interior`
+  (the QFN stub escape skips interior pads; re-run that net with
+  `--escape-method underpad`), `not_on_part`, `single_pad`, `unconnected` or
+  `no_such_net`. `failed == 0` with a non-empty `unmatched` is not a clean
+  fanout of that net. A `--nets` list none of whose patterns names a net on
+  the board is refused (exit 2, no board written), as `route.py` refuses one,
+  and a net name is matched literally (`--nets 'D[3]'` selects the bus member
+  `D[3]`, not `D3`). **After every fanout, parse it;
   if `failed > 0` (escaped < requested), re-run the fanout with `--clearance` at
   the manufacturing floor**, and `--clearance-ceiling` at it too: both fanouts
   keep and honour the other net classes otherwise, so a bare `--clearance` does
