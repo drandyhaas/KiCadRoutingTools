@@ -1369,6 +1369,10 @@ python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_
 - At the end the seeds are ranked by `quick_score.judge_key` and the best
   named; keeping it (its placement, never the `--quick` board) is the
   skill's step. `JSON_SUMMARY:` carries every seed's score and the ranking.
+- Everything is written in the folder `judge.json` is in, so a second chain
+  judged there replaces the first's boards, logs and scores. Give each arm a
+  folder holding a copy of `judge.json` and of what a chain's `{run}` names,
+  and the seeds' boards (#1666, plan-pcb-placement 3.7).
 - Level 2 is a screen, not a verdict: its copper reads a few percent off the
   full route's per seed. Seeds within that spread of the best (the same
   placement defects, blocking within 1 net, copper within 10%) are NOTEd

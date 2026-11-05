@@ -62,7 +62,9 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   placement and its `place_simple` report), `s<S>_route/` (the fast route's
   working files), `s<S>_fast.kicad_pcb` (the fast-routed board, copied out of
   that folder with `copy_board.py`) and `s<S>_fast.score.json` (its
-  `quick_score`). The kept board goes to `wk/<run>/final.kicad_pcb`.
+  `quick_score`). A second judging arm keeps these names in a folder of its
+  own (§3.7), which that table does not read. The kept board goes to
+  `wk/<run>/final.kicad_pcb`.
 - **Read the board.**
   `python3 -X utf8 py_tools/board_brief.py <board> --json wk/<run>/brief.json`
   (read `pile` and `has_copper` on its `JSON_SUMMARY` line; `poured_nets`
@@ -1228,6 +1230,28 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    it are arms too: judge the seeds under each, and settle them with
    `--confirm`, since a level-2 gap between them did not survive the full
    route on the boards measured there.
+
+   **Each arm gets its own folder.** `judge_seeds` works in the folder
+   `judge.json` is in and makes `s<S>_route/`, `s<S>_fast.kicad_pcb` and
+   `s<S>_fast.score.json` afresh there, so a second arm in one folder replaces
+   the first's boards, logs and scores and says nothing. Judge the arm the
+   final route will use in `wk/<run>/` itself, as step 2 does (where both will
+   be routed, either one), and each other arm beside it: a copy of `judge.json`
+   and of the intent (a chain's `{run}` is that folder now), and the board of
+   each seed `judge.json` names.
+   ```bash
+   mkdir -p wk/<run>/arm_B
+   cp wk/<run>/judge.json wk/<run>/intent.json wk/<run>/arm_B/
+   python3 -X utf8 py_router/copy_board.py wk/<run>/s<S>.kicad_pcb wk/<run>/arm_B/s<S>.kicad_pcb
+   python3 -X utf8 py_placer/judge_seeds.py wk/<run>/arm_B/judge.json \
+       --chain wk/<run>/judge_chain_B.txt --intent wk/<run>/arm_B/intent.json
+   ```
+   Everything in step 2 reads the same in that folder: its seed filter (a seed
+   it skips needs no board there; a seed `--seeds` names does), `--confirm`,
+   `--full`. Keep every arm's folder to the end of the run, for its `chain.log`,
+   `redo_commands.sh`, fast boards and scores, and list each arm's ranking in
+   REPORT.md. A placement is the same under every arm, so the kept one is copied
+   from `wk/<run>/` (step 3).
 2. **Fast-route and score the seeds `wk/<run>/judge.json` names** (the
    `--judge` legal seeds, buildable and floorplan-clean first, then lowest
    `final.cost`; place_simple grades each seed with `check_assembly
@@ -1307,7 +1331,9 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
 
 In `place` mode that placement is the result. Run
 `python3 -X utf8 py_tools/route_review.py wk/<run>/s<S>_fast.kicad_pcb --json wk/<run>/review.json`
-on its fast route: turn each two-pad part it lists as turned against its
+on its fast route, the arm the final route will use (§3.7, step 1: another
+arm's route wires the same parts differently; where both arms will be routed,
+review each folder's and act only on what both list): turn each two-pad part it lists as turned against its
 wiring with the `place_pose BOARD OUT set REF X Y --rot R` it prints for that
 part, then check the board again (`check_assembly`, `check_floorplan
 --intent`, `render_placement`). That pose is a half turn about the midpoint of
