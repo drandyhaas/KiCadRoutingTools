@@ -2150,7 +2150,15 @@ this. The reconciliation (`reconcile.reconcile`, in `--plan-only`, the grade
 and `context.reconciliation`) applies the same rule (#1533): it reads no
 `board` edge or pose value off an unlocked part on a pile, so a staging pose
 makes no DRIFT row, and one `pile` report row (printed as `PILE ...`) names
-the parts whose board value it withheld.
+the parts whose board value it withheld. The grade does the same for
+`edge_connectors[]` (#1664): an unlocked part's row on a pile reads no overhang,
+nearest edge, facing verdict, model end, setback or along-edge offset, and
+raises no ERROR from them. Its `edge_connector_evidence` row says `staging`
+with what a pile can answer: the declared band and the mating face's evidence,
+and the row abstains (`edge_connectors[<ref>].pose`), so the grade reads NOT
+FULLY GRADED rather than a pass. `--plan-only` is the check a plan passes before
+placing; the first placed seeds read the rest. A KiCad-locked part's row grades
+as ever.
 
 An edge part whose STRONG mating face points at another edge than the one it
 sits nearest -- the opposite edge (seated reversed) or one at right angles

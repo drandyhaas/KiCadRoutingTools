@@ -468,7 +468,13 @@ python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --intent wk
 
 For each edge connector, read its edge, its facing (`facing ... pass`, or
 `facing abstained (...)` when its body names no face, `facing exempt (...)`
-when its class is not graded for a face) and the group you gave it. Then decide, from the part's function and its datasheet:
+when its class is not graded for a face) and the group you gave it. **On a
+pile** an unlocked part's pose says nothing, so its row reads `staging pose on
+a pile`: what a pile can answer is the declared band and the evidence label of
+its mating face (`mating face +x [courtyard+fab, weak]`, or the same `facing
+abstained` / `facing exempt`), and no `edge_connector` error reads off the
+pose. Its overhang, nearest edge, facing verdict and model end wait for the
+first placed seeds (§3.6); a locked part reads them now. Then decide, from the part's function and its datasheet:
 
 - **The edge, and roughly where along it** when that matters (a USB or
   barrel jack where the enclosure opens, a debug header out of the user's
@@ -543,7 +549,12 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   short, check the body's mating face on the datasheet's drawing; if it must
   reach the edge, write as `overhang_mm.min` the overhang, in the band's own
   reading (`overhang_basis`), that brings it there (on a courtyard reading,
-  the courtyard's overhang plus the model's shortfall). A connector the
+  the courtyard's overhang plus the model's shortfall). Before any seat exists
+  (a pile reads neither number), take that `overhang_mm.min` from the
+  datasheet's drawing, or place one seed to read it: `place_simple.py
+  wk/<run>/fixed.kicad_pcb wk/<run>/read.kicad_pcb --groups wk/<run>/groups.json
+  --intent wk/<run>/intent.json --seed 0`, then `check_floorplan --intent` on
+  that board (not named `s<S>`: it is no candidate). A connector the
   intent does not declare is asked about at emit time instead: an `OWED:`
   line names each `connector_affinity` part with an in-plane face whose
   model stops more than 0.5 mm short of its courtyard. Answer it with an
@@ -572,7 +583,11 @@ into `fixed_poses[]` instead (a ref in both is refused). Check the fixed parts
 as in §3.1. Run check_floorplan again: no `edge_connector` error, and no
 `edge_oversubscribed` warning (an edge declared more connectors than fit on it
 together: move one to another edge, drop a declaration, or widen a band now,
-before placing).
+before placing). On a pile the same test is the command with `--plan-only`,
+which asks no pose and needs no `--allow-unplaced`: exit 0 and no
+`edge_oversubscribed` warning. The plain grade there reads `NOT FULLY GRADED`,
+exit 4, on a staged row or a budget the emit withheld: an absent verdict, not a
+finding about them.
 
 ### 3.4b Covers (your judgement)
 
@@ -1092,7 +1107,9 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   `python3 -X utf8 py_tools/check_assembly.py <placed> --baseline wk/<run>/fixed.kicad_pcb`
   (read `buildable`),
   `python3 -X utf8 py_tools/check_floorplan.py <placed> --intent wk/<run>/intent.json`
-  (0 errors, and read every `proximity` warning; a crystal or load cap past
+  (0 errors; on a seed placed from a pile, this is where each edge row's
+  overhang, nearest edge, facing and model end are first read, §3.4; and read
+  every `proximity` warning; a crystal or load cap past
   twice its limit is a defect to fix before judging, whatever the judge's
   rank. The seed's `floorplan` line already counts the errors, and its log
   names each claim still past its limit, `WARNING: claim ...`; read every

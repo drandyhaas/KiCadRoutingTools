@@ -4162,6 +4162,17 @@ class _Ctx:
         self.requested_floors = (None, None)
         self._connector_copper = None
         self._zero_gate = None
+        self._pile = None
+
+    def staged(self, ref: str) -> bool:
+        """#1664: is this part's pose staging? On a pile no unlocked part's
+        pose is a claim (`PlacementState.pile`, as emit_intent, board_brief,
+        cover_facts and reconcile read it); a KiCad-locked part's is a
+        decision wherever it stands. Assessed once, on first ask."""
+        if self._pile is None:
+            from .placement_state import assess_placement
+            self._pile = assess_placement(self.pcb, self.pcb_file).pile
+        return self._pile and ref not in self.locked
 
     def oob_exempt(self) -> Dict[str, float]:
         """`{ref: overhang_mm}` for every declared edge connector the census
@@ -6043,6 +6054,22 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                          f"place_simple.py applies the declared face "
                          f"before placing"),
                 measured={'side': part.side}, expected={'side': c['side']})
+        # #1664: every conjunct below reads the part's pose, and on a pile an
+        # unlocked part's pose is staging: a correct row read 2-4 ERRORs on
+        # the staging pose and none on the first placed seed, so no edit could
+        # clear them. What the footprint alone says still stands: the row's
+        # band and the mating face's evidence, and the warning about it. An
+        # abstention, neither a violation nor a pass, so a brief's clauses on
+        # this row read `abstained` and never `graded_pass`.
+        if ctx.staged(ref):
+            _ef = edge_facing(c, ctx.pcb.footprints.get(ref), ctx.body_geom(ref))
+            yield from _mating_face_warning(c, ref, _ef)
+            ctx.edge_connector_evidence.append(_staged_evidence(c, ref, _ef))
+            ctx.abstain(f"edge_connectors[{ref}].pose",
+                        "its pose on this pile is staging: its overhang, "
+                        "nearest edge, facing and model end are read on the "
+                        "placed seeds")
+            continue
         # #1301: the COURTYARD's overhang at ZERO margin. It was the occupancy
         # reading at the gate's margin -- `margin - gap` inside the board,
         # `overhang + margin` outside -- and the margin is max(clearance, edge
@@ -6206,45 +6233,7 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             'body_face': _ef['body_face'],
             'body_strong': _ef['body_strong'],
             'disagreement': _ef['disagreement']}
-        # #1586: a declared face the body reads otherwise is SAID, whichever
-        # won -- a weak reading the declaration outranks (KiCad 10's
-        # RJHSE5380 reads its mouth into the board) or a strong one that
-        # overrules the declaration. A WARN: one of the two is wrong, and only
-        # the datasheet says which -- so a declaration that records what it
-        # was read off (`mating_face_source`, #1652) silences the WARN over a
-        # weak reading. Never over a strong one, nor against the PCB-edge
-        # marker: those are evidence, a recorded source is the author's word.
-        from .mating import EVIDENCE_SOURCED, EVIDENCE_UNVERIFIED
-        said = _ef['disagreement']
-        if said and _ef['evidence'] == EVIDENCE_SOURCED and _ef['body_face']:
-            said = ''
-        if _ef['evidence'] == EVIDENCE_UNVERIFIED and edge:
-            # #1652: a declared face nothing independent confirms, whichever
-            # way a weak reading agrees -- a copy of a jack drawn turned 180
-            # degrees reads its wrong face weakly, and an author can declare
-            # that same wrong face. Said, not failed.
-            ask = ("no mating_face_source records what it was read off -- "
-                   "read the opening off this footprint's own drawing (its "
-                   "pads matched to the datasheet's) or its 3D model, and "
-                   "record which")
-            said = (f"{said}; {ask}" if said else
-                    f"its declared mating_face {_ef['declared_face']} is "
-                    f"unverified: "
-                    + (f"the body's weak {_ef['body_face']} agrees, which "
-                       f"is no check (a footprint drawn turned 180 degrees "
-                       f"reads its wrong face weakly)"
-                       if _ef['body_face'] else "its body names no face")
-                    + f", and {ask}")
-        if said:
-            yield Violation(
-                rule='edge_connector', severity=WARN, ref=ref,
-                message=f"{ref}'s mating face: {said}",
-                measured={'declared_face': _ef['declared_face'],
-                          'body_face': _ef['body_face'],
-                          'body_strong': _ef['body_strong'],
-                          'facing_basis': _ef['basis'],
-                          'facing_evidence': _ef['evidence']},
-                expected={'mating_face': _ef['declared_face']})
+        yield from _mating_face_warning(c, ref, _ef)
         if _ef['fails']:
             yield Violation(
                 rule='edge_connector',
@@ -6413,6 +6402,72 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         ctx.edge_connector_evidence.append(evidence)
 
 
+def _mating_face_warning(c, ref, _ef) -> Iterator[Violation]:
+    """#1586: a declared face the body reads otherwise is SAID, whichever
+    won -- a weak reading the declaration outranks (KiCad 10's RJHSE5380 reads
+    its mouth into the board) or a strong one that overrules the declaration.
+    A WARN: one of the two is wrong, and only the datasheet says which -- so a
+    declaration that records what it was read off (`mating_face_source`,
+    #1652) silences the WARN over a weak reading. Never over a strong one, nor
+    against the PCB-edge marker: those are evidence, a recorded source is the
+    author's word. Reads the footprint's own frame, so no pose decides it."""
+    from .mating import EVIDENCE_SOURCED, EVIDENCE_UNVERIFIED
+    said = _ef['disagreement']
+    if said and _ef['evidence'] == EVIDENCE_SOURCED and _ef['body_face']:
+        said = ''
+    if _ef['evidence'] == EVIDENCE_UNVERIFIED and c.get('edge'):
+        # #1652: a declared face nothing independent confirms, whichever
+        # way a weak reading agrees -- a copy of a jack drawn turned 180
+        # degrees reads its wrong face weakly, and an author can declare
+        # that same wrong face. Said, not failed.
+        ask = ("no mating_face_source records what it was read off -- "
+               "read the opening off this footprint's own drawing (its "
+               "pads matched to the datasheet's) or its 3D model, and "
+               "record which")
+        said = (f"{said}; {ask}" if said else
+                f"its declared mating_face {_ef['declared_face']} is "
+                f"unverified: "
+                + (f"the body's weak {_ef['body_face']} agrees, which "
+                   f"is no check (a footprint drawn turned 180 degrees "
+                   f"reads its wrong face weakly)"
+                   if _ef['body_face'] else "its body names no face")
+                + f", and {ask}")
+    if said:
+        yield Violation(
+            rule='edge_connector', severity=WARN, ref=ref,
+            message=f"{ref}'s mating face: {said}",
+            measured={'declared_face': _ef['declared_face'],
+                      'body_face': _ef['body_face'],
+                      'body_strong': _ef['body_strong'],
+                      'facing_basis': _ef['basis'],
+                      'facing_evidence': _ef['evidence']},
+            expected={'mating_face': _ef['declared_face']})
+
+
+def _staged_evidence(c, ref, _ef) -> Dict[str, object]:
+    """#1664: an `edge_connector_evidence` row for a part on a staging pose:
+    the declared band, and the mating face in the footprint's own frame with
+    what it rests on. No overhang, setback, model end or facing verdict: those
+    are readings of where the part stands, and it stands nowhere yet."""
+    lim = c.get('overhang_mm') or {}
+    hi = lim.get('max')
+    return {'ref': ref, 'edge': c.get('edge'), 'units': 'mm', 'staging': True,
+            'overhang_limit_mm': {'min': float(lim.get('min', 0.0)),
+                                  'max': None if hi is None else float(hi)},
+            'facing': {
+                'edge': c.get('edge'), 'local_face': _ef['local_face'],
+                'basis': _ef['basis'], 'evidence': _ef['evidence'],
+                'policy': _ef['policy'], 'reason': _ef['reason'],
+                'disposition': ('exempt' if _ef['policy'] != 'graded'
+                                else 'abstained' if not _ef['local_face']
+                                else 'staging'),
+                'declared_face': _ef['declared_face'],
+                'declared_source': _ef['declared_source'],
+                'body_face': _ef['body_face'],
+                'body_strong': _ef['body_strong'],
+                'disagreement': _ef['disagreement']}}
+
+
 def _setback_tail(e) -> str:
     """The CLI's `; setback ...` clause for one evidence row (#1584, #1585),
     or '' for a part that reaches its edge: how far inside its declared edge
@@ -6445,6 +6500,9 @@ def _facing_tail(f) -> str:
                 f"the entry declares a mating_face)")
     if f['disposition'] == 'abstained':
         return f"; facing abstained ({f.get('reason') or 'no face'})"
+    if f['disposition'] == 'staging':
+        return (f"; mating face {f['local_face']} [{f['basis']}, "
+                f"{f['evidence']}]")
     if f['disposition'] == 'no_edge':
         return (f"; facing {f['facing']} (no edge declared: not graded)"
                 if f.get('facing') else '')
@@ -12917,6 +12975,16 @@ def format_text(r: GradeResult) -> str:
         lines.append("  edge connector overhang (measured; the band's own "
                      "currency is named):")
         for e in r.edge_connector_evidence:
+            if e.get('staging'):
+                lim = e['overhang_limit_mm']
+                lines.append(
+                    f"    {e['ref']} {e.get('edge') or '(no edge)'}: staging "
+                    f"pose on a pile, read on the placed seeds: overhang "
+                    f"(declared {lim['min']:g}.."
+                    f"{'' if lim['max'] is None else format(lim['max'], 'g')}"
+                    f"), nearest edge, facing, model end"
+                    + _facing_tail(e.get('facing')))
+                continue
             cu = e.get('pad_copper_edge') or {}
             gap = cu.get('minimum_gap_mm')
             lines.append(
