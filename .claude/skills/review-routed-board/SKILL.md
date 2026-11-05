@@ -265,7 +265,11 @@ confirms it). Pass the flag only for boards without records.
 Reports per net: length over a reference-plane **void**, plane **split**
 crossings (the return current cannot follow the trace across either), the
 measured coplanar side-gap distribution, and the implied Z0 error vs. what the
-route call assumed. Exits 1 when anything is found.
+route call assumed. Exits 1 on a reference-plane crossing or a coplanar gap the
+copper does not have. A declared impedance the copper misses is disclosure, not
+in the exit code: read its `OFF TARGET` rows even at exit 0 (`board_score` names
+those nets with no flag, on its `DECLARED IMPEDANCE OFF TARGET` line, and counts
+them nowhere).
 
 How to read it:
 

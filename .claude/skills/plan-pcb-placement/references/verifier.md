@@ -53,7 +53,8 @@ Trust nothing it told you. Measure it yourself, from the repo root.
    skew (max 0.15mm) (within_diff_pairs)))` in `<BOARD>.kicad_dru`); the
    project's `net_impedance` records and the power widths the run asked of
    `route.py` are measured with no flag (`impedance.declared_failing`,
-   `net_widths.requested_under`). Read them and report them. A net-class
+   `impedance.declared_ohms_off_target`, `net_widths.requested_under`). Read
+   them and report them. A net-class
    `track_width` is not a spec (the router discloses copper under it in
    `design_rules`), so it is not an ungraded declaration. For
    declared diff pairs, length groups or high-speed nets, also run the

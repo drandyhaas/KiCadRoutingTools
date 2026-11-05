@@ -1199,7 +1199,8 @@ diff-pair net class with no `.kicad_dru` skew / `diff_pair_uncoupled` rule
 that binds it) is named apart, `DISCLOSED, not counted`. Net impedance
 declarations recorded by `route.py --impedance` and the power widths route.py
 was asked for are measured without a flag and reported by `board_score`
-(`impedance.declared_failing`, `net_widths.requested_under`), not graded.
+(`impedance.declared_failing`, `impedance.declared_ohms_off_target`,
+`net_widths.requested_under`), not graded.
 `--authored-from` is the board the chain started from (its project carries
 the floors this one should still respect); without it the floors are read
 against the project's recorded `fab_floor_origin` (what the board declared
@@ -3016,7 +3017,12 @@ A net carrying a recorded declaration also reports its declared ohms against
 the model's reading of the shipped copper -- the width, and for a pair the
 measured P/N gap where the two run coupled -- and names a net more than 10%
 off (`nets_ohms_off_target`, `ohms_off_pct`; #1630). That is disclosure:
-neither the exit code nor `board_score`'s count includes it. A record a
+neither the exit code nor `board_score`'s count includes it, and
+`check_complete`'s verdict does not read it. `board_score` names such nets with
+no flag, on its `DECLARED IMPEDANCE OFF TARGET` console line: JSON
+`impedance.declared_ohms_off_target` for nets `--impedance-nets` does not name,
+`nets_ohms_off_target` for the ones it does (which grades their continuity and
+gap, never their ohms), with `ohms_off_pct` for both (#1673). A record a
 step wrote with `--impedance-declare-only` (`declare_only`: the copper is
 the project's, only the ohms were recorded) is graded the same way and
 marked declare-only; any other record left `applied: false` is skipped.
