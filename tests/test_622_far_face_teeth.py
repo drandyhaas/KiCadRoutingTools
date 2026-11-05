@@ -179,7 +179,7 @@ def end_to_end():
         print(f'  {whole[-1] if whole else "no grade line"}')
         check(not any('far face' in ln and 'REFUSED' in ln for ln in r.stdout.splitlines()),
               'the fanout audit refuses no far-face tooth')
-        check(w.get('connected') == '1' and w.get('drc') == '1' and w.get('open') == '0'
+        check(w.get('connected') == '1' and w.get('drc') == '0' and w.get('open') == '0'
               and w.get('lanes', '').split('/')[0] == w.get('lanes', '/').split('/')[-1] == '12',
               f'every lane laid, connected and DRC-clean in one round: {w}')
         check(plan.get('src_cut') is not None, 'the ends model\'s source cut rides the sidecar (src_cut)')
@@ -220,7 +220,7 @@ def end_to_end_escape():
         bus = [ln for ln in r.stdout.splitlines() if ln.startswith('BUS ')]
         w = dict(re.findall(r'(\w+)=(\S+)', bus[-1].split('|')[-1])) if bus else {}
         print(f'  {bus[-1] if bus else "no BUS line"}')
-        check(bus and 'lanes=12/12' in bus[-1] and w.get('connected') == '1' and w.get('drc') == '1',
+        check(bus and 'lanes=12/12' in bus[-1] and w.get('connected') == '1' and w.get('drc') == '0',
               f'(6) the escape fanout lays every lane, connected and DRC-clean on the board: {w}')
 
 
@@ -256,7 +256,7 @@ def end_to_end_cap():
         bus = [ln for ln in r.stdout.splitlines() if ln.startswith('BUS ')]
         w = dict(re.findall(r'(\w+)=(\S+)', bus[-1].split('|')[-1])) if bus else {}
         print(f'  cap: far-face teeth {far_}; {bus[-1] if bus else "no BUS line"}')
-        check(bus and 'lanes=12/12' in bus[-1] and w.get('connected') == '1' and w.get('drc') == '1',
+        check(bus and 'lanes=12/12' in bus[-1] and w.get('connected') == '1' and w.get('drc') == '0',
               f'(7) a cap where the lead-ins run: every lane laid, connected and DRC-clean on the board: {w}')
 
 

@@ -335,16 +335,19 @@ def plan_field(board, field, buses, solo, work, log=print, avoid=None, **sizes):
             sn_ = namer(pcb_)
             got_ = []
             for b, got in zip(buses, solo):
-                nets = sorted(json.load(open(got[1])).get('routed') or []) if got else []
-                teeth = solo_teeth(got[0], src, nets, grid) if nets else {}
-                log(f'  {b[1]} solo run: {len(nets)} net(s) routed, {len(teeth)} solo teeth'
-                    + ('' if nets else ' -- its nets the shared field\'s still, toward its parts, with no tooth to '
-                                       'prefer'))
-                if not nets:
-                    # (a bus its solo run routed none of keeps its place in the shared field: its nets each escape
-                    # toward its own part, so the bus's run on the shared field has teeth turned its way -- planned as
-                    # the array's others, they left by any face)
-                    nets = sorted({sn_(n) for P_ in ff.dest_refs(b[1]) for n in mb.pair_nets(pcb_, src, P_)})
+                routed = sorted(json.load(open(got[1])).get('routed') or []) if got else []
+                teeth = solo_teeth(got[0], src, routed, grid) if routed else {}
+                # (every net of the bus the shared field's, toward its parts -- those its run routed with their teeth
+                # to prefer, the rest with none: planned as the array's others, a net its run left open left by any
+                # face, never reserved for its bus. Its nets as its step takes them: the pairs and the nets pulled
+                # through a part between -- a memory bus's 48, 22 of them pairs)
+                nets = set(routed)
+                for P_ in ff.dest_refs(b[1]):
+                    pn_ = mb.pair_nets(pcb_, src, P_)
+                    nets |= {sn_(n) for n in list(pn_) + list(rb.pulled_nets(pcb_, src, P_, sorted(pn_)))}
+                nets = sorted(nets)
+                log(f'  {b[1]}: {len(nets)} net(s), {len(teeth)} with a tooth from its run'
+                    + (f' ({len(routed)} routed there)' if got else ' -- no run: no tooth to prefer'))
                 got_.append((b[1], nets, teeth))
             if avoid:
                 log(f'  the shared field again, {sum(len(v_) for v_ in avoid.values())} crowded teeth of {len(avoid)} '
@@ -477,10 +480,64 @@ def conflicts(out, bus_of, path, log=print):
     return len(conf)
 
 
+def give_back(out, board, path, log=print):
+    """The merged board's conflicts between a bus's net and ANOTHER net (conflicts.json at `path`) settled by giving the
+    other net back: its copper this step laid -- on `out` and not on the board the step came in with, `board` -- taken
+    off `out`, the net left for the rest of the chain to route (another net's copper the step may take up, a bus net's
+    never). A whole-array bus lays the shared array's other nets again each round, round its own escapes there, and the
+    other buses, routed round the shared field's, never see it: an other net's escape laid onto the layer another bus's
+    lane ran on was the merged board's one conflict. Two buses' nets meeting stay as they are, named. Returns the nets given back"""
+    import make_bench as mb
+    from coherent_nets import net_keys
+    from kicad_parser import parse_kicad_pcb
+    try:
+        conf = json.load(open(path))
+    except (OSError, ValueError):
+        return []
+    give = sorted({c_['net2'] if c_['bus1'] else c_['net1'] for c_ in conf
+                   if bool(c_['bus1']) != bool(c_['bus2']) and (c_['net2'] if c_['bus1'] else c_['net1'])})
+    if not give:
+        return []
+    with contextlib.redirect_stdout(io.StringIO()):
+        po, pi = parse_kicad_pcb(out), parse_kicad_pcb(board)
+    full = {f_ for f_, s_ in net_keys(po).items() if s_ in give}
+    ids = {i_ for i_, n_ in po.nets.items() if n_.name in full}
+    r3 = lambda p_: (round(p_[0], 3), round(p_[1], 3))   # noqa: E731
+    came = {frozenset((r3((s_.start_x, s_.start_y)), r3((s_.end_x, s_.end_y)))) | {s_.layer} for s_ in pi.segments
+            if s_.net_id in pi.nets and pi.nets[s_.net_id].name in full}
+    came |= {frozenset({r3((v_.x, v_.y)), 'via'}) for v_ in pi.vias
+             if v_.net_id in pi.nets and pi.nets[v_.net_id].name in full}
+    gone = [0]
+
+    def laid_here(token):
+        def f(block):
+            m = re.search(r'\(net (\d+)\)', block)
+            m2 = re.search(r'\(net "([^"]+)"\)', block)
+            if not ((m and int(m.group(1)) in ids) or (m2 and m2.group(1) in full)):
+                return False
+            a_, b_, L_ = mb.block_geom(block, token)
+            key = frozenset((r3(a_), r3(b_))) | {L_} if token == 'segment' else frozenset({r3(a_), 'via'})
+            if key in came:
+                return False
+            gone[0] += 1
+            return True
+        return f
+    txt = open(out, encoding='utf-8').read()
+    txt = mb.walk_blocks(txt, 'segment', laid_here('segment'))
+    txt = mb.walk_blocks(txt, 'via', laid_here('via'))
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write(txt)
+    log(f'  the merged board: {", ".join(give)} given back -- {gone[0]} piece(s) of copper the step laid them taken off, '
+        f'theirs to route in the rest of the chain (each met a bus\'s net there)')
+    return give
+
+
 def route_negotiated(board, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None, feedback_rounds=0,
-                     **sizes):
+                     solo=None, **sizes):
     """The buses `buses` [(src, dest, mode, layers)], their modes resolved, routed negotiated on `board` (the module's
-    docstring), `out` the merged board. Returns (exit code, grade lines)"""
+    docstring), `out` the merged board. `solo` [(board, summary) or None, as `buses`]: each bus's run already made --
+    route_buses' pass in turn, each bus on the board the ones before it left -- its teeth the shared field's, in place
+    of a solo run (None: no teeth to prefer). Returns (exit code, grade lines)"""
     board, out = os.path.abspath(board), os.path.abspath(out)
     if not out.endswith('.kicad_pcb'):
         out += '.kicad_pcb'
@@ -493,15 +550,17 @@ def route_negotiated(board, out, buses, k=None, rounds=4, inproc=False, log=prin
     src, dests, modes = buses[0][0], [b[1] for b in buses], [b[2] for b in buses]
     t0 = time.time()
 
-    # 1. each bus's solo run
+    # 1. each bus's solo run -- or its run already made (`solo`)
     log(f'route_bus: {len(buses)} buses off {src} negotiated -- {", ".join(f"{d} ({m})" for d, m in zip(dests, modes))}'
-        f'; a solo run of each first')
-    _run_all([_bus_job(work, 'solo', b, board, _env0(), k, rounds, inproc, feedback_rounds, sizes) for b in buses],
-             log)
+        + ('; each bus\'s teeth from its run in turn' if solo is not None else '; a solo run of each first'))
+    if solo is None:
+        _run_all([_bus_job(work, 'solo', b, board, _env0(), k, rounds, inproc, feedback_rounds, sizes) for b in buses],
+                 log)
+        solo = [_bus_out(work, 'solo', b) for b in buses]
 
     # 2. the shared field
     field = os.path.join(work, 'shared_field.kicad_pcb')
-    rep = plan_field(board, field, buses, [_bus_out(work, 'solo', b) for b in buses], work, log=log, **sizes)
+    rep = plan_field(board, field, buses, solo, work, log=log, **sizes)
 
     # 3, 4. every bus negotiated on the shared field, merged
     code, grades = route_on_field(board, field, out, buses, k, rounds, inproc, log, json_out, feedback_rounds,
@@ -568,10 +627,15 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     # 4. merged
     boards = [_bus_out(work, 'neg', b) for b in buses]
     have = [x for x in boards if x]
-    n_conf = None
+    n_conf, given = None, []
     if have:
         bus_of = merge(out, have, log=log, field=field)
         n_conf = conflicts(out, bus_of, os.path.join(work, 'conflicts.json'), log=log)
+        if n_conf:
+            # (a bus's net meeting another net there: the other net given back, for the chain -- give_back)
+            given = give_back(out, board, os.path.join(work, 'conflicts.json'), log=log)
+            if given:
+                n_conf = conflicts(out, bus_of, os.path.join(work, 'conflicts.json'), log=log)
     else:
         with contextlib.redirect_stdout(io.StringIO()):
             copy_board(board, out)
@@ -586,7 +650,8 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
         json.dump(dict(board=board, out=out, negotiated=True, src=src, field=field,
                        field_plan={k_: v_ for k_, v_ in (field_plan or {}).items()
                                    if isinstance(v_, (int, float, str))},
-                       buses=runs, conflicts=n_conf, secs=int(time.time() - t0), exit=code), f, indent=1)
+                       buses=runs, conflicts=n_conf, given_back=given, secs=int(time.time() - t0), exit=code), f,
+                  indent=1)
     log(f'route_bus: negotiated, {sum(r["routed"] for r in runs)} nets routed by {len(runs)} buses, '
         f'{"no" if n_conf == 0 else n_conf if n_conf is not None else "ungraded"} cross-bus conflict(s), '
         f'{int(time.time() - t0)} s -- {os.path.basename(out)}')

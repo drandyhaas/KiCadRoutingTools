@@ -273,7 +273,7 @@ def one(tag, K, args, outdir, timeout, copper=2, fanout_layers=None):
         st = re.search(r'PAID static (\d+)', paid)
         row.update(gap=round(gap, 3), turn=round(turn, 1), hold=int(m.group(1)) if m else 0,
                    static=int(st.group(1)) if st else 0)
-    ok = (w.get('connected') == '1' and w.get('drc') == '1' and w.get('open') == '0' and ("'S'" in row['rings']
+    ok = (w.get('connected') == '1' and w.get('drc') == '0' and w.get('open') == '0' and ("'S'" in row['rings']
           or "'N'" in row['rings']) and row.get('gap', 1) < 1e-6 and row.get('turn', 180) < 135 and row.get('hold', 1) == 0)
     return dict(row, verdict='PASS' if ok else 'FAIL')
 

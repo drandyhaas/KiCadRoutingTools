@@ -246,7 +246,7 @@ def one(tag, K, args, graded, NL, outdir, timeout, sets=None):
         return dict(row, verdict=f'NO RESULT (rc {rc})')
     w = dict(re.findall(r'(\w+)=(\S+)', whole[-1]))
     row.update({k: w.get(k) for k in ('K', 'round', 'vias', 'copper', 'connected', 'drc', 'open')})
-    done = w.get('connected') == '1' and w.get('drc') == '1' and w.get('open') == '0'
+    done = w.get('connected') == '1' and w.get('drc') == '0' and w.get('open') == '0'
     vias = int(w['vias']) if (w.get('vias') or '').isdigit() else None
     if not done:
         row['verdict'] = 'FAIL'

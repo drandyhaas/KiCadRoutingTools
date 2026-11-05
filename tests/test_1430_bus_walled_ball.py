@@ -3,7 +3,7 @@
 A plain bus between two array parts can leave an array's OTHER ball (a net that
 is not a bus net) reachable on the board as it came and reachable from nowhere
 once the locked lanes are laid: its net then ships open, and no check of the
-step saw it (exit 0, connected=1 drc=1). `route_bus.walled_grade` names such
+step saw it (exit 0, connected=1 drc=0). `route_bus.walled_grade` names such
 balls: the BUS line's `walled=`, a log line, the summary's `walled`.
 
 End to end (about 3 minutes, one routing process) on a bus that walls one ball

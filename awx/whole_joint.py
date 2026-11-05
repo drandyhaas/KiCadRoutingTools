@@ -11,7 +11,8 @@ one's changes a via's room off the place -- or the crossing is BROKEN, at a pric
 Two lanes of two buses that come within a lane's pitch of each other are coupled alike, at each one's nearest point: on
 one layer there, they would crowd -- a conflict the two buses settle together, as a crossing. The plans the buses found
 alone are the coupled solve's warm start, laid out whole (each broken coupling of theirs priced), and the search mends
-them. Each bus's plan is written over its solve.json (its own kept beside it, .solo.json), and DIR/rROUND/BUS.joint.json
+them -- where they break none, there is nothing to mend: no search, each bus's own plan the coupled one (its
+BUS.joint.json 'own'). Each bus's plan is written over its solve.json (its own kept beside it, .solo.json), and DIR/rROUND/BUS.joint.json
 says it is there. Couplings, and the broken ones, on stdout."""
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 
@@ -253,6 +254,19 @@ def main():
             m.AddHint(m.GetIntVarFromProtoIndex(i_), v_)
     else:
         print(f'  the buses\' own plans side by side: [{sh.StatusName(st_h)}] -- the search from their hints only')
+    if st_h in ok and n_b0 == 0:
+        # (the buses' own plans breaking NO coupling: nothing for the coupled solve to settle, and its search would only
+        # search each bus's own model again, just solved by that bus -- four such searches, 198 to 264 s each, ended
+        # where they began or 2 vias-worth lower, one of them with no couplings at all. Each bus keeps its own plan, as
+        # the coupled plan: `own`, nothing written over its solve, and no coupling settled to hold through its loop)
+        print(f'  coupled search: none -- the buses\' own plans break no coupling: each bus\'s own is the coupled plan',
+              flush=True)
+        json.dump({'round': rnd, 'couplings': len(cpl), 'secs': round(time.time() - t0, 1), 'all': cpl,
+                   'broken_alone': [], 'broken': [], 'own': True}, open(os.path.join(rd, 'joint.json'), 'w'), indent=1)
+        for bus in sorted(parts):
+            json.dump({'bus': bus, 'joint': True, 'own': True, 'cuts': None},
+                      open(os.path.join(rd, f'{bus}.joint.json'), 'w'))
+        return
     s_ = cp_seed.solver()
     s_.parameters.num_workers = WORKERS
     s_.parameters.subsolvers.extend(ws.FALLBACK)

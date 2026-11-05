@@ -34,7 +34,7 @@ next seed's round follows. The loop's last re-solve keeps a plan it cannot prove
 RESORT is a partial plan on the last ends laid, the named lanes (then more) left out and open. The run's result is its best --
 the fewest open nets, then the fewest vias -- in OUTDIR/best.kicad_pcb (and its own rN/ or partialN/seq.kicad_pcb).
 The last line is that result's grade:
-  WHOLE K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=0|1 secs=.. open=..
+  WHOLE K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=N secs=.. open=..
 Exits 0 when it is connected and DRC-clean, 1 when nets are left open or a violation stands, 2 when nothing could be
 laid at all (no fanout board, or no plan even for half the lanes).
 --loop exits 0 with OUTDIR/plan.json the snapped plan that passed, 1 when no round got there, 3 when it stopped not
@@ -736,12 +736,12 @@ def loop(solve, out, rounds, env, log):
             # anything a plan can buy, so every cut that can hold does and only those no plan holds break -- keeping
             # a plan it cannot prove, as such a solve almost never proves one. The hard pass first spent four minutes
             # of the zynq's LVDS round proving no plan, for two via cuts of 34 that could not hold together, before
-            # the soft pass the loop then ran anyway)
+            # the soft pass the loop then ran anyway) -- in WINDOWS from the plan before (whole_solve SOLVE_WINDOWS)
             if stage([s2], 'whole_solve.py', [s2], s2[:-5] + '.log', BENCH=env.get('BENCH0') or env['BENCH'],
                      HINT=st['solve'], CUTS=cuts_out if os.path.isfile(cuts_out) else '', HIST=st['hist'],
-                     CUTS_FIRM='1', SOLVE_UNPROVED='1', **soft) != 0:
+                     CUTS_FIRM='1', SOLVE_UNPROVED='1', SOLVE_WINDOWS='1', **soft) != 0:
                 return failed(s2[:-5] + '.log')
-            for ln in grep(s2[:-5] + '.log', r'whole_solve|vias|check|history|firm cuts'):
+            for ln in grep(s2[:-5] + '.log', r'whole_solve|windows of|vias|check|history|firm cuts'):
                 log('  ' + ln)
             firm_known(O('firm_whole.json'), firm_keys(s2))
             took(s2, i)
@@ -1472,15 +1472,15 @@ def pick_by_snap(loopd, env, plan, say):
 
 def lay_rounds(loopd, d, env, res, lay_, say, plan=None):
     """N = lay_tries() (LAY_TRY, else 2; 1 off): a loop that did not pass chooses its round by the LAY, not by its
-    findings. The held round laid not clean (`res`, lay_'s result), the loop's other rounds' smooth plans, fewest
+    findings. The held round laid with nets open (`res`, lay_'s result), the loop's other rounds' smooth plans, fewest
     findings first, each snapped as the held one is (held_plan) and laid (lay_(plan, tag) -> a result, or None) -- N
-    boards in all (a plan that lays none not counted), stopping at the first clean one; the best by the lay's own key
-    (DRC, open nets, vias, copper) kept, its board and logs copied over the held one's names in `d`. Measured on the
+    boards in all (a plan that lays none not counted), stopping at the first with no net open; the best by the lay's
+    own key (open nets, DRC, vias, copper) kept, its board and logs copied over the held one's names in `d`. Measured on the
     zynq LVDS: the held round laid 10, 3, 2 and 2 open where the loop's best round laid 6, 0, 2 and 2 -- the findings
     count a static clearance the snap goes round and a detour not at all. (`plan`: the probe LOOP_PICK_SNAP's held
     plan in the held round's place)"""
     tries = lay_tries()
-    if tries <= 1 or (res is not None and not res['open'] and not res['drc']):
+    if tries <= 1 or (res is not None and not res['open']):
         return res
     try:
         held_i = int(json.load(open(os.path.join(loopd, 'best.json')))['i'])
@@ -1515,7 +1515,7 @@ def lay_rounds(loopd, d, env, res, lay_, say, plan=None):
         laid += 1
         if best is None or rr['key'] < best['key']:
             best = rr
-        if not rr['open'] and not rr['drc']:
+        if not rr['open']:
             break
     if best is not None and best is not res:
         tag = best['tag']
@@ -1771,18 +1771,19 @@ def joint_sync(env, r, solve, say):
     for ln in grep(os.path.join(rd, 'joint.log'), r'couplings|side by side|coupled search|NOT the same'):
         say('  coupled solve: ' + ln.strip()[:200])
     jj_ = json.load(open(os.path.join(rd, f'{bus}.joint.json')))
-    ok_, cuts_ = jj_.get('joint'), jj_.get('cuts')
+    ok_, cuts_, own_ = jj_.get('joint'), jj_.get('cuts'), bool(jj_.get('own'))
     say('  coupled solve: this bus\'s plan '
-        + ("the coupled solve's" if ok_ else 'its own (the coupled solve gave none)')
+        + ('its own, the coupled plan (no coupling broken)' if ok_ and own_ else
+           "the coupled solve's" if ok_ else 'its own (the coupled solve gave none)')
         + (f', {len(json.load(open(cuts_))["lcuts"])} coupling(s) held through its loop' if cuts_ else ''))
     # ...the COUPLED plan laid out and published in place of the one this bus solved alone, and every other bus's too
     # before the loops start: a loop's first audit read the others' plans as solved by themselves, and found clashes the
-    # coupled solve had settled
+    # coupled solve had settled (its own plan, laid out and published above, where that is the coupled one)
     genv1 = dict(genv)
-    if ok_:
+    if ok_ and not own_:
         relayed(os.path.dirname(os.path.abspath(solve)), genv1['BENCH'], json.load(open(solve)), genv1, quiet,
                 name='joint_layers')
-    if ok_ and run(['whole_geo.py', solve, os.path.join(gd, 'g1.json')], genv1,
+    if ok_ and not own_ and run(['whole_geo.py', solve, os.path.join(gd, 'g1.json')], genv1,
                    log_path=os.path.join(gd, 'g1.log'))[0] == 0 and \
             run(['whole_polish.py', os.path.join(gd, 'g1.json'), os.path.join(gd, 'p1.json')], genv1,
                 log_path=os.path.join(gd, 'p1.log'))[0] == 0:
@@ -1884,7 +1885,8 @@ def joint_loop_sync(env, pos, solve, say):
     jj_ = json.load(open(os.path.join(rd, f'{bus}.joint.json')))
     ok_, cuts_ = jj_.get('joint'), jj_.get('cuts')
     say(f'  coupled re-solve {key}: with {", ".join(with_)}, this bus\'s re-solve '
-        + ('the coupled solve\'s' if ok_ else 'its own (the coupled solve gave none)')
+        + ('its own, the coupled plan (no coupling broken)' if ok_ and jj_.get('own') else
+           'the coupled solve\'s' if ok_ else 'its own (the coupled solve gave none)')
         + (f', {len(json.load(open(cuts_))["lcuts"])} coupling(s) held from here' if ok_ and cuts_ else ''))
     return bool(ok_), (cuts_ if ok_ else None)
 
@@ -1997,16 +1999,19 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         dc = run([checker('check_drc.py'), seq, '--nets'] + pats + ['--clearance-margin', '0.1', '--json', dj], env,
                  log_path=os.path.join(d, f'drc{tag}.log'), own_process=True)[0]
         dv = drc_count(dj)[0]
-        if dv is not None:
-            dc = int(dv > 0)            # (a round's lanes, laid untuned, are not judged by their lengths: LENGTH_ROWS)
+        # (the round's violations, 0 clean -- a round's lanes, laid untuned, are not judged by their lengths:
+        # LENGTH_ROWS; a checker that counted none, its exit: one at least)
+        ndrc = dv if dv is not None else int(dc != 0)
         nopen = 0 if cc == 0 else max(1, count_open(os.path.join(d, f'conn{tag}.log')))
         lanes = '\n'.join(m.split(' ')[0] for m in re.findall(r'[0-9]+/[0-9]+ in band', sm))
         v, c = grade_counts(seq, set(nets_all))
         g = (f"WHOLE K={K} round={r} lanes={lanes} vias={v} copper={c}mm connected={int(cc == 0)} "
-             f"drc={int(dc == 0)} secs={secs()} open={nopen}")
+             f"drc={ndrc} secs={secs()} open={nopen}")
         if not quiet:
             say(g)
-        return dict(key=(int(dc != 0), nopen, int(v), int(c)), open=nopen, drc=int(dc != 0), grade=g, board=seq,
+        # (ranked by the nets left OPEN first: a violation is the step's own grade's to answer after the whole route,
+        # an open net no later stage of the step lays)
+        return dict(key=(nopen, ndrc, int(v), int(c)), open=nopen, drc=ndrc, grade=g, board=seq,
                     open_nets=sorted(open_nets(os.path.join(d, f'conn{tag}.log'), keys_)) if nopen else [],
                     tag=tag)
 
@@ -2308,13 +2313,16 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         env.pop('VBAN_WALLS', None)          # (a draw's own ends: its bans none of the next's)
         if res is not None and (best is None or res['key'] < best['key']):
             best = res
-        # done: a plan laid connected and clean -- whether or not its loop passed, proved or not. A loop that did not
-        # pass names ends its audits found crowded, and the lay went round them; a later round changes those ends and
-        # can better only the vias or the copper, and on the synth handoff bench none did (11 of 117 cases went on after
-        # such a round, each one to the same grade), while a DDR bus's whole-array fanout, its second round laid clean,
-        # spent 360 s on a third. An UNPROVED plan laid clean is done too: a DDR3 bus went on after one in six runs,
-        # each second round 1000-1600 s for 2 to 11 fewer vias, the last for 12 more
-        if res is not None and res['open'] == 0 and res['drc'] == 0:
+        # done: a plan laid with NO NET OPEN -- whether or not its loop passed, proved or not, and whatever its
+        # violations, which the step's own grade answers after the whole route: another round is for nets left open
+        # (a bus's solo run laid 0 open in each of four rounds, ~600 s each, every one with the same 0.030 mm graze of a
+        # cap pad, and the board the step shipped clean). A loop that did not pass names ends its audits found crowded,
+        # and the lay went round them; a later round changes those ends and can better only the vias or the copper, and
+        # on the synth handoff bench none did (11 of 117 cases went on after such a round, each one to the same grade),
+        # while a DDR bus's whole-array fanout, its second round laid clean, spent 360 s on a third. An UNPROVED plan
+        # laid is done too: a DDR3 bus went on after one in six runs, each second round 1000-1600 s for 2 to 11 fewer
+        # vias, the last for 12 more
+        if res is not None and res['open'] == 0:
             break
         # (what the round left open -- or, laying nothing, the lanes its solve's CROWD diagnosis found no room for --
         # recorded for the LAST RESORT, which leaves them out when no round lays anything)

@@ -362,10 +362,12 @@ def leg_placed_clear(pts, L, n, near=None):
     return True
 
 
-def via_clear(x, y, net, n, near):
+def via_clear(x, y, net, n, near, placed=None):
     """a barrel of net at (x, y), laid as drawn, clear of every other net's copper on both layers -- pads as drawn,
-    holes by their drill -- and of what is placed (a placed pair's legs off the grid by half a step)"""
+    holes by their drill -- and of what is placed (a placed pair's legs off the grid by half a step): all of it, or
+    `placed` (placed_near's)"""
     pads, segs, vias = near
+    legs_, placed_, pvias_ = placed if placed is not None else (LEGS, PLACED, PVIAS)
     for pd, Ls, kind in pads:
         if pd.net_id == net:
             continue
@@ -385,13 +387,13 @@ def via_clear(x, y, net, n, near):
         if v_.net_id != net and math.hypot(x - v_.x, y - v_.y) < max(VR + v_.size / 2 + CL,
                                                                         cfg.via_drill / 2 + v_.drill / 2 + h2h) - 1e-9:
             return False
-    for (m_, L_, p_, q_) in LEGS:
+    for (m_, L_, p_, q_) in legs_:
         if m_ != n and _pairs._pt_seg((x, y), p_, q_) < VR + TW / 2 + CL + g / 2 - 1e-9:
             return False
-    for (m_, L_, p_, q_) in PLACED:
+    for (m_, L_, p_, q_) in placed_:
         if m_ != n and m_ not in prs and _pairs._pt_seg((x, y), p_, q_) < VR + TW / 2 + CL - 1e-9:
             return False
-    for (m_, bx_, by_) in PVIAS:
+    for (m_, bx_, by_) in pvias_:
         if m_ != n and math.hypot(x - bx_, y - by_) < VVB - 1e-9:
             return False
     return True
@@ -417,8 +419,16 @@ def crossover_at(n, V, d, hand0, L1, L2):
                              floor=_pairs.handover_setback(cfg))
         if c is None:
             continue
-        if all(leg_clear(pts, L, ids[k], n, near) for k, v in c['legs'].items() for pts, L in v) \
-                and all(via_clear(x, y, ids[k], n, near) for x, y, k in c['vias']):
+        # (measured against the copper placed so far within its reach alone, as an end connector's legs are: every
+        # point of its legs and every barrel lies within dmax of V, so copper farther than dmax and the widest bar from
+        # it meets none of them -- placed_near. Against all of it, a bus's pair search spent 1290 s of 1540 here, its
+        # crossovers each measured against every lane laid)
+        dmax = max([math.hypot(p_[0] - V[0], p_[1] - V[1]) for v in c['legs'].values() for pts, _L in v for p_ in pts]
+                   + [math.hypot(x - V[0], y - V[1]) for x, y, _k in c['vias']])
+        pn_ = placed_near(V, dmax + max(TW + CL + g / 2, TW + CL, VR + TW / 2 + CL + g / 2, VVB) + 1e-6)
+        if all(leg_static_clear(pts, L, ids[k], near) and leg_placed_clear(pts, L, n, pn_)
+               for k, v in c['legs'].items() for pts, L in v) \
+                and all(via_clear(x, y, ids[k], n, near, pn_) for x, y, k in c['vias']):
             c['first'] = first
             c['at'] = [V[0], V[1]]
             c['heading'] = list(DIRS[d])

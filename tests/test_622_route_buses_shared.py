@@ -20,6 +20,7 @@ With the step itself stood in for (no routing: each bus 'handed on' as its input
    from those sources, never an escape bus;
 4. step_policy lays a step's settings over the environment, the step's own policy over both.
 """
+import json
 import os
 import shutil
 import sys
@@ -57,19 +58,43 @@ import negotiated_buses as nb  # noqa: E402
 NEG = []
 
 
-def run(buses, fail=(), sequential=False):
+SOLO, KEPT, ALONE = [], [], []
+
+
+def run(buses, fail=(), sequential=False, left=None, neg_left=0, alone_left=None):
+    """route_buses with the step and the negotiation stood in for: `left` {(src, dest): [nets]} a step hands back in
+    turn, `alone_left` the same bus routed alone, `neg_left` the nets the negotiation leaves open (its every bus, all
+    told). SOLO the teeth the negotiation was given, KEPT where each run of the summary came from ('negotiated' or
+    'in turn'), ALONE the buses routed alone"""
     calls = []
-    del NEG[:]
+    del NEG[:], SOLO[:], KEPT[:], ALONE[:]
 
-    def negotiate(board, out, grp, *a, **kw):
+    def negotiate(board, out, grp, k, rounds, inproc, log, step_json, *a, solo=None, **kw):
         NEG.append(list(grp))
-        return 0, []
-
-    def step(board, out, src, dest, *a, whole_array=False, escape=False, settings=None, **kw):
-        calls.append(dict(board=board, src=src, dest=dest, whole_array=whole_array, escape=escape,
-                          settings=dict(settings or {})))
+        SOLO.append([None if s_ is None else tuple(os.path.basename(p_) for p_ in s_) for s_ in solo or []])
+        rows = []
+        for i_, g_ in enumerate(grp):
+            sp_ = step_json[:-len('.json')] + f'.{g_[1]}.json'
+            json.dump({'routed': ['a'], 'refused': {f'n{j_}': 'open' for j_ in range(neg_left if i_ == 0 else 0)}},
+                      open(sp_, 'w'))
+            rows.append(dict(src=g_[0], dest=g_[1], mode=g_[2], exit=0, grade='', summary=sp_))
+        json.dump({'buses': rows}, open(step_json, 'w'))
         shutil.copy(board, out)
         shutil.copy(board[:-len('.kicad_pcb')] + '.kicad_pro', out[:-len('.kicad_pcb')] + '.kicad_pro')
+        return 0, []
+
+    def step(board, out, src, dest, *a, whole_array=False, escape=False, settings=None, json_out=None, **kw):
+        shutil.copy(board, out)
+        shutil.copy(board[:-len('.kicad_pcb')] + '.kicad_pro', out[:-len('.kicad_pcb')] + '.kicad_pro')
+        alone_ = bool(json_out) and json_out.endswith('.alone.summary.json')
+        if alone_:
+            ALONE.append((src, dest, os.path.basename(board)))
+        else:
+            calls.append(dict(board=board, src=src, dest=dest, whole_array=whole_array, escape=escape,
+                              settings=dict(settings or {})))
+        if json_out:
+            json.dump({'routed': ['a'], 'refused': {n_: 'open' for n_ in ((alone_left if alone_ else left) or {})
+                                                     .get((src, dest), [])}}, open(json_out, 'w'))
         return (1 if (src, dest) in fail else 0), f'BUS {src}->{dest}'
     real, real_n = rb.route_bus, nb.route_negotiated
     rb.route_bus, nb.route_negotiated = step, negotiate
@@ -80,6 +105,9 @@ def run(buses, fail=(), sequential=False):
             open(os.path.join(td, 'b.kicad_pro'), 'w').write('{}\n')
             code, _g = rb.route_buses(b0, os.path.join(td, 'o.kicad_pcb'), buses, log=lambda *a: None,
                                       sequential=sequential)
+            sj = os.path.join(td, 'o.bus', 'summary.json')
+            KEPT.extend(('negotiated' if r_.get('negotiated') else 'in turn')
+                        for r_ in (json.load(open(sj)).get('buses') or []) if os.path.isfile(sj))
             return code, calls, b0, os.path.join(td, 'o.bus')
     finally:
         rb.route_bus, nb.route_negotiated = real, real_n
@@ -111,12 +139,36 @@ check([c['settings'].get('SOURCE_SHARED') for c in calls] == [None] * 5,
 check(calls[2]['settings'] == {'ROUTE_LAYERS': L4} and not calls[2]['escape'] and not calls[2]['whole_array'],
       f'3: U1-U4: its layers, plain: {calls[2]}')
 
-# 3a. the negotiation takes an escape bus after the first (plain on the shared field: route_on_field), not first
-_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', L4), ('U1', 'U5', 'escape', L4), ('U1', 'U4', 'plain', L4)])
-check(not calls and NEG == [[('U1', 'U2', 'whole-array', L4), ('U1', 'U5', 'escape', L4), ('U1', 'U4', 'plain', L4)]],
-      f'3a: whole-array, escape and plain off U1 negotiated, in one step: {NEG} {calls}')
+# 3a. buses off one array the negotiation takes (an escape bus after the first: route_on_field runs it plain on the
+# shared field), routed IN TURN first: every one handed on with no net open -- not negotiated
+G3 = [('U1', 'U2', 'whole-array', L4), ('U1', 'U5', 'escape', L4), ('U1', 'U4', 'plain', L4)]
+_c, calls, _b, _w = run(G3)
+check([(c['src'], c['dest']) for c in calls] == [('U1', 'U2'), ('U1', 'U5'), ('U1', 'U4')] and not NEG
+      and KEPT == ['in turn'] * 3, f'3a: every one handed on in turn: not negotiated: {NEG} {calls} {KEPT}')
+# ...a bus after the first that leaves nets open is routed again ALONE, on the board before the group: the nets it
+# closes alone were the buses' before it -- the pass done, the group negotiated, each bus's teeth from its run in turn,
+# that bus's from its run alone; the negotiated result kept when it leaves no more nets open
+_c, calls, b0_, _w = run(G3, left={('U1', 'U5'): ['N1', 'N2']})
+check([(c['src'], c['dest']) for c in calls] == [('U1', 'U2'), ('U1', 'U5'), ('U1', 'U4')] and NEG == [G3]
+      and ALONE == [('U1', 'U5', 'b.kicad_pcb')],
+      f'3a: U1-U5 left 2 open it closes alone: the pass done, the group negotiated: {NEG} {calls} {ALONE}')
+check(SOLO == [[('U1-U2.kicad_pcb', 'U1-U2.summary.json'), ('U1-U5.alone.kicad_pcb', 'U1-U5.alone.summary.json'),
+                ('U1-U4.kicad_pcb', 'U1-U4.summary.json')]],
+      f'3a: the teeth: U1-U2 and U1-U4 in turn, U1-U5 alone: {SOLO}')
+check(KEPT == ['negotiated'] * 3, f'3a: the negotiation leaving fewer open kept: {KEPT}')
+# ...a net it leaves open alone too is its own: the pass goes on, not negotiated
+_c, calls, _b, _w = run(G3, left={('U1', 'U5'): ['N1']}, alone_left={('U1', 'U5'): ['N1']})
+check([(c['src'], c['dest']) for c in calls] == [('U1', 'U2'), ('U1', 'U5'), ('U1', 'U4')] and not NEG
+      and KEPT == ['in turn'] * 3, f'3a: U1-U5\'s open net open alone too: the pass goes on: {NEG} {calls} {KEPT}')
+# ...and the first bus's nets left open are its own (its run in turn is its run alone): no run alone, the pass goes on
+_c, calls, _b, _w = run(G3, left={('U1', 'U2'): ['N1']})
+check(len(calls) == 3 and not NEG and not ALONE, f'3a: the first bus\'s open net its own: {NEG} {calls} {ALONE}')
+# ...and the whole pass in turn kept when the negotiation leaves more nets open
+_c, calls, _b, _w = run(G3, left={('U1', 'U5'): ['N1']}, neg_left=5)
+check(NEG == [G3] and KEPT == ['in turn'] * 3, f'3a: the negotiation leaving more open: the pass kept: {NEG} {KEPT}')
 check(nb.check([('U1', 'U5', 'escape', L4), ('U1', 'U2', 'plain', L4)]) is not None, '3a: an escape bus first is not')
-_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', L4), ('U1', 'U5', 'escape', L4)], sequential=True)
+_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', L4), ('U1', 'U5', 'escape', L4)], sequential=True,
+                        left={('U1', 'U5'): ['N1']})
 check(not NEG and calls[1]['settings'].get('ESCAPE_JOINT') == 'U1', f'3a: --sequential: {NEG} {calls}')
 
 # 3b. keeps_source_escapes (src, escape, whole_array, SOURCE_SHARED)

@@ -138,8 +138,12 @@ the fewest vias -- is written to `OUTDIR/best.kicad_pcb` (beside its own
 round's `rN/seq.kicad_pcb`). Its last line is that result's grade:
 
 ```
-WHOLE K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=0|1 secs=.. open=..
+WHOLE K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=N secs=.. open=..
 ```
+
+`drc=` is the number of violations on the round's nets (0 clean). A round that
+leaves no net open ends the run, its violations the bus step's own grade to
+answer; another round is for nets left open.
 
 It exits 0 when that board is connected and DRC-clean, 1 when nets are left
 open or a violation stands, and 2 when nothing could be laid at all (no
@@ -321,7 +325,8 @@ ladder admits, taken where both are ball arrays (`is_array`: balls past the
 outer two rings, on two nets or more -- a QFN's interior is its exposed pad),
 the larger array the source, the largest bus first, each step routed on the
 board the one before handed on -- the buses off one array in one step,
-negotiated ([buses off one array](#buses-off-one-array-negotiated), below). A
+in turn and negotiated where they meet ([buses off one
+array](#buses-off-one-array-in-turn-and-negotiated), below). A
 pair with a row part at one end (a QFN, a
 TSOP, a connector) is named and not taken, and so is every net on both parts
 the ladder does not admit, with why (another part on it, more than one pad on
@@ -329,8 +334,8 @@ a part). `--find` names them and stops. `--bus SRC:DEST[:MODE[:LAYERS]]`,
 repeated, names the buses and their order instead, each with its own fanout
 (MODE `plain`, `whole-array` or `escape`; by default the `--whole-array` and
 `--escape` flags) and its own routing layers (LAYERS, as `ROUTE_LAYERS`).
-Routed sequentially (`--sequential`, or buses off one array the negotiation
-does not take), a later escape bus on an array an earlier bus was handed on
+Routed sequentially (in turn, `--sequential`, or buses off one array the
+negotiation does not take), a later escape bus on an array an earlier bus was handed on
 through plans that array whole with it ([a shared array](#a-shared-array),
 below).
 
@@ -632,7 +637,7 @@ python3 route_bus.py tmp/zynq/planes.kicad_pcb tmp/zynq/bus.kicad_pcb --src U1 -
 Its last line is the grade:
 
 ```
-BUS U1->U2 K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=0|1 secs=.. | on the board: ... walled=.. secs=..
+BUS U1->U2 K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=N secs=.. | on the board: ... walled=.. secs=..
 ```
 
 `walled=` counts the arrays' other balls the step walled in (#1348): reachable
@@ -857,7 +862,7 @@ the LVDS bus 49 of its 52 (106 vias, 1086 mm), and the USB and Ethernet bus
 25 of its 26 in its second (50 vias, 845 mm), each handed on connected and
 clean: 55 minutes on a Mac running five other routes beside it.
 
-#### Buses off one array, negotiated
+#### Buses off one array, in turn and negotiated
 
 Buses that leave one array in different directions -- a star round it --
 meet near it when they are routed **sequentially**, one after another. A later
@@ -866,19 +871,35 @@ earlier one left them no room, and the bus routed first is never moved for
 the one after it. Planning the array's escapes for every bus at the same time
 lowers the number of those crossings, but the few that remain decide the run.
 
-So the bus step routes the buses off one array **negotiated**, found or named
-by `--bus`: every bus at the same time, each by its own whole route in its
-own frame, on one shared field, every step of each taken with the others in
-sight and their solves coupled (`negotiated_buses.py`). `--sequential` routes
-the buses one after another instead.
+So the bus step routes the buses off one array **in turn first**, found or
+named by `--bus`, each on the board the one before handed on, and
+**negotiates** them only where they meet. A bus after the first that leaves
+nets open is routed again alone, on the board as it came; a net it closes
+alone was the buses' before it, their lanes across its way out. Then the
+buses are routed **negotiated**: every bus at the same time, each by its own
+whole route in its own frame, on one shared field, every step of each taken
+with the others in sight and their solves coupled (`negotiated_buses.py`).
+The pass in turn routes every bus first; the step keeps the negotiated
+result unless it leaves more nets open than the whole pass. A net a bus
+leaves open alone too is its own, and so is a net the first bus leaves
+open, its run in turn being its run alone. Negotiated, three buses off
+one array left their escape bus 21 to 28 nets open on the shared field,
+where in turn all three closed; in turn, a fourth bus off another array
+found its way out taken by the three before it. `--sequential` routes the
+buses one after another only.
 
-1. **Solo runs.** Each bus is routed by itself on the board, all of them at
-   the same time. Where its escapes leave the shared array, with nothing else
-   there, are its solo teeth.
+1. **Teeth.** Where each bus's escapes leave the shared array in its run in
+   turn are its teeth -- a bus the buses before it took nets from, its run
+   alone. With no teeth, or with each bus's fanout
+   alone for them, most buses of a four-bus array needed a second or third
+   negotiated round, where with teeth from full runs every bus closed in its
+   first. Called by itself, `route_negotiated` makes a solo run of each bus
+   for them.
 2. **The shared field.** The shared array is planned once for every bus off
    it, its other nets and plane balls with them (`joint_escape.plan_array`
-   with `escape_to`: each bus net escapes toward its own destination). Each
-   bus ball prefers its solo tooth, and the buses' runs stack as the other
+   with `escape_to`: each bus net escapes toward its own destination, every
+   net of each bus, those its run routed preferring their teeth). Each bus
+   ball prefers its tooth, and the buses' runs stack as the other
    balls' do (`stack_bus`). Each escape also pays for every lane of another
    bus that its sweep to its destination crosses (`sweep`,
    `sweep_crossings`): two buses whose teeth interleave along one face and
@@ -891,9 +912,9 @@ the buses one after another instead.
    are reserved on it (protected, `reserved`), so a whole-array bus's fanout
    plans round them.
 3. **Negotiated.** Every bus is routed on the shared field at the same time,
-   each in its own frame. Each plain bus keeps its escapes there; a
-   whole-array bus lays its own again each round, round the plain buses'
-   reserved ones, as in its solo run. A ball its comb refuses there holds
+   each in its own frame. Each plain bus keeps its escapes there, and an
+   escape bus is plain there too; a whole-array bus lays its own again each
+   round, round the plain buses' reserved ones, as in its run alone. A ball its comb refuses there holds
    the shared field's escape, and the comb fans its other balls again round
    it, until it refuses none it can hold (`hold_board_escapes`): fanned again
    whole, a memory bus's comb took the dog-bone sites of six deep balls the
@@ -906,6 +927,10 @@ the buses one after another instead.
    within a lane's pitch of each other: the two lanes take different layers
    there, or the coupling is paid for as `JOINT_W_CROSS` (20) vias. Each bus
    lays out its share of the coupled plan before any bus's loop starts.
+   Where the buses' own plans side by side break no coupling there is
+   nothing to settle, and no search runs: each bus's own plan is the coupled
+   one (four such searches had taken 198 to 264 s each and ended where they
+   began, or 2 vias-worth lower).
    Every re-solve of the loops after is coupled in the same way, the buses
    in step (`joint_loop_sync`): a conflict two buses' audits find is the two
    buses' to settle, not only the one that found it. In those solves another
@@ -922,16 +947,23 @@ the buses one after another instead.
    Every routed net is protected and the reservations are lifted, so a
    reserved net its bus did not hand on is left to the rest of the chain.
    Each DRC violation between two buses' nets, or between a bus's net and
-   another net, is named in `conflicts.json`.
+   another net, is named in `conflicts.json`. One between a bus's net and
+   another net gives the other net back (`give_back`): the copper the step
+   laid it is taken off the merged board, and the net is left to the rest of
+   the chain -- another net's copper the step may take up, a bus net's never.
+   A whole-array bus lays the shared array's other nets again each round,
+   round its own escapes, and the other buses, routed round the shared
+   field's, do not see them: one such escape, moved onto the layer another
+   bus's lane ran on, was a merged board's one conflict.
 
 The buses share their source and their routing layers, and each goes to
 parts of its own: `DEST` `A+B` is a group bus, each of its nets escaping
 toward its own part, so buses that overlap are planned as one whole route in
 one frame. The first may be whole-array (to one part) and the rest are plain,
 since the merge takes only each other bus's own nets (with `--whole-array`
-the first takes it). Buses off one array that do not fit that -- an escape
-bus among them, as in the recipes above -- are routed sequentially, and the
-log says why. Each bus is its own routing step, with its own process and its
+the first takes it); the rest may be escape buses. Buses off one array that
+do not fit that -- an escape bus first, a whole-array bus after the first --
+are routed sequentially only, and the log says why. Each bus is its own routing step, with its own process and its
 own pool of threads, so N buses take N runs at the same time. Everything is
 written in `OUT.bus/`: `solo/DEST/`, `shared_field.kicad_pcb`, `negotiation/`
 (where the buses meet), `neg/DEST/`, `conflicts.json` and `summary.json`.
@@ -2054,11 +2086,11 @@ for some of the lanes exists:
   lanes refused at their teeth and berths, 33 nets open, where on its own
   bench it leaves 13;
 - a round's loop runs six rounds at most (`LOOP_ROUNDS`); a loop that does
-  not pass, its held plan laid not clean, lays one other round's plan too --
-  snapped on its own bench, the fewest findings first, a plan the snap lays
+  not pass, its held plan laid with nets open, lays one other round's plan too
+  -- snapped on its own bench, the fewest findings first, a plan the snap lays
   nothing of skipped (`LAY_TRY=N`: N boards in all, stopping at the first
-  clean one; 1 lays the held plan alone) -- and keeps the better lay (DRC,
-  then open nets, vias, copper): on the zynq LVDS bus the held round laid 10,
+  with no net open; 1 lays the held plan alone) -- and keeps the better lay
+  (open nets, then DRC, vias, copper): on an LVDS bus the held round laid 10,
   3, 2 and 2 nets open where the loop's best round laid 6, 0, 2 and 2;
 - a round that lays nothing, or leaves nets open, is followed by **round 1
   again under the next seed**, up to `ROUNDS` (default 4): every solve of a
@@ -2233,6 +2265,19 @@ via.
   named, each with findings of its own, and the loop stopped not converging
   on its first round's plan; the repair re-solved 10 to 28 lanes in under
   210 s.
+- **The whole re-solve in windows** (`whole_solve` `SOLVE_WINDOWS`, which the
+  loop sets on that re-solve). From the plan before, laid out whole, eight
+  neighbouring lanes in their order along the trunk are searched again with
+  every other lane held (`WINDOW_LANES`, `WINDOW_STRIDE`: the next window
+  four lanes on), a window's plan taken when it is better, sweeping until a
+  sweep gains nothing; each window is a small model, proved optimal in a
+  second or three. Then the whole model's search runs from the windows'
+  plan for four batches (`WINDOW_FULL`), what no window can do alone, and
+  its bound is the solve's. On two buses of 45 and 41 lanes on eight layers,
+  three of their loop's re-solves took 251, 273 and 211 s searching the
+  whole model for plans of 88.9, 367.1 and 260.0 vias-worth, and 75, 68 and
+  57 s in windows for 95.1, 371.3 and 263.9, holding every firm cut the whole
+  search held.
 - **A pair's turn, a grid step wider** (`GEO_PAIR_TURN_ROOM`, in router grid
   steps; 1 here, 0 on two layers). From a pair's end through its end run and
   its two 45-degree turns onto its lane, the lanes beside it on its layer

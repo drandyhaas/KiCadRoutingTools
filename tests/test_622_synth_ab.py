@@ -39,7 +39,7 @@ def handoff(d, rows, copper):
         os.makedirs(os.path.join(d, tag))
         with open(os.path.join(d, tag, 'run.log'), 'w') as f:
             for i, mm in enumerate(mms):
-                f.write(f'WHOLE K=12 round={i + 1} lanes=12/12 vias=0 copper={mm}mm connected=1 drc=1 secs=9 open=0\n')
+                f.write(f'WHOLE K=12 round={i + 1} lanes=12/12 vias=0 copper={mm}mm connected=1 drc=0 secs=9 open=0\n')
 
 
 LAYERS = 'tag\tlayers\tk\tverdict\tvias\tround\tcopper\tconnected\tdrc\topen\tsecs\n'

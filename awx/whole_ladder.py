@@ -3,7 +3,7 @@
 the whole route's ladder on this machine: every rung of each bench through whole_route.py, JOBS at a time (the
 largest K first), each stopped at CAP seconds with every stage it started. One line per rung as it ends:
 
-  BENCH K<k> exit RC SECS s: WHOLE K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=0|1 secs=.. open=..
+  BENCH K<k> exit RC SECS s: WHOLE K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=N secs=.. open=..
 
 also in OUT/ladder.txt; each rung's log and OUTDIR beside it (OUT/BENCH_k<K>.log, OUT/BENCH_k<K>/). Exits 0 when every
 rung ends connected and DRC-clean, 1 otherwise.
@@ -63,7 +63,7 @@ def grade(log_path):
 
 
 def passed(line):
-    return bool(re.search(r'connected=1 drc=1', line))
+    return bool(re.search(r'connected=1 drc=0 ', line))
 
 
 def main():

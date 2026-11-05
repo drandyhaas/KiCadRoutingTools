@@ -22,7 +22,10 @@ variable hinted), then the BOUND-RAISING workers run a probe of WHOLE_SOLVE_PROB
 their bound is the solve. Else the PLAN-FINDING workers run on from the probe's plan and bound, ONE search of at most
 WHOLE_SOLVE_BATCHES (100). Each stops sooner when the vias are proved (the plan's vias no more than the bound's whole
 vias), and the probe, once it has a plan, when it STALLS (SOLVE_STALL of its own model reductions in a row with no
-better plan or bound: events of the search, never a clock). Only a plan PROVED optimal in its vias is written;
+better plan or bound: events of the search, never a clock). Under SOLVE_WINDOWS=1 (whole_route's loop: its whole
+re-solve) the search is in WINDOWS instead -- WINDOW_LANES neighbouring lanes searched again at a time, every other lane
+held, then WINDOW_FULL batches of the whole model from their plan (solve's windows()). Only a plan PROVED optimal in its
+vias is written;
 one the search could not prove is no plan -- except under SOLVE_UNPROVED=1 (a round's first solve in whole_route,
 which never ends with nothing): the best plan found is written marked 'proved': false, with the nets it leaves over
 two vias ('over_nets'), and never as a floor for a later solve. Under SOLVE_CROWD=1 (that solve too) a model with NO
@@ -69,6 +72,10 @@ FALLBACK = ['quick_restart', 'no_lp', 'core']
 FACE_ROOM = 2 * VNEED                 # the band along the source's near face: a change's room along its lane
 SOLVE_STALL = 3                        # the search's model reductions in a row with no progress: stalled
 WARM_WORK = 30.0                       # deterministic work to lay a re-solve's warm start out whole (one worker)
+WINDOW_LANES = 8                       # (SOLVE_WINDOWS) a window: this many lanes, neighbours in their entry order
+WINDOW_STRIDE = 4                      # ...the next window this many lanes on, so each lane is in two
+WINDOW_BATCHES = 10                    # ...a window's search, at most (it proves its window optimal well within)
+WINDOW_FULL = 4                        # ...then the whole model's search from the windows' plan
 W_FIRM = 100 * W_V                     # a broken FIRM cut (CUTS_FIRM=1, more layers than two): above everything else a
 #                                        plan can buy -- the solve holds every cut it can and breaks one only where no
 #                                        plan holds them all, in ONE solve (whole_route's loop: no hard pass first)
@@ -115,6 +122,17 @@ class _Held:
 
     def WallTime(self):
         return self.main.WallTime() + self.vals.WallTime()
+
+
+class _Windowed(_Held):
+    """(SOLVE_WINDOWS) the windows' plan -- a window's search its values and its objective, the whole model's (every
+    lane in it, the rest held) -- with the whole model's bound, the full re-solve's"""
+    def __init__(self, vals, bound):
+        super().__init__(vals, vals)
+        self.bound = bound
+
+    def BestObjectiveBound(self):
+        return self.bound
 
 
 def _room_tie(m, sv, t, chg, YL, M, ROOM_T, G):
@@ -2278,6 +2296,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     # changes and layers, and the search found no plan of its own for 16 s on the two-end USB and Ethernet bus's
     # re-solve -- the rest of the plan unhinted, nothing for its neighbourhood searches to start from. Laid out (0.1 s
     # there), the search has a plan from its first batch
+    vals_h = None
     if hint:
         sh = cp_seed.solver()
         sh.parameters.num_workers = 1
@@ -2457,13 +2476,84 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                         v_ = m.GetIntVarFromProtoIndex(i_)
                         m.AddHint(v_, s2_.Value(v_))
         print(msg_)
-    sv, st, proved, known, secs = run(SUBSOLVERS, PROBE_BATCHES)
-    solve_secs = secs
-    if not proved and warm is not None:
+    # ---- (SOLVE_WINDOWS=1, the loop's whole re-solve in whole_route) the re-solve in WINDOWS, from its warm start laid
+    # out whole: WINDOW_LANES neighbouring lanes (in their entry order along the trunk) searched again with every other
+    # lane held as the plan has it -- its changes, its layers, its crossings with another held lane -- a window taken
+    # when its plan is better, the next window WINDOW_STRIDE lanes on; sweeps until one gains nothing. Each window is a
+    # small model, proved optimal in a second or three. Then the whole model's search from the windows' plan,
+    # WINDOW_FULL batches -- what no window could do alone, two lanes far apart in the order moved together -- and its
+    # bound the solve's. Two buses of 45 and 41 lanes on eight layers, three of their loop's re-solves: the whole search
+    # 251, 273 and 211 s, plans of 88.9, 367.1 and 260.0 vias-worth; in windows 75, 68 and 57 s, plans of 95.1, 371.3
+    # and 263.9, every firm cut the whole search held held
+    def windows(cur, s0):
+        """(solver, status, proved, bound, seconds) of the re-solve in windows from `cur` (every variable's value: the
+        warm start laid out whole, `s0` its solver)"""
+        t0_ = time.time()
+        OK_ = (cp_model.OPTIMAL, cp_model.FEASIBLE)
+        NV_ = len(m.Proto().variables)
+        lanes_ = sorted(M, key=lambda n: (entry[n], n))
+        own_ = {n: [v_.Index() for v_ in list(chg[n][0]) + list(chg[n][1]) + list(YL.get(n, ()))] for n in M}
+        starts_ = list(range(0, max(1, len(lanes_) - WINDOW_LANES + 1), WINDOW_STRIDE))
+        if starts_[-1] + WINDOW_LANES < len(lanes_):
+            starts_.append(len(lanes_) - WINDOW_LANES)
+        best_, obj_, took_, sweeps_ = s0, s0.ObjectiveValue(), 0, 0
+        while True:
+            sweeps_ += 1
+            gained_ = False
+            for a_ in starts_:
+                free_ = set(lanes_[a_:a_ + WINDOW_LANES])
+                m2_ = m.clone()
+                for n in M:
+                    if n not in free_:
+                        for i_ in own_[n]:
+                            m2_.Add(m2_.GetIntVarFromProtoIndex(i_) == cur[i_])
+                for (a2_, b2_), v_ in t.items():
+                    if a2_ not in free_ and b2_ not in free_:
+                        m2_.Add(m2_.GetIntVarFromProtoIndex(v_.Index()) == cur[v_.Index()])
+                m2_.ClearHints()
+                for i_ in range(NV_):
+                    m2_.AddHint(m2_.GetIntVarFromProtoIndex(i_), cur[i_])
+                s_ = cp_seed.solver()
+                s_.parameters.num_workers = SOLVE_WORKERS
+                s_.parameters.interleave_search = True
+                s_.parameters.max_num_deterministic_batches = WINDOW_BATCHES
+                s_.parameters.share_glue_clauses = False
+                s_.parameters.share_binary_clauses = False
+                if s_.Solve(m2_) in OK_ and s_.ObjectiveValue() < obj_ - 0.5:
+                    cur = [s_.Value(m2_.GetIntVarFromProtoIndex(i_)) for i_ in range(NV_)]
+                    best_, obj_, gained_ = s_, s_.ObjectiveValue(), True
+                    took_ += 1
+            if not gained_:
+                break
+        secw_ = time.time() - t0_
+        m.ClearHints()
+        for i_ in range(NV_):
+            m.AddHint(m.GetIntVarFromProtoIndex(i_), cur[i_])
+        sf_, stf_, prf_, bf_, secf_ = run([], WINDOW_FULL)
+        print(f'   windows of {WINDOW_LANES} lanes: {sweeps_} sweep(s) of {len(starts_)}, {took_} taken, '
+              f'{s0.ObjectiveValue() / W_V:.1f} -> {obj_ / W_V:.1f} vias-worth, {secw_:.0f}s; the whole model from '
+              f'there, {WINDOW_FULL} batches: [{sf_.StatusName(stf_)}] {secf_:.0f}s'
+              + (f', {sf_.ObjectiveValue() / W_V:.1f}' if stf_ in OK_ else '') + f' (bound {bf_ / W_V:.1f})')
+        if stf_ in OK_ and sf_.ObjectiveValue() <= obj_:
+            return sf_, stf_, prf_, bf_, time.time() - t0_
+        return (_Windowed(best_, bf_), cp_model.FEASIBLE, math.floor(obj_ / W_V) <= math.floor(bf_ / W_V), bf_,
+                time.time() - t0_)
+    windowed = awx_settings.get('SOLVE_WINDOWS') == '1' and vals_h is not None and \
+        not awx_settings.get('SOLVE_HOLD') and not CROWD and not check
+    if windowed:
+        sv, st, proved, known, secs = windows(vals_h, sh)
+        solve_secs = secs
+        # (a warm start at the root's floor proves the windows' plan too: it is no dearer, and the floor holds it;
+        # unproved, it is kept as the loop's re-solve keeps one, SOLVE_UNPROVED -- no plan-finding search after it)
+        proved = proved or warm is not None
+    else:
+        sv, st, proved, known, secs = run(SUBSOLVERS, PROBE_BATCHES)
+        solve_secs = secs
+    if not proved and not windowed and warm is not None:
         print(f'   bound-raising workers: [{sv.StatusName(st)}] {secs:.0f}s, no proved plan -- the warm start, '
               f'at the root\'s floor ({warm.ObjectiveValue():.0f})')
         sv, st, proved = warm, cp_model.FEASIBLE, True
-    if not proved:
+    if not proved and not windowed:
         # the FALLBACK: the bound-raising workers could not prove it (the plan they found was not good enough to meet
         # their bound: K51 on the human's fanout, best 2 over two + 38 vias against 0 + 32, 124 s). The PLAN-FINDING
         # workers run on from there -- its best plan as their start, and its bound, proved on this very model, a

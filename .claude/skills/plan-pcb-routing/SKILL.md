@@ -1773,16 +1773,21 @@ python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
   nets against whole-array's 45. `plain` for a bus to a row part (a QFN), and
   for a **group bus**, one source with several ends, `--bus U1:U4+U3:plain:...`
   (two buses that interleave on one face, routed as one bus in one frame).
-- **Buses off one array are routed NEGOTIATED by default:** a solo run of
-  each, then the array's escapes planned once for all of them (the shared
-  field), then every bus at the same time, each in its own frame, their plans
-  one coupled solve, and the boards merged (a conflict between two buses is
-  named in `OUT.bus/conflicts.json`). The first may be `whole-array`, the
-  rest `plain`. Otherwise -- an escape bus among them, a whole-array bus
-  after the first or to several parts, different LAYERS -- and with
-  `--sequential`, they are routed SEQUENTIALLY, one after
-  another in the order given, and the log says why (`route_bus: the N buses
-  off U1 routed sequentially, not negotiated -- ...`).
+- **Buses off one array are routed IN TURN first, NEGOTIATED where they
+  meet:** each bus in the order given on the board the one before handed on;
+  a bus after the first that leaves nets open is routed again alone, and the
+  nets it closes alone (its way out taken by the buses before it) start the
+  negotiation -- the array's escapes planned once for all of them (the shared
+  field, each bus's teeth from its run in turn), every bus at the same time,
+  each in its own frame, their plans one coupled solve, the boards merged --
+  and the step keeps whichever leaves fewer nets open (`route_bus: the buses
+  off U1 in turn: ... -- the N buses negotiated`). A conflict between two
+  buses is named in `OUT.bus/conflicts.json`; one between a bus's net and
+  another net gives the other net back to `route.py`. The first may be
+  `whole-array` or `plain`, the rest `plain` or `escape`. An escape bus first,
+  a whole-array bus after the first or to several parts, different LAYERS --
+  and `--sequential` -- route them SEQUENTIALLY only, and the log says why
+  (`route_bus: the N buses off U1 routed sequentially, not negotiated -- ...`).
 - **Every ball of a bus array must leave the step served -- the rule that
   decides the rest of the chain.** A ball is served when it has an escape
   (a dog-bone via or stub), is dropped to its plane, or is strapped. `route.py`
