@@ -707,10 +707,17 @@ def loop(solve, out, rounds, env, log):
                              CUTS_FIRM='1', SOLVE_UNPROVED='1', SOLVE_HOLD=hold_, **soft)
                 bl_ = grep(s2[:-5] + '.held.log', r'firm cuts broken')
                 broke_ = [int(m_.group(1)) for ln in bl_ for m_ in [re.search(r'broken: (\d+)', ln)] if m_]
-                if rc_h == 0 and os.path.isfile(s2) and not any(broke_):
+                # (a firm cut the round's WHOLE re-solve itself broke before, in this round's loop, no plan holds: a
+                # repair breaking only such cuts is the plan the whole solve would give -- a crossing bus's clock pair
+                # across an LVDS lane's change, broken by the whole solve, broken again by the repair, and the whole
+                # solve run again, 210 s each, to break it once more)
+                known_ = firm_known(O('firm_whole.json'))
+                brk_ = firm_keys(s2) if rc_h == 0 and os.path.isfile(s2) else None
+                if rc_h == 0 and os.path.isfile(s2) and (not any(broke_) or (brk_ and brk_ <= known_)):
                     for ln in grep(s2[:-5] + '.held.log', r'whole_solve|held:|firm cuts'):
                         log('  ' + ln)
-                    log(f"  the round's repair: {len(free_)} lane(s) solved again, the rest held")
+                    log(f"  the round's repair: {len(free_)} lane(s) solved again, the rest held"
+                        + (' -- the firm cuts it breaks the whole solve broke before' if any(broke_) else ''))
                     took(s2, i)
                     return None
                 if os.path.isfile(s2):
@@ -736,6 +743,7 @@ def loop(solve, out, rounds, env, log):
                 return failed(s2[:-5] + '.log')
             for ln in grep(s2[:-5] + '.log', r'whole_solve|vias|check|history|firm cuts'):
                 log('  ' + ln)
+            firm_known(O('firm_whole.json'), firm_keys(s2))
             took(s2, i)
             return None
         if stage([s2], 'whole_solve.py', [s2], s2[:-5] + '.log', BENCH=env.get('BENCH0') or env['BENCH'],
@@ -1098,6 +1106,26 @@ def open_nets(conn_log, keys=None):
         elif mode == 'c' and '(net ' in s and s.endswith(':'):
             out.add(key_of(s.split(' (net')[0], keys))
     return out
+
+
+def firm_keys(plan):
+    """the firm cuts the solve's `plan` (its JSON) broke: {each cut's key, as JSON} -- empty where it broke none"""
+    try:
+        return {json.dumps(x_, sort_keys=True) for x_ in (json.load(open(plan)).get('firm_broken') or [])}
+    except (OSError, ValueError):
+        return set()
+
+
+def firm_known(path, add=()):
+    """the firm cuts a round's whole re-solves broke, kept in `path` (the loop's): `add` added; the set"""
+    try:
+        got = set(json.load(open(path)))
+    except (OSError, ValueError):
+        got = set()
+    if add:
+        got |= set(add)
+        json.dump(sorted(got), open(path, 'w'))
+    return got
 
 
 def relay_ends(d, bench, J, say, name='fo_layers', env=None):
@@ -1645,6 +1673,22 @@ def joint_publish(env, plan, stage_name, board=None, nets=None):
             joint_lanes.publish(plan, stage_name)
 
 
+def with_end_runs(lanes, env, q, cx, cy):
+    """the lanes a bus asks the coupled solve with, its VIA-END RUNS on the fanout's bench (BENCH0, else BENCH) among
+    their pieces (joint_lanes.end_runs): the round's relayer moves each run onto its lane's end layer, so they are the
+    lane's ways too -- two buses' runs crossing inside the shared array, each moved onto one layer by its own relayer,
+    merged as two crossings no bus had seen. Only in the request: the other buses' stages see that copper on their own
+    boards"""
+    import joint_lanes
+    with awx_settings.given(env):
+        runs = joint_lanes.end_runs(env.get('BENCH0') or env.get('BENCH'), int(q), cx, cy)
+    if not runs or not lanes:
+        return lanes                # (no lanes laid out: the coupled solve reads the taut paths, whole_joint)
+    lanes = dict(lanes)
+    lanes['pieces'] = list(lanes.get('pieces') or []) + runs
+    return lanes
+
+
 def joint_sync(env, r, solve, say):
     """(JOINT_DIR, JOINT_BUS, JOINT_PEERS, JOINT_TURN: route_bus's buses off one shared array, each its own whole route
     in a process of its own) the round's first plan one COUPLED solve: this bus's own, just solved, asked for
@@ -1683,6 +1727,7 @@ def joint_sync(env, r, solve, say):
             lanes = json.load(open(os.path.join(jd, 'lanes', f'{bus}.json')))
         except (OSError, ValueError):
             lanes = None
+    lanes = with_end_runs(lanes, genv, q_, cx_, cy_)
     say(f'  coupled solve: this bus\'s own plan laid out for the couplings: '
         + (f'{len(lanes["pieces"])} pieces' if lanes else 'NOT (its taut paths instead)'))
     req = {'bus': bus, 'env': {k_: v_ for k_, v_ in env.items() if isinstance(v_, str)}, 'solve': os.path.abspath(solve),
@@ -1803,6 +1848,7 @@ def joint_loop_sync(env, pos, solve, say):
     except (OSError, ValueError):
         lanes = None
     q_, cx_, cy_ = (float(v_) for v_ in env['JOINT_TURN'].split(','))
+    lanes = with_end_runs(lanes, env, q_, cx_, cy_)
     req = {'bus': bus, 'env': {k_: v_ for k_, v_ in env.items() if isinstance(v_, str)}, 'solve': os.path.abspath(solve),
            'turn': [int(q_), cx_, cy_], 'lanes': lanes}
     tmp = os.path.join(rd, f'.{bus}.req.json')

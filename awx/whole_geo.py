@@ -221,18 +221,41 @@ def intervals(ftag, sp, s, margin, own=(False, 0), under=frozenset()):
     ok = (X >= BX0 + EDGE) & (X <= BX1 - EDGE) & (Y >= BY0 + EDGE) & (Y <= BY1 - EDGE)
     for b in [PADS_BOX[i] if (own[0] if i == 0 else own[1] == i) else BOX[i] for i in range(len(BOX)) if i not in under]:
         ok &= ~((X > b[0] - margin) & (X < b[2] + margin) & (Y > b[1] - margin) & (Y < b[3] + margin))
-    out, i = [], 0
-    while i < len(OS):
-        if ok[i]:
-            j = i
-            while j + 1 < len(OS) and ok[j + 1]:
-                j += 1
-            out.append((float(OS[i]), float(OS[j])))
-            i = j + 1
-        else:
-            i += 1
-    _ivc[key] = out
+    _ivc[key] = out = _runs(ok[None, :])[0]
     return out
+
+
+def _runs(ok):
+    """[[(lo, hi), ..] per row]: each row's runs of True in `ok` (rows x OS), as offsets"""
+    z_ = np.zeros((ok.shape[0], 1), np.int8)
+    d_ = np.diff(np.concatenate((z_, ok.astype(np.int8), z_), axis=1), axis=1)
+    out = [[] for _ in range(ok.shape[0])]
+    for r_, a_, b_ in zip(*np.nonzero(d_ == 1), np.nonzero(d_ == -1)[1] - 1):
+        out[r_].append((float(OS[a_]), float(OS[b_])))
+    return out
+
+
+def intervals_many(ftag, sp, ss, margin, own=(False, 0), under=frozenset()):
+    """[intervals(ftag, sp, float(s), margin, own, under) for s in ss], the columns not yet cached computed together:
+    the same cache, each new column's offsets as intervals computes them"""
+    keys = [(ftag, round(float(s_), 4), margin, own, under) for s_ in ss]
+    todo = {}
+    for s_, k_ in zip(ss, keys):
+        if k_ not in _ivc and k_ not in todo:
+            todo[k_] = float(s_)
+    if todo:
+        S_ = np.array(list(todo.values()), float)
+        kk = np.clip(np.searchsorted(sp.S, S_, side='right') - 1, 0, sp.n - 1)
+        t_ = S_ - sp.S[kk]
+        X = (sp.P[kk, 0] + t_ * sp.d[kk, 0])[:, None] + OS[None, :] * sp.nrm[kk, 0][:, None]
+        Y = (sp.P[kk, 1] + t_ * sp.d[kk, 1])[:, None] + OS[None, :] * sp.nrm[kk, 1][:, None]
+        ok = (X >= BX0 + EDGE) & (X <= BX1 - EDGE) & (Y >= BY0 + EDGE) & (Y <= BY1 - EDGE)
+        for b in [PADS_BOX[i] if (own[0] if i == 0 else own[1] == i) else BOX[i] for i in range(len(BOX))
+                  if i not in under]:
+            ok &= ~((X > b[0] - margin) & (X < b[2] + margin) & (Y > b[1] - margin) & (Y < b[3] + margin))
+        for k_, row in zip(todo, _runs(ok)):
+            _ivc[k_] = row
+    return [_ivc[k_] for k_ in keys]
 
 
 STATIC = []
@@ -1169,8 +1192,7 @@ def island_reach(f, sa, sb, oa, ob, under=frozenset()):
     gx = LANE_ST + max(hw.values())
     for lo, hi in ((sa, sb), (sa - gx, sb + gx)):
         out = []
-        for s_ in np.arange(lo, hi + 1e-9, G):
-            iv = intervals(f, FR[f]['sp'], float(s_), round(B_M, 4), under=under)
+        for iv in intervals_many(f, FR[f]['sp'], np.arange(lo, hi + 1e-9, G), round(B_M, 4), under=under):
             around = [q for q in iv if q[0] <= oa + 1e-6 and q[1] >= ob - 1e-6]
             if around:
                 out.append((min(q[0] for q in around), max(q[1] for q in around)))
@@ -1232,8 +1254,7 @@ def static_sides(sol):
                 if reach is None:
                     # in no free interval anywhere its rows reach: the intervals within WIN of it
                     reach = []
-                    for s_ in np.arange(sa, sb + 1e-9, G):
-                        iv = intervals(f, FR[f]['sp'], float(s_), round(B_M, 4), under=und_)
+                    for iv in intervals_many(f, FR[f]['sp'], np.arange(sa, sb + 1e-9, G), round(B_M, 4), under=und_):
                         around = [q for q in iv if q[1] >= oa - WIN and q[0] <= ob + WIN]
                         if around:
                             reach.append((min(q[0] for q in around), max(q[1] for q in around)))

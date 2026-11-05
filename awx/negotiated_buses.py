@@ -31,10 +31,11 @@ time, and every step of each is taken with the others in sight:
 The buses share their source, each goes to parts of its own (DEST 'A+B': one bus to several parts, its nets each
 escaping toward its own part -- a group bus, planned as one whole route in one frame), and they share their routing
 layers, which the shared field is planned on. The first may be whole-array (its fanout plans the arrays' other balls,
-one part), the rest are plain: the merge takes from each other bus only its own nets. Every bus is its own routing
-step, in its own process with its own pool of threads, so N buses are N runs at the same time. Everything is written
-in OUT's work directory, <OUT stem>.bus/: solo/DEST/, shared_field.kicad_pcb, negotiation/ (the buses' meeting place,
-JOINT_DIR), neg/DEST/, conflicts.json and summary.json.
+one part), the rest are plain or escape (an escape bus's solo run is its own escape fanout; on the shared field it is
+plain, keeping the escapes the field gave it): the merge takes from each other bus only its own nets. Every bus is its
+own routing step, in its own process with its own pool of threads, so N buses are N runs at the same time. Everything is
+written in OUT's work directory, <OUT stem>.bus/: solo/DEST/, shared_field.kicad_pcb, negotiation/ (the buses' meeting
+place, JOINT_DIR), neg/DEST/, conflicts.json and summary.json.
 
 Exits as route_buses does: 0 when every bus is handed on routed and the merge has no cross-bus conflict, 1 otherwise,
 2 on a usage error.
@@ -70,10 +71,10 @@ def check(buses):
     parts = [p_ for b in buses for p_ in b[1].split('+')]
     if len(set(parts)) < len(parts):
         return 'each bus goes to parts of its own'
-    if buses[0][2] not in ('whole-array', 'plain') or any(b[2] != 'plain' for b in buses[1:]) or \
+    if buses[0][2] not in ('whole-array', 'plain') or any(b[2] not in ('plain', 'escape') for b in buses[1:]) or \
             (buses[0][2] == 'whole-array' and '+' in buses[0][1]):
-        return 'the first bus is whole-array or plain and the rest plain: the merge takes from each other bus only ' \
-               'its own nets'
+        return 'the first bus is whole-array or plain and the rest plain or escape: the merge takes from each other ' \
+               'bus only its own nets'
     if len({b[3] for b in buses}) > 1:
         return 'the buses share their routing layers: the shared field is planned on one set'
     return None
@@ -552,8 +553,14 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     # buses' reserved there: kept as the shared field laid them -- surface stubs, no via at the face -- its rounds could
     # choose no layer at that end, and a memory bus had three lanes with no room for their crossings every round,
     # against one open laid again, as in its solo run)
-    jobs = [_bus_job(work, 'neg', b, field, {**_env0(), 'SOURCE_SHARED': '0' if b[2] == 'whole-array' else src,
-                                             'JOINT_DIR': jd, 'JOINT_PEERS': ','.join(dests)},
+    # (an ESCAPE bus is plain on the shared field: the shared field escaped its balls toward its destination with every
+    # other bus's, as its own escape fanout does in its solo run, and it keeps them there as a plain bus keeps its own;
+    # its solo run, which its solo teeth came of, was an escape bus's. Turned away, an escape bus off an array with
+    # three other buses was routed sequentially with them, and the two routed after it found their faces taken by its
+    # lanes)
+    jobs = [_bus_job(work, 'neg', (b[0], b[1], 'plain' if b[2] == 'escape' else b[2], b[3]), field,
+                     {**_env0(), 'SOURCE_SHARED': '0' if b[2] == 'whole-array' else src,
+                      'JOINT_DIR': jd, 'JOINT_PEERS': ','.join(dests)},
                      k, rounds, inproc, feedback_rounds, sizes)
             for b in buses]
     codes = _run_all(jobs, log, ended=lambda d: open(os.path.join(jd, f'{d}.finished'), 'w').close())

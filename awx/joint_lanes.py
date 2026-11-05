@@ -103,6 +103,42 @@ def _bench_copper(bench, names, q, cx, cy):
     return pcs, vs
 
 
+def end_runs(bench, q, cx, cy):
+    """[[x0, y0, x1, y1, layer, lane, 'end0' or 'end1']]: every lane's VIA-END RUNS on `bench` (this bus's flow frame, the fanout's, its
+    plan sidecar beside it) -- each end's stub from its tooth or berth back to its via (relayer.run_to_via), a pair's
+    every leg under the pair's lane -- in the board's frame. The round's relayer moves each onto the layer the solve
+    gives the lane's end there, so the coupled solve couples them as the lane's own ways (whole_joint: a run before the
+    lane's entry reads the layer at its entry, its first): two buses' runs inside one array, each moved onto the same
+    layer across the other, were seen by neither relayer, each reading the other's run where the shared field laid it"""
+    sc_ = os.path.splitext(bench or '')[0] + '.plan.json'
+    if not bench or not os.path.isfile(bench) or not os.path.isfile(sc_):
+        return []
+    import contextlib
+    import io
+    import pairs as _pairs
+    import relayer
+    from coherent_nets import by_key
+    from kicad_parser import parse_kicad_pcb
+    sc = json.load(open(sc_))
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = parse_kicad_pcb(bench)
+    byk = by_key(pcb)
+    lane_of = {leg: base for base, pr in _pairs.pair_names(list(sc.get('ends') or {})).items() for leg in pr}
+    out = []
+    for leg, ends in sorted((sc.get('ends') or {}).items()):
+        if leg not in byk:
+            continue
+        for k_, key in ((0, 'tooth_layer'), (1, 'dest_layer')):
+            L = (sc.get(key) or {}).get(leg)
+            if not L or k_ >= len(ends):
+                continue
+            for s in relayer.run_to_via(pcb, byk[leg][0], ends[k_], L) or []:
+                a, b = _turn((s.start_x, s.start_y), -q, cx, cy), _turn((s.end_x, s.end_y), -q, cx, cy)
+                out.append([round(a[0], 4), round(a[1], 4), round(b[0], 4), round(b[1], 4), s.layer,
+                            lane_of.get(leg, leg), f'end{k_}'])
+    return out
+
+
 def publish_board(board, nets, stage):
     """the copper of the run's nets `nets` (the whole route's names) on the laid `board`, in this bus's flow frame,
     published in the board's frame -- tracks at their own width, vias at their own size"""

@@ -653,6 +653,17 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                     + (f'; still refused {failed}' if failed else ''))
             else:
                 log(f'  {src}: the whole-array plan has no escape for the comb\'s refused ball(s) either')
+        # (no new escape between a PAIR's two legs already on the board: the comb and the rescue fan a ball blind to
+        # the pairs whose escapes they keep -- a shared field's, or held -- and one laid between an LVDS pair's legs
+        # had the whole route's fanout audit refuse every round's board for the split pair, the bus left to its last
+        # resort, 28 nets open; taken out, its net is refused alone)
+        gated = pair_gate_cuts(base_c, fanned, pcb, src, names, short)
+        if gated:
+            txt_g, _n = mb.strip_pair_copper(open(fanned, encoding='utf-8').read(), pcb, gated)
+            with open(fanned, 'w', encoding='utf-8') as f:
+                f.write(txt_g)
+            failed = list(failed) + [n for n in gated if n not in failed]
+            log(f'  {src}: escape(s) between a pair\'s legs taken out, refused: {", ".join(short(n) for n in gated)}')
     # (a pull pad the fanout joined to its lane, attach_pulls: on its net, none of the net's two ends --
     # coherent_nets.admissible reads BUS_ATTACHED, here and in the whole route's rounds)
     att_s = ','.join(f'{r_}.{n_}' for r_, n_, _t in attached)
@@ -1632,6 +1643,58 @@ def clear_row_escapes(board, ref, names, keep, work, log=print):
     for ln in wr.grep(caps_log, r'^(Stuck|  Unresolved)'):
         log(f'  {ref}: caps: ' + ln.strip()[:200])
     return sorted(moved)
+
+
+def pair_gate_cuts(base, fanned, pcb, src, names, short=lambda n: n):
+    """The nets of `names` (full) whose copper `fanned` has at `src` and `base` has not -- the escapes this step laid --
+    crossing the GATE of a pair of `names` whose two legs' escapes `base` has there: the two legs joined, on their one
+    layer, at every depth from the ball out (each leg's points in order along its copper from its ball). Returns the
+    nets (full names)"""
+    import pairs as _pairs
+    import joint_escape as je
+    with contextlib.redirect_stdout(io.StringIO()):
+        pb, pf = parse_kicad_pcb_quiet(base), parse_kicad_pcb_quiet(fanned)
+    fp_ = pb.footprints[src]
+    xs, ys = [p.global_x for p in fp_.pads], [p.global_y for p in fp_.pads]
+    box = (min(xs) - 1.5, min(ys) - 1.5, max(xs) + 1.5, max(ys) + 1.5)
+    inside = lambda x, y: box[0] <= x <= box[2] and box[1] <= y <= box[3]   # noqa: E731
+    full = {short(n): n for n in names}
+    ids_b = {n.name: i for i, n in pb.nets.items() if n.name}
+    ids_f = {n.name: i for i, n in pf.nets.items() if n.name}
+
+    def chain(nid):
+        """([points], layer) of net `nid`'s copper on `base` at `src` on its TOOTH's layer -- the layer of its copper
+        farthest from its ball -- in order from the ball out"""
+        ball = next((p for p in fp_.pads if p.net_id == nid), None)
+        segs = [s for s in pb.segments if s.net_id == nid and inside(s.start_x, s.start_y) and inside(s.end_x, s.end_y)]
+        if ball is None or not segs:
+            return None
+        d_ = lambda q: math.hypot(q[0] - ball.global_x, q[1] - ball.global_y)          # noqa: E731
+        L = max(segs, key=lambda s: max(d_((s.start_x, s.start_y)), d_((s.end_x, s.end_y)))).layer
+        pts = sorted({(round(x, 4), round(y, 4)) for s in segs if s.layer == L
+                      for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y))}, key=d_)
+        return pts, L
+    gates = []
+    for _b, (pn, nn) in _pairs.pair_names(sorted(full)).items():
+        cp, cn = (chain(ids_b.get(full[x], -1)) for x in (pn, nn))
+        if cp and cn and cp[1] == cn[1]:
+            gates += [(cp[1], a, b, {full[pn], full[nn]}) for a, b in zip(reversed(cp[0]), reversed(cn[0]))]
+    if not gates:
+        return []
+    old = {(s.net_id, round(s.start_x, 4), round(s.start_y, 4), round(s.end_x, 4), round(s.end_y, 4), s.layer)
+           for s in pb.segments}
+    name_f = {i: n for n, i in ids_f.items()}
+    out = []
+    for s in pf.segments:
+        nm = name_f.get(s.net_id)
+        if nm not in set(names) or nm in out or \
+                (ids_b.get(nm), round(s.start_x, 4), round(s.start_y, 4), round(s.end_x, 4), round(s.end_y, 4),
+                 s.layer) in old:
+            continue
+        if any(L == s.layer and nm not in legs and je._cross((s.start_x, s.start_y), (s.end_x, s.end_y), a, b)
+               for L, a, b, legs in gates):
+            out.append(nm)
+    return out
 
 
 def hold_board_escapes(board, base, out, pcb, src, failed):

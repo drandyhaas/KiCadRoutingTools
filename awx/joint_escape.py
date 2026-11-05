@@ -1368,7 +1368,7 @@ def _solved_key(mdl, ref, keys, served, items, bus_s, oth_s, drop_s, bm, rank, w
 def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops=(), climb=CLIMB, street=2,
                batches=None, workers=None, time_limit=None, log=print, debug=False, only=None, hands=None,
                vias_only=False, exit_rays=False, escape_to=None, hold=None, executor=None, stack_bus=False,
-               sweep=None, avoid=None):
+               sweep=None, avoid=None, ban=frozenset(), colour_tries=None):
     """(hints, report): one planned move for every signal ball of `ref` on `pcb` -- the bus's nets (`bus`, full or
     short names) escaping on F.Cu/B.Cu, never by the `far` face; `others` escaping on `other_layers`, or a multi-ball
     net's ball strapped to a neighbour of its net; and every ball of the plane nets `drops` dropped to its plane --
@@ -1395,7 +1395,9 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     `sweep` (several buses' `escape_to`, {net: destination}): each bus escape paid C_SWEEP for every lane of another
     bus its own crosses round the array (sweep_crossings) -- against the teeth `sweep` names ({net: (x, y)}), or
     True: the preferred ones. `avoid` {bus net: [(x, y), ..]}: the teeth its rounds found crowded, each exit within a
-    pitch of one paid C_AVOID"""
+    pitch of one paid C_AVOID. `ban` {(ball, _opt_sig)}: options the menus leave out -- a bus ball's run no colouring
+    held, planned again without it (`colour_tries`: the runs the plan before left uncoloured)"""
+    args_ = dict(locals())
     import conflict_groups as cg
     import select_moves as sm
     import source_realize as sr
@@ -1406,6 +1408,10 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                      pocket_teeth=prefer if isinstance(escape_to, dict) and len(set(escape_to.values())) > 1
                      else None)
     bus_s, oth_s, drop_s, sz = bm.bus_s, bm.oth_s, bm.drop_s, bm.sz
+    if ban:
+        for k_ in list(bm.opts):
+            bm.opts[k_] = [x_ for x_ in bm.opts[k_] if (k_, _opt_sig(*x_)) not in ban]
+            bm.menu[k_] = [o_ for kind_, o_, _pc in bm.opts[k_] if kind_ == 'escape']
     sweep_n = None
     if sweep and isinstance(escape_to, dict):
         # (each other ball's far end: the centroid of its net's pads off the array, an angle round its centre)
@@ -2203,6 +2209,21 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
             import route_layers
             colour, uncoloured = colour_runs(runs_, sorted(edges), together, want,
                                              route_layers.plane_kinds(pcb, list(pcb.board_info.copper_layers or ())))
+            if uncoloured and (colour_tries is None or len(uncoloured) < colour_tries) and \
+                    any(items[k_][0] in bus_s for k_ in uncoloured):
+                # A BUS BALL'S RUN NO COLOURING HOLDS: the plan asked again with those runs' options out of the menus,
+                # while it colours more. The solve's capacity rows let the runs through and the colouring then had no
+                # layer for them -- a shared array left an LVDS pair and the ball behind it with none, and the repair,
+                # the engine and the bus's own comb after it laid that ball between the pair's legs; asked again, the
+                # neighbours' choices make the room
+                ban2 = frozenset(ban) | {(k_, _opt_sig(chosen[k_][0], chosen[k_][1], piece[k_])) for k_ in uncoloured}
+                log(f'  whole-array escape of {ref}: {len(uncoloured)} run(s) no colouring held {sorted(uncoloured)} -- '
+                    f'planned again without them')
+                h2_, r2_ = plan_array(**{**args_, 'ban': ban2, 'colour_tries': len(uncoloured), 'executor': None})
+                if len(r2_.get('uncoloured') or ()) < len(uncoloured):
+                    return h2_, r2_
+                log(f'  whole-array escape of {ref}: planned again, {len(r2_.get("uncoloured") or ())} uncoloured -- '
+                    f'the plan before stands')
             for key, L in colour.items():
                 kind, o = chosen[key]
                 o2 = dataclasses.replace(o, layer=L, legs=[(a, b, L if l_ == RUN else l_) for a, b, l_ in o.legs])
@@ -2253,7 +2274,50 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                     else:
                         yield i, kind, o, pc
             leg_of = {k_: (kp, kn) for _b, kp, kn in bm.pairs for k_ in (kp, kn)}
-            for key in sorted(uncoloured):
+            # (the plan's PAIR rule kept: no exit of the option between two chosen legs' exits of a pair on that face
+            # and layer -- a run on RUN counts on every layer it may take. Without it a shared array's plan gave an
+            # uncoloured ball of one bus a tooth between an LVDS pair's legs, and that bus's fanout audit refused every
+            # round's board for the split pair, the whole bus left to its last resort)
+            ex_along = lambda m: m.exit_pt[0 if m.direction in ('up', 'down') else 1]       # noqa: E731
+            ex_layers = lambda m: set(getattr(m, 'runs_on', None) or ()) if m.layer == RUN else {m.layer}  # noqa: E731
+
+            def splits(kind, o):
+                if kind != 'escape':
+                    return False
+                for _b, kp, kn in bm.pairs:
+                    cp, cn = chosen.get(kp), chosen.get(kn)
+                    if not cp or not cn or cp[0] != 'escape' or cn[0] != 'escape':
+                        continue
+                    op, on = cp[1], cn[1]
+                    if not (op.direction == on.direction == o.direction) or \
+                            not (ex_layers(o) & ex_layers(op) & ex_layers(on)):
+                        continue
+                    lo_, hi_ = sorted((ex_along(op), ex_along(on)))
+                    if lo_ + 0.02 < ex_along(o) < hi_ - 0.02:
+                        return True
+                return False
+            # (a PAIR's legs first, then the singles: a pair needs two exits that mate, a single any one -- in name
+            # order, a single's surface exit took the gap an LVDS pair's two outer balls leave by, and the pair was
+            # left with no escape)
+            reach_ = 1.3 * max(bm.grid.pitch_x, bm.grid.pitch_y)
+
+            def mated_escapes(kp, kn):
+                for ip, kd, op, pp in ways(kp):
+                    if kd != 'escape' or not stands(kp, pp) or paired(kp, ip):
+                        continue
+                    for jn, kd2, on, pn in ways(kn):
+                        if kd2 != 'escape' or on.direction != op.direction or on.layer != op.layer or \
+                                abs(ex_along(on) - ex_along(op)) > reach_ or not stands(kn, pn) or paired(kn, jn) or \
+                                _hit(pp, pn, False, sz):
+                            continue
+                        lo_, hi_ = sorted((ex_along(op), ex_along(on)))
+                        if any(c_[0] == 'escape' and c_[1].direction == op.direction and
+                               op.layer in ex_layers(c_[1]) and lo_ + 0.02 < ex_along(c_[1]) < hi_ - 0.02
+                               for c_ in chosen.values()):
+                            continue
+                        return [(kp, ip, kd, op, pp), (kn, jn, kd2, on, pn)]
+                return None
+            for key in sorted(uncoloured, key=lambda k_: (k_ not in leg_of, k_)):
                 if key in chosen:
                     continue
                 if key in leg_of:
@@ -2271,9 +2335,19 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                                 chosen[k_], ci[k_], piece[k_] = ('stub', o_), i_, p_
                                 repaired.append(k_)
                             break
+                    else:
+                        # (no two stubs: two ESCAPES that mate, as the plan's pair rule has them -- one face and layer,
+                        # the exits neighbours within its reach, no chosen exit between. An LVDS pair on the outer row,
+                        # every option of its legs a dog-bone on a run layer still to colour, had no stub and was left
+                        # with no escape, and a single's exit took its gap)
+                        got = mated_escapes(kp, kn)
+                        if got:
+                            for k_, i_, kind_, o_, p_ in got:
+                                chosen[k_], ci[k_], piece[k_] = (kind_, o_), i_, p_
+                                repaired.append(k_)
                     continue
                 for i, kind, o, pc in ways(key):
-                    if stands(key, pc) and not paired(key, i):
+                    if stands(key, pc) and not paired(key, i) and not splits(kind, o):
                         chosen[key], ci[key], piece[key] = (kind, o), i, pc
                         repaired.append(key)
                         break
@@ -2591,8 +2665,16 @@ def keep_pair_gates(pcb, ref, hints, tracks, vias):
     legs = collections.defaultdict(list)
     for h in hints.values():
         if h.get('pair') and h.get('exit') is not None:
-            legs[h['pair']].append((tuple(h['exit']), h.get('layer')))
-    gates = [(g[0][1], g[0][0], g[1][0]) for g in legs.values() if len(g) == 2 and g[0][1] == g[1][1]]
+            # (its exit, and its own legs' points: the gate is the pair's at every depth, each leg's points from the
+            # exit back joined to the other's -- an escape the engine ended at the face between the two legs, at the
+            # fab floor's track, split an LVDS pair and crossed no gate at the exit line, past the face)
+            pts = [tuple(h['legs'][0][0])] + [tuple(lg[1]) for lg in h['legs']] if h.get('legs') else []
+            legs[h['pair']].append((tuple(h['exit']), h.get('layer'), pts))
+    gates = []
+    for g in legs.values():
+        if len(g) == 2 and g[0][1] == g[1][1]:
+            gates.append((g[0][1], g[0][0], g[1][0]))
+            gates += [(g[0][1], a, b) for a, b in zip(reversed(g[0][2]), reversed(g[1][2]))]
     if not gates:
         return tracks, vias, set()
     at_ball = {(round(p.global_x, 3), round(p.global_y, 3)): p.net_id for p in pcb.footprints[ref].pads}

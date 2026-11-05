@@ -2119,7 +2119,14 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         import types
         return types.SimpleNamespace(OBJ=OBJ, finish=_finish, M=M, chg=chg, YL=YL, layer_lits=layer_lits, Q=Q, QU=QU,
                                      u_of=u_of, entry=entry, end=end, Fr=Fr, prs=prs, ctx=ctx, LAYN=LAYN,
-                                     nv=(NV0, NV1), VNEED=VNEED, VIN0=VIN0, VIN1=VIN1)
+                                     nv=(NV0, NV1), VNEED=VNEED, VIN0=VIN0, VIN1=VIN1, t=t, KMAX=KMAX, G=G,
+                                     terms={'vias': W_V * VIAS, 'over two': W_OVER * sum(over.values()),
+                                            'soft cuts': W_SOFT * sum(soft_broken.values()), 'priced': sum(cost),
+                                            'firm cuts': W_FIRM * sum(firm_broken.values()),
+                                            'gates': W_FIRM * sum(v_ for _k, v_ in GATE_OVER),
+                                            'room': W_ROOM * sum(v_ for _k, v_ in ROOM_OVER),
+                                            'regions': (W_REGION * sum(v_ for _k, v_ in REG_ON) +
+                                                        W_FIRM * sum(v_ for _k, v_ in REG_OVER)) if REG_ON else 0})
     m.Minimize(OBJ)
     if check and not CROWD:
         # (whole_ends.solve_check: has this model a plan at all? Its first plan ends the search -- the verdict alone)

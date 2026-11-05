@@ -30,6 +30,11 @@ sys.path.insert(0, HERE)
 import awx_settings  # noqa: E402
 
 W_CROSS = int(awx_settings.get('JOINT_W_CROSS') or '20')    # a broken coupling, in vias
+# ...and one of a VIA-END RUN (whole_route.with_end_runs): a run inside the array moves onto its lane's end layer and
+# nothing after moves it, so a broken one ships a short -- a loop's coupled re-solve broke two at 20 vias each, an LVDS
+# bus's run across two of a memory bus's on one layer, and the merge had both crossings. Priced past any plan: at 200
+# the same re-solve still broke both (its search stopped at 894 vias-worth); at this, none, for 546.6 against 534
+W_RUN_CROSS = int(awx_settings.get('JOINT_W_RUN_CROSS') or '100000')
 BATCHES = int(awx_settings.get('JOINT_BATCHES') or '100')   # the search's interleaved batches at most
 WORKERS = 4
 
@@ -134,10 +139,16 @@ def main():
         p.mir = ctx.M if p.flip else (lambda x, y: (x, y))
         # each lane's way in the board's frame, as pieces: its own plan laid out (the request's lanes, published in
         # the board's frame), else its taut path turned back
-        p.board_segs = {}
+        p.board_segs, p.run_segs = {}, {}
         for row_ in ((r.get('lanes') or {}).get('pieces') or []):
             x0_, y0_, x1_, y1_, _L, n_ = row_[:6]
-            if n_ in p.M:
+            if n_ not in p.M:
+                continue
+            if len(row_) > 6 and row_[6] in ('end0', 'end1'):
+                # (a VIA-END RUN inside an array, whole_route.with_end_runs: the relayer moves it onto the lane's layer
+                # at that end, so it is coupled on that layer, its lane's changes free there -- the run is a track)
+                p.run_segs.setdefault(n_, []).append(((x0_, y0_), (x1_, y1_)))
+            else:
                 p.board_segs.setdefault(n_, []).append(((x0_, y0_), (x1_, y1_)))
         if not p.board_segs:
             for n_ in p.M:
@@ -159,6 +170,7 @@ def main():
     # lane run through another bus's via at 0.25 mm, beyond the pitch: no coupling had held the via off it)
     NEAR_V = te.VIA_SIZE / 2 + te.TRACK / 2 + te.CLEAR - 1e-3
     brk, cpl, cost, lits = [], [], [], []
+    brk_run = []                # (the broken couplings of a run: W_RUN_CROSS)
     nvia = 0
     G = ws.G
 
@@ -176,24 +188,37 @@ def main():
             m.AddImplication(bb, a_)
             out.append(bb)
         return out
+    free = m.NewBoolVar('')                # (a run's own lane: its changes held off nothing -- bits_at's `k_` set)
+    m.Add(free == 1)
+
+    def ways(p):
+        """(lane, its pieces, a via-end run's?) of bus part `p`: its laid-out lanes, then its via-end runs"""
+        return [(n_, r_, False) for n_, r_ in p.board_segs.items()] + [(n_, r_, True) for n_, r_ in p.run_segs.items()]
     buses = sorted(parts)
     for i, A in enumerate(buses):
         for B in buses[i + 1:]:
             pa, pb = parts[A], parts[B]
-            for a, ra in pa.board_segs.items():
-                for b, rb in pb.board_segs.items():
+            for a, ra, run_a in ways(pa):
+                for b, rb, run_b in ways(pb):
                     for Xa, Xb, d_ in near_points(ra, rb, max(NEAR, NEAR_V)):
+                        if d_ >= NEAR and run_a and run_b:
+                            continue                # (two runs within a via's reach: neither places a via there)
                         X = Xa
                         ua = pa.u_of(a, pa.mir(*turn(Xa, pa.q, pa.cx, pa.cy)))
                         ub = pb.u_of(b, pb.mir(*turn(Xb, pb.q, pb.cx, pb.cy)))
                         ua = min(max(ua, pa.entry[a]), pa.end[a])
                         ub = min(max(ub, pb.entry[b]), pb.end[b])
                         k_ = m.NewBoolVar('')
-                        ba_, bb_ = bits_at(pa, a, ua, k_), bits_at(pb, b, ub, k_)
+                        # (a run before its lane's entry, or past its end, reads the lane's layer there: its first or
+                        # its last)
+                        ba_ = bits_at(pa, a, ua, free if run_a else k_)
+                        bb_ = bits_at(pb, b, ub, free if run_b else k_)
                         if d_ >= NEAR:
                             # (within a via's reach alone: the changes kept off, the layers free)
                             nvia += 1
                             brk.append(k_)
+                            if run_a or run_b:
+                                brk_run.append(k_)
                             lits.append(None)
                             cpl.append((A, a, round(ua, 3), B, b, round(ub, 3), [round(X[0], 3), round(X[1], 3)]))
                             continue
@@ -202,11 +227,14 @@ def main():
                         for l_ in range(len(pa.LAYN)):          # (each physical layer: each bus's index of it)
                             m.AddBoolOr([La[pa.lix[l_]].Not(), Lb[pb.lix[l_]].Not(), k_])
                         brk.append(k_)
+                        if run_a or run_b:
+                            brk_run.append(k_)
                         lits.append((pa, La, pb, Lb))
                         cpl.append((A, a, round(ua, 3), B, b, round(ub, 3), [round(X[0], 3), round(X[1], 3)]))
     print(f'  couplings: {len(cpl)} crossings and near misses (within {NEAR:.3f} mm) of two buses\' lanes, '
           f'{nvia} of them within a via\'s reach ({NEAR_V:.3f} mm)')
-    OBJ = sum(p.OBJ for p in parts.values()) + W_CROSS * W_V * sum(brk)
+    OBJ = sum(p.OBJ for p in parts.values()) + W_CROSS * W_V * sum(brk) + \
+        (W_RUN_CROSS - W_CROSS) * W_V * sum(brk_run)
     m.Minimize(OBJ)
     # the buses' own plans laid out whole: every hinted variable held, the couplings' literals completed
     sh = cp_seed.solver()

@@ -13,6 +13,8 @@ With the step itself stood in for (no routing: each bus 'handed on' as its input
    (ESCAPE_JOINT) and its ends on the board as it was before that earlier bus (ESCAPE_JOINT_ENDS); an escape bus on
    arrays nothing went through, and one after an earlier bus that was not handed on, get neither; a plain or
    whole-array bus from such an array gets neither either, and no SOURCE_SHARED set on it;
+3a. the negotiation takes an escape bus after the first (route_on_field runs it plain on the shared field), never
+   first; --sequential takes none;
 3b. keeps_source_escapes: a PLAIN bus keeps the escapes an earlier step laid its nets at its source by default, a
    whole-array or an escape bus does not; SOURCE_SHARED=0 keeps none; SOURCE_SHARED=REF,.. a plain or whole-array bus
    from those sources, never an escape bus;
@@ -50,9 +52,18 @@ for bad in ('U1', 'U1:U2:fast', ':U2', 'U1:U2:joint', 'U1:U2:whole-array:F.Cu:x'
         pass
 
 
-# 2 and 3. route_buses with the step stood in for
-def run(buses, fail=()):
+# 2 and 3. route_buses with the step stood in for, and the negotiation (its groups kept in NEG)
+import negotiated_buses as nb  # noqa: E402
+NEG = []
+
+
+def run(buses, fail=(), sequential=False):
     calls = []
+    del NEG[:]
+
+    def negotiate(board, out, grp, *a, **kw):
+        NEG.append(list(grp))
+        return 0, []
 
     def step(board, out, src, dest, *a, whole_array=False, escape=False, settings=None, **kw):
         calls.append(dict(board=board, src=src, dest=dest, whole_array=whole_array, escape=escape,
@@ -60,17 +71,18 @@ def run(buses, fail=()):
         shutil.copy(board, out)
         shutil.copy(board[:-len('.kicad_pcb')] + '.kicad_pro', out[:-len('.kicad_pcb')] + '.kicad_pro')
         return (1 if (src, dest) in fail else 0), f'BUS {src}->{dest}'
-    real = rb.route_bus
-    rb.route_bus = step
+    real, real_n = rb.route_bus, nb.route_negotiated
+    rb.route_bus, nb.route_negotiated = step, negotiate
     try:
         with tempfile.TemporaryDirectory() as td:
             b0 = os.path.join(td, 'b.kicad_pcb')
             open(b0, 'w').write('(kicad_pcb)\n')
             open(os.path.join(td, 'b.kicad_pro'), 'w').write('{}\n')
-            code, _g = rb.route_buses(b0, os.path.join(td, 'o.kicad_pcb'), buses, log=lambda *a: None)
+            code, _g = rb.route_buses(b0, os.path.join(td, 'o.kicad_pcb'), buses, log=lambda *a: None,
+                                      sequential=sequential)
             return code, calls, b0, os.path.join(td, 'o.bus')
     finally:
-        rb.route_bus = real
+        rb.route_bus, nb.route_negotiated = real, real_n
 
 
 L4 = 'F.Cu,B.Cu,In1.Cu,In2.Cu'
@@ -85,7 +97,8 @@ check(calls[1]['board'] == os.path.join(work, 'U1-U2.kicad_pcb'), '2: U1-U5 on t
 check(calls[1]['settings'] == {'ROUTE_LAYERS': L4, 'ESCAPE_JOINT': 'U1', 'ESCAPE_JOINT_ENDS': b0},
       f'3: U1-U5: its layers, U1 shared, its ends on the board before U1-U2: {calls[1]["settings"]}')
 check(calls[2]['escape'] and calls[2]['settings'] == {}, f'3: U7-U8: nothing shared: {calls[2]["settings"]}')
-_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', None), ('U1', 'U5', 'escape', None)], fail={('U1', 'U2')})
+_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', None), ('U1', 'U5', 'escape', None)], fail={('U1', 'U2')},
+                        sequential=True)
 check('ESCAPE_JOINT' not in calls[1]['settings'], f'3: after a bus left as it came, nothing shared: {calls[1]}')
 _c, calls, _b, _w = run([('U1', 'U2', 'whole-array', None), ('U1', 'U5', 'whole-array', None)])
 check(calls[1]['settings'] == {},
@@ -97,6 +110,14 @@ check([c['settings'].get('SOURCE_SHARED') for c in calls] == [None] * 5,
       f'3: SOURCE_SHARED is the environment\'s to opt into, set on no bus: {[c["settings"] for c in calls]}')
 check(calls[2]['settings'] == {'ROUTE_LAYERS': L4} and not calls[2]['escape'] and not calls[2]['whole_array'],
       f'3: U1-U4: its layers, plain: {calls[2]}')
+
+# 3a. the negotiation takes an escape bus after the first (plain on the shared field: route_on_field), not first
+_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', L4), ('U1', 'U5', 'escape', L4), ('U1', 'U4', 'plain', L4)])
+check(not calls and NEG == [[('U1', 'U2', 'whole-array', L4), ('U1', 'U5', 'escape', L4), ('U1', 'U4', 'plain', L4)]],
+      f'3a: whole-array, escape and plain off U1 negotiated, in one step: {NEG} {calls}')
+check(nb.check([('U1', 'U5', 'escape', L4), ('U1', 'U2', 'plain', L4)]) is not None, '3a: an escape bus first is not')
+_c, calls, _b, _w = run([('U1', 'U2', 'whole-array', L4), ('U1', 'U5', 'escape', L4)], sequential=True)
+check(not NEG and calls[1]['settings'].get('ESCAPE_JOINT') == 'U1', f'3a: --sequential: {NEG} {calls}')
 
 # 3b. keeps_source_escapes (src, escape, whole_array, SOURCE_SHARED)
 ks = rb.keeps_source_escapes
