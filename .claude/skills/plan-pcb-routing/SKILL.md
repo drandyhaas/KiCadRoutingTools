@@ -3875,18 +3875,39 @@ board), and every `route_diff.py` step runs before it. So run the chain
 
 A pair is ready for the all-nets step when it is in `routed_diff_pairs`, or
 in `single_ended_diff_pairs` with `failure_reason` `electrically-short` (too
-short for coupling to buy anything) -- and, on a matching step, when its
-`intra_pair_matching` status is `matched` or `within-tolerance`. An
-`unmatched` pair is a skew the board ships out of its tolerance (`check_drc`
-grades it, `board_score` counts it): the step has already matched it again on
-the copper its cleanup left (the record's `rematch`), so `reason` and
-`delta_mm` say what is left; `/diagnose-routing-failures` ("route_diff runs")
-says what each reason means. A `member_incomplete_pairs` entry is
-expected only when the pair's members are in `single_ended_followup_nets` (a
-`partial` pair's peeled far terminals, or an `electrically-short` pair's
-members): the all-nets step closes them, and `check_connected` after it says
-whether it did. **Do not proceed to the all-nets step with any other pair
-failure.** Fix it first, at the cost of a pair step (minutes):
+short for coupling to buy anything). A `member_incomplete_pairs` entry is expected
+only when the pair's members are in `single_ended_followup_nets` (a `partial`
+pair's peeled far terminals, or an `electrically-short` pair's members): the
+all-nets step closes them, and `check_connected` after it says whether it did.
+
+On a matching step, a ready pair's `intra_pair_matching` status says what to do
+next; none of these stops the chain (`/diagnose-routing-failures`, "route_diff
+runs", defines them and each `reason`):
+
+- `matched`, `within-tolerance`: nothing.
+- `not-matchable` on an `electrically-short` pair: nothing. No copper at this
+  step can match it, `delta_mm` stays measured, and it records no tolerance, so
+  `check_drc` grades it only under a `.kicad_dru` rule the board declares.
+- `skipped` (`ac-coupled-xnet`): nothing at this step. The AC-coupled pass
+  matched the pair end to end, so the number to read is
+  `ac_coupled_xnets[].skew_mm`, not the per-side `delta_mm`. It records no
+  tolerance and nothing grades it, so compare it with `tolerance_mm` yourself
+  and report it if it is over.
+- `unmatched` with `reason` `not-measured`, on a pair whose members are in
+  `single_ended_followup_nets` (a peeled pair): nothing yet. It has no length
+  until the all-nets step joins its far terminals, and `check_drc` grades it
+  after that step at its recorded tolerance.
+- Any other `unmatched`, and a peeled pair `check_drc` then finds out of range:
+  a skew the board ships out of its tolerance (`check_drc` grades it,
+  `board_score` counts it). It is a shipped blocker and nothing more: there is
+  no recipe for it, so carry it into the report rather than re-routing for it.
+  The step has already matched it again on the copper its cleanup left (the
+  record's `rematch`), so `reason` and `delta_mm` say what is left.
+
+**Do not proceed to the all-nets step with any other pair failure**: a pair in
+`failed_diff_pairs`, in `single_ended_diff_pairs` for any other `failure_reason`
+(its `not-matchable` status is that failure's), or with a member open that the
+next step will not close. Fix it first, at the cost of a pair step (minutes):
 `/diagnose-routing-failures` ("route_diff runs") maps each `failure_reason` to
 its fix, and a smaller track, gap and via (Step 4) fixes only some of them.
 Then run the rest of the chain.

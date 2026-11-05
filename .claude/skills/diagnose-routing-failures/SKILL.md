@@ -148,16 +148,34 @@ And across the buckets:
   resolve by a swap (#279); `polarity_swapped_pairs` lists the swaps it made.
 - `casualty_reconcile`: nets this step ripped whose reroute failed
   (`restored`, `rerouted`, `partial`, `unrecovered`).
-- `intra_pair_matching` (a step that matches P to N): one record per matched
-  pair, its `status` and `delta_mm` read off the shipped copper as KiCad's skew
-  DRC measures it, against `tolerance_mm`. An `unmatched` pair's `reason`:
-  `no-room-for-meanders` (no bump fits beside the shorter leg),
-  `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),
-  `copper-skew-over-tolerance` (the matcher reached the tolerance and the
-  copper that ships does not), `not-measured` (a member's pads are not joined
-  by track copper). A pair the post-route cleanup moved out of its tolerance
-  has been matched once more on the shipped copper (#1622); `rematch`
-  (`skew_before_mm`, `skew_after_mm`, `kept`) says whether that helped.
+- `intra_pair_matching` (a step that matches P to N): one record per pair it
+  set out to match, its `status` and `delta_mm` read off the shipped copper as
+  KiCad's skew DRC measures it, against `tolerance_mm`. The `status`:
+  - `matched`, `within-tolerance`: inside the tolerance.
+  - `not-matchable`: no single coupled result to meander. `reason` is
+    `members-routed-separately` or `pair-not-routed-this-run`, and `delta_mm` is
+    still measured when both members have copper. The pair's `failure_reason`
+    says what it means: an `electrically-short` pair has nothing to fix and
+    records no tolerance, so `check_drc` grades it only under a `.kicad_dru`
+    rule the board declares; on any other pair, fix that failure.
+  - `skipped`: `reason` `ac-coupled-xnet`, matched end to end by the AC-coupled
+    pass (`--ac-couple-match`). The number to read is
+    `ac_coupled_xnets[].skew_mm` (the record there also names its `nets` and
+    `bridges`), not the per-side `delta_mm`. It records no tolerance, so nothing
+    grades it: compare it with `tolerance_mm`. Not the `pair_reports` `outcome`
+    of the same name, a different field.
+  - `unmatched`: over the tolerance, or not measurable yet. `reason`:
+    `no-room-for-meanders` (no bump fits beside the shorter leg),
+    `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),
+    `copper-skew-over-tolerance` (the matcher reached the tolerance and the
+    copper that ships does not), `not-measured` (a member's pads are not joined
+    by track copper). On a peeled pair (members in `single_ended_followup_nets`)
+    `not-measured` is expected: `check_drc` grades it after the all-nets step.
+    Past that, an `unmatched` pair is a shipped blocker and nothing more: it
+    has no retry here, so report it. A pair the post-route cleanup moved out of
+    its tolerance has been matched once more on the shipped copper (#1622);
+    `rematch` (`skew_before_mm`, `skew_after_mm`, `kept`) says whether that
+    helped.
 
 `pair_reports[]` has one record per pair: `pair`, `p_net`, `n_net`, `outcome`
 (`coupled`, `partial`, `deferred`, `failed`, `skipped`, `uncoupled`,
@@ -218,7 +236,7 @@ and for none of the polarity or graze codes.
 
 | `failure_reason` | What it means | Fix |
 |------------------|---------------|-----|
-| `electrically-short` | Every leg is shorter than the coupled floor | None: single-ended by design. Check that its members closed (`se_fallback`, or the next `route.py`) |
+| `electrically-short` | Every leg is shorter than the coupled floor | None: single-ended by design. Check that its members closed (`se_fallback`, or the next `route.py`). Its `intra_pair_matching` status is `not-matchable` and it records no tolerance; a `.kicad_dru` skew rule the board declares still grades it, which is the rule's question to report, not a retry |
 | `congestion` | Copper of nets this run routed walls the coupled route (`blocking_nets` names them), and the step's own rip ladder did not clear it | The shrink; or route the pair in an earlier step, before the nets that wall it |
 | `no-escape-path` | An endpoint's escape is blocked: the search never launched | The shrink, or a shorter `--diff-pair-centerline-setback` / wider `--max-setback-angle`; on a BGA or QFN the escape is the fanout's |
 | `needs-fanout` (#764) | A single track launches at the terminal, the coupled pair does not; the step skips its rip ladder, since no freed copper helps | A coupled fanout before the pair step (`bga_fanout.py ... --diff-pairs P N`); for a terminal on a pad array the step's log prints that command with the run's own numbers |

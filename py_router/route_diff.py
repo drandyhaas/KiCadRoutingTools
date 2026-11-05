@@ -448,6 +448,19 @@ def _nothing_to_do_document(status: str, extra: Optional[dict] = None) -> dict:
     return document
 
 
+def intra_pair_reports_to_record(intra_pair_reports, pair_reports):
+    """The intra-pair records a step writes a tolerance for (#1503), which the
+    graders then hold the pair to. Not a `skipped` pair, matched end to end by
+    the AC-coupled pass, and not a pair too short to couple (#1669): nothing
+    matched it and no copper at this step can, so its skew stays measured and
+    disclosed, and only a .kicad_dru rule the board declares grades it."""
+    too_short = {r['pair'] for r in pair_reports
+                 if r.get('failure_reason') == 'electrically-short'}
+    return [r for r in intra_pair_reports
+            if r['status'] != 'skipped' and r.get('tolerance_mm') is not None
+            and not (r['status'] == 'not-matchable' and r['pair'] in too_short)]
+
+
 def resolve_intra_pair_tolerances(diff_pair_ids, config, pcb_data, input_file,
                                   override=None):
     """#1503: `({P net id: tolerance}, {P net id: (source, rule)})` for the
@@ -2462,8 +2475,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                          'source': _intra_src.get(next(
                              (p.p_net_id for _n, p in diff_pair_ids_to_route
                               if p.p_net_name == r['p_net']), None), ('default', None))[0]}
-            for r in intra_pair_reports
-            if r['status'] != 'skipped' and r.get('tolerance_mm') is not None})
+            for r in intra_pair_reports_to_record(intra_pair_reports, pair_reports)})
         print(f"\n  Intra-pair (shipped copper, #1303): {len(_im)}/{len(_im) + len(_iu)} "
               f"pair(s) within {'/'.join(f'{t:g}' for t in _tols) or config.length_match_tolerance}mm"
               + (f" ({len(_isk)} matched end-to-end by the AC-coupled pass)"
