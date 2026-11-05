@@ -1522,7 +1522,7 @@ Routing Completes): run them once, here, not again inside the routing.
 5. **One verifier, at most 3 calls.** When you believe you have your best
    board, spawn ONE fresh subagent (not a fork) with
    `references/verifier.md`, filled in for your mode, board, sha256, baseline,
-   intent and spec flags. On FAIL, fix what it names and continue.
+   intent, spec flags and, in `full` mode, whose rules the project holds. On FAIL, fix what it names and continue.
 6. **Record milestones in the ledger:** the first legal placement, the kept
    placement, the first routed board, the first DONE, the
    final board, and tried-and-worse boards with `--rejected`.
