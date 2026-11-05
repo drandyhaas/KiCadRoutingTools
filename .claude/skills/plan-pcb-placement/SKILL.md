@@ -534,7 +534,9 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   without `--declare-classes`, and an `OWED:` line stands until the entry has
   its `edge` (or a `why`, a part over a declared slot): keep that minimum when
   you write the edge. A part with no mating face in the board's plane gets
-  only the `OWED:` line, with the overhang for each side of it. Where the
+  only the `OWED:` line, with the overhang for each side of it: the entry
+  answers it with its `edge`, the side that hangs as `mating_face`, and at
+  least that side's overhang as `overhang_mm.min`. Where the
   datasheet's PCB-layout drawing puts the
   board edge inside the body (a USB-C or barrel jack's shell past the edge),
   write that distance as `overhang_mm.min`, `max` at or above it. Seated

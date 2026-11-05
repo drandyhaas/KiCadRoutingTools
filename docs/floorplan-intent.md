@@ -778,7 +778,9 @@ its band is `derived_default` whole, and the roster's `OWED:` line
 reaching that floor, or a `why`. Graded as written, with no edge, the band
 fails where the part stands on the board, as check_assembly does. A part with no
 mating face in the board's plane gets no entry, since no direction reads, and its
-`OWED:` line gives the floor for each side. A part that draws its own Edge.Cuts
+`OWED:` line gives the floor for each side, until an entry declares its `edge`, the
+side that hangs as `mating_face` and a band reaching that side's floor (#1701). A
+part that draws its own Edge.Cuts
 (a window it travels with) is not asked, a brief's or `mechanical.json`'s declared
 pose outranks the row, and a mounting hole is the pattern fit's.
 **That floor can ask too much of the pads (#1694).** On a pile and a placed board

@@ -4673,7 +4673,7 @@ def model_short_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
 
 
 def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
-                           geometry=None) -> Optional[Dict[str, object]]:
+                           geometry=None, declared=None) -> Optional[Dict[str, object]]:
     """#1662: the overhang that keeps `ref`'s body at board depth off the board,
     read in the part's own frame, so a pile's staging pose does not matter and
     no edge is asserted (#1103): an edge only chooses a direction, and the
@@ -4693,8 +4693,9 @@ def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
     `face` and `min` None for a part with no mating face in the board's plane
     (no turn is the seat's to choose then), and `by_face` the floor for each
     of the four. None when no body of it could ever gate, or none was read, or
-    a floor is 0 in every direction asked."""
-    from .mating import mating_face_local
+    a floor is 0 in every direction asked. `declared` is an entry's
+    `mating_face`, read as the seat reads it (`mating.face_with_declaration`)."""
+    from .mating import face_with_declaration, mating_face_local
     fp = (pcb_data.footprints or {}).get(ref)
     if bodies is None:
         from .body import board_bodies
@@ -4702,7 +4703,7 @@ def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
     read = _body_floor_reads(heights, pcb_data, pcb_file, ref, bodies, geometry)
     if fp is None or read is None:
         return None
-    face = mating_face_local(fp, bodies.get(ref)).face
+    face = face_with_declaration(mating_face_local(fp, bodies.get(ref)), declared)[0]
     if face:
         got, reach = read[face]
         return ({'face': face, 'min': got, 'by_face': {face: got}, 'reach': reach}
@@ -4758,9 +4759,11 @@ def body_floor_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
     has body at board depth (`body_clearing_overhang`), until the intent
     answers it: an `edge_connectors[]` row with an `edge` and a band reaching
     that overhang, or with a `why` saying no edge is meant (a part over a
-    declared slot), or a declared pose. Seated with no such row, every seed has
-    that body through the board. Disclosure only. Empty on a placed board,
-    whose emit reads the floor off the part's pose, and when no model was read."""
+    declared slot), or a declared pose. A part with no mating face reads the
+    overhang of the `mating_face` its row declares, the face the seat turns it
+    by. Seated with no such row, every seed has that body through the board.
+    Disclosure only. Empty on a placed board, whose emit reads the floor off the
+    part's pose, and when no model was read."""
     if not (getattr(heights, 'depth', None) or {}):
         return []
     from .placement_state import assess_placement
@@ -4779,7 +4782,8 @@ def body_floor_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
         if ref in locked or ref in posed or c.get('why') \
                 or not _body_floor_applies(pcb_data, ref):
             continue
-        got = body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies, geometry)
+        got = body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies, geometry,
+                                     declared=c.get('mating_face'))
         if got is None:
             continue
         name = pcb_data.footprints[ref].footprint_name
