@@ -2093,9 +2093,7 @@ co-pours), not the price — so the price follows whichever recipe that gate put
 you on, and nothing in this file ranks 3.0 against 6.0 by measurement.
 
 **A split layer has one price, 2.5, on both tiers.** That note is about solid
-planes. 2.5 is what Step 5a-tuned's STANDARD map and Step 2c's bundle carry, and
-the only split price a screen has run; the screen's figure is the bundle's, so
-no run isolates this one number.
+planes. 2.5 is what Step 5a-tuned's STANDARD map and Step 2c's bundle carry.
 
 An earlier pass through this file raised THIS line to 6.0 to make one value
 appear everywhere; that traded a

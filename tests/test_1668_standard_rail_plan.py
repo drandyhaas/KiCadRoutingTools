@@ -67,7 +67,6 @@ def main():
     check('Step 2 prices a split layer 2.5', '2.5 on a split/route+pour layer' in flat
           and '2.5 a split layer' in flat)
     check('it is stated as one price on both tiers', 'A split layer has one price, 2.5, on both tiers' in flat)
-    check('it says no run isolates the number', 'no run isolates this one number' in flat)
     check('Step 2c item 3 agrees', 'rail/split pour layers **2.5**' in flat)
 
 
