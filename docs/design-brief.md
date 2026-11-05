@@ -304,7 +304,9 @@ every violation would cite a claim its reader cannot find.
 
 ```
 design brief DRIFT: 6 claim(s) the brief declares that this intent does not
-carry. The intent is what is graded -- re-run --emit-intent to fold them in:
+carry. The intent is what is graded -- re-run --emit-intent to fold them in
+(it writes a new file: it names each row of this one it drops, to write again
+after it):
   - USB1.edge: brief says 'east', the intent does not declare it
   - USB1.overhang_mm: brief says {'min': 0.0, 'max': 0.65}, the intent says
     {'max': 2.0, 'min': 0.0}

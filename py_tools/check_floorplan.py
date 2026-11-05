@@ -333,6 +333,116 @@ def intent_doc_for_drift(path):
         return {}
 
 
+#: What an emit writes about itself rather than about the design: provenance,
+#: and the reader version its rows ask for. A row they describe is named
+#: on its own.
+_EMIT_BOOKKEEPING = ('context', 'min_reader')
+#: The key that names a list's row, so a row found on both sides is compared
+#: field by field and one edited field is named rather than the whole row.
+#: A row with none of them still compares, as a whole.
+_ROW_ID_KEYS = ('ref', 'name', 'connector', 'pair')
+_ABSENT = object()
+
+
+def _row_id(row):
+    if isinstance(row, dict):
+        for k in _ROW_ID_KEYS:
+            if k in row:
+                return k, json.dumps(row[k], sort_keys=True)
+    return None
+
+
+def _row_label(row):
+    at = _row_id(row)
+    if at is None:
+        return json.dumps(row, sort_keys=True) if isinstance(row, (dict, list)) else str(row)
+    v = row[at[0]]
+    return ','.join(map(str, v)) if isinstance(v, list) else str(v)
+
+
+def _rows_not_carried(path, old, new, out):
+    canon = lambda r: json.dumps(r, sort_keys=True)     # noqa: E731
+    new = new if isinstance(new, list) else []
+    left = {}
+    for r in new:
+        left[canon(r)] = left.get(canon(r), 0) + 1
+    ids_old, ids_new = {}, {}
+    for rows, ids in ((old, ids_old), (new, ids_new)):
+        for r in rows:
+            ids.setdefault(_row_id(r), []).append(r)
+    for r in old:
+        if left.get(canon(r)):
+            left[canon(r)] -= 1
+            continue
+        at = _row_id(r)
+        where = f"{path}[{_row_label(r)}]"
+        if at is not None and len(ids_old[at]) == 1 and len(ids_new.get(at, ())) == 1:
+            _not_carried(where, r, ids_new[at][0], out)
+        elif isinstance(r, (dict, list)):
+            out.append(f"{where} = {canon(r)}")
+        else:
+            out.append(where)
+
+
+def _not_carried(path, old, new, out):
+    if old is None or old == '' or old == [] or old == {}:
+        return                      # holds nothing a new document could lose
+    if isinstance(old, dict):
+        sub = new if isinstance(new, dict) else {}
+        for k in sorted(old):
+            _not_carried(f'{path}.{k}' if path else k, old[k], sub.get(k, _ABSENT), out)
+    elif isinstance(old, list) and not all(
+            isinstance(v, (int, float)) for v in old):
+        _rows_not_carried(path, old, new, out)
+    elif new is _ABSENT:
+        out.append(f"{path} = {json.dumps(old)}")
+    elif old != new:
+        out.append(f"{path}: {json.dumps(old)} -> {json.dumps(new)}")
+
+
+def intent_rows_not_carried(old, new):
+    """#1661: what `new` no longer says that the intent document `old` said,
+    one line per row or value: `path = value` for one it does not have,
+    `path: old -> new` for one it says otherwise, values in full, since the
+    file holding them is about to be replaced. Compared by shape, not by a
+    list of keys, so a key added later is covered. Extra rows in `new` are
+    not reported: it carries those."""
+    out = []
+    for k in sorted(old):
+        if k not in _EMIT_BOOKKEEPING:
+            _not_carried(k, old[k], new.get(k, _ABSENT), out)
+    return out
+
+
+def _warn_rows_replaced(path, doc):
+    """#1661: `--emit-intent` writes a new document from the board, the brief
+    and mechanical.json, and never reads the file it replaces, so a row
+    written only in that file is lost with exit 0. Said here, whatever
+    `--quiet` says, because the old file is about to be gone."""
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding='utf-8') as fh:
+            old = json.load(fh)
+        if not isinstance(old, dict):
+            raise ValueError('not a JSON object')
+    except (OSError, ValueError) as exc:
+        print(f"  WARNING: this emit replaces {path}, which could not be read "
+              f"as an intent, so nothing was compared ({exc})", file=sys.stderr)
+        return
+    lost = intent_rows_not_carried(old, json.loads(json.dumps(doc, sort_keys=True)))
+    if lost:
+        print(f"  WARNING: this emit replaces {path}, and the new document "
+              f"does not carry {len(lost)} row(s) of the old one. An emit is "
+              f"built from the board, the design brief and mechanical.json, "
+              f"never from the old file, so a row written only there is lost "
+              f"(put it in the brief if the brief has a key for it, else "
+              f"write it again now), and a value the emitter wrote moves with "
+              f"the board:", file=sys.stderr)
+        for row in lost:
+            print(f"    - {row}", file=sys.stderr)
+
+
 def _model_short_owed(intent, pcb, board):
     """#1653: `floorplan.model_short_owed` on the board's 3D models
     (`heights.for_board`, read once per board and cached); [] when none
@@ -788,6 +898,7 @@ def main(argv=None):
         # says "exit 4 when nothing was declared", not "produce nothing".
         # Returning early left `--emit-intent X --require-brief` with no X at
         # all, so a caller could not even see what it was refusing.
+        _warn_rows_replaced(args.emit_intent, doc)
         with open(args.emit_intent, 'w', encoding='utf-8') as fh:
             json.dump(doc, fh, indent=1, sort_keys=True)
             fh.write('\n')
@@ -917,7 +1028,9 @@ def main(argv=None):
     if brief_drift and not args.quiet:
         print(f"  design brief DRIFT: {len(brief_drift)} claim(s) the brief "
               f"declares that this intent does not carry. The intent is what "
-              f"is graded -- re-run --emit-intent to fold them in:")
+              f"is graded -- re-run --emit-intent to fold them in (it writes a "
+              f"new file: it names each row of this one it drops, to write "
+              f"again after it):")
         for line in brief_drift:
             print(f"    - {line}")
 

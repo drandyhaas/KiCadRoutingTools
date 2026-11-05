@@ -196,6 +196,17 @@ brief, `mechanical.json` or the user.
 python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --emit-intent wk/<run>/intent.json
 ```
 
+- **An emit keeps what the design brief and `mechanical.json` say, and drops
+  everything else.** It writes a new file from the board and those two, and
+  never reads the old intent, so every row written there since, by hand or by
+  a script, is gone: an edge row the brief does not hold, `dispositions`,
+  `overlap_waivers`, a template, a link, a hand-drawn block. So one order holds
+  for every step below: the rows the brief has a key for first
+  (`interfaces[]` holds an edge row and its `mating_face`, `docs/design-brief.md`
+  has the rest), then the last emit, then the rows only the intent can hold.
+  An emit over an existing intent warns and names, with its value, each row the
+  new file does not carry, and writes it anyway: write those again, and run
+  `waive_locked_overlaps.py` again.
 - When a placed reference of the design exists (a human layout, an earlier
   placement), add `--decaps-from <reference.kicad_pcb>`: it arms the decap
   limits, and say in your report that you did.
@@ -220,7 +231,7 @@ python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --emit-inte
   `"zone_containment": "no region was given; groups place this board"`.
   Never invent a limit to clear one. The roster prints again with every
   `check_floorplan --intent`; list your answers in REPORT.md.
-- **Waive the locked parts' own overlaps**, right after the intent exists:
+- **Waive the locked parts' own overlaps**, right after the last emit:
 
   ```bash
   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/waive_locked_overlaps.py \
@@ -553,14 +564,15 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   from. The seat cannot ask this for you: nothing on the board says how the
   mate is shaped.
 
-Write these into the intent's `edge_connectors[]` entries, the rows into
-`fixed_poses[]` instead (a ref in both is refused), or into the brief,
-then emit again (§3.2). Check the fixed parts -- mounting holes, switches, LEDs
-a panel shows -- against the brief or `mechanical.json`, and move any that is
-wrong with `place_pose ... set ... lock` as in §3.1. Run check_floorplan again:
-no `edge_connector` error, and no `edge_oversubscribed` warning (an edge
-declared more connectors than fit on it together: move one to another edge,
-drop a declaration, or widen a band now, before placing).
+Write these in §3.2's order: into the brief's `interfaces[]` and emit again, or
+after the last emit into the intent's `edge_connectors[]` entries, the rows
+into `fixed_poses[]` instead (a ref in both is refused). Check the fixed parts
+-- mounting holes, switches, LEDs a panel shows -- against the brief or
+`mechanical.json`, and move any that is wrong with `place_pose ... set ... lock`
+as in §3.1. Run check_floorplan again: no `edge_connector` error, and no
+`edge_oversubscribed` warning (an edge declared more connectors than fit on it
+together: move one to another edge, drop a declaration, or widen a band now,
+before placing).
 
 ### 3.4b Covers (your judgement)
 
@@ -596,7 +608,7 @@ under a card, and a tall part can be placed there.
    list each with its distance), and the card's width and reach.
 4. **Write the row** into the design brief's `covers[]`
    (`<board>.design-brief.json` beside the board, which travels with it and
-   compiles into the intent on every emit; re-emit, §3.2): `connector`, `side`,
+   compiles into the intent on every emit; emit again, in §3.2's order): `connector`, `side`,
    `axis_deg` (the facts' axis), `width_mm`, `underside_mm`, `length_mm`
    (how far the body reaches from the connector's origin), `offset_mm` (the
    standoff's "off" when the card's centre line misses the connector's
@@ -671,8 +683,7 @@ in the vocabulary of `docs/floorplan-intent.md`:
 - **An area only some parts may enter** (a keep-in for everyone else): a
   `keepouts[]` entry whose `allow` names the parts that may. A pattern that
   matches no part is a WARN, and the part it meant is pushed out.
-- **Write them after the last `--emit-intent`**, which writes a new file;
-  add them again if you emit again.
+- **Write them after the last `--emit-intent`** (§3.2).
 - **Make an overfull zone an error:** declare `legality_budget`
   (`{"overlap_area": 0.0, "oob_count": 0}`). Without it, a zone too small
   for its members is only a WARN.

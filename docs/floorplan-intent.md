@@ -2106,6 +2106,16 @@ It writes an intent that **grades clean by construction** — a baseline to
 tighten, and the round trip is what proves the rules are wired to real geometry
 rather than silently skipping.
 
+**It writes a new file, built from the board, the design brief and
+`mechanical.json`, and never reads the one it replaces** (#1661). A row written
+only in that file (`dispositions`, `overlap_waivers`, an edge row the brief
+does not hold) is not in the new one. Over an existing intent the emit warns on
+stderr, `--quiet` or not, and names each row or value the new document does not
+carry, values in full, comparing the two documents by shape (every key but the
+top-level `context` and `min_reader`), so an unchanged re-emit prints nothing.
+It still writes, with exit 0. So a board's order is: what the brief can hold
+into the brief, the last emit, then the rows only an intent can hold.
+
 It claims a `zone` only where it can defend one. A schematic sheet is a
 *functional* grouping, not a spatial one: its members scatter across the board,
 so per-sheet bounding boxes mutually overlap — all ten of ulx3s's do, by up to
