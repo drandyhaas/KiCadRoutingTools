@@ -938,7 +938,9 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
 - `pad_copper_edge`: the part's pad-copper edge clearance from
   `grade_pad_edge_clearance`, at the floor `grade_pad_legality` resolves, or
   at a `.kicad_dru` `edge_clearance` rule binding the part's pads (#1615,
-  named in `rules_applied` and `requirement_source`). This
+  named in `rules_applied` and `requirement_source`; the seat holds the same
+  floor, and where it stops a part short of its band's minimum place_simple's
+  warning names that floor and its source, #1663). This
   is the channel `check_drc --check-pad-edge` grades, and it is reported
   alongside the body because a legal body overhang does not make the copper
   legal. The *clearance* half is evidence only: a pad inside the edge floor

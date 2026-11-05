@@ -10,10 +10,16 @@ grades with a synthetic one.
      0 (x 16.53, wholly on the board): NOT BUILDABLE, naming the body
      through the board;
   3. the intent emitted off the designer's board gives J3 a band floor near
-     12 mm, not 0;
-  4. placed from that intent (the board piled, one seed), J3 is seated with
-     its body off the board: check_floorplan and check_assembly both pass,
-     and J3 stands within a cell of the designer's pose.
+     12 mm, not 0, and the emit off the pile, in J3's own frame, the same
+     (#1662);
+  4. the real model's depth reads the body (#1659): moved in from its drawn
+     pose, 0.05 mm does not gate, and 0.15, 0.25, 0.5 and 0.7 mm do;
+  5. placed from that intent (the board piled, one seed) at the fab edge floor,
+     its pads end level with its body, so that floor stops it short of its band:
+     no seat, and the warning names the floor (#1663);
+  6. with a `.kicad_dru` rule binding its pads J3 is seated with its body off the
+     board: check_floorplan and check_assembly both pass, and J3 stands within
+     0.1 mm of the designer's pose.
 
 Needs kicad-cli and KiCad's stock 3D models (placement/heights.py's own
 export). Without them it exits 77 with a `SKIP:` line.
@@ -104,16 +110,52 @@ def main():
               and doc['context']['basis'].get('edge_connectors[J3].overhang_mm.min')
               == 'derived_default', str(j3))
 
+        print('moved in from its drawn pose:')
+        for inb, gates in ((0.05, False), (0.15, True), (0.25, True), (0.5, True), (0.7, True)):
+            c = heights.body_in_board(h, pcb, {'J3': (28.46 - inb, 15.0, 0.0)})
+            row = next((r for r in c['rows'] if r['ref'] == 'J3'), {})
+            check(f'{inb} mm in ' + ('gates' if gates else 'does not gate'),
+                  ('J3' in c['gating_refs']) == gates and abs(row.get('inside_mm', 0) - inb) < 0.01,
+                  str(row))
+
         print('placed from it:')
         pile = os.path.join(tmp, 'pile.kicad_pcb')
         run_utils.check(tool('.claude/skills/plan-pcb-placement/scripts/make_unplaced.py',
                              FIXTURE, pile), accept=True)
         run_utils.evidence(pile, 'the pile')
+        emitted = os.path.join(tmp, 'pile_intent.json')
+        r = run_utils.check(tool('py_tools/check_floorplan.py', pile, '--emit-intent', emitted,
+                                 '--allow-unplaced'), accept=True)
+        run_utils.evidence(emitted, 'the intent emitted off the pile')
+        with open(emitted, encoding='utf-8') as f:
+            row = next((c for c in json.load(f)['edge_connectors'] if c['ref'] == 'J3'), {})
+        check('off the pile J3 gets the same band, in its own frame, with no edge',
+              row.get('overhang_mm') == band and 'edge' not in row, str(row))
+        check('...and an OWED line naming it',
+              any(ln.strip().startswith('OWED: J3 ') and 'board depth' in ln
+                  for ln in r.stdout.splitlines()), '')
         groups = os.path.join(tmp, 'groups.json')
         with open(groups, 'w', encoding='utf-8') as f:
             json.dump({'schema': 1, 'groups': [{'name': 'all', 'role': 'core',
                                                 'refs': ['C1', 'C2', 'J1', 'J2', 'J3']}]}, f)
-        out = os.path.join(tmp, 's0.kicad_pcb')
+        out = os.path.join(tmp, 'floor.kicad_pcb')
+        r = run_utils.check(tool('py_placer/place_simple.py', pile, out, '--groups', groups,
+                                 '--intent', intent, '--seed', 0), accept=True)
+        line = next((ln.strip() for ln in r.stdout.splitlines() if 'WARNING: J3' in ln), '')
+        check('at the fab edge floor it has no seat, and the warning names that floor',
+              'has no seat there' in line and '0.20mm from the fab edge floor' in line
+              and 'Lowering the band will not help' in line, line)
+
+        print('...with a rule binding its pads:')
+        ruled = os.path.join(tmp, 'ruled')
+        os.makedirs(ruled)
+        rule_pile = os.path.join(ruled, 'pile.kicad_pcb')
+        run_utils.check(tool('py_router/copy_board.py', pile, rule_pile), accept=True)
+        with open(os.path.join(ruled, 'pile.kicad_dru'), 'w', encoding='utf-8') as f:
+            f.write('(version 1)\n(rule "edge_launch"\n  (condition "A.Type == \'Pad\' && '
+                    'A.memberOfFootprint(\'J3\')")\n  (constraint edge_clearance (min 0mm)))\n')
+        pile = rule_pile
+        out = os.path.join(ruled, 's0.kicad_pcb')
         r = run_utils.check(tool('py_placer/place_simple.py', pile, out, '--groups', groups,
                                  '--intent', intent, '--seed', 0), accept=True)
         run_utils.evidence(out, 'the placed board')
@@ -124,8 +166,8 @@ def main():
               and any(ln.startswith('assembly: buildable') for ln in lines), ' | '.join(lines))
         with contextlib.redirect_stdout(io.StringIO()):
             j = parse_kicad_pcb(out).footprints['J3']
-        check("J3 stands within a cell of the designer's pose, its body off the board",
-              abs(j.x - 28.46) <= heights.CELL_MM + 0.01 and abs(j.y - 15.0) < 8.0,
+        check("J3 stands within 0.1 mm of the designer's pose, its body off the board",
+              abs(j.x - 28.46) <= heights.DEPTH_EDGE_TOL_MM + 0.001 and abs(j.y - 15.0) < 8.0,
               f'({j.x}, {j.y})')
         run_utils.check(tool('py_tools/check_assembly.py', out, '--intent', intent,
                              '--baseline', pile), accept=True)

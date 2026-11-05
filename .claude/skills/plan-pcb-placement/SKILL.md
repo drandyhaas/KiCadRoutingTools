@@ -549,6 +549,21 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   tolerance is read on its drawn body, and the seat puts that body flush
   even where the band reads the courtyard (#1653), so its courtyard can
   stand past the edge.
+- **When its pads stop an edge part short of its band.** An edge-launch jack
+  whose pads end level with the wall of its board slot needs those pads nearly
+  on the edge, and the board's edge clearance (0.20 mm when it declares less)
+  keeps them further in: place_simple warns that it has no seat, names that
+  pad floor, and places it as any other part, through the board. The band is
+  not the cause, and lowering it leaves the body in the laminate. Check the
+  vendor's drawing for how close its pads are meant to come; then, with the
+  board owner's agreement, write a `.kicad_dru` `edge_clearance` rule binding
+  those pads (`(rule edge_launch (condition "A.Type == 'Pad' &&
+  A.memberOfFootprint('J1')") (constraint edge_clearance (min 0mm)))`) in the
+  file beside the board, which the seat and the grade read
+  as KiCad does, and place again. Name the pads in it when only some come that
+  close. KiCad grades that clearance to the outline's drawn line, not its
+  centre, so a pad ending on the centre line fails at any minimum, which is
+  why the floor leaves the part up to 0.1 mm in.
 - **Where the part's own model ends.** Where a 3D model resolves,
   check_floorplan's line says `model end -2.07mm` beside the overhang (from
   the edge's line, negative short of it) and warns when the courtyard reads
@@ -1165,6 +1180,8 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
      will fix it: the part has no room (a WARNING that it fits the usable
      area at neither quarter turn, or that an edge part has no seat there,
      which names what stopped it: a band its overhang never comes down to,
+     its pad copper's edge clearance holding it short of its band's minimum
+     (§3.4's "When its pads stop an edge part short of its band"),
      the part in the way, or a part seated on the adjacent edge that covers
      its whole line at the corner), an edge declared more connectors than fit on
      it together (`oversubscribed`: the same parts and free span in every
