@@ -552,15 +552,19 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
 - **When its pads stop an edge part short of its band.** An edge-launch jack
   whose pads end level with the wall of its board slot needs those pads nearly
   on the edge, and the board's edge clearance (0.20 mm when it declares less)
-  keeps them further in: place_simple warns that it has no seat, names that
-  pad floor, and places it as any other part, through the board. The band is
+  keeps them further in. The roster of `--emit-intent` and `--plan-only` says
+  so here, with no pose, in an `OWED:` line naming the part, the overhang its
+  body needs and the clearance that binds its pads (`floorplan.pad_floor_owed`):
+  settle it now, because left alone place_simple warns on every seed that it
+  has no seat, names that pad floor, and places it as any other part, through
+  the board. The band is
   not the cause, and lowering it leaves the body in the laminate. Check the
   vendor's drawing for how close its pads are meant to come; then, with the
   board owner's agreement, write a `.kicad_dru` `edge_clearance` rule binding
   those pads (`(rule edge_launch (condition "A.Type == 'Pad' &&
   A.memberOfFootprint('J1')") (constraint edge_clearance (min 0mm)))`) in the
   file beside the board, which the seat and the grade read
-  as KiCad does, and place again. Name the pads in it when only some come that
+  as KiCad does, and the line goes. Name the pads in it when only some come that
   close. KiCad grades that clearance to the outline's drawn line, not its
   centre, so a pad ending on the centre line fails at any minimum, which is
   why the floor leaves the part up to 0.1 mm in.

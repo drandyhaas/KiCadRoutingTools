@@ -443,15 +443,17 @@ def _warn_rows_replaced(path, doc):
             print(f"    - {row}", file=sys.stderr)
 
 
-def _model_owed(intent, pcb, board):
+def _model_owed(intent, pcb, board, edge_clearance=None):
     """The per-part questions the board's 3D models put to a plan
     (`heights.for_board`, read once per board and cached): #1653's
-    `floorplan.model_short_owed` and #1662's `floorplan.body_floor_owed`; []
-    when none resolve."""
+    `floorplan.model_short_owed`, #1662's `floorplan.body_floor_owed` and
+    #1694's `floorplan.pad_floor_owed`, at the run's own `edge_clearance` when
+    it gives one; [] when none resolve."""
     from placement import heights as _heights
-    from placement.floorplan import body_floor_owed, model_short_owed
+    from placement.floorplan import body_floor_owed, model_short_owed, pad_floor_owed
     h = _heights.for_board(pcb, board)
-    return model_short_owed(intent, pcb, board, h) + body_floor_owed(intent, pcb, board, h)
+    return (model_short_owed(intent, pcb, board, h) + body_floor_owed(intent, pcb, board, h)
+            + pad_floor_owed(intent, pcb, board, h, edge_clearance))
 
 
 def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
@@ -501,7 +503,8 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
             print(f"    [{'ERROR' if v.severity == 'error' else 'warn '}] "
                   f"{v.rule}: {v.message}")
         for line in format_roster(rows, stale,
-                                  _model_owed(intent, pcb, args.board)):
+                                  _model_owed(intent, pcb, args.board,
+                                              args.board_edge_clearance)):
             print(line)
         for line in _rc.format_rows(recon):
             print(line)
@@ -1016,7 +1019,8 @@ def main(argv=None):
                     brief_fragment=brief_fragment or None)
                 for line in format_roster(_rows,
                                           stale_dispositions(_it, _rows),
-                                          _model_owed(_it, pcb, args.board)):
+                                          _model_owed(_it, pcb, args.board,
+                                                      args.board_edge_clearance)):
                     print(line)
             except (IntentError, UntrustworthyOutline) as exc:
                 print(f"  rule roster not computed: {exc}")

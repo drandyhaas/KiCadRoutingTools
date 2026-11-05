@@ -775,6 +775,14 @@ mating face in the board's plane gets no entry, since no direction reads, and it
 `OWED:` line gives the floor for each side. A part that draws its own Edge.Cuts
 (a window it travels with) is not asked, a brief's or `mechanical.json`'s declared
 pose outranks the row, and a mounting hole is the pattern fit's.
+**That floor can ask too much of the pads (#1694).** On a pile and a placed board
+alike, in the same words, a second `OWED:` line (`floorplan.pad_floor_owed`) names
+an unlocked part whose floor needs its pads nearer the edge than the clearance
+binding them, that clearance and its source, and the `.kicad_dru` `edge_clearance`
+rule that frees them (none, for a pad the floor would put on or past the outline):
+the seat has nothing for such a part. It reads what the seat reads, pad by pad, and
+goes when a rule frees the pads, or on a `why`, a declared pose or a lock. A part
+with no mating face in the board's plane is named only when no side of it can seat.
 Such a part is given its edge, and so this floor, **whatever its class**
 (#1634): a name with no part class (the same jack as `RF:132289`) no longer
 loses them, and its note says the edge came from its model.

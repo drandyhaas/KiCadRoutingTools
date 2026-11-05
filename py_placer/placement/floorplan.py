@@ -4693,19 +4693,39 @@ def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
     (no turn is the seat's to choose then), and `by_face` the floor for each
     of the four. None when no body of it could ever gate, or none was read, or
     a floor is 0 in every direction asked."""
+    from .mating import mating_face_local
+    fp = (pcb_data.footprints or {}).get(ref)
+    if bodies is None:
+        from .body import board_bodies
+        bodies = board_bodies(pcb_data, pcb_file)
+    read = _body_floor_reads(heights, pcb_data, pcb_file, ref, bodies, geometry)
+    if fp is None or read is None:
+        return None
+    face = mating_face_local(fp, bodies.get(ref)).face
+    if face:
+        got = read[face][0]
+        return ({'face': face, 'min': got, 'by_face': {face: got}}
+                if got > legality.EPS else None)
+    each = {f: read[f][0] for f in sorted(read)}
+    if not any(v > legality.EPS for v in each.values()):
+        return None
+    return {'face': None, 'min': None, 'by_face': each}
+
+
+def _body_floor_reads(heights, pcb_data, pcb_file, ref, bodies,
+                      geometry=None) -> Optional[Dict[str, Tuple[float, float]]]:
+    """{face: (the floor `body_clearing_overhang` gives it, how far along that
+    face the band's shape reaches)} for each of `ref`'s four sides, in its own
+    frame; None when no body of it could ever gate, or none was read."""
     from .connector_geometry import ConnectorGeometry
     from .heights import depth_past_edge
-    from .mating import facing_edge, mating_face_local
-    fp = (pcb_data.footprints or {}).get(ref)
+    from .mating import facing_edge
 
     def past(face):
         return depth_past_edge(heights, pcb_data, ref, facing_edge(face, 0.0),
                                (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0))
-    if fp is None or past('+x') is None:
+    if past('+x') is None:
         return None
-    if bodies is None:
-        from .body import board_bodies
-        bodies = board_bodies(pcb_data, pcb_file)
     g = bodies.get(ref)
     geometry = geometry or ConnectorGeometry(pcb_data, pcb_file)
     shape = (geometry.rect(ref, (0.0, 0.0, 0.0))[0]
@@ -4713,18 +4733,8 @@ def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
     if shape is None:
         return None
     reach = {'+x': shape[2], '-x': -shape[0], '+y': shape[3], '-y': -shape[1]}
-
-    def floor(face):
-        return math.floor(max(0.0, reach[face] - past(face)) * 1000.0) / 1000.0
-    face = mating_face_local(fp, g).face
-    if face:
-        got = floor(face)
-        return ({'face': face, 'min': got, 'by_face': {face: got}}
-                if got > legality.EPS else None)
-    each = {f: floor(f) for f in sorted(reach)}
-    if not any(v > legality.EPS for v in each.values()):
-        return None
-    return {'face': None, 'min': None, 'by_face': each}
+    return {f: (math.floor(max(0.0, r - past(f)) * 1000.0) / 1000.0, r)
+            for f, r in reach.items()}
 
 
 def _body_floor_applies(pcb_data, ref) -> bool:
@@ -4793,6 +4803,111 @@ def body_floor_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
                        f"no edge is written: give its edge_connectors entry its "
                        f"`edge` from the brief, mechanical.json or the user, with "
                        f"that `overhang_mm.min`, or a `why` if no edge is meant")
+    return out
+
+
+def _pads_short_of_floor(geometry, rules, pcb_data, ref, base, floor, reach, face):
+    """The pads (`connector_geometry.pad_boxes`, the seat's own) of `ref` the
+    seat would hold further in than `floor` allows, with `face` to a straight
+    edge and overhanging by `floor` on a shape reaching `reach` along that
+    face: `(pad number, mm it would stand inside the edge, the clearance
+    binding it, the rule setting that clearance or '')` each."""
+    from .connector_geometry import pad_boxes
+    from .edge_seat import COPPER_SLACK_MM
+    fp = pcb_data.footprints[ref]
+    short = []
+    for index, lx, ly, hx, hy, tilt in pad_boxes(geometry, ref):
+        a = math.radians(tilt)
+        ca, sa = abs(math.cos(a)), abs(math.sin(a))
+        ex, ey = hx * ca + hy * sa, hx * sa + hy * ca
+        inside = reach - floor - {'+x': lx + ex, '-x': ex - lx,
+                                  '+y': ly + ey, '-y': ey - ly}[face]
+        clearance, rule = base, ''
+        if rules is not None:
+            _lo, clearance, rule = rules.for_pad(fp.pads[index], base)
+        if inside < clearance + COPPER_SLACK_MM - legality.EPS:
+            short.append((str(fp.pads[index].pad_number), inside, clearance, rule))
+    return short
+
+
+def pad_floor_owed(intent, pcb_data, pcb_file, heights, edge_clearance=None) -> List[str]:
+    """#1694: one `OWED:` line per unlocked part whose body floor
+    (`body_clearing_overhang`) needs its pads nearer the edge than the clearance
+    that binds them (`design_rules.PadEdgeRules`, else the board's floor, or
+    `edge_clearance`, a run's own value), so the seat has nothing for it: without
+    this a run learns that from place_simple, after its seeds.
+
+    Read in the part's own frame, so a pile and a placed board read the same,
+    with the face the seat turns by (`mating.face_with_declaration`); a part with
+    no face in the plane is named only when no side of it could seat. Disclosure
+    only. A `why`, a declared pose or a lock answers it, as does a rule that frees
+    the pads. A straight edge's number, as the floor is. It stands beside
+    `body_floor_owed`, which says what overhang the body needs: this says what
+    that overhang does to the pads."""
+    if not (getattr(heights, 'depth', None) or {}):
+        return []
+    from design_rules import PadEdgeRules
+    from .body import board_bodies
+    from .connector_geometry import ConnectorGeometry, pad_boxes
+    from .edge_seat import COPPER_SLACK_MM, PAD_FLOOR_WAY_OUT, edge_floor_source
+    from .mating import face_with_declaration, mating_face_local
+    locked = set(extract_locked_refs_safe(pcb_file))
+    posed = {str(f.get('ref')) for f in (intent.fixed_poses or ())}
+    rows = {str(c.get('ref')): c for c in (intent.edge_connectors or ())}
+    base = resolved_floors(pcb_file, None, edge_clearance)[1]
+    try:
+        rules = PadEdgeRules(pcb_data, pcb_file)
+    except (OSError, ValueError):
+        rules = None
+    rules = rules if rules is not None and rules.active else None
+    bodies = board_bodies(pcb_data, pcb_file)
+    geometry = ConnectorGeometry(pcb_data, pcb_file)
+    out = []
+    for ref in sorted(heights.depth):
+        c = rows.get(ref) or {}
+        if ref in locked or ref in posed or c.get('why') \
+                or not _body_floor_applies(pcb_data, ref):
+            continue
+        read = _body_floor_reads(heights, pcb_data, pcb_file, ref, bodies, geometry)
+        if read is None:
+            continue
+        fp = pcb_data.footprints[ref]
+        face = face_with_declaration(mating_face_local(fp, bodies.get(ref)),
+                                     c.get('mating_face'))[0]
+        sides = [face] if face else sorted(read)
+        asked = {f: _pads_short_of_floor(geometry, rules, pcb_data, ref, base,
+                                         read[f][0], read[f][1], f) for f in sides}
+        # a side with no floor, or none of whose pads are short, seats
+        if not all(read[f][0] > legality.EPS and asked[f] for f in sides):
+            continue
+        # a part the plan may turn: the side nearest to seating
+        side = face or max(sides, key=lambda f: min(p[1] - p[2] for p in asked[f]))
+        short = sorted(asked[side], key=lambda p: p[1] - p[2])
+        worst = short[0]
+        every = len(short) == len(pad_boxes(geometry, ref))
+        numbers = sorted({p[0] for p in short})
+        some = 'its pads' if every else 'pad' + ('s ' if len(numbers) > 1 else ' ') + ', '.join(numbers)
+        how = (f"with its mating face ({side}) to the edge" if face else
+               f"no mating face reads in the board's plane and no side of it can seat: "
+               f"with its {side} side to the edge, the nearest to seating")
+        where = (f"would stand {worst[1]:.3f}mm from the edge" if worst[1] >= 0.0
+                 else f"would leave the board by {-worst[1]:.3f}mm")
+        source = (f"the .kicad_dru rule {worst[3]!r}" if worst[3]
+                  else edge_floor_source(pcb_file, base))
+        lead = (f"{ref} ({fp.footprint_name}): {how}, the overhang of "
+                f"{read[side][0]:.3f}mm its body needs means {some} {where}, and the "
+                f"clearance binding them is {worst[2]:.2f}mm, from {source}. So it "
+                f"gets no seat, and place_simple places it as any other part. ")
+        if min(p[1] for p in short) <= COPPER_SLACK_MM:
+            out.append(lead + "No edge_clearance rule frees a pad on or past the "
+                              "outline: if the board is cut away under that body, "
+                              "write a `why`; otherwise this footprint cannot seat "
+                              "on an edge")
+            continue
+        out.append(lead + f"{PAD_FLOOR_WAY_OUT}: `(rule edge_launch (condition "
+                          f"\"A.Type == 'Pad' && A.memberOfFootprint('{ref}')\") "
+                          f"(constraint edge_clearance (min 0mm)))`, beside the board, "
+                          f"or a `why` if no edge is meant")
     return out
 
 

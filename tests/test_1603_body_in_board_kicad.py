@@ -14,7 +14,8 @@ grades with a synthetic one.
      (#1662);
   4. the real model's depth reads the body (#1659): moved in from its drawn
      pose, 0.05 mm does not gate, and 0.15, 0.25, 0.5 and 0.7 mm do;
-  5. placed from that intent (the board piled, one seed) at the fab edge floor,
+  5. the emit and --plan-only say up front that its pads stop it (#1694), and
+     placed from that intent (the board piled, one seed) at the fab edge floor,
      its pads end level with its body, so that floor stops it short of its band:
      no seat, and the warning names the floor (#1663);
   6. with a `.kicad_dru` rule binding its pads J3 is seated with its body off the
@@ -134,6 +135,24 @@ def main():
         check('...and an OWED line naming it',
               any(ln.strip().startswith('OWED: J3 ') and 'board depth' in ln
                   for ln in r.stdout.splitlines()), '')
+
+        def pad_line(out):
+            return next((ln.strip() for ln in out.splitlines()
+                         if ln.strip().startswith('OWED: J3 ') and 'its pads would stand' in ln), '')
+        said = pad_line(r.stdout)
+        check('...and, before any seed, that its pads stop it at the fab edge floor (#1694)',
+              'the clearance binding them is 0.20mm, from the fab edge floor' in said
+              and "A.memberOfFootprint('J3')" in said, said)
+        with open(emitted, encoding='utf-8') as f:
+            hand = json.load(f)
+        next(c for c in hand['edge_connectors'] if c['ref'] == 'J3')['edge'] = 'east'
+        handed = os.path.join(tmp, 'pile_intent_edge.json')
+        with open(handed, 'w', encoding='utf-8') as f:
+            json.dump(hand, f)
+        r = run_utils.check(tool('py_tools/check_floorplan.py', pile, '--intent', handed,
+                                 '--plan-only'), accept=True)
+        check('...--plan-only says the same, with the edge declared', pad_line(r.stdout) == said,
+              pad_line(r.stdout))
         groups = os.path.join(tmp, 'groups.json')
         with open(groups, 'w', encoding='utf-8') as f:
             json.dump({'schema': 1, 'groups': [{'name': 'all', 'role': 'core',

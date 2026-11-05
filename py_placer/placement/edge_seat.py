@@ -174,6 +174,22 @@ def pad_span(state, seat) -> float:
     return span
 
 
+def edge_floor_source(pcb_file, base) -> str:
+    """Where the edge clearance `base` a part's pads are held at comes from, in
+    words, no `.kicad_dru` rule binding them: the board's floor as
+    `list_nets.board_floor_knobs` resolved it, else this run's own value."""
+    from list_nets import board_floor_knobs, UNSET_EDGE_SOURCE
+    knob = board_floor_knobs(pcb_file)[2]['board_edge_clearance']
+    if abs(float(knob['value']) - base) > 1e-9:
+        return "the edge clearance given to this run"
+    if knob.get('declared') is not None:
+        return (f"the fab edge floor, over the board's declared "
+                f"min_copper_edge_clearance {float(knob['declared']):g}mm")
+    if knob['source'] == UNSET_EDGE_SOURCE:
+        return "the fab edge floor: the board declares no min_copper_edge_clearance"
+    return "the board's min_copper_edge_clearance"
+
+
 def _pad_box(geometry, ref, pose):
     """The box of `ref`'s pad COPPER at `pose`: the pads `copper_clear`
     grades (`connector_geometry.pad_boxes`), each its rotated rectangle's box,
@@ -301,16 +317,7 @@ class _Probe:
                      if rule and abs(hi - self.copper_margin(ref) + COPPER_SLACK_MM) <= 1e-9]
             if named:
                 return f"the .kicad_dru rule {named[0]!r}"
-        from list_nets import board_floor_knobs, UNSET_EDGE_SOURCE
-        knob = board_floor_knobs(self.pcb_file)[2]['board_edge_clearance']
-        if abs(float(knob['value']) - base) > 1e-9:
-            return "the edge clearance given to this run"
-        if knob.get('declared') is not None:
-            return (f"the fab edge floor, over the board's declared "
-                    f"min_copper_edge_clearance {float(knob['declared']):g}mm")
-        if knob['source'] == UNSET_EDGE_SOURCE:
-            return "the fab edge floor: the board declares no min_copper_edge_clearance"
-        return "the board's min_copper_edge_clearance"
+        return edge_floor_source(self.pcb_file, base)
 
     def copper_clear(self, ref, pose) -> bool:
         """Every pad's copper its edge clearance inside the outline
@@ -703,6 +710,15 @@ def _free_stretches(probe, entry, edge, axis, coord, rot, lo, hi, fixed, tally=N
     return free
 
 
+#: What to do when a part's pad floor holds it short of what its body needs:
+#: said by the seat (`_pad_floor_text`) and, before any seed, by the emit's
+#: roster (`floorplan.pad_floor_owed`).
+PAD_FLOOR_WAY_OUT = ("Lowering the band will not help a part whose body needs it "
+                     "(check_assembly gates a body at board depth): check the "
+                     "vendor's drawing, then, with the board owner's agreement, a "
+                     ".kicad_dru edge_clearance rule for those pads")
+
+
 def _pad_floor_text(probe, ref, e, low, held) -> str:
     """#1663: the band minimum `low` failed at a seat its pad copper's edge
     clearance chose, reading `held`: the pad floor, its value and where it
@@ -712,10 +728,7 @@ def _pad_floor_text(probe, ref, e, low, held) -> str:
     reach = (f"its pads would stand {left:.2f}mm from the edge"
              if left >= 0.0 else f"its pads would leave the board by {-left:.2f}mm")
     return (f": its pad copper's edge clearance stops it there, {floor:.2f}mm from "
-            f"{probe.copper_source(ref)}, and at that minimum {reach}. Lowering the "
-            f"band will not help a part whose body needs it (check_assembly gates a "
-            f"body at board depth): check the vendor's drawing, then, with the board "
-            f"owner's agreement, a .kicad_dru edge_clearance rule for those pads")
+            f"{probe.copper_source(ref)}, and at that minimum {reach}. {PAD_FLOOR_WAY_OUT}")
 
 
 def _unseated_reason(probe, entry, edge, axis, target, e, floors, spans, tally,
