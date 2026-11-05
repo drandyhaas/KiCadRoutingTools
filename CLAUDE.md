@@ -172,6 +172,9 @@ Validate routed boards against the *real* spec, with the right checker — most
   - The PLACEMENT CLI `place_fanout_clearance.py` keeps its `--clearance` = ceiling
     contract (#768/#769, pinned by its test family); the GUI fanout tab prices that
     ceiling from the Min Clearance override alone (`placement_clearance_ceiling`).
+    Both fronts hold it at the PHYSICAL fab floor for the board's layer count, or
+    `--fab-overrides`' (#1699), since it is written into the project the later
+    steps read; a class the board declares below that floor stays as declared.
   - **`place_fanout_clearance.py` obeys the same two branches (#768/#769)**, and
     it is the only PLACEMENT step that does, because it is the only one that
     lays copper (the #313 via nudge) and therefore the only one that writes a

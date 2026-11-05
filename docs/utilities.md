@@ -2463,6 +2463,11 @@ still replay.
 - **Clearance.** Given, `--clearance` is a ceiling: every net class is priced
   at `min(class, value)` and the output project is clamped to it. Omitted,
   each pair is priced at its own net-class clearance and the classes are kept.
+  A value below the physical fab floor is pinned up to it with a warning, as on
+  the routing CLIs: the advanced rung for the board's layer count (0.1 mm on 2
+  layers, 0.09 mm on 4 or more), or the floor in a `--fab-overrides` file. A
+  class, `.kicad_dru` rule or pad override the board declares below that floor
+  stays as declared.
 - **`--intent`.** The intent's decap limits (`decaps.max_distance_mm`,
   `decaps.max_pin_distance_mm`, at error severity) are held: no move takes a
   claim past its limit and further than the board as it stands, unless no

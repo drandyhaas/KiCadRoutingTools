@@ -655,7 +655,8 @@ assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> 
   *tighter* than the ceiling survives; a *looser* one is capped, because stock net
   classes are largely aspirational (real boards, and even the human-routed references,
   route below them). The ceiling is first pinned up to the physical fab floor, as the
-  run's clearance is (`fab_tiers.enforce_fab_floors`; the GUI's `_class_ceiling`, #1691),
+  run's clearance is (`fab_tiers.enforce_fab_floors`; the GUI's `_class_ceiling`, #1691;
+  the placement step's `--clearance`, which is a ceiling too, #1699),
   so it never lowers a class below that floor. The output `.kicad_pro` writeback then clamps every non-Default
   class down to that same `min(class, ceiling)` (#1492: the ceiling, never the Default
   class's routed value, which one descent on one Default net used to drag every class

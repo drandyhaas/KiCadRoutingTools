@@ -74,6 +74,12 @@ Engine parameters and defaults:
 - `test_1691_ceiling_fab_floor_gui.py` — a plan's Clearance ceiling below the
   physical fab floor is held at it: each tab's config, and the classes the route
   step writes, against the CLI's (#1691).
+- `test_1698_plan_clearance_parity_gui.py` — the same flags through the CLI and a
+  plan on all three routing tabs: the map the engine is handed, the project the
+  plan writes, the live board and the copper (#1698).
+- `test_1699_cap_ceiling_fab_floor_gui.py` — an `optimize_caps` step's ceiling
+  below the physical fab floor is held at it: what the engine is handed, and the
+  classes written, against `place_fanout_clearance.py`'s (#1699).
 - `test_zero_diff_pair_width_gui.py` — a 0 class diff-pair width/gap resolves
   the way `route_diff.py` resolves it.
 - `test_settings_roundtrip.py` — the dialog's settings save and restore.

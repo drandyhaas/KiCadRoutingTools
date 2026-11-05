@@ -743,21 +743,24 @@ class RoutingDialog(wx.Dialog):
         mc = getattr(self, 'clearance_check', None)
         return bool(cc is not None and cc.GetValue() and mc is not None and mc.GetValue())
 
-    def _class_ceiling(self):
-        """The ceiling every net class is capped at, or None with the box
-        unchecked: the RAW override (#768), never `_effective_clearance()`, which
-        is min(Default class, override) -- pinned up to the physical fab floor,
-        as the CLI pins --clearance-ceiling (#1691). A plan sets the control
-        without the event that pins it as it is typed."""
-        if not self._ceiling_on():
-            return None
+    def _pinned_override(self):
+        """The Min Clearance override as a ceiling: the RAW value (#768), never
+        `_effective_clearance()`, which is min(Default class, override) -- pinned
+        up to the physical fab floor, as the CLIs pin theirs (#1691, #1699). A plan
+        sets the control without the event that pins it as it is typed."""
         val = self.clearance.GetValue()
         floored = self._fab_floored('clearance', val)
         if floored != val and (val, floored) != getattr(self, '_ceiling_pin_said', None):
             self._ceiling_pin_said = (val, floored)
             from fab_tiers import fab_floor_pin_warning
-            print(fab_floor_pin_warning('clearance_ceiling', val, floored))
+            print(fab_floor_pin_warning(
+                'clearance_ceiling' if self._ceiling_on() else 'clearance', val, floored))
         return floored
+
+    def _class_ceiling(self):
+        """The ceiling every net class is capped at, or None with the box
+        unchecked (`_pinned_override`)."""
+        return self._pinned_override() if self._ceiling_on() else None
 
     def _escalation_policy(self):
         """The Escalation choice as the engine's policy string."""
@@ -2040,7 +2043,7 @@ class RoutingDialog(wx.Dialog):
                 # unchecked means the board's own classes stand, so they are
                 # what the pass must price at.
                 'clamp_netclasses': self._ceiling_on(),
-                # #768: the CEILING itself, and it must be the RAW override
+                # #768: the CEILING itself, and it must be the override
                 # rather than `_effective_clearance()`. That helper already
                 # returns min(Default class, override), which is correct for the
                 # BASE and wrong for the ceiling: a class sitting BETWEEN the
@@ -2053,7 +2056,7 @@ class RoutingDialog(wx.Dialog):
                 # own --clearance is still a ceiling by contract, so the
                 # fanout tab's cap pass follows the Min Clearance override
                 # alone, without the routing tabs' class-ceiling box.
-                'placement_clearance_ceiling': (self.clearance.GetValue()
+                'placement_clearance_ceiling': (self._pinned_override()
                                                 if self.clearance_check.GetValue()
                                                 else None),
                 'placement_clamp_netclasses': self.clearance_check.GetValue(),
