@@ -2106,5 +2106,67 @@
    "title": "/tree/main/movie3d",
    "uniques": 54
   }
+ ],
+ "2026-11-05": [
+  {
+   "count": 3958,
+   "path": "/drandyhaas/KiCadRoutingTools/discussions/1364",
+   "title": "/discussions/1364",
+   "uniques": 3173
+  },
+  {
+   "count": 3233,
+   "path": "/drandyhaas/KiCadRoutingTools",
+   "title": "Overview",
+   "uniques": 1865
+  },
+  {
+   "count": 925,
+   "path": "/drandyhaas/KiCadRoutingTools/issues",
+   "title": "/issues",
+   "uniques": 105
+  },
+  {
+   "count": 208,
+   "path": "/drandyhaas/KiCadRoutingTools/pulls",
+   "title": "/pulls",
+   "uniques": 54
+  },
+  {
+   "count": 198,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_all.png",
+   "title": "/blob/main/docs/routed_all.png",
+   "uniques": 168
+  },
+  {
+   "count": 195,
+   "path": "/drandyhaas/KiCadRoutingTools/releases/tag/v0.23.7",
+   "title": "/releases/tag/v0.23.7",
+   "uniques": 155
+  },
+  {
+   "count": 163,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_kit.png",
+   "title": "/blob/main/docs/routed_kit.png",
+   "uniques": 148
+  },
+  {
+   "count": 127,
+   "path": "/drandyhaas/KiCadRoutingTools/tree/main",
+   "title": "/tree/main",
+   "uniques": 80
+  },
+  {
+   "count": 104,
+   "path": "/drandyhaas/KiCadRoutingTools/releases",
+   "title": "/releases",
+   "uniques": 71
+  },
+  {
+   "count": 71,
+   "path": "/drandyhaas/KiCadRoutingTools/tree/main/movie3d",
+   "title": "/tree/main/movie3d",
+   "uniques": 54
+  }
  ]
 }
