@@ -1899,8 +1899,9 @@ def main():
     # #1628: said before routing too -- no route can clear these
     if _drc_c.get('library_pad_gaps'):
         print(f"LIBRARY PAD GAPS (disclosed, not blocking): KiCad will report "
-              f"{_drc_c['library_pad_gaps']} clearance finding(s) on pairs of one "
-              f"footprint's own pads, which no placement or routing step "
+              f"{_drc_c['library_pad_gaps']} pair(s) of one footprint's own pads "
+              f"as clearance errors, once per copper layer the pads share, "
+              f"which no placement or routing step "
               f"changes -- a .kicad_dru clearance rule, a pad/footprint "
               f"(clearance) override or a net tie clears them; check_drc's "
               f"WARNINGS name the pairs")
