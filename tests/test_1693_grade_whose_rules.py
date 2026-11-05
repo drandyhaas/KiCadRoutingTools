@@ -10,8 +10,8 @@ each case pins:
 * one board routed at the fab floor, below the floors its input's project
   declares, reads done on aspirational rules (the default, with no `done_form`)
   and not done on the user's own (exit 4, naming the form);
-* the control: a board routed at the input's own rules is done on the user's own
-  rules, so the flag gates rather than always refusing;
+* the control: on a board routed at the input's own rules the two forms agree and
+  `done` follows them, so the flag gates rather than always refusing;
 * an explicit `--whose-rules aspirational` writes what the default writes;
 * a baseline that cannot supply the floors is refused before anything grades,
   with the reason: no project, an unreadable one, one declaring no rules, or one
@@ -53,7 +53,7 @@ FAILS = []
 def check(name, ok, detail=''):
     print(f"  [{'ok' if ok else 'FAIL'}] {name}" + (f": {detail}" if detail and not ok else ''))
     if not ok:
-        FAILS.append(name)
+        FAILS.append(f'{name}: {detail}' if detail else name)
 
 
 def stage(td, name):
@@ -111,10 +111,19 @@ def t_the_form_follows_the_answer(td):
           and doc.get('done_form') == line.get('done_form'), str(line))
 
     rc, line, _doc = run_grade(own, own_in, td, 'own_own', '--whose-rules', 'users-own')
-    check('a board routed at the input\'s own rules is done on the user\'s own rules',
-          rc == 0 and line['done'] is True
-          and line.get('check_complete_authored') == 'DONE'
+    # What a real route ships differs by machine (the suite image has no KiCad,
+    # so no oracle leg), and check_weird can then leave both forms INCOMPLETE.
+    # So the control is what the flag decides: nothing lowered, so the two forms
+    # agree and `done` follows that verdict. Where they read DONE (a KiCad
+    # machine), this is what proves the flag gates rather than always refusing.
+    verdict = line.get('check_complete')
+    check('a board routed at the input\'s own rules reads alike on both forms',
+          verdict == line.get('check_complete_authored')
+          and verdict in ('DONE', 'INCOMPLETE')
           and line.get('done_form') == 'check_complete --authored-from', f'rc {rc} {line}')
+    check('...and on the user\'s own rules its done follows that verdict',
+          line['done'] is (verdict == 'DONE') and rc == (0 if verdict == 'DONE' else 4),
+          f'rc {rc} {line}')
     return asp, own
 
 
