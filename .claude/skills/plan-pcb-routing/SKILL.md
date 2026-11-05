@@ -1333,7 +1333,7 @@ Report to user:
 
 **THE DENSITY GATE COMES FIRST — plane-map aggression must scale with the
 board (15-board wave + controlled A/B, 2026-08-17).** The aggressive map
-below (outer floods, rail co-pours, many-rail splits) is what wins on dense
+below (outer floods, and rails co-poured on them) is what wins on dense
 BGA boards (orangecrab 18 KiCad-unconnected, the best from-scratch result of
 five arms; daisho 8-layer: 1 open, 0 new DRC). The SAME map applied to
 small boards was the wave's dominant failure source AND its dominant time
@@ -2056,16 +2056,16 @@ python3 -X utf8 py_router/route.py board_step1c.kicad_pcb board_step2.kicad_pcb 
     --no-bga-zones \
     --max-ripup 5 \
     --power-nets GND VCC <other PWR...> --power-nets-widths 0.3 0.4 <W...> \
-    --layers <ALL copper layers> --layer-costs <1.0 signals / -1 solid INNER planes / 3.0 a solid outer pour / 1.5 split-or-highway> \
+    --layers <ALL copper layers> --layer-costs <1.0 signals / -1 solid INNER planes / 3.0 a solid outer pour / 2.5 a split layer / 1.0-1.5 a highway> \
     2>&1 | tee /tmp/step2_routing.txt
 
 The `--layer-costs` line is NOT optional when Step 1 poured any solid plane:
 without it signals cross the pours at cost 1.0 and shred them (measured: split
 power pours at 0–2% connected under a BGA on a chain that omitted it). Order
 matches `--layers`; **-1 on solid INNER plane layers in this first pass**,
-3.0 on a solid outer pour, 1.0–1.5 on split/route+pour and highway layers,
-1.0 on F/B. On dense boards use the measured-optimal pricing from Step 2c
-instead (GND plane 6.0, rail pours 2.5, bus highway FREE).
+3.0 on a solid outer pour, 2.5 on a split/route+pour layer, 1.0–1.5 on highway
+layers, 1.0 on F/B. On dense boards use the measured-optimal pricing from Step
+2c instead (GND plane 6.0, bus highway FREE; a rail pour is 2.5 there too).
 
 **Signals keep off poured inner planes on this first pass (#1522).** A
 negative cost forbids track copper on the layer (the pour stays an obstacle
@@ -2086,6 +2086,11 @@ exists for (see the #185 figures below). Step 10 rule 8 does NOT settle this
 one — it ranks the pour TOPOLOGY (outer floods vs inner-only, fragility, rail
 co-pours), not the price — so the price follows whichever recipe that gate put
 you on, and nothing in this file ranks 3.0 against 6.0 by measurement.
+
+**A split layer has one price, 2.5, on both tiers.** That note is about solid
+planes. 2.5 is what Step 5a-tuned's STANDARD map and Step 2c's bundle carry, and
+the only split price a screen has run; the screen's figure is the bundle's, so
+no run isolates this one number.
 
 An earlier pass through this file raised THIS line to 6.0 to make one value
 appear everywhere; that traded a
@@ -2637,8 +2642,9 @@ the better (blocking first, then vias, then copper).
 **Precedence: the Step 5a-tuned DENSITY GATE outranks this section.** The
 survey below describes HUMAN practice, and our engine measurably matches it
 only on DENSE boards. On STANDARD boards (the tier as Step 5a-tuned defines
-it — do not re-derive it here) the measured-optimal map is inner-only pours + rails as wide
-traces (see the Step 5a-tuned A/B: four small boards, floods → 16 opens
+it — do not re-derive it here) the measured-optimal map is Step 5a-tuned's:
+inner-only pours, the dominant rail poured, rails past six as wide traces (see
+the Step 5a-tuned A/B: four small boards, floods → 16 opens
 total; inner-only → 0). Read this section as the Tier-DENSE playbook and
 as background on why pours matter at all.
 
@@ -3981,11 +3987,12 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
    step (the peel machinery degrades gracefully) — note it in the plan
    rather than agonizing.
 8. **The Step 5a-tuned density gate outranks the pour-philosophy survey.**
-   Outer-layer floods, per-zone fragility `=0`, and rail co-pours are
-   DENSE-tier moves only; a STANDARD board gets inner-only pours and rails
-   as wide traces, no matter how many pads a rail has (measured: the four
-   flood-regressed wave boards all went to 0 opens and 3–5× faster on the
-   inner-only map).
+   Outer-layer floods, per-zone fragility `=0`, and rail co-pours (a rail
+   sharing an outer flood, the DENSE map's item 4) are DENSE-tier moves only;
+   a STANDARD board gets Step 5a-tuned's map: inner-only pours, the dominant
+   rail poured, up to six rails on a split layer (rule 9), rails past six as
+   wide traces (measured, flood boards against the inner-only map: the four
+   flood-regressed wave boards all went to 0 opens and 3–5× faster).
 9. **Never split more than six rails onto one plane layer** — prefer
    wide traces for the overflow (six measured: one fill island per rail,
    every BGA supply ball on its own rail's main island).
