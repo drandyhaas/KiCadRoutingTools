@@ -130,7 +130,7 @@ def shipped(src, corpus, boards):
     for root, names in ((src, tree), (corpus, files)):
         for f in names:
             h.update(f.encode() + b'\0' + open(os.path.join(root, f), 'rb').read())
-    for f in ('route_placed.py', 'modal_app.py'):
+    for f in ('route_placed.py', 'modal_app.py', 'prove_models.py'):
         h.update(open(os.path.join(HERE, f), 'rb').read())
     h.update(os.environ.get('KRT_PAB_KICAD_IMAGE', '').encode())
     return tree, files, f'krt-pab-{h.hexdigest()[:10]}'
@@ -145,7 +145,8 @@ def deploy(app, src, corpus, tree, files):
             dst = os.path.join(sd, sub, f)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(os.path.join(root, f), dst)
-    shutil.copy2(os.path.join(HERE, 'route_placed.py'), os.path.join(sd, 'route_placed.py'))
+    for f in ('route_placed.py', 'prove_models.py'):
+        shutil.copy2(os.path.join(HERE, f), os.path.join(sd, f))
     sha = subprocess.run(['git', '-C', src, 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(['git', '-C', src, 'status', '--porcelain'], capture_output=True, text=True).stdout.strip()
     # Forward slashes: the string rides into the image's env, where Modal
