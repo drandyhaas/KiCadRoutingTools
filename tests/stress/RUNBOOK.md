@@ -558,9 +558,10 @@ harmless.
    `spartan6_4layer` lost 20 nets all of their copper). **Scoping `--nets` does NOT
    protect you** — `ftdi_debug_toolkit` regressed from a retry naming three nets. It
    is the rip PERMISSION, not the route scope. Order of preference: (1) re-run the
-   whole signal step THINNER per rule 10 — destroys nothing; (2) a PLAIN retry of the
-   failed nets — the in-run #103 escalation already grants itself targeted authority
-   over the exact blockers the log named, so you usually need no flag at all;
+   whole signal step THINNER per rule 10 — destroys nothing; (2) a PLAIN retry with
+   `--nets '*'` — the in-run #103 escalation already grants itself targeted authority
+   over the exact blockers the log named (one outside `--nets` only if small and with
+   no pour), so you usually need no flag at all;
    (3) `--rip-existing-nets <the named blockers>`; (4) `'*'` only as a last resort,
    and never with `--force-reroute` over a large net list — that combination is the
    `spartan6_4layer` shape. The engine now backstops this: a run that ends net-worse

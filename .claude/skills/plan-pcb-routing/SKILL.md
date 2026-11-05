@@ -3384,7 +3384,7 @@ Rules of the loop:
   - Signal step fails a cluster of long cross-board nets while an inner
     layer is plane-reserved → revisit the plane→layer map (dense-board
     exception above): free one inner layer, drop its `--layer-costs` entry
-    to 1.0–1.5, re-run the failed nets.
+    to 1.0–1.5, re-run the step.
   - `preexisting_blockers` hints repeat for the same nets → re-run those
     nets with the hinted `--rip-existing-nets` set (the engine now
     self-escalates once in reconciliation; a manual retry may widen the set).
@@ -3407,7 +3407,10 @@ Rules of the loop:
     fitted to its own failures and penalises every engine change that fails a
     different net. An ordinary retry should use `--nets '*'` instead -- route.py
     skips already-connected nets, so a wildcard retries exactly what is still
-    broken. Ordering is the cheapest knob but rarely decisive:
+    broken, and it keeps the run's rip authority: the end-of-run reconciliation
+    takes a named blocker of any size inside `--nets`, and outside them only a
+    small one with no pour, so a named retry cannot clear a long net in the
+    way. Ordering is the cheapest knob but rarely decisive:
     measured on four corpus boards of varying density, an automatic
     failed-first restart NEVER beat the normal order (twice it graded
     worse), so an in-engine restart was tried and removed — only reach for

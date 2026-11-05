@@ -225,7 +225,7 @@ Work through the failure modes most-targeted-first. Do not jump straight to glob
 | `sealed_by_snpc` names the pad | This run's own `--same-net-pad-clearance` closed the last via site | Retry with `--same-net-pad-clearance 0`, or widen the channel in placement |
 | Failures cluster on one part's pads or escape face; `py_tools/check_reachability.py <board> --pad REF.PAD` says CAGED (its verdict grades the placement, with the board's routed copper set aside); or `boxed_in[].geometry` is already at the board/fab floor | Placement-shaped: geometry, not the router | First, if the part is a fine-pitch perimeter part (QFN/QFP, or a 2-row SMD connector or socket, at <=0.65 mm) and the chain fanned nothing out for it, route that arm (`plan-pcb-routing` Step 3, rule 3): it costs one route, and re-placing costs a whole pass. Otherwise stop retrying: no router flag fixes it. Hand the board back to `/plan-pcb-placement full` (or `place`) to re-place, then re-route |
 | `check_reachability` says PASSABLE, and its `routed` line says ROUTED COPPER cages the pad (#1347) | Congestion: the copper already laid walls the pad in | A routing finding, NOT a placement one: rip up and reroute the nets named at that throat (`--rip-existing-nets`), or reorder; do not re-place |
-| Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: reduce `--clearance`/`--track-width` toward fab minimums → add routing layers. Do NOT raise `--max-ripup` past ~5 (measured worse: deep rip chains strand their victims) |
+| Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: reduce `--clearance-ceiling`/`--track-width` toward fab minimums, re-routing the whole step rather than retrying (Step 4) → add routing layers. Do NOT raise `--max-ripup` past ~5 (measured worse: deep rip chains strand their victims) |
 
 **Pair failures** (a `route_diff.py` step), by `pair_reports[].failure_reason`.
 The shrink below means `--track-width`, `--diff-pair-gap` and
@@ -252,11 +252,11 @@ and for none of the polarity or graze codes.
 
 ## Step 4: Output the Retry Command
 
-Produce one command that retries **only the failed nets** with the targeted fixes, and explain each parameter change in one line:
+Produce one command that retries with **the failing step's own `--nets` selection** (`--nets "*"`, with any `!` exclusions it carried) and the targeted fixes, and explain each parameter change in one line:
 
 ```bash
 python3 -X utf8 py_router/route.py board_routed.kicad_pcb board_retry.kicad_pcb \
-    --nets "SDA" "Net-(U1-Pad8)" \
+    --nets "*" \
     --no-bga-zone U9 \
     --max-ripup 5 \
     2>&1 | tee /tmp/route_retry.txt
@@ -271,7 +271,11 @@ carries the failing step's `--escalation board` (or `off`) and
 shrink below them as a decision for the user rather than proposing it as the
 fix.
 
-Routing only the failed nets preserves the successful routes (already in the input file) and is much faster than a full re-run. **On a board with pours, add the poured nets to `--nets` too** (#1032): the retry's copper can cut a pour, and its in-run plane finalize repairs only the poured nets inside its scope. A broken poured net is retried the same way, with `route.py`, never a standalone `repair_planes.py` (#1112). After the retry, re-check with `check_connected.py`, and if nets still fail, repeat the diagnosis on the new log — the failure mode often changes after the first fix.
+`route.py` skips nets that are already connected, so a wildcard attempts exactly the nets still broken and preserves the successful routes (already in the input file). **Naming the failed nets instead attempts the same nets with less rip authority.** The run's end-of-run reconciliation grants itself the blockers the failed nets' searches named (#103): one inside `--nets` at any size, one outside only if it has no pour and at most 30 segments and 6 vias. So a named retry cannot clear a long net that walls the failure in, and a wildcard has nothing outside. Measured on a four-layer board with one net failed, at the same geometry: the named retry stayed open, the wildcard closed it. Name nets only when naming is the point: a pair retry (below, for #1399's reason), or a failed-first split that changes the order (`/plan-pcb-routing`), and say what it gives up. A wildcard also covers the rule for a board with pours (#1032): the retry's copper can cut a pour, and its in-run plane finalize repairs only the poured nets inside its scope, so **a retry that names nets adds the poured nets too**. A broken poured net is retried the same way, with `route.py`, never a standalone `repair_planes.py` (#1112).
+
+**When the fix thins the geometry, re-route the whole step from that step's input instead of retrying on its output.** A retry skips connected nets, so the successful wide tracks stay in the channel the failed net needs, and thinning only the failures leaves the channel full (`/plan-pcb-routing`, "Route signals at the FAB floor by default"). Measured on the same board and geometry: the wildcard retry closed at 190 vias and 1879 mm, the whole step at 154 vias and 1744 mm.
+
+After the retry, re-check with `check_connected.py`, and if nets still fail, repeat the diagnosis on the new log — the failure mode often changes after the first fix.
 
 **For a pair step, the retry is a `route_diff.py` call** on the failing pairs'
 members only, from that step's output, with the step's own flags verbatim

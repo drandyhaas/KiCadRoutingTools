@@ -129,7 +129,7 @@ what runs here is what the buttons run.
 | [`/identify-diff-pairs`](#identify-diff-pairs) | Find diff pairs by pin function, not just naming | Per-interface `route_diff.py` commands |
 | [`/recommend-stackup`](#recommend-stackup) | Review/recommend the board stackup | Stackup table + `--impedance`/plane-layer arguments |
 | [`/recommend-plane-mappings`](#recommend-plane-mappings) | Recommend net → plane-layer assignments with SI rationale | Assignment list for the Planes tab / `route_planes.py` arguments |
-| [`/diagnose-routing-failures`](#diagnose-routing-failures) | Root-cause failed routes from logs + board | Targeted retry command for the failed nets, or a hand-back to placement |
+| [`/diagnose-routing-failures`](#diagnose-routing-failures) | Root-cause failed routes from logs + board | Targeted retry command, or a hand-back to placement |
 | [`/review-routed-board`](#review-routed-board) | Post-route QA and sign-off | Pass/fail report with next actions |
 | [`/stress-test-router`](#stress-test-router) | Batch-test the router on real-world open-source boards | Completion/DRC summary table + GitHub issues for findings |
 
@@ -172,7 +172,7 @@ Recommends which nets deserve copper planes and on which layers. Reads the stack
 
 ### /diagnose-routing-failures
 
-Root-causes failed routes after a `route.py` / `route_diff.py` run. Parses the `JSON_SUMMARY` (including the structured per-failed-net `blockers` attribution and the `pad_pairs_*` routability tallies / open outcomes, #409), failed-net histories, and blocking reports from the captured logs, correlates failures spatially with board regions and components, classifies the failure mode (BGA exclusion zone, corridor congestion, layer conflicts, search space exhausted, grid-vs-pitch, placement-shaped geometry, genuine capacity), and outputs a targeted retry command for just the failed nets — most-targeted fix first, global parameter increases last. A placement-shaped failure (pads `check_reachability.py` calls CAGED, or geometry already at the floor) goes back to `/plan-pcb-placement` instead, since no router flag fixes it.
+Root-causes failed routes after a `route.py` / `route_diff.py` run. Parses the `JSON_SUMMARY` (including the structured per-failed-net `blockers` attribution and the `pad_pairs_*` routability tallies / open outcomes, #409), failed-net histories, and blocking reports from the captured logs, correlates failures spatially with board regions and components, classifies the failure mode (BGA exclusion zone, corridor congestion, layer conflicts, search space exhausted, grid-vs-pitch, placement-shaped geometry, genuine capacity), and outputs a targeted retry command (the failing step's own `--nets`, which retries what is still broken; the whole step when the fix thins the geometry) — most-targeted fix first, global parameter increases last. A placement-shaped failure (pads `check_reachability.py` calls CAGED, or geometry already at the floor) goes back to `/plan-pcb-placement` instead, since no router flag fixes it.
 
 ### /review-routed-board
 

@@ -88,8 +88,10 @@ In rough order of preference for a congestion retry:
 1. **Re-run the whole signal step thinner** (fab-floor `--track-width`, finer
    `--grid-step`). Thinner is monotonically better on dense boards and destroys
    nothing.
-2. **Plain retry of the failed nets** — the in-run escalation supplies its own
-   targeted authority.
+2. **Plain retry with `--nets '*'`** — the in-run escalation supplies its own
+   targeted authority: a named blocker of any size inside `--nets`, and outside
+   them only a small one with no pour, so naming the failed nets gives up the
+   rest.
 3. **Named authority**: `--rip-existing-nets <the blockers the log named>`. The
    router prints exactly which pre-existing nets boxed each failure; ripping
    those is a decision, whereas `'*'` is a hope.
