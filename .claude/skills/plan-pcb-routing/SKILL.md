@@ -689,8 +689,8 @@ manifest routes.
   - At the end, `check_complete.py <routed> --authored-from <input board>`
     measures the copper against the floors the input project declared and
     names every size floor broken, with a count of the tracks, vias or holes
-    below it (verdict UNSOUND). That count is the disclosure; with the flags
-    above it should read nothing relaxed.
+    below it (verdict UNSOUND). On these rules this form gates DONE ("Stop
+    conditions"); with the flags above it should read nothing relaxed.
 
 ### Read the board's design rules and pass them to the CLI
 
@@ -2454,10 +2454,10 @@ region per Step 5b) — then re-verify. Do not declare the board done while the
 list has unjustified entries.
 
 **Two reported reads on every routed board.** `check_complete.py` runs neither
-of these, and no other step grades KiCad's `connection_width` webs. Run both and
-put their lines in the report. They are reported, not
-gating (#1334): neither one changes a DONE, and neither sends the board back on
-its own.
+of these, and only the first asks KiCad's own `connection_width` check, which sees
+a web in a pour (`check_weird.py`'s `narrow-pad-joint` reads one track-to-pad case).
+Run both and put their lines in the report. They are reported, not gating (#1334):
+neither one changes a DONE, and neither sends the board back on its own.
 
 ```bash
 python3 -X utf8 tests/stress/kicad_drc_compare.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_kicad.txt
@@ -2483,7 +2483,7 @@ Its exit code covers only the `KICAD-ONLY` and `CHECKDRC-ONLY` rows:
 |---|---|---|
 | 0 | compared, and the two engines agree on copper clearance. `connwidth=`, `thermal=` and `dangling=` can still be non-zero | read and report those three |
 | 1 | a `KICAD-ONLY` or `CHECKDRC-ONLY` row | name each row. A `KICAD-ONLY` `shorting_items` may be a short `check_drc` missed: look at that copper before presenting the board |
-| 2 | NOT RUN: no `kicad-cli`, or it failed on this board. It prints SKIP and `NOT RUN` and compares 0 boards | record NOT RUN, never agreement, and say so in the report. `py_tools/kicad_cli_path.py` shows where the tools look for it (#1418) |
+| 2 | NOT RUN: no `kicad-cli`, or it failed on this board. It prints SKIP and `NOT RUN` and compares 0 boards | record NOT RUN, never agreement, and say so in the report. `py_tools/kicad_cli_path.py` says whether the tools can find it (#1418) |
 
 Add `--baseline <the board the chain started from>` to subtract what that board
 already carried, at the cost of a second KiCad run; a pile (parts staged off the
@@ -2493,9 +2493,10 @@ outline) cancels little (#1333).
 signal nets whose copper closes a loop or stacks overlapping same-net vias, and
 exits 1 when there is one, 0 when not. Report each net with its `loops` and
 `ovlVias`; `python3 -X utf8 py_tools/check_cycles.py board_final.kicad_pcb --net
-<net> --verbose` shows the via coordinates of one net. Copper that `check_weird.py` calls removable already fails
-`check_complete`, so a loop left on a DONE board is one it did not call removable:
-tell the user rather than re-route for it.
+<net> --verbose` shows the via coordinates of one net. Copper that
+`check_weird.py` calls removable already fails `check_complete`, so a loop left on
+a DONE board is one it did not call removable: tell the user rather than re-route
+for it.
 
 ### Alternative: VCC as Wide Traces (No Plane)
 
@@ -3972,7 +3973,11 @@ Then run the rest of the chain.
 Say which one fired. **DONE** is `blocking == 0` **plus** `check_complete.py`
 DONE **plus** an independent verifier's PASS (`board_score` exits 0 at
 `blocking == 0` even on a board with ten HARD clauses violated, because a repo
-checker's clauses are not `board_score` components). A blocker that is
+checker's clauses are not `board_score` components). The form of
+`check_complete.py` that gates follows Step 4's "Whose rules" decision: on
+aspirational rules the form without `--authored-from`, with that flag's verdict
+reported; on the user's own rules `--authored-from <the board the chain started
+from>` (`/review-routed-board`'s Step 5 has both commands). A blocker that is
 geometrically unsatisfiable is a finding about the REQUIREMENT and needs the
 measurement that proves it. The plateau, "no approach left" and time-cap rules
 are `.claude/skills/plan-pcb-placement/SKILL.md` §5.

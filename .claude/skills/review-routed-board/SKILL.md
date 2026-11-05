@@ -354,13 +354,31 @@ needs `check_complete.py` (repo root) to say DONE. It takes the same spec
 flags, runs `board_score` plus the instruments `board_score` has no component
 for (orphan stubs, weird copper, ...), and fails closed: exit 0 DONE, 4
 INCOMPLETE, 5 UNSOUND (the board grades clean only against floors the chain
-rewrote; pass `--authored-from <the board the chain started from>` so it can
-tell).
+rewrote). It has two forms. Without `--authored-from` it reads the floors against
+the project's recorded `fab_floor_origin` and discloses copper below them; with
+it, that copper is UNSOUND.
 
 ```bash
-python3 -X utf8 check_complete.py board.kicad_pcb --authored-from <original> \
+python3 -X utf8 check_complete.py board.kicad_pcb \
+    --min-track-width <spec> --min-via-diameter <spec> --min-via-drill <spec>
+python3 -X utf8 check_complete.py board.kicad_pcb --authored-from <the board the chain started from> \
     --min-track-width <spec> --min-via-diameter <spec> --min-via-drill <spec>
 ```
+
+**Run both. Which one gates depends on whose rules the project holds:**
+
+- **Aspirational rules:** the form without the flag gates. The `--authored-from`
+  verdict is reported: its UNSOUND is the board routed as intended at the fab
+  floor, and what it lists (each floor, with a count of what sits below it) is a
+  fab question for the user, not a reason to hand the board back.
+- **The user's own rules:** `--authored-from` gates. Its UNSOUND is copper below
+  their floors, and the board is **not done**.
+
+Take the answer from the run's plan report, which states it at the top, or from
+`REPORT.md` on a placement run; `--no-fix-drc-settings` on a recorded chain's
+routing steps also means the user's own rules. With none of those, decide it as
+`/plan-pcb-routing` Step 4, "Whose rules does the project hold?" says: never from
+the numbers, and if nobody can be asked the answer is aspirational.
 
 Then present a compact report — one pass/fail line per category, details only for failures, ending with next actions:
 
@@ -374,6 +392,7 @@ UNGRADED (not scored, not passed): impedance, length
 |-------|--------|
 | DRC (check_drc.py)        | PASS (0 violations) |
 | Zone DRC (kicad-cli)      | NOT RUN - board has 2 zones, recommend running |
+| check_complete (aspirational rules) | DONE; --authored-from UNSOUND, reported: track 0.2 -> 0.127 on 389 tracks |
 | KiCad cross-check (reported) | connwidth=1@<0.18mm thermal=0 dangling=0, 0 KICAD-ONLY |
 | Copper loops (reported)   | 0 nets |
 | Connectivity              | FAIL - 2 nets with disconnected pads |

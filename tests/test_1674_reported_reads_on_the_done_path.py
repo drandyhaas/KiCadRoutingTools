@@ -63,7 +63,7 @@ def t_skills():
         for line in ('connwidth=', 'thermal=', 'KICAD-ONLY'):
             ok(f'{label} says to read {line}', line in text)
     ok('the routing step says it is not gating',
-       'reported, not\ngating' in step, step[:300])
+       'reported, not gating' in step, step[:300])
     ok('the routing step gives every exit code',
        all(f'| {c} |' in step for c in (0, 1, 2)) and 'NOT RUN' in step)
     ok('the verifier says it is not gating',
