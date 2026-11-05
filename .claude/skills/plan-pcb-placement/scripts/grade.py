@@ -3,7 +3,8 @@
 
     python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py BOARD \
         --baseline INPUT.kicad_pcb [--intent INTENT.json] [--mode full|place] \
-        [--label NAME] [--out-dir DIR] [--spec NAME=VALUE ...]
+        [--label NAME] [--out-dir DIR] [--spec NAME=VALUE ...] \
+        [--whose-rules aspirational|users-own]
 
 Runs the graders the skill's verifier runs, at the board's own .kicad_pro
 floor, and writes `<out-dir>/grade_<label>.json` with the headline numbers
@@ -12,12 +13,21 @@ and each tool's exit code. `--spec` passes a spec flag the board declares
 Grade every arm of a comparison with this same script at the same commit,
 or the numbers do not compare.
 
+`--whose-rules` (`--mode full`) is the answer to "whose rules does the project
+hold?", which decides the check_complete form that gates (the rule is the
+review-routed-board skill's Step 5). `aspirational`, the default, is the form
+without `--authored-from`. `users-own` is `--authored-from BASELINE`, named in
+the output as `done_form`; `done_form` is absent when the other form decided.
+BASELINE must be the board the floors were authored on: one that cannot supply
+them is refused rather than graded against something else.
+
 Exit 0 when the mode's DONE conditions all hold, 4 when they do not, 2 on
 usage, 1 when the board or the baseline is missing or empty, or the intent
-is missing. Usage covers a `--spec` that board_score or check_complete
+is missing, or when `--whose-rules users-own` has a baseline that cannot
+supply the floors. Usage covers a `--spec` that board_score or check_complete
 would refuse (checked by their own parsers, before anything runs), a
-`--spec` with `--mode place` (which runs neither), and a grader that exits
-2: it graded nothing, so its error is printed and no verdict is (#1642).
+`--spec` or `--whose-rules` with `--mode place` (which runs neither), and a
+grader that exits 2: it graded nothing, so its error is printed and no verdict is (#1642).
 """
 import argparse
 import contextlib
@@ -33,9 +43,18 @@ KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'instrument'}
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))))
 
+#: The answers to "whose rules does the project hold?" (--whose-rules).
+ASPIRATIONAL, USERS_OWN = 'aspirational', 'users-own'
+
 #: The flags grade.py passes the spec readers itself; a --spec cannot name one.
 _OWN_FLAGS = ('--baseline', '--intent', '--json', '--quiet', '--authored-from',
               '--help')
+
+
+def _tools_on_path():
+    for d in ('', 'py_router', 'py_tools'):
+        if os.path.join(ROOT, d) not in sys.path:
+            sys.path.insert(0, os.path.join(ROOT, d))
 
 
 def spec_problem(spec_args):
@@ -47,9 +66,7 @@ def spec_problem(spec_args):
     for flag in spec_args[0::2]:
         if flag in _OWN_FLAGS:
             return f'{flag} is set by grade.py itself, not a spec flag'
-    for d in ('', 'py_router', 'py_tools'):
-        if os.path.join(ROOT, d) not in sys.path:
-            sys.path.insert(0, os.path.join(ROOT, d))
+    _tools_on_path()
     import board_score
     import check_complete
     for name, parser in (('board_score', board_score.build_parser()),
@@ -63,6 +80,36 @@ def spec_problem(spec_args):
             # grade.py's own argv[0]
             lines = err.getvalue().strip().splitlines() or ['refused']
             return f'{name} would refuse it: {lines[-1].partition("error: ")[2] or lines[-1]}'
+    return None
+
+
+def authored_floors_problem(baseline):
+    """Why `baseline` cannot supply the floors --authored-from reads from it;
+    None when it can. Its verdict alone would not say: with no project beside
+    the board, or none declaring a rule, check_complete compares nothing and
+    can still answer DONE, and a project a writeback already lowered reads the
+    lowered floors, so copper below the authored ones passes."""
+    _tools_on_path()
+    from fix_kicad_drc_settings import find_project
+    import tool_records
+    pro = find_project(baseline)
+    try:
+        with open(pro, encoding='utf-8') as fh:
+            rules = ((json.load(fh).get('board') or {})
+                     .get('design_settings') or {}).get('rules') or {}
+    except FileNotFoundError:
+        return f'no project beside it ({pro} does not exist)'
+    except (OSError, ValueError) as exc:
+        return f'its project {pro} is unreadable: {exc}'
+    if not rules:
+        return f'its project {pro} declares no design rules'
+    origin = tool_records.effective_namespace(baseline).get('fab_floor_origin') or {}
+    lowered = [f'{k} {origin[k]} -> {rules[k]}' for k in sorted(origin)
+               if isinstance(rules.get(k), (int, float)) and rules[k] < origin[k]]
+    if lowered:
+        return ('a writeback already lowered its project below the floors it '
+                f'records as declared first ({", ".join(lowered)}), so it is '
+                'not the board they were authored on')
     return None
 
 
@@ -96,10 +143,11 @@ def _load(path):
 
 
 def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
-          spec=()):
+          spec=(), whose_rules=ASPIRATIONAL):
     """`spec`: [(flag, value), ...] the board declares (e.g. --net-min-widths
     FILE), passed to board_score and check_complete so DONE is measured
-    against the spec, not against the fab floor."""
+    against the spec, not against the fab floor. `whose_rules`: which
+    check_complete form gates `done` (module docstring)."""
     # Absolute BEFORE anything runs: every checker runs with cwd=ROOT, so a
     # path relative to the caller's directory would name a missing file.
     board, baseline = os.path.abspath(board), os.path.abspath(baseline)
@@ -109,6 +157,16 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
     for p, what in ((board, 'board'), (baseline, 'baseline')):
         if not os.path.isfile(p) or os.path.getsize(p) == 0:
             raise SystemExit(f'refuse: {what} {p} is not a real non-empty file')
+    own_rules = mode == 'full' and whose_rules == USERS_OWN
+    if own_rules:
+        why = authored_floors_problem(baseline)
+        if why:
+            raise SystemExit(
+                f'refuse: --whose-rules {USERS_OWN} gates on check_complete '
+                f'--authored-from, which reads the floors from the board the '
+                f'run started from, and --baseline {baseline} cannot supply '
+                f'them: {why}. Nothing was graded, so this is not done; pass '
+                f'the original board with its project')
     label = label or os.path.splitext(os.path.basename(board))[0]
     out_dir = os.path.abspath(out_dir or os.path.dirname(board))
     tmp = os.path.join(out_dir, f'_grade_{label}')
@@ -207,7 +265,20 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
         # a track 7% inside the clearance (#1595).
         rc, log = _run(['py_router/check_drc.py', board, '--baseline', baseline])
         out['check_drc_rc'] = rc
-        done = done and out['blocking'] == 0 and out['check_complete'] == 'DONE' \
+        gate = 'check_complete'
+        if own_rules:
+            gate = 'check_complete_authored'
+            out['done_form'] = 'check_complete --authored-from'
+            # A floor check that did not run still lets check_complete say
+            # DONE (it names the check UNEXAMINED), and the floors are what
+            # this form is here to grade.
+            floors = (_load(os.path.join(tmp, f'{gate}.json')) or {}).get(
+                'fab_floors') or {}
+            if not floors.get('ran'):
+                out['authored_floors_unread'] = (floors.get('reason')
+                                                 or 'no floor check in its output')
+        done = done and out['blocking'] == 0 and out[gate] == 'DONE' \
+            and not out.get('authored_floors_unread') \
             and out['check_connected_rc'] == 0 and out['check_drc_rc'] == 0
 
     out['done'] = bool(done)
@@ -236,6 +307,13 @@ def main(argv=None):
                          '(--mode full only; one either would refuse is '
                          'refused here); repeatable, e.g. '
                          '--spec net-min-widths=widths.json')
+    ap.add_argument('--whose-rules', choices=(ASPIRATIONAL, USERS_OWN),
+                    default=None,
+                    help='whose rules the project holds, which decides the '
+                         'check_complete form that gates done (--mode full '
+                         f'only; default {ASPIRATIONAL}). {USERS_OWN} gates on '
+                         '--authored-from BASELINE and refuses a baseline '
+                         'that cannot supply the floors')
     a = ap.parse_args(argv)
     spec = []
     for s in a.spec:
@@ -246,12 +324,16 @@ def main(argv=None):
     if spec and a.mode != 'full':
         ap.error('--spec is read only by board_score and check_complete, '
                  'which only --mode full runs; --mode place would ignore it')
+    if a.whose_rules and a.mode != 'full':
+        ap.error('--whose-rules decides which check_complete form gates, and '
+                 'only --mode full runs check_complete; --mode place would '
+                 'ignore it')
     why = spec_problem([x for pair in spec for x in pair])
     if why:
         ap.error(f'--spec: {why}')
     out, dst = grade(a.board, a.baseline, a.intent, a.mode, a.label, a.out_dir,
-                     spec)
-    keys = ('done', 'blocking', 'unrouted', 'broken', 'drc', 'vias',
+                     spec, a.whose_rules or ASPIRATIONAL)
+    keys = ('done', 'done_form', 'authored_floors_unread', 'blocking', 'unrouted', 'broken', 'drc', 'vias',
             'copper_mm', 'segments', 'check_complete', 'check_complete_authored',
             'assembly_verdict', 'floorplan_errors')
     if out.get('usage_errors'):

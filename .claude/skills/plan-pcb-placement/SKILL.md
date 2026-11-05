@@ -26,7 +26,7 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
 | mode | input | DONE means | better, once DONE |
 |---|---|---|---|
 | `place` | an unplaced or placed board | `check_assembly` buildable, `check_floorplan --intent` 0 errors, no pad, graphic or keep-out copper off the outline, mechanical facts met, and a fast route of it with no blocking net | fewer vias, then less copper_mm, then fewer segments, on that fast route |
-| `full` | an unplaced or placed board | `board_score` blocking 0, zero unrouted, zero broken, `check_complete` DONE | fewer vias, then less copper_mm, then fewer segments |
+| `full` | an unplaced or placed board | `board_score` blocking 0, zero unrouted, zero broken, `check_complete` DONE (which form gates: `/review-routed-board` Step 5) | fewer vias, then less copper_mm, then fewer segments |
 
 - **"Better" is lexicographic, never a weighted sum.** A lower via count never
   buys back an open net.
@@ -1568,9 +1568,17 @@ Routing Completes): run them once, here, not again inside the routing.
    - **each verifier verdict.**
 3. **Independent grade and timing**, for the report's own table:
    ```bash
-   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py <board> --baseline <input> --intent <i> --mode <mode>
+   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py <board> --baseline <input> --intent <i> --mode full --whose-rules <rules>
+   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py <board> --baseline <input> --intent <i> --mode place
    python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/measure.py --self --evidence wk/<run>
    ```
+   Run the `grade.py` line for your mode. `<rules>` is the answer §2 recorded,
+   `aspirational` or `users-own`, and it picks the `check_complete` form that
+   decides `done` (`/review-routed-board` Step 5): `users-own` reads
+   `--authored-from <input>` and says so as `done_form`. It refuses (exit 1,
+   nothing graded) an `<input>` that cannot supply the floors: no project, a
+   project declaring no rule, or one a writeback has already lowered. Report
+   that refusal; do not grade against another board.
    In `full` mode, add `--spec <name>=<value>` to `grade.py` for each spec
    flag the board declares, spelled as board_score spells it
    (`min-track-width=0.09`); a name it or check_complete would refuse, or a
