@@ -7068,8 +7068,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                       f"placement or routing step can clear it. What can: a "
                       f".kicad_dru clearance rule check_drc models (conditioned "
                       f"on A.NetClass, A.Type / A.Pad_Type or A.NetName; a "
-                      f"footprint scope such as memberOfFootprint() is not "
-                      f"modelled here), a pad or footprint (clearance) "
+                      f"footprint or pad scope such as memberOfFootprint() or "
+                      f"A.Pad_Number is not modelled here), a pad or footprint (clearance) "
                       f"override, or a net-tie pad group:")
                 _lim = (len(_own_gap_rows) if max_print is None or max_print <= 0
                         else max_print)

@@ -748,9 +748,18 @@ this tool, the floorplan grade and `check_drc --check-pad-edge` all read it
 (`design_rules.PadEdgeRules`), and `pad_edge.rules_applied` names the rule and
 its pads. A courtyard term (`A.insideCourtyard('J1')`,
 `A.intersectsCourtyard('J1')`) is read as J1's own pads, which the row's
-`note` says, because placement keeps courtyards apart. A rule whose condition
+`note` says, because placement keeps courtyards apart. `A.Pad_Number` names
+pads within a part (#1660): a string, so `'1'` is not `'01'`, compared as
+`A.NetName` is (case-insensitive, a `*`/`?` literal on the right a wildcard).
+Write it quoted: KiCad refuses `A.Pad_Number == 1` and then enforces no rule of
+that file, silently, measured on kicad-cli 10.0.6, so such a rule is listed
+with that reason. KiCad tries a failed condition again with the two items
+swapped, and here the other item is the Edge.Cuts shape: a rule the shape meets
+frees every pad on the board, so `!(A.Pad_Number == '1')` frees pad 1 as well,
+and it takes a scope (`A.memberOfFootprint('J1') && ...`, or `A.Pad_Number !=
+'1'`, which is false on the shape) to leave pad 1 at the floor. A rule whose condition
 is not modelled (a predicate such as `memberOfSheet()`, or a term on `B`, the
-edge item) may bind a pad.
+edge item, other than `B.Pad_Number`) may bind a pad.
 Such a pad fails only short of the lower of its possible requirements, is
 listed `unmeasured` between the two, and the rule is listed in
 `rules_unmeasured`.

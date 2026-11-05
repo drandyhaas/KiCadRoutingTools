@@ -346,6 +346,7 @@ the subset our item model can answer without guessing:
 | `A.NetClass ==/!= 'X'`, `A.hasNetclass('X')`, `A.hasExactNetclass('X')`, same for `B` | memberships (already resolved by `net_class_memberships`) | 1 |
 | `A.NetName ==/!= 'X'`, `A.Net != B.Net`, `A.Net == B.Net` | net | 1 |
 | `A.Type == 'Track'\|'Via'\|'Pad'\|'Zone'`, `A.Pad_Type`, `A.Via_Type`, `isMicroVia`, `isBlindBuriedVia`, `isPlated` | item type | 1 |
+| `A.Pad_Number ==/!= 'X'` | pad number (#1660): a string compared as `A.NetName` is, undefined on anything but a pad | 1 |
 | `&&`, `\|\|`, `!`, parentheses, quoted strings, unit arithmetic in values | expression parser | 1 |
 | `A.memberOfFootprint('glob')`, `A.intersectsCourtyard('ref')` | footprint ref / courtyard polygon | 2 |
 | `A.memberOfGroup('G')` | group membership (parseable from the file; GUI via `GetParentGroup`) | 2 |
