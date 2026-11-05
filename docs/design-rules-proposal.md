@@ -342,8 +342,8 @@ the subset our item model can answer without guessing:
 
 | Predicate | Needs | Phase |
 |---|---|---|
-| `(layer name\|outer\|inner)`, `A.onLayer`, `existsOnLayer`, `A.Layer` | layer set | 1 |
-| `A.NetClass ==/!= 'X'`, `A.hasNetclass('X')`, `A.hasExactNetclass('X')`, same for `B` | memberships (already resolved by `net_class_memberships`) | 1 |
+| `(layer name\|outer\|inner)`, `existsOnLayer`, `A.Layer` | layer set | 1 |
+| `A.NetClass ==/!= 'X'`, `A.hasNetclass('X')`, `A.hasExactNetclass('X')`, same for `B` | the net's effective class (`DesignRules.class_constituents`, #1690): its classes by priority, plus Default when they leave a field unset | 1 |
 | `A.NetName ==/!= 'X'`, `A.Net != B.Net`, `A.Net == B.Net` | net | 1 |
 | `A.Type == 'Track'\|'Via'\|'Pad'\|'Zone'`, `A.Pad_Type`, `A.Via_Type`, `isMicroVia`, `isBlindBuriedVia`, `isPlated` | item type | 1 |
 | `A.Pad_Number ==/!= 'X'` | pad number (#1660): a string compared as `A.NetName` is, undefined on anything but a pad | 1 |
@@ -353,6 +353,9 @@ the subset our item model can answer without guessing:
 | `A.intersectsArea('zone')`, `enclosedByArea` | rule-area zone polygons (we parse zones) | 2 |
 | `A.inDiffPair('glob')`, `AB.isCoupledDiffPair()` | diff-pair detection (exists); `AB.isCoupledDiffPair()` as a positive AND term is evaluated since #1293 (KiCad's `MatchDpSuffix`, ported), negated as an AND term ("keep pairs apart") and `inDiffPair()` since #1295; OR'ed or compared it stays unsupported | 2 |
 | `fromTo`, `memberOfSheet`, `hasComponentClass`, `getField`, `A.Length`, assertions | out of scope | never |
+
+`A.onLayer` was on this list. KiCad 10 does not compile it, and then enforces no rule
+of the file (#1690, see "A rule file KiCad refuses" in `docs/configuration.md`).
 
 A rule using an unsupported predicate or kind is kept in the table marked
 **UNSUPPORTED** and reported at run start (once per board), in `JSON_SUMMARY`

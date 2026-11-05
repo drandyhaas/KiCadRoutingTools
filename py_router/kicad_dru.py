@@ -15,7 +15,9 @@ expression engine would silently manufacture wrong clearances):
   - ``(constraint clearance (min <val>))`` rules whose scope is pure layers:
       * a ``(layer <name>|outer|inner)`` clause, and/or
       * a ``(condition "A.onLayer('X') || B.onLayer('Y') ...")`` expression
-        containing ONLY onLayer terms joined by ``||``
+        containing ONLY onLayer terms joined by ``||`` (KiCad 10 no longer
+        compiles onLayer and then enforces no rule of the file;
+        design_rules.dru_refusals names it. Use existsOnLayer, or a layer clause)
   - a rule with NO scope applies to every copper layer (KiCad semantics)
   - later rules override earlier ones per layer (KiCad's engine walks the
     rules forward in file order; the last matching rule wins each field)

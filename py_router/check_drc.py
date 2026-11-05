@@ -3345,7 +3345,8 @@ def _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
             if key not in memo:
                 it = dr.item_for_net(
                     v.net_id, 'via', None, layers=frozenset(on),
-                    via_type={'through': 'through', 'micro': 'micro'}.get(vt, 'blind_buried'))
+                    via_type=vt if vt in ('through', 'micro', 'blind', 'buried')
+                    else 'blind_buried')
                 memo[key] = next(
                     (r for r, ts in reversed(via_rules)
                      if any(_DISALLOW_VIA_TYPES[t] is None or vt in _DISALLOW_VIA_TYPES[t]
@@ -5143,6 +5144,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # reads INCOMPLETE rather than DONE.
     _unmodelled_clr = []
     if pcb_file:
+        # #1690: KiCad says nothing of a rule file it refuses, so this does
+        if not quiet:
+            from design_rules import kicad_refusal_lines, read_board_kicad_refusals
+            for _ln in kicad_refusal_lines(read_board_kicad_refusals(pcb_file)):
+                print(f"  {_ln}")
         from kicad_dru import read_board_unmodelled_clearance_rules
         _graded_coupled = ({r.name for r in _coupled_dr.rules
                             if r.coupled and not r.unsupported}
@@ -7864,6 +7870,10 @@ if __name__ == "__main__":
                                       and item['overlap_mm'] >= _clearance_for(item))))
                       for item in violations],
         }
+        from design_rules import read_board_kicad_refusals
+        _refused = read_board_kicad_refusals(args.pcb)
+        if _refused:
+            _doc['kicad_refuses_file'] = _refused
         with open(args.json, 'w', encoding='utf-8') as _fh:
             _json.dump(_doc, _fh, indent=1, default=str, sort_keys=True)
         print(f"  JSON -> {args.json}")

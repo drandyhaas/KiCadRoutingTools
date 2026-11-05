@@ -117,13 +117,17 @@ def sink_summary(summary: Dict) -> None:
     PRINTED_RULES.append(_rules_text(summary))
 
 
+#: The keys of `design_rules` that come from one run's config, not the ledger
+DESIGN_RULES_PER_RUN = ('unsupported_rules', 'scoped_clearance', 'kicad_refuses_file')
+
+
 def _stamp_rules(doc: Dict, min_clearance_used, design_rules) -> None:
     doc['min_clearance_used'] = min_clearance_used
     if isinstance(design_rules, dict):
         # `unsupported_rules` is per summary (its own run's config); the rest
         # of the block is the process-wide fab_tiers ledger.
         _old = doc.get('design_rules')
-        _keep = ({k: _old[k] for k in ('unsupported_rules', 'scoped_clearance')
+        _keep = ({k: _old[k] for k in DESIGN_RULES_PER_RUN
                   if k in _old} if isinstance(_old, dict) else {})
         doc['design_rules'] = dict(design_rules, **_keep)
 

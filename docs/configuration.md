@@ -322,6 +322,20 @@ rule that sets its ring (the last matching rule, as KiCad resolves it), over
 the vias the step laid. `list_nets.py --design-rules` lists the rules that set
 a minimum below the Board Setup one, with the condition each binds.
 
+**A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
+it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on
+kicad-cli 10.0.6). A condition does it with a function or property KiCad does not
+know (`A.onLayer('F.Cu')`, `A.Foo`), a plain number against anything but a number
+(`A.NetName == 1`, `A.Pad_Number < 2`, `A.Width > 1`), a call short of an argument
+(`A.hasNetclass()`), or a syntax error (`A.Type = 'Via'`, an unbalanced
+parenthesis); so does an unknown constraint, severity or clause, a length with no
+unit (`(min 1)`), a copper layer KiCad has no such name for (`Foo.Cu`), and a file
+with no `(version ...)` line. Each step that reads the rules, and check_drc, says so
+first, naming the rule: `.kicad_dru: KiCad ENFORCES NO RULE OF THIS FILE: rule 'x':
+...`, and `kicad_refuses_file` (rule, reason) is in `JSON_SUMMARY.design_rules` and
+in check_drc's `--json`. The tools still read the file's other rules, so such a board
+is routed and graded by rules KiCad's DRC is not applying until the file is fixed.
+
 **Disclosure.** Every descent is recorded and reported three ways: the
 `JSON_SUMMARY` block `design_rules` (policy, tier, the board floors read, every
 narrowing with net / kind / requested / delivered / site, the fab-tier escalation

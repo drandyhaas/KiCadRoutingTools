@@ -296,8 +296,9 @@ class PadNumberRule(unittest.TestCase):
                               rules.unmodelled[0]['reason'])
                 self.assertEqual(rules.for_pad(pcb.footprints['J3'].pads[0], 0.4),
                                  (0.0, 0.4, ''))
-                line = [ln for ln in DesignRules.from_project(pcb, path).report_lines()
-                        if "'r0'" in ln]
+                lines = DesignRules.from_project(pcb, path).report_lines()
+                self.assertIn('KiCad ENFORCES NO RULE OF THIS FILE', lines[0])
+                line = [ln for ln in lines if ln.startswith(".kicad_dru rule 'r0'")]
                 self.assertEqual(len(line), 1, line)
                 self.assertIn('NOT honoured', line[0])
                 self.assertNotIn('KiCad will still enforce', line[0])

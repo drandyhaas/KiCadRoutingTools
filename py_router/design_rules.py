@@ -189,6 +189,12 @@ FAB_FLOOR_KEYS = {
 
 # KiCad's Default net class carries priority INT_MAX (lowest precedence).
 _DEFAULT_PRIORITY = 2147483647
+# The net-class fields whose absence brings Default into a net's effective class
+# (`DesignRules.class_constituents`), each measured alone on kicad-cli 10.0.6.
+# Dropping diff_pair_via_gap, schematic_color, pcb_color or line_style does not.
+_CLASS_COMPLETE_FIELDS = ('clearance', 'track_width', 'via_diameter', 'via_drill',
+                          'diff_pair_gap', 'diff_pair_width', 'microvia_diameter',
+                          'microvia_drill', 'wire_width', 'bus_width')
 
 
 def canonical_kind(kind: str) -> str:
@@ -228,8 +234,10 @@ class RuleItem:
     type: str = 'track'                      # track | via | pad | zone | hole | footprint | graphic | text
     net_id: int = 0
     net_name: str = ''
-    netclasses: FrozenSet[str] = frozenset()  # every class the net is a member of
-    effective_class: str = 'Default'         # the aggregate (priority-resolved) class name
+    # KiCad's effective class (`DesignRules.class_constituents`): the classes it
+    # is built from, and its name, those classes joined by commas
+    netclasses: FrozenSet[str] = frozenset()
+    effective_class: str = 'Default'
     layers: FrozenSet[str] = frozenset()
     footprint_ref: Optional[str] = None
     pad_type: Optional[str] = None           # smd | thru_hole | np_thru_hole | connect
@@ -242,7 +250,6 @@ class RuleItem:
     clearance_override: Optional[float] = None
     # zone (connect_pads (clearance ...)) -> KiCad's post-loop max path
     local_clearance: Optional[float] = None
-    plated: bool = True
     # the rule areas the item lies in, for an areas=True condition only
     areas: FrozenSet[str] = frozenset()
 
@@ -271,6 +278,10 @@ class Rule:
     # resolve('disallow') still grades it. net_keepouts.derive_layer_bans
     # rewrites it for the track bans route.py / route_diff.py honour.
     router_unhonoured: Optional[str] = None
+    # why KiCad cannot load this rule, and so enforces no rule of the file
+    # (#1690, `kicad_condition_refusal`). It says nothing of whether this tool
+    # reads the rule: `unsupported` does.
+    kicad_refused: Optional[str] = None
     # the condition ANDs in AB.isCoupledDiffPair() (#1293): the rule binds a
     # diff pair's P against its own N
     coupled: bool = False
@@ -415,6 +426,7 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                         spec.setdefault('tokens', []).append(str(sub))
         if rule.severity in ('ignore', 'exclusion'):
             rule.unsupported = f"severity {rule.severity}"
+        rule.kicad_refused = _rule_refusal(node, rule)
         if rule.condition_src is not None and rule.unsupported is None:
             try:
                 rule.condition = parse_condition(rule.condition_src)
@@ -440,12 +452,14 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                 rule.unsupported = f"layer clause {lc!r} (non-copper)"
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
-        if 'clearance' in rule.constraints and rule.unsupported is None \
-                and _reads_pad_number(rule.condition):
+        if 'clearance' in rule.constraints and rule.unsupported is None:
             # evaluable, and check_drc reads it for the violations it may make
-            # legal, but no obstacle stamp prices one pad
-            rule.router_unhonoured = ("clearance scoped by A.Pad_Number: routing "
-                                      "prices a net and a pad type, never one pad")
+            # legal, but no obstacle stamp prices one pad or one part
+            term = _reads_one_part(rule.condition)
+            if term:
+                rule.router_unhonoured = (f"clearance scoped by {term}: routing "
+                                          f"prices a net and a pad type, never one "
+                                          f"pad or one part")
         if 'disallow' in rule.constraints and rule.unsupported is None:
             # #1527: evaluable, so nothing of it is "consumed" until a step
             # honours it -- it used to pass silently as consumed
@@ -468,9 +482,9 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
 #   term   := ITEM '.' NAME '(' args ')' | ITEM '.' NAME | STRING | NUMBER | 'L'
 # Supported properties: NetClass, NetName, Net, Type, Layer, Pad_Type, Via_Type,
 #   Pad_Number (#1660: a string compared as a NetName is, so '1' is not '01' and
-#   a plain number is not a pad number -- `_refused_pad_number`)
-# Supported functions: hasNetclass, hasExactNetclass, onLayer, existsOnLayer,
-#   isMicroVia, isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup,
+#   a plain number is not a pad number -- `kicad_condition_refusal`)
+# Supported functions: hasNetclass, hasExactNetclass, existsOnLayer, isMicroVia,
+#   isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup,
 #   inDiffPair('pattern') (#1295), and AB.isCoupledDiffPair() as a term of an
 #   AND only, positive (#1293: the pair's own P<->N rule) or negated (#1295:
 #   KiCad's "keep pairs apart" rule); OR'ed or compared it stays Unsupported
@@ -481,10 +495,14 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
 #   isCoupledDiffPair in any other position, fromTo, memberOfSheet,
 #   memberOfSheetOrChildren, hasComponentClass, getField, and any numeric
 #   comparison (<, >, arithmetic).
+# Read, though KiCad refuses it (`kicad_condition_refusal`, which is what says
+#   so): onLayer, the spelling existsOnLayer replaced. Whether the tools should
+#   read a rule KiCad will not load is a question they have not been asked to
+#   change, so it stays read and the run names the file.
 
 _TOKEN = re.compile(r"""
     \s*(?:
-        (?P<str>'[^']*'|"[^"]*") |
+        (?P<str>'[^']*(?:'|$)|"[^"]*") |
         (?P<op>==|!=|&&|\|\||<=|>=|[<>!()+\-*/]) |
         (?P<num>-?\d+(?:\.\d+)?\s*(?:mm|mil|in|um|nm)?) |
         (?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?) |
@@ -531,31 +549,324 @@ _NUMERIC_OPS = ('<', '>', '<=', '>=', '+', '-', '*', '/')
 _KICAD_REFUSES = 'KiCad refuses'
 
 
-def _reads_pad_number(node) -> bool:
+def _reads_one_part(node) -> Optional[str]:
+    """The first term of a parsed condition that scopes it to one pad or one
+    part (A.Pad_Number, memberOfFootprint()), or None."""
     if not isinstance(node, tuple) or not node:
-        return False
+        return None
     if node[0] == 'prop':
-        return node[2] == 'pad_number'
-    return node[0] in ('cmp', 'and', 'or', 'not') and any(
-        _reads_pad_number(c) for c in node[1:])
-
-
-def _refused_pad_number(toks) -> Optional[str]:
-    """Why KiCad refuses a condition comparing A.Pad_Number with a plain
-    number (#1660), or None. Pad numbers look numeric, so `A.Pad_Number == 1`
-    is an easy thing to write, and it is a compile error: measured on
-    kicad-cli 10.0.6, a file holding one enforces NONE of its rules, in any
-    order, with exit 0 and nothing printed. A number with a unit compiles."""
-    for (k1, v1), (k2, v2), (k3, v3) in zip(toks, toks[1:], toks[2:]):
-        if (k2, v2) not in (('op', '=='), ('op', '!=')):
-            continue
-        for (ka, va), (kb, vb) in (((k1, v1), (k3, v3)), ((k3, v3), (k1, v1))):
-            if ka == 'name' and va.lower().endswith('.pad_number') \
-                    and kb == 'num' and vb[-1].isdigit():
-                return (f"{va} compared with the number {vb}: a pad number is "
-                        f"a string, and {_KICAD_REFUSES} the comparison and then "
-                        f"enforces no rule of this file (write '{vb}')")
+        return f'{node[1]}.Pad_Number' if node[2] == 'pad_number' else None
+    if node[0] == 'call':
+        return f'{node[1]}.memberOfFootprint()' if node[2] == 'memberoffootprint' else None
+    if node[0] in ('cmp', 'and', 'or', 'not'):
+        return next(filter(None, map(_reads_one_part, node[1:])), None)
     return None
+
+
+#: Every function KiCad's condition compiler knows, with the arguments it will
+#: not compile without. Measured on kicad-cli 10.0.6.
+_KICAD_FUNCTIONS = {
+    'existsonlayer': 1, 'isplated': 0, 'insidecourtyard': 1, 'insidefrontcourtyard': 1,
+    'insidebackcourtyard': 1, 'intersectscourtyard': 1, 'intersectsfrontcourtyard': 1,
+    'intersectsbackcourtyard': 1, 'insidearea': 1, 'intersectsarea': 1, 'enclosedbyarea': 1,
+    'ismicrovia': 0, 'isblindburiedvia': 0, 'isblindvia': 0, 'isburiedvia': 0,
+    'memberof': 1, 'memberofgroup': 1, 'memberoffootprint': 1, 'memberofsheet': 1,
+    'memberofsheetorchildren': 1, 'fromto': 2, 'iscoupleddiffpair': 0, 'indiffpair': 1,
+    'getfield': 1, 'hasnetclass': 1, 'hasexactnetclass': 1, 'hascomponentclass': 1,
+}
+#: Every property it knows, lower case with spaces as '_'. Measured on kicad-cli
+#: 10.0.6: each name here compiles as `A.<name>`. The names tried were the Title
+#: Case strings the KiCad binary holds, so a later KiCad may know one this does not.
+#: `A.Net_Name` does not compile and `A.NetName` does.
+_KICAD_PROPERTIES = frozenset({
+    'arrow_direction', 'associated_layer', 'auto_thickness', 'back_covering',
+    'back_plugging', 'back_tenting', 'backdrill_mode', 'barcode_type',
+    'best_length_ratio', 'best_width_ratio', 'bold', 'border', 'border_style',
+    'border_width', 'bottom_backdrill_size', 'bottom_counterbore_depth',
+    'bottom_countersink_angle', 'capping', 'cell_separators', 'center_x', 'center_y',
+    'clearance', 'clearance_override', 'column_width', 'component_class',
+    'componentclass', 'copper_layers', 'corner_radius', 'corner_radius_ratio',
+    'corner_radius_size', 'crossbar_height', 'curved_teardrops', 'diameter',
+    'do_not_populate', 'enable', 'enable_teardrops', 'end_x', 'end_y',
+    'error_correction', 'exclude_from_bill_of_materials',
+    'exclude_from_position_files', 'exempt_from_courtyard_requirement',
+    'extension_line_overshoot', 'external_border', 'fabrication_property', 'fill',
+    'fill_mode', 'filling', 'font', 'front_covering', 'front_plugging',
+    'front_tenting', 'hatch_gap', 'hatch_minimum_hole_ratio', 'hatch_width',
+    'header_border', 'height', 'hole', 'hole_shape', 'hole_size_x', 'hole_size_y',
+    'horizontal_justification', 'hyperlink', 'initial_side', 'italic',
+    'keep_aligned_with_dimension', 'keep_out_footprints', 'keep_out_pads',
+    'keep_out_tracks', 'keep_out_vias', 'keep_out_zone_fills', 'keep_upright',
+    'keywords', 'knockout', 'layer', 'layer_bottom', 'layer_top', 'leader_length',
+    'library_description', 'library_link', 'line_style', 'line_width', 'locked',
+    'margin_bottom', 'margin_left', 'margin_right', 'margin_top', 'margin_x',
+    'margin_y', 'max_amplitude', 'max_length', 'max_width', 'max_width_ratio',
+    'min_amplitude', 'min_spacing', 'minimum_width', 'mirrored', 'name', 'net',
+    'net_class', 'netclass', 'netname', 'not_in_schematic', 'number_box',
+    'orientation', 'origin_x', 'origin_y', 'override_custom_rules', 'override_text',
+    'pad_connections', 'pad_number', 'pad_shape', 'pad_to_die_delay',
+    'pad_to_die_length', 'pad_type', 'parent', 'pin_name', 'pin_type', 'position_x',
+    'position_y', 'precision', 'prefer_zone_connections', 'prefix', 'radius',
+    'reference', 'remove_islands', 'rounded', 'row_height', 'row_separators', 'scale',
+    'separators_style', 'separators_width', 'shape', 'show_text', 'size', 'size_x',
+    'size_y', 'smoothing_amount', 'smoothing_effort', 'soldermask',
+    'soldermask_margin_override', 'solderpaste_margin_override',
+    'solderpaste_margin_ratio_override', 'source_name', 'source_type', 'start_x',
+    'start_y', 'suffix', 'suppress_trailing_zeroes', 'target_delay', 'target_length',
+    'target_skew', 'target_skew_delay', 'text', 'text_frame', 'text_size',
+    'thermal_relief_gap', 'thermal_relief_spoke_angle', 'thermal_relief_spoke_width',
+    'thermal_spoke_template', 'thickness', 'top_backdrill_size',
+    'top_counterbore_depth', 'top_countersink_angle', 'transform_offset_x',
+    'transform_offset_y', 'tuning_mode', 'type', 'units', 'units_format',
+    'vertical_justification', 'via_type', 'visible', 'width', 'zone_connection_style'})
+#: The units a number may carry (`1 mm` too). `1um`, `1nm`, `1cm`, `1MM` do not compile.
+_KICAD_UNITS = frozenset({'mm', 'mil', 'in', 'deg', 'ps', 'fs'})
+
+_KC_TOKEN = re.compile(r"""\s*(?:
+    (?P<str>'[^']*(?:'|$)) |
+    (?P<num>\d+(?:\.\d+)?(?![\d.])) |
+    (?P<name>[A-Za-z_][A-Za-z0-9_]*) |
+    (?P<op>==|!=|&&|\|\||<=|>=|[<>!()+\-*/.,])
+    )""", re.VERBOSE)
+_KC_COMPARE = ('==', '!=', '<', '>', '<=', '>=')
+
+
+class _KiCadCompile:
+    """KiCad's condition compiler as `kicad_condition_refusal` needs it: raises
+    Unsupported naming the first thing it will not compile, and answers nothing
+    about what a condition means. Its forms are the table in
+    tests/test_1690_rule_readings.py, each measured on kicad-cli."""
+    PLAIN, UNIT, OTHER = 'plain number', 'number with a unit', 'other'
+
+    def __init__(self, src: str):
+        self.toks, pos = [], 0
+        while src[pos:].strip():
+            m = _KC_TOKEN.match(src, pos)
+            if not m:
+                raise Unsupported(f"it cannot read {src[pos:].strip()[:20]!r}")
+            self.toks.append((m.lastgroup, m.group(m.lastgroup)))
+            pos = m.end()
+        self.i = 0
+
+    def _peek(self):
+        return self.toks[self.i] if self.i < len(self.toks) else (None, None)
+
+    def _next(self):
+        t = self._peek()
+        self.i += 1
+        return t
+
+    def _is_op(self, *ops) -> bool:
+        k, v = self._peek()
+        return k == 'op' and v in ops
+
+    def run(self):
+        if not self.toks:
+            return
+        kind = self._or()
+        if self.i != len(self.toks):
+            raise Unsupported(f"it does not expect {self._peek()[1]!r} there")
+        if kind == self.PLAIN:
+            raise Unsupported("a plain number is not a condition")
+
+    def _pair(self, a, b, op):
+        """A plain number compiles against another number, never anything else."""
+        if self.PLAIN in (a, b) and not {a, b} <= {self.PLAIN, self.UNIT}:
+            raise Unsupported(f"a plain number with no unit beside {op}: a string or a "
+                              f"property is never compared with one (quote it, or give "
+                              f"it a unit)")
+        return self.OTHER
+
+    def _chain(self, ops, down):
+        a = down()
+        while self._is_op(*ops):
+            op = self._next()[1]
+            a = self._pair(a, down(), op)
+        return a
+
+    def _or(self):
+        return self._chain(('||',), self._and)
+
+    def _and(self):
+        return self._chain(('&&',), self._cmp)
+
+    def _cmp(self):
+        a = self._add()
+        if self._is_op(*_KC_COMPARE):
+            op = self._next()[1]
+            a = self._pair(a, self._add(), op)
+            if self._is_op(*_KC_COMPARE):
+                raise Unsupported(f"{op} does not chain")
+        return a
+
+    def _add(self):
+        return self._chain(('+', '-'), self._mul)
+
+    def _mul(self):
+        return self._chain(('*', '/'), self._unary)
+
+    def _unary(self):
+        if self._is_op('!'):
+            self._next()
+            if self._unary() == self.PLAIN:
+                raise Unsupported("! on a plain number")
+            return self.OTHER
+        if self._is_op('-'):
+            self._next()
+            self._unary()
+            return self.OTHER
+        return self._atom()
+
+    def _atom(self):
+        k, v = self._next()
+        if k == 'str':
+            return self.OTHER
+        if k == 'num':
+            nk, nv = self._peek()
+            if nk != 'name':
+                return self.PLAIN
+            self._next()
+            if nv not in _KICAD_UNITS:
+                raise Unsupported(f"{v}{nv}: {nv!r} is not a unit it knows")
+            return self.UNIT
+        if k == 'op' and v == '(':
+            kind = self._or()
+            if not self._is_op(')'):
+                raise Unsupported("an unclosed parenthesis")
+            self._next()
+            return kind
+        if k == 'name':
+            return self._name(v)
+        raise Unsupported("a term is missing" if k is None else f"it does not expect {v!r} there")
+
+    def _name(self, item):
+        if not self._is_op('.'):
+            if item in ('A', 'B', 'AB', 'L'):
+                return self.OTHER
+            raise Unsupported(f"{item!r} is not a name it knows")
+        self._next()
+        k, name = self._next()
+        if k != 'name':
+            raise Unsupported(f"{item}. names nothing")
+        if item not in ('A', 'B', 'AB'):
+            raise Unsupported(f"{item}.{name}: it knows the items A, B and AB, spelled so")
+        if self._is_op('('):
+            self._next()
+            return self._call(item, name)
+        if item == 'AB':
+            raise Unsupported(f"AB.{name}: AB has no properties")
+        if name.lower() not in _KICAD_PROPERTIES:
+            raise Unsupported(f"{item}.{name} is not a property it knows")
+        return self.OTHER
+
+    def _call(self, item, name):
+        need = _KICAD_FUNCTIONS.get(name.lower())
+        if need is None:
+            raise Unsupported(f"{item}.{name}() is not a function it knows")
+        strings = others = props = 0
+        while not self._is_op(')'):
+            k, v = self._peek()
+            if k is None:
+                raise Unsupported(f"{item}.{name}( is not closed")
+            if k == 'op' and v == ',':
+                self._next()
+                continue
+            if k == 'str':
+                self._next()
+                strings += 1
+                continue
+            props += k == 'name'
+            others += 1
+            if self._or() == self.PLAIN:
+                raise Unsupported(f"{item}.{name}() with a plain number")
+        self._next()
+        if need and props and not strings:
+            raise Unsupported(f"{item}.{name}() takes a quoted string")
+        if strings + others < need:
+            raise Unsupported(f"{item}.{name}() needs {need} argument(s)")
+        return self.OTHER
+
+
+def kicad_condition_refusal(src: str) -> Optional[str]:
+    """Why KiCad cannot compile a `.kicad_dru` condition, or None. Measured on
+    kicad-cli 10.0.6: a file holding such a condition, in any position, enforces
+    NONE of its rules, with exit 0 and nothing printed."""
+    try:
+        _KiCadCompile(src).run()
+    except Unsupported as e:
+        return (f"{_KICAD_REFUSES} the condition {src!r} ({e}) and then enforces no "
+                f"rule of this file")
+    return None
+
+
+#: What a rule's clauses may be, beside the condition. A file with any other
+#: enforces none of its rules, the same way (kicad-cli 10.0.6, #1690).
+_KICAD_CLAUSES = frozenset({'condition', 'constraint', 'layer', 'severity'})
+_KICAD_SEVERITIES = frozenset({'error', 'warning', 'ignore', 'exclusion'})
+_KICAD_VALUE = re.compile(r"-?\d*\.?\d+(?:mm|mil|in|deg|ps|fs)?$")
+_KICAD_DISALLOW = DISALLOW_GRADED | {'pad', 'zone', 'text', 'graphic', 'hole', 'footprint'}
+#: A layer clause spelled as copper that is no copper layer KiCad has
+_KICAD_COPPER_LAYER = re.compile(r"(?:F|B|In\d+|\*)\.Cu$")
+
+
+def _rule_refusal(node: list, rule: 'Rule') -> Optional[str]:
+    """Why KiCad cannot load this rule of a parsed `.kicad_dru`, or None."""
+    def refused(what):
+        return f"{_KICAD_REFUSES} {what} and then enforces no rule of this file"
+    for item in node[2:]:
+        head = item[0] if isinstance(item, list) and item else item
+        if head not in _KICAD_CLAUSES:
+            return refused(f"the clause {head!r}")
+        if head == 'severity' and len(item) > 1 and item[1] not in _KICAD_SEVERITIES:
+            return refused(f"the severity {item[1]!r}")
+        if head == 'layer' and len(item) > 1 and str(item[1]).endswith('.Cu') \
+                and not _KICAD_COPPER_LAYER.match(str(item[1])):
+            return refused(f"the layer {item[1]!r}")
+        if head != 'constraint' or len(item) < 2:
+            continue
+        kind = canonical_kind(str(item[1]))
+        if kind not in DRU_KINDS:
+            return refused(f"the constraint {item[1]!r}")
+        for sub in item[2:]:
+            if kind == 'disallow' and not isinstance(sub, list) \
+                    and str(sub).lower() not in _KICAD_DISALLOW:
+                return refused(f"the disallow item {sub!r}")
+            if not (isinstance(sub, list) and len(sub) == 2 and sub[0] in ('min', 'opt', 'max')):
+                continue
+            val = str(sub[1])
+            # a count (via_count, min_resolved_spokes) takes a plain number
+            if not _KICAD_VALUE.match(val) or (
+                    kind in CLEARANCE_KINDS | SIZE_KINDS and val[-1].isdigit()):
+                return refused(f"the value {val!r} of {item[1]} {sub[0]} (a length has "
+                               f"a unit)")
+    if rule.condition_src is not None:
+        return kicad_condition_refusal(rule.condition_src)
+    return None
+
+
+def dru_refusals(text: str, rules: Sequence['Rule']) -> List[dict]:
+    """[{'rule', 'reason'}] for each thing in a `.kicad_dru` that makes KiCad
+    enforce none of its rules (#1690), [] when it loads the file. `rule` is ''
+    for a fault of the file itself."""
+    from kicad_dru import _tokenize, _parse_nodes
+    out = []
+    try:
+        nodes = _parse_nodes(_tokenize(text))
+    except Exception:                                          # noqa: BLE001
+        nodes = []
+    if not any(isinstance(n, list) and n and n[0] == 'version' for n in nodes):
+        out.append({'rule': '', 'reason': f"{_KICAD_REFUSES} a file with no (version ...) "
+                                          f"line and then enforces no rule of it"})
+    for n in nodes:
+        head = n[0] if isinstance(n, list) and n else n
+        if head not in ('version', 'rule'):
+            out.append({'rule': '', 'reason': f"{_KICAD_REFUSES} the top-level form {head!r} "
+                                              f"and then enforces no rule of this file"})
+        elif head == 'rule' and (len(n) < 2 or isinstance(n[1], list)):
+            out.append({'rule': '?', 'reason': f"{_KICAD_REFUSES} a rule with no name and "
+                                               f"then enforces no rule of this file"})
+    out.extend({'rule': r.name, 'reason': r.kicad_refused} for r in rules if r.kicad_refused)
+    return out
 
 
 class _Parser:
@@ -597,9 +908,6 @@ class _Parser:
         return v
 
     def parse(self):
-        refused = _refused_pad_number(self.toks)
-        if refused:
-            raise Unsupported(refused)
         node = self.or_()
         if self.i != len(self.toks):
             raise Unsupported(f"trailing {self.peek()[1]!r}")
@@ -655,7 +963,10 @@ class _Parser:
         k, v = self.peek()
         if k == 'str':
             self.take()
-            return ('lit', v[1:-1])
+            # KiCad's lexer ends a literal at the end of the condition when it
+            # has no closing quote, measured on kicad-cli 10.0.6: `A.Type == 'Via`
+            # compiles and binds vias
+            return ('lit', v[1:-1] if len(v) > 1 and v[-1] == v[0] else v[1:])
         if k == 'num':
             self.take()
             return self._unmodelled("numeric literal outside a supported comparison")
@@ -723,7 +1034,13 @@ def parse_condition(src: str, areas: bool = False):
     KiCad's "keep pairs apart" rule, which binds everything but the pair's
     own partner). OR'ed or compared it raises Unsupported, so such a rule
     stays unread rather than half-read."""
-    node = _Parser(src, areas=areas).parse()
+    try:
+        node = _Parser(src, areas=areas).parse()
+    except Unsupported as e:
+        # a condition this reader does not read that KiCad refuses as well: the
+        # second is the one a user has to act on (and "KiCad will still enforce
+        # it", which report_lines says of the first, would not be so)
+        raise Unsupported(kicad_condition_refusal(src) or str(e)) from None
     if _contains_coupled(node) and _coupled_terms(node) is None:
         raise Unsupported("AB.isCoupledDiffPair() is modelled only as a "
                           "term ANDed into the condition, or its negation")
@@ -739,9 +1056,11 @@ def parse_condition_maybe(src: Optional[str]):
     if src is None:
         return None
     try:
-        return _Parser(src, unknown=True).parse()
+        node = _Parser(src, unknown=True).parse()
     except Unsupported:
         return ('unknown',)
+    # a refused condition's terms do not hold or fail one by one
+    return ('unknown',) if _has_unknown(node) and kicad_condition_refusal(src) else node
 
 
 def _eval3(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
@@ -904,7 +1223,7 @@ def _in_diff_pair(it: 'RuleItem', pattern: str, ctx) -> bool:
 #: 'Default', hasNetclass() and isPlated() false, the pad and via properties
 #: undefined. So `!(A.Pad_Number == '1')` binds every item on the board, pad 1
 #: included, and `A.Layer == 'Edge.Cuts'` does too.
-_EDGE_ITEM = RuleItem(type='graphic', layers=frozenset({'Edge.Cuts'}), plated=False)
+_EDGE_ITEM = RuleItem(type='graphic', layers=frozenset({'Edge.Cuts'}))
 
 
 class _Undefined:
@@ -917,16 +1236,13 @@ class _Undefined:
 _UNDEFINED = _Undefined()
 
 
-def _norm_type(t: Optional[str]) -> str:
-    return (t or '').lower().replace('-', '_').replace(' ', '_')
-
-
-_PAD_TYPE_NAMES = {'smd': 'smd', 'through_hole': 'thru_hole', 'thru_hole': 'thru_hole',
-                   'connector': 'connect', 'connect': 'connect',
-                   'npth,_mechanical': 'np_thru_hole', 'npth': 'np_thru_hole',
-                   'np_thru_hole': 'np_thru_hole'}
-_VIA_TYPE_NAMES = {'through': 'through', 'micro': 'micro', 'blind/buried': 'blind_buried',
-                   'blind_buried': 'blind_buried'}
+#: What `A.Pad_Type` and `A.Via_Type` read in KiCad, measured on kicad-cli 10.0.6
+#: (#1690), for the board file's tokens. A via this module knows only as
+#: 'blind_buried' reads as 'Blind'.
+_PAD_TYPE_NAMES = {'smd': 'SMD', 'thru_hole': 'Through-hole', 'connect': 'Edge connector',
+                   'np_thru_hole': 'NPTH, mechanical'}
+_VIA_TYPE_NAMES = {'through': 'Through', 'micro': 'Micro', 'blind': 'Blind', 'buried': 'Buried',
+                   'blind_buried': 'Blind'}
 
 
 def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
@@ -952,6 +1268,14 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
             return False
         if lhs[0] == 'prop' and rhs[0] == 'prop' and lhs[2] == 'net' and rhs[2] == 'net':
             eq = (lv == rv)
+        elif lhs[0] == 'prop' and lhs[2] == 'netclass' and rhs[0] == 'lit' \
+                and isinstance(lv, str):
+            # #1690, measured on kicad-cli 10.0.6: true when the literal matches
+            # one class the net's effective class is built from, or the whole
+            # name ('HS,LS'), as a NetName compare does (case-insensitive, '*'
+            # and '?' wildcards)
+            it = _item(lhs[1], a, b)
+            eq = any(netname_matches(n, rv) for n in it.netclasses | {it.effective_class})
         elif isinstance(lv, str) and isinstance(rv, str):
             eq = _cmp_strings(lhs, lv, rv, rhs)
         else:
@@ -984,16 +1308,20 @@ def _cmp_strings(lhs_node, lv: str, rv: str, rhs_node=None) -> bool:
         # on the RIGHT is a wildcard ('A*' == A.Pad_Number does not bind A1).
         return netname_matches(lv, rv, wildcard=rhs_node is not None
                                and rhs_node[0] == 'lit')
-    if prop in ('type', 'pad_type', 'via_type'):
-        return _norm_type(lv) == _norm_type(rv)
-    if prop == 'netname':
+    if prop in ('type', 'pad_type', 'via_type', 'netname') or (
+            rhs_node is not None and rhs_node[0] == 'prop'
+            and rhs_node[2] in ('type', 'pad_type', 'via_type')):
+        # KiCad's string compare, as for a net name: case-insensitive, and a
+        # literal on the right a wildcard ('T*' binds a through-hole pad)
         return netname_matches(lv, rv, wildcard=rhs_node is not None
                                and rhs_node[0] == 'lit')
-    if prop == 'netclass':
-        # NetClass == 'X' is true for any class the net is a member of (its
-        # aggregate class included); this is the lenient reading and agrees
-        # with KiCad on every single-membership board.
-        return lv == rv or rv in lv.split(',')
+    if 'netclass' in (prop, rhs_node[2] if rhs_node is not None
+                      and rhs_node[0] == 'prop' else None):
+        # #1690: not `A.NetClass == 'X'`, which `_eval` answers. A literal on
+        # the LEFT is compared with the whole name, case-insensitive and no
+        # wildcard, measured on kicad-cli 10.0.6: 'HS' == A.NetClass is false on
+        # a net in HS and LS, 'H*' == A.NetClass false on a net in HS.
+        return netname_matches(lv, rv, wildcard=False)
     if prop == 'layer':
         # KiCad accepts wildcards in layer names ('*.Cu').
         return fnmatch.fnmatchcase(lv, rv) if any(ch in rv for ch in '*?[') else lv == rv
@@ -1028,13 +1356,12 @@ def _value(node, a, b, layer, ctx=None):
     if op == 'prop':
         it = _item(node[1], a, b)
         if it is None:
-            return _UNDEFINED if node[2] == 'pad_number' else None
+            # a term on a B there is not: `A.Net != B.Net` is false on one item
+            # (kicad-cli 10.0.6, #1690), as `==` is
+            return _UNDEFINED
         name = node[2]
         if name == 'netclass':
-            # the aggregate name plus every membership, joined so the lenient
-            # compare above can see both
-            names = [it.effective_class] + sorted(it.netclasses - {it.effective_class})
-            return ','.join(n for n in names if n)
+            return it.effective_class
         if name == 'netname':
             return it.net_name
         if name == 'net':
@@ -1058,9 +1385,11 @@ def _value(node, a, b, layer, ctx=None):
         # measured on kicad-cli 10.0.6: `A.Pad_Type != 'SMD'` binds no track
         # or via, and `A.Pad_Number != '1'` none of them either.
         if name == 'pad_type':
-            return (it.pad_type or '') if it.type == 'pad' else _UNDEFINED
+            return (_PAD_TYPE_NAMES.get(it.pad_type, it.pad_type or '')
+                    if it.type == 'pad' else _UNDEFINED)
         if name == 'via_type':
-            return (it.via_type or '') if it.type == 'via' else _UNDEFINED
+            return (_VIA_TYPE_NAMES.get(it.via_type, it.via_type or '')
+                    if it.type == 'via' else _UNDEFINED)
         if name == 'pad_number':
             return (it.pad_number if it.type == 'pad' and it.pad_number is not None
                     else _UNDEFINED)
@@ -1081,8 +1410,12 @@ def _call(node, a, b, layer, ctx=None):
     if it is _EDGE_ITEM and fn in ('hasnetclass', 'hasexactnetclass'):
         return False
     if fn == 'hasnetclass':
-        return bool(args) and (args[0] in it.netclasses or args[0] == it.effective_class)
+        # one class of the effective class, by wxString::Matches: 'H*' binds HS,
+        # 'hs' does not, 'HS,LS' does not (kicad-cli 10.0.6, #1690)
+        return bool(args) and any(_wx_matches(args[0], n)
+                                  for n in it.netclasses or {it.effective_class})
     if fn == 'hasexactnetclass':
+        # the whole name, spelled exactly: 'HS,LS', never 'HS' on a net in both
         return bool(args) and args[0] == it.effective_class
     if fn in ('onlayer', 'existsonlayer'):
         return bool(args) and (args[0] in it.layers or
@@ -1090,9 +1423,12 @@ def _call(node, a, b, layer, ctx=None):
     if fn == 'ismicrovia':
         return it.type == 'via' and it.via_type == 'micro'
     if fn == 'isblindburiedvia':
-        return it.type == 'via' and it.via_type == 'blind_buried'
+        return it.type == 'via' and it.via_type in ('blind_buried', 'blind', 'buried')
     if fn == 'isplated':
-        return it.plated
+        # #1690, measured on kicad-cli 10.0.6: true on a via of any type and a
+        # through-hole pad (a castellated one too), false on an SMD or a
+        # connector pad, an NPTH pad, a track, a zone and a graphic
+        return it.type == 'via' or (it.type == 'pad' and it.pad_type == 'thru_hole')
     if fn == 'memberoffootprint':
         return bool(args) and it.footprint_ref is not None and \
             fnmatch.fnmatchcase(it.footprint_ref, args[0])
@@ -1203,6 +1539,8 @@ class DesignRules:
     board_min: Dict[str, float] = field(default_factory=dict)      # rules.min_* (only >0)
     classes: Dict[str, dict] = field(default_factory=dict)        # name -> {clearance, track_width, ..., priority}
     memberships: Dict[int, FrozenSet[str]] = field(default_factory=dict)  # net_id -> classes
+    # class name -> the fields its project entry leaves unset (`class_constituents`)
+    unset_fields: Dict[str, FrozenSet[str]] = field(default_factory=dict)
     net_names: Dict[int, str] = field(default_factory=dict)
     rules: List[Rule] = field(default_factory=list)
     copper_layers: List[str] = field(default_factory=list)
@@ -1212,6 +1550,8 @@ class DesignRules:
     source: str = ''
     dru_path: str = ''
     notes: List[str] = field(default_factory=list)
+    # `dru_refusals`: why KiCad enforces no rule of this board's .kicad_dru
+    kicad_refused: List[dict] = field(default_factory=list)
     # net_keepouts.derive_area_keepouts' regions (install_design_rules)
     net_keepouts: List[dict] = field(default_factory=list)
     _cache: dict = field(default_factory=dict, repr=False)
@@ -1251,6 +1591,7 @@ class DesignRules:
                 else:
                     dr.rules, notes = parse_dru(text)
                     dr.notes.extend(notes)
+                    dr.kicad_refused = dru_refusals(text, dr.rules)
         dr._finish()
         return dr
 
@@ -1337,6 +1678,9 @@ class DesignRules:
                 d['priority'] = int(c.get('priority', _DEFAULT_PRIORITY
                                           if name == 'Default' else 0))
                 self.classes[name] = d
+                self.unset_fields[name] = frozenset(
+                    k for k in _CLASS_COMPLETE_FIELDS
+                    if not isinstance(c.get(k), (int, float)))
             # every membership form, KiCad 6's classes[].nets included (#1304)
             assignments, patterns = project_class_membership(ns)
             rules =((proj.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
@@ -1392,6 +1736,27 @@ class DesignRules:
             self._effective[net_id] = e
         return e
 
+    def class_constituents(self, net_id: int) -> Tuple[str, ...]:
+        """The classes KiCad builds a net's effective class from, in the order
+        its name joins them, which is what a rule condition reads (#1690):
+        priority, then name, then Default when the net's classes leave one of
+        `_CLASS_COMPLETE_FIELDS` unset between them, since Default then
+        supplies it. So on a net whose one class sets no bus width,
+        `A.NetClass == 'Default'` and `A.hasNetclass('Default')` are true,
+        `A.hasExactNetclass('HS')` false and `A.hasExactNetclass('HS,Default')`
+        true. Measured on kicad-cli 10.0.6, the same at every project schema
+        0 to 5. A net assigned to a class the project does not declare is
+        not modelled: `memberships` drops that class."""
+        members = [c for c in self.memberships.get(net_id, ()) if c in self.classes]
+        if not members:
+            return ('Default',)
+        members.sort(key=lambda c: (self.classes[c].get('priority', 0), c))
+        unset = frozenset.intersection(*(self.unset_fields.get(c, frozenset())
+                                         for c in members))
+        if unset and 'Default' not in members:
+            members.append('Default')
+        return tuple(members)
+
     def class_value(self, net_id: int, prop: str) -> Optional[float]:
         """``prop`` from the aggregate class: the highest-priority member class
         that SETS it, else Default's, else None."""
@@ -1409,27 +1774,28 @@ class DesignRules:
         layers = facts.pop('layers', None)
         if layers is None:
             layers = frozenset([layer]) if layer else frozenset()
+        names = self.class_constituents(net_id)
         return RuleItem(type=type, net_id=net_id,
                         net_name=self.net_names.get(net_id, ''),
-                        netclasses=self.memberships.get(net_id, frozenset()),
-                        effective_class=self.effective_class(net_id),
+                        netclasses=frozenset(names),
+                        effective_class=','.join(names),
                         layers=frozenset(layers), **facts)
 
     def item_for_pad(self, pad, layer: Optional[str] = None) -> RuleItem:
         ref = getattr(pad, 'component_ref', None)
+        names = self.class_constituents(getattr(pad, 'net_id', 0))
         return RuleItem(
             type='pad', net_id=int(getattr(pad, 'net_id', 0) or 0),
             net_name=getattr(pad, 'net_name', '') or self.net_names.get(getattr(pad, 'net_id', 0), ''),
-            netclasses=self.memberships.get(getattr(pad, 'net_id', 0), frozenset()),
-            effective_class=self.effective_class(getattr(pad, 'net_id', 0)),
+            netclasses=frozenset(names),
+            effective_class=','.join(names),
             layers=frozenset(l for l in (getattr(pad, 'layers', None) or []) if str(l).endswith('.Cu')),
             footprint_ref=ref, pad_type=getattr(pad, 'pad_type', None),
             pad_number=getattr(pad, 'pad_number', None),
             groups=self.groups.get(ref, frozenset()),
             xy=(getattr(pad, 'global_x', None), getattr(pad, 'global_y', None))
             if getattr(pad, 'global_x', None) is not None else None,
-            clearance_override=(getattr(pad, 'local_clearance', 0) or None),
-            plated=(getattr(pad, 'pad_type', '') != 'np_thru_hole'))
+            clearance_override=(getattr(pad, 'local_clearance', 0) or None))
 
     # ---------------- resolution ----------------
 
@@ -1755,7 +2121,7 @@ class DesignRules:
                 if not r.unsupported and r.unconsumed_kinds]
 
     def report_lines(self) -> List[str]:
-        out = []
+        out = kicad_refusal_lines(self.kicad_refused)
         for name, what in self.honoured_rules():
             out.append(f".kicad_dru rule '{name}': {what}")
         for name, why in self.unsupported():
@@ -1792,9 +2158,32 @@ class DesignRules:
                 'honoured': r.honoured, 'router_unhonoured': r.router_unhonoured,
                 'unconsumed': list(r.unconsumed_kinds),
             } for r in self.rules],
+            'kicad_refused': list(self.kicad_refused),
             'fab_floor': dict(sorted(self.fab_floor.items())),
             'cli': dict(sorted(self.cli.items())),
         }
+
+
+def kicad_refusal_lines(refused: Sequence[dict]) -> List[str]:
+    """The finding `dru_refusals` is, for a console: about the file, and first,
+    because KiCad itself says nothing (exit 0, no message). One line per cause."""
+    return [".kicad_dru: KiCad ENFORCES NO RULE OF THIS FILE"
+            + (f": rule '{r['rule']}': " if r['rule'] else ': ') + r['reason']
+            + ". This tool still reads the file's other rules, so it routes and "
+              "grades by rules KiCad's own DRC is not applying" for r in refused]
+
+
+def read_board_kicad_refusals(board_path: Optional[str]) -> List[dict]:
+    """`dru_refusals` of the `.kicad_dru` beside a board, [] without one, for a
+    tool with no DesignRules in hand."""
+    dru = os.path.splitext(board_path)[0] + '.kicad_dru' if board_path else ''
+    if not dru or not os.path.isfile(dru):
+        return []
+    try:
+        text = open(dru, encoding='utf-8').read()
+    except OSError:
+        return []
+    return dru_refusals(text, parse_dru(text)[0])
 
 
 def relaxing_rules(rules, board_min) -> List[dict]:
@@ -2034,7 +2423,9 @@ class PadEdgeRules:
         KiCad's filler keeps from Edge.Cuts there. Measured on kicad-cli
         10.0.6 (tests/test_1643_zone_edge_gap.py): that gap is the edge
         clearance alone -- the board's rule, replaced by a binding rule here,
-        a lower one too -- whatever the zone's or its class's clearance."""
+        a lower one too -- whatever the zone's or its class's clearance. The
+        filler asks both ways as the DRC does (#1690): `!(A.Type == 'Zone')`
+        binds, on the Edge.Cuts shape."""
         if not self.rules:
             return base, base, ''
         key = ('zone', net_id, layer, base)
@@ -2046,7 +2437,7 @@ class PadEdgeRules:
         ctx = ('edge_clearance', dr._net_name_set())
         values, rule_name = {base}, ''
         for rule, ast, value in self.rules:
-            m = rule_may_match(rule, ast, item, None, layer, dr.copper_layers, ctx)
+            m = rule_may_match(rule, ast, item, _EDGE_ITEM, layer, dr.copper_layers, ctx)
             if m is True:
                 values, rule_name = {value}, rule.name
             elif m is None:
