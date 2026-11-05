@@ -2828,6 +2828,9 @@ Options:
 ```
 
 Exits non-zero if any signal net has loops or overlapping vias (usable in CI).
+A footprint's drawn copper (#908) is not routed copper and is not counted: a
+closed shape's perimeter is a ring by construction. The routing skill runs this
+as a reported read on every routed board; `check_complete` does not run it.
 
 ### Examples
 

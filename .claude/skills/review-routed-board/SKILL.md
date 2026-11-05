@@ -108,6 +108,12 @@ an *overlap/short* finding — KiCad 10 net-unifies touching copper on load, so
 overlapping foreign-net tracks/pads report nothing at any severity. For
 touching-copper overlaps, `check_drc.py` is the authoritative one.
 
+Also run `tests/stress/kicad_drc_compare.py` and `py_tools/check_cycles.py` on
+the board: `check_complete.py` runs neither, and the raw KiCad command above does
+not grade what the first one stages. `/plan-pcb-routing`'s "Verify Results" has
+the commands, the lines to report and what each exit code means. Put them in the
+report as reported, not as pass or fail.
+
 ## Step 2: Length/Time Match Verification
 
 If the board has length-matched groups (DDR byte lanes, matched buses — detect DQ/DQS patterns or ask the user for the groups and tolerance):
@@ -364,6 +370,8 @@ UNGRADED (not scored, not passed): impedance, length
 |-------|--------|
 | DRC (check_drc.py)        | PASS (0 violations) |
 | Zone DRC (kicad-cli)      | NOT RUN - board has 2 zones, recommend running |
+| KiCad cross-check (reported) | connwidth=1@<0.18mm thermal=0 dangling=0, 0 KICAD-ONLY |
+| Copper loops (reported)   | 0 nets |
 | Connectivity              | FAIL - 2 nets with disconnected pads |
 | Orphan stubs              | PASS |
 | Length match (byte_lane_0)| PASS (spread 0.06mm, tol 0.1mm) |

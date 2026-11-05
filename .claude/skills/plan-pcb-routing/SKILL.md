@@ -54,10 +54,10 @@ in run 29, where KiCad's DRC was the only channel that saw copper against a
 part's own net-0 tab (#962, #994). It also reports KiCad's `connection_width`
 webs and `starved_thermal` spokes on lines of their own (`connwidth=`,
 `thermal=`; #406, #1334). Neither is part of its CONSISTENT verdict or its
-exit code, so read them before calling a board done. It needs `kicad-cli`,
-and `krt_registry` does not list it because it lives under `tests/`. Without
-`kicad-cli` it prints SKIP and `NOT RUN`, compares 0 boards and exits 2: record
-that as NOT RUN, never as agreement.
+exit code, so read them before calling a board done. `krt_registry` lists the
+tracked tools outside `tests/`, so it does not list this one. "Verify Results"
+(the example chain's Step 6) runs it and `check_cycles.py`, and says what to
+read and what each exit code means.
 
 Every runnable tool in this clone declares which door it serves and which of
 those two kinds it is. The routing door's own view, with each tool's purpose:
@@ -2452,6 +2452,50 @@ through the stage partition (Step 5b). For each one, go back and handle it —
 route it, or add it to the plane step (a secondary ground gets its own pour
 region per Step 5b) — then re-verify. Do not declare the board done while the
 list has unjustified entries.
+
+**Two reported reads on every routed board.** `check_complete.py` runs neither
+of these, and no other step grades KiCad's `connection_width` webs. Run both and
+put their lines in the report. They are reported, not
+gating (#1334): neither one changes a DONE, and neither sends the board back on
+its own.
+
+```bash
+python3 -X utf8 tests/stress/kicad_drc_compare.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_kicad.txt
+python3 -X utf8 py_tools/check_cycles.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_cycles.txt
+```
+
+`kicad_drc_compare.py` took 2 s on a 21-part 2-layer board and 4 s on a 64-part
+one; it refills the zones of a staged copy, never your board, so allow longer on
+a large pour. Report from it:
+
+- **`connwidth=N@<W mm`**: copper webs narrower than W, one `CONNWIDTH` row each
+  (net, position), for instance a neck in a pour. W is the project's `min_connection`,
+  else its `min_track_width`, staged for this run: KiCad's check is off by
+  default, so a plain `kicad-cli pcb drc` of the same file can report none.
+  `connwidth=not-graded` means no floor was recorded to grade at.
+- **`thermal=` and `dangling=`**: pads short of spokes and dangling track ends
+  at the project's severity (`STARVED-THERMAL`, `TRACK-DANGLING` rows).
+- **Every `KICAD-ONLY` and `CHECKDRC-ONLY` row**, and any `NOT CLASSIFIED` line.
+
+Its exit code covers only the `KICAD-ONLY` and `CHECKDRC-ONLY` rows:
+
+| exit | means | do |
+|---|---|---|
+| 0 | compared, and the two engines agree on copper clearance. `connwidth=`, `thermal=` and `dangling=` can still be non-zero | read and report those three |
+| 1 | a `KICAD-ONLY` or `CHECKDRC-ONLY` row | name each row. A `KICAD-ONLY` `shorting_items` may be a short `check_drc` missed: look at that copper before presenting the board |
+| 2 | NOT RUN: no `kicad-cli`, or it failed on this board. It prints SKIP and `NOT RUN` and compares 0 boards | record NOT RUN, never agreement, and say so in the report. `py_tools/kicad_cli_path.py` shows where the tools look for it (#1418) |
+
+Add `--baseline <the board the chain started from>` to subtract what that board
+already carried, at the cost of a second KiCad run; a pile (parts staged off the
+outline) cancels little (#1333).
+
+`check_cycles.py` needs no KiCad and took 0.1 s on the same board. It lists
+signal nets whose copper closes a loop or stacks overlapping same-net vias, and
+exits 1 when there is one, 0 when not. Report each net with its `loops` and
+`ovlVias`; `python3 -X utf8 py_tools/check_cycles.py board_final.kicad_pcb --net
+<net> --verbose` shows the via coordinates of one net. Copper that `check_weird.py` calls removable already fails
+`check_complete`, so a loop left on a DONE board is one it did not call removable:
+tell the user rather than re-route for it.
 
 ### Alternative: VCC as Wide Traces (No Plane)
 
