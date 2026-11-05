@@ -11,11 +11,12 @@ The chain (whole_chain.sh): the fanout choosing every net's tooth and berth with
 graded (check_connected, check_drc). A round that leaves nets open is followed by round 1 AGAIN under the next seed
 (cp_seed: every solve of the round searches under the step's seed plus the round less one) -- from the same board, the
 cap step again, nothing carried from the round before: another draw, not a repair of this one -- up to ROUNDS rounds
-(default 4), the first laid clean ending them. With --feedback-rounds F (default 0), up to F of them after each draw
-are FEEDBACK ROUNDS under its seed instead: the ends the round before's audits found crowded, its lanes over two vias
-and its open nets (whole_feedback) go back to the fanout (FEEDBACK=), which chooses again INCREMENTALLY from that
-round's board. BASE (default fb_t2q_pairs.kicad_pcb) is the bench, DEST (default DU1) its destination part, both from
-the environment as the shell script reads them.
+(default 4), the first laid clean ending them. With --feedback-rounds F (default 0), up to F of them after each draw are
+FEEDBACK ROUNDS under its seed instead: the ends the round before's audits found crowded, its lanes over two vias and
+its open nets (whole_feedback) go back to the fanout (FEEDBACK=), which chooses again INCREMENTALLY from that round's
+board. A round whose solve has NO PLAN is followed by a feedback round whatever F (the lanes its solve found no room
+for, named), within the ROUNDS. BASE (default fb_t2q_pairs.kicad_pcb) is the bench, DEST (default DU1) its destination
+part, both from the environment as the shell script reads them.
 
 The loop (whole_loop.sh), every step fed by a MEASUREMENT of the one before: geometry (whole_geo), polish
 (whole_polish), audit (whole_audit through whole_gate); side flips the polish could not avoid go to the geometry again
@@ -2202,7 +2203,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                         **({'JOINT_ROUND': str(r), 'JOINT_LOOP': '1'} if env.get('JOINT_DIR') else {})}
         crowded = json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []
         J, proved, rc, res, loopd = {}, False, None, None, os.path.join(d, 'loop')
-        if not os.path.isfile(solve):
+        no_plan = not os.path.isfile(solve)
+        if no_plan:
             say("  no plan from the solve -- nothing for this round to lay"
                 + (f" (no room for the crossings of {', '.join(crowded)})" if crowded else ''))
             if env.get('JOINT_DIR'):
@@ -2274,9 +2276,13 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             say(stripped(run(['whole_feedback.py', '--name', os.path.join(d, 'fo.plan.json'), FB]
                              + (res['open_nets'] if res else crowded),
                              {**env, 'FB_ROUND': str(r), 'FB_CONN': os.path.join(d, 'conn.log')}, err=sys.stderr)[1]))
-        if fed_left and r < R:
-            # ---- a FEEDBACK ROUND next: its findings -- the ends the audits found crowded (a loop that did not pass),
-            # and the lanes an unproved plan left over two vias, which the ends counted on keeping at two
+        if (fed_left or no_plan) and r < R:
+            # ---- a FEEDBACK ROUND next -- and after a round whose solve had NO PLAN whatever F, within the R rounds: a
+            # draw under the next seed may choose the same ends and find the same no room (a memory bus's four draws
+            # chose the same ends, each solve with no room for one lane's crossings, and the bus was left 2 open; fed
+            # the lane the solve named, the next round closed it) -- its findings: the ends the audits found crowded (a
+            # loop that did not pass), and the lanes an unproved plan left over two vias, which the ends counted on
+            # keeping at two
             hots = []
             if rc is not None and rc != 0:
                 for a in sorted(glob.glob(os.path.join(loopd, 'p*.audit'))) + \
@@ -2307,7 +2313,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 nothing = nothing and not re.search(r'whole_feedback: [1-9]', fbn)
             if not nothing:
                 base = advance(d, base)
-                prev, fed_left = d, fed_left - 1
+                prev, fed_left = d, max(0, fed_left - 1)
                 say(f"=== round {r} left nets open -- a feedback round, under the same seed")
                 continue
             say("  the findings add nothing new: a feedback round would lay the same ends")

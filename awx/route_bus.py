@@ -198,12 +198,12 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
     (or none was found, or negotiated buses met), 2 on a usage error. The summary (--json-out, default
     <OUT>.bus/summary.json) holds each bus's own, and the buses found and not taken.
 
-    BUSES OFF ONE ARRAY are routed NEGOTIATED, each seeing the others (negotiated_buses.route_negotiated: a solo run
-    of each, the shared field planned once for all of them, every bus on that shared field in its own frame and a
-    process of its own, their plans one coupled solve, merged), in one step where the first of them comes. The first of
-    them may be whole-array and the rest are plain: where their modes come from `whole_array` only, the first takes
-    it; a group the negotiation does not take (an escape bus, a whole-array one after the first, a group bus, routing
-    layers apart -- negotiated_buses.check) is routed sequentially, and why is named. `sequential`: every bus
+    BUSES OFF ONE ARRAY are routed NEGOTIATED, each seeing the others (negotiated_buses.route_negotiated: a solo run of
+    each, the shared field planned once for all of them, every bus on that shared field in its own frame and a process
+    of its own, their plans one coupled solve, merged), in one step where the first of them comes. The first of them may
+    be whole-array and the rest are plain: where their modes come from `whole_array` only, the first takes it; a group
+    the negotiation does not take (an escape bus, a whole-array one after the first or to several parts, routing layers
+    apart -- negotiated_buses.check) is routed sequentially, and why is named. `sequential`: every bus
     sequentially.
 
     Sequential, A SHARED ARRAY: an escape bus on an array an earlier bus was handed on through has that array planned
@@ -588,8 +588,24 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                 f'-- '
                 + '; '.join(x.strip() for x in elog if x.strip().startswith((f'{src}:', f'{dest}:')))[:300])
     else:
-        with contextlib.redirect_stdout(sys.stderr):
-            n_t, n_v, failed = mb.fanout_source(base, fanned, src, names, reserve=spec)
+        # (a ball the comb refuses HOLDS the escape the board came with at the source, where every piece of it stands
+        # clear of the board before the comb, and the comb fans the bus's other balls again round it, until it refuses
+        # none it can hold: on a shared field, which planned every bus's balls together, a whole-array bus fans its own
+        # balls again round the other buses' reserved runs, and its comb's stubs took the dog-bone sites of six deep
+        # balls of a memory bus the field had escaped, so their nets were never in the ladder)
+        held_e, base_c = [], base
+        while True:
+            with contextlib.redirect_stdout(sys.stderr):
+                n_t, n_v, failed = mb.fanout_source(base_c, fanned, src, [n for n in names if n not in held_e],
+                                                    reserve=spec)
+            more = hold_board_escapes(board, base_c, os.path.join(work, 'base_held.kicad_pcb'), pcb, src, failed) \
+                if failed else []
+            if not more:
+                break
+            held_e += more
+            base_c = os.path.join(work, 'base_held.kicad_pcb')
+            log(f'  {src}: the comb\'s refused ball(s) holding the escape the board came with: '
+                + ', '.join(short(n) for n in more) + ' -- the rest fanned again round them')
         with contextlib.redirect_stdout(sys.stderr):
             fix_project_for_output(fanned, clearance=te.SPEC_CLEARANCE, track_width=sr.FAN_TRACK,
                                    via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL, verbose=False)
@@ -1618,6 +1634,35 @@ def clear_row_escapes(board, ref, names, keep, work, log=print):
     return sorted(moved)
 
 
+def hold_board_escapes(board, base, out, pcb, src, failed):
+    """The refused balls `failed` (full names) of `src` that can HOLD the escape `board` has them at `src`
+    (escape_blocks): a net's whole escape where every piece of it stands clear of the copper `base` holds
+    (_clear_blocks), none of it otherwise. `out`: `base` with those escapes laid (its project `base`'s). Returns the
+    nets that hold one"""
+    blocks = escape_blocks(open(board, encoding='utf-8').read(), pcb, src, failed)
+    if not blocks:
+        return []
+    name_of = {i: n.name for i, n in pcb.nets.items() if n.name}
+
+    def net_of(b):
+        m_nm = re.search(r'\(net "([^"]+)"\)', b)
+        m_id = re.search(r'\(net (\d+)\)', b)
+        return m_nm.group(1) if m_nm else name_of.get(int(m_id.group(1))) if m_id else None
+    by_net = collections.defaultdict(list)
+    for b in blocks:
+        by_net[net_of(b)].append(('via' if b.lstrip().startswith('(via') else 'segment', b))
+    txt = open(base, encoding='utf-8').read()
+    held = [n for n in failed if by_net.get(n) and len(_clear_blocks(base, txt, by_net[n])) == len(by_net[n])]
+    if held:
+        end = txt.rstrip().rfind(')')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(txt[:end].rstrip() + '\n' + ''.join(f'  {b}\n' for n in held for _t, b in by_net[n]) + txt[end:])
+        if os.path.abspath(out) != os.path.abspath(base):
+            import fanout_from_plan as fp
+            fp.copy_pro(base, out)
+    return held
+
+
 def escape_blocks(txt, pcb, ref, names, grow=1.5):
     """The segment and via blocks of the nets `names` (full names) inside `ref`'s box of pads grown `grow` mm, in
     either net dialect: the escapes an earlier fanout laid them at that array (SOURCE_SHARED)"""
@@ -1965,7 +2010,8 @@ def main():
     ap.add_argument('--feedback-rounds', type=int, default=0, metavar='F',
                     help='after each draw that leaves nets open, up to F of the rounds under its seed, the fanout '
                          'fed what the round before found (its crowded ends, its lanes over two vias, its open nets) '
-                         'and choosing again from that round\'s board (default 0: every round a draw)')
+                         'and choosing again from that round\'s board (default 0: every round a draw, but a round '
+                         'whose solve had no plan is followed by a feedback round whatever F)')
     ap.add_argument('--inproc', action='store_true', help='every stage in this process rather than each in its own')
     ap.add_argument('--whole-array', action='store_true',
                     help='the WHOLE-ARRAY fanout: after each round lays the bus at the two arrays, plan and lay '

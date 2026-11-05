@@ -1778,8 +1778,9 @@ python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
   field), then every bus at the same time, each in its own frame, their plans
   one coupled solve, and the boards merged (a conflict between two buses is
   named in `OUT.bus/conflicts.json`). The first may be `whole-array`, the
-  rest `plain`. Otherwise -- an escape bus among them, a group bus, different
-  LAYERS -- and with `--sequential`, they are routed SEQUENTIALLY, one after
+  rest `plain`. Otherwise -- an escape bus among them, a whole-array bus
+  after the first or to several parts, different LAYERS -- and with
+  `--sequential`, they are routed SEQUENTIALLY, one after
   another in the order given, and the log says why (`route_bus: the N buses
   off U1 routed sequentially, not negotiated -- ...`).
 - **Every ball of a bus array must leave the step served -- the rule that

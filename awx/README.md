@@ -893,7 +893,12 @@ the buses one after another instead.
 3. **Negotiated.** Every bus is routed on the shared field at the same time,
    each in its own frame. Each plain bus keeps its escapes there; a
    whole-array bus lays its own again each round, round the plain buses'
-   reserved ones, as in its solo run. Each round's first plan is a **coupled
+   reserved ones, as in its solo run. A ball its comb refuses there holds
+   the shared field's escape, and the comb fans its other balls again round
+   it, until it refuses none it can hold (`hold_board_escapes`): fanned again
+   whole, a memory bus's comb took the dog-bone sites of six deep balls the
+   field had escaped, and their nets never reached its ladder; held, all 48
+   did, and the bus routed 0 open. Each round's first plan is a **coupled
    solve**: each bus solves its own plan, lays it out (geometry and polish)
    and asks. The last to ask builds every bus's model into one CP-SAT model
    (`whole_solve.solve(joint=)`, `whole_joint.py`), each hinted with its own
@@ -2078,6 +2083,14 @@ for some of the lanes exists:
   same ends after raising them, is the next draw instead. On a short DDR bus
   whose round 1 left one net open under both of its first two seeds, a
   feedback round after the first closed it;
+- a round whose solve has **no plan** is followed by a feedback round
+  whatever F, within the rounds: its solve's lanes with no room for their
+  crossings named to the fanout. A draw under the next seed may choose the
+  same ends: a memory bus's four draws chose the same ones, every solve with
+  no room for one lane's crossings, and the bus was left 2 nets open (the
+  last resort); fed that lane, its second round laid every net clean. The
+  feedback round's fanout takes about a draw's time, so the rounds take no
+  longer;
 - when no round laid anything, the **last resort** is a partial plan on the
   last ends laid: the lanes the rounds named left out (else the three most
   crossed), then more, to a quarter and to half of the lanes -- never every
