@@ -372,7 +372,7 @@ layers only.
 |-------|------|---------|
 | `layers` | Dict[int, str] | Layer ID → name for all layers |
 | `copper_layers` | List[str] | Copper layer names, top to bottom. Includes every `.Cu` layer regardless of declared use-type (`signal`, `power`, `mixed`, `jumper`) — KiCad often types plane layers `power`. |
-| `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts (board-level graphics AND footprint-embedded outline shapes), or `None` |
+| `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts (board-level graphics AND footprint-embedded outline shapes), or `None`. An arc is read off chords of 5 um sag (`BOUNDS_CHORD_EPS`) on both parse paths, coarser than the rings' 0.5 um (`EDGE_CHORD_EPS`), so a ring can stand up to 5 um past it (#1700). To ask whether a ring fits, read the bounds at the ring's sag, as `floorplan.outline_state` does |
 | `board_outline` | List[Tuple[float, float]] | Outline polygon for non-rectangular boards (empty if rectangular); the largest outer ring when there are several |
 | `board_outlines` | List[List[Tuple]] | EVERY outer ring (#304): split keyboards drawn as two halves, panels. Empty on a single-outline or rectangular board, which means "use `board_outline`" |
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
@@ -744,7 +744,7 @@ large file:
 |----------|---------|
 | `read_board_text(path, quiet=False)` | the file's text as KiCad reads it (teardrop-token repair, one-line reflow) — what `parse_kicad_pcb` hands the extractors |
 | `extract_layers(content)` | `BoardInfo` (layers, bounds, stackup, outline, cutouts) |
-| `extract_board_bounds(content)` | `(min_x, min_y, max_x, max_y)` from Edge.Cuts, or `None` |
+| `extract_board_bounds(content, chord_eps=BOUNDS_CHORD_EPS)` | `(min_x, min_y, max_x, max_y)` from Edge.Cuts with an arc read at chord sag `chord_eps`, or `None` |
 | `extract_stackup(content)` | `List[StackupLayer]` |
 | `extract_nets(content, kicad_version=0)` | `(Dict[int, Net], Dict[str, int])` — nets and name→id; the dialect is read from the content, `kicad_version` is kept for callers |
 | `extract_footprints_and_pads(content, nets, name_to_id=None, duplicates=None, board_copper=None)` | `(Dict[str, Footprint], Dict[int, List[Pad]])` — `duplicates`, if given, is FILLED with the duplicate-reference counts; `board_copper` (the board's copper layers) puts a plated pad on all of them, as pcbnew does |

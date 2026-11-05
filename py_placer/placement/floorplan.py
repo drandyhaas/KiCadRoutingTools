@@ -3618,7 +3618,10 @@ def outline_state(pcb_data, pcb_file: str = '') -> Dict[str, object]:
         `gr_curve`, so a round board reads as having no outline at all on the
         text path while the pcbnew path sees it fine.
       * A parsed ring reaches OUTSIDE `board_bounds` -- the same bug, curve
-        flavour, where the bbox scan misses the bulge.
+        flavour, where the bbox scan misses the bulge. The rings read an arc
+        finer than `board_bounds` does (`kicad_parser.BOUNDS_CHORD_EPS`, #1700),
+        so a ring past them is asked again of the same scan at the rings' sag:
+        that scan misses what the bbox scan misses, and an arc's apex is not one.
       * Segments exist, they are not a simple rectangle, and no ring chained.
 
     None of these are graded around; the run refuses and says which.
@@ -3632,11 +3635,13 @@ def outline_state(pcb_data, pcb_file: str = '') -> Dict[str, object]:
     bounds = bi.board_bounds
 
     segments = []
+    text = None
     if pcb_file and os.path.exists(pcb_file):
         try:
             from kicad_parser import _collect_edge_cuts_segments
             with open(pcb_file, encoding='utf-8') as fh:
-                segments = _collect_edge_cuts_segments(fh.read())
+                text = fh.read()
+            segments = _collect_edge_cuts_segments(text)
         except (OSError, ImportError, ValueError):
             segments = []
     rectangle = _is_simple_rectangle(segments)
@@ -3653,8 +3658,12 @@ def outline_state(pcb_data, pcb_file: str = '') -> Dict[str, object]:
         else:
             problems.append("the board has no Edge.Cuts outline")
     elif ring_pts:
-        out = max(max(bounds[0] - x, x - bounds[2], bounds[1] - y,
-                      y - bounds[3]) for x, y in ring_pts)
+        def past(b):
+            return max(max(b[0] - x, x - b[2], b[1] - y, y - b[3]) for x, y in ring_pts)
+        out = past(bounds)
+        if out > 1e-3 and text is not None:
+            from kicad_parser import EDGE_CHORD_EPS, extract_board_bounds
+            out = past(extract_board_bounds(text, chord_eps=EDGE_CHORD_EPS) or bounds)
         if out > 1e-3:
             problems.append(
                 f"a parsed outline ring reaches {out:.3f}mm outside "

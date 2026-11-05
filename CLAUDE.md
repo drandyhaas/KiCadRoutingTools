@@ -766,7 +766,9 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 
 - `pcb.board_info.copper_layers` - List[str] of copper layer names (e.g., ['F.Cu', 'B.Cu'])
 - `pcb.board_info.layers` - Dict[int, str] layer_id -> layer_name
-- `pcb.board_info.board_bounds` - (min_x, min_y, max_x, max_y) or None
+- `pcb.board_info.board_bounds` - (min_x, min_y, max_x, max_y) or None. Copper
+  and poses are laid out from it, so it keeps its coarser reading of an arc
+  (`BOUNDS_CHORD_EPS`, #1700) and a ring can stand up to 5 um past it
 - `pcb.board_info.stackup` - List[StackupLayer], ordered top to bottom
   (NOT `pcb.stackup`). Empty list if the board has no stackup section.
 - StackupLayer fields: `name`, `layer_type` ('copper', 'core', 'prepreg', ...),

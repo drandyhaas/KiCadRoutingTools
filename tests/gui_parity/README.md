@@ -131,6 +131,7 @@ Text parser vs pcbnew (both parse paths, with pcbnew as the referee where it
 can be): `test_726_parse_path_parity.py` (duplicated references),
 `test_ref_label_pcbnew_parity.py` (reference labels, #481),
 `test_829_edge_cuts_owner_parity.py` (who owns the outline),
+`test_1700_arc_bounds_parity.py` (`board_bounds` off an Edge.Cuts arc),
 `test_751_via_protection_readback.py` (via protection on a SWIG without the
 enums), `test_via_type_parse_parity.py` (via spans, #1268),
 `test_962_paste_parity.py` and `test_962_native_graphic_overrun.py` (paste
