@@ -1138,6 +1138,43 @@ def main():
                          or own_gating or rule_gating or through_gating)
     verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
+    # #1665: an intent's waivers are read only with --intent, so a pair a
+    # placement run waived gates here while place_simple and the verifier call
+    # the same board buildable. Said only when it could matter: when a gating
+    # pair is one a waiver reaches (`PairWaivers`). Pad intersections, copper
+    # off the outline, a plug's mating region, own-pad shorts, rule-area items
+    # and a body through the board take no waiver.
+    waiver_candidates = None
+    if not args.intent:
+        _by_pair = {}
+        for _what, _pairs in (
+                ('containment', [(q.a, q.b) for q in g['containment_blocking_pairs']]),
+                ('closed silk body', [(q.a, q.b) for q in silk_gating]),
+                ('courtyard', [(q.a, q.b) for q in courtyard_gating]),
+                ('test point covered', [(t.testpoint, t.cover) for t in tp_gating]),
+                ('pin in courtyard', [(q.a, q.b) for q in pin_hits]),
+                ('coincident origin', [(a, b) for grp in stack_groups
+                                       for i, a in enumerate(grp['refs'])
+                                       for b in grp['refs'][i + 1:]])):
+            for _p in _pairs:
+                _by_pair.setdefault(tuple(sorted(_p)), []).append(_what)
+        waiver_candidates = [{'pair': list(k), 'channels': v}
+                             for k, v in sorted(_by_pair.items())]
+        if waiver_candidates:
+            _no_waiver = bool(g['blocking'] or off_outline_pads or mating
+                              or graphic_gating or own_gating or rule_gating
+                              or through_gating)
+            print("  NOTE: no --intent, so no waiver was read. An intent's "
+                  "`overlap_waivers` or `fixed_poses[].accept_courtyard_overlap` "
+                  "can excuse: "
+                  + ', '.join(f"{r['pair'][0]}<->{r['pair'][1]} "
+                              f"({', '.join(r['channels'])})"
+                              for r in waiver_candidates)
+                  + ". If a placement run left this board an intent, grade with "
+                    "--intent <intent.json> before acting on this verdict; with "
+                    "no intent behind it, the verdict stands."
+                  + (" Other conjuncts above take no waiver, and gate either way."
+                     if _no_waiver else ''))
 
     if args.json:
         doc = {
@@ -1161,6 +1198,9 @@ def main():
             # verdict back out of stdout rather than reading the JSON.
             'buildable': not not_buildable,
             'verdict': verdict,
+            # #1665: the gating pairs a waiver could excuse, none having been
+            # read; null with --intent, where the waivers were.
+            'waiver_candidates': waiver_candidates,
             'locked_contacts': len(locked_contact),
             'advisory': g['advisory'],
             'waived': g['waived'],

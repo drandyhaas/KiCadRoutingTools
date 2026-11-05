@@ -808,7 +808,10 @@ overlap is waived whatever the parts' lock and listed under `COURTYARD
 ACCEPTED BY A DECLARED POSE` (JSON `courtyard_fixed_pose_waived`), while a
 drawn-body containment, pads and holes keep their gates. `check_floorplan
 --emit-intent` writes those pairs, with a WARNING, for declared poses that
-overlap each other. Courtyards are graded
+overlap each other. Without `--intent` none of this is read, and a NOT BUILDABLE
+with a gating pair a waiver could excuse says so in a `NOTE: no --intent` line
+after the verdict, naming the pairs (JSON `waiver_candidates`, null with
+`--intent`; #1665). Courtyards are graded
 at the project's own `courtyards_overlap` severity unless
 `--ignore-project-severity`. A part standing under another's body with room
 to spare (#1443, the placer's notes above) is labelled `height_clear` on

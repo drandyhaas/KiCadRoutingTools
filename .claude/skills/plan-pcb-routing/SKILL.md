@@ -79,6 +79,12 @@ python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --json wk/assembly0.j
 python3 -X utf8 py_tools/board_score.py board.kicad_pcb --json wk/score0.json --quiet
 ```
 
+When placement left a floorplan intent, add `--intent <intent.json>` to
+`check_assembly`: only then does it read the overlaps that run waived
+(`overlap_waivers`, a declared pose's `accept_courtyard_overlap`), and without
+it such a pair reads NOT BUILDABLE. A `NOTE: no --intent` beside the verdict
+names the pairs a waiver could excuse.
+
 **What each one is for.** `check_assembly` decides this gate: read its
 `VERDICT:` line, **not** `blocking == 0`. `blocking` is only one of the
 conjuncts that verdict is made of, so a board unbuildable through a

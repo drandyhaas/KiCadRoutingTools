@@ -1104,7 +1104,7 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   Read the `cost` line: `hints` and `groups` say which group or hint the
   result could not satisfy.
 - **Check and LOOK** at each judged seed:
-  `python3 -X utf8 py_tools/check_assembly.py <placed> --baseline wk/<run>/fixed.kicad_pcb`
+  `python3 -X utf8 py_tools/check_assembly.py <placed> --intent wk/<run>/intent.json --baseline wk/<run>/fixed.kicad_pcb`
   (read `buildable`),
   `python3 -X utf8 py_tools/check_floorplan.py <placed> --intent wk/<run>/intent.json`
   (0 errors; on a seed placed from a pile, this is where each edge row's
