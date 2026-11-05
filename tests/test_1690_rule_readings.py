@@ -20,6 +20,14 @@ What the table pins:
   4. a literal with no closing quote runs to the end of the condition;
   5. a term on a B there is not is false, `A.Net != B.Net` too.
 
+`LAYER_ROWS` and `PART_ROWS` do the same on a second fixture, for
+existsOnLayer() (wildcards by wxString::Matches, case-sensitive, a pad's mask and
+paste layers, every copper layer for `*.Cu`) and memberOfFootprint() (the reference
+by the same match; the library id too when the name holds a ':'; the reference as the
+file spells it on a second block claiming it). `COURTYARD_ARGS` holds
+`PadEdgeRules`' reading of a courtyard term as memberOfFootprint() to KiCad, and
+`EDGE_LIBRARY` holds `for_pad` to an edge rule naming a library.
+
 `COMPILES` / `REFUSED` are conditions KiCad does and does not compile: a refused
 one makes it enforce no rule of the file, with exit 0 and nothing printed, which
 `kicad_condition_refusal` models and the run says. `FILES_REFUSED` are the same
@@ -28,7 +36,7 @@ which retries a failed condition with the Edge.Cuts shape as A, as the DRC does.
 
 Cost with kicad-cli (the fixture is a dozen items): `READINGS` about 10 runs,
 `COMPILES` one, each row of `REFUSED` and `FILES_REFUSED` one on three workers,
-`ZONE` one each: 3 minutes on a laptop busy with other runs, 100 s of it `REFUSED`.
+`ZONE` one each: under 4 minutes on a laptop busy with other runs, 100 s of it `REFUSED`.
 Without KiCad the model half runs in seconds.
 
     python3 tests/test_1690_rule_readings.py
@@ -401,6 +409,189 @@ ZONE = (
 )
 
 
+def _part(lib, ref, uid, x):
+    return (f'(footprint "{lib}" (layer "F.Cu") (uuid "f0{uid}0000-0000-0000-0000-000000000000") (at {x} 10)\n'
+            f'  (property "Reference" "{ref}" (at 0 -2 0) (layer "F.SilkS") '
+            f'(uuid "f1{uid}0000-0000-0000-0000-000000000000") '
+            f'(effects (font (size 1 1) (thickness 0.15))))\n'
+            f'  (fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05) (type default)) (fill no) '
+            f'(layer "F.CrtYd") (uuid "f3{uid}0000-0000-0000-0000-000000000000"))\n'
+            f'  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "A") '
+            f'(uuid "a0{uid}0000-0000-0000-0000-000000000000")))\n')
+
+
+_PARTS2 = (('Device:R_0402', 'R7', '01'), ('x:Z', 'a:b', '02'), ('Bare0603', 'B3', '03'),
+           ('Device:R_0402', 'R8', '04'), ('lib.v2:Name With Space', 'U1', '05'),
+           ('x:D', 'D1', '09'), ('x:D', 'D1', '10'))
+#: a part's reference may read as a library name; two blocks may claim one reference
+BOARD2 = ('''(kicad_pcb (version 20241229) (generator "pcbnew") (generator_version "9.0")
+ (general (thickness 1.6)) (paper "A4")
+ (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)
+  (36 "B.SilkS" user "B.Silkscreen") (37 "F.SilkS" user "F.Silkscreen") (38 "B.Mask" user)
+  (39 "F.Mask" user) (34 "B.Paste" user) (35 "F.Paste" user) (44 "Edge.Cuts" user)
+  (46 "B.CrtYd" user "B.Courtyard") (47 "F.CrtYd" user "F.Courtyard"))
+ (setup (pad_to_mask_clearance 0))
+ (net 0 "") (net 1 "A") (net 2 "B")
+ (gr_rect (start 0 0) (end 60 40) (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts")
+  (uuid "e0000000-0000-0000-0000-000000000001"))
+ ''' + ''.join(_part(lib, ref, uid, 5 + 7 * i) for i, (lib, ref, uid) in enumerate(_PARTS2)) + '''
+ (footprint "x:P" (layer "F.Cu") (uuid "f0060000-0000-0000-0000-000000000000") (at 10 20)
+  (property "Reference" "P1" (at 0 -2 0) (layer "F.SilkS") (uuid "f1060000-0000-0000-0000-000000000000")
+   (effects (font (size 1 1) (thickness 0.15))))
+  (pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") (net 2 "B")
+   (uuid "a0060000-0000-0000-0000-000000000000")))
+ (footprint "x:H" (layer "F.Cu") (uuid "f0070000-0000-0000-0000-000000000000") (at 20 20)
+  (property "Reference" "H1" (at 0 -2 0) (layer "F.SilkS") (uuid "f1070000-0000-0000-0000-000000000000")
+   (effects (font (size 1 1) (thickness 0.15))))
+  (pad "1" np_thru_hole circle (at 0 0) (size 1.6 1.6) (drill 1.6) (layers "*.Cu" "*.Mask")
+   (uuid "a0070000-0000-0000-0000-000000000000")))
+ (footprint "x:BK" (layer "B.Cu") (uuid "f0080000-0000-0000-0000-000000000000") (at 30 20)
+  (property "Reference" "K1" (at 0 -2 0) (layer "B.SilkS") (uuid "f1080000-0000-0000-0000-000000000000")
+   (effects (font (size 1 1) (thickness 0.15))))
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "B.Cu" "B.Mask" "B.Paste") (net 2 "B")
+   (uuid "a0080000-0000-0000-0000-000000000000")))
+ (segment (start 5 30) (end 8 30) (width 0.2) (layer "F.Cu") (net 2) (uuid "b0000000-0000-0000-0000-000000000001"))
+ (segment (start 5 32) (end 8 32) (width 0.2) (layer "In1.Cu") (net 2) (uuid "b0000000-0000-0000-0000-000000000002"))
+ (segment (start 5 34) (end 8 34) (width 0.2) (layer "B.Cu") (net 2) (uuid "b0000000-0000-0000-0000-000000000003"))
+ (via (at 20 30) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "c0000000-0000-0000-0000-000000000001"))
+ (via micro (at 25 30) (size 0.5) (drill 0.2) (layers "F.Cu" "In1.Cu") (net 2) (uuid "c0000000-0000-0000-0000-000000000002"))
+ (via blind (at 30 30) (size 0.6) (drill 0.3) (layers "F.Cu" "In2.Cu") (net 2) (uuid "c0000000-0000-0000-0000-000000000003"))
+ (zone (net 2) (net_name "B") (layer "B.Cu") (uuid "d0000000-0000-0000-0000-000000000001") (hatch edge 0.5)
+  (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))
+  (polygon (pts (xy 40 25) (xy 55 25) (xy 55 35) (xy 40 35))))
+)
+''')
+NAMES2 = {'a0010000-0000-0000-0000-000000000000': 'R7', 'a0020000-0000-0000-0000-000000000000': 'a:b',
+          'a0030000-0000-0000-0000-000000000000': 'B3', 'a0040000-0000-0000-0000-000000000000': 'R8',
+          'a0050000-0000-0000-0000-000000000000': 'U1', 'a0090000-0000-0000-0000-000000000000': 'D1',
+          'a0100000-0000-0000-0000-000000000000': 'D1~2', 'a0060000-0000-0000-0000-000000000000': 'P1',
+          'a0070000-0000-0000-0000-000000000000': 'H1', 'a0080000-0000-0000-0000-000000000000': 'K1',
+          'b0000000-0000-0000-0000-000000000001': 't_F', 'b0000000-0000-0000-0000-000000000002': 't_In1',
+          'b0000000-0000-0000-0000-000000000003': 't_B', 'c0000000-0000-0000-0000-000000000001': 'via',
+          'c0000000-0000-0000-0000-000000000002': 'micro', 'c0000000-0000-0000-0000-000000000003': 'blind',
+          'd0000000-0000-0000-0000-000000000001': 'zone', 'e0000000-0000-0000-0000-000000000001': 'edge'}
+ALL2 = frozenset(NAMES2.values())
+F_PADS = frozenset({'R7', 'a:b', 'B3', 'R8', 'U1', 'D1', 'D1~2'})
+HOLES = frozenset({'P1', 'H1'})
+ALL_PADS = F_PADS | HOLES | {'K1'}
+_F = F_PADS | HOLES | {'t_F', 'via', 'micro', 'blind'}
+_INNER1 = HOLES | {'t_In1', 'via', 'micro', 'blind'}
+
+
+def _on(arg):
+    return f"A.existsOnLayer('{arg}')"
+
+
+LAYER_ROWS = {
+    _on('F.Cu'): _F,
+    _on('B.Cu'): HOLES | {'K1', 't_B', 'via', 'zone'},
+    _on('In1.Cu'): _INNER1,
+    _on('In2.Cu'): HOLES | {'via', 'blind'},
+    # wildcards, by wxString::Matches: case-sensitive, and '[' is no class
+    _on('In*.Cu'): _INNER1,
+    _on('In?.Cu'): _INNER1,
+    _on('In1*'): _INNER1,
+    _on('*.Cu'): ALL2 - {'edge'},
+    _on('?.Cu'): ALL2 - {'edge', 't_In1'},
+    _on('F.*'): _F,
+    _on('*'): ALL2,
+    _on('[FB].Cu'): NONE,
+    _on('f.cu'): NONE,
+    _on('F.cu'): NONE,
+    _on('B.cu'): NONE,
+    _on('in1.cu'): NONE,
+    _on('in*.cu'): NONE,
+    _on('*.cu'): NONE,
+    # not copper
+    _on('Edge.Cuts'): {'edge'},
+    _on('Edge*'): {'edge'},
+    _on('F.Mask'): F_PADS | HOLES,
+    _on('*.Mask'): ALL_PADS,
+    _on('B.Paste'): {'K1'},
+    _on('*.Paste'): {'K1'},
+    _on('Nope'): NONE,
+    _on('Dwgs.User'): NONE,
+    # a pad's *.Cu is every layer KiCad has, a through via every layer of the board
+    _on('In9.Cu'): HOLES,
+    _on('In3*'): HOLES,
+    # a second argument
+    "A.existsOnLayer('F.Cu','B.Cu')": NONE,
+    "A.existsOnLayer('Nope','F.Cu')": NONE,
+    # in a condition, as a rule file writes them
+    "!A.existsOnLayer('In*.Cu')": ALL2 - _INNER1,
+    "A.existsOnLayer('In*.Cu') && A.Type == 'Track'": {'t_In1'},
+    "(A.existsOnLayer('F.Cu') || A.existsOnLayer('B.cu')) && A.Type == 'Track'": {'t_F'},
+}
+
+
+def _of(arg):
+    return f"A.memberOfFootprint('{arg}')"
+
+
+PART_ROWS = {
+    # the reference
+    _of('R7'): {'R7'},
+    _of('r7'): NONE,
+    _of('R*'): {'R7', 'R8'},
+    _of('R?'): {'R7', 'R8'},
+    _of('?7'): {'R7'},
+    _of('[R]7'): NONE,
+    _of('*'): ALL_PADS,
+    _of('D1'): {'D1', 'D1~2'},      # both blocks claim it
+    # the library id, only when the name holds a ':'
+    _of('Device:R_0402'): {'R7', 'R8'},
+    _of('device:r_0402'): NONE,
+    _of('Device:*'): {'R7', 'R8'},
+    _of('*:R_0402'): {'R7', 'R8'},
+    _of('Device:R_????'): {'R7', 'R8'},
+    _of('Dev*:R*'): {'R7', 'R8'},
+    _of('R_0402'): NONE,
+    _of('*R_0402'): NONE,
+    _of('*0402*'): NONE,
+    _of(':R_0402'): NONE,
+    _of('Device:'): NONE,
+    _of('*:*'): ALL_PADS - {'B3'},
+    _of('x:D'): {'D1', 'D1~2'},
+    _of('x:*'): {'a:b', 'D1', 'D1~2', 'P1', 'H1', 'K1'},
+    _of('lib.v2:Name With Space'): {'U1'},
+    _of('*:Name*'): {'U1'},
+    # a reference that reads as a library name matches either way
+    _of('a:b'): {'a:b'},
+    _of('a:*'): {'a:b'},
+    _of('*:b'): {'a:b'},
+    _of('x:Z'): {'a:b'},
+    _of('*:Z'): {'a:b'},
+    _of('A:B'): NONE,
+    # a part with no library
+    _of('Bare0603'): NONE,
+    _of(':Bare0603'): NONE,
+    _of('*:Bare0603'): NONE,
+    _of('*0603*'): NONE,
+    _of('B3'): {'B3'},
+    # a second argument, and what is no part's
+    "A.memberOfFootprint('R7','x')": NONE,
+    "A.memberOfFootprint('x','R7')": NONE,
+    "A.Type == 'Track' && A.memberOfFootprint('*')": NONE,
+}
+
+#: `PadEdgeRules` reads `A.insideCourtyard('X')` as `A.memberOfFootprint('X')`. For a
+#: part with a courtyard, these X read alike in KiCad.
+COURTYARD_ARGS = ('R7', 'R*', 'Device:R_0402', 'Device:*', '*:R_0402', 'a:b', 'x:Z', 'r7', '*0402*',
+                  'Bare0603', 'D1', 'x:D')
+
+#: On J3 (Connector_Coaxial:SMA_Amphenol_132289_EdgeMount), 0.05 mm inside the edge
+#: under a 0.4 mm floor: the condition freeing it, and whether it does
+EDGE_LIBRARY = (
+    ("A.memberOfFootprint('Connector_Coaxial:*')", True),
+    ("A.memberOfFootprint('*:SMA_Amphenol*')", True),
+    ("A.memberOfFootprint('Connector_Coaxial:SMA_Amphenol_132289_EdgeMount')", True),
+    ("A.memberOfFootprint('connector_coaxial:*')", False),
+    ("A.memberOfFootprint('SMA_Amphenol*')", False),
+    ("A.Type == 'Pad' && A.memberOfFootprint('Connector_Coaxial:*')", True),
+    ("A.insideCourtyard('Connector_Coaxial:*')", True),
+)
+
+
 def project(classes=(DEFAULT,), assign=None, rules=None):
     return {'board': {'design_settings': {'rules': rules or {}}},
             'meta': {'filename': 'p.kicad_pro', 'version': 3},
@@ -428,22 +619,23 @@ def kicad_drc(path, *extra):
         return json.load(fh)['violations']
 
 
-def kicad_holds(work, name, pro, conds):
-    """{condition: the items it holds on}, in batches of 14 to a DRC pass."""
+def kicad_holds(work, name, pro, conds, board=BOARD, names=NAMES, size=14):
+    """{condition: the items it holds on}, in batches of `size` to a DRC pass."""
     holds = {}
-    for start in range(0, len(conds), 14):
-        batch = conds[start:start + 14]
+    every = frozenset(names.values())
+    for start in range(0, len(conds), size):
+        batch = conds[start:start + size]
         path = stage(work, f'{name}_{start}', '(version 1)\n' + ''.join(
             f'(rule "row{i}" (condition "{_SCOPE}") (constraint assertion "{c}"))\n'
-            for i, c in enumerate(batch)), pro)
+            for i, c in enumerate(batch)), pro, board)
         failed = {c: set() for c in batch}
         rows = [v for v in kicad_drc(path) if v['type'] == 'assertion_failure']
         assert len(rows) < 190, f'{len(rows)} failures: KiCad stops looking near 199'
         for v in rows:
             c = batch[int(re.search(r"row(\d+)", v['description']).group(1))]
-            failed[c] |= {NAMES.get(i['uuid'], i['uuid']) for i in v['items']}
+            failed[c] |= {names.get(i['uuid'], i['uuid']) for i in v['items']}
         for c in batch:
-            holds[c] = ALL - failed[c]
+            holds[c] = every - failed[c]
     return holds
 
 
@@ -481,8 +673,29 @@ def model_items(path):
     return items, dr
 
 
-def model_holds(path, conds):
-    items, dr = model_items(path)
+def model_items2(path):
+    from geometry_utils import via_copper_layers
+    pcb = parse_kicad_pcb(path)
+    dr = DesignRules.from_project(pcb, path)
+    b = next(nid for nid, n in pcb.nets.items() if n.name == 'B')
+    items = {f't_{ln.split(".")[0]}': (dr.item_for_net(b, 'track', ln), ln)
+             for ln in ('F.Cu', 'In1.Cu', 'B.Cu')}
+    items['zone'] = (dr.item_for_net(b, 'zone', 'B.Cu'), 'B.Cu')
+    items['edge'] = (dr_mod._EDGE_ITEM, None)
+    for v in pcb.vias:
+        if v.via_type == 'through':     # as the engines ask, with no span given
+            items['via'] = (dr.item_for_net(v.net_id, 'via', None, via_type='through'), None)
+        else:
+            items[v.via_type] = (dr.item_for_net(
+                v.net_id, 'via', None, via_type=v.via_type,
+                layers=frozenset(via_copper_layers(v, pcb.board_info.copper_layers))), None)
+    for key, fp in pcb.footprints.items():
+        items[key] = (dr.item_for_pad(fp.pads[0]), None)
+    return items, dr
+
+
+def model_holds(path, conds, build=None):
+    items, dr = (build or model_items)(path)
     ctx = ('clearance', dr._net_name_set())
     out = {}
     for c in conds:
@@ -499,6 +712,7 @@ import json, sys
 sys.path.insert(0, sys.argv[1])
 import pcbnew
 import design_rules as d
+from geometry_utils import via_copper_layers
 from kicad_parser import build_pcb_data_from_board
 board = pcbnew.LoadBoard(sys.argv[2])
 pcb = build_pcb_data_from_board(board)
@@ -511,7 +725,8 @@ items = {'track_hs': dr.item_for_net(nets['HSNET'], 'track', 'F.Cu'),
          'connect': dr.item_for_pad(pcb.footprints['C1'].pads[0]),
          'npth': dr.item_for_pad(pcb.footprints['H1'].pads[0])}
 for v in pcb.vias:
-    items[v.via_type] = dr.item_for_net(v.net_id, 'via', None, via_type=v.via_type)
+    items[v.via_type] = dr.item_for_net(v.net_id, 'via', None, via_type=v.via_type,
+                                        layers=frozenset(via_copper_layers(v, pcb.board_info.copper_layers)))
 out = {}
 for c in json.loads(sys.argv[3]):
     ast = d.parse_condition_maybe(c)
@@ -543,6 +758,63 @@ class RuleReadings(unittest.TestCase):
             for c, want in rows.items():
                 with self.subTest(arm=arm, cond=c):
                     self.assertEqual(got[c], frozenset(want), 'the table is stale')
+
+    def test_layers_and_parts_are_the_model(self):
+        path = stage(self.work, 'lp', None, project(), BOARD2)
+        rows = {**LAYER_ROWS, **PART_ROWS}
+        got = model_holds(path, list(rows), model_items2)
+        for c, want in rows.items():
+            with self.subTest(cond=c):
+                self.assertEqual(got[c], frozenset(want))
+
+    @unittest.skipUnless(CLI, 'no kicad-cli')
+    def test_layers_and_parts_are_kicad(self):
+        rows = {**LAYER_ROWS, **PART_ROWS}
+        got = kicad_holds(self.work, 'lpk', project(), list(rows), BOARD2, NAMES2, 9)
+        for c, want in rows.items():
+            with self.subTest(cond=c):
+                self.assertEqual(got[c], frozenset(want), 'the table is stale')
+
+    @unittest.skipUnless(CLI, 'no kicad-cli')
+    def test_courtyard_reads_as_the_member_in_kicad(self):
+        """The rewrite `PadEdgeRules` makes is true of a part with a courtyard."""
+        conds = [f"A.{fn}('{x}')" for x in COURTYARD_ARGS
+                 for fn in ('insideCourtyard', 'intersectsCourtyard', 'memberOfFootprint')]
+        got = kicad_holds(self.work, 'cy', project(), conds, BOARD2, NAMES2, 9)
+        for x in COURTYARD_ARGS:
+            member = got[f"A.memberOfFootprint('{x}')"]
+            for fn in ('insideCourtyard', 'intersectsCourtyard'):
+                with self.subTest(fn=fn, arg=x):
+                    self.assertEqual(got[f"A.{fn}('{x}')"], member)
+
+    def _edge_board(self, name, cond):
+        from test_1615_edge_rule_pads import EDGE_X
+        from test_1615_edge_rule_pads import stage as board_stage
+        return board_stage(self.work, name, EDGE_X,
+                           f'(version 1)\n(rule "e" (condition "{cond}") '
+                           f'(constraint edge_clearance (min 0mm)))\n')
+
+    def test_edge_library_is_the_model(self):
+        for i, (cond, frees) in enumerate(EDGE_LIBRARY):
+            with self.subTest(cond=cond):
+                path = self._edge_board(f'em{i}', cond)
+                pcb = parse_kicad_pcb(path)
+                rules = PadEdgeRules(pcb, path)
+                self.assertEqual(rules.unmodelled, [])
+                want = 0.0 if frees else 0.4
+                for pad in pcb.footprints['J3'].pads:
+                    self.assertEqual(rules.for_pad(pad, 0.4)[:2], (want, want))
+                # another part's pad stays at the floor
+                self.assertEqual(rules.for_pad(pcb.footprints['C1'].pads[0], 0.4)[:2], (0.4, 0.4))
+
+    @unittest.skipUnless(CLI, 'no kicad-cli')
+    def test_edge_library_in_kicad(self):
+        for i, (cond, frees) in enumerate(EDGE_LIBRARY):
+            with self.subTest(cond=cond):
+                flagged = sum(v['type'] == 'copper_edge_clearance'
+                              and any('J3' in it['description'] for it in v['items'])
+                              for v in kicad_drc(self._edge_board(f'ek{i}', cond)))
+                self.assertEqual(flagged == 0, frees, 'the table is stale')
 
     def _field_project(self):
         classes = [DEFAULT] + [cls(f'C{i}', i, drop=(f,)) for i, f in enumerate(FIELDS)]
@@ -758,7 +1030,8 @@ class RuleReadings(unittest.TestCase):
             [DEFAULT, cls('HS', 0, drop=('bus_width',))], {'HSNET': 'HS'}))
         conds = ["A.isPlated()", "A.hasNetclass('Default')", "A.hasExactNetclass('HS,Default')",
                  "A.Pad_Type == 'Through-hole'", "A.Pad_Type == 'NPTH, mechanical'",
-                 "A.Via_Type == 'Blind'"]
+                 "A.Via_Type == 'Blind'", "A.existsOnLayer('In*.Cu')", "A.existsOnLayer('F.Mask')",
+                 "A.memberOfFootprint('x:*')", "A.memberOfFootprint('S*')"]
         r = subprocess.run([python, '-c', PCBNEW_PROBE, os.path.join(REPO, 'py_router'), path,
                             json.dumps(conds)], capture_output=True, text=True, encoding='utf-8',
                            timeout=300)
@@ -772,6 +1045,10 @@ class RuleReadings(unittest.TestCase):
         self.assertEqual(got["A.Pad_Type == 'Through-hole'"], ['pth'])
         self.assertEqual(got["A.Pad_Type == 'NPTH, mechanical'"], ['npth'])
         self.assertEqual(got["A.Via_Type == 'Blind'"], ['blind'])
+        self.assertEqual(got["A.existsOnLayer('In*.Cu')"], ['blind', 'micro', 'npth', 'pth', 'through'])
+        self.assertEqual(got["A.existsOnLayer('F.Mask')"], ['connect', 'npth', 'pth', 'smd'])
+        self.assertEqual(got["A.memberOfFootprint('x:*')"], ['connect', 'npth', 'pth', 'smd'])
+        self.assertEqual(got["A.memberOfFootprint('S*')"], ['smd'])
 
 
 if __name__ == '__main__':

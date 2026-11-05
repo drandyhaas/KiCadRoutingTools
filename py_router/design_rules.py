@@ -239,7 +239,10 @@ class RuleItem:
     netclasses: FrozenSet[str] = frozenset()
     effective_class: str = 'Default'
     layers: FrozenSet[str] = frozenset()
-    footprint_ref: Optional[str] = None
+    # a pad's other layers (F.Mask, ...), which existsOnLayer() reads too
+    other_layers: FrozenSet[str] = frozenset()
+    footprint_ref: Optional[str] = None      # as the file spells it
+    footprint_lib: Optional[str] = None      # the part's library id, 'lib:name'
     pad_type: Optional[str] = None           # smd | thru_hole | np_thru_hole | connect
     pad_number: Optional[str] = None         # as the file spells it; '' is a pad with no number
     via_type: Optional[str] = None           # through | micro | blind_buried
@@ -483,7 +486,8 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
 # Supported properties: NetClass, NetName, Net, Type, Layer, Pad_Type, Via_Type,
 #   Pad_Number (#1660: a string compared as a NetName is, so '1' is not '01' and
 #   a plain number is not a pad number -- `kicad_condition_refusal`)
-# Supported functions: hasNetclass, hasExactNetclass, existsOnLayer, isMicroVia,
+# Supported functions: hasNetclass, hasExactNetclass, existsOnLayer (a wildcard is
+#   a layer pattern), isMicroVia,
 #   isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup,
 #   inDiffPair('pattern') (#1295), and AB.isCoupledDiffPair() as a term of an
 #   AND only, positive (#1293: the pair's own P<->N rule) or negated (#1295:
@@ -1417,7 +1421,13 @@ def _call(node, a, b, layer, ctx=None):
     if fn == 'hasexactnetclass':
         # the whole name, spelled exactly: 'HS,LS', never 'HS' on a net in both
         return bool(args) and args[0] == it.effective_class
-    if fn in ('onlayer', 'existsonlayer'):
+    if fn == 'existsonlayer':
+        # by wxString::Matches, measured on kicad-cli 10.0.6 (#1690): 'In*.Cu'
+        # binds an inner layer, 'B.cu' nothing, and a second argument makes it
+        # false whatever the first
+        on = it.layers | it.other_layers or ({layer} if layer else ())
+        return len(args) == 1 and any(_wx_matches(args[0], n) for n in on)
+    if fn == 'onlayer':     # KiCad refuses it: read as it always was
         return bool(args) and (args[0] in it.layers or
                                (layer is not None and args[0] == layer and not it.layers))
     if fn == 'ismicrovia':
@@ -1430,8 +1440,14 @@ def _call(node, a, b, layer, ctx=None):
         # connector pad, an NPTH pad, a track, a zone and a graphic
         return it.type == 'via' or (it.type == 'pad' and it.pad_type == 'thru_hole')
     if fn == 'memberoffootprint':
-        return bool(args) and it.footprint_ref is not None and \
-            fnmatch.fnmatchcase(it.footprint_ref, args[0])
+        # the reference by wxString::Matches and, for a name with a ':' in it,
+        # the library id too, measured on kicad-cli 10.0.6 (#1690): 'Device:*'
+        # binds that library's parts, '*0402*' does not, 'a:b' binds a part
+        # whose reference is spelled so. A second argument makes it false.
+        return len(args) == 1 and it.footprint_ref is not None and (
+            _wx_matches(args[0], it.footprint_ref)
+            or (':' in args[0] and it.footprint_lib is not None
+                and _wx_matches(args[0], it.footprint_lib)))
     if fn == 'memberofgroup':
         return bool(args) and args[0] in it.groups
     if fn == 'indiffpair':
@@ -1539,6 +1555,8 @@ class DesignRules:
     board_min: Dict[str, float] = field(default_factory=dict)      # rules.min_* (only >0)
     classes: Dict[str, dict] = field(default_factory=dict)        # name -> {clearance, track_width, ..., priority}
     memberships: Dict[int, FrozenSet[str]] = field(default_factory=dict)  # net_id -> classes
+    # footprint key -> (its reference as the file spells it, its library id)
+    footprint_ids: Dict[str, Tuple[str, str]] = field(default_factory=dict)
     # class name -> the fields its project entry leaves unset (`class_constituents`)
     unset_fields: Dict[str, FrozenSet[str]] = field(default_factory=dict)
     net_names: Dict[int, str] = field(default_factory=dict)
@@ -1579,6 +1597,7 @@ class DesignRules:
         dr.net_names = {nid: n.name for nid, n in (getattr(pcb_data, 'nets', None) or {}).items()
                         if getattr(n, 'name', None)}
         dr.groups = _groups_by_ref(pcb_data)
+        dr.footprint_ids = _footprint_ids(pcb_data)
         if path:
             dr._load_project_file(os.path.splitext(path)[0] + '.kicad_pro', path)
             dru = os.path.splitext(path)[0] + '.kicad_dru'
@@ -1772,6 +1791,10 @@ class DesignRules:
                      layer: Optional[str] = None, **facts) -> RuleItem:
         """A RuleItem for a net with the class facts filled in."""
         layers = facts.pop('layers', None)
+        if layers is None and type == 'via' and facts.get('via_type') in (None, 'through'):
+            # for existsOnLayer(): a through via is on every copper layer of the
+            # board, whichever one is asked about
+            facts['other_layers'] = frozenset(self.copper_layers)
         if layers is None:
             layers = frozenset([layer]) if layer else frozenset()
         names = self.class_constituents(net_id)
@@ -1784,13 +1807,16 @@ class DesignRules:
     def item_for_pad(self, pad, layer: Optional[str] = None) -> RuleItem:
         ref = getattr(pad, 'component_ref', None)
         names = self.class_constituents(getattr(pad, 'net_id', 0))
+        fp_ref, fp_lib = self.footprint_ids.get(ref, (ref, None))
+        layers = _pad_rule_layers(getattr(pad, 'layers', None))
         return RuleItem(
             type='pad', net_id=int(getattr(pad, 'net_id', 0) or 0),
             net_name=getattr(pad, 'net_name', '') or self.net_names.get(getattr(pad, 'net_id', 0), ''),
             netclasses=frozenset(names),
             effective_class=','.join(names),
-            layers=frozenset(l for l in (getattr(pad, 'layers', None) or []) if str(l).endswith('.Cu')),
-            footprint_ref=ref, pad_type=getattr(pad, 'pad_type', None),
+            layers=frozenset(l for l in layers if l.endswith('.Cu')),
+            other_layers=frozenset(l for l in layers if not l.endswith('.Cu')),
+            footprint_ref=fp_ref, footprint_lib=fp_lib, pad_type=getattr(pad, 'pad_type', None),
             pad_number=getattr(pad, 'pad_number', None),
             groups=self.groups.get(ref, frozenset()),
             xy=(getattr(pad, 'global_x', None), getattr(pad, 'global_y', None))
@@ -2470,6 +2496,36 @@ def _netclass_dict(nc) -> dict:
     except Exception:                                          # noqa: BLE001
         pass
     return d
+
+
+def _footprint_ids(pcb_data) -> Dict[str, Tuple[str, str]]:
+    """{footprint key: (reference, library id)}. A key is not always the
+    reference: the second block claiming one is keyed `R7~2` and a block with
+    none `#<uuid>` (kicad_parser.disambiguate_references), and KiCad reads the
+    reference itself."""
+    dup = getattr(pcb_data, 'duplicate_references', None) or {}
+    out = {}
+    for key, fp in (getattr(pcb_data, 'footprints', None) or {}).items():
+        ref = str(key)
+        head, sep, tail = ref.rpartition('~')
+        if sep and tail.isdigit() and head in dup:
+            ref = head
+        elif ref.startswith('#'):
+            ref = ''
+        out[key] = (ref, getattr(fp, 'footprint_name', None))
+    return out
+
+
+#: A pad's `*.Cu` is every copper layer KiCad has, whatever the board's stack:
+#: `A.existsOnLayer('In9.Cu')` holds on a through-hole pad of a 4-layer board.
+_ALL_COPPER = ('F.Cu', 'B.Cu') + tuple(f'In{i}.Cu' for i in range(1, 31))
+_PAD_LAYER_SETS = {'*.Cu': _ALL_COPPER, 'F&B.Cu': ('F.Cu', 'B.Cu'),
+                   '*.Mask': ('F.Mask', 'B.Mask'), '*.Paste': ('F.Paste', 'B.Paste'),
+                   '*.SilkS': ('F.SilkS', 'B.SilkS')}
+
+
+def _pad_rule_layers(layers) -> Tuple[str, ...]:
+    return tuple(n for l in layers or () for n in _PAD_LAYER_SETS.get(str(l), (str(l),)))
 
 
 def _groups_by_ref(pcb_data) -> Dict[str, FrozenSet[str]]:
