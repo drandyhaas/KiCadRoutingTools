@@ -988,9 +988,9 @@ class DifferentialTab(wx.Panel):
             # cross-class max(A,B)) -- mirrors the single-ended route tab
             # (swig_gui). Passing an explicit map STOPS the engine's internal
             # always-cap auto-read, so honoring classes (Min Clearance override
-            # unchecked) actually reaches the router. Checking Min Clearance
-            # (== the CLI passing --clearance) caps each class at
-            # min(class, clearance); unchecked routes each class in full.
+            # unchecked) actually reaches the router. The Clearance ceiling box
+            # (== the CLI passing --clearance-ceiling) caps each class at
+            # min(class, ceiling), #1698; unchecked routes each class in full.
             # #755: the fallback is routing_defaults.CLEARANCE, not a bare
             # literal -- this seeds EVERY net's priced clearance and the
             # Min-Clearance cap below, so a 0.1 here under-prices the whole
@@ -1019,7 +1019,7 @@ class DifferentialTab(wx.Panel):
                 if config.get('clamp_netclasses', False):
                     from fab_tiers import cap_net_clearances  # #1561 discloses
                     net_clearances = cap_net_clearances(
-                        net_clearances, _diff_clearance,
+                        net_clearances, config['clearance_ceiling'],
                         net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
                         class_of=all_net_to_class)
             except Exception as e:

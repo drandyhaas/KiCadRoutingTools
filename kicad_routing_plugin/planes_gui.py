@@ -1011,13 +1011,13 @@ class PlanesTab(wx.Panel):
         # route_planes.py and the route tab (swig_gui). Passing an explicit map
         # STOPS the engine's internal always-cap auto-read, so honoring classes
         # (Min Clearance override unchecked) actually reaches the router.
-        # Checking Min Clearance (== the CLI passing --clearance) caps each class
-        # at min(class, clearance); unchecked routes each class in full. The
-        # clamp/ceiling params are also threaded so create_plane's OWN internal
-        # auto-read (the ripped-net reroute path) honors/caps the same way.
+        # The Clearance ceiling box (== the CLI passing --clearance-ceiling) caps
+        # each class at min(class, ceiling), #1698; unchecked routes each class in
+        # full. The clamp/ceiling params are also threaded so create_plane's OWN
+        # internal auto-read (the ripped-net reroute path) honors/caps the same way.
         _plane_clearance = config.get('clearance', defaults.CLEARANCE)
         _plane_clamp = config.get('clamp_netclasses', False)
-        _plane_ceiling = _plane_clearance if _plane_clamp else None
+        _plane_ceiling = config.get('clearance_ceiling') if _plane_clamp else None
         _plane_net_clearances = {}
         plane_error = None      # set if plane creation raises; surfaced to the dialog
         try:
@@ -1042,7 +1042,7 @@ class PlanesTab(wx.Panel):
             if _plane_clamp:
                 from fab_tiers import cap_net_clearances  # #1561 discloses
                 _plane_net_clearances = cap_net_clearances(
-                    _plane_net_clearances, _plane_clearance,
+                    _plane_net_clearances, _plane_ceiling,
                     net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
                     class_of=all_net_to_class)
         except Exception as e:

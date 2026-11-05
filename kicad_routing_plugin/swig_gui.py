@@ -3737,13 +3737,13 @@ class RoutingDialog(wx.Dialog):
                         continue
                     net_clearances[net_id] = class_clearance_cache.get(cname, config['clearance'])
                 # #530: the Clearance ceiling box (== the CLI passing --clearance-ceiling)
-                # caps each class at min(class, clearance). Unchecked = every
+                # caps each class at min(class, ceiling) -- the ceiling, which
+                # may sit above the run's clearance (#1698). Unchecked = every
                 # other class routed at its own clearance, no clamp.
                 if config.get('clamp_netclasses', False):
-                    _base_clr = config['clearance']
                     from fab_tiers import cap_net_clearances  # #1561 discloses
                     net_clearances = cap_net_clearances(
-                        net_clearances, _base_clr,
+                        net_clearances, config['clearance_ceiling'],
                         net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
                         class_of=all_net_to_class)
             except Exception as e:
