@@ -838,7 +838,11 @@ wherever its face falls on the grid (#1659), and the tolerance is there
 because KiCad grades edge clearance to the outline's DRAWN line: a pad ending on
 a centre line drawn 0.1 mm wide overlaps it by 0.05 mm, so a land whose pads end
 level with the part's board slot has to stand that far in. `inside_mm` is how
-far the deepest point of that body lies inside the outline. What lies on the
+far the deepest point of that body lies inside the outline: the distance to the
+NEAREST outline, not the overhang that would clear it, so a gating row's
+`clearing_overhang_mm` ({the part's mating face: mm}, every side where no face
+reads, null when it has no reading) and the line printed under it give the
+`overhang_mm.min` that does (#1662, `floorplan.body_clearing_overhang`). What lies on the
 part's own pads and drilled holes is left out (a header's pins in their
 holes), a cutout is not the board (a mid-mount part over its slot reads
 nothing), and a body that starts on the edge reads nothing. A board whose

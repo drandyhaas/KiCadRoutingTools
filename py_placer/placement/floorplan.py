@@ -4672,6 +4672,130 @@ def model_short_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
     return out
 
 
+def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
+                           geometry=None) -> Optional[Dict[str, object]]:
+    """#1662: the overhang that keeps `ref`'s body at board depth off the board,
+    read in the part's own frame, so a pile's staging pose does not matter and
+    no edge is asserted (#1103): an edge only chooses a direction, and the
+    seat turns the part's mating face at whichever edge it is given.
+
+    It is the band's own reading less `heights.depth_past_edge`, the same
+    number the emit writes off a placed board, with the part's own origin as
+    the edge's line: how far its band's shape (the drawn body where one can be
+    read, else the courtyard) reaches along its mating face, less how far back
+    along it its body at board depth starts, less the gate's tolerance. It is
+    a straight edge's number: where the outline under the seat is not one, the
+    band reads the courtyard (`ConnectorGeometry.boundary_under`), and the gate
+    has the last word.
+
+    `{'face', 'min', 'by_face'}`: `min` for its mating face `face`, in mm;
+    `face` and `min` None for a part with no mating face in the board's plane
+    (no turn is the seat's to choose then), and `by_face` the floor for each
+    of the four. None when no body of it could ever gate, or none was read, or
+    a floor is 0 in every direction asked."""
+    from .connector_geometry import ConnectorGeometry
+    from .heights import depth_past_edge
+    from .mating import facing_edge, mating_face_local
+    fp = (pcb_data.footprints or {}).get(ref)
+
+    def past(face):
+        return depth_past_edge(heights, pcb_data, ref, facing_edge(face, 0.0),
+                               (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0))
+    if fp is None or past('+x') is None:
+        return None
+    if bodies is None:
+        from .body import board_bodies
+        bodies = board_bodies(pcb_data, pcb_file)
+    g = bodies.get(ref)
+    geometry = geometry or ConnectorGeometry(pcb_data, pcb_file)
+    shape = (geometry.rect(ref, (0.0, 0.0, 0.0))[0]
+             or (g.body_local if g is not None else None))
+    if shape is None:
+        return None
+    reach = {'+x': shape[2], '-x': -shape[0], '+y': shape[3], '-y': -shape[1]}
+
+    def floor(face):
+        return math.floor(max(0.0, reach[face] - past(face)) * 1000.0) / 1000.0
+    face = mating_face_local(fp, g).face
+    if face:
+        got = floor(face)
+        return ({'face': face, 'min': got, 'by_face': {face: got}}
+                if got > legality.EPS else None)
+    each = {f: floor(f) for f in sorted(reach)}
+    if not any(v > legality.EPS for v in each.values()):
+        return None
+    return {'face': None, 'min': None, 'by_face': each}
+
+
+def _body_floor_applies(pcb_data, ref) -> bool:
+    """Can `ref` be asked for an overhang at all? Not a mounting hole, which
+    the pattern fit owns, and not a part whose footprint draws Edge.Cuts of
+    its own: the window travels with it, so its body is over its own cut-out
+    wherever it stands (a reverse-mount LED)."""
+    from .part_class import classify_part
+    fp = (pcb_data.footprints or {}).get(ref)
+    return (fp is not None and not getattr(fp, 'owns_edge_cuts', False)
+            and classify_part(fp, ref).name != 'mount_hole')
+
+
+def body_floor_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
+    """#1662: one `OWED:` line per unlocked part of a PILE whose own 3D model
+    has body at board depth (`body_clearing_overhang`), until the intent
+    answers it: an `edge_connectors[]` row with an `edge` and a band reaching
+    that overhang, or with a `why` saying no edge is meant (a part over a
+    declared slot), or a declared pose. Seated with no such row, every seed has
+    that body through the board. Disclosure only. Empty on a placed board,
+    whose emit reads the floor off the part's pose, and when no model was read."""
+    if not (getattr(heights, 'depth', None) or {}):
+        return []
+    from .placement_state import assess_placement
+    if not assess_placement(pcb_data, pcb_file).pile:
+        return []
+    locked = set(extract_locked_refs_safe(pcb_file))
+    posed = {str(f.get('ref')) for f in (intent.fixed_poses or ())}
+    rows = {str(c.get('ref')): c for c in (intent.edge_connectors or ())}
+    from .body import board_bodies
+    from .connector_geometry import ConnectorGeometry
+    bodies = board_bodies(pcb_data, pcb_file)
+    geometry = ConnectorGeometry(pcb_data, pcb_file)
+    out = []
+    for ref in sorted(heights.depth):
+        c = rows.get(ref) or {}
+        if ref in locked or ref in posed or c.get('why') \
+                or not _body_floor_applies(pcb_data, ref):
+            continue
+        got = body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies, geometry)
+        if got is None:
+            continue
+        name = pcb_data.footprints[ref].footprint_name
+        lead = (f"{ref} ({name}): its own 3D model has body at board depth, so "
+                f"seated wholly on the board that body is in the laminate, "
+                f"which check_assembly gates")
+        if got['min'] is None:
+            each = ', '.join(f"{f} {v:.3f}mm" for f, v in got['by_face'].items())
+            out.append(f"{lead}. No mating face reads in the board's plane, so "
+                       f"which way it hangs is the plan's: the overhang it needs "
+                       f"with each side of it to the edge is {each}. Declare its "
+                       f"`edge`, `mating_face` and that `overhang_mm.min`, or a "
+                       f"`why` if no edge is meant")
+            continue
+        low = float((c.get('overhang_mm') or {}).get('min', 0.0))
+        if c.get('edge') and low >= got['min'] - legality.EPS:
+            continue
+        need = (f"it needs an overhang of at least {got['min']:.3f}mm past the "
+                f"edge its mating face ({got['face']}) points at")
+        if c.get('edge'):
+            out.append(f"{lead}: {need}, and its entry declares a minimum of "
+                       f"{low:.3f}mm on the {c['edge']} edge. Raise it, or write "
+                       f"a `why` if the board is cut away under that body")
+        else:
+            out.append(f"{lead}: {need}. A pile's staging pose says nothing, so "
+                       f"no edge is written: give its edge_connectors entry its "
+                       f"`edge` from the brief, mechanical.json or the user, with "
+                       f"that `overhang_mm.min`, or a `why` if no edge is meant")
+    return out
+
+
 #: #1155: the mount modes whose mating face must point at the declared edge.
 FACING_MOUNTS = ('edge_mount', 'through_edge')
 
@@ -12006,12 +12130,46 @@ def emit_intent(pcb_data, pcb_file: str, *,
     #: at board depth (`heights.depth_past_edge`), likewise `derived_default`
     depth_floor = set()
     from .connector_geometry import band_amount, courtyard_overhang_past
-    from .heights import depth_past_edge
+    from .heights import DEPTH_EDGE_TOL_MM, depth_past_edge
+    #: the parts a brief places: the loader refuses a fixed pose or an array
+    #: member that also has an `edge_connectors` row
+    _emit_posed = {str(f.get('ref')) for f in (brief_fragment or {}).get('fixed_poses') or ()}
+    for _a in (brief_fragment or {}).get('arrays') or ():
+        _emit_posed |= {str(m) for m in _a.get('members') or ()}
     for ref in sorted(parts):
         near = _at_edge_gate.rect_outside_amount(parts[ref].rect)
         if _pile and ref not in _pile_locked:
             if near > legality.EPS:
                 _pose_withheld.append(ref)
+            # #1662: a part's own model says what overhang it needs wherever
+            # it stands, and only its edge is the plan's: the floor is written
+            # with no edge (#1103), whichever way the emit was asked.
+            if ref in _emit_posed or not _body_floor_applies(pcb_data, ref):
+                continue
+            _clear = body_clearing_overhang(
+                state.heights, pcb_data, pcb_file, ref,
+                _emit_bodies_of(pcb_data, pcb_file, _emit_bodies), _overhang_geo)
+            if _clear is None or _clear['min'] is None:
+                continue        # no floor to write: `body_floor_owed` says so
+            entry = {'ref': ref,
+                     'overhang_mm': {
+                         'min': _clear['min'],
+                         'max': round(_clear['min'] + DEPTH_EDGE_TOL_MM + 0.5, 3)},
+                     'note': (f"band min {_clear['min']:.3f}mm from the part's 3D "
+                              f"model, read in its own frame with its mating "
+                              f"face ({_clear['face']}) to the edge: with less "
+                              f"overhang its body at board depth is on the "
+                              f"board, which check_assembly gates (#1603). No "
+                              f"edge is read off its staging pose")}
+            from .part_class import classify_part
+            _pc = classify_part(pcb_data.footprints[ref], ref)
+            if declare_classes and _pc.name in ('edge_receptacle', 'edge_actuator'):
+                entry['class'] = _pc.name
+                entry['source'] = 'auto-class'
+            band_default.add(ref)
+            depth_floor.add(ref)
+            conns.append(entry)
+            declared.add(ref)
             continue
         if near > legality.EPS:
             # #1634: the overhang is a DISTANCE -- the courtyard's farthest

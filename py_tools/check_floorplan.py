@@ -443,13 +443,15 @@ def _warn_rows_replaced(path, doc):
             print(f"    - {row}", file=sys.stderr)
 
 
-def _model_short_owed(intent, pcb, board):
-    """#1653: `floorplan.model_short_owed` on the board's 3D models
-    (`heights.for_board`, read once per board and cached); [] when none
-    resolve."""
+def _model_owed(intent, pcb, board):
+    """The per-part questions the board's 3D models put to a plan
+    (`heights.for_board`, read once per board and cached): #1653's
+    `floorplan.model_short_owed` and #1662's `floorplan.body_floor_owed`; []
+    when none resolve."""
     from placement import heights as _heights
-    from placement.floorplan import model_short_owed
-    return model_short_owed(intent, pcb, board, _heights.for_board(pcb, board))
+    from placement.floorplan import body_floor_owed, model_short_owed
+    h = _heights.for_board(pcb, board)
+    return model_short_owed(intent, pcb, board, h) + body_floor_owed(intent, pcb, board, h)
 
 
 def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
@@ -499,7 +501,7 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
             print(f"    [{'ERROR' if v.severity == 'error' else 'warn '}] "
                   f"{v.rule}: {v.message}")
         for line in format_roster(rows, stale,
-                                  _model_short_owed(intent, pcb, args.board)):
+                                  _model_owed(intent, pcb, args.board)):
             print(line)
         for line in _rc.format_rows(recon):
             print(line)
@@ -798,6 +800,21 @@ def main(argv=None):
             # drops the seat, never the grade. A ref another claim of
             # this intent already places is skipped by name -- the
             # loader refuses a ref under two such claims.
+            # An emitted floor with no edge (#1662) places nothing, and a
+            # recorded pose answers what it asks: the row goes.
+            _basis = _ctx.get('basis') or {}
+            _kept = []
+            for _c in doc.get('edge_connectors') or ():
+                _k = f"edge_connectors[{_c.get('ref')}].overhang_mm"
+                if (str(_c.get('ref')) in _ctx['mechanical']['anchored']
+                        and not _c.get('edge')
+                        and _basis.get(_k + '.min') == 'derived_default'):
+                    _basis.pop(_k, None)
+                    _basis.pop(_k + '.min', None)
+                else:
+                    _kept.append(_c)
+            if 'edge_connectors' in doc:
+                doc['edge_connectors'] = _kept
             _claimed = {}
             for _c in doc.get('edge_connectors') or ():
                 _claimed[str(_c.get('ref'))] = (
@@ -999,8 +1016,7 @@ def main(argv=None):
                     brief_fragment=brief_fragment or None)
                 for line in format_roster(_rows,
                                           stale_dispositions(_it, _rows),
-                                          _model_short_owed(_it, pcb,
-                                                            args.board)):
+                                          _model_owed(_it, pcb, args.board)):
                     print(line)
             except (IntentError, UntrustworthyOutline) as exc:
                 print(f"  rule roster not computed: {exc}")

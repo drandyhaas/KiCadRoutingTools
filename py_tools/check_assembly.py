@@ -1113,6 +1113,18 @@ def main():
                    'unmeasured': f'{type(exc).__name__}: {str(exc)[:120]}',
                    'basis': None}
     through_gating = list(through['gating_refs'])
+    # #1662: what would clear it. `inside_mm` is the distance to the nearest
+    # outline, which reads no band: written as a minimum it still gated.
+    from placement.floorplan import body_clearing_overhang
+    for r in through['rows']:
+        if not r['gates']:
+            continue
+        try:
+            _clear = body_clearing_overhang(_heights.for_board(pcb, args.board, declared_heights),
+                                            pcb, args.board, r['ref'])
+        except Exception:                                    # noqa: BLE001
+            _clear = None
+        r['clearing_overhang_mm'] = _clear and _clear['by_face']
     if through['rows']:
         print(f"  BODY THROUGH THE BOARD ({len(through_gating)} part(s) GATE): "
               f"a part's own 3D model is at board depth inside the outline"
@@ -1126,6 +1138,13 @@ def main():
                      f"  [under {_heights.DEPTH_MIN_MM2:g}mm2, and no "
                      f"{_heights.DEPTH_MIN_SPAN_MM:g}mm long slice more than "
                      f"{_heights.DEPTH_EDGE_TOL_MM:g}mm inside: does not gate]"))
+            if r['gates']:
+                _by = r.get('clearing_overhang_mm')
+                print("      that depth is to the nearest outline, not the overhang it "
+                      "needs"
+                      + ("; the overhang_mm.min that keeps this body off the board, "
+                         "by the side of it at the edge: "
+                         + ', '.join(f"{f} {v:g}mm" for f, v in _by.items()) if _by else ''))
     elif through['unmeasured']:
         print(f"  body through the board: not measured ({through['unmeasured']})")
     # #1250, the NINTH: a test point a move left under another part's body

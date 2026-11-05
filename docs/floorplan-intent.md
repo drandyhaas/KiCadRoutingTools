@@ -760,6 +760,21 @@ gets a floor (#1635). The reading is the gate's own, on the body rather than
 its 0.25 mm cell (#1659): the floor leaves the body at most `DEPTH_EDGE_TOL_MM`
 (0.1 mm) inside. Measured: KiCad's stock `SMA_Amphenol_132289_EdgeMount`,
 emitted at the pose its footprint draws, reads 11.93 mm and gets `min` 11.83.
+**On a pile (#1662)** no pose reads, so an UNLOCKED such part gets that floor in
+its own frame (`floorplan.body_clearing_overhang`): how far the band's shape
+reaches along the part's mating face, less where its body at board depth
+starts, less the tolerance. It is a straight edge's number: where the outline
+under the seat is not one, the band reads the courtyard and the gate has the
+last word. The entry is written with or without
+`--declare-classes` and carries no `edge` (#1103: a staging pose says nothing),
+its band is `derived_default` whole, and the roster's `OWED:` line
+(`floorplan.body_floor_owed`) stands until the entry has an `edge` and a band
+reaching that floor, or a `why`. Graded as written, with no edge, the band
+fails where the part stands on the board, as check_assembly does. A part with no
+mating face in the board's plane gets no entry, since no direction reads, and its
+`OWED:` line gives the floor for each side. A part that draws its own Edge.Cuts
+(a window it travels with) is not asked, a brief's or `mechanical.json`'s declared
+pose outranks the row, and a mounting hole is the pattern fit's.
 Such a part is given its edge, and so this floor, **whatever its class**
 (#1634): a name with no part class (the same jack as `RF:132289`) no longer
 loses them, and its note says the edge came from its model.

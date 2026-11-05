@@ -189,8 +189,9 @@ either: leave it unlocked with its `edge` in the intent's
 edge will do), and `place_simple` holds it to that edge, mating face out,
 and slides it along. On a pile the emitter writes no `edge` -- the staging
 pose says nothing; `--emit-intent --declare-classes` writes each edge part's
-entry without one, plain `--emit-intent` no entry -- so write it from the
-brief, `mechanical.json` or the user.
+entry without one, plain `--emit-intent` no entry (except a part whose own
+model needs an overhang, §3.4's "How far an edge receptacle reaches past the
+edge") -- so write it from the brief, `mechanical.json` or the user.
 
 ### 3.2 Emit the intent
 
@@ -527,7 +528,13 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   emitter writes as 0 -- unless the part's own 3D model has body at board
   depth (an edge-mount jack the board slides into), when it writes the
   overhang that keeps that body off the board (`derived_default`, #1603;
-  check_assembly gates such a body inside the outline). Where the
+  check_assembly gates such a body more than 0.1 mm inside the outline). Off
+  a placed board that floor comes with the edge the part overhangs. On a pile
+  it is read in the part's own frame and written with no `edge`, with or
+  without `--declare-classes`, and an `OWED:` line stands until the entry has
+  its `edge` (or a `why`, a part over a declared slot): keep that minimum when
+  you write the edge. A part with no mating face in the board's plane gets
+  only the `OWED:` line, with the overhang for each side of it. Where the
   datasheet's PCB-layout drawing puts the
   board edge inside the body (a USB-C or barrel jack's shell past the edge),
   write that distance as `overhang_mm.min`, `max` at or above it. Seated
@@ -1141,7 +1148,14 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
     and `oversubscribed`, and the seeds are still judged (fix the intent, as
     above).
   - **Every judged seed is NOT BUILDABLE** (`check_assembly`'s `buildable`
-    false): read the pairs it names.
+    false): read the pairs it names. A `BODY THROUGH THE BOARD` row names no
+    pair: it is one part's own 3D model at board depth. Its `mm inside the
+    outline` is the distance to the nearest outline, which is not a band; the
+    line under it prints the `overhang_mm.min` that clears the board. Declare
+    that with the part's `edge` (§3.4's "How far an edge receptacle reaches
+    past the edge"). A part that does not mount across an edge is not cured by
+    an overhang (a model drawn low reads this way): say so in the report rather
+    than hanging it off the board.
   - **Every judged seed fails the floorplan** (place_simple WARNs that it
     judged a seed with floorplan errors; `check_floorplan --intent` names
     each finding, its measured distance and its limit).
