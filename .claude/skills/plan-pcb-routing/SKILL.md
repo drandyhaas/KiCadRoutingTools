@@ -887,7 +887,12 @@ Use the printed flags as-is:
   the finalize still reports them unconnected, re-run the route step with this
   smaller via.) Keep the **standard** working via for
   general `route.py` routing and the bulk `route_planes.py` pour — the advanced
-  via is escape-only, not a board-wide default (issues #99/#122).
+  via is escape-only, not a board-wide default (issues #99/#122). A route-wide
+  advanced via is a recipe's deliberate choice, not that default: Step 2c's
+  bundle was screened with it, and the congestion escalation ("Route signals at
+  the FAB floor by default") passes a floor via on the whole signal step. The
+  "use ONLY" that `--design-rules` prints beside the escape via is this default;
+  it does not limit those two.
 - **Non-Default classes:** no separate pass is needed for their clearance.
   `route.py` / `route_diff.py` / the plane scripts auto-read every net's class
   clearance from the `.kicad_pro` and price each pair at `max(classA, classB)`,
@@ -2114,13 +2119,16 @@ rip/retry churn). Apply it whenever the board is dense enough that any
 fanout or escape is contested; on trivially-open boards the defaults are
 fine. That 62 → 23 is the BUNDLE's figure, not any one item's, and the
 bundle as screened also carried `--direction-preference-cost 5`, which has
-since been reverted (item 2).
+since been reverted (item 2). It was screened when a bare `--clearance` capped
+every net class, which is what `--clearance-ceiling` does now (#530), so item 1
+spells it that way.
 
 1. **Strict small features** (the single biggest lever on packed boards —
    lane pitch is quantized by track+clearance, and a 0.1 grid cannot
    express a 0.28 pitch at fat features):
-   `--track-width 0.0762 --clearance 0.0889 --via-size 0.25
+   `--track-width 0.0762 --clearance-ceiling 0.0889 --via-size 0.25
    --via-drill 0.15`
+   The route-wide via belongs to the bundle (Step 4, "Fine-pitch escape VIA").
    The fab-floor clamps pin track/clearance/via UP automatically (with a
    warning) on boards whose layer count can't take them — passing those
    four always yields a size the fab can make. The clamp is the PHYSICAL
