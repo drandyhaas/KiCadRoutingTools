@@ -240,6 +240,7 @@ def main():
     dlg._suppress_completion_popups = True
     steps = [{'action': 'route', 'params': dict(STEP)}]
     ex = PlanExecutor(dlg, steps, [0], lambda *a: None, lambda *a: None)
+    ex._completed = 1    # the plan's step ran; the write reads the steps that did
     _quiet(ex._write_drc_floors)
     with open(os.path.splitext(plan)[0] + '.kicad_pro', encoding='utf-8') as f:
         written = json.load(f)

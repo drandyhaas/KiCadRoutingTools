@@ -141,7 +141,9 @@ Validate routed boards against the *real* spec, with the right checker — most
     aspirational" workflow. GUI: the **Clearance ceiling** checkbox with Min Clearance.
     X holds the PHYSICAL fab floor as `--clearance` does (`enforce_fab_floors`, the
     GUI's `_class_ceiling`, #1691), so it lowers no class below that floor; a class
-    the board declares below it stays as declared, as the Default class does.
+    the board declares below it stays as declared, as the Default class does. A
+    plan's end-of-plan write reads which of the two branches each step that ran
+    took from the step's own flags, never from the Min Clearance box (#1698).
   - **Both omitted** → base = the board's Default class, else
     `routing_defaults.CLEARANCE` 0.25; classes preserved.
   - **In a CHAIN, pass `--clearance-ceiling <floor>`, not `--clearance`.** The

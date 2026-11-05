@@ -907,8 +907,7 @@ class RoutingDialog(wx.Dialog):
             # An ABSENT class value uses the same constant as those CLIs; a
             # stale control from an earlier override must not supply a default.
             if name == 'clearance':
-                val = board_val if board_val is not None else defaults.CLEARANCE
-                return self._fab_floored(name, val)
+                return self._fab_floored(name, self._board_clearance())
             # A declared 0 is UNSET for the other geometry controls. KiCad writes 0 into
             # these fields for "not configured". In particular, the CLI hole
             # resolver (resolve_cli_floor) substitutes its fixed default.
@@ -925,6 +924,12 @@ class RoutingDialog(wx.Dialog):
                 board_val = None
             val = board_val if board_val is not None else getattr(self, name).GetValue()
         return self._fab_floored(name, val)
+
+    def _board_clearance(self):
+        """The clearance a run naming none starts from, as the routing CLIs
+        resolve it: the board's Default class, else the shared fallback."""
+        board_val = (_get_netclass_parameters('Default') or {}).get('clearance')
+        return board_val if board_val is not None else defaults.CLEARANCE
 
     def _effective_track_width(self):
         return self._effective_geometry_floor('track_width')

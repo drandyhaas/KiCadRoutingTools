@@ -1325,6 +1325,14 @@ def restore_fix_drc_preference(dialog, preference):
         pass
 
 
+def _runs_cap_pass(step):
+    """Does this plan step run the decoupling-cap pass, whose `clearance` is a
+    ceiling (#768)? The standalone step, or a fanout that switches it on inline."""
+    _p = step.get("params") or {}
+    return bool(step["action"] == "optimize_caps"
+                or (step["action"] == "fanout" and _p.get("optimize_caps")))
+
+
 class PlanExecutor:
     """Runs checked plan steps sequentially through the tabs' own machinery.
 
@@ -1553,9 +1561,15 @@ class PlanExecutor:
             board_file = getattr(self.dialog, 'board_filename', None)
             # Gather every floor the CLI records (route.py passes clearance,
             # hole_to_hole, edge_clearance, track_width, via size/drill;
-            # route_diff adds the pair geometry) from the plan's steps --
-            # smallest value wins where steps disagree, like the ledger.
+            # route_diff adds the pair geometry) from the steps that RAN --
+            # smallest value wins where steps disagree, as a chain's lower-only
+            # writes do. A step not run wrote nothing on the CLI (#1698).
             floors = {}
+            # The ceilings those steps ran under, as each CLI step decides it:
+            # by the flags it was given (#1698). Min Clearance's box says
+            # neither: it is ticked for a bare `clearance`, which leaves the
+            # other classes as declared, and it holds only the LAST step's state.
+            ceilings = []
 
             def _take(key, val, smallest=True):
                 try:
@@ -1566,11 +1580,12 @@ class PlanExecutor:
                     return
                 if key not in floors or (smallest and v < floors[key]):
                     floors[key] = v
-            _FLOOR_KEYS = ('clearance', 'track_width', 'via_size',
+            _FLOOR_KEYS = ('track_width', 'via_size',
                            'via_drill', 'hole_to_hole_clearance',
                            'board_edge_clearance', 'diff_pair_width',
                            'diff_pair_gap')
-            for step in self.steps:
+            for index in self.indices[:self._completed]:
+                step = self.steps[index]
                 p = step.get('params') or {}
                 _keys = _FLOOR_KEYS
                 if step.get('action') == 'optimize_caps':
@@ -1585,17 +1600,27 @@ class PlanExecutor:
                     # Converted plans now spell it
                     # cap_board_edge_clearance, which is not a floor key at
                     # all; this covers plans converted before that.
-                    # `clearance` is deliberately STILL harvested from a cap
-                    # step -- that IS what the CLI writes (#768/#769).
                     _keys = tuple(k for k in _FLOOR_KEYS
                                   if k != 'board_edge_clearance')
                 for k in _keys:
                     if p.get(k) is not None:
                         _take(k, p[k])
+                # The clearance this step's CLI writes: what it was given, else
+                # the board's Default class, capped at its ceiling.
+                _given = p.get('clearance')
+                _ceiling = p.get('clearance_ceiling')
+                _base = _given if _given is not None else self.dialog._board_clearance()
+                if _ceiling is not None:
+                    ceilings.append(_ceiling)
+                    _base = min(float(_base), float(_ceiling))
+                elif _given and _runs_cap_pass(step):
+                    # `clearance` IS the ceiling on a cap step (#768/#769)
+                    ceilings.append(_given)
+                _take('clearance', _base)
             clearance = floors.get('clearance')
             track_width = floors.get('track_width')
             if clearance is None:
-                return
+                return      # no step ran, so none wrote anything
             eff = clearance_ledger.effective(clearance)
             # #693: the shared "Fix DRC settings after routing" box gates EVERY
             # floor this writes -- the live Board Setup floors, the Default
@@ -1679,13 +1704,9 @@ class PlanExecutor:
             if board_file and os.path.isfile(board_file):
                 if _fixdrc693:
                     # #439: clamp non-Default classes in the written
-                    # .kicad_pro only when this plan routed with a
-                    # --clearance ceiling (the Min-Clearance override the
-                    # executor checks when a step sets clearance), matching
-                    # the interactive route tab -- not unconditionally (the
-                    # function default).
-                    _cc = getattr(self.dialog, 'clearance_check', None)
-                    _clamp = bool(_cc.GetValue()) if _cc is not None else False
+                    # .kicad_pro only when a step ran under a ceiling --
+                    # not unconditionally (the function default).
+                    _clamp = bool(ceilings)
                     # Board minima from the LIVE board, so
                     # fix_project_for_output does NOT re-parse the file. That
                     # parse allocates thousands of GC-tracked objects, and this
@@ -1701,8 +1722,14 @@ class PlanExecutor:
                     from fix_kicad_drc_settings import (fix_project_for_output,
                                                         apply_fix_to_board,
                                                         close_live_step)
+                    # The copper-to-hole floor the steps held and wrote to the
+                    # live board (#1493). Without it this write defaults that
+                    # floor to the copper clearance, which no CLI step writes.
+                    _hole_held = (_live.GetDesignSettings().m_HoleClearance / 1e6
+                                  if _live is not None else None)
                     _fix_kw = dict(
                         clearance=eff,
+                        hole_clearance=_hole_held,
                         track_width=track_width,
                         via_diameter=floors.get('via_size'),
                         via_drill=floors.get('via_drill'),
@@ -1711,13 +1738,12 @@ class PlanExecutor:
                         diff_pair_width=floors.get('diff_pair_width'),
                         diff_pair_gap=floors.get('diff_pair_gap'),
                         clamp_nondefault_netclasses=_clamp,
-                        # #1492: the raw override is the ceiling the classes
-                        # land at, min(class, ceiling); #1691: held at the
-                        # physical fab floor, as `_class_ceiling` holds it
-                        class_ceiling=(self.dialog._fab_floored(
-                                           'clearance', self.dialog.clearance.GetValue())
-                                       if _clamp and hasattr(self.dialog, 'clearance')
-                                       else None))
+                        # #1492: the ceiling the classes land at, min(class,
+                        # ceiling), the lowest a step ran under; #1691: held at
+                        # the physical fab floor, as `_class_ceiling` holds it
+                        class_ceiling=(min(self.dialog._fab_floored('clearance', float(c))
+                                           for c in ceilings)
+                                       if _clamp else None))
                     fix_project_for_output(board_file, input_pcb=board_file,
                                            minima=_minima, **_fix_kw)
                     # The SAME floors on the live board. KiCad's own save
@@ -1832,9 +1858,7 @@ class PlanExecutor:
             # plan may, and this is the executor's rule, not the
             # converter's.
             _p = step.get("params") or {}
-            _runs_caps = (step["action"] == "optimize_caps"
-                          or (step["action"] == "fanout"
-                              and _p.get("optimize_caps")))
+            _runs_caps = _runs_cap_pass(step)
             if _runs_caps and not _p.get("clearance"):
                 _cc = getattr(self.dialog, 'clearance_check', None)
                 if _cc is not None and _cc.GetValue():

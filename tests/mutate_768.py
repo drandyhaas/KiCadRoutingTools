@@ -123,9 +123,7 @@ _GUI_CEILING = (
 # five-line quote matched ZERO times and the row reported BROKEN. Quote
 # the guard as it now stands; deleting it is still the mutation.
 _PLAN_UNTICK = """            _p = step.get("params") or {}
-            _runs_caps = (step["action"] == "optimize_caps"
-                          or (step["action"] == "fanout"
-                              and _p.get("optimize_caps")))
+            _runs_caps = _runs_cap_pass(step)
             if _runs_caps and not _p.get("clearance"):
                 _cc = getattr(self.dialog, 'clearance_check', None)
                 if _cc is not None and _cc.GetValue():
