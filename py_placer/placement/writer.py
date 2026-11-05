@@ -14,7 +14,8 @@ from typing import List, Dict, Optional
 
 from kicad_parser import (find_matching_paren, flip_layer_token,
                           iter_footprint_blocks, footprint_at_match,
-                          AT_NUM, layer_list_tokens, map_layer_list_tokens)
+                          AT_NUM, TRANSFORM_NODE_RE, layer_list_tokens,
+                          map_layer_list_tokens)
 from kicad_writer import move_copper_text_to_silkscreen
 
 
@@ -1402,7 +1403,10 @@ def write_placed_output(input_file: str, output_file: str,
         # and matches KiCad's own footprint `at` precision (6 decimals). Rotation
         # keeps a significant-digit format (angles are small and exact-ish) but
         # widened so e.g. 137.25deg survives.
-        if new_rot != 0:
+        if at_match.re is TRANSFORM_NODE_RE:
+            new_at = (f"(transform (translate {new_x:.6f} {new_y:.6f}) "
+                      f"(rotate {new_rot:.6g}) (scale 1 1))")
+        elif new_rot != 0:
             new_at = f"(at {new_x:.6f} {new_y:.6f} {new_rot:.6g})"
         else:
             new_at = f"(at {new_x:.6f} {new_y:.6f})"
@@ -1442,12 +1446,14 @@ def write_placed_output(input_file: str, output_file: str,
             # ABSOLUTE board coordinates, so a move or rotation must carry
             # the zone's points with the footprint (#1214). Runs for a
             # pure move too, not just a rotation; _move_zone_pts is a
-            # no-op when the pose is unchanged.
-            new_fp_text = _move_zone_pts(
-                new_fp_text, key,
-                float(at_match.group(1)), float(at_match.group(2)),
-                delta_rot, new_x - float(at_match.group(1)),
-                new_y - float(at_match.group(2)))
+            # no-op when the pose is unchanged. Under a (transform ...)
+            # pose they are in the footprint's frame and move with it.
+            if at_match.re is not TRANSFORM_NODE_RE:
+                new_fp_text = _move_zone_pts(
+                    new_fp_text, key,
+                    float(at_match.group(1)), float(at_match.group(2)),
+                    delta_rot, new_x - float(at_match.group(1)),
+                    new_y - float(at_match.group(2)))
 
         # #1163: an absolute text angle, after either path has composed its
         # texts, so it holds whatever the rotation or the side did.
