@@ -4685,10 +4685,11 @@ def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
     read, else the courtyard) reaches along its mating face, less how far back
     along it its body at board depth starts, less the gate's tolerance. It is
     a straight edge's number: where the outline under the seat is not one, the
-    band reads the courtyard (`ConnectorGeometry.boundary_under`), and the gate
-    has the last word.
+    band reads the courtyard (`ConnectorGeometry.boundary_under`), and the seat
+    reads the gate itself (`edge_seat._Probe.body_inside`, #1692).
 
-    `{'face', 'min', 'by_face'}`: `min` for its mating face `face`, in mm;
+    `{'face', 'min', 'by_face'}`: `min` for its mating face `face`, in mm, with
+    `reach` how far that shape reaches along it;
     `face` and `min` None for a part with no mating face in the board's plane
     (no turn is the seat's to choose then), and `by_face` the floor for each
     of the four. None when no body of it could ever gate, or none was read, or
@@ -4703,8 +4704,8 @@ def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
         return None
     face = mating_face_local(fp, bodies.get(ref)).face
     if face:
-        got = read[face][0]
-        return ({'face': face, 'min': got, 'by_face': {face: got}}
+        got, reach = read[face]
+        return ({'face': face, 'min': got, 'by_face': {face: got}, 'reach': reach}
                 if got > legality.EPS else None)
     each = {f: read[f][0] for f in sorted(read)}
     if not any(v > legality.EPS for v in each.values()):
@@ -4732,9 +4733,13 @@ def _body_floor_reads(heights, pcb_data, pcb_file, ref, bodies,
              or (g.body_local if g is not None else None))
     if shape is None:
         return None
-    reach = {'+x': shape[2], '-x': -shape[0], '+y': shape[3], '-y': -shape[1]}
     return {f: (math.floor(max(0.0, r - past(f)) * 1000.0) / 1000.0, r)
-            for f, r in reach.items()}
+            for f, r in _face_reach(shape).items()}
+
+
+def _face_reach(rect) -> Dict[str, float]:
+    """How far a part-frame `rect` reaches along each of the part's four faces."""
+    return {'+x': rect[2], '-x': -rect[0], '+y': rect[3], '-y': -rect[1]}
 
 
 def _body_floor_applies(pcb_data, ref) -> bool:
@@ -12266,10 +12271,18 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 _emit_bodies_of(pcb_data, pcb_file, _emit_bodies), _overhang_geo)
             if _clear is None or _clear['min'] is None:
                 continue        # no floor to write: `body_floor_owed` says so
+            _over = 0.0
+            if _overhang_geo.boundary_reason:
+                # #1692: off a plain rectangle the band can read the courtyard,
+                # and the seat must reach the overhang that clears the body in
+                # that currency, not the shape's this floor is read on
+                _over = max(0.0, _face_reach(
+                    (_zp.get(ref) or state.parts[ref]).rect(0.0, 0.0, 0.0))[_clear['face']]
+                    - _clear['reach'])
             entry = {'ref': ref,
                      'overhang_mm': {
                          'min': _clear['min'],
-                         'max': round(_clear['min'] + DEPTH_EDGE_TOL_MM + 0.5, 3)},
+                         'max': round(_clear['min'] + DEPTH_EDGE_TOL_MM + 0.5 + _over, 3)},
                      'note': (f"band min {_clear['min']:.3f}mm from the part's 3D "
                               f"model, read in its own frame with its mating "
                               f"face ({_clear['face']}) to the edge: with less "

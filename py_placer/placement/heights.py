@@ -1741,7 +1741,6 @@ def body_in_board(h, pcb_data, poses=None) -> Dict[str, object]:
     `DEPTH_MIN_MM2` of area, or a `DEPTH_MIN_SPAN_MM` span (#1635) of body
     more than `DEPTH_EDGE_TOL_MM` inside; `unmeasured` says why nothing could
     be read (None when it was)."""
-    import numpy as np
     basis = (f'the part\'s own 3D model (one kicad-cli GLB export) strictly between '
              f'the board\'s faces, {DEPTH_FACE_MM:g} mm in from each, its own pads '
              f'and drilled holes left out, as far as it lies inside the outline; '
@@ -1753,20 +1752,8 @@ def body_in_board(h, pcb_data, poses=None) -> Dict[str, object]:
            'basis': basis}
     if note is not None or not depth:
         return out
-    import shapely
-    from shapely.affinity import affine_transform
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
-    from check_drc import board_edge_geometry
-    # the outline's rings less its cutouts; a plain rectangle is its bounds
-    _rings, outer, cutouts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
-    region = None
-    if outer:
-        region = unary_union([Polygon(o).buffer(0) for o in outer if len(o) >= 3])
-        if cutouts:
-            region = region.difference(unary_union(
-                [Polygon(c).buffer(0) for c in cutouts if len(c) >= 3]))
-    if region is None or region.is_empty:
+    region = board_region(pcb_data)
+    if region is None:
         out['unmeasured'] = 'the board has no outline'
         return out
     fps = pcb_data.footprints or {}
@@ -1774,44 +1761,71 @@ def body_in_board(h, pcb_data, poses=None) -> Dict[str, object]:
         fp = fps.get(ref)
         if fp is None:
             continue
-        x, y, rot = (poses or {}).get(ref) or (fp.x, fp.y, fp.rotation or 0.0)
-        a = math.radians(rot % 360)
-        c, s = math.cos(a), math.sin(a)
-        # the outline in the part's own frame, where its body's boxes are
-        local = affine_transform(region, [c, -s, s, c, -(c * x - s * y), -(s * x + c * y)])
-        shapely.prepare(local)
-        boxes = depth[ref]
-        cx, cy = boxes[:, [0, 2, 2, 0]], boxes[:, [1, 1, 3, 3]]
-        on = shapely.contains_xy(local, cx, cy)
-        reach = np.where(on, shapely.distance(local.boundary, shapely.points(cx, cy)), 0.0).max(1)
-        keep = reach > DEPTH_READ_MM
-        if not keep.any():
-            continue
-        reach, on, p = reach[keep], on[keep], boxes[keep].copy()
-        area = np.maximum(p[:, 2] - p[:, 0], 0.0) * np.maximum(p[:, 3] - p[:, 1], 0.0)
-        # a box the outline crosses counts as far as it is inside
-        cross = ~on.all(1)
-        if cross.any():
-            q = p[cross]
-            cut = shapely.intersection(
-                shapely.box(q[:, 0], q[:, 1], np.maximum(q[:, 2], q[:, 0] + 1e-6),
-                            np.maximum(q[:, 3], q[:, 1] + 1e-6)), local)
-            p[cross] = shapely.bounds(cut)
-            area[cross] = shapely.area(cut)
-        px, py = p[:, [0, 2, 2, 0]], p[:, [1, 1, 3, 3]]
-        bx, by = x + px * c + py * s, y - px * s + py * c
-        total = round(float(area.sum()), 4)
-        beyond = reach > DEPTH_EDGE_TOL_MM + DEPTH_RES_MM
-        out['rows'].append({'ref': ref, 'area_mm2': total,
-                            'span_mm': round(_box_span(p), 4),
-                            'inside_mm': round(float(reach.max()), 3),
-                            'box': [round(float(bx.min()), 3), round(float(by.min()), 3),
-                                    round(float(bx.max()), 3), round(float(by.max()), 3)],
-                            'gates': _gates(total, _box_span(p[beyond]) if beyond.any()
-                                            else 0.0)})
+        row = body_row(depth[ref], region, ref,
+                       (poses or {}).get(ref) or (fp.x, fp.y, fp.rotation or 0.0))
+        if row is not None:
+            out['rows'].append(row)
     out['gating_refs'] = [r['ref'] for r in out['rows'] if r['gates']]
     out['count'] = len(out['gating_refs'])
     return out
+
+
+def board_region(pcb_data):
+    """The board `body_in_board` reads a body against: the outline's rings less
+    its cutouts, a plain rectangle being its bounds. None when it has none."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from check_drc import board_edge_geometry
+    _rings, outer, cutouts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
+    region = None
+    if outer:
+        region = unary_union([Polygon(o).buffer(0) for o in outer if len(o) >= 3])
+        if cutouts:
+            region = region.difference(unary_union(
+                [Polygon(c).buffer(0) for c in cutouts if len(c) >= 3]))
+    return None if region is None or region.is_empty else region
+
+
+def body_row(boxes, region, ref, pose) -> Optional[Dict[str, object]]:
+    """`body_in_board`'s row for one part's body at board depth (`boxes`, from
+    `Heights.depth`) against `region` (`board_region`) at `pose`; None when none
+    of it lies inside."""
+    import numpy as np
+    import shapely
+    from shapely.affinity import affine_transform
+    x, y, rot = pose
+    a = math.radians(rot % 360)
+    c, s = math.cos(a), math.sin(a)
+    # the outline in the part's own frame, where its body's boxes are
+    local = affine_transform(region, [c, -s, s, c, -(c * x - s * y), -(s * x + c * y)])
+    shapely.prepare(local)
+    cx, cy = boxes[:, [0, 2, 2, 0]], boxes[:, [1, 1, 3, 3]]
+    on = shapely.contains_xy(local, cx, cy)
+    reach = np.where(on, shapely.distance(local.boundary, shapely.points(cx, cy)), 0.0).max(1)
+    keep = reach > DEPTH_READ_MM
+    if not keep.any():
+        return None
+    reach, on, p = reach[keep], on[keep], boxes[keep].copy()
+    area = np.maximum(p[:, 2] - p[:, 0], 0.0) * np.maximum(p[:, 3] - p[:, 1], 0.0)
+    # a box the outline crosses counts as far as it is inside
+    cross = ~on.all(1)
+    if cross.any():
+        q = p[cross]
+        cut = shapely.intersection(
+            shapely.box(q[:, 0], q[:, 1], np.maximum(q[:, 2], q[:, 0] + 1e-6),
+                        np.maximum(q[:, 3], q[:, 1] + 1e-6)), local)
+        p[cross] = shapely.bounds(cut)
+        area[cross] = shapely.area(cut)
+    px, py = p[:, [0, 2, 2, 0]], p[:, [1, 1, 3, 3]]
+    bx, by = x + px * c + py * s, y - px * s + py * c
+    total = round(float(area.sum()), 4)
+    beyond = reach > DEPTH_EDGE_TOL_MM + DEPTH_RES_MM
+    return {'ref': ref, 'area_mm2': total,
+            'span_mm': round(_box_span(p), 4),
+            'inside_mm': round(float(reach.max()), 3),
+            'box': [round(float(bx.min()), 3), round(float(by.min()), 3),
+                    round(float(bx.max()), 3), round(float(by.max()), 3)],
+            'gates': _gates(total, _box_span(p[beyond]) if beyond.any() else 0.0)}
 
 
 def _box_span(boxes) -> float:

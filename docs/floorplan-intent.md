@@ -764,8 +764,14 @@ emitted at the pose its footprint draws, reads 11.93 mm and gets `min` 11.83.
 its own frame (`floorplan.body_clearing_overhang`): how far the band's shape
 reaches along the part's mating face, less where its body at board depth
 starts, less the tolerance. It is a straight edge's number: where the outline
-under the seat is not one, the band reads the courtyard and the gate has the
-last word. The entry is written with or without
+under the seat is not one, the band reads the courtyard, so **the seat reads the
+gate itself (#1692)**, on any outline but a plain rectangle: it moves the part out
+until `check_assembly`'s gate passes, and holds the part's whole line to that, within
+the band's `max` and its pads' edge clearance. A part no line can clear keeps the
+seat the band gives it, and its note says `WARNING:`, how far inside its body reads
+and what stopped it. On such an outline the emit widens `max` by how far the courtyard
+stands past the shape the floor reads, since that is what the band then reads. The
+entry is written with or without
 `--declare-classes` and carries no `edge` (#1103: a staging pose says nothing),
 its band is `derived_default` whole, and the roster's `OWED:` line
 (`floorplan.body_floor_owed`) stands until the entry has an `edge` and a band

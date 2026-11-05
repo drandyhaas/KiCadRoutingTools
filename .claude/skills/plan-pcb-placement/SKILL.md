@@ -548,7 +548,11 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   `overhang_basis` says which of the two it read. A receptacle's seat
   tolerance is read on its drawn body, and the seat puts that body flush
   even where the band reads the courtyard (#1653), so its courtyard can
-  stand past the edge.
+  stand past the edge. That floor is a straight edge's number, so on an outline
+  that is not a plain rectangle the seat reads check_assembly's gate itself and
+  moves the part out until it passes, within the band's `max`. A part no line
+  can clear keeps its seat, and its note says `WARNING:`, how far inside its body
+  reads and what stopped it: raise the `max` it names if the drawing allows.
 - **When its pads stop an edge part short of its band.** An edge-launch jack
   whose pads end level with the wall of its board slot needs those pads nearly
   on the edge, and the board's edge clearance (0.20 mm when it declares less)
