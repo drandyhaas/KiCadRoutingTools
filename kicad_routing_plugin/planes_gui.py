@@ -440,7 +440,10 @@ class CreatePlanesOptionsPanel(wx.Panel):
         gnd_sizer = wx.StaticBoxSizer(gnd_box, wx.VERTICAL)
 
         self.add_gnd_vias_check = wx.CheckBox(self, label="Add GND vias near signal vias")
-        self.add_gnd_vias_check.SetToolTip("Add GND vias near signal vias for return current path")
+        self.add_gnd_vias_check.SetToolTip(
+            "Add GND vias near signal vias for return current path. A return via "
+            "needs GND poured on a second layer: on one layer it joins nothing, "
+            "so none is placed.")
         gnd_sizer.Add(self.add_gnd_vias_check, 0, wx.ALL, 5)
 
         # GND via parameters
@@ -1055,6 +1058,7 @@ class PlanesTab(wx.Panel):
             _plane_net_clearances = _explicit
 
         failed_pads = 0
+        gnd_via_warnings = []
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
              failed_pads, ripped_net_ids, reconnect_swap_data,
@@ -1239,7 +1243,9 @@ class PlanesTab(wx.Panel):
                         self.pcb_data, gnd_config, [],
                         net_clearances=_plane_net_clearances)
 
-                    # Add GND vias near existing signal vias
+                    # Add GND vias near existing signal vias. self.pcb_data does
+                    # not hold this call's pours yet (the applier adds them), so
+                    # the engine is told what a return via could join.
                     gnd_vias = add_gnd_vias_to_existing_board(
                         self.pcb_data,
                         gnd_via_net,
@@ -1247,7 +1253,9 @@ class PlanesTab(wx.Panel):
                         gnd_config,
                         obstacles,
                         coord,
-                        net_clearances=_plane_net_clearances
+                        net_clearances=_plane_net_clearances,
+                        poured_now=new_zones,
+                        warnings=gnd_via_warnings
                     )
 
                     # Add to new vias list
@@ -1312,6 +1320,7 @@ class PlanesTab(wx.Panel):
             'total_traces': total_traces,
             'total_pads': total_pads,
             'failed_pads': failed_pads,
+            'gnd_via_warnings': gnd_via_warnings,
             'cancelled': self._cancel_requested,
             'affected_nets': sorted(set(expanded_nets)),
             'config': config,
@@ -1402,6 +1411,8 @@ class PlanesTab(wx.Panel):
                 msg += f"{label}: {result[key]}\n"
         if failed_pads:
             msg += f"Failed pads (no via placed): {failed_pads}\n"
+        for warning in result.get('gnd_via_warnings') or ():
+            msg += f"{warning}\n"
 
         status = f"Created: {zones_added} zone(s)"
         if replaced:

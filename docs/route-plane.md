@@ -222,9 +222,16 @@ path close to each signal via.
 **Note:** Differential pair routing (`route_diff.py`) adds its own GND return vias automatically.
 This feature is for single-ended signal vias placed by `route.py`.
 
+**A return via needs its ground net poured on two layers.** A via that joins fewer than two layers
+connects nothing, and the next `route.py` removes it (#1166). The placer keeps a return via off the
+net's own tracks and pads, so its layers come from pours: on a net poured on one layer, or none, it
+warns and places none, on either front. On a net poured on more, a site must lie inside two of its
+pours, by the test the removal uses (`check_weird.via_support_parts`). A pour from an earlier step
+counts, as does one in this call.
+
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--add-gnd-vias` | off | Enable GND return via placement near signal vias (a post-pass on the written board) |
+| `--add-gnd-vias` | off | Enable GND return via placement near signal vias (a post-pass on the written board). Needs the ground net poured on two layers; on fewer it warns and places none |
 | `--gnd-via-net` | *auto* | Pin every return via to this net. Empty (the default) matches each signal to **its own ground domain** |
 | `--gnd-via-distance` | 2.0 | Maximum distance from signal via to place GND via (mm) |
 
@@ -355,13 +362,13 @@ centre-to-centre minimum, `max(via_size + clearance, via_drill + hole_to_hole)` 
 at or below that finds no position at all, and one only a little above it leaves few.
 
 Use the `/find-high-speed-nets` Claude Code skill to analyze component datasheets and determine
-the appropriate distance for your board. The `/plan-pcb-routing` skill includes this as a
-standard step when GND planes are present.
+the appropriate distance for your board. The `/plan-pcb-routing` skill includes this step at high
+speed tier or above, when GND is poured on two or more layers.
 
 #### Example
 
 ```bash
-python3 py_router/route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --add-gnd-vias --gnd-via-distance 2.0
+python3 py_router/route_planes.py input.kicad_pcb --nets GND GND --plane-layers F.Cu B.Cu --add-gnd-vias --gnd-via-distance 2.0
 ```
 
 Output:

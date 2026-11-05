@@ -4504,7 +4504,8 @@ Examples:
 
     # GND return vias
     parser.add_argument("--add-gnd-vias", action="store_true",
-        help="Add GND vias near signal vias for return current path")
+        help="Add GND vias near signal vias for return current path. A return via needs "
+             "its ground net poured on two layers: on fewer it warns and places none")
     parser.add_argument("--gnd-via-net", type=str, default=defaults.GND_VIA_NET,
         help="Pin GND return vias to this net (default: auto -- match each "
              "signal's own ground domain, which is plain GND on a board with "

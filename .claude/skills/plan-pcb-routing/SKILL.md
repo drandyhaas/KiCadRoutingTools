@@ -1031,24 +1031,32 @@ Report to user:
 
 ### High-Speed Signal Check (delegate to /find-high-speed-nets)
 
-Whether the plan includes GND return vias - and the `--gnd-via-distance` to use -
-is the `/find-high-speed-nets` skill's job: it classifies nets into speed tiers
+The board's speed tier - and the `--gnd-via-distance` to use - is the
+`/find-high-speed-nets` skill's job: it classifies nets into speed tiers
 (datasheet lookup, rise-time estimates) and maps tiers to recommended distances.
 Follow that skill's methodology here (its quick net-name/footprint scan decides
-whether the deeper datasheet pass is worth it) and put the recommended distance
-into the plan's GND-via step. Remember its physical floor: never set
+whether the deeper datasheet pass is worth it). Step 10 rule 10 says which tiers
+get a GND-via step; when the plan has one, put the recommended distance into
+it. Remember its physical floor: never set
 `--gnd-via-distance` below 3 x (via_size + clearance) -- 2.25 mm at the repo's
 own defaults (`routing_defaults.VIA_SIZE` 0.5 + `CLEARANCE` 0.25), and MORE on a
 board that routes wider. Compute it for the sizes this plan actually passes; the
 number is not a constant.
 
-Report to user when presenting the plan:
-- If high-speed nets found: "**GND Return Vias:** This board has [tier] signals ([examples]).
-  GND return vias are included in Step N with `--gnd-via-distance [X]mm`. Let me know if
-  you'd like to skip this step."
-- If no high-speed nets found: "**GND Return Vias:** The high-speed scan found
-  no nets that need them (only low-frequency I2C/UART/GPIO). The step is
-  included; it is cheap and harmless here. Want me to remove it?"
+Report to user when presenting the plan, by Step 10 rule 10 (the tier) and
+Step 3 of the example chain (what a return via needs):
+- High tier or above, with GND poured on two or more layers: "**GND Return Vias:**
+  This board has [tier] signals ([examples]). GND return vias are included in
+  Step N with `--gnd-via-distance [X]mm`. Let me know if you'd like to skip this
+  step."
+- High tier or above, with GND poured on one layer: "**GND Return Vias:** This
+  board has [tier] signals ([examples]), and this plan pours GND on one layer, so
+  it has no return vias: a return via needs GND on a second layer. Let me know if
+  you'd like GND poured on a second layer for them."
+- Medium tier or below: "**GND Return Vias:** The high-speed scan found [tier]
+  signals at most ([examples], or only low-frequency I2C/UART/GPIO), so this plan
+  has no return vias and ends at the Step 2 route. Let me know if you'd like them
+  anyway."
   Say what the SCAN found, not that the vias are "optional" -- optional invites
   dropping them on a board where the scan simply was not run, and a missing
   return path is not visible in any DRC.
@@ -1583,7 +1591,7 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    any diff-pair pads peeled off in step 2, so keep the diff-pair nets in its
    selection (the `"*"` covers them). The fragility field steers it away from
    severing the Step 1 pours.
-4. **Finalize planes (only when GND return vias / stitching are wanted)** -
+4. **Finalize planes (only at the tier Step 10 rule 10 names)** -
    Re-run `route_planes` with the same nets/layers plus `--add-gnd-vias` (and
    any `--stitch-*` flags): an existing same-net zone is REPLACED in place, and
    the return/stitching vias now adapt around the finished signals — the #56
@@ -2291,9 +2299,9 @@ presumably by freeing corridor space.
 `--no-smoothing` exists for A/B only (`KICAD_SMOOTH_ROUTE=0/1` overrides either
 way). The lesson worth carrying: a two-board result is not a default change.
 
-### Step 3 of the example chain: Finalize Planes — GND Return Vias + Stitching (only if wanted)
-Skip this step entirely on low-speed boards. When the speed analysis calls
-for GND return vias or area stitching, re-run `route_planes` with the SAME
+### Step 3 of the example chain: Finalize Planes — GND Return Vias + Stitching (high speed tier or above)
+Step 10 rule 10 says when this step runs; below that tier the chain ends at
+the Step 2 route. When it runs, re-run `route_planes` with the SAME
 nets/layers as Step 1 plus the via flags: an existing same-net zone on the
 target layer is REPLACED in place (CLI default), and `--add-gnd-vias` places
 return-current vias that adapt around the now-finished signals — the old
@@ -2307,21 +2315,29 @@ lost for tap pads the drops already serve. Reconnect anything a chain does
 leave open with a follow-up `route.py` pass naming them,
 using the same parameters as Step 2.)
 
+**A return via needs GND on a second layer.** A via connects nothing unless it
+joins two layers of its net, and the closing `route.py` removes one that does
+not (#1166). A return via gets its layers from GND's pours: the placer keeps it
+off the net's own tracks and pads. So with GND poured on one layer, the STANDARD
+map's GND, `--add-gnd-vias` warns and places none; with GND on two or more it
+takes only a site inside two of those pours. A pour from an earlier step counts.
+Whether to pour GND on a second layer for them is a plane-map decision for the
+user, not something this step can settle.
+
 > **Note to user:** GND return vias improve signal integrity for high-speed
 > signals. Based on the speed analysis, this board has [speed_tier] signals,
-> so `--gnd-via-distance` is set to [X] mm. If this is a purely low-frequency
-> board (I2C/UART/GPIO only), drop `--add-gnd-vias`. Let me know if you'd
-> like that.
+> so `--gnd-via-distance` is set to [X] mm. Let me know if you'd rather skip
+> this step.
 
 python3 -X utf8 py_router/route_planes.py board_step2.kicad_pcb board_step4.kicad_pcb \
-    --nets GND VCC \
-    --plane-layers B.Cu F.Cu \
+    --nets <the Step 1 nets> \
+    --plane-layers <the Step 1 layers, GND on two or more> \
     --add-gnd-vias --gnd-via-distance 2.5 \
     2>&1 | tee /tmp/step3_planes.txt
 
 python3 -X utf8 py_router/route.py board_step4.kicad_pcb board_step4b.kicad_pcb \
-    --nets GND VCC \
-    --power-nets GND VCC --power-nets-widths <the Step 2 widths> \
+    --nets <the Step 1 nets> \
+    --power-nets <the Step 2 power nets> --power-nets-widths <the Step 2 widths> \
     --layers <ALL copper layers> --layer-costs <the Step 2 vector> \
     2>&1 | tee /tmp/step3_finalize.txt
 
@@ -2344,7 +2360,8 @@ are electrical targets, the floor is what fits:
 - Ultra-high (>1 GHz): the floor itself (2.25 mm at the default via+clearance);
   tighter is not buildable, so there is no tighter tier to offer
 - High (100 MHz - 1 GHz): 3.0 mm
-- Medium (10 - 100 MHz): 5.0 mm
+- Medium (10 - 100 MHz): 5.0 mm, which `/review-routed-board` grades coverage
+  at; this tier gets no via step (Step 10 rule 10)
 - Minimum physical limit: 3 x (via_size + clearance) -- 2.25 mm at the default
   0.5 via / 0.25 clearance, recomputed for whatever sizes the plan passes
 
@@ -3974,5 +3991,8 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
    every BGA supply ball on its own rail's main island).
 10. **Stitch/GND-via tail only at high speed tier or above** (from
    `/find-high-speed-nets`) — and when it runs, the chain still ends on
-   `route.py`. Low-speed boards end at the Step 2 route (plus Step 2d
-   iterations) with no re-pour tail.
+   `route.py`. Low-speed and medium-tier boards end at the Step 2 route (plus
+   Step 2d iterations) with no re-pour tail: the medium tier's 5.0 mm row
+   grades return-via coverage in review and does not schedule this step.
+   This is the one statement of the rule; the other passages cite it. Return
+   vias also need GND on a second layer (Step 3 of the example chain).

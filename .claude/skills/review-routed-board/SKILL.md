@@ -229,6 +229,10 @@ for via in pcb.vias:
         # default 0.5 via / 0.25 clearance; high: 3.0mm; medium: 5.0mm)
 ```
 
+The medium distance grades coverage only: `/plan-pcb-routing` runs no via step
+at that tier (its Step 10 rule 10), so a medium-tier miss is a note, not a
+skipped step.
+
 ## Step 3b: Impedance & Return-Path Audit (#486)
 
 A controlled-impedance trace whose reference plane has a **gap under its path**
@@ -372,7 +376,8 @@ UNGRADED (not scored, not passed): impedance, length
 
 ### Next actions
 1. Run /diagnose-routing-failures with the routing logs for the 2 disconnected nets
-2. Re-run route_planes.py --add-gnd-vias for the 3 uncovered signal vias, then
+2. Re-run route_planes.py --add-gnd-vias for the 3 uncovered signal vias (GND
+   poured on two layers; on one it places none), then
    a closing route.py whose --nets covers the poured nets (the re-pour leaves
    its welds unverified until route.py's plane finalize runs)
 ```

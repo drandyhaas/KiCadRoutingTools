@@ -618,7 +618,9 @@ through there too.
   that runs the Planes tab's **Add GND vias** step. Real PlanesTab, real
   create_plane, against `route_planes.py --add-gnd-vias` on the same files:
   class clearance, `.kicad_dru` layer rules, every copper layer and the fab
-  edge floor, and identical via positions on both fronts. Seconds to run.
+  edge floor, and identical via positions on both fronts, with GND on two
+  layers (on one, #1667: no via on either front, and both say why). Seconds to
+  run.
 - **A gate that waits on a tab's worker must run a real MainLoop**
   (`tests/gui_parity/wx_pump.run_until`), never a `wx.YieldIfNeeded()` loop:
   the tabs collect results through `wx.CallLater`, and Yield-pumping never

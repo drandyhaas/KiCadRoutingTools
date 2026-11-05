@@ -401,7 +401,7 @@ Based on the highest speed class found on the board:
 |-------------|-----------|----------------------------------|-----------|
 | Ultra-high | >1 GHz | the floor below (2.25 mm at the default 0.5 via / 0.25 clearance) | Return path critical; lambda/20 ~ 7 mm at 1 GHz in FR4 — but 2.0 mm, the value this row used to name, is UNDER the floor |
 | High | 100 MHz - 1 GHz | 3.0 mm | Good return path, moderate density |
-| Medium | 10 - 100 MHz | 5.0 mm | Return current less localized |
+| Medium | 10 - 100 MHz | 5.0 mm, as a review grade: no via step | Return current less localized; `/review-routed-board` grades coverage at this distance, and `/plan-pcb-routing` runs no via step at this tier (its Step 10 rule 10) |
 | Low | <10 MHz | Skip | Plane provides adequate return path |
 | **Minimum physical** | any | **3 x (via_size + clearance)** | Vias cannot physically fit closer |
 
@@ -410,9 +410,10 @@ Based on the highest speed class found on the board:
 recommend `max(the speed tier, that floor)`. Recommending below it asks for
 vias that cannot be placed.
 
-For this board, the tightest interface is **[interface]** at **[freq]**, so use
-(`route_planes.py` flags — the plan's finalize-planes step; the tool default is
-2.0 mm):
+For this board, the tightest interface is **[interface]** at **[freq]**. At high
+tier or above, with GND poured on two or more layers (a return via needs a second
+layer: `/plan-pcb-routing` Step 3 of its example chain), use (`route_planes.py`
+flags — the plan's finalize-planes step; the tool default is 2.0 mm):
 
 ```
 --add-gnd-vias --gnd-via-distance [recommended_value]

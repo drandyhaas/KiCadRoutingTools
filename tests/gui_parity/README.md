@@ -599,7 +599,8 @@ pass. Run any directly:
   real (nothing mocked) against `route_planes.py --add-gnd-vias` on the same
   files: return vias keep a net-class clearance (#1030), a `.kicad_dru` layer
   rule (#498), every copper layer (not the plane step's outer+pour set), and
-  the fab copper-to-edge floor; GUI and CLI place identical vias. On the
+  the fab copper-to-edge floor; GUI and CLI place identical vias, GND poured
+  on two layers (on one, #1667, both warn and place none). On the
   pre-2026-09-24 code it fails 9 checks, CLI included (its rules lookup read
   the output's not-yet-copied `.kicad_dru`). Its `file` arm (#1272) sets the
   Net Clearances File / `--net-clearances`: the file replaces the class map

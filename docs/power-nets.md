@@ -195,5 +195,5 @@ recommended column already carries safety margin over the bare formula.
 
 When using GND planes, signal vias that transition between layers need nearby GND return vias
 for proper return current paths. Use the `/find-high-speed-nets` skill to identify which signals
-need this, and `route_planes.py --add-gnd-vias` to place them. See
+need this, and `route_planes.py --add-gnd-vias` to place them (with GND poured on two layers). See
 [GND Return Via Placement](route-plane.md#gnd-return-via-placement) for details.
