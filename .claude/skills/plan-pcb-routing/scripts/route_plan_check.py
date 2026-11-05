@@ -562,12 +562,23 @@ def r_gnd_via_distance(p):
     places. A fanout escape via is not the via the GND pass places, and the
     skill itself has them at different sizes.
     """
-    def _resolved(flag, tool, fallback):
+    def _resolved(read, tool, fallback):
         seen = [v for a in p.by_tool(tool)
-                for v in (scalar(a, flag),) if v is not None]
+                for v in (read(a),) if v is not None]
         if seen:
             return min(seen), f'{tool} elsewhere in the plan'
         return fallback, 'routing_defaults'
+
+    def _via(argv):
+        return scalar(argv, '--via-size')
+
+    def _clearance(argv):
+        # A chain's routing steps spell the floor `--clearance-ceiling` (Step
+        # 4), so a plan that says only that must not read as saying nothing.
+        given = [v for v in (scalar(argv, '--clearance'),
+                             scalar(argv, '--clearance-ceiling'))
+                 if v is not None]
+        return min(given) if given else None
 
     bad = []
     for argv in p.argvs:
@@ -575,13 +586,12 @@ def r_gnd_via_distance(p):
         if d is None:
             continue
         tool = tool_of(argv)
-        vs, vs_src = scalar(argv, '--via-size'), 'this step'
+        vs, vs_src = _via(argv), 'this step'
         if vs is None:
-            vs, vs_src = _resolved('--via-size', tool,
-                                   routing_defaults.VIA_SIZE)
-        clr, clr_src = scalar(argv, '--clearance'), 'this step'
+            vs, vs_src = _resolved(_via, tool, routing_defaults.VIA_SIZE)
+        clr, clr_src = _clearance(argv), 'this step'
         if clr is None:
-            clr, clr_src = _resolved('--clearance', tool,
+            clr, clr_src = _resolved(_clearance, tool,
                                      routing_defaults.CLEARANCE)
         floor = 3.0 * (vs + clr)
         if d < floor - 1e-9:

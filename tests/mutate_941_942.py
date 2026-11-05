@@ -105,11 +105,11 @@ ROWS = [
     # unless all three flags rode one argv. This is that bail.
     ('r15-needs-all-three-flags', 'rpc',
      "        tool = tool_of(argv)\n"
-     "        vs, vs_src = scalar(argv, '--via-size'), 'this step'\n",
+     "        vs, vs_src = _via(argv), 'this step'\n",
      "        tool = tool_of(argv)\n"
-     "        if scalar(argv, '--via-size') is None:\n"
+     "        if _via(argv) is None:\n"
      "            continue\n"
-     "        vs, vs_src = scalar(argv, '--via-size'), 'this step'\n",
+     "        vs, vs_src = _via(argv), 'this step'\n",
      (T_937,), KILLED),
 
     # GATE ROW. max() across the whole plan refuses CORRECT plans: a coarse
@@ -118,11 +118,11 @@ ROWS = [
     # back must redden the gate rather than pass quietly.
     ('r15-max-across-plan', 'rpc',
      "        seen = [v for a in p.by_tool(tool)\n"
-     "                for v in (scalar(a, flag),) if v is not None]\n"
+     "                for v in (read(a),) if v is not None]\n"
      "        if seen:\n"
      "            return min(seen), f'{tool} elsewhere in the plan'\n",
      "        seen = [v for a in p.argvs\n"
-     "                for v in (scalar(a, flag),) if v is not None]\n"
+     "                for v in (read(a),) if v is not None]\n"
      "        if seen:\n"
      "            return max(seen), 'the plan'\n",
      (T_937,), KILLED),
