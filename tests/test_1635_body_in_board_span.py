@@ -11,7 +11,8 @@ and a row under the gate says what it measured, not a cause.
 
 With #1603's synthetic body measurement (no KiCad needed):
 
-  1. the jack 0.25, 0.5 and 0.7 mm in gates, each under 4 mm^2, by its span;
+  1. the jack 0.25, 0.5 and 0.7 mm in gates by its span, the first two under
+     4 mm^2 (a read of the body itself, #1659, puts the third at 4.1);
   2. at its drawn pose it reads nothing;
   3. a 1 x 1 mm and a 1 x 2.5 mm model drawn low (the longest the tracked
      boards have) are listed and do not gate; a 5.25 x 0.5 mm lip does;
@@ -56,11 +57,12 @@ def main():
     for inb in (0.25, 0.5, 0.7):
         c = heights.body_in_board(h, pcb, {'J3': (DESIGNED[0] - inb, DESIGNED[1], 0.0)})
         row = next((r for r in c['rows'] if r['ref'] == 'J3'), {})
-        check(f'{inb} mm in: under {heights.DEPTH_MIN_MM2:g} mm^2 and gates by its span',
-              row.get('area_mm2', 99) < heights.DEPTH_MIN_MM2
+        check(f'{inb} mm in: its span gates it, '
+              + (f'under {heights.DEPTH_MIN_MM2:g} mm^2' if inb < 0.7 else 'with its area'),
+              (row.get('area_mm2', 99) < heights.DEPTH_MIN_MM2 or inb >= 0.7)
               and row.get('span_mm', 0) >= heights.DEPTH_MIN_SPAN_MM
               and 'J3' in c['gating_refs']
-              and abs(row.get('inside_mm', 0) - inb) < heights.CELL_MM + 0.05, str(row))
+              and abs(row.get('inside_mm', 0) - inb) < 0.002, str(row))
     c = heights.body_in_board(h, pcb)
     check('at its drawn pose it reads nothing', not c['rows'], str(c['rows']))
 

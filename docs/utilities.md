@@ -826,14 +826,19 @@ slab and its cross-section half way through the board. A right-angle or
 edge-mount jack whose board slides into its slot is seated past the edge by
 the slot's depth; placed wholly on the board, its housing is in the
 laminate. Such a part is NOT BUILDABLE, absolutely and lock or not, when the
-part of that body on 0.25 mm cells wholly inside the outline is at least
-`DEPTH_MIN_MM2` (4 mm^2) in area OR at least `DEPTH_MIN_SPAN_MM` (3 mm) long
--- the longest side of its box in the part's own frame (#1635): by area
-alone, the stock edge-mount SMA jack 0.7 mm in, its body 0.74 mm inside the
-edge across 6.5 mm, read 2.0 mm^2 and passed (`BODY THROUGH THE BOARD`, JSON
-`body_in_board_count`, `body_in_board` rows with `area_mm2`, `span_mm`,
-`inside_mm` -- how far the deepest such cell lies inside the outline --
-`box` and `gates`; a row under the gate prints what it measured). What lies on the
+part of that body inside the outline is at least `DEPTH_MIN_MM2` (4 mm^2) in
+area OR, more than `DEPTH_EDGE_TOL_MM` (0.1 mm) inside, at least
+`DEPTH_MIN_SPAN_MM` (3 mm) long -- the longest side of its box in the part's
+own frame (#1635): by area alone, the stock edge-mount SMA jack 0.7 mm in read
+2.0 mm^2 and passed (`BODY THROUGH THE BOARD`, JSON `body_in_board_count`,
+`body_in_board` rows with `area_mm2`, `span_mm`, `inside_mm`, `box` and
+`gates`; a row under the gate prints what it measured). The depth reads the
+body, not the 0.25 mm cell it enters, so one real depth has one verdict
+wherever its face falls on the grid (#1659), and the tolerance is there
+because KiCad grades edge clearance to the outline's DRAWN line: a pad ending on
+a centre line drawn 0.1 mm wide overlaps it by 0.05 mm, so a land whose pads end
+level with the part's board slot has to stand that far in. `inside_mm` is how
+far the deepest point of that body lies inside the outline. What lies on the
 part's own pads and drilled holes is left out (a header's pins in their
 holes), a cutout is not the board (a mid-mount part over its slot reads
 nothing), and a body that starts on the edge reads nothing. A board whose

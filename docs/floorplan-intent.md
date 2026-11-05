@@ -756,9 +756,10 @@ labelled `derived_default` in `context.basis`
 `observed_baseline`. A part with too little such body for the gate ever to
 read it (under `DEPTH_MIN_MM2` in area and `DEPTH_MIN_SPAN_MM` in length)
 keeps `min` 0; a micro-B receptacle's 5.25 mm front lip is long enough, so it
-gets a floor (#1635). Measured: KiCad's stock
-`SMA_Amphenol_132289_EdgeMount`, emitted at the pose its footprint draws,
-reads 11.93 mm and gets `min` 11.719.
+gets a floor (#1635). The reading is the gate's own, on the body rather than
+its 0.25 mm cell (#1659): the floor leaves the body at most `DEPTH_EDGE_TOL_MM`
+(0.1 mm) inside. Measured: KiCad's stock `SMA_Amphenol_132289_EdgeMount`,
+emitted at the pose its footprint draws, reads 11.93 mm and gets `min` 11.83.
 Such a part is given its edge, and so this floor, **whatever its class**
 (#1634): a name with no part class (the same jack as `RF:132289`) no longer
 loses them, and its note says the edge came from its model.

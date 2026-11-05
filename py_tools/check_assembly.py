@@ -1123,8 +1123,9 @@ def main():
                   f"{r['inside_mm']:g}mm inside the outline, at x "
                   f"{b[0]}..{b[2]}, y {b[1]}..{b[3]}"
                   + ('' if r['gates'] else
-                     f"  [under {_heights.DEPTH_MIN_MM2:g}mm2 and "
-                     f"{_heights.DEPTH_MIN_SPAN_MM:g}mm long: does not gate]"))
+                     f"  [under {_heights.DEPTH_MIN_MM2:g}mm2, and no "
+                     f"{_heights.DEPTH_MIN_SPAN_MM:g}mm long slice more than "
+                     f"{_heights.DEPTH_EDGE_TOL_MM:g}mm inside: does not gate]"))
     elif through['unmeasured']:
         print(f"  body through the board: not measured ({through['unmeasured']})")
     # #1250, the NINTH: a test point a move left under another part's body
