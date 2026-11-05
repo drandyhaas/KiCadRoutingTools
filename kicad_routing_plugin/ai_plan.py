@@ -1559,7 +1559,9 @@ class PlanExecutor:
 
             def _take(key, val, smallest=True):
                 try:
-                    v = float(val)
+                    # #1691: the value the step ran at, which the dialog pinned
+                    # at the physical fab floor; a plan's own number can be below
+                    v = self.dialog._fab_floored(key, float(val))
                 except (TypeError, ValueError):
                     return
                 if key not in floors or (smallest and v < floors[key]):
@@ -1710,8 +1712,10 @@ class PlanExecutor:
                         diff_pair_gap=floors.get('diff_pair_gap'),
                         clamp_nondefault_netclasses=_clamp,
                         # #1492: the raw override is the ceiling the classes
-                        # land at, min(class, ceiling)
-                        class_ceiling=(self.dialog.clearance.GetValue()
+                        # land at, min(class, ceiling); #1691: held at the
+                        # physical fab floor, as `_class_ceiling` holds it
+                        class_ceiling=(self.dialog._fab_floored(
+                                           'clearance', self.dialog.clearance.GetValue())
                                        if _clamp and hasattr(self.dialog, 'clearance')
                                        else None))
                     fix_project_for_output(board_file, input_pcb=board_file,

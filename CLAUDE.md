@@ -139,6 +139,9 @@ Validate routed boards against the *real* spec, with the right checker — most
     `min(its class, X)` in the map and the `.kicad_pro` writeback clamps every class
     DOWN to it, so KiCad grades exactly what was routed — the "stock classes are
     aspirational" workflow. GUI: the **Clearance ceiling** checkbox with Min Clearance.
+    X holds the PHYSICAL fab floor as `--clearance` does (`enforce_fab_floors`, the
+    GUI's `_class_ceiling`, #1691), so it lowers no class below that floor; a class
+    the board declares below it stays as declared, as the Default class does.
   - **Both omitted** → base = the board's Default class, else
     `routing_defaults.CLEARANCE` 0.25; classes preserved.
   - **In a CHAIN, pass `--clearance-ceiling <floor>`, not `--clearance`.** The

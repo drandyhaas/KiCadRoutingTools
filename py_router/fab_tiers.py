@@ -758,6 +758,9 @@ _PARAM_FLOOR_KEY = {
     # board because only --track-width was enforced).
     'min_track_width': 'track_width',
     'clearance': 'clearance',
+    # What it caps every net class at, in the map and in the writeback (#1691),
+    # so it holds the floor the Default class holds.
+    'clearance_ceiling': 'clearance',
     'via_size': 'via_diameter',
     'via_diameter': 'via_diameter',
     'via_drill': 'via_drill',
@@ -892,6 +895,15 @@ def min_via_center_distance(via_diameter, clearance, via_drill,
                float(via_drill) + float(hole_to_hole or 0.0))
 
 
+def fab_floor_pin_warning(name, val, floor):
+    """The line saying ``name`` was pinned up to the physical fab floor, on
+    both fronts."""
+    return (f"  WARNING: --{name.replace('_', '-')} {val} is below the physical fab "
+            f"floor {floor} (the advanced rung, or your --fab-overrides); "
+            f"pinning up to {floor}. Pass --fab-overrides "
+            f"to declare a smaller fab capability, or raise the value to silence this.")
+
+
 def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):
     """CLI guard: pin any routing parameter that is below the PHYSICAL fab
     floor (``fab_floor_for_param`` -> ``physical_fab_floor``: the advanced rung,
@@ -901,17 +913,15 @@ def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):
     a warning. Neither the selected tier nor a board minimum pins an explicit
     request: those bound automatic descents only.
 
-    Each CLI passes the params it accepts (track_width, clearance, via_size,
-    via_drill, hole_to_hole_clearance); None values skip. Returns a
+    Each CLI passes the params it accepts (track_width, clearance,
+    clearance_ceiling, via_size, via_drill, hole_to_hole_clearance); None values
+    skip. Returns a
     ``{param_name: pinned_floor}`` dict of the clamps applied (empty if all in
     range) so the caller can write the pinned values back onto its parsed args."""
     viols = check_param_floors(copper_layer_count, tier, overrides, **params)
     pinned = {}
     for name, val, floor in viols:
-        print(f"  WARNING: --{name.replace('_', '-')} {val} is below the physical fab "
-              f"floor {floor} (the advanced rung, or your --fab-overrides); "
-              f"pinning up to {floor}. Pass --fab-overrides "
-              f"to declare a smaller fab capability, or raise the value to silence this.")
+        print(fab_floor_pin_warning(name, val, floor))
         pinned[name] = floor
     # #1433: the size and drill floors hold one value at a time; the via must
     # also keep a copper ring around its hole.
@@ -1040,6 +1050,11 @@ def cap_net_clearances(net_clearances, ceiling, *, net_names=None, class_of=None
     ``escalation_summary()['ceiling_lowered_classes']`` (JSON_SUMMARY
     ``design_rules``): the class, its clearance, the capped value and the nets
     it covers. Disclosure only: the map is capped exactly as before.
+
+    ``ceiling`` is the value the front pinned at the physical fab floor
+    (``enforce_fab_floors``, the GUI's ``_class_ceiling``, #1691), so the cap
+    never lowers a class below that floor; a class the board declares below it
+    stays as declared, as the Default class does in the writeback.
 
     ``net_names`` is {net_id: name}; the class of each net is ``class_of``
     ({net_id or net name: class}) when given (a front that read the classes
@@ -1530,7 +1545,8 @@ def apply_clearance_ceiling(args, tool=''):
     The run clearance is ``min(requested, ceiling)`` -- tighten-only, exactly
     as it is for the Default class on the routing mains. The classes: both
     fanouts price each class at ``min(class, ceiling)`` and write it there,
-    as route.py does (#1529, ``fanout_fix_kwargs``).
+    as route.py does (#1529, ``fanout_fix_kwargs``). The caller's
+    ``enforce_fab_floors`` then pins both values at the physical fab floor.
 
     Call it AFTER ``parse_args`` and BEFORE anything reads ``args.clearance``
     (on bga_fanout that means before ``enforce_fab_floors``, which would

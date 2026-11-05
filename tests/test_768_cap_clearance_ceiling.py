@@ -984,11 +984,11 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         self.assertIn("'clamp_netclasses': self._ceiling_on(),", src)
         self.assertIn("'placement_clamp_netclasses': self.clearance_check.GetValue(),",
                       src)
-        # The fanout tab's own site, by its two lines: since #1492 the signal
-        # and diff tabs export the raw ceiling too (on one line), and the
-        # first line alone was satisfied by them with the fanout tab's wrong.
-        self.assertIn("'clearance_ceiling': (self.clearance.GetValue()\n"
-                      "                                      if self._ceiling_on()\n", src,
+        # All three tabs export the one helper (#1691), which holds the raw
+        # spin value at the physical fab floor.
+        self.assertEqual(src.count("'clearance_ceiling': self._class_ceiling(),"), 3)
+        self.assertIn("        val = self.clearance.GetValue()\n"
+                      "        floored = self._fab_floored('clearance', val)\n", src,
                       'the ceiling must be the RAW spin value; '
                       '_effective_clearance() is already min(Default, it)')
 

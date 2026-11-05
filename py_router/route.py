@@ -10174,6 +10174,7 @@ For differential pair routing, use route_diff.py:
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
+        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
@@ -10181,6 +10182,7 @@ For differential pair routing, use route_diff.py:
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)
+    args._clearance_ceiling = getattr(args, 'clearance_ceiling', None)
 
     # --output is a named alias for the positional output_file; reject giving both differently.
     if args.output is not None:

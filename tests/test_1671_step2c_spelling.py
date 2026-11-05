@@ -85,7 +85,9 @@ def flag_checks(td):
     check('precondition: the board has another class, wider',
           got['bare'].get('Wide', 0) > 0.0889, f'{got}')
     check('a bare --clearance leaves it at its own clearance', got['bare'].get('Wide') == 0.4, f"{got['bare']}")
-    check('the ceiling caps it', abs(got['ceiling'].get('Wide', 9) - 0.0889) < 1e-9, f"{got['ceiling']}")
+    # 0.0889 is below this 2-layer board's physical fab floor, which holds (#1691)
+    check('the ceiling caps it, at the physical fab floor',
+          abs(got['ceiling'].get('Wide', 9) - 0.1) < 1e-9, f"{got['ceiling']}")
 
 
 if __name__ == '__main__':

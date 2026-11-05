@@ -743,6 +743,22 @@ class RoutingDialog(wx.Dialog):
         mc = getattr(self, 'clearance_check', None)
         return bool(cc is not None and cc.GetValue() and mc is not None and mc.GetValue())
 
+    def _class_ceiling(self):
+        """The ceiling every net class is capped at, or None with the box
+        unchecked: the RAW override (#768), never `_effective_clearance()`, which
+        is min(Default class, override) -- pinned up to the physical fab floor,
+        as the CLI pins --clearance-ceiling (#1691). A plan sets the control
+        without the event that pins it as it is typed."""
+        if not self._ceiling_on():
+            return None
+        val = self.clearance.GetValue()
+        floored = self._fab_floored('clearance', val)
+        if floored != val and (val, floored) != getattr(self, '_ceiling_pin_said', None):
+            self._ceiling_pin_said = (val, floored)
+            from fab_tiers import fab_floor_pin_warning
+            print(fab_floor_pin_warning('clearance_ceiling', val, floored))
+        return floored
+
     def _escalation_policy(self):
         """The Escalation choice as the engine's policy string."""
         ctrl = getattr(self, 'escalation', None)
@@ -2027,9 +2043,7 @@ class RoutingDialog(wx.Dialog):
                 # number the operator typed. None when the box is unchecked,
                 # which gives this the same one-value contract `--clearance`
                 # has -- the presence of a value IS the switch.
-                'clearance_ceiling': (self.clearance.GetValue()
-                                      if self._ceiling_on()
-                                      else None),
+                'clearance_ceiling': self._class_ceiling(),
                 # The PLACEMENT ceiling (#768): place_fanout_clearance.py's
                 # own --clearance is still a ceiling by contract, so the
                 # fanout tab's cap pass follows the Min Clearance override
@@ -2103,9 +2117,8 @@ class RoutingDialog(wx.Dialog):
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
                 'relax_drc_severities': self.relax_drc_severities_check.GetValue(),
                 'clamp_netclasses': self._ceiling_on(),
-                # #1492: the raw ceiling for the writeback's class clamp
-                'clearance_ceiling': (self.clearance.GetValue()
-                                      if self._ceiling_on() else None),
+                # #1492: the ceiling for the writeback's class clamp
+                'clearance_ceiling': self._class_ceiling(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 # route_planes.py --net-clearances: the Advanced tab's Net
@@ -3359,10 +3372,9 @@ class RoutingDialog(wx.Dialog):
             'fix_drc_settings': self.fix_drc_check.GetValue(),
             'relax_drc_severities': self.relax_drc_severities_check.GetValue(),
             'clamp_netclasses': self._ceiling_on(),
-            # #1492: the RAW ceiling (#768), which the writeback clamps each
+            # #1492: the ceiling (#768), which the writeback clamps each
             # non-Default class to -- min(class, ceiling) -- None unchecked
-            'clearance_ceiling': (self.clearance.GetValue()
-                                  if self._ceiling_on() else None),
+            'clearance_ceiling': self._class_ceiling(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,

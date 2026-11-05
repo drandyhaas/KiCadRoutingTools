@@ -71,6 +71,9 @@ Engine parameters and defaults:
   reaches is gated on "Fix DRC settings" (#693).
 - `test_966_unset_clearance.py` — clearance resolution in every tab's shared
   config (#966).
+- `test_1691_ceiling_fab_floor_gui.py` — a plan's Clearance ceiling below the
+  physical fab floor is held at it: each tab's config, and the classes the route
+  step writes, against the CLI's (#1691).
 - `test_zero_diff_pair_width_gui.py` — a 0 class diff-pair width/gap resolves
   the way `route_diff.py` resolves it.
 - `test_settings_roundtrip.py` — the dialog's settings save and restore.

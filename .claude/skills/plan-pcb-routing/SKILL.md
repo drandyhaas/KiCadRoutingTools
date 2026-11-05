@@ -2130,8 +2130,11 @@ spells it that way.
    --via-drill 0.15`
    The route-wide via belongs to the bundle (Step 4, "Fine-pitch escape VIA").
    The fab-floor clamps pin track/clearance/via UP automatically (with a
-   warning) on boards whose layer count can't take them — passing those
-   four always yields a size the fab can make. The clamp is the PHYSICAL
+   warning) on boards whose layer count can't take them, and the ceiling
+   with them, so it lowers no net class below that floor — those four never
+   ask for a size the fab cannot make. What the board itself declares below
+   the floor (a net class, a pad clearance override, a `.kicad_dru` rule)
+   stays in the output project as declared. The clamp is the PHYSICAL
    fab floor: an explicit size is never pinned up to the `--fab-tier` floor
    or the board's own minimums. **This item is for aspirational rules only**
    (Step 4, "Whose rules"). The `.kicad_pro` floor writeback then lowers the
