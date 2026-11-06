@@ -173,6 +173,11 @@ def cap_optimization_summary(result):
         summary += f"; {nudged} via(s) nudged with reconnect (#313)"
     if via_resolved:
         summary += f"; {len(via_resolved)} cap(s) freed by that nudge"
+    # #1686: unresolved because a via landed below the board's hole-to-hole
+    # floor to free them, not because they graze.
+    below = result.get('below_hole_floor') or []
+    _below_parts = {b.get('part') for b in below}
+    unresolved = [r for r in unresolved if r not in _below_parts]
     if unresolved:
         # The verdict has ALWAYS been via + track + pad (the engine's
         # graze_penalty is via #130 + track #278 + pad #275). This line said
@@ -193,6 +198,15 @@ def cap_optimization_summary(result):
     if shorted:
         summary += (f"; {len(shorted)} SHORTED to foreign copper (no pose "
                     f"apart from it): {', '.join(sorted(shorted))}")
+    # #1681: a mover moved so a stuck part could take a clear pose.
+    room = result.get('made_room') or {}
+    if room:
+        summary += (f"; {len(room)} moved to make room: "
+                    + ', '.join(f"{o} for {r}" for r, o in sorted(room.items())))
+    if below:
+        summary += (f"; {len(below)} via(s) below the board's min_hole_to_hole "
+                    f"to free a part, KiCad fails the pair: "
+                    f"{', '.join(sorted(_below_parts))}")
     # #1067: only when the step carried an intent (the key is absent else).
     decap = result.get('decap') or {}
     decap_broken = sorted(decap.get('broken') or {})

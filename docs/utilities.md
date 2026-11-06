@@ -2456,10 +2456,21 @@ still replay.
   fix. A cap no pose clears whose copper TOUCHES another net's where it
   stands (a short, not a graze) is moved to the pose apart from all foreign
   copper that grazes least, named on the `Moved off a short` line; one with
-  no such pose is named on the `SHORTED` line (#1563). Quarter-turn
-  rotations are tried unless `--no-rotate`;
+  no such pose is named on the `SHORTED` line (#1563). A route step asked to
+  route the net of the copper on that line takes it off the pad and re-routes
+  it; what it cannot take is named at the end of its run (see
+  [pad contacts](api-routing-config.md#pad-contacts-1680)). A stuck cap whose
+  only clear poses are blocked by one other mover has that mover moved to a
+  clear pose of its own, named on the `Moved to make room` line (result key
+  `made_room`, #1681). Quarter-turn rotations are tried unless `--no-rotate`;
   `--beneath-only` moves only the passives under a BGA's package and keeps
   them there.
+- **Vias.** The last resort for a cap still not clear moves the offending via
+  at most 0.6 mm, with a connector back to where it stood. It prefers the
+  board's own `min_hole_to_hole`; if nothing clears at that it takes a landing
+  at the fab floor rather than leave the via on the part. KiCad fails that hole
+  pair, so the part counts as unresolved and the pair is named on the
+  `BELOW min_hole_to_hole` line (result key `below_hole_floor`, #1686).
 - **Clearance.** Given, `--clearance` is a ceiling: every net class is priced
   at `min(class, value)` and the output project is clamped to it. Omitted,
   each pair is priced at its own net-class clearance and the classes are kept.

@@ -41,7 +41,9 @@ for _sub in ('py_placer', 'py_router', 'py_tools'):
 RUN_ALL_TIMEOUT = 1200
 
 FIX = os.path.join(ROOT, 'tests', 'fixtures', '1067', 'u30_crop.kicad_pcb')
-CLI = os.path.join(ROOT, 'py_placer', 'place_fanout_clearance.py')
+# #1681's make-room rung held off, so the run kept is still the ungated one
+# (with it the gated pass makes room for the cap its holds box in, and wins).
+CLI = os.path.join(ROOT, 'tests', 'fanout_clearance_no_room.py')
 ENGINE = os.path.join(ROOT, 'py_placer', 'placement', 'fanout_clearance.py')
 COPY = os.path.join(ROOT, 'py_router', 'copy_board.py')
 TIGHT = ['--clearance', '0.1', '--max-displacement', '1.0',
@@ -200,7 +202,9 @@ def test_the_ungated_arm_is_handed_the_claims():
         intent = fp.load_intent(_intent(td, [{'name': 'rot_C24', 'refs':
                                               ['C24'], 'rotation': 270.0}],
                                         'spy'))
-        with patch.object(fc, '_repair_one_arm', spy):
+        # #1681's make-room rung held off, as for the CLI runs above
+        with patch.object(fc, '_repair_one_arm', spy), \
+                patch.object(fc, '_clear_by_moving_one', lambda *a, **k: None):
             fc.repair_fanout_clearance(
                 parse_kicad_pcb(b), b, clearance=0.1, netclass_ceiling=0.1,
                 max_displacement=0.6, max_displacement_cap=2.0, intent=intent)
@@ -287,7 +291,12 @@ def test_the_escalation_guard_saves_a_round():
         ip = _intent(td, [{'name': 'a', 'refs': ['C63'], 'rotation': 0.0}],
                      'c63')
         b = _board(td)
-        with contextlib.redirect_stdout(io.StringIO()):
+        from unittest.mock import patch
+        from placement import fanout_clearance as fc
+        # #1681's make-room rung held off: with it C63 ends clear and only
+        # one arm runs, so the rounds the guard saves are not counted
+        with contextlib.redirect_stdout(io.StringIO()), \
+                patch.object(fc, '_clear_by_moving_one', lambda *a, **k: None):
             r = repair_fanout_clearance(
                 parse_kicad_pcb(b), b, clearance=0.1, max_displacement=1.0,
                 max_displacement_cap=2.0, intent=fp.load_intent(ip),

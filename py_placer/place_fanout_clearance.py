@@ -288,6 +288,10 @@ Examples:
             # short to a pose that only grazes
             'shorted': list(result.get('shorted') or ()),
             'parted': list(result.get('parted') or ()),
+            # #1681: {cap: the mover moved to make room for it}
+            'made_room': dict(result.get('made_room') or {}),
+            # #1686: vias landed below the board's min_hole_to_hole
+            'below_hole_floor': list(result.get('below_hole_floor') or ()),
             # #1122: only when a cap's rotation is declared, so a run whose
             # intent declares none prints what it printed before.
             **({'declared_rotations': result['declared_rotations']}
