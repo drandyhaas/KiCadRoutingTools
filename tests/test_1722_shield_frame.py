@@ -22,7 +22,13 @@ BUILDABLE on the same outline.
   4. a fence whose room is declared (`heights[]` `underside_mm`) is a cover
      the heights judge, not a container: a part too tall for the declared
      room (less the cover margin) is refused under it, and one that fits is
-     not.
+     not;
+  5. the fence's WALL is still a body: a part whose courtyard lies across
+     its wall pads is refused by the seat and gated by check_assembly (a
+     container skips only its rect; with nothing else holding parts off the
+     wall, a placement from a pile left a pin header lying on it);
+  6. two fences do not stack: one whose body lies over another's wall is
+     refused, one beside it is not.
 
     python3 tests/test_1722_shield_frame.py
 """
@@ -77,10 +83,11 @@ def _fp(name, ref, x, y, pads, crt=None, fab=None):
     return s + '\t)\n'
 
 
-def write_board(tmp, name, fence='ring'):
+def write_board(tmp, name, fence='ring', c1_at=(16, 16), second=None):
     """40 x 40 mm, the frame SH at (20, 20) holding C1 and U1. `fence`:
     'ring' (every pad on GND), 'two_nets' (the east wall on N2), 'rows'
-    (the north and south walls only)."""
+    (the north and south walls only). `second`: a 10 x 10 mm fence SH2
+    there too."""
     wall = [('1', a * 6, b * 9.6, 3, 0.8, 'GND') for a in (-1, 0, 1) for b in (-1, 1)]
     side = [('1', b * 9.6, a * 6, 0.8, 3, 'N2' if (fence == 'two_nets' and b > 0)
              else 'GND') for a in (-1, 0, 1) for b in (-1, 1)]
@@ -89,8 +96,13 @@ def write_board(tmp, name, fence='ring'):
     chip = [(str(i + 1), -1.5 + i, 1.4, 0.4, 0.8, 'N1' if i % 2 else 'N2')
             for i in range(4)]
     parts = (_fp('Test:Shield_Frame_20x20mm', 'SH', 20, 20, pads, fab=(10, 10))
-             + _fp('Test:C_0603', 'C1', 16, 16, cap, crt=(1.5, 0.75))
+             + _fp('Test:C_0603', 'C1', c1_at[0], c1_at[1], cap, crt=(1.5, 0.75))
              + _fp('Test:Chip_4x4', 'U1', 21, 22, chip, crt=(2.2, 2.2)))
+    if second:
+        small = ([('1', a * 3, b * 4.6, 2, 0.8, 'GND') for a in (-1, 0, 1) for b in (-1, 1)]
+                 + [('1', b * 4.6, a * 3, 0.8, 2, 'GND') for a in (-1, 0, 1) for b in (-1, 1)])
+        parts += _fp('Test:Shield_Frame_10x10mm', 'SH2', second[0], second[1], small,
+                     fab=(5, 5))
     nets = ''.join(f'\t(net {i + 1} "{n}")\n' for i, n in enumerate(NETS))
     path = os.path.join(tmp, f'{name}.kicad_pcb')
     with open(path, 'w', encoding='utf-8') as f:
@@ -174,6 +186,30 @@ def main():
         check('C1 (0.9 mm) fits under 2.5 mm of room', v['C1'] is None, str(v))
         check('U1 (2.4 mm, past the cover margin) is refused under it, against the frame',
               v['U1'] is not None and v['U1'][1] == 'SH', str(v))
+
+        print('5. the wall is a body')
+        wall = write_board(tmp, 'wall', 'ring', c1_at=(10.4, 20))
+        v = vetoes(seat(wall))
+        # the file pose is the seed, so the pad layer (no worse than the
+        # seed) admits it there: the wall's own check is what refuses
+        check('C1 across the west wall: refused on the wall',
+              v['C1'] == ('container_pin', 'SH'), str(v))
+        check('U1 inside: still admitted', v['U1'] is None, str(v))
+        r = run_utils.check(cli + [wall], refuse='NOT BUILDABLE', code=4)
+        check('check_assembly gates C1 on the wall',
+              any('C1 <-> SH' in ln and 'courtyard' in ln and 'BLOCKING' in ln
+                  for ln in r.stdout.splitlines()))
+
+        print('6. two fences do not stack')
+        st = seat(write_board(tmp, 'two', 'ring', second=(30, 33)))
+        check('both read as fences',
+              st.container_kinds == {'SH': 'fence', 'SH2': 'fence'}, str(st.container_kinds))
+        v = vetoes(st, ('SH2',))
+        check('SH2 over SH\'s south wall: refused against SH',
+              v['SH2'] is not None and v['SH2'][1] == 'SH', str(v))
+        st = seat(write_board(tmp, 'apart', 'ring', second=(34.5, 34.5)))
+        v = vetoes(st, ('SH2',))
+        check('control: SH2 beside SH, neither on the other\'s wall, is admitted', v['SH2'] is None, str(v))
 
     print(f"\n{'PASS' if not failures else 'FAIL'}: test_1722_shield_frame "
           f"({len(failures)} failure(s))")

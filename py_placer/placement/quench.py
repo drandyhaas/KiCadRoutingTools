@@ -1931,6 +1931,11 @@ class QuenchState:
                                                        (p.x, p.y, p.rot))
         if fg is None:
             return []
+        if self.container_kinds.get(frame) == 'fence':
+            # #1722: a fence's wall, pad by pad: a drawn ring's bounds are
+            # the whole frame, and would price every part inside it
+            boxes = [w.bounds for w in self._pin_census_obj.fence_walls(
+                frame, (p.x, p.y, p.rot))] or boxes
         sides = frozenset((fg.side,))
         return [tuple(b) + (sides,) for b in boxes]
 

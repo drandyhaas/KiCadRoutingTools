@@ -802,10 +802,16 @@ def frame_courtyard_refs(kinds, local_bounds) -> frozenset:
     drawn courtyard -- one covering less than `FRAME_COURTYARD_COVER` of the
     frame, such as rings round its posts. The frame is not graded, but those
     islands are, as drawn, as KiCad's courtyards_overlap grades them
-    (`CourtyardCensus._frame_court_pairs`)."""
+    (`CourtyardCensus._frame_court_pairs`).
+
+    A FENCE (#1722) is one whatever it draws: its wall -- the drawn ring,
+    else its pads' copper (`CourtyardCensus.frame_islands`) -- is a body
+    standing on the board, and another part's courtyard over it collides
+    with that wall, inside the frame or out."""
     from placement.body import SOURCE_COURTYARD
     return frozenset(r for r in kinds
-                     if getattr(local_bounds.get(r), 'source', '')
+                     if kinds[r] == 'fence'
+                     or getattr(local_bounds.get(r), 'source', '')
                      == SOURCE_COURTYARD)
 
 
@@ -3053,7 +3059,10 @@ class CourtyardCensus:
         placed (its frame is no body), and the bounds of each island, the
         broad phase. `(None, [])` when that courtyard does not close: KiCad
         reports malformed_courtyard there and tests nothing against it, as
-        `_pin_shapes` treats one."""
+        `_pin_shapes` treats one. A fence that draws no courtyard (#1722)
+        stands on its wall instead (`fence_walls`): a part's courtyard over
+        it collides with the wall, which check_assembly gates and the seat
+        refuses, though KiCad, with no courtyard drawn, reports nothing."""
         key = (frame, None if pose is None else tuple(pose))
         hit = self._islands.get(key)
         if hit is not None:
@@ -3062,14 +3071,28 @@ class CourtyardCensus:
         out = (None, [])
         geom = self.bodies.get(frame)
         lb = self.lbs.get(frame)
-        if (geom is not None and lb is not None
-                and geom.court_shape_local is not None
-                and geom.court_shape_how == OUTLINE_POLYGON):
+        drawn = (geom is not None and geom.court_shape_local is not None
+                 and geom.court_shape_how == OUTLINE_POLYGON)
+        shape, boxes = None, None
+        fence = self.kinds.get(frame) == 'fence'
+        if lb is not None and (drawn or fence):
             fp = self.fps[frame]
             x, y, rot = (pose if pose is not None
                          else (fp.x, fp.y, fp.rotation or 0.0))
-            shape = place_local_shape(geom.court_shape_local, x, y, rot)
-            boxes = [g.bounds for g in getattr(shape, 'geoms', [shape])]
+            if drawn:
+                shape = place_local_shape(geom.court_shape_local, x, y, rot)
+            else:
+                # #1722: a fence drawing no courtyard -- its wall is its
+                # pads' copper, the metal the frame stands on, each pad its
+                # own box (their union is one ring, whose bounds are the frame)
+                walls = self.fence_walls(frame, (x, y, rot))
+                if walls:
+                    from shapely.ops import unary_union
+                    shape = unary_union(walls)
+                    boxes = [w.bounds for w in walls]
+        if shape is not None and not shape.is_empty:
+            if boxes is None:
+                boxes = [g.bounds for g in getattr(shape, 'geoms', [shape])]
             out = (GradedPart(ref=frame, side=lb.side, rect=shape.bounds,
                               source=lb.source, poly=shape,
                               local=tuple(lb.local),
@@ -3078,6 +3101,21 @@ class CourtyardCensus:
             self._islands = {}
         self._islands[key] = out
         return out
+
+    def fence_walls(self, frame: str, pose) -> list:
+        """#1722: a fence's wall at `pose` -- each copper pad's true copper
+        (shapely), [] when it cannot be drawn. The islands of a fence that
+        draws no courtyard, and what place_simple's anneal prices a
+        courtyard over on every fence (`QuenchState.frame_court_boxes`):
+        a drawn ring's bounds are the whole frame."""
+        from check_pads import _copper_geometry
+        try:
+            return [w for w in (_copper_geometry(p) for p in
+                                footprint_at_pose(self.fps[frame], tuple(pose)).pads
+                                or () if _pad_carries_copper(p))
+                    if not w.is_empty]
+        except Exception:                                    # noqa: BLE001
+            return []
 
     def _frame_court_pairs(self, parts, poses, members=None) -> list:
         """Raw courtyard pairs against each `court_frames` container's own
@@ -3094,7 +3132,10 @@ class CourtyardCensus:
             if fg is None:
                 continue
             for r, gp in parts.items():
-                if r == frame or r in self.containers:
+                # a fence is a frame to the parts it holds, and a body to
+                # another fence's wall: two shield frames do not stack (#1722)
+                if r == frame or (r in self.containers
+                                  and self.kinds.get(r) != 'fence'):
                     continue
                 if members is not None and frame not in members \
                         and r not in members:

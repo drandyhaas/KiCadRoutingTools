@@ -218,6 +218,8 @@ class Annealer:
         # instead (`_pins`, #1307).
         self.containers = frozenset(r for r in self.names if r in st.container_refs)
         self.frames = sorted(r for r in self.containers if r in st.frame_refs)
+        self.fences = frozenset(r for r in self.containers
+                                if st.container_kinds.get(r) == 'fence')
         bit = {}
         self.faces = {r: 0 if r in self.containers else
                       sum(1 << bit.setdefault(f, len(bit)) for f in set(st.parts[r].sides))
@@ -480,7 +482,8 @@ class Annealer:
             H = (min(h[0] for h in every), min(h[1] for h in every),
                  max(h[2] for h in every), max(h[3] for h in every))
             for b in (self.names if f in mset else mine):
-                if b in self.containers:
+                # another fence is priced on this one's wall (#1722)
+                if b in self.containers and b not in self.fences:
                     continue
                 pb = P[b]
                 c = pb.rect()
