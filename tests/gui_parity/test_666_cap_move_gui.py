@@ -848,6 +848,7 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
 
     app = wx.App(False)  # noqa: F841 - must outlive the dialogs
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
     import kicad_oracle
     import net_rescue

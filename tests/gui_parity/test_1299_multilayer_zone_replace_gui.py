@@ -192,6 +192,7 @@ def main():
         sys.path.insert(0, p)
 
     app = wx.App(False)          # noqa: F841 - must outlive the dialogs
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
     d = tempfile.mkdtemp(prefix='multilayer1299_')

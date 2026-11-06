@@ -63,6 +63,7 @@ def run():
     from kicad_routing_plugin.placement_gui import PlacementTab
 
     app = wx.App(False)  # noqa: F841  (before any wx object)
+    wx.Log.SetActiveTarget(wx.LogStderr())
     failures = []
 
     def check(label, ok, detail=""):

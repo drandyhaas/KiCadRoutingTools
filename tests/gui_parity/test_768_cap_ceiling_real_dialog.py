@@ -103,6 +103,7 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     # flat_hierarchy is the repo's only tracked board declaring a NON-Default
     # class (Default 0.2, Wide 0.4). A board with one class cannot tell a
     # working ceiling from a broken one, because there is nothing to cap.

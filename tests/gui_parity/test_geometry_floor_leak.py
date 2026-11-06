@@ -83,6 +83,7 @@ def main():
     # Bind it: an unreferenced wx.App is collected before the dialog is built,
     # and RoutingDialog then dies with "The wx.App object must be created first!"
     _app = wx.App(False)
+    wx.Log.SetActiveTarget(wx.LogStderr())
     assert _app is not None
     board = pcbnew.LoadBoard(board_path)
     pcbnew.GetBoard = lambda: board

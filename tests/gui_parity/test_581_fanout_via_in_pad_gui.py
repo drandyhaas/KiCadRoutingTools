@@ -118,6 +118,7 @@ def main():
     from kicad_routing_plugin import swig_gui
 
     app = wx.App(False)  # noqa: F841 - must outlive the dialog
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
     board = pcbnew.LoadBoard(BOARD)

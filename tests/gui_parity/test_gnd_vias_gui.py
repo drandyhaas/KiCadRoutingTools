@@ -321,6 +321,7 @@ def main():
     from kicad_routing_plugin import swig_gui
 
     app = wx.App(False)          # noqa: F841 - must outlive the dialogs
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
     real_map = obstacle_map.build_base_obstacle_map

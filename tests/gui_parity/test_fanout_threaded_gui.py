@@ -91,6 +91,7 @@ def main():
     from kicad_routing_plugin import swig_gui
 
     app = wx.App(False)                                          # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     board = pcbnew.LoadBoard(BOARD)
     pcbnew.GetBoard = lambda: board
     pcb_data = build_pcb_data_from_board(board)

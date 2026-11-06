@@ -389,6 +389,7 @@ def main():
     evidence(PRO, "the sense_star fixture's .kicad_pro")
     print('KiCad build: %s' % pcbnew.GetBuildVersion())
     app = wx.App(False)  # noqa: F841  (before any wx object)
+    wx.Log.SetActiveTarget(wx.LogStderr())
     td = tempfile.mkdtemp(prefix='t1279live_')
     try:
         for arm in ARMS:

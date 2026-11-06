@@ -280,6 +280,7 @@ def main():
         sys.path.insert(0, p)
 
     app = wx.App(False)          # noqa: F841 - must outlive the dialogs
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
     want = sorted([('+5V', pcbnew.In2_Cu), ('GND', pcbnew.In1_Cu)])
 

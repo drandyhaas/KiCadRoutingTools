@@ -103,6 +103,7 @@ def main():
     sys.path.insert(0, os.path.join(REPO, 'py_tools'))
     sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
 
     r = []
     print("[1] GND (three interior pads), stub escape")

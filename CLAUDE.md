@@ -693,6 +693,12 @@ through there too.
   This cost an entire session's worth of "wx is blocked, gate not run" marker
   entries. With it set, `test_gui_engine_parity.py` completes in ~90 s.
 
+  **The other invisible modal is wx's own log box.** A logged wx error opens it
+  from the next idle event or at exit (`sample`: `wxLogGui::Flush` ->
+  `wxDialog::ShowModal`, no NSAlert). So every headless `wx.App` is followed at
+  once by `wx.Log.SetActiveTarget(wx.LogStderr())`, which
+  `tests/gui_parity/test_wx_log_no_modal.py` enforces.
+
   Two caveats when reading its output:
   - It **REPORTS divergence; it is not pass/fail.** Known-deliberate divergences
     exist (the CLI mains' kicad-oracle recheck, `clean_plane_copper`, end-of-run

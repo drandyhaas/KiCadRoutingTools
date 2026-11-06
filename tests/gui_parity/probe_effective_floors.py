@@ -33,6 +33,7 @@ from kicad_routing_plugin import swig_gui
 
 board_path = sys.argv[1]
 app = wx.App(False)
+wx.Log.SetActiveTarget(wx.LogStderr())
 board = pcbnew.LoadBoard(board_path)
 pcbnew.GetBoard = lambda: board
 pd = build_pcb_data_from_board(board)

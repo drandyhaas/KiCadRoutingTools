@@ -81,6 +81,7 @@ def main():
               os.path.join(REPO, 'tests', 'gui_parity')):
         sys.path.insert(0, p)
     app = wx.App(False)  # noqa: F841  (before any wx object)
+    wx.Log.SetActiveTarget(wx.LogStderr())
     popups = []
     wx.MessageBox = lambda msg, *a, **k: popups.append(msg) or wx.OK
 

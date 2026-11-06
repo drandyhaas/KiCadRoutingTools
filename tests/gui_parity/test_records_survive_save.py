@@ -93,6 +93,7 @@ def main():
         sys.path.insert(0, os.path.join(REPO, sub))
     sys.path.insert(0, os.path.dirname(REPO))
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     import pcbnew as _pcbnew
     import protected_nets as P
     from copy_board import copy_board

@@ -93,6 +93,7 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     import pcbnew as _pcbnew
     from kicad_parser import parse_kicad_pcb
     from kicad_routing_plugin.swig_gui import RoutingDialog

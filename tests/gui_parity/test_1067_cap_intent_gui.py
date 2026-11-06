@@ -122,6 +122,7 @@ def main():
             for k, f in parse_kicad_pcb(board).footprints.items()}
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     dlg = RoutingDialog(None, parse_kicad_pcb(board), board)
     live = pcbnew.LoadBoard(board)
     pcbnew.GetBoard = lambda: live
