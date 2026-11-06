@@ -642,6 +642,19 @@ def _grade(a, doc):
             extra[name] = {'ran': True, 'exit': c, 'clean': c == 0}
     doc['components'] = extra
 
+    # ---- 2b. copper on another net's pad (#1680) ---------------------------
+    # `blocking` counts these with every other DRC item, as a number. A short
+    # is the one a reader must not have to go and find, so it is named.
+    contacts, contacts_err = [], None
+    if layers and not lyr_err:
+        try:
+            from kicad_parser import parse_kicad_pcb
+            from pad_contact import shipped_report
+            contacts = shipped_report(parse_kicad_pcb(a.board))
+        except Exception as exc:                                # noqa: BLE001
+            contacts_err = f'{type(exc).__name__}: {exc}'
+    doc['pad_contacts'] = contacts
+
     # ---- 3. the fab floors this board grades itself against ----------------
     try:
         floors = fab_floor_integrity(a.board, a.authored_from,
@@ -741,6 +754,12 @@ def _grade(a, doc):
                        'null is not a zero')
     elif blocking:
         reasons.append(f'blocking = {blocking}')
+    if contacts_err:
+        reasons.append(f'pad contacts: did not run ({contacts_err})')
+    elif contacts:
+        from pad_contact import format_rows
+        reasons.append(f"{len(contacts)} via(s)/track(s) on another net's pad, "
+                       f"a short: " + '; '.join(format_rows(contacts, limit=5)))
     for name, r in sorted(extra.items()):
         if r.get('error'):
             reasons.append(f'{name}: did not run ({r["error"]})')

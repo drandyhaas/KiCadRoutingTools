@@ -543,7 +543,8 @@ class Chain:
         d = self.check_drc(board)
         if d is None:
             return None
-        return {'open': len(open_nets), 'open_nets': open_nets, 'drc': int(d['violations'])}
+        return {'open': len(open_nets), 'open_nets': open_nets, 'drc': int(d['violations']),
+                'drc_items': _named_items(d)}
 
     def check_drc(self, board):
         """check_drc's JSON report for BOARD at the board's recorded floors
@@ -750,6 +751,24 @@ def fan_ladder(ch, fan, rungs=None, hold=(), tag=''):
         if s is not None and failed == 0 and grazes == 0:
             break
     return best
+
+
+def _named_items(d, cap=20):
+    """check_drc report D's real items, one short line each, so the run's last
+    line says WHAT is left and not only how many (#1681): a part the clearance
+    step could not clear ships as `R6.2 pad-via GND 0.07`."""
+    names = []
+    for it in d.get('items') or []:
+        if it.get('accepted'):
+            continue
+        over = it.get('overlap_mm')
+        names.append(' '.join(str(x) for x in (
+            it.get('pad_ref') or it.get('net1'), it.get('type'), it.get('net2'),
+            round(over, 3) if isinstance(over, (int, float)) else None,
+            'SHORT' if it.get('short') else None) if x is not None))
+    if len(names) > cap:
+        return names[:cap] + [f'+{len(names) - cap} more']
+    return names
 
 
 def _shorts(d):
@@ -1030,6 +1049,7 @@ def main():
         {'final_step': os.path.basename(final),
          'open': grade['open'] if grade else None,
          'drc': grade['drc'] if grade else None,
+         'drc_items': grade['drc_items'] if grade else None,
          'steps': len(ch.steps),
          'skipped': [s['tag'] for s in ch.steps if not s.get('ok', True)]}), flush=True)
     return 0

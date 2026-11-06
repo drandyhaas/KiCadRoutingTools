@@ -253,6 +253,18 @@ Validate routed boards against the *real* spec, with the right checker — most
   by an intent `fixed_poses[]` entry at the declared pose (with its `rot` where the
   file has one), which `place_simple` seats and holds (#1054).
   `docs/floorplan-intent.md` has the authority table.
+- **A via or track on another net's pad is ripped by the route step that owns
+  its net (#1680).** `batch_route`'s `pad_contact.rip_pad_contacts` runs before the
+  already-connected filter: the copper of a net in `--nets` goes with its stub
+  and the net re-routes clear of the pad. Out of scope, locked or protected, it
+  stays, and every route run's end says so on the board it ships
+  (`pad_contacts`, and `pad_grazes` for copper inside a pad's clearance, in
+  JSON_SUMMARY_MIN and `--json-out`; `check_complete.py` names the shorts). The
+  clearance step's own last rungs, in order: the stuck cap's search, one other
+  mover moved to a clear pose to make room (`made_room`, #1681), then the via
+  nudge, whose landing below the board's `min_hole_to_hole` leaves the part
+  unresolved and named (`below_hole_floor`, #1686; left where it stood, that via
+  was measured a short).
 - **Protected nets (#521): matched groups and routed diff pairs are recorded in
   the sibling `.kicad_pro`** (`kicad_routing_tools.protected_nets`, written next
   to the DRC-floor writeback, carried down chains by the project copy) and later

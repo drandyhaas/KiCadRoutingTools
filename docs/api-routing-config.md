@@ -408,6 +408,30 @@ GUI's `results_data` as `pour_cuts: [{net, open_pads_before,
 open_pads_after}]`, and in `JSON_SUMMARY_MIN.pour_cuts` (the names). The audit
 only reports: it does not fail the run or revert it.
 
+##### Pad contacts (#1680)
+
+A via or track lying on another net's pad is a short the rest of a route step
+would never touch: the copper is the input's, and its net reads connected. So
+the outermost `batch_route`, before its already-connected filter, takes such
+copper of a net in this step's `--nets` off the board with the stub that led to
+it (back to the first pad, surviving via or junction), and the net routes clear
+of the pad (`pad_contact.rip_pad_contacts`). KiCad-locked and sense-held copper
+and protected nets stay, under the #521 rules: naming a protected net exactly
+in `--nets` lifts it. A pad with no net and a net tie's partner pad are not
+contacts. The copper is not given back if the reroute fails: an open net is
+named by the run's own tally, and is not a short. The rips are
+`pad_contact_rips` in `--json-out` and the `JSON_SUMMARY`.
+
+The run then audits the board it ships (`pad_contact.audit_shipped`, the written
+file or the GUI's write model, on the "nothing to route" path too). Copper still
+on another net's pad is named on the console (`SHORTED on the board this run
+ships`), and copper inside the clearance of one (`NOT CLEAR ...`, at the floor
+the writeback stores, so a pair a net class raises above it is `check_drc`'s to
+name), in `--json-out` and the GUI's `results_data` as `pad_contacts` and
+`pad_grazes` (`[{pad, pad_net, net, kind, at, overlap_mm, short, ...}]`), and in
+`JSON_SUMMARY_MIN` (the pads). This part only reports. `check_complete.py` names
+the shorts among its reasons.
+
 ##### History congestion (#590), the only field that measures TIME
 
 Every other field prices the board's state *now*. This one prices how often a

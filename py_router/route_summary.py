@@ -331,7 +331,9 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False,
         # over the call's whole scope. A reconciliation sub-run re-forms them
         # over the few nets it retries, so last-wins would report that slice
         # (or drop the key) as the run's membership. First wins.
-        for _k in ('length_match_groups', 'length_match_auto'):
+        for _k in ('length_match_groups', 'length_match_auto',
+                   # #1680: the rip runs once, before the first pass.
+                   'pad_contact_rips'):
             if _k in first:
                 merged[_k] = first[_k]
 
