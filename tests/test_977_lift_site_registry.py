@@ -74,6 +74,10 @@ REGISTRY = {
                         'working map clones it and prepare_obstacles_inplace '
                         'lifts per net, and the fallback path clones it '
                         'through build_single_ended_obstacles'),
+    ('py_router/diff_pair_custody.py', '_single_ended_engine'): (
+        CONSUMER_LIFTS, "the member fallback's single-ended base map (#1679): "
+                        'each member routes on a clone from '
+                        'build_single_ended_obstacles, which lifts'),
     ('py_router/obstacle_cache.py', 'build_working_obstacle_map'): (
         CONSUMER_LIFTS, 'the shared working map, lifted per net by '
                         'prepare_obstacles_inplace and put back by '
