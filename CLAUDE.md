@@ -497,6 +497,10 @@ make them trustworthy -- notably: the baseline is the RECORDED RUNS re-graded
 (not an archived wave), grade both sides on the same terms, compare only boards
 that replayed an IDENTICAL chain, and **a two-board result is not a default
 change** (per-board spread is +-2..3 nets).
+**Arc outlines barely run in those replays**: the ordinary prep rebuilds Edge.Cuts
+as chained lines. A change to how an arc outline is read adds `--sets set1arc`, 6
+chains whose inputs keep their arcs, which no range includes (RUNBOOK, "Arc
+outlines: `set1arc`").
 **Per-net via sizes (#530) never run in those replays**: they are live only when
 route.py is given no `--via-size`, and 396 of the 403 recorded route steps pass
 one. A change that touches per-net vias is A/B'd with
