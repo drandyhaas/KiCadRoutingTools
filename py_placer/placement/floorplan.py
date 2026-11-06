@@ -8734,6 +8734,35 @@ def cover_hole_sites(intent, pcb) -> List[Dict[str, object]]:
     return out
 
 
+def _ring_gap(g, fp, pose, x, y, far) -> Optional[float]:
+    """#1712: how far (mm, centre to the nearest box) a part at `pose` stands
+    from a cover's hole site (x, y) when it reaches into the site's
+    screw-head ring of radius `far`, else None -- read on the shapes a circle
+    keep-out over the site reads (`keepout_hit`, the seat's and the grade's
+    one hit test): a drawn courtyard and each pad copper box on its own, as
+    `rule_keepout` and `seeder.pose_ok` hand them over (#1588). The empty
+    corners of their union's bounding box hold nothing, so a keep-out of the
+    ring's radius on the site holds every part with a drawn courtyard that
+    the ring would name. A part that draws no courtyard is read on its
+    occupancy box (`g`'s `occupancy_local`), as before: the estimate
+    `place_simple` seats it on (#1300)."""
+    from .body import SOURCE_COURTYARD
+    from .heights import to_board, to_local
+    if g.source == SOURCE_COURTYARD and g.body_local is not None:
+        rects = [to_board(g.body_local, pose)] + pad_copper_rects(fp, pose, copper_only=True)
+        if not keepout_hit({'circle': [x, y, far]}, rects):
+            return None
+        return min(math.hypot(max(b[0] - x, 0.0, x - b[2]), max(b[1] - y, 0.0, y - b[3]))
+                   for b in rects)
+    occ = g.occupancy_local
+    if occ is None:
+        return None
+    lx, ly = to_local((x, y, x, y), pose)[:2]
+    gap = math.hypot(max(occ[0] - lx, 0.0, lx - occ[2]),
+                     max(occ[1] - ly, 0.0, ly - occ[3]))
+    return gap if gap < far else None
+
+
 def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, object]]:
     """#1537: each of a cover's own mounting holes (`holes[]`), where the row
     puts it -- `length_mm` along the axis, `off_mm` to the left of the centre
@@ -8741,7 +8770,9 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
     (`mounting_holes.reach`, the ring check_mounting_holes uses): the
     standoff there (a mounting hole on the board within
     `COVER_STANDOFF_TOLERANCE_MM` of the site; its own pads and nets are its
-    own), the parts whose occupancy reaches into the ring and the pads and
+    own), the parts reaching into the ring (`_ring_gap`: a drawn courtyard
+    and each pad copper box, as a keep-out over the site reads them, else the
+    occupancy box) and the pads and
     other-net copper inside it, on either face (the screw passes through the
     board). A site with anything in it appends to `why`; a free site with no
     standoff yet is reported (`standoff` None), not judged, and so is a site
@@ -8754,7 +8785,6 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
     `connector` (`{ref, gap_mm, pads}`), else None -- a row whose site lands
     on its own connector is the declaration to read again."""
     import mounting_holes as mh
-    from .heights import to_local
     mounts = mh.mounting_holes(pcb)
     con = c['connector']
     out = []
@@ -8766,14 +8796,11 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
         own = {st.ref} if st is not None else set()
         parts, con_gap = [], None
         for r, g in sorted(geo.items()):
-            occ = getattr(g, 'occupancy_local', None)
             fpr = (pcb.footprints or {}).get(r)
-            if r in own or occ is None or fpr is None or not fpr.pads:
+            if r in own or fpr is None or not fpr.pads:
                 continue
-            lx, ly = to_local((x, y, x, y), poses[r])[:2]
-            gap = math.hypot(max(occ[0] - lx, 0.0, lx - occ[2]),
-                             max(occ[1] - ly, 0.0, ly - occ[3]))
-            if gap < far:
+            gap = _ring_gap(g, fpr, poses[r], x, y, far)
+            if gap is not None:
                 if r == con:
                     con_gap = round(gap - d / 2.0, 3)
                     continue

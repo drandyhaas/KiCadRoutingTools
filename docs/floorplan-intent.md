@@ -1673,8 +1673,13 @@ drawing gives, and one rule grades whether it can go on:
   ring `check_mounting_holes.py` uses), on either face since the screw
   passes through the board: the standoff fitted there (a mounting hole on
   the board within 0.3 mm of the site, whose own pads and nets are not in
-  its way), the parts whose occupancy reaches into the ring, the pads, and
-  the tracks and vias of another net. A site with anything in it makes the
+  its way), the parts reaching into the ring, the pads, and the tracks and
+  vias of another net. A part is read on the shapes a circle keep-out over
+  the site reads: its drawn courtyard and each pad copper box on its own,
+  never their union's bounding box, whose corners can be empty board (#1712);
+  a part that draws no courtyard on its occupancy box, the estimate
+  `place_simple` seats it on (#1300). So a keep-out of the ring's radius on
+  a site holds every part with a drawn courtyard that the ring would name. A site with anything in it makes the
   cover NOT mountable and is named in the finding; a clear site with no
   standoff yet is reported (`standoff: null`), not judged, and so is a site
   past the outline. Report only: `place_simple` does not price the sites.
