@@ -146,31 +146,36 @@ def closeups(board, specs, out_dir, px_per_mm=DEFAULT_PX_PER_MM,
              width=1600, height=900, cli=None):
     """Render each `REF` or `REF:edge` in `specs`; returns one row per part."""
     from kicad_parser import parse_kicad_pcb
-    cli = cli or _cli()
-    if not cli:
-        raise RuntimeError('kicad-cli not found (set KICAD_CLI)')
     with contextlib.redirect_stdout(io.StringIO()), \
             contextlib.redirect_stderr(io.StringIO()):
         pcb = parse_kicad_pcb(board)
     bounds = pcb.board_info.board_bounds
     if not bounds:
         raise RuntimeError(f'{board}: no board outline, so no edge to stand at')
+    # Every part and edge is checked before kicad-cli is asked for, so a
+    # usage error reads the same with or without KiCad installed.
+    parts = []
+    for spec in specs:
+        ref, _, edge = spec.partition(':')
+        fp = pcb.footprints.get(ref)
+        if fp is None:
+            raise RuntimeError(f'{ref}: no such part on {board}')
+        rect = _pads_rect(fp)
+        basis = 'named' if edge else 'nearest'
+        edge = (edge or nearest_edge(rect, bounds)).lower()
+        if edge not in SIDES:
+            raise RuntimeError(f'{spec}: the edge is one of '
+                               f'{", ".join(SIDES)}')
+        parts.append((ref, rect, basis, edge))
+    cli = cli or _cli()
+    if not cli:
+        raise RuntimeError('kicad-cli not found (set KICAD_CLI)')
     cx, cy = (bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0
     os.makedirs(out_dir, exist_ok=True)
-    models = _model_states(board, {sp.partition(':')[0] for sp in specs})
+    models = _model_states(board, {ref for ref, _, _, _ in parts})
     scale1, rows = {}, []
     with tempfile.TemporaryDirectory() as tmp:
-        for spec in specs:
-            ref, _, edge = spec.partition(':')
-            fp = pcb.footprints.get(ref)
-            if fp is None:
-                raise RuntimeError(f'{ref}: no such part on {board}')
-            rect = _pads_rect(fp)
-            basis = 'named' if edge else 'nearest'
-            edge = (edge or nearest_edge(rect, bounds)).lower()
-            if edge not in SIDES:
-                raise RuntimeError(f'{spec}: the edge is one of '
-                                   f'{", ".join(SIDES)}')
+        for ref, rect, basis, edge in parts:
             side = SIDES[edge]
             if side not in scale1:
                 scale1[side] = px_per_mm_at_zoom1(cli, board, side, width,
