@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - stale checkout
 
 
 from .fanout_gui import NetSelectionPanel
-from .gui_utils import StdoutRedirector, board_minima_from_live
+from .gui_utils import StdoutRedirector, board_minima_from_live, note_for_the_log
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
 
 
@@ -753,7 +753,7 @@ class RoutingDialog(wx.Dialog):
         if floored != val and (val, floored) != getattr(self, '_ceiling_pin_said', None):
             self._ceiling_pin_said = (val, floored)
             from fab_tiers import fab_floor_pin_warning
-            print(fab_floor_pin_warning(
+            note_for_the_log(fab_floor_pin_warning(
                 'clearance_ceiling' if self._ceiling_on() else 'clearance', val, floored))
         return floored
 
@@ -1001,30 +1001,6 @@ class RoutingDialog(wx.Dialog):
                 f"declare a smaller fab capability.",
                 "Fab Floor", wx.OK | wx.ICON_WARNING)
             return
-
-        # #439 B: WITH the class-ceiling box, Min Clearance is a pure CEILING. A
-        # value ABOVE the board's Default net-class clearance has no effect on
-        # the base clearance then (min(Default, ceiling), as the CLI). Pin it to
-        # the Default class and warn, so what you enter routes. Without the
-        # ceiling box the value IS the Default class for the run (#530).
-        if ctrl_name == 'clearance' and ctrl is not None \
-                and getattr(self, 'clearance_check', None) is not None \
-                and self.clearance_check.GetValue() and self._ceiling_on():
-            dflt = (_get_netclass_parameters('Default') or {}).get('clearance')
-            if dflt is not None and ctrl.GetValue() > dflt + 1e-9:
-                self._drc_validating = True
-                try:
-                    ctrl.SetValue(dflt)
-                finally:
-                    self._drc_validating = False
-                wx.CallAfter(
-                    wx.MessageBox,
-                    f"Min Clearance is a ceiling: a value above the board's Default "
-                    f"net-class clearance ({dflt:.4f} mm) has no effect on the base "
-                    f"clearance (nets never route looser than their own class). "
-                    f"Pinned to {dflt:.4f} mm.",
-                    "Min Clearance", wx.OK | wx.ICON_WARNING)
-                return
 
         if self._escalation_policy() == 'fab':
             event.Skip()
