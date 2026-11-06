@@ -19,7 +19,8 @@ such leftovers:
 
 Real dialog and plan executor (headless_plan.run_plan) against route_planes.py
 on the same files, for a project declaring 0, one declaring 0.3 (a rule above
-the floor stands) and no project at all. Each arm runs in its own process, under
+the floor stands), no project at all, and an explicit --board-edge-clearance,
+which outranks the rule as the pour's inset on both fronts. Each arm runs in its own process, under
 a wall limit, so a stuck wx loop fails rather than hangs.
 
 Needs KiCad python (wx + pcbnew); re-execs into it, and does NOT self-skip
@@ -30,6 +31,7 @@ without it (exit 2).
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -72,7 +74,10 @@ STEP = {'action': 'route_planes',
         'params': {'via_size': 0.6, 'via_drill': 0.3},
         'assignments': [{'nets': ['GND'], 'layer': 'B.Cu'}]}
 
-ARMS = (('declares 0', 0.0), ('declares 0.3', 0.3), ('no project', None))
+#: (name, the project's edge rule, an explicit --board-edge-clearance)
+ARMS = (('declares 0', 0.0, None), ('declares 0.3', 0.3, None), ('no project', None, None),
+        ('declares 0, explicit 1.0', 0.0, 1.0), ('declares 0.3, explicit 1.0', 0.3, 1.0))
+BOARD_SIDE = 30.0
 
 FAILS = []
 
@@ -100,7 +105,13 @@ def _stage(d, rule):
     return path
 
 
-def _gui_arm(board_path, out_path):
+def _zone_inset(xs_ys):
+    """How far a pour's outline stands inside the board's 0..BOARD_SIDE square."""
+    xs, ys = xs_ys
+    return round(min(min(xs), min(ys), BOARD_SIDE - max(xs), BOARD_SIDE - max(ys)), 4)
+
+
+def _gui_arm(board_path, out_path, explicit=None):
     """Child process: run the step through the real dialog, read what it left."""
     import pcbnew
     for p in (REPO, os.path.join(REPO, 'py_router'), os.path.join(REPO, 'py_tools')):
@@ -128,9 +139,16 @@ def _gui_arm(board_path, out_path):
         if status == 'done':
             seen['at_done'] = {
                 'edge': pcbnew.GetBoard().GetDesignSettings().m_CopperEdgeClearance / 1e6,
-                'map': [getattr(b, plane_fill_model._NC_ATTR, None) or {} for b in boards]}
+                'map': [getattr(b, plane_fill_model._NC_ATTR, None) or {} for b in boards],
+                'inset': [_zone_inset((
+                    [pcbnew.ToMM(z.Outline().CVertex(i).x) for i in range(z.Outline().TotalVertices())],
+                    [pcbnew.ToMM(z.Outline().CVertex(i).y) for i in range(z.Outline().TotalVertices())]))
+                          for z in pcbnew.GetBoard().Zones()]}
 
-    res = run_plan(board_path, [json.loads(json.dumps(STEP))], on_status=on_status,
+    step = json.loads(json.dumps(STEP))
+    if explicit is not None:
+        step['params']['board_edge_clearance'] = explicit
+    res = run_plan(board_path, [step], on_status=on_status,
                    quiet=True, timeout=ARM_WALL_S - 30)
     seen['completed'] = res['completed']
     seen['aborted'] = res['aborted']
@@ -140,9 +158,10 @@ def _gui_arm(board_path, out_path):
     os._exit(0)     # the arm's verdict is on disk; no wx teardown to wait for
 
 
-def _gui(board_path, d):
+def _gui(board_path, d, explicit=None):
     out = os.path.join(d, 'gui.json')
-    r = subprocess.run([sys.executable, os.path.abspath(__file__), '--arm', board_path, out],
+    r = subprocess.run([sys.executable, os.path.abspath(__file__), '--arm', board_path, out,
+                        *([] if explicit is None else [str(explicit)])],
                        capture_output=True, text=True, errors='replace',
                        timeout=ARM_WALL_S, cwd=REPO)
     if not os.path.exists(out):
@@ -152,26 +171,36 @@ def _gui(board_path, d):
         return json.load(f)
 
 
-def _cli(board_path, d):
-    """The edge rule route_planes.py records, and the retract floor its main reads."""
+def _cli(board_path, d, explicit=None):
+    """(The edge rule route_planes.py records, its pours' inset from the edge.)"""
     out = os.path.join(d, 'cli.kicad_pcb')
     r = subprocess.run(
         [sys.executable, '-X', 'utf8', os.path.join(REPO, 'py_router', 'route_planes.py'),
          board_path, out, '--nets', 'GND', '--plane-layers', 'B.Cu',
-         '--via-size', '0.6', '--via-drill', '0.3'],
+         '--via-size', '0.6', '--via-drill', '0.3',
+         *([] if explicit is None else ['--board-edge-clearance', str(explicit)])],
         capture_output=True, text=True, encoding='utf-8', errors='replace',
         cwd=REPO, timeout=ARM_WALL_S)
     pro = os.path.join(d, 'cli.kicad_pro')
     if r.returncode != 0 or not os.path.exists(pro):
         print(r.stdout[-1500:] + r.stderr[-1500:])
         return None
+    with open(out, encoding='utf-8') as f:
+        text = f.read()
+    outlines = re.findall(r'\(polygon\s*\(pts(.*?)\)\s*\)', text, re.S)
+    insets = []
+    for o in outlines:
+        pts = [(float(a), float(b)) for a, b in re.findall(r'\(xy ([-\d.]+) ([-\d.]+)\)', o)]
+        insets.append(_zone_inset(([a for a, _ in pts], [b for _, b in pts])))
     with open(pro, encoding='utf-8') as f:
-        return json.load(f)['board']['design_settings']['rules']['min_copper_edge_clearance']
+        rule = json.load(f)['board']['design_settings']['rules']['min_copper_edge_clearance']
+    return rule, insets
 
 
 def main():
-    if len(sys.argv) == 4 and sys.argv[1] == '--arm':
-        return _gui_arm(sys.argv[2], sys.argv[3])
+    if len(sys.argv) in (4, 5) and sys.argv[1] == '--arm':
+        return _gui_arm(sys.argv[2], sys.argv[3],
+                        float(sys.argv[4]) if len(sys.argv) == 5 else None)
     try:
         import wx  # noqa: F401
         import pcbnew  # noqa: F401
@@ -187,21 +216,28 @@ def main():
     sys.path.insert(0, os.path.join(REPO, 'py_router'))
     from fix_kicad_drc_settings import effective_board_edge_clearance
 
-    for name, rule in ARMS:
+    for name, rule, explicit in ARMS:
         print(f'--- {name}')
         d = tempfile.mkdtemp(prefix='plane1698_')
         try:
             board = _stage(d, rule)
             cli_input_floor = effective_board_edge_clearance(board, 0.0)
-            cli = _cli(board, d)
-            check(f'[{name}] route_planes.py recorded an edge rule', cli is not None)
+            got = _cli(board, d, explicit)
+            check(f'[{name}] route_planes.py recorded an edge rule', got is not None)
+            cli, cli_insets = got or (None, None)
             # After the CLI leg: the GUI leg writes the same board and project.
-            gui = _gui(board, d)
+            gui = _gui(board, d, explicit)
             check(f'[{name}] the plan ran its step',
                   gui is not None and gui['completed'] == 1 and not gui['aborted'],
                   f"{gui and (gui['completed'], gui['aborted'])}")
             if gui is None or cli is None or not gui['at_done']:
                 continue
+            check(f"[{name}] the tab insets its pour as the CLI does",
+                  bool(cli_insets) and gui['at_done']['inset'] == cli_insets,
+                  f"live {gui['at_done']['inset']} vs CLI {cli_insets}")
+            if explicit is not None:
+                check(f'[{name}] the inset is the explicit value',
+                      gui['at_done']['inset'] == [explicit], f"{gui['at_done']['inset']}")
             check(f"[{name}] the tab leaves the CLI's copper-to-edge rule on the board",
                   abs(gui['at_done']['edge'] - cli) < 1e-6,
                   f"live {gui['at_done']['edge']} vs project {cli}")

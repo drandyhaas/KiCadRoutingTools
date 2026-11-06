@@ -874,9 +874,13 @@ class RoutingDialog(wx.Dialog):
         (0.5 -- plane pours want more edge margin than signal traces); pinned up to the
         fab copper-to-edge floor. NOT the signal _effective_board_edge_clearance, which
         fab-floors a no-edge-rule board's 0 up to 0.2 and loses the 'declared vs not'
-        distinction (that collapsed the GUI plane inset to 0.2 while the CLI held 0.5)."""
-        rule = (_get_board_minimum_constraints() or {}).get('min_copper_edge_clearance')
-        val = rule if (rule and rule > 1e-9) else defaults.PLANE_EDGE_CLEARANCE
+        distinction (that collapsed the GUI plane inset to 0.2 while the CLI held 0.5).
+        The override box outranks both, as `--board-edge-clearance` does there."""
+        if self.edge_clearance_check.GetValue():
+            val = self.board_edge_clearance.GetValue()
+        else:
+            rule = (_get_board_minimum_constraints() or {}).get('min_copper_edge_clearance')
+            val = rule if (rule and rule > 1e-9) else defaults.PLANE_EDGE_CLEARANCE
         return self._fab_floored('board_edge_clearance', val)
 
 
