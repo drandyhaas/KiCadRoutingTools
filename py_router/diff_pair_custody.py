@@ -639,6 +639,55 @@ def run_single_ended_member_fallback(state, diff_pairs_list, nets_to_route,
     return summary
 
 
+MEMBER_FALLBACK_WIDTH_SITE = 'pair member fallback copper shipped under width'
+
+
+def disclose_member_fallback_widths(pcb_data, config, member_names,
+                                    input_keys) -> Dict:
+    """The design-rules rows of the member fallback's narrowed copper (#1679).
+
+    On a run with a layer wider than the call's `track_width`, a fallback
+    member that does not fit at its layer width necks down in the
+    single-ended engine, and that ladder records nothing. Route.py's rule for
+    a net with its own width (found reviewing #1282), on the same helpers:
+    one row per member net, measured on the board this run ships
+    (`pcb_data.segments` once the engine is done), graded on the copper THIS
+    run laid -- a segment whose `segment_identity` is in `input_keys` was on
+    the input board -- against the member's own width on that copper's
+    layer. The member's per-attempt `track_width` rows (terminal necks of
+    coupled attempts that never shipped, among them) are replaced, so a
+    member that necked in one attempt and shipped at full width records
+    nothing.
+
+    `member_names` is the fallback summary's `attempted` list. The members
+    belong to pairs with no coupled copper, so no `pair partner neck` row of
+    a shipped pair is touched. Returns the shortfall per covered net."""
+    from routing_common import new_copper_width_shortfall
+    from fab_tiers import replace_track_rows
+    member_names = set(member_names or ())
+    names = {nid: net.name for nid, net in pcb_data.nets.items()}
+    by_name = {}
+    for nid, nm in names.items():
+        if (nm in member_names and config.layers
+                and max(config.get_net_track_width(nid, layer)
+                        for layer in config.layers)
+                > config.track_width + 1e-9):
+            by_name[nm] = nid
+    if not by_name:
+        return {}
+    short = new_copper_width_shortfall(
+        pcb_data.segments, lambda nid: names.get(nid, f"Net {nid}"),
+        input_keys,
+        lambda nm, layer: (config.get_net_track_width(by_name[nm], layer)
+                           if nm in by_name else None))
+    replace_track_rows(
+        set(by_name.values()),
+        [(by_name[nm], nm, r['requested_mm'], r['min_mm'], r['under_mm'])
+         for nm, r in short.items()],
+        MEMBER_FALLBACK_WIDTH_SITE)
+    return short
+
+
 # --------------------------------------------------------------------------
 # Part 2: reconciliation casualty custody
 # --------------------------------------------------------------------------

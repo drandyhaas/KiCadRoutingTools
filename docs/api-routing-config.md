@@ -904,7 +904,9 @@ always computed against this value, so stamps and margins cannot drift.
 The baking covers track and via stamps. Pads, the board edge and keep-outs
 stamp the call's `track_width`, so a pair's single-ended member fallback, which
 needs them priced for its layer width, routes with
-`reserve_layer_widths=False` on a map of its own (#1679). A hole keep-out reads
+`reserve_layer_widths=False` on a map of its own (#1679); a member that
+necks there ships under its layer width and gets one `design_rules` row
+(`diff_pair_custody.disclose_member_fallback_widths`). A hole keep-out reads
 the reserve per layer, and on a pair's centreline map also reaches the member's
 far edge, because a neck does not look at holes (#1687).
 

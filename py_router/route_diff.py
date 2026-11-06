@@ -776,6 +776,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # #962: the input's vias as values, for the ship-time Type VII stamp
     from fab_notes import via_snapshot as _via_snapshot962
     _input_vias962 = _via_snapshot962(pcb_data.vias, pcb_data)  # #1171: + sites
+    # #1679: the input's segments, frozen NOW (segments are mutable), for the
+    # member fallback's width rows: copper whose key is here is not this run's
+    from routing_common import segment_identity as _sid1679
+    _input_seg_keys1679 = {_sid1679(_s, pcb_data.nets[_s.net_id].name)
+                           for _s in pcb_data.segments
+                           if _s.net_id in pcb_data.nets}
     # KICAD_ROUTE_TRACE=1: the pairs' copper as laid, ripped and restored, for
     # route_movie.py (written beside the output at the end)
     from route_trace import attach as _attach_route_trace
@@ -2718,6 +2724,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             'via copper shipped under size')
     except Exception as _vre:                                   # noqa: BLE001
         print(f"  (via-size disclosure skipped: {_vre})")
+    # #1679: a member the fallback necked below its layer width ships that
+    # copper narrower; one row per member net, measured on the shipped board
+    # (route.py's rule for a net with its own width, #1282).
+    try:
+        from diff_pair_custody import disclose_member_fallback_widths
+        disclose_member_fallback_widths(
+            pcb_data, config, se_fallback_summary.get('attempted'),
+            _input_seg_keys1679)
+    except Exception as _mfe:                                   # noqa: BLE001
+        print(f"  (member fallback width disclosure skipped: {_mfe})")
     # #857: what this run delivered below a requested size (route.py's
     # key), when it delivered anything there.
     from fab_tiers import narrowed_summary
