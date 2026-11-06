@@ -238,7 +238,12 @@ EDGE_BAND_SANITY_MM = 5.0
 #: `.standoffs[]`, a site behind the origin. Each changes what the grade and
 #: the placer admit; an older build refuses `start_mm` by name and a
 #: negative length by its bound.
-READER_VERSION = 23
+#: 24 (#1714): `edge_connectors[].overhang_face` -- the side a row's band was
+#: read along, so a row with no `edge` is graded past the edge that side
+#: points at, not on the summed reading. It changes the band's verdict; an
+#: older build refuses the key by name, and the emit stamps `min_reader` 24
+#: on a document carrying it.
+READER_VERSION = 24
 #: The reader version that first reads `templates[]`.
 TEMPLATES_READER = 13
 #: The reader version that first reads a template row's `kind` and
@@ -265,6 +270,9 @@ HOLES_READER = 22
 #: The reader version that first reads `covers[].start_mm` and a hole or
 #: standoff behind the connector's origin (#1589).
 BEHIND_READER = 23
+#: The reader version that first reads `edge_connectors[].overhang_face`
+#: (#1714).
+OVERHANG_FACE_READER = 24
 #: #1475. The keep-outs a block's `fence_mm` compiles to are named
 #: `fence:<block>:<N|S|W|E>`; an intent may not name its own keep-out so.
 FENCE_KEEPOUT_PREFIX = 'fence:'
@@ -445,7 +453,15 @@ _EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
                         'class', 'source', 'suspect', 'suspect_reason',
                         'overhang_capped', 'observed_overhang_mm', 'context',
                         'center_on_edge', 'along_edge_band', 'side',
-                        'mating_face', 'mating_face_source'} | _FREE_TEXT_KEYS
+                        'mating_face', 'mating_face_source',
+                        'overhang_face'} | _FREE_TEXT_KEYS
+#: `edge_connectors[].overhang_face` (#1714): the side of the footprint, in its
+#: OWN unrotated frame, along which a row's `overhang_mm` was read as a
+#: distance. Written by the emit on a pile's #1603 floor row, which has no
+#: `edge` (#1103): a row with no `edge` that carries it is graded past the
+#: edge that side points at where the part stands (`band_edge`), the currency
+#: its band was read in, not on #1634's summed reading. An `edge` outranks it.
+#: Not a mating face: nothing reads it as one.
 #: `edge_connectors[].mating_face`: the side of the footprint, in its OWN
 #: unrotated frame, its mating face opens on -- declared for a part whose body
 #: names none (`mating.mating_face_local` abstains: a side-entry JST drawn
@@ -2111,6 +2127,13 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                 f"{c['mating_face']!r}, expected one of "
                 f"{', '.join(MATING_FACES)} (the side, in the footprint's own "
                 f"frame, its mating face opens on)")
+        if c.get('overhang_face') is not None \
+                and c['overhang_face'] not in MATING_FACES:
+            raise IntentError(
+                f"edge_connectors[{i}] ({c['ref']}): overhang_face "
+                f"{c['overhang_face']!r}, expected one of "
+                f"{', '.join(MATING_FACES)} (the side, in the footprint's own "
+                f"frame, its overhang_mm was read along)")
         if c.get('mating_face_source') is not None:
             if not isinstance(c['mating_face_source'], str) \
                     or not c['mating_face_source'].strip():
@@ -4277,12 +4300,12 @@ class _Ctx:
                 # cannot (#1301), on the part placement seats (#1531,
                 # `band_courtyard_rect`). `amt` still decides whether the
                 # census counted the part at all.
+                _bedge = band_edge(self, c)     # #1714, as the rule reads it
                 _cy, _cy_others = courtyard_overhang_past(
                     geometry_for(self, self.pcb, self.pcb_file),
-                    band_courtyard_rect(self, ref, part), c.get('edge'),
+                    band_courtyard_rect(self, ref, part), _bedge,
                     skip_rings=own)
-                band, _basis, _body = _band_amount(
-                    self, ref, c.get('edge'), _cy)
+                band, _basis, _body = _band_amount(self, ref, _bedge, _cy)
                 # #1403: the band reads the declared edge alone, so the
                 # exemption must not license a part hanging past ANOTHER edge
                 # by more than the band's own maximum.
@@ -6386,10 +6409,13 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # reading it was. `amount` keeps its other job: the setback
         # conjunct's no-overhang gate below, on a courtyard seat basis (on a
         # body basis that gate reads the body, #1585).
+        # #1714: a row with no edge whose band was read as a distance along
+        # a side of the part (`overhang_face`) is read past the edge that side
+        # points at (`band_edge`), not on the sum
+        _bedge = band_edge(ctx, c)
         _band_cy, _cy_others = courtyard_overhang_past(
-            _geo, band_courtyard_rect(ctx, ref, part), c.get('edge'))
-        band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),
-                                                  _band_cy)
+            _geo, band_courtyard_rect(ctx, ref, part), _bedge)
+        band, overhang_basis, body = _band_amount(ctx, ref, _bedge, _band_cy)
         # #1403: the band above is ONE distance past the declared edge. What
         # the part does past a DIFFERENT edge is graded on its own: more than
         # the band's maximum is an error (the sum used to bound it); anything
@@ -6405,10 +6431,11 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                     ref=ref,
                     message=(f"{ref} overhangs the {_oe} edge by {_ov:.2f}mm, "
                              f"past the declared maximum {float(hi):.2f}mm "
-                             f"(its band is declared on the "
-                             f"{c.get('edge')} edge)"),
+                             f"(its band is "
+                             f"{'declared on' if c.get('edge') else 'read past'} "
+                             f"the {_bedge} edge)"),
                     measured={'edge': _oe, 'overhang_mm': round(_ov, 4)},
-                    expected={'edge': c.get('edge'), 'max': float(hi)})
+                    expected={'edge': _bedge, 'max': float(hi)})
         if band < lo - legality.EPS:
             yield Violation(
                 rule='edge_connector', severity=ctx.sev('edge_connector'),
@@ -6459,6 +6486,10 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         evidence['other_edge_overhang_mm'] = {
             e: round(v, 4) for e, v in sorted(_others.items())
             if v > legality.EPS}
+        if _bedge and not c.get('edge'):
+            # #1714: said on the placed board, as the emit's OWED line says it
+            # on the pile: the seat seats only a row with an edge
+            evidence['band_edge'] = _bedge
         # The SEAT BASIS, decided once for the two conjuncts that ask where
         # the part's MATING FACE is (nearest edge, seat). A receptacle's
         # pads sit well inboard of its opening by construction: a micro-USB
@@ -6821,6 +6852,27 @@ def band_courtyard_rect(ctx, ref, part):
     the context's own record, the answer for every other part."""
     zp = _ctx_zone_parts(ctx).get(ref)
     return zp.rect if zp is not None else part.rect
+
+
+def band_edge(ctx, entry: Dict) -> Optional[str]:
+    """#1714: the edge `entry`'s overhang band is read past: its declared
+    `edge`; else, for a row carrying `overhang_face` (the side its band was
+    read along, as a distance), the edge that side points at where the part
+    stands in `ctx` (`mating.facing_edge`); else None, #1634's summed reading
+    for a row declaring no edge."""
+    if entry.get('edge'):
+        return entry['edge']
+    face = entry.get('overhang_face')
+    if not face:
+        return None
+    ref = entry['ref']
+    p = (getattr(ctx.state, 'parts', None) or {}).get(ref)
+    fp = (ctx.pcb.footprints or {}).get(ref)
+    rot = p.rot if p is not None else getattr(fp, 'rotation', None)
+    if rot is None:
+        return None
+    from .mating import facing_edge
+    return facing_edge(face, rot)
 
 
 def _band_amount(ctx, ref, edge, courtyard_amount):
@@ -12349,10 +12401,14 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 _over = max(0.0, _face_reach(
                     (_zp.get(ref) or state.parts[ref]).rect(0.0, 0.0, 0.0))[_clear['face']]
                     - _clear['reach'])
+            # #1714: the side the band was read along goes with it, so a
+            # placed board reads it past the edge that side points at, the
+            # distance it is, rather than on an edge-less row's summed reading
             entry = {'ref': ref,
                      'overhang_mm': {
                          'min': _clear['min'],
                          'max': round(_clear['min'] + DEPTH_EDGE_TOL_MM + 0.5 + _over, 3)},
+                     'overhang_face': _clear['face'],
                      'note': (f"band min {_clear['min']:.3f}mm from the part's 3D "
                               f"model, read in its own frame with its mating "
                               f"face ({_clear['face']}) to the edge: with less "
@@ -12388,6 +12444,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # An entry declaring NO edge is graded on the summed reading
             # (`courtyard_overhang_past` with no edge), so its band is read
             # in that currency: the board it was read off grades it clean.
+            # (The pile's floor row above carries `overhang_face` instead and
+            # is read as the distance it is, `band_edge`, #1714.)
             amt_edgeless = courtyard_overhang(_overhang_geo, erect[ref])
             # An OBSERVED overhang above the sanity cap is not a band. Emitting
             # it as one launders the damage into the spec that is supposed to
@@ -13067,6 +13125,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
     if xrows:
         doc['proximity'] = list(doc.get('proximity') or []) + xrows
         doc['min_reader'] = max(int(doc.get('min_reader') or 0), 12)
+    if any('overhang_face' in c for c in doc.get('edge_connectors') or ()):
+        doc['min_reader'] = max(int(doc.get('min_reader') or 0), OVERHANG_FACE_READER)
     return doc
 
 
@@ -13345,8 +13405,13 @@ def format_text(r: GradeResult) -> str:
             gap = cu.get('minimum_gap_mm')
             lines.append(
                 f"    {e['ref']} {e.get('edge') or '(no edge)'}: overhang "
-                f"{e['overhang_mm']:.4f}mm [{e['overhang_basis']}] "
-                f"{e['overhang_disposition']}"
+                f"{e['overhang_mm']:.4f}mm"
+                + (f" past the {e['band_edge']} edge its overhang_face points at"
+                   if e.get('band_edge') else '')
+                + f" [{e['overhang_basis']}] {e['overhang_disposition']}"
+                + (f" (its row declares no edge, and place_simple seats only a "
+                   f"row with one: give it its `edge`)"
+                   if e.get('band_edge') else '')
                 + (f"; model end {e['model_end_mm']:+.2f}mm"
                    if e.get('model_end_mm') is not None else '')
                 + _setback_tail(e) + "; pad copper "

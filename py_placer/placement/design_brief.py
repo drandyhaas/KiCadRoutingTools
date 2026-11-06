@@ -2087,6 +2087,10 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
             base['context']['was_source'] = base['source']
         merged_ctx = dict(base.get('context') or {})
         merged_ctx.update(c.get('context') or {})
+        if 'overhang_mm' in c:
+            # #1714: the side the emitter's band was read along goes with
+            # that band
+            base.pop('overhang_face', None)
         base.update({k: v for k, v in c.items() if k != 'context'})
         # The flag is a statement about THIS brief row, so a row that DOES
         # declare an edge must clear it. Without that, re-merging a document
