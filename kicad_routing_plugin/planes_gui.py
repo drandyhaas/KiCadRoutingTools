@@ -1892,15 +1892,15 @@ class PlanesTab(wx.Panel):
         # Castellated landings (run-6 fix 1.7, GUI twin of the plane mains'
         # retract_castellated_landings): plane taps/joins that landed inside a
         # castellated pad's edge-clearance zone are pulled to its inner reach.
+        # The board's own rule pinned up to the fab floor, as the mains read it
+        # (effective_board_edge_clearance). The config's value is the plane-zone
+        # INSET, 0.5 on a board declaring no rule, which is not a copper floor.
         from .gui_utils import apply_castellated_landing_retract
-        try:
-            _live_edge = (board.GetDesignSettings().m_CopperEdgeClearance
-                          or 0) / 1e6
-        except Exception:
-            _live_edge = 0.0
-        _cfg_edge = (getattr(self, '_plane_drc_config', {}) or {}).get(
-            'board_edge_clearance') or 0.0
-        apply_castellated_landing_retract(board, max(_cfg_edge, _live_edge))
+        from fix_kicad_drc_settings import fab_edge_floor, live_declared_rules
+        _edge_rule = (live_declared_rules(board) or {}).get(
+            'min_copper_edge_clearance') or 0.0
+        apply_castellated_landing_retract(
+            board, max(_edge_rule, fab_edge_floor(self.board_filename or None)))
 
         # Make the live board's DRC constraints consistent with the plane routing
         # floors (issue #160), mirroring route_planes.py's auto-fix. Best-effort.
@@ -1929,11 +1929,15 @@ class PlanesTab(wx.Panel):
                 _hole_clr = (self._held_hole_clearance(board, _floor_segs,
                                                        _floor_vias, eff_clearance)
                              if _pkw['copper_holes'] else None)
+                # #338: no edge_clearance. This step's own value is the
+                # plane-zone inset, and written here it became the board's rule
+                # for every later step, which routed and graded at 0.5 where
+                # the CLI, recording the project's rule, holds the fab floor.
+                # apply_targets_to_board keeps a declared rule above that floor.
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=_hole_clr,
                     hole_to_hole=_pkw['hole_to_hole'],
-                    edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=_pkw['track_width'],
                     via_diameter=_pkw['via_diameter'],
                     via_drill=_pkw['via_drill'],

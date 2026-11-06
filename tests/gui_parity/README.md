@@ -86,7 +86,8 @@ Engine parameters and defaults:
 
 Planes tab: `test_plane_all_layers_parity.py`, `test_plane_layer_costs_gui.py`,
 `test_gnd_vias_gui.py`, `test_skip_existing_zones_gui.py`,
-`test_1056_renamed_layers_gui.py` (all described below).
+`test_1056_renamed_layers_gui.py`, `test_1698_plane_step_leaves.py` (all
+described below).
 
 Fanout tab and cap placement:
 - `test_fanout_rotated_gui.py` — QFN fanout on a rotated footprint: the only
@@ -605,6 +606,13 @@ pass. Run any directly:
   says "unchanged by this step but still below", in the CLI's words. On the
   code before that fix it fails 3 checks: the GUI's step 1 reported pcbnew's
   factory floors as relaxed, and its step 2 named different floors and values.
+- `test_1698_plane_step_leaves.py` -- what a Planes step leaves for the next
+  step, through the real dialog and plan executor against `route_planes.py` on
+  the same files: the copper-to-edge rule is the CLI's (the board's own, pinned
+  up to the fab floor), never the plane-zone inset, for the castellated retract
+  too; and the class map the step published to the fill model is gone, as it
+  is on the CLI, where the next step is a fresh process. On the code before
+  that fix it fails 6 checks.
 - `test_gnd_vias_gui.py` -- the Planes tab's **Add GND vias** step, run for
   real (nothing mocked) against `route_planes.py --add-gnd-vias` on the same
   files: return vias keep a net-class clearance (#1030), a `.kicad_dru` layer

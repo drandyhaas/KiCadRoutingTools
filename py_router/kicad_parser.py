@@ -10082,8 +10082,11 @@ def resync_live_copper(pcb_data, board) -> None:
     session (optimize_caps, the placement Apply, the user) carries its tab or
     antenna with it. Kept as built, they stayed where the part had been: a
     phantom obstacle there and nothing where the copper is.
-    Every memo derived from the old copper is dropped. Call
-    resolve_live_sense_branches afterwards, once pads and zones are current.
+    Every memo derived from the old copper is dropped, and so is the class map
+    a plane step published to the fill model: it belongs to that step's run, as
+    it does on the CLI, where the next step is a fresh process that holds none.
+    Call resolve_live_sense_branches afterwards, once pads and zones are
+    current.
     """
     import pcbnew
     get_layer_name = pcbnew_layer_maps(board)[2]
@@ -10101,6 +10104,8 @@ def resync_live_copper(pcb_data, board) -> None:
     # engine run marks the board it is handed.
     from rip_up_reroute import forget_input_copper
     forget_input_copper(pcb_data)
+    from plane_fill_model import set_board_net_clearances
+    set_board_net_clearances(pcb_data, None)
     for attr in LIVE_COPPER_MEMOS:
         vars(pcb_data).pop(attr, None)
 
