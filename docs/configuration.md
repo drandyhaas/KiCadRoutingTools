@@ -340,6 +340,13 @@ whatever the vias are (#1490), since an explicit via and a descent need not hold
 it. `list_nets.py --design-rules` lists the rules that set a minimum below the
 Board Setup one, with the condition each binds.
 
+**Via count rules (#1707).** A `(constraint via_count (min N) (max M))` rule is
+not honoured by any routing step: a net is routed with the vias it needs
+(completion first), so every step that reads the rules lists it NOT honoured on
+the console, and route.py in `design_rules.unsupported_rules`. `check_drc.py`
+grades it (`via-count-out-of-range`, KiCad's `too_many_vias`), and board_score
+counts it in `drc`.
+
 **Edge clearance rules (#1678).** A `.kicad_dru` `edge_clearance` rule holds the
 tracks and vias of every routing step, on both fronts, with no flag or control,
 and `check_drc.py` grades them at it. It replaces `--board-edge-clearance` and the

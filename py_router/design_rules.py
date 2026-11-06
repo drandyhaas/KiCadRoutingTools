@@ -111,7 +111,8 @@ SIZE_KINDS = frozenset({
 # keep-out, or a track ban's forbidden layers -- whatever of a `disallow`
 # rule no step honours is named by `Rule.router_unhonoured`, #1527). A rule
 # built only on the other kinds listed here is reported neither "NOT
-# honoured" nor "not consumed".
+# honoured" nor "not consumed", except a ROUTER_UNHONOURED_KINDS kind
+# (`annular_width`, `via_count`), which `unsupported()` names NOT honoured.
 CONSUMED_KINDS = CLEARANCE_KINDS | SIZE_KINDS | {'disallow', 'via_count'}
 # Kinds no routing step honours but a grader does: check_drc grades every
 # `length` window (kicad_dru.read_board_length_rules, #1313) and every
@@ -123,7 +124,20 @@ GRADED_ONLY_KINDS = frozenset({'length', 'skew', 'diff_pair_uncoupled'})
 # `DesignRules.via_meeting_rules`), an explicit via size and a last-resort
 # descent need not, so a rule declaring one is reported NOT honoured -- in
 # route.py's `design_rules.unsupported_rules` -- rather than passing as consumed.
-ROUTER_UNHONOURED_KINDS = frozenset({'annular_width'})
+# `via_count` (#1707) likewise: no step counts a net's vias against it -- a
+# net is routed with the vias it needs, completion first -- and check_drc
+# grades it as KiCad's too_many_vias does.
+ROUTER_UNHONOURED_KINDS = frozenset({'annular_width', 'via_count'})
+#: why each ROUTER_UNHONOURED_KINDS kind is not honoured, as `unsupported()` says it
+_ROUTER_UNHONOURED_WHY = {
+    'annular_width': ("a via a step sizes itself holds it, an explicit via size and a "
+                      "last-resort descent need not, so this line is printed whatever "
+                      "the vias are; route.py and route_diff.py grade their own vias "
+                      "against it when they end, check_drc the board"),
+    'via_count': ("no routing step counts a net's vias against it (a net is routed "
+                  "with the vias it needs, completion first); check_drc grades the "
+                  "board's vias per net against it, as KiCad's too_many_vias does"),
+}
 # `disallow` item tokens (#1527). The router lays tracks and THROUGH vias
 # only, so a rule forbidding only blind, buried or micro vias asks nothing of
 # it. A track ban is honoured by the steps that derive it (route.py and
@@ -2110,13 +2124,8 @@ class DesignRules:
         for r in self.rules:
             kinds = sorted(k for k in r.constraints if k in ROUTER_UNHONOURED_KINDS)
             if kinds and r.name not in named and not r.honoured:
-                out.append((r.name, f"{', '.join(kinds)}: a via a step sizes itself "
-                                    f"holds it, an explicit via size and a "
-                                    f"last-resort descent need not, so this line "
-                                    f"is printed whatever the vias are; route.py "
-                                    f"and route_diff.py grade their own vias "
-                                    f"against it when they end, check_drc the "
-                                    f"board"))
+                out.append((r.name, '; '.join(f"{k}: {_ROUTER_UNHONOURED_WHY[k]}"
+                                              for k in kinds)))
         return out
 
     def severity_of(self, kind: str) -> str:

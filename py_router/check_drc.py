@@ -3320,6 +3320,141 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     return summary
 
 
+def _via_count_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
+    """Grade every `.kicad_dru` `via_count` rule (#1707) as KiCad's
+    too_many_vias does.
+
+    `(constraint via_count (min N) (max M))` bounds the vias of what it
+    binds; no routing step counts vias against it, so this is where it is
+    graded. KiCad evaluates the rule on every pad, track and via (the last
+    matching rule in file order binds each item), groups the items by
+    binding rule and then by net, and counts the vias in each group. So,
+    measured on kicad-cli 10.0.6: the count is every via of the net, a stray
+    one included; a `min` flags a net with no vias at all -- a one-pad net,
+    and the no-net pads as one -- and a `max` only a net with more. The
+    conditions are read by the resolver (`design_rules`, three-valued): an
+    item whose binding rule turns on a term it cannot read leaves the net
+    NOT GRADED for that rule, named with its reason, never dropped. A
+    `(severity ignore)` rule binds and reports nothing, a `warning` one
+    reports a warning and an `exclusion` one an error, as KiCad's do. A
+    group outside its bounds is a `via-count-out-of-range` violation.
+    Returns the summary, or None when the board has no such rule."""
+    path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
+    if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+        return None
+    from design_rules import DesignRules, parse_condition_maybe, rule_may_match
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ['F.Cu', 'B.Cu'])
+    dr = DesignRules.from_project(pcb_data, path, copper_layers=copper)
+    rules = []
+    for r in dr.rules:
+        spec = r.constraints.get('via_count') or {}
+        if spec.get('min') is None and spec.get('max') is None:
+            continue
+        sev = str(r.unsupported or '')
+        known = not r.unsupported or sev.startswith(('condition', 'severity'))
+        rules.append((r, parse_condition_maybe(r.condition_src) if known else ('unknown',),
+                      spec.get('min'), spec.get('max')))
+    if not rules:
+        return None
+    ctx = ('via_count', dr._net_name_set())
+
+    def _binding(item, layer):
+        """(rule, None) for the item's binding rule (None: none binds), or
+        (None, rule) when an undecidable rule comes first."""
+        for r, ast, _lo, _hi in reversed(rules):
+            m = rule_may_match(r, ast, item, None, layer, dr.copper_layers, ctx)
+            if m is None:
+                return None, r
+            if m:
+                return r, None
+        return None, None
+
+    vias: Dict[int, int] = {}
+    for v in pcb_data.vias:
+        vias[v.net_id or 0] = vias.get(v.net_id or 0, 0) + 1
+    tracks: Dict[int, set] = {}
+    for s in pcb_data.segments:
+        if not getattr(s, 'graphic', False):
+            tracks.setdefault(s.net_id or 0, set()).add(s.layer)
+    pads: Dict[int, list] = {}
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            pads.setdefault(p.net_id or 0, []).append(p)
+    names = {nid: (n.name or '') for nid, n in pcb_data.nets.items()}
+    graded, undecided, bound_rules = 0, {}, set()
+    for nid in sorted(set(vias) | set(tracks) | set(pads), key=lambda i: (names.get(i, ''), i)):
+        if matching_net_ids is not None and nid not in matching_net_ids:
+            continue
+        name = names.get(nid, '')
+        items = [(dr.item_for_net(nid, 'track', layer), layer)
+                 for layer in sorted(tracks.get(nid, ()))]
+        items += [(dr.item_for_pad(p), None) for p in pads.get(nid, ())]
+        via_rule = None
+        groups = set()
+        if vias.get(nid):
+            via_rule, blocker = _binding(dr.item_for_net(nid, 'via'), None)
+            if blocker is not None:
+                undecided.setdefault(blocker.name, (blocker.unsupported or 'condition',
+                                                    []))[1].append(name or '<no net>')
+                continue
+            if via_rule is not None:
+                groups.add(via_rule.name)
+        for item, layer in items:
+            r, blocker = _binding(item, layer)
+            if blocker is not None:
+                # it may bind a group of no vias, which a `min` flags
+                if blocker.constraints['via_count'].get('min'):
+                    nets = undecided.setdefault(blocker.name,
+                                                (blocker.unsupported or 'condition', []))[1]
+                    if (name or '<no net>') not in nets:
+                        nets.append(name or '<no net>')
+            elif r is not None:
+                groups.add(r.name)
+        for r, _ast, lo, hi in rules:
+            if r.name not in groups:
+                continue
+            bound_rules.add(r.name)
+            if r.severity == 'ignore':
+                continue
+            graded += 1
+            n = vias.get(nid, 0) if via_rule is r else 0
+            bound = limit = None
+            if hi is not None and n > hi + 1e-9:
+                bound, limit = 'max', int(round(hi))
+            elif lo is not None and n < lo - 1e-9:
+                bound, limit = 'min', int(round(lo))
+            if bound:
+                violations.append({
+                    'type': 'via-count-out-of-range',
+                    'net1': name or 'net_0',
+                    'rule': r.name,
+                    # measured: an exclusion rule reports an error
+                    'severity': 'error' if r.severity == 'exclusion' else r.severity,
+                    'vias': n,
+                    'bound': bound,
+                    'limit': limit,
+                    'min': None if lo is None else int(round(lo)),
+                    'max': None if hi is None else int(round(hi)),
+                })
+    unbound = [r.name for r, _a, _l, _h in rules
+               if r.name not in bound_rules and r.name not in undecided]
+    out_n = sum(1 for v in violations if v['type'] == 'via-count-out-of-range')
+    summary = {'rules': len(rules), 'graded': graded, 'out_of_range': out_n,
+               'unbound_rules': unbound,
+               'not_graded': {k: {'reason': r, 'nets': n}
+                              for k, (r, n) in undecided.items()}}
+    if not quiet:
+        print(f"Via-count rules (.kicad_dru, #1707): {len(rules)} rule(s); "
+              f"{graded} net(s) graded, {out_n} out of range (KiCad: too_many_vias)")
+        for rname, (why, nets) in undecided.items():
+            # board_score lists the rule ungraded (#1490's line form)
+            print(f"  NOT GRADED (via_count): rule '{rname}' ({why}) -- {len(nets)} "
+                  f"net(s) it may bind are not graded here; KiCad still grades them")
+        for rname in unbound:
+            print(f"  {_UNBOUND_RULE_NOTE.format(rname=rname)}")
+    return summary
+
+
 #: clearance violation type -> the KiCad item types of its two items
 _CLEARANCE_PAIR_TYPES = {'segment-segment': ('track', 'track'),
                          'via-segment': ('via', 'track'),
@@ -4627,6 +4762,7 @@ KICAD_SEVERITY_KEY = {
     'via-drill-size': 'drill_out_of_range', 'via-annular': 'annular_width',
     'items-not-allowed': 'items_not_allowed', 'keepout': 'items_not_allowed',
     'length-out-of-range': 'length_out_of_range',
+    'via-count-out-of-range': 'too_many_vias',
     'skew-out-of-range': 'skew_out_of_range',
     'diff-pair-uncoupled': 'diff_pair_uncoupled_length_too_long',
 }
@@ -7246,6 +7382,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                   violations, _accepted_edge,
                   _grade_tol(clearance, clearance_margin), quiet)
     _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet)
+    _via_count_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet)
     _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet)
     _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
                         violations, quiet)
@@ -7744,6 +7881,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                                     for b in (v['min_mm'], v['max_mm']))
                         print(f"    .kicad_dru rule '{v['rule']}': window "
                               f"{_lo}..{_hi} mm (KiCad: length_out_of_range)")
+                    elif vtype == 'via-count-out-of-range':
+                        print(f"  {v['net1']}: {v['vias']} via(s) "
+                              f"{'<' if v['bound'] == 'min' else '>'} {v['bound']} "
+                              f"{v['limit']}")
+                        print(f"    .kicad_dru rule '{v['rule']}' (KiCad: too_many_vias)")
                     elif vtype == 'via-board-edge':
                         where = _edge_phrase(v['edge'])
                         print(f"  Via:{v['net1']} {where}")

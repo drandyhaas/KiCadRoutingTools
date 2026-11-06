@@ -800,9 +800,10 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     _unsz = sorted(set(re.findall(r"NOT GRADED \(size\): rule '([^']*)'", out)))
     _size_extra = {'ungraded_rules': _unsz} if _unsz else {}
     # #1490: and the .kicad_dru clearance rules it does not model; #1527: and
-    # the `disallow` rules (or tokens) it does not grade.
-    _uncl = sorted(set(re.findall(r"NOT GRADED \((?:clearance|disallow)\): rule '([^']*)'",
-                                  out)))
+    # the `disallow` rules (or tokens) it does not grade; #1707: and the
+    # `via_count` rules whose condition it does not read.
+    _uncl = sorted(set(re.findall(
+        r"NOT GRADED \((?:clearance|disallow|via_count)\): rule '([^']*)'", out)))
     _clr_extra = {'ungraded_rules': _uncl} if _uncl else {}
     # #1528: of `count`, the violations such a rule may make legal -- graded
     # at the class value, which KiCad may not report.
