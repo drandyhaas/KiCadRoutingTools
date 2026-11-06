@@ -1253,9 +1253,10 @@ def net_pads_joined(pcb_data: PCBData, net_id: int, pads=None,
     Copper joins where it touches, as check_connected and KiCad have it
     (#1629): a track whose round end reaches a pad's exact outline (a
     rotated pad, a cap that stops short of the edge), a via whose barrel
-    overlaps a pad, two same-net pads whose copper overlaps. Before, it read
-    a point inside the pad's axis box only, and check_drc and board_score
-    skipped the skew of three connected pairs KiCad graded out of range.
+    overlaps a pad, two same-net pads whose copper overlaps, two same-layer
+    tracks that cross mid-span (#1705). Before, it read a point inside the
+    pad's axis box only, and an X crossing not at all, and check_drc and
+    board_score skipped the skew of connected pairs KiCad graded out of range.
     False for an unrouted net, a net carrying only fanout stubs, a broken net,
     one whose pads meet only through a plane, and a net with fewer than two
     copper pads. `pads` overrides which pads must be joined (default: every
@@ -1508,6 +1509,44 @@ def _track_reaches_pad_at(pad, x: float, y: float, half_width: float,
     return _point_to_pad_distance()(x, y, pad) <= reach
 
 
+def _segment_crossings(segments) -> Dict[int, List[Tuple[float, float]]]:
+    """id(segment) -> the points where another segment of the same layer
+    CROSSES its centreline (#1705).
+
+    Two same-layer tracks that cross mid-span overlap in copper and KiCad
+    joins them, but neither has an endpoint on the other, so a T-junction cut
+    never meets them. check_connected unions such a pair with the same
+    `segments_intersect` test (#1279 review)."""
+    from geometry_utils import segments_intersect
+    out: Dict[int, List[Tuple[float, float]]] = {}
+    by_layer: Dict[str, list] = {}
+    for s in segments:
+        by_layer.setdefault(s.layer, []).append(
+            (min(s.start_x, s.end_x), max(s.start_x, s.end_x),
+             min(s.start_y, s.end_y), max(s.start_y, s.end_y), s))
+    for items in by_layer.values():
+        items.sort(key=lambda it: it[0])
+        for i, (ax0, ax1, ay0, ay1, a) in enumerate(items):
+            for bx0, bx1, by0, by1, b in items[i + 1:]:
+                if bx0 > ax1:
+                    break
+                if by0 > ay1 or by1 < ay0:
+                    continue
+                if not segments_intersect(a.start_x, a.start_y, a.end_x, a.end_y,
+                                          b.start_x, b.start_y, b.end_x, b.end_y):
+                    continue
+                dax, day = a.end_x - a.start_x, a.end_y - a.start_y
+                dbx, dby = b.end_x - b.start_x, b.end_y - b.start_y
+                den = dax * dby - day * dbx
+                if abs(den) < 1e-15:
+                    continue      # collinear overlap: the endpoint cuts meet it
+                t = ((b.start_x - a.start_x) * dby - (b.start_y - a.start_y) * dbx) / den
+                pt = (a.start_x + t * dax, a.start_y + t * day)
+                out.setdefault(id(a), []).append(pt)
+                out.setdefault(id(b), []).append(pt)
+    return out
+
+
 def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                      tolerance: float = 0.02, detail: Optional[dict] = None):
     """(adjacency, pad_nodes) over ONE net's track copper, with `pads` attached.
@@ -1518,8 +1557,9 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
 
     Copper joins where it touches, as check_connected and KiCad have it
     (#1629): a track node joins a pad when its round cap reaches the pad's
-    exact outline, a via joins a pad its copper overlaps, and two of `pads`
-    whose copper touches on a shared layer join each other.
+    exact outline, a via joins a pad its copper overlaps, two of `pads`
+    whose copper touches on a shared layer join each other, and two tracks
+    of a layer whose centrelines cross meet at the crossing (#1705).
 
     `detail`, when given, is filled with what each edge IS, for a measure
     that reads the copper a walk selected (`_selected_copper_mm`):
@@ -1599,11 +1639,13 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                       'pad', pad))
 
     # Cut each segment at every T-junction (another segment's endpoint on its
-    # interior) and at every disc it passes through, then chain the pieces.
+    # interior), at every point where another segment of the layer CROSSES it,
+    # and at every disc it passes through, then chain the pieces.
     endpoints_by_layer: Dict[str, List[Tuple[float, float]]] = {}
     for s in segments:
         endpoints_by_layer.setdefault(s.layer, []).extend(
             [(s.start_x, s.start_y), (s.end_x, s.end_y)])
+    crossings = _segment_crossings(segments)
 
     for s in segments:
         length = segment_length(s)
@@ -1622,7 +1664,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             perp = abs(-(px - s.start_x) * uy + (py - s.start_y) * ux)
             return t if perp <= max_perp else None
 
-        for (px, py) in endpoints_by_layer.get(s.layer, ()):
+        for (px, py) in endpoints_by_layer.get(s.layer, ()) + crossings.get(id(s), []):
             t = _project(px, py, tolerance)
             if t is not None:
                 cuts.append(t)

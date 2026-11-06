@@ -324,8 +324,9 @@ pin_pair_path_length(pcb_data, net_id, pad_a, pad_b, tolerance=0.02)
 
 Shortest **copper path between two pads** — the from-to measurement length
 matching needs. Walks a weighted graph over the net's own copper: segments
-carry their length, coincident endpoints and T-junctions join at zero cost,
-and a via crosses each layer step at the stackup between the two layers (#1623;
+carry their length, coincident endpoints, T-junctions and two same-layer
+tracks that cross mid-span (#1705, `check_connected`'s X-crossing rule) join
+at zero cost, and a via crosses each layer step at the stackup between the two layers (#1623;
 from KiCad 10.0.2 half of each inner copper layer ending a span, so a walk
 through a via is charged the span it walks). Pads and vias attach by copper
 **overlap** (a track ends anywhere inside them, not on their centre), and their
