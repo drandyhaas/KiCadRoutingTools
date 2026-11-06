@@ -354,8 +354,9 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
   board draws.
 - **A part under another part's body (#1443).** Each part's height, and the
   room under each part, are read off its 3D model (one `kicad-cli pcb export
-  glb` of the board, cached by the footprints' models in
-  `~/.cache/krt_heights`), else off an IPC-7351 name (`CAPC1005X55N` is
+  glb` of the board's footprints, each staged at a position of its own so the
+  measurement does not depend on where the parts stand (#1734), cached by
+  the footprints' models in `~/.cache/krt_heights`), else off an IPC-7351 name (`CAPC1005X55N` is
   0.55 mm tall). A part may stand inside a COVER's occupancy -- a module on
   headers, a shield can, a part whose body stands off the board -- where the
   cover's model is over it at least its height plus 0.5 mm higher (and at

@@ -164,8 +164,12 @@ EXPORT_TIMEOUT_S = 600
 #: below) and the next one facing down (solid above), is read from this tall:
 #: under it is a seam between two drawn solids, not room, mm
 GAP_MIN_MM = 0.1
+#: #1734: where `_measure` stages the n-th footprint for the export, mm:
+#: (n * x, n * y). Distinct in x and in y for every part, so the export's
+#: frame is fit from poses no two parts share
+_CANON_STEP_MM = (5.0, 3.0)
 #: bump to invalidate every cached measurement
-_CACHE_VERSION = 8
+_CACHE_VERSION = 9
 
 #: IPC-7351 land-pattern names end their body dimensions with the height in
 #: 1/100 mm: CAPC1005X55N, QFN50P400X400X80-25N, SOIC127P600X175-8N,
@@ -1098,7 +1102,9 @@ def _key(staged, cli, iter_blocks, thickness=_THICKNESS_MM):
     """What the measurement depends on: each footprint's layer, models (the
     blocks, and the files' sizes and times) and pads, kicad-cli, and the
     board's thickness (where its board depth is, #1603) -- never its pose,
-    so every seed of a placement reads one measurement."""
+    so every seed of a placement reads one measurement. That holds because
+    `_measure` exports every part at a pose of its own (`_canonical_poses`),
+    never the board's (#1734)."""
     h = hashlib.sha1(f'v{_CACHE_VERSION}\0{cli}\0{thickness:g}'.encode())
     for _s, _e, fp, _raw, key in iter_blocks(staged):
         m = re.search(r'\(layer\s+"([^"]+)"', fp)
@@ -1168,6 +1174,7 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
     export failed, or the reason when it timed out (never cached, so the next
     run measures again)."""
     import numpy as np
+    staged = _canonical_poses(staged)
     td = tempfile.mkdtemp(prefix='krt_heights_')
     try:
         brd = os.path.join(td, 'b.kicad_pcb')
@@ -1270,11 +1277,41 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
             out_cov[r] = cov
     # `frame_fits`: how many frames put the most parts on their poses. More
     # than one, and which axis is UP is a guess: a board with one resolved
-    # model fits every frame, and the first (qfn_csi_underpad_diff J1, a
-    # 1x04 header read 1.27 mm tall) says nothing about what is below the
-    # face (#1603)
+    # model fits every frame, and the first (a 1x04 header read 1.27 mm tall)
+    # says nothing about what is below the face (#1603). Two models or more
+    # fit one frame: `_canonical_poses` gives each its own x and y (#1734)
     return {'top': out_top, 'covers': out_cov, 'bodies': out_body,
             'gaps': out_gap, 'depth': out_depth, 'frame_fits': int(fits)}
+
+
+def _canonical_poses(staged):
+    """`staged` with the n-th footprint moved to (n * `_CANON_STEP_MM`), its
+    angle and side kept (#1734).
+
+    The cache key leaves the pose out, and the measurement read it twice.
+    The export's frame is fit to the parts' poses by the median miss, and on
+    a pile -- parts staged on a grid, more than half of them sharing one x --
+    a frame reading the board's face as a plan axis missed under half of
+    them and won the tie: every part measured on its side (a 4.34 mm jack
+    read 15.24 mm tall, its depth on another part), cached under the placed
+    board's key, and read back by the next run on the placed board. And the
+    export tessellates a curved model where it stands, so the same part
+    measured at two poses differed in a few cells by up to 0.24 mm. Each
+    part's position is only the way its node is found in the export; its
+    angle and side are in the key (its pads' angles, its layer), so the
+    position is replaced by one that depends on file order alone."""
+    from kicad_parser import footprint_at_match, iter_footprint_blocks
+    out, last = [], 0
+    for n, (s, e, fp, _raw, _k) in enumerate(iter_footprint_blocks(staged)):
+        m = footprint_at_match(fp)
+        if m is None:
+            continue
+        x, y = n * _CANON_STEP_MM[0], n * _CANON_STEP_MM[1]
+        out += [staged[last:s], fp[:m.start(1)], f'{x:g}',
+                fp[m.end(1):m.start(2)], f'{y:g}', fp[m.end(2):]]
+        last = e
+    out.append(staged[last:])
+    return ''.join(out)
 
 
 def _faces(refs, side, tris, roots, up, u, thickness):
@@ -1759,7 +1796,7 @@ def _depths(raw, pcb_data):
     if fits != 1:
         return {'depth': {}, 'depth_note': (
             f'the export fits {fits} frames to the parts\' poses, so which way is '
-            f'up is a guess (one resolved model, or every one on a line)')}
+            f'up is a guess (one resolved model)')}
     fps = pcb_data.footprints or {}
     out = {}
     for r, (x0, y0, nx, ny, hx, hb) in (raw.get('depth') or {}).items():
