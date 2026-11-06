@@ -702,6 +702,13 @@ _START_END = re.compile(r'\(start\s+' + _NUM + r'\s+' + _NUM + r'\)\s*'
                         r'\(end\s+' + _NUM + r'\s+' + _NUM + r'\)')
 
 
+def is_edge_marker_text(node: str) -> bool:
+    """Whether one footprint text node is a "PCB Edge" marker text, as
+    `edge_marker_of` reads one (#1715: a pile keeps its angle to the part)."""
+    m = _MARKER_TEXT_HEAD.match(node)
+    return bool(m and EDGE_MARKER_TEXT.search(m.group(1)))
+
+
 def edge_marker_of(fp_text: str) -> Optional[EdgeMarker]:
     """The `EdgeMarker` one footprint block draws, or None when it draws no
     marker text."""

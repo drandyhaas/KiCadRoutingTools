@@ -19,8 +19,9 @@ Checks:
      reads C1's Reference at 270 = -R_h, and `text_angle_leaks` flags it --
      so the check below can fail;
   2. a REAL rotation still composes (C1 90 -> 180 turns its texts by 90);
-  3. make_unplaced's pile: every text of every moved part is written
-     `(at x y 0)`, token present, its summary says so, C1's is 0;
+  3. make_unplaced's pile: every label of every moved part is written
+     `(at x y 0)`, token present, its summary says so, C1's is 0; a PCB-edge
+     marker text keeps its angle to the part mod 180 (#1715);
   4. the zones: a board-level zone that outlines the placement (under a
      quarter of the bounding box, holding a moved part's pad) is DROPPED --
      the local pour and the local keep-out both -- and the board-wide pour is
@@ -43,7 +44,9 @@ for _d in (os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_placer'),
 
 import run_utils                                              # noqa: E402
 from kicad_parser import parse_kicad_pcb, iter_footprint_blocks  # noqa: E402
-from placement.writer import write_placed_output, text_node_angles  # noqa: E402
+from placement.parser import is_edge_marker_text                  # noqa: E402
+from placement.writer import (write_placed_output, text_node_angles,  # noqa: E402
+                              text_node_markers)
 import make_unplaced                                          # noqa: E402
 
 ESP = run_utils.evidence(os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb'))
@@ -173,20 +176,37 @@ def main():
                  != (round(human.footprints[k].x, 4), round(human.footprints[k].y, 4))}
         check('control: the pile moved C1 and most parts', 'C1' in moved
               and len(moved) >= 15, sorted(moved))
-        tokens = {}
+        tokens, markers = {}, {}
         for _s, _e, fp_text, _raw, key in iter_footprint_blocks(ptext):
             if key in moved:
-                tokens[key] = re.findall(
-                    r'\n\t\t\((?:property|fp_text) [^\n]*\n\t\t\t(\(at [^)]*\))', fp_text)
+                nodes = re.findall(
+                    r'\n\t\t(\((?:property|fp_text) [^\n]*)\n\t\t\t(\(at [^)]*\))', fp_text)
+                tokens[key] = [at for head, at in nodes if not is_edge_marker_text(head)]
+                markers[key] = [at for head, at in nodes if is_edge_marker_text(head)]
         bad = {k: v for k, v in tokens.items()
                if not v or any(not re.fullmatch(r'\(at \S+ \S+ 0\)', t) for t in v)}
-        check('every text of every moved part is written (at x y 0)', not bad,
+        check('every label of every moved part is written (at x y 0)', not bad,
               dict(list(bad.items())[:3]))
+        # #1715: a PCB-edge marker text keeps its angle to the part, folded
+        # into a half-turn: the library's drawing, which the marker reader
+        # reads, and no part's rotation
+        want = {}
+        for _s, _e, fp_text, _raw, key in iter_footprint_blocks(text):
+            if markers.get(key):
+                rot = human.footprints[key].rotation
+                want[key] = [f'{(a - rot) % 180:g}' for a, mk in
+                             zip(text_node_angles(fp_text), text_node_markers(fp_text)) if mk]
+        got = {k: [t.split()[-1].rstrip(')') for t in v] for k, v in markers.items() if v}
+        check('control: a moved part draws a PCB-edge marker', bool(got), got)
+        check("...written at its angle to the part, mod 180, as the source draws it",
+              got == want, (got, want))
         leaks, n, good = make_unplaced.text_angle_leaks(pile, moved)
         check('text_angle_leaks: none', not leaks and n == good > 0, (leaks, n, good))
         line = [ln for ln in r.stdout.splitlines() if ln.startswith('texts')]
         check('the summary states it', line == [f'texts      {n} of {n} text(s) on '
-                                                f'{len(moved)} moved part(s) at absolute 0'],
+                                                f'{len(moved)} moved part(s) at absolute 0 '
+                                                f'(a PCB-edge marker at its own angle to '
+                                                f'the part)'],
               line)
 
         # 4. the zones

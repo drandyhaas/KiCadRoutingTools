@@ -297,7 +297,7 @@ def _rotate_text_angles(fp_text: str, delta_rot: float, ref: str) -> str:
     labelled. The flip path has always composed its texts (#714) and is
     untouched here -- one code path per mode, as `write_placed_output` says.
     """
-    def rotated(x, y, a):
+    def rotated(x, y, a, _node):
         na = round(((float(a) if a is not None else 0.0) + delta_rot) % 360, 6)
         if a is not None or na != 0:
             return f"(at {x} {y} {na:.6g})"
@@ -305,8 +305,20 @@ def _rotate_text_angles(fp_text: str, delta_rot: float, ref: str) -> str:
     return _rewrite_text_ats(fp_text, ref, rotated, 'this rotation')
 
 
-def _set_text_angles(fp_text: str, angle: float, ref: str) -> str:
-    """Set EVERY top-level text node's absolute angle to `angle` (#1163).
+def marker_pile_angle(text_angle: Optional[float], part_rot: float) -> float:
+    """#1715: the absolute angle a pile writes a "PCB Edge" marker text at, on a
+    part at `part_rot` whose marker stands at `text_angle` (absolute, None for
+    0): its angle to the part folded into one half-turn, which is all the
+    marker reader reads (`mating.marker_face_local`, mod 180) and is the
+    library's drawing, not the part's pose, so it hands back no rotation."""
+    rel = ((float(text_angle) if text_angle is not None else 0.0) - part_rot) % 180.0
+    return round((part_rot + rel) % 360, 6)
+
+
+def _set_text_angles(fp_text: str, angle: float, ref: str,
+                     part_rot: float = 0.0) -> str:
+    """Set every top-level text node's absolute angle to `angle` (#1163), but
+    a "PCB Edge" marker text's (#1715).
 
     A pile must carry nothing about the poses it was made from. Composing a
     text with the rotation change (`_rotate_text_angles`) is right for a real
@@ -315,10 +327,33 @@ def _set_text_angles(fp_text: str, angle: float, ref: str) -> str:
     hands back the human rotation `R`. Writing one angle for every text
     removes it, and the token is always written (KiCad 10's own spelling for
     a text), so its presence carries nothing either.
+
+    A marker text is not a label: the library draws it along the line where
+    the board edge goes, and the marker reader picks that line by the text's
+    angle to the part. Written at `angle` it was read against the line across
+    it, and a face the marker confirmed was lost on every seed. It keeps that
+    angle, folded into one half-turn (`marker_pile_angle`), on the part at
+    `part_rot`, the rotation its texts were already composed to.
     """
-    def fixed(x, y, _a):
+    from .parser import is_edge_marker_text
+
+    def fixed(x, y, a, node):
+        if is_edge_marker_text(node):
+            return (f"(at {x} {y} "
+                    f"{marker_pile_angle(None if a is None else float(a), part_rot):.6g})")
         return f"(at {x} {y} {round(angle % 360, 6):.6g})"
     return _rewrite_text_ats(fp_text, ref, fixed, 'this text-angle reset')
+
+
+def text_node_markers(fp_text: str) -> List[bool]:
+    """Whether each top-level text node is a "PCB Edge" marker text, in the
+    order `text_node_angles` gives their angles (#1715)."""
+    from .parser import is_edge_marker_text
+    out = []
+    for head, s, e in _iter_sexpr_children(fp_text, 0):
+        if head in _FLIP_TEXTS and _TEXT_AT.search(fp_text[s:e]):
+            out.append(is_edge_marker_text(fp_text[s:e]))
+    return out
 
 
 def text_node_angles(fp_text: str) -> List[Optional[float]]:
@@ -338,7 +373,8 @@ def text_node_angles(fp_text: str) -> List[Optional[float]]:
 
 def _rewrite_text_ats(fp_text: str, ref: str, new_at, what: str) -> str:
     """Replace the FIRST `(at x y [a])` of every top-level text node
-    (`property`, `fp_text`) with `new_at(x, y, a)`; `a` is None when absent."""
+    (`property`, `fp_text`) with `new_at(x, y, a, node)`; `a` is None when
+    absent, `node` the text node's own text."""
     pieces = []
     for head, s, e in _iter_sexpr_children(fp_text, 0):
         if head not in _FLIP_TEXTS:
@@ -357,7 +393,7 @@ def _rewrite_text_ats(fp_text: str, ref: str, new_at, what: str) -> str:
                     f"Refusing rather than rotating the pads and leaving the "
                     f"text where it was: {node[:120]!r}")
             continue
-        rep = new_at(m.group(1), m.group(2), m.group(3))
+        rep = new_at(m.group(1), m.group(2), m.group(3), node)
         if m.group(4):
             rep = rep[:-1] + ' unlocked)'
         if rep != node[m.start():m.end()]:
@@ -1255,7 +1291,9 @@ def write_placed_output(input_file: str, output_file: str,
               write is unchanged). Present, every top-level text node
               (`property`, `fp_text`) is written at this ABSOLUTE angle
               instead -- the pile builder's way to keep a text-to-part
-              angle from handing back the rotation it replaced.
+              angle from handing back the rotation it replaced -- but a
+              "PCB Edge" marker text, which keeps its angle to the part
+              folded into a half-turn (#1715, `marker_pile_angle`).
 
     Returns:
         True if output was written successfully
@@ -1464,7 +1502,7 @@ def write_placed_output(input_file: str, output_file: str,
                 raise ValueError(f"{key}: new_text_angle must be a number of "
                                  f"degrees, not {new_text_angle!r}")
             new_fp_text = _set_text_angles(new_fp_text, float(new_text_angle),
-                                           key)
+                                           key, new_rot)
 
         pieces.append(content[end:tail])
         pieces.append(new_fp_text)
