@@ -864,7 +864,10 @@ Use the printed flags as-is:
   `drc_grazes` class > 0 and there is headroom above the fab floor, re-run the
   fanout stepping toward — never below — the floor:**
   - `via_segment` / `pad_via` (#130): smaller **`--via-size` / `--via-drill`**
-    (and/or a thinner `--track-width`).
+    (and/or a thinner `--track-width`). When `bga_fanout`'s summary has an
+    `escape_budget`, the via, track and clearance do not fit the half-pitch: its
+    `can_take_effect` lists only what clears the fab floor (#1685), which at the
+    floor via on 0.5 mm pitch is `--escape-method dogbone` alone.
   - `segment_segment` (#179): thinner **`--width`** — the escape stubs carry the
     track width, so narrowing them widens the gap between the two converging
     diagonals. Step down toward the fab-floor track (e.g. 0.15 → 0.13 → 0.10 mm)

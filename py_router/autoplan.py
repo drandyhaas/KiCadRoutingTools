@@ -27,10 +27,10 @@ congestion before the router starts:
                    CM4/CM5's 200+ pads at 0.4 mm, qfn_fanout under the
                    pads), read from the pads and their pitch
                    along a row -- never a connector, socket or magnetics --
-                   plane nets excluded; a part that drops escapes is retried
-                   with the fine via (BGA), then with the dogbone (BGA) or
-                   under-pad (QFN) method, keeping the attempt that escaped
-                   most
+                   plane nets excluded; a part that drops escapes or leaves
+                   grazes is retried with the fine via (BGA), then with the
+                   dogbone (BGA) or under-pad (QFN) method, keeping the attempt
+                   that escaped most, then grazed least
   4. decaps        place_fanout_clearance once, after the fanouts; a part it
                    leaves shorted to a BGA's fanout copper is held in a re-fan
                    of that BGA (bga_fanout --immovable-refs, the BGA's whole
@@ -719,11 +719,20 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
     return route_passes(ch, a, L, costs, effort_factor, rip=rip, reroute=reroute)
 
 
+def rung_grazes(summary):
+    """The clearance rows a fanout rung's own copper left that no later step
+    clears: its JSON_SUMMARY drc_grazes, less those on a part the decap step
+    moves. A grade that errored or never ran counts none: it measured nothing."""
+    g = (summary or {}).get('drc_grazes') or {}
+    return int(g.get('total') or 0) - int(g.get('deferred_to_decap') or 0)
+
+
 def fan_ladder(ch, fan, rungs=None, hold=(), tag=''):
     """Run FAN's fanout ladder (or the RUNGS of it named) until a rung escapes
-    every ball; returns the rung that escaped most as {'escaped', 'failed',
-    'out', 'rung'}, or None when no rung produced a board. HOLD names the
-    parts the fanout keeps off as if locked (bga_fanout --immovable-refs)."""
+    every ball and leaves no graze; returns the rung that escaped most, then
+    grazed least (#1685), the earliest of equals, as {'escaped', 'failed',
+    'grazes', 'out', 'rung'}, or None when no rung produced a board. HOLD names
+    the parts the fanout keeps off as if locked (bga_fanout --immovable-refs)."""
     ref = fan['ref']
     best = None
     for i in (range(len(fan['ladder'])) if rungs is None else rungs):
@@ -734,9 +743,11 @@ def fan_ladder(ch, fan, rungs=None, hold=(), tag=''):
             continue
         escaped = int((s or {}).get('escaped', 0))
         failed = int((s or {}).get('failed', 0) or 0)
-        if best is None or escaped > best['escaped']:
-            best = {'escaped': escaped, 'failed': failed, 'out': out, 'rung': i}
-        if s is not None and failed == 0:
+        grazes = rung_grazes(s)
+        if best is None or (escaped, -grazes) > (best['escaped'], -best['grazes']):
+            best = {'escaped': escaped, 'failed': failed, 'grazes': grazes,
+                    'out': out, 'rung': i}
+        if s is not None and failed == 0 and grazes == 0:
             break
     return best
 

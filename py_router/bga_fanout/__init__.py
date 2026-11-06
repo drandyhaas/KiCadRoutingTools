@@ -2123,6 +2123,62 @@ def build_diff_pair_routes(
     return routes
 
 
+def escape_budget(half_pitch: float, via_size: float, via_drill: float,
+                  track_width: float, clearance: float,
+                  copper_layers: int) -> Optional[Dict]:
+    """What it would take for a channel escape to clear the vias beside it, or
+    None when it already does. Each size is read against the floor that would
+    pin it back up (fab_tiers.enforce_fab_floors), so `advice` only names a
+    value that can take effect (#1685); --escape-method dogbone is named
+    always, because it does not run tracks between the via columns."""
+    from fab_tiers import fab_floor_for_param, min_via_annular_ring
+    need = via_size / 2.0 + track_width / 2.0 + clearance
+    if need <= half_pitch + 1e-6:
+        return None
+
+    def _down(x):           # to 1 um, never up: the value is a ceiling
+        return math.floor(x * 1000.0 + 1e-6) / 1000.0
+
+    def _floor(name):
+        return fab_floor_for_param(name, copper_layers) or 0.0
+
+    ring = min_via_annular_ring(copper_layers) or 0.0
+    via_max = _down(2.0 * (half_pitch - track_width / 2.0 - clearance))
+    # the smallest via the floors let through: its own floor, and a ring round
+    # the smallest drill
+    via_min = max(_floor('via_size'), _floor('via_drill') + 2.0 * ring)
+    track_max = _down(2.0 * (half_pitch - via_size / 2.0 - clearance))
+    clearance_max = _down(half_pitch - via_size / 2.0 - track_width / 2.0)
+    can = []
+    if via_max >= via_min - 1e-9:
+        drill = via_drill if (via_max - via_drill) / 2.0 >= ring - 1e-9 \
+            else _floor('via_drill')
+        can.append(f"--via-size {via_max:.3f}"
+                   + ('' if drill == via_drill else f" --via-drill {drill:.3f}"))
+    if track_max >= _floor('track_width') - 1e-9:
+        can.append(f"--track-width {track_max:.3f}")
+    if clearance_max >= _floor('clearance') - 1e-9:
+        can.append(f"--clearance {clearance_max:.3f}")
+    cannot = []
+    if via_max < via_min - 1e-9:
+        cannot.append(f"a via of {via_max:.3f} (fab floor {via_min:.4g})")
+    if track_max < _floor('track_width') - 1e-9:
+        cannot.append(f"a track of {track_max:.3f} (fab floor {_floor('track_width'):.4g})")
+    if clearance_max < _floor('clearance') - 1e-9:
+        cannot.append(f"a clearance of {clearance_max:.3f} (fab floor {_floor('clearance'):.4g})")
+    said = ", ".join(can + ["--escape-method dogbone (another escape, which may drop "
+                            "balls this one does not)"])
+    can.append("--escape-method dogbone")
+    return {
+        'half_pitch_mm': round(half_pitch, 6),
+        'need_mm': round(need, 6),
+        'overrun_mm': round(need - half_pitch, 6),
+        'can_take_effect': can,
+        'advice': ("It would take " + " or ".join(cannot) + ". " if cannot else "")
+                  + "What can take effect: " + said + ".",
+    }
+
+
 def single_pad_net_ids(footprint: Footprint, pcb_data: PCBData) -> Set[int]:
     """Net IDs on `footprint` that have only one pad board-wide, i.e. nothing to
     connect to (spare/NC pins). Fanning these out is pointless and burns escape
@@ -3856,21 +3912,22 @@ def _generate_bga_fanout_core(footprint: Footprint,
 
     # Escape-budget guard (issue #158). The channel engine runs one escape track down
     # the half-pitch between adjacent via columns, so via/2 + track/2 + clearance must
-    # fit the half-pitch or EVERY escape grazes the neighbouring column's via by the
+    # fit the half-pitch or an escape grazes the neighbouring column's via by the
     # deficit -- and the run still reports failed:0, since the success metric ignores
     # sub-clearance grazes. We have all four numbers here, so warn (don't silently
     # ship the graze). Doesn't apply to underpad, which routes under the pad field.
     if escape_method not in ('underpad', 'dogbone', 'jointescape'):
-        half_pitch = min(grid.pitch_x, grid.pitch_y) / 2.0
-        need = via_size / 2.0 + track_width / 2.0 + clearance
-        if need > half_pitch + 1e-6:
-            via_max = 2.0 * (half_pitch - track_width / 2.0 - clearance)
+        _budget = escape_budget(
+            min(grid.pitch_x, grid.pitch_y) / 2.0, via_size, via_drill, track_width,
+            clearance, len(pcb_data.board_info.copper_layers or []) or 2)
+        if _budget:
             print(f"  WARNING: escape via {via_size:.3f}mm busts the half-pitch budget "
-                  f"(need {need:.4f} > half-pitch {half_pitch:.4f}mm) -> every escape "
-                  f"track grazes an adjacent via by ~{(need - half_pitch) * 1000:.0f}um "
-                  f"at clearance {clearance:.3f}. Use --via-size <= {via_max:.3f} "
-                  f"(>= drill {via_drill:.3f} + annular ring), a narrower track, or more "
-                  f"escape layers. See issue #158.")
+                  f"(need {_budget['need_mm']:.4f} > half-pitch "
+                  f"{_budget['half_pitch_mm']:.4f}mm) -> an escape track beside a via "
+                  f"column grazes its vias by ~{_budget['overrun_mm'] * 1000:.0f}um at "
+                  f"clearance {clearance:.3f}. {_budget['advice']} See issue #158.")
+            if _budget['overrun_mm'] > LAST_ESCAPE_BUDGET.get('overrun_mm', 0.0):
+                LAST_ESCAPE_BUDGET.update(_budget)
 
     # Under-pad grid escape (issue #122) - a separate engine for dense arrays.
     # Dog-bone (#128) is the same engine with gap-site vias instead of
@@ -4837,6 +4894,10 @@ LAST_CANCEL_SKIPPED: List[str] = []
 # pattern selected one. JSON_SUMMARY `unmatched` and the fanout tab read it.
 LAST_FILTER_MISSES: List[Dict] = []
 
+# #1685: the worst half-pitch overrun the last generate_bga_fanout warned of
+# (escape_budget's dict, {} when none). JSON_SUMMARY `escape_budget` reads it.
+LAST_ESCAPE_BUDGET: Dict = {}
+
 
 def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
                           net_filter: Optional[List[str]] = None,
@@ -5347,6 +5408,7 @@ def generate_bga_fanout(footprint: Footprint,
     # #1641: each --nets pattern that selects no ball, and why; then every
     # pattern that spells a board net verbatim is made literal, so a bus
     # member 'D[3]' fans out itself rather than 'D3' in every pass below.
+    LAST_ESCAPE_BUDGET.clear()
     LAST_FILTER_MISSES.clear()
     LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, net_filter))
     for _line in filter_miss_lines(LAST_FILTER_MISSES):
@@ -6007,6 +6069,10 @@ def main():
         # every such row, the via_*/pad_* keys are the fanout-relevant #130
         # classes.
         'drc_grazes': drc_grazes,
+        # #1685: why the channel escape grazes its vias and what can take effect
+        # ({} when via, track and clearance fit the half-pitch). Not a failure:
+        # every ball escaped, and drc_grazes counts what shipped.
+        'escape_budget': dict(LAST_ESCAPE_BUDGET),
         # Smallest copper clearance any step actually routed at; downstream steps
         # and check_drc grade the board at this floor.
         'min_clearance_used': eff_clearance,

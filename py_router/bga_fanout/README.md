@@ -122,9 +122,9 @@ advanced one under the default `--fab-tier auto`; it is warned and counted in
 ### Sizing the escape via to the pitch (issue #158)
 
 The channel engine runs one escape track down the **half-pitch** between adjacent
-via columns, so the via, track, and clearance must fit it or **every** escape
-grazes the neighbouring column's via by a few µm (a sub-clearance DRC violation
-the fanout would otherwise report as a clean `failed: 0`). The budget, per array:
+via columns, so the via, track, and clearance must fit it or an escape grazes
+the vias beside it by a few µm (a sub-clearance DRC violation the fanout would
+otherwise report as a clean `failed: 0`). The budget, per array:
 
 ```
 via_size  ≤  pitch − track_width − 2·clearance        (one escape track per channel)
@@ -135,8 +135,16 @@ Example: at 0.8 mm pitch with `--track-width 0.127 --clearance 0.1`, the escape
 via must be ≤ 0.473 mm — **Ø0.5 grazes (every escape ~13 µm short), Ø0.45 is
 clean** (pair with `--via-drill 0.25` to keep a 0.1 mm annular ring). When handed
 infeasible params, `bga_fanout` prints a `WARNING: escape via ... busts the
-half-pitch budget` with the recommended maximum. The `plan-pcb-routing` skill
-computes this automatically.
+half-pitch budget` and `JSON_SUMMARY.escape_budget` carries the same numbers.
+It names a smaller via, narrower track or smaller clearance only when that value
+clears the floor that would pin it back up (`fab_tiers.enforce_fab_floors`), and
+says which it cannot be otherwise, as at 0.5 mm pitch on the fab floor's 0.25 mm
+via, where neither fits (#1685); it always names `--escape-method dogbone`,
+which runs no track between the via columns but is another escape, which may
+drop balls this one does not. More escape layers is not a remedy: a via spans
+them all. The grazes stay disclosed and are not a failure: `failed` counts
+balls, and every one escaped. The `plan-pcb-routing` skill computes this
+automatically.
 
 On the **top layer** (the balls' own layer) the channel runs between two rows of
 balls instead of vias, so it needs `ball gap ≥ track_width + 2·clearance`, where
@@ -426,7 +434,9 @@ is nothing to fan, so a chain always has a next input), and the run ends with a
 (balls actually attempted, so skipped plane balls and already-fanned nets are
 not counted), `skipped_nc`, `clearance`, `track_width`, `layers`, `drc_grazes`
 (a `check_drc` pass over the output at `--clearance`: `pad_via`,
-`via_segment`, `pad_segment`, `segment_segment`, `total`; #130),
+`via_segment`, `pad_segment`, `segment_segment`, `segment_crossing`, `total`; #130),
+`escape_budget` (the half-pitch overrun and `can_take_effect`, `{}` when the via
+fits; #1685),
 `min_clearance_used`, `deferred_fanout_nets` (nets deliberately left for the
 route step; empty by default), `plane_drop` (per-net
 `gap`/`in_pad`/`existing`/`pour`/`failed` counts and the promised

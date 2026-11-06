@@ -2529,9 +2529,10 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    form neither shape (a mezzanine aside), a through-hole part other than a PGA, and any
    connector, socket, header or magnetics by footprint name
    (`autoplan.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
-   A part that drops escapes is retried with the fine via (BGA), then with
-   the dogbone (BGA) or under-pad (QFN) method, keeping the attempt that
-   escaped most.
+   A part that drops escapes or leaves grazes is retried with the fine via
+   (BGA), then with the dogbone (BGA) or under-pad (QFN) method, keeping the
+   attempt that escaped most, then grazed least (`drc_grazes`, less what the
+   decap step clears, #1685).
    BGA escapes take the same layer costs as the route step.
 4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts. A 2-pad
    C/R/FB part it leaves shorted to a BGA's fanout copper (a `short: true`
