@@ -2235,7 +2235,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # unmeasured while the run reported the pair routed.
         intra_pair_reports = run_intra_pair_matching(
             diff_pair_ids_to_route, routed_results, config, pcb_data,
-            skip_p_net_ids=xnet_member_p_net_ids)
+            skip_p_net_ids=xnet_member_p_net_ids,
+            pair_geom=getattr(state, 'pair_diff_geom', None))
         # The verdict line is printed once the board is final and each
         # status has been re-read off the shipped copper (#1303, below).
 
@@ -2350,7 +2351,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         from length_matching import rematch_intra_pairs_on_shipped_copper
         rematch_intra_pairs_on_shipped_copper(
             intra_pair_reports, diff_pair_ids_to_route, routed_results,
-            config, pcb_data)
+            config, pcb_data, pair_geom=getattr(state, 'pair_diff_geom', None))
 
     # Build summary data
     import json

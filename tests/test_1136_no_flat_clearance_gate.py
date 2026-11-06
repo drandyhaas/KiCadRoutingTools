@@ -99,10 +99,6 @@ ALLOWED = {
      'meander_clearance_margin + corner_margin'):
         (1, _FLAT_SCALAR + ' (via_clearance)'),
     (_LM, 'get_safe_amplitude_at_point',
-     'net_half + config.track_width / 2 + config.clearance'):
-        (1, 'paired_clearance when there is NO partner (it is unused then); '
-            'with one it is priced at the pair'),
-    (_LM, 'get_safe_amplitude_at_point',
      'config.board_edge_clearance if config.board_edge_clearance > 0 else '
      'config.clearance'): (1, _EDGE),
     (_LM, 'get_safe_amplitude_for_diff_pair',
