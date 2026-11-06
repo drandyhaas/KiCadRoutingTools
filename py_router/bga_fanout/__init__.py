@@ -2213,14 +2213,11 @@ FILTER_MISS_TEXT = {
     'unconnected': "{pads} {are} on a no-connect (unconnected-*) net",
     'single_pad': ("{pads} {are} on a net with one pad board-wide, nothing "
                    "to connect to (counted in skipped_nc)"),
-    'interior': ("{pads} {are} interior, which the stub escape skips; "
-                 "--escape-method underpad reaches {them}"),
 }
 
 
 def net_filter_misses(footprint: Footprint, pcb_data: PCBData,
-                      net_filter: Optional[List[str]],
-                      skip_reason=None) -> List[Dict]:
+                      net_filter: Optional[List[str]]) -> List[Dict]:
     """The --nets patterns that select NO pad of FOOTPRINT to fan out (#1641).
 
     One dict per include pattern that selects nothing -- `pattern`,
@@ -2228,9 +2225,9 @@ def net_filter_misses(footprint: Footprint, pcb_data: PCBData,
     `nets` (the board nets it names) and `pads` ("U1.33") -- in the
     filter's order; [] with no filter, or when
     every pattern selects a pad. A pattern's pads are judged as the fanouts'
-    own loops judge them: a no-connect or single-pad net is skipped, and
-    SKIP_REASON(pad) -> reason-or-None adds an engine's own skip (the QFN
-    stub escape's interior pads). Exclusions only narrow what a pattern
+    own loops judge them: a no-connect or single-pad net is skipped (a QFN
+    run's interior pads are escaped by its via-drop, #1717, so they are
+    selected like any other). Exclusions only narrow what a pattern
     names. Without this a filter that selected nothing printed "Found 0 pads"
     and a summary of `requested: 0, failed: 0`, which reads the same as a
     part with nothing to do.
@@ -2264,14 +2261,9 @@ def net_filter_misses(footprint: Footprint, pcb_data: PCBData,
             elif p.net_id in nc:
                 why.append('single_pad')
             else:
-                r = skip_reason(p) if skip_reason else None
-                if r is None:
-                    break                       # this pattern selects a pad
-                why.append(r)
+                break                           # this pattern selects a pad
         else:
-            # the actionable reason first: an engine's own skip, then NC
-            reason = next((r for r in ('interior', 'single_pad', 'unconnected')
-                           if r in why), why[0])
+            reason = 'single_pad' if 'single_pad' in why else why[0]
             misses.append({'pattern': pat, 'reason': reason, 'part': ref,
                            'nets': nets,
                            'pads': sorted({f"{ref}.{p.pad_number}" for p in pads})})

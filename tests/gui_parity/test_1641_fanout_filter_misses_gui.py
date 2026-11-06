@@ -5,17 +5,16 @@ out, as qfn_fanout.py's JSON_SUMMARY `unmatched` does.
 Drives the REAL FanoutTab of a headless RoutingDialog on
 kicad_files/qfn_interior_pads.kicad_pcb (U1 has three interior GND pads):
 
-  1. GND selected, stub escape: the engine's LAST_FILTER_MISSES reaches the
-     apply step as `filter_misses` (reason `interior`, the three pads), and
-     the completion message lists GND and names --escape-method underpad.
-     Before #1641 the tab said only "Fanout complete! 0 tracks".
+  1. GND selected, stub escape: since #1717 the engine via-drops GND's three
+     interior pads, so there is no filter miss; the via it places reaches
+     the apply step, and so do the two pads it cannot place, as
+     `skipped_interior`, which the completion message lists.
   2. A perimeter net renamed with a bus index ('D[3]') and selected in the
      tab is fanned out: the tab passes the literal name, which fnmatch read
      as 'D' plus a class, so the engine selected nothing.
   3. #1717: GND and FOREIGN selected (interior pads plus a perimeter net):
-     the engine's LAST_SKIPPED_INTERIOR reaches the apply step as
-     `skipped_interior` and the completion message lists the pads, as
-     qfn_fanout.py's JSON_SUMMARY `skipped_interior` does.
+     FOREIGN's stubs and the same `skipped_interior` reach the apply step,
+     as qfn_fanout.py's JSON_SUMMARY `skipped_interior` has them.
 
 Needs KiCad python (wx + pcbnew); re-execs into it, skips without it.
 Seconds to run.
@@ -81,7 +80,7 @@ def run_tab(pcbnew, wx, board_path, nets):
         real_apply = tab._apply_fanout_results
 
         def _spy(tracks, vias, **kw):
-            seen.update(kw, tracks=tracks)
+            seen.update(kw, tracks=tracks, vias=vias)
             return real_apply(tracks, vias, **kw)
 
         tab._apply_fanout_results = _spy
@@ -112,13 +111,13 @@ def main():
     r = []
     print("[1] GND (three interior pads), stub escape")
     seen, msg = run_tab(pcbnew, wx, BOARD, ['GND'])
-    miss = seen.get('filter_misses') or []
-    r.append(_ok("the apply step got the engine's miss: interior, U1.33/36/37",
-                 len(miss) == 1 and miss[0]['reason'] == 'interior'
-                 and miss[0]['pads'] == ['U1.33', 'U1.36', 'U1.37'], repr(miss)))
-    r.append(_ok("the completion message lists it and names underpad",
-                 'Selected nets with no pad to fan out' in msg
-                 and '--escape-method underpad' in msg, msg.replace('\n', ' | ')[:300]))
+    r.append(_ok("no filter miss, and the via-drop's via reaches the apply step",
+                 not seen.get('filter_misses') and len(seen.get('vias') or []) == 1,
+                 f"misses {seen.get('filter_misses')}, {len(seen.get('vias') or [])} via(s)"))
+    r.append(_ok("the unplaced pads reach it and the message lists them",
+                 seen.get('skipped_interior') == ['U1.36', 'U1.37']
+                 and 'Selected interior pads given no copper' in msg,
+                 msg.replace('\n', ' | ')[:300]))
 
     print("[2] a net named with a bus index, selected by its name")
     tmp = tempfile.mkdtemp(prefix='t1641gui_')
@@ -138,9 +137,10 @@ def main():
 
     print("[3] #1717: GND and the perimeter net FOREIGN, stub escape")
     seen, msg = run_tab(pcbnew, wx, BOARD, ['GND', 'FOREIGN'])
-    r.append(_ok("the apply step got the skipped interior pads",
-                 seen.get('skipped_interior') == ['U1.33', 'U1.36', 'U1.37'],
-                 repr(seen.get('skipped_interior'))))
+    r.append(_ok("FOREIGN's stubs and the unplaced pads reach the apply step",
+                 len(seen.get('tracks') or []) > 0
+                 and seen.get('skipped_interior') == ['U1.36', 'U1.37'],
+                 f"{len(seen.get('tracks') or [])} track(s), {seen.get('skipped_interior')}"))
     r.append(_ok("the completion message lists them",
                  'Selected interior pads given no copper' in msg
                  and 'U1.36' in msg, msg.replace('\n', ' | ')[:300]))

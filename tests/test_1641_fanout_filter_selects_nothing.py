@@ -15,12 +15,12 @@ Checks:
      literal ('D[3]' does not select 'D3'); literal_net_patterns rewrites a
      filter so fnmatch reads it the same way; expand_net_patterns too.
   2. qfn_fanout.py on qfn_interior_pads: --nets GND (three interior pads,
-     stub mode) lists GND in `unmatched` as `interior`, naming the pads;
+     stub mode) is not a miss -- since #1717 the stub run via-drops them;
      --nets 'D[3]' (a perimeter net renamed) fans it out; --nets NO_SUCH_NET
      is refused with exit 2 and writes no board; a list with one real and
      one missing net runs and lists both misses.
-  3. The engine both fronts call: LAST_FILTER_MISSES carries the interior
-     miss in stub mode and is empty under underpad, which escapes the pads.
+  3. The engine both fronts call: LAST_FILTER_MISSES is empty for GND in
+     both escape modes, each of which tries its interior pads.
   4. bga_fanout.py on a BGA: a missing net is refused with exit 2, and a
      ball net renamed with a bus index fans out by its name.
 
@@ -115,11 +115,8 @@ def qfn_cli(tmp):
                           os.path.join(tmp, 'a.kicad_pcb'), '--nets', 'GND'], accept=True)
     s = summary(r.stdout)
     miss = (s or {}).get('unmatched') or []
-    check("--nets GND: GND listed as interior, with its three pads",
-          len(miss) == 1 and miss[0]['reason'] == 'interior'
-          and miss[0]['pads'] == ['U1.33', 'U1.36', 'U1.37'], repr(miss))
-    check("--nets GND: the console names underpad",
-          '--escape-method underpad reaches them' in r.stdout)
+    check("--nets GND: not a miss (the stub run via-drops its pads, #1717)",
+          miss == [] and (s or {}).get('requested') == 1, repr(miss))
 
     r = run_check(base + [br, '--component', 'U1', '--output',
                           os.path.join(tmp, 'c.kicad_pcb'), '--nets', 'D[3]'], accept=True)
@@ -137,8 +134,8 @@ def qfn_cli(tmp):
                           os.path.join(tmp, 'g.kicad_pcb'), '--nets', 'GND', 'NO_SUCH_NET'],
                   accept=True)
     reasons = [(m['pattern'], m['reason']) for m in (summary(r.stdout) or {}).get('unmatched', [])]
-    check("one real, one missing net: runs, both misses listed",
-          reasons == [('GND', 'interior'), ('NO_SUCH_NET', 'no_such_net')], repr(reasons))
+    check("one real, one missing net: runs, the missing one listed",
+          reasons == [('NO_SUCH_NET', 'no_such_net')], repr(reasons))
 
 
 def engine():
@@ -156,7 +153,7 @@ def engine():
         pcb = parse_kicad_pcb(QFN)
         qfn_fanout.generate_qfn_fanout(pcb.footprints['U1'], pcb, escape_method='underpad', **kw)
     under = list(qfn_fanout.LAST_FILTER_MISSES)
-    check("stub: LAST_FILTER_MISSES = [interior]", stub == ['interior'], repr(stub))
+    check("stub: no miss (#1717: its via-drop tries the pads)", stub == [], repr(stub))
     check("underpad: no miss", under == [], repr(under))
 
 

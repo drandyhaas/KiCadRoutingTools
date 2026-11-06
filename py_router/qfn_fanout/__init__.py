@@ -79,12 +79,13 @@ LAST_ESCALATED: List[Dict] = []
 # fanout tab's completion message read it.
 LAST_FILTER_MISSES: List[Dict] = []
 
-# #1717: every pad a --nets filter selected that the stub escape skipped as
-# interior ("U1.34"), whether or not its pattern also selected a pad the stub
-# escape reaches -- LAST_FILTER_MISSES names a pattern only when it selected
-# nothing else. Refreshed by every generate_qfn_fanout call; EMPTY with no
-# filter and on an underpad run. The CLI's JSON_SUMMARY `skipped_interior`
-# and the fanout tab's completion message read it.
+# #1717: a stub run via-drops every interior pad its --nets filter selected
+# (the surface fan has no edge for them); this names each one the via-drop
+# could not place ("U1.34"), left with no copper. Its net is also failed.
+# Refreshed by every generate_qfn_fanout call; EMPTY with no filter (an
+# unscoped run never via-drops the exposed pad) and on an underpad run, whose
+# dropped pads are its failures. The CLI's JSON_SUMMARY `skipped_interior` and
+# the fanout tab's completion message read it.
 LAST_SKIPPED_INTERIOR: List[str] = []
 
 
@@ -92,10 +93,9 @@ def skipped_interior_line(pads: List[str]) -> str:
     """The one line naming LAST_SKIPPED_INTERIOR's pads (#1717), for the
     console and the fanout tab's completion message."""
     shown = ', '.join(pads[:8]) + (f" (+{len(pads) - 8} more)" if len(pads) > 8 else '')
-    one = len(pads) == 1
-    return (f"WARNING: {len(pads)} selected pad(s) given no copper: {shown} "
-            f"{'is' if one else 'are'} interior, which the stub escape skips; "
-            f"--escape-method underpad reaches {'it' if one else 'them'}")
+    return (f"WARNING: {len(pads)} selected interior pad(s) given no copper: "
+            f"{shown} -- the via-drop found no clear via site; a smaller "
+            f"--via-size or --allow-via-in-pad may fit")
 
 
 #: #1565: (board, part) pairs whose held .kicad_dru rules this call named, so
@@ -1773,8 +1773,10 @@ def generate_qfn_fanout(footprint: Footprint,
     2. 45 degree segment fanning outward from center
 
     Edge pads get short straight (just past pad) + long 45 degree for maximum fan.
-    Center (interior/EP) pads are skipped by the surface fan; on a net-scoped
-    underpad run they escape via a via-drop instead (issue #410).
+    Center (interior/EP) pads have no edge for the surface fan; on a
+    net-scoped run they escape by the underpad via-drop instead (issue #410;
+    #1717: a stub run via-drops them after its surface fan). An unscoped run
+    never via-drops them.
 
     Args:
         footprint: The QFN/QFP footprint
@@ -1920,6 +1922,7 @@ def generate_qfn_fanout(footprint: Footprint,
 
     # Analyze all pads
     pad_infos: List[PadInfo] = []
+    interior_infos: List[PadInfo] = []      # #1717: a stub run's via-drops
     side_counts = defaultdict(int)
 
     if progress_callback:
@@ -1957,43 +1960,39 @@ def generate_qfn_fanout(footprint: Footprint,
             continue
 
         pad_info = analyze_pad(pad, layout)
-        if pad_info.side == 'center' and not (escape_method == "underpad"
-                                              and net_filter):
+        if pad_info.side == 'center':
             # Interior/EP pads have no free surface edge for the 45-deg fan,
-            # but a via-drop straight down doesn't need one (issue #410). Let
-            # them through ONLY on a net-scoped underpad run: requiring --nets
-            # is a deliberate safety guard so an unscoped run never via-drops
-            # the exposed/thermal pad.
-            if net_filter:
-                # #1717: the filter selected it, so it is named, never dropped
-                LAST_SKIPPED_INTERIOR.append(
-                    f"{getattr(footprint, 'reference', '?')}.{pad.pad_number}")
-            continue
+            # but a via-drop straight down doesn't need one (issue #410). They
+            # are escaped ONLY on a net-scoped run: requiring --nets is a
+            # deliberate safety guard so an unscoped run never via-drops the
+            # exposed/thermal pad.
+            if not net_filter:
+                continue
+            side_counts[pad_info.side] += 1
+            if escape_method != "underpad":
+                # #1717: a stub run via-drops the interior pads its filter
+                # selected, after the surface fan (_serve_interior below).
+                interior_infos.append(pad_info)
+                continue
 
         pad_infos.append(pad_info)
-        side_counts[pad_info.side] += 1
+        if pad_info.side != 'center':
+            side_counts[pad_info.side] += 1
 
-    print(f"  Found {len(pad_infos)} pads to fanout:")
+    print(f"  Found {len(pad_infos) + len(interior_infos)} pads to fanout:")
     for side, count in sorted(side_counts.items()):
         print(f"    {side}: {count} pads")
-    # #1641: each --nets pattern that selected no pad, and why -- the stub
-    # escape's interior skip above among the reasons.
-    LAST_FILTER_MISSES.extend(net_filter_misses(
-        footprint, pcb_data, _user_filter,
-        skip_reason=(None if escape_method == "underpad" else
-                     lambda p: ('interior' if analyze_pad(p, layout).side
-                                == 'center' else None))))
+    # #1641: each --nets pattern that selected no pad, and why.
+    LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, _user_filter))
     for _line in filter_miss_lines(LAST_FILTER_MISSES):
         print(_line)
-    if LAST_SKIPPED_INTERIOR:
-        print(f"  {skipped_interior_line(LAST_SKIPPED_INTERIOR)}")
 
     # Show sample pad geometry
     if pad_infos:
         sample = pad_infos[0]
         print(f"  Sample pad geometry: {sample.pad_length:.2f} x {sample.pad_width:.2f} mm")
 
-    if not pad_infos:
+    if not pad_infos and not interior_infos:
         return [], [], []
 
     def _record_skipped(tracks_, vias_, failed_):
@@ -2019,11 +2018,12 @@ def generate_qfn_fanout(footprint: Footprint,
     # Via-drop / underpad escape (issue #164): drop a through-via just past each
     # pad and let signal routing pick the net up on an inner layer, for crowded
     # fine-pitch edges where the surface fan has no room.
-    if escape_method == "underpad":
-        print(f"  Escape method: underpad (via-drop), via {via_size:.2f}/{via_drill:.2f} mm"
-              f"{', allow via-in-pad' if allow_via_in_pad else ''}")
+    def _via_drop(infos, board=pcb_data):
+        """The underpad via-drop of INFOS, down #1328's clearance ladder.
+        BOARD is the copper it clears (#1717: with the surface fan's stubs on
+        it). Returns (tracks, vias, dropped net names)."""
         def _drop_run(cl):
-            return _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
+            return _underpad_via_escape(footprint, board, infos, layout, layer,
                                         track_width, cl, via_size, via_drill, grid_step,
                                         allow_via_in_pad=allow_via_in_pad,
                                         board_edge_clearance=board_edge_clearance,
@@ -2079,6 +2079,44 @@ def generate_qfn_fanout(footprint: Footprint,
                       f"({len(best[2])} still dropped)")
             res = best
         return res
+
+    if escape_method == "underpad":
+        print(f"  Escape method: underpad (via-drop), via {via_size:.2f}/{via_drill:.2f} mm"
+              f"{', allow via-in-pad' if allow_via_in_pad else ''}")
+        return _via_drop(pad_infos)
+
+    def _serve_interior(tracks_, failed_):
+        """#1717: the interior pads this stub run's filter selected get the
+        underpad via-drop, clearing the surface fan's stubs as well as the
+        board. A pad it drops is named in LAST_SKIPPED_INTERIOR and its net
+        is failed, as an underpad run fails it. (tracks, vias, failed)."""
+        if not interior_infos:
+            _record_skipped(tracks_, [], failed_)
+            return tracks_, [], failed_
+        print(f"  Interior pads: {len(interior_infos)} selected, escaped by "
+              f"via-drop (underpad), via {via_size:.2f}/{via_drill:.2f} mm"
+              f"{', allow via-in-pad' if allow_via_in_pad else ''}")
+        import copy
+        from kicad_parser import Segment
+        board = copy.copy(pcb_data)
+        board.segments = list(pcb_data.segments) + [
+            Segment(start_x=t['start'][0], start_y=t['start'][1],
+                    end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
+                    layer=t['layer'], net_id=t['net_id']) for t in tracks_]
+        itracks, ivias, idropped = _via_drop(interior_infos, board)
+        _ref = getattr(footprint, 'reference', '?')
+        LAST_SKIPPED_INTERIOR.extend(
+            f"{_ref}.{num}" for num, _name in
+            LAST_UNDERPAD_REPORT.get('dropped_pads', ()))
+        if LAST_SKIPPED_INTERIOR:
+            print(f"  {skipped_interior_line(LAST_SKIPPED_INTERIOR)}")
+        out = (tracks_ + itracks, ivias,
+               list(dict.fromkeys(failed_ + list(idropped))))
+        _record_skipped(*out)
+        return out
+
+    if not pad_infos:
+        return _serve_interior([], [])
 
     # Build stubs
     stubs: List[FanoutStub] = []
@@ -2634,8 +2672,7 @@ def generate_qfn_fanout(footprint: Footprint,
     else:
         print(f"  Validated: No endpoint collisions")
 
-    _record_skipped(tracks, [], failed_nets)
-    return tracks, [], failed_nets
+    return _serve_interior(tracks, failed_nets)
 
 
 
@@ -2691,7 +2728,10 @@ def main():
     parser.add_argument('--escape-method', choices=['stub', 'underpad'], default='stub',
                         help="'stub' (default) = surface 45-degree fan; 'underpad' = drop a "
                              "through-via just past each pad and escape on an inner layer "
-                             "(issue #164), for crowded fine-pitch edges where the surface is full.")
+                             "(issue #164), for crowded fine-pitch edges where the surface is full. "
+                             "With --nets either method via-drops the interior pads the filter "
+                             "selects (stub: after its fan, #1717); a run without --nets never "
+                             "via-drops the exposed/thermal pad.")
     parser.add_argument('--via-size', type=float, default=None,
                         help='Underpad escape via outer diameter (mm, default 0.45)')
     parser.add_argument('--via-drill', type=float, default=None,
@@ -3043,10 +3083,9 @@ def main():
         # (an interior pad the stub escape skips, a net with no pad on the
         # part, ...): requested counts only the pads a pattern selected.
         'unmatched': list(LAST_FILTER_MISSES),
-        # #1717: every pad the filter selected that the stub escape skipped
-        # as interior, given no copper ("U1.34"), also when its pattern
-        # selected other pads; requested/failed count only the pads the
-        # escape tried.
+        # #1717: the interior pads the filter selected that the stub run's
+        # via-drop could not place ("U1.34"), left with no copper; their
+        # nets are in failed / unescaped_nets as well.
         'skipped_interior': list(LAST_SKIPPED_INTERIOR),
         'clearance': args.clearance,
         'track_width': args.width,

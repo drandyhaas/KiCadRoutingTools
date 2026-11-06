@@ -2239,11 +2239,11 @@ class FanoutTab(wx.Panel):
                 board too (#508 finding 17 -- they were silently discarded).
             filter_misses: the engine's LAST_FILTER_MISSES (#1641) -- each
                 selected net that had no pad to fan out on this part, and why
-                (an interior pad the stub escape skips, ...); listed in the
+                (a single-pad net, a net with no pad on the part, ...); listed in the
                 completion message, as the CLI lists them in `unmatched`.
             skipped_interior: the QFN engine's LAST_SKIPPED_INTERIOR (#1717)
-                -- every selected pad the stub escape skipped as interior,
-                listed as the CLI lists them in `skipped_interior`.
+                -- every selected interior pad the stub run's via-drop could
+                not place, listed as the CLI lists them in `skipped_interior`.
         """
         import pcbnew
         from .swig_gui import _build_layer_mappings
@@ -2472,8 +2472,8 @@ class FanoutTab(wx.Panel):
                                    filter_miss_lines(filter_misses, flag='')])
         if skipped_interior:
             msg += self._net_list(
-                "Selected interior pads given no copper (the stub escape skips "
-                "them; the underpad escape reaches them)", skipped_interior)
+                "Selected interior pads given no copper (no clear via-drop "
+                "site)", skipped_interior)
         if failed_nets:
             if fanout_kind == 'qfn':
                 unescaped, flagged = self._qfn_failure_split(failed_nets, tracks,
