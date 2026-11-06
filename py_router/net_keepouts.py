@@ -438,6 +438,7 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
     """`stamp(map, config)` that rasterises keep-outs `idx` into `map` with
     the native keep-out pass, so the rasterisation stays single-sourced."""
     from obstacle_map import add_rule_area_keepout_obstacles
+    from routing_config import extra_past_scalar
     kos = pcb_data._net_keepouts
     shim = SimpleNamespace(board_info=SimpleNamespace(
         keepouts=[kos[i] for i in idx if not kos[i].get('edge_band')],
@@ -446,7 +447,11 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
 
     def stamp_into(sink, cfg):
         if shim.board_info.keepouts:
-            add_rule_area_keepout_obstacles(sink, shim, cfg)
+            # a centreline config's clearance carries the member half-pitch's
+            # scalar; what a layer's own half-pitch adds past it rides here
+            add_rule_area_keepout_obstacles(
+                sink, shim, cfg, extra_clearance=extra_past_scalar(
+                    getattr(cfg, 'edge_extra_clearance', 0.0) or 0.0))
         for ko in bands:
             _stamp_edge_band(sink, pcb_data, cfg, ko)
     return stamp_into
@@ -462,6 +467,7 @@ def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.n
     alone, a window's clipped cells would be handed to a whole-board route
     at the same geometry, which would then see only part of the region."""
     key = (idx, config.grid_step, config.track_width, config.clearance,
+           getattr(config, 'edge_extra_clearance', 0.0),
            config.via_size, config.via_drill, tuple(config.layers),
            getattr(pcb_data.board_info, 'board_bounds', None))
     cache: Dict = pcb_data.__dict__.setdefault('_net_keepout_cells', {})
@@ -524,14 +530,17 @@ def centerline_config(config):
     (layer width + diff_pair_gap) / 2 either side of the centreline, so the
     band a region keeps the centreline out of grows by that offset -- the
     extra clearance route_diff builds every other obstacle of that map with
-    (`centreline_extra_clearance`, the widest layer's, #1729).
+    (`centreline_extra_clearance`, each layer's own, #1729): the clearance
+    takes the call's, and `edge_extra_clearance` carries the per-layer values
+    (the region stamp reads what a layer adds past the call's).
     Stamped at the plain run geometry, a member could come up to
     (track_width + diff_pair_gap) / 2 - clearance INTO the region
     (lvds_converter_dualclk /CLK+: its copper over the edge by 0.5 um)."""
     from dataclasses import replace
     from diff_pair_routing import centreline_extra_clearance
     extra = centreline_extra_clearance(config)
-    return replace(config, clearance=config.clearance + extra, edge_extra_clearance=extra)
+    return replace(config, clearance=config.clearance + float(extra),
+                   edge_extra_clearance=extra)
 
 
 def stamping(net_ids_of, maps_of, centerline: bool = False):

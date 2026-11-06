@@ -994,6 +994,7 @@ def sense_obstacle_rows(b: SenseBranch, config, coord, layer_map, clearance: flo
     from obstacle_map import (_add_segment_obstacle, _add_via_obstacle,
                               _add_pad_obstacle, _via_track_expansion_per_layer)
     from routing_utils import segment_blocked_cells_array
+    from routing_config import extra_on_layer
     import routing_defaults as defaults
     col = _Collector()
     join = b.join
@@ -1002,7 +1003,8 @@ def sense_obstacle_rows(b: SenseBranch, config, coord, layer_map, clearance: flo
         seg_w = s.width if s.width > 0 else config.get_track_width(s.layer)
         seg_clr = config.layer_clearance(s.layer, clearance, b.net_id)
         trk = config.track_obstacle_clearance(b.net_id, seg_clr)
-        exp = config.route_reserve_width(s.layer) / 2 + seg_w / 2 + trk + extra_clearance
+        exp = (config.route_reserve_width(s.layer) / 2 + seg_w / 2 + trk
+               + extra_on_layer(extra_clearance, s.layer))
         vblk = config.via_size / 2 + seg_w / 2 + seg_clr + extra_clearance
         li = layer_map.get(s.layer)
         for xy in _outside_join(s, join):
@@ -1048,7 +1050,8 @@ def sense_obstacle_rows(b: SenseBranch, config, coord, layer_map, clearance: flo
             on = cells[:, 2] == li
             if on.any():
                 clr = config.track_obstacle_clearance(
-                    b.net_id, config.layer_clearance(lname, clearance, b.net_id)) + extra_clearance
+                    b.net_id, config.layer_clearance(lname, clearance, b.net_id)) \
+                    + extra_on_layer(extra_clearance, lname)
                 keep[on] = _still_blocked(
                     b, cells[on, 0] * step, cells[on, 1] * step,
                     config.route_reserve_width(lname) / 2.0,

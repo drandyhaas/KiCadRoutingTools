@@ -93,6 +93,67 @@ def layer_costs_count_error(layers, layer_costs) -> Optional[str]:
             f"value(s) ({shown})")
 
 
+class LayerExtraClearance(float):
+    """An obstacle map's extra clearance that differs by copper layer: a diff
+    pair's CENTRELINE map, whose members ride (layer width + gap) / 2 off the
+    centreline (#1729). As a number it is the call's member half-pitch,
+    (track_width + gap) / 2, which a stamp that is not per layer keeps (a via
+    barrel spans the stack); a stamp on one layer reads that layer's own value
+    through `extra_on_layer`. Equal only to another of its kind with the same
+    values, so a cache keyed on an extra clearance never hands one map's cells
+    to another."""
+
+    def __new__(cls, value, by_layer=None):
+        obj = float.__new__(cls, value)
+        obj.by_layer = dict(by_layer or {})
+        return obj
+
+    def _key(self):
+        return (float(self), tuple(sorted(self.by_layer.items())))
+
+    def __eq__(self, other):
+        return isinstance(other, LayerExtraClearance) and self._key() == other._key()
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(self._key())
+
+    def __repr__(self):
+        per = ', '.join(f"{k} {v:.3f}" for k, v in self.by_layer.items())
+        return f"{float(self):.3f}mm ({per})"
+
+
+def extra_on_layer(extra, layer: str):
+    """The extra clearance a stamp on copper layer `layer` takes: that layer's
+    own value for a `LayerExtraClearance`, the value itself otherwise."""
+    by = getattr(extra, 'by_layer', None)
+    if by is None:
+        return extra
+    return by.get(layer, float(extra))
+
+
+def extra_layer_groups(extra, layers):
+    """{extra clearance: [indices into `layers`]} -- one entry (the value
+    itself, every layer) unless `extra` differs by layer."""
+    groups: Dict[float, List[int]] = {}
+    for idx, layer in enumerate(layers):
+        groups.setdefault(extra_on_layer(extra, layer), []).append(idx)
+    return groups
+
+
+def extra_past_scalar(extra):
+    """What each layer's value of `extra` adds to its scalar: a
+    `LayerExtraClearance` at 0.0 carrying the per-layer remainder, for a
+    stamp whose scalar is already folded into another term (a centreline
+    keep-out config's clearance); 0.0 for a plain value."""
+    by = getattr(extra, 'by_layer', None)
+    if by is None:
+        return 0.0
+    return LayerExtraClearance(0.0, {k: v - float(extra) for k, v in by.items()})
+
+
 @dataclass
 class DiffPairNet:
     """Represents a differential pair with P and N nets (tracks net IDs)."""

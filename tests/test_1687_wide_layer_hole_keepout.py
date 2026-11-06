@@ -72,9 +72,13 @@ def _radius(grid_map, layer_idx):
 
 
 def _map(reserve, extra):
+    """`extra` None: the centreline map's own, as the diff engine builds it."""
     cfg = GridRouteConfig(layers=['F.Cu', 'B.Cu'], clearance=CLR, track_width=TRACK,
                           diff_pair_gap=GAP, grid_step=GRID, via_size=0.3, via_drill=0.15,
                           layer_widths={'F.Cu': 0.3}, reserve_layer_widths=reserve)
+    if extra is None:
+        from diff_pair_routing import centreline_extra_clearance
+        extra = centreline_extra_clearance(cfg)
     with contextlib.redirect_stdout(io.StringIO()):
         return build_base_obstacle_map(_npth_board(), cfg, [], extra)
 
@@ -92,7 +96,7 @@ def test_stamps():
           abs(_radius(wide, 0) - _reach(half + FLOOR + 0.3 / 2)) < 1e-6, str(_radius(wide, 0)))
     check('... and the layer at the call\'s width stays there',
           abs(_radius(wide, 1) - _reach(half + FLOOR + TRACK / 2)) < 1e-6, str(_radius(wide, 1)))
-    centre = _map(True, half_pitch)
+    centre = _map(True, None)
     # the member's far edge: its own half width + the layer's half-pitch, which
     # at a 45-degree bend is half-pitch / cos(22.5 deg) at the outer corner
     mitre = 1.0 / math.cos(math.radians(22.5))

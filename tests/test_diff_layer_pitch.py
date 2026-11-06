@@ -20,10 +20,10 @@ call's track width closed the P/N gap to 0.05 mm at the approach. Rows:
     margin-scaled offset from the partner via.
 
 A segment wider than the call's track width that still grazes a neighbour
-is necked where it does. The centreline obstacle map carries one extra
-clearance for every layer, the widest layer's P/N half-pitch (#1729; it was
-the call's, which let the outer member on a wider layer pass a neighbour
-inside clearance). Rows:
+is necked where it does. The centreline obstacle map stamps each layer with
+that layer's own P/N half-pitch (#1729; it was the call's on every layer,
+which let the outer member on a wider layer pass a neighbour inside
+clearance). Rows:
   - no per-layer widths, or no segment wider than the call's track width:
     that pass does not run (the terminal neck is the only one);
   - routed: cap_chain with a 2-layer stackup, --impedance 80 (0.407 mm on both
@@ -261,7 +261,7 @@ def test_wide_layer_run_keeps_clear_of_its_neighbour():
                      if names.get(s.net_id, '').startswith('DPA')})
     check('routed: the pair runs at the 0.407 impedance width over a 0.25 call width, '
           'and the map reserves the layer\'s half-pitch',
-          bool(widths) and max(widths) >= 0.4 and 'extra clearance: 0.329mm' in log.getvalue(),
+          bool(widths) and max(widths) >= 0.4 and 'F.Cu 0.329, B.Cu 0.329' in log.getvalue(),
           str(widths))
     check('routed: DRC clean at the 0.25 clearance', list(drc) == [], str(drc)[:300])
     check('routed: the pair is connected', list(conn) == [], str(conn)[:200])

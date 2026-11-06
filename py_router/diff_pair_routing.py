@@ -2185,8 +2185,8 @@ def layer_pair_spacing(config):
 
 
 def centreline_extra_clearance(config):
-    """The extra clearance a pair's CENTRELINE map stamps every obstacle with:
-    the widest member half-pitch (`layer_pair_spacing`) of the call's layers.
+    """The extra clearance a pair's CENTRELINE map stamps obstacles with: on
+    each layer that layer's member half-pitch (`layer_pair_spacing`).
 
     A member rides (layer width + gap) / 2 off the centreline, and the
     centreline map's track stamps already reserve the layer's own width
@@ -2194,15 +2194,22 @@ def centreline_extra_clearance(config):
     call's pitch, (track_width + gap) / 2, a layer wider than the track width
     let the outer member reach (layer width - track width) / 2 into a
     neighbour's clearance, and the graze neck then narrowed that member alone
-    -- on an impedance pair at a 0.1 mm track width, 0.11 mm on each outer
-    layer, so P shipped most of its run at 0.18-0.24 mm beside N at 0.32
-    (#1729). One scalar serves every layer: a layer narrower than the widest
-    is reserved more room than it needs, which is what a layer narrower than
-    the track width always had."""
+    (#1729). One value for every layer cannot serve them all: the widest
+    layer's on a stripline layer far narrower than the outer microstrip
+    reserved room no member there needs, and a pair could no longer leave
+    its pads. So each layer's stamps take its own half-pitch
+    (`routing_config.LayerExtraClearance`); a stamp that is not on one layer
+    (a via barrel) keeps the call's. A plain float, the call's half-pitch,
+    when every layer shares one width."""
+    from routing_config import LayerExtraClearance
+    base = (config.track_width + config.diff_pair_gap) / 2
     sp = layer_pair_spacing(config)
     if not callable(sp):
         return sp
-    return max(sp(layer) for layer in config.layers)
+    by_layer = {layer: sp(layer) for layer in config.layers}
+    if all(v == base for v in by_layer.values()):
+        return base
+    return LayerExtraClearance(base, by_layer)
 
 
 def create_parallel_path_from_float(centerline_path, sign, spacing_mm=0.1, start_dir=None, end_dir=None):

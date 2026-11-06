@@ -14,7 +14,7 @@ from collections import OrderedDict
 import math
 
 from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles, pad_drill_capsule
-from routing_config import GridRouteConfig, GridCoord
+from routing_config import GridRouteConfig, GridCoord, extra_on_layer, extra_layer_groups
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
     circle_offsets, segment_blocked_cells_array, segment_blocked_spans, GRID_TIE_EPS
@@ -354,7 +354,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735)
         # (the track capsule); via_block keeps the resolved value.
         trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
-        expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
+        expansion_mm = (reserve_width / 2 + seg_width / 2 + trk_clearance
+                        + extra_on_layer(extra_clearance, seg.layer))
         # For via blocking by segments: via half-size + segment half-width + clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         # FFI batching (2026-08-14 profiling): one Rust call per segment was
@@ -1099,31 +1100,48 @@ def add_user_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     ``extra_clearance`` (a diff-pair centreline map: the member offset) also
     blocks the cells within that distance of the polygon, so each member's
     centreline stays out as a single track's does. 0 leaves the cell set
-    exactly the polygon's interior.
+    exactly the polygon's interior. Where it differs by layer (a pair
+    centreline's member half-pitch, #1729) each layer takes its own band, and
+    the via cells the scalar's.
     """
     if not config.keepout_enabled or not pcb_data.keepout_zones:
         return
 
-    all_cells = set()
+    interior = set()
     for zone in pcb_data.keepout_zones:
-        all_cells |= _polygon_grid_cells(zone.points, coord)
-        if extra_clearance > 0:
-            gx_lo, gy_lo, nx, _ny, inside, edge_dist = _rasterize_polygon_box(
-                zone.points, coord, extra_clearance + coord.grid_step)
-            if inside is not None:
-                band_x, band_y = _box_masked_cells(
-                    gx_lo, gy_lo, nx, edge_dist < extra_clearance - GRID_TIE_EPS)
-                all_cells |= set(zip(band_x.tolist(), band_y.tolist()))
+        interior |= _polygon_grid_cells(zone.points, coord)
 
-    if not all_cells:
-        return
+    _memo = {}
 
-    xy_arr = np.array(sorted(all_cells), dtype=np.int32)
-    for layer_idx in range(num_layers):
-        layer_col = np.full((xy_arr.shape[0], 1), layer_idx, dtype=np.int32)
-        obstacles.add_blocked_cells_batch(np.hstack([xy_arr, layer_col]))
+    def _cells(extra):
+        extra = float(extra)
+        if extra in _memo:
+            return _memo[extra]
+        all_cells = set(interior)
+        if extra > 0:
+            for zone in pcb_data.keepout_zones:
+                gx_lo, gy_lo, nx, _ny, inside, edge_dist = _rasterize_polygon_box(
+                    zone.points, coord, extra + coord.grid_step)
+                if inside is not None:
+                    band_x, band_y = _box_masked_cells(
+                        gx_lo, gy_lo, nx, edge_dist < extra - GRID_TIE_EPS)
+                    all_cells |= set(zip(band_x.tolist(), band_y.tolist()))
+        _memo[extra] = np.array(sorted(all_cells), dtype=np.int32).reshape(-1, 2)
+        return _memo[extra]
+
+    names = [config.layers[i] if i < len(config.layers) else None
+             for i in range(num_layers)]
+    for extra, layer_idxs in extra_layer_groups(extra_clearance, names).items():
+        xy_arr = _cells(extra)
+        if not len(xy_arr):
+            continue
+        for layer_idx in layer_idxs:
+            layer_col = np.full((xy_arr.shape[0], 1), layer_idx, dtype=np.int32)
+            obstacles.add_blocked_cells_batch(np.hstack([xy_arr, layer_col]))
     # Block vias inside the zone too (vias span all layers)
-    obstacles.add_blocked_vias_batch(xy_arr)
+    xy_arr = _cells(float(extra_clearance))
+    if len(xy_arr):
+        obstacles.add_blocked_vias_batch(xy_arr)
 
 
 def point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
@@ -1223,7 +1241,8 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     ``extra_clearance`` widens both bands, as it does every other obstacle: on a
     diff-pair CENTRELINE map it is the member offset, without which a member's
     copper reached into the area (lvds_converter_dualclk /CLK+: KiCad
-    items_not_allowed; found reviewing #1278).
+    items_not_allowed; found reviewing #1278). Where it differs by layer (the
+    member half-pitch, #1729) each layer's track band takes its own.
     """
     keepouts = getattr(pcb_data.board_info, 'keepouts', None)
     if not keepouts:
@@ -1232,7 +1251,9 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     coord = GridCoord(config.grid_step)
     layer_list = layers if layers is not None else config.layers
     layer_map = build_layer_map(layer_list)
-    track_clear = config.clearance + config.track_width / 2 + extra_clearance
+    track_clear_of = {_ex: config.clearance + config.track_width / 2 + _ex
+                      for _ex in extra_layer_groups(extra_clearance, layer_list)}
+    track_clear_max = max(track_clear_of.values())
     via_clear = config.clearance + config.via_size / 2 + extra_clearance
     # Restrict rasterization to the map's extent: on a local-window build a
     # whole-board ring keep-out would otherwise rasterize the entire board per
@@ -1273,9 +1294,16 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         if not (block_tracks or block_vias):
             continue
 
+        # The keep-out's track layers by the track band each takes: one entry
+        # unless the extra clearance differs by layer.
+        track_groups: Dict[float, List[int]] = {}
+        for _li in (layer_idxs if block_tracks else ()):
+            _tc = track_clear_of[extra_on_layer(extra_clearance, layer_list[_li])]
+            track_groups.setdefault(_tc, []).append(_li)
+
         # Bounding box gets a clearance margin so we also catch cells just outside
         # the polygon whose track/via copper would still intrude past the boundary.
-        margin = max(track_clear, via_clear) + coord.grid_step
+        margin = max(track_clear_max, via_clear) + coord.grid_step
         o_gx_lo, o_gy_lo, o_nx, o_ny, inside, edge_dist = _rasterize_polygon_box(
             poly, coord, margin, clip_bounds=clip)
         if inside is None:
@@ -1286,7 +1314,8 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # since edge_dist is measured in absolute board coordinates the answer
         # varied with the polygon's POSITION (measured: 8 different cell sets
         # for one rectangle at clearance 0.2 on a 0.1 grid).
-        track_mask = inside | (edge_dist < track_clear - GRID_TIE_EPS)
+        track_masks = {_tc: inside | (edge_dist < _tc - GRID_TIE_EPS)
+                       for _tc in track_groups}
         via_mask = inside | (edge_dist < via_clear - GRID_TIE_EPS)
 
         # Holes: the keep-out is the outer polygon MINUS its holes (a ring).
@@ -1308,7 +1337,7 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
             for hole in holes:
                 if len(hole) < 3:
                     continue
-                h_margin = max(track_clear, via_clear)
+                h_margin = max(track_clear_max, via_clear)
                 h_gx_lo, h_gy_lo, h_nx, h_ny, h_inside, h_edge = _rasterize_polygon_box(
                     hole, coord, h_margin, clip_bounds=clip)
                 if h_inside is None:
@@ -1323,12 +1352,15 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
                 h_sel_edge = h_edge[h_inside][sel]
                 # Complement of the blocking test above -- shift by the same
                 # epsilon or a ring cell could be both blocked and unblocked.
-                track_mask[idx[h_sel_edge >= track_clear - GRID_TIE_EPS]] = False
+                for _tc, track_mask in track_masks.items():
+                    track_mask[idx[h_sel_edge >= _tc - GRID_TIE_EPS]] = False
                 via_mask[idx[h_sel_edge >= via_clear - GRID_TIE_EPS]] = False
 
-        if block_tracks and track_mask.any():
-            t_gx, t_gy = _box_masked_cells(o_gx_lo, o_gy_lo, o_nx, track_mask)
-            _block_cells_sel(obstacles, t_gx, t_gy, layer_idxs)
+        for _tc, _idxs in track_groups.items():
+            track_mask = track_masks[_tc]
+            if track_mask.any():
+                t_gx, t_gy = _box_masked_cells(o_gx_lo, o_gy_lo, o_nx, track_mask)
+                _block_cells_sel(obstacles, t_gx, t_gy, _idxs)
         if block_vias and via_mask.any():
             v_gx, v_gy = _box_masked_cells(o_gx_lo, o_gy_lo, o_nx, via_mask)
             obstacles.add_blocked_vias_batch(np.column_stack([v_gx, v_gy]))
@@ -1367,7 +1399,10 @@ def add_pour_barrier_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                 if obstacle_clearance is not None and nid is not None
                 else config.clearance)
         clear = max(pair, b.get('clearance') or 0.0) + extra_clearance
-        track_clear = clear + config.track_width / 2
+        # the track band on the island's layer takes that layer's extra (#1729)
+        track_clear = (max(pair, b.get('clearance') or 0.0)
+                       + extra_on_layer(extra_clearance, b.get('layer'))
+                       + config.track_width / 2)
         via_clear = clear + config.via_size / 2
         margin = max(track_clear, via_clear) + coord.grid_step
         for poly in b.get('polygons') or []:
@@ -1430,13 +1465,17 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # connection with track_margin=0; a config.track_width band lets that wider copper
     # graze the outline sub-fab (crkbd/dilemma). Callers pass the stamped width here.
     _edge_tw = track_width if track_width is not None else config.track_width
-    track_edge_clearance = edge_clearance + _edge_tw / 2 + extra_clearance
+    # The track band per layer group: one band on every layer unless the
+    # map's extra clearance differs by layer (a pair centreline's member
+    # half-pitch, #1729). The via band spans the stack at the scalar.
+    track_groups = [(edge_clearance + _edge_tw / 2 + _ex, _idxs)
+                    for _ex, _idxs in extra_layer_groups(extra_clearance, layer_list).items()]
     via_edge_clearance = via_edge + config.via_size / 2 + extra_clearance
 
     # Convert to grid coordinates. Use to_grid_dist_safe (ceil) for the via
     # keep-out so grid quantization can't leave a via inside the edge clearance
     # (#170) - mirrors the via-clearance rounding in the obstacle cache.
-    track_expand = coord.to_grid_dist(track_edge_clearance)
+    track_expand = max(coord.to_grid_dist(_t) for _t, _ in track_groups)
     via_expand = coord.to_grid_dist_safe(via_edge_clearance)
 
     # Get grid bounds
@@ -1466,23 +1505,25 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     if board_outlines:
         # Use polygon-based blocking for non-rectangular boards
         _add_polygon_edge_obstacles(obstacles, board_outlines, coord, num_layers,
-                                     track_edge_clearance, via_edge_clearance,
+                                     track_groups, via_edge_clearance,
                                      gmin_x, gmin_y, gmax_x, gmax_y, track_expand, via_expand,
                                      layer_exempt=layer_exempt, progress=progress)
     else:
         # Use simple rectangular blocking
-        _add_rectangular_edge_obstacles(obstacles, coord, num_layers,
-                                         board_bounds,
-                                         track_edge_clearance, via_edge_clearance,
-                                         layer_exempt=layer_exempt)
+        for _gi, (_t, _idxs) in enumerate(track_groups):
+            _add_rectangular_edge_obstacles(obstacles, coord, num_layers,
+                                             board_bounds,
+                                             _t, via_edge_clearance,
+                                             layer_exempt=layer_exempt,
+                                             layer_idxs=_idxs, stamp_vias=_gi == 0)
 
     # Block areas inside board cutouts (e.g., connector/switch openings)
     board_cutouts = pcb_data.board_info.board_cutouts
     if board_cutouts:
         for cutout in board_cutouts:
             if len(cutout) >= 3:
-                _add_cutout_obstacles(obstacles, cutout, coord, num_layers,
-                                      track_edge_clearance, via_edge_clearance)
+                _add_cutout_obstacles(obstacles, cutout, coord, track_groups,
+                                      via_edge_clearance)
 
     # Milled inner contours (#505): Edge.Cuts boundaries that are neither holes
     # nor outer rings -- a pad-containing inner outline reclassified by
@@ -1491,8 +1532,8 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # whole board), so a cutout-style `inside` fill would block everything.
     for contour in (getattr(pcb_data.board_info, 'board_edge_contours', None) or []):
         if len(contour) >= 3:
-            _add_edge_contour_obstacles(obstacles, contour, coord, num_layers,
-                                        track_edge_clearance, via_edge_clearance)
+            _add_edge_contour_obstacles(obstacles, contour, coord, track_groups,
+                                        via_edge_clearance)
 
 
 def track_edge_point_test(pcb_data: PCBData, config: GridRouteConfig,
@@ -1660,22 +1701,24 @@ def _rasterize_polygon_banded(poly_points, coord: GridCoord, margin: float,
 
 
 def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, float]],
-                          coord: GridCoord, num_layers: int,
-                          track_edge_clearance: float, via_edge_clearance: float):
+                          coord: GridCoord, track_groups, via_edge_clearance: float):
     """Block tracks and vias inside a board cutout and within clearance of its edges.
 
     Cells whose centre is inside the cutout polygon are blocked on all layers; cells
     just outside whose track/via copper would intrude past the edge are blocked too.
-    #423: rasterized in row bands so a whole-board-scale cutout polygon does not
-    spike memory (byte-identical to the unbanded stamp).
+    `track_groups` is [(track keep-out reach, layer indices)], one entry unless
+    the reach differs by layer. #423: rasterized in row bands so a
+    whole-board-scale cutout polygon does not spike memory (byte-identical to
+    the unbanded stamp).
     """
-    margin = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
+    margin = max(max(t for t, _ in track_groups), via_edge_clearance) + coord.grid_step
     for gx_flat, gy_flat, inside, edge_dist in _rasterize_polygon_banded(cutout, coord, margin):
-        ring_track = (~inside) & (edge_dist < track_edge_clearance - GRID_TIE_EPS)
         ring_via = (~inside) & (edge_dist < via_edge_clearance - GRID_TIE_EPS)
-        # #422: cutouts are permanent board geometry -> static keep-out bitmap.
-        _block_cells_on_layers(obstacles, gx_flat, gy_flat,
-                               inside | ring_track, range(num_layers), static=True)
+        for track_edge_clearance, layer_idxs in track_groups:
+            ring_track = (~inside) & (edge_dist < track_edge_clearance - GRID_TIE_EPS)
+            # #422: cutouts are permanent board geometry -> static keep-out bitmap.
+            _block_cells_on_layers(obstacles, gx_flat, gy_flat,
+                                   inside | ring_track, layer_idxs, static=True)
         via_mask = inside | ring_via
         if via_mask.any():
             obstacles.add_static_blocked_vias_batch(
@@ -1683,8 +1726,7 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
 
 
 def _add_edge_contour_obstacles(obstacles: GridObstacleMap, contour: List[Tuple[float, float]],
-                                coord: GridCoord, num_layers: int,
-                                track_edge_clearance: float, via_edge_clearance: float):
+                                coord: GridCoord, track_groups, via_edge_clearance: float):
     """Block a clearance BAND on both sides of a milled inner contour (#505).
 
     Unlike :func:`_add_cutout_obstacles` this never blocks the polygon interior.
@@ -1694,16 +1736,17 @@ def _add_edge_contour_obstacles(obstacles: GridObstacleMap, contour: List[Tuple[
     the geometry does demand is edge clearance: KiCad mills along the line and
     grades copper against it, so a track may not come within the edge clearance
     from EITHER side. `_points_edge_distance` is unsigned, so one distance test
-    covers both sides.
+    covers both sides. `track_groups` as `_add_cutout_obstacles`'.
     """
-    margin = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
+    margin = max(max(t for t, _ in track_groups), via_edge_clearance) + coord.grid_step
     for gx_flat, gy_flat, _inside, edge_dist in _rasterize_polygon_banded(
             contour, coord, margin):
-        band_track = edge_dist < track_edge_clearance - GRID_TIE_EPS
         band_via = edge_dist < via_edge_clearance - GRID_TIE_EPS
-        # #422: board geometry is permanent -> static keep-out bitmap.
-        _block_cells_on_layers(obstacles, gx_flat, gy_flat, band_track,
-                               range(num_layers), static=True)
+        for track_edge_clearance, layer_idxs in track_groups:
+            band_track = edge_dist < track_edge_clearance - GRID_TIE_EPS
+            # #422: board geometry is permanent -> static keep-out bitmap.
+            _block_cells_on_layers(obstacles, gx_flat, gy_flat, band_track,
+                                   layer_idxs, static=True)
         if band_via.any():
             obstacles.add_static_blocked_vias_batch(
                 np.column_stack([gx_flat[band_via], gy_flat[band_via]]))
@@ -1711,7 +1754,8 @@ def _add_edge_contour_obstacles(obstacles: GridObstacleMap, contour: List[Tuple[
 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
                                      bounds, track_edge_clearance: float,
-                                     via_edge_clearance: float, layer_exempt=None):
+                                     via_edge_clearance: float, layer_exempt=None,
+                                     layer_idxs=None, stamp_vias: bool = True):
     """Add obstacles for simple rectangular board outline.
 
     ``bounds`` is the rectangle in mm and the two clearances are the keep-out
@@ -1729,7 +1773,12 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
     board-edge clearance (#170). The track keep-out and the parallel corner
     handoff to the left/right sweeps are unchanged. ``layer_exempt`` (#441) keeps
     an in-band pad's own copper cells landable on its own layer.
+    ``layer_idxs`` (default every layer) are the layers the track band is
+    stamped on, and ``stamp_vias`` False leaves the via band to another call:
+    a caller whose track reach differs by layer calls once per reach.
     """
+    if layer_idxs is None:
+        layer_idxs = range(num_layers)
     _le = layer_exempt or {}
     min_x, min_y, max_x, max_y = bounds
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
@@ -1772,7 +1821,7 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
         if cell_t.any():
             tx, ty = gxf[cell_t], gyf[cell_t]
             keys = (tx << 32) + (ty & 0xFFFFFFFF)
-            for layer_idx in range(num_layers):
+            for layer_idx in layer_idxs:
                 ex = _le_packed.get(layer_idx)
                 keep = ~np.isin(keys, ex) if ex is not None else slice(None)
                 kx, ky = tx[keep], ty[keep]
@@ -1780,7 +1829,7 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
                     obstacles.add_static_blocked_cells_batch(np.column_stack(
                         [kx, ky, np.full(len(kx), layer_idx, dtype=np.int64)]
                     ).astype(np.int32))
-        if cell_v.any():
+        if stamp_vias and cell_v.any():
             obstacles.add_static_blocked_vias_batch(np.column_stack(
                 [gxf[cell_v], gyf[cell_v]]).astype(np.int32))
 
@@ -1806,7 +1855,7 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
 
 def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
                                  coord: GridCoord, num_layers: int,
-                                 track_edge_clearance: float, via_edge_clearance: float,
+                                 track_groups, via_edge_clearance: float,
                                  gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
                                  track_expand: int, via_expand: int, layer_exempt=None,
                                  progress=None):
@@ -1853,7 +1902,8 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
     px_axis = gx_range.astype(np.float64) * coord.grid_step
     # #546: threshold for the banded distance kernel -- strictly above both
     # consumer clearances so their `<` comparisons are exact.
-    _dist_thr = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
+    _dist_thr = (max(max(t for t, _ in track_groups), via_edge_clearance)
+                 + coord.grid_step)
     # #556: per-band progress (the edge pass is the long pole on complex
     # outlines; the band index gives the GUI a real percentage).
     _n_bands = (gy_hi - gy_lo) // rows_per_band + 1 if gy_hi >= gy_lo else 0
@@ -1898,9 +1948,11 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
             in_gx = gx_flat[inside_idx]
             in_gy = gy_flat[inside_idx]
 
-            # Block tracks if too close to edge
-            track_mask = min_dist < track_edge_clearance
-            if np.any(track_mask):
+            # Block tracks if too close to edge (one band per track reach)
+            for track_edge_clearance, layer_idxs in track_groups:
+                track_mask = min_dist < track_edge_clearance
+                if not np.any(track_mask):
+                    continue
                 track_gx = in_gx[track_mask]
                 track_gy = in_gy[track_mask]
                 track_cells = np.column_stack([track_gx, track_gy])
@@ -1910,7 +1962,7 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
                 _le = layer_exempt or {}
                 track_keys = ((track_gx.astype(np.int64) << 32)
                               + (track_gy.astype(np.int64) & 0xFFFFFFFF)) if _le else None
-                for layer_idx in range(num_layers):
+                for layer_idx in layer_idxs:
                     ex = _le.get(layer_idx)
                     if ex:
                         keep = ~np.isin(track_keys, np.fromiter(ex, dtype=np.int64, count=len(ex)))
@@ -2423,8 +2475,10 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
     return v
 
 
-def _hole_stamp_widths(config: GridRouteConfig, extra_clearance: float) -> Dict[float, List[int]]:
-    """{track width a hole keep-out stamps at: its layer indices}.
+def _hole_stamp_widths(config: GridRouteConfig,
+                       extra_clearance: float) -> Dict[Tuple[float, float], List[int]]:
+    """{(track width a hole keep-out stamps at, extra clearance on the layer):
+    its layer indices}.
 
     A hole keep-out is written for the call's `track_width`, which holds on a
     map that leaves the rest of a wider track to its margin. A map that bakes
@@ -2432,29 +2486,24 @@ def _hole_stamp_widths(config: GridRouteConfig, extra_clearance: float) -> Dict[
     track no margin, so the stamp itself has to reach for it: half of what the
     layer's width exceeds the call's by.
 
-    A pair's CENTRELINE map (`extra_clearance` > 0, the member half-pitch
-    `centreline_extra_clearance` stamps at) has more to cover. A member on a
-    layer whose half-pitch (`layer_pair_spacing`) exceeds that rides further
-    out by the difference, and at a 45-degree bend the outer member's corner
-    stands off the centreline by half-pitch / cos(22.5 deg). Grazing pads and
-    tracks are necked afterwards (`_neck_terminal_grazes`), but a neck looks
-    at copper, not at holes, so here the stamp is the only thing holding the
-    board's copper-to-hole clearance.
+    A pair's CENTRELINE map (`extra_clearance` > 0) has more to cover. A
+    member rides the layer's half-pitch off the centreline (`extra_on_layer`,
+    #1729), and at a 45-degree bend the outer member's corner stands off it by
+    half-pitch / cos(22.5 deg). Grazing pads and tracks are necked afterwards
+    (`_neck_terminal_grazes`), but a neck looks at copper, not at holes, so
+    here the stamp is the only thing holding the board's copper-to-hole
+    clearance.
 
-    One entry at `track_width` on a single-ended map with no such layer."""
-    groups: Dict[float, List[int]] = {}
+    One entry at (`track_width`, `extra_clearance`) on a single-ended map with
+    no such layer."""
+    groups: Dict[Tuple[float, float], List[int]] = {}
     for idx, layer in enumerate(config.layers):
         over = max(0.0, config.route_reserve_width(layer) - config.track_width)
         width = config.track_width + over
-        if extra_clearance > 0:
-            # the member's half-pitch on this layer: on the diff engine's
-            # map (#1729) the layer's own, which `extra_clearance` covers on
-            # the widest layer; on any other map nothing rides wider
-            offset = ((config.track_width + over + config.diff_pair_gap) / 2.0
-                      if config.reserve_layer_widths else extra_clearance)
-            width += (2.0 * max(0.0, offset - extra_clearance)
-                      + 2.0 * offset * (1.0 / math.cos(math.radians(22.5)) - 1.0))
-        groups.setdefault(width, []).append(idx)
+        extra = extra_on_layer(extra_clearance, layer)
+        if extra > 0:
+            width += 2.0 * extra * (1.0 / math.cos(math.radians(22.5)) - 1.0)
+        groups.setdefault((width, extra), []).append(idx)
     return groups
 
 
@@ -2543,9 +2592,9 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # other obstacle in that base map is inflated (issue #268).
         # `_hole_clr` is the BOARD's own min_hole_clearance -- raise-only, so a
         # board declaring nothing is byte-identical (see resolve_hole_clearance).
-        npth_clr = (max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
-                        _hole_clr) + extra_clearance)
-        for _stamp_w, _stamp_layers in _hole_widths.items():
+        for (_stamp_w, _stamp_ex), _stamp_layers in _hole_widths.items():
+            npth_clr = (max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                            _hole_clr) + _stamp_ex)
             block_track_cells_near_drills(obstacles, npth_holes, _stamp_w,
                                           npth_clr, config.grid_step, _stamp_layers)
 
@@ -2558,12 +2607,12 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     if npth_slot_holes:
         edge_eff = (config.board_edge_clearance if config.board_edge_clearance > 0
                     else config.clearance)
-        slot_clr = edge_eff + extra_clearance
-        if slot_clr > max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
-                          _hole_clr) + extra_clearance:
-            for _stamp_w, _stamp_layers in _hole_widths.items():
+        if edge_eff + extra_clearance > max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                                            _hole_clr) + extra_clearance:
+            for (_stamp_w, _stamp_ex), _stamp_layers in _hole_widths.items():
                 block_track_cells_near_drills(obstacles, npth_slot_holes, _stamp_w,
-                                              slot_clr, config.grid_step, _stamp_layers)
+                                              edge_eff + _stamp_ex, config.grid_step,
+                                              _stamp_layers)
         # Via-copper edge band: block_via_cells_near_drills builds its radius as
         # hole_r + clearance + via_drill/2, so passing
         # edge_eff + (via_size - via_drill)/2 yields hole_r + edge_eff + via_size/2
@@ -2577,11 +2626,11 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # (KiCad's hole_clearance honors it, #326 residual). Plated pads are left
     # to the copper-pad blockers here: stamping their hole annulus would make
     # zero-annular-ring pads unreachable for their own signal net.
-    for _stamp_w, _stamp_layers in _hole_widths.items():
+    for (_stamp_w, _stamp_ex), _stamp_layers in _hole_widths.items():
         block_track_cells_near_override_pad_holes(
             obstacles, pcb_data, _stamp_w, config.clearance,
             config.grid_step, _stamp_layers,
-            extra_clearance=extra_clearance, include_plated=False)
+            extra_clearance=_stamp_ex, include_plated=False)
 
     # Via keep-out (hole-to-hole drill minimum) near every drill.
     if config.hole_to_hole_clearance > 0 and drill_holes:
@@ -2740,7 +2789,8 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         seg_clearance = config.layer_clearance(seg.layer, obs_clearance, net_id)
         # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735).
         trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
-        expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
+        expansion_mm = (reserve_width / 2 + seg_width / 2 + trk_clearance
+                        + extra_on_layer(extra_clearance, seg.layer))
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         if not _via_only:
             _c = segment_blocked_cells_array(seg.start_x, seg.start_y,
@@ -2837,7 +2887,8 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
         seg_clearance = config.layer_clearance(seg.layer, config.clearance)
-        expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        expansion_mm = (reserve_width / 2 + seg_width / 2 + seg_clearance
+                        + extra_on_layer(extra_clearance, seg.layer))
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         _add_segment_obstacle_with_exclusion(
             obstacles, seg, coord, layer_idx, exclude_grid_cells, expansion_mm, via_block_mm
@@ -3397,7 +3448,8 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             # the REMOVE twin below (ref-count symmetry).
             trk_clearance = config.track_obstacle_clearance(
                 getattr(seg, 'net_id', 0), seg_clearance)
-            expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
+            expansion_mm = (reserve_width / 2 + seg_width / 2 + trk_clearance
+                            + extra_on_layer(extra_clearance, seg.layer))
             via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
             if not _via_only:
                 _c = segment_blocked_cells_array(seg.start_x, seg.start_y,
@@ -3472,7 +3524,8 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         # Identical track-rule raise to the ADD twin, or ref-counts desync.
         trk_clearance = config.track_obstacle_clearance(
             getattr(seg, 'net_id', 0), seg_clearance)
-        expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
+        expansion_mm = (reserve_width / 2 + seg_width / 2 + trk_clearance
+                        + extra_on_layer(extra_clearance, seg.layer))
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
 
         # Sweep item 2 (#625 follow-up): the arrays already exist -- stack a
@@ -4207,7 +4260,8 @@ def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
     this helper, so the per-layer values cannot desync ref-counts."""
     return [max(1, coord.to_grid_dist_safe(
                 via_size / 2 + config.route_reserve_width(layer) / 2
-                + config.layer_clearance(layer, clearance, net_id) + extra_clearance))
+                + config.layer_clearance(layer, clearance, net_id)
+                + extra_on_layer(extra_clearance, layer)))
             for layer in config.layers]
 
 
@@ -4653,10 +4707,14 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
             config.layer_clearance(layer_name, clearance, pad=pad), pad)
 
     def _clr_groups(expanded):
+        # keyed by the track keep-out's two per-layer terms: the clearance and
+        # the map's extra clearance on that layer (a pair centreline's member
+        # half-pitch, #1729)
         groups = {}
         for l in expanded:
             if l in layer_map:
-                groups.setdefault(_layer_clr(l), []).append(layer_map[l])
+                groups.setdefault((_layer_clr(l), extra_on_layer(extra_clearance, l)),
+                                  []).append(layer_map[l])
         return groups
 
     def _via_clr(expanded):
@@ -4704,9 +4762,9 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
                             blocked_cells[li].update(zip(gxs.tolist(), gys.tolist()))
 
         for poly in pad_polys:
-            for g_clr, g_idxs in (() if isinstance(obstacles, _RungViaSink)   # #1226
-                                  else clr_groups.items()):
-                _emit(poly, config.track_width / 2 + g_clr + extra_clearance,
+            for (g_clr, g_ex), g_idxs in (() if isinstance(obstacles, _RungViaSink)   # #1226
+                                          else clr_groups.items()):
+                _emit(poly, config.track_width / 2 + g_clr + g_ex,
                       via_pass=False, layer_idxs=g_idxs)
             if on_copper:
                 _emit(poly, via_margin, via_pass=True)
@@ -4736,10 +4794,10 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # exact cell set of iter_pad_blocked_cells (verified bit-identical). The
     # rare skip_cell path (per-cell Python predicate, used for connector
     # exemptions) filters the array with the same predicate.
-    for g_clr, g_idxs in (() if isinstance(obstacles, _RungViaSink)   # #1226: vias only
-                          else _clr_groups(expanded_layers).items()):
+    for (g_clr, g_ex), g_idxs in (() if isinstance(obstacles, _RungViaSink)   # #1226: vias only
+                                  else _clr_groups(expanded_layers).items()):
         cells = pad_blocked_cells_array(gx, gy, half_width, half_height,
-                                        config.track_width / 2 + g_clr + extra_clearance,
+                                        config.track_width / 2 + g_clr + g_ex,
                                         config.grid_step, corner_radius, corner_buffer,
                                         off_x, off_y, rotation_deg=pad.rect_rotation)
         if skip_cell is not None and len(cells):

@@ -28,7 +28,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from kicad_parser import PCBData, Segment, Via
-from routing_config import GridRouteConfig, GridCoord
+from routing_config import GridRouteConfig, GridCoord, extra_on_layer
 from check_drc import point_to_pad_distance
 from routing_utils import build_layer_map, segment_blocked_cells_array, pad_rect_halfspan
 
@@ -204,7 +204,8 @@ def compute_net_obstacle_cells(
         _clr = config.obstacle_clearance(net_id) if hasattr(config, 'obstacle_clearance') else config.clearance
         if hasattr(config, 'layer_clearance'):  # #498: layer rule replaces
             _clr = config.layer_clearance(config.layers[layer_idx], _clr, net_id)
-        expansion_mm = reserve_width / 2 + seg_width / 2 + _clr + extra_clearance
+        expansion_mm = (reserve_width / 2 + seg_width / 2 + _clr
+                        + extra_on_layer(extra_clearance, config.layers[layer_idx]))
         cells = segment_blocked_cells_array(x1, y1, x2, y2, expansion_mm, grid_step)
         if len(cells):
             track_parts.append(_pack_cells(cells, layer_idx))

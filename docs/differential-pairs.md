@@ -300,20 +300,22 @@ The first distance with a clear angle wins (0° is preferred unless it sits too 
 The centerline is routed with extra clearance to accommodate both P and N tracks:
 
 ```python
-# Extra clearance = offset from centerline to the P/N track centres, on the
-# widest layer (diff_pair_routing.centreline_extra_clearance)
-extra_clearance = max((layer_width(l) + diff_pair_gap) / 2 for l in layers)
+# Extra clearance = offset from centerline to the P/N track centres, on each
+# layer that layer's own (diff_pair_routing.centreline_extra_clearance)
+extra_clearance(l) = (layer_width(l) + diff_pair_gap) / 2
 ```
 
 It is added to the ordinary single-track keep-out (half the track width plus the clearance), so each offset track keeps its clearance from every obstacle.
-The map carries this one offset for every layer: a layer narrower than the widest
-is reserved more room than its members need. It used to be the call's,
-`(track_width + diff_pair_gap) / 2`, so on a layer wider than `--track-width` (an
-`--impedance` outer layer) the outer member came up to (layer width - track width) / 2
-inside a neighbour's clearance and was necked there alone, shipping the pair with one
-member narrow beside a full-width partner (#1729). A segment that still grazes (pads
-stamp the call's track width, not the layer's) is necked where it is emitted, the same
-fab-floored neck the terminal legs get.
+Every stamp on one layer (tracks, pads, the via ring on that layer, the board edge and
+cut-outs, keep-out areas, pour barriers and hole keep-outs) takes its layer's own offset;
+a stamp across the stack (where a via may sit) keeps the call's,
+`(track_width + diff_pair_gap) / 2`. The call's offset on every layer let the outer
+member on a layer wider than `--track-width` (an `--impedance` outer layer) come up to
+(layer width - track width) / 2 inside a neighbour's clearance, where it was necked
+alone, shipping the pair with one member narrow beside a full-width partner; the widest
+layer's offset on every layer reserved a narrow stripline layer room no member there
+needs (#1729). A segment that still grazes (pads stamp the call's track width, not the
+layer's) is necked where it is emitted, the same fab-floored neck the terminal legs get.
 
 ## P/N Path Generation
 

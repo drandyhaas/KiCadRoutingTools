@@ -8,14 +8,14 @@ on a wider layer rides (layer width + gap) / 2 off the centreline: the map
 let the outer member reach (layer width - track width) / 2 into a
 neighbour's clearance, the graze neck then narrowed that member alone, and
 the pair shipped one member narrow beside a full-width partner (an
-intra-pair width and impedance mismatch). The map now stamps the widest
-layer's half-pitch (`centreline_extra_clearance`).
+intra-pair width and impedance mismatch). The map now stamps each layer's
+own half-pitch (`centreline_extra_clearance`; the per-layer rows are
+test_1729_centreline_per_layer).
 
-  * the value: the call's half-pitch with no layer widths, else the widest
-    layer's;
+  * the value: the call's half-pitch with no layer widths, else each
+    layer's own;
   * hole stamps: on the wide layer the centreline map reaches the member's
-    far edge exactly as before (no double count), and a narrower layer
-    reserves no less than it did;
+    far edge exactly as before (no double count);
   * routed: an in-repo board with a 2-layer stackup, --impedance 80 over a
     0.25 --track-width and a foreign track ending just above the pair's
     path. Every member segment ships at the layer width or, for the
@@ -68,12 +68,13 @@ def _cfg(layer_widths, reserve=True):
 
 def t_value(td):
     from diff_pair_routing import centreline_extra_clearance
+    from routing_config import extra_on_layer
     assert abs(centreline_extra_clearance(_cfg({})) - 0.1) < 1e-12
-    v = centreline_extra_clearance(_cfg({'F.Cu': 0.3, 'B.Cu': 0.1}))
-    assert abs(v - 0.2) < 1e-12, v
-    v = centreline_extra_clearance(_cfg({'F.Cu': 0.3}))
-    assert abs(v - 0.2) < 1e-12, v
-    print("  ok  the call's half-pitch with no layer widths, else the widest layer's")
+    for widths in ({'F.Cu': 0.3, 'B.Cu': 0.1}, {'F.Cu': 0.3}):
+        v = centreline_extra_clearance(_cfg(widths))
+        assert abs(extra_on_layer(v, 'F.Cu') - 0.2) < 1e-12, repr(v)
+        assert abs(extra_on_layer(v, 'B.Cu') - 0.1) < 1e-12, repr(v)
+    print("  ok  the call's half-pitch with no layer widths, else each layer's own")
 
 
 def t_hole_stamps(td):
@@ -84,18 +85,18 @@ def t_hole_stamps(td):
     new = centreline_extra_clearance(cfg)
 
     def reach(extra):
-        return {i: w / 2 + extra for w, idxs in _hole_stamp_widths(cfg, extra).items()
+        return {i: w / 2 + ex for (w, ex), idxs in _hole_stamp_widths(cfg, extra).items()
                 for i in idxs}
-    old, now = reach(call), reach(new)
+    now = reach(new)
     mitre = 1.0 / math.cos(math.radians(22.5))
     far = 0.3 / 2 + (0.3 + 0.1) / 2 * mitre
-    assert abs(old[0] - far) < 1e-9 and abs(now[0] - far) < 1e-9, (old, now, far)
-    assert now[1] >= old[1] - 1e-9, (old, now)
+    assert abs(now[0] - far) < 1e-9, (now, far)
+    assert abs(now[1] - (0.1 / 2 + call * mitre)) < 1e-9, now
     se = _cfg({'F.Cu': 0.3}, reserve=False)
-    assert _hole_stamp_widths(se, 0.05) == {0.1 + 2 * 0.05 * (mitre - 1): [0, 1]}, \
+    assert _hole_stamp_widths(se, 0.05) == {(0.1 + 2 * 0.05 * (mitre - 1), 0.05): [0, 1]}, \
         _hole_stamp_widths(se, 0.05)
-    print("  ok  hole stamps: the wide layer reaches the member's far edge as before, "
-          "a narrower layer no less; a map with no baked width unchanged")
+    print("  ok  hole stamps: each layer reaches its member's far edge; "
+          "a map with no baked width unchanged")
 
 
 def _board(td):

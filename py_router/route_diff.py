@@ -1826,11 +1826,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     original_via_ids = set(id(v) for v in _original_vias_keepalive)
 
     # Build separate base obstacle map with extra clearance for diff pair centerline routing
-    # Extra clearance = spacing from centerline to P/N track center, at the
-    # widest layer's (#1729)
+    # Extra clearance = spacing from centerline to P/N track center, each
+    # layer's own (#1729)
     from diff_pair_routing import centreline_extra_clearance as _cec1729
     diff_pair_extra_clearance = _cec1729(config)
-    print(f"Building diff pair obstacle map (extra clearance: {diff_pair_extra_clearance:.3f}mm)...")
+    _per_layer = getattr(diff_pair_extra_clearance, 'by_layer', None)
+    _per_layer = (" per layer " + ", ".join(f"{_l} {_v:.3f}" for _l, _v in _per_layer.items())
+                  if _per_layer else "")
+    print(f"Building diff pair obstacle map (extra clearance: "
+          f"{diff_pair_extra_clearance:.3f}mm{_per_layer})...")
     if progress_callback:
         progress_callback(0, 0, "Building diff-pair obstacle map...")
     dp_base_start = time.time()
