@@ -178,6 +178,15 @@ the routing pipeline applies both so the model and the output file agree.
 > vertex a locked segment touches, and the #284 stale-input strip and
 > `remove_route_from_pcb_data`'s signature fallback never take a locked item.
 
+> **#1732 -- a same-net X crossing is a joint to the cleanup too.** Two
+> same-layer tracks of one net whose centrelines cross are joined there
+> (check_connected, KiCad, the length graph since #1705). So
+> `trim_dangles_past_body_anchor` takes a crossing on a segment's body as an
+> anchor, beside a via and a tee, and cuts a dead-end tail past it back to the
+> crossing (its 3-width nib floor and connectivity gate unchanged); and
+> `snap_stub_gaps` skips a target trace the stub's own segment already crosses,
+> instead of laying a connector back over the tail.
+
 > **The graze prune keeps a fill island's only link.** `prune_grazing_segments`
 > grades each removal on a zoned net twice: under the real-fill validator
 > (`check_connected.make_real_fill_validator`, no pour credit within 0.25 mm

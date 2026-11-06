@@ -12,7 +12,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via, is_immutable_copper
 from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
-from geometry_utils import point_to_segment_distance
+from geometry_utils import point_to_segment_distance, segments_intersect
 
 # Read once at import: both are checked inside per-segment cleanup loops (hot).
 _COLLAPSE_DEBUG = os.environ.get('KICAD_COLLAPSE_DEBUG')
@@ -1207,6 +1207,31 @@ def _board_min_track_width(pcb_data, scope_net_ids, config) -> float:
         shipped=True) or 0.1
 
 
+def _x_crossing(s: Segment, o: Segment, tol: float = None) -> Optional[float]:
+    """Where `o`'s centreline CROSSES `s`'s, as a fraction along `s`, or None
+    (#1732). An X only: the crossing lies more than `tol` (COINCIDENCE_TOL)
+    from every end of both, so two segments that share an end, or a tee
+    (one ending on the other), are not crossings -- `segments_intersect`
+    alone reads a shared end as one."""
+    if tol is None:
+        tol = COINCIDENCE_TOL
+    if not segments_intersect(s.start_x, s.start_y, s.end_x, s.end_y,
+                              o.start_x, o.start_y, o.end_x, o.end_y):
+        return None
+    dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+    odx, ody = o.end_x - o.start_x, o.end_y - o.start_y
+    den = dx * ody - dy * odx
+    if abs(den) < 1e-15:
+        return None
+    t = ((o.start_x - s.start_x) * ody - (o.start_y - s.start_y) * odx) / den
+    x, y = s.start_x + t * dx, s.start_y + t * dy
+    for seg in (s, o):
+        for ex, ey in ((seg.start_x, seg.start_y), (seg.end_x, seg.end_y)):
+            if math.hypot(x - ex, y - ey) <= tol:
+                return None
+    return t
+
+
 def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                    max_gap_factor: float = 1.5) -> int:
     """Close small gaps where a routed dead end stopped just short of same-net
@@ -1284,6 +1309,16 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                         t = max(0.0, min(1.0, ((px - o.start_x) * dx + (py - o.start_y) * dy) / L2))
                         fx, fy = o.start_x + t * dx, o.start_y + t * dy
                         g = math.hypot(px - fx, py - fy)
+                        # #1732: a trace this stub's own segment already
+                        # CROSSES is joined to it at the crossing; the end is
+                        # a tail past that joint, not a stub short of it, and
+                        # a connector back to the trace only stacks copper
+                        # on the tail. (An end already ON the trace -- a tee,
+                        # g ~ 0 -- stays the target: it is what says "already
+                        # touching", and skipping it would send the end to the
+                        # next copper over.)
+                        if g > 1e-4 and _x_crossing(s, o) is not None:
+                            continue
                         if best is None or g < best[0]:
                             best = (g, (fx, fy))
                     # nearest same-net pad on this layer (land on its copper)
@@ -3714,6 +3749,12 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                         cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                         if math.hypot(ox - cx_, oy - cy_) < (o.width + s.width) / 2 - 1e-6:
                             cands.append(t)
+                    # #1732: and where another same-net track of the layer
+                    # CROSSES the body (an X, neither end on the other):
+                    # joined there, as check_connected and KiCad have it
+                    t = _x_crossing(s, o)
+                    if t is not None and lo_d < t * seg_len < seg_len - lo_d:
+                        cands.append(t)
                 if not cands:
                     continue
                 t_anchor = min(cands) if free_is_start else max(cands)
