@@ -56,7 +56,8 @@ import sys
 #: keyed by `BodyOverlapPair.gate_exempt`.
 _GATE_EXEMPT_WHY = {
     'marker_class': 'a mount-hole/fiducial/testpoint is involved',
-    'container_class': 'a board-sized container is involved',
+    'container_class': ('a container (a board-sized frame or a shield '
+                        'frame, #1722) is involved'),
     'intent_declared': "named in the intent's overlap_waivers",
     'silk_drawn': 'a silk-drawn body, which never gates (#896)',
     'silk_enclosed': ('inside a CLOSED silk-drawn body: gates when a member '
@@ -572,7 +573,8 @@ def main():
         if g['containment_blocking']:
             print(f"    {g['containment_blocking']} of these BLOCK: a "
                   f"containment gates unless a mount-hole/fiducial/testpoint "
-                  f"or a board-sized container is involved, or the pair is "
+                  f"or a container (a board-sized frame or a shield frame) is "
+                  f"involved, or the pair is "
                   f"named in the intent's `overlap_waivers`. An `edge_class` "
                   f"waiver does NOT exempt -- it is a part-class lookup with "
                   f"no geometry in it, and it is what hid a part wholly "
@@ -589,7 +591,7 @@ def main():
                 for k, n in sorted(_why.items())) + '.')
             if set(_why) <= {'marker_class', 'container_class'}:
                 print(f"    Each is a by-design containment (a marker or a "
-                      f"board-sized container), which the corpus ships "
+                      f"container), which the corpus ships "
                       f"legitimately -- orangecrab FID2/J5 at 100%.")
     # BODY COVERAGE (#896). Printed UNCONDITIONALLY, including the fully
     # covered case: "which geometry was this board graded on" is a fact about

@@ -382,7 +382,8 @@ class SilkContainmentIsNamed(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = _board(td, disp + _fab_part('U1', 22, 12, 1, pads=2))
             out, _js = _check_assembly(td, path)
-        self.assertIn('a board-sized container is involved', out)
+        self.assertIn('a container (a board-sized frame or a shield frame, '
+                      '#1722) is involved', out)
         self.assertIn('Each is a by-design containment', out)
 
 

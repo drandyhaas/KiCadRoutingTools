@@ -780,14 +780,21 @@ def courtyard_cover(court_shape, local) -> Optional[float]:
     return min(1.0, float(court_shape.area) / area)
 
 
-def container_kinds(pcb_data, local_bounds) -> Dict[str, str]:
-    """{ref: 'outline' | 'pin_frame'} for every container on the board, from
-    its LOCAL geometry only -- a turn cannot make a part a frame. Empty when
-    the board declares no bounds (the conservative answer). See
-    `FRAME_DRILLED_FRAC` for the rule and the measurements behind it."""
+def container_kinds(pcb_data, local_bounds, covers=()) -> Dict[str, str]:
+    """{ref: 'outline' | 'pin_frame' | 'fence'} for every container on the
+    board, from its LOCAL geometry only -- a turn cannot make a part a
+    frame. Empty when the board declares no bounds (the conservative
+    answer). See `FRAME_DRILLED_FRAC` for the rule and the measurements
+    behind it.
+
+    `covers` (`heights.Heights.covers`, from a caller that holds them): a
+    fence whose height is known -- its model, or a declared can's room
+    (`cans[]`, `heights[]` underside) -- is no container, so what stands
+    under it is judged by that height, as under any cover (#1475)."""
     return {ref: k for ref, lb in sorted(local_bounds.items())
             for k in (_container_kind(pcb_data, ref, lb.local, lb.source,
-                                      lb.synthetic, lb.court_cover),) if k}
+                                      lb.synthetic, lb.court_cover),)
+            if k and not (k == 'fence' and ref in covers)}
 
 
 def frame_courtyard_refs(kinds, local_bounds) -> frozenset:
@@ -834,19 +841,48 @@ def container_courtyard_notes(pcb_data, local_bounds) -> List[str]:
     return out
 
 
+def _is_fence(pads, inset_box) -> bool:
+    """#1722: is this ring of pads a FENCE -- a shield frame's wall, open
+    inside? Every pad on ONE net, a real one (a frame is grounded; pads
+    on no net say nothing -- a board without its netlist, a library part
+    not yet wired), no pad centre inside `inset_box` (the occupancy box
+    inset by `FRAME_BAND_FRAC` of its shorter side), and on each of the
+    four sides a pad centre in the band between the two boxes and off its
+    corners, so the pads wall the interior in. Two rows of pads, whose end
+    pads stand in the corners, line two edges of a body and enclose
+    nothing; a part whose pads carry two nets is a component, whatever
+    their layout."""
+    nets = {p.net_id for p in pads}
+    if len(pads) < 2 or len(nets) != 1 or not min(nets) > 0:
+        return False
+    ix0, iy0, ix1, iy1 = inset_box
+    if any(ix0 < p.local_x < ix1 and iy0 < p.local_y < iy1 for p in pads):
+        return False
+    mid_y = [p for p in pads if iy0 < p.local_y < iy1]
+    mid_x = [p for p in pads if ix0 < p.local_x < ix1]
+    return (any(p.local_x <= ix0 for p in mid_y)
+            and any(p.local_x >= ix1 for p in mid_y)
+            and any(p.local_y <= iy0 for p in mid_x)
+            and any(p.local_y >= iy1 for p in mid_x))
+
+
 def _container_kind(pcb_data, ref, local, source, synthetic,
                     court_cover=None):
     """The one decision behind `container_kinds` and `container_refs`:
-    'outline', 'pin_frame' or None for one part, from its LOCAL occupancy
-    box, its occupancy source, the share of that box its drawn courtyard
-    covers (`courtyard_cover`) and its pads."""
+    'outline', 'pin_frame', 'fence' or None for one part, from its LOCAL
+    occupancy box, its occupancy source, the share of that box its drawn
+    courtyard covers (`courtyard_cover`) and its pads.
+
+    'fence' (#1722) is the one kind of any size: a shield frame drawn as
+    its wall's pads round a body outline, open inside, which the designer
+    places a circuit under. KiCad grades it on its courtyard alone, and
+    without one, or with a ring that leaves the inside open, it grades
+    nothing inside it; read as the solid body its outline draws, it refused
+    every part under it and graded the board NOT BUILDABLE. Its pads stay
+    the wall the pad layer keeps every other part's copper off."""
     from placement.body import SOURCE_COURTYARD
     bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
     if not bb or local is None:
-        return None
-    barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
-    x0, y0, x1, y1 = local
-    if (x1 - x0) * (y1 - y0) < CONTAINER_RATIO * barea:
         return None
     if synthetic:
         return None
@@ -858,15 +894,23 @@ def _container_kind(pcb_data, ref, local, source, synthetic,
         return None
     pads = [p for p in (fp.pads or ())
             if (getattr(p, 'drill', 0) or 0) > 0 or _pad_carries_copper(p)]
+    x0, y0, x1, y1 = local
+    inset = FRAME_BAND_FRAC * min(x1 - x0, y1 - y0)
+    inset_box = (x0 + inset, y0 + inset, x1 - inset, y1 - inset)
+    # A board-sized frame keeps its kind (a pin frame's pins are graded as
+    # pins); a fence is the answer for every other ring of one net's pads.
+    fence = 'fence' if pads and _is_fence(pads, inset_box) else None
+    barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
+    if (x1 - x0) * (y1 - y0) < CONTAINER_RATIO * barea:
+        return fence
     if not pads:
         return 'outline'
     drilled = sum(1 for p in pads if (getattr(p, 'drill', 0) or 0) > 0)
     if drilled < FRAME_DRILLED_FRAC * len(pads):
-        return None
-    inset = FRAME_BAND_FRAC * min(x1 - x0, y1 - y0)
-    ix0, iy0, ix1, iy1 = x0 + inset, y0 + inset, x1 - inset, y1 - inset
+        return fence
+    ix0, iy0, ix1, iy1 = inset_box
     if any(ix0 < p.local_x < ix1 and iy0 < p.local_y < iy1 for p in pads):
-        return None
+        return fence
     return 'pin_frame'
 
 
@@ -2798,6 +2842,12 @@ class CourtyardCensus:
         # sonde_u's J1 to 135 degrees made it one. A pin frame's rect pairs
         # leave the courtyard channel; its PINS are graded instead.
         self.kinds = container_kinds(pcb_data, self.lbs)
+        if 'fence' in self.kinds.values():
+            # #1722: a fence whose height the heights know is a cover they
+            # judge, as the seat reads it (`QuenchState`). Asked only on a
+            # board with a fence, so no other board measures its heights here.
+            self.kinds = container_kinds(pcb_data, self.lbs,
+                                         covers=self.heights.covers)
         self.containers = frozenset(self.kinds)
         self.pin_frames = frozenset(r for r, k in self.kinds.items()
                                     if k == 'pin_frame')

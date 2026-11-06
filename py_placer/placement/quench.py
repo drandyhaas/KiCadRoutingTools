@@ -839,14 +839,17 @@ def locked_body_locals(pcb_data, pcb_file
     six parts seated there made every grouped candidate NOT BUILDABLE. A
     MOVABLE part keeps its pad box -- the body model as a seat currency for
     every part (#1182) was A/B'd and rejected -- and a silk outline or a
-    pin-1 marking is no body (#896, #1201), nor is a container's outline,
-    which other parts sit inside by design."""
+    pin-1 marking is no body (#896, #1201), nor is a board-sized container's
+    outline, which other parts sit inside by design. A fence (#1722) keeps
+    its body here, as in `body.estimated_courtyards`: the courtyard channels
+    skip it as a container, and a fence whose height is known is a cover."""
     from placement import body as _body
     out = {}
     for ref, g in _body.board_bodies(pcb_data, pcb_file).items():
         if (g.source == _body.SOURCE_FAB and g.occupancy_local is not None
-                and not legality._container_kind(pcb_data, ref, g.occupancy_local,
-                                                 g.source, False)):
+                and legality._container_kind(pcb_data, ref, g.occupancy_local,
+                                             g.source, False)
+                in (None, 'fence')):
             out[ref] = tuple(g.occupancy_local)
     return out
 
@@ -1403,9 +1406,15 @@ class QuenchState:
         # Classified BEFORE the declared zones below, because a container is
         # no stranger to an exclusive zone either (#1463): its frame rect is
         # not a body there any more than in the courtyard channel.
+        #
+        # #1722: the heights first, so a fence (a shield frame) whose height
+        # is known -- its model, or a declared can's room -- stays a cover
+        # the heights judge, not a container nothing under is judged in.
+        self.heights = _heights.for_board(pcb_data, pcb_file, declared_heights)
         try:
             _lbs = legality.part_local_bounds(pcb_data, pcb_file)
-            _kinds = legality.container_kinds(pcb_data, _lbs)
+            _kinds = legality.container_kinds(pcb_data, _lbs,
+                                              covers=self.heights.covers)
         except Exception:                                    # noqa: BLE001
             _lbs, _kinds = {}, {}
         self.container_kinds = {r: k for r, k in _kinds.items()
@@ -1464,8 +1473,8 @@ class QuenchState:
         # are both known is judged on the heights (`_height_pair`), its own
         # face only; every other pair keeps its occupancy test. A cover
         # whose raised body reaches past its own box (`_overhangs`) is
-        # swept by that reach.
-        self.heights = _heights.for_board(pcb_data, pcb_file, declared_heights)
+        # swept by that reach. (`self.heights` is read above, before the
+        # containers.)
         self.covers = {r for r in self.heights.covers
                        if r in self.parts and r not in self.container_refs}
         self._overhangs = set()
@@ -1486,11 +1495,21 @@ class QuenchState:
         self._pin_census_obj = None
         self._pin_copper = {}
         if self.container_refs:
-            print(f"  container footprint(s) (>= {CONTAINER_RATIO:.0%} of "
-                  f"the board, a pin frame or an outline -- frame, not "
-                  f"body): " + ', '.join(
+            print(f"  container footprint(s) (a pin frame or an outline "
+                  f">= {CONTAINER_RATIO:.0%} of the board, or a shield "
+                  f"frame's fence of any size -- frame, not body): "
+                  + ', '.join(
                       f"{r} ({k})"
                       for r, k in sorted(self.container_kinds.items())))
+            _fences = sorted(r for r, k in self.container_kinds.items()
+                             if k == 'fence')
+            if _fences:
+                print(f"  {', '.join(_fences)}: read as a shield frame (one "
+                      f"net's pads ringing an open outline), so a part may "
+                      f"stand inside it; how tall is not judged -- declare "
+                      f"its room (a design brief's `cans[]` row with "
+                      f"`interior_height_mm`, or `heights[]` `underside_mm`) "
+                      f"to judge what fits under the lid")
         # #1465: what a drawn courtyard on a container-sized part decided,
         # either way, so neither a placeholder that keeps the frame nor a
         # real one that removes it is silent.

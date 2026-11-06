@@ -639,6 +639,10 @@ which leaves the inside open, and a can drawn that way has its room. A can
 that is not locked is named, because its zone is in board coordinates and does not
 follow a can a placer moves.
 
+A drawn can that is not declared and whose pads are a fence (one net,
+walling an open interior: #1722) is read as a frame: parts may stand inside
+it, and their height is not judged. Declaring its room is what judges it.
+
 Openings in the wall (a dashed fence, an in and an out, a single mouse-hole)
 are not declared: a drawn can's pads are the wall the router routes round.
 What a track crossing the wall costs is not priced.

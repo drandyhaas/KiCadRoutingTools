@@ -1064,10 +1064,21 @@ job (`refs`, `exclusive`); the fence only adds the band. A design brief's
 `cans[]` row writes this block, its keep-outs and its height limit for you
 from one declaration (`docs/design-brief.md`, "`cans[]`").
 
-A container -- an enclosure drawn as a footprint round the parts, a pin frame
--- is graded by every keep-out on its pads, not its frame rect, as the seat
-already measures it: a fence (or any keep-out) inside an enclosure is no hit
-on the enclosure, while a post standing in a keep-out still is.
+A container -- an enclosure drawn as a footprint round the parts, a pin frame,
+a shield frame -- is graded by every keep-out on its pads, not its frame rect,
+as the seat already measures it: a fence (or any keep-out) inside an enclosure
+is no hit on the enclosure, while a post standing in a keep-out still is.
+
+A shield frame is a container of any size (#1722, `legality._container_kind`
+kind `fence`): every pad on one real net, none inside its body, and a pad off
+the corners on each of its four sides, so the pads wall an open interior.
+KiCad grades such a part on its courtyard alone -- none, or a ring that
+leaves the inside open -- so nothing inside it is a courtyard overlap there,
+and the seat and check_assembly no longer read its outline as a solid body.
+How tall a part under it may be is then not judged; a frame whose room is
+known (its 3D model, or a `cans[]` row with `interior_height_mm`, or
+`heights[]` `underside_mm`) is no container but a cover, judged by that
+height.
 
 ### `pad stacks` (printed, not a rule)
 
@@ -1168,7 +1179,7 @@ status from this list:
 | `zone_containment` | a member's courtyard leaves its block's zone. A zone side is OPEN for an edge-claim member when that side lies on the outline (within 0.01 mm) and the member's claim names that edge with an `overhang_mm.max`: the edge rule bounds how far past the edge it may go, so the zone does not eject it for going there. Its PADS stay graded there, against the board's own side and at zero whatever the zone's tolerance: pad copper past it is the error (`measured.pads_graded`), since a soldered pad cannot overhang; castellated pads are left out, as the edge rule leaves them out | `GradedPart.rect`. **Priced, not only graded** — `place_simple`'s anneal charges how far a member is outside its block's zone, exclusive or not, through the same `zone_escape` this rule calls with the same open sides (its moves keep every courtyard on the board, so an open side changes nothing there); the feasibility check and the plan check call it with the same open sides (`zone_open_sides`); `place_pose --intent` refuses a pose that leaves a part further outside |
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
 | `assembly_side` | a part sits on a face the board's declared assembly policy does not populate. **warn** by default: no placement tool reads the policy, and a part changes face only by a face declaration (`place_simple` applies `blocks[].side` and the rest before it places), so an error would be a red mark until someone declares the faces | `legality.assembly_census`, body face — the pad-bearing population, so a zero-pad graphic on the back is not a part (a part whose only pads are paste/mask apertures is zero-pad too) |
-| `zone_exclusive` | a non-member intrudes on a reserved zone. A container (an enclosure or pin frame other parts sit inside, `legality.container_kinds`) is no stranger: its rect is a frame, not a body, here as in the courtyard channel. A locked or fixed-pose stranger already inside is also named before placing (`plan_fixed_in_exclusive_zone`) | `rect_overlap_area`, **courtyard only** — a through-hole stranger's leads may cross a reserved zone, unlike a keep-out's. **Priced and enforced** — `place_simple`'s anneal charges a stranger's courtyard area inside the zone, and its final legality check (`seeder.pose_ok`, through `QuenchState.exclusive_clear`) refuses a stranger's pose inside it and moves the part to the nearest legal pose |
+| `zone_exclusive` | a non-member intrudes on a reserved zone. A container (an enclosure, pin frame or shield frame other parts sit inside, `legality.container_kinds`) is no stranger: its rect is a frame, not a body, here as in the courtyard channel. A locked or fixed-pose stranger already inside is also named before placing (`plan_fixed_in_exclusive_zone`) | `rect_overlap_area`, **courtyard only** — a through-hole stranger's leads may cross a reserved zone, unlike a keep-out's. **Priced and enforced** — `place_simple`'s anneal charges a stranger's courtyard area inside the zone, and its final legality check (`seeder.pose_ok`, through `QuenchState.exclusive_clear`) refuses a stranger's pose inside it and moves the part to the nearest legal pose |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect, **and** its pad copper boxes; a part that draws no courtyard on the courtyard it is seated on (`zone_parts`, its #1300 estimate), in this rule, in `place_pose`'s verdict and in a cover site's ring alike (#1730) (#1588: a keep-out is physical, so a pad reaching past the courtyard into it is in it, as `mountable` and rule-area keep-outs read it; inert for pads inside the courtyard). **Priced and enforced, not only graded** — `place_simple`'s anneal charges the area inside a keep-out, and its final legality check (`seeder.pose_ok`) refuses such a pose, both through the same `keepout_hit` this rule calls; `place_pose --intent` refuses a pose that puts a moved part inside one it was not in, or deeper in a rect one (`intent_keepout_pairs`, relative like its zone check), and its snap ranker prices them |
 | `edge_connector` | overhang outside `[min,max]`; the wrong edge; a graded receptacle whose mating face points away from its declared edge (**error** on a strong face, **warn** on a weak one); on the body path, pad copper past the OUTLINE (castellated pads excepted); a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | the band: the drawn body's overhang past the outline, summed over the sides it crosses (`body_outside_mm`, `connector_geometry`), else `BoardOutlineGate.rect_outside_amount`; the seat: `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_populations` (`near`) |
