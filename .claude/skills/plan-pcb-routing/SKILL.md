@@ -1577,11 +1577,13 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    **plane-drop vias** (#424), and because the pour already exists the drop
    pass can skip a via entirely where the fill already covers the ball
    (pour-direct) and land the rest on intact copper.
-1c. **After ALL fanouts are done — once, not per-BGA — run
-   `place_fanout_clearance.py`** to clear decoupling-cap / fanout-via
-   collisions (#130) before routing. The pass is board-global (it reads every
-   via and every BGA), so one late run sees everything; running it per-BGA
+1c. **On a board with a BGA/PGA, after ALL fanouts are done — once, not
+   per-BGA — run `place_fanout_clearance.py`** to clear decoupling-cap /
+   fanout-via collisions (#130) before routing. The pass is board-global (it
+   reads every via and every BGA), so one late run sees everything; running it per-BGA
    compounds cap displacement and changes what later fanouts route around.
+   It moves only parts near a BGA's ball field, so a board with no BGA, whose
+   only fanouts are `qfn_fanout.py`, skips it (#1710).
    A cap it leaves in DRC with a BGA's fanout copper: re-fan that BGA with
    `--immovable-refs <REF>` and run the pass again (#1521). See Step 1c.
 2. **Differential Pairs** - The most constrained routes claim their channels before
@@ -1910,7 +1912,7 @@ to Step 2 once `failed == 0` (or the remaining `unescaped_nets` are understood a
 accepted). In a chain spell that floor `--clearance-ceiling` (#1529): a bare
 `--clearance` does not lower a net class the dropped balls sit in.
 
-### Step 1c: Optimize Decoupling-Cap Placement (run ONCE after ALL fanouts — issue #130)
+### Step 1c: Optimize Decoupling-Cap Placement (on a board with a BGA/PGA: run ONCE after ALL fanouts — issue #130)
 Nudges decoupling caps near the BGA off the foreign-net fanout vias (the
 `PAD-VIA` violations #130) and pulls each pad toward its nearest same-net
 ball. Run it on the fully-fanned board — after the LAST fanout, **before**

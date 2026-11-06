@@ -431,8 +431,16 @@ def r_cp_carries_the_project(p):
 
 
 def r_one_cap_pass_after_fanout(p):
-    """SKILL.md :993 / :1137 -- exactly one `place_fanout_clearance.py`, and
-    it runs after every fanout step."""
+    """SKILL.md Step 1c -- a plan that fans out a BGA runs exactly one
+    `place_fanout_clearance.py`, and it runs after every fanout step.
+
+    The pass moves only 2-pad parts near a BGA's ball field
+    (`fanout_clearance` builds its movers from `find_components_by_type(pcb,
+    'BGA')`, `is_near_bga_cap`), so it is asked for by a `bga_fanout.py` step,
+    or by a `qfn_fanout.py` step on a board that has a BGA (needs `--board`;
+    without one that case is NOTED). On a board with no BGA it has nothing
+    to move (#1710). A cap pass the plan runs anyway is still held to once,
+    after every fanout: the pass is board-global and reads every via."""
     order = [tool_of(a) for a in p.argvs]
     caps = [i for i, t in enumerate(order) if t == 'place_fanout_clearance.py']
     fans = [i for i, t in enumerate(order)
@@ -443,7 +451,23 @@ def r_one_cap_pass_after_fanout(p):
         return [f'{len(caps)} place_fanout_clearance.py steps; the cap pass '
                 f'runs ONCE, after all fanouts']
     if not caps:
-        return ['the plan fans out but never runs place_fanout_clearance.py']
+        if 'bga_fanout.py' in order:
+            return ['the plan fans out a BGA (bga_fanout.py) but never runs '
+                    'place_fanout_clearance.py']
+        if p.board is None:
+            p.note('the plan fans out with qfn_fanout.py only and runs no '
+                   'place_fanout_clearance.py, which moves only parts near a '
+                   'BGA: pass --board to check whether this board has one')
+            return []
+        from kicad_parser import find_components_by_type
+        bgas = sorted(fp.reference for fp in
+                      find_components_by_type(p.board, 'BGA'))
+        if bgas:
+            return [f'the plan fans out but never runs '
+                    f'place_fanout_clearance.py, and the board has a BGA '
+                    f'({", ".join(bgas[:4])}{" ..." if len(bgas) > 4 else ""}) '
+                    f'whose nearby parts it moves off fanout vias']
+        return []
     if caps[0] < max(fans):
         return ['place_fanout_clearance.py runs before a later fanout step; '
                 'it must come after all of them']
