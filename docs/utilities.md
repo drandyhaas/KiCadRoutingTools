@@ -1494,6 +1494,12 @@ connector's own frame:
 - each model it names that does not resolve;
 - what its resolved models raise over the board, with that model's
   underside -- one card type's, to weigh against the datasheets;
+- the air gaps inside its own models, where a model has solid both under and
+  over a gap (a socket's card slot, a side-entry housing's mouth): each gap's
+  floor and ceiling above the board, area and extent, the largest three
+  groups (floor and ceiling to 0.1 mm). A vertical ray at each 0.25 mm cell
+  crosses the model's surfaces: one facing up ends solid, one facing down
+  starts it. The model's geometry, not a datasheet's;
 - the standoffs and mounting holes (a hole 2 mm or wider, at most one
   numbered pad) within 15 mm of one of its four axes, each with its distance
   along the axis and its offset to the axis's left;

@@ -160,8 +160,12 @@ DEPTH_READ_MM = 0.005
 _THICKNESS_MM = 1.6
 #: kicad-cli's export, a hang guard (a 500-part board takes under a minute)
 EXPORT_TIMEOUT_S = 600
+#: #1720: an air gap inside a model, between a surface facing up (solid
+#: below) and the next one facing down (solid above), is read from this tall:
+#: under it is a seam between two drawn solids, not room, mm
+GAP_MIN_MM = 0.1
 #: bump to invalidate every cached measurement
-_CACHE_VERSION = 7
+_CACHE_VERSION = 8
 
 #: IPC-7351 land-pattern names end their body dimensions with the height in
 #: 1/100 mm: CAPC1005X55N, QFN50P400X400X80-25N, SOIC127P600X175-8N,
@@ -1154,10 +1158,13 @@ def _ipc_tops(pcb_data, have, names):
 def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
     """Export the staged board's parts and measure them: {'top': {ref: mm},
     'covers': {ref: [x0, y0, nx, ny, hex of uint16 centi-mm]}, 'bodies': (the
-    same, each cell's highest point), 'depth': {ref: [x0, y0, nx, ny, hex of
-    uint8 0/1, hex of each such cell's 4 uint8 sides]}, the cells where the
-    part's body is at the depth of a board `thickness` mm thick and where in
-    each it is (`_depth_raster`), 'frame_fits'}, None when the
+    same, each cell's highest point), 'gaps': {ref: [x0, y0, nx, ny, hex of
+    the lowest air gap's floor, hex of its ceiling]} where the part's model
+    has solid both under and over a gap (`_gap_raster`, #1720), 'depth': {ref:
+    [x0, y0, nx, ny, hex of uint8 0/1, hex of each such cell's 4 uint8
+    sides]}, the cells where the part's body is at the depth of a board
+    `thickness` mm thick and where in each it is (`_depth_raster`),
+    'frame_fits'}, None when the
     export failed, or the reason when it timed out (never cached, so the next
     run measures again)."""
     import numpy as np
@@ -1191,7 +1198,8 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
                         float(m.group(3)) if m.group(3) else 0.0)
     tris, norms, roots = _glb_parts(data, set(pcb_data.footprints or {}) & set(poses))
     if not roots:
-        return {'top': {}, 'covers': {}, 'depth': {}, 'frame_fits': 0}
+        return {'top': {}, 'covers': {}, 'depth': {}, 'gaps': {},
+                'frame_fits': 0}
     fps = pcb_data.footprints
     refs = sorted(roots)
     T = np.array([roots[r][:3, 3] for r in refs])
@@ -1222,7 +1230,7 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
     if faces is None:
         return None
     outward, top_face, bot_face = faces
-    out_top, out_cov, out_body, out_depth = {}, {}, {}, {}
+    out_top, out_cov, out_body, out_depth, out_gap = {}, {}, {}, {}, {}
     for r in refs:
         t = tris.get(r)
         if t is None:
@@ -1249,6 +1257,9 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
             continue          # a model that is not over its pads says nothing
         out_top[r] = round(float(q[:, :, 2].max()), 3)
         out_body[r] = _raster(q, high=True)
+        gap = _gap_raster(q, nh)
+        if gap is not None:
+            out_gap[r] = gap
         dep = _depth_raster(low, thickness)
         if dep is not None:
             out_depth[r] = dep
@@ -1263,7 +1274,7 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
     # 1x04 header read 1.27 mm tall) says nothing about what is below the
     # face (#1603)
     return {'top': out_top, 'covers': out_cov, 'bodies': out_body,
-            'depth': out_depth, 'frame_fits': int(fits)}
+            'gaps': out_gap, 'depth': out_depth, 'frame_fits': int(fits)}
 
 
 def _faces(refs, side, tris, roots, up, u, thickness):
@@ -1349,6 +1360,87 @@ def _raster(q, high=False):
         return None
     cm = np.where(fin, np.minimum(np.round(lo * 100), 65534), 65535).astype('<u2')
     return [round(x0, 4), round(y0, 4), nx, ny, cm.tobytes().hex()]
+
+
+def _gap_raster(q, nh):
+    """#1720: the lowest AIR GAP inside a part's model over each cell -- a
+    socket's card slot, a side-entry housing's mouth -- as [x0, y0, nx, ny,
+    hex of its floor, hex of its ceiling] (uint16 centi-mm above the part's
+    face, 65535 where the cell has none), or None when no cell has one.
+
+    `_raster` keeps one value per cell, the lowest point (or the highest), so
+    a cavity between plastic below and plastic above is in neither. This
+    casts a vertical ray at each cell's centre through the model's surfaces
+    (`q`, local frame, and `nh`, each triangle's normal away from the face):
+    going up, a surface facing up ends solid and one facing down starts it,
+    so a facing-up surface followed by a facing-down one `GAP_MIN_MM` or more
+    above it bounds air with solid under and over it. A surface standing on
+    edge (|nh| under `_UP_FACING`) is a wall, which a vertical ray does not
+    cross. The model's geometry, not a datasheet's: what a socket's drawing
+    calls its card seat is the author's to weigh against it."""
+    import numpy as np
+    if not len(q):
+        return None
+    facing = np.where(nh > _UP_FACING, 1.0, np.where(nh < -_UP_FACING, -1.0, 0.0))
+    keep = facing != 0
+    if not keep.any():
+        return None
+    t = np.concatenate([q[keep], np.repeat(facing[keep][:, None, None], 3, 1)], 2)
+    t = _subdivide(t)
+    x0 = math.floor(t[:, :, 0].min() / CELL_MM) * CELL_MM
+    y0 = math.floor(t[:, :, 1].min() / CELL_MM) * CELL_MM
+    nx = int(math.ceil((t[:, :, 0].max() - x0) / CELL_MM)) + 1
+    ny = int(math.ceil((t[:, :, 1].max() - y0) / CELL_MM)) + 1
+    ax, ay = t[:, 0, 0], t[:, 0, 1]
+    bx, by = t[:, 1, 0], t[:, 1, 1]
+    cx, cy = t[:, 2, 0], t[:, 2, 1]
+    den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+    ok = np.abs(den) > 1e-12
+    # a subdivided triangle spans at most two cell centres each way
+    i0 = np.ceil((t[:, :, 0].min(1) - x0) / CELL_MM - 0.5).astype(int)
+    j0 = np.ceil((t[:, :, 1].min(1) - y0) / CELL_MM - 0.5).astype(int)
+    cells, zs, fs = [], [], []
+    for di in (0, 1):
+        for dj in (0, 1):
+            ii, jj = i0 + di, j0 + dj
+            px = x0 + (ii + 0.5) * CELL_MM
+            py = y0 + (jj + 0.5) * CELL_MM
+            with np.errstate(divide='ignore', invalid='ignore'):
+                w1 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den
+                w2 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den
+            w3 = 1.0 - w1 - w2
+            e = -1e-9
+            hit = ok & (w1 >= e) & (w2 >= e) & (w3 >= e) \
+                & (ii >= 0) & (ii < nx) & (jj >= 0) & (jj < ny)
+            if not hit.any():
+                continue
+            z = (w1 * t[:, 0, 2] + w2 * t[:, 1, 2] + w3 * t[:, 2, 2])[hit]
+            cells.append(ii[hit] * ny + jj[hit])
+            zs.append(z)
+            fs.append(t[hit, 0, 3])
+    if not cells:
+        return None
+    cell, z, f = np.concatenate(cells), np.concatenate(zs), np.concatenate(fs)
+    o = np.lexsort((z, cell))
+    cell, z, f = cell[o], z[o], f[o]
+    # a facing-up crossing, then a facing-down one above it in the same cell
+    g = (cell[:-1] == cell[1:]) & (f[:-1] > 0) & (f[1:] < 0) \
+        & (z[1:] - z[:-1] >= GAP_MIN_MM) & (z[:-1] > _ABOVE_MM)
+    if not g.any():
+        return None
+    k = np.nonzero(g)[0]
+    lo = np.full(nx * ny, np.inf)
+    hi = np.full(nx * ny, np.inf)
+    # the LOWEST gap per cell: crossings are sorted, so the first one wins
+    first = np.unique(cell[k], return_index=True)[1]
+    sel = k[first]
+    lo[cell[sel]] = z[sel]
+    hi[cell[sel]] = z[sel + 1]
+
+    def enc(a):
+        return np.where(np.isfinite(a), np.clip(np.round(a * 100), 0, 65534),
+                        65535).astype('<u2').reshape(nx, ny).tobytes().hex()
+    return [round(x0, 4), round(y0, 4), nx, ny, enc(lo), enc(hi)]
 
 
 def _depth_raster(q, thickness):

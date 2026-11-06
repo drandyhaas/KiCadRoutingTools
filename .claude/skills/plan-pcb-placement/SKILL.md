@@ -649,7 +649,9 @@ under a card, and a tall part can be placed there.
    Without `--refs` it lists every connector of ten pads or more and every
    part whose models raise a body. Per connector it prints its height, each 3D model it names that does not
    resolve, what its resolved models raise over the board (a card or module
-   model) with that model's underside, the standoffs and mounting holes on
+   model) with that model's underside, each air gap inside its own model (a
+   socket's card slot: its floor and ceiling above the board, area and
+   extent), the standoffs and mounting holes on
    its axes (distance along the axis and off it), and the parts under the
    raised extent now. Facts, not decisions. On a pile (a from-scratch
    run's `fixed.kicad_pcb`) it says so first and withholds the standoff
@@ -661,8 +663,13 @@ under a card, and a tall part can be placed there.
    hangs below the card: nothing for a single-sided card, its bottom-side
    height for a double-sided one. A measured card model draws ONE card
    type: weigh its underside against the datasheets, never take it as the
-   answer. When it cannot be established, declare the conservative value
-   (the lowest card the socket takes) and say so in the hand-back.
+   answer. When the socket's drawing cannot be had, its own model's gap
+   along the card's axis is the card's seat as the model draws it: its
+   floor is where the card's underside sits, less what hangs below the
+   card. It is the model's number, so declare it as that (`source`) and
+   weigh it against any datasheet you do find. When it cannot be
+   established, declare the conservative value (the lowest card the socket
+   takes) and say so in the hand-back.
 3. **Choose the standoff for each card length** the board takes (the facts
    list each with its distance), and the card's width and reach.
 4. **Write the row** into the design brief's `covers[]`

@@ -1616,8 +1616,9 @@ number is the author's and the loader fills none in: `side`, `axis_deg`,
 service (a card out of its socket for test and rework) or stays (a module
 soldered to its stacking connector, a shield fixed on). `py_tools/cover_facts.py BOARD` prints what the board does know
 (the connector's height, a card model attached to it and its measured
-underside, the standoffs on its axes with their distances, the parts under
-it now); the skill's "Covers" step says how an agent gets from those facts
+underside, the air gaps inside its own model such as a socket's card slot,
+the standoffs on its axes with their distances, the parts under it now);
+the skill's "Covers" step says how an agent gets from those facts
 and the datasheets to a row.
 
 The body is a rectangle in the connector's own frame (its footprint's local
