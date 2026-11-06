@@ -115,6 +115,9 @@ REGISTRY = {
                  '(#908 wired it into the single-ended paths only)'),
     ('py_router/route_diff.py', 'batch_route_diff_pairs'): (
         NO_LIFT, 'diff-pair base maps; see build_diff_pair_obstacles'),
+    ('py_router/route_diff.py', '_pair_map_builder'): (
+        NO_LIFT, 'the base map of a pair narrowed to fit (#1742), built as its '
+                 "geometry's diff-pair base map is; see build_diff_pair_obstacles"),
     ('py_router/bga_fanout/__init__.py', '_generate_bga_fanout_core'): (
         NO_LIFT, 'BGA fanout escapes; built for every fanned net at once, so '
                  'the old bake never fired here either'),

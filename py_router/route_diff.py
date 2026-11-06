@@ -1857,6 +1857,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     pair_diff_geom = {}                       # {p_net_id: (width, gap)}; EMPTY when
                                               # geometry is explicit (loop stays inert)
     diff_pair_base_obstacles_by_geom = {}     # {(width, gap): obstacle_map}
+    _pair_map_builder = None                  # #1742, set below
     if diff_pair_ids_to_route:
         _global_geom = (round(config.track_width, 4), round(config.diff_pair_gap, 4))
         diff_pair_base_obstacles_by_geom[_global_geom] = diff_pair_base_obstacles
@@ -1929,25 +1930,40 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # (global map when geometry is explicit -- pair_diff_geom empty)
         # (vias span all layers, so connector regions must be blocked before routing).
         print(f"Blocking connector regions for {len(diff_pair_ids_to_route)} diff pair(s)...")
-        for pair_name, pair in diff_pair_ids_to_route:
-            geom = pair_diff_geom.get(pair.p_net_id, _global_geom)
-            _dp_map = diff_pair_base_obstacles_by_geom[geom]
-            _pcfg = config if geom == _global_geom else replace(
-                config, track_width=geom[0], diff_pair_gap=geom[1])
-            connector_info = get_diff_pair_connector_regions(pcb_data, pair, _pcfg)
-            if connector_info:
-                for end in ('src', 'tgt'):
-                    dir_x, dir_y = connector_info[f'{end}_dir']
-                    # Synthesized (bare-pad) directions may be flipped by the
-                    # router, so block the connector region on both sides
-                    signs = (1, -1) if connector_info[f'{end}_dir_synthesized'] else (1,)
-                    for sign in signs:
-                        add_connector_region_via_blocking(
-                            _dp_map,
-                            connector_info[f'{end}_center'][0], connector_info[f'{end}_center'][1],
-                            dir_x * sign, dir_y * sign,
-                            connector_info[f'{end}_setback'], connector_info['spacing_mm'], _pcfg
-                        )
+
+        def _block_connector_regions(only_geom=None, dp_map=None):
+            for pair_name, pair in diff_pair_ids_to_route:
+                geom = pair_diff_geom.get(pair.p_net_id, _global_geom)
+                if only_geom is not None and geom != only_geom:
+                    continue
+                _dp_map = dp_map if dp_map is not None else diff_pair_base_obstacles_by_geom[geom]
+                _pcfg = config if geom == _global_geom else replace(
+                    config, track_width=geom[0], diff_pair_gap=geom[1])
+                connector_info = get_diff_pair_connector_regions(pcb_data, pair, _pcfg)
+                if connector_info:
+                    for end in ('src', 'tgt'):
+                        dir_x, dir_y = connector_info[f'{end}_dir']
+                        # Synthesized (bare-pad) directions may be flipped by the
+                        # router, so block the connector region on both sides
+                        signs = (1, -1) if connector_info[f'{end}_dir_synthesized'] else (1,)
+                        for sign in signs:
+                            add_connector_region_via_blocking(
+                                _dp_map,
+                                connector_info[f'{end}_center'][0], connector_info[f'{end}_center'][1],
+                                dir_x * sign, dir_y * sign,
+                                connector_info[f'{end}_setback'], connector_info['spacing_mm'], _pcfg
+                            )
+        _block_connector_regions()
+
+        def _pair_map_builder(narrow_config, geom):
+            """#1742: the base centreline map of a pair narrowed to fit, built
+            as its geometry's map is -- stamped at the narrowed widths, with
+            the same connector regions blocked."""
+            dp_map = build_base_obstacle_map(
+                pcb_data, narrow_config, all_net_ids_to_route,
+                _cec1729(narrow_config), net_clearances=net_clearances)
+            _block_connector_regions(only_geom=geom, dp_map=dp_map)
+            return dp_map
 
     # Get ALL unrouted nets in the PCB for stub proximity costs
     all_unrouted_net_ids = sorted(set(get_all_unrouted_net_ids(pcb_data)))
@@ -2036,6 +2052,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # reads them via getattr and is inert when unset.
     state.pair_diff_geom = pair_diff_geom
     state.diff_pair_base_obstacles_by_geom = diff_pair_base_obstacles_by_geom
+    state.pair_map_builder = _pair_map_builder
+    state.global_pair_geom = (round(config.track_width, 4), round(config.diff_pair_gap, 4))
 
     # Create local aliases for frequently-used state fields
     routed_net_ids = state.routed_net_ids
@@ -2212,6 +2230,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Engine-side, so the GUI diff tab inherits it.
     se_fallback_summary = run_single_ended_member_fallback(
         state, diff_pair_ids_to_route, all_net_ids_to_route, net_clearances)
+    # #1742: a pair the fallback routed single-ended because no coupled
+    # route fit at its layer widths is tried coupled once more, narrowed to
+    # fit, in place of its own fallback copper (put back if none is found)
+    from diff_pair_loop import couple_fallback_pairs_narrowed
+    successful += couple_fallback_pairs_narrowed(state, diff_pair_ids_to_route,
+                                                 se_fallback_summary)
 
     # Apply length matching if configured
     _length_match_report = {}
@@ -2750,7 +2774,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         disclose_coupled_pair_widths(
             pcb_data, config, diff_pair_ids_to_route,
             se_fallback_summary.get('attempted'), _input_seg_keys1679,
-            pair_geom=getattr(state, 'pair_diff_geom', None))
+            pair_geom=getattr(state, 'pair_diff_geom', None),
+            narrowed=getattr(state, 'narrowed_pairs', None))
     except Exception as _cpe:                                   # noqa: BLE001
         print(f"  (coupled pair width disclosure skipped: {_cpe})")
     # #857: what this run delivered below a requested size (route.py's

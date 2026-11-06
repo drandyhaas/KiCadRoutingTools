@@ -444,6 +444,13 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
         if any(rr.get('hybrid_escape') for rr in (_rr_p, _rr_n) if rr):
             rep['coupled_terminals'] = False
             rep['escape'] = 'hybrid'
+        # #1742: a pair that fit only narrowed -- both members at this width
+        # where the full width does not fit (the shipped-width rows say
+        # where and how long)
+        _nar = next((rr.get('pair_narrowed_to') for rr in (_rr_p, _rr_n)
+                     if rr and rr.get('pair_narrowed_to')), None)
+        if _nar is not None and outcome != 'deferred':
+            rep['narrowed_to_mm'] = _nar
         if diag.get('blocking_nets'):
             rep['blocking_nets'] = diag['blocking_nets']
         if diag.get('casualty'):
@@ -641,6 +648,8 @@ def run_single_ended_member_fallback(state, diff_pairs_list, nets_to_route,
 
 MEMBER_FALLBACK_WIDTH_SITE = 'pair member fallback copper shipped under width'
 COUPLED_PAIR_WIDTH_SITE = 'coupled pair copper shipped under width'
+#: #1742: a pair that fit only narrowed, both members together
+NARROWED_PAIR_WIDTH_SITE = 'coupled pair narrowed to fit, both members'
 
 #: A segment within this of the width the pair router draws its connectors
 #: at is that connector, delivered at its own request (#1725).
@@ -720,7 +729,7 @@ def disclose_member_fallback_widths(pcb_data, config, member_names,
 
 
 def disclose_coupled_pair_widths(pcb_data, config, pairs, fallback_names,
-                                 input_keys, pair_geom=None) -> Dict:
+                                 input_keys, pair_geom=None, narrowed=None) -> Dict:
     """:func:`disclose_pair_widths` for the pairs routed coupled (#1725).
 
     The pair router records its narrowings per routing ATTEMPT: a `terminal
@@ -740,20 +749,38 @@ def disclose_coupled_pair_widths(pcb_data, config, pairs, fallback_names,
     nothing. KiCad grades a track only against the board's minimum track
     width and `.kicad_dru` track_width rules (a net class width is the
     router's default, not a DRC limit), so a row here is disclosure of a
-    request not met, not a DRC flag."""
+    request not met, not a DRC flag.
+
+    `narrowed` ({p_net_id: width}, #1742) names the pairs that fit only
+    narrowed to that width, both members together: their members' rows
+    carry their own site (`NARROWED_PAIR_WIDTH_SITE`), so a deliberate
+    matched narrowing reads apart from a neck. Their connectors are drawn at
+    the narrowed width where it is below the pair's track width, so that
+    copper is graded too."""
     from dataclasses import replace
     fallback_names = set(fallback_names or ())
     pair_geom = pair_geom or {}
-    members = {}
+    narrowed = narrowed or {}
+    members, narrowed_members = {}, {}
     for _name, pair in pairs or ():
         geom = pair_geom.get(pair.p_net_id)
         pcfg = config if geom is None else replace(config, track_width=geom[0])
+        nar = narrowed.get(pair.p_net_id)
         for nid, nm in ((pair.p_net_id, pair.p_net_name),
                         (pair.n_net_id, pair.n_net_name)):
-            if nm not in fallback_names:
+            if nm in fallback_names:
+                continue
+            if nar is None:
                 members[nid] = (pcfg.get_track_width, pcfg.track_width)
-    return disclose_pair_widths(pcb_data, members, input_keys,
-                                COUPLED_PAIR_WIDTH_SITE)
+            else:
+                narrowed_members[nid] = (
+                    pcfg.get_track_width,
+                    pcfg.track_width if nar > pcfg.track_width + DRAWN_WIDTH_TOL else None)
+    short = disclose_pair_widths(pcb_data, members, input_keys,
+                                 COUPLED_PAIR_WIDTH_SITE)
+    short.update(disclose_pair_widths(pcb_data, narrowed_members, input_keys,
+                                      NARROWED_PAIR_WIDTH_SITE))
+    return short
 
 
 # --------------------------------------------------------------------------

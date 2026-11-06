@@ -237,6 +237,35 @@ Each such pair is listed in `single_ended_diff_pairs` with `pair_reports[]`
 own failure code. The end-of-run `Single-ended:` line and the GUI's completion
 dialog count the deferred pairs by that reason.
 
+**Narrowed to fit (#1742).** On a run with per-layer widths (`--impedance`, or a
+stored impedance declaration), a 2-terminal pair whose coupled route failed and
+whose members the single-ended member fallback then routed is tried once more,
+coupled at a narrower width, before the run ships it single-ended. Its fallback
+copper is lifted for the try and put back if no narrowed route is found, and every
+other net of the run is already on the board, so the try can only replace this
+pair's own single-ended members: it takes room from no other net, and the pair is
+connected either way. Both members are narrowed together -- one width, on a
+centreline map built for it -- from one grid step under the widest layer width down
+to the fab floor (the escalation ladder's floor, raised to a member's own rule),
+widest first; the first width that routes is kept. Then every centreline edge where
+the full-width pair fits goes back to the layer width: the full pair's centreline is
+free there on the full-width map and both full-width members clear every foreign pad,
+via and track. Where a full edge meets a narrow one each member steps across at the
+narrow width, so P and N change width at the same point. The edges beside a via stay
+narrow (the narrowed pitch places the vias). Where a graze neck narrows one member, the
+partner beside it is drawn at that width too, and a width at which the two members
+still do not change width in the same order along their path is skipped for the next
+narrower one, so a narrowed pair ships matched. The declared gap is kept, so a narrowed
+stretch runs above the target impedance (a 100 ohm pair on a 0.41 mm microstrip is
+about 112 ohm at 0.31 mm and 120 ohm at 0.26 mm). The pair is reported coupled, with
+`narrowed_to_mm` in its `pair_reports[]` record, and each member's narrowed copper is
+a `coupled pair narrowed to fit, both members` row in `design_rules` (measured on the
+shipped copper, as the #1725 rows are), which `--strict-sizes` counts. A pair left
+single-ended because it is electrically short, a multi-point pair and a pair with a
+member the input already connects are not tried; a run without per-layer widths never
+narrows a pair. A narrowed pair takes no centreline meanders in length matching
+(regenerating its members from the centreline would lay it back at full width).
+
 **Why the 3 mm absolute floor.** The geometric term alone (`5 × setback =
 10 × (width+gap)` in the auto case) drops to only ~2 mm at tight pitch, which
 is *below* the length at which coupling matters electrically. Below ~λ/10 at

@@ -3569,6 +3569,14 @@ def apply_meanders_to_diff_pair(
     """
     from routing_config import GridCoord
 
+    # #1742: a pair narrowed to fit is narrow only where the full width does
+    # not fit; regenerating P/N from the centreline here would lay it back at
+    # full width everywhere
+    if result.get('pair_narrowed_to'):
+        print(f"    Warning: diff pair narrowed to fit "
+              f"({result['pair_narrowed_to']:.4f}mm) - no centreline meanders")
+        return result, 0
+
     # Extract data from result
     centerline_grid = result.get('centerline_path_grid')
     if not centerline_grid or len(centerline_grid) < 2:
