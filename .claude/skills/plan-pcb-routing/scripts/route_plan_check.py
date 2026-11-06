@@ -9,6 +9,8 @@
 Exit: 0 checked and clean, 1 crash, 2 usage, 3 the plan could not be read,
 4 a rule failed. Deliberately the fail-closed dialect `board_score.py` uses --
 1 is a CRASH, never a finding, so a traceback can never read as a verdict.
+A NOTE under a rule is a step it could not decide without `--board` (#1709):
+printed, never a failure.
 
 TWO FORMATS, ONE SET OF RULES (#1592)
 -------------------------------------

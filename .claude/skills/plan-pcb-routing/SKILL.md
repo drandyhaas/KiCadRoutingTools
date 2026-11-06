@@ -3931,7 +3931,10 @@ last fanout.
 Exit **0** checked and clean — proceed. **1** the checker itself crashed:
 nothing was proved, so fix the crash and do NOT run the plan. **2** usage.
 **3** the plan could not be read. **4** a rule failed. A refusal is not a
-malfunction: fix the plan, do not run it.
+malfunction: fix the plan, do not run it. A `NOTE` under a rule is a step the
+rule could not decide without `--board` (a size the step would read from the
+board's Default net class, say): it fails nothing, and passing `--board`
+decides it.
 
 It also PRINTS what it cannot decide, with the tool that owns each — nine
 rules need a routed board or a finished run, and an unchecked rule that says
