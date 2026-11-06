@@ -107,7 +107,12 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   and read `emc_roles.roles`: each converter, crystal, oscillator and ESD
   array its pin functions name, each discrete ESD/TVS diode at the one
   connector its line reaches (`esd diode`), every leg measured pad edge to
-  pad edge, and a ready `proximity` row with `max_mm` left null. Ask the
+  pad edge, and a ready `proximity` row with `max_mm` left null. A `role:
+  unknown` record is a part that looks like one of these whose pins cannot
+  say which pin is which (its `candidate` and `why`: a pin-less converter,
+  an ESD array read off its nets with its `connector` and
+  `candidate_lines`): it proposes no row, so read its datasheet, and when
+  it is one write its row by hand and put it with the others. Ask the
   user for the limits (crystal to its load pins, input cap to the
   regulator's VIN and PGND, inductor to SW, ESD array or diode to its
   connector, and each row of the schematic's layout notes, §3.3), put each

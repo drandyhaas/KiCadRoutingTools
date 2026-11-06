@@ -898,7 +898,13 @@ python3 -X utf8 py_tools/board_context.py board.kicad_pcb --json -o context.json
 
 The JSON adds `emc_roles`: each converter, crystal, oscillator and ESD array
 its pin functions name, every leg measured pad edge to pad edge, a ready
-`proximity` row with `max_mm` left null for the user to fill, and
+`proximity` row with `max_mm` left null for the user to fill, a `role:
+unknown` record with a `candidate` and a `why` for a part that looks like one
+but whose pins cannot say which pin is which (a pin-less converter or
+crystal, or an ESD array read off its nets: a pad on ground, its lines on
+one receptacle, its other pads supplies or the lines' flow-through side;
+such a record proposes no row, and a small chip on a bus that receptacle
+carries can look the same, so its datasheet decides), and
 `emc_roles.keep_away`, a proposed keep-away rule per clock with a `brief_row`
 to paste into the design brief. Every derived fact carries its source, and
 "unknown" is printed apart from "not looked at". `--panels DIR` writes one

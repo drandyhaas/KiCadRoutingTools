@@ -1,7 +1,8 @@
 """EMC roles (#1254): which parts form a converter's hot loop, a crystal's load
 loop or an ESD path (an array by its I/O pins, a discrete TVS diode by the
-role table and its nets, #1344), and how far apart their pads are. REPORT
-ONLY.
+role table and its nets, #1344, and an array its pins cannot name as an
+`unknown` candidate read off its nets, #1718), and how far apart their pads
+are. REPORT ONLY.
 
 `proximity[]` (#902) can grade "Cin within 1 mm of VIN/PGND", "L within 1 mm
 of SW", "the crystal within 2 mm of XIN/XOUT", "the ESD array within 1 mm of
@@ -61,6 +62,9 @@ _IO_FN = re.compile(r'^(I/?O|CH)\d+$')
 #: no-connect. A part with any OTHER named pin (an ADC's CLK / DIN / CS
 #: beside its CH0..CH7) is not an ESD array.
 _ESD_OTHER_FN = re.compile(r'^(V?BUS|VCC|VDD|VP|[ADP]?GND\d*|N/?C)$')
+#: The role-table roles (`roles.infer_role`) a part `_esd_candidates` reads
+#: off its nets may have: an array is a chip or, by its reference, a diode.
+_ESD_CANDIDATE_ROLES = ('integrated circuit', 'diode')
 #: An active oscillator's clock output.
 _OSC_OUT_FN = re.compile(r'^(OUT|OUTPUT|CLK\w*)$')
 
@@ -548,6 +552,121 @@ def _esd_arrays(b: _Board, out: List[Dict]) -> None:
                 'proximity': [_row(e, j, subj, part, legs)]})
 
 
+def _esd_candidates(b: _Board, out: List[Dict]) -> None:
+    """A part that LOOKS like an ESD array but whose pins `_esd_arrays`
+    cannot read as one (#1718): no pin functions at all, or lines named
+    after the signals they clamp (`D+`, `RX1-`) rather than I/O<n> / CH<n>.
+    Such a part was no role and no `unknown` either, so nothing proposed
+    its row and nothing said one was missed.
+
+    Read off the NETS, as the pin-less converter arm is. A part a loop
+    forms at (`_Board.big`) that the role table reads as a chip or a diode
+    (`_ESD_CANDIDATE_ROLES`: a potentiometer or a solder jumper from a rail
+    to ground through a connector's line has the same nets), not a
+    connector and not already a role, with a pad on ground, whose every
+    other pad that reaches another part is on
+      * a SUPPLY: a net a decoupling cap ties to ground, or a rail-shaped
+        name;
+      * a LINE: a net that is no supply and that a connector carries, one
+        connector (not a pin header) carrying every line -- a cable or a
+        hand meets a receptacle, while a header can break out every net of
+        a logic chip;
+      * or a PASS-THROUGH: a net no connector carries, the far side of a
+        flow-through line (an array whose two pads per line the layout
+        routes connector-side in and circuit-side out). There are never
+        more of them than lines, and on a part whose pins are named each
+        carries the name of a line pad (`D+` on both pads of its line, as
+        KiCad numbers a pin it repeats), which a chip's own signal pin
+        (an MCU's GPIO, a sensor's interrupt) does not.
+    One `unknown` record per such connector, naming its lines and their
+    pads, with no row: which pin is a protected line is read off the
+    datasheet, never guessed. It is a CANDIDATE: a small chip on a bus a
+    connector carries (a one-wire sensor, an I2C buffer) has the same nets,
+    and only its datasheet tells the two apart."""
+    from .arrays import _rail_by_name
+    taken = {r['part'] for r in out}
+    for e in sorted(b.fps, key=_nkey):
+        if (e in taken or not b.big(e) or b.connector(e)
+                or b.role[e]['role'] not in _ESD_CANDIDATE_ROLES):
+            continue
+        pads = b.copper[e]
+        gnd = [p for p in pads if b.ground(p.net_id)]
+        if not gnd:
+            continue
+        lines, inner, rails = [], [], []
+        for p in pads:
+            if p.net_id <= 0 or b.ground(p.net_id):
+                continue
+            others = b.net_parts.get(p.net_id, set()) - {e}
+            if not others:
+                continue                       # a no-connect
+            if b.decoupled(p.net_id) or _rail_by_name(b.net(p.net_id)):
+                rails.append(p)
+                continue
+            conns = {r for r in others if b.connector(r)
+                     and b.role[r]['role'] != 'pin header'}
+            (lines if conns else inner).append((p, conns))
+        if not lines:
+            continue
+        common = set.intersection(*(c for _p, c in lines))
+        if not common:
+            continue
+        line_nets = {p.net_id for p, _c in lines}
+        if len({p.net_id for p, _c in inner}) > len(line_nets):
+            continue
+        if b.has_functions(e):
+            line_names = {pin_function_name(p) for p, _c in lines} - {''}
+            if any(pin_function_name(p) not in line_names
+                   for p, _c in inner):
+                continue
+            names = sorted({pin_function_name(p) for p in pads} - {''})
+            read = (f"its pins are named {', '.join(names)}, and the array "
+                    f"reading takes a protected line only as I/O<n> or CH<n> "
+                    f"beside a rail, ground or no-connect pin")
+        else:
+            read = f"no pad of {e} carries a pin function"
+        for j in sorted(common, key=_nkey):
+            rows: List[Dict] = []
+            for p, _c in sorted(lines + inner,
+                                key=lambda t: _nkey(t[0].pad_number)):
+                net = b.net(p.net_id)
+                row = next((r for r in rows if r['net'] == net), None)
+                if row is None:
+                    row = {'net': net, 'pads': [],
+                           'at_connector': p.net_id in line_nets,
+                           'connector_pads': sorted(
+                               (str(q.pad_number) for q in b.copper[j]
+                                if q.net_id == p.net_id), key=_nkey)}
+                    rows.append(row)
+                row['pads'].append(str(p.pad_number))
+            at = [r['net'] for r in rows if r['at_connector']]
+            ev = [f"{e} pad {gnd[0].pad_number} is on "
+                  f"{b.net(gnd[0].net_id)} (ground)",
+                  f"{j} is a connector carrying {', '.join(at)}, which "
+                  f"{e} shares"]
+            if inner:
+                ev.append(f"{e}'s other signal pads are on "
+                          + ', '.join(r['net'] for r in rows
+                                      if not r['at_connector'])
+                          + ", no more nets than its lines, read as their "
+                            "pass-through side")
+            if rails:
+                ev.append(f"{e}'s other pads are on supplies: "
+                          + ', '.join(sorted({b.net(p.net_id)
+                                              for p in rails})))
+            out.append({
+                'role': 'unknown', 'candidate': 'esd array',
+                'part': e, 'value': b.value(e), 'connector': j,
+                'candidate_lines': rows, 'evidence': ev,
+                'why': (f"{read}, so which pins are its protected lines is "
+                        f"not read -- pin numbers are never guessed. Its "
+                        f"nets look like an ESD array's at {j} (a small "
+                        f"chip on a bus {j} carries can look the same): "
+                        f"read its pins off the datasheet and, if it is "
+                        f"one, declare the row by hand ({', '.join(at)})"),
+                'proximity': []})
+
+
 def _esd_diodes(b: _Board, out: List[Dict]) -> None:
     """A DISCRETE ESD / TVS diode (#1344): `_esd_arrays` reads an array by
     its I/O pin functions, and a two-terminal diode has none (its pins are
@@ -829,6 +948,7 @@ def emc_roles(pcb_data) -> Dict[str, object]:
     _crystals(b, roles)
     _esd_arrays(b, roles)
     _esd_diodes(b, roles)
+    _esd_candidates(b, roles)
     counts: Dict[str, int] = {}
     for r in roles:
         counts[r['role']] = counts.get(r['role'], 0) + 1
