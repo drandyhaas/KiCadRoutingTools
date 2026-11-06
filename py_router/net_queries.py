@@ -1385,9 +1385,16 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
     net (close_soft_joints): joined for free, a pair matched here to
     0.0006 mm shipped 0.76 mm of KiCad skew.
 
+    A loop the 2-pad walk leaves out is charged when it meets the path at
+    ONE node and runs along a segment the path uses (#1704,
+    `_loops_off_one_node`): a track that runs past a corner and comes back
+    along itself, which the cleanup cannot take out and KiCad charges. Left
+    out, a pair KiCad read 2 mm apart read matched.
+
     What it still does not read is copper the cleanup will remove: a branch
-    or loop the walk leaves out is not in it, which on copper that already
-    shipped (no cleanup to come) KiCad does charge."""
+    or a second way between two points the walk leaves out is not in it,
+    which on copper that already shipped (no cleanup to come) KiCad does
+    charge -- so shipped copper is measured with `net_match_length`."""
     pads = _copper_pads(pcb_data, net_id)
     if len(pads) < 2 or not net_pads_joined(pcb_data, net_id, pads, tolerance):
         return None
@@ -1399,7 +1406,9 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
     adjacency, pad_nodes = graph
     infos = detail['edges']
     if len(pads) == 2:
-        picked = _pad_pair_walk(adjacency, infos, pad_nodes, pads[0], pads[1])
+        walk_nodes: List[int] = []
+        picked = _pad_pair_walk(adjacency, infos, pad_nodes, pads[0], pads[1],
+                                nodes=walk_nodes)
         if picked is None:
             return None
         # the track pieces lying inside either pad (both ends joined to its
@@ -1410,6 +1419,7 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
             if any(u in j and v in j for j in joined):
                 picked.extend(info for _w, info in lst
                               if info and info[0] == 'track')
+        picked.extend(_loops_off_one_node(infos, pad_nodes, walk_nodes, picked))
         return _selected_copper_mm(pcb_data, net_id, picked, detail) + die
     keep = {n for hubs in pad_nodes.values() for n in hubs}
     edges = [(u, v, info) for (u, v), lst in infos.items() for _w, info in lst]
@@ -1437,9 +1447,91 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
     return _selected_copper_mm(pcb_data, net_id, picked, detail) + die
 
 
-def _pad_pair_walk(adjacency, infos, pad_nodes, pad_a, pad_b):
+def _loops_off_one_node(infos, pad_nodes, walk_nodes, picked):
+    """The edge infos of copper the 2-pad walk left out that the cleanup
+    keeps (#1704): a loop meeting the pad-to-pad path at ONE node, with a
+    piece of a segment the walk uses in it.
+
+    The walk takes the shortest path, so it leaves out every loop. A loop
+    that rejoins the path at two nodes is a second way between them, which
+    the cleanup collapses to one. A loop that meets it at one node is not:
+    it is a track that runs on past a corner and comes back along itself,
+    where the return leg's far end lands on the outbound segment, which is
+    cut there. The cleanup removes copper in whole segments (and a dead
+    end's tail), so it cannot take out the overshoot of a segment the path
+    runs along, nor, since a return leg's removal would leave that
+    overshoot's end dangling, the return leg: KiCad charges both. A loop
+    made only of segments the walk does not touch (a ring hanging off the
+    path) the cycle prune and the dead-end sweep do remove, and it stays
+    out."""
+    in_walk = {id(i) for i in picked if i}
+    walk_segs = {id(i[1]) for i in picked if i and i[0] == 'track'}
+    hubs = {h for hs in pad_nodes.values() for h in hs}
+    out_edges = [(u, v, info) for (u, v), lst in infos.items() for _w, info in lst
+                 if info and id(info) not in in_walk]
+    if not out_edges:
+        return []
+    # trim the dead ends (leaves that are not pads), as the cleanup does;
+    # what is left of the walk's leftovers is loops
+    deg: Dict[int, int] = {}
+    for (u, v), lst in infos.items():
+        for _w, info in lst:
+            if info is not None:
+                deg[u] = deg.get(u, 0) + 1
+                deg[v] = deg.get(v, 0) + 1
+    incident: Dict[int, List[int]] = {}
+    for i, (u, v, _info) in enumerate(out_edges):
+        incident.setdefault(u, []).append(i)
+        incident.setdefault(v, []).append(i)
+    alive = [True] * len(out_edges)
+    todo = [n for n in incident if deg.get(n) == 1 and n not in hubs]
+    while todo:
+        node = todo.pop()
+        if deg.get(node) != 1:
+            continue
+        for i in incident.get(node, ()):
+            if alive[i]:
+                alive[i] = False
+                for end in out_edges[i][:2]:
+                    deg[end] -= 1
+                    if end != node and deg[end] == 1 and end not in hubs:
+                        todo.append(end)
+    # each loop: the left-out copper joined through nodes OFF the path, and
+    # the path nodes it meets
+    on_path = set(walk_nodes) | hubs
+    parent: Dict[int, int] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    loop = [i for i, a in enumerate(alive) if a]
+    for i in loop:
+        u, v, _info = out_edges[i]
+        if u not in on_path and v not in on_path:
+            parent[find(u)] = find(v)
+    groups: Dict[object, List[int]] = {}
+    for i in loop:
+        u, v, _info = out_edges[i]
+        off = u if u not in on_path else (v if v not in on_path else None)
+        groups.setdefault(('chord', i) if off is None else find(off), []).append(i)
+    picked_more = []
+    for ids in groups.values():
+        meets = {n for i in ids for n in out_edges[i][:2] if n in on_path}
+        if len(meets) != 1:
+            continue                    # a second way between two path nodes
+        loop_infos = [out_edges[i][2] for i in ids]
+        if any(info[0] == 'track' and id(info[1]) in walk_segs for info in loop_infos):
+            picked_more.extend(loop_infos)
+    return picked_more
+
+
+def _pad_pair_walk(adjacency, infos, pad_nodes, pad_a, pad_b, nodes=None):
     """The edge infos of the shortest walk of `_net_track_graph` from
-    `pad_a`'s hubs to `pad_b`'s, or None when the two are not joined."""
+    `pad_a`'s hubs to `pad_b`'s, or None when the two are not joined.
+    `nodes`, when given, is filled with the nodes the walk passes."""
     import heapq
     starts = pad_nodes.get(id(pad_a)) or []
     goals = set(pad_nodes.get(id(pad_b)) or [])
@@ -1468,8 +1560,12 @@ def _pad_pair_walk(adjacency, infos, pad_nodes, pad_a, pad_b):
     if end is None:
         return None
     picked = []
+    if nodes is not None:
+        nodes.append(end)
     while end in prev:
         u = prev[end]
+        if nodes is not None:
+            nodes.append(u)
         lst = infos.get((min(u, end), max(u, end))) or [(0.0, None)]
         picked.append(min(lst, key=lambda wi: wi[0])[1])
         end = u

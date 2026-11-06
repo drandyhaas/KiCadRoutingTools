@@ -3957,7 +3957,8 @@ def apply_intra_pair_length_matching(
     pcb_data: PCBData,
     p_net_id: int = None,
     n_net_id: int = None,
-    status: dict = None
+    status: dict = None,
+    shipped: bool = False,
 ) -> dict:
     """
     Apply length matching within a differential pair by adding meanders to
@@ -3977,6 +3978,11 @@ def apply_intra_pair_length_matching(
             {'status', 'reason', 'delta_mm', 'delta_before_mm'} -- the outcome
             as data, so the caller can report per pair instead of leaving the
             printed log as the only record.
+        shipped: the board's copper is the copper that ships (the post-route
+            cleanup has run, #1622's re-match), so each member is measured as
+            KiCad's skew DRC measures it (`net_match_length`, mode 'total':
+            all its copper), not with `net_signal_length`'s estimate of what
+            a cleanup still to come will leave (#1704).
 
     Returns:
         Modified result dict with adjusted segments
@@ -4059,15 +4065,24 @@ def apply_intra_pair_length_matching(
     # cleanup then changes (a graze re-bend, a collapsed loop): the pairs the
     # cleanup moves out of tolerance are matched again on the shipped copper
     # (rematch_intra_pairs_on_shipped_copper, #1622).
+    # #1704: on copper that ships there is no cleanup to come, so a member is
+    # read as KiCad reads it: all its copper. A track that ran past a corner
+    # and came back along itself read 2 mm short in the estimate, and the
+    # re-match said "already matched" on a pair KiCad graded 2 mm out.
     _board = None
     if pcb_data is not None:
-        from net_queries import net_signal_length
-        _bp = net_signal_length(pcb_data, p_net_id)
-        _bn = net_signal_length(pcb_data, n_net_id)
+        from net_queries import net_match_length, net_signal_length
+        if shipped:
+            _bp = net_match_length(pcb_data, p_net_id, 'total')
+            _bn = net_match_length(pcb_data, n_net_id, 'total')
+        else:
+            _bp = net_signal_length(pcb_data, p_net_id)
+            _bn = net_signal_length(pcb_data, n_net_id)
         if _bp is not None and _bn is not None:
             _board = (_bp, _bn)
     if _board is not None:
-        print(f"    P/N intra-pair: board copper P={_board[0]:.3f}mm, "
+        print(f"    P/N intra-pair: {'shipped' if shipped else 'board'} copper "
+              f"P={_board[0]:.3f}mm, "
               f"N={_board[1]:.3f}mm (the routing result read P={p_length:.3f}, "
               f"N={n_length:.3f})")
         # Each leg's offset is then everything the board has beyond the
@@ -4400,7 +4415,7 @@ def rematch_intra_pairs_on_shipped_copper(reports, diff_pair_ids, routed_results
         status = {}
         apply_intra_pair_length_matching(
             result, cfg, pcb_data, p_net_id=pair.p_net_id,
-            n_net_id=pair.n_net_id, status=status)
+            n_net_id=pair.n_net_id, status=status, shipped=True)
         new_segments = list(result.get('new_segments') or [])
         old_ids = {id(s) for s in old_segments}
         new_ids = {id(s) for s in new_segments}

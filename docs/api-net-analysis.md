@@ -462,7 +462,11 @@ where it enters the via and lays a protected bridge from there to the centre
 (copper the run did not lay, or an end another track shares, is bridged from
 where it ends). It agrees with `net_match_length` on copper the cleanup leaves
 as it is; it still leaves out what the cleanup will remove -- a dead-end branch
-or a loop -- which KiCad charges on a board that keeps it.
+or a second way between two points of the path -- which KiCad charges on a board
+that keeps it. A loop that meets the 2-pad path at ONE node along a segment the
+path uses (a track run past a corner and back along itself, its return leg
+ending on the outbound segment) is not such copper: the cleanup keeps it, and it
+is charged (#1704). On copper that has shipped, measure with `net_match_length`.
 
 The gap window is the caller's: `check_drc` and `board_score` pass the pair's
 binding `diff_pair_gap` (`design_rules.DesignRules`), as KiCad does;
