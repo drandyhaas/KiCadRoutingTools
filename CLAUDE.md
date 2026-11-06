@@ -862,7 +862,11 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   (`segment.graphic_ring`, #1181) is stamped by the obstacle map and graded by
   check_drc, lifted only for the shape's one own-pad net (or a declared tie
   group), and a touching track or via grants net-tie copper its net but no
-  other footprint's (KiCad gives that copper none). A PAD grants a part's
+  other footprint's (KiCad gives that copper none). A generator that does not
+  route on the map asks `check_drc.FilledCopperGate` (`filled_graphic_refusal`
+  for a few vias) rather than measuring to the strokes, and `BoardEdgeGate` for
+  the outline and cut-outs (#1677, #1682, #1683): the fanout engines, the
+  layer-switch and swap vias, the GND vias. A PAD grants a part's
   copper its net only when it is that part's own pad (#1266): a foreign pad
   over one vertex of esp_prog U2's tab used to waive its own short. #962 adds what a
   MEASUREMENT needs: `segment.drawn_width`

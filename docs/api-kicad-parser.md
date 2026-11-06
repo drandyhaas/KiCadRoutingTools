@@ -325,7 +325,11 @@ pads owns a land pattern (modelled, kept on copper), a pad-less one is a logo
 (relocated to silk by the writer, as #146 has always done, and therefore not
 modelled). The segments are the **perimeter**; a filled shape's interior is
 its `graphic_ring` (#1181), which the obstacle map stamps for every foreign net
-and check_drc grades containment in -- the same for board-level graphics. The
+and check_drc grades containment in -- the same for board-level graphics. A
+generator that lays copper without reading that map asks
+`check_drc.FilledCopperGate` (`filled_graphic_refusal` for a few vias): the
+fanout engines, the layer-switch and swap vias, the GND return and stitching
+vias (#1682, #1683). The
 off-outline grade (`check_drc.footprint_graphic_outline_census`, #962) reads
 `Segment.graphic_filled` to look inside a filled shape, and another part's
 PADS on the copper (`check_drc.footprint_graphic_pad_census`, #1266) are

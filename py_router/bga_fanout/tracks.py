@@ -89,7 +89,8 @@ def pair_self_collisions(tracks: List[Dict], pair_spacing: float) -> List[Tuple[
 
 
 def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float,
-                        bounds: Tuple[float, float, float, float] = None) -> List[Dict]:
+                        bounds: Tuple[float, float, float, float] = None,
+                        clearance: float = 0.0) -> List[Dict]:
     """The copper already on the board, as existing-track dicts for the
     collision checks: every segment, and every via as a zero-length track on
     each of `layers` it has copper on.
@@ -104,7 +105,12 @@ def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float
     check_for_previous (the "skip pads that already have fanout" option), and
     its vias never did, so a fanout on a board that already carried copper
     near the array validated its escapes against nothing but each other.
+
+    #1677: the board's Edge.Cuts rings stand here too, one zero-width track of
+    no net per edge on each of `layers`, held at the edge clearance, so a
+    channel escape across a cut-out is a collision like any other.
     """
+    from check_drc import BoardEdgeGate, laid_copper_edge_clearance
     from geometry_utils import via_copper_layers
 
     def _inside(x0, y0, x1, y1, h):
@@ -132,6 +138,16 @@ def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float
                              via.net_id, is_existing=True)
             t['spacing_extra'] = (via.size - track_width) / 2
             out.append(t)
+    edges = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
+    extra = edges.clearance - clearance - track_width / 2
+    for ring in edges.rings:
+        for (x0, y0), (x1, y1) in zip(ring, list(ring[1:]) + [ring[0]]):
+            if not _inside(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1), 0.0):
+                continue
+            for layer in layers:
+                t = create_track((x0, y0), (x1, y1), 0.0, layer, -1, is_existing=True)
+                t['spacing_extra'] = extra
+                out.append(t)
     return out
 
 

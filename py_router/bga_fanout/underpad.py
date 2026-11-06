@@ -133,6 +133,13 @@ class _Occ:
         # length per span); ny is the longest span any column can need.
         self._ones = b'\x01' * self.ny
         self._disk_memo = {}       # #864: see disk_cells
+        # Copper only SOME nets may enter (#1682): a filled graphic, and a
+        # fanned net's own graphic. `grid` cannot hold it, being net-blind and
+        # lifted by a ball's home, so it stands apart: one bytearray per layer
+        # (None until something is stamped), each cell an index into
+        # `owned_nets`, the nets that cell does not block. Index 1 blocks all.
+        self.owned = None
+        self.owned_nets = [None, frozenset()]
 
     # The lattice is a NODE lattice: cell (ix, iy) is the point
     # x0 + ix*res (see `xy`), and a coordinate is quantised by truncation.
@@ -528,6 +535,106 @@ class _Occ:
     def blocked(self, li, ix, iy):
         return self.grid[li][ix * self.ny + iy]
 
+    def _owned_tag(self, owners):
+        if owners in self.owned_nets[1:]:
+            return self.owned_nets.index(owners, 1)
+        if len(self.owned_nets) >= 255:
+            return 1
+        self.owned_nets.append(owners)
+        return len(self.owned_nets) - 1
+
+    def stamp_owned(self, li, spans, owners):
+        """Block `spans` on layer li for every net but `owners`. A cell two
+        stamps share is open only to the nets both leave it open to."""
+        if self.owned is None:
+            self.owned = [bytearray(self.nx * self.ny) for _ in range(self.nl)]
+        g = self.owned[li]
+        tag = self._owned_tag(owners)
+        ny = self.ny
+        for a, b0, b1 in spans:
+            for i in range(a * ny + b0, a * ny + b1 + 1):
+                old = g[i]
+                g[i] = tag if old in (0, tag) else self._owned_tag(
+                    self.owned_nets[old] & owners)
+
+    def owned_foreign(self, li, ix, iy, net_id=None):
+        """Does an owned stamp block net_id here? (None: a net not known, so
+        an owner's stamp blocks it too.)"""
+        if self.owned is None:
+            return False
+        t = self.owned[li][ix * self.ny + iy]
+        return bool(t) and (net_id is None or net_id not in self.owned_nets[t])
+
+    def ring_spans(self, ring):
+        """Column spans of the lattice points inside `ring`, by even-odd."""
+        n = len(ring)
+        xs = [p[0] for p in ring]
+        a0 = max(0, int(math.ceil((min(xs) - self.x0) / self.res)))
+        a1 = min(self.nx - 1, int(math.floor((max(xs) - self.x0) / self.res)))
+        spans = []
+        for a in range(a0, a1 + 1):
+            x = self.x0 + a * self.res
+            ys = []
+            for i in range(n):
+                xi, yi = ring[i]
+                xj, yj = ring[(i + 1) % n]
+                if (xi > x) != (xj > x):
+                    ys.append(yi + (x - xi) * (yj - yi) / (xj - xi))
+            ys.sort()
+            for k in range(0, len(ys) - 1, 2):
+                b0 = max(0, int(math.ceil((ys[k] - self.y0) / self.res)))
+                b1 = min(self.ny - 1, int(math.floor((ys[k + 1] - self.y0) / self.res)))
+                if b0 <= b1:
+                    spans.append((a, b0, b1))
+        return spans
+
+    def ring_keep_spans(self, ring, r):
+        """Column spans of every cell inside `ring` or within r of it."""
+        spans = self.ring_spans(ring)
+        n = len(ring)
+        for i in range(n):
+            p, q = ring[i], ring[(i + 1) % n]
+            if (max(p[0], q[0]) + r < self.x0 or min(p[0], q[0]) - r > self.x1
+                    or max(p[1], q[1]) + r < self.y0 or min(p[1], q[1]) - r > self.y1):
+                continue
+            spans.extend(self._capsule_spans(p, q, r))
+        return spans
+
+    def block_all_spans(self, spans):
+        ny = self.ny
+        ones = self._ones
+        for a, b0, b1 in spans:
+            s = a * ny
+            run = ones[:b1 - b0 + 1]
+            for li in range(self.nl):
+                self.grid[li][s + b0:s + b1 + 1] = run
+
+    def block_off_board(self, rings):
+        """Block every cell outside all of `rings` (the board's outer
+        outlines), on every layer. Free when no ring's edge reaches the window
+        and the window stands inside one."""
+        reach = False
+        for ring in rings:
+            for i in range(len(ring)):
+                p, q = ring[i], ring[(i + 1) % len(ring)]
+                if not (max(p[0], q[0]) < self.x0 or min(p[0], q[0]) > self.x1
+                        or max(p[1], q[1]) < self.y0 or min(p[1], q[1]) > self.y1):
+                    reach = True
+                    break
+            if reach:
+                break
+        from check_drc import _point_in_poly
+        if not reach and any(_point_in_poly(self.x0, self.y0, r) for r in rings):
+            return
+        import numpy as np
+        on = np.zeros(self.nx * self.ny, dtype=np.uint8)
+        for ring in rings:
+            for a, b0, b1 in self.ring_spans(ring):
+                on[a * self.ny + b0:a * self.ny + b1 + 1] = 1
+        for li in range(self.nl):
+            g = np.frombuffer(self.grid[li], dtype=np.uint8)
+            g |= (on == 0).astype(np.uint8)
+
     def mark_soft_layer(self, li, x, y, r, net_id):
         g = self.soft[li]
         ny = self.ny
@@ -568,14 +675,15 @@ class _Occ:
                 hits += 1
         return hits
 
-    def seg_clear(self, li, p, q, exempt=None):
+    def seg_clear(self, li, p, q, exempt=None, net_id=None):
         """True if the track centerline p->q is clear on layer li.
 
         Tests the centerline cells (the grid is already inflated by obstacle
         half-size + track/2 + clearance, so a clear centerline cell guarantees
         the track edge clears the obstacle edge - same contract astar relies on).
         Cells in `exempt` (a set of (ix, iy), e.g. the ball's own home keepout)
-        are ignored. Samples finely so no blocked cell between endpoints is
+        are ignored, but never an owned stamp (`owned_foreign`, read for
+        `net_id`). Samples finely so no blocked cell between endpoints is
         missed.
         """
         (x0, y0), (x1, y1) = p, q
@@ -585,6 +693,8 @@ class _Occ:
             ix, iy = self.cell(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
             if not self.inside(ix, iy):
                 continue
+            if self.owned is not None and self.owned_foreign(li, ix, iy, net_id):
+                return False
             if exempt is not None and (ix, iy) in exempt:
                 continue
             if self.blocked(li, ix, iy):
@@ -1224,6 +1334,7 @@ def generate_underpad_escape(footprint: Footprint,
             carve_disks.append((v.x, v.y, vkeep_v, None, v.net_id))
     layer_set = set(layers)
     route_net_ids = {p.net_id for p in signal_pads}
+    _graphic_of_fanned = []
     for s in pcb_data.segments:
         routed = s.layer in layer_set
         if not routed and not (s.layer or '').endswith('.Cu'):
@@ -1238,6 +1349,10 @@ def generate_underpad_escape(footprint: Footprint,
             # priority extras pass (#129, only_pad_keys set) the set nets'
             # existing copper is their PASS-1 primary escape -- real committed
             # copper every extra (own net included) must route clear of.
+            # Its GRAPHICS stay (#1682): art is no future copper. They block
+            # the other nets, below, net-aware.
+            if getattr(s, 'graphic', False):
+                _graphic_of_fanned.append(s)
             continue
         if not routed:
             # A track on a copper layer this fanout does not route (an inner
@@ -1256,6 +1371,59 @@ def generate_underpad_escape(footprint: Footprint,
                           s.width / 2 + track_width / 2 + clearance + _cx(s.net_id))
         exact_segs.append((s.start_x, s.start_y, s.end_x, s.end_y,
                            (s.width or 0.0) / 2.0, s.net_id, li))
+
+    # What no ball's escape may run through, whatever its net (#1677, #1682):
+    # the board's edges, and every filled copper graphic foreign to it. Tracks
+    # read these from the grid and vias from _via_site_conflict, by the same
+    # gates the map and the checker answer from.
+    from check_drc import (BoardEdgeGate, FilledCopperGate,
+                           laid_copper_edge_clearance)
+    edge_gate = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
+    if edge_gate:
+        _ek = edge_gate.clearance + track_width / 2 + margin
+        if edge_gate.outer:
+            occ.block_off_board(edge_gate.outer)
+        for _ring in edge_gate.cutouts:
+            occ.block_all_spans(occ.ring_keep_spans(_ring, _ek))
+        for _ring in edge_gate.rings:
+            if _ring in edge_gate.cutouts:
+                continue
+            for _i in range(len(_ring)):
+                occ.block_all_spans(occ._capsule_spans(
+                    _ring[_i], _ring[(_i + 1) % len(_ring)], _ek))
+    for _s in _graphic_of_fanned:
+        _li = layer_idx.get(_s.layer)
+        exact_segs.append((_s.start_x, _s.start_y, _s.end_x, _s.end_y,
+                           (_s.width or 0.0) / 2.0, _s.net_id, _li))
+        if _li is not None:
+            occ.stamp_owned(_li, occ._capsule_spans(
+                (_s.start_x, _s.start_y), (_s.end_x, _s.end_y),
+                _s.width / 2 + track_width / 2 + clearance + _cx(_s.net_id)),
+                frozenset({_s.net_id}))
+    filled_gate = FilledCopperGate(pcb_data)
+
+    def _filled_cl(sh):
+        return clearance + _cx(sh.net_id)
+
+    # A shape the array's own part draws keeps the grid's home lift: its balls
+    # stand on it. Any other is stamped apart, for tracks. The outline's reach
+    # comes with it.
+    for _sh in filled_gate.shapes:
+        _li = layer_idx.get(_sh.layer)
+        if _li is None:
+            continue
+        _keep = (max(m.width for m in _sh.members) / 2.0 + track_width / 2
+                 + _filled_cl(_sh) + margin)
+        if _sh.circle is not None:
+            _spans = occ._disk_spans(_sh.circle[0], _sh.circle[1], _sh.circle[2] + _keep)
+        else:
+            _spans = occ.ring_keep_spans(_sh.ring, _keep)
+        if _sh.owner_ref == footprint.reference:
+            _g = occ.grid[_li]
+            for _a, _b0, _b1 in _spans:
+                _g[_a * occ.ny + _b0:_a * occ.ny + _b1 + 1] = occ._ones[:_b1 - _b0 + 1]
+        else:
+            occ.stamp_owned(_li, _spans, filled_gate.track_nets(_sh))
 
     # IMMOVABLE foreign components' pads in the region (locked parts,
     # connectors, test points -- anything place_fanout_clearance will not
@@ -1595,6 +1763,10 @@ def generate_underpad_escape(footprint: Footprint,
             vr = via_size / 2.0
         if vdr is None:
             vdr = (via_drill or 0.0) / 2.0
+        if edge_gate.via_refused(x, y, 2 * vr):
+            return "via vs the board edge"
+        if filled_gate.via_hit(x, y, 2 * vr, net_id, _filled_cl) is not None:
+            return "via in a foreign filled graphic"
         for (ox, oy, orr, odr, onid) in ctx['vias']:
             d = math.hypot(ox - x, oy - y)
             if d < vdr + odr + _h2h - 1e-6:
@@ -1779,6 +1951,8 @@ def generate_underpad_escape(footprint: Footprint,
         else:
             hm = 5
         _cv_lay = cv_lay if cv_lay else None
+        _owned = occ.owned
+        _onets = occ.owned_nets
         while pq:
             _, cur = _heappop(pq)
             cx, cy, L = cur
@@ -1803,6 +1977,7 @@ def generate_underpad_escape(footprint: Footprint,
                 _gL = _ogrid[L]
                 cvL = _cv_lay.get(L) if _cv_lay is not None else None
                 _softL = _soft[L] if _has_soft else None
+                _ownL = _owned[L] if _owned is not None else None
                 for dx, dy in _steps:
                     nx, ny = cx + dx, cy + dy
                     if not (0 <= nx < _onx and 0 <= ny < _ony):
@@ -1833,6 +2008,18 @@ def generate_underpad_escape(footprint: Footprint,
                             reach_out.add((nx, ny))
                         continue
                     nidx = nx * _ony + ny
+                    # An owned stamp (#1682) takes no home lift, corners included.
+                    if _ownL is not None:
+                        _t = _ownL[nidx]
+                        if _t and net_id not in _onets[_t]:
+                            continue
+                        if dx != 0 and dy != 0:
+                            _t = _ownL[(cx + dx) * _ony + cy]
+                            if _t and net_id not in _onets[_t]:
+                                continue
+                            _t = _ownL[cx * _ony + cy + dy]
+                            if _t and net_id not in _onets[_t]:
+                                continue
                     # Every step passes the occupancy test, the exit step and
                     # a planned goal outside the window included (#1189): the
                     # margin is stamped so foreign copper there is seen, and
@@ -2046,7 +2233,7 @@ def generate_underpad_escape(footprint: Footprint,
             # inflated by obstacle half-size + track/2 + clearance. Also refuse
             # movable-cap soft keep-outs (#278) -- a jog must not create a new
             # graze for cap-opt to clean up.
-            return (occ.seg_clear(li, p, q, exempt=exempt) and
+            return (occ.seg_clear(li, p, q, exempt=exempt, net_id=net_id_for_snap) and
                     not (occ.has_soft and occ.seg_soft_hits(li, p, q, net_id_for_snap,
                                                             exempt=exempt)))
         if _ok((bx, by), (gx, gy)):
@@ -2546,6 +2733,10 @@ def generate_underpad_escape(footprint: Footprint,
         if stub_track_conflict(net_id, (gx, gy), (vx, vy), ctx['segs'], top_idx, hw, clearance,
                                _cx_map):
             return True
+        if edge_gate.segment_refused(gx, gy, vx, vy, track_width) \
+                or filled_gate.segment_hit(gx, gy, vx, vy, track_width, layers[top_idx],
+                                           net_id, _filled_cl) is not None:
+            return True
         for (ox, oy, orr, odr, onid) in ctx['vias'] + ctx['resv']:
             if onid == net_id:
                 continue
@@ -2655,7 +2846,7 @@ def generate_underpad_escape(footprint: Footprint,
                             continue
                         ex_cells = pad_ex | occ.disk_cells(vx, vy, via_keep)
                         if not occ.seg_clear(top_idx, (gx, gy), (vx, vy),
-                                             exempt=ex_cells):
+                                             exempt=ex_cells, net_id=p.net_id):
                             continue
                         return (vx, vy), [(gx, gy), (vx, vy)]
                     # k >= 1: walk the horizontal lane, then the vertical one.
@@ -2670,11 +2861,11 @@ def generate_underpad_escape(footprint: Footprint,
                             continue
                         via_ex = occ.disk_cells(vx, vy, via_keep)
                         if not occ.seg_clear(top_idx, (gx, gy), (ex_, ey_),
-                                             exempt=pad_ex | via_ex):
+                                             exempt=pad_ex | via_ex, net_id=p.net_id):
                             continue
                         lane_ex = _lane_pad_exempt(ex_, ey_, vx, vy)
                         if not occ.seg_clear(top_idx, (ex_, ey_), (vx, vy),
-                                             exempt=pad_ex | via_ex | lane_ex):
+                                             exempt=pad_ex | via_ex | lane_ex, net_id=p.net_id):
                             continue
                         return (vx, vy), [(gx, gy), (ex_, ey_), (vx, vy)]
         return None
@@ -2733,7 +2924,7 @@ def generate_underpad_escape(footprint: Footprint,
             return None
         pad_ex = occ.disk_cells(gx, gy, max(pad_keep, via_keep))
         ex_cells = pad_ex | occ.disk_cells(vx, vy, keep)
-        if not occ.seg_clear(top_idx, (gx, gy), (vx, vy), exempt=ex_cells):
+        if not occ.seg_clear(top_idx, (gx, gy), (vx, vy), exempt=ex_cells, net_id=p.net_id):
             return None
         return (vx, vy), [(gx, gy), (vx, vy)]
 
@@ -2752,7 +2943,7 @@ def generate_underpad_escape(footprint: Footprint,
         if _stub_conflict(p, vx, vy, ctx):
             return None
         ex_cells = occ.disk_cells(gx, gy, max(pad_keep, via_keep)) | occ.disk_cells(vx, vy, via_keep)
-        if not occ.seg_clear(top_idx, (gx, gy), (vx, vy), exempt=ex_cells):
+        if not occ.seg_clear(top_idx, (gx, gy), (vx, vy), exempt=ex_cells, net_id=p.net_id):
             return None
         return [(gx, gy), (vx, vy)]
 
@@ -3998,7 +4189,8 @@ def generate_underpad_escape(footprint: Footprint,
                             continue
                         _ix, _iy = occ.cell(_sx, _sy)
                         if not occ.inside(_ix, _iy) or \
-                                occ.blocked(_li, _ix, _iy):
+                                occ.blocked(_li, _ix, _iy) or \
+                                occ.owned_foreign(_li, _ix, _iy, p.net_id):
                             _free = False
                             break
                     if _free:
@@ -4054,7 +4246,8 @@ def generate_underpad_escape(footprint: Footprint,
                             if math.hypot(_sx - _vx, _sy - _vy) < _vr:
                                 continue
                             _ix, _iy = occ.cell(_sx, _sy)
-                            if not occ.inside(_ix, _iy) or occ.blocked(_lay_i, _ix, _iy):
+                            if not occ.inside(_ix, _iy) or occ.blocked(_lay_i, _ix, _iy) \
+                                    or occ.owned_foreign(_lay_i, _ix, _iy, p.net_id):
                                 _free = False
                                 break
                         if _free:

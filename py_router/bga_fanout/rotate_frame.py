@@ -223,6 +223,7 @@ def to_axis_aligned_frame(pcb_data: PCBData, ref: str
     for seg in rp.segments:
         seg.start_x, seg.start_y = fwd(seg.start_x, seg.start_y)
         seg.end_x, seg.end_y = fwd(seg.end_x, seg.end_y)
+    transform_graphic_shapes(rp.segments, fwd)
 
     for via in rp.vias:
         via.x, via.y = fwd(via.x, via.y)
@@ -262,6 +263,24 @@ def to_axis_aligned_frame(pcb_data: PCBData, ref: str
     tgt.rotation = 0.0
 
     return rp, back
+
+
+def transform_graphic_shapes(segments, fn):
+    """Carry a filled graphic's outline (#1181's `graphic_ring`, and the true
+    circle) through a frame change with its strokes (#1682). `fn` is the frame's
+    (x, y) map. Without this a shape's strokes moved and its interior did not,
+    so the obstacle map and every gate read the interior somewhere else."""
+    rings = {}
+    for seg in segments:
+        ring = getattr(seg, 'graphic_ring', None)
+        if ring:
+            new = rings.get(ring)
+            if new is None:
+                new = rings[ring] = tuple(fn(x, y) for (x, y) in ring)
+            seg.graphic_ring = new
+        circle = getattr(seg, 'graphic_circle', None)
+        if circle:
+            seg.graphic_circle = (*fn(circle[0], circle[1]), circle[2])
 
 
 def back_transform_results(tracks, vias_to_add, vias_to_remove,

@@ -943,6 +943,11 @@ def manage_vias(
             if (getattr(_p, 'drill', 0) or 0) > 0:
                 drill_capsules.append(pad_drill_capsule(_p))
 
+    from check_drc import (BoardEdgeGate, FilledCopperGate,
+                           laid_copper_edge_clearance)
+    _edge_gate = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
+    _filled_gate = FilledCopperGate(pcb_data)
+
     def via_in_pad_conflict(x, y, v_size, v_drill, net_id):
         """Reason a via physically cannot go at (x, y), or None (#370 B4):
 
@@ -969,6 +974,12 @@ def manage_vias(
             if d < vdr + prad + _h2h - 1e-6:
                 return "drill hole-to-hole vs a pad drill"
         vr = v_size / 2.0
+        # #1677, #1682: the board's edges and a filled graphic's interior,
+        # which the stroke loop below cannot see.
+        if _edge_gate.via_refused(x, y, v_size):
+            return "via ring vs the board edge"
+        if _filled_gate.via_hit(x, y, v_size, net_id, clearance) is not None:
+            return "via in a foreign filled graphic"
         for s in pcb_data.segments:
             if s.net_id == net_id:
                 continue
@@ -2628,6 +2639,10 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
 
     failed_nets = list(failed_nets)      # one entry per failed ball; removed one per ball served
     own_pads = list(footprint.pads)
+    from check_drc import (BoardEdgeGate, FilledCopperGate,
+                           laid_copper_edge_clearance)
+    _edge_gate = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
+    _filled_gate = FilledCopperGate(pcb_data)
     xs = sorted({round(p.global_x, 4) for p in own_pads})
     ys = sorted({round(p.global_y, 4) for p in own_pads})
     if len(xs) < 2 or len(ys) < 2:
@@ -2647,6 +2662,11 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
         """Exact clearance check of candidate segment AB (width track_width,
         layer lay) against every foreign pad / track / via, committed write
         lists included. Returns True if legal at `clearance`."""
+        # #1677, #1682: the board's edges and a filled graphic's interior.
+        if _edge_gate.segment_refused(ax, ay, bx, by, track_width) \
+                or _filled_gate.segment_hit(ax, ay, bx, by, track_width, lay, net_id,
+                                            clearance) is not None:
+            return False
         # Pads: same-layer SMD + all plated/NPTH holes.
         for fp2 in pcb_data.footprints.values():
             for p in fp2.pads:
@@ -4290,7 +4310,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     _board_bounds = (grid.min_x - _reach, grid.min_y - _reach,
                      grid.max_x + _reach, grid.max_y + _reach)
     _board_tracks = board_copper_tracks(pcb_data, layers, track_width,
-                                        _board_bounds)
+                                        _board_bounds, clearance)
 
     # Build routes - process differential pairs together
     def _run_pass(force_secondary_pairs):

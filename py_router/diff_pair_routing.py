@@ -1556,6 +1556,13 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
                 # blocker is usually a GND via already there.
                 why = _gnd_via_drill_conflict(gx, gy, config, pcb_data,
                                               gnd_vias + pair_vias, _ignore)
+                if why is None:     # #1682: a filled graphic's interior
+                    from check_drc import filled_graphic_refusal
+                    why = filled_graphic_refusal(pcb_data, vias=[Via(
+                        x=gx, y=gy, size=config.via_size, drill=config.via_drill,
+                        layers=["F.Cu", "B.Cu"], net_id=gnd_net_id)],
+                        clearance=lambda sh: config.pair_clearance(
+                            gnd_net_id, sh.net_id, sh.layer)) or None
                 if why is not None:
                     print(f"  GND return via at ({gx:.3f},{gy:.3f}) not placed: "
                           f"{why} (#1341)")

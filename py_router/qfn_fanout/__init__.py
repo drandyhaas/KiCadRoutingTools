@@ -1005,6 +1005,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         pcb_data, clearance, board_edge_clearance)
     from check_drc import _point_to_rings_distance as _pt_rings_dist
     from check_drc import _point_on_board as _pt_on_board
+    # #1682: a filled graphic's interior, on the nets this run erases from its
+    # map too (a fanned net's shape is foreign to the part's other pins).
+    from check_drc import FilledCopperGate
+    _filled_gate = FilledCopperGate(pcb_data)
 
     # #1568: each pad with the radius about its centre that holds all its
     # copper, so `via_clears` calls the grader only on a pad the via's
@@ -1051,6 +1055,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
             if _pt_rings_dist(vx, vy, _edge_rings) < via_size / 2 + _edge_clear - 1e-6:
                 return False
+        if _filled_gate and _filled_gate.via_hit(
+                vx, vy, via_size, net_id, lambda sh: _pc(net_id, sh.net_id)) is not None:
+            return False
         for fx, fy, fs, fn, fd in foreign_vias:
             # The DRILLS are an obstacle whatever the net: hole-to-hole is
             # net-independent (#282/#479 audit gap 2), and on a board whose
@@ -1137,6 +1144,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         10.9s baseline (-36%); appended after `via_clears` instead, +18%.
         The gate is a speed-up.
         """
+        if stub_layer_idx is not None and _filled_gate and _filled_gate.segment_hit(
+                px, py, vx, vy, track_width, stub_layer, net_id,
+                lambda sh: _pc(net_id, sh.net_id)) is not None:
+            return False
         if math.hypot(vx - px, vy - py) <= POSITION_TOLERANCE:
             # Via centred on the pad: the commit loop emits NO track at all
             # (:604, :616), so there is no stub to test. `run_output_conflict`
@@ -2217,6 +2228,8 @@ def generate_qfn_fanout(footprint: Footprint,
         pcb_data, clearance, board_edge_clearance)
     from check_drc import _segment_to_rings_distance as _seg_rings_dist
     from check_drc import _point_on_board as _pt_on_board
+    from check_drc import FilledCopperGate
+    _filled_gate = FilledCopperGate(pcb_data)   # #1682: as the under-pad escape
 
     # #1328: a stub that cannot escape at `clearance` retries at the rungs of
     # qfn_clearance_ladder (empty under --escalation off), and #1318 tries a
@@ -2273,6 +2286,9 @@ def generate_qfn_fanout(footprint: Footprint,
     def _seg_grazes(p1, p2, net_id, cl=clearance, width=track_width):
         # Board edge first (issue #288) - independent of net.
         if _seg_hits_edge(p1, p2, cl, width):
+            return True
+        if _filled_gate and _filled_gate.segment_hit(
+                p1[0], p1[1], p2[0], p2[1], width, layer, net_id, cl) is not None:
             return True
         # Foreign tracks / vias via the shared obstacle map (issue #149 part 2).
         if _obs_layer_idx is not None:

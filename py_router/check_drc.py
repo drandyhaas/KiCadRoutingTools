@@ -1289,6 +1289,115 @@ def filled_graphic_lift_nets(shape: FilledGraphic, own_pad_nets, footprints):
     return frozenset(nets) if tie and nets <= tie else frozenset()
 
 
+class FilledCopperGate:
+    """Filled copper graphics as a generator that does not read the obstacle
+    map must see them (#1677, #1682, #1683): the fanout engines and the
+    layer-switch vias test foreign copper by their own means, and a test of a
+    shape's perimeter strokes passes a via wholly inside it.
+
+    It answers what the map stamps (`obstacle_map.build_base_obstacle_map`) and
+    check_drc grades (`run_drc`'s inside-filled pass): a shape is foreign to
+    every net but the one it is tagged with and the nets its own pads lift it
+    for, and a via's drill is never lifted on a net tie -- the map's
+    `_own_pad_via_rows` rule, since a drill cuts the bridge. The own nets are
+    the lift's, so this stays no more permissive than the checker (the subset
+    chain at `graphic_effective_nets`).
+
+    `clearance` below is the pair's value, a float or `clearance(shape)`. The
+    interior test needs none; the distance to the outline is measured here too
+    because a caller's stroke test may skip the shape (a fanout does not stamp
+    the copper of the nets it fans)."""
+
+    def __init__(self, pcb_data):
+        self.pcb_data = pcb_data
+        self.shapes = filled_graphic_shapes(pcb_data)
+        self._lift = {}
+        self._own_pad_nets = None
+
+    def __bool__(self):
+        return bool(self.shapes)
+
+    def track_nets(self, shape) -> frozenset:
+        """The nets whose tracks may enter `shape`."""
+        hit = self._lift.get(id(shape))
+        if hit is None:
+            nets = set()
+            if shape.owner_ref:
+                if self._own_pad_nets is None:
+                    self._own_pad_nets = graphic_own_pad_nets(self.pcb_data)
+                nets |= filled_graphic_lift_nets(
+                    shape, self._own_pad_nets,
+                    getattr(self.pcb_data, 'footprints', None) or {})
+            if shape.net_id:
+                nets.add(shape.net_id)
+            hit = self._lift[id(shape)] = frozenset(nets)
+        return hit
+
+    def via_nets(self, shape) -> frozenset:
+        """The nets whose vias may stand in `shape`."""
+        fp = ((getattr(self.pcb_data, 'footprints', None) or {}).get(shape.owner_ref)
+              if shape.owner_ref else None)
+        if fp is not None and getattr(fp, 'net_tie_groups', None):
+            return frozenset({shape.net_id}) if shape.net_id else frozenset()
+        return self.track_nets(shape)
+
+    @staticmethod
+    def _reach(shape, clearance):
+        return (max(m.width for m in shape.members) / 2.0
+                + (clearance(shape) if callable(clearance) else clearance))
+
+    def via_hit(self, x, y, size, net_id, clearance):
+        """The first filled shape a through via at (x, y) would short or graze,
+        or None. A via spans the stack, so every shape counts, on any layer."""
+        for sh in self.shapes:
+            x0, y0, x1, y1 = sh._bbox
+            need = size / 2.0 + self._reach(sh, clearance)
+            if x < x0 - need or x > x1 + need or y < y0 - need or y > y1 + need:
+                continue
+            if net_id in self.via_nets(sh):
+                continue
+            if sh.contains(x, y) or sh.boundary_distance(x, y) < need - 1e-6:
+                return sh
+        return None
+
+    def segment_hit(self, x1, y1, x2, y2, width, layer, net_id, clearance):
+        """The first filled shape on `layer` a track would short or graze, or
+        None."""
+        for sh in self.shapes:
+            if sh.layer != layer:
+                continue
+            x0, y0, xe, ye = sh._bbox
+            need = width / 2.0 + self._reach(sh, clearance)
+            if (max(x1, x2) < x0 - need or min(x1, x2) > xe + need
+                    or max(y1, y2) < y0 - need or min(y1, y2) > ye + need):
+                continue
+            if net_id in self.track_nets(sh):
+                continue
+            if sh.contains(x1, y1) or sh.contains(x2, y2):
+                return sh
+            if _segment_to_rings_distance(x1, y1, x2, y2, [list(sh.ring)]) < need - 1e-6:
+                return sh
+        return None
+
+
+def filled_graphic_refusal(pcb_data, vias=(), clearance=0.0) -> str:
+    """Why these not-yet-laid vias may not be laid ('' when they may): the
+    first that shorts or grazes a filled graphic foreign to its net, as
+    `FilledCopperGate` measures it. Free on a board with no filled graphic. A
+    caller placing many vias keeps one gate instead."""
+    gate = FilledCopperGate(pcb_data)
+    if not gate:
+        return ''
+    for v in vias:
+        sh = gate.via_hit(v.x, v.y, v.size, v.net_id, clearance)
+        if sh is not None:
+            net = (getattr(pcb_data, 'nets', None) or {}).get(sh.net_id)
+            nm = net.name if net else (sh.owner_ref or 'no net')
+            return (f"via at ({v.x:.3f},{v.y:.3f}) would short the filled "
+                    f"{nm} graphic on {sh.layer}")
+    return ''
+
+
 # --- #1266: pad copper against ANOTHER part's footprint graphic copper -------
 #
 # A footprint's drawn copper (#908's `fp_poly` / `fp_line` on F.Cu or B.Cu: a
@@ -2633,6 +2742,53 @@ def board_edge_geometry(board_info, rect_ring: bool = False
     rings.extend(c for c in (getattr(board_info, 'board_edge_contours', None) or [])
                  if len(c) >= 3)
     return rings, outer, cutouts
+
+
+def laid_copper_edge_clearance(pcb_data, clearance: float) -> float:
+    """The copper-to-edge clearance a step that takes no edge setting holds
+    (#1677): the board's own `min_copper_edge_clearance`, else the copper
+    clearance, raised to the fab floor -- `run_drc`'s grade of the same board.
+    A project whose `copper_edge_clearance` severity is 'ignore' grades no
+    band, so only the copper clearance is held. Read off `source_path`, so
+    both fronts get it with no wiring."""
+    from fix_kicad_drc_settings import fab_edge_floor
+    src = getattr(pcb_data, 'source_path', '') or ''
+    declared = 0.0
+    if src and not os.path.isdir(src):
+        if edge_clearance_severity(src) == 'ignore':
+            return clearance
+        from list_nets import board_constraint
+        declared = board_constraint(src, 'min_copper_edge_clearance') or 0.0
+    return max(declared if declared > 0 else clearance, fab_edge_floor())
+
+
+class BoardEdgeGate:
+    """The board's Edge.Cuts as a generator that does not read the obstacle
+    map must see them (#1677): off the board or inside a cut-out is refused
+    outright, and copper holds `edge_clearance` from every ring. The geometry
+    is `board_edge_geometry`, so generator and checker agree on what an edge
+    is."""
+
+    def __init__(self, pcb_data, edge_clearance: float):
+        self.rings, self.outer, self.cutouts = board_edge_geometry(
+            pcb_data.board_info, rect_ring=True)
+        self.clearance = edge_clearance
+
+    def __bool__(self):
+        return bool(self.rings)
+
+    def via_refused(self, x, y, size) -> bool:
+        return bool(self.rings) and (
+            not _point_on_board(x, y, self.outer, self.cutouts)
+            or _point_to_rings_distance(x, y, self.rings)
+            < size / 2.0 + self.clearance - 1e-6)
+
+    def segment_refused(self, x1, y1, x2, y2, width) -> bool:
+        return bool(self.rings) and (
+            not _point_on_board(x1, y1, self.outer, self.cutouts)
+            or not _point_on_board(x2, y2, self.outer, self.cutouts)
+            or _segment_to_rings_distance(x1, y1, x2, y2, self.rings)
+            < width / 2.0 + self.clearance - 1e-6)
 
 
 # -- #962: footprint graphic copper against the board outline -----------------

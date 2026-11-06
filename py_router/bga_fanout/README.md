@@ -211,6 +211,28 @@ every class to the run clearance (#439), which hid copper laid below a class.
 run clearance every class is at it and the escape is the one-clearance escape
 it always was.
 
+## Board edges and filled graphics (#1677, #1682)
+
+The fanout does not route on the shared obstacle map, so it reads two things no
+ball's copper may enter from the gates that speak for that map and for
+`check_drc`, in `check_drc.py`:
+
+- **`BoardEdgeGate`**: outside the outline, inside a cut-out, or within the edge
+  clearance of either. The clearance is `laid_copper_edge_clearance`: the board's
+  `min_copper_edge_clearance`, else `--clearance`, raised to the fab floor, and
+  only `--clearance` on a project that sets `copper_edge_clearance` to `ignore`.
+  There is no flag: the engine reads the board off `source_path`, on both fronts.
+- **`FilledCopperGate`**: a filled copper graphic foreign to the net, by the rule
+  the map and the checker use. A shape is own copper for the net it is tagged
+  with and the nets its own pads lift it for; a via stays off a net tie's copper
+  even for a tied net, since a drill cuts the bridge.
+
+The under-pad engines stamp both into their grid (a graphic in `_Occ.owned`, which
+is net-aware and takes no ball's home lift) and ask the gates for every via site
+and stub. The channel engine holds the outline and cut-outs as collision tracks
+(`board_copper_tracks`) and asks the gates in `manage_vias`. A ball that cannot
+escape past them is dropped and named, like any other.
+
 ## Plane-ball drops (#424)
 
 With any escape method, after the signal escape completes every SMD ball on a

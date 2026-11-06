@@ -274,8 +274,17 @@ def add_gnd_vias_to_existing_board(
     _pad_rad = np.array([math.hypot(p.size_x, p.size_y) / 2.0 for p in _cu_pads],
                         dtype=np.float64)
 
+    from check_drc import FilledCopperGate
+    _filled_gate = FilledCopperGate(pcb_data)
+
     def _exact_copper_clear(x_mm, y_mm, own_net):
         vr = config.via_size / 2.0
+        # A filled graphic's interior (#1682): the strokes below stop at its
+        # outline.
+        _fs = _filled_gate.via_hit(x_mm, y_mm, config.via_size, own_net,
+                                   lambda sh: config.pair_clearance(own_net, sh.net_id, sh.layer))
+        if _fs is not None:
+            return (False, f"filled_graphic({_fs.layer})")
         if len(_seg_rows):
             with np.errstate(divide='ignore', invalid='ignore'):
                 t = np.clip(((x_mm - _seg_ax) * _seg_dx + (y_mm - _seg_ay) * _seg_dy)
