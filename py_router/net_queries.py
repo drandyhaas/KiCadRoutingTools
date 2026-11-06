@@ -248,6 +248,31 @@ class MPSResult:
     geometric_conflicts: Dict[int, Set[int]] = None           # All crossings regardless of layer (for swap checking)
 
 
+def via_height_in_length(pcb_data) -> bool:
+    """Does a via's stackup height count toward a net's length on this board
+    (#1731)? The board's Board Setup "use stackup height for length
+    calculations", `rules.use_height_for_length_calcs` in its .kicad_pro:
+    with it off, KiCad's length and skew DRC charge no via any barrel at all
+    (kicad-cli 10.0.6: track length plus pad-to-die, exactly, for a via-in-pad,
+    a via between two track layers and a pad-to-pad chain through vias). The
+    live board's value when the GUI built `pcb_data`
+    (`PCBData.use_height_for_length_calcs`), else the sibling project's, else
+    KiCad's default, True."""
+    live = getattr(pcb_data, 'use_height_for_length_calcs', None)
+    if isinstance(live, bool):
+        return live
+    path = getattr(pcb_data, 'source_path', '') or ''
+    if path:
+        try:
+            from fix_kicad_drc_settings import project_rules
+            v = project_rules(path).get('use_height_for_length_calcs')
+        except Exception:
+            v = None
+        if isinstance(v, bool):
+            return v
+    return True
+
+
 def calculate_route_length(segments: List[Segment], vias: List[Via] = None, pcb_data=None) -> float:
     """
     Calculate the total length of a routed path.
@@ -264,8 +289,10 @@ def calculate_route_length(segments: List[Segment], vias: List[Via] = None, pcb_
     for seg in segments:
         total += segment_length(seg)
 
-    # Add via barrel lengths if pcb_data with stackup is provided
-    if vias and pcb_data and hasattr(pcb_data, 'get_via_barrel_length'):
+    # Add via barrel lengths if pcb_data with stackup is provided, and the
+    # board counts a via's height toward a length (#1731)
+    if vias and pcb_data and hasattr(pcb_data, 'get_via_barrel_length') \
+            and via_height_in_length(pcb_data):
         from geometry_utils import via_end_layers
         for via in vias:
             if via.layers and len(via.layers) >= 2:
@@ -288,8 +315,9 @@ def calculate_via_barrel_length(vias: List[Via], pcb_data) -> float:
     Returns:
         Total via barrel length in mm
     """
-    if not vias or not pcb_data or not hasattr(pcb_data, 'get_via_barrel_length'):
-        return 0.0
+    if not vias or not pcb_data or not hasattr(pcb_data, 'get_via_barrel_length') \
+            or not via_height_in_length(pcb_data):
+        return 0.0      # #1731: a board that counts no via height
 
     from geometry_utils import via_end_layers
     total = 0.0
@@ -461,12 +489,15 @@ def length_measure_note() -> str:
 #  5. The via is charged BOARD_STACKUP::GetLayerDistance(first, last): the
 #     stackup between them, from 10.0.2 with half of each INNER copper layer
 #     that ends the span.
+#     Every release: a board whose Board Setup does not "use stackup height
+#     for length calculations" (`rules.use_height_for_length_calcs` off)
+#     charges no via anything (#1731, `via_height_in_length`).
 #
 # Items are taken in board-file order; KiCad takes them in memory order, which
 # matters only where a joint could merge either way. Not modelled: true arc
 # length (an arc is measured on the parser's chords, within a few um), oval,
-# custom and tilted pad outlines (the exact outline is used),
-# `use_height_for_length_calcs` off, and a board with no (stackup) block --
+# custom and tilted pad outlines (the exact outline is used), and a board
+# with no (stackup) block --
 # KiCad builds a default stack from the board thickness; here the barrel is 0.
 _NM_PER_MM = 1_000_000
 
@@ -981,6 +1012,8 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
     """The barrel KiCad charges each of `vias`, in nm, as release `key` does
     (step 1 and 5 of the block comment above)."""
     from geometry_utils import via_end_layers
+    if not via_height_in_length(pcb_data):
+        return [0] * len(vias)       # #1731: Board Setup counts no via height
     copper = _copper_stack(pcb_data)
     rank = {l: i for i, l in enumerate(copper)}
     half = key >= (10, 0, 2)
@@ -1852,6 +1885,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     pad_nodes: Dict[int, List[int]] = {}
     hubs_by_obj: Dict[int, Dict[str, int]] = {}
     _half_inner = _release_key(length_measure_release()) >= (10, 0, 2)
+    _via_height = via_height_in_length(pcb_data)     # #1731
     for (cx, cy, radius, dlayers, hit, kind, obj) in discs:
         layer_nodes: Dict[str, int] = {}
         for layer in dlayers:
@@ -1882,8 +1916,9 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             # span; the flat share only where the stackup names a step's
             # layers no more
             steps = [_stackup_height_nm(pcb_data, l1, l2, _half_inner) / _NM_PER_MM
+                     if _via_height else 0.0
                      for l1, l2 in zip(dlayers, dlayers[1:])]
-            if len(dlayers) > 1 and not all(steps):
+            if _via_height and len(dlayers) > 1 and not all(steps):
                 span = _stackup_height_nm(pcb_data, dlayers[0], dlayers[-1],
                                           _half_inner) / _NM_PER_MM
                 steps = [span / (len(dlayers) - 1)] * len(steps)

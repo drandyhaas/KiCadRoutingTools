@@ -955,6 +955,12 @@ class PCBData:
     # the board because KiCad's own project save drops what was written into
     # the .kicad_pro after load. None = read the files (parse_kicad_pcb).
     live_records_provider: object = None
+    # #1731: the board's Board Setup "use stackup height for length
+    # calculations" (`rules.use_height_for_length_calcs`). Off, KiCad's length
+    # DRC charges no via any barrel at all. build_pcb_data_from_board sets it
+    # from the LIVE board; None = read the sibling .kicad_pro
+    # (net_queries.via_height_in_length), KiCad's default True without one.
+    use_height_for_length_calcs: Optional[bool] = None
     # #459: KiCad (group "name" (uuid ...) (members <uuid> ...)) blocks, as
     # {group name: [footprint reference, ...]}. The designer's own statement that
     # these parts belong together, so placement grouping ranks it above any
@@ -9969,6 +9975,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         live_rules_provider=lambda _board=board: _live_design_rules(_board),
         # The board's records, as the session holds them (tool_records)
         live_records_provider=lambda _board=board: _live_records(_board),
+        # #1731 parity with the file read: whether a via's stackup height
+        # counts toward a length, as the live board's Board Setup has it
+        use_height_for_length_calcs=_live_use_height(board),
     )
     # #1279 parity with parse_kicad_pcb: the LIVE board's `sense:<REF>.<PAD>`
     # groups (a group drawn in this session counts before it is saved),
@@ -9986,6 +9995,16 @@ def _live_records(board):
         return tool_records.live_namespace(board)
     except Exception:
         return {}
+
+
+def _live_use_height(board):
+    """The live board's `m_UseHeightForLengthCalcs` (#1731), or None when
+    pcbnew cannot say (the file is read then)."""
+    try:
+        v = board.GetDesignSettings().m_UseHeightForLengthCalcs
+    except Exception:
+        return None
+    return v if isinstance(v, bool) else None
 
 
 def _live_design_rules(board):
@@ -11218,6 +11237,16 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                              f"rev {tool_records.revision(_rf)}")
         except ImportError as _e:
             diffs.append(f"Tool records: not compared ({type(_e).__name__}: {_e})")
+    # #1731: whether a via's stackup height counts toward a length -- the live
+    # Board Setup against the project file's rule
+    try:
+        from net_queries import via_height_in_length
+        _uh_b, _uh_f = via_height_in_length(from_board), via_height_in_length(from_file)
+        if _uh_b != _uh_f:
+            diffs.append(f"Use stackup height for lengths: board={_uh_b} file={_uh_f}")
+    except ImportError as _e:
+        diffs.append(f"Use stackup height for lengths: not compared "
+                     f"({type(_e).__name__}: {_e})")
 
     def _ap_sig(pcb, ap):
         nm = pcb.nets.get(ap.net_id)

@@ -1200,6 +1200,9 @@ def calculate_stub_via_barrel_length(stub_vias: List, stub_layer: str, pcb_data)
     """
     if not stub_vias or not pcb_data or not hasattr(pcb_data, 'get_via_barrel_length'):
         return 0.0
+    from net_queries import via_height_in_length
+    if not via_height_in_length(pcb_data):
+        return 0.0      # #1731: the board counts no via height toward a length
 
     total = 0.0
     for via in stub_vias:

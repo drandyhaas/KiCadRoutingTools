@@ -303,6 +303,17 @@ measured as and the installed one when they differ. A via-in-pad on F.Cu whose
 track leaves on In1.Cu is charged F.Cu to In1.Cu (from 10.0.2, to half of
 In1.Cu), not the whole stack.
 
+All of the above holds while the board's Board Setup counts via heights
+("use stackup height for length calculations", `rules.use_height_for_length_calcs`
+in the .kicad_pro, on by default). With it off, KiCad charges no via anything:
+kicad-cli 10.0.6 reads every net of the fixture below, and two pad-to-pad chains
+through vias, as its tracks plus pad-to-die exactly (#1731). The measure reads
+the setting through `via_height_in_length(pcb_data)` -- the live board's on the
+GUI path (`PCBData.use_height_for_length_calcs`), else the sibling project's,
+else on -- and so does every via charge: the length DRC measure, the pad-to-pad
+walk's barrel steps, and the router's own `calculate_route_length` /
+`calculate_via_barrel_length` (group and intra-pair matching).
+
 Each release's measure equals that kicad-cli's `length_out_of_range` actuals,
 at its four decimals, on every net it reported of three routed boards and of
 `tests/fixtures/1432/length_cases.kicad_pcb` (one net per change above), for
