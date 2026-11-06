@@ -4429,6 +4429,11 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
     -- full overlap inside the own pad, graze-only passage beyond it, hard
     block anywhere the copper would reach partner copper off the own pad.
     The partner-minus-own region is sampled at 0.01mm (guard = one step).
+    And (#1728) a cell within the partner stamp's reach is legal only when
+    the partner point its copper meets lies on the own pad
+    (check_drc.net_tie_contact_point, the grader's own question): a graze
+    along the partner's side away from the own pad is not waived by KiCad,
+    so the corridor does not open it.
 
     Returns {tied_net_id: {'cells': set[(gx,gy)], 'partner_pad_ids': set,
     'partner_net_ids': set}}.
@@ -4436,7 +4441,8 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
     corridors: Dict[int, dict] = {}
     fine = 0.01
     try:
-        from check_drc import point_to_pad_distance
+        from check_drc import (point_to_pad_distance, net_tie_contact_point,
+                               NET_TIE_CONTACT_EPS)
     except Exception:
         return corridors
     for fp in pcb_data.footprints.values():
@@ -4543,6 +4549,24 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                             ok &= ~_inside
                     else:
                         ok = np.ones(cxm.shape, dtype=bool)
+                    # #1728: the waiver is LOCAL. A cell inside the partner
+                    # stamp's reach is lifted only when the partner point its
+                    # copper meets (or grazes) lies on the own pad, as the
+                    # grader asks it (check_drc.net_tie_contact_point); off
+                    # it, the copper rides the partner sub-clearance and
+                    # KiCad grades every such segment.
+                    try:
+                        _pcl = config.pad_override_clearance(
+                            config.obstacle_clearance(partner.net_id), partner)
+                    except Exception:                         # noqa: BLE001
+                        _pcl = config.clearance
+                    _near_idx = np.flatnonzero(ok & _pad_dist_le_batch(
+                        cxm, cym, partner, half_w + _pcl + coord.grid_step))
+                    if _near_idx.size:
+                        _cp = np.array([net_tie_contact_point(partner, cxm[i], cym[i])
+                                        for i in _near_idx], dtype=np.float64)
+                        ok[_near_idx[~_pad_dist_le_batch(
+                            _cp[:, 0], _cp[:, 1], own, NET_TIE_CONTACT_EPS)]] = False
                     if not ok.any():
                         continue
                     entry['cells'].update(

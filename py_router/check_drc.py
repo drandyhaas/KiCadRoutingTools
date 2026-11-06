@@ -2349,6 +2349,35 @@ def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
     return False, 0.0, None
 
 
+#: How far a net-tie contact may stand off the tied net's own pad and still be
+#: waived: one 0.01 mm sample step plus KiCad's collision epsilon headroom.
+NET_TIE_CONTACT_EPS = 0.011
+
+
+def net_tie_contact_point(partner_pad, px, py):
+    """Where copper centred at (px, py) meets a net-tie PARTNER pad: the
+    closest point ON the partner's rectangle (the point itself when inside).
+    KiCad waives the contact when this lies on the tied net's own pad; the
+    grader (_net_tie_span_waived) and the router's net-tie corridor
+    (obstacle_map._compute_net_tie_corridors, #1728) both ask it here."""
+    rot = getattr(partner_pad, 'rect_rotation', 0.0) or 0.0
+    dx, dy = px - partner_pad.global_x, py - partner_pad.global_y
+    if rot:
+        r = math.radians(rot)
+        c, s = math.cos(r), math.sin(r)
+        lx, ly = dx * c + dy * s, -dx * s + dy * c
+    else:
+        lx, ly = dx, dy
+    hx, hy = partner_pad.size_x / 2, partner_pad.size_y / 2
+    qx, qy = max(-hx, min(hx, lx)), max(-hy, min(hy, ly))
+    if rot:
+        r = math.radians(rot)
+        c, s = math.cos(r), math.sin(r)
+        return (partner_pad.global_x + qx * c - qy * s,
+                partner_pad.global_y + qx * s + qy * c)
+    return (partner_pad.global_x + qx, partner_pad.global_y + qy)
+
+
 def _net_tie_span_waived(pcb_data, seg, seg_net: int, partner_pad, clearance: float) -> bool:
     """True when a tie-net segment's collision with its net-tie PARTNER pad is
     the KiCad-legal local contact: every sample of the segment whose copper
@@ -2376,26 +2405,11 @@ def _net_tie_span_waived(pcb_data, seg, seg_net: int, partner_pad, clearance: fl
     # through the partner's heart has interior contact points far from the
     # own pad and stays flagged.
     def _cp_on_partner(px, py):
-        rot = getattr(partner_pad, 'rect_rotation', 0.0) or 0.0
-        dx, dy = px - partner_pad.global_x, py - partner_pad.global_y
-        if rot:
-            r = math.radians(rot)
-            c, s = math.cos(r), math.sin(r)
-            lx, ly = dx * c + dy * s, -dx * s + dy * c
-        else:
-            lx, ly = dx, dy
-        hx, hy = partner_pad.size_x / 2, partner_pad.size_y / 2
-        qx, qy = max(-hx, min(hx, lx)), max(-hy, min(hy, ly))
-        if rot:
-            r = math.radians(rot)
-            c, s = math.cos(r), math.sin(r)
-            return (partner_pad.global_x + qx * c - qy * s,
-                    partner_pad.global_y + qx * s + qy * c)
-        return (partner_pad.global_x + qx, partner_pad.global_y + qy)
+        return net_tie_contact_point(partner_pad, px, py)
 
     half_w = seg.width / 2
     n = max(2, int(math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y) / 0.01) + 1)
-    eps = 0.011  # one sample step + KiCad's collision epsilon headroom
+    eps = NET_TIE_CONTACT_EPS
     contacts = []
     best_d, best_pt = 1e9, None
     for i in range(n + 1):
