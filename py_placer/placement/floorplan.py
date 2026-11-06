@@ -3515,6 +3515,27 @@ def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
     return keepout_findings(pcb_data, pcb_file, ks)
 
 
+_EST_SIDES_CACHE: Dict[tuple, Dict] = {}
+
+
+def _estimated_courtyard_sides(pcb_data, path: str) -> Dict:
+    """`body.courtyard_sides_with_estimates`' map for `path`, kept per file
+    state and per footprint face: local boxes, so a pose change keeps it
+    (place_pose re-grades every snap candidate on one input file)."""
+    from .body import courtyard_sides_with_estimates
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_mtime_ns, st.st_size,
+           tuple(sorted((r, getattr(f, 'layer', None))
+                        for r, f in (pcb_data.footprints or {}).items())))
+    got = _EST_SIDES_CACHE.get(key)
+    if got is None:
+        got = courtyard_sides_with_estimates(pcb_data, path)[0]
+        if len(_EST_SIDES_CACHE) > 8:
+            _EST_SIDES_CACHE.clear()
+        _EST_SIDES_CACHE[key] = got
+    return got
+
+
 def keepout_findings(pcb_data, pcb_file: Optional[str], keepouts, *,
                      height_of=None, containers=()) -> List[Dict]:
     """`[{ref, keepout, side, area_mm2}]`: the parts inside `keepouts` at the
@@ -3533,11 +3554,14 @@ def keepout_findings(pcb_data, pcb_file: Optional[str], keepouts, *,
     ks = tuple(keepouts or ())
     if not ks:
         return []
-    from .parser import courtyard_for_side, extract_courtyard_sides
+    from .parser import courtyard_for_side
     from .utility import compute_footprint_bbox_local
     path = pcb_file or getattr(pcb_data, 'source_path', None)
     try:
-        crt = extract_courtyard_sides(path) if path else {}
+        # #1730: a part that draws no courtyard is read on its ESTIMATED
+        # courtyard (#1300), the box place_simple seats it on and
+        # `rule_keepout` grades it on (`zone_parts`), never its pad box alone
+        crt = _estimated_courtyard_sides(pcb_data, path) if path else {}
     except Exception:                                        # noqa: BLE001
         crt = {}
     out = []
@@ -3561,14 +3585,21 @@ def keepout_findings(pcb_data, pcb_file: Optional[str], keepouts, *,
                 tht = legality.offset_far(legality.rotate_far(tl, rot),
                                           fp.x, fp.y)
         sides = legality.sides_occupied(side, has_tht)
-        rects = (rect, tht)
+        binding = keepouts_for_ref(ks, ref, sides,
+                                   height_of(ref) if height_of is not None else None)
+        if not binding:
+            continue
         if ref in containers:
             rects = []
             for q in legality.pads_at_pose(fp, (fp.x, fp.y, rot)):
                 cx, cy, hx, hy = legality.pad_copper_box(q)
                 rects.append((cx - hx, cy - hy, cx + hx, cy + hy))
-        for k in keepouts_for_ref(ks, ref, sides,
-                                  height_of(ref) if height_of is not None else None):
+        else:
+            # ...and its pad copper beside the courtyard, as `rule_keepout`
+            # grades it (#1588): a pad reaching past a drawn courtyard is in
+            # the keep-out it reaches
+            rects = (rect, tht, *pad_copper_rects(fp, (fp.x, fp.y, rot), copper_only=True))
+        for k in binding:
             a = keepout_hit(k, rects)
             if a:
                 out.append({'ref': ref, 'keepout': k['name'],
@@ -6233,7 +6264,10 @@ def rule_keepout(ctx) -> Iterator[Violation]:
     hts = (_ctx_heights(ctx) if any(k.get('max_height_mm') is not None
                                     for k in ctx.intent.keepouts) else None)
     cont = set(getattr(ctx.state, 'container_refs', ()) or ())
-    for ref, part in sorted(ctx.parts.items()):
+    # #1730: on the basis place_simple SEATS a part on (`zone_parts`): a part
+    # that draws no courtyard is graded on its estimated courtyard (#1300),
+    # the box the seat's keep-out test reads, never its pad box alone
+    for ref, part in sorted(_ctx_zone_parts(ctx).items()):
         # #1475: a CONTAINER is graded on its pads, never its frame rect (as
         # #1463 for exclusive zones): a keep-out inside an enclosure -- a
         # can's fence -- is no hit on the enclosure, while a post standing
@@ -8742,25 +8776,21 @@ def _ring_gap(g, fp, pose, x, y, far) -> Optional[float]:
     one hit test): a drawn courtyard and each pad copper box on its own, as
     `rule_keepout` and `seeder.pose_ok` hand them over (#1588). The empty
     corners of their union's bounding box hold nothing, so a keep-out of the
-    ring's radius on the site holds every part with a drawn courtyard that
-    the ring would name. A part that draws no courtyard is read on its
-    occupancy box (`g`'s `occupancy_local`), as before: the estimate
-    `place_simple` seats it on (#1300)."""
+    ring's radius on the site holds every part the ring would name. A part
+    that draws no courtyard is read on its occupancy box (`g`'s
+    `occupancy_local`), which is its estimated courtyard
+    (`body.estimate_courtyard`, #1300): the box place_simple seats it on and
+    the keep-out readers read it on (#1730)."""
     from .body import SOURCE_COURTYARD
-    from .heights import to_board, to_local
-    if g.source == SOURCE_COURTYARD and g.body_local is not None:
-        rects = [to_board(g.body_local, pose)] + pad_copper_rects(fp, pose, copper_only=True)
-        if not keepout_hit({'circle': [x, y, far]}, rects):
-            return None
-        return min(math.hypot(max(b[0] - x, 0.0, x - b[2]), max(b[1] - y, 0.0, y - b[3]))
-                   for b in rects)
-    occ = g.occupancy_local
-    if occ is None:
+    from .heights import to_board
+    box = g.body_local if g.source == SOURCE_COURTYARD else g.occupancy_local
+    if box is None:
         return None
-    lx, ly = to_local((x, y, x, y), pose)[:2]
-    gap = math.hypot(max(occ[0] - lx, 0.0, lx - occ[2]),
-                     max(occ[1] - ly, 0.0, ly - occ[3]))
-    return gap if gap < far else None
+    rects = [to_board(box, pose)] + pad_copper_rects(fp, pose, copper_only=True)
+    if not keepout_hit({'circle': [x, y, far]}, rects):
+        return None
+    return min(math.hypot(max(b[0] - x, 0.0, x - b[2]), max(b[1] - y, 0.0, y - b[3]))
+               for b in rects)
 
 
 def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, object]]:
