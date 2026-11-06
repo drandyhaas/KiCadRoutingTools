@@ -2432,9 +2432,10 @@ def _hole_stamp_widths(config: GridRouteConfig, extra_clearance: float) -> Dict[
     track no margin, so the stamp itself has to reach for it: half of what the
     layer's width exceeds the call's by.
 
-    A pair's CENTRELINE map (`extra_clearance` > 0, the call's half-pitch) has
-    more to cover. A member on a wider layer also rides a half-pitch wider
-    (`layer_pair_spacing`), and at a 45-degree bend the outer member's corner
+    A pair's CENTRELINE map (`extra_clearance` > 0, the member half-pitch
+    `centreline_extra_clearance` stamps at) has more to cover. A member on a
+    layer whose half-pitch (`layer_pair_spacing`) exceeds that rides further
+    out by the difference, and at a 45-degree bend the outer member's corner
     stands off the centreline by half-pitch / cos(22.5 deg). Grazing pads and
     tracks are necked afterwards (`_neck_terminal_grazes`), but a neck looks
     at copper, not at holes, so here the stamp is the only thing holding the
@@ -2446,8 +2447,13 @@ def _hole_stamp_widths(config: GridRouteConfig, extra_clearance: float) -> Dict[
         over = max(0.0, config.route_reserve_width(layer) - config.track_width)
         width = config.track_width + over
         if extra_clearance > 0:
-            offset = extra_clearance + over / 2.0
-            width += over + 2.0 * offset * (1.0 / math.cos(math.radians(22.5)) - 1.0)
+            # the member's half-pitch on this layer: on the diff engine's
+            # map (#1729) the layer's own, which `extra_clearance` covers on
+            # the widest layer; on any other map nothing rides wider
+            offset = ((config.track_width + over + config.diff_pair_gap) / 2.0
+                      if config.reserve_layer_widths else extra_clearance)
+            width += (2.0 * max(0.0, offset - extra_clearance)
+                      + 2.0 * offset * (1.0 / math.cos(math.radians(22.5)) - 1.0))
         groups.setdefault(width, []).append(idx)
     return groups
 

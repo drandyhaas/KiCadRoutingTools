@@ -1700,7 +1700,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # launch layer rather than blindly the source layer (issue #121: lpddr4
         # DQ_S0's target was fanned to B.Cu, which is 100% blocked by a connector
         # pad wall, while the inner layers right there were empty).
-        _swap_probe_clearance = (config.track_width + config.diff_pair_gap) / 2
+        from diff_pair_routing import centreline_extra_clearance as _cec1729p
+        _swap_probe_clearance = _cec1729p(config)
         if progress_callback:
             progress_callback(0, 0, "Building layer-swap probe obstacle map...")
         swap_probe_obstacles = build_base_obstacle_map(
@@ -1825,8 +1826,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     original_via_ids = set(id(v) for v in _original_vias_keepalive)
 
     # Build separate base obstacle map with extra clearance for diff pair centerline routing
-    # Extra clearance = spacing from centerline to P/N track center
-    diff_pair_extra_clearance = (config.track_width + config.diff_pair_gap) / 2
+    # Extra clearance = spacing from centerline to P/N track center, at the
+    # widest layer's (#1729)
+    from diff_pair_routing import centreline_extra_clearance as _cec1729
+    diff_pair_extra_clearance = _cec1729(config)
     print(f"Building diff pair obstacle map (extra clearance: {diff_pair_extra_clearance:.3f}mm)...")
     if progress_callback:
         progress_callback(0, 0, "Building diff-pair obstacle map...")
@@ -1884,7 +1887,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 pair_diff_geom[_pair.p_net_id] = geom
                 # Build one base obstacle map per DISTINCT geometry (dedup; ~1-3 classes).
                 if geom not in diff_pair_base_obstacles_by_geom:
-                    _ec = (geom[0] + geom[1]) / 2
+                    _ec = _cec1729(replace(config, track_width=geom[0],
+                                           diff_pair_gap=geom[1]))
                     print(f"  #435: building diff obstacle map for class geometry "
                           f"width={geom[0]} gap={geom[1]} (extra clearance {_ec:.3f}mm)...")
                     if progress_callback:

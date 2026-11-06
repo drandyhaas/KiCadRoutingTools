@@ -521,14 +521,16 @@ def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
 
 def centerline_config(config):
     """The geometry a diff-pair CENTRELINE map is stamped at. The members run
-    (track_width + diff_pair_gap) / 2 either side of the centreline, so the
+    (layer width + diff_pair_gap) / 2 either side of the centreline, so the
     band a region keeps the centreline out of grows by that offset -- the
-    extra clearance route_diff builds every other obstacle of that map with.
+    extra clearance route_diff builds every other obstacle of that map with
+    (`centreline_extra_clearance`, the widest layer's, #1729).
     Stamped at the plain run geometry, a member could come up to
     (track_width + diff_pair_gap) / 2 - clearance INTO the region
     (lvds_converter_dualclk /CLK+: its copper over the edge by 0.5 um)."""
     from dataclasses import replace
-    extra = (config.track_width + config.diff_pair_gap) / 2
+    from diff_pair_routing import centreline_extra_clearance
+    extra = centreline_extra_clearance(config)
     return replace(config, clearance=config.clearance + extra, edge_extra_clearance=extra)
 
 

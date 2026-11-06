@@ -20,12 +20,12 @@ land on the pads are delivered as asked and are not a row.
     and delivered width; a pair's class track width is its drawn width;
     fallback members, nets outside the pairs and via rows are untouched;
   * routed: an in-repo board with a 2-layer stackup, --impedance 80 over a
-    0.25 --track-width and a foreign track ending just above the pair's path,
-    so one member necks where it passes: exit 3 under --strict-sizes, one row
-    for that member whose length and width match the WRITTEN board, and none
-    for the partner, which ships at the layer width plus its connectors
-    (FAILS on 95e6dc1d: the member carries two `terminal neck` rows with no
-    length, and the new site is absent).
+    0.25 --track-width and a wall of another net's pads ending just below the
+    pair's path, so one member necks where it passes the end pad: exit 3
+    under --strict-sizes, one row for that member whose length and width
+    match the WRITTEN board, and none for the partner, which ships at the
+    layer width plus its connectors (FAILS on 95e6dc1d: the member carries
+    `terminal neck` rows with no length, and the new site is absent).
 
     python3 tests/test_1725_coupled_pair_width_disclosed.py
 """
@@ -35,6 +35,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -54,10 +55,25 @@ STACKUP = ('\t\t(stackup\n'
            '(epsilon_r 4.5) (loss_tangent 0.02))\n'
            '\t\t\t(layer "B.Cu" (type "copper") (thickness 0.035))\n'
            '\t\t)\n')
-# another pair's member, a track on both layers ending just above DPA's path
-WALL = ''.join('\t(segment (start 14 5.5) (end 14 15.45) (width 0.25) (layer "%s") '
-               '(net "DPB_P") (uuid "00000000-0000-0000-0000-00000000000%d"))\n' % (lay, k)
-               for k, lay in enumerate(('F.Cu', 'B.Cu')))
+
+
+def _wall():
+    """Another net's 0.5 mm pads on both layers in a column at x = 14, from
+    y = 17 up to the board's top half: the pair passes the end pad."""
+    pads, y, k = [], 17.0, 0
+    while y > 5.5:
+        k += 1
+        for sfx, lay in (('', 'F.Cu'), ('b', 'B.Cu')):
+            pads.append(f'\t\t(pad "{k}{sfx}" smd rect (at 0 {y - 10:.3f}) (size 0.5 0.5) '
+                        f'(layers "{lay}") (net "DPB_P") (uuid "{uuid.uuid4()}"))')
+        y -= 0.55
+    return ('\t(footprint "T:Wall"\n\t\t(layer "F.Cu")\n'
+            f'\t\t(uuid "{uuid.uuid4()}")\n\t\t(at 14 10)\n'
+            f'\t\t(property "Reference" "W1" (at 0 -1.5 0) (layer "F.SilkS") '
+            f'(uuid "{uuid.uuid4()}")\n\t\t\t(effects (font (size 1 1) (thickness 0.15))))\n'
+            '\t\t(attr smd)\n' + '\n'.join(pads) + '\n\t)\n')
+
+
 PRO = {"net_settings": {"classes": [{
     "name": "Default", "clearance": 0.25, "track_width": 0.25, "diff_pair_gap": 0.25,
     "diff_pair_width": 0.25, "via_diameter": 0.6, "via_drill": 0.3}]}}
@@ -128,7 +144,7 @@ def _board(td):
     i = src.index('\n', src.index('(setup')) + 1
     txt = src[:i] + STACKUP + src[i:]
     k = txt.rstrip().rfind(')')
-    txt = txt[:k] + WALL + txt[k:]
+    txt = txt[:k] + _wall() + txt[k:]
     dst = os.path.join(td, 'cc.kicad_pcb')
     with open(dst, 'w', encoding='utf-8', newline='') as fh:
         fh.write(txt)

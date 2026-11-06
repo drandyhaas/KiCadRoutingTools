@@ -300,15 +300,20 @@ The first distance with a clear angle wins (0° is preferred unless it sits too 
 The centerline is routed with extra clearance to accommodate both P and N tracks:
 
 ```python
-# Extra clearance = offset from centerline to the P/N track centres
-extra_clearance = (track_width + diff_pair_gap) / 2
+# Extra clearance = offset from centerline to the P/N track centres, on the
+# widest layer (diff_pair_routing.centreline_extra_clearance)
+extra_clearance = max((layer_width(l) + diff_pair_gap) / 2 for l in layers)
 ```
 
 It is added to the ordinary single-track keep-out (half the track width plus the clearance), so each offset track keeps its clearance from every obstacle.
-The map carries this one offset, the call's, for every layer. A layer wider than the
-pair's own width (an `--impedance` outer layer above `--track-width`) runs at its own
-wider pitch (below), so a segment of it that comes inside a neighbour's clearance is
-necked there when it is emitted, the same fab-floored neck the terminal legs get.
+The map carries this one offset for every layer: a layer narrower than the widest
+is reserved more room than its members need. It used to be the call's,
+`(track_width + diff_pair_gap) / 2`, so on a layer wider than `--track-width` (an
+`--impedance` outer layer) the outer member came up to (layer width - track width) / 2
+inside a neighbour's clearance and was necked there alone, shipping the pair with one
+member narrow beside a full-width partner (#1729). A segment that still grazes (pads
+stamp the call's track width, not the layer's) is necked where it is emitted, the same
+fab-floored neck the terminal legs get.
 
 ## P/N Path Generation
 

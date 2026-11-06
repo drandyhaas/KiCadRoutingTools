@@ -2184,6 +2184,27 @@ def layer_pair_spacing(config):
     return spacing
 
 
+def centreline_extra_clearance(config):
+    """The extra clearance a pair's CENTRELINE map stamps every obstacle with:
+    the widest member half-pitch (`layer_pair_spacing`) of the call's layers.
+
+    A member rides (layer width + gap) / 2 off the centreline, and the
+    centreline map's track stamps already reserve the layer's own width
+    (`reserve_layer_widths`), so the half-pitch is the one term left. At the
+    call's pitch, (track_width + gap) / 2, a layer wider than the track width
+    let the outer member reach (layer width - track width) / 2 into a
+    neighbour's clearance, and the graze neck then narrowed that member alone
+    -- on an impedance pair at a 0.1 mm track width, 0.11 mm on each outer
+    layer, so P shipped most of its run at 0.18-0.24 mm beside N at 0.32
+    (#1729). One scalar serves every layer: a layer narrower than the widest
+    is reserved more room than it needs, which is what a layer narrower than
+    the track width always had."""
+    sp = layer_pair_spacing(config)
+    if not callable(sp):
+        return sp
+    return max(sp(layer) for layer in config.layers)
+
+
 def create_parallel_path_from_float(centerline_path, sign, spacing_mm=0.1, start_dir=None, end_dir=None):
     """
     Create a path parallel to centerline from float coordinates (no grid conversion).

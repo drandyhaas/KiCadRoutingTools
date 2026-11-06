@@ -19,16 +19,18 @@ call's track width closed the P/N gap to 0.05 mm at the approach. Rows:
     track-to-via margin: the via offset still leaves each layer's track its
     margin-scaled offset from the partner via.
 
-The centreline obstacle map carries one extra clearance for every layer, the
-call's P/N half-pitch, so on a layer wider than the call's track width the
-outer track, now at that layer's wider pitch, can pass a neighbour inside
-clearance. Such a segment is necked where it grazes. Rows:
+A segment wider than the call's track width that still grazes a neighbour
+is necked where it does. The centreline obstacle map carries one extra
+clearance for every layer, the widest layer's P/N half-pitch (#1729; it was
+the call's, which let the outer member on a wider layer pass a neighbour
+inside clearance). Rows:
   - no per-layer widths, or no segment wider than the call's track width:
     that pass does not run (the terminal neck is the only one);
   - routed: cap_chain with a 2-layer stackup, --impedance 80 (0.407 mm on both
     layers over a 0.25 mm --track-width) and a foreign track ending just above
-    the pair's path. Without the neck the pair grazed it (0.226 mm against
-    0.25); here it routes DRC-clean, at 0.407 away from the neighbour.
+    the pair's path. With neither the neck nor the wider map the pair grazed
+    it (0.226 mm against 0.25); here it routes DRC-clean, at 0.407 away from
+    the neighbour, and the map reserves the layer's half-pitch.
 
     python3 tests/test_diff_layer_pitch.py
 """
@@ -258,8 +260,8 @@ def test_wide_layer_run_keeps_clear_of_its_neighbour():
     widths = sorted({round(s.width, 3) for s in pcb.segments
                      if names.get(s.net_id, '').startswith('DPA')})
     check('routed: the pair runs at the 0.407 impedance width over a 0.25 call width, '
-          'and the map reserves the call\'s half-pitch',
-          bool(widths) and max(widths) >= 0.4 and 'extra clearance: 0.250mm' in log.getvalue(),
+          'and the map reserves the layer\'s half-pitch',
+          bool(widths) and max(widths) >= 0.4 and 'extra clearance: 0.329mm' in log.getvalue(),
           str(widths))
     check('routed: DRC clean at the 0.25 clearance', list(drc) == [], str(drc)[:300])
     check('routed: the pair is connected', list(conn) == [], str(conn)[:200])

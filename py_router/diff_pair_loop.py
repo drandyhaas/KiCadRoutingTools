@@ -220,7 +220,8 @@ def route_diff_pairs(
             _dw, _dg = _pgeom.get(pair.p_net_id,
                                   (state.config.track_width, state.config.diff_pair_gap))
             config = replace(state.config, track_width=_dw, diff_pair_gap=_dg)
-            diff_pair_extra_clearance = (_dw + _dg) / 2.0
+            from diff_pair_routing import centreline_extra_clearance as _cec1729
+            diff_pair_extra_clearance = _cec1729(config)
             diff_pair_base_obstacles = (getattr(state, 'diff_pair_base_obstacles_by_geom', None)
                                         or {}).get((_dw, _dg), state.diff_pair_base_obstacles)
         # Check for cancellation request
