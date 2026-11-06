@@ -874,6 +874,13 @@ covers its extra half-width through its own fractional `track_margin`. With
 `get_track_width(layer)`, baked mm-exact into the maps. Track margins are
 always computed against this value, so stamps and margins cannot drift.
 
+The baking covers track and via stamps. Pads, the board edge and keep-outs
+stamp the call's `track_width`, so a pair's single-ended member fallback, which
+needs them priced for its layer width, routes with
+`reserve_layer_widths=False` on a map of its own (#1679). A hole keep-out reads
+the reserve per layer, and on a pair's centreline map also reaches the member's
+far edge, because a neck does not look at holes (#1687).
+
 ```python
 config.track_margins_for_net(net_id) -> List[float]   # grid cells, per layer
 config.track_margins_for_width(width) -> List[float]  # for a uniform width

@@ -2415,6 +2415,35 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
     return v
 
 
+def _hole_stamp_widths(config: GridRouteConfig, extra_clearance: float) -> Dict[float, List[int]]:
+    """{track width a hole keep-out stamps at: its layer indices}.
+
+    A hole keep-out is written for the call's `track_width`, which holds on a
+    map that leaves the rest of a wider track to its margin. A map that bakes
+    each layer's width (`reserve_layer_widths`, the diff engine) gives such a
+    track no margin, so the stamp itself has to reach for it: half of what the
+    layer's width exceeds the call's by.
+
+    A pair's CENTRELINE map (`extra_clearance` > 0, the call's half-pitch) has
+    more to cover. A member on a wider layer also rides a half-pitch wider
+    (`layer_pair_spacing`), and at a 45-degree bend the outer member's corner
+    stands off the centreline by half-pitch / cos(22.5 deg). Grazing pads and
+    tracks are necked afterwards (`_neck_terminal_grazes`), but a neck looks
+    at copper, not at holes, so here the stamp is the only thing holding the
+    board's copper-to-hole clearance.
+
+    One entry at `track_width` on a single-ended map with no such layer."""
+    groups: Dict[float, List[int]] = {}
+    for idx, layer in enumerate(config.layers):
+        over = max(0.0, config.route_reserve_width(layer) - config.track_width)
+        width = config.track_width + over
+        if extra_clearance > 0:
+            offset = extra_clearance + over / 2.0
+            width += over + 2.0 * offset * (1.0 / math.cos(math.radians(22.5)) - 1.0)
+        groups.setdefault(width, []).append(idx)
+    return groups
+
+
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, nets_to_route_set: set,
                               extra_clearance: float = 0.0):
@@ -2489,6 +2518,8 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                     # degenerate) signal pad is never made unroutable.
                     npth_holes.extend(circles)
 
+    _hole_widths = _hole_stamp_widths(config, extra_clearance)
+
     # Track keep-out for NPTH holes on every copper layer (issue #233). The
     # copper-to-NPTH-hole floor is the JLC "NPTH to Track" fab value, never below
     # the routing clearance.
@@ -2500,9 +2531,9 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # board declaring nothing is byte-identical (see resolve_hole_clearance).
         npth_clr = (max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
                         _hole_clr) + extra_clearance)
-        block_track_cells_near_drills(obstacles, npth_holes, config.track_width,
-                                      npth_clr, config.grid_step,
-                                      list(range(len(config.layers))))
+        for _stamp_w, _stamp_layers in _hole_widths.items():
+            block_track_cells_near_drills(obstacles, npth_holes, _stamp_w,
+                                          npth_clr, config.grid_step, _stamp_layers)
 
     # Milled NPTH SLOTS are board edge to KiCad (#448): its DRC grades copper
     # proximity to the slot wall at copper_edge_clearance (sofle_pico SW25),
@@ -2516,10 +2547,9 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         slot_clr = edge_eff + extra_clearance
         if slot_clr > max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
                           _hole_clr) + extra_clearance:
-            block_track_cells_near_drills(obstacles, npth_slot_holes,
-                                          config.track_width, slot_clr,
-                                          config.grid_step,
-                                          list(range(len(config.layers))))
+            for _stamp_w, _stamp_layers in _hole_widths.items():
+                block_track_cells_near_drills(obstacles, npth_slot_holes, _stamp_w,
+                                              slot_clr, config.grid_step, _stamp_layers)
         # Via-copper edge band: block_via_cells_near_drills builds its radius as
         # hole_r + clearance + via_drill/2, so passing
         # edge_eff + (via_size - via_drill)/2 yields hole_r + edge_eff + via_size/2
@@ -2533,10 +2563,11 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # (KiCad's hole_clearance honors it, #326 residual). Plated pads are left
     # to the copper-pad blockers here: stamping their hole annulus would make
     # zero-annular-ring pads unreachable for their own signal net.
-    block_track_cells_near_override_pad_holes(
-        obstacles, pcb_data, config.track_width, config.clearance,
-        config.grid_step, list(range(len(config.layers))),
-        extra_clearance=extra_clearance, include_plated=False)
+    for _stamp_w, _stamp_layers in _hole_widths.items():
+        block_track_cells_near_override_pad_holes(
+            obstacles, pcb_data, _stamp_w, config.clearance,
+            config.grid_step, _stamp_layers,
+            extra_clearance=extra_clearance, include_plated=False)
 
     # Via keep-out (hole-to-hole drill minimum) near every drill.
     if config.hole_to_hole_clearance > 0 and drill_holes:
