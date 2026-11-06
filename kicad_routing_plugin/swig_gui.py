@@ -1969,6 +1969,8 @@ class RoutingDialog(wx.Dialog):
                 'track_width_from_class': not self.track_width_check.GetValue(),
                 'clearance': self._effective_clearance(),
                 'via_size': self._effective_via_size(),
+                'via_from_class': not (self.via_size_check.GetValue()
+                                        or self.via_drill_check.GetValue()),
                 'via_drill': self._effective_via_drill(),
                 'layers': self._get_selected_layers(),
                 'layer_costs': layer_costs,
@@ -2077,6 +2079,8 @@ class RoutingDialog(wx.Dialog):
                 'track_width': self._effective_track_width(),
                 'clearance': self._effective_clearance(),
                 'via_size': self._effective_via_size(),
+                'via_from_class': not (self.via_size_check.GetValue()
+                                        or self.via_drill_check.GetValue()),
                 'via_drill': self._effective_via_drill(),
                 'grid_step': self.grid_step.GetValue(),
                 'hole_to_hole_clearance': self._effective_hole_to_hole_clearance(),
@@ -2201,6 +2205,8 @@ class RoutingDialog(wx.Dialog):
                 'track_width': self._effective_track_width(),
                 'clearance': self._effective_clearance(),
                 'via_size': self._effective_via_size(),
+                'via_from_class': not (self.via_size_check.GetValue()
+                                        or self.via_drill_check.GetValue()),
                 'via_drill': self._effective_via_drill(),
                 # Shared across all tabs: the single "Fix DRC settings after
                 # routing" toggle lives on the Basic tab (issue #160).
@@ -3298,6 +3304,8 @@ class RoutingDialog(wx.Dialog):
             # #581: via-in-pad policy (Basic tab; -1 = allowed)
             'same_net_pad_clearance': self._same_net_pad_clearance_value(),
             'via_size': self._effective_via_size(),
+            'via_from_class': not (self.via_size_check.GetValue()
+                                    or self.via_drill_check.GetValue()),
             'via_drill': self._effective_via_drill(),
             'grid_step': self.grid_step.GetValue(),
             'via_cost': self.via_cost.GetValue(),

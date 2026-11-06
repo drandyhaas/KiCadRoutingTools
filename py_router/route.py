@@ -314,6 +314,8 @@ _FINALIZE_ROUTE_KNOBS = (
     # .kicad_dru: a reconnect of a bound net must stay out of the regions the
     # step kept it out of.
     'net_keepouts',
+    # #1678: each net's edge clearance under the step's .kicad_dru
+    'edge_floors',
     # #1260: the step's pour barriers, so a casualty reconnect cannot cut
     # the out-of-scope pours the step itself was kept out of.
     'pour_barriers',
@@ -2156,6 +2158,14 @@ def _late_finished_dead_end_sweep1525(pcb_data, output_file, return_results,
 
 
 
+def _edge_for_project(config) -> float:
+    """The edge clearance a step records in the output project: what it
+    resolved before any .kicad_dru rule (#1678), since the rule file still
+    grades what the rule binds, and the project grades everything else."""
+    declared = getattr(config, 'board_edge_declared', None)
+    return config.board_edge_clearance if declared is None else declared
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 # #530: cap every auto-read net class at this clearance (the
@@ -2181,6 +2191,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # layer_clearances (#498). Internal: no CLI flag, no GUI
                 # control; None = derive them from this run's own rules.
                 net_keepouts: Optional[List[dict]] = None,
+                # #1678 / #1676: the floors a PARENT run resolved from the
+                # .kicad_dru, which the output it hands a sub-run has no
+                # sibling of yet. Engine-internal: no flag and no GUI control.
+                edge_floors=None,
+                rule_via_floors: Optional[dict] = None,
                 power_tap_neckdown: bool = True,
                 neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
@@ -2687,6 +2702,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     copper_layers=list(getattr(pcb_data.board_info, 'copper_layers', None)
                                        or (layers or [])))
                 _dflt_w = _dr.classes.get('Default', {}).get('track_width')
+                # #1676: a via this run sizes itself starts at the board's own
+                # via rules, for every path that lays one at the run's via
+                if via_from_class:
+                    _rv = _dr.via_meeting_rules(via_size, via_drill)
+                    if _rv != (via_size, via_drill):
+                        print(f"Via {via_size:g}/{via_drill:g} raised to {_rv[0]:g}/{_rv[1]:g} "
+                              f"to meet the board's .kicad_dru via rules (#1676).")
+                        via_size, via_drill = _rv
+                        _reconcile_kwargs.update(via_size=via_size, via_drill=via_drill)
                 _cu = [l for l in (getattr(pcb_data.board_info, 'copper_layers', None)
                                    or (layers or [])) if str(l).endswith('.Cu')]
                 for nid in pcb_data.nets:
@@ -2707,6 +2731,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if via_from_class:
                         _vd = _dr.draw_size('via_diameter', nid, default=None)
                         _vh = _dr.draw_size('hole_size', nid, default=None)
+                        # #1676: and whatever .kicad_dru rule binds this net's
+                        # via, the ring included, which no draw size reads
+                        if _vd and _vh:
+                            _vd, _vh = _dr.via_meeting_rules(_vd, _vh, nid)
                         if _vd and _vh and _vh < _vd and (
                                 abs(_vd - via_size) > 1e-9 or abs(_vh - via_drill) > 1e-9):
                             _per_net_via[nid] = (round(_vd, 4), round(_vh, 4))
@@ -3548,6 +3576,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _nk_attach(pcb_data, net_keepouts if net_keepouts is not None
                else getattr(getattr(config, 'rules', None), 'net_keepouts', None))
     _reconcile_kwargs['net_keepouts'] = list(getattr(pcb_data, '_net_keepouts', None) or [])
+    # #1678 / #1676: a nested run reads the output, whose .kicad_dru sibling
+    # does not exist yet, so it carries what this run resolved.
+    if edge_floors is not None:
+        config.edge_floors = edge_floors
+    if rule_via_floors is not None:
+        from fab_tiers import set_rule_via_floors as _srvf
+        _srvf(rule_via_floors)
+    _reconcile_kwargs['edge_floors'] = getattr(config, 'edge_floors', None)
+    _reconcile_kwargs['board_edge_clearance'] = config.board_edge_clearance
+    from fab_tiers import get_rule_via_floors as _grvf
+    _reconcile_kwargs['rule_via_floors'] = _grvf()
 
     # Apply target swaps for single-ended swappable-nets
     single_ended_target_swaps: Dict[str, str] = {}
@@ -5891,7 +5930,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         from fix_kicad_drc_settings import apply_routed_floors
                         apply_routed_floors(_staged,
                                             clearance=config.clearance,
-                                            edge_clearance=config.board_edge_clearance,
+                                            edge_clearance=_edge_for_project(config),
                                             clamp_nondefault_netclasses=False)
                     except Exception as _e650:
                         print(f"  (in-run DRC floor sync skipped: {_e650})")
@@ -6207,14 +6246,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if _rules.kicad_refused:
                 _dr['kicad_refuses_file'] = list(_rules.kicad_refused)
             # #1649: whether this step's vias meet each annular_width rule the
-            # "NOT honoured" line (printed before routing) names
-            _ag = _rules.annular_grade(
-                [_v for _r in results for _v in (_r.get('new_vias') or [])])
-            if _ag:
-                from design_rules import annular_grade_lines
-                _dr['annular_rules'] = _ag
-                for _line in annular_grade_lines(_ag):
-                    print(f"  {_line}")
+            # "NOT honoured" line (printed before routing) names.
+            # #1676 / #1678: and the via size and edge clearance rules
+            from design_rules import disclose_step_rules
+            _dr.update(disclose_step_rules(_rules, pcb_data, results, input_file))
         # #1491: the class/type-scoped rules this call honoured, and each
         # relaxing one another routed net held at its class value
         _sc = getattr(config, 'scoped_clearance', None)
@@ -7027,7 +7062,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                         hole_clearance=step_hole_clearance(
                                             input_file, output_file, config.clearance,
                                             verbose=False, ledger=False),
-                                        edge_clearance=config.board_edge_clearance,
+                                        edge_clearance=_edge_for_project(config),
                                         clamp_nondefault_netclasses=False,
                                         verbose=True)
                 except Exception as _e650b:

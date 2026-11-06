@@ -5342,6 +5342,9 @@ def generate_bga_fanout(footprint: Footprint,
     re-escaped at it (bga_fanout.class_clearance). Plane drops are laid one
     class at a time, lowest first, each at its class.
     """
+    # #1676: the rungs below start at the board's own via rules
+    from design_rules import install_board_via_rule_floors
+    install_board_via_rule_floors(pcb_data)
     # #1529: the classes first, so the probe below dumps the map the engine
     # runs at on both fronts (the CLI's is read from the file here, the GUI
     # hands its live board's).
@@ -5701,9 +5704,9 @@ def main():
                              f'--width is an alias)')
     parser.add_argument('--clearance', type=float, default=defaults.BGA_CLEARANCE,
                         help=f'Track clearance in mm (default: {defaults.BGA_CLEARANCE})')
-    parser.add_argument('--via-size', type=float, default=defaults.BGA_VIA_SIZE,
+    parser.add_argument('--via-size', type=float, default=None,
                         help=f'Via outer diameter in mm (default: {defaults.BGA_VIA_SIZE})')
-    parser.add_argument('--via-drill', type=float, default=defaults.BGA_VIA_DRILL,
+    parser.add_argument('--via-drill', type=float, default=None,
                         help=f'Via drill size in mm (default: {defaults.BGA_VIA_DRILL})')
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
@@ -5810,6 +5813,14 @@ def main():
     # number nothing routed to. This front registers --clearance-ceiling and
     # used to ignore it.
     __import__('fab_tiers').apply_clearance_ceiling(args, 'bga_fanout')
+    # #1676: a via nobody asked for starts at the board's own .kicad_dru rules
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
+    args.via_size = defaults.BGA_VIA_SIZE if args.via_size is None else args.via_size
+    args.via_drill = defaults.BGA_VIA_DRILL if args.via_drill is None else args.via_drill
+    if not _vs_explicit:
+        from design_rules import run_via_for_rules
+        args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
+                                                          args.via_drill)
     set_default_fab_tier(*fab_tier_from_args(args))
     __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
     _pinned_floors = enforce_fab_floors(

@@ -383,7 +383,7 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     layers = list(pcb.board_info.copper_layers)
     n_layers = len(layers)
     rules = read_design_rules(board)
-    eff = effective_floors(rules.get('constraints') or {}, n_layers)
+    eff = rules.get('effective') or effective_floors(rules.get('constraints') or {}, n_layers)
 
     # A finished board meets the fab floor everywhere; a declared net class
     # above it is aspirational, so every step routes at the floor (#1522).

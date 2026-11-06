@@ -897,6 +897,9 @@ def repair_planes(
     board_edge_clearance: float = defaults.PLANE_EDGE_CLEARANCE,
     via_size: float = defaults.VIA_SIZE,
     via_drill: float = defaults.VIA_DRILL,
+    # #1676: no explicit via was asked for (--via-size omitted): the via
+    # starts at the board's .kicad_dru rules.
+    via_from_class: bool = False,
     max_iterations: int = defaults.MAX_ITERATIONS,
     verbose: bool = False,
     dry_run: bool = False,
@@ -1014,6 +1017,10 @@ def repair_planes(
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
+    # #1676: a via this run sizes itself starts at the board's own via rules
+    if via_from_class:
+        from design_rules import run_via_for_rules
+        via_size, via_drill = run_via_for_rules(input_file, pcb_data, via_size, via_drill)
         # #1279: the board's `sense:<REF>.<PAD>` groups -- protected, or why
         # not. Only when this engine parsed the board: a caller handing it
         # pcb_data (route.py's in-run finalize) has reported them already.
@@ -3804,6 +3811,7 @@ Examples:
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            resolve_cli_floor)
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
@@ -3942,6 +3950,7 @@ Examples:
         board_edge_clearance=args.board_edge_clearance,
         via_size=args.via_size,
         via_drill=args.via_drill,
+        via_from_class=not _vs_explicit,
         max_iterations=args.max_iterations,
         verbose=args.verbose,
         dry_run=args.dry_run,

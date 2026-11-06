@@ -78,7 +78,7 @@ def _count_copper_layers(content):
     return len(re.findall(r'\(\d+\s+"[^"]*\.Cu"', content)) or 0
 
 
-def effective_floors(constraints, copper_layers):
+def effective_floors(constraints, copper_layers, via_rule_floors=None):
     """Combine the board's own Constraints with the JLC fab floor.
 
     Returns the values the tools should actually use:
@@ -109,10 +109,17 @@ def effective_floors(constraints, copper_layers):
     # tier's via meets). That changes nothing on a board whose working via
     # already met both: over the corpus, the 58 of 437 projects it moves are
     # exactly those whose old suggestion failed their own annular rule.
-    via_drill = floor(constraints.get('min_through_hole_diameter'), fab['via_drill'])
-    via_ring = max(constraints.get('min_via_annular_width') or 0.0,
+    # #1676: a .kicad_dru rule on a via (``via_rule_floors``,
+    # DesignRules.via_floors) REPLACES the Board Setup minimum of its kind, as
+    # KiCad resolves it, so the working via is the smallest one that board's
+    # rule file accepts.
+    _vr = via_rule_floors or {}
+    via_drill = floor(_vr.get('via_drill', constraints.get('min_through_hole_diameter')),
+                      fab['via_drill'])
+    via_ring = max(_vr.get('annular', constraints.get('min_via_annular_width')) or 0.0,
                    (fmin['via_diameter'] - fmin['via_drill']) / 2.0)
-    via_dia = floor(constraints.get('min_via_diameter'), fab['via_diameter'])
+    via_dia = floor(_vr.get('via_diameter', constraints.get('min_via_diameter')),
+                    fab['via_diameter'])
     via_held = round(via_drill + 2.0 * via_ring, 4)
 
     return {
@@ -154,6 +161,26 @@ def effective_floors(constraints, copper_layers):
         'drc_edge_clearance':   floor(constraints.get('min_copper_edge_clearance'), fmin['board_edge']),
         'fab': fab,
     }
+
+
+_VIA_FLOORS_READING = set()
+
+
+def _board_via_rule_floors(pcb_path):
+    """`DesignRules.via_floors` of the board's `.kicad_dru`, {} without one.
+    DesignRules itself reads a project with no classes through
+    read_design_rules, whose own answer then needs no floors."""
+    if pcb_path in _VIA_FLOORS_READING \
+            or not os.path.isfile(os.path.splitext(pcb_path)[0] + '.kicad_dru'):
+        return {}
+    _VIA_FLOORS_READING.add(pcb_path)
+    try:
+        from design_rules import DesignRules
+        return DesignRules.from_project(None, pcb_path).via_floors(0)
+    except (OSError, ValueError):
+        return {}
+    finally:
+        _VIA_FLOORS_READING.discard(pcb_path)
 
 
 def read_design_rules(pcb_path):
@@ -250,7 +277,8 @@ def read_design_rules(pcb_path):
 
     return {'classes': classes, 'assignments': assignments, 'patterns': patterns,
             'constraints': constraints, 'copper_layers': copper_layers,
-            'effective': effective_floors(constraints, copper_layers),
+            'effective': effective_floors(constraints, copper_layers,
+                                          _board_via_rule_floors(pcb_path)),
             'source': source}
 
 

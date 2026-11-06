@@ -6627,11 +6627,34 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # loosens the TOUCH test; the pad-closer-to-edge guard below stays strict, so
         # a track poking genuinely CLOSER to the edge than the pad is still a real graze.
         _edge_touch_quant = 0.025
+        # #1678: a .kicad_dru edge_clearance rule sets the floor of the tracks
+        # and vias it binds, as KiCad grades them, below the fab floor and
+        # the Board Setup minimum too. A rule whose condition cannot be decided
+        # for the item fails it only short of the lower of its values, and
+        # between the two publishes it as undecided.
+        from design_rules import PadEdgeRules
+        try:
+            _edge_rules = PadEdgeRules(pcb_data, pcb_file)
+            if not _edge_rules.copper_rules:
+                _edge_rules = None
+        except (OSError, ValueError):
+            _edge_rules = None
+
+        def _copper_edge_range(net_id, kind, layer=None):
+            if _edge_rules is None:
+                return effective_board_edge_clearance, effective_board_edge_clearance
+            lo, hi, _name = _edge_rules.for_copper(int(net_id or 0), kind,
+                                                   effective_board_edge_clearance, layer)
+            return lo, hi
+        _reach_floor = effective_board_edge_clearance
+        if _edge_rules is not None:
+            _reach_floor = max([effective_board_edge_clearance]
+                               + [v for _r, _a, v in _edge_rules.copper_rules])
         if edge_rings:
             for _pd in (p for fp in pcb_data.footprints.values() for p in fp.pads):
                 if getattr(_pd, 'pad_type', '') == 'np_thru_hole' or not (_pd.size_x and _pd.size_y):
                     continue  # NPTH has no copper
-                _ext = max(_pd.size_x, _pd.size_y) / 2.0 + effective_board_edge_clearance + 0.05
+                _ext = max(_pd.size_x, _pd.size_y) / 2.0 + _reach_floor + 0.05
                 if _point_to_rings_distance(_pd.global_x, _pd.global_y, edge_rings) <= _ext:
                     _edge_pads.append(_pd)
                     _ep_edge[id(_pd)] = min((_point_to_rings_distance(px, py, edge_rings)
@@ -6639,7 +6662,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                                             default=_point_to_rings_distance(
                                                 _pd.global_x, _pd.global_y, edge_rings))
 
-        def _seg_edge_all_in_pads(seg):
+        def _seg_edge_all_in_pads(seg, floor):
             """True iff every board-edge-violating point of ``seg`` is COVERED by a
             near-edge (edge-exempt) pad: the track copper TOUCHES the pad copper (the
             centreline is within a half-width of it) AND that point is no closer to the
@@ -6650,7 +6673,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if not _edge_pads:
                 return False
             half = seg.width / 2.0
-            req = effective_board_edge_clearance + half
+            req = floor + half
             L = math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y)
             steps = max(2, int(L / 0.05) + 1)
             saw_viol = False
@@ -6683,14 +6706,28 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # +3V3 taps graze 0.008/0.020mm, below the 0.025mm margin, but are
             # pad-covered -- they were silently margin-dropped and left their kicad
             # findings orphaned as false-negative alarms).
+            _seg_floor, _seg_hi = effective_board_edge_clearance, effective_board_edge_clearance
+            if not getattr(seg, 'graphic', False):
+                _seg_floor, _seg_hi = _copper_edge_range(seg.net_id, 'track', seg.layer)
             s_viol, s_overlap, s_edge = check_segment_board_edge_poly(
                 seg, edge_rings, edge_outer, edge_cutouts,
-                effective_board_edge_clearance, 0.0)
+                _seg_floor, 0.0)
             if not s_viol:
+                if _seg_hi > _seg_floor and check_segment_board_edge_poly(
+                        seg, edge_rings, edge_outer, edge_cutouts, _seg_hi, 0.0)[0]:
+                    _net = pcb_data.nets.get(seg.net_id, None)
+                    _accepted_edge.append({
+                        'type': 'segment-board-edge',
+                        'net1': _net.name if _net else f"net_{seg.net_id}",
+                        'edge': 'edge', 'item1': graphic_item_label(seg), 'layer': seg.layer,
+                        'overlap_mm': 0.0,
+                        'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                        'accepted': 'edge-rule-undecided',
+                    })
                 continue  # no sub-rule edge graze at all
             net_name = pcb_data.nets.get(seg.net_id, None)
             net_str = net_name.name if net_name else f"net_{seg.net_id}"
-            if s_edge != "off-board" and _seg_edge_all_in_pads(seg):
+            if s_edge != "off-board" and _seg_edge_all_in_pads(seg, _seg_floor):
                 _accepted_edge.append({
                     'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
                     'item1': graphic_item_label(seg),
@@ -6752,7 +6789,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # Derived from the STRICT result already computed above (identical
             # distances, only the tolerance differs) -- re-running the check at
             # the margin doubled the full outline-ring scan per segment.
-            if s_edge == "off-board" or s_overlap > _grade_tol(effective_board_edge_clearance, clearance_margin):
+            if s_edge == "off-board" or s_overlap > _grade_tol(_seg_floor, clearance_margin):
                 violations.append({
                     'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
                     'item1': graphic_item_label(seg),
@@ -6793,12 +6830,22 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             # One STRICT check; the margined verdict is derived from it (same
             # distances, different tolerance -- avoids a second ring scan).
+            _via_floor, _via_hi = _copper_edge_range(via.net_id, 'via')
             s_viol, s_overlap, s_edge = check_via_board_edge_poly(
                 via, edge_rings, edge_outer, edge_cutouts,
-                effective_board_edge_clearance, 0.0)
+                _via_floor, 0.0)
             has_violation = s_viol and (
                 s_edge == "off-board"
-                or s_overlap > _grade_tol(effective_board_edge_clearance, clearance_margin))
+                or s_overlap > _grade_tol(_via_floor, clearance_margin))
+            if not s_viol and _via_hi > _via_floor and check_via_board_edge_poly(
+                    via, edge_rings, edge_outer, edge_cutouts, _via_hi, 0.0)[0]:
+                _net = pcb_data.nets.get(via.net_id, None)
+                _accepted_edge.append({
+                    'type': 'via-board-edge',
+                    'net1': _net.name if _net else f"net_{via.net_id}", 'edge': 'edge',
+                    'overlap_mm': 0.0, 'via_loc': (via.x, via.y),
+                    'accepted': 'edge-rule-undecided',
+                })
             if s_viol:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
@@ -6882,12 +6929,19 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                                np.array([s.width for s in pcb_data.segments], dtype=np.float64))
             _esw = _seg_arrays[7]
             _edge_tol = _grade_tol(effective_board_edge_clearance, clearance_margin)
+            # #1678: each track's and via's own floor (`_copper_edge_range`)
+            _seg_floors = effective_board_edge_clearance
+            if _edge_rules is not None:
+                _seg_floors = np.array(
+                    [(effective_board_edge_clearance if getattr(s, 'graphic', False)
+                      else _copper_edge_range(s.net_id, 'track', s.layer)[0])
+                     for s in pcb_data.segments], dtype=np.float64)
 
             for (_h1x, _h1y), (_h2x, _h2y), _hr, _slot_ref in _slot_caps:
                 _d = _np_capsule_to_tracks(_h1x, _h1y, _h2x, _h2y, *_seg_arrays[:7])
                 _hdx, _hdy = _h2x - _h1x, _h2y - _h1y
                 _hlen2 = _hdx * _hdx + _hdy * _hdy
-                _ovl = (effective_board_edge_clearance + _esw / 2.0) - (_d - _hr)
+                _ovl = (_seg_floors + _esw / 2.0) - (_d - _hr)
                 for _k in np.nonzero(_ovl > 1e-9)[0].tolist():
                     seg = pcb_data.segments[_k]
                     if matching_seg_net_set is not None and seg.net_id not in matching_seg_net_set:
@@ -6911,7 +6965,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         continue
                     _t = 0.0 if _hlen2 <= 0 else max(0.0, min(1.0, ((via.x - _h1x) * _hdx + (via.y - _h1y) * _hdy) / _hlen2))
                     _vd = math.hypot(via.x - (_h1x + _t * _hdx), via.y - (_h1y + _t * _hdy)) - _hr
-                    _vovl = (effective_board_edge_clearance + via.size / 2.0) - _vd
+                    _vovl = (_copper_edge_range(via.net_id, 'via')[0] + via.size / 2.0) - _vd
                     if _vovl > 1e-9:
                         net_name = pcb_data.nets.get(via.net_id, None)
                         net_str = net_name.name if net_name else f"net_{via.net_id}"

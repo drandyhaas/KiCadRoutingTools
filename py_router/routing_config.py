@@ -199,6 +199,18 @@ class GridRouteConfig:
                                            # Hole-to-Hole Spacing" (keep in sync with
                                            # routing_defaults.HOLE_TO_HOLE_CLEARANCE)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
+    # #1678: with a .kicad_dru edge_clearance rule binding copper, the scalar
+    # above is the STRICTEST floor any net's tracks or vias are held to, for
+    # every reader that has one number; `edge_floors` (design_rules.EdgeFloors,
+    # installed by install_design_rules) holds each net's own, for the board's
+    # edge band, and `board_edge_declared` the value the run resolved before
+    # the rule (which the DRC writeback records: a rule is the rule file's, not
+    # the board's minimum). None = no such rule, the scalar is all there is.
+    edge_floors: Optional[object] = None
+    board_edge_declared: Optional[float] = None
+    # What a map's edge band adds for geometry offset from the routed
+    # centreline (net_keepouts.centerline_config: a diff pair's members)
+    edge_extra_clearance: float = 0.0
     # #581: edge-to-edge clearance between ANY placed via and SAME-NET pads.
     # > 0 forbids via-in-pad globally: routing/tap/rescue via placement blocks
     # same-net SMD pads at this clearance, and pad-centre swap vias are
@@ -457,6 +469,21 @@ class GridRouteConfig:
         to these under ``--escalation board``. Empty when the board declares
         none, or under ``--escalation fab`` (which may go below them)."""
         out = {}
+        # #1676: a via rule binds this net under every policy that may descend.
+        # Under `board` a rung may not go below it; under `fab` it may, last,
+        # and `first_*` asks only that the ladder's first choice meets it
+        # (fab_tiers.escalation_rungs).
+        rules_v = self.rules
+        if rules_v is not None and getattr(rules_v, 'dru_path', '') and hasattr(rules_v, 'via_floors'):
+            try:
+                from fab_tiers import get_escalation_policy
+                _vf = rules_v.via_floors(net_id)
+                if _vf and get_escalation_policy()[0] == 'fab':
+                    out.update({'first_' + k: v for k, v in _vf.items()})
+                elif _vf and 'annular' in _vf:
+                    out['annular'] = _vf['annular']
+            except Exception:                                  # noqa: BLE001
+                pass
         # #530 (corpus A/B, core1106_cam): a net in a NON-Default class is graded
         # by KiCad at that class's clearance whatever this run narrowed to --
         # the writeback lowers only the Default class (decision 2) -- so no

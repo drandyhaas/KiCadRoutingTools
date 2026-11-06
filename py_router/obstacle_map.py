@@ -1415,6 +1415,14 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
     # Use board_edge_clearance if set, otherwise use track clearance
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
+    # #1678: with a .kicad_dru rule the shared band is each kind's LOWEST floor
+    # over the nets, and a net above it gets the rest while it routes
+    # (net_keepouts.derive_edge_bands). A caller that replaced the scalar for
+    # one search asked for that number, and gets it.
+    _floors = getattr(config, 'edge_floors', None)
+    via_edge = edge_clearance
+    if _floors is not None and abs(edge_clearance - _floors.strictest) < 1e-9:
+        edge_clearance, via_edge = _floors.track_band, _floors.via_band
     # Add track half-width to clearance (tracks need to stay away from edge).
     # #447: the edge band must use the width the map is STAMPED at -- build_base_obstacles
     # (repair_planes plane connections) stamps every obstacle at
@@ -1423,7 +1431,7 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # graze the outline sub-fab (crkbd/dilemma). Callers pass the stamped width here.
     _edge_tw = track_width if track_width is not None else config.track_width
     track_edge_clearance = edge_clearance + _edge_tw / 2 + extra_clearance
-    via_edge_clearance = edge_clearance + config.via_size / 2 + extra_clearance
+    via_edge_clearance = via_edge + config.via_size / 2 + extra_clearance
 
     # Convert to grid coordinates. Use to_grid_dist_safe (ceil) for the via
     # keep-out so grid quantization can't leave a via inside the edge clearance

@@ -1069,6 +1069,7 @@ class PlanesTab(wx.Panel):
                 plane_layers=expanded_layers,
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
+                via_from_class=config.get('via_from_class', False),
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 zone_clearance=config.get('zone_clearance'),

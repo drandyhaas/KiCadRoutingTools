@@ -661,12 +661,18 @@ manifest routes.
     request: it is drawn as asked, floored only at the physical fab floor.
   - A rule with an `annular_width` constraint prints `.kicad_dru rule '<name>':
     NOT honoured (annular_width ...)` at the start of a routing step, whatever
-    the vias are: no routing step sizes a via by it, so the line is a disclosure
-    that no chain removes. Whether the vias meet it is the line `route.py` and
+    the vias are: a step that was given no via size holds it, an explicit
+    `--via-size` and a descent need not, so the line is a disclosure that
+    no chain removes. Whether the vias meet it is the line `route.py` and
     `route_diff.py` print when they end, `.kicad_dru rule '<name>'
     (annular_width min X mm): this step's N via(s) it binds meet it` or
-    `... K BELOW it` (`JSON_SUMMARY.design_rules.annular_rules`), and
-    `check_drc` for the whole board.
+    `... K BELOW it` (`JSON_SUMMARY.design_rules.annular_rules`; `via_diameter`
+    and `hole_size` rules likewise, in `via_rules`), and `check_drc` for the
+    whole board. A via below a rule ships only when nothing else connected the
+    net, so read a `BELOW it` as a place to look, not a run to fail.
+  - An `edge_clearance` rule holds every step's tracks and vias with no flag
+    (`edge_rules` in `JSON_SUMMARY`), and its `(layer ...)` clause scopes only a
+    zone's gap: KiCad applies `(layer inner)` to an F.Cu track too.
   - **A pair class the project SOLVED** (its own `diff_pair_width` /
     `diff_pair_gap` from a fab or field solver, not the stock 0.2 / 0.25):
     omit `--track-width` and `--diff-pair-gap`, so each pair is built at its

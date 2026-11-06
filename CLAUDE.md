@@ -342,6 +342,24 @@ Validate routed boards against the *real* spec, with the right checker — most
   Grade a ruled board with plain `check_drc.py` (it auto-reads); a hand-rolled
   checker that ignores the dru will manufacture phantom flags on relaxed layers
   and miss real ones on tightened layers.
+  **An `edge_clearance` rule (#1678) installs at the same chokepoint**
+  (`design_rules._install_rule_floors`, no flag, no control): it replaces
+  `--board-edge-clearance` for the tracks and vias it binds, tightening or
+  relaxing, pinned up only at the fab floor, and `check_drc` grades KiCad's value.
+  **Its `(layer ...)` clause scopes a zone's gap and nothing else**: kicad-cli
+  10.0.6 evaluates a pad, track or via at no layer, so `(layer inner)` binds an
+  F.Cu track too (a condition term such as `A.Layer` does read the item's layer).
+  `config.board_edge_clearance` is then the STRICTEST floor of any net, for every
+  one-number reader; `config.edge_floors` (`design_rules.EdgeFloors`) holds each
+  net's, the shared band is each kind's lowest, a net above it gets the rest while
+  it routes (`net_keepouts.derive_edge_bands`), and `config.board_edge_declared`
+  is what the DRC writeback records.
+  **Via rules (#1676) are read at the same place.** `DesignRules.via_floors` is
+  what binds a via (condition, and the project's `rule_severities`); a step given
+  no explicit via starts there (`via_from_class`), and `fab_tiers.escalation_rungs`
+  raises its first rung to them under `fab` and every rung under `board`. A descent
+  below a rule stays legal and last, and `design_rules.disclose_step_rules` names
+  every rule a step broke, per rule, in `JSON_SUMMARY.design_rules`.
   **Why clamp on a ceiling:** stock net classes are largely *aspirational* — corpus and
   real boards route below them, and even the human-routed references violate their own
   class (zynq: 499 clearance violations at its 0.2 class, routed ~0.1), so keeping the

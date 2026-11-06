@@ -1934,6 +1934,10 @@ class FanoutTab(wx.Panel):
         clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
+        if shared.get('via_from_class'):
+            # #1676: a via nobody asked for starts at the board's .kicad_dru rules
+            from design_rules import run_via_for_rules
+            via_size, via_drill = run_via_for_rules(None, self.pcb_data, via_size, via_drill)
         layers = shared.get('layers', defaults.DEFAULT_LAYERS)
         # #861: say where the width came from. A user who typed 3 mil and got
         # 0.2 mm escapes had the Track Width override box unticked, so the
@@ -2121,6 +2125,10 @@ class FanoutTab(wx.Panel):
         allow_via_in_pad = config.get('allow_via_in_pad', False)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
+        if shared.get('via_from_class'):
+            # #1676: a via nobody asked for starts at the board's .kicad_dru rules
+            from design_rules import run_via_for_rules
+            via_size, via_drill = run_via_for_rules(None, self.pcb_data, via_size, via_drill)
 
         # The panel's escape layer: None = the part's mounted layer (F.Cu for
         # top, B.Cu for bottom), as qfn_fanout.py resolves an omitted --layer,

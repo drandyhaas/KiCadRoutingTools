@@ -502,6 +502,10 @@ def resolve_intra_pair_tolerances(diff_pair_ids, config, pcb_data, input_file,
 
 def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
+                # #1676: no explicit via was asked for (the CLI's omitted
+                # --via-size, the GUI's unticked override), so the run's via
+                # starts at the board's own .kicad_dru via rules.
+                via_from_class: bool = False,
                 # #530: cap every auto-read net class at this clearance (the
                 # explicit --clearance-ceiling). None = honour the classes.
                 clearance_ceiling: Optional[float] = None,
@@ -1265,6 +1269,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         pcb_data, disable_bga_zones, bga_exclusion_zones,
         selected_net_ids=_sel_ids)
 
+    # #1676: a via this run sizes itself starts at the board's own via rules
+    if via_from_class:
+        from design_rules import run_via_for_rules
+        via_size, via_drill = run_via_for_rules(input_file, pcb_data, via_size, via_drill)
     # Build config kwargs from common parameters plus diff-pair specific options
     config_kwargs = get_common_config_kwargs(
         track_width=track_width, clearance=clearance, via_size=via_size,
@@ -2718,18 +2726,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         summary['design_rules'] = _dr857
     # #1649: whether this call's vias meet each annular_width rule the "NOT
     # honoured" line (printed before routing) names -- route.py's key
+    # #1676 / #1678: and the via size and edge clearance rules.
     _rules1649 = getattr(config, 'rules', None)
     if _rules1649 is not None:
         try:
-            from design_rules import annular_grade_lines
-            _ag = _rules1649.annular_grade(
-                [_v for _r in results for _v in (_r.get('new_vias') or [])])
+            from design_rules import disclose_step_rules
+            _ag = disclose_step_rules(_rules1649, pcb_data, results, input_file)
             if _ag:
-                summary.setdefault('design_rules', {})['annular_rules'] = _ag
-                for _line in annular_grade_lines(_ag):
-                    print(f"  {_line}")
+                summary.setdefault('design_rules', {}).update(_ag)
         except Exception as _age:                               # noqa: BLE001
-            print(f"  (annular_width grade skipped: {_age})")
+            print(f"  (design rule grade skipped: {_age})")
     # #1491: the class/type-scoped rules this call honoured, and each relaxing
     # one another routed pair held at its class value
     if getattr(config, 'scoped_clearance', None) is not None:
@@ -3344,6 +3350,7 @@ Examples:
               f"{args.track_width}mm.")
     # via_size / via_drill: when omitted, default to the board's OWN Default
     # net-class value (else the routing_defaults constant).
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
     for _pname, _nckey, _fallback in (('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
         if getattr(args, _pname) is None:
@@ -3536,6 +3543,7 @@ Examples:
                 clearance=args.clearance,
                 via_size=args.via_size,
                 via_drill=args.via_drill,
+                via_from_class=not _vs_explicit,
                 grid_step=args.grid_step,
                 via_cost=args.via_cost,
                 max_iterations=args.max_iterations,

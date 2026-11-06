@@ -661,6 +661,32 @@ def _apply_board_floors(rungs, floors=None):
     return out
 
 
+#: #1676: the `.kicad_dru` via minimums that bind a via of no particular net
+#: (`DesignRules.via_floors(0)`), set per board at the chokepoint every engine
+#: passes through (design_rules._install_rule_floors), for the descent sites
+#: with no net in hand.
+_RULE_VIA_FLOORS = {}
+
+
+def set_rule_via_floors(floors):
+    """Install this board's `_RULE_VIA_FLOORS` ({} when it has none)."""
+    _RULE_VIA_FLOORS.clear()
+    _RULE_VIA_FLOORS.update(floors or {})
+
+
+def get_rule_via_floors():
+    return dict(_RULE_VIA_FLOORS)
+
+
+def _first_choice_meets(rungs, floors):
+    """The ladder `--escalation fab` walks on a board whose rules size a via:
+    the first rung raised to meet them, then every tier rung below it, so a
+    descent below a rule is the last thing tried and never the first. An
+    unchanged first rung leaves the ladder as it was."""
+    first = _apply_board_floors(rungs[:1], floors)
+    return first + [r for r in rungs if r['via_diameter'] < first[0]['via_diameter'] - 1e-9]
+
+
 def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
     """Ordered list of floor dicts for the tier under the active escalation
     policy: the nominal (preferred) floor first, then any escalation rungs
@@ -707,6 +733,17 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     # class clearance -- a grading floor the writeback never lowers, #530).
     if extra_floors:
         rungs = _apply_board_floors(rungs, extra_floors)
+    # #1676: the board's own via rules. ``board`` may not go below them;
+    # ``fab`` may, but only after a first choice that meets them, and each rule
+    # a run then breaks is named when the step ends
+    # (design_rules.disclose_step_rules).
+    want = dict(_RULE_VIA_FLOORS)
+    for k, v in (extra_floors or {}).items():
+        if k.startswith('first_'):
+            want[k[len('first_'):]] = max(want.get(k[len('first_'):], 0.0), v)
+    if want and rungs:
+        rungs = (_apply_board_floors(rungs, want) if _ESCALATION == 'board'
+                 else _first_choice_meets(rungs, want))
     return rungs
 
 

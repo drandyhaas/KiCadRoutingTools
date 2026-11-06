@@ -3210,6 +3210,9 @@ def create_plane(
     plane_layers: List[str],
     via_size: float = defaults.VIA_SIZE,
     via_drill: float = defaults.VIA_DRILL,
+    # #1676: no explicit via was asked for (the CLI's omitted --via-size, the
+    # GUI's unticked override): the via starts at the board's .kicad_dru rules.
+    via_from_class: bool = False,
     track_width: float = defaults.TRACK_WIDTH,
     clearance: float = defaults.CLEARANCE,
     zone_clearance: float = None,
@@ -3336,6 +3339,10 @@ def create_plane(
     # copper in different ORDER, and list position leaks into decisions.
     from kicad_parser import canonicalize_pcb_data_order
     canonicalize_pcb_data_order(pcb_data)
+    # #1676: a via this run sizes itself starts at the board's own via rules
+    if via_from_class:
+        from design_rules import run_via_for_rules
+        via_size, via_drill = run_via_for_rules(input_file, pcb_data, via_size, via_drill)
     # #962: the input's vias as values, for the Type VII stamp (only vias this
     # run ADDS are stamped; see fab_notes.via_protection_stamps)
     from fab_notes import via_snapshot as _via_snapshot962
@@ -4528,6 +4535,7 @@ Examples:
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            resolve_cli_floor)
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
@@ -4683,6 +4691,7 @@ Examples:
         plane_layers=plane_layers,
         via_size=args.via_size,
         via_drill=args.via_drill,
+        via_from_class=not _vs_explicit,
         track_width=args.track_width,
         clearance=args.clearance,
         zone_clearance=args.zone_clearance,

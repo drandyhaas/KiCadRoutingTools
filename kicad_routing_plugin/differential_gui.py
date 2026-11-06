@@ -1067,6 +1067,7 @@ class DifferentialTab(wx.Panel):
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
+                via_from_class=config.get('via_from_class', False),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance',
                                                   defaults.HOLE_TO_HOLE_CLEARANCE),
                 board_edge_clearance=config.get('board_edge_clearance',

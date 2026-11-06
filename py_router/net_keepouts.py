@@ -21,6 +21,10 @@ nets come from the resolver's own evaluator (NetName, NetClass, Type, layer
 predicates ...), separately for tracks and for vias; a rule it cannot model
 completely stays reported as NOT honoured rather than half-applied.
 
+An `edge_clearance` rule that binds some nets harder than others (#1678,
+`derive_edge_bands`) takes the same stamp: the board's static edge band is the
+lowest floor over the nets, and a net above it gets the rest while it routes.
+
 A region is stamped into the obstacle map only while a net it binds routes:
 `stamp()` wraps the single-ended and diff-pair route entries, adds the cells
 (the same rasterisation and clearance band `add_rule_area_keepout_obstacles`
@@ -324,6 +328,23 @@ def banned_layers(pcb_data, net_ids: Iterable[int]) -> FrozenSet[str]:
     return frozenset(out)
 
 
+def derive_edge_bands(floors, pcb_data) -> List[dict]:
+    """One entry per distinct set of `design_rules.EdgeFloors` a net holds above
+    the board's static band: {'name', 'edge_band': True, 'nets', 'track': {layer:
+    floor}, 'via': floor}. [] when every net is at the band."""
+    groups: Dict[tuple, set] = {}
+    for nid, name in ((nid, getattr(n, 'name', '')) for nid, n in pcb_data.nets.items()):
+        if not nid or not name or nid not in floors.track:
+            continue
+        track = {l: v for l, v in floors.track[nid].items() if v > floors.track_band + 1e-9}
+        via = floors.via[nid] if floors.via[nid] > floors.via_band + 1e-9 else None
+        if track or via is not None:
+            groups.setdefault((tuple(sorted(track.items())), via), set()).add(name)
+    return [{'name': 'edge clearance', 'edge_band': True, 'nets': frozenset(names),
+             'track': dict(track), 'via': via, 'layers': ['*.Cu']}
+            for (track, via), names in sorted(groups.items(), key=lambda kv: repr(kv[0]))]
+
+
 def binds(ko: dict, net_name: str) -> bool:
     """True when keep-out `ko` forbids its items to net `net_name`."""
     return net_name in ko.get('nets', ())
@@ -340,6 +361,51 @@ def attach(pcb_data, keepouts: Optional[List[dict]]) -> None:
         return
     pcb_data._net_keepouts = list(keepouts)
     pcb_data._net_keepout_cells = {}
+
+
+class _EdgeBandSink:
+    """What add_board_edge_obstacles stamps as permanent board geometry, handed
+    to a map a net's band comes and goes on: track cells on `layers` (indices)
+    and via cells, each only when asked for."""
+
+    def __init__(self, sink, layers=None, vias=False):
+        self.sink, self.layers, self.vias = sink, layers, vias
+
+    def _cells(self, arr):
+        if self.layers is None:
+            return
+        a = np.asarray(arr, dtype=np.int32).reshape(-1, 3)
+        a = a[np.isin(a[:, 2], list(self.layers))]
+        if len(a):
+            self.sink.add_blocked_cells_batch(a)
+
+    def _vias(self, arr):
+        if self.vias:
+            a = np.asarray(arr, dtype=np.int32).reshape(-1, 2)
+            if len(a):
+                self.sink.add_blocked_vias_batch(a)
+
+    add_static_blocked_cells_batch = add_blocked_cells_batch = _cells
+    add_static_blocked_vias_batch = add_blocked_vias_batch = _vias
+
+
+def _stamp_edge_band(sink, pcb_data, cfg, ko: dict) -> None:
+    """The native edge pass, at the floors ko holds its nets to."""
+    from dataclasses import replace
+    from obstacle_map import add_board_edge_obstacles
+    extra = getattr(cfg, 'edge_extra_clearance', 0.0) or 0.0
+    index = {l: i for i, l in enumerate(cfg.layers)}
+    by_value: Dict[float, list] = {}
+    for layer, v in ko['track'].items():
+        if layer in index:
+            by_value.setdefault(v, []).append(index[layer])
+    for v, layers in by_value.items():
+        add_board_edge_obstacles(_EdgeBandSink(sink, layers=layers), pcb_data,
+                                 replace(cfg, board_edge_clearance=v, edge_floors=None), extra)
+    if ko['via'] is not None:
+        add_board_edge_obstacles(_EdgeBandSink(sink, vias=True), pcb_data,
+                                 replace(cfg, board_edge_clearance=ko['via'], edge_floors=None),
+                                 extra)
 
 
 class _Recorder:
@@ -374,9 +440,16 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
     from obstacle_map import add_rule_area_keepout_obstacles
     kos = pcb_data._net_keepouts
     shim = SimpleNamespace(board_info=SimpleNamespace(
-        keepouts=[kos[i] for i in idx],
+        keepouts=[kos[i] for i in idx if not kos[i].get('edge_band')],
         board_bounds=getattr(pcb_data.board_info, 'board_bounds', None)))
-    return lambda sink, cfg: add_rule_area_keepout_obstacles(sink, shim, cfg)
+    bands = [kos[i] for i in idx if kos[i].get('edge_band')]
+
+    def stamp_into(sink, cfg):
+        if shim.board_info.keepouts:
+            add_rule_area_keepout_obstacles(sink, shim, cfg)
+        for ko in bands:
+            _stamp_edge_band(sink, pcb_data, cfg, ko)
+    return stamp_into
 
 
 def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.ndarray]:
@@ -456,7 +529,7 @@ def centerline_config(config):
     (lvds_converter_dualclk /CLK+: its copper over the edge by 0.5 um)."""
     from dataclasses import replace
     extra = (config.track_width + config.diff_pair_gap) / 2
-    return replace(config, clearance=config.clearance + extra)
+    return replace(config, clearance=config.clearance + extra, edge_extra_clearance=extra)
 
 
 def stamping(net_ids_of, maps_of, centerline: bool = False):
@@ -534,6 +607,8 @@ def audit_items(pcb_data, segments, vias, keepouts):
         return bool(name) and binds(ko, name)
 
     for ko in keepouts:
+        if ko.get('edge_band'):
+            continue    # edge_rule_grade's, and KiCad reports it under another name
         if ko.get('layer_ban'):
             # a track ban covers the board: every bound-net track on one of
             # its layers is an item KiCad does not allow
@@ -598,6 +673,7 @@ def audit(pcb_data, segments, vias,
     and the keep-outs unless `keepouts` names them (a re-parsed output board
     carries none of its own)."""
     kos = keepouts if keepouts is not None else getattr(pcb_data, '_net_keepouts', None)
+    kos = [ko for ko in kos or () if not ko.get('edge_band')]
     if not kos:
         return None
     rows: Dict[Tuple[str, str], List[int]] = {}

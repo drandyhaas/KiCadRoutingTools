@@ -546,6 +546,11 @@ def _board_edge_model(pcb_data, clearance, board_edge_clearance):
     usable outline AND no bounds (then no edge test is possible)."""
     from check_drc import board_edge_geometry
     edge_clear = board_edge_clearance if board_edge_clearance > 0 else clearance
+    # #1678: a .kicad_dru edge_clearance rule outranks it, at the strictest
+    # floor any net's copper is held to: an escape is laid before the net's
+    # own route, and the fanout keeps one number per part.
+    from design_rules import strictest_edge_floor
+    edge_clear = strictest_edge_floor(pcb_data, edge_clear)
     rings, outer, cutouts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
     return edge_clear, rings, outer, cutouts
 
@@ -1793,6 +1798,9 @@ def generate_qfn_fanout(footprint: Footprint,
     nets are published as qfn_fanout.LAST_CANCEL_SKIPPED. Passing None (the
     default, and what the CLI passes) is fully inert.
     """
+    # #1676: the rungs below start at the board's own via rules
+    from design_rules import install_board_via_rule_floors
+    install_board_via_rule_floors(pcb_data)
     LAST_CANCEL_SKIPPED.clear()
     LAST_ESCALATED.clear()          # #1328
     LAST_FILTER_MISSES.clear()      # #1641
@@ -2659,9 +2667,9 @@ def main():
                         help="'stub' (default) = surface 45-degree fan; 'underpad' = drop a "
                              "through-via just past each pad and escape on an inner layer "
                              "(issue #164), for crowded fine-pitch edges where the surface is full.")
-    parser.add_argument('--via-size', type=float, default=0.45,
+    parser.add_argument('--via-size', type=float, default=None,
                         help='Underpad escape via outer diameter (mm, default 0.45)')
-    parser.add_argument('--via-drill', type=float, default=0.25,
+    parser.add_argument('--via-drill', type=float, default=None,
                         help='Underpad escape via drill diameter (mm, default 0.25)')
     parser.add_argument('--board-edge-clearance', type=float, default=defaults.BOARD_EDGE_CLEARANCE,
                         help='Min clearance from stub/via copper to the Edge.Cuts '
@@ -2746,6 +2754,14 @@ def main():
     # stock 0.2 mm board minimum pinned 0.1 mm escape stubs up to 0.2.
     if getattr(args, 'track_width', None) is None:
         args.track_width = args.width
+    # #1676: a via nobody asked for starts at the board's own .kicad_dru rules
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
+    args.via_size = 0.45 if args.via_size is None else args.via_size
+    args.via_drill = 0.25 if args.via_drill is None else args.via_drill
+    if not _vs_explicit:
+        from design_rules import run_via_for_rules
+        args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
+                                                          args.via_drill)
     __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
