@@ -4940,6 +4940,64 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
                 return next(iter(got))[0]
         return None
 
+    # #1733: KiCad's binding clearance rule may be a `(severity ignore)` one,
+    # which decides the pair and reports nothing (kicad-cli 10.0.6: alone, and
+    # over an earlier error rule; an error rule after it wins back). No
+    # clearance channel reads such a rule, so it is asked here, of the
+    # resolver, three-valued: only a certain binding silences a row.
+    _ign = {}
+    if any(r.severity == 'ignore' and (r.constraints.get('clearance') or {}).get('min')
+           is not None for r in rules):
+        _ign['walk'] = None
+
+    def _ignore_rule(v):
+        if not _ign:
+            return None
+        kinds = _CLEARANCE_PAIR_TYPES.get(v['type'])
+        if kinds is None:
+            return None
+        from design_rules import DesignRules, parse_condition_maybe, rule_may_match
+        if _ign['walk'] is None:
+            dr = size_rules
+            if dr is None:
+                try:
+                    dr = DesignRules.from_project(pcb_data, pcb_file,
+                                                  copper_layers=list(board_copper))
+                except Exception:                                # noqa: BLE001
+                    _ign.clear()
+                    return None
+            walk = []
+            for r in dr.rules:
+                if (r.constraints.get('clearance') or {}).get('min') is None:
+                    continue
+                known = not r.unsupported or str(r.unsupported).startswith(
+                    ('condition', 'severity'))
+                walk.append((r, parse_condition_maybe(r.condition_src) if known
+                             else ('unknown',)))
+            _ign['dr'], _ign['walk'] = dr, walk
+            _ign['ctx'] = ('clearance', dr._net_name_set())
+        dr = _ign['dr']
+        na, nb = _nid(v.get('net1')), _nid(v.get('net2'))
+        if na is None or nb is None:
+            return None
+        layer = v.get('layer')
+        pa = _pad(v.get('pad_ref')) if kinds[0] == 'pad' else None
+        pb = _pad(v.get('pad_ref2')) if kinds[1] == 'pad' else None
+        if any((getattr(p, 'local_clearance', 0.0) or 0.0) > 0.0
+               for p in (pa, pb) if p is not None):
+            return None                          # an override: no rule binds
+        if (kinds[0] == 'pad' and pa is None) or (kinds[1] == 'pad' and pb is None):
+            return None
+        a = dr.item_for_pad(pa, layer) if pa is not None else dr.item_for_net(na, kinds[0], layer)
+        b = dr.item_for_pad(pb, layer) if pb is not None else dr.item_for_net(nb, kinds[1], layer)
+        for r, ast in reversed(_ign['walk']):
+            m = rule_may_match(r, ast, a, b, layer, dr.copper_layers, _ign['ctx'])
+            if m is None:
+                return None
+            if m:
+                return r.name if r.severity == 'ignore' else None
+        return None
+
     _size_kinds = {'track-width': ('track_width', 'track', 'width'),
                    'via-size': ('via_diameter', 'via', 'size'),
                    'via-drill-size': ('hole_size', 'via', 'drill'),
@@ -5007,7 +5065,11 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
             rsev = rule_sev.get(rule)
         elif key in ('clearance', 'shorting_items') and rule_sev \
                 and v['type'] in _CLEARANCE_FAMILY:
-            rule = _clearance_rule(v) if key == 'clearance' else None
+            # #1733: an ignore rule binding the pair decides it, though no
+            # channel above prices it (they read no ignore rule)
+            rule = _ignore_rule(v)
+            if rule is None:
+                rule = _clearance_rule(v) if key == 'clearance' else None
             rsev = rule_sev.get(rule)
         elif rsev is None and v.get('rule'):
             rsev = rule_sev.get(v['rule'])
