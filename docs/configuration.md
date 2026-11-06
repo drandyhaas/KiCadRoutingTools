@@ -325,7 +325,12 @@ ladder's first rung is raised to meet them and the tier's own rungs follow it,
 so going below a rule is the last thing a net tries, and completion first still
 stands: a via below a rule ships when nothing else connected the net. Under
 `--escalation board` no rung is below them. The fanouts, plane taps and rescue
-paths walk the same ladder.
+paths walk the same ladder. A via-in-pad the clamp shrinks to fit its pad is
+held to the same rules (#1727): where a via of the pad's size can meet them, it
+takes the drill that leaves the rule's ring and meets the hole minimum, rather
+than keeping the requested drill round the rung's own ring. Where none can (the
+pad is under the diameter minimum, or too small for the ring round the hole
+minimum) every via there breaks a rule, and the clamp sizes it as before.
 
 Every such rule is graded when route.py or route_diff.py ends, over the vias the
 step laid: `.kicad_dru rule 'rf ring' (annular_width min 0.07 mm): this step's 7

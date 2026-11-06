@@ -357,7 +357,9 @@ Validate routed boards against the *real* spec, with the right checker — most
   **Via rules (#1676) are read at the same place.** `DesignRules.via_floors` is
   what binds a via (condition, and the project's `rule_severities`); a step given
   no explicit via starts there (`via_from_class`), and `fab_tiers.escalation_rungs`
-  raises its first rung to them under `fab` and every rung under `board`. A descent
+  raises its first rung to them under `fab` and every rung under `board`; the
+  via-in-pad clamp holds a shrunk via to them wherever a via of its size can
+  meet them (`fab_tiers.drill_meeting_rules`, #1727). A descent
   below a rule stays legal and last, and `design_rules.disclose_step_rules` names
   every rule a step broke, per rule, in `JSON_SUMMARY.design_rules`.
   **Why clamp on a ceiling:** stock net classes are largely *aspirational* — corpus and

@@ -1472,10 +1472,11 @@ def tap_pad_with_escalation(
         n_layers = len(pcb_data.board_info.copper_layers) or 2
         # escalation_rungs: empty under --escalation off (the via then stays
         # at the caller's size), raised to the board's minimums under board.
+        _net_floors = config.rule_floors(getattr(pad, 'net_id', 0) or 0)
         cvs, cvd, vstatus, vrung = clamp_via_to_pad(
             via_size, via_drill, pad,
-            escalation_rungs(n_layers, extra_floors=config.rule_floors(
-                getattr(pad, 'net_id', 0) or 0)))
+            escalation_rungs(n_layers, extra_floors=_net_floors),
+            rule_floors=_net_floors)
         # Only adopt the clamp when it genuinely produces a SMALLER via than the
         # caller's -- a pad the caller's via already fits ('fits'), or a pad so
         # small the clamp can't shrink below the fab floor it's already at, leaves

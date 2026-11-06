@@ -678,6 +678,43 @@ def get_rule_via_floors():
     return dict(_RULE_VIA_FLOORS)
 
 
+def rule_via_floors(extra_floors=None):
+    """The via rules a descent's first choice is held to: this board's
+    `_RULE_VIA_FLOORS`, and the ``first_*`` keys of a net's ``extra_floors``
+    (``GridRouteConfig.rule_floors``) on top. :func:`escalation_rungs` raises
+    the ladder's first rung to them; :func:`drill_meeting_rules` answers for a
+    via a descent site sizes itself (#1727)."""
+    want = dict(_RULE_VIA_FLOORS)
+    for k, v in (extra_floors or {}).items():
+        if k.startswith('first_'):
+            want[k[len('first_'):]] = max(want.get(k[len('first_'):], 0.0), v)
+    return want
+
+
+def drill_meeting_rules(diameter, drill, drill_floor, ring_floor, floors):
+    """#1727: the drill a via of ``diameter`` takes to meet the via rules
+    ``floors`` (:func:`rule_via_floors`), or None when no drill does.
+
+    The drill is ``drill`` where that holds the rules, else the largest that
+    leaves the ring each side (``ring_floor``, the fab rung's, or the rule's
+    where larger) round it, never below ``drill_floor`` (the rung's) nor the
+    hole minimum. None when the diameter is under the diameter minimum, or
+    cannot hold the ring round the smallest drill allowed (the smallest via
+    meeting the rules at that drill, :func:`_via_holding_ring`, is larger)."""
+    if not floors:
+        return None
+    import math
+    lo = max(drill_floor, floors.get('via_drill', 0.0))
+    ring = max(ring_floor, floors.get('annular') or 0.0)
+    if diameter < floors.get('via_diameter', 0.0) - 1e-9:
+        return None
+    if _via_holding_ring(diameter, lo, ring) > diameter + 1e-9:
+        return None
+    # Rounded DOWN to 0.1 um, so the ring it leaves is never a rounding under.
+    hi = math.floor(round(diameter - 2.0 * ring, 6) * 1e4 + 1e-6) / 1e4
+    return max(lo, min(drill, hi))
+
+
 def _first_choice_meets(rungs, floors):
     """The ladder `--escalation fab` walks on a board whose rules size a via:
     the first rung raised to meet them, then every tier rung below it, so a
@@ -737,10 +774,7 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     # ``fab`` may, but only after a first choice that meets them, and each rule
     # a run then breaks is named when the step ends
     # (design_rules.disclose_step_rules).
-    want = dict(_RULE_VIA_FLOORS)
-    for k, v in (extra_floors or {}).items():
-        if k.startswith('first_'):
-            want[k[len('first_'):]] = max(want.get(k[len('first_'):], 0.0), v)
+    want = rule_via_floors(extra_floors)
     if want and rungs:
         rungs = (_apply_board_floors(rungs, want) if _ESCALATION == 'board'
                  else _first_choice_meets(rungs, want))
