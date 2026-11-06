@@ -640,52 +640,120 @@ def run_single_ended_member_fallback(state, diff_pairs_list, nets_to_route,
 
 
 MEMBER_FALLBACK_WIDTH_SITE = 'pair member fallback copper shipped under width'
+COUPLED_PAIR_WIDTH_SITE = 'coupled pair copper shipped under width'
+
+#: A segment within this of the width the pair router draws its connectors
+#: at is that connector, delivered at its own request (#1725).
+DRAWN_WIDTH_TOL = 1e-4
 
 
-def disclose_member_fallback_widths(pcb_data, config, member_names,
-                                    input_keys) -> Dict:
-    """The design-rules rows of the member fallback's narrowed copper (#1679).
+def disclose_pair_widths(pcb_data, members, input_keys, site) -> Dict:
+    """The design-rules rows of pair members' narrowed copper, as shipped.
 
-    On a run with a layer wider than the call's `track_width`, a fallback
-    member that does not fit at its layer width necks down in the
-    single-ended engine, and that ladder records nothing. Route.py's rule for
-    a net with its own width (found reviewing #1282), on the same helpers:
-    one row per member net, measured on the board this run ships
-    (`pcb_data.segments` once the engine is done), graded on the copper THIS
-    run laid -- a segment whose `segment_identity` is in `input_keys` was on
-    the input board -- against the member's own width on that copper's
-    layer. The member's per-attempt `track_width` rows (terminal necks of
-    coupled attempts that never shipped, among them) are replaced, so a
-    member that necked in one attempt and shipped at full width records
-    nothing.
+    Route.py's rule for a net with its own width (found reviewing #1282), on
+    the same helpers: one row per member net, measured on the board this run
+    ships (`pcb_data.segments` once the engine is done), graded on the copper
+    THIS run laid -- a segment whose `segment_identity` is in `input_keys`
+    was on the input board -- against the member's own width on that
+    copper's layer. Every `track_width` row of a covered member, recorded per
+    routing ATTEMPT, is replaced by the measurement, so a member that necked
+    in one attempt and shipped at full width records nothing, and copper that
+    never shipped no longer fails --strict-sizes.
 
-    `member_names` is the fallback summary's `attempted` list. The members
-    belong to pairs with no coupled copper, so no `pair partner neck` row of
-    a shipped pair is touched. Returns the shortfall per covered net."""
+    `members` is {net_id: (width_on, drawn)}: `width_on(layer)` the member's
+    own width on a layer, `drawn` the narrower width the pair router draws
+    the member's terminal connectors at by design (the pair's track width,
+    matched to the stubs it lands on), or None. New copper at `drawn` is
+    delivered at that request and is not a shortfall; copper under it is.
+    Rows of other kinds (vias, clearance) and of other nets are untouched.
+    Returns the shortfall per covered net name."""
     from routing_common import new_copper_width_shortfall
     from fab_tiers import replace_track_rows
-    member_names = set(member_names or ())
-    names = {nid: net.name for nid, net in pcb_data.nets.items()}
-    by_name = {}
-    for nid, nm in names.items():
-        if (nm in member_names and config.layers
-                and max(config.get_net_track_width(nid, layer)
-                        for layer in config.layers)
-                > config.track_width + 1e-9):
-            by_name[nm] = nid
-    if not by_name:
+    if not members:
         return {}
+    names = {nid: net.name for nid, net in pcb_data.nets.items()}
+    by_name = {names[nid]: nid for nid in members if nid in names}
+
+    def _as_drawn(seg):
+        m = members.get(seg.net_id)
+        return (m is not None and m[1] is not None
+                and abs(seg.width - m[1]) <= DRAWN_WIDTH_TOL)
+
     short = new_copper_width_shortfall(
-        pcb_data.segments, lambda nid: names.get(nid, f"Net {nid}"),
-        input_keys,
-        lambda nm, layer: (config.get_net_track_width(by_name[nm], layer)
+        [s for s in pcb_data.segments if not _as_drawn(s)],
+        lambda nid: names.get(nid, f"Net {nid}"), input_keys,
+        lambda nm, layer: (members[by_name[nm]][0](layer)
                            if nm in by_name else None))
     replace_track_rows(
         set(by_name.values()),
         [(by_name[nm], nm, r['requested_mm'], r['min_mm'], r['under_mm'])
          for nm, r in short.items()],
-        MEMBER_FALLBACK_WIDTH_SITE)
+        site)
     return short
+
+
+def disclose_member_fallback_widths(pcb_data, config, member_names,
+                                    input_keys) -> Dict:
+    """:func:`disclose_pair_widths` for the member fallback (#1679).
+
+    On a run with a layer wider than the call's `track_width`, a fallback
+    member that does not fit at its layer width necks down in the
+    single-ended engine, and that ladder records nothing. Each member with
+    such a layer is graded against its own width
+    (`config.get_net_track_width`), with no drawn connector width: the
+    single-ended engine draws none.
+
+    `member_names` is the fallback summary's `attempted` list. The members
+    belong to pairs with no coupled copper, so no row of a coupled pair is
+    touched."""
+    member_names = set(member_names or ())
+    members = {}
+    for nid, net in pcb_data.nets.items():
+        if (net.name in member_names and config.layers
+                and max(config.get_net_track_width(nid, layer)
+                        for layer in config.layers)
+                > config.track_width + 1e-9):
+            members[nid] = (lambda layer, _n=nid:
+                            config.get_net_track_width(_n, layer), None)
+    return disclose_pair_widths(pcb_data, members, input_keys,
+                                MEMBER_FALLBACK_WIDTH_SITE)
+
+
+def disclose_coupled_pair_widths(pcb_data, config, pairs, fallback_names,
+                                 input_keys, pair_geom=None) -> Dict:
+    """:func:`disclose_pair_widths` for the pairs routed coupled (#1725).
+
+    The pair router records its narrowings per routing ATTEMPT: a `terminal
+    neck` row each time an attempt's connector or terminal leg necks, and a
+    `pair partner neck` row for each candidate that passes the intra-pair
+    gate -- which a later gate, a rip-up or a reroute can still discard. So
+    the rows counted attempts, among them copper that never shipped. Every
+    member of `pairs` ([(name, pair)], the call's pairs) the member fallback
+    did not attempt (`fallback_names`, graded by
+    :func:`disclose_member_fallback_widths`) is graded instead on the copper
+    it ships, against the width the pair router asks for: the layer's width
+    (`get_track_width`, the impedance width where the run has one) on the
+    pair's own config, whose track width is the pair's class geometry
+    (`pair_geom`, {p_net_id: (width, gap)}) or the call's. The connectors the
+    router draws at that track width to land on the pads and stubs are
+    delivered as asked, so a pair shipped coupled at full width records
+    nothing. KiCad grades a track only against the board's minimum track
+    width and `.kicad_dru` track_width rules (a net class width is the
+    router's default, not a DRC limit), so a row here is disclosure of a
+    request not met, not a DRC flag."""
+    from dataclasses import replace
+    fallback_names = set(fallback_names or ())
+    pair_geom = pair_geom or {}
+    members = {}
+    for _name, pair in pairs or ():
+        geom = pair_geom.get(pair.p_net_id)
+        pcfg = config if geom is None else replace(config, track_width=geom[0])
+        for nid, nm in ((pair.p_net_id, pair.p_net_name),
+                        (pair.n_net_id, pair.n_net_name)):
+            if nm not in fallback_names:
+                members[nid] = (pcfg.get_track_width, pcfg.track_width)
+    return disclose_pair_widths(pcb_data, members, input_keys,
+                                COUPLED_PAIR_WIDTH_SITE)
 
 
 # --------------------------------------------------------------------------

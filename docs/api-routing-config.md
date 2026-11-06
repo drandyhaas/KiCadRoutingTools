@@ -906,7 +906,11 @@ stamp the call's `track_width`, so a pair's single-ended member fallback, which
 needs them priced for its layer width, routes with
 `reserve_layer_widths=False` on a map of its own (#1679); a member that
 necks there ships under its layer width and gets one `design_rules` row
-(`diff_pair_custody.disclose_member_fallback_widths`). A hole keep-out reads
+(`diff_pair_custody.disclose_member_fallback_widths`). A member routed coupled
+is graded the same way on the copper it ships, against `get_track_width(layer)`
+on the pair's own config, the connectors drawn at that config's `track_width`
+counted as delivered (`disclose_coupled_pair_widths`, #1725); both call
+`disclose_pair_widths`. A hole keep-out reads
 the reserve per layer, and on a pair's centreline map also reaches the member's
 far edge, because a neck does not look at holes (#1687).
 

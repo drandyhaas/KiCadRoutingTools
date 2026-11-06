@@ -2735,6 +2735,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             _input_seg_keys1679)
     except Exception as _mfe:                                   # noqa: BLE001
         print(f"  (member fallback width disclosure skipped: {_mfe})")
+    # #1725: the same rule for every other pair member: the pair router's
+    # terminal and partner necks were rows per routing attempt.
+    try:
+        from diff_pair_custody import disclose_coupled_pair_widths
+        disclose_coupled_pair_widths(
+            pcb_data, config, diff_pair_ids_to_route,
+            se_fallback_summary.get('attempted'), _input_seg_keys1679,
+            pair_geom=getattr(state, 'pair_diff_geom', None))
+    except Exception as _cpe:                                   # noqa: BLE001
+        print(f"  (coupled pair width disclosure skipped: {_cpe})")
     # #857: what this run delivered below a requested size (route.py's
     # key), when it delivered anything there.
     from fab_tiers import narrowed_summary

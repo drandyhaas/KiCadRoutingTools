@@ -1791,7 +1791,9 @@ def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data,
     if not hard:
         # A neck is a narrowing like any other (#857): into the design-rules
         # ledger, so JSON_SUMMARY.design_rules, the Design rules line and
-        # --strict-sizes see it.
+        # --strict-sizes see it. The row is this CANDIDATE's, which a later
+        # gate or a rip-up can still discard: batch_route_diff_pairs replaces
+        # it with the member's shipped copper at the end (#1725).
         for s, asked in requested.values():
             note_narrowing(s.net_id, 'track_width', asked, s.width,
                            'pair partner neck')
