@@ -4849,9 +4849,11 @@ Examples:
     # writes outside route.py's write-list, so its dead-end stubs are not cleaned
     # otherwise. Gated against connectivity + pours, so it never breaks a net.
     if not args.dry_run and _wrote_output:
+        from fix_kicad_drc_settings import effective_board_edge_clearance
         from pcb_modification import clean_plane_copper
-        _snapped, _removed = clean_plane_copper(args.output_file, net_names,
-                                                args.clearance, args.grid_step)
+        _snapped, _removed = clean_plane_copper(
+            args.output_file, net_names, args.clearance, args.grid_step,
+            effective_board_edge_clearance(args.input_file, 0.0))
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
         # Castellated landings (run-6 fix 1.7): tap/join copper that landed in

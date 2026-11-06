@@ -250,11 +250,11 @@ the routing pipeline applies both so the model and the output file agree.
 ### File-level post-passes
 
 ```python
-compute_plane_copper_cleanup(pcb, plane_net_names, clearance=0.1,
-                             grid_step=0.05, progress_callback=None)
+compute_plane_copper_cleanup(pcb, plane_net_names, clearance, grid_step,
+                             board_edge_clearance, progress_callback=None)
     -> PlaneCleanupDelta      # connectors, segments_to_remove, vias_to_remove, snapped
-clean_plane_copper(output_file, plane_net_names, clearance=0.1,
-                   grid_step=0.05) -> Tuple[int, int]   # (snapped, removed)
+clean_plane_copper(output_file, plane_net_names, clearance, grid_step,
+                   board_edge_clearance) -> Tuple[int, int]   # (snapped, removed)
 compute_castellated_landing_retract(pcb, board_edge_clearance, margin=0.02)
     -> CastellationRetractDelta   # moves: [(segment, 'start'|'end', new_x, new_y)]
 retract_castellated_landings(output_file, board_edge_clearance) -> int

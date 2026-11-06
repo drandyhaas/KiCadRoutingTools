@@ -2015,11 +2015,17 @@ class PlanesTab(wx.Panel):
             grid_step = cfg.get('grid_step', defaults.GRID_STEP)
             self._apply_status("Plane cleanup: reading the live board...")
             pcb = build_pcb_data_from_board(board)
+            # The board's own rule pinned up to the fab floor, as the mains
+            # read it. The config's value is the plane-zone INSET.
+            from fix_kicad_drc_settings import fab_edge_floor, live_declared_rules
+            _edge_rule = (live_declared_rules(board) or {}).get(
+                'min_copper_edge_clearance') or 0.0
             # Runs on the UI thread, so it reports through _apply_status (which
             # forces the repaint) rather than the engine-thread callback. This
             # is the shared 13-pass pipeline -- it named none of its passes.
             delta = compute_plane_copper_cleanup(
                 pcb, names, clearance, grid_step,
+                max(_edge_rule, fab_edge_floor(self.board_filename or None)),
                 progress_callback=(lambda c, t, m:
                                    self._apply_status(f"{m} ({c}/{t})" if t else m)))
             if delta.is_empty:

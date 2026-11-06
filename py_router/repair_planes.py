@@ -3401,7 +3401,8 @@ def repair_planes(
             _res_wrap = []
             _out = run_post_route_cleanup(
                 _res_wrap, pcb_data, _scope,
-                SimpleNamespace(clearance=clearance, grid_step=grid_step),
+                SimpleNamespace(clearance=clearance, grid_step=grid_step,
+                                board_edge_clearance=_reconnect_edge()),
                 label='Plane ', phantom=False, via_nudge=False, neck=False,
                 microshift_max_shift=grid_step,
                 # 13 passes that reported nothing: the status bar sat on the
@@ -3963,9 +3964,12 @@ Examples:
     # Dead-end sweep + gap-snap on the repaired plane copper (issue #84), gated
     # against connectivity + pours so it never breaks a net.
     if not args.dry_run:
+        from fix_kicad_drc_settings import effective_board_edge_clearance
         from pcb_modification import clean_plane_copper
-        _snapped, _removed = clean_plane_copper(args.output_file, net_names,
-                                                args.clearance, args.grid_step)
+        _snapped, _removed = clean_plane_copper(
+            args.output_file, net_names, args.clearance, args.grid_step,
+            effective_board_edge_clearance(
+                args.input_file, args.board_edge_clearance if _edge_given else 0.0))
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
         # Castellated landings (run-6 fix 1.7): reconnect/tap copper that

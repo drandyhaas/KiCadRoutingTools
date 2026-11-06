@@ -1473,8 +1473,8 @@ class PlaneCleanupDelta(NamedTuple):
         return not (self.connectors or self.segments_to_remove or self.vias_to_remove)
 
 
-def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
-                                 grid_step: float = 0.05,
+def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float,
+                                 grid_step: float, board_edge_clearance: float,
                                  progress_callback=None) -> "PlaneCleanupDelta":
     """Board-level core of the plane-copper cleanup (issues #84, #308, #319).
 
@@ -1492,6 +1492,11 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
     (not grid_step/2) because a plane-repair quantization graze can be a full
     grid cell (#308: on-grid track vs off-grid hole); each shift is still
     verified to clear all foreign copper and keep the net connected.
+
+    ``board_edge_clearance`` is the copper-to-edge floor the board is graded at,
+    which every pass that lays or moves copper here honours. It is required, not
+    defaulted: a run that left it out graded its connectors at the track
+    clearance alone and shipped them inside the edge clearance.
     """
     from types import SimpleNamespace
     from cleanup_pipeline import run_post_route_cleanup
@@ -1502,7 +1507,8 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
         return PlaneCleanupDelta([], [], [], 0)
 
     plane_results: list = []
-    _cfg = SimpleNamespace(clearance=clearance, grid_step=grid_step)
+    _cfg = SimpleNamespace(clearance=clearance, grid_step=grid_step,
+                           board_edge_clearance=board_edge_clearance)
     _outcome = run_post_route_cleanup(
         plane_results, pcb, scope, _cfg,
         label='Plane ', phantom=False, via_nudge=False, neck=False,
@@ -1515,8 +1521,8 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
         snapped=_outcome.counts.get('stub_gaps_snapped', 0))
 
 
-def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1,
-                       grid_step: float = 0.05) -> Tuple[int, int]:
+def clean_plane_copper(output_file: str, plane_net_names, clearance: float,
+                       grid_step: float, board_edge_clearance: float) -> Tuple[int, int]:
     """FILE front for the plane-copper cleanup: parse the plane tool's OUTPUT
     FILE, compute the cleanup delta via compute_plane_copper_cleanup (the shared
     board-level core), and rewrite the file (stripping removed segments/vias,
@@ -1533,7 +1539,8 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     pcb = parse_kicad_pcb(output_file)
     with open(output_file, 'r', encoding='utf-8') as f:
         content = f.read()
-    delta = compute_plane_copper_cleanup(pcb, plane_net_names, clearance, grid_step)
+    delta = compute_plane_copper_cleanup(pcb, plane_net_names, clearance, grid_step,
+                                         board_edge_clearance)
     if delta.is_empty:
         return 0, 0
 

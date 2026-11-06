@@ -7514,7 +7514,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     from pcb_modification import clean_plane_copper
                     _cs, _cr = clean_plane_copper(
                         output_file, sorted(set(_zn)),
-                        config.clearance, config.grid_step)
+                        config.clearance, config.grid_step,
+                        config.board_edge_clearance)
                     print(f"  [finalize timing] cleanup leg: "
                           f"{_time9.time() - _t9:.1f}s")
                     if _cs or _cr:
