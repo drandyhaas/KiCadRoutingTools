@@ -79,6 +79,24 @@ LAST_ESCALATED: List[Dict] = []
 # fanout tab's completion message read it.
 LAST_FILTER_MISSES: List[Dict] = []
 
+# #1717: every pad a --nets filter selected that the stub escape skipped as
+# interior ("U1.34"), whether or not its pattern also selected a pad the stub
+# escape reaches -- LAST_FILTER_MISSES names a pattern only when it selected
+# nothing else. Refreshed by every generate_qfn_fanout call; EMPTY with no
+# filter and on an underpad run. The CLI's JSON_SUMMARY `skipped_interior`
+# and the fanout tab's completion message read it.
+LAST_SKIPPED_INTERIOR: List[str] = []
+
+
+def skipped_interior_line(pads: List[str]) -> str:
+    """The one line naming LAST_SKIPPED_INTERIOR's pads (#1717), for the
+    console and the fanout tab's completion message."""
+    shown = ', '.join(pads[:8]) + (f" (+{len(pads) - 8} more)" if len(pads) > 8 else '')
+    one = len(pads) == 1
+    return (f"WARNING: {len(pads)} selected pad(s) given no copper: {shown} "
+            f"{'is' if one else 'are'} interior, which the stub escape skips; "
+            f"--escape-method underpad reaches {'it' if one else 'them'}")
+
 
 #: #1565: (board, part) pairs whose held .kicad_dru rules this call named, so
 #: an escape re-run down the clearance ladder says it once
@@ -1804,6 +1822,7 @@ def generate_qfn_fanout(footprint: Footprint,
     LAST_CANCEL_SKIPPED.clear()
     LAST_ESCALATED.clear()          # #1328
     LAST_FILTER_MISSES.clear()      # #1641
+    LAST_SKIPPED_INTERIOR.clear()   # #1717
     _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
@@ -1945,6 +1964,10 @@ def generate_qfn_fanout(footprint: Footprint,
             # them through ONLY on a net-scoped underpad run: requiring --nets
             # is a deliberate safety guard so an unscoped run never via-drops
             # the exposed/thermal pad.
+            if net_filter:
+                # #1717: the filter selected it, so it is named, never dropped
+                LAST_SKIPPED_INTERIOR.append(
+                    f"{getattr(footprint, 'reference', '?')}.{pad.pad_number}")
             continue
 
         pad_infos.append(pad_info)
@@ -1962,6 +1985,8 @@ def generate_qfn_fanout(footprint: Footprint,
                                 == 'center' else None))))
     for _line in filter_miss_lines(LAST_FILTER_MISSES):
         print(_line)
+    if LAST_SKIPPED_INTERIOR:
+        print(f"  {skipped_interior_line(LAST_SKIPPED_INTERIOR)}")
 
     # Show sample pad geometry
     if pad_infos:
@@ -3018,6 +3043,11 @@ def main():
         # (an interior pad the stub escape skips, a net with no pad on the
         # part, ...): requested counts only the pads a pattern selected.
         'unmatched': list(LAST_FILTER_MISSES),
+        # #1717: every pad the filter selected that the stub escape skipped
+        # as interior, given no copper ("U1.34"), also when its pattern
+        # selected other pads; requested/failed count only the pads the
+        # escape tried.
+        'skipped_interior': list(LAST_SKIPPED_INTERIOR),
         'clearance': args.clearance,
         'track_width': args.width,
         'escape_method': args.escape_method,

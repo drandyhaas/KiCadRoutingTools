@@ -85,6 +85,12 @@ in `JSON_SUMMARY`'s `unmatched`, with its `reason` (`interior` -- the stub escap
 pattern selected. A `--nets` list none of whose patterns names a net on the board is refused, exit 2, with no
 board written, as `route.py` refuses one.
 
+**Interior pads a filter selected (#1717):** `unmatched` names a pattern only when it selected nothing
+else, so the stub escape also names every pad a `--nets` filter selected and skipped as interior, given no
+copper, in `JSON_SUMMARY`'s `skipped_interior` (`"U1.34"`) and one `WARNING` line with the underpad hint --
+also when its pattern selected perimeter pads. Those pads are not in `requested` or `failed`. An unscoped
+run skips the exposed pad by design and lists nothing; an underpad run tries the pads and counts them.
+
 ## Options
 
 | Option | Description | Default |

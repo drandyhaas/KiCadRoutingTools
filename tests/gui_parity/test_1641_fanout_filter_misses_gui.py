@@ -12,6 +12,10 @@ kicad_files/qfn_interior_pads.kicad_pcb (U1 has three interior GND pads):
   2. A perimeter net renamed with a bus index ('D[3]') and selected in the
      tab is fanned out: the tab passes the literal name, which fnmatch read
      as 'D' plus a class, so the engine selected nothing.
+  3. #1717: GND and FOREIGN selected (interior pads plus a perimeter net):
+     the engine's LAST_SKIPPED_INTERIOR reaches the apply step as
+     `skipped_interior` and the completion message lists the pads, as
+     qfn_fanout.py's JSON_SUMMARY `skipped_interior` does.
 
 Needs KiCad python (wx + pcbnew); re-execs into it, skips without it.
 Seconds to run.
@@ -131,6 +135,15 @@ def main():
                      f"{len(tracks)} track(s), misses {seen.get('filter_misses')}"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+    print("[3] #1717: GND and the perimeter net FOREIGN, stub escape")
+    seen, msg = run_tab(pcbnew, wx, BOARD, ['GND', 'FOREIGN'])
+    r.append(_ok("the apply step got the skipped interior pads",
+                 seen.get('skipped_interior') == ['U1.33', 'U1.36', 'U1.37'],
+                 repr(seen.get('skipped_interior'))))
+    r.append(_ok("the completion message lists them",
+                 'Selected interior pads given no copper' in msg
+                 and 'U1.36' in msg, msg.replace('\n', ' | ')[:300]))
 
     if all(r):
         print("\nALL PASS")

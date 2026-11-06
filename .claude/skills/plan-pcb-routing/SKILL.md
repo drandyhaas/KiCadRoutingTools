@@ -833,7 +833,11 @@ Use the printed flags as-is:
   (the QFN stub escape skips interior pads; re-run that net with
   `--escape-method underpad`), `not_on_part`, `single_pad`, `unconnected` or
   `no_such_net`. `failed == 0` with a non-empty `unmatched` is not a clean
-  fanout of that net. A `--nets` list none of whose patterns names a net on
+  fanout of that net. A QFN pattern that selected perimeter pads as well
+  is not in `unmatched`, so also read `skipped_interior` (#1717): every
+  selected pad the stub escape skipped as interior and gave no copper
+  (`"U1.34"`); re-run those pads' nets with `--escape-method underpad`. A
+  non-empty `skipped_interior` is not a clean fanout either. A `--nets` list none of whose patterns names a net on
   the board is refused (exit 2, no board written), as `route.py` refuses one,
   and a net name is matched literally (`--nets 'D[3]'` selects the bus member
   `D[3]`, not `D3`). **After every fanout, parse it;
