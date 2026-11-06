@@ -514,11 +514,16 @@ def segment_to_segment_distance(seg1: Segment, seg2: Segment) -> float:
     return dist
 
 
-def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001) -> Tuple[bool, Optional[Tuple[float, float]]]:
+def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001,
+                   touching: bool = False) -> Tuple[bool, Optional[Tuple[float, float]]]:
     """Check if two segments on the same layer cross each other.
 
     Returns (True, intersection_point) if they cross, (False, None) otherwise.
-    Segments that share an endpoint are not considered crossing.
+    Segments that share an endpoint are not considered crossing, which is what
+    a net's own bend needs. `touching` counts an end of either segment on the
+    other (or a shared end), for two DIFFERENT nets: a track running through
+    the bend of another net's track meets each of its two segments only at
+    that end, and KiCad's tracks_crossing counts ends (#1684).
     """
     if seg1.layer != seg2.layer:
         return False, None
@@ -532,8 +537,8 @@ def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001) -> Tu
     def points_equal(ax, ay, bx, by):
         return abs(ax - bx) < tolerance and abs(ay - by) < tolerance
 
-    if (points_equal(x1, y1, x3, y3) or points_equal(x1, y1, x4, y4) or
-        points_equal(x2, y2, x3, y3) or points_equal(x2, y2, x4, y4)):
+    if not touching and (points_equal(x1, y1, x3, y3) or points_equal(x1, y1, x4, y4) or
+                         points_equal(x2, y2, x3, y3) or points_equal(x2, y2, x4, y4)):
         return False, None
 
     # Direction vectors
@@ -552,6 +557,13 @@ def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001) -> Tu
     dx3, dy3 = x3 - x1, y3 - y1
     t = (dx3 * dy2 - dy3 * dx2) / cross
     u = (dx3 * dy1 - dy3 * dx1) / cross
+
+    if touching:
+        eps_t = tolerance / math.hypot(dx1, dy1)
+        eps_u = tolerance / math.hypot(dx2, dy2)
+        if -eps_t <= t <= 1 + eps_t and -eps_u <= u <= 1 + eps_u:
+            return True, (x1 + t * dx1, y1 + t * dy1)
+        return False, None
 
     # Check if intersection is within both segments (exclusive of endpoints)
     eps = 0.001  # Small margin to exclude near-endpoint intersections
@@ -5356,6 +5368,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         print("\nChecking segment-to-segment clearances...")
 
     checked_pairs = set()  # Track checked segment pairs to avoid duplicates
+    crossings_seen = set()
     for seg1 in pcb_data.segments:
         net1 = seg1.net_id
         net1_matches = matching_net_ids is None or net1 in matching_net_ids
@@ -5430,8 +5443,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     _v['track_rule'] = _trule.name
                 violations.append(_mark_required(_v, _eff))
 
-            # Also check for segment crossings (different nets)
-            crosses, cross_point = segments_cross(seg1, seg2)
+            # Also check for segment crossings (different nets). Two tracks
+            # touch as well as cross (#1684); a graphic is not a track.
+            crosses, cross_point = segments_cross(
+                seg1, seg2, touching=not (seg1.graphic or seg2.graphic))
             if crosses and _graphic_own_pad_pair(seg1, seg2, net1, net2):
                 # #908: a net's own track crossing its own footprint's copper
                 # -- the whole point of a SOT89 tab -- is not a violation. The
@@ -5448,6 +5463,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 net2_name = pcb_data.nets.get(net2, None)
                 net1_str = net1_name.name if net1_name else f"net_{net1}"
                 net2_str = net2_name.name if net2_name else f"net_{net2}"
+                # One crossing per place: a track through another's bend meets
+                # both of the bend's segments at that one point.
+                _at = (min(net1, net2), max(net1, net2), seg1.layer,
+                       round(cross_point[0], 3), round(cross_point[1], 3))
+                if _at in crossings_seen:
+                    continue
+                crossings_seen.add(_at)
                 violations.append({
                     'type': 'segment-crossing',
                     'net1': net1_str,

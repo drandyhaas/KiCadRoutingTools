@@ -67,6 +67,27 @@ def detect_collisions(
     return collision_count, collision_pairs
 
 
+def pair_self_collisions(tracks: List[Dict], pair_spacing: float) -> List[Tuple[Dict, Dict]]:
+    """The tracks of one differential pair that come closer to their partner
+    than `pair_spacing`, the pair's own centreline spacing (#1684).
+
+    detect_collisions leaves a pair's two legs out, since they run closer than
+    two strangers may, and layer reassignment (its remedy) moves both legs
+    together. So P and N could cross and still validate as no collisions."""
+    hits = []
+    for i, t1 in enumerate(tracks):
+        if not t1.get('pair_id'):
+            continue
+        for t2 in tracks[i + 1:]:
+            if t1.get('pair_id') == t2.get('pair_id') \
+                    and t1['net_id'] != t2['net_id'] and t1['layer'] == t2['layer'] \
+                    and check_segment_collision(t1['start'], t1['end'],
+                                                t2['start'], t2['end'],
+                                                pair_spacing - 1e-6):
+                hits.append((t1, t2))
+    return hits
+
+
 def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float,
                         bounds: Tuple[float, float, float, float] = None) -> List[Dict]:
     """The copper already on the board, as existing-track dicts for the

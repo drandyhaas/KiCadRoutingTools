@@ -80,6 +80,7 @@ from bga_fanout.diff_pair import find_differential_pairs
 _direct_route_nets: Set[str] = set()
 from bga_fanout.tracks import (
     detect_collisions,
+    pair_self_collisions,
     board_copper_tracks,
     generate_tracks_from_routes,
 )
@@ -1339,9 +1340,12 @@ def select_adjacent_channels(
                 # Use closest channel above for one pad, closest below for the other
                 ch_above = channels_above[-1]  # closest above
                 ch_below = channels_below[0]   # closest below
-                # P/t goes to channel below, N/c goes to channel above
-                p_channel = ch_below
-                n_channel = ch_above
+                # P/t goes to channel below, N/c goes to channel above -- unless
+                # P sits above N (a diagonal pair), when that would cross (#1684)
+                if p_pad.global_y < n_pad.global_y - POSITION_TOLERANCE:
+                    p_channel, n_channel = ch_above, ch_below
+                else:
+                    p_channel, n_channel = ch_below, ch_above
             elif channels_above:
                 # Only channels above - use two adjacent ones
                 ch_above = channels_above[-1]
@@ -1378,9 +1382,13 @@ def select_adjacent_channels(
             if channels_left and channels_right:
                 ch_left = channels_left[-1]   # closest left
                 ch_right = channels_right[0]  # closest right
-                # P/t goes right, N/c goes left (consistent with horizontal)
-                p_channel = ch_right
-                n_channel = ch_left
+                # P/t goes right, N/c goes left (consistent with horizontal) --
+                # unless P sits left of N (a diagonal pair), when that would
+                # cross (#1684)
+                if p_pad.global_x < n_pad.global_x - POSITION_TOLERANCE:
+                    p_channel, n_channel = ch_left, ch_right
+                else:
+                    p_channel, n_channel = ch_right, ch_left
             elif channels_left:
                 ch_left = channels_left[-1]
                 idx = v_channels_sorted.index(ch_left)
@@ -1815,47 +1823,40 @@ def build_converge_route(
                 else:  # right
                     p_closer_to_edge = p_pad.global_x > n_pad.global_x
 
-                # Pad closer to edge uses between_ch (normal routing)
-                # Pad farther from edge jogs to adjacent_ch
-                # Choose adjacent_ch on the side of the farther pad
+                # Each pad's next channel on its OWN side of the pair. A pad
+                # taking the channel on its partner's side has to cross the
+                # partner's stub to get there (#1684), so the top pad always
+                # ends above the bottom pad.
+                ch_above = h_channels_sorted[between_idx - 1] if between_idx > 0 else None
+                ch_below = (h_channels_sorted[between_idx + 1]
+                            if between_idx < len(h_channels_sorted) - 1 else None)
+                p_side_ch = ch_above if p_is_top else ch_below
+                n_side_ch = ch_below if p_is_top else ch_above
+
+                # Pad closer to edge uses between_ch (normal routing) and the
+                # pad farther from edge jogs to the channel on its own side.
+                # An outermost-row pad has no channel there, so the two swap:
+                # it takes between_ch and its partner its own side's channel.
+                # With neither (a two-row array) the pair has one channel and
+                # takes the convergence fallback below.
                 if p_closer_to_edge:
-                    # P uses between, N jogs to adjacent
-                    # N is farther, so pick adjacent on N's side (above if N is top, below if N is bottom)
-                    n_is_top = n_pad.global_y < p_pad.global_y
-                    if n_is_top and between_idx > 0:
-                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                    elif not n_is_top and between_idx < len(h_channels_sorted) - 1:
-                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                    elif between_idx > 0:
-                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                    elif between_idx < len(h_channels_sorted) - 1:
-                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                    else:
-                        adjacent_ch = between_ch
-                    p_target_ch = between_ch
-                    n_target_ch = adjacent_ch
+                    p_target_ch, n_target_ch = (
+                        (between_ch, n_side_ch) if n_side_ch else
+                        (p_side_ch, between_ch) if p_side_ch else (None, None))
                 else:
-                    # N uses between, P jogs to adjacent
-                    # P is farther, so pick adjacent on P's side
-                    p_is_top_here = p_pad.global_y < n_pad.global_y
-                    if p_is_top_here and between_idx > 0:
-                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                    elif not p_is_top_here and between_idx < len(h_channels_sorted) - 1:
-                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                    elif between_idx > 0:
-                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                    elif between_idx < len(h_channels_sorted) - 1:
-                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                    else:
-                        adjacent_ch = between_ch
-                    p_target_ch = adjacent_ch
-                    n_target_ch = between_ch
+                    p_target_ch, n_target_ch = (
+                        (p_side_ch, between_ch) if p_side_ch else
+                        (between_ch, n_side_ch) if n_side_ch else (None, None))
             else:
-                # No channel between pads - use channels above and below
+                # No channel between pads - the top pad takes the channel above
+                # and the bottom pad the one below, or the fallback below
                 channels_above = [c for c in h_channels_sorted if c.position < top_pad_y]
                 channels_below = [c for c in h_channels_sorted if c.position > bot_pad_y]
-                p_target_ch = channels_above[-1] if channels_above and p_is_top else (channels_below[0] if channels_below else None)
-                n_target_ch = channels_below[0] if channels_below and not p_is_top else (channels_above[-1] if channels_above else None)
+                top_ch = channels_above[-1] if channels_above else None
+                bot_ch = channels_below[0] if channels_below else None
+                p_target_ch, n_target_ch = (top_ch, bot_ch) if p_is_top else (bot_ch, top_ch)
+                if p_target_ch is None or n_target_ch is None:
+                    p_target_ch = n_target_ch = None
 
             # Initialize route_ch with default before conditional assignment
             route_ch = channel
@@ -1980,6 +1981,33 @@ def build_inner_aligned_route(
     )
 
 
+def route_centreline(route: FanoutRoute) -> List[Tuple[float, float]]:
+    """A route's points from its pad to its exit, before any jog."""
+    return [p for p in (route.pad_pos, route.pre_channel_jog, route.channel_point,
+                        route.channel_point2, route.stub_end, route.exit_pos)
+            if p is not None]
+
+
+def route_legs_gap(routes: List[FanoutRoute]) -> float:
+    """The smallest centreline distance between a pair's two routes."""
+    from geometry_utils import segment_to_segment_distance
+    lines = [route_centreline(r) for r in routes]
+    return min(segment_to_segment_distance(*a0, *a1, *b0, *b1)
+               for a0, a1 in zip(lines[0], lines[0][1:])
+               for b0, b1 in zip(lines[1], lines[1][1:]))
+
+
+def pair_between_channel(p_pad: Pad, n_pad: Pad, channel: 'Channel',
+                         channels: List[Channel]) -> Optional['Channel']:
+    """The channel of `channel`'s orientation lying strictly between the pads."""
+    horizontal = channel.orientation == 'horizontal'
+    lo, hi = sorted((p_pad.global_y, n_pad.global_y) if horizontal
+                    else (p_pad.global_x, n_pad.global_x))
+    return next((c for c in channels if c.orientation == channel.orientation
+                 and lo + POSITION_TOLERANCE < c.position < hi - POSITION_TOLERANCE),
+                None)
+
+
 def build_diff_pair_routes(
     pair_id: str,
     pair: DiffPairPads,
@@ -2052,7 +2080,8 @@ def build_diff_pair_routes(
 
     # Create routes for both P and N
     # In adjacent-channel mode, p_channel and n_channel are different
-    for pad_info, offset, is_p_route, route_ch in [(p_pad, p_offset, True, p_channel), (n_pad, n_offset, False, n_channel)]:
+    legs = [(p_pad, p_offset, True, p_channel), (n_pad, n_offset, False, n_channel)]
+    for pad_info, offset, is_p_route, route_ch in legs:
         if is_half_edge:
             routes.append(build_half_edge_route(
                 pad_info, is_p_route, p_pad, n_pad, actual_escape_dir,
@@ -2072,6 +2101,24 @@ def build_diff_pair_routes(
                 pad_info, is_p_route, offset, route_ch, escape_dir, is_edge,
                 grid, layers, exit_margin, pair_layer_assignments, pair_id
             ))
+
+    # A diagonal pair sharing a channel on one side of both pads: the far pad's
+    # 45 passes the near pad on its way there, and lands on or across it
+    # (#1684). The channel BETWEEN the two pads needs neither to pass the other.
+    if channel and not (is_half_edge or is_edge or is_cross_escape) \
+            and p_channel == n_channel:
+        between = pair_between_channel(p_pad, n_pad, channel, channels)
+        if between is not None and route_legs_gap(routes) < 2 * half_pair_spacing - 1e-6:
+            sign = 1 if ((p_pad.global_y > n_pad.global_y)
+                         if channel.orientation == 'horizontal'
+                         else (p_pad.global_x > n_pad.global_x)) else -1
+            routes = [
+                build_inner_aligned_route(
+                    pad_info, is_p_route,
+                    (sign if is_p_route else -sign) * half_pair_spacing,
+                    between, escape_dir, is_edge, grid, layers, exit_margin,
+                    pair_layer_assignments, pair_id)
+                for pad_info, _, is_p_route, _ in legs]
 
     return routes
 
@@ -4006,6 +4053,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # Calculate half-spacing for differential pairs
     # Each trace is offset from channel center by this amount
     half_pair_spacing = (track_width + diff_pair_gap) / 2
+    _pair_spacing = track_width + min(diff_pair_gap, clearance)
 
     # Check if channels are wide enough for both tracks of a diff pair
     # If not, route P and N in adjacent channels instead of same channel with offsets
@@ -4393,8 +4441,15 @@ def _generate_bga_fanout_core(footprint: Footprint,
             print(f"  After resolution: {new_collision_count} collisions remaining")
             collisions_remaining = new_collision_count
         else:
-            print(f"  Validated: No collisions")
             collisions_remaining = 0
+        # What was checked is tracks against tracks; a pad or a via is graded
+        # on the written board (JSON_SUMMARY drc_grazes).
+        _self_hits = pair_self_collisions(tracks, _pair_spacing)
+        if _self_hits:
+            print(f"  Validated: the two legs of {len({t[0]['pair_id'] for t in _self_hits})} "
+                  f"diff pair(s) run closer than their spacing")
+        elif collision_count == 0:
+            print(f"  Validated: no track-to-track collisions")
 
         # Post-resolution layer rebalancing for even distribution. With
         # --layer-costs this only balances across the cheapest tier so costly
@@ -4643,6 +4698,19 @@ def _generate_bga_fanout_core(footprint: Footprint,
         print(f"  Via-clearance: dropped {len(via_drop)} ball(s) whose via "
               f"would short a foreign track (issue #123); retry with smaller "
               f"--via-size / --track-width / --clearance")
+
+    # A pair whose two legs still touch (#1684) is a short no layer move can
+    # resolve, so both escapes go and the route step takes the pair from its
+    # bare balls. Legs merely closer than their spacing ship, as any graze does,
+    # and drc_grazes counts them.
+    _self_pairs = {t[0]['pair_id'] for t in pair_self_collisions(tracks, track_width)}
+    if _self_pairs:
+        for r in [r for r in best_routes if r.pair_id in _self_pairs]:
+            _drop_escape(r)
+            if r.pad.net_name and r.pad.net_name not in failed_nets:
+                failed_nets.append(r.pad.net_name)
+        print(f"  WARNING: dropped the escapes of {len(_self_pairs)} diff pair(s) "
+              f"whose P and N touch (#1684): {sorted(_self_pairs)}")
 
     # Under-pad auto-fallback (issue #288). On dense/locked-neighbour arrays the
     # channel engine deterministically drops balls the grid escapes handle

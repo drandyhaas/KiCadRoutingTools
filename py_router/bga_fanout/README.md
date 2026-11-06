@@ -411,7 +411,8 @@ bga_fanout/
 - **`find_differential_pairs()`** - Finds P/N pairs in a footprint
 - **`assign_layers_smart()`** - Assigns routes to layers avoiding collisions
 - **`rebalance_layers()`** - Rebalances routes across layers for even distribution
-- **`detect_collisions()`** - Detects track spacing violations
+- **`detect_collisions()`** - Detects track spacing violations between nets and pairs
+- **`pair_self_collisions()`** - Detects a diff pair's two legs colliding with each other (#1684): the `Validated:` line reports legs closer than the pair's spacing, and a pair whose legs touch is dropped and reported failed
 - **`resolve_collisions()`** - Attempts to fix collisions via rerouting
 - **`BGAGrid`** - Analyzes BGA pad grid geometry
 - **`FanoutRoute`** - Represents a single pad's fanout route
