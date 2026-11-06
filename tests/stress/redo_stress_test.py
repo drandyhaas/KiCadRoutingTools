@@ -54,6 +54,7 @@ _ENGINE_ROOT = Path(__file__).resolve().parent.parent.parent
 for _d in ('py_router', 'py_placer', 'py_tools'):
     sys.path.insert(0, os.path.join(str(_ENGINE_ROOT), _d))
 from _gitver import write_git_version, format_version
+from copy_board import SIBLING_EXTS  # one list, never a hand-written copy
 
 REPO = Path(__file__).resolve().parent.parent.parent  # tests/stress/ -> repo root
 
@@ -401,7 +402,7 @@ def is_check_cmd(argv):
 
 
 def mirror_project_sibling(argv, cwd):
-    """After a `cp`/`mv` of a .kicad_pcb, carry its sibling .kicad_pro too.
+    """After a `cp`/`mv` of a .kicad_pcb, carry its siblings too.
 
     Routing steps record the run's true DRC floor (the smallest clearance / via /
     hole-to-hole actually used, incl. fine-tap escalations below nominal) in the
@@ -411,9 +412,10 @@ def mirror_project_sibling(argv, cwd):
     (the de-hole rename, #334/#345) copies only the .kicad_pcb, stranding
     `final.kicad_pcb` with NO .kicad_pro -- so grading silently falls back to the
     board's default netclass and manufactures phantom clearance/hole violations on
-    fine-tapped copper (core1106_cam: clean at the routed 0.09, but graded at the
-    0.2 default; #403/#326). Mirror the .kicad_pro so the recorded floor travels
-    with the board it describes."""
+    fine-tapped copper (#403/#326). The same holds for the board's `.kicad_dru`
+    custom rules (#498) and its design brief (#711, #1253), which every later
+    step reads from its input's sibling: every `copy_board.SIBLING_EXTS` sibling
+    travels with the board it describes (#1721)."""
     if not argv or argv[0] not in ("cp", "mv"):
         return
     pcbs = [a for a in argv[1:] if a.endswith(".kicad_pcb")]
@@ -421,19 +423,22 @@ def mirror_project_sibling(argv, cwd):
         return
     def _resolve(p):
         return p if os.path.isabs(p) else os.path.join(cwd or ".", p)
-    src_pro = _resolve(pcbs[0])[:-len(".kicad_pcb")] + ".kicad_pro"
-    dst_pro = _resolve(pcbs[1])[:-len(".kicad_pcb")] + ".kicad_pro"
-    if (not os.path.isfile(src_pro)
-            or os.path.abspath(src_pro) == os.path.abspath(dst_pro)):
+    src_stem = _resolve(pcbs[0])[:-len(".kicad_pcb")]
+    dst_stem = _resolve(pcbs[1])[:-len(".kicad_pcb")]
+    if os.path.abspath(src_stem) == os.path.abspath(dst_stem):
         return
-    try:
-        if argv[0] == "mv":
-            shutil.move(src_pro, dst_pro)
-        else:
-            shutil.copy2(src_pro, dst_pro)
-        print(f"    mirrored DRC floor -> {os.path.basename(dst_pro)}")
-    except OSError as e:
-        print(f"    (could not mirror .kicad_pro: {e})")
+    for ext in SIBLING_EXTS:
+        src_sib, dst_sib = src_stem + ext, dst_stem + ext
+        if not os.path.isfile(src_sib):
+            continue
+        try:
+            if argv[0] == "mv":
+                shutil.move(src_sib, dst_sib)
+            else:
+                shutil.copy2(src_sib, dst_sib)
+            print(f"    mirrored sibling -> {os.path.basename(dst_sib)}")
+        except OSError as e:
+            print(f"    (could not mirror {ext}: {e})")
 
 
 def board_io(argv):
@@ -716,37 +721,42 @@ def seed_input_boards(manifest, cmds, dest_dir):
         src = os.path.join(src_dir, base)
         dst = os.path.join(dest_dir, base)
         if os.path.exists(src) and not os.path.exists(dst):
-            import shutil
             shutil.copy2(src, dst)
             seeded.append(base)
-            # Carry the sibling .kicad_pro too (same custody rule as
-            # mirror_project_sibling): the seed board's project holds the
-            # design's real DRC rules -- min_copper_edge_clearance above all
-            # (#338: ecp5_mini's 0.01 edge rule lost at seed -> planes step
-            # wrote its 0.5 zone-pullback default as the constraint -> 82
-            # phantom kicad edge items; rp2350_dev's 0.5 rule lost -> route
-            # steps never honored the band). Floors applied downstream are
-            # lower-only, so carrying the project is always safe.
-            src_pro = src[:-len(".kicad_pcb")] + ".kicad_pro"
-            dst_pro = dst[:-len(".kicad_pcb")] + ".kicad_pro"
+            # Carry every sibling too (same custody rule as
+            # mirror_project_sibling, the one list copy_board.SIBLING_EXTS):
+            # the seed board's project holds the design's real DRC rules --
+            # min_copper_edge_clearance above all (#338: an 0.01 edge rule
+            # lost at seed -> the planes step wrote its 0.5 zone-pullback
+            # default as the constraint -> 82 phantom kicad edge items; an
+            # 0.5 rule lost -> route steps never honored the band). Floors
+            # applied downstream are lower-only, so carrying the project is
+            # always safe. Its `.kicad_dru` (#498) and design brief (#1253)
+            # are read by every routing step from its input's sibling and by
+            # nothing else, so a seed without them replays the whole chain
+            # without the project's custom rules and reports success (#1721).
+            src_stem = src[:-len(".kicad_pcb")]
+            dst_stem = dst[:-len(".kicad_pcb")]
             # Stem-mismatch fallback (the openstint gap): stress workers
             # RENAMED the pristine board into the run dir (board0.kicad_pcb)
             # but left the project under the ORIGINAL board name
             # (<run_dir_name>.kicad_pro), so no same-stem sibling exists and
             # the design's DRC rules (0.3 edge on openstint) silently vanish
             # for the whole chain. The run dir is named after the board, so
-            # that pro is the pristine project -- carry it under the seeded
-            # stem.
-            if not os.path.exists(src_pro):
-                board_named = os.path.join(src_dir,
-                                           os.path.basename(os.path.normpath(src_dir)) + ".kicad_pro")
-                if os.path.exists(board_named):
-                    print(f"    (seed {base}: no same-stem .kicad_pro; carrying "
-                          f"{os.path.basename(board_named)} as {os.path.basename(dst_pro)})")
-                    src_pro = board_named
-            if os.path.exists(src_pro) and not os.path.exists(dst_pro):
-                shutil.copy2(src_pro, dst_pro)
-                seeded.append(os.path.basename(src_pro))
+            # those siblings are the pristine project's -- carry them under
+            # the seeded stem.
+            board_stem = os.path.join(
+                src_dir, os.path.basename(os.path.normpath(src_dir)))
+            for ext in SIBLING_EXTS:
+                src_sib, dst_sib = src_stem + ext, dst_stem + ext
+                if not os.path.exists(src_sib) and os.path.exists(board_stem + ext):
+                    print(f"    (seed {base}: no same-stem {ext}; carrying "
+                          f"{os.path.basename(board_stem + ext)} as "
+                          f"{os.path.basename(dst_sib)})")
+                    src_sib = board_stem + ext
+                if os.path.exists(src_sib) and not os.path.exists(dst_sib):
+                    shutil.copy2(src_sib, dst_sib)
+                    seeded.append(os.path.basename(dst_sib))
     return seeded
 
 

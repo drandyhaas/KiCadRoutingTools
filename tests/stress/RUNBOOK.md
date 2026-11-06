@@ -779,7 +779,8 @@ flags. Extend its table when a future flag goes.
   <prior_wave>/setN --out <fresh_wave>/setN [--only b1,b2] [--from-script route_planes.py]`.
   Cuts each board's manifest over at the first `--from-script` command (default the
   first `route_planes.py`), stages the boards that step reads from upstream out of
-  `--seed` (with their `.kicad_pro` DRC floors), and replays only the tail via
+  `--seed` (with every `copy_board.SIBLING_EXTS` sibling: the `.kicad_pro` DRC
+  floors, the `.kicad_dru` rules and the brief), and replays only the tail via
   `redo_stress_test`. Grade the finals yourself (`ab_replay_grade.py --regrade` or
   `kicad_drc_compare.py`). It saves work only when the cutover comes late in the
   chain. Since #562 the pour runs FIRST and the chain ends in the route step whose
