@@ -92,6 +92,15 @@ clear of the fan's stubs. A pad the via-drop cannot place fails its net, as an u
 named in `JSON_SUMMARY`'s `skipped_interior` (`"U1.34"`) with one `WARNING` line. A run without `--nets` never
 via-drops an interior or exposed pad and lists nothing.
 
+**Power stubs drawn at `--width` (#1743):** the via-drop draws every pad-to-via stub at `--width`, and
+`--power-nets` widens only a surface stub (where it fits, #1318). So `JSON_SUMMARY`'s `power_stubs_at_width`
+lists each escape stub drawn at the track width on a net that reads as power or ground -- `pad` (`"U1.5"`),
+`net`, `width` (as drawn), `escape` (`surface` or `via-drop`) and `why` -- with a console `NOTE` saying what
+widens it. A net reads as power by the rules autoplan builds `--power-nets` from (`list_nets.
+power_net_evidence`): a ground or rail name, power pins on two or more parts, or a pour the board draws for it.
+A surface stub of a net `--power-nets` names is not listed; a via-drop stub is, while its named width is wider
+than drawn. Disclosure only: the copper is unchanged.
+
 ## Options
 
 | Option | Description | Default |

@@ -8,7 +8,9 @@ kicad_files/qfn_interior_pads.kicad_pcb (U1 has three interior GND pads):
   1. GND selected, stub escape: since #1717 the engine via-drops GND's three
      interior pads, so there is no filter miss; the via it places reaches
      the apply step, and so do the two pads it cannot place, as
-     `skipped_interior`, which the completion message lists.
+     `skipped_interior`, which the completion message lists. #1743: the
+     placed pad's via-drop stub, drawn at the track width on a ground net,
+     reaches it as `power_stubs_at_width`, and the message lists it too.
   2. A perimeter net renamed with a bus index ('D[3]') and selected in the
      tab is fanned out: the tab passes the literal name, which fnmatch read
      as 'D' plus a class, so the engine selected nothing.
@@ -118,6 +120,14 @@ def main():
                  seen.get('skipped_interior') == ['U1.36', 'U1.37']
                  and 'Selected interior pads given no copper' in msg,
                  msg.replace('\n', ' | ')[:300]))
+    # #1743: the placed pad's via-drop stub is drawn at the track width on a
+    # ground net, as the CLI's `power_stubs_at_width` names it
+    r.append(_ok("the power stub at the track width reaches it and the message lists it",
+                 [p.get('pad') for p in seen.get('power_stubs_at_width') or []] == ['U1.33']
+                 and 'Power/ground stubs drawn at the track width' in msg
+                 and 'only a wider --width widens it' in msg,
+                 f"{seen.get('power_stubs_at_width')} | "
+                 + msg.replace('\n', ' | ')[:300]))
 
     print("[2] a net named with a bus index, selected by its name")
     tmp = tempfile.mkdtemp(prefix='t1641gui_')

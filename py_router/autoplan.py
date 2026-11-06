@@ -378,7 +378,8 @@ def plane_layers(n):
 def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     from kicad_parser import parse_kicad_pcb, pour_zones
     from list_nets import (read_design_rules, effective_floors,
-                           find_power_nets, find_differential_pairs)
+                           find_power_nets, find_differential_pairs,
+                           power_pin_parts)
 
     pcb = parse_kicad_pcb(board)
     layers = list(pcb.board_info.copper_layers)
@@ -408,8 +409,7 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     named = {n for n, _ in gnd + vcc} | set(pairs)
     vcc = vcc + [(n.name, len(n.pads)) for n in pcb.nets.values()
                  if n.name and n.name not in named
-                 and len({p.component_ref for p in n.pads
-                          if p.pintype in ('power_in', 'power_out')}) >= 2]
+                 and len(power_pin_parts(n)) >= 2]
     real = lambda t: t[1] >= 3 and not t[0].lower().startswith('unconnected-')
     gnd = sorted(filter(real, gnd), key=lambda t: -t[1])
     rails = sorted(filter(real, vcc), key=lambda t: -t[1])

@@ -1729,6 +1729,7 @@ class FanoutTab(wx.Panel):
                     skipped = list(bga_fanout.LAST_CANCEL_SKIPPED)
                     misses = list(bga_fanout.LAST_FILTER_MISSES)
                     interior = []
+                    power_stubs = []
                 else:
                     import qfn_fanout
                     tracks, vias, failed = qfn_fanout.generate_qfn_fanout(
@@ -1737,6 +1738,7 @@ class FanoutTab(wx.Panel):
                     skipped = list(qfn_fanout.LAST_CANCEL_SKIPPED)
                     misses = list(qfn_fanout.LAST_FILTER_MISSES)
                     interior = list(qfn_fanout.LAST_SKIPPED_INTERIOR)
+                    power_stubs = list(qfn_fanout.LAST_POWER_STUBS_AT_WIDTH)
                 # #857: the Design rules line bga_fanout.py / qfn_fanout.py
                 # print (the exit code is the CLI's alone).
                 from fab_tiers import finish_design_rules
@@ -1744,7 +1746,8 @@ class FanoutTab(wx.Panel):
                 self._operation_result = {
                     'tracks': tracks, 'vias': vias, 'failed': failed,
                     'vias_to_remove': vias_to_remove, 'skipped': skipped,
-                    'filter_misses': misses, 'skipped_interior': interior}
+                    'filter_misses': misses, 'skipped_interior': interior,
+                    'power_stubs_at_width': power_stubs}
         except Exception as exc:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -1787,6 +1790,7 @@ class FanoutTab(wx.Panel):
                     vias_to_remove=res.get('vias_to_remove'),
                     filter_misses=res.get('filter_misses'),
                     skipped_interior=res.get('skipped_interior'),
+                    power_stubs_at_width=res.get('power_stubs_at_width'),
                     **apply_kw)
             # The plan executor's "this step produced its result" (gui_utils);
             # the error and cancel returns above produce none.
@@ -2218,7 +2222,8 @@ class FanoutTab(wx.Panel):
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga',
                               optimize_caps=False, vias_to_remove=None,
-                              filter_misses=None, skipped_interior=None):
+                              filter_misses=None, skipped_interior=None,
+                              power_stubs_at_width=None):
         """Apply fanout results to the pcbnew board.
 
         Args:
@@ -2244,6 +2249,10 @@ class FanoutTab(wx.Panel):
             skipped_interior: the QFN engine's LAST_SKIPPED_INTERIOR (#1717)
                 -- every selected interior pad the stub run's via-drop could
                 not place, listed as the CLI lists them in `skipped_interior`.
+            power_stubs_at_width: the QFN engine's LAST_POWER_STUBS_AT_WIDTH
+                (#1743) -- each escape stub drawn at the track width on a net
+                that reads as power or ground, listed as the CLI lists them
+                in `power_stubs_at_width`, with what widens them.
         """
         import pcbnew
         from .swig_gui import _build_layer_mappings
@@ -2474,6 +2483,15 @@ class FanoutTab(wx.Panel):
             msg += self._net_list(
                 "Selected interior pads given no copper (no clear via-drop "
                 "site)", skipped_interior)
+        if power_stubs_at_width:
+            from qfn_fanout import power_stubs_lines
+            msg += self._net_list(
+                f"Power/ground stubs drawn at the track width "
+                f"({power_stubs_at_width[0]['width']:g} mm)",
+                [f"{r['pad']} {r['net']} ({r['escape']}, {r['why']})"
+                 for r in power_stubs_at_width])
+            msg += "".join(f"{line.strip()}\n"
+                           for line in power_stubs_lines(power_stubs_at_width)[1:])
         if failed_nets:
             if fanout_kind == 'qfn':
                 unescaped, flagged = self._qfn_failure_split(failed_nets, tracks,

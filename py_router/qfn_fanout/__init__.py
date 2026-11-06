@@ -98,6 +98,82 @@ def skipped_interior_line(pads: List[str]) -> str:
             f"--via-size or --allow-via-in-pad may fit")
 
 
+# #1743: the escape stubs the last run drew at its track width on a net that
+# reads as power or ground (`list_nets.power_net_evidence`), one dict per pad:
+# `pad` ("U1.5"), `net`, `width` (as drawn), `escape` ('surface' or
+# 'via-drop') and `why`. A surface stub of a net --power-nets names is not
+# listed: it takes the net's width where it fits (#1318). A via-drop stub
+# never does, so one is listed while its named width is wider than drawn.
+# Refreshed by every generate_qfn_fanout call. The CLI's JSON_SUMMARY
+# `power_stubs_at_width` and the fanout tab's completion message read it.
+LAST_POWER_STUBS_AT_WIDTH: List[Dict] = []
+
+
+def power_stubs_lines(rows: List[Dict]) -> List[str]:
+    """The lines naming LAST_POWER_STUBS_AT_WIDTH's stubs (#1743), for the
+    console and the fanout tab's completion message: the stubs, then what
+    widens them."""
+    if not rows:
+        return []
+    shown = ', '.join(f"{r['pad']} {r['net']} ({r['escape']}, {r['why']})"
+                      for r in rows[:8])
+    more = f" (+{len(rows) - 8} more)" if len(rows) > 8 else ''
+    out = [f"NOTE: {len(rows)} power/ground escape stub(s) drawn at the track "
+           f"width {rows[0]['width']:g} mm: {shown}{more}"]
+    surface = list(dict.fromkeys(r['net'] for r in rows if r['escape'] == 'surface'))
+    if surface:
+        out.append(f"  pass --power-nets {' '.join(surface[:8])} with "
+                   f"--power-nets-widths to lay the surface stub(s) at that width "
+                   f"where it fits")
+    if any(r['escape'] == 'via-drop' for r in rows):
+        out.append("  a via-drop stub is drawn at --width whether or not "
+                   "--power-nets names its net; only a wider --width widens it")
+    return out
+
+
+def _note_power_stubs_at_width(footprint, pcb_data, tracks, infos, track_width,
+                               power_nets, power_nets_widths):
+    """#1743: fill LAST_POWER_STUBS_AT_WIDTH from the copper this run drew.
+    INFOS is [(PadInfo, 'surface' | 'via-drop')]; a pad's stub is the track
+    that starts on it. Copper is not changed."""
+    starts = {}
+    for t in tracks:
+        k = (t.get('net_id'), round(t['start'][0], 4), round(t['start'][1], 4))
+        starts.setdefault(k, t)
+    rows = [(pi.pad, kind, starts.get((pi.pad.net_id, round(pi.pad.global_x, 4),
+                                       round(pi.pad.global_y, 4))))
+            for pi, kind in infos]
+    rows = [(p, kind, t) for p, kind, t in rows
+            if t is not None and t['width'] <= track_width + 1e-9]
+    if not rows:
+        return
+    from list_nets import power_net_evidence
+    why = power_net_evidence(pcb_data)
+    named = {}
+    if power_nets:
+        from net_queries import identify_power_nets
+        named = identify_power_nets(pcb_data, list(power_nets),
+                                    list(power_nets_widths or ()))
+    ref = getattr(footprint, 'reference', '?')
+    seen = set()
+    for pad, kind, t in rows:
+        nid = pad.net_id
+        reason = why.get(nid)
+        if nid in named:
+            if kind == 'surface' or named[nid] <= t['width'] + 1e-9:
+                continue
+            reason = f"--power-nets names it at {named[nid]:g} mm"
+        label = f"{ref}.{pad.pad_number}"
+        if reason is None or label in seen:
+            continue
+        seen.add(label)
+        LAST_POWER_STUBS_AT_WIDTH.append({
+            'pad': label, 'net': pad.net_name, 'width': round(t['width'], 4),
+            'escape': kind, 'why': reason})
+    for line in power_stubs_lines(LAST_POWER_STUBS_AT_WIDTH):
+        print(f"  {line}")
+
+
 #: #1565: (board, part) pairs whose held .kicad_dru rules this call named, so
 #: an escape re-run down the clearance ladder says it once
 _RULES_SAID: set = set()
@@ -1825,6 +1901,7 @@ def generate_qfn_fanout(footprint: Footprint,
     LAST_ESCALATED.clear()          # #1328
     LAST_FILTER_MISSES.clear()      # #1641
     LAST_SKIPPED_INTERIOR.clear()   # #1717
+    LAST_POWER_STUBS_AT_WIDTH.clear()   # #1743
     _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
@@ -2083,7 +2160,11 @@ def generate_qfn_fanout(footprint: Footprint,
     if escape_method == "underpad":
         print(f"  Escape method: underpad (via-drop), via {via_size:.2f}/{via_drill:.2f} mm"
               f"{', allow via-in-pad' if allow_via_in_pad else ''}")
-        return _via_drop(pad_infos)
+        res = _via_drop(pad_infos)
+        _note_power_stubs_at_width(                                 # #1743
+            footprint, pcb_data, res[0], [(pi, 'via-drop') for pi in pad_infos],
+            track_width, power_nets, power_nets_widths)
+        return res
 
     def _serve_interior(tracks_, failed_):
         """#1717: the interior pads this stub run's filter selected get the
@@ -2092,6 +2173,7 @@ def generate_qfn_fanout(footprint: Footprint,
         is failed, as an underpad run fails it. (tracks, vias, failed)."""
         if not interior_infos:
             _record_skipped(tracks_, [], failed_)
+            _note_power_stubs(tracks_)
             return tracks_, [], failed_
         print(f"  Interior pads: {len(interior_infos)} selected, escaped by "
               f"via-drop (underpad), via {via_size:.2f}/{via_drill:.2f} mm"
@@ -2113,7 +2195,17 @@ def generate_qfn_fanout(footprint: Footprint,
         out = (tracks_ + itracks, ivias,
                list(dict.fromkeys(failed_ + list(idropped))))
         _record_skipped(*out)
+        _note_power_stubs(out[0])
         return out
+
+    def _note_power_stubs(tracks_):
+        """#1743: the surface fan's and the via-drop's power stubs drawn at
+        the track width."""
+        _note_power_stubs_at_width(
+            footprint, pcb_data, tracks_,
+            [(pi, 'surface') for pi in pad_infos]
+            + [(pi, 'via-drop') for pi in interior_infos],
+            track_width, power_nets, power_nets_widths)
 
     if not pad_infos:
         return _serve_interior([], [])
@@ -2745,10 +2837,12 @@ def main():
     parser.add_argument('--power-nets', nargs='*', default=[],
                         help="Glob patterns for power nets, as route.py takes them "
                              "(e.g. '*GND*' '+3V3'). Must pair with --power-nets-widths. "
-                             "A power net's stub, on a pad at least that wide, is laid at "
-                             "its width wherever that fits, and at --width where it does "
-                             "not (#1318): route.py keeps fanout copper as it finds it, so "
-                             "pass the route step's own --power-nets here.")
+                             "A power net's surface stub, on a pad at least that wide, is "
+                             "laid at its width wherever that fits, and at --width where it "
+                             "does not (#1318): route.py keeps fanout copper as it finds it, "
+                             "so pass the route step's own --power-nets here. A via-drop "
+                             "stub is drawn at --width; JSON_SUMMARY power_stubs_at_width "
+                             "names each power/ground stub drawn at --width (#1743).")
     parser.add_argument('--power-nets-widths', nargs='*', type=float, default=[],
                         help='Track widths in mm for each --power-nets pattern')
     parser.add_argument('--same-net-pad-clearance', type=float, default=None,
@@ -3087,6 +3181,9 @@ def main():
         # via-drop could not place ("U1.34"), left with no copper; their
         # nets are in failed / unescaped_nets as well.
         'skipped_interior': list(LAST_SKIPPED_INTERIOR),
+        # #1743: the escape stubs drawn at --width on a net that reads as
+        # power or ground (pad, net, width, escape, why). Disclosure only.
+        'power_stubs_at_width': list(LAST_POWER_STUBS_AT_WIDTH),
         'clearance': args.clearance,
         'track_width': args.width,
         'escape_method': args.escape_method,

@@ -42,6 +42,12 @@ Patterns are matched in order - first matching pattern determines the width. Obs
 
 **The widths asked for are measured, not graded.** Each `route.py` step (and the GUI's routing tab) records the widths it was given in the output's `kicad_routing_tools` records (`power_widths`, net name -> mm), and `board_score.py` measures every recorded net against them with no flag: copper narrower than the request is reported in `net_widths.requested_under` (and on a `REQUESTED POWER WIDTHS` line), except a pad neck -- copper within the router's pad-entry zone of a narrower pad of its own net, at no less than that pad's short side -- which is excused and listed per net (`pad_neck_allowed_mm`). It is not counted in `blocking`: the router narrows a power route where its width does not fit and discloses it, so a request is what it aimed for. A width a net must have goes in `--net-min-widths`, which is graded (with the same pad-neck allowance) and outranks the record. A net class's own `track_width` is a drawing default, not a spec: the router honours it and discloses copper under it, and nothing grades it.
 
+**Fanout stubs come first.** `qfn_fanout.py` takes `--power-nets`/`--power-nets-widths` too, and lays a
+power net's SURFACE stub at that width where it fits (#1318); its via-drop stub (the under-pad escape, and
+the interior pads a stub run's `--nets` selects) is always drawn at `--width`. `route.py` keeps fanout copper
+as it finds it, so a stub drawn narrow ships narrow. The fanout names each such stub on a net that reads as
+power or ground in its `JSON_SUMMARY` `power_stubs_at_width` (#1743; see `py_router/qfn_fanout/README.md`).
+
 ## Neck-Down for Failed Power Routes
 
 A wide power track sometimes cannot fit where it matters most - escaping a fine-pitch pad,

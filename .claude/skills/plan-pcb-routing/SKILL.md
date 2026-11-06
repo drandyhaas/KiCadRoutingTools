@@ -835,7 +835,12 @@ Use the printed flags as-is:
   fanout of that net. A QFN stub run with `--nets` via-drops the interior
   pads its filter selects (#1717); one it cannot place fails its net and is
   named in `skipped_interior` (`"U1.34"`) -- retry with a smaller
-  `--via-size`/`--via-drill`, or `--allow-via-in-pad`. A `--nets` list none of whose patterns names a net on
+  `--via-size`/`--via-drill`, or `--allow-via-in-pad`. `power_stubs_at_width`
+  (#1743) names each escape stub drawn at `--width` on a net that reads as
+  power or ground (`pad`, `net`, `width`, `escape`, `why`): for a `surface`
+  one, pass the route step's `--power-nets`/`--power-nets-widths` to the
+  fanout too; a `via-drop` stub stays at `--width` either way (`route.py`
+  keeps fanout copper as it finds it), so say so in the report. A `--nets` list none of whose patterns names a net on
   the board is refused (exit 2, no board written), as `route.py` refuses one,
   and a net name is matched literally (`--nets 'D[3]'` selects the bus member
   `D[3]`, not `D3`). **After every fanout, parse it;

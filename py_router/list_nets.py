@@ -1282,6 +1282,44 @@ def find_power_nets(pcb_data):
     return gnd_nets, vcc_nets, candidates
 
 
+def power_pin_parts(net):
+    """The parts with a `power_in` / `power_out` pin on NET. Two or more is
+    autoplan's rail rule for a net no name pattern catches: one part's power
+    pins are its own supply tap, an enable or a misdeclared connector pin."""
+    return {p.component_ref for p in net.pads
+            if p.pintype in ('power_in', 'power_out')}
+
+
+def power_net_evidence(pcb_data):
+    """{net_id: why} for each net the general rules read as power or ground,
+    the rules autoplan builds a chain's --power-nets from: a ground or rail
+    NAME (`find_power_nets`, not its pad-count candidates), power pins on two
+    or more parts (`power_pin_parts`), and a pour the board draws for it.
+    A disclosure input (#1743): it decides no width."""
+    from kicad_parser import pour_zones
+    gnd, vcc, _cand = find_power_nets(pcb_data)
+    by_name = {}
+    for nid, net in pcb_data.nets.items():
+        if nid and net.name:
+            by_name.setdefault(net.name, nid)
+    why = {}
+    for names, text in ((gnd, 'its name reads as ground'),
+                        (vcc, 'its name reads as a supply rail')):
+        for name, _n in names:
+            if name in by_name:
+                why.setdefault(by_name[name], text)
+    for nid, net in pcb_data.nets.items():
+        if nid and nid not in why and net.name:
+            parts = power_pin_parts(net)
+            if len(parts) >= 2:
+                why[nid] = f"power pins on {len(parts)} parts"
+    for z in pour_zones(getattr(pcb_data, 'zones', None)):
+        nid = getattr(z, 'net_id', 0)
+        if nid and nid not in why and not getattr(z, 'in_footprint', False):
+            why[nid] = 'the board pours it'
+    return why
+
+
 def find_high_connection_nets(pcb_data, top_n=10):
     """Find nets with the most connections (often power/ground)."""
     nets_by_count = []
