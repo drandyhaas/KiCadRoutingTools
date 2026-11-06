@@ -480,6 +480,11 @@ class Pad:
     # pad_zone_connection(pad, zone) applies the zone and THT rules. Set by
     # BOTH parse paths.
     zone_connection: Optional[str] = None
+    # #1737: the pad's own KiCad uuid ('' when the file gives none). KiCad
+    # 10's DRC waives a net-tie contact only when the track's uuid sorts
+    # BEFORE its partner pad's (check_drc.kicad_tests_tie_waiver). Set by
+    # BOTH parse paths.
+    uuid: str = ""
 
 
 _VIA_BIRTH_WATCH = None
@@ -2348,6 +2353,18 @@ def footprint_at_match(fp_text: str):
     if j < 0:
         return None
     return AT_NODE_RE.match(fp_text, j) or TRANSFORM_NODE_RE.match(fp_text, j)
+
+
+def own_uuid_from_text(block_text: str) -> str:
+    """The ``(uuid ...)`` that is a DIRECT child of BLOCK_TEXT's outer
+    ``(...)`` -- a pad's own, never one of its primitives' -- or ''."""
+    i = block_text.find('(', 1)
+    while i != -1:
+        if block_text.startswith('(uuid', i):
+            m = re.match(r'\(uuid\s+"?([^")\s]+)"?\s*\)', block_text[i:])
+            return m.group(1) if m else ''
+        i = block_text.find('(', find_matching_paren(block_text, i))
+    return ''
 
 
 def find_matching_paren(content: str, open_idx: int) -> int:
@@ -5277,6 +5294,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 copper_box=copper_box,
                 zone_connection=(zone_connect_from_text(pad_text)
                                  or fp_zone_connection),
+                uuid=own_uuid_from_text(pad_text),
             )
 
             footprint.pads.append(pad)
@@ -9671,6 +9689,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 copper_box=copper_box,
                 zone_connection=(zone_connect_from_pcbnew(pad)
                                  or fp_zone_connection),
+                uuid=str(pad.m_Uuid.AsString()),        # #1737
             )
 
             footprint.pads.append(pad_obj)
@@ -10978,6 +10997,11 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 bzc = getattr(bp, 'zone_connection', None); fzc = getattr(fp, 'zone_connection', None)
                 if bzc != fzc:
                     diffs.append(f"Pad {ref}:{bp.pad_number} zone_connection: board={bzc} file={fzc}")
+                # #1737: check_drc's net-tie verdict follows the uuid order.
+                # A pad the file gives no uuid gets a fresh one from pcbnew.
+                bu, fu = getattr(bp, 'uuid', ''), getattr(fp, 'uuid', '')
+                if fu and (bu or '').lower() != fu.lower():
+                    diffs.append(f"Pad {ref}:{bp.pad_number} uuid: board={bu} file={fu}")
                 # Roundrect corner ratio - only consumed (and only meaningful) for
                 # roundrect pads; pcbnew returns a default ratio on every pad shape,
                 # so comparing it on circle/rect pads is pure noise.

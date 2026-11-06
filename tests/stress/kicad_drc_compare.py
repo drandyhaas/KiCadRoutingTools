@@ -1196,6 +1196,11 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # never the edge family's `intentional` count.
     cd_own = [c for c in cd if c.get("accepted") == "footprint-own-copper"]
     cd = [c for c in cd if c.get("accepted") != "footprint-own-copper"]
+    # #1737: a contact at a net-tie pad nested in its partner, which KiCad
+    # reports by item order; KiCad's side drops tie-pair items at the tie
+    # footprint below (_drop_net_tie_accepted), so this is its own count.
+    cd_tie_order = sum(1 for c in cd if c.get("accepted") == "net-tie-order")
+    cd = [c for c in cd if c.get("accepted") != "net-tie-order"]
     # #1306: two of one footprint's pads touching that the --baseline board's
     # footprint already had -- pre-existing, as KiCad's side subtracts it.
     cd_own_pads_pre = sum(1 for c in cd
@@ -1302,6 +1307,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             # and the check_drc contacts that accepted them
             "kicad_own_copper": kicad_own,
             "checkdrc_own_copper": len(cd_own),
+            "checkdrc_net_tie_order": cd_tie_order,
             # #1628: KiCad clearance items on one footprint's own pad pairs,
             # and the gaps check_drc measured and published (not graded)
             "kicad_library_pad_gaps": kicad_gaps,
@@ -1346,7 +1352,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
 # Summary keys the CLI callers persist (item lists + verdict are print-only).
 _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "kicad_intentional_edge", "checkdrc_intentional_edge",
-                 "kicad_own_copper", "checkdrc_own_copper",
+                 "kicad_own_copper", "checkdrc_own_copper", "checkdrc_net_tie_order",
                  "kicad_library_pad_gaps", "checkdrc_library_pad_gaps",
                  "checkdrc_library_pad_gaps_unreported",
                  "matched", "kicad_only", "checkdrc_only",

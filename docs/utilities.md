@@ -165,7 +165,7 @@ python3 py_router/check_drc.py routed.kicad_pcb --nets "*DATA*"
 The DRC checker validates:
 
 1. **Track-to-track clearance** - Segments on the same layer maintain minimum clearance
-2. **Track-to-pad clearance** - Tracks maintain clearance from pads on other nets
+2. **Track-to-pad clearance** - Tracks maintain clearance from pads on other nets. A `net_tie_pad_groups` net may touch its partner pad where the contact lies on its own pad, as KiCad waives it -- but KiCad 10 (measured on 10.0.6, #1737) applies that waiver at a partner that is not a plain rect only when the track's uuid sorts before the partner pad's, and reports the contact otherwise. check_drc reports it the same way: a pad-segment violation where the tied pad has copper clear of the partner, and, where the footprint nests the tied pad inside its partner (no landing avoids the contact), an accepted `net-tie-order` row named under WARNINGS (`NET-TIE LANDINGS`) and counted in `--json` `net_tie_order` and `kicad_drc_compare`'s `checkdrc_net_tie_order`
 3. **Via-to-track clearance** - Vias maintain clearance from tracks on other nets. A via KiCad types blind, buried or micro is graded only on the copper layers between its end layers, here, in check 5 and inside a filled copper graphic (#1268); a via with no type word is a through via whatever its `(layers ...)` pair, as KiCad loads it
 4. **Via-to-via clearance** - Vias maintain clearance from each other
 5. **Pad-to-via clearance** - Vias maintain clearance from pads on other nets (an SMD pad off a blind/micro via's span is not graded against it)

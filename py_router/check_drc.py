@@ -2378,6 +2378,78 @@ def net_tie_contact_point(partner_pad, px, py):
     return (partner_pad.global_x + qx, partner_pad.global_y + qy)
 
 
+def kicad_tests_tie_waiver(seg, partner_pad) -> bool:
+    """Does KiCad apply its net-tie waiver to this (track, partner pad) pair?
+
+    Measured on kicad-cli 10.0.6 (#1737), not read from KiCad's source: for a
+    partner that is not a plain axis-aligned rect (a roundrect or oval was
+    measured), KiCad waives a tied net's contact (the per-contact rule
+    _net_tie_span_waived models) only when the track's uuid sorts BEFORE the
+    partner pad's. When it sorts after, every contact of the pair is
+    reported as shorting_items, even one lying wholly on the tied net's own
+    pad: same geometry, same file position, and the verdict flips at exactly
+    the partner pad's uuid. A rect partner was waived in both orders. Any
+    other shape (custom, chamfered, a rotated rect) is treated as the
+    roundrect, unmeasured. True when either uuid is unknown (the router's
+    copper before it is written), so router-side gates keep the geometric
+    rule."""
+    a = (getattr(seg, 'uuid', '') or '').lower()
+    b = (getattr(partner_pad, 'uuid', '') or '').lower()
+    if not a or not b or a < b:
+        return True
+    return (getattr(partner_pad, 'shape', '') == 'rect'
+            and not (getattr(partner_pad, 'rect_rotation', 0.0) or 0.0)
+            and not getattr(partner_pad, 'polygons', None))
+
+
+def net_tie_landing_forced(pcb_data, seg_net: int, partner_pad) -> bool:
+    """True when every pad of `seg_net` tied to `partner_pad` lies inside the
+    partner's copper (sampled), so no copper can reach the tied net's pad
+    without contacting the partner -- the footprint, not the route, puts the
+    contact there (#1737; the Kelvin tab nested in its shunt pad)."""
+    fp = pcb_data.footprints.get(getattr(partner_pad, 'component_ref', None))
+    if fp is None or not getattr(fp, 'net_tie_groups', None):
+        return False
+    by_num = {}
+    for p in fp.pads:
+        by_num.setdefault(p.pad_number, []).append(p)
+    own = []
+    for group in fp.net_tie_groups:
+        members = [p for num in group for p in by_num.get(num, [])]
+        if any(p is partner_pad for p in members):
+            own.extend(p for p in members if p.net_id == seg_net)
+    if not own:
+        return False
+    n = 9
+    for p in own:
+        hx, hy = p.size_x / 2, p.size_y / 2
+        for i in range(n):
+            for j in range(n):
+                x = p.global_x - hx + 2 * hx * i / (n - 1)
+                y = p.global_y - hy + 2 * hy * j / (n - 1)
+                if point_to_pad_distance(x, y, p) > 1e-9:
+                    continue        # outside this pad's own copper
+                if point_to_pad_distance(x, y, partner_pad) > NET_TIE_CONTACT_EPS:
+                    return False    # a part of the own pad off the partner
+    return True
+
+
+def _net_tie_order_row(pcb_data, seg, seg_net, pad, contact: bool):
+    """The accepted row for a net-tie contact KiCad reports only because of
+    item order, at a pad the footprint nests in its partner (#1737)."""
+    net1 = pcb_data.nets.get(pad.net_id)
+    net2 = pcb_data.nets.get(seg_net)
+    return {'type': 'net-tie-order',
+            'net1': net1.name if net1 else f'net_{pad.net_id}',
+            'net2': net2.name if net2 else f'net_{seg_net}',
+            'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+            'layer': seg.layer,
+            'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+            'loc1': (pad.global_x, pad.global_y),
+            'kicad_class': 'shorting_items' if contact else 'clearance',
+            'accepted': 'net-tie-order'}
+
+
 def _net_tie_span_waived(pcb_data, seg, seg_net: int, partner_pad, clearance: float) -> bool:
     """True when a tie-net segment's collision with its net-tie PARTNER pad is
     the KiCad-legal local contact: every sample of the segment whose copper
@@ -5347,7 +5419,8 @@ def fanout_drc_grazes(out_path, clearance, input_copper, net_classes=False,
     # stamped via-in-pad would otherwise inflate `total`. #995: an accepted
     # footprint-own-copper contact is not a graze either.
     rows = [r for r in rows
-            if r.get('type') not in ('via-in-paste', 'footprint-own-copper')
+            if r.get('type') not in ('via-in-paste', 'footprint-own-copper',
+                                     'net-tie-order')
             and _row_on_copper(r, new_segs, new_geoms, new_vias)]
     by = {}
     for r in rows:
@@ -6381,7 +6454,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if hasattr(pcb_data, 'net_tie_exempt_pad_ids') and \
                     id(pad) in pcb_data.net_tie_exempt_pad_ids(seg_net) and \
                     _net_tie_span_waived(pcb_data, seg, seg_net, pad, clearance):
-                continue
+                if kicad_tests_tie_waiver(seg, pad):
+                    continue
+                # #1737: KiCad reports this contact (item order). When the
+                # footprint nests the tied pad in its partner no landing
+                # avoids it: named, accepted. Otherwise a landing clear of
+                # the partner exists, so it is graded below as KiCad grades it.
+                if net_tie_landing_forced(pcb_data, seg_net, pad):
+                    _tie_cl = _pad_pair_cl(pad, seg_net, layer=seg.layer, other_type='track')
+                    if check_pad_segment_overlap(pad, seg, _tie_cl, routing_layers,
+                                                 clearance_margin)[0]:
+                        _touch = check_pad_segment_overlap(
+                            pad, seg, 0.0, routing_layers, 0.0)[0]
+                        _accepted_edge.append(_net_tie_order_row(
+                            pcb_data, seg, seg_net, pad, contact=bool(_touch)))
+                    continue
 
             pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
             if not seg_net_matches and not pad_net_matches:
@@ -7660,11 +7747,26 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
     own_copper = [a for a in _accepted_edge
                   if a.get('accepted') == 'footprint-own-copper']
+    tie_order = [a for a in _accepted_edge if a.get('accepted') == 'net-tie-order']
 
     def _warn_note():
-        if warnings or own_copper or _sev_warn or _own_gap_rows:
-            print(f"\nWARNINGS ({len(warnings) + len(own_copper) + len(_sev_warn) + len(_own_gap_rows)}, "
-                  f"not DRC failures):")
+        _nw = (len(warnings) + len(own_copper) + len(_sev_warn) + len(_own_gap_rows)
+               + len(tie_order))
+        if _nw:
+            print(f"\nWARNINGS ({_nw}, not DRC failures):")
+            if tie_order:
+                # #1737: what KiCad 10 reports that check_drc accepts
+                from collections import Counter as _C1737
+                _by = _C1737(a['pad_ref'] for a in tie_order)
+                print(f"  NET-TIE LANDINGS: {len(tie_order)} contact(s) at a net-tie "
+                      f"pad the footprint nests inside its partner pad "
+                      f"({', '.join(f'{r} x{c}' for r, c in sorted(_by.items()))}). "
+                      f"No copper reaches such a pad without touching the partner, "
+                      f"so the footprint, not the route, makes the contact. KiCad "
+                      f"10 reports each as {'/'.join(sorted({a['kicad_class'] for a in tie_order}))} "
+                      f"because the track's uuid sorts after the partner pad's: at a "
+                      f"partner that is not a plain rect it waives a net-tie contact "
+                      f"only in the other order")
             if _own_gap_rows:
                 # #1628: the count line is what board_score reads.
                 _ng = sum(1 for r in _own_gap_rows if r['kicad_severity'] == 'error')
@@ -8432,6 +8534,10 @@ if __name__ == "__main__":
             # #995: accepted, and each one an error in KiCad's own DRC
             'footprint_own_copper': sum(
                 1 for v in violations if v.get('accepted') == 'footprint-own-copper'),
+            # #1737: accepted, each one an error in KiCad's own DRC (a contact
+            # at a net-tie pad nested in its partner, reported by item order)
+            'net_tie_order': sum(
+                1 for v in violations if v.get('accepted') == 'net-tie-order'),
             # #1626: accepted, each one a WARNING in KiCad's own DRC at the
             # board's severity (a rule's own, or the project's); the items
             # carry `kicad_severity` and `severity_source`

@@ -846,7 +846,10 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   net-ties). KiCad's clearance exemption between the grouped pads is LOCAL:
   the tied net's copper may contact the partner pad only where the contact
   lies on its own pad. Consumers: `PCBData.net_tie_exempt_pad_ids(net_id)`,
-  the obstacle builders (own-pad-sliver lift), and check_drc's waiver.
+  the obstacle builders (own-pad-sliver lift), and check_drc's waiver --
+  which KiCad applies at a partner that is not a plain rect only when the
+  track's uuid sorts before the partner pad's (#1737, measured; check_drc
+  follows it, and names a contact the footprint forces as `net-tie-order`).
 - `footprint.owns_edge_cuts` / `footprint.owns_board_outline` - #829. The
   first is the FACT (this footprint draws Edge.Cuts of its own, so its
   `(at x y rot)` transforms part of the outline); the second is the DECISION
