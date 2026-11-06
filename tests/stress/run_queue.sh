@@ -98,7 +98,12 @@ STATUS="$ROOT/QUEUE_STATUS.txt"
 # Optional scope: QUEUE_SETS="11 12 .. 25" (space-separated) restricts the run to
 # those sets; empty/unset = the whole corpus (the default, backward-compatible).
 QUEUE_SETS="${QUEUE_SETS:-}"
-in_scope(){ [ -z "$QUEUE_SETS" ] && return 0; for x in $QUEUE_SETS; do [ "$x" = "$1" ] && return 0; done; return 1; }
+# A set with a name rather than a number (set1arc, set3monster) holds replay inputs,
+# or a board kept apart for its cost: never an LLM worker's, unless QUEUE_SETS names it.
+in_scope(){
+  if [ -z "$QUEUE_SETS" ]; then case "$1" in *[!0-9]*) return 1;; esac; return 0; fi
+  for x in $QUEUE_SETS; do [ "$x" = "$1" ] && return 0; done; return 1
+}
 pairs=""
 for d in "$ROOT"/boards_unrouted_set*; do
   [ -d "$d" ] || continue

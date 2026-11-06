@@ -1019,9 +1019,8 @@ from the source's ordinary input by more than its outline: pour outlines and boa
 graphics stay. The chain is the source's recorded one, repointed at that input and
 replayed. A short name ends `_arc` because tools key a board by its bare name
 across sets, and a twin named like its source would vanish from a run that names
-both sets. `results_set1arc/<board>.json` is what makes `run_queue.sh` treat a
-board as done, so a `--stage-only` prep leaves it for an LLM worker unless the
-queue is scoped with `QUEUE_SETS`. A tool that globs `runs_set*` sees the set too:
+both sets. `run_queue.sh` leaves a set with a name rather than a number alone
+unless `QUEUE_SETS` names it, so no LLM worker takes these. A tool that globs `runs_set*` sees the set too:
 `test_manifest_plan_parity.py` reads its chains, and `pernet_via_ab.py select`
 qualifies one of its boards, which that tool's two arms then share.
 
