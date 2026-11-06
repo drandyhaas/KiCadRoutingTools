@@ -91,7 +91,7 @@ def checker_cases(td):
     evidence(BOARD, 'fixture board')
     r = check([sys.executable, '-X', 'utf8', CHECKER, write(os.path.join(td, 'chain.txt'), CHAIN),
                '--board', BOARD], accept=True)
-    ok('the compliant chain is OK', 'OK: 16 rule(s) checked, 1 skipped' in r.stdout, r.stdout[-600:])
+    ok('the compliant chain is OK', 'OK: 17 rule(s) checked, 1 skipped' in r.stdout, r.stdout[-600:])
     ok('...read as a judging chain, both steps board-mutating',
        'a judging chain' in r.stdout and '2 command(s), 2 of them board-mutating' in r.stdout,
        r.stdout[:400])
@@ -104,8 +104,8 @@ def checker_cases(td):
             .replace('{dir}', '.'))
     r = check([sys.executable, '-X', 'utf8', CHECKER, write(os.path.join(td, 'plan.sh'), plan),
                '--board', BOARD], accept=True)
-    ok('control: the same commands as a plan are OK, all 17 rules run',
-       'OK: 17 rule(s) checked, 0 skipped' in r.stdout and 'judging chain' not in r.stdout,
+    ok('control: the same commands as a plan are OK, all 18 rules run',
+       'OK: 18 rule(s) checked, 0 skipped' in r.stdout and 'judging chain' not in r.stdout,
        r.stdout[-600:])
 
     print('2. R04 reports what the chain does')

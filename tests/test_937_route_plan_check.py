@@ -110,9 +110,13 @@ BREAKS = [
      ('# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py',
       '# cwd=/repo\ncp s2.kicad_pcb copy.kicad_pcb\n'
       '# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py')),
+    # The pour then reads the fanned board: dropping the step and leaving the
+    # pour on s2 would also read a board nothing writes (R18).
     ('R12', 'no cap pass after fanout',
      ('# cwd=/repo\npython3 -u -X utf8 py_placer/place_fanout_clearance.py '
-      's1.kicad_pcb s2.kicad_pcb --clearance 0.09\n', '')),
+      's1.kicad_pcb s2.kicad_pcb --clearance 0.09\n'
+      '# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py s2.kicad_pcb',
+      '# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py s1.kicad_pcb')),
     ('R13', 'the first pour carries a via tail',
      ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu',
       '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias')),
@@ -179,6 +183,10 @@ BREAKS = [
      ('--component U1 --nets \'*\' --clearance 0.09 --layers F.Cu B.Cu',
       '--component U1 --nets \'*\' --clearance 0.09 '
       '--layers F.Cu In1.Cu B.Cu')),
+    # #1708: the route step reads a board no earlier step writes.
+    ('R18', 'a step reads a board no earlier step writes',
+     ('py_router/route.py s3.kicad_pcb final.kicad_pcb',
+      'py_router/route.py s3x.kicad_pcb final.kicad_pcb')),
 ]
 
 #: Rows that must NOT be refused -- a rule demanding something the engine

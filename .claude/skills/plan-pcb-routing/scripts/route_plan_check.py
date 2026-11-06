@@ -679,6 +679,64 @@ def r_fanout_layers_exclude_planes(p):
     return bad
 
 
+def r_every_board_read_is_written_first(p):
+    """Step 9 -- every board a step reads exists when the step runs (#1708).
+
+    A board a step reads is a SEED (read before any step writes a board: the
+    plan's input, or the source of a `copy_board.py` / `cp`) or the output of
+    an EARLIER step. The step's own output path does not count: `route.py
+    s1b.kicad_pcb s1b.kicad_pcb` with nothing writing `s1b` first has no board
+    to read, and its tool refuses it ("input board ... does not exist"). Nor
+    does a later step's. Run as written, such a plan cannot reach its final
+    step; and when a later step reads a board that does exist, the file can
+    still exit 0 with a final board the skipped step never touched.
+
+    Inputs and outputs are read the way the replayer reads them
+    (`redo_stress_test.board_tokens`: the last board token is the output),
+    keyed by the path each resolves to from its command's cwd, so two
+    folders' `s1.kicad_pcb` are two boards. A `mv` takes its source away.
+
+    A judging chain cannot have the hole: judge_seeds binds each step's
+    `{in}` to the board the step before it wrote, so the rule holds there by
+    construction."""
+    if p.chain:
+        return []
+    from redo_stress_test import (board_tokens, boards_read, is_check_cmd,
+                                  split_env_prefix)
+    here = os.path.dirname(os.path.abspath(p.path))
+
+    def where(cwd, tok):
+        return os.path.normpath(os.path.join(cwd or here,
+                                             os.path.expanduser(tok)))
+
+    written, seeds, bad = set(), set(), []
+    for n, (cwd, argv) in enumerate(p.cmds, 1):
+        argv = split_env_prefix(argv)[1]
+        if is_check_cmd(argv):
+            continue
+        ins, out = board_tokens(argv)
+        out = where(cwd, out) if out is not None else None
+        named = {where(cwd, t): t for t in ins}
+        for at in boards_read(list(named), out):
+            if at in written or at in seeds:
+                continue
+            if not written:             # nothing written yet: a seed
+                seeds.add(at)
+                continue
+            bad.append(f'{tool_of(argv) or argv[0]} (command {n} of '
+                       f'{len(p.cmds)}) reads {named[at]}, which no earlier '
+                       f'step writes'
+                       + (' -- its own output path counts only once an '
+                          'earlier step has written it' if at == out else '')
+                       + '. Read the board the step before it wrote.')
+        if argv[:1] == ['mv']:
+            written -= set(named)
+            seeds -= set(named)
+        if out is not None:
+            written.add(out)
+    return bad
+
+
 #: (id, what it checks, SKILL.md citation, fn). Order is the order printed.
 RULES = (
     ('R01', 'the plan begins with an explicit cd', 'Step 9', r_starts_with_cd),
@@ -722,6 +780,8 @@ RULES = (
     ('R17', 'fanout escapes stay off poured inner layers',
      'Step 10 rule 3',
      r_fanout_layers_exclude_planes),
+    ('R18', 'every board a step reads is written before it', 'Step 9',
+     r_every_board_read_is_written_first),
 )
 
 

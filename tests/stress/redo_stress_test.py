@@ -471,6 +471,26 @@ def board_io(argv):
     .kicad_pcb, so the bare scan took the whole `--output=b.kicad_pcb` string
     as the board's name -- latent (no recorded manifest spells it that way)
     but wrong for both the output and this branch's write-flag test."""
+    ins, out = board_tokens(argv)
+    return ([os.path.basename(b) for b in ins],
+            os.path.basename(out) if out is not None else None)
+
+
+def boards_read(ins, out):
+    """Which of a command's `board_io` inputs it READS. An input equal to its
+    output is the output named twice (`route_diff.py a b --output b`, which
+    the recorded manifests carry) unless it is the only input: `route.py s1b
+    s1b` reads s1b (#1708). Keys are whatever the caller compares (basenames
+    or resolved paths)."""
+    others = [b for b in ins if b != out]
+    return others if others else list(ins)
+
+
+def board_tokens(argv):
+    """`board_io`'s reading with each board AS WRITTEN rather than by
+    basename: (input tokens, output token or None). For a reader that keys
+    boards by their resolved path -- route_plan_check's provenance rule
+    (#1708) -- where two folders' `s1.kicad_pcb` are different boards."""
     def _named_board(a):
         return a.split("=", 1)[1] if a.startswith("-") and "=" in a else a
 
@@ -483,9 +503,8 @@ def board_io(argv):
         prev = argv[i - 1] if i > 0 else ""
         written = prev in ("--output", "-o") or argv[i].startswith("--output=")
         if not written:
-            return [os.path.basename(vals[i])], None
-    return ([os.path.basename(vals[i]) for i in idx[:-1]],
-            os.path.basename(vals[idx[-1]]))
+            return [vals[i]], None
+    return [vals[i] for i in idx[:-1]], vals[idx[-1]]
 
 
 def refused_commands(cmds, manifest=None):
@@ -553,6 +572,10 @@ def compute_prune_keep(cmds, refused=None, final_board=None):
     deps = [set() for _ in range(n)]
     out_of = [None] * n
     in_of = [[] for _ in range(n)]
+    # inputs no EARLIER command wrote -- the step's own output does not count,
+    # nor does a later step's (#1708: `route.py s1b s1b` with nothing writing
+    # s1b first is a hole, and its tool refuses it)
+    unwritten_in = [[] for _ in range(n)]
     final = None
     for i, (_cwd, argv) in enumerate(cmds):
         if i in refused:
@@ -562,6 +585,8 @@ def compute_prune_keep(cmds, refused=None, final_board=None):
         if is_check_cmd(argv):
             continue  # reads boards but produces none; not part of the producer chain
         out_of[i] = out
+        unwritten_in[i] = [b for b in boards_read(ins, out)
+                           if b not in producer]
         deps[i] = {producer[b] for b in ins if b in producer}
         if out is not None:
             producer[out] = i
@@ -594,7 +619,7 @@ def compute_prune_keep(cmds, refused=None, final_board=None):
                and i not in refused]
 
     # CHAIN-HOLE detection (zynq final_board lesson): a kept command reading a
-    # board that NO recorded command produces is normally just the seed input
+    # board that no EARLIER recorded command produces is normally just the seed input
     # (first command). Any OTHER unproduced input means the agent hand-created
     # a board mid-run (cp/mv is not recorded), so the pruner cannot see past
     # it -- the replay would silently run current code on STALE original-run
@@ -603,9 +628,8 @@ def compute_prune_keep(cmds, refused=None, final_board=None):
                      and i not in refused), None)
     seed_ok = set(in_of[first_nc]) if first_nc is not None else set()
     holes = sorted({b for i in keep if not is_check_cmd(cmds[i][1])
-                    for b in in_of[i]
-                    if b not in produced_any and b not in seed_ok
-                    and str(b).endswith('.kicad_pcb')})
+                    for b in unwritten_in[i]
+                    if b not in seed_ok and str(b).endswith('.kicad_pcb')})
     return keep, {"final_index": final, "final_board": out_of[final],
                   "dropped": dropped, "chain_holes": holes}
 
@@ -621,13 +645,12 @@ def compute_contamination(cmds):
     produces, other than the first command's seed inputs) or reads a board whose
     latest producer is tainted. Returns (holes, tainted_outputs, last_clean_out):
     the hole files, every tainted output board, and the last board written by a
-    clean command -- the artifact a grader should use."""
-    produced_any = set()
-    for _cwd, argv in cmds:
-        if not is_check_cmd(argv):
-            _ins, out = board_io(argv)
-            if out:
-                produced_any.add(out)
+    clean command -- the artifact a grader should use.
+
+    "Produces" means an EARLIER command wrote it: a command reading its own
+    output path, or a board only a later command writes, reads a hole
+    (#1708) -- its tool refuses a missing input, or reads a stale file."""
+    produced_before = set()
 
     holes = set()
     tainted_boards = set()
@@ -645,8 +668,8 @@ def compute_contamination(cmds):
         # Only an unproduced RELATIVE input first read mid-chain is original-
         # run copper the replay can't regenerate.
         cmd_holes = set()
-        for b in ins:
-            if not str(b).endswith('.kicad_pcb') or b in produced_any or b in seed_ok:
+        for b in boards_read(ins, out):
+            if not str(b).endswith('.kicad_pcb') or b in produced_before or b in seed_ok:
                 continue
             if os.path.isabs(str(b)) or not seen_output:
                 seed_ok.add(b)
@@ -656,6 +679,7 @@ def compute_contamination(cmds):
         tainted = bool(cmd_holes) or any(b in tainted_boards for b in ins)
         if out:
             seen_output = True
+            produced_before.add(out)
             if tainted:
                 tainted_boards.add(out)
                 tainted_outputs.append(out)

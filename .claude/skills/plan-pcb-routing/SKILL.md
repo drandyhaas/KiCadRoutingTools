@@ -3859,6 +3859,13 @@ next to the board, so the exact tuned choices replay with no LLM:
    as `# cwd=` is read (#1337), and an `export` of a `KICAD_*` knob as the
    env prefix of every later command; other exports (`REDO_*`) are the
    recorder's, and are not replayed.
+   **Put a `set -e` line before or after the `cd`**, as `redo_commands.sh`
+   has: without it the file's exit code is only its LAST line's, so a step
+   that refused to run (exit 2, say a missing input board) leaves a file
+   that exits 0 with a final board that step never touched (#1708).
+   **Every board a step reads is the plan's input or an EARLIER step's
+   output** (R18 below): a step whose input is its own output path, with no
+   earlier step writing that path, has no board to read.
    **Verification commands go in as COMMENTS, never executable lines** —
    the file's exit code is read by executors as the chain verdict, and a
    trailing read-only check that exits non-zero (violations found, or a
@@ -3898,7 +3905,7 @@ the skill is the tuner; the plan file is its output.
 python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py <board>_plan.sh --board board.kicad_pcb
 ```
 
-Read-only, no model in the loop. It evaluates **seventeen** rules of this
+Read-only, no model in the loop. It evaluates **eighteen** rules of this
 skill that a recorded chain can answer, and REFUSES BY NAME, citing the
 SECTION here each rule comes from so you can argue with it at its source.
 
@@ -3910,7 +3917,7 @@ it: every rule applies with `{in}`/`{out}` as the boards, R01 (the `cd`
 line) is not asked, and a chain judge_seeds would refuse is exit 3 (#1592).
 
 **Run `--list` BEFORE you author the plan**, not after it is refused — it
-prints all seventeen in a few lines. The five that bite most often are: the
+prints all eighteen in a few lines. The five that bite most often are: the
 chain ends on `route.py`, verification is commented rather than executable,
 no pipes, Step 5b's net-coverage `assert`s, and one cap pass after the
 last fanout.
