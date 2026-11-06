@@ -6776,7 +6776,9 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              keep_input_copper: bool = False,
                              net_clearances=None,
                              board_edge_clearance: float = 0.0,
-                             config=None) -> Tuple[int, int, List[Segment], List[Segment]]:
+                             config=None,
+                             unresolved_net_ids=None
+                             ) -> Tuple[int, int, List[Segment], List[Segment]]:
     """Micro-shift copper that still grazes after prune / re-bend / neck (#276).
 
     Complements nudge_grazing_octolinear, which keeps a jog's anchor endpoints
@@ -6821,7 +6823,11 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     is read off `pcb_data.source_path` either way), and the scoped .kicad_dru
     rules and the rules binding a diff pair's P against its N (#1561, #1630),
     which the graze test, the offender and the acceptance gate all read: a
-    pair the router built at its rule's gap is not a graze."""
+    pair the router built at its rule's gap is not a graze.
+
+    `unresolved_net_ids`, a set when given, collects the nets left with a graze
+    no candidate cleared, so a later pass that moved their neighbours can retry
+    them (#1688)."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
     from connectivity import COINCIDENCE_TOL
@@ -7163,6 +7169,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                     break
 
             if not round_changed:
+                if unresolved_net_ids is not None:
+                    unresolved_net_ids.add(net_id)
                 break
         if net_changed:
             nets_changed += 1
