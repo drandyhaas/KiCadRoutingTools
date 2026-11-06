@@ -332,25 +332,27 @@ class Annealer:
         mset = set(mine)
         fix, seen, h = 0.0, set(), self.half
         for a in mine:
-            if a in self.shaped:
-                A = self._grown(a)
-                cand = ((self.model._ixp.query((A[0] - h, A[1] - h, A[2] + h, A[3] + h))
-                         - mset) | mset)
-            else:
-                cand = self.shaped
+            # the index's neighbours of `a` and the other movers; a part of
+            # one box pairs only with the parts of several boxes among them
+            A = self._grown(a)
+            cand = ((self.model._ixp.query((A[0] - h, A[1] - h, A[2] + h, A[3] + h))
+                     - mset) | mset)
+            if a not in self.shaped:
+                cand &= self.shaped
             for b in sorted(cand):
                 if b == a:
+                    continue
+                # apart now is apart from either side: no pair to price
+                B = self._grown(b)
+                ox = min(A[2], B[2]) - max(A[0], B[0])
+                oy = min(A[3], B[3]) - max(A[1], B[1])
+                if ox <= 0 or oy <= 0:
                     continue
                 key = (a, b) if a < b else (b, a)
                 if key in seen:
                     continue
                 seen.add(key)
-                if not self._shape_pair(a, b):
-                    continue
-                A, B = self._grown(a), self._grown(b)
-                ox = min(A[2], B[2]) - max(A[0], B[0])
-                oy = min(A[3], B[3]) - max(A[1], B[1])
-                if ox > 0 and oy > 0:
+                if self._shape_pair(a, b):
                     fix += self._box_area(a, b) - ox * oy
         return fix
 
