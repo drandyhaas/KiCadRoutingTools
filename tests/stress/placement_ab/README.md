@@ -15,8 +15,9 @@ segments.
   `--quick` adds route.py's fast judge to the chain's whole-board route
   steps. `--quick 2`, the seed judge, also passes it to every
   `route_diff.py` step and scores with `py_tools/quick_score.py` (the
-  connectivity of the nets without a zone, and board_score's quality counts),
-  as the placement skill does.
+  connectivity of the nets without a zone, the assembly against the placed
+  board as at the other levels, and board_score's quality counts), as the
+  placement skill does.
 - **`place_modal.py OUT BOARDS SEEDS`** places a whole arm on Modal: every
   board and seed in its own container, each `place_simple.py --seed N` of the
   tree being measured (`--src`), into `OUT/<key>/s<seed>.kicad_pcb` -- where
@@ -60,12 +61,15 @@ Rules that keep the comparison honest:
   release's `-full` image (3.4 GB on disk, about a minute once, cached after
   that; nothing else of that image), and `prove_models.py` runs at build:
   fewer than 7000 models, or a stock edge-mount jack that does not read as a
-  body through the board, fails the build. A level-1 or `--full` score
+  body through the board, fails the build. A score at any level
   then has `body_in_board_count` measured, with its number in the assembly
   component's `conjuncts`. A model that is neither in the library nor embedded in
   the board reads as no model, here as on a desktop; `place_modal.py` ships a
-  board's sibling files, not a project's own model directory. `--quick 2`'s score
-  grades no assembly on any image.
+  board's sibling files, not a project's own model directory.
+- **A `--quick 2` score from before it graded the assembly is a different era.**
+  Its `blocking` leaves out what `blocking_by.assembly` now adds, which is 1 at
+  least on any NOT BUILDABLE board, with or without a body through it, so keep
+  such a score apart from a new one. Its connectivity and quality read the same.
 - **Results from before the image had models are a different era.** The app's
   name covers `modal_app.py`, so no run reuses the old image, but keep older
   results apart from new ones: every level-1 or `--full` score from the old
