@@ -216,17 +216,41 @@ class Plan:
 # refusal can be argued with at its source.
 
 def r_starts_with_cd(p):
-    """SKILL.md :2554 -- begin with an explicit `cd <repo>` line, not just a
-    `# cwd=` comment, so a bare `bash <board>_plan.sh` works at all."""
+    """SKILL.md Step 9 -- begin with an explicit `cd <repo>` line, not just a
+    `# cwd=` comment, so a bare `bash <board>_plan.sh` works at all; and
+    carry `set -e` before the first command (#1735), as `redo_commands.sh`
+    does, or the file's exit code is only its last line's and a step that
+    failed leaves a file that can exit 0 (#1708).
+
+    `set -e` is asked for in exactly that spelling, before or after the `cd`
+    (an `export` may sit among them): it is the one the plan's readers
+    (`parse_manifest`, this checker) skip as a directive. `set -eu` would be
+    read as a command."""
+    lead = []
     for ln in p.lines:
         s = ln.strip()
-        if not s or s.startswith('#') or s in ('set -e',):
+        if not s or s.startswith('#'):
             continue
-        if s.split()[0] == 'cd':
-            return []
-        return [f'the first executable line is {s[:70]!r}, not a `cd <repo>`. '
-                f'Relative py_router/ paths fail from any other directory.']
-    return ['the plan has no executable line at all']
+        if s == 'set -e' or s.split()[0] in ('cd', 'export'):
+            lead.append(s)
+            continue
+        break
+    first = next((s for s in lead if s != 'set -e'), None)
+    if first is None or first.split()[0] != 'cd':
+        shown = first or next((ln.strip() for ln in p.lines if ln.strip()
+                               and not ln.strip().startswith('#')
+                               and ln.strip() != 'set -e'), None)
+        if shown is None:
+            return ['the plan has no executable line at all']
+        return [f'the first executable line is {shown[:70]!r}, not a `cd '
+                f'<repo>`. Relative py_router/ paths fail from any other '
+                f'directory.']
+    if 'set -e' not in lead:
+        return ['the plan carries no `set -e` line before its first command: '
+                'without it the file exits with its LAST line\'s code, so a '
+                'step that failed can leave a file that exits 0. Put `set -e` '
+                '(exactly that spelling) before or after the `cd`.']
+    return []
 
 
 def r_no_pipes(p):
@@ -438,24 +462,30 @@ def r_one_cap_pass_after_fanout(p):
 
     The pass moves only 2-pad parts near a BGA's ball field
     (`fanout_clearance` builds its movers from `find_components_by_type(pcb,
-    'BGA')`, `is_near_bga_cap`), so it is asked for by a `bga_fanout.py` step,
-    or by a `qfn_fanout.py` step on a board that has a BGA (needs `--board`;
-    without one that case is NOTED). On a board with no BGA it has nothing
-    to move (#1710). A cap pass the plan runs anyway is still held to once,
-    after every fanout: the pass is board-global and reads every via."""
+    'BGA')`, `is_near_bga_cap`), so it is asked for by a step that fans out
+    a ball array -- `bga_fanout.py`, or the bus step `route_bus.py` (#1735:
+    it fans its source array out, and Step 1a runs the pass after it "as
+    always"; its `--find` form writes nothing) -- or by a `qfn_fanout.py`
+    step on a board that has a BGA (needs `--board`; without one that case is
+    NOTED). On a board with no BGA it has nothing to move (#1710). A cap pass
+    the plan runs anyway is still held to once, after every fanout: the pass
+    is board-global and reads every via."""
     order = [tool_of(a) for a in p.argvs]
     caps = [i for i, t in enumerate(order) if t == 'place_fanout_clearance.py']
-    fans = [i for i, t in enumerate(order)
-            if t in ('bga_fanout.py', 'qfn_fanout.py')]
+    arrays = [i for i, a in enumerate(p.argvs)
+              if order[i] == 'bga_fanout.py'
+              or (order[i] == 'route_bus.py' and '--find' not in a)]
+    fans = sorted(set(arrays) | {i for i, t in enumerate(order)
+                                 if t == 'qfn_fanout.py'})
     if not fans:
         return []
     if len(caps) > 1:
         return [f'{len(caps)} place_fanout_clearance.py steps; the cap pass '
                 f'runs ONCE, after all fanouts']
     if not caps:
-        if 'bga_fanout.py' in order:
-            return ['the plan fans out a BGA (bga_fanout.py) but never runs '
-                    'place_fanout_clearance.py']
+        if arrays:
+            return [f'the plan fans out a ball array ({order[arrays[0]]}) but '
+                    f'never runs place_fanout_clearance.py']
         if p.board is None:
             p.note('the plan fans out with qfn_fanout.py only and runs no '
                    'place_fanout_clearance.py, which moves only parts near a '
@@ -570,86 +600,156 @@ def r_net_coverage_reconciles(p):
     return bad
 
 
+def _resolve_board(here, cwd, tok):
+    return os.path.normpath(os.path.join(cwd or here, os.path.expanduser(tok)))
+
+
+def _step_io(p):
+    """[(cwd, argv, boards read, board written or None, is a check)] for each
+    command, boards keyed by the path each resolves to from its cwd -- the
+    replayer's reading (`board_tokens`, `boards_read`), as R18 reads it."""
+    from redo_stress_test import (board_tokens, boards_read, is_check_cmd,
+                                  split_env_prefix)
+    here = os.path.dirname(os.path.abspath(p.path))
+    out = []
+    for cwd, argv in p.cmds:
+        argv = split_env_prefix(argv)[1]
+        ins, dst = board_tokens(argv)
+        dst = _resolve_board(here, cwd, dst) if dst is not None else None
+        reads = boards_read([_resolve_board(here, cwd, t) for t in ins], dst)
+        out.append((cwd, argv, reads, dst, is_check_cmd(argv)))
+    return out
+
+
+def _lineage(p, steps, i):
+    """Indices of the earlier steps the board step `i` reads descends from:
+    each read board's latest earlier writer, then that step's reads, back to
+    the seeds -- the steps whose projects it inherits. In a judging chain
+    `{in}` is the board the step before wrote, so every earlier step that
+    writes one."""
+    if p.chain:
+        from judge_seeds import placeholders
+        return [j for j in range(i) if not steps[j][4]
+                and any('out' in placeholders(t) for t in steps[j][1])]
+    seen, todo = set(), [(i, b) for b in steps[i][2]]
+    while todo:
+        k, board = todo.pop()
+        j = next((j for j in range(k - 1, -1, -1)
+                  if not steps[j][4] and steps[j][3] == board), None)
+        if j is None or j in seen:
+            continue
+        seen.add(j)
+        todo.extend((j, b) for b in steps[j][2])
+    return sorted(seen)
+
+
 def r_gnd_via_distance(p):
-    """Step 3 GND return vias -- `--gnd-via-distance` >= 3x (via + clearance).
+    """Step 3 GND return vias -- `--gnd-via-distance` >= 3x (via + clearance),
+    at the via and the clearance the step PLACES its vias at.
 
-    The size and the clearance are resolved from the PLAN, not from the one
-    argv that carries the distance. This rule used to `continue` unless all
-    three flags appeared together, and the step that sets the distance is a
-    `route_planes.py` GND-via pass, which has no reason to restate a via size
-    the earlier steps already fixed -- so the rule could not fire on the
-    skill's own Step 3 command, which is precisely the command #941 row 2
-    reports as recommending a distance below the floor.
+    The step that sets the distance is a `route_planes.py` GND-via pass,
+    which has no reason to restate a size the chain already fixed, so the
+    sizes are resolved the way route_planes' main resolves its own (#1709,
+    #1735), not read off the one argv:
 
-    Resolution order: this argv, then the other steps RUN BY THE SAME TOOL,
-    then what the step itself falls back to when it is given neither --
-    route_planes' main reads the board's Default net class (`via_diameter`,
-    `clearance`) and only then `routing_defaults` (#1709) -- so the `--board`'s
-    Default class, then `routing_defaults`. This step's `--clearance-ceiling`
-    then caps the clearance, as route_planes caps it (`min(base, ceiling)`).
-    The reason names which it used, so a refusal resting on a default is not
-    mistaken for one resting on the plan. Without `--board` a floor resting on
-    `routing_defaults` is not what the step routes at (it reads the board), so
-    it is NOTED, never refused. Not modelled: the fab-floor pin-up of a class
-    below the physical floor, and a Default class an earlier step lowered in
-    the project it writes back (the same-tool read covers a plan that says
-    so).
+      * via: this step's `--via-size`, else the board's Default class
+        `via_diameter`, else `routing_defaults` -- and nothing an earlier
+        step passed: the project writeback never writes a class's via
+        (#842), so an earlier `--via-size` does not reach this step;
+      * clearance: this step's `--clearance`, else the Default class of the
+        board the step READS -- the `--board`'s, as LOWERED by each step
+        upstream of it (`_lineage`) that writes its `--clearance` /
+        `--clearance-ceiling` back into the project it hands on (lower-only;
+        `--no-fix-drc-settings` writes nothing) -- else `routing_defaults`;
+        then this step's `--clearance-ceiling` caps it (`min(base, ceiling)`);
+      * then the physical fab floor pins each up, as `enforce_fab_floors`
+        does (needs `--board` for its layer count; the step's
+        `--fab-overrides` is read): a value below the floor is placed at the
+        floor, and a via whose drill leaves no annular ring grows.
 
-    Scoped to the same tool, and taking the SMALLEST value there, because the
-    vias whose spacing this grades are the ones THIS tool places. An earlier
-    draft took `max()` across every command in the plan, on the theory that the
-    widest via implies the floor that must hold for the whole board. That is
-    wrong, and refuses correct plans: a coarse PGA escape via
-    (`bga_fanout --via-size 0.8 --clearance 0.1`) beside a fine signal route
-    (`route.py --via-size 0.25 --clearance 0.0889`) yields a resolved floor of
-    2.70, while the GND-via pass that places the vias resolves 0.5/0.0889 for a
-    real floor of 1.77 -- so a correct 2.0 is refused by a via the pass never
-    places. A fanout escape via is not the via the GND pass places, and the
-    skill itself has them at different sizes.
+    The reason names each source. Without `--board` a floor resting on
+    `routing_defaults` is not what the step routes at (it reads the board),
+    so it is NOTED, never refused; one the plan states (this step, or an
+    upstream writeback) is graded. Not modelled: a descent decided at run
+    time (a fab escalation's lower rung written back), which lowers the real
+    floor further, so the rule can still err toward refusing there.
+
+    A size passed to ANOTHER tool's step is never this step's: a coarse PGA
+    escape via (`bga_fanout --via-size 0.8`) is not the via the GND pass
+    places, and reading it refused a correct 2.0 (#941).
     """
-    def _resolved(read, argv, board_key, fallback):
-        # the OTHER steps: this one's own --clearance-ceiling caps what is
-        # resolved here, and must not be read back as the base it caps
-        tool = tool_of(argv)
-        seen = [v for a in p.by_tool(tool) if a != argv
-                for v in (read(a),) if v is not None]
-        if seen:
-            return min(seen), f'{tool} elsewhere in the plan'
-        if p.board_path is not None:
-            from list_nets import board_default_netclass_param
-            got = board_default_netclass_param(p.board_path, board_key)
-            if got is not None:
-                return got, 'board Default class'
-        return fallback, 'routing_defaults'
+    from list_nets import board_default_netclass_param
+    from fab_tiers import (check_param_floors, count_copper_layers_in_file,
+                           parse_fab_overrides, via_size_for_annular_ring)
+    here = os.path.dirname(os.path.abspath(p.path))
+    layers = (count_copper_layers_in_file(p.board_path)
+              if p.board_path is not None else 0)
+
+    def _class(key):
+        if p.board_path is None:
+            return None
+        return board_default_netclass_param(p.board_path, key)
 
     def _via(argv):
         return scalar(argv, '--via-size')
 
-    def _clearance(argv):
-        # A chain's routing steps spell the floor `--clearance-ceiling` (Step
-        # 4), so a plan that says only that must not read as saying nothing.
-        given = [v for v in (scalar(argv, '--clearance'),
-                             scalar(argv, '--clearance-ceiling'))
-                 if v is not None]
-        return min(given) if given else None
+    def _pin(cwd, argv, **vals):
+        """enforce_fab_floors' pin-up of `vals`, at the step's overrides:
+        (the values as placed, the names it pinned)."""
+        if not layers:
+            return vals, set()
+        path = (values(argv, '--fab-overrides') or [None])[0]
+        path = _resolve_board(here, cwd, path) if path else None
+        ov = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
+        pinned = {n: f for n, _v, f in
+                  check_param_floors(layers, None, ov, **vals)}
+        got = dict(vals, **pinned)
+        if got.get('via_size') is not None and got.get('via_drill') is not None:
+            grown = via_size_for_annular_ring(got['via_size'], got['via_drill'],
+                                              layers, None, ov)
+            if grown is not None and grown > got['via_size']:
+                got['via_size'] = pinned['via_size'] = grown
+        return got, set(pinned)
 
+    steps = _step_io(p)
     bad = []
-    for argv in p.argvs:
+    for i, (cwd, argv, _reads, _dst, _chk) in enumerate(steps):
         d = scalar(argv, '--gnd-via-distance')
         if d is None:
             continue
         tool = tool_of(argv)
         vs, vs_src = _via(argv), 'this step'
         if vs is None:
-            vs, vs_src = _resolved(_via, argv, 'via_diameter',
-                                   routing_defaults.VIA_SIZE)
+            vs, vs_src = _class('via_diameter'), 'board Default class'
+        if vs is None:
+            vs, vs_src = routing_defaults.VIA_SIZE, 'routing_defaults'
+        vd = scalar(argv, '--via-drill')
+        if vd is None:
+            vd = _class('via_drill')
+        if vd is None:
+            vd = routing_defaults.VIA_DRILL
         clr, clr_src = scalar(argv, '--clearance'), 'this step'
         if clr is None:
-            clr, clr_src = _resolved(_clearance, argv, 'clearance',
-                                     routing_defaults.CLEARANCE)
+            base = [(c, 'board Default class') for c in (_class('clearance'),)
+                    if c is not None]
+            for j in _lineage(p, steps, i):
+                jcwd, ja = steps[j][0], steps[j][1]
+                given = [v for v in (scalar(ja, '--clearance'),
+                                     scalar(ja, '--clearance-ceiling'))
+                         if v is not None]
+                if given and '--no-fix-drc-settings' not in ja:
+                    w = _pin(jcwd, ja, clearance=min(given))[0]['clearance']
+                    base.append((w, f'lowered upstream by {tool_of(ja)}'))
+            clr, clr_src = (min(base) if base else
+                            (routing_defaults.CLEARANCE, 'routing_defaults'))
         ceiling = scalar(argv, '--clearance-ceiling')
         if ceiling is not None and ceiling < clr:
             clr, clr_src = ceiling, 'this step'
+        got, pinned = _pin(cwd, argv, clearance=clr, via_size=vs, via_drill=vd)
+        if 'clearance' in pinned:
+            clr, clr_src = got['clearance'], clr_src + ', pinned to the fab floor'
+        if 'via_size' in pinned:
+            vs, vs_src = got['via_size'], vs_src + ', pinned to the fab floor'
         floor = 3.0 * (vs + clr)
         sizes = (f'3x(via {vs:g} [{vs_src}] + clearance {clr:g} '
                  f'[{clr_src}]) = {floor:.3f}')
@@ -803,7 +903,8 @@ def r_every_board_read_is_written_first(p):
 
 #: (id, what it checks, SKILL.md citation, fn). Order is the order printed.
 RULES = (
-    ('R01', 'the plan begins with an explicit cd', 'Step 9', r_starts_with_cd),
+    ('R01', 'the plan begins with an explicit cd and set -e', 'Step 9',
+     r_starts_with_cd),
     ('R02', 'no pipes', 'Step 10 rule 5', r_no_pipes),
     ('R03', 'verification is commented, not executable', 'Step 9',
      r_verification_is_commented),

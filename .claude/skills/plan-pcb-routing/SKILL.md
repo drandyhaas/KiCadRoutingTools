@@ -1057,10 +1057,13 @@ it. Remember its physical floor: never set
 own defaults (`routing_defaults.VIA_SIZE` 0.5 + `CLEARANCE` 0.25), and MORE on a
 board that routes wider. Compute it for the sizes this plan actually passes; the
 number is not a constant. Where the GND-via step passes no `--via-size` or
-`--clearance`, those sizes are the board's Default net class (route_planes
-reads it; the repo defaults apply only when the board declares none), capped by
-the step's own `--clearance-ceiling`, which is how `route_plan_check` R15 prices
-it given `--board` (#1709).
+`--clearance`, those sizes are the Default net class of the board it reads
+(route_planes reads it; the repo defaults apply only when the board declares
+none) -- a class clearance an earlier step's `--clearance` /
+`--clearance-ceiling` lowered when it wrote its project back, though never a
+class via -- capped by the step's own `--clearance-ceiling` and pinned up to
+the physical fab floor. That is how `route_plan_check` R15 prices it given
+`--board` (#1709, #1735).
 
 Report to user when presenting the plan, by Step 10 rule 10 (the tier) and
 Step 3 of the example chain (what a return via needs):
@@ -1848,7 +1851,9 @@ connected=1 drc=.. planes=.. vs .. in walled=..` -- and `<out stem>.bus/summary.
 names every net routed and every one refused, with why. It exits 0 when the
 bus is handed on routed, connected and clean, and 1 when OUT is the board as it
 came (then the rest of the chain routes the whole bus with A*: carry on from
-OUT either way, it is not a chain failure). Its routed nets are **protected**
+OUT either way, it is not a chain failure; under the plan file's `set -e`,
+Step 9, that exit 1 stops `bash <board>_plan.sh` at this step, so run the
+rest from OUT). Its routed nets are **protected**
 in OUT's `.kicad_pro` (#521): later steps route round them and will not rip
 them. So:
 
@@ -3868,7 +3873,12 @@ next to the board, so the exact tuned choices replay with no LLM:
    **Put a `set -e` line before or after the `cd`**, as `redo_commands.sh`
    has: without it the file's exit code is only its LAST line's, so a step
    that refused to run (exit 2, say a missing input board) leaves a file
-   that exits 0 with a final board that step never touched (#1708).
+   that exits 0 with a final board that step never touched (#1708). R01
+   refuses a plan without it (#1735); spell it exactly `set -e`, the one
+   form the replayer and the converter skip as a directive. Under it a
+   step that exits non-zero stops the file there -- including the bus step
+   when it hands OUT on unrouted (exit 1, Step 1a) and a kept hand join with
+   a finding: carry on from that step's board by hand.
    **Every board a step reads is the plan's input or an EARLIER step's
    output** (R18 below): a step whose input is its own output path, with no
    earlier step writing that path, has no board to read.

@@ -576,6 +576,7 @@ def compute_prune_keep(cmds, refused=None, final_board=None):
     # nor does a later step's (#1708: `route.py s1b s1b` with nothing writing
     # s1b first is a hole, and its tool refuses it)
     unwritten_in = [[] for _ in range(n)]
+    seed_ok = set()
     final = None
     for i, (_cwd, argv) in enumerate(cmds):
         if i in refused:
@@ -587,6 +588,8 @@ def compute_prune_keep(cmds, refused=None, final_board=None):
         out_of[i] = out
         unwritten_in[i] = [b for b in boards_read(ins, out)
                            if b not in producer]
+        if not producer:        # read before any command wrote a board: a seed
+            seed_ok.update(unwritten_in[i])
         deps[i] = {producer[b] for b in ins if b in producer}
         if out is not None:
             producer[out] = i
@@ -620,13 +623,11 @@ def compute_prune_keep(cmds, refused=None, final_board=None):
 
     # CHAIN-HOLE detection (zynq final_board lesson): a kept command reading a
     # board that no EARLIER recorded command produces is normally just the seed input
-    # (first command). Any OTHER unproduced input means the agent hand-created
+    # (read before any command wrote a board, #1735 -- not the first command's
+    # inputs, which a leading `--help` leaves empty). Any OTHER unproduced input means the agent hand-created
     # a board mid-run (cp/mv is not recorded), so the pruner cannot see past
     # it -- the replay would silently run current code on STALE original-run
     # copper and the A/B verdict is contaminated. Callers must warn loudly.
-    first_nc = next((i for i in range(n) if not is_check_cmd(cmds[i][1])
-                     and i not in refused), None)
-    seed_ok = set(in_of[first_nc]) if first_nc is not None else set()
     holes = sorted({b for i in keep if not is_check_cmd(cmds[i][1])
                     for b in unwritten_in[i]
                     if b not in seed_ok and str(b).endswith('.kicad_pcb')})
@@ -642,7 +643,7 @@ def compute_contamination(cmds):
     'fix still broken at step5e' verdict was contamination, not code).
 
     A command is TAINTED if it reads a chain-hole file (a .kicad_pcb no command
-    produces, other than the first command's seed inputs) or reads a board whose
+    produces, other than the seeds read before any output) or reads a board whose
     latest producer is tainted. Returns (holes, tainted_outputs, last_clean_out):
     the hole files, every tainted output board, and the last board written by a
     clean command -- the artifact a grader should use.
@@ -662,16 +663,16 @@ def compute_contamination(cmds):
         if is_check_cmd(argv):
             continue
         ins, out = board_io(argv)
-        # An unproduced input is a legit external seed when it's an absolute
-        # path (corpus source board -- identical in both runs) or when it is
-        # first read before ANY output exists (a hand-copied `*_input` seed).
-        # Only an unproduced RELATIVE input first read mid-chain is original-
-        # run copper the replay can't regenerate.
+        # An unproduced input is a legit external seed when it is first read
+        # before ANY output exists (the source board, a hand-copied `*_input`
+        # seed). An unproduced input first read mid-chain is original-run
+        # copper the replay can't regenerate, whether the manifest spelled its
+        # path absolute or relative (board_io keys boards by basename, #1735).
         cmd_holes = set()
         for b in boards_read(ins, out):
             if not str(b).endswith('.kicad_pcb') or b in produced_before or b in seed_ok:
                 continue
-            if os.path.isabs(str(b)) or not seen_output:
+            if not seen_output:
                 seed_ok.add(b)
             else:
                 cmd_holes.add(b)
