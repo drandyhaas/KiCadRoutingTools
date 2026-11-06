@@ -97,8 +97,9 @@ ONE footprint's pads closer than their clearance, which KiCad's DRC reports as
 `clearance` errors on every layout of the board and no route can clear. Tell
 the user before routing; `check_drc`'s WARNINGS name the pairs and gaps, and
 what clears them is the board's to decide (a `.kicad_dru` clearance rule
-scoped by net class, item type or net name, a pad or footprint `(clearance)`
-override, or a net tie).
+that binds the pair, a pad or footprint `(clearance)` override, or a net tie).
+A pair a rule already clears is not counted; "up to N" means a rule check_drc
+cannot fully read may clear some of them.
 
 Classify from the JSON fields, not from exit status: `check_assembly` exits 4
 for any of its conjuncts, and the lines above its VERDICT name which one fired.

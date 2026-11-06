@@ -12,6 +12,7 @@ import argparse
 import math
 import fnmatch
 import os
+import re
 import numpy as np
 from collections import defaultdict
 from typing import List, Tuple, Set, Optional, Dict, Any
@@ -3412,6 +3413,129 @@ def _unverified_rule_pass(pcb_file, pcb_data, board_copper, unmodelled, violatio
               + ', '.join(f"'{n}' {c}" for n, c in sorted(moved.items()))
               + ") -- counted, but KiCad may not report them")
     return moved
+
+
+#: #1706: a pad's courtyard term, read as its footprint (`PadEdgeRules` does too)
+_OWN_GAP_COURTYARD = re.compile(r"\b([AB])\s*\.\s*(?:insideCourtyard|intersectsCourtyard)\s*\(",
+                                re.IGNORECASE)
+
+
+def _own_gap_rule_pass(pcb_file, pcb_data, board_copper, unmodelled, census,
+                       routing_layers, clearance_margin):
+    """#1706: which of one footprint's pad pairs closer than their modelled
+    clearance (`footprint_own_pad_census`, not touching) a `.kicad_dru`
+    clearance rule the channels do not model decides, so the LIBRARY PAD
+    GAPS disclosure says what KiCad reports and not more.
+
+    The modelled channels priced each pair (`required_mm`); a rule they do
+    not read was never asked. Here every clearance rule that sets a `min` is
+    walked as KiCad's EvalRules walks them, from the last in file order, the
+    first that binds the pair winning. A courtyard term,
+    `A.insideCourtyard('X')` / `A.intersectsCourtyard('X')`, is read for a
+    pad as `A.memberOfFootprint('X')`, as `PadEdgeRules` reads it
+    (placement keeps courtyards apart, so the pads in X's courtyard are X's
+    own); any other unmodelled term is three-valued (`rule_may_match`).
+
+    Per shared copper layer (KiCad reports a pair once per layer):
+    - an unmodelled rule binds and the gap meets it, or the binding rule is
+      `(severity ignore)`: KiCad reports nothing;
+    - an unmodelled rule binds and the gap falls short: still reported, at
+      the rule's value;
+    - an undecidable rule comes first and one of the values it may leave
+      clears the gap: KiCad MAY not report it.
+    A modelled binding rule, or none, leaves the pair as priced. A pad
+    clearance override returns before any rule in KiCad, so such a pair is
+    left alone too.
+
+    Returns ``{(ref, index_a, index_b): {'state': 'cleared' | 'maybe' |
+    'priced', 'rule', 'required_mm', 'severity'}}`` for the pairs it changes;
+    {} when the board has no such rule (nothing to ask)."""
+    if not census or not pcb_file \
+            or not os.path.isfile(os.path.splitext(pcb_file)[0] + '.kicad_dru'):
+        return {}
+    from design_rules import DesignRules, parse_condition_maybe, rule_may_match
+    dr = DesignRules.from_project(pcb_data, pcb_file, copper_layers=board_copper)
+    names = {n for n, _mm, _c in unmodelled or ()}
+    walk = []
+    for r in dr.rules:
+        spec = r.constraints.get('clearance') or {}
+        if spec.get('min') is None:
+            continue
+        # measured on kicad-cli 10.0.6: an ignore rule binding the pair hides
+        # it; `(severity exclusion)` hides nothing
+        quiet = r.severity == 'ignore'
+        if (r.unsupported and not quiet
+                and not str(r.unsupported).startswith('condition')):
+            # a value or a layer clause the resolver does not read: it may
+            # bind anything, at a value it states
+            walk.append((r, ('unknown',), float(spec['min']), r.name in names, False))
+            continue
+        src = r.condition_src
+        if src is not None:
+            src = _OWN_GAP_COURTYARD.sub(r'\1.memberOfFootprint(', src)
+        walk.append((r, parse_condition_maybe(src), float(spec['min']),
+                     r.name in names or quiet, quiet))
+    if not any(dec for _r, _a, _v, dec, _q in walk):
+        return {}
+    ctx = ('clearance', dr._net_name_set())
+    fps = getattr(pcb_data, 'footprints', None) or {}
+    out = {}
+    for row in census:
+        if row.get('contact'):
+            continue
+        fp = fps.get(row['ref'])
+        if fp is None:
+            continue
+        pa, pb = fp.pads[row['index_a']], fp.pads[row['index_b']]
+        if (getattr(pa, 'local_clearance', 0) or 0) > 0 \
+                or (getattr(pb, 'local_clearance', 0) or 0) > 0:
+            continue
+        gap = row['required_mm'] - row['overlap_mm']
+        shared = [l for l in _expand_cu(pa.layers, routing_layers)
+                  if l.endswith('.Cu') and l in _expand_cu(pb.layers, routing_layers)]
+        states = []
+        for layer in shared or [row.get('layer') or None]:
+            a, b = dr.item_for_pad(pa, layer), dr.item_for_pad(pb, layer)
+            outcomes = []          # (reported?, rule, value, severity) KiCad may land on
+            decided = None
+            for r, ast, value, unmodelled_rule, quiet in reversed(walk):
+                m = rule_may_match(r, ast, a, b, layer, dr.copper_layers, ctx)
+                if m is False:
+                    continue
+                # reported as the census grades: past the run's tolerance
+                o = (not quiet and value - gap > _grade_tol(value, clearance_margin),
+                     r.name, value, r.severity) if unmodelled_rule else None
+                if m is None:
+                    outcomes.append(o)
+                    continue
+                decided = o
+                break
+            # None stands for "as priced": a modelled rule, or no rule
+            outcomes.append(decided)
+            if all(o is None for o in outcomes):
+                states.append(('priced', None))
+            elif all(o is not None and not o[0] for o in outcomes):
+                states.append(('cleared', next(o for o in outcomes)))
+            elif any(o is not None and not o[0] for o in outcomes):
+                states.append(('maybe', next(o for o in outcomes
+                                             if o is not None and not o[0])))
+            elif decided is not None:
+                states.append(('priced', decided))
+            else:
+                states.append(('priced', None))
+        kinds = {s for s, _o in states}
+        if kinds == {'cleared'}:
+            state, o = 'cleared', states[0][1]
+        elif 'maybe' in kinds or 'cleared' in kinds:
+            state, o = 'maybe', next(o for s, o in states if s in ('maybe', 'cleared'))
+        else:
+            o = next((o for _s, o in states if o is not None), None)
+            if o is None:
+                continue
+            state = 'priced'
+        out[(row['ref'], row['index_a'], row['index_b'])] = {
+            'state': state, 'rule': o[1], 'required_mm': o[2], 'severity': o[3]}
+    return out
 
 
 #: a `disallow` via token -> the Via.via_type values it forbids (None = any)
@@ -7169,24 +7293,48 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if severity_overrides:
         _own_proj_sev = dict(_own_proj_sev, **severity_overrides)
     _own_gap_sev = effective_severity('clearance', None, _own_proj_sev)
+    # #1706: a .kicad_dru clearance rule the channels above do not model
+    # (an insideCourtyard() scope, say) may decide a pair KiCad then does not
+    # report; ask it before publishing the pair as a certain KiCad error.
+    _own_rule = _own_gap_rule_pass(pcb_file, pcb_data, _board_copper, _unmodelled_clr,
+                                   _own, routing_layers, clearance_margin)
+    _own_cleared = {}
     for r in _own:
         if not r['contact']:
             _own_gaps += 1
-            if _own_gap_sev != 'ignore':
-                _own_gap_rows.append({
+            _rr = _own_rule.get((r['ref'], r['index_a'], r['index_b']))
+            if _rr is not None and _rr['state'] == 'cleared':
+                _own_cleared[_rr['rule']] = _own_cleared.get(_rr['rule'], 0) + 1
+                continue
+            _req = r['required_mm']
+            _sev = _own_gap_sev
+            if _rr is not None and _rr['state'] == 'priced':
+                _req = _rr['required_mm']
+                if _rr['severity'] == 'warning' and _sev == 'error':
+                    _sev = 'warning'
+            if _sev != 'ignore':
+                _row = {
                     'type': 'pad-pad', 'own_footprint': True,
                     'accepted': 'own-footprint-gap',
-                    'kicad_severity': _own_gap_sev,
+                    'kicad_severity': _sev,
                     'net1': r['net_a'] or f"net_{r['net_id_a']}",
                     'net2': r['net_b'] or f"net_{r['net_id_b']}",
                     'no_net': r['no_net'], 'layer': r['layer'],
-                    'overlap_mm': r['overlap_mm'],
-                    'required_mm': r['required_mm'],
+                    'overlap_mm': round(r['overlap_mm'] + _req - r['required_mm'], 4),
+                    'required_mm': _req,
                     'gap_mm': round(r['required_mm'] - r['overlap_mm'], 4),
                     'pad_ref': f"{r['ref']}.{r['pad_a']}",
                     'pad_ref2': f"{r['ref']}.{r['pad_b']}",
                     'pad_loc': r['pad_loc_a'], 'pad_loc2': r['pad_loc_b'],
-                    'closest_pt': r['closest_pt']})
+                    'closest_pt': r['closest_pt']}
+                if _rr is not None and _rr['state'] == 'priced':
+                    _row['rule'] = _rr['rule']
+                elif _rr is not None:
+                    # KiCad may not report it: the rule decides on a term
+                    # this grader cannot read (#1528's tag)
+                    _row['unverified_rule'] = _rr['rule']
+                    _row['unverified_binds'] = 'maybe'
+                _own_gap_rows.append(_row)
             continue
         _v = _mark_required({
             'type': 'pad-pad',
@@ -7220,6 +7368,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                  '; pass --baseline <input board> to accept the contacts its '
                  'footprints already had' if _own_counts['violation']
                  and _baseline_pd is None else ''))
+    if not quiet and _own_cleared:
+        # #1706: the rule decides them, so KiCad reports none
+        print(f"  {sum(_own_cleared.values())} of those pair(s) are cleared by a "
+              f".kicad_dru rule KiCad applies to them ("
+              + ', '.join(f"'{n}' {c}" for n, c in sorted(_own_cleared.items()))
+              + ": the gap meets the rule, or the rule's severity is ignore; a "
+                "courtyard term is read as that footprint's own pads) -- KiCad "
+                "reports none of them, so they are not listed")
 
     # #1528: a clearance item graded at the class or layer value that an
     # UNMODELLED .kicad_dru clearance rule (insideCourtyard(), a layer clause
@@ -7299,22 +7455,35 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if _own_gap_rows:
                 # #1628: the count line is what board_score reads.
                 _ng = sum(1 for r in _own_gap_rows if r['kicad_severity'] == 'error')
+                # #1706: the pairs a rule this grader cannot fully read may clear
+                _maybe = {}
+                for r in _own_gap_rows:
+                    if r.get('unverified_rule'):
+                        _maybe[r['unverified_rule']] = _maybe.get(r['unverified_rule'], 0) + 1
                 print(f"  LIBRARY PAD GAPS: {len(_own_gap_rows)} pair(s) of one "
                       f"footprint's pads on different nets closer than their "
                       f"clearance without touching -- KiCad reports each as a "
-                      f"`clearance` {'error' if _ng else 'warning'}, and no "
+                      f"`clearance` {'error' if _ng else 'warning'}"
+                      + (f" (up to {len(_own_gap_rows)}: {sum(_maybe.values())} "
+                         f"may be cleared by a .kicad_dru rule decided by a term "
+                         f"check_drc cannot read -- "
+                         + ', '.join(f"'{n}' {c}" for n, c in sorted(_maybe.items()))
+                         + ")" if _maybe else '')
+                      + ", and no "
                       f"placement or routing step can clear it. What can: a "
-                      f".kicad_dru clearance rule check_drc models (conditioned "
-                      f"on A.NetClass, A.Type / A.Pad_Type or A.NetName; a "
-                      f"footprint or pad scope such as memberOfFootprint() or "
-                      f"A.Pad_Number is not modelled here), a pad or footprint (clearance) "
+                      f".kicad_dru clearance rule binding the pair (KiCad's last "
+                      f"matching rule decides; a courtyard term is read as that "
+                      f"footprint's own pads), a pad or footprint (clearance) "
                       f"override, or a net-tie pad group:")
                 _lim = (len(_own_gap_rows) if max_print is None or max_print <= 0
                         else max_print)
                 for r in _own_gap_rows[:_lim]:
                     print(f"    {r['pad_ref']} [{r['net1']}] | {r['pad_ref2']} "
                           f"[{r['net2']}] on {r['layer'] or '?'}: gap "
-                          f"{r['gap_mm']:.4f}mm < {r['required_mm']:.4f}mm")
+                          f"{r['gap_mm']:.4f}mm < {r['required_mm']:.4f}mm"
+                          + (f" (rule '{r['rule']}')" if r.get('rule') else '')
+                          + (f" (may be cleared by rule '{r['unverified_rule']}')"
+                             if r.get('unverified_rule') else ''))
                 if len(_own_gap_rows) > _lim:
                     print(f"    ... and {len(_own_gap_rows) - _lim} more "
                           f"(use --max-print 0 to show all)")
@@ -8058,6 +8227,11 @@ if __name__ == "__main__":
             # KiCad `clearance` finding (`kicad_severity` on the item)
             'own_footprint_gaps': sum(
                 1 for v in violations if v.get('accepted') == 'own-footprint-gap'),
+            # #1706: of those, the ones a .kicad_dru rule decided by a term
+            # this grader cannot read may clear (KiCad reports up to the count)
+            'own_footprint_gaps_unverified': sum(
+                1 for v in violations if v.get('accepted') == 'own-footprint-gap'
+                and v.get('unverified_rule')),
             # #1528: of `violations`, the ones an unmodelled .kicad_dru
             # clearance rule may make legal (each names its `unverified_rule`)
             'unverified': sum(1 for v in _real if v.get('unverified_rule')),

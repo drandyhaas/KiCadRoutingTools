@@ -732,7 +732,12 @@ def _grade(a, doc):
     if _drc_c.get('library_pad_gaps'):
         # #1628: library geometry, not graded (#1306) -- but KiCad's DRC of
         # this board will show them, so a DONE says so
-        notes.append(f"KiCad will report {_drc_c['library_pad_gaps']} pair(s) of "
+        _unv = _drc_c.get('library_pad_gaps_unverified')
+        notes.append(f"KiCad will report "
+                     + (f"up to {_drc_c['library_pad_gaps']} pair(s) ({_unv} may be "
+                        f"cleared by a .kicad_dru rule check_drc cannot fully read)"
+                        if _unv else f"{_drc_c['library_pad_gaps']} pair(s)")
+                     + f" of "
                      f"library pads as clearance errors, once per copper layer "
                      f"they share (one footprint's pads closer than their "
                      f"clearance; no route can clear "

@@ -866,12 +866,16 @@ def _drc_disclosures(out: str) -> dict:
     (`severity_warnings`) and the ones a project `ignore` drops
     (`severity_ignored`), and the pairs of one footprint's pads closer than
     their clearance (`library_pad_gaps`, #1628), library geometry KiCad
-    reports as `clearance` and no routing step can clear. Keys are present
-    only when non-zero."""
+    reports as `clearance` and no routing step can clear, and of those the
+    ones a rule check_drc cannot fully read may clear
+    (`library_pad_gaps_unverified`, #1706: KiCad reports up to
+    `library_pad_gaps`). Keys are present only when non-zero."""
     d = {}
     for key, pat in (('severity_warnings', r'SEVERITY WARNING: (\d+) finding'),
                      ('severity_ignored', r'SEVERITY IGNORE: (\d+) finding'),
-                     ('library_pad_gaps', r'LIBRARY PAD GAPS: (\d+) pair')):
+                     ('library_pad_gaps', r'LIBRARY PAD GAPS: (\d+) pair'),
+                     ('library_pad_gaps_unverified',
+                      r'LIBRARY PAD GAPS: \d+ pair[^\n]*?\(up to \d+: (\d+) may be cleared')):
         m = re.search(pat, out)
         if m and int(m.group(1)):
             d[key] = int(m.group(1))
@@ -1908,8 +1912,12 @@ def main():
               + " -- see check_drc's WARNINGS")
     # #1628: said before routing too -- no route can clear these
     if _drc_c.get('library_pad_gaps'):
+        _unv = _drc_c.get('library_pad_gaps_unverified')
         print(f"LIBRARY PAD GAPS (disclosed, not blocking): KiCad will report "
-              f"{_drc_c['library_pad_gaps']} pair(s) of one footprint's own pads "
+              + (f"up to {_drc_c['library_pad_gaps']} pair(s) ({_unv} may be cleared "
+                 f"by a .kicad_dru rule check_drc cannot fully read)"
+                 if _unv else f"{_drc_c['library_pad_gaps']} pair(s)")
+              + f" of one footprint's own pads "
               f"as clearance errors, once per copper layer the pads share, "
               f"which no placement or routing step "
               f"changes -- a .kicad_dru clearance rule, a pad/footprint "

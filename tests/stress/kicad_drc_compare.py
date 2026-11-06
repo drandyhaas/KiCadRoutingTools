@@ -60,7 +60,10 @@ copper layer the two pads share (#1675), so one row answers for one item on an
 SMD pair and for two identical items on a through-hole pair of a 2-layer board.
 Every such item is dropped and counted as kicad_library_pad_gaps (KiCad items;
 checkdrc_library_pad_gaps counts pairs), not listed as a check_drc false
-negative.
+negative. A row KiCad lists no item for is the channel disagreeing (#1706):
+counted as checkdrc_library_pad_gaps_unreported and named, apart from the
+rows check_drc tagged `unverified_rule` (a rule it cannot fully read may
+clear them). Neither enters the verdict, which grades the copper match.
 
 Usage:
   python3 tests/stress/kicad_drc_compare.py <board.kicad_pcb> [...]
@@ -458,6 +461,8 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = True,
             # the second block of a reference one file uses twice (#726)
             item["pad_pair"] = frozenset(re.sub(r"~\d+(?=\.)", "", v[k], count=1)
                                          for k in ("pad_ref", "pad_ref2"))
+            if v.get("unverified_rule"):
+                item["unverified_rule"] = v["unverified_rule"]     # #1706
         if v.get("owner"):
             item["owner"] = v["owner"]     # #995 footprint-own-copper
         # The part whose graphic copper the row names ("Polygon(U2)"), so
@@ -756,17 +761,32 @@ def _drop_kicad_library_gaps(kicad, cd_gaps):
         return kicad, 0
     keep, dropped = [], 0
     for kv in kicad:
-        if kv.get("type") == "clearance" and any(
-                c["nets"] == kv.get("nets")
-                and c.get("pad_pair") == frozenset(kv.get("pads") or ())
-                and any(p and math.hypot(kv["pos"][0] - p[0], kv["pos"][1] - p[1])
-                        <= LIBRARY_GAP_MATCH_RADIUS_MM
-                        for p in (c.get("pos"), c.get("pos2")))
-                for c in cd_gaps):
+        if any(_library_gap_match(kv, c) for c in cd_gaps):
             dropped += 1
         else:
             keep.append(kv)
     return keep, dropped
+
+
+def _library_gap_match(kv, c):
+    """Does KiCad item `kv` report check_drc's library-gap row `c`?"""
+    return (kv.get("type") == "clearance" and c["nets"] == kv.get("nets")
+            and c.get("pad_pair") == frozenset(kv.get("pads") or ())
+            and any(p and math.hypot(kv["pos"][0] - p[0], kv["pos"][1] - p[1])
+                    <= LIBRARY_GAP_MATCH_RADIUS_MM
+                    for p in (c.get("pos"), c.get("pos2"))))
+
+
+def _library_gaps_unreported(kicad, cd_gaps):
+    """#1706: check_drc's library-gap rows KiCad lists no item for, split as
+    (certain, may_be_cleared): a row tagged `unverified_rule` is one a rule
+    check_drc cannot fully read may clear, so KiCad's silence on it is
+    expected; an untagged one is the channel disagreeing."""
+    certain, maybe = [], []
+    for c in cd_gaps:
+        if not any(_library_gap_match(kv, c) for kv in kicad):
+            (maybe if c.get("unverified_rule") else certain).append(c)
+    return certain, maybe
 
 
 # The floor itself lives in py_router so check_weird and the repair passes call
@@ -1241,6 +1261,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
         kicad_intentional += k_tie
         checkdrc_intentional += c_tie
     kicad, kicad_own = _drop_kicad_own_copper(kicad, cd_own)
+    gaps_unreported, gaps_maybe = _library_gaps_unreported(kicad, cd_gaps)
     kicad, kicad_gaps = _drop_kicad_library_gaps(kicad, cd_gaps)
     matched, kicad_only, cd_only = match(kicad, cd)
     # Part B: collapse the board-edge anchor double-count (same edge violation
@@ -1285,6 +1306,12 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             # and the gaps check_drc measured and published (not graded)
             "kicad_library_pad_gaps": kicad_gaps,
             "checkdrc_library_pad_gaps": len(cd_gaps),
+            # #1706: of those, the pairs KiCad lists no item for -- untagged
+            # (the channel disagrees) and tagged `unverified_rule` (a rule
+            # check_drc cannot fully read may clear them, as it did)
+            "checkdrc_library_pad_gaps_unreported": len(gaps_unreported),
+            "checkdrc_library_pad_gaps_unreported_maybe": len(gaps_maybe),
+            "library_pad_gaps_unreported_items": gaps_unreported,
             "matched": n_matched, "kicad_only": len(kicad_only),
             "checkdrc_only": len(cd_only),
             "pairs_both": len(kpairs & cpairs),
@@ -1321,6 +1348,7 @@ _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "kicad_intentional_edge", "checkdrc_intentional_edge",
                  "kicad_own_copper", "checkdrc_own_copper",
                  "kicad_library_pad_gaps", "checkdrc_library_pad_gaps",
+                 "checkdrc_library_pad_gaps_unreported",
                  "matched", "kicad_only", "checkdrc_only",
                  "pairs_kicad_only", "pairs_checkdrc_only",
                  "kicad_connection_width", "connection_width_min",
@@ -1352,7 +1380,15 @@ def compare_board(board: str, label: str = None, clearance: float = None,
                     f"item(s) / -{data.get('checkdrc_library_pad_gaps', 0)} "
                     f"check_drc pair(s) library pad gaps (one footprint's "
                     f"pads, not graded; KiCad lists a pair per copper layer "
-                    f"they share)]")
+                    f"they share)"
+                    # #1706: the two counts of the channel disagree
+                    + (f"; {data['checkdrc_library_pad_gaps_unreported']} check_drc "
+                       f"pair(s) KiCad does NOT report"
+                       if data.get("checkdrc_library_pad_gaps_unreported") else "")
+                    + (f"; {data['checkdrc_library_pad_gaps_unreported_maybe']} more "
+                       f"KiCad does not report that check_drc said a rule may clear"
+                       if data.get("checkdrc_library_pad_gaps_unreported_maybe") else "")
+                    + "]")
     # #406 min copper web: separate class, not matched against check_drc.
     cw = data.get("kicad_connection_width")
     cw_min = data.get("connection_width_min")
@@ -1383,6 +1419,10 @@ def compare_board(board: str, label: str = None, clearance: float = None,
         print(f"    KICAD-ONLY  {kv['type']:16s} {sorted(kv['nets'])} @ {kv['pos']}  {kv.get('desc','')[:60]}")
     for cv in data["checkdrc_only_items"]:
         print(f"    CHECKDRC-ONLY {cv['type']:16s} {sorted(cv['nets'])} @ {cv['pos']}")
+    for gv in data.get("library_pad_gaps_unreported_items", []):
+        # #1706: a library-gap pair check_drc publishes as a KiCad error
+        print(f"    LIBRARY-GAP NOT IN KICAD {'|'.join(sorted(gv.get('pad_pair') or ()))} "
+              f"{sorted(gv['nets'])} @ {gv['pos']}")
     for wv in data.get("connection_width_items", []):
         print(f"    CONNWIDTH   {'/'.join(wv.get('kinds', ())) or '?':16s} "
               f"{sorted(wv['nets'])} @ {wv['pos']}  {wv.get('desc', '')[:60]}")
