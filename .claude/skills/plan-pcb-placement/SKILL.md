@@ -1005,8 +1005,10 @@ leaving that pose expensive.
    ```
    - **What it does.** It seats each member in order, within its reach of
      its partner pads, as close to them as the courtyards already seated
-     allow, kept the board's clearance apart (the placer's own rule). It
-     tries each quarter turn and keeps the one that brings the pads closest.
+     allow: courtyards the board's clearance apart, and each pad pair at its
+     own clearance (a net class, a `.kicad_dru` rule, a pad override), as the
+     placer's seat gate holds them. It tries each quarter turn and keeps the
+     one that brings the pads closest.
    - **What it prints.** Each member's pose, the gap of each of its legs
      (`legs 1.07 + 0.74 mm`), and its gap to the chip. A NOTE flags a member
      that ended beside another edge than its `side`.

@@ -1430,8 +1430,10 @@ net as an intent `proximity[]` row's `pads` are. Optionally it also gives:
 
 Each member is seated in turn within `--reach` mm (4, or its own `reach`) of
 its partner pads, as close to them as the courtyards already seated allow.
-They are kept the board's clearance apart (the placer's seat rule), at the
-quarter turn that brings the pads closest. The run prints each member's legs
+Their courtyards are kept the board's clearance apart and their pads each
+pad pair's own clearance apart (a net class above the board's, a `.kicad_dru`
+rule, a pad override), as the placer's seat gate holds them, at the quarter
+turn that brings the pads closest. The run prints each member's legs
 one by one and its gap to the chip, and a NOTE for a member with one `side`
 that ended beside another edge. A LOCKED chip's locked neighbours, containers
 aside, are where the board has them: obstacles, and partners a member may

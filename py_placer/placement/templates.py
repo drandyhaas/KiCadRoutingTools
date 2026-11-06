@@ -414,7 +414,11 @@ def fit(pcb, state, sketch, *, step: float = 0.1, fine: float = 0.01,
     each part already seated presents on the faces they share (its courtyard
     on its own face, its drilled pads' boxes on the other, as the seat gate
     pairs them: a member on the far face of a through-hole chip sits clear of
-    its leads, under its body if need be). It is seated trying
+    its leads, under its body if need be), and passing the seat gate's pad
+    test against each (`state.legality_ctx.pair_shortfall`: every pad pair at
+    its own clearance -- a net class above the board's, a `.kicad_dru` rule,
+    a pad override -- and no stack, hole or graphic-copper conflict; #1711).
+    It is seated trying
     each quarter turn (or the sketch's `rot`) and, with `side`, only centres
     on that side of the anchor (`side_ok`). A coarse grid
     (`step`) within `reach` mm of its partners, then a fine one round the
@@ -436,6 +440,11 @@ def fit(pcb, state, sketch, *, step: float = 0.1, fine: float = 0.01,
     # the seat gate's courtyard clearance (`QuenchState.candidate_valid`),
     # so a member at its template pose is legal beside the others
     gap = float(sketch.get('gap_mm', state.clearance))
+    # ...and the pad test it makes after the courtyards (#1711): each pad
+    # pair at its own clearance (`legality.PadClearanceModel`: net class,
+    # .kicad_dru rule, pad override), holes and graphic copper, asked of the
+    # gate's own context rather than measured again here
+    ctx = getattr(state, 'legality_ctx', None)
     A = parts[a]
     a_side = getattr(A, 'side', None)
     for r in ROTS:
@@ -500,11 +509,38 @@ def fit(pcb, state, sketch, *, step: float = 0.1, fine: float = 0.01,
                         out += [(b1, b2) for b1 in far_boxes(mb) for b2 in far_boxes(qb)]
             return out
 
+        def pads_short(o, qp, x, y, rot):
+            """Does the member at (x, y, rot), as the row records it (rounded),
+            fail the seat gate's pad test against seated part `o` at `qp`
+            (`LegalityContext.pair_shortfall`): a pad pair short of its own
+            clearance, a pad stack, a hole keep-out or graphic copper? Asked
+            absolutely -- a template carries no seed to license a shortfall."""
+            if ctx is None:
+                return False
+            from .legality import EPS, ZERO_SHORTFALL
+            sf = ctx.pair_shortfall(r, o, pose_a=(round(x, 4), round(y, 4), rot),
+                                    pose_b=qp)
+            return sf is not ZERO_SHORTFALL and (sf.pad > EPS or sf.stack
+                                                 or sf.hole > EPS)
+
+        def first_clear(sc, X, Y, rot, clear):
+            """The index of the best-scored candidate the pad test passes
+            (the courtyard test is in `sc`), None when none does; in score
+            order, so the first candidate wins wherever the pads clear."""
+            for i in np.argsort(sc, kind='stable'):
+                if not math.isfinite(sc[i]):
+                    return None
+                if not clear or not any(pads_short(o, qp, X[i], Y[i], rot)
+                                        for o, _Q, qp in occ):
+                    return int(i)
+            return None
+
         def search(clear=True, sided=True):
             """(sum of leg gaps + tie-break, x, y, rot, legs) of the best
             origin, over the coarse grid and then a fine one round its best;
             None when no candidate passes. `clear` False drops the courtyard
-            test and `sided` False the side, to say which one blocked."""
+            and pad tests and `sided` False the side, to say which one
+            blocked."""
             best = None
             for rot in rots:
                 P.ensure_rotation(rot)
@@ -549,15 +585,17 @@ def fit(pcb, state, sketch, *, step: float = 0.1, fine: float = 0.01,
                 ox, oy = (base[0] + base[2]) / 2.0, (base[1] + base[3]) / 2.0
                 X, Y = X.ravel() - ox, Y.ravel() - oy
                 sc, _t = score(X, Y)
-                i0 = int(np.argmin(sc))
-                if not math.isfinite(sc[i0]):
+                i0 = first_clear(sc, X, Y, rot, clear)
+                if i0 is None:
                     continue
                 fx = np.arange(X[i0] - step, X[i0] + step + fine / 2, fine)
                 fy = np.arange(Y[i0] - step, Y[i0] + step + fine / 2, fine)
                 FX, FY = np.meshgrid(fx, fy)
                 FX, FY = FX.ravel(), FY.ravel()
                 s2, t2 = score(FX, FY)
-                i1 = int(np.argmin(s2))
+                i1 = first_clear(s2, FX, FY, rot, clear)
+                if i1 is None:
+                    continue
                 cand = (float(s2[i1]), float(FX[i1]), float(FY[i1]), rot, float(t2[i1]))
                 if best is None or cand[0] < best[0] - 1e-9:
                     best = cand
@@ -579,7 +617,7 @@ def fit(pcb, state, sketch, *, step: float = 0.1, fine: float = 0.01,
                     Q.ensure_rotation(qp[2])
                     qc, qf = Q.rects(*qp)
                     g = pair_min_gap(P.sides, P.side, wc, wf, Q.sides, Q.side, qc, qf)
-                    if g is not None and g < gap:
+                    if (g is not None and g < gap) or pads_short(o, qp, x, y, rot):
                         taken.append(o)
                 why += (f" clears the parts seated before it: the spot nearest its partners "
                         f"is taken by {', '.join(taken) or 'nothing (raise --reach)'}. List it "
