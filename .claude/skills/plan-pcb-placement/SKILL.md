@@ -1367,20 +1367,25 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    edge connector whose facing clause reads anything but `strong` or
    `marker` (`weak`, `unverified`, `sourced`, abstained, exempt). No grade
    reads where the opening is, and `render_placement`'s plan view cannot
-   show a mouth. One render per edge, a few seconds each:
+   show a mouth. A whole-board render cannot either: it frames the board, so
+   a ~155 mm board renders at ~5.6 px/mm, where a 1.00 mm side-entry
+   header's contacts are 1 px specks and its mouth out and mouth in look the
+   same. Render each listed part close up, a few seconds each:
    ```bash
-   KCLI=$(python3 py_tools/kicad_cli_path.py)
-   "$KCLI" pcb render wk/<run>/final.kicad_pcb --side back -w 2400 -h 900 -o wk/<run>/edge_north.png
+   python3 py_tools/edge_closeup.py wk/<run>/final.kicad_pcb J7 J3 --out-dir wk/<run>/edges
    ```
-   `--side` is where you stand: `back` outside the north edge, `front` the
-   south, `left` the west, `right` the east (from the north, west is on the
-   right). The edge's parts are nearest the camera: a jack's or USB socket's
-   mouth must face you; its back wall means it opens into the board. Fix the
-   declaration (`mating_face`, and the source you read it off) and place
-   again. A part drawn as a bare footprint (no body) has no model that
-   resolved, and the render shows nothing about it: say so in REPORT.md
-   rather than counting it checked. List each part and what you saw in
-   REPORT.md.
+   Each part is centred, seen from outside the edge its pads are nearest
+   (`J3:north` names the edge), at 40 px/mm (`--px-per-mm`), and the line
+   it prints names the image, the edge and the scale. In each image you
+   stand outside that edge (from the north, west is on the right), so the
+   part is nearest the camera: a jack's or USB socket's mouth must face
+   you; its back wall means it opens into the board. Fix the declaration
+   (`mating_face`, and the source you read it off) and place again. A part
+   whose line says its 3D model is not declared or does not resolve is
+   drawn as a bare footprint, and the render shows nothing about its mouth;
+   a part you still cannot read at that scale is the same. Say so in
+   REPORT.md rather than counting it checked. List each part and what you
+   saw in REPORT.md.
 
 In `place` mode that placement is the result. Run
 `python3 -X utf8 py_tools/route_review.py wk/<run>/s<S>_fast.kicad_pcb --json wk/<run>/review.json`

@@ -1670,6 +1670,29 @@ written); with `--gate`, 4 when the checklist finds anything. Every toggle,
 with pictures, is in `py_placer/placement/README.md` ("Reviewing a
 placement: render it").
 
+## Edge Close-ups (`edge_closeup.py`)
+
+A 3D render of each named edge part, close up and from outside the board edge
+it sits on, so which way a connector opens can be read off the picture (the
+plan view cannot show a mouth). A whole-board `kicad-cli pcb render` frames
+the board, so its scale falls as the board grows (~5.6 px/mm on a ~155 mm
+board, where a 1.00 mm header's contacts are 1 px specks); this centres each
+part and renders it at a stated scale.
+
+```bash
+python3 py_tools/edge_closeup.py placed.kicad_pcb J7 J3:north --out-dir edges [--px-per-mm 40] [--json rows.json]
+```
+
+Each part is read on the outline edge its pads are nearest unless
+`REF:north|south|east|west` names it, and rendered from the side standing
+outside that edge (`back` for north, `front` south, `left` west, `right`
+east). The scale defaults to 40 px/mm. kicad-cli's scale at zoom 1 is
+measured per side (two renders a 1 cm pivot apart), not assumed, and the
+zoom follows from it. One line per part names the image, the edge, the scale
+and whether the part's 3D model is declared and resolves; a part without one
+renders as its pads only. Needs kicad-cli (found as `kicad_cli_path.py`
+finds it).
+
 ## Floorplan Overlay (`render_plan.py`)
 
 A library module, not a command: it draws a floorplan intent's geometry onto
