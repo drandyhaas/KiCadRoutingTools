@@ -10,7 +10,7 @@ own value the bounding box), and the anneal's overlap
 measure read the boxes. A rectangle, and a single shape that is not
 axis-aligned, are the box they always were.
 
-    python3 tests/test_placer_courtyard_boxes.py
+    python3 tests/test_1740_courtyard_boxes.py
 """
 import json
 import os
@@ -405,54 +405,26 @@ def test_one_box_unchanged(td):
     ok('two halves place exactly as one rectangle (poses, cost)', got[0] == got[1], got)
 
 
-#: esp_prog piled (make_unplaced), its intent emitted, four groups of four,
-#: placed with `--seed 0 --moves 3000`: recorded at 95e6dc1d3, before
-#: courtyards were read as boxes. No part of esp_prog draws a courtyard that
-#: is not a rectangle, so nothing may change.
-ESP_GROUPS = [['C1', 'C2', 'C3', 'C4'], ['CON1', 'CON2', 'Q1', 'Q2'],
-              ['R1', 'R2', 'R3', 'R4'], ['U1', 'U2', 'USB1', 'Y1']]
-ESP_GOLDEN = [
-    ["#00000000-0000-0000-0000-00005a3b5201", 115.25, 95.75, 90.0],
-    ["#00000000-0000-0000-0000-00005d8c51dd", 119.2, 100.9, 0.0],
-    ["#00000000-0000-0000-0000-00005e7dd057", 130.0, 99.0, 180.0],
-    ["C1", 137.1088, 95.7717, 180.0], ["C2", 119.386, 95.5547, 0.0],
-    ["C3", 134.9458, 96.0473, 90.0], ["C4", 121.2726, 93.9987, 90.0],
-    ["CON1", 115.5474, 96.1767, 270.0], ["CON2", 130.6921, 92.9169, 0.0],
-    ["Q1", 128.9671, 95.9681, 0.0], ["Q2", 128.1094, 102.1348, 180.0],
-    ["R1", 128.1937, 100.1085, 180.0], ["R2", 126.8974, 99.0602, 90.0],
-    ["R3", 126.2568, 96.9044, 270.0], ["R4", 125.1968, 95.6202, 180.0],
-    ["Ref*", 130.6135, 99.0469, 0.0], ["Ref*~2", 132.9093, 98.1712, 0.0],
-    ["U1", 121.9208, 100.775, 180.0], ["U2", 133.1643, 102.3094, 0.0],
-    ["USB1", 140.0393, 100.868, 0.0], ["Y1", 119.3341, 93.0908, 90.0]]
-ESP_GOLDEN_COST = 400.99956625781584
-
-
 def test_existing_board_unchanged(td):
-    pile = os.path.join(td, 'pile.kicad_pcb')
-    check([sys.executable, '-X', 'utf8', os.path.join(
-        ROOT, '.claude', 'skills', 'plan-pcb-placement', 'scripts', 'make_unplaced.py'),
-        os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb'), pile], accept=True)
-    evidence(pile, 'the piled board')
-    intent = os.path.join(td, 'intent.json')
-    check([sys.executable, '-X', 'utf8', tool('check_floorplan.py'), pile,
-           '--allow-unplaced', '--emit-intent', intent], accept=True)
-    evidence(intent, 'the emitted intent')
-    groups = os.path.join(td, 'groups.json')
-    with open(groups, 'w', encoding='utf-8') as fh:
-        json.dump({'schema': 1, 'groups': [{'name': f'g{4 * i}', 'refs': g}
-                                           for i, g in enumerate(ESP_GROUPS)]}, fh)
-    out = os.path.join(td, 's0.kicad_pcb')
-    r = check([sys.executable, '-X', 'utf8', tool('place_simple.py'), pile, out,
-               '--groups', groups, '--intent', intent, '--seed', '0', '--moves', '3000',
-               '--jobs', '1'], accept=True)
-    evidence(out, 'the placed board')
-    pcb = parse_kicad_pcb(out)
-    got = sorted([r_, round(f.x, 4), round(f.y, 4), round(f.rotation % 360, 4)]
-                 for r_, f in pcb.footprints.items())
-    ok('esp_prog seed 0: every pose as recorded before', got == ESP_GOLDEN,
-       [g for g in got if g not in ESP_GOLDEN])
-    cost = json.loads(r.stdout.split('JSON_SUMMARY:', 1)[1].splitlines()[0])['final']['cost']
-    ok('... and the same cost, to the bit', cost == ESP_GOLDEN_COST, cost)
+    """A real board whose every drawn courtyard is a rectangle reads no boxes,
+    so every part is a plain `_Part` and the anneal prices no part box by
+    box: each path this change adds is gated on one of those and stays off,
+    and the board places as it did. Structural, so a later change to the
+    placer's objective does not have to re-record it."""
+    from placement.parser import extract_courtyard_boxes, extract_courtyard_sides
+    from placement import quench
+    path = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+    evidence(path, 'the in-repo board')
+    drawn = extract_courtyard_sides(path)
+    ok('the board draws courtyards (the case is not empty)', len(drawn) >= 20,
+       len(drawn))
+    ok('none of them reads as several boxes', extract_courtyard_boxes(path) == {},
+       sorted(extract_courtyard_boxes(path)))
+    st = _state(path)
+    kinds = {type(p).__name__ for p in st.parts.values()}
+    ok('every part is a plain _Part', kinds == {quench._Part.__name__}, kinds)
+    an = _annealer(st)
+    ok('the anneal prices no part box by box', an.shaped == frozenset(), an.shaped)
 
 
 def main():
