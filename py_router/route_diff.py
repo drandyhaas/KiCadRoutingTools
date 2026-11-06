@@ -2189,7 +2189,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # here (no rip-up; failures stay honestly listed for the downstream pass).
     # Engine-side, so the GUI diff tab inherits it.
     se_fallback_summary = run_single_ended_member_fallback(
-        state, diff_pair_ids_to_route)
+        state, diff_pair_ids_to_route, all_net_ids_to_route, net_clearances)
 
     # Apply length matching if configured
     _length_match_report = {}
