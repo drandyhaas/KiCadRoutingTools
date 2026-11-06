@@ -1848,12 +1848,14 @@ python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
 **What it hands on, and how to check it.** The last line of its log is the
 grade -- `BUS U1->U2 K=.. lanes=../.. vias=.. ... | on the board: ...
 connected=1 drc=.. planes=.. vs .. in walled=..` -- and `<out stem>.bus/summary.json`
-names every net routed and every one refused, with why. It exits 0 when the
-bus is handed on routed, connected and clean, and 1 when OUT is the board as it
-came (then the rest of the chain routes the whole bus with A*: carry on from
-OUT either way, it is not a chain failure; under the plan file's `set -e`,
-Step 9, that exit 1 stops `bash <board>_plan.sh` at this step, so run the
-rest from OUT). Its routed nets are **protected**
+names every net routed and every one refused, with why. It exits 0 whenever
+it writes OUT (#1738): the bus handed on routed, connected and clean, or OUT
+the board as it came, when the rest of the chain routes the whole bus with A*.
+Carry on from OUT either way -- it is not a chain failure, so the plan file's
+`set -e` (Step 9) does not stop there. Read which it was from the summary's
+`exit` (0 routed, 1 as it came) and the log's last line. It exits 2 on a usage
+error (a part the board does not have) and non-zero when it wrote no OUT. Its
+routed nets are **protected**
 in OUT's `.kicad_pro` (#521): later steps route round them and will not rip
 them. So:
 
@@ -3876,9 +3878,9 @@ next to the board, so the exact tuned choices replay with no LLM:
    that exits 0 with a final board that step never touched (#1708). R01
    refuses a plan without it (#1735); spell it exactly `set -e`, the one
    form the replayer and the converter skip as a directive. Under it a
-   step that exits non-zero stops the file there -- including the bus step
-   when it hands OUT on unrouted (exit 1, Step 1a) and a kept hand join with
-   a finding: carry on from that step's board by hand.
+   step that exits non-zero stops the file there -- including a kept hand
+   join with a finding: carry on from that step's board by hand. (The bus
+   step exits 0 whenever it writes OUT, routed or not, Step 1a.)
    **Every board a step reads is the plan's input or an EARLIER step's
    output** (R18 below): a step whose input is its own output path, with no
    earlier step writing that path, has no board to read.

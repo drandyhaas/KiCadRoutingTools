@@ -55,8 +55,11 @@ that carries a POUR (a plane: zynq's In1 GND and In2 VCC_1V8) is crossed by the 
 the board as it came and as routed, each refilled (kicad_exact_fill), and a split the bus made is named. The caches are off. Everything the step writes goes in OUT's work directory,
 <OUT stem>.bus/, beside OUT.
 
-Exits 0 when the bus is handed on routed, connected and clean (every bus, without --src and --dest); 1 when OUT is
-the board as it came (a bus of them left as it came, or none found); 2 on a usage error.
+Exits 0 whenever it writes OUT (#1738) -- the bus handed on routed, or OUT the board as it came (a bus of them left
+as it came, or none found): either way the chain carries on from OUT, and the summary and the console name the nets
+routed and refused, and why. Exits 2 on a usage error (a part the board does not have, a bus spec the step cannot
+run), and non-zero whenever it wrote no OUT. The summary's `exit` keeps the step's own status: 0 routed, 1 handed
+on as it came, 2 refused.
 """
 
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
@@ -168,6 +171,44 @@ def route_bus(board, out, src, dest, k=None, rounds=3, inproc=False, log=print, 
 
 BUS_MODES = ('joint', 'escape', 'plain')
 
+#: the OUT boards this process wrote (absolute paths): a step that hands on -- routed, or the board as it came --
+#: adds its OUT here, and the CLI exits 0 for it (cli_exit, #1738)
+HANDED_ON = set()
+
+
+def cli_exit(status, out):
+    """The process exit for a run whose step returned `status` (route_bus / route_buses) with `out` its OUT: 0
+    whenever the run WROTE OUT -- the bus routed or the board as it came, the chain carrying on from it either way and
+    the summary naming what was refused -- else the step's status (2 a usage error), and 1 for a run that wrote
+    nothing usable with no status of its own (#1738). A plan file runs under `set -e` (route_plan_check R01), and
+    the old exit 1 for a board handed on as it came stopped it at the bus step"""
+    out = os.path.abspath(out)
+    if not out.endswith('.kicad_pcb'):
+        out += '.kicad_pcb'
+    if out in HANDED_ON:
+        return 0
+    return status or 1
+
+
+def bus_usage_errors(board, buses, joint_fanout=False, escape=False):
+    """What the CLI refuses before a run (#1738), `buses` as [(src, dest, mode, layers)] (parse_bus): a part the
+    board does not have, and a bus to several parts with a joint or escape fanout -- the refusals _route makes for
+    one bus, made for every named bus up front, so a bus named wrong is a usage error (exit 2) rather than one
+    skipped while the run goes on to write OUT"""
+    from kicad_parser import parse_kicad_pcb
+    import flow_frame as ff
+    with contextlib.redirect_stdout(sys.stderr):
+        pcb = parse_kicad_pcb(board)
+    bad = []
+    for bus in buses:
+        s, d = bus[0], bus[1]
+        mode = (bus[2] if len(bus) > 2 else None) or ('escape' if escape else 'joint' if joint_fanout else 'plain')
+        dests = ff.dest_refs(d)
+        bad += [f'{s} -> {d}: no footprint {r} on the board' for r in [s] + dests if r not in pcb.footprints]
+        if len(dests) > 1 and mode in ('joint', 'escape'):
+            bad.append(f'{s} -> {d}: a bus to several parts is a plain bus -- no {mode} fanout')
+    return bad
+
 
 def parse_bus(spec):
     """--bus SRC:DEST[:MODE[:LAYERS]] -> (src, dest, mode or None, layers or None): MODE one of BUS_MODES (joint: the
@@ -188,8 +229,9 @@ def route_buses(board, out, buses=None, k=None, rounds=3, inproc=False, log=prin
     """Every bus on `board` routed in turn, each on the board the one before handed on, `out` the last: `buses` as
     [(src, dest)] or [(src, dest, mode, layers)] (parse_bus: MODE joint, escape or plain, None for `joint_fanout` /
     `escape`; LAYERS the bus's ROUTE_LAYERS, None for the environment's), else the ones find_buses takes, the largest
-    first. Returns (exit code, grade lines): 0 when every bus was handed on routed, 1 when one or more left as it came
-    (or none was found), 2 on a usage error. The summary (--json-out, default <OUT>.bus/summary.json) holds each bus's
+    first. Returns (status, grade lines): 0 when every bus was handed on routed, 1 when one or more left as it came
+    (or none was found), 2 on a usage error -- the step's status, which the summary keeps; the process exits 0
+    whenever OUT is written (cli_exit, #1738). The summary (--json-out, default <OUT>.bus/summary.json) holds each bus's
     own, and the buses found and not taken.
 
     A SHARED ARRAY: an escape bus on an array an earlier bus was handed on through has that array planned whole with
@@ -239,6 +281,7 @@ def route_buses(board, out, buses=None, k=None, rounds=3, inproc=False, log=prin
             cur = step_out
     with contextlib.redirect_stdout(sys.stderr):
         copy_board(cur, out)
+    HANDED_ON.add(out)
     code = 1 if not runs else max(r['exit'] for r in runs)
     with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
         json.dump(dict(board=board, out=out, buses=runs, found=found, exit=code), f, indent=1)
@@ -570,6 +613,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                 copy_board(board, out)
             for n in nets:
                 refused.setdefault(n, why)
+        HANDED_ON.add(out)          # (OUT written either way: routed, or the board as it came)
         summary.update(routed=sorted(routed), refused=dict(sorted(refused.items())), grade=g,
                        secs=int(time.time() - t0), exit=code, why=why if code else None)
         with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
@@ -1641,11 +1685,17 @@ def main():
     except ValueError as e:
         ap.error(str(e))
     sizes = {n: getattr(a, n) for n in SIZE_ARGS if getattr(a, n) is not None}
+    named = buses if buses is not None else ([(a.src, a.dest, None, None)] if a.src is not None else [])
+    bad = bus_usage_errors(a.board, named, a.joint_fanout, a.escape) if named else []
+    if bad:
+        for why in bad:
+            print(f'route_bus: {why}', file=sys.stderr)
+        sys.exit(2)
     if a.src is None:
-        sys.exit(route_buses(a.board, a.out, buses, a.k, a.rounds, a.inproc, json_out=a.json_out,
-                             joint_fanout=a.joint_fanout, escape=a.escape, **sizes)[0])
-    sys.exit(route_bus(a.board, a.out, a.src, a.dest, a.k, a.rounds, a.inproc, json_out=a.json_out,
-                       joint_fanout=a.joint_fanout, escape=a.escape, **sizes)[0])
+        sys.exit(cli_exit(route_buses(a.board, a.out, buses, a.k, a.rounds, a.inproc, json_out=a.json_out,
+                                      joint_fanout=a.joint_fanout, escape=a.escape, **sizes)[0], a.out))
+    sys.exit(cli_exit(route_bus(a.board, a.out, a.src, a.dest, a.k, a.rounds, a.inproc, json_out=a.json_out,
+                                joint_fanout=a.joint_fanout, escape=a.escape, **sizes)[0], a.out))
 
 
 if __name__ == '__main__':
