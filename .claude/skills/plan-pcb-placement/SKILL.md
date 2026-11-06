@@ -573,7 +573,12 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   as KiCad does, and the line goes. Name the pads in it when only some come that
   close. KiCad grades that clearance to the outline's drawn line, not its
   centre, so a pad ending on the centre line fails at any minimum, which is
-  why the floor leaves the part up to 0.1 mm in.
+  why the floor leaves the part up to 0.1 mm in. The same floor can hold a
+  receptacle's drawn body further from its edge than its setback limit (pads
+  in front of the body): the seat's reason then names the pad floor, not the
+  band, and the way out is the same, or a larger `max_setback_mm` where the
+  drawing allows (#1713). It offers `overhang_mm.max` only where the band's
+  maximum is what holds the body back.
 - **Where the part's own model ends.** Where a 3D model resolves,
   check_floorplan's line says `model end -2.07mm` beside the overhang (from
   the edge's line, negative short of it) and warns when the courtyard reads

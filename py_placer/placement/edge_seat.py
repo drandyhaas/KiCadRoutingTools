@@ -420,7 +420,7 @@ class _Probe:
         `obstacles` passes; else the first that fails and what it read:
         `('band_min', amount)`, `('band_max', amount)`, `('copper', None)`,
         `('body', how far inside)` (#1692), `('edge', the edge it reads
-        nearest)`, `('setback', (its edge clearance, basis))` (#1653) or
+        nearest)`, `('setback', (its edge clearance, basis, pose))` (#1653) or
         `('fixed', [the parts in the way, else the declared-pose check's
         reasons])`."""
         from .floorplan import _nearest_edge, edge_reach_mm
@@ -449,7 +449,7 @@ class _Probe:
             return 'edge', near
         short = self.setback_short(entry, edge, seat_rect)
         if short is not None:
-            return 'setback', (short, basis)
+            return 'setback', (short, basis, pose)
         how, reasons, conflicts = _fixed_pose_check(st, ref, pose, obstacles)
         if how is None:
             return 'fixed', sorted(conflicts) or list(reasons)[:1]
@@ -835,10 +835,10 @@ def _free_stretches(probe, entry, edge, axis, coord, rot, lo, hi, fixed, tally=N
 #: What to do when a part's pad floor holds it short of what its body needs:
 #: said by the seat (`_pad_floor_text`) and, before any seed, by the emit's
 #: roster (`floorplan.pad_floor_owed`).
+PAD_FLOOR_RULE = ("check the vendor's drawing, then, with the board owner's "
+                  "agreement, a .kicad_dru edge_clearance rule for those pads")
 PAD_FLOOR_WAY_OUT = ("Lowering the band will not help a part whose body needs it "
-                     "(check_assembly gates a body at board depth): check the "
-                     "vendor's drawing, then, with the board owner's agreement, a "
-                     ".kicad_dru edge_clearance rule for those pads")
+                     "(check_assembly gates a body at board depth): " + PAD_FLOOR_RULE)
 
 
 def _pad_floor_text(probe, ref, e, low, held) -> str:
@@ -851,6 +851,43 @@ def _pad_floor_text(probe, ref, e, low, held) -> str:
              if left >= 0.0 else f"its pads would leave the board by {-left:.2f}mm")
     return (f": its pad copper's edge clearance stops it there, {floor:.2f}mm from "
             f"{probe.copper_source(ref)}, and at that minimum {reach}. {PAD_FLOOR_WAY_OUT}")
+
+
+def _setback_held_text(probe, entry, edge, e, reads) -> str:
+    """#1713: the reason's clause for positions whose setback shape stands
+    past its limit, `reads` their `(edge clearance, basis, pose)`: what holds
+    that shape back at the nearest of them, read where it would meet the
+    limit -- the band's declared `max` (the seat's own cap, `_setback_flush`)
+    or its pads' edge clearance (`_seat_coord`'s copper limit) -- and the
+    remedy that can move each. A larger `max_setback_mm` alone when neither
+    holds it there."""
+    from .floorplan import edge_setback_rule
+    limit = edge_setback_rule(entry)[0]
+    ref = entry['ref']
+    short, basis, pose = min(reads, key=lambda r: r[0])
+    head = (f"with its {basis} at least {short:.2f}mm from the nearest edge, past its "
+            f"setback limit {limit:.2f}mm")
+    axis = 0 if edge in ('north', 'south') else 1
+    reach = list(pose)
+    reach[1 - axis] += (-1.0 if edge in ('north', 'west') else 1.0) * (short - limit)
+    reach = tuple(reach)
+    hi = (entry.get('overhang_mm') or {}).get('max')
+    held = []
+    if hi is not None and probe.band(ref, edge, reach) > float(hi) - BAND_SLACK_MM + EPS:
+        held.append(f"its declared overhang_mm.max {float(hi):.2f}mm holds it there "
+                    f"(raise overhang_mm.max if its drawing allows, or declare a larger "
+                    f"max_setback_mm)")
+    if not probe.copper_clear(ref, reach):
+        left = e - (short - limit)
+        stand = (f"its pads would stand {left:.2f}mm from the edge" if left >= 0.0
+                 else f"its pads would leave the board by {-left:.2f}mm")
+        held.append(f"its pad copper's edge clearance holds it there, "
+                    f"{e - COPPER_SLACK_MM:.2f}mm from {probe.copper_source(ref)}, and at "
+                    f"its setback limit {stand}: {PAD_FLOOR_RULE}, or a larger "
+                    f"max_setback_mm if the drawing allows")
+    if not held:
+        return head + " (declare a larger max_setback_mm)"
+    return head + ': ' + '; and '.join(held)
 
 
 def _unseated_reason(probe, entry, edge, axis, target, e, floors, spans, tally,
@@ -906,13 +943,7 @@ def _unseated_reason(probe, entry, edge, axis, target, e, floors, spans, tally,
             elif kind == 'edge':
                 said.append(f"{n} reading nearest the {'/'.join(sorted(set(reads)))} edge")
             elif kind == 'setback':
-                from .floorplan import edge_setback_rule
-                said.append(f"{n} with its {reads[0][1]} at least "
-                            f"{min(r[0] for r in reads):.2f}mm from the nearest edge, "
-                            f"past its setback limit "
-                            f"{edge_setback_rule(entry)[0]:.2f}mm (declare a larger "
-                            f"max_setback_mm, or an overhang_mm.max that lets it reach "
-                            f"the edge)")
+                said.append(f"{n} " + _setback_held_text(probe, entry, edge, e, reads))
             else:
                 seen = []
                 for r in reads:
