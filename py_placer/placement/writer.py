@@ -308,8 +308,7 @@ def _rotate_text_angles(fp_text: str, delta_rot: float, ref: str) -> str:
 def marker_pile_angle(text_angle: Optional[float], part_rot: float) -> float:
     """#1715: the absolute angle a pile writes a "PCB Edge" marker text at, on a
     part at `part_rot` whose marker stands at `text_angle` (absolute, None for
-    0): its angle to the part folded into one half-turn, which is all the
-    marker reader reads (`mating.marker_face_local`, mod 180) and is the
+    0): its angle to the part folded into one half-turn, which is the
     library's drawing, not the part's pose, so it hands back no rotation."""
     rel = ((float(text_angle) if text_angle is not None else 0.0) - part_rot) % 180.0
     return round((part_rot + rel) % 360, 6)
@@ -329,10 +328,11 @@ def _set_text_angles(fp_text: str, angle: float, ref: str,
     a text), so its presence carries nothing either.
 
     A marker text is not a label: the library draws it along the line where
-    the board edge goes, and the marker reader picks that line by the text's
-    angle to the part. Written at `angle` it was read against the line across
-    it, and a face the marker confirmed was lost on every seed. It keeps that
-    angle, folded into one half-turn (`marker_pile_angle`), on the part at
+    the board edge goes, and written at `angle` it ran across that line, so
+    the pile no longer drew what the library did (the marker reader, which
+    then picked its line by the text's angle, lost the face on every seed;
+    it reads the line off the drawing alone since). It keeps that angle,
+    folded into one half-turn (`marker_pile_angle`), on the part at
     `part_rot`, the rotation its texts were already composed to.
     """
     from .parser import is_edge_marker_text

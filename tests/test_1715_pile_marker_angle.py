@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""#1715: a pile keeps a "PCB Edge" marker text's angle to its part, so the
-marker reader still finds the line the library drew where the board edge goes.
+"""#1715: a pile keeps a "PCB Edge" marker text's angle to its part, and the
+marker reader finds the line the library drew where the board edge goes off
+the drawing alone, whatever angle the text is stored at.
 
-`make_unplaced` writes every text of a moved part at absolute 0 (#1163), and
-the marker reader (#1245) picks the line by the marker text's angle to the
+`make_unplaced` wrote every text of a moved part at absolute 0 (#1163), and
+the marker reader (#1245) picked the line by the marker text's angle to the
 part, admitting only a line parallel to it. A USB receptacle at rotation 180
 whose marker runs along a vertical line lost it on the pile: the text read
 horizontal, two silk lines across it named different faces, the reader
@@ -11,8 +12,9 @@ abstained, the body's face went weak and a correct declared `mating_face`
 read `unverified`. Every seed composes its rotation onto the pile's text, so
 every seed read the same. On a tracked board (no KiCad needed):
 
-  1. NEGATIVE CONTROL: the marker text written at the pile's 0 (the old
-     write) is read against the wrong lines, and the face is weak;
+  1. the marker text turned by hand (to 0, 45, 180, 270) with the part at
+     its own pose still reads the source's face on the source's line,
+     strong -- the reader no longer reads the stored angle;
   2. on make_unplaced's pile the marker text keeps its angle to the part,
      mod 180, and the reader names the source's face on the source's line,
      strong;
@@ -79,25 +81,26 @@ def main():
         check('make_unplaced reports no text leak', 'FAIL' not in r.stdout + r.stderr,
               (r.stdout + r.stderr)[-400:])
 
-        # 1. the marker at the pile's text angle, as the old write left it
-        with open(pile, encoding='utf-8', newline='') as fh:
+        # 1. the marker text turned by hand on the source board, the part at
+        # its own pose: the reader reads the line off the drawing, whatever
+        # angle the text is stored at (0 is what the old pile wrote; 45 runs
+        # off both axes)
+        with open(SRC, encoding='utf-8', newline='') as fh:
             text = fh.read()
         block = next(b for _s, _e, b, _r, k in iter_footprint_blocks(text) if k == REF)
-        old = re.sub(r'(\(fp_text user "pcb edge"[^\n]*\n\s*\(at \S+ \S+) \S+\)', r'\1 0)',
-                     block, count=1)
-        if old == block:
-            raise AssertionError('BROKEN FIXTURE: no PCB-edge marker text in the pile block')
-        zero = os.path.join(td, 'zero.kicad_pcb')
-        with open(zero, 'w', encoding='utf-8', newline='') as fh:
-            fh.write(text.replace(block, old))
-        back0 = os.path.join(td, 'back0.kicad_pcb')
-        run_utils.check(PY + [os.path.join(ROOT, 'py_placer', 'place_pose.py'), zero, back0,
-                              'set', REF, str(POSE[0]), str(POSE[1]), '--rot', str(POSE[2])],
-                        accept=True)
-        _r, angle, mk, lf = read(run_utils.evidence(back0, 'the old pile, put back'))
-        check('control: written at 0 and put back, the marker labels another line and '
-              'the face is weak', mk.line != src_line and mk.face != src_face
-              and not lf.strong, (angle, mk, lf))
+        for turned in (0, 45, 180, 270):
+            hand = re.sub(r'(\(fp_text user "pcb edge"[^\n]*\n\s*\(at \S+ \S+) \S+\)',
+                          rf'\g<1> {turned})', block, count=1)
+            if hand == block:
+                raise AssertionError('BROKEN FIXTURE: no PCB-edge marker text in the block')
+            path = os.path.join(td, f'hand{turned}.kicad_pcb')
+            with open(path, 'w', encoding='utf-8', newline='') as fh:
+                fh.write(text.replace(block, hand))
+            rot, angle, mk, lf = read(run_utils.evidence(path, f'the text turned to {turned}'))
+            check(f"marker text turned by hand to {turned}: the source's face on the "
+                  f"source's line, strong", angle == turned and rot == POSE[2]
+                  and mk.line == src_line and mk.face == src_face and lf.strong,
+                  (angle, mk, lf))
 
         # 2. the pile itself
         rot, angle, mk, lf = read(pile)

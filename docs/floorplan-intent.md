@@ -584,10 +584,13 @@ points west, not out of the east edge
   the guard.
 - **The footprint's "PCB Edge" marker confirms or vetoes the face.**
   Many footprints draw a "PCB Edge" / "Board edge" text beside a line where
-  the board edge goes. `mating.marker_face_local` reads that LINE (parallel
-  to the text, nearest it, not on a courtyard or copper layer; the face is
-  the side away from the pads) -- not the text's position, which sits at an
-  end of the line. A marker that agrees with the body's face makes it STRONG
+  the board edge goes. `mating.marker_face_local` reads that LINE (the
+  straight line nearest the text, along either axis, not an arrow's shaft and
+  not on a courtyard or copper layer; the face is the side away from the
+  pads) -- not the text's position, which sits at an end of the line. The
+  text's stored angle, which any tool or hand can turn, breaks only a tie
+  between the nearest lines along the two axes, a text sitting where the
+  edge line meets the body's side (#1715). A marker that agrees with the body's face makes it STRONG
   (`basis` gains `+marker`, so esp_prog's USB1 and orangecrab's J3, at 1.05
   and 0.63 mm, fail at ERROR when turned away); one that contradicts it makes
   the face abstain, never fail; with no marker, the body's reading stands. It
