@@ -4345,7 +4345,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if existing_rippable:
         _reg_set = set(existing_rippable)
         for _s in pcb_data.segments:
-            if _s.net_id in _reg_set:
+            # A net-tagged copper graphic is not this net's route: nothing
+            # re-lays it and the writer keeps it, so a rip that took it
+            # off the board left later routes free to cross copper that ships.
+            if _s.net_id in _reg_set and not getattr(_s, 'graphic', False):
                 _reg_segs.setdefault(_s.net_id, []).append(_s)
         for _v in pcb_data.vias:
             if _v.net_id in _reg_set:
