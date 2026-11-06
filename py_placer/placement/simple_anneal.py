@@ -531,7 +531,8 @@ class Annealer:
              + w * (max(0.0, i[1] - c[1]) + max(0.0, c[3] - i[3])))
         g = self.gate
         if g is not None and not g.rect_bbox_decides(c):
-            amt = g.rect_outside_amount(c)
+            # the rings the part owns, as `pose_ok` exempts them (#1723)
+            amt = g.rect_outside_amount(c, skip_rings=self.st._owned_rings(r))
             if amt > BOARD_TOL:
                 v += max(FLOOR, amt * (w + hh))
         return v

@@ -530,7 +530,8 @@ def illegal_reason(st, model, r):
         if not legal_on_edge(st, r, pose):
             return 'no legal seat on its declared edge'
     elif not legal(st, r, *pose):
-        if st.edge_gate.rect_outside_amount(rects[0]) > BOARD_TOL:
+        if st.edge_gate.rect_outside_amount(
+                rects[0], skip_rings=st._owned_rings(r)) > BOARD_TOL:
             return 'its courtyard is off the board'
         ko = st.keepout_blockers(r, rects)
         if ko:

@@ -1256,12 +1256,12 @@ class BoardOutlineGate:
         """Ids of the MILLED rings enclosing any of `points` -- a part's OWN
         milled relief, for the `skip_rings` argument of the two probes.
 
-        Only milled contours can be owned, by construction:
+        Only milled contours can be owned THIS way, by construction:
         `drop_pad_containing_cutouts` moves every ring enclosing >= 2 pad
         centres OUT of board_cutouts and into board_edge_contours, so no ring
-        left in `self.cutouts` encloses a pad and no cutout id can ever land in
-        a skip set. That is what keeps the genuine-cutout half of the swallow
-        probe untouchable rather than merely untouched.
+        left in `self.cutouts` encloses a pad. A cutout reaches a skip set
+        only through `cutouts_straddled` (#1723), with the part's copper clear
+        of it.
 
         >= 1 enclosed pad, not >= 2: two parts with one pad each inside a ring
         are both partial owners and both must be exempt. Pad CENTRES and the
@@ -1275,6 +1275,41 @@ class BoardOutlineGate:
         from check_drc import milled_rings_enclosing
         base = len(self.cutouts)
         return frozenset(base + i for i in milled_rings_enclosing(self.milled, points))
+
+    def cutouts_straddled(self, rect, copper) -> frozenset:
+        """#1723: ids of the CUTOUTS `rect` meets -- crosses, swallows, or
+        comes within the margin of -- while none of `copper` (a part's pad
+        copper, shapely geometries) enters them: a cutout the part
+        stands over with its copper on the board, a reverse-mount LED over
+        its window, a switch round the window under it. KiCad never grades
+        a courtyard against Edge.Cuts; only the copper is the edge's
+        question. For the `skip_rings` of the two probes, asked at a part's
+        SEED pose (`QuenchState._owned_rings`), as `rings_enclosing` is."""
+        if not self.cutouts or rect is None:
+            return frozenset()
+        try:
+            from shapely.geometry import Polygon, box
+        except ImportError:
+            return frozenset()
+        r = box(*rect)
+        cops = list(copper)
+        out = set()
+        for i, ring in enumerate(self.cutouts):
+            if len(ring) < 3:
+                continue
+            poly = Polygon(ring)
+            if not poly.is_valid or poly.distance(r) >= self.margin:
+                continue
+            if not any(poly.intersects(c) for c in cops):
+                out.add(i)
+        return frozenset(out)
+
+    def _cutouts_but(self, skip_rings):
+        """`self.cutouts` less the ones `skip_rings` names (a part's own,
+        `cutouts_straddled`), for the corner test of the two probes."""
+        if not skip_rings or not any(r < len(self.cutouts) for r in skip_rings):
+            return self.cutouts
+        return [c for i, c in enumerate(self.cutouts) if i not in skip_rings]
 
     # -- level 2b: per-rect bbox prefilter, exact
     def _edges_touching(self, rect, edges):
@@ -1345,14 +1380,17 @@ class BoardOutlineGate:
 
         PER-PART, never global: the ring stays a hard edge for every other
         part, and `rings_enclosing` only ever returns MILLED ids, so the outer
-        outline and the genuine cutouts can never be exempted by this path.
+        outline can never be exempted by this path. A CUTOUT is exempted
+        only as `cutouts_straddled` names it (#1723): one the part already
+        stood over at its seed pose with its copper clear of it.
         """
         if self._rect_safe(rect):
             return False
         from check_drc import _point_on_board, _seg_seg_dist_coords
         x0, y0, x1, y1 = rect
+        cuts = self._cutouts_but(skip_rings)
         for (px, py) in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
-            if not _point_on_board(px, py, self.outer, self.cutouts):
+            if not _point_on_board(px, py, self.outer, cuts):
                 return True
         near = self._edges_touching(
             rect, self.edges() if edges is None else edges)
@@ -1439,8 +1477,9 @@ class BoardOutlineGate:
             _seg_seg_dist_coords
         use = self.edges() if edges is None else edges
         x0, y0, x1, y1 = rect
+        cuts = self._cutouts_but(skip_rings)
         for (px, py) in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
-            if not _point_on_board(px, py, self.outer, self.cutouts):
+            if not _point_on_board(px, py, self.outer, cuts):
                 # How far the stray corner must come back, floored at the margin
                 # so an off-board corner always outweighs a mere margin graze.
                 amt += max(self.margin,

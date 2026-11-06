@@ -2890,7 +2890,8 @@ class QuenchState:
         the seeder's own two functions (`_pad_copper_overhang`,
         `_pad_copper_off_board`) rather than a copy."""
         sd = _seeder()
-        if sd._pad_copper_overhang(self, ref) <= self.edge_gate.margin:
+        if (sd._pad_copper_overhang(self, ref) <= self.edge_gate.margin
+                and not self._owned_cutouts(ref)):
             return 0.0
         return sd._pad_copper_off_board(self, ref, x, y, rot)
 
@@ -2932,6 +2933,14 @@ class QuenchState:
         ownership is what the reclassification itself was computed from, and it
         is the anti-gaming choice -- ownership taken at the CANDIDATE pose would
         let any part claim a ring merely by moving onto it.
+
+        #1723: and the CUTOUTS the part's courtyard stands over at its seed
+        pose with its pad copper clear of them (`BoardOutlineGate.
+        cutouts_straddled`) -- a reverse-mount LED over its window, a switch
+        round the window under it. KiCad grades no courtyard against an
+        Edge.Cuts window, and the seat refused every such part at its own
+        pose. Its pad copper stays on the board (`_owned_cutouts`,
+        `_pad_copper_past`): a window is an edge to copper still.
         """
         owned = self._owned_rings_cache.get(ref)
         if owned is None:
@@ -2939,8 +2948,48 @@ class QuenchState:
             pts = [(gx, gy) for (gx, gy, _net) in
                    part.pad_globals(part.seed_x, part.seed_y, part.orig_rot)]
             owned = self.edge_gate.rings_enclosing(pts) if pts else frozenset()
+            owned |= self._seed_cutouts(ref)
             self._owned_rings_cache[ref] = owned
         return owned
+
+    def _seed_cutouts(self, ref) -> frozenset:
+        """The cutout ids `_owned_rings` adds for `ref` (#1723), from its
+        grade rect and its pads' copper at the seed pose -- the pose the
+        board was read at, which is where `pcb_data` holds the pads."""
+        gate = self.edge_gate
+        if not gate.active or not gate.cutouts:
+            return frozenset()
+        part = self.parts[ref]
+        fp = (self.pcb_data.footprints or {}).get(ref)
+        if fp is None:
+            return frozenset()
+        # each pad's true copper (a turned pad's box would reach into a
+        # window its copper clears), and a hole as its drill circle
+        from check_pads import _copper_geometry
+        from shapely.geometry import Point
+        copper = []
+        for p in fp.pads or ():
+            d = getattr(p, 'drill', 0) or 0
+            try:
+                if legality._pad_carries_copper(p):
+                    copper.append(_copper_geometry(p))
+                if d > 0:
+                    copper.append(Point(p.hole_x if p.hole_x is not None else p.global_x,
+                                        p.hole_y if p.hole_y is not None else p.global_y
+                                        ).buffer(d / 2.0))
+            except Exception:                                # noqa: BLE001
+                return frozenset()      # copper not drawn: own nothing
+        if not copper:
+            return frozenset()
+        return gate.cutouts_straddled(
+            part.grade_rect(part.seed_x, part.seed_y, part.orig_rot), copper)
+
+    def _owned_cutouts(self, ref) -> bool:
+        """True when `ref` stands over a cutout of its own (`_owned_rings`),
+        so its pad copper is measured against the outline at every pose: its
+        courtyard no longer keeps the copper out of that window."""
+        n = len(self.edge_gate.cutouts)
+        return any(r < n for r in self._owned_rings(ref))
 
     # ----- bodies and reporting ---------------------------------------------
 
