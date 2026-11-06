@@ -163,10 +163,13 @@ BREAKS = [
     # that would redden R13 as well, and a break that reddens two rules names
     # neither. Not the route.py step: `route.py` has no `--add-gnd-vias` in
     # its argparse, so putting it there would encode a command that dies at
-    # argparse as if it were a plan.
+    # argparse as if it were a plan. The first pour states the sizes: a floor
+    # resting on routing_defaults with no --board is NOTED, not refused
+    # (#1709), and this harness passes no board.
     ('R15', 'a gnd-via pass under the floor, with the size set upstream',
      ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n',
-      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n'
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --via-size 0.45 '
+      '--clearance 0.09\n'
       '# cwd=/repo\n'
       'python3 -u -X utf8 py_router/route_planes.py s3.kicad_pcb '
       's3b.kicad_pcb \\\n'

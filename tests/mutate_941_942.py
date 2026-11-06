@@ -117,7 +117,7 @@ ROWS = [
     # The COMPLIANT_VARIANTS arm is what catches that, so breaking the rule
     # back must redden the gate rather than pass quietly.
     ('r15-max-across-plan', 'rpc',
-     "        seen = [v for a in p.by_tool(tool)\n"
+     "        seen = [v for a in p.by_tool(tool) if a != argv\n"
      "                for v in (read(a),) if v is not None]\n"
      "        if seen:\n"
      "            return min(seen), f'{tool} elsewhere in the plan'\n",

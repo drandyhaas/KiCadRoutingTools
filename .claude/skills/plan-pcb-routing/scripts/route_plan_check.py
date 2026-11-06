@@ -167,13 +167,22 @@ def boards_in(argv, chain=False):
 class Plan:
     """Everything a rule may read: the raw text, and the recorded commands."""
 
-    def __init__(self, path, text, cmds, board=None, chain=False):
+    def __init__(self, path, text, cmds, board=None, chain=False,
+                 board_path=None):
         self.path = path
         self.text = text
         self.lines = text.splitlines()
         self.cmds = cmds                      # [(cwd, argv)], file order
         self.board = board                    # PCBData, or None
+        self.board_path = board_path          # its file (the project beside it)
         self.chain = chain                    # a judge_seeds chain ({in}/{out})
+        self.notes = {}                       # {rule id: [what it could not decide]}
+        self._noting = None
+
+    def note(self, text):
+        """What a rule could not decide and therefore did not refuse -- printed
+        under the rule as NOTE, never a failure (#1709)."""
+        self.notes.setdefault(self._noting, []).append(text)
 
     @property
     def argvs(self):
@@ -547,8 +556,18 @@ def r_gnd_via_distance(p):
     reports as recommending a distance below the floor.
 
     Resolution order: this argv, then the other steps RUN BY THE SAME TOOL,
-    then `routing_defaults`. The reason names which it used, so a refusal
-    resting on a default is not mistaken for one resting on the plan.
+    then what the step itself falls back to when it is given neither --
+    route_planes' main reads the board's Default net class (`via_diameter`,
+    `clearance`) and only then `routing_defaults` (#1709) -- so the `--board`'s
+    Default class, then `routing_defaults`. This step's `--clearance-ceiling`
+    then caps the clearance, as route_planes caps it (`min(base, ceiling)`).
+    The reason names which it used, so a refusal resting on a default is not
+    mistaken for one resting on the plan. Without `--board` a floor resting on
+    `routing_defaults` is not what the step routes at (it reads the board), so
+    it is NOTED, never refused. Not modelled: the fab-floor pin-up of a class
+    below the physical floor, and a Default class an earlier step lowered in
+    the project it writes back (the same-tool read covers a plan that says
+    so).
 
     Scoped to the same tool, and taking the SMALLEST value there, because the
     vias whose spacing this grades are the ones THIS tool places. An earlier
@@ -562,11 +581,19 @@ def r_gnd_via_distance(p):
     places. A fanout escape via is not the via the GND pass places, and the
     skill itself has them at different sizes.
     """
-    def _resolved(read, tool, fallback):
-        seen = [v for a in p.by_tool(tool)
+    def _resolved(read, argv, board_key, fallback):
+        # the OTHER steps: this one's own --clearance-ceiling caps what is
+        # resolved here, and must not be read back as the base it caps
+        tool = tool_of(argv)
+        seen = [v for a in p.by_tool(tool) if a != argv
                 for v in (read(a),) if v is not None]
         if seen:
             return min(seen), f'{tool} elsewhere in the plan'
+        if p.board_path is not None:
+            from list_nets import board_default_netclass_param
+            got = board_default_netclass_param(p.board_path, board_key)
+            if got is not None:
+                return got, 'board Default class'
         return fallback, 'routing_defaults'
 
     def _via(argv):
@@ -588,16 +615,27 @@ def r_gnd_via_distance(p):
         tool = tool_of(argv)
         vs, vs_src = _via(argv), 'this step'
         if vs is None:
-            vs, vs_src = _resolved(_via, tool, routing_defaults.VIA_SIZE)
-        clr, clr_src = _clearance(argv), 'this step'
+            vs, vs_src = _resolved(_via, argv, 'via_diameter',
+                                   routing_defaults.VIA_SIZE)
+        clr, clr_src = scalar(argv, '--clearance'), 'this step'
         if clr is None:
-            clr, clr_src = _resolved(_clearance, tool,
+            clr, clr_src = _resolved(_clearance, argv, 'clearance',
                                      routing_defaults.CLEARANCE)
+        ceiling = scalar(argv, '--clearance-ceiling')
+        if ceiling is not None and ceiling < clr:
+            clr, clr_src = ceiling, 'this step'
         floor = 3.0 * (vs + clr)
-        if d < floor - 1e-9:
+        sizes = (f'3x(via {vs:g} [{vs_src}] + clearance {clr:g} '
+                 f'[{clr_src}]) = {floor:.3f}')
+        if p.board_path is None and 'routing_defaults' in (vs_src, clr_src):
+            p.note(f'{tool} --gnd-via-distance {d:g} '
+                   f'{"is below" if d < floor - 1e-9 else "clears"} {sizes}, '
+                   f'but that rests on routing_defaults, and the step routes '
+                   f"at the board's Default net class: pass --board to check "
+                   f'it. Not refused on a default.')
+        elif d < floor - 1e-9:
             bad.append(f'{tool_of(argv)} --gnd-via-distance {d:g} is below '
-                       f'3x(via {vs:g} [{vs_src}] + clearance {clr:g} '
-                       f'[{clr_src}]) = {floor:.3f}')
+                       f'{sizes}')
     return bad
 
 
@@ -826,7 +864,8 @@ def check(path, board_path=None):
     if board_path:
         from kicad_parser import parse_kicad_pcb
         board = parse_kicad_pcb(board_path)
-    plan = Plan(manifest, text, cmds, board, chain=chain)
+    plan = Plan(manifest, text, cmds, board, chain=chain,
+                board_path=board_path or None)
 
     failures, skipped = [], []
     for rid, what, cite, fn in RULES:
@@ -836,6 +875,7 @@ def check(path, board_path=None):
         if chain and rid in NOT_ASKED_OF_A_CHAIN:
             skipped.append((rid, what, cite, NOT_ASKED_OF_A_CHAIN[rid]))
             continue
+        plan._noting = rid
         reasons = fn(plan)
         if reasons:
             failures.append((rid, what, cite, reasons))
@@ -890,14 +930,19 @@ def main(argv=None):
     for rid, what, cite, _fn in RULES:
         hit = next((f for f in failures if f[0] == rid), None)
         skip = next((s for s in skipped if s[0] == rid), None)
+        notes = plan.notes.get(rid, [])
         if skip:
             print(f'  SKIP  {rid}  {what}  -- {skip[3]}')
         elif hit:
             print(f'  FAIL  {rid}  {what}   [SKILL.md, {cite}]')
             for reason in hit[3]:
                 print(f'          {reason}')
+        elif notes:
+            print(f'  NOTE  {rid}  {what}')
         else:
             print(f'  ok    {rid}  {what}')
+        for text in notes if not skip else ():
+            print(f'          note: {text}')
 
     print('\nNOT checked here -- a recorded plan cannot answer these:')
     for what, who in DELEGATED:

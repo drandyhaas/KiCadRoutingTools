@@ -1056,7 +1056,11 @@ it. Remember its physical floor: never set
 `--gnd-via-distance` below 3 x (via_size + clearance) -- 2.25 mm at the repo's
 own defaults (`routing_defaults.VIA_SIZE` 0.5 + `CLEARANCE` 0.25), and MORE on a
 board that routes wider. Compute it for the sizes this plan actually passes; the
-number is not a constant.
+number is not a constant. Where the GND-via step passes no `--via-size` or
+`--clearance`, those sizes are the board's Default net class (route_planes
+reads it; the repo defaults apply only when the board declares none), capped by
+the step's own `--clearance-ceiling`, which is how `route_plan_check` R15 prices
+it given `--board` (#1709).
 
 Report to user when presenting the plan, by Step 10 rule 10 (the tier) and
 Step 3 of the example chain (what a return via needs):
