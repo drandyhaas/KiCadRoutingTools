@@ -28,7 +28,8 @@ import sys as _sys
 _sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..',
                                                  'rust_router')))
 import grid_router  # noqa: E402  the placement kernels: crossing_pairs, mst_prim
-from placement.parser import (courtyard_for_side, extract_courtyard_sides,
+from placement.parser import (courtyard_for_side, extract_courtyard_boxes,
+                              extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local
 from placement import heights as _heights
@@ -664,7 +665,7 @@ class _NearIndex:
     def build(cls, parts):
         """An index over `parts`, or None when one is not a `_Part` (it
         could be moved without marking the index)."""
-        if not all(type(p) is _Part for p in parts.values()):
+        if not all(type(p) in _PART_TYPES for p in parts.values()):
             return None
         return cls(parts)
 
@@ -781,11 +782,15 @@ def _footprint_box(rect, tht):
     if tht is None:
         box = tuple(rect)
         s = box[0] + box[1] + box[2] + box[3]
+        if type(rect) is not tuple:       # a courtyard of several boxes
+            s += sum(map(sum, legality.far_boxes(rect)))
     else:
         box = (min(rect[0], tht[0]), min(rect[1], tht[1]),
                max(rect[2], tht[2]), max(rect[3], tht[3]))
         s = (rect[0] + rect[1] + rect[2] + rect[3]
              + sum(map(sum, legality.far_boxes(tht))))
+        if type(rect) is not tuple:
+            s += sum(map(sum, legality.far_boxes(rect)))
     # `s - s` is 0.0 exactly when `s` is finite, and `s` is finite only
     # when every term is: a NaN or an infinity propagates (an overflow is
     # refused too, which only costs the prune).
@@ -860,10 +865,10 @@ class _Part(_NearWatched):
                  'nets', 'footprint_name', 'orig_rot',
                  'side', 'has_tht', 'sides', 'tht_by_rot', 'padbox_local',
                  'padbox_by_rot', 'grade_by_rot', '_live_rects',
-                 '_pg_rot', '_pg_pose', 'drawn_local')
+                 '_pg_rot', '_pg_pose', 'drawn_local', '_shape_live')
 
     def __init__(self, ref, fp, courtyard_sides, locked, body_local=None,
-                 drawn_sides=None):
+                 drawn_sides=None, court_boxes=None):
         self._live_rects = None
         self.ref = ref
         self.footprint_name = fp.footprint_name
@@ -891,10 +896,25 @@ class _Part(_NearWatched):
         lb = body_local
         if lb is None:
             lb = grade_lb
-        self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
-        self.grade_by_rot = (self.bounds_by_rot if lb is grade_lb else
-                             {r: _rotate_local_bounds(*grade_lb, r)
-                              for r in ROTATIONS})
+        # A courtyard drawn as several shapes (`parser.
+        # extract_courtyard_boxes`, `court_boxes` its {side: boxes}) is
+        # occupied box by box: `rect` answers a `legality.FarSide` whose
+        # own value is the bounding box, so a part may stand in its notch.
+        # The grade ladder keeps the bounding box. None for every other part.
+        shaped = _shaped_local(courtyard_sides.get(ref), self.side, grade_lb,
+                               court_boxes) if body_local is None else None
+        if shaped is not None:
+            lb = shaped
+            self.bounds_by_rot = {r: legality.rotate_far(lb, r)
+                                  for r in ROTATIONS}
+            self.grade_by_rot = {r: _rotate_local_bounds(*grade_lb, r)
+                                 for r in ROTATIONS}
+        else:
+            self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r)
+                                  for r in ROTATIONS}
+            self.grade_by_rot = (self.bounds_by_rot if lb is grade_lb else
+                                 {r: _rotate_local_bounds(*grade_lb, r)
+                                  for r in ROTATIONS})
         # #1300: when `courtyard_sides` carries an ESTIMATED courtyard for a
         # part that draws none, `drawn_sides` is the board's own map, and
         # `drawn_local` the box KiCad would judge the part on (its pad box):
@@ -931,7 +951,7 @@ class _Part(_NearWatched):
         if base:
             for r in ROTATIONS:
                 rot = (base + r) % 360
-                self.bounds_by_rot[rot] = _rotate_local_bounds(*lb, rot)
+                self.bounds_by_rot[rot] = legality.rotate_far(lb, rot)
                 if self.grade_by_rot is not self.bounds_by_rot:
                     self.grade_by_rot[rot] = _rotate_local_bounds(*grade_lb,
                                                                   rot)
@@ -947,6 +967,9 @@ class _Part(_NearWatched):
         # stale answer.
         self._pg_rot = None
         self._pg_pose = None
+        self._shape_live = None
+        if shaped is not None:
+            object.__setattr__(self, '__class__', _ShapedPart)
 
     def ensure_rotation(self, rot):
         """Fill both rotation caches for `rot`, as given (a caller that
@@ -960,8 +983,8 @@ class _Part(_NearWatched):
         it marks the part stale in every `_NearIndex` watching it."""
         added = False
         if rot not in self.bounds_by_rot:
-            self.bounds_by_rot[rot] = _rotate_local_bounds(
-                *self.bounds_by_rot[0.0], rot)
+            self.bounds_by_rot[rot] = legality.rotate_far(
+                self.bounds_by_rot[0.0], rot)
             added = True
         if rot not in self.grade_by_rot:
             self.grade_by_rot[rot] = _rotate_local_bounds(
@@ -1136,14 +1159,61 @@ def courtyard_check(gap: float) -> str:
     """#1724: the label of a courtyard refusal at `gap` (mm, the rects'
     `rect_gap`; negative when they overlap). 'courtyard' when the rects
     overlap -- the seat's reading of KiCad's courtyards_overlap, on the
-    courtyards' bounding rects (or a part's estimated one), which can
-    overlap where KiCad's drawn outlines do not; 'courtyard_gap' when they
-    are apart but closer than the seat's spacing, the copper clearance the
-    placer keeps between courtyards (routed A/Bs kept it over a gap of 0),
-    which KiCad does not ask for at all. One rule refuses both; the label
-    says which, so a refusal at a placement KiCad accepts does not read as
-    a courtyard overlap."""
+    courtyards' bounding rects (a `_ShapedPart`'s boxes, or a part's
+    estimated rect), which can overlap where KiCad's drawn outlines do
+    not; 'courtyard_gap' when they are apart but closer than the seat's
+    spacing, the copper clearance the placer keeps between courtyards
+    (routed A/Bs kept it over a gap of 0), which KiCad does not ask for at
+    all. One rule refuses both; the label says which, so a refusal at a
+    placement KiCad accepts does not read as a courtyard overlap."""
     return 'courtyard' if gap < 0.0 else 'courtyard_gap'
+
+
+class _ShapedPart(_Part):
+    """A `_Part` whose courtyard is several boxes (`_shaped_local`):
+    `rect` answers a `legality.FarSide` -- the bounding box, carrying
+    `.boxes` -- so every pair test that reads the boxes (`far_gap`,
+    `far_overlap_area`, `pair_min_gap`) spaces the part by its shapes, and
+    every other reader sees the bounding box, as before. Its own class, so
+    the plain `_Part.rect` stays the four sums it was."""
+
+    __slots__ = ()
+
+    def rect(self, x=None, y=None, rot=None):
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rot = self.rot if rot is None else rot
+        b = self.bounds_by_rot.get(rot % 360)
+        if b is None:
+            b = self.bounds_by_rot[0.0]
+        key = (x, y, b)
+        hit = self._shape_live
+        if hit is not None and hit[0] == key and hit[0][2] is b:
+            return hit[1]
+        got = legality.offset_far(b, x, y)
+        object.__setattr__(self, '_shape_live', (key, got))  # not geometry
+        return got
+
+
+_PART_TYPES = (_Part, _ShapedPart)
+
+
+def _shaped_local(sides, side, grade_lb, court_boxes):
+    """The `legality.FarSide` of a courtyard drawn as several shapes, in the
+    footprint's frame, for the side `courtyard_for_side` reads, or None:
+    no boxes for that side, or boxes whose bounding box is not the
+    courtyard's (`parser.extract_courtyard_boxes` and `extract_courtyard_
+    sides` read the same drawing, so they agree)."""
+    if not court_boxes or not sides:
+        return None
+    pick = side if sides.get(side) else next(iter(sides))
+    boxes = court_boxes.get(pick)
+    if not boxes or len(boxes) < 2:
+        return None
+    fs = legality.FarSide(boxes)
+    if any(abs(a - b) > 1e-6 for a, b in zip(fs, grade_lb)):
+        return None
+    return fs
 
 
 class QuenchState:
@@ -1231,6 +1301,8 @@ class QuenchState:
         # does (`_Part.drawn_rect`, a declared pose against a declared pose).
         self._drawn_courtyards = extract_courtyard_sides(pcb_file)
         courtyards = self._drawn_courtyards
+        # the courtyards drawn as several shapes, box by box (`_ShapedPart`)
+        court_boxes = extract_courtyard_boxes(pcb_file)
         self.courtyard_estimates: Dict[str, object] = {}
         #: the refs this state seats on what the board draws although they
         #: have an estimate (place_simple's #1300 fallback): `floorplan.
@@ -1269,7 +1341,8 @@ class QuenchState:
                 # they draw a courtyard; without one there is no geometry to
                 # respect.
                 if ref in courtyards:
-                    self.parts[ref] = _Part(ref, fp, courtyards, True)
+                    self.parts[ref] = _Part(ref, fp, courtyards, True,
+                                            court_boxes=court_boxes.get(ref))
                     self.lock_reasons[ref] = (
                         LOCK_FILE if ref in file_locked else
                         LOCK_CALLER if ref in locked_refs else LOCK_PADLESS)
@@ -1306,7 +1379,8 @@ class QuenchState:
             self.parts[ref] = _Part(
                 ref, fp, courtyards, locked, body_local,
                 drawn_sides=(self._drawn_courtyards
-                             if self.courtyard_estimates else None))
+                             if self.courtyard_estimates else None),
+                court_boxes=court_boxes.get(ref))
             if locked:
                 self.lock_reasons[ref] = (
                     LOCK_FILE if ref in file_locked else
@@ -1871,6 +1945,9 @@ class QuenchState:
                         or rect[3] + clr <= r[1] or r[3] + clr <= rect[1]):
                     continue        # clear, so no shortfall to add
                 gap = rect_gap(rect, r)
+                if gap < clr and (type(rect) is not tuple
+                                  or type(r) is not tuple):
+                    gap = legality.far_gap(rect, r)     # `_ShapedPart`
             if gap < clr:
                 overlap += clr - gap
                 if limit is not None and board + overlap > limit:
@@ -2458,7 +2535,12 @@ class QuenchState:
                 if (rect[2] + clr <= r[0] or r[2] + clr <= rect[0]
                         or rect[3] + clr <= r[1] or r[3] + clr <= rect[1]):
                     continue                    # provably clear
+                # a courtyard of several boxes (`_ShapedPart`) is gapped
+                # box by box once its bounding box comes too close
                 gap = rect_gap(rect, r)
+                if gap < clr and not (type(rect) is tuple
+                                      and type(r) is tuple):
+                    gap = legality.far_gap(rect, r)
                 if gap < clr:
                     legal = False
                     if self._why is not None:

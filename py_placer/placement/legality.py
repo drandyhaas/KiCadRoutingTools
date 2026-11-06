@@ -509,6 +509,17 @@ class FarSide(tuple):
             for i, a in enumerate(boxes) for b in boxes[i + 1:])
         return self
 
+    @classmethod
+    def moved(cls, fs, x, y):
+        """`fs` at local + (x, y): a translation keeps the boxes' overlaps,
+        so their `disjoint` is carried over rather than measured again."""
+        self = tuple.__new__(cls, (x + fs[0], y + fs[1], x + fs[2],
+                                   y + fs[3]))
+        self.boxes = tuple((x + b[0], y + b[1], x + b[2], y + b[3])
+                           for b in fs.boxes)
+        self.disjoint = fs.disjoint
+        return self
+
     def __reduce__(self):
         return (FarSide, (self.boxes,))
 
@@ -572,8 +583,7 @@ def rotate_far(r, rot):
 def offset_far(r, x, y):
     """A far-side value at a position: local + (x, y), cluster by cluster."""
     if isinstance(r, FarSide):
-        return FarSide([(x + b[0], y + b[1], x + b[2], y + b[3])
-                        for b in r.boxes])
+        return FarSide.moved(r, x, y)
     return (x + r[0], y + r[1], x + r[2], y + r[3])
 
 

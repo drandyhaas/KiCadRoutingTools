@@ -350,7 +350,8 @@ def _nested_even_odd(geoms):
 
 
 def _outline_shapes_by_side(fp_text: str, layer_re: str,
-                            even_odd: bool = False) -> Dict[str, tuple]:
+                            even_odd: bool = False,
+                            with_parts: bool = False) -> Dict[str, tuple]:
     """The TRUE drawn outline of one footprint on `layer_re`, per side (#1094).
 
     `{side: (shapely geometry in the local frame, how)}`, where `how` is
@@ -369,6 +370,10 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
     (`_nested_even_odd`: a contour inside another is a hole). Off, every
     closed contour is united -- a .Fab drawing's inner circle is a detail
     of the body (a button, a lens), not a hole through it.
+
+    `with_parts`: each value is `(geometry, how, parts)`, `parts` the closed
+    shapes the outline was composed from (one per drawn area or closed
+    chain; the hull alone when the drawing did not close).
     """
     from shapely.geometry import LineString, Point, Polygon, box
     from shapely.ops import polygonize, unary_union
@@ -572,14 +577,16 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
                 if retry:
                     cand = composed(retry, side)
                     if covers(cand, pts, _OUTLINE_JOIN_REACH_MM):
-                        shape, tol = cand, _OUTLINE_JOIN_REACH_MM
+                        shape, tol, parts = cand, _OUTLINE_JOIN_REACH_MM, retry
                         break
         if pts and not covers(shape, pts, tol):
             from shapely.geometry import MultiPoint
             shape, how = MultiPoint(pts).convex_hull, OUTLINE_HULL
+            parts = [shape]
         if shape is None or shape.is_empty or shape.area <= 0:
             continue
-        out[side] = (shape, how)
+        out[side] = ((shape, how, tuple(parts) + tuple(united.get(side, ())))
+                     if with_parts else (shape, how))
     return out
 
 
@@ -642,6 +649,184 @@ def extract_silk_shapes(pcb_file: str) -> Dict[str, Dict[str, tuple]]:
     drawn stands in. Only the first is an outline a part can be said to sit
     inside."""
     return _extract_outline_shapes(pcb_file, _SILK_LAYER, '.SilkS"')
+
+
+#: Horizontal slabs a courtyard shape that is not axis-aligned (an arc, a
+#: diagonal) is covered by (`shape_boxes`): each slab's box spans what the
+#: shape holds in it, so the cover is never smaller than the shape.
+COVER_SLABS = 8
+#: Box coordinates are rounded OUTWARD to this grid (mm) before boxes are
+#: united, so two shapes meeting on one drawn line share its coordinate; a
+#: coordinate within a nanometre of the grid is on it.
+_BOX_GRID = 1e-6
+
+
+def _polygons(geom):
+    """The polygons of a shapely geometry, at any nesting."""
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == 'Polygon':
+        return [geom]
+    return [q for g in getattr(geom, 'geoms', ()) for q in _polygons(g)]
+
+
+def _rectilinear(poly) -> bool:
+    cs = list(poly.exterior.coords)
+    return all(abs(a[0] - b[0]) < 1e-9 or abs(a[1] - b[1]) < 1e-9
+               for a, b in zip(cs, cs[1:]))
+
+
+def shape_boxes(geom) -> list:
+    """Axis-aligned boxes covering `geom` (local frame): exactly when its
+    outline is axis-aligned, otherwise outward, slab by slab
+    (`COVER_SLABS`). A hole is covered."""
+    from shapely.geometry import Polygon, box
+    out = []
+    for poly in _polygons(geom):
+        shell = Polygon(poly.exterior)
+        x0, y0, x1, y1 = shell.bounds
+        if shell.area >= (x1 - x0) * (y1 - y0) - 1e-9:
+            out.append((x0, y0, x1, y1))
+            continue
+        if _rectilinear(shell):
+            ys = sorted({c[1] for c in shell.exterior.coords})
+        else:
+            ys = [y0 + (y1 - y0) * k / COVER_SLABS
+                  for k in range(COVER_SLABS + 1)]
+        for ya, yb in zip(ys, ys[1:]):
+            for q in _polygons(shell.intersection(box(x0, ya, x1, yb))):
+                bx0, _by0, bx1, _by1 = q.bounds
+                if bx1 > bx0:
+                    out.append((bx0, ya, bx1, yb))
+    return out
+
+
+def union_boxes(boxes) -> list:
+    """The union of axis-aligned boxes as DISJOINT boxes (they may share an
+    edge): cut into vertical slabs at every box's x, the covered y spans of
+    each slab merged, and a span carried on while the next slab has it too.
+    Sorted."""
+    g = _BOX_GRID
+    bs = [(math.floor(b[0] / g + 1e-3) * g, math.floor(b[1] / g + 1e-3) * g,
+           math.ceil(b[2] / g - 1e-3) * g, math.ceil(b[3] / g - 1e-3) * g)
+          for b in boxes]
+    bs = [tuple(round(v, 9) for v in b) for b in bs]
+    bs = [b for b in bs if b[2] > b[0] and b[3] > b[1]]
+    xs = sorted({v for b in bs for v in (b[0], b[2])})
+    out, open_ = [], {}
+    for xa, xb in zip(xs, xs[1:]):
+        spans = []
+        for b in sorted((b[1], b[3]) for b in bs
+                        if b[0] <= xa and b[2] >= xb):
+            if spans and b[0] <= spans[-1][1]:
+                spans[-1] = (spans[-1][0], max(spans[-1][1], b[1]))
+            else:
+                spans.append(b)
+        now = {}
+        for sp in spans:
+            now[sp] = open_.pop(sp, xa)
+        for sp, start in open_.items():
+            out.append((start, sp[0], xa, sp[1]))
+        open_ = now
+    for sp, start in open_.items():
+        out.append((start, sp[0], xs[-1], sp[1]))
+    return sorted(out)
+
+
+_BOX_CACHE: Dict[tuple, Dict[str, Dict[str, tuple]]] = {}
+
+_CRTYD_AREA = re.compile(r'\((?:fp_rect|fp_circle)\b' + _FP_ELEMENT_GAP
+                         + _CRTYD_LAYER, re.DOTALL)
+_CRTYD_ENDS = re.compile(r'\(fp_(?:line|arc)\s+\(start\s+' + _NUM + r'\s+'
+                         + _NUM + r'\)' + r'(?:\s+\(mid\s+' + _NUM + r'\s+'
+                         + _NUM + r'\))?\s+\(end\s+' + _NUM + r'\s+' + _NUM
+                         + r'\)' + _FP_ELEMENT_GAP + _CRTYD_LAYER, re.DOTALL)
+
+
+def _may_not_be_a_box(fp_text: str) -> bool:
+    """Whether one footprint's courtyard can be other than one box on a side:
+    two drawn areas, an area and a drawn loop, line and arc pieces that close
+    more than one loop (edges - vertices + components, their ends the
+    vertices), or one polygon or loop of more than four corners. A cheap
+    screen: what passes is measured."""
+    areas: Dict[str, int] = {}
+    for m in _CRTYD_AREA.finditer(fp_text):
+        areas[m.group(1)] = areas.get(m.group(1), 0) + 1
+    for pm in re.finditer(r'\(fp_poly\b', fp_text):
+        body = fp_text[pm.start():find_matching_paren(fp_text, pm.start())]
+        lm = re.search(_CRTYD_LAYER, body)
+        if lm:
+            if len(re.findall(r'\(xy\s', body)) > 4:
+                return True
+            areas[lm.group(1)] = areas.get(lm.group(1), 0) + 1
+    chains: Dict[str, dict] = {}
+    edges: Dict[str, int] = {}
+    for m in _CRTYD_ENDS.finditer(fp_text):
+        parent = chains.setdefault(m.group(7), {})
+
+        def find(k):
+            while parent.setdefault(k, k) != k:
+                k = parent[k]
+            return k
+        a = (round(float(m.group(1)), 3), round(float(m.group(2)), 3))
+        b = (round(float(m.group(5)), 3), round(float(m.group(6)), 3))
+        parent[find(a)] = find(b)
+        edges[m.group(7)] = edges.get(m.group(7), 0) + 1
+    for side in set(areas) | set(chains):
+        parent = chains.get(side, {})
+        loops = (edges.get(side, 0) - len(parent)
+                 + len({k for k in parent if parent[k] == k}))
+        if areas.get(side, 0) + loops >= 2 or edges.get(side, 0) > 4:
+            return True
+    return False
+
+
+def extract_courtyard_boxes(pcb_file: str) -> Dict[str, Dict[str, tuple]]:
+    """`{ref: {side: boxes}}` for each courtyard drawn as several shapes, or
+    as one axis-aligned shape (an L, a U, a step), whose union is not its
+    bounding box: the disjoint boxes (`union_boxes`) covering its shapes
+    (`shape_boxes`), in the footprint's local frame. Their bounding box is
+    `extract_courtyard_sides`' box. A courtyard of one shape that is not
+    axis-aligned (a chamfer, a circle), one that does not close, or one
+    whose shapes fill their bounding box is absent: the placer seats it on
+    that box, as it always did."""
+    import os as _os
+    try:
+        st = _os.stat(pcb_file)
+        key = (_os.path.abspath(pcb_file), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and key in _BOX_CACHE:
+        return dict(_BOX_CACHE[key])
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+    result: Dict[str, Dict[str, tuple]] = {}
+    for ref, fp_text in _file_blocks(pcb_file):
+        if '.CrtYd"' not in fp_text or not _may_not_be_a_box(fp_text):
+            continue
+        by_side = _outline_shapes_by_side(fp_text, _CRTYD_LAYER,
+                                          even_odd=True, with_parts=True)
+        for side, (shape, how, parts) in by_side.items():
+            # a shape inside another adds nothing to the occupancy (a ring's
+            # inner circle is a hole the boxes cover anyway)
+            parts = [g for i, g in enumerate(parts)
+                     if not any(j != i and h.buffer(1e-6).contains(g)
+                                and not (g.buffer(1e-6).contains(h) and j > i)
+                                for j, h in enumerate(parts))]
+            if how != OUTLINE_POLYGON or not parts or (
+                    len(parts) == 1 and not all(_rectilinear(q) and not q.interiors
+                                                for q in _polygons(parts[0]))):
+                continue
+            boxes = union_boxes(b for g in parts for b in shape_boxes(g))
+            # never less than the outline the grade reads
+            if len(boxes) >= 2 and unary_union([box(*b) for b in boxes]).buffer(
+                    1e-9).contains(shape):
+                result.setdefault(ref, {})[side] = tuple(boxes)
+    if key is not None:
+        if len(_BOX_CACHE) > 16:
+            _BOX_CACHE.clear()
+        _BOX_CACHE[key] = result
+    return dict(result)
 
 
 def extract_courtyard_bboxes(pcb_file: str) -> Dict[str, Bbox]:

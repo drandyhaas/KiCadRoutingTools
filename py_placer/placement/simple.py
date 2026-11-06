@@ -1184,7 +1184,15 @@ class Model:
         if drop_b:
             fb = tuple(None if i in drop_b else f for i, f in enumerate(fb))
         if pa.side == pb.side:
-            return self._halo_rects(pa, pb, pa.rect(), pb.rect(), fa, fb)
+            ra, rb = pa.rect(), pb.rect()
+            if type(ra) is tuple and type(rb) is tuple:
+                return self._halo_rects(pa, pb, ra, rb, fa, fb)
+            # a courtyard of several boxes (`quench._ShapedPart`): the box
+            # the other part comes nearest decides, so one in its notch is
+            # judged by the boxes round it
+            from .legality import far_boxes
+            return max(self._halo_rects(pa, pb, qa, qb, fa, fb)
+                       for qa in far_boxes(ra) for qb in far_boxes(rb))
         # On opposite faces, a drilled part among them: on each face they
         # share, a part on its far face presents its lead boxes alone
         # (`legality.rect_on`), as the seat gate measures the pair.
@@ -1192,8 +1200,10 @@ class Model:
         (ca, ta), (cb, tb) = pa.rects(), pb.rects()
         worst = 0.0
         for f in sorted(shared):
-            for ra in ((ca,) if f == pa.side else far_boxes(ta)):
-                for rb in ((cb,) if f == pb.side else far_boxes(tb)):
+            for ra in (((ca,) if type(ca) is tuple else far_boxes(ca))
+                       if f == pa.side else far_boxes(ta)):
+                for rb in (((cb,) if type(cb) is tuple else far_boxes(cb))
+                           if f == pb.side else far_boxes(tb)):
                     worst = max(worst, self._halo_rects(pa, pb, ra, rb, fa, fb))
         return worst
 
