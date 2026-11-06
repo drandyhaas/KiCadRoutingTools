@@ -1132,6 +1132,20 @@ class _Part(_NearWatched):
         return list(out)
 
 
+def courtyard_check(gap: float) -> str:
+    """#1724: the label of a courtyard refusal at `gap` (mm, the rects'
+    `rect_gap`; negative when they overlap). 'courtyard' when the rects
+    overlap -- the seat's reading of KiCad's courtyards_overlap, on the
+    courtyards' bounding rects (or a part's estimated one), which can
+    overlap where KiCad's drawn outlines do not; 'courtyard_gap' when they
+    are apart but closer than the seat's spacing, the copper clearance the
+    placer keeps between courtyards (routed A/Bs kept it over a gap of 0),
+    which KiCad does not ask for at all. One rule refuses both; the label
+    says which, so a refusal at a placement KiCad accepts does not read as
+    a courtyard overlap."""
+    return 'courtyard' if gap < 0.0 else 'courtyard_gap'
+
+
 class QuenchState:
     """Current placement plus cached airwires: the seat gate
     (`candidate_valid`) and the measurements the graders read."""
@@ -2419,7 +2433,8 @@ class QuenchState:
                     if gap is not None and gap < clr:
                         legal = False
                         if self._why is not None:
-                            self._veto('courtyard', other_ref, path='tht')
+                            self._veto(courtyard_check(gap), other_ref,
+                                       path='tht', gap=gap)
                         break
                     continue
                 # Fast path: two plain SMD parts, same side. The per-axis test is
@@ -2438,10 +2453,12 @@ class QuenchState:
                 if (rect[2] + clr <= r[0] or r[2] + clr <= rect[0]
                         or rect[3] + clr <= r[1] or r[3] + clr <= rect[1]):
                     continue                    # provably clear
-                if rect_gap(rect, r) < clr:
+                gap = rect_gap(rect, r)
+                if gap < clr:
                     legal = False
                     if self._why is not None:
-                        self._veto('courtyard', other_ref, path='smd')
+                        self._veto(courtyard_check(gap), other_ref,
+                                   path='smd', gap=gap)
                     break
         if legal and self.frame_refs:
             # #1212: a pin frame's PINS. Its rect is skipped above (a frame,
