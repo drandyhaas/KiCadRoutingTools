@@ -2572,9 +2572,11 @@ A step that fails is skipped and the chain continues from the last good board.
 Each route pass is graded: open nets are the nets `check_connected` reports
 unrouted or broken (its KiCad cross-check off, so the same board always grades
 the same), and DRC is `check_drc`'s real violations at the board's recorded
-floors. A pass is kept only if it is no worse than the best board so far on
-both and better on one; the first pass that is not kept ends the passes, and
-a tie keeps the earlier board.
+floors. A pass is kept when it ranks above the best board so far, completion
+first: fewer open nets, then fewer violations at the same open count, so a
+pass that closes nets at the cost of new violations is kept and its grade says
+so. The first pass that is not kept ends the passes, and a tie keeps the
+earlier board.
 
 ### Usage
 

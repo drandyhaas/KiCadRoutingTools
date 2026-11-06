@@ -58,8 +58,9 @@ Every step runs as its own process in <output>.autoplan/, so a step that
 fails is skipped and the chain continues from the last good board. Each route
 pass is graded: open nets as check_connected reports them (the KiCad
 cross-check off, so the grade is deterministic) and real violations as
-check_drc reports them. A pass is kept only if it is no worse on both and
-better on one; the first pass that is not kept ends the passes. A further pass
+check_drc reports them. A pass is kept when it ranks above the best board so
+far, completion first: fewer open nets, then fewer violations at the same open
+count. The first pass that is not kept ends the passes. A further pass
 starts only while the router iterations spent, plus the last pass's again,
 stay within --effort-factor times the first pass's -- a forecast from counts
 the router reproduces exactly, not a cap on the pass itself -- and not at all
@@ -872,9 +873,10 @@ def refan(ch, fans, decap):
 
 
 def _improves(g, best):
-    """G is no worse than BEST on open nets and on DRC, and better on one."""
-    return (g['open'] <= best['open'] and g['drc'] <= best['drc']
-            and (g['open'], g['drc']) != (best['open'], best['drc']))
+    """G ranks above BEST completion first: fewer open nets, then, at the same
+    open count, fewer DRC violations. A pass that closes nets at the cost of
+    new violations is kept, and its violations are disclosed by the grade."""
+    return (g['open'], g['drc']) < (best['open'], best['drc'])
 
 
 def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), reroute=()):
