@@ -1721,14 +1721,18 @@ def _rk3(x, y):
     return (round(x, 3), round(y, 3))
 
 
-def _soft_joint_pairs(segs, vias, pads):
+def _soft_joint_pairs(segs, vias, pads, min_gap=None):
     """Canonical set of SOFT-JOINT pairs among ``segs``: same-layer degree-1
     free ends (not anchored on a same-net via/pad) whose round end caps overlap
     without the endpoints being coincident. Each pair is a frozenset of two
     (layer, rounded-point) keys, so pair sets from different segment subsets of
-    the same net are directly comparable."""
+    the same net are directly comparable. ``min_gap`` raises the smallest gap
+    that counts (default SOFT_JOINT_MIN_GAP); COINCIDENCE_TOL asks for the
+    joints check_drc COUNTS, a smaller gap being only its warning."""
     from collections import defaultdict
     from routing_constants import SOFT_JOINT_MIN_GAP
+    if min_gap is None:
+        min_gap = SOFT_JOINT_MIN_GAP
     from check_drc import point_to_pad_distance
 
     def anchored(x, y, layer, width):
@@ -1783,7 +1787,7 @@ def _soft_joint_pairs(segs, vias, pads):
                     # pair. A MIXED pair is kept -- the track end is real.
                     continue
                 gap = math.hypot(xi - xj, yi - yj)
-                if SOFT_JOINT_MIN_GAP < gap < (wi + wj) / 2.0 - 1e-6:
+                if min_gap < gap < (wi + wj) / 2.0 - 1e-6:
                     pairs.add(frozenset((ki, kj)))
     return pairs
 
@@ -6790,8 +6794,12 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     Every candidate is verified to clear ALL foreign copper (pad/track/via)
     and the board edge at its own width, and to not worsen the net's
     connectivity, before it replaces the original geometry -- the pass can only
-    remove a graze, never introduce one or disconnect a net. A graze that no
-    candidate clears is left for the DRC report.
+    remove a graze, never introduce one or disconnect a net. Nor may it add a
+    soft joint check_drc counts: sliding an end away from another free end it
+    all but met turns a coincident joint into a SEGMENT-ENDPOINT-GAP, and the
+    bridge's clearance gate then refuses the repair through the graze the
+    neighbour still has. A graze that no candidate clears is left for the DRC
+    report.
 
     ``max_shift`` HARD-caps how far any copper may move (callers pass half the
     routing grid step): this pass is strictly a micrometre-scale touch-up, so a
@@ -6809,6 +6817,7 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     pair the router built at its rule's gap is not a graze."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
+    from connectivity import COINCIDENCE_TOL
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                       _seg_foreign_via_dist, _seg_foreign_hole_dist)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
@@ -6993,6 +7002,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                 before = check_net_connectivity(net_id, net_segs, net_vias,
                                                 net_pads, net_zones,
                                                 pcb_data=pcb_data)
+                soft_before = len(_soft_joint_pairs(net_segs, net_vias, net_pads,
+                                                    COINCIDENCE_TOL))
             round_changed = False
 
             for s, (shortfall, t, awx, awy) in offenders:
@@ -7097,6 +7108,9 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                                       g.layer, net_id, g.width) for g in new):
                         continue
                     trial = [g for g in net_segs if g not in old] + new
+                    if len(_soft_joint_pairs(trial, net_vias, net_pads,
+                                             COINCIDENCE_TOL)) > soft_before:
+                        continue
                     if worse(before, check_net_connectivity(net_id, trial, net_vias,
                                                             net_pads, net_zones,
                                                             pcb_data=pcb_data)):
