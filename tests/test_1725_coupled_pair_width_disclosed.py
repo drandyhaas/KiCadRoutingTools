@@ -20,9 +20,9 @@ land on the pads are delivered as asked and are not a row.
     and delivered width; a pair's class track width is its drawn width;
     fallback members, nets outside the pairs and via rows are untouched;
   * routed: an in-repo board with a 2-layer stackup, --impedance 80 over a
-    0.25 --track-width and a wall of another net's pads ending just below the
-    pair's path, so one member necks where it passes the end pad: exit 3
-    under --strict-sizes, one row for that member whose length and width
+    0.25 --track-width and a wall of another net's pads the pair routes
+    around, so one member necks against its partner at the launch bend:
+    exit 3 under --strict-sizes, one row for that member whose length and width
     match the WRITTEN board, and none for the partner, which ships at the
     layer width plus its connectors (FAILS on 95e6dc1d: the member carries
     `terminal neck` rows with no length, and the new site is absent).
@@ -59,7 +59,7 @@ STACKUP = ('\t\t(stackup\n'
 
 def _wall():
     """Another net's 0.5 mm pads on both layers in a column at x = 14, from
-    y = 17 up to the board's top half: the pair passes the end pad."""
+    y = 17 up to the board's top half, which the pair routes around."""
     pads, y, k = [], 17.0, 0
     while y > 5.5:
         k += 1
