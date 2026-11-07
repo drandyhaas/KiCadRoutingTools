@@ -410,9 +410,10 @@ def crossover_at(n, V, d, hand0, L1, L2):
     pn, nn = prs[n]
     ids = {'P': ctx.byname[pn][0], 'N': ctx.byname[nn][0]}
     near = static_around(V, 4 * bd.LANE_MIN)
-    # of the two that clear everything laid, the one that leaves the singles not yet laid the most room: its barrels
-    # and legs as far outside their bars from those lanes' smooth lines as they stand (a crossover's barrels are all on
-    # one side of the pair -- put them where there is room for them)
+    # of the two that clear everything laid, the one whose barrels keep off the planned line of every PAIR not yet laid
+    # (pair_conflict), and of those the one that leaves the singles not yet laid the most room: its barrels and legs as
+    # far outside their bars from those lanes' smooth lines as they stand (a crossover's barrels are all on one side of
+    # the pair -- put them where there is room for them)
     best = None
     for first in ('P', 'N'):
         c = _pairs.crossover(V, DIRS[d], hand0, HALF, cfg.via_size, VX[n], TW, CL, g, L1, L2, first=first,
@@ -433,7 +434,7 @@ def crossover_at(n, V, d, hand0, L1, L2):
             c['at'] = [V[0], V[1]]
             c['heading'] = list(DIRS[d])
             c['layers'] = [L1, L2]
-            mode_ = awx_settings.get('SNAP_XROOM_PAIRS') or '0'
+            mode_ = awx_settings.get('SNAP_XROOM_PAIRS') or '3'
             room = room_margin(c, n) if mode_ == '2' else \
                 ((0 if pair_conflict(c, n) else 1), room_left(c)) if mode_ == '3' else room_left(c)
             if best is None or room > best[0]:
@@ -462,12 +463,14 @@ def room_margin(c, n):
 
 
 def pair_conflict(c, n):
-    """(probe SNAP_XROOM_PAIRS=3) a crossover's barrel within a pair's via ring of a PAIR not yet laid -- its planned
-    centreline: the pairs are snapped in turn on the lines the plan drew, so a barrel there is a pair lost (the zynq
-    LVDS's RX_D2 crossover on RX_D5's line, 0.036 from it), where a single, polished round the pairs before its snap,
-    goes round it (zKP K40 r1: RX_D0's barrels 0.095 from CTRL_OUT2's line, and CTRL_OUT2 laid). The side is changed
-    for that alone; else the side the singles' room chose, as before -- moved for room alone, the singles polished round
-    it differently and four failed"""
+    """(SNAP_XROOM_PAIRS 3, the default) a crossover's barrel within a pair's via ring of a PAIR not yet laid -- its
+    planned centreline: the pairs are snapped in turn on the lines the plan drew, so a barrel there is a pair lost (the
+    zynq LVDS's RX_D2 crossover on RX_D5's line, 0.036 from it), where a single, polished round the pairs before its
+    snap, goes round it (zKP K40 r1: RX_D0's barrels 0.095 from CTRL_OUT2's line, and CTRL_OUT2 laid). The side is
+    changed for that alone; else the side the singles' room chose, as before -- moved for room alone, the singles
+    polished round it differently and four failed. On a bus of pairs alone the singles' room is no measure at all: both
+    sides tie and the first was laid, a crossover's barrels 0.2 mm from the next pair's planned line, and every sweep
+    laid it there again and that pair never"""
     for x, y, _k in c['vias']:
         for m in M:
             if m == n or m not in prs or m in res['lanes'] or m in failed:
@@ -855,7 +858,7 @@ def build(n, neck=False):
         # audit had refused could count as clear: the zynq LVDS's RX_D2, laid before RX_D3 and RX_D5, put its crossover
         # barrels on RX_D5's planned line and 0.28 from RX_D3's -- the audit had passed the other side -- and neither
         # pair could then be laid)
-        if (awx_settings.get('SNAP_XROOM_PAIRS') or '0') == '1':
+        if (awx_settings.get('SNAP_XROOM_PAIRS') or '3') == '1':
             for m in [m for m in M if m in prs and m != n and m not in res['lanes']]:
                 Pm = LANE[m]['pts']
                 for p_, q_ in zip(Pm, Pm[1:]):
@@ -1393,7 +1396,7 @@ def _route_memo(n, strict=True, wide=False):
     laid leaves where its search got stuck in STUCK_AT"""
     # (a pair searches pose to pose: strict is a single's)
     key = (n, strict or n in prs, wide, json.dumps(res['lanes']), tuple(sorted(UNSHARED)), SINGLES_ROOM[0])
-    if (awx_settings.get('SNAP_XROOM_PAIRS') or '0') in ('2', '3'):
+    if (awx_settings.get('SNAP_XROOM_PAIRS') or '3') in ('2', '3'):
         key += (tuple(sorted(failed)),)     # (those crossover sides leave the failed lanes out: they read them too)
     if key not in ROUTED:
         STUCK_AT.pop('last', None)

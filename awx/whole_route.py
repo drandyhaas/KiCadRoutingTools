@@ -319,6 +319,45 @@ def _tracks_of(bench):
     return _TRACKS[key]
 
 
+_VIA_ENDS = {}      # (a bench file, its mtime and size) -> its single lanes' via ends {(lane, 0 tooth / 1 berth)}
+
+
+def _via_ends(bench):
+    """the single lanes' ends on `bench` that are VIA ENDS -- its plan sidecar's end standing on a via of its net, or
+    running to one on its layer (relayer.run_to_via), as whole_solve reads them: a via end's run is moved onto the
+    layer the solve chooses (relay_ends), so its layer is no more the fanout's than the rest of its lane is"""
+    sc_ = os.path.splitext(bench)[0] + '.plan.json'
+    if not os.path.isfile(sc_):
+        return set()
+    st_ = os.stat(bench)
+    key = (os.path.abspath(bench), st_.st_mtime_ns, st_.st_size)
+    if key not in _VIA_ENDS:
+        if PYR not in sys.path:
+            sys.path.insert(0, PYR)
+        from kicad_parser import parse_kicad_pcb
+        from coherent_nets import namer
+        import relayer as _relayer
+        with contextlib.redirect_stdout(io.StringIO()):
+            pcb = parse_kicad_pcb(bench)
+        sn = namer(pcb)
+        ids = {sn(nt.name): i for i, nt in pcb.nets.items() if nt.name}
+        sc = json.load(open(sc_))
+        lay = (sc.get('tooth_layer') or {}, sc.get('dest_layer') or {})
+        out = set()
+        for n, e_ in (sc.get('ends') or {}).items():
+            nid = ids.get(n)
+            if nid is None:
+                continue
+            for k_ in (0, 1):
+                pt_, L_ = e_[k_], lay[k_].get(n)
+                if any(v.net_id == nid and math.hypot(v.x - pt_[0], v.y - pt_[1]) < v.size / 2 for v in pcb.vias) \
+                        or (L_ and _relayer.run_to_via(pcb, nid, pt_, L_)):
+                    out.add((n, k_))
+        _VIA_ENDS.clear()
+        _VIA_ENDS[key] = out
+    return _VIA_ENDS[key]
+
+
 def audit_layer_cuts(audit, geo, bench=None):
     """the LAYER cuts an audit's STATIC findings give: a lane found against a pad of an island (a geometry's 'islands',
     'REF.PAD' -> island) on one layer, the layer it was found on -- and, on more routing layers than two, a lane found
@@ -392,7 +431,11 @@ def place_cuts(cuts, plan, bench, own=()):
     below U11: the same four lanes through it every round, a different one on B each round, until the loop stopped on
     ENDS CROWDED after six). The bus's own copper -- its stubs, where its lanes end, which the plan orders itself -- is
     no such place, and a lane that ENDS in the place is not held, its end being the fanout's to move: the zynq's ETH
-    stubs at U1's teeth would hold ETH_TXCTL off its own stub's layer, and the lanes beside it"""
+    stubs at U1's teeth would hold ETH_TXCTL off its own stub's layer, and the lanes beside it. Unless that end is a
+    VIA END (_via_ends): its run's layer is the solve's to choose, and the place blocks it as it blocked the lane found
+    -- two lanes' teeth stacked on two layers at one exit, another bus's track crossing in front of it on one of them:
+    the lane found was held off that layer, the other put on it the next round, a layer cut a round apiece, and the
+    re-solve holding every crosser could keep neither off it"""
     import route_layers
     import rules as _rules
     if len(route_layers.layers()) <= 2 or not bench:
@@ -401,6 +444,7 @@ def place_cuts(cuts, plan, bench, own=()):
     bar = R.track / 2 + R.clearance + R.grid / 2
     tracks = _tracks_of(bench)[0]
     lanes = plan.get('lanes') or {}
+    vends = _via_ends(bench)
     out = []
     for c in cuts:
         if not c.get('firm') or c['island'] in own:
@@ -415,7 +459,7 @@ def place_cuts(cuts, plan, bench, own=()):
         for n, v in lanes.items():
             if n == c['lane'] or not v.get('xy'):
                 continue
-            if inb(v['xy'][0], bar) or inb(v['xy'][-1], bar):
+            if any(inb(p_, bar) and (n, k_) not in vends for k_, p_ in ((0, v['xy'][0]), (1, v['xy'][-1]))):
                 continue        # (a lane ENDING there: its end is the fanout's to move, not a layer's to leave)
             pts = [p for p in _dense([list(q) for q in v['xy']], R.grid / 2) if inb(p, bar)]
             blk = sorted(L for L, ss in near.items()

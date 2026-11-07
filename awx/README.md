@@ -1914,7 +1914,11 @@ and the snap lays the singles.
   travel at its tooth and on the other at its berth -- swaps its legs at its
   first dive with a crossover (`pairs.crossover`): 45-degree jogs, both
   barrels on one side, staggered by the least whole grid steps. The whole
-  plan knows its shape before it is laid (`pairs.crossover_shape`).
+  plan knows its shape before it is laid (`pairs.crossover_shape`). Its side
+  keeps its barrels off the planned line of every pair not yet laid, then
+  leaves the singles not yet laid the most room: on a bus of pairs alone the
+  singles' room ties both sides, and a crossover laid on the next pair's line
+  left that pair no way past.
 - **A pair the step cannot lay** sends its change nearest where it got stuck
   back to the solve as a via cut, a jog's room wide.
 - **A change with no room where the plan put it:** a lane, pair or single,
@@ -2299,7 +2303,12 @@ via.
   lane through the same crossing: on sdi_mipi_conv the same four SDI lanes
   crossed the DDR3 fan below U11 every round, a different one on B.Cu each
   time, for six rounds. The bus's own stubs are no such place, and a lane
-  that ends in the place is not held there: its end is the fanout's to move.
+  that ends in the place is not held there: its end is the fanout's to move --
+  unless that end is a via end (`whole_route._via_ends`), whose run's layer
+  the solve chooses. Two lanes' teeth stacked on two layers at one exit, an
+  earlier bus's track crossing in front of it on one of them: the lane found
+  was held off that layer, the other was put on it the next round, and the
+  repair holding every lane it crosses could keep it off nowhere.
 - **Keep-out rule areas.** The audit measures each lane against the board's
   keep-out areas whose tracks are not allowed on its layer
   (`plan_audit.keepout_areas`, resolved as the router resolves them), and a
@@ -3077,8 +3086,9 @@ channels first, and the other escapes leave round it.
     the round whose snap leaves the fewest lanes unlaid, of the held round
     and N-1 others;
   - the snap -- `SNAP_XROOM_PAIRS=1`: a crossover's side chosen with the pairs
-    not yet laid weighed too (`2`: by the audit's margin; `3`: moved only to
-    keep its barrels off a pair's planned line); `SNAP_PAIR_OWN_VIAS=1`: a
+    not yet laid weighed as the singles are (`2`: by the audit's margin; `0`:
+    the singles alone; the default `3` keeps its barrels off a pair's planned
+    line); `SNAP_PAIR_OWN_VIAS=1`: a
     pair's body kept off its own nets' vias; `SNAP_DEBUG=LANE` (or `*`): the
     map round where a lane's snap stopped, each cell marked by the stage that
     blocked it;
