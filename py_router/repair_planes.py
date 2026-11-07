@@ -897,6 +897,9 @@ def repair_planes(
     board_edge_clearance: float = defaults.PLANE_EDGE_CLEARANCE,
     via_size: float = defaults.VIA_SIZE,
     via_drill: float = defaults.VIA_DRILL,
+    # #1676: no explicit via was asked for (--via-size omitted): the via
+    # starts at the board's .kicad_dru rules.
+    via_from_class: bool = False,
     max_iterations: int = defaults.MAX_ITERATIONS,
     verbose: bool = False,
     dry_run: bool = False,
@@ -1014,6 +1017,10 @@ def repair_planes(
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
+    # #1676: a via this run sizes itself starts at the board's own via rules
+    if via_from_class:
+        from design_rules import run_via_for_rules
+        via_size, via_drill = run_via_for_rules(input_file, pcb_data, via_size, via_drill)
         # #1279: the board's `sense:<REF>.<PAD>` groups -- protected, or why
         # not. Only when this engine parsed the board: a caller handing it
         # pcb_data (route.py's in-run finalize) has reported them already.
@@ -3407,7 +3414,8 @@ def repair_planes(
             _res_wrap = []
             _out = run_post_route_cleanup(
                 _res_wrap, pcb_data, _scope,
-                SimpleNamespace(clearance=clearance, grid_step=grid_step),
+                SimpleNamespace(clearance=clearance, grid_step=grid_step,
+                                board_edge_clearance=_reconnect_edge()),
                 label='Plane ', phantom=False, via_nudge=False, neck=False,
                 microshift_max_shift=grid_step,
                 # 13 passes that reported nothing: the status bar sat on the
@@ -3809,6 +3817,7 @@ Examples:
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            resolve_cli_floor)
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
@@ -3866,6 +3875,7 @@ Examples:
         # The strap NECK floor must also be manufacturable (#513 item 9).
         min_track_width=getattr(args, 'min_track_width', None),
         clearance=getattr(args, 'clearance', None),
+        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
@@ -3873,6 +3883,7 @@ Examples:
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)
+    args._clearance_ceiling = getattr(args, 'clearance_ceiling', None)
 
     # #381 D9: --output FILE overrides the positional (matches route.py/route_diff).
     if getattr(args, 'output', None) is not None:
@@ -3945,6 +3956,7 @@ Examples:
         board_edge_clearance=args.board_edge_clearance,
         via_size=args.via_size,
         via_drill=args.via_drill,
+        via_from_class=not _vs_explicit,
         max_iterations=args.max_iterations,
         verbose=args.verbose,
         dry_run=args.dry_run,
@@ -3967,9 +3979,12 @@ Examples:
     # Dead-end sweep + gap-snap on the repaired plane copper (issue #84), gated
     # against connectivity + pours so it never breaks a net.
     if not args.dry_run:
+        from fix_kicad_drc_settings import effective_board_edge_clearance
         from pcb_modification import clean_plane_copper
-        _snapped, _removed = clean_plane_copper(args.output_file, net_names,
-                                                args.clearance, args.grid_step)
+        _snapped, _removed = clean_plane_copper(
+            args.output_file, net_names, args.clearance, args.grid_step,
+            effective_board_edge_clearance(
+                args.input_file, args.board_edge_clearance if _edge_given else 0.0))
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
         # Castellated landings (run-6 fix 1.7): reconnect/tap copper that

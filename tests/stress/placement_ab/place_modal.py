@@ -18,10 +18,12 @@ measured. The boards land where route_modal.py looks for them.
   after --   more place_simple arguments, the same for every seed.
 
 The app is route_modal.py's: one image, named after a hash of everything it
-ships, deployed when missing and stopped when nothing is pending on it. A
-seed's placement is the same placement `place_simple.py --seed N` gives on
-any machine with the same Python stack -- but Modal is Linux and the KiCad
-image's Python, so place every arm of an A/B here, not some on a Mac.
+ships, deployed when missing and stopped when nothing is pending on it. Its
+image carries KiCad's stock 3D models and refuses to build unless
+check_assembly's body gate reads them (prove_models.py), so a placement here
+seats a part with that gate as a desktop does. Place every arm of an A/B here
+all the same, not some on a Mac: Modal is Linux, the KiCad image's Python, and
+that image's KiCad and model library.
 """
 import argparse
 import hashlib

@@ -178,6 +178,15 @@ the routing pipeline applies both so the model and the output file agree.
 > vertex a locked segment touches, and the #284 stale-input strip and
 > `remove_route_from_pcb_data`'s signature fallback never take a locked item.
 
+> **#1732 -- a same-net X crossing is a joint to the cleanup too.** Two
+> same-layer tracks of one net whose centrelines cross are joined there
+> (check_connected, KiCad, the length graph since #1705). So
+> `trim_dangles_past_body_anchor` takes a crossing on a segment's body as an
+> anchor, beside a via and a tee, and cuts a dead-end tail past it back to the
+> crossing (its 3-width nib floor and connectivity gate unchanged); and
+> `snap_stub_gaps` skips a target trace the stub's own segment already crosses,
+> instead of laying a connector back over the tail.
+
 > **The graze prune keeps a fill island's only link.** `prune_grazing_segments`
 > grades each removal on a zoned net twice: under the real-fill validator
 > (`check_connected.make_real_fill_validator`, no pour credit within 0.25 mm
@@ -250,11 +259,11 @@ the routing pipeline applies both so the model and the output file agree.
 ### File-level post-passes
 
 ```python
-compute_plane_copper_cleanup(pcb, plane_net_names, clearance=0.1,
-                             grid_step=0.05, progress_callback=None)
+compute_plane_copper_cleanup(pcb, plane_net_names, clearance, grid_step,
+                             board_edge_clearance, progress_callback=None)
     -> PlaneCleanupDelta      # connectors, segments_to_remove, vias_to_remove, snapped
-clean_plane_copper(output_file, plane_net_names, clearance=0.1,
-                   grid_step=0.05) -> Tuple[int, int]   # (snapped, removed)
+clean_plane_copper(output_file, plane_net_names, clearance, grid_step,
+                   board_edge_clearance) -> Tuple[int, int]   # (snapped, removed)
 compute_castellated_landing_retract(pcb, board_edge_clearance, margin=0.02)
     -> CastellationRetractDelta   # moves: [(segment, 'start'|'end', new_x, new_y)]
 retract_castellated_landings(output_file, board_edge_clearance) -> int

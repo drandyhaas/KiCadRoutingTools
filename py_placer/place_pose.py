@@ -847,9 +847,12 @@ def _report(summary):
             '' if r['severity'] in (None, 'error') else ' (warn)'))
     if summary.get('forced'):
         # NOT the refusal sentence verbatim: it ends "Refused rather than
-        # written", which is false on a run that wrote.
-        print("WARNING: WRITTEN under --force, over this finding -- %s"
-              % summary['refused'])
+        # written", which is false on a run that wrote. The verb follows the
+        # outcome, as on the refusal path: a --dry-run wrote nothing, so it
+        # says what --force WOULD write.
+        print("WARNING: %s under --force, over this finding -- %s"
+              % ('WOULD BE WRITTEN' if summary['dry_run'] else 'WRITTEN',
+                 summary['refused']))
     if summary.get('locked_count') is not None:
         print("locked %d, unlocked %d" % (summary.get('locked_count') or 0,
                                           summary.get('unlocked_count') or 0))

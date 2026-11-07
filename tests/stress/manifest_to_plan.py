@@ -875,6 +875,8 @@ CAP_FLAG_PARAMS = {
     # one parameter whose two branches decide whether the step clamps the
     # project at all.
     '--clearance': 'clearance',
+    # #1699: the shared control, whose file the ceiling's floor reads
+    '--fab-overrides': 'fab_overrides_path',
     '--capture-radius': 'cap_capture_radius',
     '--near-margin': 'cap_near_margin',
     '--step': 'cap_step',
@@ -947,9 +949,9 @@ def cap_optimization_step(argv, cwd=None):
             params[CAP_FLAG_PARAMS[a]] = _num(argv[i + 1]); i += 2
             # #1067: the CLI read a relative intent from ITS cwd; the GUI
             # would read it from the board's folder. Make it absolute here.
-            if (CAP_FLAG_PARAMS[a] == 'cap_intent_path' and cwd
+            if (CAP_FLAG_PARAMS[a] in PATH_PARAMS | {'cap_intent_path'} and cwd
                     and not os.path.isabs(argv[i - 1])):
-                params['cap_intent_path'] = os.path.normpath(
+                params[CAP_FLAG_PARAMS[a]] = os.path.normpath(
                     os.path.join(cwd, argv[i - 1]))
         elif a in CAP_BOOL_FLAGS:
             key, val = CAP_BOOL_FLAGS[a]; params[key] = val; i += 1

@@ -157,7 +157,7 @@ _PRODUCT_KEYS = {'form_factor', 'primary_axis', 'held_by', 'user_top_side'}
 _INTERFACE_KEYS = {'ref', 'role', 'user_facing', 'edge', 'along_edge',
                    'along_edge_tolerance_mm', 'overhang_mm', 'mount_mode',
                    'cable_entry', 'cable_envelope_mm', 'requirement', 'why',
-                   'note', 'context', 'mating_face'}
+                   'note', 'context', 'mating_face', 'mating_face_source'}
 #: #959 (#1000): the space a cable needs, declared. `depth` is how far an
 #: in-plane plug reaches in from the edge; `clear` is the margin around a
 #: perpendicular one. There are NO defaults: measured on five as-built boards
@@ -701,6 +701,13 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
         _enum(c.get('edge'), fp._EDGES + (UNKNOWN,), f"{where}.edge")
         _enum(c.get('mating_face'), fp.MATING_FACES + (UNKNOWN,),
               f"{where}.mating_face")
+        src = c.get('mating_face_source')
+        if src is not None and (not isinstance(src, str) or not src.strip()
+                                or not _known(c.get('mating_face'))):
+            raise BriefError(
+                f"{where}.mating_face_source: {src!r} -- a non-empty string "
+                f"naming what a declared mating_face was read off (a drawing "
+                f"and its page, or the 3D model), beside a known mating_face")
         _enum(c.get('mount_mode'), _MOUNT_MODES, f"{where}.mount_mode")
         _enum(c.get('cable_entry'), _CABLE_ENTRY, f"{where}.cable_entry")
         env = c.get('cable_envelope_mm')
@@ -1131,6 +1138,10 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         if _known(face):
             entry['mating_face'] = face
             declared.append(f"interfaces[{ref}].mating_face")
+            if c.get('mating_face_source') is not None:
+                # #1652: what the face was read off -- part of the
+                # mating_face clause, not a clause of its own
+                entry['mating_face_source'] = c['mating_face_source']
         elif face == UNKNOWN:
             unknown.append(f"interfaces[{ref}].mating_face")
 
@@ -2076,6 +2087,10 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
             base['context']['was_source'] = base['source']
         merged_ctx = dict(base.get('context') or {})
         merged_ctx.update(c.get('context') or {})
+        if 'overhang_mm' in c:
+            # #1714: the side the emitter's band was read along goes with
+            # that band
+            base.pop('overhang_face', None)
         base.update({k: v for k, v in c.items() if k != 'context'})
         # The flag is a statement about THIS brief row, so a row that DOES
         # declare an edge must clear it. Without that, re-merging a document
@@ -2232,7 +2247,7 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
             bmap.pop(f"edge_connectors[{c['ref']}].edge", None)
         for key in ('edge', 'overhang_mm', 'center_on_edge',
                     'along_edge_band', 'max_setback_mm', 'side',
-                    'mating_face'):
+                    'mating_face', 'mating_face_source'):
             if key in c:
                 own = cb.get(key) or (cb.get('overhang_mm.min')
                                       if key == 'overhang_mm' else None)
@@ -2287,6 +2302,8 @@ def _drift_clause_id(kind, ref, key, *, near=None, fragment=None):
         # claim the brief calls `along_edge`, and the report names that.
         if key in ('center_on_edge', 'along_edge_band'):
             key = 'along_edge'
+        if key == 'mating_face_source':     # #1652: part of that clause
+            key = 'mating_face'
         # #959 (#1000): a key the consequence step COMPILED belongs to the
         # declaration it came from -- the setback to `mount_mode`, the face
         # to `cable_entry` or `user_facing`, a derived overhang floor to
@@ -2330,7 +2347,8 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
                             f"the intent has no entry for it"))
             continue
         for key in ('edge', 'center_on_edge', 'along_edge_band',
-                    'overhang_mm', 'max_setback_mm', 'side', 'mating_face'):
+                    'overhang_mm', 'max_setback_mm', 'side', 'mating_face',
+                    'mating_face_source'):
             if key in c and cur.get(key) != c[key]:
                 out.append((
                     _drift_clause_id('interfaces', ref, key,

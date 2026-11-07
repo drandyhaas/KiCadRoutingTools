@@ -237,6 +237,45 @@ Each such pair is listed in `single_ended_diff_pairs` with `pair_reports[]`
 own failure code. The end-of-run `Single-ended:` line and the GUI's completion
 dialog count the deferred pairs by that reason.
 
+**Narrowed to fit (#1742).** On a run with per-layer widths (`--impedance`, or a
+stored impedance declaration), a 2-terminal pair whose coupled route failed and
+whose members the single-ended member fallback then routed is tried once more,
+coupled at a narrower width, before the run ships it single-ended. Its fallback
+copper is lifted for the try and put back if no narrowed route is found, and every
+other net of the run is already on the board, so the try can only replace this
+pair's own single-ended members: it takes room from no other net, and the pair is
+connected either way. Both members are narrowed together -- one width, on a
+centreline map built for it -- from one grid step under the widest layer width down
+to the fab floor (the escalation ladder's floor, raised to a member's own rule),
+widest first; the first width that routes is kept. Then every centreline edge where
+the full-width pair fits goes back to the layer width: the full pair's centreline is
+free there on the full-width map and both full-width members clear every foreign pad,
+via and track. Where a full edge meets a narrow one each member steps across at the
+narrow width, so P and N change width at the same point. The edges beside a via stay
+narrow (the narrowed pitch places the vias). Where a graze neck narrows one member, the
+partner beside it is drawn at that width too, and a width at which the two members
+still do not change width in the same order along their path is skipped for the next
+narrower one, so a narrowed pair ships matched. A narrower trace raises the
+differential impedance, so each narrowed layer also narrows the P/N gap (#1747): to
+the gap that holds the impedance target the layer widths were solved for at the
+narrowed width (`impedance.differential_gap_for_impedance`), never below the gap
+KiCad grades clean between P and N (the pair's net class, a rule binding P against N,
+the run's clearance and the fab floor). The narrower pitch also lets a wider narrowed
+width fit. A narrow trace's own impedance can hold the pair above the target even at
+that floor (on one 4-layer stackup a 100 ohm microstrip pair narrowed from 0.41 mm to
+0.21 mm is about 130 ohm at its 0.19 mm gap and still about 116 ohm at 0.09 mm), and a
+pair whose gap is already its floor keeps it. Without an impedance target (widths from
+a layer-scoped rule) the gap is kept. The pair is reported coupled, with
+`narrowed_to_mm` in its `pair_reports[]` record -- and, per narrowed layer, the gap it
+was built at (`narrowed_gap_mm`) and the impedance that reaches
+(`narrowed_zdiff_ohm`) -- and each member's narrowed copper is
+a `coupled pair narrowed to fit, both members` row in `design_rules` (measured on the
+shipped copper, as the #1725 rows are), which `--strict-sizes` counts. A pair left
+single-ended because it is electrically short, a multi-point pair and a pair with a
+member the input already connects are not tried; a run without per-layer widths never
+narrows a pair. A narrowed pair takes no centreline meanders in length matching
+(regenerating its members from the centreline would lay it back at full width).
+
 **Why the 3 mm absolute floor.** The geometric term alone (`5 × setback =
 10 × (width+gap)` in the auto case) drops to only ~2 mm at tight pitch, which
 is *below* the length at which coupling matters electrically. Below ~λ/10 at
@@ -293,22 +332,36 @@ For each angle:
 1. Check if the position is blocked in the obstacle map
 2. Check if the connector path from stub center is clear
 
+A long bare pad launches from its edge rather than its centre, and the setback is then pulled in by the same distance so the setback point stands where a centre launch would put it.
+
 The first distance with a clear angle wins (0° is preferred unless it sits too close to a neighbouring stub). If no distance works, the ladder is re-run with the launch direction rotated 90°, −90° and 180°, so a terminal buried in a dense row can launch sideways or backwards; such a launch routes like a flipped end (it must wrap around its endpoint).
+
+A pulled-in launch has two far rungs as well, tried straight and then rotated, only once the whole ladder has failed in every direction (#1736). They stand where a centre launch's 1.5× and 2× rungs stand: half and one configured setback past the pulled-in setback. 1.5× and 2× of the pulled-in setback leave even the outermost rung within a third of a millimetre of a long pad's edge, short of where a pair priced at its layer width clears the pads beside its own. They come last because a far launch, tried with the ladder, wins over the rotated launch that routes such a pair better.
 
 ### Extra Clearance
 
 The centerline is routed with extra clearance to accommodate both P and N tracks:
 
 ```python
-# Extra clearance = offset from centerline to the P/N track centres
-extra_clearance = (track_width + diff_pair_gap) / 2
+# Extra clearance = offset from centerline to the P/N track centres, on each
+# layer that layer's own (diff_pair_routing.centreline_extra_clearance)
+extra_clearance(l) = (layer_width(l) + diff_pair_gap) / 2
 ```
 
 It is added to the ordinary single-track keep-out (half the track width plus the clearance), so each offset track keeps its clearance from every obstacle.
-The map carries this one offset, the call's, for every layer. A layer wider than the
-pair's own width (an `--impedance` outer layer above `--track-width`) runs at its own
-wider pitch (below), so a segment of it that comes inside a neighbour's clearance is
-necked there when it is emitted, the same fab-floored neck the terminal legs get.
+Every stamp on one layer (tracks, pads, the via ring on that layer, the board edge and
+cut-outs, keep-out areas, pour barriers and hole keep-outs) takes its layer's own offset;
+a stamp across the stack (where a via may sit) keeps the call's,
+`(track_width + diff_pair_gap) / 2`. The call's offset on every layer let the outer
+member on a layer wider than `--track-width` (an `--impedance` outer layer) come up to
+(layer width - track width) / 2 inside a neighbour's clearance, where it was necked
+alone, shipping the pair with one member narrow beside a full-width partner; the widest
+layer's offset on every layer reserved a narrow stripline layer room no member there
+needs (#1729). Pads and the board edge reserve the layer's width too, as track and via
+stamps do (`GridRouteConfig.stamp_track_width`, #1736): at the call's track width a
+member at its layer width came (layer width - track width) / 2 inside a foreign pad's
+clearance, and was necked there. A segment that still grazes is necked where it is
+emitted, the same fab-floored neck the terminal legs get.
 
 ## P/N Path Generation
 
@@ -609,7 +662,17 @@ from the terminal escapes (`_route_direct_coupled_middle`):
    the partner's **original fanout stub** (excluded from the diff-pair obstacle
    map, so re-added here) — is added as an obstacle, so a side-swap leg routes
    *around* it. That is where polarity is resolved: at the pads, by independent A*,
-   with no coupled crossing.
+   with no coupled crossing. A leg's escape via keeps out of the connector region
+   of every pair not yet routed, as the centreline map's vias always have (#1736):
+   in a row of bare connector pads, a via dropped in front of the next pair's pads
+   sealed its launch. When no leg attaches on the run's maps, whose pads and board
+   edge reserve the layer's width, the legs are routed once more on a map that
+   stamps them at the call's track width (`routing_context.hybrid_leg_maps`,
+   #1736), built the first time a hybrid needs it. On a fine-pitch part whose
+   layer width is wider than its pads, a leg at that width fits only along its
+   own pad's centreline, and the pad stamp's half-cell corner keep-out can close
+   that line. The assembled route is still graded at the legs' real width against
+   foreign pads, vias and tracks, so a leg that grazes is rejected, not shipped.
 
    **Boxed-endpoint handling.** A bare-pad stub tip can sit in a foreign keep-out
    tight enough that the leg can't get a via in *at the tip* — but a via still
@@ -681,6 +744,11 @@ not boxed, or open the obstruction in placement. The hybrid is gated by
 `diff_pair_hybrid_escape` (default on) and returns the pair to the normal failure
 path (single-ended follow-up) when it can't lay a clean route, so it never makes a
 pair worse.
+
+A hybrid-routed pair is a blocker a later pair can name, as any routed pair is
+(#1736): its middle, legs and vias are read off the board by the blocking
+analysis, so a pair whose launch they seal can rip it and route, rather than
+being told no routed net blocks it.
 
 **How it is reported (#766).** A hybrid-routed pair is genuinely routed — its pads
 connect and its copper is DRC-clean — so it keeps its place in `routed_diff_pairs`

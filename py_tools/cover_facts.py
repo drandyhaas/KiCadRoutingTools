@@ -18,6 +18,12 @@ frame (the footprint's local axes; axis 0 = local +x, 90 = local +y, as a
     the designer's own library is the usual one);
   * what its resolved models raise over the board (a card or module model
     attached to it): the raised extent and its measured underside;
+  * the air gaps INSIDE its own models (#1720): where a model has solid both
+    under and over a gap -- a socket's card slot, a side-entry housing's
+    mouth -- the gap's floor and ceiling above the face, each run of cells
+    with one floor and ceiling (to `GAP_ROUND_MM`) a row with its area and
+    extent, largest first. The model's geometry: what the socket's drawing
+    calls its card seat is the datasheet's, and is weighed against this;
   * the parts that could be its standoffs: standoffs and mounting holes (a
     hole 2 mm or wider, at most one numbered pad) on its face or through the
     board, within 15 mm of one of its four axes, each with its distance
@@ -68,6 +74,10 @@ OFF_AXIS_MM = 15.0
 STANDOFF_HOLE_MM = 2.0
 #: a connector with fewer pads than this carries no card or module
 CONNECTOR_PADS = 10
+#: a model's gaps are grouped by floor and ceiling to this (mm), and the
+#: largest `GAP_ROWS` groups reported
+GAP_ROUND_MM = 0.1
+GAP_ROWS = 3
 
 
 class MissingRefs(ValueError):
@@ -112,6 +122,41 @@ def _raised(entry):
     return ext, float(lo[up].min()), float(np.median(lo[up]))
 
 
+def _gaps(entry):
+    """The air gaps inside a part's model (`heights._gap_raster`), grouped
+    by floor and ceiling to `GAP_ROUND_MM`: the `GAP_ROWS` largest groups,
+    each {floor_mm, ceiling_mm, gap_mm, area_mm2, extent_local}."""
+    import numpy as np
+    from placement.heights import CELL_MM
+    x0, y0, nx, ny, hf, hc = entry
+
+    def dec(hx):
+        a = np.frombuffer(bytes.fromhex(hx), '<u2').reshape(nx, ny)
+        return np.where(a == 65535, np.nan, a / 100.0)
+    lo, hi = dec(hf), dec(hc)
+    have = np.isfinite(lo) & np.isfinite(hi)
+    if not have.any():
+        return []
+    ii, jj = np.nonzero(have)
+    kf = np.round(lo[have] / GAP_ROUND_MM).astype(int)
+    kc = np.round(hi[have] / GAP_ROUND_MM).astype(int)
+    rows = []
+    for f, c in set(zip(kf.tolist(), kc.tolist())):
+        m = (kf == f) & (kc == c)
+        gi, gj = ii[m], jj[m]
+        rows.append({'floor_mm': round(float(np.median(lo[have][m])), 2),
+                     'ceiling_mm': round(float(np.median(hi[have][m])), 2),
+                     'area_mm2': round(float(m.sum()) * CELL_MM * CELL_MM, 2),
+                     'extent_local': [float(round(v, 3)) for v in (
+                         x0 + gi.min() * CELL_MM, y0 + gj.min() * CELL_MM,
+                         x0 + (gi.max() + 1) * CELL_MM,
+                         y0 + (gj.max() + 1) * CELL_MM)]})
+        rows[-1]['gap_mm'] = round(rows[-1]['ceiling_mm']
+                                   - rows[-1]['floor_mm'], 2)
+    rows.sort(key=lambda r: (-r['area_mm2'], r['floor_mm']))
+    return rows[:GAP_ROWS]
+
+
 def _models(text, board, refs):
     """The model references each footprint in `refs` names, and whether
     each resolves (as the height measurement stages them)."""
@@ -144,6 +189,7 @@ def facts(pcb, board, refs=None):
     h = for_board(pcb, board)
     raw = getattr(h, 'raw', None) or {}
     rasters = raw.get('covers') or {}
+    gap_rasters = raw.get('gaps') or {}
     geo = board_bodies(pcb, board)
     if refs:
         missing = [r for r in refs if r not in fps]
@@ -187,6 +233,9 @@ def facts(pcb, board, refs=None):
                'pose': [round(v, 4) for v in pose], 'height_mm': h.height(r),
                'height_from': (h.top.get(r) or (None, None))[1],
                'models': models.get(r, [])}
+        gaps = _gaps(gap_rasters[r]) if r in gap_rasters else []
+        if gaps:
+            row['model_gaps'] = gaps
         rz = _raised(rasters[r]) if r in rasters else None
         if rz:
             ext, lo_min, lo_med = rz
@@ -285,6 +334,12 @@ def _print(doc):
                   f"median {rz['underside_median_mm']:g}mm")
         else:
             print("  no resolved model raises anything over the board")
+        for g in c.get('model_gaps') or ():
+            e = g['extent_local']
+            print(f"  gap in its model (the model's, not the datasheet's): floor "
+                  f"{g['floor_mm']:g}mm, ceiling {g['ceiling_mm']:g}mm ({g['gap_mm']:g}mm) "
+                  f"over {g['area_mm2']:g}mm2, local x {e[0]:.2f}..{e[2]:.2f}, "
+                  f"y {e[1]:.2f}..{e[3]:.2f}")
         for s in c['standoff_candidates']:
             print(f"  standoff? {s['ref']} ({s['footprint']}, {s['side']}"
                   f"{', through' if s['through_hole'] else ''}): axis {s['axis_deg']}, "

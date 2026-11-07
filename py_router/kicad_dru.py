@@ -15,7 +15,10 @@ expression engine would silently manufacture wrong clearances):
   - ``(constraint clearance (min <val>))`` rules whose scope is pure layers:
       * a ``(layer <name>|outer|inner)`` clause, and/or
       * a ``(condition "A.onLayer('X') || B.onLayer('Y') ...")`` expression
-        containing ONLY onLayer terms joined by ``||``
+        containing ONLY onLayer terms joined by ``||`` (KiCad 10 no longer
+        compiles onLayer and then enforces no rule of the file;
+        design_rules.dru_refusals names it. Use existsOnLayer, which takes a
+        wildcard, or a layer clause)
   - a rule with NO scope applies to every copper layer (KiCad semantics)
   - later rules override earlier ones per layer (KiCad's engine walks the
     rules forward in file order; the last matching rule wins each field)
@@ -979,7 +982,10 @@ def install_track_clearances(config, track_clearances, input_file,
 # == 'HS'`, compared as KiCad compares it -- case-insensitive, a '*'/'?'
 # literal a wildcard), joined by && || !. A rule with a layer clause, a layer,
 # area, diff-pair or coupled term stays out (layer and coupled rules have their
-# own channels; the rest is #865).
+# own channels; the rest is #865), and so does a pad-scoped term, memberOfFootprint
+# or Pad_Number: this channel prices a net and a pad type, never one pad. Such a
+# rule is NOT GRADED by check_drc, which tags the violations it may make legal
+# `unverified`, reading the pad's own number (`design_rules.rule_may_match`).
 #
 # The grader reads it PAIR-EXACT (`ScopedClearanceRules.pair_value`). The
 # router's obstacle map is shared across a call's routed set, so it prices

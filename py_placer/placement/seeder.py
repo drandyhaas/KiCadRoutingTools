@@ -62,12 +62,21 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # `BOARD_TOL`: rounding, the same allowance candidate_valid's own board
     # tests make, so the two never split on a courtyard flush with the edge.
     from .legality import BOARD_TOL
-    if state.edge_gate.rect_outside_amount(r) > BOARD_TOL:
+    # #628 / #1723: the rings the part owns -- its own milled relief, a
+    # cutout it stood over at its seed pose -- as `candidate_valid` exempts
+    # them, so the two seat tests agree.
+    _own = getattr(state, '_owned_rings', None)
+    _skip = _own(ref) if _own is not None else None
+    if state.edge_gate.rect_outside_amount(r, skip_rings=_skip) > BOARD_TOL:
         return False
     # #1257: the pad copper, for the few parts the courtyard test above cannot
     # vouch for -- a cached float compare for every other one. 1e-6 is the
-    # gate's own threshold (`legality.EPS`, check_assembly's `d > EPS`).
-    if (_pad_copper_overhang(state, ref) > state.edge_gate.margin
+    # gate's own threshold (`legality.EPS`, check_assembly's `d > EPS`). A
+    # part over a cutout of its own (#1723) is one: its courtyard is not
+    # held off that window, so its copper is measured.
+    _oc = getattr(state, '_owned_cutouts', None)
+    if ((_pad_copper_overhang(state, ref) > state.edge_gate.margin
+         or (_oc is not None and _oc(ref)))
             and _pad_copper_off_board(state, ref, x, y, rot) > 1e-6):
         return False
     # #962: and the copper the footprint draws (a tab, an antenna), for the

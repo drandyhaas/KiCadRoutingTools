@@ -314,6 +314,31 @@ class MPSResult:
     geometric_conflicts: Dict[int, Set[int]] = None           # All crossings regardless of layer (for swap checking)
 
 
+def via_height_in_length(pcb_data) -> bool:
+    """Does a via's stackup height count toward a net's length on this board
+    (#1731)? The board's Board Setup "use stackup height for length
+    calculations", `rules.use_height_for_length_calcs` in its .kicad_pro:
+    with it off, KiCad's length and skew DRC charge no via any barrel at all
+    (kicad-cli 10.0.6: track length plus pad-to-die, exactly, for a via-in-pad,
+    a via between two track layers and a pad-to-pad chain through vias). The
+    live board's value when the GUI built `pcb_data`
+    (`PCBData.use_height_for_length_calcs`), else the sibling project's, else
+    KiCad's default, True."""
+    live = getattr(pcb_data, 'use_height_for_length_calcs', None)
+    if isinstance(live, bool):
+        return live
+    path = getattr(pcb_data, 'source_path', '') or ''
+    if path:
+        try:
+            from fix_kicad_drc_settings import project_rules
+            v = project_rules(path).get('use_height_for_length_calcs')
+        except Exception:
+            v = None
+        if isinstance(v, bool):
+            return v
+    return True
+
+
 def calculate_route_length(segments: List[Segment], vias: List[Via] = None, pcb_data=None) -> float:
     """
     Calculate the total length of a routed path.
@@ -330,8 +355,10 @@ def calculate_route_length(segments: List[Segment], vias: List[Via] = None, pcb_
     for seg in segments:
         total += segment_length(seg)
 
-    # Add via barrel lengths if pcb_data with stackup is provided
-    if vias and pcb_data and hasattr(pcb_data, 'get_via_barrel_length'):
+    # Add via barrel lengths if pcb_data with stackup is provided, and the
+    # board counts a via's height toward a length (#1731)
+    if vias and pcb_data and hasattr(pcb_data, 'get_via_barrel_length') \
+            and via_height_in_length(pcb_data):
         from geometry_utils import via_end_layers
         for via in vias:
             if via.layers and len(via.layers) >= 2:
@@ -354,8 +381,9 @@ def calculate_via_barrel_length(vias: List[Via], pcb_data) -> float:
     Returns:
         Total via barrel length in mm
     """
-    if not vias or not pcb_data or not hasattr(pcb_data, 'get_via_barrel_length'):
-        return 0.0
+    if not vias or not pcb_data or not hasattr(pcb_data, 'get_via_barrel_length') \
+            or not via_height_in_length(pcb_data):
+        return 0.0      # #1731: a board that counts no via height
 
     from geometry_utils import via_end_layers
     total = 0.0
@@ -527,12 +555,15 @@ def length_measure_note() -> str:
 #  5. The via is charged BOARD_STACKUP::GetLayerDistance(first, last): the
 #     stackup between them, from 10.0.2 with half of each INNER copper layer
 #     that ends the span.
+#     Every release: a board whose Board Setup does not "use stackup height
+#     for length calculations" (`rules.use_height_for_length_calcs` off)
+#     charges no via anything (#1731, `via_height_in_length`).
 #
 # Items are taken in board-file order; KiCad takes them in memory order, which
 # matters only where a joint could merge either way. Not modelled: true arc
 # length (an arc is measured on the parser's chords, within a few um), oval,
-# custom and tilted pad outlines (the exact outline is used),
-# `use_height_for_length_calcs` off, and a board with no (stackup) block --
+# custom and tilted pad outlines (the exact outline is used), and a board
+# with no (stackup) block --
 # KiCad builds a default stack from the board thickness; here the barrel is 0.
 _NM_PER_MM = 1_000_000
 
@@ -1047,6 +1078,8 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
     """The barrel KiCad charges each of `vias`, in nm, as release `key` does
     (step 1 and 5 of the block comment above)."""
     from geometry_utils import via_end_layers
+    if not via_height_in_length(pcb_data):
+        return [0] * len(vias)       # #1731: Board Setup counts no via height
     copper = _copper_stack(pcb_data)
     rank = {l: i for i, l in enumerate(copper)}
     half = key >= (10, 0, 2)
@@ -1319,9 +1352,10 @@ def net_pads_joined(pcb_data: PCBData, net_id: int, pads=None,
     Copper joins where it touches, as check_connected and KiCad have it
     (#1629): a track whose round end reaches a pad's exact outline (a
     rotated pad, a cap that stops short of the edge), a via whose barrel
-    overlaps a pad, two same-net pads whose copper overlaps. Before, it read
-    a point inside the pad's axis box only, and check_drc and board_score
-    skipped the skew of three connected pairs KiCad graded out of range.
+    overlaps a pad, two same-net pads whose copper overlaps, two same-layer
+    tracks that cross mid-span (#1705). Before, it read a point inside the
+    pad's axis box only, and an X crossing not at all, and check_drc and
+    board_score skipped the skew of connected pairs KiCad graded out of range.
     False for an unrouted net, a net carrying only fanout stubs, a broken net,
     one whose pads meet only through a plane, and a net with fewer than two
     copper pads. `pads` overrides which pads must be joined (default: every
@@ -1450,9 +1484,16 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
     net (close_soft_joints): joined for free, a pair matched here to
     0.0006 mm shipped 0.76 mm of KiCad skew.
 
+    A loop the 2-pad walk leaves out is charged when it meets the path at
+    ONE node and runs along a segment the path uses (#1704,
+    `_loops_off_one_node`): a track that runs past a corner and comes back
+    along itself, which the cleanup cannot take out and KiCad charges. Left
+    out, a pair KiCad read 2 mm apart read matched.
+
     What it still does not read is copper the cleanup will remove: a branch
-    or loop the walk leaves out is not in it, which on copper that already
-    shipped (no cleanup to come) KiCad does charge."""
+    or a second way between two points the walk leaves out is not in it,
+    which on copper that already shipped (no cleanup to come) KiCad does
+    charge -- so shipped copper is measured with `net_match_length`."""
     pads = _copper_pads(pcb_data, net_id)
     if len(pads) < 2 or not net_pads_joined(pcb_data, net_id, pads, tolerance):
         return None
@@ -1464,7 +1505,9 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
     adjacency, pad_nodes = graph
     infos = detail['edges']
     if len(pads) == 2:
-        picked = _pad_pair_walk(adjacency, infos, pad_nodes, pads[0], pads[1])
+        walk_nodes: List[int] = []
+        picked = _pad_pair_walk(adjacency, infos, pad_nodes, pads[0], pads[1],
+                                nodes=walk_nodes)
         if picked is None:
             return None
         # the track pieces lying inside either pad (both ends joined to its
@@ -1475,6 +1518,7 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
             if any(u in j and v in j for j in joined):
                 picked.extend(info for _w, info in lst
                               if info and info[0] == 'track')
+        picked.extend(_loops_off_one_node(infos, pad_nodes, walk_nodes, picked))
         return _selected_copper_mm(pcb_data, net_id, picked, detail) + die
     keep = {n for hubs in pad_nodes.values() for n in hubs}
     edges = [(u, v, info) for (u, v), lst in infos.items() for _w, info in lst]
@@ -1502,9 +1546,91 @@ def net_signal_length(pcb_data: PCBData, net_id: int,
     return _selected_copper_mm(pcb_data, net_id, picked, detail) + die
 
 
-def _pad_pair_walk(adjacency, infos, pad_nodes, pad_a, pad_b):
+def _loops_off_one_node(infos, pad_nodes, walk_nodes, picked):
+    """The edge infos of copper the 2-pad walk left out that the cleanup
+    keeps (#1704): a loop meeting the pad-to-pad path at ONE node, with a
+    piece of a segment the walk uses in it.
+
+    The walk takes the shortest path, so it leaves out every loop. A loop
+    that rejoins the path at two nodes is a second way between them, which
+    the cleanup collapses to one. A loop that meets it at one node is not:
+    it is a track that runs on past a corner and comes back along itself,
+    where the return leg's far end lands on the outbound segment, which is
+    cut there. The cleanup removes copper in whole segments (and a dead
+    end's tail), so it cannot take out the overshoot of a segment the path
+    runs along, nor, since a return leg's removal would leave that
+    overshoot's end dangling, the return leg: KiCad charges both. A loop
+    made only of segments the walk does not touch (a ring hanging off the
+    path) the cycle prune and the dead-end sweep do remove, and it stays
+    out."""
+    in_walk = {id(i) for i in picked if i}
+    walk_segs = {id(i[1]) for i in picked if i and i[0] == 'track'}
+    hubs = {h for hs in pad_nodes.values() for h in hs}
+    out_edges = [(u, v, info) for (u, v), lst in infos.items() for _w, info in lst
+                 if info and id(info) not in in_walk]
+    if not out_edges:
+        return []
+    # trim the dead ends (leaves that are not pads), as the cleanup does;
+    # what is left of the walk's leftovers is loops
+    deg: Dict[int, int] = {}
+    for (u, v), lst in infos.items():
+        for _w, info in lst:
+            if info is not None:
+                deg[u] = deg.get(u, 0) + 1
+                deg[v] = deg.get(v, 0) + 1
+    incident: Dict[int, List[int]] = {}
+    for i, (u, v, _info) in enumerate(out_edges):
+        incident.setdefault(u, []).append(i)
+        incident.setdefault(v, []).append(i)
+    alive = [True] * len(out_edges)
+    todo = [n for n in incident if deg.get(n) == 1 and n not in hubs]
+    while todo:
+        node = todo.pop()
+        if deg.get(node) != 1:
+            continue
+        for i in incident.get(node, ()):
+            if alive[i]:
+                alive[i] = False
+                for end in out_edges[i][:2]:
+                    deg[end] -= 1
+                    if end != node and deg[end] == 1 and end not in hubs:
+                        todo.append(end)
+    # each loop: the left-out copper joined through nodes OFF the path, and
+    # the path nodes it meets
+    on_path = set(walk_nodes) | hubs
+    parent: Dict[int, int] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    loop = [i for i, a in enumerate(alive) if a]
+    for i in loop:
+        u, v, _info = out_edges[i]
+        if u not in on_path and v not in on_path:
+            parent[find(u)] = find(v)
+    groups: Dict[object, List[int]] = {}
+    for i in loop:
+        u, v, _info = out_edges[i]
+        off = u if u not in on_path else (v if v not in on_path else None)
+        groups.setdefault(('chord', i) if off is None else find(off), []).append(i)
+    picked_more = []
+    for ids in groups.values():
+        meets = {n for i in ids for n in out_edges[i][:2] if n in on_path}
+        if len(meets) != 1:
+            continue                    # a second way between two path nodes
+        loop_infos = [out_edges[i][2] for i in ids]
+        if any(info[0] == 'track' and id(info[1]) in walk_segs for info in loop_infos):
+            picked_more.extend(loop_infos)
+    return picked_more
+
+
+def _pad_pair_walk(adjacency, infos, pad_nodes, pad_a, pad_b, nodes=None):
     """The edge infos of the shortest walk of `_net_track_graph` from
-    `pad_a`'s hubs to `pad_b`'s, or None when the two are not joined."""
+    `pad_a`'s hubs to `pad_b`'s, or None when the two are not joined.
+    `nodes`, when given, is filled with the nodes the walk passes."""
     import heapq
     starts = pad_nodes.get(id(pad_a)) or []
     goals = set(pad_nodes.get(id(pad_b)) or [])
@@ -1533,8 +1659,12 @@ def _pad_pair_walk(adjacency, infos, pad_nodes, pad_a, pad_b):
     if end is None:
         return None
     picked = []
+    if nodes is not None:
+        nodes.append(end)
     while end in prev:
         u = prev[end]
+        if nodes is not None:
+            nodes.append(u)
         lst = infos.get((min(u, end), max(u, end))) or [(0.0, None)]
         picked.append(min(lst, key=lambda wi: wi[0])[1])
         end = u
@@ -1574,6 +1704,44 @@ def _track_reaches_pad_at(pad, x: float, y: float, half_width: float,
     return _point_to_pad_distance()(x, y, pad) <= reach
 
 
+def _segment_crossings(segments) -> Dict[int, List[Tuple[float, float]]]:
+    """id(segment) -> the points where another segment of the same layer
+    CROSSES its centreline (#1705).
+
+    Two same-layer tracks that cross mid-span overlap in copper and KiCad
+    joins them, but neither has an endpoint on the other, so a T-junction cut
+    never meets them. check_connected unions such a pair with the same
+    `segments_intersect` test (#1279 review)."""
+    from geometry_utils import segments_intersect
+    out: Dict[int, List[Tuple[float, float]]] = {}
+    by_layer: Dict[str, list] = {}
+    for s in segments:
+        by_layer.setdefault(s.layer, []).append(
+            (min(s.start_x, s.end_x), max(s.start_x, s.end_x),
+             min(s.start_y, s.end_y), max(s.start_y, s.end_y), s))
+    for items in by_layer.values():
+        items.sort(key=lambda it: it[0])
+        for i, (ax0, ax1, ay0, ay1, a) in enumerate(items):
+            for bx0, bx1, by0, by1, b in items[i + 1:]:
+                if bx0 > ax1:
+                    break
+                if by0 > ay1 or by1 < ay0:
+                    continue
+                if not segments_intersect(a.start_x, a.start_y, a.end_x, a.end_y,
+                                          b.start_x, b.start_y, b.end_x, b.end_y):
+                    continue
+                dax, day = a.end_x - a.start_x, a.end_y - a.start_y
+                dbx, dby = b.end_x - b.start_x, b.end_y - b.start_y
+                den = dax * dby - day * dbx
+                if abs(den) < 1e-15:
+                    continue      # collinear overlap: the endpoint cuts meet it
+                t = ((b.start_x - a.start_x) * dby - (b.start_y - a.start_y) * dbx) / den
+                pt = (a.start_x + t * dax, a.start_y + t * day)
+                out.setdefault(id(a), []).append(pt)
+                out.setdefault(id(b), []).append(pt)
+    return out
+
+
 def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                      tolerance: float = 0.02, detail: Optional[dict] = None):
     """(adjacency, pad_nodes) over ONE net's track copper, with `pads` attached.
@@ -1584,8 +1752,9 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
 
     Copper joins where it touches, as check_connected and KiCad have it
     (#1629): a track node joins a pad when its round cap reaches the pad's
-    exact outline, a via joins a pad its copper overlaps, and two of `pads`
-    whose copper touches on a shared layer join each other.
+    exact outline, a via joins a pad its copper overlaps, two of `pads`
+    whose copper touches on a shared layer join each other, and two tracks
+    of a layer whose centrelines cross meet at the crossing (#1705).
 
     `detail`, when given, is filled with what each edge IS, for a measure
     that reads the copper a walk selected (`_selected_copper_mm`):
@@ -1665,11 +1834,13 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                       'pad', pad))
 
     # Cut each segment at every T-junction (another segment's endpoint on its
-    # interior) and at every disc it passes through, then chain the pieces.
+    # interior), at every point where another segment of the layer CROSSES it,
+    # and at every disc it passes through, then chain the pieces.
     endpoints_by_layer: Dict[str, List[Tuple[float, float]]] = {}
     for s in segments:
         endpoints_by_layer.setdefault(s.layer, []).extend(
             [(s.start_x, s.start_y), (s.end_x, s.end_y)])
+    crossings = _segment_crossings(segments)
 
     for s in segments:
         length = segment_length(s)
@@ -1688,7 +1859,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             perp = abs(-(px - s.start_x) * uy + (py - s.start_y) * ux)
             return t if perp <= max_perp else None
 
-        for (px, py) in endpoints_by_layer.get(s.layer, ()):
+        for (px, py) in endpoints_by_layer.get(s.layer, ()) + crossings.get(id(s), []):
             t = _project(px, py, tolerance)
             if t is not None:
                 cuts.append(t)
@@ -1780,6 +1951,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     pad_nodes: Dict[int, List[int]] = {}
     hubs_by_obj: Dict[int, Dict[str, int]] = {}
     _half_inner = _release_key(length_measure_release()) >= (10, 0, 2)
+    _via_height = via_height_in_length(pcb_data)     # #1731
     for (cx, cy, radius, dlayers, hit, kind, obj) in discs:
         layer_nodes: Dict[str, int] = {}
         for layer in dlayers:
@@ -1810,8 +1982,9 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             # span; the flat share only where the stackup names a step's
             # layers no more
             steps = [_stackup_height_nm(pcb_data, l1, l2, _half_inner) / _NM_PER_MM
+                     if _via_height else 0.0
                      for l1, l2 in zip(dlayers, dlayers[1:])]
-            if len(dlayers) > 1 and not all(steps):
+            if _via_height and len(dlayers) > 1 and not all(steps):
                 span = _stackup_height_nm(pcb_data, dlayers[0], dlayers[-1],
                                           _half_inner) / _NM_PER_MM
                 steps = [span / (len(dlayers) - 1)] * len(steps)

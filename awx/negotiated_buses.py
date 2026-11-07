@@ -643,7 +643,9 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     runs = []
     for b, x in zip(buses, boards):
         j = json.load(open(x[1])) if x else {}
-        runs.append(dict(src=b[0], dest=b[1], mode=b[2], exit=codes.get(b[1]), routed=len(j.get('routed') or []),
+        # (the step's own status is its summary's: the process exits 0 whenever it wrote OUT, #1738)
+        ex = j.get('exit', codes.get(b[1])) if x else codes.get(b[1])
+        runs.append(dict(src=b[0], dest=b[1], mode=b[2], exit=ex, routed=len(j.get('routed') or []),
                          grade=_grade_line(os.path.join(work, 'neg', b[1], 'bus.log')), summary=x[1] if x else None))
     code = max([1 if r['exit'] is None else r['exit'] for r in runs] + [0 if n_conf == 0 else 1])
     with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:

@@ -181,7 +181,10 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                   KICAD_SMOOTH_ROUTE=1/0 overrides. Last
                                   shape pass, still before close (it removes
                                   copper); skips protected / impedance nets
-                                  (_smooth_skip_net_ids).
+                                  (_smooth_skip_net_ids). When it straightened
+                                  anything, the micro-shift runs again on the
+                                  nets its first run left grazing (#1688): the
+                                  neighbour that left no room may have moved.
      10. close_soft_joints     -- LAST ADDITIVE copper step (#319 ordering):
                                   bridge any remaining same-net soft joint.
                                   The subtractive passes above run with the
@@ -364,26 +367,33 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             print(f"{label}Graze nudge: re-bent grazing octolinear jog(s) "
                   f"on {_nz_nets} net(s)")
 
+    def _microshift(scope, unresolved=None):
+        _segs, _nets, _strip, _ = nudge_grazing_microshift(
+            results, pcb_data, scope, clearance=config.clearance,
+            max_shift=(microshift_max_shift if microshift_max_shift is not None
+                       else config.grid_step / 2),
+            keep_input_copper=keep_input_copper,
+            # #436: cross-class-aware graze fix — measure shortfall against each
+            # net's own netclass floor and each foreign net's class, not the global
+            # clearance (daisho's 456 same-class grid grazes, cparti's SW1-vs-SMA).
+            net_clearances=_nc, board_edge_clearance=_bec,
+            # #617: this front HAS a config, so the explicit
+            # `config.hole_clearance` override reaches resolve_hole_clearance
+            # rather than being silently dropped. Both fronts call this pipeline.
+            config=config,
+            unresolved_net_ids=unresolved)
+        counts['microshifted'] += _segs
+        _trace('microshift')
+        strip.extend(_strip)
+        if _segs:
+            print(f"{label}Graze micro-shift: moved copper by its clearance "
+                  f"shortfall on {_nets} net(s)")
+
     _prog("graze micro-shift")
-    _ms_segs, _ms_nets, _ms_strip, _ = (0, 0, [], None) if _judge else nudge_grazing_microshift(
-        results, pcb_data, scope_net_ids, clearance=config.clearance,
-        max_shift=(microshift_max_shift if microshift_max_shift is not None
-                   else config.grid_step / 2),
-        keep_input_copper=keep_input_copper,
-        # #436: cross-class-aware graze fix — measure shortfall against each
-        # net's own netclass floor and each foreign net's class, not the global
-        # clearance (daisho's 456 same-class grid grazes, cparti's SW1-vs-SMA).
-        net_clearances=_nc, board_edge_clearance=_bec,
-        # #617: this front HAS a config, so the explicit
-        # `config.hole_clearance` override reaches resolve_hole_clearance
-        # rather than being silently dropped. Both fronts call this pipeline.
-        config=config)
-    counts['microshifted'] = _ms_segs
-    _trace('microshift')
-    strip.extend(_ms_strip)
-    if _ms_segs:
-        print(f"{label}Graze micro-shift: moved copper by its clearance "
-              f"shortfall on {_ms_nets} net(s)")
+    counts['microshifted'] = 0
+    _ms_unresolved = set()
+    if not _judge:
+        _microshift(scope_net_ids, _ms_unresolved)
 
     if via_nudge:
         _prog("via nudge")
@@ -551,6 +561,11 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   f"{_sm_stats.get('spans', 0)} staircase span(s) on "
                   f"{_sm_nets} net(s), -{_sm_stats.get('saved_mm', 0.0):.2f} mm "
                   f"of copper (#536)")
+            # #1688: a neighbour's jog left a graze no room to shift into, and
+            # this pass has just straightened neighbours. Only those nets.
+            if _ms_unresolved:
+                _prog("graze micro-shift after smoothing")
+                _microshift(_ms_unresolved)
 
     # FINAL copper step (#319 ordering): nothing below may remove copper.
     # KICAD_NO_SOFT_JOINT_BRIDGE=1 is an A/B ablation knob (like

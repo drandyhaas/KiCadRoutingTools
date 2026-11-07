@@ -103,6 +103,7 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     # flat_hierarchy is the repo's only tracked board declaring a NON-Default
     # class (Default 0.2, Wide 0.4). A board with one class cannot tell a
     # working ceiling from a broken one, because there is nothing to cap.
@@ -464,12 +465,11 @@ def main():
     # #768 the PRESENCE of --clearance is a semantic switch, so a step carrying
     # no `clearance` param must also clear the override, or an omitted flag
     # arrives at the engine as a ceiling. Replays the executor's own rule.
+    from kicad_routing_plugin.ai_plan import _runs_cap_pass
+
     def _executor_rule(step):
         _p = step.get("params") or {}
-        _runs_caps = (step["action"] == "optimize_caps"
-                      or (step["action"] == "fanout"
-                          and _p.get("optimize_caps")))
-        if _runs_caps and not _p.get("clearance"):
+        if _runs_cap_pass(step) and not _p.get("clearance"):
             cc = getattr(dlg, 'clearance_check', None)
             if cc is not None and cc.GetValue():
                 cc.SetValue(False)
@@ -498,20 +498,16 @@ def main():
     check("plan: a plain fanout step does NOT clear it",
           _executor_rule({"action": "fanout", "params": {}}) is True)
 
-    # and the rule as SHIPPED. The four arms above run a MIRROR of the
-    # executor's predicate, which is only worth anything while the two
-    # agree -- so assert the shipped text of the predicate itself, not a
-    # bag of loose substrings. The old spelling here was satisfied by
+    # and the rule as SHIPPED. The four arms above call the executor's
+    # predicate and MIRROR the guard around it, which is only worth anything
+    # while the two agree -- so assert the shipped text of the guard itself,
+    # not a bag of loose substrings. The old spelling here was satisfied by
     # 'clearance_check' and 'optimize_caps' appearing ANYWHERE in a
     # 1500-line file, which is true of a file that dropped the rule.
     _plan_src = open(os.path.join(REPO, 'kicad_routing_plugin', 'ai_plan.py'),
                      encoding='utf-8').read()
-    _pred = ('_runs_caps = (step["action"] == "optimize_caps"\n'
-             '                          or (step["action"] == "fanout"\n'
-             '                              and _p.get("optimize_caps")))')
     check("the executor actually carries that rule, verbatim",
-          _pred.replace('\n', '') in _plan_src.replace('\r', '')
-                                              .replace('\n', '')
+          '_runs_caps = _runs_cap_pass(step)' in _plan_src
           and 'if _runs_caps and not _p.get("clearance"):' in _plan_src
           and "_cc.SetValue(False)" in _plan_src,
           "the mirror above no longer matches the shipped predicate, so "

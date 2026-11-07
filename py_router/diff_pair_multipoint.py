@@ -38,7 +38,8 @@ from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair, rank_f
 from stub_layer_switching import apply_bare_pad_target_via
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from polarity_swap import apply_polarity_swap, undo_polarity_swap
-from routing_context import build_diff_pair_obstacles, build_diff_pair_leg_obstacles
+from routing_context import (build_diff_pair_obstacles, build_diff_pair_leg_obstacles,
+                             hybrid_leg_maps)
 
 
 def _segments_properly_cross(a, b, eps: float = 1e-6) -> bool:
@@ -1240,7 +1241,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             # can't launch a *coupled* pair from the pads (CK1's DDR3-bank escape),
             # but each net escapes individually and couples once clear; the coupled
             # middle shortens until reachable and the legs single-end the rest.
-            leg_obstacles = build_diff_pair_leg_obstacles(
+            leg_obstacles, leg_fallback = hybrid_leg_maps(
                 state.base_obstacles, pcb_data, config,
                 state.routed_net_ids, state.remaining_net_ids,
                 state.all_unrouted_net_ids, pair.p_net_id, pair.n_net_id,
@@ -1254,7 +1255,8 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
                          pair.n_net_id: [term_a[1], term_b[1]]}
             hyb = _route_direct_coupled_middle(
                 pcb_data, pair, config, obstacles, config.layers,
-                leg_obstacles=leg_obstacles, endpoints=hyb_eps, terminal_pads=_leg_pads)
+                leg_obstacles=leg_obstacles, endpoints=hyb_eps, terminal_pads=_leg_pads,
+                leg_fallback=leg_fallback)
             if (hyb is not None and not hyb.get('failed') and
                     not _pn_tracks_cross(hyb.get('new_segments', []), pair.p_net_id, pair.n_net_id) and
                     not _crosses_committed_legs(hyb.get('new_segments', []), committed_segments)):

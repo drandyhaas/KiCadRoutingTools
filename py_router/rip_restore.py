@@ -17,7 +17,10 @@ freed corridor (that is WHY the #134 pass leaves such nets ripped). So:
      the net's pads that individually clear current copper, so the pad
      keeps its landing site for later passes (pcb_data-only insertion; an
      unrouted net's stubs are stamped per-prepare from pcb_data, so no
-     direct obstacle-map surgery and no #309 ref-count exposure).
+     direct obstacle-map surgery and no #309 ref-count exposure). No result
+     owns a stub this run laid, so the result whose commit makes the net
+     need it (a pad reached only through it) adopts it and it ships with
+     that route (`pcb_modification.adopt_restored_stubs`).
 
 The saved payload rides pcb_data._rip_saved, recorded by rip_up_net for
 every rip and popped by restore_net -- so any net still ripped at terminal
@@ -312,6 +315,20 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
     # extending pcb_data with copper the map never sees.
     pcb_data.segments.extend(kept_s)
     pcb_data.vias.extend(kept_v)
+    # Stubs this run laid are owned by no result now, so they would never be
+    # written, and the copper sync would take them back off the board: the
+    # result whose commit makes the net need them adopts them
+    # (`pcb_modification.adopt_restored_stubs`). Copper the step was handed is
+    # in the file already.
+    _inp = getattr(pcb_data, '_input_copper', None)
+    _inp_ids = _inp[0] if _inp else frozenset()
+    if not saved_result.get('is_existing_route'):
+        _ledger = getattr(pcb_data, '_stub_restores', None)
+        if _ledger is None:
+            _ledger = pcb_data._stub_restores = {}
+        for _o in kept_s + kept_v:
+            if id(_o) not in _inp_ids:
+                _ledger.setdefault(_o.net_id, []).append(_o)
     from obstacle_cache import refresh_net_obstacles
     refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
                           config, sorted(own))

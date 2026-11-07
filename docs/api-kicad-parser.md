@@ -189,6 +189,7 @@ pads that `net_id`'s copper may ignore because a footprint's
 | `die_delay` | float | The time twin in **ps**, `(die_delay …)` / `PAD.GetPadToDieDelay()` (KiCad 10; `0.0` on KiCad 9). Time matching adds it; a `die_length` is never converted into a delay, as in KiCad 10. Set by both parse paths (#1248). |
 | `sense` | str | The `sense:<REF>.<PAD>` group this pad is a SENSE pad of (#1279): a pad of the branch's net that its member copper touches, the join pad excepted. Set only on a protected branch; the router never attaches new copper to it. `''` otherwise |
 | `zone_connection` | str or None | The pad's zone-connection **override**, spelled like `Zone.pad_connection` (`'none'`, `'thermal'`, `'solid'`, `'thru_hole_only'`): its own `(zone_connect N)`, else its footprint's, **resolved** at parse time like `local_clearance` (pcbnew: `PAD.GetZoneConnectionOverrides()`). `None` = no override, so each zone's `connect_pads` decides. Never read it raw to ask whether a pour reaches the pad: `pad_zone_connection(pad, zone)` applies the zone and the thermal-for-PTH rule, and `pad_joins_zone(pad, zone)` is `False` exactly when KiCad keeps that zone's fill off the pad (`'none'`). Then the fill model knocks the pad out at the zone's clearance and `check_net_connectivity` gives it no pour credit, so the pad needs a track, a via or another pad (a GND solder-jumper half with `(zone_connect 0)` shipped open while every grade credited the B.Cu pour). A `.kicad_dru` `zone_connection` rule, which KiCad ranks between the pad's and the footprint's override, is not read. Set by both parse paths; `compare_pcb_data` diffs it |
+| `uuid` | str | The pad's own KiCad uuid (`''` when the file gives none). `check_drc.kicad_tests_tie_waiver` reads it: KiCad 10 waives a net-tie contact at a partner pad that is not a plain rect only when the track's uuid sorts before the pad's (#1737). Set by both parse paths; `compare_pcb_data` diffs it |
 
 Pad dimensions are resolved into board space using the pad's **absolute** angle
 (the KiCad `(at … angle)` already includes the footprint rotation; applying the
@@ -325,7 +326,11 @@ pads owns a land pattern (modelled, kept on copper), a pad-less one is a logo
 (relocated to silk by the writer, as #146 has always done, and therefore not
 modelled). The segments are the **perimeter**; a filled shape's interior is
 its `graphic_ring` (#1181), which the obstacle map stamps for every foreign net
-and check_drc grades containment in -- the same for board-level graphics. The
+and check_drc grades containment in -- the same for board-level graphics. A
+generator that lays copper without reading that map asks
+`check_drc.FilledCopperGate` (`filled_graphic_refusal` for a few vias): the
+fanout engines, the layer-switch and swap vias, the GND return and stitching
+vias (#1682, #1683). The
 off-outline grade (`check_drc.footprint_graphic_outline_census`, #962) reads
 `Segment.graphic_filled` to look inside a filled shape, and another part's
 PADS on the copper (`check_drc.footprint_graphic_pad_census`, #1266) are
@@ -372,7 +377,7 @@ layers only.
 |-------|------|---------|
 | `layers` | Dict[int, str] | Layer ID → name for all layers |
 | `copper_layers` | List[str] | Copper layer names, top to bottom. Includes every `.Cu` layer regardless of declared use-type (`signal`, `power`, `mixed`, `jumper`) — KiCad often types plane layers `power`. |
-| `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts (board-level graphics AND footprint-embedded outline shapes), or `None` |
+| `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts (board-level graphics AND footprint-embedded outline shapes), or `None`. An arc is read off chords of 5 um sag (`BOUNDS_CHORD_EPS`) on both parse paths, coarser than the rings' 0.5 um (`EDGE_CHORD_EPS`), so a ring can stand up to 5 um past it (#1700). To ask whether a ring fits, read the bounds at the ring's sag, as `floorplan.outline_state` does |
 | `board_outline` | List[Tuple[float, float]] | Outline polygon for non-rectangular boards (empty if rectangular); the largest outer ring when there are several |
 | `board_outlines` | List[List[Tuple]] | EVERY outer ring (#304): split keyboards drawn as two halves, panels. Empty on a single-outline or rectangular board, which means "use `board_outline`" |
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
@@ -744,7 +749,7 @@ large file:
 |----------|---------|
 | `read_board_text(path, quiet=False)` | the file's text as KiCad reads it (teardrop-token repair, one-line reflow) — what `parse_kicad_pcb` hands the extractors |
 | `extract_layers(content)` | `BoardInfo` (layers, bounds, stackup, outline, cutouts) |
-| `extract_board_bounds(content)` | `(min_x, min_y, max_x, max_y)` from Edge.Cuts, or `None` |
+| `extract_board_bounds(content, chord_eps=BOUNDS_CHORD_EPS)` | `(min_x, min_y, max_x, max_y)` from Edge.Cuts with an arc read at chord sag `chord_eps`, or `None` |
 | `extract_stackup(content)` | `List[StackupLayer]` |
 | `extract_nets(content, kicad_version=0)` | `(Dict[int, Net], Dict[str, int])` — nets and name→id; the dialect is read from the content, `kicad_version` is kept for callers |
 | `extract_footprints_and_pads(content, nets, name_to_id=None, duplicates=None, board_copper=None)` | `(Dict[str, Footprint], Dict[int, List[Pad]])` — `duplicates`, if given, is FILLED with the duplicate-reference counts; `board_copper` (the board's copper layers) puts a plated pad on all of them, as pcbnew does |

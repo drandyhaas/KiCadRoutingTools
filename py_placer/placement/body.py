@@ -475,8 +475,10 @@ def estimated_courtyards(pcb_data, pcb_file: Optional[str] = None,
     """`{ref: CourtyardEstimate}` for every pad-bearing part on the board
     that draws no courtyard, except a container (`legality._container_kind`:
     a board-sized outline or pin frame other parts sit inside by design,
-    which no consumer spaces as a body). `bodies` is `board_bodies`' answer
-    when the caller already holds it."""
+    which no consumer spaces as a body). A fence (a shield frame, #1722)
+    keeps its estimate: it is a container to the courtyard channels alone,
+    which read `container_refs`, and a cover when its height is known.
+    `bodies` is `board_bodies`' answer when the caller already holds it."""
     from placement.legality import _container_kind, footprint_side
     if bodies is None:
         bodies = board_bodies(pcb_data, pcb_file)
@@ -487,7 +489,7 @@ def estimated_courtyards(pcb_data, pcb_file: Optional[str] = None,
         if fp is None or geom.source in (SOURCE_COURTYARD, SOURCE_NONE):
             continue
         if _container_kind(pcb_data, ref, geom.occupancy_local, geom.source,
-                           False):
+                           False) not in (None, 'fence'):
             continue
         est = estimate_courtyard(fp, geom, footprint_side(fp))
         if est is not None:

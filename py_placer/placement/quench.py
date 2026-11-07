@@ -28,7 +28,8 @@ import sys as _sys
 _sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..',
                                                  'rust_router')))
 import grid_router  # noqa: E402  the placement kernels: crossing_pairs, mst_prim
-from placement.parser import (courtyard_for_side, extract_courtyard_sides,
+from placement.parser import (courtyard_for_side, extract_courtyard_boxes,
+                              extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local
 from placement import heights as _heights
@@ -664,7 +665,7 @@ class _NearIndex:
     def build(cls, parts):
         """An index over `parts`, or None when one is not a `_Part` (it
         could be moved without marking the index)."""
-        if not all(type(p) is _Part for p in parts.values()):
+        if not all(type(p) in _PART_TYPES for p in parts.values()):
             return None
         return cls(parts)
 
@@ -781,11 +782,15 @@ def _footprint_box(rect, tht):
     if tht is None:
         box = tuple(rect)
         s = box[0] + box[1] + box[2] + box[3]
+        if type(rect) is not tuple:       # a courtyard of several boxes
+            s += sum(map(sum, legality.far_boxes(rect)))
     else:
         box = (min(rect[0], tht[0]), min(rect[1], tht[1]),
                max(rect[2], tht[2]), max(rect[3], tht[3]))
         s = (rect[0] + rect[1] + rect[2] + rect[3]
              + sum(map(sum, legality.far_boxes(tht))))
+        if type(rect) is not tuple:
+            s += sum(map(sum, legality.far_boxes(rect)))
     # `s - s` is 0.0 exactly when `s` is finite, and `s` is finite only
     # when every term is: a NaN or an infinity propagates (an overflow is
     # refused too, which only costs the prune).
@@ -839,14 +844,17 @@ def locked_body_locals(pcb_data, pcb_file
     six parts seated there made every grouped candidate NOT BUILDABLE. A
     MOVABLE part keeps its pad box -- the body model as a seat currency for
     every part (#1182) was A/B'd and rejected -- and a silk outline or a
-    pin-1 marking is no body (#896, #1201), nor is a container's outline,
-    which other parts sit inside by design."""
+    pin-1 marking is no body (#896, #1201), nor is a board-sized container's
+    outline, which other parts sit inside by design. A fence (#1722) keeps
+    its body here, as in `body.estimated_courtyards`: the courtyard channels
+    skip it as a container, and a fence whose height is known is a cover."""
     from placement import body as _body
     out = {}
     for ref, g in _body.board_bodies(pcb_data, pcb_file).items():
         if (g.source == _body.SOURCE_FAB and g.occupancy_local is not None
-                and not legality._container_kind(pcb_data, ref, g.occupancy_local,
-                                                 g.source, False)):
+                and legality._container_kind(pcb_data, ref, g.occupancy_local,
+                                             g.source, False)
+                in (None, 'fence')):
             out[ref] = tuple(g.occupancy_local)
     return out
 
@@ -857,10 +865,10 @@ class _Part(_NearWatched):
                  'nets', 'footprint_name', 'orig_rot',
                  'side', 'has_tht', 'sides', 'tht_by_rot', 'padbox_local',
                  'padbox_by_rot', 'grade_by_rot', '_live_rects',
-                 '_pg_rot', '_pg_pose', 'drawn_local')
+                 '_pg_rot', '_pg_pose', 'drawn_local', '_shape_live')
 
     def __init__(self, ref, fp, courtyard_sides, locked, body_local=None,
-                 drawn_sides=None):
+                 drawn_sides=None, court_boxes=None):
         self._live_rects = None
         self.ref = ref
         self.footprint_name = fp.footprint_name
@@ -888,10 +896,25 @@ class _Part(_NearWatched):
         lb = body_local
         if lb is None:
             lb = grade_lb
-        self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
-        self.grade_by_rot = (self.bounds_by_rot if lb is grade_lb else
-                             {r: _rotate_local_bounds(*grade_lb, r)
-                              for r in ROTATIONS})
+        # A courtyard drawn as several shapes (`parser.
+        # extract_courtyard_boxes`, `court_boxes` its {side: boxes}) is
+        # occupied box by box: `rect` answers a `legality.FarSide` whose
+        # own value is the bounding box, so a part may stand in its notch.
+        # The grade ladder keeps the bounding box. None for every other part.
+        shaped = _shaped_local(courtyard_sides.get(ref), self.side, grade_lb,
+                               court_boxes) if body_local is None else None
+        if shaped is not None:
+            lb = shaped
+            self.bounds_by_rot = {r: legality.rotate_far(lb, r)
+                                  for r in ROTATIONS}
+            self.grade_by_rot = {r: _rotate_local_bounds(*grade_lb, r)
+                                 for r in ROTATIONS}
+        else:
+            self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r)
+                                  for r in ROTATIONS}
+            self.grade_by_rot = (self.bounds_by_rot if lb is grade_lb else
+                                 {r: _rotate_local_bounds(*grade_lb, r)
+                                  for r in ROTATIONS})
         # #1300: when `courtyard_sides` carries an ESTIMATED courtyard for a
         # part that draws none, `drawn_sides` is the board's own map, and
         # `drawn_local` the box KiCad would judge the part on (its pad box):
@@ -928,7 +951,7 @@ class _Part(_NearWatched):
         if base:
             for r in ROTATIONS:
                 rot = (base + r) % 360
-                self.bounds_by_rot[rot] = _rotate_local_bounds(*lb, rot)
+                self.bounds_by_rot[rot] = legality.rotate_far(lb, rot)
                 if self.grade_by_rot is not self.bounds_by_rot:
                     self.grade_by_rot[rot] = _rotate_local_bounds(*grade_lb,
                                                                   rot)
@@ -944,6 +967,9 @@ class _Part(_NearWatched):
         # stale answer.
         self._pg_rot = None
         self._pg_pose = None
+        self._shape_live = None
+        if shaped is not None:
+            object.__setattr__(self, '__class__', _ShapedPart)
 
     def ensure_rotation(self, rot):
         """Fill both rotation caches for `rot`, as given (a caller that
@@ -957,8 +983,8 @@ class _Part(_NearWatched):
         it marks the part stale in every `_NearIndex` watching it."""
         added = False
         if rot not in self.bounds_by_rot:
-            self.bounds_by_rot[rot] = _rotate_local_bounds(
-                *self.bounds_by_rot[0.0], rot)
+            self.bounds_by_rot[rot] = legality.rotate_far(
+                self.bounds_by_rot[0.0], rot)
             added = True
         if rot not in self.grade_by_rot:
             self.grade_by_rot[rot] = _rotate_local_bounds(
@@ -1129,6 +1155,75 @@ class _Part(_NearWatched):
         return list(out)
 
 
+def courtyard_check(gap: float, undrawn: bool = False) -> str:
+    """#1724: the label of a courtyard refusal at `gap` (mm, the rects'
+    `rect_gap`; negative when they overlap). 'courtyard' when the rects
+    overlap -- the seat's reading of KiCad's courtyards_overlap, on the
+    courtyards' bounding rects (a `_ShapedPart`'s boxes), which can
+    overlap where KiCad's drawn outlines do not; 'courtyard_gap' when they
+    are apart but closer than the seat's spacing, the copper clearance the
+    placer keeps between courtyards (routed A/Bs kept it over a gap of 0),
+    which KiCad does not ask for at all. One rule refuses both; the label
+    says which, so a refusal at a placement KiCad accepts does not read as
+    a courtyard overlap.
+
+    #1744: 'estimated_courtyard' for an overlap where a part of the pair
+    draws no courtyard (`undrawn`): the seat reads a stand-in for it (its
+    #1300 estimate, else its pad box), the occupancy check_assembly's
+    courtyard channel grades it on, and KiCad, having no courtyard to
+    test, reports no courtyards_overlap there."""
+    if gap >= 0.0:
+        return 'courtyard_gap'
+    return 'estimated_courtyard' if undrawn else 'courtyard'
+
+
+class _ShapedPart(_Part):
+    """A `_Part` whose courtyard is several boxes (`_shaped_local`):
+    `rect` answers a `legality.FarSide` -- the bounding box, carrying
+    `.boxes` -- so every pair test that reads the boxes (`far_gap`,
+    `far_overlap_area`, `pair_min_gap`) spaces the part by its shapes, and
+    every other reader sees the bounding box, as before. Its own class, so
+    the plain `_Part.rect` stays the four sums it was."""
+
+    __slots__ = ()
+
+    def rect(self, x=None, y=None, rot=None):
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rot = self.rot if rot is None else rot
+        b = self.bounds_by_rot.get(rot % 360)
+        if b is None:
+            b = self.bounds_by_rot[0.0]
+        key = (x, y, b)
+        hit = self._shape_live
+        if hit is not None and hit[0] == key and hit[0][2] is b:
+            return hit[1]
+        got = legality.offset_far(b, x, y)
+        object.__setattr__(self, '_shape_live', (key, got))  # not geometry
+        return got
+
+
+_PART_TYPES = (_Part, _ShapedPart)
+
+
+def _shaped_local(sides, side, grade_lb, court_boxes):
+    """The `legality.FarSide` of a courtyard drawn as several shapes, in the
+    footprint's frame, for the side `courtyard_for_side` reads, or None:
+    no boxes for that side, or boxes whose bounding box is not the
+    courtyard's (`parser.extract_courtyard_boxes` and `extract_courtyard_
+    sides` read the same drawing, so they agree)."""
+    if not court_boxes or not sides:
+        return None
+    pick = side if sides.get(side) else next(iter(sides))
+    boxes = court_boxes.get(pick)
+    if not boxes or len(boxes) < 2:
+        return None
+    fs = legality.FarSide(boxes)
+    if any(abs(a - b) > 1e-6 for a, b in zip(fs, grade_lb)):
+        return None
+    return fs
+
+
 class QuenchState:
     """Current placement plus cached airwires: the seat gate
     (`candidate_valid`) and the measurements the graders read."""
@@ -1214,6 +1309,8 @@ class QuenchState:
         # does (`_Part.drawn_rect`, a declared pose against a declared pose).
         self._drawn_courtyards = extract_courtyard_sides(pcb_file)
         courtyards = self._drawn_courtyards
+        # the courtyards drawn as several shapes, box by box (`_ShapedPart`)
+        court_boxes = extract_courtyard_boxes(pcb_file)
         self.courtyard_estimates: Dict[str, object] = {}
         #: the refs this state seats on what the board draws although they
         #: have an estimate (place_simple's #1300 fallback): `floorplan.
@@ -1252,7 +1349,8 @@ class QuenchState:
                 # they draw a courtyard; without one there is no geometry to
                 # respect.
                 if ref in courtyards:
-                    self.parts[ref] = _Part(ref, fp, courtyards, True)
+                    self.parts[ref] = _Part(ref, fp, courtyards, True,
+                                            court_boxes=court_boxes.get(ref))
                     self.lock_reasons[ref] = (
                         LOCK_FILE if ref in file_locked else
                         LOCK_CALLER if ref in locked_refs else LOCK_PADLESS)
@@ -1289,7 +1387,8 @@ class QuenchState:
             self.parts[ref] = _Part(
                 ref, fp, courtyards, locked, body_local,
                 drawn_sides=(self._drawn_courtyards
-                             if self.courtyard_estimates else None))
+                             if self.courtyard_estimates else None),
+                court_boxes=court_boxes.get(ref))
             if locked:
                 self.lock_reasons[ref] = (
                     LOCK_FILE if ref in file_locked else
@@ -1403,9 +1502,15 @@ class QuenchState:
         # Classified BEFORE the declared zones below, because a container is
         # no stranger to an exclusive zone either (#1463): its frame rect is
         # not a body there any more than in the courtyard channel.
+        #
+        # #1722: the heights first, so a fence (a shield frame) whose height
+        # is known -- its model, or a declared can's room -- stays a cover
+        # the heights judge, not a container nothing under is judged in.
+        self.heights = _heights.for_board(pcb_data, pcb_file, declared_heights)
         try:
             _lbs = legality.part_local_bounds(pcb_data, pcb_file)
-            _kinds = legality.container_kinds(pcb_data, _lbs)
+            _kinds = legality.container_kinds(pcb_data, _lbs,
+                                              covers=self.heights.covers)
         except Exception:                                    # noqa: BLE001
             _lbs, _kinds = {}, {}
         self.container_kinds = {r: k for r, k in _kinds.items()
@@ -1464,8 +1569,8 @@ class QuenchState:
         # are both known is judged on the heights (`_height_pair`), its own
         # face only; every other pair keeps its occupancy test. A cover
         # whose raised body reaches past its own box (`_overhangs`) is
-        # swept by that reach.
-        self.heights = _heights.for_board(pcb_data, pcb_file, declared_heights)
+        # swept by that reach. (`self.heights` is read above, before the
+        # containers.)
         self.covers = {r for r in self.heights.covers
                        if r in self.parts and r not in self.container_refs}
         self._overhangs = set()
@@ -1486,11 +1591,21 @@ class QuenchState:
         self._pin_census_obj = None
         self._pin_copper = {}
         if self.container_refs:
-            print(f"  container footprint(s) (>= {CONTAINER_RATIO:.0%} of "
-                  f"the board, a pin frame or an outline -- frame, not "
-                  f"body): " + ', '.join(
+            print(f"  container footprint(s) (a pin frame or an outline "
+                  f">= {CONTAINER_RATIO:.0%} of the board, or a shield "
+                  f"frame's fence of any size -- frame, not body): "
+                  + ', '.join(
                       f"{r} ({k})"
                       for r, k in sorted(self.container_kinds.items())))
+            _fences = sorted(r for r, k in self.container_kinds.items()
+                             if k == 'fence')
+            if _fences:
+                print(f"  {', '.join(_fences)}: read as a shield frame (one "
+                      f"net's pads ringing an open outline), so a part may "
+                      f"stand inside it; how tall is not judged -- declare "
+                      f"its room (a design brief's `cans[]` row with "
+                      f"`interior_height_mm`, or `heights[]` `underside_mm`) "
+                      f"to judge what fits under the lid")
         # #1465: what a drawn courtyard on a container-sized part decided,
         # either way, so neither a placeholder that keeps the frame nor a
         # real one that removes it is silent.
@@ -1838,6 +1953,9 @@ class QuenchState:
                         or rect[3] + clr <= r[1] or r[3] + clr <= rect[1]):
                     continue        # clear, so no shortfall to add
                 gap = rect_gap(rect, r)
+                if gap < clr and (type(rect) is not tuple
+                                  or type(r) is not tuple):
+                    gap = legality.far_gap(rect, r)     # `_ShapedPart`
             if gap < clr:
                 overlap += clr - gap
                 if limit is not None and board + overlap > limit:
@@ -1898,6 +2016,11 @@ class QuenchState:
                                                        (p.x, p.y, p.rot))
         if fg is None:
             return []
+        if self.container_kinds.get(frame) == 'fence':
+            # #1722: a fence's wall, pad by pad: a drawn ring's bounds are
+            # the whole frame, and would price every part inside it
+            boxes = [w.bounds for w in self._pin_census_obj.fence_walls(
+                frame, (p.x, p.y, p.rot))] or boxes
         sides = frozenset((fg.side,))
         return [tuple(b) + (sides,) for b in boxes]
 
@@ -2198,6 +2321,15 @@ class QuenchState:
         if self._why is not None and 'check' not in self._why:
             self._why.update(detail, check=check, blocker=blocker)
 
+    def _court_veto(self, gap, ref, other_ref, **detail):
+        """`_veto` for a courtyard refusal at `gap`, labelled by
+        `courtyard_check`: an overlap is KiCad's courtyards_overlap only
+        when both parts draw a courtyard (#1744)."""
+        drawn = self._drawn_courtyards
+        self._veto(courtyard_check(gap, ref not in drawn
+                                   or other_ref not in drawn),
+                   other_ref, gap=gap, **detail)
+
     def candidate_veto(self, ref, x, y, rot,
                        exclude: Optional[Set[str]] = None):
         """`None` when `candidate_valid` admits the pose, else `(check,
@@ -2388,9 +2520,11 @@ class QuenchState:
                             bad = gap is not None and gap < clr
                         if bad:
                             legal = False
-                            if self._why is not None:
-                                self._veto('height' if hv[1] > 0.0 else 'courtyard',
-                                           other_ref, path='height')
+                            if self._why is not None and hv[1] > 0.0:
+                                self._veto('height', other_ref, path='height')
+                            elif self._why is not None:
+                                self._court_veto(gap, ref, other_ref,
+                                                 path='height')
                             break
                         continue
                 if tht or other.has_tht:
@@ -2400,7 +2534,7 @@ class QuenchState:
                     if gap is not None and gap < clr:
                         legal = False
                         if self._why is not None:
-                            self._veto('courtyard', other_ref, path='tht')
+                            self._court_veto(gap, ref, other_ref, path='tht')
                         break
                     continue
                 # Fast path: two plain SMD parts, same side. The per-axis test is
@@ -2419,10 +2553,16 @@ class QuenchState:
                 if (rect[2] + clr <= r[0] or r[2] + clr <= rect[0]
                         or rect[3] + clr <= r[1] or r[3] + clr <= rect[1]):
                     continue                    # provably clear
-                if rect_gap(rect, r) < clr:
+                # a courtyard of several boxes (`_ShapedPart`) is gapped
+                # box by box once its bounding box comes too close
+                gap = rect_gap(rect, r)
+                if gap < clr and not (type(rect) is tuple
+                                      and type(r) is tuple):
+                    gap = legality.far_gap(rect, r)
+                if gap < clr:
                     legal = False
                     if self._why is not None:
-                        self._veto('courtyard', other_ref, path='smd')
+                        self._court_veto(gap, ref, other_ref, path='smd')
                     break
         if legal and self.frame_refs:
             # #1212: a pin frame's PINS. Its rect is skipped above (a frame,
@@ -2871,7 +3011,8 @@ class QuenchState:
         the seeder's own two functions (`_pad_copper_overhang`,
         `_pad_copper_off_board`) rather than a copy."""
         sd = _seeder()
-        if sd._pad_copper_overhang(self, ref) <= self.edge_gate.margin:
+        if (sd._pad_copper_overhang(self, ref) <= self.edge_gate.margin
+                and not self._owned_cutouts(ref)):
             return 0.0
         return sd._pad_copper_off_board(self, ref, x, y, rot)
 
@@ -2913,6 +3054,14 @@ class QuenchState:
         ownership is what the reclassification itself was computed from, and it
         is the anti-gaming choice -- ownership taken at the CANDIDATE pose would
         let any part claim a ring merely by moving onto it.
+
+        #1723: and the CUTOUTS the part's courtyard stands over at its seed
+        pose with its pad copper clear of them (`BoardOutlineGate.
+        cutouts_straddled`) -- a reverse-mount LED over its window, a switch
+        round the window under it. KiCad grades no courtyard against an
+        Edge.Cuts window, and the seat refused every such part at its own
+        pose. Its pad copper stays on the board (`_owned_cutouts`,
+        `_pad_copper_past`): a window is an edge to copper still.
         """
         owned = self._owned_rings_cache.get(ref)
         if owned is None:
@@ -2920,8 +3069,48 @@ class QuenchState:
             pts = [(gx, gy) for (gx, gy, _net) in
                    part.pad_globals(part.seed_x, part.seed_y, part.orig_rot)]
             owned = self.edge_gate.rings_enclosing(pts) if pts else frozenset()
+            owned |= self._seed_cutouts(ref)
             self._owned_rings_cache[ref] = owned
         return owned
+
+    def _seed_cutouts(self, ref) -> frozenset:
+        """The cutout ids `_owned_rings` adds for `ref` (#1723), from its
+        grade rect and its pads' copper at the seed pose -- the pose the
+        board was read at, which is where `pcb_data` holds the pads."""
+        gate = self.edge_gate
+        if not gate.active or not gate.cutouts:
+            return frozenset()
+        part = self.parts[ref]
+        fp = (self.pcb_data.footprints or {}).get(ref)
+        if fp is None:
+            return frozenset()
+        # each pad's true copper (a turned pad's box would reach into a
+        # window its copper clears), and a hole as its drill circle
+        from check_pads import _copper_geometry
+        from shapely.geometry import Point
+        copper = []
+        for p in fp.pads or ():
+            d = getattr(p, 'drill', 0) or 0
+            try:
+                if legality._pad_carries_copper(p):
+                    copper.append(_copper_geometry(p))
+                if d > 0:
+                    copper.append(Point(p.hole_x if p.hole_x is not None else p.global_x,
+                                        p.hole_y if p.hole_y is not None else p.global_y
+                                        ).buffer(d / 2.0))
+            except Exception:                                # noqa: BLE001
+                return frozenset()      # copper not drawn: own nothing
+        if not copper:
+            return frozenset()
+        return gate.cutouts_straddled(
+            part.grade_rect(part.seed_x, part.seed_y, part.orig_rot), copper)
+
+    def _owned_cutouts(self, ref) -> bool:
+        """True when `ref` stands over a cutout of its own (`_owned_rings`),
+        so its pad copper is measured against the outline at every pose: its
+        courtyard no longer keeps the copper out of that window."""
+        n = len(self.edge_gate.cutouts)
+        return any(r < n for r in self._owned_rings(ref))
 
     # ----- bodies and reporting ---------------------------------------------
 

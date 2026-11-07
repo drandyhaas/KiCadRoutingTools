@@ -131,7 +131,8 @@ def main():
     seg_ids, res_ids = [id(s) for s in pcb.segments], [id(s) for s in result['new_segments']]
     real = length_matching.apply_intra_pair_length_matching
 
-    def worse(res, cfg, pcb_data, p_net_id=None, n_net_id=None, status=None):
+    def worse(res, cfg, pcb_data, p_net_id=None, n_net_id=None, status=None,
+              shipped=False):
         # lengthens the LONGER leg: the shipped skew goes up
         res['new_segments'] = [s for s in res['new_segments'] if s.net_id != P] \
             + seg(P, [(0, 0), (10, 0), (10, -1), (11, -1), (11, 0), (20, 0)])

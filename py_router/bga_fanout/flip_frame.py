@@ -132,6 +132,8 @@ def to_front_frame(pcb_data: PCBData, ref: str, axis: float = None
         seg.start_x, seg.start_y = m(seg.start_x, seg.start_y)
         seg.end_x, seg.end_y = m(seg.end_x, seg.end_y)
         seg.layer = other_layer(seg.layer)
+    from bga_fanout.rotate_frame import transform_graphic_shapes
+    transform_graphic_shapes(rp.segments, m)
     for via in rp.vias:
         via.x, via.y = m(via.x, via.y)
         via.layers = [other_layer(L) for L in via.layers]

@@ -455,7 +455,10 @@ class CreatePlanesOptionsPanel(wx.Panel):
         gnd_sizer = wx.StaticBoxSizer(gnd_box, wx.VERTICAL)
 
         self.add_gnd_vias_check = wx.CheckBox(self, label="Add GND vias near signal vias")
-        self.add_gnd_vias_check.SetToolTip("Add GND vias near signal vias for return current path")
+        self.add_gnd_vias_check.SetToolTip(
+            "Add GND vias near signal vias for return current path. A return via "
+            "needs GND poured on a second layer: on one layer it joins nothing, "
+            "so none is placed.")
         gnd_sizer.Add(self.add_gnd_vias_check, 0, wx.ALL, 5)
 
         # GND via parameters
@@ -1024,13 +1027,13 @@ class PlanesTab(wx.Panel):
         # route_planes.py and the route tab (swig_gui). Passing an explicit map
         # STOPS the engine's internal always-cap auto-read, so honoring classes
         # (Min Clearance override unchecked) actually reaches the router.
-        # Checking Min Clearance (== the CLI passing --clearance) caps each class
-        # at min(class, clearance); unchecked routes each class in full. The
-        # clamp/ceiling params are also threaded so create_plane's OWN internal
-        # auto-read (the ripped-net reroute path) honors/caps the same way.
+        # The Clearance ceiling box (== the CLI passing --clearance-ceiling) caps
+        # each class at min(class, ceiling), #1698; unchecked routes each class in
+        # full. The clamp/ceiling params are also threaded so create_plane's OWN
+        # internal auto-read (the ripped-net reroute path) honors/caps the same way.
         _plane_clearance = config.get('clearance', defaults.CLEARANCE)
         _plane_clamp = config.get('clamp_netclasses', False)
-        _plane_ceiling = _plane_clearance if _plane_clamp else None
+        _plane_ceiling = config.get('clearance_ceiling') if _plane_clamp else None
         _plane_net_clearances = {}
         plane_error = None      # set if plane creation raises; surfaced to the dialog
         try:
@@ -1055,7 +1058,7 @@ class PlanesTab(wx.Panel):
             if _plane_clamp:
                 from fab_tiers import cap_net_clearances  # #1561 discloses
                 _plane_net_clearances = cap_net_clearances(
-                    _plane_net_clearances, _plane_clearance,
+                    _plane_net_clearances, _plane_ceiling,
                     net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
                     class_of=all_net_to_class)
         except Exception as e:
@@ -1071,6 +1074,7 @@ class PlanesTab(wx.Panel):
             _plane_net_clearances = _explicit
 
         failed_pads = 0
+        gnd_via_warnings = []
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
              failed_pads, ripped_net_ids, reconnect_swap_data,
@@ -1081,6 +1085,7 @@ class PlanesTab(wx.Panel):
                 plane_layers=expanded_layers,
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
+                via_from_class=config.get('via_from_class', False),
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 zone_clearance=config.get('zone_clearance'),
@@ -1258,7 +1263,9 @@ class PlanesTab(wx.Panel):
                         self.pcb_data, gnd_config, [],
                         net_clearances=_plane_net_clearances)
 
-                    # Add GND vias near existing signal vias
+                    # Add GND vias near existing signal vias. self.pcb_data does
+                    # not hold this call's pours yet (the applier adds them), so
+                    # the engine is told what a return via could join.
                     gnd_vias = add_gnd_vias_to_existing_board(
                         self.pcb_data,
                         gnd_via_net,
@@ -1266,7 +1273,9 @@ class PlanesTab(wx.Panel):
                         gnd_config,
                         obstacles,
                         coord,
-                        net_clearances=_plane_net_clearances
+                        net_clearances=_plane_net_clearances,
+                        poured_now=new_zones,
+                        warnings=gnd_via_warnings
                     )
 
                     # Add to new vias list
@@ -1331,6 +1340,7 @@ class PlanesTab(wx.Panel):
             'total_traces': total_traces,
             'total_pads': total_pads,
             'failed_pads': failed_pads,
+            'gnd_via_warnings': gnd_via_warnings,
             'cancelled': self._cancel_requested,
             'affected_nets': sorted(set(expanded_nets)),
             'config': config,
@@ -1421,6 +1431,8 @@ class PlanesTab(wx.Panel):
                 msg += f"{label}: {result[key]}\n"
         if failed_pads:
             msg += f"Failed pads (no via placed): {failed_pads}\n"
+        for warning in result.get('gnd_via_warnings') or ():
+            msg += f"{warning}\n"
 
         status = f"Created: {zones_added} zone(s)"
         if replaced:
@@ -1900,15 +1912,15 @@ class PlanesTab(wx.Panel):
         # Castellated landings (run-6 fix 1.7, GUI twin of the plane mains'
         # retract_castellated_landings): plane taps/joins that landed inside a
         # castellated pad's edge-clearance zone are pulled to its inner reach.
+        # The board's own rule pinned up to the fab floor, as the mains read it
+        # (effective_board_edge_clearance). The config's value is the plane-zone
+        # INSET, 0.5 on a board declaring no rule, which is not a copper floor.
         from .gui_utils import apply_castellated_landing_retract
-        try:
-            _live_edge = (board.GetDesignSettings().m_CopperEdgeClearance
-                          or 0) / 1e6
-        except Exception:
-            _live_edge = 0.0
-        _cfg_edge = (getattr(self, '_plane_drc_config', {}) or {}).get(
-            'board_edge_clearance') or 0.0
-        apply_castellated_landing_retract(board, max(_cfg_edge, _live_edge))
+        from fix_kicad_drc_settings import fab_edge_floor, live_declared_rules
+        _edge_rule = (live_declared_rules(board) or {}).get(
+            'min_copper_edge_clearance') or 0.0
+        apply_castellated_landing_retract(
+            board, max(_edge_rule, fab_edge_floor(self.board_filename or None)))
 
         # Make the live board's DRC constraints consistent with the plane routing
         # floors (issue #160), mirroring route_planes.py's auto-fix. Best-effort.
@@ -1937,11 +1949,15 @@ class PlanesTab(wx.Panel):
                 _hole_clr = (self._held_hole_clearance(board, _floor_segs,
                                                        _floor_vias, eff_clearance)
                              if _pkw['copper_holes'] else None)
+                # #338: no edge_clearance. This step's own value is the
+                # plane-zone inset, and written here it became the board's rule
+                # for every later step, which routed and graded at 0.5 where
+                # the CLI, recording the project's rule, holds the fab floor.
+                # apply_targets_to_board keeps a declared rule above that floor.
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=_hole_clr,
                     hole_to_hole=_pkw['hole_to_hole'],
-                    edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=_pkw['track_width'],
                     via_diameter=_pkw['via_diameter'],
                     via_drill=_pkw['via_drill'],
@@ -2019,11 +2035,17 @@ class PlanesTab(wx.Panel):
             grid_step = cfg.get('grid_step', defaults.GRID_STEP)
             self._apply_status("Plane cleanup: reading the live board...")
             pcb = build_pcb_data_from_board(board)
+            # The board's own rule pinned up to the fab floor, as the mains
+            # read it. The config's value is the plane-zone INSET.
+            from fix_kicad_drc_settings import fab_edge_floor, live_declared_rules
+            _edge_rule = (live_declared_rules(board) or {}).get(
+                'min_copper_edge_clearance') or 0.0
             # Runs on the UI thread, so it reports through _apply_status (which
             # forces the repaint) rather than the engine-thread callback. This
             # is the shared 13-pass pipeline -- it named none of its passes.
             delta = compute_plane_copper_cleanup(
                 pcb, names, clearance, grid_step,
+                max(_edge_rule, fab_edge_floor(self.board_filename or None)),
                 progress_callback=(lambda c, t, m:
                                    self._apply_status(f"{m} ({c}/{t})" if t else m)))
             if delta.is_empty:

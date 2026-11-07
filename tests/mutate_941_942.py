@@ -74,6 +74,7 @@ TARGETS = {
 T_937 = 'tests/test_937_route_plan_check.py'
 T_941 = 'tests/test_941_final_board_is_one_name.py'
 T_918 = 'tests/test_918_gate_wording.py'
+T_1709 = 'tests/test_1709_gnd_via_floor_board_class.py'
 
 #: (name, target, old, new, tests that must notice, expectation)
 ROWS = [
@@ -102,29 +103,28 @@ ROWS = [
      (T_937,), KILLED),
 
     # R15 could not fire on the SKILL's own Step 3 command, because it bailed
-    # unless all three flags rode one argv. This is that bail.
+    # unless all three flags rode one argv. This is that bail. A GND pass
+    # with no --via-size of its own takes the board's class via (#1709), so
+    # the plan that notices is one checked WITH --board: test_1709's.
     ('r15-needs-all-three-flags', 'rpc',
      "        tool = tool_of(argv)\n"
-     "        vs, vs_src = scalar(argv, '--via-size'), 'this step'\n",
+     "        vs, vs_src = _via(argv), 'this step'\n",
      "        tool = tool_of(argv)\n"
-     "        if scalar(argv, '--via-size') is None:\n"
+     "        if _via(argv) is None:\n"
      "            continue\n"
-     "        vs, vs_src = scalar(argv, '--via-size'), 'this step'\n",
-     (T_937,), KILLED),
+     "        vs, vs_src = _via(argv), 'this step'\n",
+     (T_937, T_1709), KILLED),
 
     # GATE ROW. max() across the whole plan refuses CORRECT plans: a coarse
     # fanout escape via sets a floor for a GND pass that places a finer one.
     # The COMPLIANT_VARIANTS arm is what catches that, so breaking the rule
     # back must redden the gate rather than pass quietly.
     ('r15-max-across-plan', 'rpc',
-     "        seen = [v for a in p.by_tool(tool)\n"
-     "                for v in (scalar(a, flag),) if v is not None]\n"
-     "        if seen:\n"
-     "            return min(seen), f'{tool} elsewhere in the plan'\n",
-     "        seen = [v for a in p.argvs\n"
-     "                for v in (scalar(a, flag),) if v is not None]\n"
-     "        if seen:\n"
-     "            return max(seen), 'the plan'\n",
+     "        if vs is None:\n"
+     "            vs, vs_src = _class('via_diameter'), 'board Default class'\n",
+     "        if vs is None:\n"
+     "            vs, vs_src = max([v for a in p.argvs for v in (_via(a),)\n"
+     "                              if v is not None] or [None]), 'the plan'\n",
      (T_937,), KILLED),
 
     # GATE ROW. Both COMPLIANT_VARIANTS rows were vacuous under a full revert

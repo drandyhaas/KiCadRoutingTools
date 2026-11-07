@@ -79,6 +79,100 @@ LAST_ESCALATED: List[Dict] = []
 # fanout tab's completion message read it.
 LAST_FILTER_MISSES: List[Dict] = []
 
+# #1717: a stub run via-drops every interior pad its --nets filter selected
+# (the surface fan has no edge for them); this names each one the via-drop
+# could not place ("U1.34"), left with no copper. Its net is also failed.
+# Refreshed by every generate_qfn_fanout call; EMPTY with no filter (an
+# unscoped run never via-drops the exposed pad) and on an underpad run, whose
+# dropped pads are its failures. The CLI's JSON_SUMMARY `skipped_interior` and
+# the fanout tab's completion message read it.
+LAST_SKIPPED_INTERIOR: List[str] = []
+
+
+def skipped_interior_line(pads: List[str]) -> str:
+    """The one line naming LAST_SKIPPED_INTERIOR's pads (#1717), for the
+    console and the fanout tab's completion message."""
+    shown = ', '.join(pads[:8]) + (f" (+{len(pads) - 8} more)" if len(pads) > 8 else '')
+    return (f"WARNING: {len(pads)} selected interior pad(s) given no copper: "
+            f"{shown} -- the via-drop found no clear via site; a smaller "
+            f"--via-size or --allow-via-in-pad may fit")
+
+
+# #1743: the escape stubs the last run drew at its track width on a net that
+# reads as power or ground (`list_nets.power_net_evidence`), one dict per pad:
+# `pad` ("U1.5"), `net`, `width` (as drawn), `escape` ('surface' or
+# 'via-drop') and `why`. A surface stub of a net --power-nets names is not
+# listed: it takes the net's width where it fits (#1318). A via-drop stub
+# never does, so one is listed while its named width is wider than drawn.
+# Refreshed by every generate_qfn_fanout call. The CLI's JSON_SUMMARY
+# `power_stubs_at_width` and the fanout tab's completion message read it.
+LAST_POWER_STUBS_AT_WIDTH: List[Dict] = []
+
+
+def power_stubs_lines(rows: List[Dict]) -> List[str]:
+    """The lines naming LAST_POWER_STUBS_AT_WIDTH's stubs (#1743), for the
+    console and the fanout tab's completion message: the stubs, then what
+    widens them."""
+    if not rows:
+        return []
+    shown = ', '.join(f"{r['pad']} {r['net']} ({r['escape']}, {r['why']})"
+                      for r in rows[:8])
+    more = f" (+{len(rows) - 8} more)" if len(rows) > 8 else ''
+    out = [f"NOTE: {len(rows)} power/ground escape stub(s) drawn at the track "
+           f"width {rows[0]['width']:g} mm: {shown}{more}"]
+    surface = list(dict.fromkeys(r['net'] for r in rows if r['escape'] == 'surface'))
+    if surface:
+        out.append(f"  pass --power-nets {' '.join(surface[:8])} with "
+                   f"--power-nets-widths to lay the surface stub(s) at that width "
+                   f"where it fits")
+    if any(r['escape'] == 'via-drop' for r in rows):
+        out.append("  a via-drop stub is drawn at --width whether or not "
+                   "--power-nets names its net; only a wider --width widens it")
+    return out
+
+
+def _note_power_stubs_at_width(footprint, pcb_data, tracks, infos, track_width,
+                               power_nets, power_nets_widths):
+    """#1743: fill LAST_POWER_STUBS_AT_WIDTH from the copper this run drew.
+    INFOS is [(PadInfo, 'surface' | 'via-drop')]; a pad's stub is the track
+    that starts on it. Copper is not changed."""
+    starts = {}
+    for t in tracks:
+        k = (t.get('net_id'), round(t['start'][0], 4), round(t['start'][1], 4))
+        starts.setdefault(k, t)
+    rows = [(pi.pad, kind, starts.get((pi.pad.net_id, round(pi.pad.global_x, 4),
+                                       round(pi.pad.global_y, 4))))
+            for pi, kind in infos]
+    rows = [(p, kind, t) for p, kind, t in rows
+            if t is not None and t['width'] <= track_width + 1e-9]
+    if not rows:
+        return
+    from list_nets import power_net_evidence
+    why = power_net_evidence(pcb_data)
+    named = {}
+    if power_nets:
+        from net_queries import identify_power_nets
+        named = identify_power_nets(pcb_data, list(power_nets),
+                                    list(power_nets_widths or ()))
+    ref = getattr(footprint, 'reference', '?')
+    seen = set()
+    for pad, kind, t in rows:
+        nid = pad.net_id
+        reason = why.get(nid)
+        if nid in named:
+            if kind == 'surface' or named[nid] <= t['width'] + 1e-9:
+                continue
+            reason = f"--power-nets names it at {named[nid]:g} mm"
+        label = f"{ref}.{pad.pad_number}"
+        if reason is None or label in seen:
+            continue
+        seen.add(label)
+        LAST_POWER_STUBS_AT_WIDTH.append({
+            'pad': label, 'net': pad.net_name, 'width': round(t['width'], 4),
+            'escape': kind, 'why': reason})
+    for line in power_stubs_lines(LAST_POWER_STUBS_AT_WIDTH):
+        print(f"  {line}")
+
 
 #: #1565: (board, part) pairs whose held .kicad_dru rules this call named, so
 #: an escape re-run down the clearance ladder says it once
@@ -546,6 +640,11 @@ def _board_edge_model(pcb_data, clearance, board_edge_clearance):
     usable outline AND no bounds (then no edge test is possible)."""
     from check_drc import board_edge_geometry
     edge_clear = board_edge_clearance if board_edge_clearance > 0 else clearance
+    # #1678: a .kicad_dru edge_clearance rule outranks it, at the strictest
+    # floor any net's copper is held to: an escape is laid before the net's
+    # own route, and the fanout keeps one number per part.
+    from design_rules import strictest_edge_floor
+    edge_clear = strictest_edge_floor(pcb_data, edge_clear)
     rings, outer, cutouts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
     return edge_clear, rings, outer, cutouts
 
@@ -1005,6 +1104,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         pcb_data, clearance, board_edge_clearance)
     from check_drc import _point_to_rings_distance as _pt_rings_dist
     from check_drc import _point_on_board as _pt_on_board
+    # #1682: a filled graphic's interior, on the nets this run erases from its
+    # map too (a fanned net's shape is foreign to the part's other pins).
+    from check_drc import FilledCopperGate
+    _filled_gate = FilledCopperGate(pcb_data)
 
     # #1568: each pad with the radius about its centre that holds all its
     # copper, so `via_clears` calls the grader only on a pad the via's
@@ -1051,6 +1154,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
             if _pt_rings_dist(vx, vy, _edge_rings) < via_size / 2 + _edge_clear - 1e-6:
                 return False
+        if _filled_gate and _filled_gate.via_hit(
+                vx, vy, via_size, net_id, lambda sh: _pc(net_id, sh.net_id)) is not None:
+            return False
         for fx, fy, fs, fn, fd in foreign_vias:
             # The DRILLS are an obstacle whatever the net: hole-to-hole is
             # net-independent (#282/#479 audit gap 2), and on a board whose
@@ -1137,6 +1243,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         10.9s baseline (-36%); appended after `via_clears` instead, +18%.
         The gate is a speed-up.
         """
+        if stub_layer_idx is not None and _filled_gate and _filled_gate.segment_hit(
+                px, py, vx, vy, track_width, stub_layer, net_id,
+                lambda sh: _pc(net_id, sh.net_id)) is not None:
+            return False
         if math.hypot(vx - px, vy - py) <= POSITION_TOLERANCE:
             # Via centred on the pad: the commit loop emits NO track at all
             # (:604, :616), so there is no stub to test. `run_output_conflict`
@@ -1739,8 +1849,10 @@ def generate_qfn_fanout(footprint: Footprint,
     2. 45 degree segment fanning outward from center
 
     Edge pads get short straight (just past pad) + long 45 degree for maximum fan.
-    Center (interior/EP) pads are skipped by the surface fan; on a net-scoped
-    underpad run they escape via a via-drop instead (issue #410).
+    Center (interior/EP) pads have no edge for the surface fan; on a
+    net-scoped run they escape by the underpad via-drop instead (issue #410;
+    #1717: a stub run via-drops them after its surface fan). An unscoped run
+    never via-drops them.
 
     Args:
         footprint: The QFN/QFP footprint
@@ -1782,9 +1894,14 @@ def generate_qfn_fanout(footprint: Footprint,
     nets are published as qfn_fanout.LAST_CANCEL_SKIPPED. Passing None (the
     default, and what the CLI passes) is fully inert.
     """
+    # #1676: the rungs below start at the board's own via rules
+    from design_rules import install_board_via_rule_floors
+    install_board_via_rule_floors(pcb_data)
     LAST_CANCEL_SKIPPED.clear()
     LAST_ESCALATED.clear()          # #1328
     LAST_FILTER_MISSES.clear()      # #1641
+    LAST_SKIPPED_INTERIOR.clear()   # #1717
+    LAST_POWER_STUBS_AT_WIDTH.clear()   # #1743
     _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
@@ -1882,6 +1999,7 @@ def generate_qfn_fanout(footprint: Footprint,
 
     # Analyze all pads
     pad_infos: List[PadInfo] = []
+    interior_infos: List[PadInfo] = []      # #1717: a stub run's via-drops
     side_counts = defaultdict(int)
 
     if progress_callback:
@@ -1920,28 +2038,30 @@ def generate_qfn_fanout(footprint: Footprint,
             continue
 
         pad_info = analyze_pad(pad, layout)
-        if pad_info.side == 'center' and not (escape_method == "underpad"
-                                              and net_filter):
+        if pad_info.side == 'center':
             # Interior/EP pads have no free surface edge for the 45-deg fan,
-            # but a via-drop straight down doesn't need one (issue #410). Let
-            # them through ONLY on a net-scoped underpad run: requiring --nets
-            # is a deliberate safety guard so an unscoped run never via-drops
-            # the exposed/thermal pad.
-            continue
+            # but a via-drop straight down doesn't need one (issue #410). They
+            # are escaped ONLY on a net-scoped run: requiring --nets is a
+            # deliberate safety guard so an unscoped run never via-drops the
+            # exposed/thermal pad.
+            if not net_filter:
+                continue
+            side_counts[pad_info.side] += 1
+            if escape_method != "underpad":
+                # #1717: a stub run via-drops the interior pads its filter
+                # selected, after the surface fan (_serve_interior below).
+                interior_infos.append(pad_info)
+                continue
 
         pad_infos.append(pad_info)
-        side_counts[pad_info.side] += 1
+        if pad_info.side != 'center':
+            side_counts[pad_info.side] += 1
 
-    print(f"  Found {len(pad_infos)} pads to fanout:")
+    print(f"  Found {len(pad_infos) + len(interior_infos)} pads to fanout:")
     for side, count in sorted(side_counts.items()):
         print(f"    {side}: {count} pads")
-    # #1641: each --nets pattern that selected no pad, and why -- the stub
-    # escape's interior skip above among the reasons.
-    LAST_FILTER_MISSES.extend(net_filter_misses(
-        footprint, pcb_data, _user_filter,
-        skip_reason=(None if escape_method == "underpad" else
-                     lambda p: ('interior' if analyze_pad(p, layout).side
-                                == 'center' else None))))
+    # #1641: each --nets pattern that selected no pad, and why.
+    LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, _user_filter))
     for _line in filter_miss_lines(LAST_FILTER_MISSES):
         print(_line)
 
@@ -1950,7 +2070,7 @@ def generate_qfn_fanout(footprint: Footprint,
         sample = pad_infos[0]
         print(f"  Sample pad geometry: {sample.pad_length:.2f} x {sample.pad_width:.2f} mm")
 
-    if not pad_infos:
+    if not pad_infos and not interior_infos:
         return [], [], []
 
     def _record_skipped(tracks_, vias_, failed_):
@@ -1976,11 +2096,12 @@ def generate_qfn_fanout(footprint: Footprint,
     # Via-drop / underpad escape (issue #164): drop a through-via just past each
     # pad and let signal routing pick the net up on an inner layer, for crowded
     # fine-pitch edges where the surface fan has no room.
-    if escape_method == "underpad":
-        print(f"  Escape method: underpad (via-drop), via {via_size:.2f}/{via_drill:.2f} mm"
-              f"{', allow via-in-pad' if allow_via_in_pad else ''}")
+    def _via_drop(infos, board=pcb_data):
+        """The underpad via-drop of INFOS, down #1328's clearance ladder.
+        BOARD is the copper it clears (#1717: with the surface fan's stubs on
+        it). Returns (tracks, vias, dropped net names)."""
         def _drop_run(cl):
-            return _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
+            return _underpad_via_escape(footprint, board, infos, layout, layer,
                                         track_width, cl, via_size, via_drill, grid_step,
                                         allow_via_in_pad=allow_via_in_pad,
                                         board_edge_clearance=board_edge_clearance,
@@ -2036,6 +2157,59 @@ def generate_qfn_fanout(footprint: Footprint,
                       f"({len(best[2])} still dropped)")
             res = best
         return res
+
+    if escape_method == "underpad":
+        print(f"  Escape method: underpad (via-drop), via {via_size:.2f}/{via_drill:.2f} mm"
+              f"{', allow via-in-pad' if allow_via_in_pad else ''}")
+        res = _via_drop(pad_infos)
+        _note_power_stubs_at_width(                                 # #1743
+            footprint, pcb_data, res[0], [(pi, 'via-drop') for pi in pad_infos],
+            track_width, power_nets, power_nets_widths)
+        return res
+
+    def _serve_interior(tracks_, failed_):
+        """#1717: the interior pads this stub run's filter selected get the
+        underpad via-drop, clearing the surface fan's stubs as well as the
+        board. A pad it drops is named in LAST_SKIPPED_INTERIOR and its net
+        is failed, as an underpad run fails it. (tracks, vias, failed)."""
+        if not interior_infos:
+            _record_skipped(tracks_, [], failed_)
+            _note_power_stubs(tracks_)
+            return tracks_, [], failed_
+        print(f"  Interior pads: {len(interior_infos)} selected, escaped by "
+              f"via-drop (underpad), via {via_size:.2f}/{via_drill:.2f} mm"
+              f"{', allow via-in-pad' if allow_via_in_pad else ''}")
+        import copy
+        from kicad_parser import Segment
+        board = copy.copy(pcb_data)
+        board.segments = list(pcb_data.segments) + [
+            Segment(start_x=t['start'][0], start_y=t['start'][1],
+                    end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
+                    layer=t['layer'], net_id=t['net_id']) for t in tracks_]
+        itracks, ivias, idropped = _via_drop(interior_infos, board)
+        _ref = getattr(footprint, 'reference', '?')
+        LAST_SKIPPED_INTERIOR.extend(
+            f"{_ref}.{num}" for num, _name in
+            LAST_UNDERPAD_REPORT.get('dropped_pads', ()))
+        if LAST_SKIPPED_INTERIOR:
+            print(f"  {skipped_interior_line(LAST_SKIPPED_INTERIOR)}")
+        out = (tracks_ + itracks, ivias,
+               list(dict.fromkeys(failed_ + list(idropped))))
+        _record_skipped(*out)
+        _note_power_stubs(out[0])
+        return out
+
+    def _note_power_stubs(tracks_):
+        """#1743: the surface fan's and the via-drop's power stubs drawn at
+        the track width."""
+        _note_power_stubs_at_width(
+            footprint, pcb_data, tracks_,
+            [(pi, 'surface') for pi in pad_infos]
+            + [(pi, 'via-drop') for pi in interior_infos],
+            track_width, power_nets, power_nets_widths)
+
+    if not pad_infos:
+        return _serve_interior([], [])
 
     # Build stubs
     stubs: List[FanoutStub] = []
@@ -2218,6 +2392,8 @@ def generate_qfn_fanout(footprint: Footprint,
         pcb_data, clearance, board_edge_clearance)
     from check_drc import _segment_to_rings_distance as _seg_rings_dist
     from check_drc import _point_on_board as _pt_on_board
+    from check_drc import FilledCopperGate
+    _filled_gate = FilledCopperGate(pcb_data)   # #1682: as the under-pad escape
 
     # #1328: a stub that cannot escape at `clearance` retries at the rungs of
     # qfn_clearance_ladder (empty under --escalation off), and #1318 tries a
@@ -2274,6 +2450,9 @@ def generate_qfn_fanout(footprint: Footprint,
     def _seg_grazes(p1, p2, net_id, cl=clearance, width=track_width):
         # Board edge first (issue #288) - independent of net.
         if _seg_hits_edge(p1, p2, cl, width):
+            return True
+        if _filled_gate and _filled_gate.segment_hit(
+                p1[0], p1[1], p2[0], p2[1], width, layer, net_id, cl) is not None:
             return True
         # Foreign tracks / vias via the shared obstacle map (issue #149 part 2).
         if _obs_layer_idx is not None:
@@ -2586,8 +2765,7 @@ def generate_qfn_fanout(footprint: Footprint,
     else:
         print(f"  Validated: No endpoint collisions")
 
-    _record_skipped(tracks, [], failed_nets)
-    return tracks, [], failed_nets
+    return _serve_interior(tracks, failed_nets)
 
 
 
@@ -2643,10 +2821,13 @@ def main():
     parser.add_argument('--escape-method', choices=['stub', 'underpad'], default='stub',
                         help="'stub' (default) = surface 45-degree fan; 'underpad' = drop a "
                              "through-via just past each pad and escape on an inner layer "
-                             "(issue #164), for crowded fine-pitch edges where the surface is full.")
-    parser.add_argument('--via-size', type=float, default=0.45,
+                             "(issue #164), for crowded fine-pitch edges where the surface is full. "
+                             "With --nets either method via-drops the interior pads the filter "
+                             "selects (stub: after its fan, #1717); a run without --nets never "
+                             "via-drops the exposed/thermal pad.")
+    parser.add_argument('--via-size', type=float, default=None,
                         help='Underpad escape via outer diameter (mm, default 0.45)')
-    parser.add_argument('--via-drill', type=float, default=0.25,
+    parser.add_argument('--via-drill', type=float, default=None,
                         help='Underpad escape via drill diameter (mm, default 0.25)')
     parser.add_argument('--board-edge-clearance', type=float, default=defaults.BOARD_EDGE_CLEARANCE,
                         help='Min clearance from stub/via copper to the Edge.Cuts '
@@ -2657,10 +2838,12 @@ def main():
     parser.add_argument('--power-nets', nargs='*', default=[],
                         help="Glob patterns for power nets, as route.py takes them "
                              "(e.g. '*GND*' '+3V3'). Must pair with --power-nets-widths. "
-                             "A power net's stub, on a pad at least that wide, is laid at "
-                             "its width wherever that fits, and at --width where it does "
-                             "not (#1318): route.py keeps fanout copper as it finds it, so "
-                             "pass the route step's own --power-nets here.")
+                             "A power net's surface stub, on a pad at least that wide, is "
+                             "laid at its width wherever that fits, and at --width where it "
+                             "does not (#1318): route.py keeps fanout copper as it finds it, "
+                             "so pass the route step's own --power-nets here. A via-drop "
+                             "stub is drawn at --width; JSON_SUMMARY power_stubs_at_width "
+                             "names each power/ground stub drawn at --width (#1743).")
     parser.add_argument('--power-nets-widths', nargs='*', type=float, default=[],
                         help='Track widths in mm for each --power-nets pattern')
     parser.add_argument('--same-net-pad-clearance', type=float, default=None,
@@ -2731,11 +2914,20 @@ def main():
     # stock 0.2 mm board minimum pinned 0.1 mm escape stubs up to 0.2.
     if getattr(args, 'track_width', None) is None:
         args.track_width = args.width
+    # #1676: a via nobody asked for starts at the board's own .kicad_dru rules
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
+    args.via_size = 0.45 if args.via_size is None else args.via_size
+    args.via_drill = 0.25 if args.via_drill is None else args.via_drill
+    if not _vs_explicit:
+        from design_rules import run_via_for_rules
+        args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
+                                                          args.via_drill)
     __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
+        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
@@ -2986,6 +3178,13 @@ def main():
         # (an interior pad the stub escape skips, a net with no pad on the
         # part, ...): requested counts only the pads a pattern selected.
         'unmatched': list(LAST_FILTER_MISSES),
+        # #1717: the interior pads the filter selected that the stub run's
+        # via-drop could not place ("U1.34"), left with no copper; their
+        # nets are in failed / unescaped_nets as well.
+        'skipped_interior': list(LAST_SKIPPED_INTERIOR),
+        # #1743: the escape stubs drawn at --width on a net that reads as
+        # power or ground (pad, net, width, escape, why). Disclosure only.
+        'power_stubs_at_width': list(LAST_POWER_STUBS_AT_WIDTH),
         'clearance': args.clearance,
         'track_width': args.width,
         'escape_method': args.escape_method,

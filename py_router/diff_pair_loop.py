@@ -30,8 +30,8 @@ from diff_pair_multipoint import (
     leg_electrically_short, pair_leg_electrically_short,
     diff_pair_min_coupled_length,
 )
-from routing_context import (build_diff_pair_obstacles, build_diff_pair_leg_obstacles,
-                             restore_ripped_net)
+from routing_context import (build_diff_pair_obstacles, hybrid_leg_maps,
+                             record_pair_paths)
 from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
                                record_pair_diag,
                                blocker_names as custody_blocker_names)
@@ -122,12 +122,13 @@ def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstac
     finally:
         config.diff_pair_centerline_setback = saved_sb
         config.diff_pair_setback_no_ladder = saved_no_ladder
-    leg_obstacles = build_diff_pair_leg_obstacles(
+    leg_obstacles, leg_fallback = hybrid_leg_maps(
         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
         all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
         track_proximity_cache, layer_map)
     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles,
-                                       config.layers, leg_obstacles=leg_obstacles)
+                                       config.layers, leg_obstacles=leg_obstacles,
+                                       leg_fallback=leg_fallback)
     if not hyb or hyb.get('failed'):
         return result
     hns = hyb.get('new_segments', [])
@@ -137,6 +138,272 @@ def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstac
         print(f"  HYBRID REPLACES coupled route ({base_ov} -> {hyb_ov} intra-pair P/N overlap(s))")
         return hyb
     return result
+
+
+def _annotate_pair_lengths(result, pair, pcb_data, config):
+    """The routed and stub lengths a committed pair result carries for length
+    matching (as the coupled success path computes them)."""
+    new_segments = result.get('new_segments', [])
+    new_vias = result.get('new_vias', [])
+    p_len = calculate_route_length([s for s in new_segments if s.net_id == pair.p_net_id],
+                                   [v for v in new_vias if v.net_id == pair.p_net_id], pcb_data)
+    n_len = calculate_route_length([s for s in new_segments if s.net_id == pair.n_net_id],
+                                   [v for v in new_vias if v.net_id == pair.n_net_id], pcb_data)
+    p_src, p_tgt = result.get('p_src_stub_length', 0.0), result.get('p_tgt_stub_length', 0.0)
+    n_src, n_tgt = result.get('n_src_stub_length', 0.0), result.get('n_tgt_stub_length', 0.0)
+    if result.get('polarity_fixed', False):
+        p_stub, n_stub = p_src + n_tgt, n_src + p_tgt
+    else:
+        p_stub, n_stub = p_src + p_tgt, n_src + n_tgt
+    centreline = (p_len + n_len) / 2
+    result.update(centerline_length=centreline, stub_length=(p_stub + n_stub) / 2,
+                  p_stub_length=p_stub, n_stub_length=n_stub,
+                  p_routed_length=p_len, n_routed_length=n_len)
+    if intra_pair_on(config, pair.p_net_id):
+        result['route_length'] = max(p_len + p_stub, n_len + n_stub)
+    else:
+        result['route_length'] = centreline + (p_stub + n_stub) / 2
+
+
+def narrow_pair_rungs(config, pcb_data, pair) -> List[float]:
+    """#1742: the widths a pair that fits at no layer width is tried at, widest
+    first: one grid step apart below the widest layer width, down to the fab
+    floor (the escalation ladder's floor, raised to the members' own rules).
+    Empty unless the run routes pairs at per-layer (impedance) widths above
+    that floor."""
+    if not getattr(config, 'layer_widths', None):
+        return []
+    from single_ended_routing import _fab_track_floor
+    from diff_pair_custody import DRAWN_WIDTH_TOL
+    layers = [l for l in config.routable_layers()] or list(config.layers)
+    full = max(config.get_track_width(l) for l in layers)
+    fab = _fab_track_floor(pcb_data)
+    floor = max(config.track_floor(pair.p_net_id, None, fab),
+                config.track_floor(pair.n_net_id, None, fab))
+    if full <= floor + 1e-6:
+        return []
+    rungs = []
+    w = full - config.grid_step
+    while w > floor + 1e-6:
+        # a rung at the call's own track width would draw the middle at the
+        # connectors' width, where the shipped-width rows cannot see it
+        if abs(w - config.track_width) > DRAWN_WIDTH_TOL:
+            rungs.append(round(w, 4))
+        w -= config.grid_step
+    rungs.append(round(floor, 4))
+    return rungs
+
+
+def _width_runs(segs):
+    """A member's segment widths in emitted order (along its path), equal
+    neighbours merged."""
+    runs = []
+    for s in segs:
+        w = round(s.width, 4)
+        if not runs or runs[-1] != w:
+            runs.append(w)
+    return runs
+
+
+def narrowed_pair_config(config, width, gaps=None):
+    """`config` with every layer's pair width capped at `width` (#1742); the
+    call's track width (the connectors') too where it is wider. `gaps`
+    ({layer: gap}, #1747) sets the P/N gap of a narrowed layer."""
+    return replace(config,
+                   layer_widths={l: min(w, width) for l, w in config.layer_widths.items()},
+                   track_width=min(config.track_width, width),
+                   pair_layer_gaps=dict(gaps or {}))
+
+
+def narrowed_pair_gaps(config, pcb_data, width, target, gap_floor):
+    """#1747: {layer: (gap, zdiff)} for each layer whose pair width `width`
+    narrows: the P/N gap that holds the differential impedance `target`
+    (ohms, coplanar gap) at `width` there, no wider than the pair's gap
+    (`config.diff_pair_gap`) and no narrower than `gap_floor`, the gap the
+    clearance between P and N allows (None: the pair's gap). A narrower
+    trace raises Zdiff and a narrower gap lowers it, so the stretch that does
+    not fit at the layer width keeps as much of the target as the floor
+    allows; `zdiff` is what it reaches. Empty without a target."""
+    if not target:
+        return {}
+    from impedance import differential_gap_for_impedance
+    ohms, coplanar = target
+    gap = config.diff_pair_gap
+    floor = min(gap_floor, gap) if gap_floor else gap
+    routable = set(config.routable_layers()) or set(config.layers)
+    out = {}
+    for layer, lw in config.layer_widths.items():
+        if lw <= width + 1e-9 or layer not in routable:
+            continue
+        got = differential_gap_for_impedance(pcb_data, layer, width, ohms, floor, gap,
+                                             coplanar_gap=coplanar)
+        if got is not None:
+            out[layer] = (got[0], round(got[1], 1))
+    return out
+
+
+def _route_narrowed_to_fit(state, pair, pair_name, config):
+    """#1742: the pair routed coupled at one narrower width -- both members --
+    on a centreline map built for that width. The rungs are tried from the
+    widest down and the first that routes is kept: a narrower one is not
+    always easier (the terminal connectors fan differently), so none is
+    skipped. Every stretch where the full-width pair fits goes back to full
+    width (`narrowed_pair_widening`), so only what does not fit stays
+    narrow. The pair's own nets must have no copper of this run on the
+    board. Returns the result to commit, or None."""
+    builder = getattr(state, 'pair_map_builder', None)
+    rungs = narrow_pair_rungs(config, state.pcb_data, pair)
+    if builder is None or not rungs:
+        return None
+    from diff_pair_routing import centreline_extra_clearance, narrowed_pair_widening
+    pgeom = getattr(state, 'pair_diff_geom', None) or {}
+    geom = pgeom.get(pair.p_net_id, getattr(state, 'global_pair_geom', None))
+    dp_base = ((getattr(state, 'diff_pair_base_obstacles_by_geom', None) or {}).get(geom)
+               or state.diff_pair_base_obstacles)
+    cache = state.__dict__.setdefault('narrowed_pair_maps', {})
+    own = (pair.p_net_id, pair.n_net_id)
+    routed = [n for n in state.routed_net_ids if n not in own]
+
+    def pair_map(base_map, cfg):
+        return build_diff_pair_obstacles(
+            base_map, state.pcb_data, cfg, routed, state.remaining_net_ids,
+            state.all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, state.gnd_net_id,
+            state.track_proximity_cache, state.layer_map, centreline_extra_clearance(cfg),
+            add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
+            ripped_route_layer_costs=state.ripped_route_layer_costs,
+            ripped_route_via_positions=state.ripped_route_via_positions)
+
+    full_map, _ = pair_map(dp_base, config)
+    # #1747: the impedance target the layer widths were solved for, and the
+    # narrowest P/N gap this pair's clearance allows
+    target = getattr(state, 'pair_narrow_target', None)
+    gap_floor = (getattr(state, 'pair_gap_floors', None) or {}).get(pair.p_net_id)
+
+    def attempt(width):
+        gz = narrowed_pair_gaps(config, state.pcb_data, width, target, gap_floor)
+        gaps = {l: g for l, (g, _z) in gz.items()}
+        ncfg = narrowed_pair_config(config, width, gaps)
+        key = (geom, width, tuple(sorted(gaps.items())))
+        if key not in cache:
+            cache[key] = builder(ncfg, geom)
+        nobs, stubs = pair_map(cache[key], ncfg)
+        with narrowed_pair_widening(config, full_map):
+            res = route_diff_pair_with_obstacles(state.pcb_data, pair, ncfg, nobs,
+                                                 state.base_obstacles, stubs)
+        if not res or res.get('failed') or res.get('probe_blocked'):
+            return None
+        # both members at one width at every point (`_match_member_necks`
+        # draws a partner at its member's neck): walked from the source, P
+        # and N change width in the same order, or a narrower width is tried
+        runs = [_width_runs([s for s in res.get('new_segments', ()) if s.net_id == n])
+                for n in own]
+        if runs[0] != runs[1]:
+            print(f"    at {width:.4f}mm the members do not change width together "
+                  f"-- narrower")
+            return None
+        if gz:
+            res['pair_narrowed_gaps'] = gz
+        return res
+
+    print(f"  Narrowing {pair_name} to fit: both members from "
+          f"{max(config.get_track_width(l) for l in config.layers):.4f}mm "
+          f"toward the {rungs[-1]:.4f}mm floor")
+    for w in rungs:
+        res = attempt(w)
+        if res is not None:
+            res['pair_narrowed_to'] = w
+            return res
+    print(f"  No coupled route at any width down to the {rungs[-1]:.4f}mm floor")
+    return None
+
+
+def couple_fallback_pairs_narrowed(state, diff_pair_ids_to_route, se_summary) -> int:
+    """#1742: a 2-terminal pair that found no coupled route at its layer
+    widths, and that the single-ended member fallback then routed, is tried
+    once more coupled -- narrowed to fit (`_route_narrowed_to_fit`) -- with
+    every other net of the run already on the board. Its fallback copper is
+    lifted for the attempt and put back when no narrowed route is found, so
+    the attempt can only replace this pair's own single-ended members: no
+    other net of the run loses room to it, and the pair stays connected
+    either way. A pair left single-ended because it is electrically short,
+    a multipoint pair and a pair with a member the input already connects
+    are not tried. `se_summary` (the fallback's) loses the members of a pair
+    that couples. Returns the number of pairs coupled."""
+    from pcb_modification import remove_route_from_pcb_data
+    pcb_data = state.pcb_data
+    coupled = 0
+    for pair_name, pair in diff_pair_ids_to_route:
+        diag = state.pair_diagnostics.get(pair_name, {})
+        outcomes = diag.get('se_fallback') or {}
+        if (set(outcomes) != {'p', 'n'}
+                or 'already-connected' in outcomes.values()
+                or diag.get('reason') == 'electrically-short'):
+            continue
+        if len(get_diff_pair_terminals(pcb_data, pair.p_net_id, pair.n_net_id)) != 2:
+            continue
+        config = state.config
+        _pgeom = getattr(state, 'pair_diff_geom', None)
+        if _pgeom:
+            _dw, _dg = _pgeom.get(pair.p_net_id, (config.track_width, config.diff_pair_gap))
+            config = replace(config, track_width=_dw, diff_pair_gap=_dg)
+        if not narrow_pair_rungs(config, pcb_data, pair):
+            continue
+        own = (pair.p_net_id, pair.n_net_id)
+        fallback = [state.routed_results[n] for n in own
+                    if n in state.routed_results
+                    and state.routed_results[n].get('se_member_fallback')]
+        print(f"\n[{pair_name}] no coupled route at its layer widths: its "
+              f"single-ended members lifted for a narrowed try")
+        for r in fallback:
+            remove_route_from_pcb_data(pcb_data, r)
+        nar = _route_narrowed_to_fit(state, pair, pair_name, config)
+        if nar is None:
+            for r in fallback:
+                add_route_to_pcb_data(pcb_data, r, debug_lines=config.debug_lines)
+                refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,
+                                      pcb_data, config, own)
+            print(f"  {pair_name} keeps its single-ended members")
+            continue
+        _annotate_pair_lengths(nar, pair, pcb_data, config)
+        ids = {id(r) for r in fallback}
+        state.results[:] = [r for r in state.results if id(r) not in ids]
+        state.results.append(nar)
+        if nar.get('polarity_swap_denied'):
+            state.polarity_swap_denied_pairs.add(pair_name)
+        apply_polarity_swap(pcb_data, nar, state.pad_swaps, pair_name,
+                            state.polarity_swapped_pairs)
+        add_route_to_pcb_data(pcb_data, nar, debug_lines=config.debug_lines)
+        refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,
+                              pcb_data, config, own)
+        for nid, path in ((pair.p_net_id, nar.get('p_path')),
+                          (pair.n_net_id, nar.get('n_path'))):
+            if nid in state.remaining_net_ids:
+                state.remaining_net_ids.remove(nid)
+            if nid not in state.routed_net_ids:
+                state.routed_net_ids.append(nid)
+            state.routed_results[nid] = nar
+            state.diff_pair_by_net_id[nid] = (pair_name, pair)
+            state.track_proximity_cache[nid] = compute_track_proximity_for_net(
+                pcb_data, nid, config, state.layer_map)
+            if path:
+                state.routed_net_paths[nid] = path
+            state.diff_pair_single_ended_nets.pop(nid, None)
+        for nm in (pair.p_net_name, pair.n_net_name):
+            for key in ('attempted', 'routed', 'partial', 'failed'):
+                if nm in se_summary.get(key, ()):
+                    se_summary[key].remove(nm)
+        for key in ('se_fallback', 'reason', 'stage', 'blocking_nets'):
+            diag.pop(key, None)
+        state.__dict__.setdefault('narrowed_pairs', {})[pair.p_net_id] = \
+            nar['pair_narrowed_to']
+        coupled += 1
+        print(f"  {GREEN}COUPLED NARROWED: {pair_name} at {nar['pair_narrowed_to']:.4f}mm "
+              f"where the full width does not fit, both members together{RESET}")
+        for layer, (g, z) in sorted((nar.get('pair_narrowed_gaps') or {}).items()):
+            print(f"    {layer}: gap {g:.4f}mm (pair gap {config.diff_pair_gap:.4f}mm), "
+                  f"Zdiff {z:.1f} ohm against the {state.pair_narrow_target[0]:g} ohm "
+                  f"target")
+    return coupled
 
 
 def route_diff_pairs(
@@ -221,7 +488,8 @@ def route_diff_pairs(
             _dw, _dg = _pgeom.get(pair.p_net_id,
                                   (state.config.track_width, state.config.diff_pair_gap))
             config = replace(state.config, track_width=_dw, diff_pair_gap=_dg)
-            diff_pair_extra_clearance = (_dw + _dg) / 2.0
+            from diff_pair_routing import centreline_extra_clearance as _cec1729
+            diff_pair_extra_clearance = _cec1729(config)
             diff_pair_base_obstacles = (getattr(state, 'diff_pair_base_obstacles_by_geom', None)
                                         or {}).get((_dw, _dg), state.diff_pair_base_obstacles)
         # Check for cancellation request
@@ -337,10 +605,7 @@ def route_diff_pairs(
                 routed_net_ids.append(pair.n_net_id)
                 track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
                 track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-                if merged.get('p_path'):
-                    routed_net_paths[pair.p_net_id] = merged['p_path']
-                if merged.get('n_path'):
-                    routed_net_paths[pair.n_net_id] = merged['n_path']
+                record_pair_paths(routed_net_paths, pair, merged)
                 routed_results[pair.p_net_id] = merged
                 routed_results[pair.n_net_id] = merged
                 diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
@@ -458,12 +723,19 @@ def route_diff_pairs(
                         reroute_queue.append(('single', net.name if net else f"Net {gnet}", gnet))
                         queued_net_ids.add(gnet)
             else:
-                # rip-up didn't produce a clean route -> restore the ripped net(s)
+                # rip-up didn't produce a clean route -> restore the ripped net(s).
+                # #1651: every undo of a rip_up_net goes through restore_net, its
+                # inverse, which puts back what the rip took: the routed paths
+                # blocker analysis reads, the working-map entry and the
+                # registry entries.
                 for gnet, _sr, _ri, was_in_results, _gp in reversed(graze_ripped_items):
-                    restore_ripped_net(
-                        pcb_data, _sr, _ri, was_in_results,
-                        routed_net_ids, remaining_net_ids, routed_results, results,
-                        config, track_proximity_cache, layer_map)
+                    restore_net(gnet, _sr, _ri, was_in_results,
+                                pcb_data, routed_net_ids, routed_net_paths,
+                                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                results, config, track_proximity_cache, layer_map,
+                                state.working_obstacles, state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                refused_sink=state.collision_refused_net_ids)
 
         # Handle probe_blocked: try progressive rip-up before full route
         probe_ripup_attempts = 0
@@ -504,11 +776,14 @@ def route_diff_pairs(
                 if probe_ripped_items:
                     print(f"    Restoring {len(probe_ripped_items)} previously ripped net(s)")
                     for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                        restore_ripped_net(
-                            pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
-                            routed_net_ids, remaining_net_ids, routed_results, results,
-                            config, track_proximity_cache, layer_map
-                        )
+                        restore_net(ripped_blocker.net_id, ripped_saved, ripped_ids_item,
+                                    ripped_was_in_results,
+                                    pcb_data, routed_net_ids, routed_net_paths,
+                                    routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                    results, config, track_proximity_cache, layer_map,
+                                    state.working_obstacles, state.net_obstacles_cache,
+                                    state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                    refused_sink=state.collision_refused_net_ids)
                     probe_ripped_items.clear()
                 # Convert to failed result so normal failure handling takes over
                 result = {
@@ -579,11 +854,14 @@ def route_diff_pairs(
                 # Route failed completely - restore ALL ripped nets
                 print(f"    Probe rip-up didn't help, restoring {len(probe_ripped_items)} net(s)")
                 for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                    restore_ripped_net(
-                        pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
-                        routed_net_ids, remaining_net_ids, routed_results, results,
-                        config, track_proximity_cache, layer_map
-                    )
+                    restore_net(ripped_blocker.net_id, ripped_saved, ripped_ids_item,
+                                ripped_was_in_results,
+                                pcb_data, routed_net_ids, routed_net_paths,
+                                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                results, config, track_proximity_cache, layer_map,
+                                state.working_obstacles, state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                refused_sink=state.collision_refused_net_ids)
                 probe_ripped_items.clear()
                 break
 
@@ -591,11 +869,14 @@ def route_diff_pairs(
         if result and result.get('probe_blocked'):
             print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), trying full route...")
             for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                restore_ripped_net(
-                    pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
-                    routed_net_ids, remaining_net_ids, routed_results, results,
-                    config, track_proximity_cache, layer_map
-                )
+                restore_net(ripped_blocker.net_id, ripped_saved, ripped_ids_item,
+                            ripped_was_in_results,
+                            pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, diff_pair_by_net_id, remaining_net_ids,
+                            results, config, track_proximity_cache, layer_map,
+                            state.working_obstacles, state.net_obstacles_cache,
+                            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                            refused_sink=state.collision_refused_net_ids)
             result = {
                 'failed': True,
                 'iterations': result.get('iterations', 0),
@@ -684,10 +965,7 @@ def route_diff_pairs(
             routed_net_ids.append(pair.n_net_id)
             track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
             track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-            if result.get('p_path'):
-                routed_net_paths[pair.p_net_id] = result['p_path']
-            if result.get('n_path'):
-                routed_net_paths[pair.n_net_id] = result['n_path']
+            record_pair_paths(routed_net_paths, pair, result)
             routed_results[pair.p_net_id] = result
             routed_results[pair.n_net_id] = result
             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
@@ -991,10 +1269,7 @@ def route_diff_pairs(
                             routed_net_ids.append(pair.n_net_id)
                             track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
                             track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-                            if retry_result.get('p_path'):
-                                routed_net_paths[pair.p_net_id] = retry_result['p_path']
-                            if retry_result.get('n_path'):
-                                routed_net_paths[pair.n_net_id] = retry_result['n_path']
+                            record_pair_paths(routed_net_paths, pair, retry_result)
                             routed_results[pair.p_net_id] = retry_result
                             routed_results[pair.n_net_id] = retry_result
                             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
@@ -1137,10 +1412,7 @@ def route_diff_pairs(
                         routed_net_ids.append(pair.n_net_id)
                         track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
                         track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-                        if swap_result.get('p_path'):
-                            routed_net_paths[pair.p_net_id] = swap_result['p_path']
-                        if swap_result.get('n_path'):
-                            routed_net_paths[pair.n_net_id] = swap_result['n_path']
+                        record_pair_paths(routed_net_paths, pair, swap_result)
                         routed_results[pair.p_net_id] = swap_result
                         routed_results[pair.n_net_id] = swap_result
                         diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
@@ -1163,12 +1435,13 @@ def route_diff_pairs(
                 if config.diff_pair_hybrid_escape and result:
                     # Single-ended leg clearance map (built lazily, only now). See
                     # build_diff_pair_leg_obstacles for why base_obstacles + 0 clearance.
-                    leg_obstacles = build_diff_pair_leg_obstacles(
+                    leg_obstacles, leg_fallback = hybrid_leg_maps(
                         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
                         track_proximity_cache, layer_map)
                     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles,
-                                                       config.layers, leg_obstacles=leg_obstacles)
+                                                       config.layers, leg_obstacles=leg_obstacles,
+                                                       leg_fallback=leg_fallback)
                     if hyb and not hyb.get('failed'):
                         print(f"  HYBRID ESCAPE: direct coupled middle + point-to-point "
                               f"terminal legs")
@@ -1186,6 +1459,7 @@ def route_diff_pairs(
                         routed_net_ids.append(pair.n_net_id)
                         routed_results[pair.p_net_id] = hyb
                         routed_results[pair.n_net_id] = hyb
+                        record_pair_paths(routed_net_paths, pair, hyb)
                         diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
                         diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
                         track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)

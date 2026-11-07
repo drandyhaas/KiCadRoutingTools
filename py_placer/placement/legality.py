@@ -509,6 +509,17 @@ class FarSide(tuple):
             for i, a in enumerate(boxes) for b in boxes[i + 1:])
         return self
 
+    @classmethod
+    def moved(cls, fs, x, y):
+        """`fs` at local + (x, y): a translation keeps the boxes' overlaps,
+        so their `disjoint` is carried over rather than measured again."""
+        self = tuple.__new__(cls, (x + fs[0], y + fs[1], x + fs[2],
+                                   y + fs[3]))
+        self.boxes = tuple((x + b[0], y + b[1], x + b[2], y + b[3])
+                           for b in fs.boxes)
+        self.disjoint = fs.disjoint
+        return self
+
     def __reduce__(self):
         return (FarSide, (self.boxes,))
 
@@ -572,8 +583,7 @@ def rotate_far(r, rot):
 def offset_far(r, x, y):
     """A far-side value at a position: local + (x, y), cluster by cluster."""
     if isinstance(r, FarSide):
-        return FarSide([(x + b[0], y + b[1], x + b[2], y + b[3])
-                        for b in r.boxes])
+        return FarSide.moved(r, x, y)
     return (x + r[0], y + r[1], x + r[2], y + r[3])
 
 
@@ -780,14 +790,21 @@ def courtyard_cover(court_shape, local) -> Optional[float]:
     return min(1.0, float(court_shape.area) / area)
 
 
-def container_kinds(pcb_data, local_bounds) -> Dict[str, str]:
-    """{ref: 'outline' | 'pin_frame'} for every container on the board, from
-    its LOCAL geometry only -- a turn cannot make a part a frame. Empty when
-    the board declares no bounds (the conservative answer). See
-    `FRAME_DRILLED_FRAC` for the rule and the measurements behind it."""
+def container_kinds(pcb_data, local_bounds, covers=()) -> Dict[str, str]:
+    """{ref: 'outline' | 'pin_frame' | 'fence'} for every container on the
+    board, from its LOCAL geometry only -- a turn cannot make a part a
+    frame. Empty when the board declares no bounds (the conservative
+    answer). See `FRAME_DRILLED_FRAC` for the rule and the measurements
+    behind it.
+
+    `covers` (`heights.Heights.covers`, from a caller that holds them): a
+    fence whose height is known -- its model, or a declared can's room
+    (`cans[]`, `heights[]` underside) -- is no container, so what stands
+    under it is judged by that height, as under any cover (#1475)."""
     return {ref: k for ref, lb in sorted(local_bounds.items())
             for k in (_container_kind(pcb_data, ref, lb.local, lb.source,
-                                      lb.synthetic, lb.court_cover),) if k}
+                                      lb.synthetic, lb.court_cover),)
+            if k and not (k == 'fence' and ref in covers)}
 
 
 def frame_courtyard_refs(kinds, local_bounds) -> frozenset:
@@ -795,10 +812,16 @@ def frame_courtyard_refs(kinds, local_bounds) -> frozenset:
     drawn courtyard -- one covering less than `FRAME_COURTYARD_COVER` of the
     frame, such as rings round its posts. The frame is not graded, but those
     islands are, as drawn, as KiCad's courtyards_overlap grades them
-    (`CourtyardCensus._frame_court_pairs`)."""
+    (`CourtyardCensus._frame_court_pairs`).
+
+    A FENCE (#1722) is one whatever it draws: its wall -- the drawn ring,
+    else its pads' copper (`CourtyardCensus.frame_islands`) -- is a body
+    standing on the board, and another part's courtyard over it collides
+    with that wall, inside the frame or out."""
     from placement.body import SOURCE_COURTYARD
     return frozenset(r for r in kinds
-                     if getattr(local_bounds.get(r), 'source', '')
+                     if kinds[r] == 'fence'
+                     or getattr(local_bounds.get(r), 'source', '')
                      == SOURCE_COURTYARD)
 
 
@@ -834,19 +857,48 @@ def container_courtyard_notes(pcb_data, local_bounds) -> List[str]:
     return out
 
 
+def _is_fence(pads, inset_box) -> bool:
+    """#1722: is this ring of pads a FENCE -- a shield frame's wall, open
+    inside? Every pad on ONE net, a real one (a frame is grounded; pads
+    on no net say nothing -- a board without its netlist, a library part
+    not yet wired), no pad centre inside `inset_box` (the occupancy box
+    inset by `FRAME_BAND_FRAC` of its shorter side), and on each of the
+    four sides a pad centre in the band between the two boxes and off its
+    corners, so the pads wall the interior in. Two rows of pads, whose end
+    pads stand in the corners, line two edges of a body and enclose
+    nothing; a part whose pads carry two nets is a component, whatever
+    their layout."""
+    nets = {p.net_id for p in pads}
+    if len(pads) < 2 or len(nets) != 1 or not min(nets) > 0:
+        return False
+    ix0, iy0, ix1, iy1 = inset_box
+    if any(ix0 < p.local_x < ix1 and iy0 < p.local_y < iy1 for p in pads):
+        return False
+    mid_y = [p for p in pads if iy0 < p.local_y < iy1]
+    mid_x = [p for p in pads if ix0 < p.local_x < ix1]
+    return (any(p.local_x <= ix0 for p in mid_y)
+            and any(p.local_x >= ix1 for p in mid_y)
+            and any(p.local_y <= iy0 for p in mid_x)
+            and any(p.local_y >= iy1 for p in mid_x))
+
+
 def _container_kind(pcb_data, ref, local, source, synthetic,
                     court_cover=None):
     """The one decision behind `container_kinds` and `container_refs`:
-    'outline', 'pin_frame' or None for one part, from its LOCAL occupancy
-    box, its occupancy source, the share of that box its drawn courtyard
-    covers (`courtyard_cover`) and its pads."""
+    'outline', 'pin_frame', 'fence' or None for one part, from its LOCAL
+    occupancy box, its occupancy source, the share of that box its drawn
+    courtyard covers (`courtyard_cover`) and its pads.
+
+    'fence' (#1722) is the one kind of any size: a shield frame drawn as
+    its wall's pads round a body outline, open inside, which the designer
+    places a circuit under. KiCad grades it on its courtyard alone, and
+    without one, or with a ring that leaves the inside open, it grades
+    nothing inside it; read as the solid body its outline draws, it refused
+    every part under it and graded the board NOT BUILDABLE. Its pads stay
+    the wall the pad layer keeps every other part's copper off."""
     from placement.body import SOURCE_COURTYARD
     bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
     if not bb or local is None:
-        return None
-    barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
-    x0, y0, x1, y1 = local
-    if (x1 - x0) * (y1 - y0) < CONTAINER_RATIO * barea:
         return None
     if synthetic:
         return None
@@ -858,15 +910,23 @@ def _container_kind(pcb_data, ref, local, source, synthetic,
         return None
     pads = [p for p in (fp.pads or ())
             if (getattr(p, 'drill', 0) or 0) > 0 or _pad_carries_copper(p)]
+    x0, y0, x1, y1 = local
+    inset = FRAME_BAND_FRAC * min(x1 - x0, y1 - y0)
+    inset_box = (x0 + inset, y0 + inset, x1 - inset, y1 - inset)
+    # A board-sized frame keeps its kind (a pin frame's pins are graded as
+    # pins); a fence is the answer for every other ring of one net's pads.
+    fence = 'fence' if pads and _is_fence(pads, inset_box) else None
+    barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
+    if (x1 - x0) * (y1 - y0) < CONTAINER_RATIO * barea:
+        return fence
     if not pads:
         return 'outline'
     drilled = sum(1 for p in pads if (getattr(p, 'drill', 0) or 0) > 0)
     if drilled < FRAME_DRILLED_FRAC * len(pads):
-        return None
-    inset = FRAME_BAND_FRAC * min(x1 - x0, y1 - y0)
-    ix0, iy0, ix1, iy1 = x0 + inset, y0 + inset, x1 - inset, y1 - inset
+        return fence
+    ix0, iy0, ix1, iy1 = inset_box
     if any(ix0 < p.local_x < ix1 and iy0 < p.local_y < iy1 for p in pads):
-        return None
+        return fence
     return 'pin_frame'
 
 
@@ -1212,12 +1272,12 @@ class BoardOutlineGate:
         """Ids of the MILLED rings enclosing any of `points` -- a part's OWN
         milled relief, for the `skip_rings` argument of the two probes.
 
-        Only milled contours can be owned, by construction:
+        Only milled contours can be owned THIS way, by construction:
         `drop_pad_containing_cutouts` moves every ring enclosing >= 2 pad
         centres OUT of board_cutouts and into board_edge_contours, so no ring
-        left in `self.cutouts` encloses a pad and no cutout id can ever land in
-        a skip set. That is what keeps the genuine-cutout half of the swallow
-        probe untouchable rather than merely untouched.
+        left in `self.cutouts` encloses a pad. A cutout reaches a skip set
+        only through `cutouts_straddled` (#1723), with the part's copper clear
+        of it.
 
         >= 1 enclosed pad, not >= 2: two parts with one pad each inside a ring
         are both partial owners and both must be exempt. Pad CENTRES and the
@@ -1231,6 +1291,41 @@ class BoardOutlineGate:
         from check_drc import milled_rings_enclosing
         base = len(self.cutouts)
         return frozenset(base + i for i in milled_rings_enclosing(self.milled, points))
+
+    def cutouts_straddled(self, rect, copper) -> frozenset:
+        """#1723: ids of the CUTOUTS `rect` meets -- crosses, swallows, or
+        comes within the margin of -- while none of `copper` (a part's pad
+        copper, shapely geometries) enters them: a cutout the part
+        stands over with its copper on the board, a reverse-mount LED over
+        its window, a switch round the window under it. KiCad never grades
+        a courtyard against Edge.Cuts; only the copper is the edge's
+        question. For the `skip_rings` of the two probes, asked at a part's
+        SEED pose (`QuenchState._owned_rings`), as `rings_enclosing` is."""
+        if not self.cutouts or rect is None:
+            return frozenset()
+        try:
+            from shapely.geometry import Polygon, box
+        except ImportError:
+            return frozenset()
+        r = box(*rect)
+        cops = list(copper)
+        out = set()
+        for i, ring in enumerate(self.cutouts):
+            if len(ring) < 3:
+                continue
+            poly = Polygon(ring)
+            if not poly.is_valid or poly.distance(r) >= self.margin:
+                continue
+            if not any(poly.intersects(c) for c in cops):
+                out.add(i)
+        return frozenset(out)
+
+    def _cutouts_but(self, skip_rings):
+        """`self.cutouts` less the ones `skip_rings` names (a part's own,
+        `cutouts_straddled`), for the corner test of the two probes."""
+        if not skip_rings or not any(r < len(self.cutouts) for r in skip_rings):
+            return self.cutouts
+        return [c for i, c in enumerate(self.cutouts) if i not in skip_rings]
 
     # -- level 2b: per-rect bbox prefilter, exact
     def _edges_touching(self, rect, edges):
@@ -1301,14 +1396,17 @@ class BoardOutlineGate:
 
         PER-PART, never global: the ring stays a hard edge for every other
         part, and `rings_enclosing` only ever returns MILLED ids, so the outer
-        outline and the genuine cutouts can never be exempted by this path.
+        outline can never be exempted by this path. A CUTOUT is exempted
+        only as `cutouts_straddled` names it (#1723): one the part already
+        stood over at its seed pose with its copper clear of it.
         """
         if self._rect_safe(rect):
             return False
         from check_drc import _point_on_board, _seg_seg_dist_coords
         x0, y0, x1, y1 = rect
+        cuts = self._cutouts_but(skip_rings)
         for (px, py) in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
-            if not _point_on_board(px, py, self.outer, self.cutouts):
+            if not _point_on_board(px, py, self.outer, cuts):
                 return True
         near = self._edges_touching(
             rect, self.edges() if edges is None else edges)
@@ -1395,8 +1493,9 @@ class BoardOutlineGate:
             _seg_seg_dist_coords
         use = self.edges() if edges is None else edges
         x0, y0, x1, y1 = rect
+        cuts = self._cutouts_but(skip_rings)
         for (px, py) in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
-            if not _point_on_board(px, py, self.outer, self.cutouts):
+            if not _point_on_board(px, py, self.outer, cuts):
                 # How far the stray corner must come back, floored at the margin
                 # so an off-board corner always outweighs a mere margin graze.
                 amt += max(self.margin,
@@ -2798,6 +2897,12 @@ class CourtyardCensus:
         # sonde_u's J1 to 135 degrees made it one. A pin frame's rect pairs
         # leave the courtyard channel; its PINS are graded instead.
         self.kinds = container_kinds(pcb_data, self.lbs)
+        if 'fence' in self.kinds.values():
+            # #1722: a fence whose height the heights know is a cover they
+            # judge, as the seat reads it (`QuenchState`). Asked only on a
+            # board with a fence, so no other board measures its heights here.
+            self.kinds = container_kinds(pcb_data, self.lbs,
+                                         covers=self.heights.covers)
         self.containers = frozenset(self.kinds)
         self.pin_frames = frozenset(r for r, k in self.kinds.items()
                                     if k == 'pin_frame')
@@ -2964,7 +3069,10 @@ class CourtyardCensus:
         placed (its frame is no body), and the bounds of each island, the
         broad phase. `(None, [])` when that courtyard does not close: KiCad
         reports malformed_courtyard there and tests nothing against it, as
-        `_pin_shapes` treats one."""
+        `_pin_shapes` treats one. A fence that draws no courtyard (#1722)
+        stands on its wall instead (`fence_walls`): a part's courtyard over
+        it collides with the wall, which check_assembly gates and the seat
+        refuses, though KiCad, with no courtyard drawn, reports nothing."""
         key = (frame, None if pose is None else tuple(pose))
         hit = self._islands.get(key)
         if hit is not None:
@@ -2973,14 +3081,28 @@ class CourtyardCensus:
         out = (None, [])
         geom = self.bodies.get(frame)
         lb = self.lbs.get(frame)
-        if (geom is not None and lb is not None
-                and geom.court_shape_local is not None
-                and geom.court_shape_how == OUTLINE_POLYGON):
+        drawn = (geom is not None and geom.court_shape_local is not None
+                 and geom.court_shape_how == OUTLINE_POLYGON)
+        shape, boxes = None, None
+        fence = self.kinds.get(frame) == 'fence'
+        if lb is not None and (drawn or fence):
             fp = self.fps[frame]
             x, y, rot = (pose if pose is not None
                          else (fp.x, fp.y, fp.rotation or 0.0))
-            shape = place_local_shape(geom.court_shape_local, x, y, rot)
-            boxes = [g.bounds for g in getattr(shape, 'geoms', [shape])]
+            if drawn:
+                shape = place_local_shape(geom.court_shape_local, x, y, rot)
+            else:
+                # #1722: a fence drawing no courtyard -- its wall is its
+                # pads' copper, the metal the frame stands on, each pad its
+                # own box (their union is one ring, whose bounds are the frame)
+                walls = self.fence_walls(frame, (x, y, rot))
+                if walls:
+                    from shapely.ops import unary_union
+                    shape = unary_union(walls)
+                    boxes = [w.bounds for w in walls]
+        if shape is not None and not shape.is_empty:
+            if boxes is None:
+                boxes = [g.bounds for g in getattr(shape, 'geoms', [shape])]
             out = (GradedPart(ref=frame, side=lb.side, rect=shape.bounds,
                               source=lb.source, poly=shape,
                               local=tuple(lb.local),
@@ -2989,6 +3111,21 @@ class CourtyardCensus:
             self._islands = {}
         self._islands[key] = out
         return out
+
+    def fence_walls(self, frame: str, pose) -> list:
+        """#1722: a fence's wall at `pose` -- each copper pad's true copper
+        (shapely), [] when it cannot be drawn. The islands of a fence that
+        draws no courtyard, and what place_simple's anneal prices a
+        courtyard over on every fence (`QuenchState.frame_court_boxes`):
+        a drawn ring's bounds are the whole frame."""
+        from check_pads import _copper_geometry
+        try:
+            return [w for w in (_copper_geometry(p) for p in
+                                footprint_at_pose(self.fps[frame], tuple(pose)).pads
+                                or () if _pad_carries_copper(p))
+                    if not w.is_empty]
+        except Exception:                                    # noqa: BLE001
+            return []
 
     def _frame_court_pairs(self, parts, poses, members=None) -> list:
         """Raw courtyard pairs against each `court_frames` container's own
@@ -3005,7 +3142,10 @@ class CourtyardCensus:
             if fg is None:
                 continue
             for r, gp in parts.items():
-                if r == frame or r in self.containers:
+                # a fence is a frame to the parts it holds, and a body to
+                # another fence's wall: two shield frames do not stack (#1722)
+                if r == frame or (r in self.containers
+                                  and self.kinds.get(r) != 'fence'):
                     continue
                 if members is not None and frame not in members \
                         and r not in members:

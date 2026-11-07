@@ -667,8 +667,10 @@ could clear; reserved as a straight line from the ball, the way round the end
 of the walling lane's own fanout run was left open, and the lane routed again
 took that end and walled the ball once more.
 
-It exits 0 when every bus net it hands on is connected and clean (those it put
-back are in `refused`), and 1 when it hands on none. A bus net it does not hand
+It exits 0 whenever it writes OUT (#1738): the bus nets it hands on connected
+and clean (those it put back are in `refused`), or none handed on and OUT the
+board as it came -- the summary's `exit` says which (0 routed, 1 as it came).
+2 is a usage error, and any other non-zero exit means no OUT was written. A bus net it does not hand
 on goes back as it came: its earlier copper, where that copper still clears
 what the step laid.
 

@@ -382,7 +382,11 @@ hold boards too heavy for an ordinary set (what `validate_candidate.py` tiers
 takes a board whose replay is too slow for one (set25's spartan6_4layer, ~2.7 h
 of route steps). Every set `N` has its
 `manifest_setN.json`, `fetch_setN.py` and `prep_setN.sh` here; RUNBOOK →
-"Building a board set" is the recipe. The first four:
+"Building a board set" is the recipe. `set1arc` is the exception: 6 boards the
+corpus already has, whose inputs keep the arcs on Edge.Cuts that the ordinary prep
+rebuilds as lines, built from those boards' own sets by `prep_set1arc.py` from
+`manifest_set1arc.json`, with no fetch; RUNBOOK → "Arc outlines: `set1arc`". No
+`--sets` range includes it. The first four:
 
 - **Set 1** — the original 15 (curated in `fetch_boards.py` / `normalize_boards.py`).
   `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`

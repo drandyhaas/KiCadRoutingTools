@@ -26,7 +26,7 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
 | mode | input | DONE means | better, once DONE |
 |---|---|---|---|
 | `place` | an unplaced or placed board | `check_assembly` buildable, `check_floorplan --intent` 0 errors, no pad, graphic or keep-out copper off the outline, mechanical facts met, and a fast route of it with no blocking net | fewer vias, then less copper_mm, then fewer segments, on that fast route |
-| `full` | an unplaced or placed board | `board_score` blocking 0, zero unrouted, zero broken, `check_complete` DONE | fewer vias, then less copper_mm, then fewer segments |
+| `full` | an unplaced or placed board | `board_score` blocking 0, zero unrouted, zero broken, `check_complete` DONE (which form gates: `/review-routed-board` Step 5) | fewer vias, then less copper_mm, then fewer segments |
 
 - **"Better" is lexicographic, never a weighted sum.** A lower via count never
   buys back an open net.
@@ -62,7 +62,9 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   placement and its `place_simple` report), `s<S>_route/` (the fast route's
   working files), `s<S>_fast.kicad_pcb` (the fast-routed board, copied out of
   that folder with `copy_board.py`) and `s<S>_fast.score.json` (its
-  `quick_score`). The kept board goes to `wk/<run>/final.kicad_pcb`.
+  `quick_score`). A second judging arm keeps these names in a folder of its
+  own (§3.7), which that table does not read. The kept board goes to
+  `wk/<run>/final.kicad_pcb`.
 - **Read the board.**
   `python3 -X utf8 py_tools/board_brief.py <board> --json wk/<run>/brief.json`
   (read `pile` and `has_copper` on its `JSON_SUMMARY` line; `poured_nets`
@@ -105,7 +107,12 @@ given; its defaults (6, 6, 0, 6) apply when they are not. Anchored seeds
   and read `emc_roles.roles`: each converter, crystal, oscillator and ESD
   array its pin functions name, each discrete ESD/TVS diode at the one
   connector its line reaches (`esd diode`), every leg measured pad edge to
-  pad edge, and a ready `proximity` row with `max_mm` left null. Ask the
+  pad edge, and a ready `proximity` row with `max_mm` left null. A `role:
+  unknown` record is a part that looks like one of these whose pins cannot
+  say which pin is which (its `candidate` and `why`: a pin-less converter,
+  an ESD array read off its nets with its `connector` and
+  `candidate_lines`): it proposes no row, so read its datasheet, and when
+  it is one write its row by hand and put it with the others. Ask the
   user for the limits (crystal to its load pins, input cap to the
   regulator's VIN and PGND, inductor to SW, ESD array or diode to its
   connector, and each row of the schematic's layout notes, §3.3), put each
@@ -187,8 +194,9 @@ either: leave it unlocked with its `edge` in the intent's
 edge will do), and `place_simple` holds it to that edge, mating face out,
 and slides it along. On a pile the emitter writes no `edge` -- the staging
 pose says nothing; `--emit-intent --declare-classes` writes each edge part's
-entry without one, plain `--emit-intent` no entry -- so write it from the
-brief, `mechanical.json` or the user.
+entry without one, plain `--emit-intent` no entry (except a part whose own
+model needs an overhang, §3.4's "How far an edge receptacle reaches past the
+edge") -- so write it from the brief, `mechanical.json` or the user.
 
 ### 3.2 Emit the intent
 
@@ -196,6 +204,17 @@ brief, `mechanical.json` or the user.
 python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --emit-intent wk/<run>/intent.json
 ```
 
+- **An emit keeps what the design brief and `mechanical.json` say, and drops
+  everything else.** It writes a new file from the board and those two, and
+  never reads the old intent, so every row written there since, by hand or by
+  a script, is gone: an edge row the brief does not hold, `dispositions`,
+  `overlap_waivers`, a template, a link, a hand-drawn block. So one order holds
+  for every step below: the rows the brief has a key for first
+  (`interfaces[]` holds an edge row and its `mating_face`, `docs/design-brief.md`
+  has the rest), then the last emit, then the rows only the intent can hold.
+  An emit over an existing intent warns and names, with its value, each row the
+  new file does not carry, and writes it anyway: write those again, and run
+  `waive_locked_overlaps.py` again.
 - When a placed reference of the design exists (a human layout, an earlier
   placement), add `--decaps-from <reference.kicad_pcb>`: it arms the decap
   limits, and say in your report that you did.
@@ -220,7 +239,7 @@ python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --emit-inte
   `"zone_containment": "no region was given; groups place this board"`.
   Never invent a limit to clear one. The roster prints again with every
   `check_floorplan --intent`; list your answers in REPORT.md.
-- **Waive the locked parts' own overlaps**, right after the intent exists:
+- **Waive the locked parts' own overlaps**, right after the last emit:
 
   ```bash
   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/waive_locked_overlaps.py \
@@ -457,7 +476,13 @@ python3 -X utf8 py_tools/check_floorplan.py wk/<run>/fixed.kicad_pcb --intent wk
 
 For each edge connector, read its edge, its facing (`facing ... pass`, or
 `facing abstained (...)` when its body names no face, `facing exempt (...)`
-when its class is not graded for a face) and the group you gave it. Then decide, from the part's function and its datasheet:
+when its class is not graded for a face) and the group you gave it. **On a
+pile** an unlocked part's pose says nothing, so its row reads `staging pose on
+a pile`: what a pile can answer is the declared band and the evidence label of
+its mating face (`mating face +x [courtyard+fab, weak]`, or the same `facing
+abstained` / `facing exempt`), and no `edge_connector` error reads off the
+pose. Its overhang, nearest edge, facing verdict and model end wait for the
+first placed seeds (§3.6); a locked part reads them now. Then decide, from the part's function and its datasheet:
 
 - **The edge, and roughly where along it** when that matters (a USB or
   barrel jack where the enclosure opens, a debug header out of the user's
@@ -470,14 +495,28 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   the body sits on its pads, and the pad layout can set it wrong -- KiCad
   10's RJ45_Amphenol_RJHSE5380 reads its mouth into the board): find the
   side its opening is on in the datasheet's PCB-layout drawing and write
-  `mating_face` (`+x`/`-x`/`+y`/`-y`, the footprint's own frame). A declared
+  `mating_face` (`+x`/`-x`/`+y`/`-y`, the footprint's own frame). A face
+  belongs to one drawing's frame: a library copy of the part (a vendor or
+  importer drawing) is often turned 180 degrees from KiCad's, so match the
+  drawing's pads to the footprint's on this board before reading a side off
+  it, or read the opening off the footprint's 3D model. A declared
   face outranks a weak reading (never a strong one), and the grade warns
-  where the two disagree. The side of its solder tabs, away from the
+  where the two disagree. The grade prints a declared face `unverified`
+  (`facing north [courtyard+fab+declared, unverified] pass`) even where the
+  weak reading agrees: a turned copy reads its wrong face weakly, so the
+  agreement is no check -- only a `strong` reading or a footprint's PCB-edge
+  marker (`marker`) is. A wrong turn of a declared face still fails at
+  ERROR. Write what you read the face off in `mating_face_source` (the
+  drawing and its page, or "3D model"); an `unverified` face without one is
+  a WARN, and with one the clause reads `sourced`. Write it only for what you
+  actually read: a guess from the footprint's pads or pegs is not a source.
+  The side of its solder tabs, away from the
   contact row, is a hint to check against the drawing, not a rule: it is
   wrong on 3 of 50 side-entry connectors in the corpus.
 - **The side a vertical header's cable leaves.** A `Vertical` header mates
   off the board and names no face, but its cable leaves on one side: a
-  2xN ribbon off a long side. Write that side as its `mating_face`, so the
+  2xN ribbon off a long side. Write that side as its `mating_face` (and
+  the cable's drawing or the 3D model as its `mating_face_source`), so the
   seat lays the header with its long side along the edge and the cable runs
   off the board. Without it, a 2x05 header lay across its edge on most
   seeds, its cable along the edge.
@@ -494,7 +533,15 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   emitter writes as 0 -- unless the part's own 3D model has body at board
   depth (an edge-mount jack the board slides into), when it writes the
   overhang that keeps that body off the board (`derived_default`, #1603;
-  check_assembly gates such a body inside the outline). Where the
+  check_assembly gates such a body more than 0.1 mm inside the outline). Off
+  a placed board that floor comes with the edge the part overhangs. On a pile
+  it is read in the part's own frame and written with no `edge`, with or
+  without `--declare-classes`, and an `OWED:` line stands until the entry has
+  its `edge` (or a `why`, a part over a declared slot): keep that minimum when
+  you write the edge. A part with no mating face in the board's plane gets
+  only the `OWED:` line, with the overhang for each side of it: the entry
+  answers it with its `edge`, the side that hangs as `mating_face`, and at
+  least that side's overhang as `overhang_mm.min`. Where the
   datasheet's PCB-layout drawing puts the
   board edge inside the body (a USB-C or barrel jack's shell past the edge),
   write that distance as `overhang_mm.min`, `max` at or above it. Seated
@@ -505,16 +552,86 @@ when its class is not graded for a face) and the group you gave it. Then decide,
   edge's normal; what the part does past another edge is reported on its own
   and bounded by the band's maximum, #1403), so write the distance the part reaches past the edge and never add
   the board's edge margin to it. check_floorplan's
-  `overhang_basis` says which of the two it read.
+  `overhang_basis` says which of the two it read. A receptacle's seat
+  tolerance is read on its drawn body, and the seat puts that body flush
+  even where the band reads the courtyard (#1653), so its courtyard can
+  stand past the edge. That floor is a straight edge's number, so on an outline
+  that is not a plain rectangle the seat reads check_assembly's gate itself and
+  moves the part out until it passes, within the band's `max`. A part no line
+  can clear keeps its seat, and its note says `WARNING:`, how far inside its body
+  reads and what stopped it: raise the `max` it names if the drawing allows.
+- **When its pads stop an edge part short of its band.** An edge-launch jack
+  whose pads end level with the wall of its board slot needs those pads nearly
+  on the edge, and the board's edge clearance (0.20 mm when it declares less)
+  keeps them further in. The roster of `--emit-intent` and `--plan-only` says
+  so here, with no pose, in an `OWED:` line naming the part, the overhang its
+  body needs and the clearance that binds its pads (`floorplan.pad_floor_owed`):
+  settle it now, because left alone place_simple warns on every seed that it
+  has no seat, names that pad floor, and places it as any other part, through
+  the board. The band is
+  not the cause, and lowering it leaves the body in the laminate. Check the
+  vendor's drawing for how close its pads are meant to come; then, with the
+  board owner's agreement, write a `.kicad_dru` `edge_clearance` rule binding
+  those pads (`(rule edge_launch (condition "A.Type == 'Pad' &&
+  A.memberOfFootprint('J1')") (constraint edge_clearance (min 0mm)))`) in the
+  file beside the board, which the seat and the grade read
+  as KiCad does, and the line goes. Name the pads in it when only some come that
+  close. KiCad grades that clearance to the outline's drawn line, not its
+  centre, so a pad ending on the centre line fails at any minimum, which is
+  why the floor leaves the part up to 0.1 mm in. The same floor can hold a
+  receptacle's drawn body further from its edge than its setback limit (pads
+  in front of the body): the seat's reason then names the pad floor, not the
+  band, and the way out is the same, or a larger `max_setback_mm` where the
+  drawing allows (#1713). It offers `overhang_mm.max` only where the band's
+  maximum is what holds the body back.
+- **Where the part's own model ends.** Where a 3D model resolves,
+  check_floorplan's line says `model end -2.07mm` beside the overhang (from
+  the edge's line, negative short of it) and warns when the courtyard reads
+  the part as reaching its edge but the model stops short by more than the
+  seat tolerance. A courtyard says nothing about the body: read the model end
+  for every connector a mate plugs into across the edge, and when it is
+  short, check the body's mating face on the datasheet's drawing; if it must
+  reach the edge, write as `overhang_mm.min` the overhang, in the band's own
+  reading (`overhang_basis`), that brings it there (on a courtyard reading,
+  the courtyard's overhang plus the model's shortfall). Before any seat exists
+  (a pile reads neither number), take that `overhang_mm.min` from the
+  datasheet's drawing, or place one seed to read it: `place_simple.py
+  wk/<run>/fixed.kicad_pcb wk/<run>/read.kicad_pcb --groups wk/<run>/groups.json
+  --intent wk/<run>/intent.json --seed 0`, then `check_floorplan --intent` on
+  that board (not named `s<S>`: it is no candidate). A connector the
+  intent does not declare is asked about at emit time instead: an `OWED:`
+  line names each `connector_affinity` part with an in-plane face whose
+  model stops more than 0.5 mm short of its courtyard. Answer it with an
+  `edge_connectors[]` entry: its `edge`, `class: edge_receptacle` and an
+  `overhang_mm.min` from the datasheet when a mate plugs in across that
+  edge, else just a `why` saying it is not mated across an edge.
+- **A mate that wraps the body.** Some mates are a shell that slides over
+  the receptacle's body rather than a plug into an opening in it (the
+  XT-series power connectors' plug sleeves both barrels). Find the mate's
+  outer height on its datasheet and the height above the board of the body
+  section it wraps (the datasheet, or the 3D model). If the mated shell's
+  lowest point is below the board's top face (for a shell centred on the
+  body: half its outer height is more than the height of the body's centre
+  above the board), the board edge stops it, so the length it slides over
+  the body must stand past the edge: write as `overhang_mm.min` (`max` at or
+  above it) the overhang, in the band's reading, that puts that length of
+  the body past the edge, and say in the report where the numbers came
+  from. The seat cannot ask this for you: nothing on the board says how the
+  mate is shaped.
 
-Write these into the intent's `edge_connectors[]` entries, the rows into
-`fixed_poses[]` instead (a ref in both is refused), or into the brief,
-then emit again (§3.2). Check the fixed parts -- mounting holes, switches, LEDs
-a panel shows -- against the brief or `mechanical.json`, and move any that is
-wrong with `place_pose ... set ... lock` as in §3.1. Run check_floorplan again:
-no `edge_connector` error, and no `edge_oversubscribed` warning (an edge
-declared more connectors than fit on it together: move one to another edge,
-drop a declaration, or widen a band now, before placing).
+Write these in §3.2's order: into the brief's `interfaces[]` and emit again, or
+after the last emit into the intent's `edge_connectors[]` entries, the rows
+into `fixed_poses[]` instead (a ref in both is refused). Check the fixed parts
+-- mounting holes, switches, LEDs a panel shows -- against the brief or
+`mechanical.json`, and move any that is wrong with `place_pose ... set ... lock`
+as in §3.1. Run check_floorplan again: no `edge_connector` error, and no
+`edge_oversubscribed` warning (an edge declared more connectors than fit on it
+together: move one to another edge, drop a declaration, or widen a band now,
+before placing). On a pile the same test is the command with `--plan-only`,
+which asks no pose and needs no `--allow-unplaced`: exit 0 and no
+`edge_oversubscribed` warning. The plain grade there reads `NOT FULLY GRADED`,
+exit 4, on a staged row or a budget the emit withheld: an absent verdict, not a
+finding about them.
 
 ### 3.4b Covers (your judgement)
 
@@ -532,7 +649,9 @@ under a card, and a tall part can be placed there.
    Without `--refs` it lists every connector of ten pads or more and every
    part whose models raise a body. Per connector it prints its height, each 3D model it names that does not
    resolve, what its resolved models raise over the board (a card or module
-   model) with that model's underside, the standoffs and mounting holes on
+   model) with that model's underside, each air gap inside its own model (a
+   socket's card slot: its floor and ceiling above the board, area and
+   extent), the standoffs and mounting holes on
    its axes (distance along the axis and off it), and the parts under the
    raised extent now. Facts, not decisions. On a pile (a from-scratch
    run's `fixed.kicad_pcb`) it says so first and withholds the standoff
@@ -544,13 +663,18 @@ under a card, and a tall part can be placed there.
    hangs below the card: nothing for a single-sided card, its bottom-side
    height for a double-sided one. A measured card model draws ONE card
    type: weigh its underside against the datasheets, never take it as the
-   answer. When it cannot be established, declare the conservative value
-   (the lowest card the socket takes) and say so in the hand-back.
+   answer. When the socket's drawing cannot be had, its own model's gap
+   along the card's axis is the card's seat as the model draws it: its
+   floor is where the card's underside sits, less what hangs below the
+   card. It is the model's number, so declare it as that (`source`) and
+   weigh it against any datasheet you do find. When it cannot be
+   established, declare the conservative value (the lowest card the socket
+   takes) and say so in the hand-back.
 3. **Choose the standoff for each card length** the board takes (the facts
    list each with its distance), and the card's width and reach.
 4. **Write the row** into the design brief's `covers[]`
    (`<board>.design-brief.json` beside the board, which travels with it and
-   compiles into the intent on every emit; re-emit, §3.2): `connector`, `side`,
+   compiles into the intent on every emit; emit again, in §3.2's order): `connector`, `side`,
    `axis_deg` (the facts' axis), `width_mm`, `underside_mm`, `length_mm`
    (how far the body reaches from the connector's origin), `offset_mm` (the
    standoff's "off" when the card's centre line misses the connector's
@@ -625,8 +749,7 @@ in the vocabulary of `docs/floorplan-intent.md`:
 - **An area only some parts may enter** (a keep-in for everyone else): a
   `keepouts[]` entry whose `allow` names the parts that may. A pattern that
   matches no part is a WARN, and the part it meant is pushed out.
-- **Write them after the last `--emit-intent`**, which writes a new file;
-  add them again if you emit again.
+- **Write them after the last `--emit-intent`** (§3.2).
 - **Make an overfull zone an error:** declare `legality_budget`
   (`{"overlap_area": 0.0, "oob_count": 0}`). Without it, a zone too small
   for its members is only a WARN.
@@ -899,8 +1022,10 @@ leaving that pose expensive.
    ```
    - **What it does.** It seats each member in order, within its reach of
      its partner pads, as close to them as the courtyards already seated
-     allow, kept the board's clearance apart (the placer's own rule). It
-     tries each quarter turn and keeps the one that brings the pads closest.
+     allow: courtyards the board's clearance apart, and each pad pair at its
+     own clearance (a net class, a `.kicad_dru` rule, a pad override), as the
+     placer's seat gate holds them. It tries each quarter turn and keeps the
+     one that brings the pads closest.
    - **What it prints.** Each member's pose, the gap of each of its legs
      (`legs 1.07 + 0.74 mm`), and its gap to the chip. A NOTE flags a member
      that ended beside another edge than its `side`.
@@ -1032,10 +1157,12 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
   Read the `cost` line: `hints` and `groups` say which group or hint the
   result could not satisfy.
 - **Check and LOOK** at each judged seed:
-  `python3 -X utf8 py_tools/check_assembly.py <placed> --baseline wk/<run>/fixed.kicad_pcb`
+  `python3 -X utf8 py_tools/check_assembly.py <placed> --intent wk/<run>/intent.json --baseline wk/<run>/fixed.kicad_pcb`
   (read `buildable`),
   `python3 -X utf8 py_tools/check_floorplan.py <placed> --intent wk/<run>/intent.json`
-  (0 errors, and read every `proximity` warning; a crystal or load cap past
+  (0 errors; on a seed placed from a pile, this is where each edge row's
+  overhang, nearest edge, facing and model end are first read, §3.4; and read
+  every `proximity` warning; a crystal or load cap past
   twice its limit is a defect to fix before judging, whatever the judge's
   rank. The seed's `floorplan` line already counts the errors, and its log
   names each claim still past its limit, `WARNING: claim ...`; read every
@@ -1065,7 +1192,14 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
     and `oversubscribed`, and the seeds are still judged (fix the intent, as
     above).
   - **Every judged seed is NOT BUILDABLE** (`check_assembly`'s `buildable`
-    false): read the pairs it names.
+    false): read the pairs it names. A `BODY THROUGH THE BOARD` row names no
+    pair: it is one part's own 3D model at board depth. Its `mm inside the
+    outline` is the distance to the nearest outline, which is not a band; the
+    line under it prints the `overhang_mm.min` that clears the board. Declare
+    that with the part's `edge` (§3.4's "How far an edge receptacle reaches
+    past the edge"). A part that does not mount across an edge is not cured by
+    an overhang (a model drawn low reads this way): say so in the report rather
+    than hanging it off the board.
   - **Every judged seed fails the floorplan** (place_simple WARNs that it
     judged a seed with floorplan errors; `check_floorplan --intent` names
     each finding, its measured distance and its limit).
@@ -1075,6 +1209,8 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
      will fix it: the part has no room (a WARNING that it fits the usable
      area at neither quarter turn, or that an edge part has no seat there,
      which names what stopped it: a band its overhang never comes down to,
+     its pad copper's edge clearance holding it short of its band's minimum
+     (§3.4's "When its pads stop an edge part short of its band"),
      the part in the way, or a part seated on the adjacent edge that covers
      its whole line at the corner), an edge declared more connectors than fit on
      it together (`oversubscribed`: the same parts and free span in every
@@ -1154,6 +1290,28 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    it are arms too: judge the seeds under each, and settle them with
    `--confirm`, since a level-2 gap between them did not survive the full
    route on the boards measured there.
+
+   **Each arm gets its own folder.** `judge_seeds` works in the folder
+   `judge.json` is in and makes `s<S>_route/`, `s<S>_fast.kicad_pcb` and
+   `s<S>_fast.score.json` afresh there, so a second arm in one folder replaces
+   the first's boards, logs and scores and says nothing. Judge the arm the
+   final route will use in `wk/<run>/` itself, as step 2 does (where both will
+   be routed, either one), and each other arm beside it: a copy of `judge.json`
+   and of the intent (a chain's `{run}` is that folder now), and the board of
+   each seed `judge.json` names.
+   ```bash
+   mkdir -p wk/<run>/arm_B
+   cp wk/<run>/judge.json wk/<run>/intent.json wk/<run>/arm_B/
+   python3 -X utf8 py_router/copy_board.py wk/<run>/s<S>.kicad_pcb wk/<run>/arm_B/s<S>.kicad_pcb
+   python3 -X utf8 py_placer/judge_seeds.py wk/<run>/arm_B/judge.json \
+       --chain wk/<run>/judge_chain_B.txt --intent wk/<run>/arm_B/intent.json
+   ```
+   Everything in step 2 reads the same in that folder: its seed filter (a seed
+   it skips needs no board there; a seed `--seeds` names does), `--confirm`,
+   `--full`. Keep every arm's folder to the end of the run, for its `chain.log`,
+   `redo_commands.sh`, fast boards and scores, and list each arm's ranking in
+   REPORT.md. A placement is the same under every arm, so the kept one is copied
+   from `wk/<run>/` (step 3).
 2. **Fast-route and score the seeds `wk/<run>/judge.json` names** (the
    `--judge` legal seeds, buildable and floorplan-clean first, then lowest
    `final.cost`; place_simple grades each seed with `check_assembly
@@ -1212,10 +1370,35 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    `--quick` board) to `wk/<run>/final.kicad_pcb` with `copy_board.py`. A
    kept seed is not finished while its `floorplan` or `assembly` is above 0,
    whatever its route.
+4. **Look at each edge part's opening from outside its edge** (#1652): every
+   edge connector whose facing clause reads anything but `strong` or
+   `marker` (`weak`, `unverified`, `sourced`, abstained, exempt). No grade
+   reads where the opening is, and `render_placement`'s plan view cannot
+   show a mouth. A whole-board render cannot either: it frames the board, so
+   a ~155 mm board renders at ~5.6 px/mm, where a 1.00 mm side-entry
+   header's contacts are 1 px specks and its mouth out and mouth in look the
+   same. Render each listed part close up, a few seconds each:
+   ```bash
+   python3 py_tools/edge_closeup.py wk/<run>/final.kicad_pcb J7 J3 --out-dir wk/<run>/edges
+   ```
+   Each part is centred, seen from outside the edge its pads are nearest
+   (`J3:north` names the edge), at 40 px/mm (`--px-per-mm`), and the line
+   it prints names the image, the edge and the scale. In each image you
+   stand outside that edge (from the north, west is on the right), so the
+   part is nearest the camera: a jack's or USB socket's mouth must face
+   you; its back wall means it opens into the board. Fix the declaration
+   (`mating_face`, and the source you read it off) and place again. A part
+   whose line says its 3D model is not declared or does not resolve is
+   drawn as a bare footprint, and the render shows nothing about its mouth;
+   a part you still cannot read at that scale is the same. Say so in
+   REPORT.md rather than counting it checked. List each part and what you
+   saw in REPORT.md.
 
 In `place` mode that placement is the result. Run
 `python3 -X utf8 py_tools/route_review.py wk/<run>/s<S>_fast.kicad_pcb --json wk/<run>/review.json`
-on its fast route: turn each two-pad part it lists as turned against its
+on its fast route, the arm the final route will use (§3.7, step 1: another
+arm's route wires the same parts differently; where both arms will be routed,
+review each folder's and act only on what both list): turn each two-pad part it lists as turned against its
 wiring with the `place_pose BOARD OUT set REF X Y --rot R` it prints for that
 part, then check the board again (`check_assembly`, `check_floorplan
 --intent`, `render_placement`). That pose is a half turn about the midpoint of
@@ -1373,7 +1556,7 @@ Routing Completes): run them once, here, not again inside the routing.
 5. **One verifier, at most 3 calls.** When you believe you have your best
    board, spawn ONE fresh subagent (not a fork) with
    `references/verifier.md`, filled in for your mode, board, sha256, baseline,
-   intent and spec flags. On FAIL, fix what it names and continue.
+   intent, spec flags and, in `full` mode, whose rules the project holds. On FAIL, fix what it names and continue.
 6. **Record milestones in the ledger:** the first legal placement, the kept
    placement, the first routed board, the first DONE, the
    final board, and tried-and-worse boards with `--rejected`.
@@ -1419,9 +1602,17 @@ Routing Completes): run them once, here, not again inside the routing.
    - **each verifier verdict.**
 3. **Independent grade and timing**, for the report's own table:
    ```bash
-   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py <board> --baseline <input> --intent <i> --mode <mode>
+   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py <board> --baseline <input> --intent <i> --mode full --whose-rules <rules>
+   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/grade.py <board> --baseline <input> --intent <i> --mode place
    python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/measure.py --self --evidence wk/<run>
    ```
+   Run the `grade.py` line for your mode. `<rules>` is the answer §2 recorded,
+   `aspirational` or `users-own`, and it picks the `check_complete` form that
+   decides `done` (`/review-routed-board` Step 5): `users-own` reads
+   `--authored-from <input>` and says so as `done_form`. It refuses (exit 1,
+   nothing graded) an `<input>` that cannot supply the floors: no project, a
+   project declaring no rule, or one a writeback has already lowered. Report
+   that refusal; do not grade against another board.
    In `full` mode, add `--spec <name>=<value>` to `grade.py` for each spec
    flag the board declares, spelled as board_score spells it
    (`min-track-width=0.09`); a name it or check_complete would refuse, or a

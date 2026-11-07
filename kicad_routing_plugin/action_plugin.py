@@ -83,6 +83,21 @@ def _get_selected_net_names(board):
     return net_names
 
 
+def _pcb_editor_frame():
+    """The PCB Editor's frame, to own the plugin's dialogs (#1654).
+
+    The first top-level window is the Project Manager when KiCad was opened
+    on a project, and the dialogs used to open under it. KiCad names the
+    editor's frame "PcbFrame" (PCB_EDIT_FRAME_NAME), in a project and in a
+    standalone editor alike; the first top-level window stays the fallback.
+    """
+    frame = wx.FindWindowByName("PcbFrame")
+    if frame is not None:
+        return frame
+    windows = wx.GetTopLevelWindows()
+    return windows[0] if windows else None
+
+
 class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
     """Action Plugin for KiCad Routing Tools."""
 
@@ -122,8 +137,7 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
         # Ensure scipy/shapely are available (KiCad doesn't bundle them, and
         # PCM-installed plugins can't pip-install during install).
         from .deps_check import ensure_dependencies
-        parent_for_deps = wx.GetTopLevelWindows()[0] if wx.GetTopLevelWindows() else None
-        if not ensure_dependencies(parent_for_deps):
+        if not ensure_dependencies(_pcb_editor_frame()):
             return
 
         board = pcbnew.GetBoard()
@@ -158,7 +172,7 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
         preselected_nets = _get_selected_net_names(board)
 
         # Show the configuration dialog (modal)
-        parent = wx.GetTopLevelWindows()[0] if wx.GetTopLevelWindows() else None
+        parent = _pcb_editor_frame()
 
         # Check if we have saved settings for this board
         saved_settings = None

@@ -90,7 +90,7 @@ def _route(d, tag, extra):
     out = os.path.join(d, f'out_{tag}.kicad_pcb')   # fresh output per run
     r = subprocess.run(
         [sys.executable, os.path.join(ROOT, 'py_router', 'route_planes.py'),
-         src, out, '--nets', 'GND', '--plane-layers', 'B.Cu',
+         src, out, '--nets', 'GND', 'GND', '--plane-layers', 'F.Cu', 'B.Cu',
          '--clearance', str(BASE_CLEARANCE), '--via-size', str(VIA_SIZE),
          '--via-drill', '0.3', '--track-width', '0.2', '--grid-step', '0.1',
          '--add-gnd-vias', '--gnd-via-distance', '3.0', *extra],

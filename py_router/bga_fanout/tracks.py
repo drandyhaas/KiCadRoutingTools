@@ -67,8 +67,30 @@ def detect_collisions(
     return collision_count, collision_pairs
 
 
+def pair_self_collisions(tracks: List[Dict], pair_spacing: float) -> List[Tuple[Dict, Dict]]:
+    """The tracks of one differential pair that come closer to their partner
+    than `pair_spacing`, the pair's own centreline spacing (#1684).
+
+    detect_collisions leaves a pair's two legs out, since they run closer than
+    two strangers may, and layer reassignment (its remedy) moves both legs
+    together. So P and N could cross and still validate as no collisions."""
+    hits = []
+    for i, t1 in enumerate(tracks):
+        if not t1.get('pair_id'):
+            continue
+        for t2 in tracks[i + 1:]:
+            if t1.get('pair_id') == t2.get('pair_id') \
+                    and t1['net_id'] != t2['net_id'] and t1['layer'] == t2['layer'] \
+                    and check_segment_collision(t1['start'], t1['end'],
+                                                t2['start'], t2['end'],
+                                                pair_spacing - 1e-6):
+                hits.append((t1, t2))
+    return hits
+
+
 def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float,
-                        bounds: Tuple[float, float, float, float] = None) -> List[Dict]:
+                        bounds: Tuple[float, float, float, float] = None,
+                        clearance: float = 0.0) -> List[Dict]:
     """The copper already on the board, as existing-track dicts for the
     collision checks: every segment, and every via as a zero-length track on
     each of `layers` it has copper on.
@@ -83,7 +105,12 @@ def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float
     check_for_previous (the "skip pads that already have fanout" option), and
     its vias never did, so a fanout on a board that already carried copper
     near the array validated its escapes against nothing but each other.
+
+    #1677: the board's Edge.Cuts rings stand here too, one zero-width track of
+    no net per edge on each of `layers`, held at the edge clearance, so a
+    channel escape across a cut-out is a collision like any other.
     """
+    from check_drc import BoardEdgeGate, laid_copper_edge_clearance
     from geometry_utils import via_copper_layers
 
     def _inside(x0, y0, x1, y1, h):
@@ -111,6 +138,16 @@ def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float
                              via.net_id, is_existing=True)
             t['spacing_extra'] = (via.size - track_width) / 2
             out.append(t)
+    edges = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
+    extra = edges.clearance - clearance - track_width / 2
+    for ring in edges.rings:
+        for (x0, y0), (x1, y1) in zip(ring, list(ring[1:]) + [ring[0]]):
+            if not _inside(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1), 0.0):
+                continue
+            for layer in layers:
+                t = create_track((x0, y0), (x1, y1), 0.0, layer, -1, is_existing=True)
+                t['spacing_extra'] = extra
+                out.append(t)
     return out
 
 

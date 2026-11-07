@@ -16,7 +16,8 @@ both parts the whole route does not admit. On tracked boards this pins:
    point-to-point pair kept, and a base name that is a net of its own is no pair; two nets whose names end in one
    part are each named by the full name, a net alone of its kind by its last part (coherent_nets.net_keys); the
    K-ladder keeps a pair's two legs in one river, so no prefix K runs a leg alone;
-5. a board with no bus: route_buses hands the board on as it came, exit 1, the summary saying none was found.
+5. a board with no bus: route_buses hands the board on as it came, status 1 (the CLI exits 0 for it: OUT written,
+   #1738), the summary saying none was found.
 """
 import contextlib
 import json

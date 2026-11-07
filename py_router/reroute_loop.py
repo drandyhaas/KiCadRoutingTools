@@ -30,8 +30,8 @@ from polarity_swap import apply_polarity_swap, get_canonical_net_id, rip_combo_a
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from routing_context import (
     build_single_ended_obstacles, build_diff_pair_obstacles,
-    build_diff_pair_leg_obstacles,
-    record_single_ended_success, record_diff_pair_success,
+    hybrid_leg_maps,
+    record_single_ended_success, record_diff_pair_success, record_pair_paths,
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
 from obstacle_cache import update_net_obstacles_after_routing, refresh_net_obstacles
@@ -901,6 +901,16 @@ def run_reroute_loop(
 
                 reroute_succeeded = False
                 ripped_items = []
+                # #1650: bound on EVERY pass, before the branch below that
+                # fills them. routed_net_paths can be empty here (a routed
+                # pair whose result carries no p_path/n_path -- a direct
+                # hybrid -- never enters it), and the setback fallback after
+                # the rip ladder reads both: unbound they raised
+                # UnboundLocalError, bound once per loop they handed this
+                # pair an EARLIER pair's blocked cells. Empty matches the
+                # main diff-pair loop, whose setback fallback also runs only
+                # inside its routed_net_paths branch.
+                fwd_cells = bwd_cells = []
                 if routed_net_paths and result:
                     # Find blocked cells from the failed route
                     # Pop to free memory from result dict (cells kept in local vars for fallback)
@@ -1121,10 +1131,7 @@ def run_reroute_loop(
                                     remaining_net_ids.remove(ripped_pair.n_net_id)
                                 routed_net_ids.append(ripped_pair.p_net_id)
                                 routed_net_ids.append(ripped_pair.n_net_id)
-                                if retry_result.get('p_path'):
-                                    routed_net_paths[ripped_pair.p_net_id] = retry_result['p_path']
-                                if retry_result.get('n_path'):
-                                    routed_net_paths[ripped_pair.n_net_id] = retry_result['n_path']
+                                record_pair_paths(routed_net_paths, ripped_pair, retry_result)
                                 routed_results[ripped_pair.p_net_id] = retry_result
                                 routed_results[ripped_pair.n_net_id] = retry_result
                                 diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
@@ -1197,7 +1204,8 @@ def run_reroute_loop(
                                     successful += 1
 
                 # Fallback layer swap for setback failures in reroute (after rip-up fails)
-                # Note: fwd_cells and bwd_cells already extracted above
+                # Note: fwd_cells and bwd_cells already extracted above ([] when
+                # routed_net_paths was empty, #1650)
                 if not reroute_succeeded and enable_layer_switch and result:
                     fwd_iters = result.get('iterations_forward', 0)
                     bwd_iters = result.get('iterations_backward', 0)
@@ -1245,10 +1253,7 @@ def run_reroute_loop(
                             routed_net_ids.append(ripped_pair.n_net_id)
                             track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
                             track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
-                            if swap_result.get('p_path'):
-                                routed_net_paths[ripped_pair.p_net_id] = swap_result['p_path']
-                            if swap_result.get('n_path'):
-                                routed_net_paths[ripped_pair.n_net_id] = swap_result['n_path']
+                            record_pair_paths(routed_net_paths, ripped_pair, swap_result)
                             routed_results[ripped_pair.p_net_id] = swap_result
                             routed_results[ripped_pair.n_net_id] = swap_result
                             diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
@@ -1280,13 +1285,13 @@ def run_reroute_loop(
                     # for why this uses base_obstacles + 0 clearance (not the coupled
                     # diff_pair_base_obstacles / extra clearance the middle map above
                     # uses) -- previously this site built it inconsistently (#246 review).
-                    leg_obstacles = build_diff_pair_leg_obstacles(
+                    leg_obstacles, leg_fallback = hybrid_leg_maps(
                         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, ripped_pair.p_net_id, ripped_pair.n_net_id,
                         gnd_net_id, track_proximity_cache, layer_map)
                     hyb = _route_direct_coupled_middle(
                         pcb_data, ripped_pair, config, hyb_obstacles, config.layers,
-                        leg_obstacles=leg_obstacles)
+                        leg_obstacles=leg_obstacles, leg_fallback=leg_fallback)
                     if hyb and not hyb.get('failed'):
                         print(f"  {GREEN}HYBRID ESCAPE (reroute): direct coupled middle "
                               f"+ point-to-point terminal legs{RESET}")

@@ -181,7 +181,12 @@ KEY_SETS = {
         'side',
         # The side of the footprint its mating face opens on, in its own
         # frame: a part placed from a pile has no pose to read it from.
-        'mating_face'} | FREE,
+        'mating_face',
+        # #1652: what that face was read off (a drawing, the 3D model).
+        'mating_face_source',
+        # #1714: the side a pile's floor row's band was read along, written
+        # by `emit_intent`, so an edge-less row is graded as that distance.
+        'overhang_face'} | FREE,
     '_OVERHANG_KEYS': {'min', 'max'},
     '_CENTER_ON_EDGE_KEYS': {'tolerance_mm'},
     '_ALONG_EDGE_BAND_KEYS': {'from', 'to'},
@@ -347,7 +352,8 @@ def test_an_intent_using_every_known_key_loads():
             # is accepted" claim would silently degrade to "every key but one".
             {'ref': 'J2', 'edge': 'west',
              'along_edge_band': {'from': 0.10, 'to': 0.35},
-             'mating_face': '-x'}],
+             'mating_face': '-x', 'mating_face_source': 'the 3D model',
+             'overhang_face': '-x'}],
         'decaps': {'max_distance_mm': 2.5, 'exempt': ['C99'],
                    'search_radius_mm': 6.0, 'max_pin_distance_mm': 1.5,
                    'pin_functions': ['VCC', 'VDD'], 'same_side': False,

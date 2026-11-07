@@ -81,9 +81,25 @@ says; the run prints `Skipping N single-pad/NC net(s)` and `JSON_SUMMARY` carrie
 counts as neither requested nor failed.
 
 **Selected nothing (#1641):** each `--nets` pattern that selects no pad on the part is printed and listed
-in `JSON_SUMMARY`'s `unmatched`, with its `reason` (`interior` -- the stub escape skips interior pads and `--escape-method underpad` reaches them -- `not_on_part`, `single_pad`, `unconnected`, `no_such_net`); `requested` counts only what a
+in `JSON_SUMMARY`'s `unmatched`, with its `reason` (`not_on_part`, `single_pad`, `unconnected`, `no_such_net`); `requested` counts only what a
 pattern selected. A `--nets` list none of whose patterns names a net on the board is refused, exit 2, with no
 board written, as `route.py` refuses one.
+
+**Interior pads a filter selected (#1717):** the surface fan has no edge for an interior pad, so a stub run
+with `--nets` gives each interior pad its filter selects the under-pad via-drop after the fan (the
+`--escape-method underpad` code, its clearance ladder, `--via-size`/`--via-drill`/`--allow-via-in-pad`), placed
+clear of the fan's stubs. A pad the via-drop cannot place fails its net, as an underpad run does, and is
+named in `JSON_SUMMARY`'s `skipped_interior` (`"U1.34"`) with one `WARNING` line. A run without `--nets` never
+via-drops an interior or exposed pad and lists nothing.
+
+**Power stubs drawn at `--width` (#1743):** the via-drop draws every pad-to-via stub at `--width`, and
+`--power-nets` widens only a surface stub (where it fits, #1318). So `JSON_SUMMARY`'s `power_stubs_at_width`
+lists each escape stub drawn at the track width on a net that reads as power or ground -- `pad` (`"U1.5"`),
+`net`, `width` (as drawn), `escape` (`surface` or `via-drop`) and `why` -- with a console `NOTE` saying what
+widens it. A net reads as power by the rules autoplan builds `--power-nets` from (`list_nets.
+power_net_evidence`): a ground or rail name, power pins on two or more parts, or a pour the board draws for it.
+A surface stub of a net `--power-nets` names is not listed; a via-drop stub is, while its named width is wider
+than drawn. Disclosure only: the copper is unchanged.
 
 ## Options
 

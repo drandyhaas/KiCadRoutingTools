@@ -574,6 +574,13 @@ gate, `place_pose` and the graders:
   at least the board's clearance apart, and inside the board's real Edge.Cuts
   outline (cutouts and notches included) by the edge clearance.
   `check_assembly` refuses real courtyard overlap on a part that moved.
+- **Courtyards that are not a rectangle.** A courtyard drawn as several
+  shapes, or as one axis-aligned shape (an L, a U), is occupied box by box
+  (`parser.extract_courtyard_boxes`, `quench._ShapedPart`), so a part may
+  stand in its notch: the seat gate, the violation measure and the anneal's
+  overlap and halo read the boxes; zones, keep-outs and the outline keep the
+  bounding box. A single shape that is not axis-aligned (a chamfer, a
+  circle) is its bounding box.
 - **Pads and holes.** Pad copper keeps its clearance to every other net's
   copper (net classes, `.kicad_dru` layer rules and pad overrides included),
   never stacks on another part's pad, and stays inside the outline; NPTH holes

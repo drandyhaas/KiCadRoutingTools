@@ -488,7 +488,7 @@ python3 py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND "VA19|V
 python3 py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
 
-GND return vias (`--add-gnd-vias`) and area stitching (`--stitch-vias`, `--stitch-edge-fence`) go in a re-run of the same pour after routing, so they place around the finished signals — see [Plane Routing](docs/route-plane.md).
+GND return vias (`--add-gnd-vias`) and area stitching (`--stitch-vias`, `--stitch-edge-fence`) go in a re-run of the same pour after routing, so they place around the finished signals, and a return via needs GND poured on two layers — see [Plane Routing](docs/route-plane.md).
 
 ### Repair Disconnected Plane Regions
 

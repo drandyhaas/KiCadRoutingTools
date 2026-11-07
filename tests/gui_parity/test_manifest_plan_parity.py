@@ -1473,6 +1473,7 @@ def check_cap_flags():
             '--max-displacement-cap', '6', '--displacement-growth', '2',
             '--max-passes', '7', '--cap-prefix', 'C',
             '--grid-step', '0.05', '--clearance', '0.1',
+            '--fab-overrides', 'fine.fab',
             '--default-via-size', '0.42', '--no-rotate',
             '--intent', 'x.intent.json', '--no-fix-drc-settings']
     step = m2p.cap_optimization_step(argv)
@@ -1494,6 +1495,7 @@ def check_cap_flags():
             ('--cap-prefix', 'cap_prefix', 'C'),
             ('--grid-step', 'grid_step', 0.05),
             ('--clearance', 'clearance', 0.1),
+            ('--fab-overrides', 'fab_overrides_path', 'fine.fab'),
             ('--default-via-size', 'cap_default_via_size', 0.42),
             ('--intent', 'cap_intent_path', 'x.intent.json'),
             ('--no-rotate', 'cap_allow_rotation', False),

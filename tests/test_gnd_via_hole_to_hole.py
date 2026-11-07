@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
-from kicad_parser import Pad, Via, Net, PCBData, BoardInfo
+from kicad_parser import Pad, Via, Net, PCBData, BoardInfo, Zone
 from routing_config import GridRouteConfig, GridCoord
 from obstacle_map import GridObstacleMap  # also puts rust_router on sys.path
 from add_gnd_vias import add_gnd_vias_to_existing_board
@@ -50,7 +50,11 @@ def run():
                         2: Net(net_id=2, name='GND', pads=[]),
                         3: Net(net_id=3, name='VCC', pads=[foreign_pad])},
                   footprints={}, vias=[sig_via], segments=[],
-                  pads_by_net={1: [], 2: [], 3: [foreign_pad]})
+                  pads_by_net={1: [], 2: [], 3: [foreign_pad]},
+                  # GND on two layers: a return via must join two (#1667)
+                  zones=[Zone(net_id=2, net_name='GND', layer=lay,
+                              polygon=[(-5.0, -5.0), (5.0, -5.0), (5.0, 5.0), (-5.0, 5.0)])
+                         for lay in ('F.Cu', 'B.Cu')])
 
     obs = GridObstacleMap(len(cfg.layers))  # empty board: no track obstacles
 

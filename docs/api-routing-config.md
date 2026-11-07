@@ -408,6 +408,30 @@ GUI's `results_data` as `pour_cuts: [{net, open_pads_before,
 open_pads_after}]`, and in `JSON_SUMMARY_MIN.pour_cuts` (the names). The audit
 only reports: it does not fail the run or revert it.
 
+##### Pad contacts (#1680)
+
+A via or track lying on another net's pad is a short the rest of a route step
+would never touch: the copper is the input's, and its net reads connected. So
+the outermost `batch_route`, before its already-connected filter, takes such
+copper of a net in this step's `--nets` off the board with the stub that led to
+it (back to the first pad, surviving via or junction), and the net routes clear
+of the pad (`pad_contact.rip_pad_contacts`). KiCad-locked and sense-held copper
+and protected nets stay, under the #521 rules: naming a protected net exactly
+in `--nets` lifts it. A pad with no net and a net tie's partner pad are not
+contacts. The copper is not given back if the reroute fails: an open net is
+named by the run's own tally, and is not a short. The rips are
+`pad_contact_rips` in `--json-out` and the `JSON_SUMMARY`.
+
+The run then audits the board it ships (`pad_contact.audit_shipped`, the written
+file or the GUI's write model, on the "nothing to route" path too). Copper still
+on another net's pad is named on the console (`SHORTED on the board this run
+ships`), and copper inside the clearance of one (`NOT CLEAR ...`, at the floor
+the writeback stores, so a pair a net class raises above it is `check_drc`'s to
+name), in `--json-out` and the GUI's `results_data` as `pad_contacts` and
+`pad_grazes` (`[{pad, pad_net, net, kind, at, overlap_mm, short, ...}]`), and in
+`JSON_SUMMARY_MIN` (the pads). This part only reports. `check_complete.py` names
+the shorts among its reasons.
+
 ##### History congestion (#590), the only field that measures TIME
 
 Every other field prices the board's state *now*. This one prices how often a
@@ -544,10 +568,12 @@ on the corpus.
 |-------|---------|---------|
 | `impedance_target` | `None` | Target Z0 in Ω; when set, per-layer widths come from `layer_widths` |
 | `layer_widths` | `{}` | Layer name → width (filled by `impedance.calculate_layer_widths_for_impedance`) |
+| `pair_layer_gaps` | `{}` | #1747: layer name → P/N gap where it differs from `diff_pair_gap`. Set only on the config of a diff pair narrowed to fit (#1742): a narrowed layer takes the gap that holds the impedance target at the narrowed width (`impedance.differential_gap_for_impedance`), floored at the pair's own clearance floor. `layer_pair_spacing` reads it |
 | `coplanar_gap` | `0.0` | #486 **declaration**: design gap (mm) from a controlled-impedance trace's edge to the same-layer ground pour. `> 0` means outer-layer widths came from the coplanar-waveguide-over-ground model rather than microstrip. Set from `route.py --coplanar-gap` / `route_diff.py --coplanar-gap` |
 | `coplanar_net_ids` | `set()` | #486: net ids the coplanar declaration applies to. **Empty with a non-zero `coplanar_gap` means the whole call is coplanar**, and `layer_widths` already holds the CPW widths. Non-empty means only these nets are, and their widths live in `coplanar_layer_widths` |
 | `coplanar_layer_widths` | `{}` | #486: layer name → CPW-derived width, used only for `coplanar_net_ids`. Lets one call mix coplanar and microstrip nets |
 | `reserve_layer_widths` | `False` | Obstacle-stamp reserve policy (#156): `False` = stamps reserve nominal `track_width`, wide/impedance nets ride per-net fractional `track_margin`; `True` (diff engine) = stamps bake the full per-layer width |
+| `stamp_pads_at_call_width` | `False` | On a `reserve_layer_widths` map, stamp pads and the board edge at the call's `track_width` anyway (#1736). Set only on the hybrid escape's leg fallback map, used when no leg attaches on the layer-width stamps; the assembled route's foreign-copper gate grades the legs at their real width |
 | `power_net_widths` | `{}` | net_id → width override for power nets (never below `track_width`) |
 | `net_track_widths` | `{}` | net_id → the net's OWN netclass width (mm, #435), used EXACTLY (may be *narrower* than `track_width`); auto-read from the `.kicad_pro` only when `--track-width` is omitted AND no `--impedance` is set (impedance-solved widths would be overridden otherwise, #610), floored at the fab minimum by the caller. Lower priority than a manual `power_net_widths` override |
 | `net_layer_widths` | `{}` | Per-net per-layer widths reapplied from stored `.kicad_pro` impedance declarations on a redo (#521); outranks the netclass scalar |
@@ -600,7 +626,10 @@ on the corpus.
 | `routing_clearance_margin` | `1.0` | Diff pairs only: multiplier on the track-to-via distance that sets the P/N via offset and the centerline's via keep-out (1.0 = exact DRC minimum). No single-ended obstacle reads it |
 | `hole_to_hole_clearance` | `0.20` | Drill-to-drill clearance, edge to edge (the CLIs pass the board's own `min_hole_to_hole`, else `routing_defaults.HOLE_TO_HOLE_CLEARANCE`, 0.20). Net-blind, like KiCad's `hole_to_hole` rule: a new via keeps it from vias of its OWN net too -- the same-net via rings are `max(via_size + clearance, (d1 + d2)/2 + hole_to_hole)` (#1070) |
 | `hole_clearance` | `0.0` | Copper-to-HOLE floor (KiCad's `min_hole_clearance`) — keeps TRACKS off an NPTH wall (never below `routing_defaults.NPTH_TO_TRACK_CLEARANCE`), and whenever a floor resolves above 0 also keeps VIA copper `max(clearance, floor)` off it (#1038). NOT the same rule as `hole_to_hole_clearance` (drill-to-drill). `0` = read the board's own constraint (`rules.min_hole_clearance` or `fab_floor_origin`; on a PCBData built from pcbnew the rule is the live board's in-memory value, `obstacle_map.declared_hole_clearance`); the track keep-out then falls back to `NPTH_TO_TRACK_CLEARANCE`, the via keep-out to none. The project is re-read whenever it changes, so a long-lived process (the GUI) never keeps a superseded value. route.py's DRC writeback writes `min_hole_clearance` into each route step's output project, so every chain step after the first resolves a floor |
-| `board_edge_clearance` | `0.0` | Clearance from board edge (0 = use `clearance`) |
+| `board_edge_clearance` | `0.0` | Clearance from board edge (0 = use `clearance`). With a `.kicad_dru` `edge_clearance` rule binding copper (#1678) it is the strictest floor of any net, for every one-number reader |
+| `edge_floors` | `None` | #1678: `design_rules.EdgeFloors`, each net's edge floor under the board's `.kicad_dru`, installed engine-side by `install_design_rules`. `None` = no rule moves a floor. No CLI flag and no GUI control |
+| `board_edge_declared` | `None` | #1678: what `board_edge_clearance` was before a rule moved it, which the DRC writeback records |
+| `edge_extra_clearance` | `0.0` | #1678: what a map's edge band adds for geometry offset from the routed centreline (a diff pair's members, `net_keepouts.centerline_config`; per layer when the members' half-pitch differs by layer, #1729) |
 | `pour_barriers` | `[]` | #1260: the fill islands of out-of-scope zone nets this run could only cut, `[{net, layer, polygons, clearance}]`, installed by `pour_guard.install_pour_barriers` and stamped by `build_base_obstacle_map` as track and via keep-outs (see "Pour guard (#1260)" above). Engine-computed and inherited by nested sub-runs; no CLI flag and no GUI control (`KICAD_POUR_GUARD=0` reverts). Empty = inert |
 | `same_net_pad_clearance` | `-1.0` | #581: edge-to-edge clearance between **every placed via** and **same-net SMD pads**. `> 0` forbids via-in-pad globally (routing/tap/rescue via placement blocks same-net SMD pads at this clearance; pad-centre swap vias are declined; the #189 in-pad rescue is disabled; the sub-grid via nudge honors it; BGA under-pad escapes run dog-bone, QFN refuses via-in-pad). #962: `> 0` also keeps vias out of the net's solder-paste OPENINGS at the same clearance -- graphic and paste-only openings, and pad openings larger than their pad -- in the routing, plane-via, nudge and seal-hint paths (the fanouts keep their own via-in-pad rules). `-1` **and** `0` preserve pre-#581 behavior exactly (0 keeps only its legacy meaning where `route_planes` passes it explicitly into its stitching via maps). Set from `--same-net-pad-clearance` (planes/route/route_diff/fanout/repair) or auto-read from the persisted `.kicad_pro` record (`kicad_routing_tools.same_net_pad_clearance`); an active flag value is persisted so later chain steps inherit it |
 | `net_clearances` | `{}` | `{net_id: class_clearance_mm}` — per-net **net-class** clearance for KiCad's cross-class rule (see below) |
@@ -654,7 +683,10 @@ assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> 
   (`net_clearances[nid] = min(class, ceiling)`) before it is installed — a class
   *tighter* than the ceiling survives; a *looser* one is capped, because stock net
   classes are largely aspirational (real boards, and even the human-routed references,
-  route below them). The output `.kicad_pro` writeback then clamps every non-Default
+  route below them). The ceiling is first pinned up to the physical fab floor, as the
+  run's clearance is (`fab_tiers.enforce_fab_floors`; the GUI's `_class_ceiling`, #1691;
+  the placement step's `--clearance`, which is a ceiling too, #1699),
+  so it never lowers a class below that floor. The output `.kicad_pro` writeback then clamps every non-Default
   class down to that same `min(class, ceiling)` (#1492: the ceiling, never the Default
   class's routed value, which one descent on one Default net used to drag every class
   down to), so KiCad grades exactly what was routed. An automatic clearance descent on
@@ -870,6 +902,19 @@ covers its extra half-width through its own fractional `track_margin`. With
 `reserve_layer_widths=True` (the diff-pair engine) it is the full
 `get_track_width(layer)`, baked mm-exact into the maps. Track margins are
 always computed against this value, so stamps and margins cannot drift.
+
+The baking covers track and via stamps. Pads, the board edge and keep-outs
+stamp the call's `track_width`, so a pair's single-ended member fallback, which
+needs them priced for its layer width, routes with
+`reserve_layer_widths=False` on a map of its own (#1679); a member that
+necks there ships under its layer width and gets one `design_rules` row
+(`diff_pair_custody.disclose_member_fallback_widths`). A member routed coupled
+is graded the same way on the copper it ships, against `get_track_width(layer)`
+on the pair's own config, the connectors drawn at that config's `track_width`
+counted as delivered (`disclose_coupled_pair_widths`, #1725); both call
+`disclose_pair_widths`. A hole keep-out reads
+the reserve per layer, and on a pair's centreline map also reaches the member's
+far edge, because a neck does not look at holes (#1687).
 
 ```python
 config.track_margins_for_net(net_id) -> List[float]   # grid cells, per layer

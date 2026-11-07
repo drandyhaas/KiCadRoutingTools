@@ -356,6 +356,7 @@ def check_class2(missing=None):
     os.environ.setdefault("WXSUPPRESS_SIZER_FLAGS_CHECK", "1")
     board = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
     app = wx.App(False)  # noqa: F841 -- must outlive the dialog
+    wx.Log.SetActiveTarget(wx.LogStderr())
     dlg = swig_gui.RoutingDialog(None, parse_kicad_pcb(board), board)
     try:
         # (GUI call name, GUI module, {receiver var -> live dict the call site

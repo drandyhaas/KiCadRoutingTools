@@ -860,17 +860,28 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
                 print(f"    rescue rung rejected: route escaped the window "
                       f"bounds (fence leak) net={net_id}")
                 continue
-            _tie_bad = _tie_band_violations(
-                pcb_data, net_id, cfg, result.get('new_segments') or [])
-            if _tie_bad:
-                _s, _p, _d = _tie_bad[0]
-                print(f"    rescue rung rejected: {len(_tie_bad)} segment(s) "
-                      f"ride net-tie partner pad "
-                      f"{_p.component_ref}.{_p.pad_number} sub-clearance "
-                      f"beyond KiCad's waiver (worst {_d:.3f}mm)")
+            if _tie_band_rejects(pcb_data, net_id, cfg, result, 'rescue rung'):
                 continue
             return result, cfg
     return None, None
+
+
+def _tie_band_rejects(pcb_data, net_id, cfg, result, what):
+    """True (and the line saying why) when RESULT's new copper rides a net-tie
+    partner pad beyond KiCad's waiver (_tie_band_violations): the one gate
+    every route this module accepts passes -- a rescue rung's, and each edge
+    of a whole-net retry (#1697: the terminal escalation shipped the copper
+    the rungs had just rejected)."""
+    bad = _tie_band_violations(pcb_data, net_id, cfg,
+                               result.get('new_segments') or [])
+    if not bad:
+        return False
+    _s, _p, _d = bad[0]
+    print(f"    {what} rejected: {len(bad)} segment(s) "
+          f"ride net-tie partner pad "
+          f"{_p.component_ref}.{_p.pad_number} sub-clearance "
+          f"beyond KiCad's waiver (worst {_d:.3f}mm)")
+    return True
 
 
 def _tie_band_violations(pcb_data, net_id, cfg, segments):
@@ -1564,6 +1575,24 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                  f" stay where they are" if _capmv666
                                  else ""))
                         continue
+                    # ...and against the net-filtered keep-outs binding the
+                    # net (net_keepouts): the fanout ladder places on maps
+                    # the per-route region stamp never reaches. The dogbone
+                    # tap above (tap_pad_with_escalation) checks the same.
+                    if getattr(pcb_data, '_net_keepouts', None):
+                        from net_keepouts import audit as _nk_audit
+                        _ko666 = _nk_audit(pcb_data, _gsegs, _gvias)
+                        if _ko666:
+                            print(f"    bare-ball escape: "
+                                  f"{_pad.component_ref}.{_pad.pad_number} "
+                                  f"declined (escape inside net keep-out(s) "
+                                  + ', '.join(f"{r['region']}" for r in _ko666)
+                                  + ")"
+                                  + (f"; cap(s) "
+                                     f"{', '.join(m['reference'] for m in _capmv666)}"
+                                     f" stay where they are" if _capmv666
+                                     else ""))
+                            continue
                     pcb_data.segments.extend(_gsegs)
                     pcb_data.vias.extend(_gvias)
                     # #803: bump the copper epoch -- _blockid_geom_memo and
@@ -2048,7 +2077,9 @@ def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
         result = route_net_with_obstacles(pcb_data, net_id, cfg, obstacles,
                                           sources_override=src_over,
                                           targets_override=tgt_over)
-        if not result or result.get('failed'):
+        if not result or result.get('failed') \
+                or _tie_band_rejects(pcb_data, net_id, cfg, result,
+                                     'whole-net edge'):
             failed_gaps.add(key)
             continue
         add_route_to_pcb_data(pcb_data, result, debug_lines=cfg.debug_lines)

@@ -308,6 +308,17 @@ measured as and the installed one when they differ. A via-in-pad on F.Cu whose
 track leaves on In1.Cu is charged F.Cu to In1.Cu (from 10.0.2, to half of
 In1.Cu), not the whole stack.
 
+All of the above holds while the board's Board Setup counts via heights
+("use stackup height for length calculations", `rules.use_height_for_length_calcs`
+in the .kicad_pro, on by default). With it off, KiCad charges no via anything:
+kicad-cli 10.0.6 reads every net of the fixture below, and two pad-to-pad chains
+through vias, as its tracks plus pad-to-die exactly (#1731). The measure reads
+the setting through `via_height_in_length(pcb_data)` -- the live board's on the
+GUI path (`PCBData.use_height_for_length_calcs`), else the sibling project's,
+else on -- and so does every via charge: the length DRC measure, the pad-to-pad
+walk's barrel steps, and the router's own `calculate_route_length` /
+`calculate_via_barrel_length` (group and intra-pair matching).
+
 Each release's measure equals that kicad-cli's `length_out_of_range` actuals,
 at its four decimals, on every net it reported of three routed boards and of
 `tests/fixtures/1432/length_cases.kicad_pcb` (one net per change above), for
@@ -329,8 +340,9 @@ pin_pair_path_length(pcb_data, net_id, pad_a, pad_b, tolerance=0.02)
 
 Shortest **copper path between two pads** — the from-to measurement length
 matching needs. Walks a weighted graph over the net's own copper: segments
-carry their length, coincident endpoints and T-junctions join at zero cost,
-and a via crosses each layer step at the stackup between the two layers (#1623;
+carry their length, coincident endpoints, T-junctions and two same-layer
+tracks that cross mid-span (#1705, `check_connected`'s X-crossing rule) join
+at zero cost, and a via crosses each layer step at the stackup between the two layers (#1623;
 from KiCad 10.0.2 half of each inner copper layer ending a span, so a walk
 through a via is charged the span it walks). Pads and vias attach by copper
 **overlap** (a track ends anywhere inside them, not on their centre), and their
@@ -466,7 +478,11 @@ where it enters the via and lays a protected bridge from there to the centre
 (copper the run did not lay, or an end another track shares, is bridged from
 where it ends). It agrees with `net_match_length` on copper the cleanup leaves
 as it is; it still leaves out what the cleanup will remove -- a dead-end branch
-or a loop -- which KiCad charges on a board that keeps it.
+or a second way between two points of the path -- which KiCad charges on a board
+that keeps it. A loop that meets the 2-pad path at ONE node along a segment the
+path uses (a track run past a corner and back along itself, its return leg
+ending on the outbound segment) is not such copper: the cleanup keeps it, and it
+is charged (#1704). On copper that has shipped, measure with `net_match_length`.
 
 The gap window is the caller's: `check_drc` and `board_score` pass the pair's
 binding `diff_pair_gap` (`design_rules.DesignRules`), as KiCad does;

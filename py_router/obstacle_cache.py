@@ -12,7 +12,7 @@ import math
 import numpy as np
 
 from kicad_parser import PCBData
-from routing_config import GridRouteConfig, GridCoord
+from routing_config import GridRouteConfig, GridCoord, extra_on_layer
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, \
     pad_blocked_cells_array, segment_blocked_cells_array, segment_blocked_spans, \
@@ -835,7 +835,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # the via ring keeps clr_l. Add/remove parity is automatic (the same
         # NetObstacleData arrays are batch-added and batch-removed).
         trk_l = config.track_obstacle_clearance(net_id, clr_l)
-        expansion_mm = layer_width / 2 + trk_l + config.route_reserve_width(layer_name) / 2 + extra_clearance
+        expansion_mm = (layer_width / 2 + trk_l + config.route_reserve_width(layer_name) / 2
+                        + extra_on_layer(extra_clearance, layer_name))
         # Float keep-out half-width for the capsule segment stamp (no floor): the
         # true perpendicular clearance, so off-grid / diagonal tracks are covered.
         expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
@@ -885,7 +886,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             _trk_l = config.track_obstacle_clearance(net_id, _clr_l)  # dru track rule
             expansion_mm = max(coord.grid_step,
                                own_half + _trk_l
-                               + config.route_reserve_width(seg.layer) / 2 + extra_clearance)
+                               + config.route_reserve_width(seg.layer) / 2
+                               + extra_on_layer(extra_clearance, seg.layer))
             via_block_mm = config.via_size / 2 + own_half + _clr_l + extra_clearance
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,
                                    blocked_cell_spans_set, blocked_via_spans_set,
@@ -923,7 +925,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         vs = via.size if (getattr(via, 'size', 0) and via.size > 0) else config.via_size
         # #498: the via meets each layer's copper ON that layer -> per-layer rule.
         via_track_list = [max(1, coord.to_grid_dist_safe(
-            vs / 2 + lw / 2 + config.layer_clearance(ln, obs_clearance, net_id) + extra_clearance))
+            vs / 2 + lw / 2 + config.layer_clearance(ln, obs_clearance, net_id)
+            + extra_on_layer(extra_clearance, ln)))
             for ln, lw in zip(config.layers, layer_widths)]
         # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
         # Float radius (no floor) so the disc threshold blocks the true clearance.
@@ -1179,11 +1182,16 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
             config.layer_clearance(layer_name, clearance, pad=pad), pad)
 
     def _clr_groups(expanded):
+        # keyed by reach past the pad (the stamped track's half-width plus
+        # the clearance, #1736) and the extra clearance on the layer (#1729),
+        # as _add_pad_obstacle's
         groups = {}
         for l in expanded:
             li = layer_map.get(l)
             if li is not None:
-                groups.setdefault(_layer_clr(l), []).append(li)
+                groups.setdefault((config.stamp_track_width(l) / 2 + _layer_clr(l),
+                                   extra_on_layer(extra_clearance, l)),
+                                  []).append(li)
         return groups
 
     def _via_clr(expanded):
@@ -1204,8 +1212,8 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
         via_margin = config.via_size / 2 + _via_clr(expanded_layers) + config.grid_step / 2
         for poly in pad_polys:
-            for g_clr, g_idxs in clr_groups.items():
-                margin = config.track_width / 2 + g_clr + extra_clearance
+            for (g_clr, g_ex), g_idxs in clr_groups.items():
+                margin = g_clr + g_ex
                 gx_lo, gy_lo, nx, ny, inside, edist = _rasterize_polygon_box(
                     poly, coord, margin)
                 if inside is not None:
@@ -1240,9 +1248,9 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
     # Batched rasterization (issue #35): same cell sets as the generator
     # (pad_blocked_cells_array is bit-identical to iter_pad_blocked_cells)
-    for g_clr, g_idxs in _clr_groups(expanded_layers).items():
+    for (g_clr, g_ex), g_idxs in _clr_groups(expanded_layers).items():
         cells = pad_blocked_cells_array(gx, gy, half_width, half_height,
-                                        config.track_width / 2 + g_clr + extra_clearance,
+                                        g_clr + g_ex,
                                         config.grid_step, corner_radius,
                                         off_x=off_x, off_y=off_y,
                                         rotation_deg=pad.rect_rotation)

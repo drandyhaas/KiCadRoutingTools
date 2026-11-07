@@ -86,7 +86,9 @@ without buses: the defaults, and `--layer-costs 1.0 1.0 --via-cost 600`),
 write one chain per arm and judge the seeds under each: the arms can pick
 different seeds (#1383). Keep a seed that wins under the arm the final route
 will use; where both arms will be routed, one that ranks first or second under
-both.
+both. This tool works in the folder judge.json is in and makes its files afresh
+there, so each arm needs a folder of its own, or the last leaves the only boards,
+logs and scores (plan-pcb-placement 3.7's recipe, #1666).
 
 LEVEL 2 IS A SCREEN, NOT A VERDICT. It skips the rescue tail and the plane
 finalize, so its vias and copper differ from the full route's by a few percent

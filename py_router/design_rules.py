@@ -111,18 +111,33 @@ SIZE_KINDS = frozenset({
 # keep-out, or a track ban's forbidden layers -- whatever of a `disallow`
 # rule no step honours is named by `Rule.router_unhonoured`, #1527). A rule
 # built only on the other kinds listed here is reported neither "NOT
-# honoured" nor "not consumed".
+# honoured" nor "not consumed", except a ROUTER_UNHONOURED_KINDS kind
+# (`annular_width`, `via_count`), which `unsupported()` names NOT honoured.
 CONSUMED_KINDS = CLEARANCE_KINDS | SIZE_KINDS | {'disallow', 'via_count'}
 # Kinds no routing step honours but a grader does: check_drc grades every
 # `length` window (kicad_dru.read_board_length_rules, #1313) and every
 # diff-pair `skew` / `diff_pair_uncoupled` rule through the same channel
 # (#1303).
 GRADED_ONLY_KINDS = frozenset({'length', 'skew', 'diff_pair_uncoupled'})
-# Kinds the resolver models but no routing step sizes copper by (#1490): a
-# via's ring follows from via_diameter and hole_size alone, so a rule
-# declaring one is reported NOT honoured -- in route.py's
-# `design_rules.unsupported_rules` -- rather than passing as consumed.
-ROUTER_UNHONOURED_KINDS = frozenset({'annular_width'})
+# Kinds the resolver models that a routing step does not hold every via to
+# (#1490): a via a step sizes itself meets an annular_width rule (#1676,
+# `DesignRules.via_meeting_rules`), an explicit via size and a last-resort
+# descent need not, so a rule declaring one is reported NOT honoured -- in
+# route.py's `design_rules.unsupported_rules` -- rather than passing as consumed.
+# `via_count` (#1707) likewise: no step counts a net's vias against it -- a
+# net is routed with the vias it needs, completion first -- and check_drc
+# grades it as KiCad's too_many_vias does.
+ROUTER_UNHONOURED_KINDS = frozenset({'annular_width', 'via_count'})
+#: why each ROUTER_UNHONOURED_KINDS kind is not honoured, as `unsupported()` says it
+_ROUTER_UNHONOURED_WHY = {
+    'annular_width': ("a via a step sizes itself holds it, an explicit via size and a "
+                      "last-resort descent need not, so this line is printed whatever "
+                      "the vias are; route.py and route_diff.py grade their own vias "
+                      "against it when they end, check_drc the board"),
+    'via_count': ("no routing step counts a net's vias against it (a net is routed "
+                  "with the vias it needs, completion first); check_drc grades the "
+                  "board's vias per net against it, as KiCad's too_many_vias does"),
+}
 # `disallow` item tokens (#1527). The router lays tracks and THROUGH vias
 # only, so a rule forbidding only blind, buried or micro vias asks nothing of
 # it. A track ban is honoured by the steps that derive it (route.py and
@@ -189,6 +204,12 @@ FAB_FLOOR_KEYS = {
 
 # KiCad's Default net class carries priority INT_MAX (lowest precedence).
 _DEFAULT_PRIORITY = 2147483647
+# The net-class fields whose absence brings Default into a net's effective class
+# (`DesignRules.class_constituents`), each measured alone on kicad-cli 10.0.6.
+# Dropping diff_pair_via_gap, schematic_color, pcb_color or line_style does not.
+_CLASS_COMPLETE_FIELDS = ('clearance', 'track_width', 'via_diameter', 'via_drill',
+                          'diff_pair_gap', 'diff_pair_width', 'microvia_diameter',
+                          'microvia_drill', 'wire_width', 'bus_width')
 
 
 def canonical_kind(kind: str) -> str:
@@ -228,11 +249,17 @@ class RuleItem:
     type: str = 'track'                      # track | via | pad | zone | hole | footprint | graphic | text
     net_id: int = 0
     net_name: str = ''
-    netclasses: FrozenSet[str] = frozenset()  # every class the net is a member of
-    effective_class: str = 'Default'         # the aggregate (priority-resolved) class name
+    # KiCad's effective class (`DesignRules.class_constituents`): the classes it
+    # is built from, and its name, those classes joined by commas
+    netclasses: FrozenSet[str] = frozenset()
+    effective_class: str = 'Default'
     layers: FrozenSet[str] = frozenset()
-    footprint_ref: Optional[str] = None
+    # a pad's other layers (F.Mask, ...), which existsOnLayer() reads too
+    other_layers: FrozenSet[str] = frozenset()
+    footprint_ref: Optional[str] = None      # as the file spells it
+    footprint_lib: Optional[str] = None      # the part's library id, 'lib:name'
     pad_type: Optional[str] = None           # smd | thru_hole | np_thru_hole | connect
+    pad_number: Optional[str] = None         # as the file spells it; '' is a pad with no number
     via_type: Optional[str] = None           # through | micro | blind_buried
     groups: FrozenSet[str] = frozenset()
     diff_pair: Optional[str] = None
@@ -241,7 +268,6 @@ class RuleItem:
     clearance_override: Optional[float] = None
     # zone (connect_pads (clearance ...)) -> KiCad's post-loop max path
     local_clearance: Optional[float] = None
-    plated: bool = True
     # the rule areas the item lies in, for an areas=True condition only
     areas: FrozenSet[str] = frozenset()
 
@@ -270,6 +296,10 @@ class Rule:
     # resolve('disallow') still grades it. net_keepouts.derive_layer_bans
     # rewrites it for the track bans route.py / route_diff.py honour.
     router_unhonoured: Optional[str] = None
+    # why KiCad cannot load this rule, and so enforces no rule of the file
+    # (#1690, `kicad_condition_refusal`). It says nothing of whether this tool
+    # reads the rule: `unsupported` does.
+    kicad_refused: Optional[str] = None
     # the condition ANDs in AB.isCoupledDiffPair() (#1293): the rule binds a
     # diff pair's P against its own N
     coupled: bool = False
@@ -414,6 +444,7 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                         spec.setdefault('tokens', []).append(str(sub))
         if rule.severity in ('ignore', 'exclusion'):
             rule.unsupported = f"severity {rule.severity}"
+        rule.kicad_refused = _rule_refusal(node, rule)
         if rule.condition_src is not None and rule.unsupported is None:
             try:
                 rule.condition = parse_condition(rule.condition_src)
@@ -439,6 +470,14 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                 rule.unsupported = f"layer clause {lc!r} (non-copper)"
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
+        if 'clearance' in rule.constraints and rule.unsupported is None:
+            # evaluable, and check_drc reads it for the violations it may make
+            # legal, but no obstacle stamp prices one pad or one part
+            term = _reads_one_part(rule.condition)
+            if term:
+                rule.router_unhonoured = (f"clearance scoped by {term}: routing "
+                                          f"prices a net and a pad type, never one "
+                                          f"pad or one part")
         if 'disallow' in rule.constraints and rule.unsupported is None:
             # #1527: evaluable, so nothing of it is "consumed" until a step
             # honours it -- it used to pass silently as consumed
@@ -446,6 +485,13 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                 rule.constraints['disallow'].get('disallow', ()))
         rules.append(rule)
     return rules, notes
+
+
+# KiCad's error key for what each constraint kind reports (`severity_of`)
+_SEVERITY_KEY = {'edge_clearance': 'copper_edge_clearance', 'hole_size': 'drill_out_of_range'}
+# (KiCad's report type, check_drc's row) of a via below a rule (`via_size_grade`)
+_VIA_SIZE_FLAGS = {'via_diameter': ('via_diameter', 'VIA-SIZE'),
+                   'hole_size': ('drill_out_of_range', 'VIA-DRILL-SIZE')}
 
 
 # --------------------------------------------------------------------------
@@ -459,9 +505,12 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
 #   atom   := '(' expr ')' | cmp
 #   cmp    := term (('=='|'!=') term)?
 #   term   := ITEM '.' NAME '(' args ')' | ITEM '.' NAME | STRING | NUMBER | 'L'
-# Supported properties: NetClass, NetName, Net, Type, Layer, Pad_Type, Via_Type
-# Supported functions: hasNetclass, hasExactNetclass, onLayer, existsOnLayer,
-#   isMicroVia, isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup,
+# Supported properties: NetClass, NetName, Net, Type, Layer, Pad_Type, Via_Type,
+#   Pad_Number (#1660: a string compared as a NetName is, so '1' is not '01' and
+#   a plain number is not a pad number -- `kicad_condition_refusal`)
+# Supported functions: hasNetclass, hasExactNetclass, existsOnLayer (a wildcard is
+#   a layer pattern), isMicroVia,
+#   isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup,
 #   inDiffPair('pattern') (#1295), and AB.isCoupledDiffPair() as a term of an
 #   AND only, positive (#1293: the pair's own P<->N rule) or negated (#1295:
 #   KiCad's "keep pairs apart" rule); OR'ed or compared it stays Unsupported
@@ -472,10 +521,14 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
 #   isCoupledDiffPair in any other position, fromTo, memberOfSheet,
 #   memberOfSheetOrChildren, hasComponentClass, getField, and any numeric
 #   comparison (<, >, arithmetic).
+# Read, though KiCad refuses it (`kicad_condition_refusal`, which is what says
+#   so): onLayer, the spelling existsOnLayer replaced. Whether the tools should
+#   read a rule KiCad will not load is a question they have not been asked to
+#   change, so it stays read and the run names the file.
 
 _TOKEN = re.compile(r"""
     \s*(?:
-        (?P<str>'[^']*'|"[^"]*") |
+        (?P<str>'[^']*(?:'|$)|"[^"]*") |
         (?P<op>==|!=|&&|\|\||<=|>=|[<>!()+\-*/]) |
         (?P<num>-?\d+(?:\.\d+)?\s*(?:mm|mil|in|um|nm)?) |
         (?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?) |
@@ -483,7 +536,7 @@ _TOKEN = re.compile(r"""
     )""", re.VERBOSE)
 
 _SUPPORTED_PROPS = {'netclass', 'netname', 'net', 'type', 'layer', 'pad_type',
-                    'via_type'}
+                    'via_type', 'pad_number'}
 _SUPPORTED_FUNCS = {'hasnetclass', 'hasexactnetclass', 'onlayer', 'existsonlayer',
                     'ismicrovia', 'isblindburiedvia', 'isplated',
                     'memberoffootprint', 'memberofgroup', 'indiffpair'}
@@ -516,6 +569,330 @@ def _tokens(src: str):
 
 
 _NUMERIC_OPS = ('<', '>', '<=', '>=', '+', '-', '*', '/')
+
+#: How a condition KiCad refuses is named: `report_lines` drops its "KiCad will
+#: still enforce it" for one, since KiCad enforces nothing of that file.
+_KICAD_REFUSES = 'KiCad refuses'
+
+
+def _reads_one_part(node) -> Optional[str]:
+    """The first term of a parsed condition that scopes it to one pad or one
+    part (A.Pad_Number, memberOfFootprint()), or None."""
+    if not isinstance(node, tuple) or not node:
+        return None
+    if node[0] == 'prop':
+        return f'{node[1]}.Pad_Number' if node[2] == 'pad_number' else None
+    if node[0] == 'call':
+        return f'{node[1]}.memberOfFootprint()' if node[2] == 'memberoffootprint' else None
+    if node[0] in ('cmp', 'and', 'or', 'not'):
+        return next(filter(None, map(_reads_one_part, node[1:])), None)
+    return None
+
+
+#: Every function KiCad's condition compiler knows, with the arguments it will
+#: not compile without. Measured on kicad-cli 10.0.6.
+_KICAD_FUNCTIONS = {
+    'existsonlayer': 1, 'isplated': 0, 'insidecourtyard': 1, 'insidefrontcourtyard': 1,
+    'insidebackcourtyard': 1, 'intersectscourtyard': 1, 'intersectsfrontcourtyard': 1,
+    'intersectsbackcourtyard': 1, 'insidearea': 1, 'intersectsarea': 1, 'enclosedbyarea': 1,
+    'ismicrovia': 0, 'isblindburiedvia': 0, 'isblindvia': 0, 'isburiedvia': 0,
+    'memberof': 1, 'memberofgroup': 1, 'memberoffootprint': 1, 'memberofsheet': 1,
+    'memberofsheetorchildren': 1, 'fromto': 2, 'iscoupleddiffpair': 0, 'indiffpair': 1,
+    'getfield': 1, 'hasnetclass': 1, 'hasexactnetclass': 1, 'hascomponentclass': 1,
+}
+#: Every property it knows, lower case with spaces as '_'. Measured on kicad-cli
+#: 10.0.6: each name here compiles as `A.<name>`. The names tried were the Title
+#: Case strings the KiCad binary holds, so a later KiCad may know one this does not.
+#: `A.Net_Name` does not compile and `A.NetName` does.
+_KICAD_PROPERTIES = frozenset({
+    'arrow_direction', 'associated_layer', 'auto_thickness', 'back_covering',
+    'back_plugging', 'back_tenting', 'backdrill_mode', 'barcode_type',
+    'best_length_ratio', 'best_width_ratio', 'bold', 'border', 'border_style',
+    'border_width', 'bottom_backdrill_size', 'bottom_counterbore_depth',
+    'bottom_countersink_angle', 'capping', 'cell_separators', 'center_x', 'center_y',
+    'clearance', 'clearance_override', 'column_width', 'component_class',
+    'componentclass', 'copper_layers', 'corner_radius', 'corner_radius_ratio',
+    'corner_radius_size', 'crossbar_height', 'curved_teardrops', 'diameter',
+    'do_not_populate', 'enable', 'enable_teardrops', 'end_x', 'end_y',
+    'error_correction', 'exclude_from_bill_of_materials',
+    'exclude_from_position_files', 'exempt_from_courtyard_requirement',
+    'extension_line_overshoot', 'external_border', 'fabrication_property', 'fill',
+    'fill_mode', 'filling', 'font', 'front_covering', 'front_plugging',
+    'front_tenting', 'hatch_gap', 'hatch_minimum_hole_ratio', 'hatch_width',
+    'header_border', 'height', 'hole', 'hole_shape', 'hole_size_x', 'hole_size_y',
+    'horizontal_justification', 'hyperlink', 'initial_side', 'italic',
+    'keep_aligned_with_dimension', 'keep_out_footprints', 'keep_out_pads',
+    'keep_out_tracks', 'keep_out_vias', 'keep_out_zone_fills', 'keep_upright',
+    'keywords', 'knockout', 'layer', 'layer_bottom', 'layer_top', 'leader_length',
+    'library_description', 'library_link', 'line_style', 'line_width', 'locked',
+    'margin_bottom', 'margin_left', 'margin_right', 'margin_top', 'margin_x',
+    'margin_y', 'max_amplitude', 'max_length', 'max_width', 'max_width_ratio',
+    'min_amplitude', 'min_spacing', 'minimum_width', 'mirrored', 'name', 'net',
+    'net_class', 'netclass', 'netname', 'not_in_schematic', 'number_box',
+    'orientation', 'origin_x', 'origin_y', 'override_custom_rules', 'override_text',
+    'pad_connections', 'pad_number', 'pad_shape', 'pad_to_die_delay',
+    'pad_to_die_length', 'pad_type', 'parent', 'pin_name', 'pin_type', 'position_x',
+    'position_y', 'precision', 'prefer_zone_connections', 'prefix', 'radius',
+    'reference', 'remove_islands', 'rounded', 'row_height', 'row_separators', 'scale',
+    'separators_style', 'separators_width', 'shape', 'show_text', 'size', 'size_x',
+    'size_y', 'smoothing_amount', 'smoothing_effort', 'soldermask',
+    'soldermask_margin_override', 'solderpaste_margin_override',
+    'solderpaste_margin_ratio_override', 'source_name', 'source_type', 'start_x',
+    'start_y', 'suffix', 'suppress_trailing_zeroes', 'target_delay', 'target_length',
+    'target_skew', 'target_skew_delay', 'text', 'text_frame', 'text_size',
+    'thermal_relief_gap', 'thermal_relief_spoke_angle', 'thermal_relief_spoke_width',
+    'thermal_spoke_template', 'thickness', 'top_backdrill_size',
+    'top_counterbore_depth', 'top_countersink_angle', 'transform_offset_x',
+    'transform_offset_y', 'tuning_mode', 'type', 'units', 'units_format',
+    'vertical_justification', 'via_type', 'visible', 'width', 'zone_connection_style'})
+#: The units a number may carry (`1 mm` too). `1um`, `1nm`, `1cm`, `1MM` do not compile.
+_KICAD_UNITS = frozenset({'mm', 'mil', 'in', 'deg', 'ps', 'fs'})
+
+_KC_TOKEN = re.compile(r"""\s*(?:
+    (?P<str>'[^']*(?:'|$)) |
+    (?P<num>\d+(?:\.\d+)?(?![\d.])) |
+    (?P<name>[A-Za-z_][A-Za-z0-9_]*) |
+    (?P<op>==|!=|&&|\|\||<=|>=|[<>!()+\-*/.,])
+    )""", re.VERBOSE)
+_KC_COMPARE = ('==', '!=', '<', '>', '<=', '>=')
+
+
+class _KiCadCompile:
+    """KiCad's condition compiler as `kicad_condition_refusal` needs it: raises
+    Unsupported naming the first thing it will not compile, and answers nothing
+    about what a condition means. Its forms are the table in
+    tests/test_1690_rule_readings.py, each measured on kicad-cli."""
+    PLAIN, UNIT, OTHER = 'plain number', 'number with a unit', 'other'
+
+    def __init__(self, src: str):
+        self.toks, pos = [], 0
+        while src[pos:].strip():
+            m = _KC_TOKEN.match(src, pos)
+            if not m:
+                raise Unsupported(f"it cannot read {src[pos:].strip()[:20]!r}")
+            self.toks.append((m.lastgroup, m.group(m.lastgroup)))
+            pos = m.end()
+        self.i = 0
+
+    def _peek(self):
+        return self.toks[self.i] if self.i < len(self.toks) else (None, None)
+
+    def _next(self):
+        t = self._peek()
+        self.i += 1
+        return t
+
+    def _is_op(self, *ops) -> bool:
+        k, v = self._peek()
+        return k == 'op' and v in ops
+
+    def run(self):
+        if not self.toks:
+            return
+        kind = self._or()
+        if self.i != len(self.toks):
+            raise Unsupported(f"it does not expect {self._peek()[1]!r} there")
+        if kind == self.PLAIN:
+            raise Unsupported("a plain number is not a condition")
+
+    def _pair(self, a, b, op):
+        """A plain number compiles against another number, never anything else."""
+        if self.PLAIN in (a, b) and not {a, b} <= {self.PLAIN, self.UNIT}:
+            raise Unsupported(f"a plain number with no unit beside {op}: a string or a "
+                              f"property is never compared with one (quote it, or give "
+                              f"it a unit)")
+        return self.OTHER
+
+    def _chain(self, ops, down):
+        a = down()
+        while self._is_op(*ops):
+            op = self._next()[1]
+            a = self._pair(a, down(), op)
+        return a
+
+    def _or(self):
+        return self._chain(('||',), self._and)
+
+    def _and(self):
+        return self._chain(('&&',), self._cmp)
+
+    def _cmp(self):
+        a = self._add()
+        if self._is_op(*_KC_COMPARE):
+            op = self._next()[1]
+            a = self._pair(a, self._add(), op)
+            if self._is_op(*_KC_COMPARE):
+                raise Unsupported(f"{op} does not chain")
+        return a
+
+    def _add(self):
+        return self._chain(('+', '-'), self._mul)
+
+    def _mul(self):
+        return self._chain(('*', '/'), self._unary)
+
+    def _unary(self):
+        if self._is_op('!'):
+            self._next()
+            if self._unary() == self.PLAIN:
+                raise Unsupported("! on a plain number")
+            return self.OTHER
+        if self._is_op('-'):
+            self._next()
+            self._unary()
+            return self.OTHER
+        return self._atom()
+
+    def _atom(self):
+        k, v = self._next()
+        if k == 'str':
+            return self.OTHER
+        if k == 'num':
+            nk, nv = self._peek()
+            if nk != 'name':
+                return self.PLAIN
+            self._next()
+            if nv not in _KICAD_UNITS:
+                raise Unsupported(f"{v}{nv}: {nv!r} is not a unit it knows")
+            return self.UNIT
+        if k == 'op' and v == '(':
+            kind = self._or()
+            if not self._is_op(')'):
+                raise Unsupported("an unclosed parenthesis")
+            self._next()
+            return kind
+        if k == 'name':
+            return self._name(v)
+        raise Unsupported("a term is missing" if k is None else f"it does not expect {v!r} there")
+
+    def _name(self, item):
+        if not self._is_op('.'):
+            if item in ('A', 'B', 'AB', 'L'):
+                return self.OTHER
+            raise Unsupported(f"{item!r} is not a name it knows")
+        self._next()
+        k, name = self._next()
+        if k != 'name':
+            raise Unsupported(f"{item}. names nothing")
+        if item not in ('A', 'B', 'AB'):
+            raise Unsupported(f"{item}.{name}: it knows the items A, B and AB, spelled so")
+        if self._is_op('('):
+            self._next()
+            return self._call(item, name)
+        if item == 'AB':
+            raise Unsupported(f"AB.{name}: AB has no properties")
+        if name.lower() not in _KICAD_PROPERTIES:
+            raise Unsupported(f"{item}.{name} is not a property it knows")
+        return self.OTHER
+
+    def _call(self, item, name):
+        need = _KICAD_FUNCTIONS.get(name.lower())
+        if need is None:
+            raise Unsupported(f"{item}.{name}() is not a function it knows")
+        strings = others = props = 0
+        while not self._is_op(')'):
+            k, v = self._peek()
+            if k is None:
+                raise Unsupported(f"{item}.{name}( is not closed")
+            if k == 'op' and v == ',':
+                self._next()
+                continue
+            if k == 'str':
+                self._next()
+                strings += 1
+                continue
+            props += k == 'name'
+            others += 1
+            if self._or() == self.PLAIN:
+                raise Unsupported(f"{item}.{name}() with a plain number")
+        self._next()
+        if need and props and not strings:
+            raise Unsupported(f"{item}.{name}() takes a quoted string")
+        if strings + others < need:
+            raise Unsupported(f"{item}.{name}() needs {need} argument(s)")
+        return self.OTHER
+
+
+def kicad_condition_refusal(src: str) -> Optional[str]:
+    """Why KiCad cannot compile a `.kicad_dru` condition, or None. Measured on
+    kicad-cli 10.0.6: a file holding such a condition, in any position, enforces
+    NONE of its rules, with exit 0 and nothing printed."""
+    try:
+        _KiCadCompile(src).run()
+    except Unsupported as e:
+        return (f"{_KICAD_REFUSES} the condition {src!r} ({e}) and then enforces no "
+                f"rule of this file")
+    return None
+
+
+#: What a rule's clauses may be, beside the condition. A file with any other
+#: enforces none of its rules, the same way (kicad-cli 10.0.6, #1690).
+_KICAD_CLAUSES = frozenset({'condition', 'constraint', 'layer', 'severity'})
+_KICAD_SEVERITIES = frozenset({'error', 'warning', 'ignore', 'exclusion'})
+_KICAD_VALUE = re.compile(r"-?\d*\.?\d+(?:mm|mil|in|deg|ps|fs)?$")
+_KICAD_DISALLOW = DISALLOW_GRADED | {'pad', 'zone', 'text', 'graphic', 'hole', 'footprint'}
+#: A layer clause spelled as copper that is no copper layer KiCad has
+_KICAD_COPPER_LAYER = re.compile(r"(?:F|B|In\d+|\*)\.Cu$")
+
+
+def _rule_refusal(node: list, rule: 'Rule') -> Optional[str]:
+    """Why KiCad cannot load this rule of a parsed `.kicad_dru`, or None."""
+    def refused(what):
+        return f"{_KICAD_REFUSES} {what} and then enforces no rule of this file"
+    for item in node[2:]:
+        head = item[0] if isinstance(item, list) and item else item
+        if head not in _KICAD_CLAUSES:
+            return refused(f"the clause {head!r}")
+        if head == 'severity' and len(item) > 1 and item[1] not in _KICAD_SEVERITIES:
+            return refused(f"the severity {item[1]!r}")
+        if head == 'layer' and len(item) > 1 and str(item[1]).endswith('.Cu') \
+                and not _KICAD_COPPER_LAYER.match(str(item[1])):
+            return refused(f"the layer {item[1]!r}")
+        if head != 'constraint' or len(item) < 2:
+            continue
+        kind = canonical_kind(str(item[1]))
+        if kind not in DRU_KINDS:
+            return refused(f"the constraint {item[1]!r}")
+        for sub in item[2:]:
+            if kind == 'disallow' and not isinstance(sub, list) \
+                    and str(sub).lower() not in _KICAD_DISALLOW:
+                return refused(f"the disallow item {sub!r}")
+            if not (isinstance(sub, list) and len(sub) == 2 and sub[0] in ('min', 'opt', 'max')):
+                continue
+            val = str(sub[1])
+            # a count (via_count, min_resolved_spokes) takes a plain number
+            if not _KICAD_VALUE.match(val) or (
+                    kind in CLEARANCE_KINDS | SIZE_KINDS and val[-1].isdigit()):
+                return refused(f"the value {val!r} of {item[1]} {sub[0]} (a length has "
+                               f"a unit)")
+    if rule.condition_src is not None:
+        return kicad_condition_refusal(rule.condition_src)
+    return None
+
+
+def dru_refusals(text: str, rules: Sequence['Rule']) -> List[dict]:
+    """[{'rule', 'reason'}] for each thing in a `.kicad_dru` that makes KiCad
+    enforce none of its rules (#1690), [] when it loads the file. `rule` is ''
+    for a fault of the file itself."""
+    from kicad_dru import _tokenize, _parse_nodes
+    out = []
+    try:
+        nodes = _parse_nodes(_tokenize(text))
+    except Exception:                                          # noqa: BLE001
+        nodes = []
+    if not any(isinstance(n, list) and n and n[0] == 'version' for n in nodes):
+        out.append({'rule': '', 'reason': f"{_KICAD_REFUSES} a file with no (version ...) "
+                                          f"line and then enforces no rule of it"})
+    for n in nodes:
+        head = n[0] if isinstance(n, list) and n else n
+        if head not in ('version', 'rule'):
+            out.append({'rule': '', 'reason': f"{_KICAD_REFUSES} the top-level form {head!r} "
+                                              f"and then enforces no rule of this file"})
+        elif head == 'rule' and (len(n) < 2 or isinstance(n[1], list)):
+            out.append({'rule': '?', 'reason': f"{_KICAD_REFUSES} a rule with no name and "
+                                               f"then enforces no rule of this file"})
+    out.extend({'rule': r.name, 'reason': r.kicad_refused} for r in rules if r.kicad_refused)
+    return out
 
 
 class _Parser:
@@ -612,7 +989,10 @@ class _Parser:
         k, v = self.peek()
         if k == 'str':
             self.take()
-            return ('lit', v[1:-1])
+            # KiCad's lexer ends a literal at the end of the condition when it
+            # has no closing quote, measured on kicad-cli 10.0.6: `A.Type == 'Via`
+            # compiles and binds vias
+            return ('lit', v[1:-1] if len(v) > 1 and v[-1] == v[0] else v[1:])
         if k == 'num':
             self.take()
             return self._unmodelled("numeric literal outside a supported comparison")
@@ -680,7 +1060,13 @@ def parse_condition(src: str, areas: bool = False):
     KiCad's "keep pairs apart" rule, which binds everything but the pair's
     own partner). OR'ed or compared it raises Unsupported, so such a rule
     stays unread rather than half-read."""
-    node = _Parser(src, areas=areas).parse()
+    try:
+        node = _Parser(src, areas=areas).parse()
+    except Unsupported as e:
+        # a condition this reader does not read that KiCad refuses as well: the
+        # second is the one a user has to act on (and "KiCad will still enforce
+        # it", which report_lines says of the first, would not be so)
+        raise Unsupported(kicad_condition_refusal(src) or str(e)) from None
     if _contains_coupled(node) and _coupled_terms(node) is None:
         raise Unsupported("AB.isCoupledDiffPair() is modelled only as a "
                           "term ANDed into the condition, or its negation")
@@ -696,9 +1082,11 @@ def parse_condition_maybe(src: Optional[str]):
     if src is None:
         return None
     try:
-        return _Parser(src, unknown=True).parse()
+        node = _Parser(src, unknown=True).parse()
     except Unsupported:
         return ('unknown',)
+    # a refused condition's terms do not hold or fail one by one
+    return ('unknown',) if _has_unknown(node) and kicad_condition_refusal(src) else node
 
 
 def _eval3(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
@@ -724,12 +1112,14 @@ def _eval3(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
 
 def rule_may_match(rule: 'Rule', ast, a: RuleItem, b: Optional[RuleItem],
                    layer: Optional[str], copper_layers: Sequence[str],
-                   ctx=None) -> Optional[bool]:
+                   ctx=None, layer_clause: bool = True) -> Optional[bool]:
     """`_rule_matches` in three values over a `parse_condition_maybe` AST:
     True when the rule binds the pair, False when it cannot, None when an
     unmodelled term decides it (or the pair's layer is not known and the rule
-    names layers). Commutative, as KiCad's EvaluateFor is."""
-    lay = rule.layers_for(copper_layers)
+    names layers). Commutative, as KiCad's EvaluateFor is. ``layer_clause``
+    False: the rule's `(layer ...)` is not read (`PadEdgeRules`); its condition
+    still is, at ``layer``."""
+    lay = rule.layers_for(copper_layers) if layer_clause else None
     unsure = False
     if lay is not None:
         if layer is None:
@@ -855,6 +1245,15 @@ def _in_diff_pair(it: 'RuleItem', pattern: str, ctx) -> bool:
     return base.endswith('_') and _wx_matches(pattern, base[:base.rfind('_')])
 
 
+#: The Edge.Cuts shape an edge clearance is measured to, as `_rule_matches`'
+#: swapped A. Measured on kicad-cli 10.0.6 (tests/test_1660_pad_number_rule.py):
+#: A.Type reads 'Graphic', A.Layer 'Edge.Cuts', A.NetName '', A.NetClass
+#: 'Default', hasNetclass() and isPlated() false, the pad and via properties
+#: undefined. So `!(A.Pad_Number == '1')` binds every item on the board, pad 1
+#: included, and `A.Layer == 'Edge.Cuts'` does too.
+_EDGE_ITEM = RuleItem(type='graphic', layers=frozenset({'Edge.Cuts'}))
+
+
 class _Undefined:
     """A property the item does not have (KiCad's VT_UNDEFINED value)."""
 
@@ -865,16 +1264,13 @@ class _Undefined:
 _UNDEFINED = _Undefined()
 
 
-def _norm_type(t: Optional[str]) -> str:
-    return (t or '').lower().replace('-', '_').replace(' ', '_')
-
-
-_PAD_TYPE_NAMES = {'smd': 'smd', 'through_hole': 'thru_hole', 'thru_hole': 'thru_hole',
-                   'connector': 'connect', 'connect': 'connect',
-                   'npth,_mechanical': 'np_thru_hole', 'npth': 'np_thru_hole',
-                   'np_thru_hole': 'np_thru_hole'}
-_VIA_TYPE_NAMES = {'through': 'through', 'micro': 'micro', 'blind/buried': 'blind_buried',
-                   'blind_buried': 'blind_buried'}
+#: What `A.Pad_Type` and `A.Via_Type` read in KiCad, measured on kicad-cli 10.0.6
+#: (#1690), for the board file's tokens. A via this module knows only as
+#: 'blind_buried' reads as 'Blind'.
+_PAD_TYPE_NAMES = {'smd': 'SMD', 'thru_hole': 'Through-hole', 'connect': 'Edge connector',
+                   'np_thru_hole': 'NPTH, mechanical'}
+_VIA_TYPE_NAMES = {'through': 'Through', 'micro': 'Micro', 'blind': 'Blind', 'buried': 'Buried',
+                   'blind_buried': 'Blind'}
 
 
 def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
@@ -900,6 +1296,14 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
             return False
         if lhs[0] == 'prop' and rhs[0] == 'prop' and lhs[2] == 'net' and rhs[2] == 'net':
             eq = (lv == rv)
+        elif lhs[0] == 'prop' and lhs[2] == 'netclass' and rhs[0] == 'lit' \
+                and isinstance(lv, str):
+            # #1690, measured on kicad-cli 10.0.6: true when the literal matches
+            # one class the net's effective class is built from, or the whole
+            # name ('HS,LS'), as a NetName compare does (case-insensitive, '*'
+            # and '?' wildcards)
+            it = _item(lhs[1], a, b)
+            eq = any(netname_matches(n, rv) for n in it.netclasses | {it.effective_class})
         elif isinstance(lv, str) and isinstance(rv, str):
             eq = _cmp_strings(lhs, lv, rv, rhs)
         else:
@@ -912,7 +1316,10 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
         return it is not None and node[3] in it.areas
     if op == 'prop':
         v = _value(node, a, b, layer)
-        return v is not _UNDEFINED and bool(v)
+        # a string alone is false in KiCad, whatever it holds: measured on
+        # kicad-cli 10.0.6, a rule on bare A.Pad_Number, A.NetName, A.NetClass,
+        # A.Type, A.Layer, A.Pad_Type or A.Via_Type binds nothing
+        return v is not _UNDEFINED and not isinstance(v, str) and bool(v)
     if op == 'lit':
         return bool(node[1])
     if op == 'L':
@@ -922,16 +1329,27 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
 
 def _cmp_strings(lhs_node, lv: str, rv: str, rhs_node=None) -> bool:
     prop = lhs_node[2] if lhs_node[0] == 'prop' else None
-    if prop in ('type', 'pad_type', 'via_type'):
-        return _norm_type(lv) == _norm_type(rv)
-    if prop == 'netname':
+    if 'pad_number' in (prop, rhs_node[2] if rhs_node is not None
+                        and rhs_node[0] == 'prop' else None):
+        # #1660: the NetName compare, measured on kicad-cli 10.0.6. 'a1' binds
+        # pad A1, 'A*' and '?1' bind it, '[A]1' does not, and only a literal
+        # on the RIGHT is a wildcard ('A*' == A.Pad_Number does not bind A1).
         return netname_matches(lv, rv, wildcard=rhs_node is not None
                                and rhs_node[0] == 'lit')
-    if prop == 'netclass':
-        # NetClass == 'X' is true for any class the net is a member of (its
-        # aggregate class included); this is the lenient reading and agrees
-        # with KiCad on every single-membership board.
-        return lv == rv or rv in lv.split(',')
+    if prop in ('type', 'pad_type', 'via_type', 'netname') or (
+            rhs_node is not None and rhs_node[0] == 'prop'
+            and rhs_node[2] in ('type', 'pad_type', 'via_type')):
+        # KiCad's string compare, as for a net name: case-insensitive, and a
+        # literal on the right a wildcard ('T*' binds a through-hole pad)
+        return netname_matches(lv, rv, wildcard=rhs_node is not None
+                               and rhs_node[0] == 'lit')
+    if 'netclass' in (prop, rhs_node[2] if rhs_node is not None
+                      and rhs_node[0] == 'prop' else None):
+        # #1690: not `A.NetClass == 'X'`, which `_eval` answers. A literal on
+        # the LEFT is compared with the whole name, case-insensitive and no
+        # wildcard, measured on kicad-cli 10.0.6: 'HS' == A.NetClass is false on
+        # a net in HS and LS, 'H*' == A.NetClass false on a net in HS.
+        return netname_matches(lv, rv, wildcard=False)
     if prop == 'layer':
         # KiCad accepts wildcards in layer names ('*.Cu').
         return fnmatch.fnmatchcase(lv, rv) if any(ch in rv for ch in '*?[') else lv == rv
@@ -966,13 +1384,12 @@ def _value(node, a, b, layer, ctx=None):
     if op == 'prop':
         it = _item(node[1], a, b)
         if it is None:
-            return None
+            # a term on a B there is not: `A.Net != B.Net` is false on one item
+            # (kicad-cli 10.0.6, #1690), as `==` is
+            return _UNDEFINED
         name = node[2]
         if name == 'netclass':
-            # the aggregate name plus every membership, joined so the lenient
-            # compare above can see both
-            names = [it.effective_class] + sorted(it.netclasses - {it.effective_class})
-            return ','.join(n for n in names if n)
+            return it.effective_class
         if name == 'netname':
             return it.net_name
         if name == 'net':
@@ -987,13 +1404,23 @@ def _value(node, a, b, layer, ctx=None):
                 # `A.Layer != 'F.Cu'` and one on `A.Layer == 'F.Cu'` both
                 # flag no via
                 return _UNDEFINED
+            if it is _EDGE_ITEM:
+                return 'Edge.Cuts'
             if layer:
                 return layer
             return next(iter(it.layers)) if len(it.layers) == 1 else ''
+        # A property only a pad or a via has is undefined on anything else,
+        # measured on kicad-cli 10.0.6: `A.Pad_Type != 'SMD'` binds no track
+        # or via, and `A.Pad_Number != '1'` none of them either.
         if name == 'pad_type':
-            return it.pad_type or ''
+            return (_PAD_TYPE_NAMES.get(it.pad_type, it.pad_type or '')
+                    if it.type == 'pad' else _UNDEFINED)
         if name == 'via_type':
-            return it.via_type or ''
+            return (_VIA_TYPE_NAMES.get(it.via_type, it.via_type or '')
+                    if it.type == 'via' else _UNDEFINED)
+        if name == 'pad_number':
+            return (it.pad_number if it.type == 'pad' and it.pad_number is not None
+                    else _UNDEFINED)
     if op == 'call':
         return _call(node, a, b, layer, ctx)
     raise Unsupported(f"value of {op}")
@@ -1008,22 +1435,43 @@ def _call(node, a, b, layer, ctx=None):
     it = _item(which, a, b)
     if it is None:
         return False
+    if it is _EDGE_ITEM and fn in ('hasnetclass', 'hasexactnetclass'):
+        return False
     if fn == 'hasnetclass':
-        return bool(args) and (args[0] in it.netclasses or args[0] == it.effective_class)
+        # one class of the effective class, by wxString::Matches: 'H*' binds HS,
+        # 'hs' does not, 'HS,LS' does not (kicad-cli 10.0.6, #1690)
+        return bool(args) and any(_wx_matches(args[0], n)
+                                  for n in it.netclasses or {it.effective_class})
     if fn == 'hasexactnetclass':
+        # the whole name, spelled exactly: 'HS,LS', never 'HS' on a net in both
         return bool(args) and args[0] == it.effective_class
-    if fn in ('onlayer', 'existsonlayer'):
+    if fn == 'existsonlayer':
+        # by wxString::Matches, measured on kicad-cli 10.0.6 (#1690): 'In*.Cu'
+        # binds an inner layer, 'B.cu' nothing, and a second argument makes it
+        # false whatever the first
+        on = it.layers | it.other_layers or ({layer} if layer else ())
+        return len(args) == 1 and any(_wx_matches(args[0], n) for n in on)
+    if fn == 'onlayer':     # KiCad refuses it: read as it always was
         return bool(args) and (args[0] in it.layers or
                                (layer is not None and args[0] == layer and not it.layers))
     if fn == 'ismicrovia':
         return it.type == 'via' and it.via_type == 'micro'
     if fn == 'isblindburiedvia':
-        return it.type == 'via' and it.via_type == 'blind_buried'
+        return it.type == 'via' and it.via_type in ('blind_buried', 'blind', 'buried')
     if fn == 'isplated':
-        return it.plated
+        # #1690, measured on kicad-cli 10.0.6: true on a via of any type and a
+        # through-hole pad (a castellated one too), false on an SMD or a
+        # connector pad, an NPTH pad, a track, a zone and a graphic
+        return it.type == 'via' or (it.type == 'pad' and it.pad_type == 'thru_hole')
     if fn == 'memberoffootprint':
-        return bool(args) and it.footprint_ref is not None and \
-            fnmatch.fnmatchcase(it.footprint_ref, args[0])
+        # the reference by wxString::Matches and, for a name with a ':' in it,
+        # the library id too, measured on kicad-cli 10.0.6 (#1690): 'Device:*'
+        # binds that library's parts, '*0402*' does not, 'a:b' binds a part
+        # whose reference is spelled so. A second argument makes it false.
+        return len(args) == 1 and it.footprint_ref is not None and (
+            _wx_matches(args[0], it.footprint_ref)
+            or (':' in args[0] and it.footprint_lib is not None
+                and _wx_matches(args[0], it.footprint_lib)))
     if fn == 'memberofgroup':
         return bool(args) and args[0] in it.groups
     if fn == 'indiffpair':
@@ -1131,6 +1579,10 @@ class DesignRules:
     board_min: Dict[str, float] = field(default_factory=dict)      # rules.min_* (only >0)
     classes: Dict[str, dict] = field(default_factory=dict)        # name -> {clearance, track_width, ..., priority}
     memberships: Dict[int, FrozenSet[str]] = field(default_factory=dict)  # net_id -> classes
+    # footprint key -> (its reference as the file spells it, its library id)
+    footprint_ids: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+    # class name -> the fields its project entry leaves unset (`class_constituents`)
+    unset_fields: Dict[str, FrozenSet[str]] = field(default_factory=dict)
     net_names: Dict[int, str] = field(default_factory=dict)
     rules: List[Rule] = field(default_factory=list)
     copper_layers: List[str] = field(default_factory=list)
@@ -1140,8 +1592,12 @@ class DesignRules:
     source: str = ''
     dru_path: str = ''
     notes: List[str] = field(default_factory=list)
+    # `dru_refusals`: why KiCad enforces no rule of this board's .kicad_dru
+    kicad_refused: List[dict] = field(default_factory=list)
     # net_keepouts.derive_area_keepouts' regions (install_design_rules)
     net_keepouts: List[dict] = field(default_factory=list)
+    # the project's rule_severities: {KiCad error key: severity}
+    rule_severities: Dict[str, str] = field(default_factory=dict)
     _cache: dict = field(default_factory=dict, repr=False)
     _effective: Dict[int, str] = field(default_factory=dict, repr=False)
 
@@ -1167,6 +1623,7 @@ class DesignRules:
         dr.net_names = {nid: n.name for nid, n in (getattr(pcb_data, 'nets', None) or {}).items()
                         if getattr(n, 'name', None)}
         dr.groups = _groups_by_ref(pcb_data)
+        dr.footprint_ids = _footprint_ids(pcb_data)
         if path:
             dr._load_project_file(os.path.splitext(path)[0] + '.kicad_pro', path)
             dru = os.path.splitext(path)[0] + '.kicad_dru'
@@ -1179,6 +1636,7 @@ class DesignRules:
                 else:
                     dr.rules, notes = parse_dru(text)
                     dr.notes.extend(notes)
+                    dr.kicad_refused = dru_refusals(text, dr.rules)
         dr._finish()
         return dr
 
@@ -1265,12 +1723,18 @@ class DesignRules:
                 d['priority'] = int(c.get('priority', _DEFAULT_PRIORITY
                                           if name == 'Default' else 0))
                 self.classes[name] = d
+                self.unset_fields[name] = frozenset(
+                    k for k in _CLASS_COMPLETE_FIELDS
+                    if not isinstance(c.get(k), (int, float)))
             # every membership form, KiCad 6's classes[].nets included (#1304)
             assignments, patterns = project_class_membership(ns)
-            rules =((proj.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
+            ds = (proj.get('board', {}) or {}).get('design_settings', {}) or {}
+            rules = ds.get('rules', {}) or {}
             for k, v in rules.items():
                 if k.startswith('min_') and isinstance(v, (int, float)) and v > 0:
                     self.board_min[k] = float(v)
+            self.rule_severities = {str(k): str(v) for k, v in
+                                    (ds.get('rule_severities') or {}).items()}
         if not self.classes:
             # KiCad 6/7: (net_class ...) blocks in the board file.
             try:
@@ -1320,6 +1784,27 @@ class DesignRules:
             self._effective[net_id] = e
         return e
 
+    def class_constituents(self, net_id: int) -> Tuple[str, ...]:
+        """The classes KiCad builds a net's effective class from, in the order
+        its name joins them, which is what a rule condition reads (#1690):
+        priority, then name, then Default when the net's classes leave one of
+        `_CLASS_COMPLETE_FIELDS` unset between them, since Default then
+        supplies it. So on a net whose one class sets no bus width,
+        `A.NetClass == 'Default'` and `A.hasNetclass('Default')` are true,
+        `A.hasExactNetclass('HS')` false and `A.hasExactNetclass('HS,Default')`
+        true. Measured on kicad-cli 10.0.6, the same at every project schema
+        0 to 5. A net assigned to a class the project does not declare is
+        not modelled: `memberships` drops that class."""
+        members = [c for c in self.memberships.get(net_id, ()) if c in self.classes]
+        if not members:
+            return ('Default',)
+        members.sort(key=lambda c: (self.classes[c].get('priority', 0), c))
+        unset = frozenset.intersection(*(self.unset_fields.get(c, frozenset())
+                                         for c in members))
+        if unset and 'Default' not in members:
+            members.append('Default')
+        return tuple(members)
+
     def class_value(self, net_id: int, prop: str) -> Optional[float]:
         """``prop`` from the aggregate class: the highest-priority member class
         that SETS it, else Default's, else None."""
@@ -1335,28 +1820,37 @@ class DesignRules:
                      layer: Optional[str] = None, **facts) -> RuleItem:
         """A RuleItem for a net with the class facts filled in."""
         layers = facts.pop('layers', None)
+        if layers is None and type == 'via' and facts.get('via_type') in (None, 'through'):
+            # for existsOnLayer(): a through via is on every copper layer of the
+            # board, whichever one is asked about
+            facts['other_layers'] = frozenset(self.copper_layers)
         if layers is None:
             layers = frozenset([layer]) if layer else frozenset()
+        names = self.class_constituents(net_id)
         return RuleItem(type=type, net_id=net_id,
                         net_name=self.net_names.get(net_id, ''),
-                        netclasses=self.memberships.get(net_id, frozenset()),
-                        effective_class=self.effective_class(net_id),
+                        netclasses=frozenset(names),
+                        effective_class=','.join(names),
                         layers=frozenset(layers), **facts)
 
     def item_for_pad(self, pad, layer: Optional[str] = None) -> RuleItem:
         ref = getattr(pad, 'component_ref', None)
+        names = self.class_constituents(getattr(pad, 'net_id', 0))
+        fp_ref, fp_lib = self.footprint_ids.get(ref, (ref, None))
+        layers = _pad_rule_layers(getattr(pad, 'layers', None))
         return RuleItem(
             type='pad', net_id=int(getattr(pad, 'net_id', 0) or 0),
             net_name=getattr(pad, 'net_name', '') or self.net_names.get(getattr(pad, 'net_id', 0), ''),
-            netclasses=self.memberships.get(getattr(pad, 'net_id', 0), frozenset()),
-            effective_class=self.effective_class(getattr(pad, 'net_id', 0)),
-            layers=frozenset(l for l in (getattr(pad, 'layers', None) or []) if str(l).endswith('.Cu')),
-            footprint_ref=ref, pad_type=getattr(pad, 'pad_type', None),
+            netclasses=frozenset(names),
+            effective_class=','.join(names),
+            layers=frozenset(l for l in layers if l.endswith('.Cu')),
+            other_layers=frozenset(l for l in layers if not l.endswith('.Cu')),
+            footprint_ref=fp_ref, footprint_lib=fp_lib, pad_type=getattr(pad, 'pad_type', None),
+            pad_number=getattr(pad, 'pad_number', None),
             groups=self.groups.get(ref, frozenset()),
             xy=(getattr(pad, 'global_x', None), getattr(pad, 'global_y', None))
             if getattr(pad, 'global_x', None) is not None else None,
-            clearance_override=(getattr(pad, 'local_clearance', 0) or None),
-            plated=(getattr(pad, 'pad_type', '') != 'np_thru_hole'))
+            clearance_override=(getattr(pad, 'local_clearance', 0) or None))
 
     # ---------------- resolution ----------------
 
@@ -1630,17 +2124,89 @@ class DesignRules:
         for r in self.rules:
             kinds = sorted(k for k in r.constraints if k in ROUTER_UNHONOURED_KINDS)
             if kinds and r.name not in named and not r.honoured:
-                out.append((r.name, f"{', '.join(kinds)}: no routing step sizes "
-                                    f"a via by it (via_diameter and hole_size "
-                                    f"alone), so this line is printed whatever "
-                                    f"the vias are; route.py and route_diff.py "
-                                    f"grade their own vias against it when they "
-                                    f"end, check_drc the board"))
+                out.append((r.name, '; '.join(f"{k}: {_ROUTER_UNHONOURED_WHY[k]}"
+                                              for k in kinds)))
         return out
+
+    def severity_of(self, kind: str) -> str:
+        """KiCad's severity for the error ``kind`` reports under (the project's
+        ``rule_severities``, 'error' when it says nothing). A rule of a kind
+        the project ignores is one KiCad flags nothing for."""
+        return self.rule_severities.get(_SEVERITY_KEY.get(kind, kind), 'error')
+
+    def via_floors(self, net_id: int = 0) -> Dict[str, float]:
+        """#1676: the minimums `.kicad_dru` rules set on a via of ``net_id``, in
+        fab_tiers FLOOR_KEYS vocabulary (`via_diameter`, `via_drill`,
+        `annular`), at KiCad's value. A kind no rule sets is absent (a Board
+        Setup minimum is `--escalation board`'s, not this), and so is one the
+        project's severities ignore. {} on a board without such a rule, so a
+        via is then exactly what it was."""
+        if not self.dru_path:
+            return {}
+        key = ('_via_floors', net_id)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        out: Dict[str, float] = {}
+        item = self.item_for_net(net_id, 'via')
+        for kind, floor_key in (('via_diameter', 'via_diameter'), ('hole_size', 'via_drill'),
+                                ('annular_width', 'annular')):
+            if self.severity_of(kind) == 'ignore':
+                continue
+            c = self.resolve(kind, item, None, None)
+            v = c.kicad_min if c.fab_bound else c.min
+            if c.min_rule is not None and v is not None and v > 0:
+                out[floor_key] = float(v)
+        self._cache[key] = out
+        return out
+
+    def via_meeting_rules(self, size: float, drill: float, net_id: int = 0) -> Tuple[float, float]:
+        """(size, drill) raised as far as the rules `via_floors` names require:
+        the drill to a `hole_size` minimum, the diameter to a `via_diameter`
+        minimum and to the drill plus the `annular_width` ring each side
+        (`fab_tiers._via_holding_ring`, as #1579 does for the Board Setup
+        ring). Raise-only: a via that meets them is returned as it came."""
+        floors = self.via_floors(net_id)
+        if not floors:
+            return size, drill
+        from fab_tiers import _via_holding_ring
+        d = max(drill, floors.get('via_drill', 0.0))
+        s = max(size, floors.get('via_diameter', 0.0))
+        ring = floors.get('annular')
+        if ring:
+            s = _via_holding_ring(s, d, ring)
+        return s, d
+
+    def via_size_grade(self, vias) -> List[dict]:
+        """#1676: `annular_grade` for the two other kinds a rule sizes a via by:
+        one row per `via_diameter` / `hole_size` rule that sets the minimum of
+        at least one of ``vias``: ``{rule, kind, min, vias, below, smallest}``,
+        ``min`` KiCad's value and ``smallest`` the smallest size it bound."""
+        rows: Dict[Tuple[str, str], dict] = {}
+        for v in vias or ():
+            size, drill = getattr(v, 'size', 0) or 0, getattr(v, 'drill', 0) or 0
+            if not size or not drill:
+                continue
+            item = self.item_for_net(int(getattr(v, 'net_id', 0) or 0), 'via')
+            for kind, have in (('via_diameter', size), ('hole_size', drill)):
+                c = self.resolve(kind, item, None, None)
+                need = c.kicad_min if c.fab_bound else c.min
+                if c.min_rule is None or need is None:
+                    continue
+                row = rows.setdefault((c.min_rule, kind), {
+                    'rule': c.min_rule, 'kind': kind, 'min': need, 'vias': 0, 'below': 0,
+                    'smallest': have})
+                row['vias'] += 1
+                row['smallest'] = min(row['smallest'], have)
+                if have < need - 1e-6:
+                    row['below'] += 1
+        for row in rows.values():
+            row['smallest'] = round(row['smallest'], 4)
+        return [rows[k] for k in sorted(rows)]
 
     def annular_grade(self, vias) -> List[dict]:
         """#1649: the vias of one step graded against each `annular_width`
-        rule no routing step sizes a via by (`ROUTER_UNHONOURED_KINDS`) -- the
+        rule (`ROUTER_UNHONOURED_KINDS`) -- the
         answer the "NOT honoured" line, printed before the step, cannot give.
         One row per rule that sets the ring of at least one of ``vias``:
         ``{rule, min, vias, below, smallest_ring}``, ``min`` KiCad's value
@@ -1682,12 +2248,13 @@ class DesignRules:
                 if not r.unsupported and r.unconsumed_kinds]
 
     def report_lines(self) -> List[str]:
-        out = []
+        out = kicad_refusal_lines(self.kicad_refused)
         for name, what in self.honoured_rules():
             out.append(f".kicad_dru rule '{name}': {what}")
         for name, why in self.unsupported():
-            out.append(f".kicad_dru rule '{name}': NOT honoured ({why}); "
-                       f"KiCad will still enforce it")
+            out.append(f".kicad_dru rule '{name}': NOT honoured ({why})"
+                       + ('' if _KICAD_REFUSES in why
+                          else '; KiCad will still enforce it'))
         for name, kinds in self.unconsumed():
             # #1313: a length window is graded (check_drc) but not routed to.
             graded = [k for k in kinds if k in GRADED_ONLY_KINDS]
@@ -1718,9 +2285,32 @@ class DesignRules:
                 'honoured': r.honoured, 'router_unhonoured': r.router_unhonoured,
                 'unconsumed': list(r.unconsumed_kinds),
             } for r in self.rules],
+            'kicad_refused': list(self.kicad_refused),
             'fab_floor': dict(sorted(self.fab_floor.items())),
             'cli': dict(sorted(self.cli.items())),
         }
+
+
+def kicad_refusal_lines(refused: Sequence[dict]) -> List[str]:
+    """The finding `dru_refusals` is, for a console: about the file, and first,
+    because KiCad itself says nothing (exit 0, no message). One line per cause."""
+    return [".kicad_dru: KiCad ENFORCES NO RULE OF THIS FILE"
+            + (f": rule '{r['rule']}': " if r['rule'] else ': ') + r['reason']
+            + ". This tool still reads the file's other rules, so it routes and "
+              "grades by rules KiCad's own DRC is not applying" for r in refused]
+
+
+def read_board_kicad_refusals(board_path: Optional[str]) -> List[dict]:
+    """`dru_refusals` of the `.kicad_dru` beside a board, [] without one, for a
+    tool with no DesignRules in hand."""
+    dru = os.path.splitext(board_path)[0] + '.kicad_dru' if board_path else ''
+    if not dru or not os.path.isfile(dru):
+        return []
+    try:
+        text = open(dru, encoding='utf-8').read()
+    except OSError:
+        return []
+    return dru_refusals(text, parse_dru(text)[0])
 
 
 def relaxing_rules(rules, board_min) -> List[dict]:
@@ -1758,6 +2348,134 @@ def annular_grade_lines(rows) -> List[str]:
                        f"check_drc VIA-ANNULAR")
         else:
             out.append(f"{head} meet it (smallest ring {r['smallest_ring']:g} mm)")
+    return out
+
+
+def run_via_for_rules(board_path: Optional[str], pcb_data, via_size: float,
+                      via_drill: float) -> Tuple[float, float]:
+    """#1676: the (size, drill) a step that was given no explicit via starts
+    from: its own, raised to the `.kicad_dru` rules that bind a via of no
+    particular net. Without a rule file it is what it was, unread."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+        return via_size, via_drill
+    try:
+        out = DesignRules.from_project(pcb_data, path).via_meeting_rules(via_size, via_drill)
+    except (OSError, ValueError) as e:
+        print(f"  (via rules not read: {e})")
+        return via_size, via_drill
+    if out != (via_size, via_drill):
+        print(f"Via {via_size:g}/{via_drill:g} raised to {out[0]:g}/{out[1]:g} to meet the "
+              f"board's .kicad_dru via rules (#1676).")
+    return out
+
+
+def install_board_via_rule_floors(pcb_data, board_path: Optional[str] = None) -> None:
+    """`fab_tiers.set_rule_via_floors` for a step that reads its via rungs
+    before it has built a config (the fanouts)."""
+    from fab_tiers import set_rule_via_floors
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+        set_rule_via_floors({})
+        return
+    try:
+        set_rule_via_floors(DesignRules.from_project(pcb_data, path).via_floors(0))
+    except (OSError, ValueError):
+        set_rule_via_floors({})
+
+
+def via_size_grade_lines(rows) -> List[str]:
+    """One end-of-step line per `DesignRules.via_size_grade` row (#1676)."""
+    out = []
+    for r in rows:
+        kicad, ours = _VIA_SIZE_FLAGS[r['kind']]
+        head = (f".kicad_dru rule '{r['rule']}' ({r['kind']} min {r['min']:g} mm): "
+                f"this step's {r['vias']} via(s) it binds")
+        if r['below']:
+            out.append(f"{head}: {r['below']} BELOW it (smallest {r['smallest']:g} mm); "
+                       f"KiCad flags them ({kicad}), check_drc {ours}")
+        else:
+            out.append(f"{head} meet it (smallest {r['smallest']:g} mm)")
+    return out
+
+
+def edge_rule_grade(pcb_data, segments, vias, board_path: Optional[str] = None) -> List[dict]:
+    """#1678: the tracks and vias of one step graded against each `.kicad_dru`
+    `edge_clearance` rule that sets their floor: one row per rule, ``{rule,
+    min, tracks, vias, closer, closest}``, ``min`` KiCad's value and ``closest``
+    the smallest copper-to-Edge.Cuts gap it bound. It reads only geometry, so
+    it sees copper from every path, and it counts a track that lands on a pad
+    already inside the rule, which KiCad flags too. [] when no rule binds."""
+    if not segments and not vias:
+        return []
+    edge = PadEdgeRules(pcb_data, board_path)
+    if not edge.copper_rules:
+        return []
+    from check_drc import board_edge_geometry, _point_to_rings_distance, _segment_to_rings_distance
+    rings, _outer, _cutouts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
+    if not rings:
+        return []
+    values = {r.name: v for r, _a, v in edge.copper_rules}
+    rows: Dict[str, dict] = {}
+
+    def note(name, gap, kind):
+        row = rows.setdefault(name, {'rule': name, 'min': values[name], 'tracks': 0, 'vias': 0,
+                                     'closer': 0, 'closest': gap})
+        row['tracks' if kind == 'track' else 'vias'] += 1
+        row['closest'] = min(row['closest'], gap)
+        if gap < values[name] - 1e-6:
+            row['closer'] += 1
+
+    for s in segments or ():
+        name = edge.for_copper(int(s.net_id or 0), 'track', 0.0, s.layer)[2]
+        if name:
+            note(name, _segment_to_rings_distance(s.start_x, s.start_y, s.end_x, s.end_y, rings)
+                 - s.width / 2.0, 'track')
+    for v in vias or ():
+        name = edge.for_copper(int(v.net_id or 0), 'via', 0.0)[2]
+        if name:
+            note(name, _point_to_rings_distance(v.x, v.y, rings) - v.size / 2.0, 'via')
+    for row in rows.values():
+        row['closest'] = round(row['closest'], 4)
+    return [rows[k] for k in sorted(rows)]
+
+
+def edge_rule_grade_lines(rows) -> List[str]:
+    """One end-of-step line per `edge_rule_grade` row (#1678)."""
+    out = []
+    for r in rows:
+        head = (f".kicad_dru rule '{r['rule']}' (edge_clearance min {r['min']:g} mm): "
+                f"this step's {r['tracks']} track(s), {r['vias']} via(s) it binds")
+        if r['closer']:
+            out.append(f"{head}: {r['closer']} closer to Edge.Cuts (closest {r['closest']:g} mm); "
+                       f"KiCad flags them (copper_edge_clearance), check_drc "
+                       f"segment-board-edge / via-board-edge, or accepted where the "
+                       f"copper lands on a pad that is itself inside the rule")
+        else:
+            out.append(f"{head} keep it (closest {r['closest']:g} mm)")
+    return out
+
+
+def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = None) -> dict:
+    """The rule grades of one routing step's own copper, printed per rule and
+    returned as `JSON_SUMMARY.design_rules` keys: `annular_rules` (#1649),
+    `via_rules` (#1676) and `edge_rules` (#1678). A rule broken by a descent is
+    named here whatever the policy that allowed the descent. A disclosure only:
+    it changes no copper. Both routing engines call it, so both fronts get it."""
+    vias = [v for r in results for v in (r.get('new_vias') or [])]
+    segs = [s for r in results for s in (r.get('new_segments') or [])]
+    out = {}
+    ag = rules.annular_grade(vias)
+    if ag:
+        out['annular_rules'] = ag
+    vg = rules.via_size_grade(vias)
+    if vg:
+        out['via_rules'] = vg
+    eg = edge_rule_grade(pcb_data, segs, vias, board_path or rules.source or None)
+    if eg:
+        out['edge_rules'] = eg
+    for line in annular_grade_lines(ag) + via_size_grade_lines(vg) + edge_rule_grade_lines(eg):
+        print(f"  {line}")
     return out
 
 
@@ -1821,12 +2539,14 @@ def board_min_clearance_cached(pcb_data) -> float:
 
 
 def _edge_item_unknown(node):
-    """`node` with every term that reads B as ('unknown',). An edge
-    clearance is evaluated with B the Edge.Cuts shape it is measured to,
-    which no RuleItem models."""
+    """`node` with every term that reads B as ('unknown',), B.Pad_Number apart.
+    An edge clearance is evaluated with B the Edge.Cuts shape it is measured
+    to, and `_EDGE_ITEM` answers only what was measured of that shape as A."""
     if not isinstance(node, tuple) or not node:
         return node
     op = node[0]
+    if op == 'prop' and node[1:] == ('B', 'pad_number'):
+        return node                # the shape has none (`_EDGE_ITEM`), the pad does
     if op in ('prop', 'call', 'area'):
         return ('unknown',) if node[1] in ('B', 'AB') else node
     if op == 'coupled':
@@ -1852,12 +2572,21 @@ def _has_unknown(node) -> bool:
 
 
 class PadEdgeRules:
-    """The board-edge clearance each pad is graded at (#1615), and each
-    zone's fill kept at (`for_zone`, #1643): the floor
-    the caller passes, replaced by every `.kicad_dru` `edge_clearance` rule
-    that binds the pad, in file order, the last winning. That is KiCad's
-    order, and an explicit rule binds below the Board Setup minimum too.
-    Edge-launch connectors rely on that: their land runs to the edge.
+    """The board-edge clearance each pad is graded at (#1615), each track and
+    via (`for_copper`, #1678), and each zone's fill kept at (`for_zone`,
+    #1643): the floor the caller passes, replaced by every `.kicad_dru`
+    `edge_clearance` rule that binds the item, in file order, the last
+    winning. That is KiCad's order, and an explicit rule binds below the
+    Board Setup minimum too. Edge-launch connectors rely on that: their land
+    runs to the edge.
+
+    A rule's `(layer ...)` clause scopes only the ZONE gap. KiCad's edge check
+    evaluates pads, tracks and vias at no layer, and a rule's layer clause
+    then excludes none of them. Measured on kicad-cli 10.0.6: `(layer inner)`
+    and `(layer B.Cu)` each flag an F.Cu track, an F.Cu pad and a through via,
+    and a relaxing `(layer F.Cu)` rule passes B.Cu copper. A term of the
+    condition does read the item's layer: `A.Layer == 'In1.Cu'` binds only a
+    track on In1.Cu, no via and no other layer's track.
 
     A pad's `A.insideCourtyard('X')` / `A.intersectsCourtyard('X')` is read
     as `A.memberOfFootprint('X')`, and `notes` says so: placement keeps
@@ -1872,11 +2601,18 @@ class PadEdgeRules:
     rule that set the decided value, '' for the caller's floor.
 
     `active` is False on a board with no edge rule, where every pad reads
-    `(base, base, '')`."""
+    `(base, base, '')`.
+
+    KiCad tries a failed condition again with the two items swapped, and here
+    the other item is the Edge.Cuts shape, so `for_pad` asks both ways: a rule
+    the shape meets as A binds every pad (`_EDGE_ITEM`)."""
 
     def __init__(self, pcb_data, board_path: Optional[str] = None):
         path = board_path or getattr(pcb_data, 'source_path', '') or ''
         self.rules: List[tuple] = []
+        #: the same rows read for a track or via, whose courtyard term is a
+        #: place on the board and not a part: it stays undecided
+        self.copper_rules: List[tuple] = []
         #: [{'rule', 'reason'}] for each rule whose condition is not modelled
         self.unmodelled: List[dict] = []
         #: {rule name: how its condition was read}, for a courtyard term
@@ -1903,6 +2639,9 @@ class PadEdgeRules:
                                          'that footprint')
             ast = _edge_item_unknown(parse_condition_maybe(src))
             self.rules.append((rule, ast, float(spec['min'])))
+            self.copper_rules.append(
+                (rule, _edge_item_unknown(parse_condition_maybe(rule.condition_src)),
+                 float(spec['min'])))
             if _has_unknown(ast):
                 self.unmodelled.append({
                     'rule': rule.name,
@@ -1934,7 +2673,8 @@ class PadEdgeRules:
             # the values this layer may resolve to, walked in file order
             values, rule_name = {base}, ''
             for rule, ast, value in self.rules:
-                m = rule_may_match(rule, ast, item, None, layer, dr.copper_layers, ctx)
+                m = rule_may_match(rule, ast, item, _EDGE_ITEM, layer, dr.copper_layers, ctx,
+                                   layer_clause=False)
                 if m is True:
                     values, rule_name = {value}, rule.name
                 elif m is None:
@@ -1949,12 +2689,48 @@ class PadEdgeRules:
         self._cache[key] = out
         return out
 
+    def for_copper(self, net_id: int, kind: str, base: float,
+                   layer: Optional[str] = None) -> Tuple[float, float, str]:
+        """The same range for a track (``kind`` 'track', on ``layer``) or a via
+        ('via') of `net_id`: what KiCad grades, so a rule below the board's
+        minimum binds and no fab floor applies (`EdgeFloors` applies it to what
+        is routed)."""
+        if not self.copper_rules:
+            return base, base, ''
+        key = ('copper', net_id, kind, layer, base)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        dr = self.dr
+        item = dr.item_for_net(net_id, type=kind, layer=layer)
+        ctx = ('edge_clearance', dr._net_name_set())
+        values, rule_name = {base}, ''
+        for rule, ast, value in self.copper_rules:
+            m = rule_may_match(rule, ast, item, _EDGE_ITEM, layer, dr.copper_layers, ctx,
+                               layer_clause=False)
+            if m is True:
+                values, rule_name = {value}, rule.name
+            elif m is None:
+                values = values | {value}
+        lo, hi = min(values), max(values)
+        out = (lo, hi, rule_name if lo == hi else '')
+        self._cache[key] = out
+        return out
+
+    def layer_dependent(self) -> bool:
+        """A rule's CONDITION reads the copper layer, so a track's floor may
+        differ layer by layer."""
+        from net_keepouts import _layer_dependent
+        return any(_layer_dependent(ast) for _r, ast, _v in self.copper_rules)
+
     def for_zone(self, net_id: int, layer: str, base: float) -> Tuple[float, float, str]:
         """The same range for a zone of `net_id` filling `layer`: the gap
         KiCad's filler keeps from Edge.Cuts there. Measured on kicad-cli
         10.0.6 (tests/test_1643_zone_edge_gap.py): that gap is the edge
         clearance alone -- the board's rule, replaced by a binding rule here,
-        a lower one too -- whatever the zone's or its class's clearance."""
+        a lower one too -- whatever the zone's or its class's clearance. The
+        filler asks both ways as the DRC does (#1690): `!(A.Type == 'Zone')`
+        binds, on the Edge.Cuts shape."""
         if not self.rules:
             return base, base, ''
         key = ('zone', net_id, layer, base)
@@ -1966,7 +2742,7 @@ class PadEdgeRules:
         ctx = ('edge_clearance', dr._net_name_set())
         values, rule_name = {base}, ''
         for rule, ast, value in self.rules:
-            m = rule_may_match(rule, ast, item, None, layer, dr.copper_layers, ctx)
+            m = rule_may_match(rule, ast, item, _EDGE_ITEM, layer, dr.copper_layers, ctx)
             if m is True:
                 values, rule_name = {value}, rule.name
             elif m is None:
@@ -1975,6 +2751,86 @@ class PadEdgeRules:
         out = (lo, hi, rule_name if lo == hi else '')
         self._cache[key] = out
         return out
+
+
+class EdgeFloors:
+    """What one routing step holds its tracks and vias to from Edge.Cuts when
+    a `.kicad_dru` `edge_clearance` rule binds them (#1678): per net, the
+    largest value `PadEdgeRules.for_copper` says KiCad may grade it at, pinned
+    up to the fab floor, as a layer rule is (a rule may tighten or relax, and
+    only the fab floor stops it).
+
+    `track_band` / `via_band` are the smallest floors over the board's nets, so
+    the board's static band over-blocks no net; `strictest` is the largest, for
+    every scalar reader of ``config.board_edge_clearance``, through which no
+    net can then break a rule. A net above a band gets the rest while it routes
+    (`net_keepouts.derive_edge_bands`).
+
+    `for_config` answers None on a board with no edge rule on copper, and
+    `changed` says whether a rule moved any net's floor: a board where none does
+    takes the path it always took."""
+
+    def __init__(self, track, via, base, rule_names, fab):
+        #: {net id: {layer: floor}}, {net id: floor}
+        self.track, self.via = track, via
+        self.base = base
+        self.rule_names = rule_names
+        self.fab = fab
+        vals = [v for d in track.values() for v in d.values()]
+        self.track_band = min(vals)
+        self.via_band = min(via.values())
+        self.strictest = max(max(vals), max(via.values()))
+        #: does any net's floor differ from the base the run resolved?
+        self.changed = (abs(self.strictest - base) > 1e-9 or abs(self.track_band - base) > 1e-9
+                        or abs(self.via_band - base) > 1e-9)
+
+    @classmethod
+    def for_config(cls, rules: 'DesignRules', pcb_data, config,
+                   base: float) -> Optional['EdgeFloors']:
+        if rules is None or not rules.dru_path or rules.severity_of('edge_clearance') == 'ignore':
+            return None
+        edge = PadEdgeRules(pcb_data, rules.source or None)
+        if not edge.copper_rules:
+            return None
+        from fix_kicad_drc_settings import fab_edge_floor
+        fab = fab_edge_floor(rules.source or None)
+        nets = [nid for nid, n in (getattr(pcb_data, 'nets', None) or {}).items()
+                if nid and getattr(n, 'name', None)] or [0]
+        layers = [l for l in (getattr(config, 'layers', None) or rules.copper_layers or ())
+                  if str(l).endswith('.Cu')] or [None]
+        per_layer = edge.layer_dependent()
+        track, via, named = {}, {}, set()
+
+        def floor(row):
+            lo, hi, name = row
+            if name:
+                named.add(name)
+            # A value no rule set is the base the run already resolved; a
+            # rule's own, or the larger of what an undecided rule may set,
+            # floored at the fab's.
+            return base if lo == hi == base and not name else max(hi, fab)
+        for nid in nets:
+            if per_layer:
+                track[nid] = {l: floor(edge.for_copper(nid, 'track', base, l)) for l in layers}
+            else:
+                v = floor(edge.for_copper(nid, 'track', base, layers[0]))
+                track[nid] = {l: v for l in layers}
+            via[nid] = floor(edge.for_copper(nid, 'via', base))
+        return cls(track, via, base, named, fab)
+
+
+def strictest_edge_floor(pcb_data, base: float, board_path: Optional[str] = None) -> float:
+    """`EdgeFloors.strictest` for a step that keeps one edge number and has no
+    config in hand; ``base`` on a board with no rule that moves it."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+        return base
+    try:
+        rules = DesignRules.from_project(pcb_data, path)
+        floors = EdgeFloors.for_config(rules, pcb_data, object(), base)
+    except (OSError, ValueError):
+        return base
+    return floors.strictest if floors is not None and floors.changed else base
 
 
 def _netclass_dict(nc) -> dict:
@@ -2001,6 +2857,36 @@ def _netclass_dict(nc) -> dict:
     return d
 
 
+def _footprint_ids(pcb_data) -> Dict[str, Tuple[str, str]]:
+    """{footprint key: (reference, library id)}. A key is not always the
+    reference: the second block claiming one is keyed `R7~2` and a block with
+    none `#<uuid>` (kicad_parser.disambiguate_references), and KiCad reads the
+    reference itself."""
+    dup = getattr(pcb_data, 'duplicate_references', None) or {}
+    out = {}
+    for key, fp in (getattr(pcb_data, 'footprints', None) or {}).items():
+        ref = str(key)
+        head, sep, tail = ref.rpartition('~')
+        if sep and tail.isdigit() and head in dup:
+            ref = head
+        elif ref.startswith('#'):
+            ref = ''
+        out[key] = (ref, getattr(fp, 'footprint_name', None))
+    return out
+
+
+#: A pad's `*.Cu` is every copper layer KiCad has, whatever the board's stack:
+#: `A.existsOnLayer('In9.Cu')` holds on a through-hole pad of a 4-layer board.
+_ALL_COPPER = ('F.Cu', 'B.Cu') + tuple(f'In{i}.Cu' for i in range(1, 31))
+_PAD_LAYER_SETS = {'*.Cu': _ALL_COPPER, 'F&B.Cu': ('F.Cu', 'B.Cu'),
+                   '*.Mask': ('F.Mask', 'B.Mask'), '*.Paste': ('F.Paste', 'B.Paste'),
+                   '*.SilkS': ('F.SilkS', 'B.SilkS')}
+
+
+def _pad_rule_layers(layers) -> Tuple[str, ...]:
+    return tuple(n for l in layers or () for n in _PAD_LAYER_SETS.get(str(l), (str(l),)))
+
+
 def _groups_by_ref(pcb_data) -> Dict[str, FrozenSet[str]]:
     out: Dict[str, set] = {}
     for gname, refs in (getattr(pcb_data, 'groups', None) or {}).items():
@@ -2014,6 +2900,40 @@ def _groups_by_ref(pcb_data) -> Dict[str, FrozenSet[str]]:
 # --------------------------------------------------------------------------
 
 _ANNOUNCED = set()
+
+
+def _install_rule_floors(config, rules, pcb_data) -> None:
+    """The floors the board's `.kicad_dru` sets on what a routing step lays,
+    installed at the chokepoint every engine passes through, so both fronts get
+    them with no flag: the via rungs' first choice (#1676) and each net's edge
+    clearance (#1678). Never raises into the engine."""
+    try:
+        from fab_tiers import set_rule_via_floors
+        set_rule_via_floors(rules.via_floors(0))
+    except Exception as e:                                     # noqa: BLE001
+        rules.notes.append(f"via rule floors not installed ({e})")
+    if pcb_data is None:
+        return
+    try:
+        declared = getattr(config, 'board_edge_declared', None)
+        scalar = declared if declared is not None else config.board_edge_clearance
+        base = scalar if scalar and scalar > 0 else config.clearance
+        floors = EdgeFloors.for_config(rules, pcb_data, config, base)
+    except Exception as e:                                     # noqa: BLE001
+        rules.notes.append(f"edge_clearance rules not resolved for routing ({e})")
+        return
+    if floors is None:
+        return
+    for rule, _ast, value in PadEdgeRules(pcb_data, rules.source or None).copper_rules:
+        for own in rules.rules:
+            if own.name == rule.name and rule.name in floors.rule_names and not own.honoured:
+                own.honoured = (f"edge_clearance min {value:g} mm: the tracks and vias it "
+                                f"binds are held to {max(value, floors.fab):g} mm from Edge.Cuts"
+                                + (' (the fab floor)' if value < floors.fab - 1e-9 else ''))
+    if floors.changed:
+        config.board_edge_declared = scalar
+        config.board_edge_clearance = floors.strictest
+        config.edge_floors = floors
 
 
 def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
@@ -2054,6 +2974,14 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         config.rules = rules
     except Exception:                                          # noqa: BLE001
         pass
+    _install_rule_floors(config, rules, pcb_data)
+    if net_keepouts and getattr(config, 'edge_floors', None) is not None:
+        try:
+            from net_keepouts import derive_edge_bands
+            rules.net_keepouts = list(rules.net_keepouts) + derive_edge_bands(
+                config.edge_floors, pcb_data)
+        except Exception as e:                                 # noqa: BLE001
+            rules.notes.append(f"per-net edge bands not derived ({e})")
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))

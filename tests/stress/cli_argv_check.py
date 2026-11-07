@@ -321,7 +321,8 @@ POST_PARSE = {
     'bga_fanout.py': (_fab_overrides_missing,),
     'qfn_fanout.py': (_power_nets_count_mismatch, _fab_overrides_missing),
     'place_fanout_clearance.py': (_cap_clearance_not_finite,
-                                  _cap_intent_unreadable),
+                                  _cap_intent_unreadable,
+                                  _fab_overrides_missing),
 }
 
 #: Every post-parse refusal site in each tool's main, by fingerprint -- a
@@ -426,6 +427,7 @@ REFUSAL_SITES = {
             ('argv', '_cap_clearance_not_finite'),
         'call:load_intent_or_exit': ('file', '_cap_intent_unreadable'),
         'if _rc': ('file', '_cap_intent_unreadable'),
+        'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'call:tether_gate_spec': ('file', '_cap_intent_unreadable'),
         'except (TypeError, ValueError) from _fp1067.tether_gate_spec':
             ('file', '_cap_intent_unreadable'),

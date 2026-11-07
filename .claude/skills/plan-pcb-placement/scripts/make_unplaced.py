@@ -68,7 +68,8 @@ from placement.placement_state import assess_placement          # noqa: E402
 from placement.utility import compute_footprint_bbox_local       # noqa: E402
 from placement.portfolio import copy_siblings                    # noqa: E402
 from placement.writer import (write_placed_output,              # noqa: E402
-                              text_node_angles)
+                              marker_pile_angle, text_node_angles,
+                              text_node_markers)
 
 CLUSTER_FRAC = 0.10     # of the board diagonal; SPREAD_RATIO (s2) is 0.15
 GAP_MARGIN = 2.0        # mm of clear air beyond the tallest part's reach
@@ -85,6 +86,8 @@ def text_angle_leaks(path, refs):
     The token is checked as well as the value: KiCad reads an absent token as
     0, but the writer adds one only to a text whose angle came out non-zero,
     so whether a token is there would itself say something about the pose.
+    A "PCB Edge" marker text keeps its angle to the part, folded into one
+    half-turn (#1715, `writer.marker_pile_angle`), which says nothing of it.
     """
     with open(path, encoding='utf-8', newline='') as fh:
         text = fh.read()
@@ -93,7 +96,9 @@ def text_angle_leaks(path, refs):
         if key not in refs:
             continue
         angles = text_node_angles(fp_text)
-        ok = [a is not None and a % 360 == PILE_TEXT_ANGLE for a in angles]
+        ok = [a is not None and (a == marker_pile_angle(a, PILE_ROT) if mk
+                                 else a % 360 == PILE_TEXT_ANGLE)
+              for a, mk in zip(angles, text_node_markers(fp_text))]
         n += len(angles)
         good += sum(ok)
         if not all(ok):
@@ -343,7 +348,8 @@ def build(src: str, dst: str, keep_locked: bool = False,
     print(f'unlocked   {len(unlocked)}: {", ".join(unlocked) or "-"}')
     print(f'held       {len(held)} locked part(s), {len(artwork)} padless artwork block(s)')
     print(f'texts      {n_text_ok} of {n_texts} text(s) on {len(movable)} '
-          f'moved part(s) at absolute {PILE_TEXT_ANGLE:g}')
+          f'moved part(s) at absolute {PILE_TEXT_ANGLE:g} (a PCB-edge marker at '
+          f'its own angle to the part)')
     named = ', '.join(in_local[:8]) + (' ...' if len(in_local) > 8 else '')
     if not local:
         zl = (f'zones      {n_zones} board-level zone(s)/rule area(s) kept; '

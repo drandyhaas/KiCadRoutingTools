@@ -15,15 +15,18 @@ segments.
   `--quick` adds route.py's fast judge to the chain's whole-board route
   steps. `--quick 2`, the seed judge, also passes it to every
   `route_diff.py` step and scores with `py_tools/quick_score.py` (the
-  connectivity of the nets without a zone, and board_score's quality counts),
-  as the placement skill does.
+  connectivity of the nets without a zone, the assembly against the placed
+  board as at the other levels, and board_score's quality counts), as the
+  placement skill does.
 - **`place_modal.py OUT BOARDS SEEDS`** places a whole arm on Modal: every
   board and seed in its own container, each `place_simple.py --seed N` of the
   tree being measured (`--src`), into `OUT/<key>/s<seed>.kicad_pcb` -- where
   `route_modal.py` looks for them. BOARDS is a comma list of
   `key=BOARD.kicad_pcb:GROUPS.json:INTENT.json`; use `route_modal.py`'s keys.
   Arguments after `--` go to every `place_simple.py`. Place every arm of an
-  A/B there (Linux and the KiCad image's Python), never some on a Mac.
+  A/B there (Linux, the KiCad image's Python and its model library), never
+  some on a Mac: a seed repeats on each machine, but 2 of 10 measured came out
+  differently on the two.
 - **`route_modal.py PLACED_DIR BOARDS SEEDS --out OUT`** routes a whole arm on
   Modal with `route_placed.py --quick` (`--quick 2` for the seed judge,
   `--full` for the whole chain, the final route of a chosen placement), one
@@ -48,7 +51,36 @@ Rules that keep the comparison honest:
 
 - **Compare Modal routes only with Modal routes.** Modal runs Linux, the
   KiCad image's Python and its KiCad (`kicad/kicad:10.0.0`; set
-  `KRT_PAB_KICAD_IMAGE` for another), so route the baseline arm there too.
+  `KRT_PAB_KICAD_IMAGE` for another, which must have a `-full` tag), so route
+  the baseline arm there too.
+- **The image carries KiCad's stock 3D models, and proves they read.** The
+  plain KiCad image has none, and without them check_assembly's body gate is
+  unmeasured rather than failed: on an outline that is not a plain rectangle the
+  seat goes without it, and a score calls a board buildable with a body through
+  it. So `modal_app.py` copies `/usr/share/kicad/3dmodels` out of the same
+  release's `-full` image (3.4 GB on disk, about a minute once, cached after
+  that; nothing else of that image), and `prove_models.py` runs at build:
+  fewer than 7000 models, or a stock edge-mount jack that does not read as a
+  body through the board, fails the build. A score at any level
+  then has `body_in_board_count` measured, with its number in the assembly
+  component's `conjuncts`. A model that is neither in the library nor embedded in
+  the board reads as no model, here as on a desktop; `place_modal.py` ships a
+  board's sibling files, not a project's own model directory.
+- **A `--quick 2` score from before it graded the assembly is a different era.**
+  Its `blocking` leaves out what `blocking_by.assembly` now adds, which is 1 at
+  least on any NOT BUILDABLE board, with or without a body through it, so keep
+  such a score apart from a new one. Its connectivity and quality read the same.
+- **Results from before the image had models are a different era.** The app's
+  name covers `modal_app.py`, so no run reuses the old image, but keep older
+  results apart from new ones: every level-1 or `--full` score from the old
+  image has `body_in_board_count` under `conjuncts_unmeasured`, where a new one
+  has it there only for a board whose own parts resolve too few models to read
+  (`body_in_board_unmeasured` in check_assembly says why). A placed board routed the same copper on both
+  in the 5 routes compared, 2 of them through a chain's
+  `place_fanout_clearance` step. Its score can differ: a
+  body through the board now counts toward NOT BUILDABLE. Placements can differ
+  too, on an outline that is not a plain rectangle, so re-place a baseline arm
+  rather than reuse one.
 - **The tree that routes is `--src`**: this checkout by default, *as it
   stands*. Uncommitted and untracked-but-not-ignored files are shipped;
   ignored ones (work dirs, built libraries) are not. Pass a worktree to route

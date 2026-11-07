@@ -393,9 +393,10 @@ def plan_state(pcb, names, sref, dref, banned=frozenset(), log=print, hold_teeth
     chi = sm.pair_chirality({nm: (src_pad[nm].global_x, src_pad[nm].global_y) for nm in launch},
                             {nm: (dst_pad[nm].global_x, dst_pad[nm].global_y) for nm in launch},
                             sgrid.bbox, dgrid.bbox)
+    street_moves = sum(1 for v in list(smenu.values()) + list(dmenu.values()) for m in v
+                       if getattr(m, "street", False))
     log(f'  escape menus: {sum(len(v) for v in smenu.values())} tooth moves, {sum(len(v) for v in dmenu.values())} '
-        f'berth moves for {len(launch)} nets ({sum(1 for v in list(smenu.values()) + list(dmenu.values()) for m in v
-                                                 if getattr(m, "street", False))} along streets); '
+        f'berth moves for {len(launch)} nets ({street_moves} along streets); '
         f'{nclash} pair leg combinations clash'
         + (f'; no ball at both arrays: {none}' if none else '')
         + (f'; no tooth escape: {[n for n in launch if not smenu.get(n)]}' if any(not smenu.get(n) for n in launch)

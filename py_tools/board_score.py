@@ -800,9 +800,10 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     _unsz = sorted(set(re.findall(r"NOT GRADED \(size\): rule '([^']*)'", out)))
     _size_extra = {'ungraded_rules': _unsz} if _unsz else {}
     # #1490: and the .kicad_dru clearance rules it does not model; #1527: and
-    # the `disallow` rules (or tokens) it does not grade.
-    _uncl = sorted(set(re.findall(r"NOT GRADED \((?:clearance|disallow)\): rule '([^']*)'",
-                                  out)))
+    # the `disallow` rules (or tokens) it does not grade; #1707: and the
+    # `via_count` rules whose condition it does not read.
+    _uncl = sorted(set(re.findall(
+        r"NOT GRADED \((?:clearance|disallow|via_count)\): rule '([^']*)'", out)))
     _clr_extra = {'ungraded_rules': _uncl} if _uncl else {}
     # #1528: of `count`, the violations such a rule may make legal -- graded
     # at the class value, which KiCad may not report.
@@ -866,12 +867,16 @@ def _drc_disclosures(out: str) -> dict:
     (`severity_warnings`) and the ones a project `ignore` drops
     (`severity_ignored`), and the pairs of one footprint's pads closer than
     their clearance (`library_pad_gaps`, #1628), library geometry KiCad
-    reports as `clearance` and no routing step can clear. Keys are present
-    only when non-zero."""
+    reports as `clearance` and no routing step can clear, and of those the
+    ones a rule check_drc cannot fully read may clear
+    (`library_pad_gaps_unverified`, #1706: KiCad reports up to
+    `library_pad_gaps`). Keys are present only when non-zero."""
     d = {}
     for key, pat in (('severity_warnings', r'SEVERITY WARNING: (\d+) finding'),
                      ('severity_ignored', r'SEVERITY IGNORE: (\d+) finding'),
-                     ('library_pad_gaps', r'LIBRARY PAD GAPS: (\d+) pair')):
+                     ('library_pad_gaps', r'LIBRARY PAD GAPS: (\d+) pair'),
+                     ('library_pad_gaps_unverified',
+                      r'LIBRARY PAD GAPS: \d+ pair[^\n]*?\(up to \d+: (\d+) may be cleared')):
         m = re.search(pat, out)
         if m and int(m.group(1)):
             d[key] = int(m.group(1))
@@ -1123,6 +1128,12 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
     `declared_failing` -- a declaration nothing named is disclosed rather than
     made a blocker.
 
+    Never counted, named or not (#1630): a net's shipped copper more than the
+    tolerance off its declared ohms, on check_impedance's model.
+    `nets_ohms_off_target` holds the named nets and `declared_ohms_off_target`
+    the rest (#1673), so the disclosure needs no flag; `ohms_off_pct` has how
+    far each one is (None: nothing to read it on).
+
     The graded nets are exactly the ones check_impedance would select for
     ``--nets <--impedance-nets>``: the selection is check_impedance's own
     matcher (`net_queries.matches_net_filter`), so a sheet-path net
@@ -1166,11 +1177,16 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
                               r.get('length_gap_wrong_mm', 0.0))
     failing = sorted(r['net_name'] for r in rows
                      if r.get('crossings') or _broken(r))
+    off_ohms = set((d.get('totals') or {}).get('nets_ohms_off_target') or ())
     extra = {}
     if declared:
         extra = {'declared_nets': declared,
                  'declared_failing': [n for n in failing
-                                      if n in declared_set and not named(n)]}
+                                      if n in declared_set and not named(n)],
+                 'declared_ohms_off_target': sorted(
+                     n for n in off_ohms if n in declared_set and not named(n)),
+                 'ohms_off_pct': {r['net_name']: r.get('ohms_off_pct')
+                                  for r in rows if r['net_name'] in off_ohms}}
     if not asked:
         return dict(skipped('no --impedance-nets given; impedance is ungraded '
                             '(the project\'s impedance declarations are measured '
@@ -1187,7 +1203,6 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
                 'reason': 'no routed nets matched --impedance-nets', **extra}
     broken = sorted(r['net_name'] for r in graded if _broken(r))
     crossing = sorted(r['net_name'] for r in graded if r.get('crossings'))
-    off_ohms = set((d.get('totals') or {}).get('nets_ohms_off_target') or ())
     return {'ran': True, 'count': len(set(broken) | set(crossing)),
             'nets_with_crossing': len(crossing),
             'nets_broken_promise': broken,
@@ -1898,9 +1913,14 @@ def main():
               + " -- see check_drc's WARNINGS")
     # #1628: said before routing too -- no route can clear these
     if _drc_c.get('library_pad_gaps'):
+        _unv = _drc_c.get('library_pad_gaps_unverified')
         print(f"LIBRARY PAD GAPS (disclosed, not blocking): KiCad will report "
-              f"{_drc_c['library_pad_gaps']} clearance finding(s) on pairs of one "
-              f"footprint's own pads, which no placement or routing step "
+              + (f"up to {_drc_c['library_pad_gaps']} pair(s) ({_unv} may be cleared "
+                 f"by a .kicad_dru rule check_drc cannot fully read)"
+                 if _unv else f"{_drc_c['library_pad_gaps']} pair(s)")
+              + f" of one footprint's own pads "
+              f"as clearance errors, once per copper layer the pads share, "
+              f"which no placement or routing step "
               f"changes -- a .kicad_dru clearance rule, a pad/footprint "
               f"(clearance) override or a net tie clears them; check_drc's "
               f"WARNINGS name the pairs")
@@ -1944,13 +1964,28 @@ def main():
                   f"under {r['required_mm']:g}" for n, r in sorted(_ru.items())[:6])
               + (', ...' if len(_ru) > 6 else '')
               + " -- name a net in --net-min-widths to grade it")
-    _df = (score['components'].get('impedance') or {}).get('declared_failing') or []
+    _imp = score['components'].get('impedance') or {}
+    _df = _imp.get('declared_failing') or []
     if _df:
         print(f"DECLARED IMPEDANCE (measured, not graded): {len(_df)} net(s) the "
               f"project records an impedance for fail reference-plane continuity "
               f"or their coplanar gap: {', '.join(_df[:8])}"
               + (', ...' if len(_df) > 8 else '')
               + " -- name them in --impedance-nets to grade them")
+    # #1673: both lists, one sentence. --impedance-nets grades continuity and
+    # the coplanar gap, never the ohms, so this holds for a graded net too.
+    _oo = sorted({*(_imp.get('declared_ohms_off_target') or ()),
+                  *(_imp.get('nets_ohms_off_target') or ())})
+    if _oo:
+        from check_impedance import DECLARED_OHMS_TOLERANCE_PCT as _tol
+        _pct = _imp.get('ohms_off_pct') or {}
+        print(f"DECLARED IMPEDANCE OFF TARGET (disclosed, never counted): "
+              f"{len(_oo)} net(s) ship more than {_tol:g}% off the ohms the project "
+              f"records, or nothing could be read: " + ', '.join(
+                  f"{n} {_pct[n]:+.1f}%" if _pct.get(n) is not None
+                  else f"{n} unread" for n in _oo[:8])
+              + (', ...' if len(_oo) > 8 else '')
+              + " -- check_impedance.py has the table")
     # WHICH LEVER. `unrouted` looks the same whether the router had a path and
     # missed it (parameter-shaped) or the net has fewer than 2 pads ON the
     # board (placement-shaped, and no router setting will ever fix it). The

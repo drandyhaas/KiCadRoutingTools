@@ -93,6 +93,7 @@ def main():
         sys.path.insert(0, os.path.join(REPO, sub))
     sys.path.insert(0, os.path.dirname(REPO))
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     import pcbnew as _pcbnew
     import protected_nets as P
     from copy_board import copy_board
@@ -240,6 +241,7 @@ def main():
     dlg._suppress_completion_popups = True
     steps = [{'action': 'route', 'params': dict(STEP)}]
     ex = PlanExecutor(dlg, steps, [0], lambda *a: None, lambda *a: None)
+    ex._completed = 1    # the plan's step ran; the write reads the steps that did
     _quiet(ex._write_drc_floors)
     with open(os.path.splitext(plan)[0] + '.kicad_pro', encoding='utf-8') as f:
         written = json.load(f)

@@ -93,6 +93,67 @@ def layer_costs_count_error(layers, layer_costs) -> Optional[str]:
             f"value(s) ({shown})")
 
 
+class LayerExtraClearance(float):
+    """An obstacle map's extra clearance that differs by copper layer: a diff
+    pair's CENTRELINE map, whose members ride (layer width + gap) / 2 off the
+    centreline (#1729). As a number it is the call's member half-pitch,
+    (track_width + gap) / 2, which a stamp that is not per layer keeps (a via
+    barrel spans the stack); a stamp on one layer reads that layer's own value
+    through `extra_on_layer`. Equal only to another of its kind with the same
+    values, so a cache keyed on an extra clearance never hands one map's cells
+    to another."""
+
+    def __new__(cls, value, by_layer=None):
+        obj = float.__new__(cls, value)
+        obj.by_layer = dict(by_layer or {})
+        return obj
+
+    def _key(self):
+        return (float(self), tuple(sorted(self.by_layer.items())))
+
+    def __eq__(self, other):
+        return isinstance(other, LayerExtraClearance) and self._key() == other._key()
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(self._key())
+
+    def __repr__(self):
+        per = ', '.join(f"{k} {v:.3f}" for k, v in self.by_layer.items())
+        return f"{float(self):.3f}mm ({per})"
+
+
+def extra_on_layer(extra, layer: str):
+    """The extra clearance a stamp on copper layer `layer` takes: that layer's
+    own value for a `LayerExtraClearance`, the value itself otherwise."""
+    by = getattr(extra, 'by_layer', None)
+    if by is None:
+        return extra
+    return by.get(layer, float(extra))
+
+
+def extra_layer_groups(extra, layers):
+    """{extra clearance: [indices into `layers`]} -- one entry (the value
+    itself, every layer) unless `extra` differs by layer."""
+    groups: Dict[float, List[int]] = {}
+    for idx, layer in enumerate(layers):
+        groups.setdefault(extra_on_layer(extra, layer), []).append(idx)
+    return groups
+
+
+def extra_past_scalar(extra):
+    """What each layer's value of `extra` adds to its scalar: a
+    `LayerExtraClearance` at 0.0 carrying the per-layer remainder, for a
+    stamp whose scalar is already folded into another term (a centreline
+    keep-out config's clearance); 0.0 for a plain value."""
+    by = getattr(extra, 'by_layer', None)
+    if by is None:
+        return 0.0
+    return LayerExtraClearance(0.0, {k: v - float(extra) for k, v in by.items()})
+
+
 @dataclass
 class DiffPairNet:
     """Represents a differential pair with P and N nets (tracks net IDs)."""
@@ -199,6 +260,18 @@ class GridRouteConfig:
                                            # Hole-to-Hole Spacing" (keep in sync with
                                            # routing_defaults.HOLE_TO_HOLE_CLEARANCE)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
+    # #1678: with a .kicad_dru edge_clearance rule binding copper, the scalar
+    # above is the STRICTEST floor any net's tracks or vias are held to, for
+    # every reader that has one number; `edge_floors` (design_rules.EdgeFloors,
+    # installed by install_design_rules) holds each net's own, for the board's
+    # edge band, and `board_edge_declared` the value the run resolved before
+    # the rule (which the DRC writeback records: a rule is the rule file's, not
+    # the board's minimum). None = no such rule, the scalar is all there is.
+    edge_floors: Optional[object] = None
+    board_edge_declared: Optional[float] = None
+    # What a map's edge band adds for geometry offset from the routed
+    # centreline (net_keepouts.centerline_config: a diff pair's members)
+    edge_extra_clearance: float = 0.0
     # #581: edge-to-edge clearance between ANY placed via and SAME-NET pads.
     # > 0 forbids via-in-pad globally: routing/tap/rescue via placement blocks
     # same-net SMD pads at this clearance, and pad-centre swap vias are
@@ -283,6 +356,11 @@ class GridRouteConfig:
     # Impedance-controlled routing
     impedance_target: Optional[float] = None  # Target impedance in ohms (None = use fixed track_width)
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
+    # #1747: a diff pair's P/N gap per layer, where it differs from
+    # diff_pair_gap. Set only on the config of a pair narrowed to fit (#1742):
+    # a layer whose width was narrowed takes the gap that holds the impedance
+    # target at the narrowed width. Empty = diff_pair_gap on every layer.
+    pair_layer_gaps: Dict[str, float] = field(default_factory=dict)
     # Coplanar-waveguide-over-ground declaration (#486). A trace running through
     # a ground pour on its OWN layer is a CPW, not a microstrip: the side ground
     # pulls Z0 down, so hitting the target needs a NARROWER trace. The pour does
@@ -309,6 +387,12 @@ class GridRouteConfig:
     # (the pose router has no track_margin channel), margins then compute 0
     # for impedance-width nets -- today's mm-exact behaviour, unchanged.
     reserve_layer_widths: bool = False
+    # #1736: on a reserve_layer_widths map, stamp pads and the board edge at
+    # the call's track_width anyway (stamp_track_width). Only the hybrid
+    # escape's leg FALLBACK map sets it, for a leg that cannot attach on the
+    # layer-width stamps; the assembled route's foreign-copper gate then
+    # rejects any leg that grazes at its real width.
+    stamp_pads_at_call_width: bool = False
     # Power net routing - per-net width overrides
     power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
     # Per-net netclass track width (auto-read from the .kicad_pro when --track-width
@@ -457,6 +541,21 @@ class GridRouteConfig:
         to these under ``--escalation board``. Empty when the board declares
         none, or under ``--escalation fab`` (which may go below them)."""
         out = {}
+        # #1676: a via rule binds this net under every policy that may descend.
+        # Under `board` a rung may not go below it; under `fab` it may, last,
+        # and `first_*` asks only that the ladder's first choice meets it
+        # (fab_tiers.escalation_rungs).
+        rules_v = self.rules
+        if rules_v is not None and getattr(rules_v, 'dru_path', '') and hasattr(rules_v, 'via_floors'):
+            try:
+                from fab_tiers import get_escalation_policy
+                _vf = rules_v.via_floors(net_id)
+                if _vf and get_escalation_policy()[0] == 'fab':
+                    out.update({'first_' + k: v for k, v in _vf.items()})
+                elif _vf and 'annular' in _vf:
+                    out['annular'] = _vf['annular']
+            except Exception:                                  # noqa: BLE001
+                pass
         # #530 (corpus A/B, core1106_cam): a net in a NON-Default class is graded
         # by KiCad at that class's clearance whatever this run narrowed to --
         # the writeback lowers only the Default class (decision 2) -- so no
@@ -856,6 +955,20 @@ class GridRouteConfig:
         if self.reserve_layer_widths:
             return lw
         return lw if lw < self.track_width else self.track_width
+
+    def stamp_track_width(self, layer: str) -> float:
+        """Track width (mm) a PAD or BOARD-EDGE stamp reserves on `layer` for
+        the future routed track (#1736): the call's `track_width`, or on a map
+        that bakes each layer's width (`reserve_layer_widths`, the diff
+        engine) that layer's where it is wider -- as its track and via stamps
+        do (`route_reserve_width`). The single-ended engine keeps the call's:
+        a wider net's extra rides its own track margin there. A map built with
+        `stamp_pads_at_call_width` (the hybrid leg fallback) keeps the call's
+        too; the assembled route's foreign-copper gate grades its legs at
+        their real width."""
+        if self.reserve_layer_widths and not self.stamp_pads_at_call_width:
+            return max(self.track_width, self.route_reserve_width(layer))
+        return self.track_width
 
     def _phase_exact_margin(self, layer: str, net_width: float) -> float:
         """Fractional A* track margin (grid cells) on `layer` for a track of

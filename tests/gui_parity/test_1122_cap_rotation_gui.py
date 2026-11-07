@@ -40,7 +40,9 @@ KICAD_PYTHONS = [
            key=path_version_key, reverse=True),
 ]
 FIX = os.path.join(REPO, 'tests', 'fixtures', '1067', 'u30_crop.kicad_pcb')
-TOOL = os.path.join(REPO, 'py_placer', 'place_fanout_clearance.py')
+# The comparison needs a gated pass that boxes a cap in, so the ungated run is kept;
+# since #1681 the gated pass makes room instead, so both arms hold that rung off.
+TOOL = os.path.join(REPO, 'tests', 'fanout_clearance_no_room.py')
 HOST_PYTHON = os.environ.get('KRT_HOST_PYTHON') or sys.executable
 TIGHT = {'clearance': 0.1, 'cap_max_displacement': 1.0,
          'cap_max_displacement_cap': 2.0}
@@ -78,6 +80,8 @@ def main():
     from kicad_routing_plugin.swig_gui import RoutingDialog
     from kicad_routing_plugin import ai_plan
     from placement import floorplan as fp
+    import placement.fanout_clearance as _fc
+    _fc._clear_by_moving_one = lambda *a, **k: None    # as TOOL does for the CLI arm
 
     failures = []
 
@@ -131,6 +135,7 @@ def main():
             for k, f in parse_kicad_pcb(board).footprints.items()}
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     dlg = RoutingDialog(None, parse_kicad_pcb(board), board)
     live = pcbnew.LoadBoard(board)
     pcbnew.GetBoard = lambda: live

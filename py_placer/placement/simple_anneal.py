@@ -4,7 +4,8 @@ The cost is `simple.Model`'s, exactly as it is priced -- each net's Manhattan
 spanning tree, crossings among those trees, claims, decaps, each group's gap
 tree, the halo, foreign-pad hits and congestion -- plus, while it runs, an
 OVERLAP penalty: the area where two parts' courtyards, each grown by half
-the clearance, intersect on a face they share (a drilled part presents only
+the clearance, intersect on a face they share (box by box for a courtyard
+drawn as several shapes, `_shape_correction`) (a drilled part presents only
 its lead boxes on its far face, as the seat gate pairs them), how far a
 courtyard is outside the board less its edge margin -- the real outline,
 cutouts and notches too -- and how far a part breaks the intent's keep-outs
@@ -149,6 +150,8 @@ def turns_alike(part, fp) -> bool:
     def boxes(rot):
         out = [part.rect(0.0, 0.0, rot), part.grade_rect(0.0, 0.0, rot),
                part.padbox(0.0, 0.0, rot), part.drawn_rect(0.0, 0.0, rot)]
+        own = getattr(out[0], 'boxes', None)    # a courtyard of several boxes
+        out += sorted(own) if own else []
         far = part.tht_rect(0.0, 0.0, rot)
         out += sorted(far_boxes(far)) if far is not None else []
         return [None if b is None else tuple(round(v, 4) for v in b) for b in out]
@@ -218,6 +221,8 @@ class Annealer:
         # instead (`_pins`, #1307).
         self.containers = frozenset(r for r in self.names if r in st.container_refs)
         self.frames = sorted(r for r in self.containers if r in st.frame_refs)
+        self.fences = frozenset(r for r in self.containers
+                                if st.container_kinds.get(r) == 'fence')
         bit = {}
         self.faces = {r: 0 if r in self.containers else
                       sum(1 << bit.setdefault(f, len(bit)) for f in set(st.parts[r].sides))
@@ -244,6 +249,11 @@ class Annealer:
             r for r in self.drilled
             if any(t[0] < c[0] or t[1] < c[1] or t[2] > c[2] or t[3] > c[3]
                    for c, f in [P[r].rects()] for t in far_boxes(f)))
+        # the parts whose courtyard is several boxes (`quench._ShapedPart`):
+        # the Rust sum prices them on the bounding box, `_shape_correction`
+        # box by box
+        self.shaped = frozenset(r for r in bodies
+                                if getattr(P[r].rect(), 'boxes', None))
         self.lam = LAM_START
         self.shoving = False        # an escape may shove: only in `repair`
         # #1443: the parts with room under them (`QuenchState.covers`)
@@ -263,6 +273,88 @@ class Annealer:
     def _grown(self, r):
         c, h = self.st.parts[r].rect(), self.half
         return (c[0] - h, c[1] - h, c[2] + h, c[3] + h)
+
+    def _box_area(self, a, b, pa=None, pb=None):
+        """The overlap of a same-face pair with a part of several boxes
+        (`shaped`): each box grown by half the clearance, summed box pair by
+        box pair, and never more than the grown bounding boxes' overlap,
+        which covers it (a box pair across the seam of two grown boxes
+        would count twice). `pa`, `pb`: their poses, else where they are."""
+        P, h = self.st.parts, self.half
+        ra = P[a].rect() if pa is None else P[a].rect(*pa)
+        rb = P[b].rect() if pb is None else P[b].rect(*pb)
+        # the grown bounding boxes as `_grown` forms them, so a pair that
+        # gains nothing from its boxes cancels the Rust sum's term exactly
+        GA = (ra[0] - h, ra[1] - h, ra[2] + h, ra[3] + h)
+        GB = (rb[0] - h, rb[1] - h, rb[2] + h, rb[3] + h)
+        ox = min(GA[2], GB[2]) - max(GA[0], GB[0])
+        oy = min(GA[3], GB[3]) - max(GA[1], GB[1])
+        if ox <= 0 or oy <= 0:
+            return 0.0
+        A = ([(c[0] - h, c[1] - h, c[2] + h, c[3] + h) for c in ra.boxes]
+             if getattr(ra, 'boxes', None) else [GA])
+        B = ([(c[0] - h, c[1] - h, c[2] + h, c[3] + h) for c in rb.boxes]
+             if getattr(rb, 'boxes', None) else [GB])
+        v = 0.0
+        for c in A:
+            for d in B:
+                bx = min(c[2], d[2]) - max(c[0], d[0])
+                if bx > 0:
+                    by = min(c[3], d[3]) - max(c[1], d[1])
+                    if by > 0:
+                        v += bx * by
+        return min(v, ox * oy)
+
+    def _shape_pair(self, a, b):
+        """Whether `_box_area` prices the pair: a part of several boxes
+        among them, on a face both have, and no other term reprices it --
+        a seated part's pair with a wall (`_seat_correction`), a pair with
+        a cover (the heights), a `_cross` pair (`_far_correction`, which
+        reads the boxes itself). Those keep the bounding box."""
+        if not (a in self.shaped or b in self.shaped):
+            return False
+        if not self.faces[a] & self.faces[b]:
+            return False
+        if self.seats and self._seat_pair(a, b) != 0.0:
+            return False
+        covers = self.st.covers
+        if covers and (a in covers or b in covers):
+            return False
+        return not (a in self.far_parts and b in self.far_parts
+                    and self._cross(a, b))
+
+    def _shape_correction(self, mine):
+        """What `_box_area` changes in a move's overlap, which the Rust sum
+        prices on the grown bounding boxes: each `_shape_pair` with a part in
+        `mine`, once -- a part of several boxes in `mine` with its neighbours
+        and the other movers, any other part in `mine` with the parts of
+        several boxes."""
+        mset = set(mine)
+        fix, seen, h = 0.0, set(), self.half
+        for a in mine:
+            # the index's neighbours of `a` and the other movers; a part of
+            # one box pairs only with the parts of several boxes among them
+            A = self._grown(a)
+            cand = ((self.model._ixp.query((A[0] - h, A[1] - h, A[2] + h, A[3] + h))
+                     - mset) | mset)
+            if a not in self.shaped:
+                cand &= self.shaped
+            for b in sorted(cand):
+                if b == a:
+                    continue
+                # apart now is apart from either side: no pair to price
+                B = self._grown(b)
+                ox = min(A[2], B[2]) - max(A[0], B[0])
+                oy = min(A[3], B[3]) - max(A[1], B[1])
+                if ox <= 0 or oy <= 0:
+                    continue
+                key = (a, b) if a < b else (b, a)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if self._shape_pair(a, b):
+                    fix += self._box_area(a, b) - ox * oy
+        return fix
 
     def _seat_pair(self, a, b):
         """For a pair with a seated part: None when it is not this term's to
@@ -320,7 +412,8 @@ class Annealer:
         where it is."""
         p, h = self.st.parts[r], self.half
         if face == p.side:
-            bs = (p.rect() if pose is None else p.rect(*pose),)
+            c = p.rect() if pose is None else p.rect(*pose)
+            bs = (c,) if type(c) is tuple else far_boxes(c)     # `_ShapedPart`
         else:
             bs = far_boxes(p.rects()[1] if pose is None else p.tht_rect(*pose))
         return [(b[0] - h, b[1] - h, b[2] + h, b[3] + h) for b in bs]
@@ -480,7 +573,8 @@ class Annealer:
             H = (min(h[0] for h in every), min(h[1] for h in every),
                  max(h[2] for h in every), max(h[3] for h in every))
             for b in (self.names if f in mset else mine):
-                if b in self.containers:
+                # another fence is priced on this one's wall (#1722)
+                if b in self.containers and b not in self.fences:
                     continue
                 pb = P[b]
                 c = pb.rect()
@@ -531,7 +625,8 @@ class Annealer:
              + w * (max(0.0, i[1] - c[1]) + max(0.0, c[3] - i[3])))
         g = self.gate
         if g is not None and not g.rect_bbox_decides(c):
-            amt = g.rect_outside_amount(c)
+            # the rings the part owns, as `pose_ok` exempts them (#1723)
+            amt = g.rect_outside_amount(c, skip_rings=self.st._owned_rings(r))
             if amt > BOARD_TOL:
                 v += max(FLOOR, amt * (w + hh))
         return v
@@ -590,6 +685,8 @@ class Annealer:
                 total += self._seat_correction(mine)
             if self.far_parts:
                 total += self._far_correction(mine)
+            if self.shaped:
+                total += self._shape_correction(mine)
             if self.frames:
                 total += self._pins(mine)
             if self.st.covers:
@@ -629,7 +726,8 @@ class Annealer:
                 if less:
                     oy -= less
                 if oy > 0:
-                    total += ox * oy
+                    total += (self._box_area(a, b) if self.shaped and self._shape_pair(a, b)
+                              else ox * oy)
         return total
 
     # -- proposals: {ref: new pose} or None --------------------------------------
@@ -786,6 +884,9 @@ class Annealer:
                 if (r in self.far_parts and b in self.far_parts and self._cross(r, b)
                         and self._far_area(r, b, at, poses.get(b)) <= 0.0):
                     continue
+                if (self.shaped and self._shape_pair(r, b)
+                        and self._box_area(r, b, at, poses.get(b)) <= 0.0):
+                    continue        # in a notch of the other's courtyard
                 if self.st.covers and (r in self.st.covers or b in self.st.covers):
                     P = self.st.parts
                     pa = at if at is not None else self.pose(r)

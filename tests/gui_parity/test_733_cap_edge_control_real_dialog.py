@@ -72,6 +72,7 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     board = os.path.join(REPO, 'kicad_files', 'splitflap_driver.kicad_pcb')
     from kicad_parser import parse_kicad_pcb
     from kicad_routing_plugin.swig_gui import RoutingDialog

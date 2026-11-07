@@ -139,17 +139,34 @@ def recorded_corpus_prefix(manifest_text: str) -> str | None:
 def load_cost_table(stress_dir: Path) -> dict:
     """board -> {'seconds': float, 'peak_mb': float} from prior runs.
 
-    Prefers REPLAY timings (ab_*/**/summary.json: total_seconds +
-    peak_footprint_mb) because that is what this sweep actually runs. Falls back
+    Prefers REPLAY timings, because that is what this sweep actually runs:
+    first the NEWEST harvested cloud replay of each board
+    (cloud_*/_raw/<arm>/<set>__<board>.json, total_seconds), since the code's
+    own speed moves and an old wave would rank today's slowest boards wrong;
+    then ab_*/**/summary.json (total_seconds + peak_footprint_mb). Falls back
     to LLM-run tool_exec_s, which measures the agent's whole tool session
-    (including exploration and retries) and so overestimates a replay -- fine
-    for ORDERING, which is all it is used for.
+    (including exploration and retries) and so overestimates a replay. The
+    table orders dispatch and picks what `--limit` keeps or drops.
 
     peak_footprint_mb is preferred over peak_rss_mb: RSS under-reports by up to
     5x (mimalloc-retained + IOAccelerator-tagged pages, issue #419), and sizing
     containers off RSS would under-provision the heavy boards.
     """
     table: dict[str, dict] = {}
+    newest: dict[str, float] = {}
+    for row in stress_dir.glob("cloud_*/_raw/*/*.json"):
+        try:
+            mtime = row.stat().st_mtime
+            r = json.loads(row.read_text())
+        except Exception:
+            continue   # a row harvested empty, or one still being written
+        b = r.get("board") if isinstance(r, dict) else None
+        sec = r.get("total_seconds") if b else None
+        if not isinstance(sec, (int, float)) or sec <= 0 or mtime <= newest.get(b, 0):
+            continue
+        newest[b] = mtime
+        table[b] = {"seconds": float(sec), "peak_mb": float(r.get("peak_rss_mb") or 0.0),
+                    "src": "replay"}
     for summary in sorted(stress_dir.glob("ab_*/*/summary.json")):
         try:
             rows = json.loads(summary.read_text())
@@ -158,7 +175,7 @@ def load_cost_table(stress_dir: Path) -> dict:
         for r in rows if isinstance(rows, list) else []:
             b = r.get("board")
             sec = r.get("total_seconds")
-            if not b or not isinstance(sec, (int, float)) or sec <= 0:
+            if not b or b in newest or not isinstance(sec, (int, float)) or sec <= 0:
                 continue
             peak = r.get("peak_footprint_mb") or r.get("peak_rss_mb") or 0.0
             prev = table.get(b)
@@ -177,6 +194,17 @@ def load_cost_table(stress_dir: Path) -> dict:
             continue
         table[b] = {"seconds": float(sec), "peak_mb": 0.0, "src": "llm"}
     return table
+
+
+def drop_slowest(board_list: list, costs: dict, n: int):
+    """(board_list without its `n` slowest boards by `costs`, the dropped
+    [(seconds, set, board)] slowest first). A board with no recorded cost is
+    never dropped: it is not KNOWN to be slow."""
+    known = sorted(((costs[b]["seconds"], s, b) for s, b in board_list
+                    if (costs.get(b) or {}).get("seconds")), reverse=True)
+    slowest = known[:max(0, n)]
+    drop = {(s, b) for _sec, s, b in slowest}
+    return [sb for sb in board_list if sb not in drop], slowest
 
 
 def memory_mb_for(board: str, costs: dict) -> int:

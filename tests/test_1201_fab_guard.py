@@ -312,7 +312,9 @@ class SilkContainmentIsNamed(unittest.TestCase):
         # the pad box gates the courtyard channel, as before the guard
         self.assertTrue([q for q in g['courtyard_blocking_pairs']
                          if {q.a, q.b} == {'BAT1', 'DC1'}])
-        self.assertEqual((veto or (None,))[0], 'courtyard', veto)
+        # BAT1 draws no courtyard, so the seat's refusal is not KiCad's
+        # courtyards_overlap (#1744)
+        self.assertEqual((veto or (None,))[0], 'estimated_courtyard', veto)
         # one pair, one label, wherever it is listed
         for lst in ('pairs', 'advisory_pairs'):
             for q in g[lst]:
@@ -382,7 +384,8 @@ class SilkContainmentIsNamed(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = _board(td, disp + _fab_part('U1', 22, 12, 1, pads=2))
             out, _js = _check_assembly(td, path)
-        self.assertIn('a board-sized container is involved', out)
+        self.assertIn('a container (a board-sized frame or a shield frame, '
+                      '#1722) is involved', out)
         self.assertIn('Each is a by-design containment', out)
 
 

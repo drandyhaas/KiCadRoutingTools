@@ -39,6 +39,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 import redo_stress_test as rst  # noqa: E402  (sibling module in tests/stress)
+from copy_board import copy_siblings  # noqa: E402  (on sys.path via rst)
 
 
 def script_of(argv):
@@ -160,15 +161,14 @@ def main():
             print("  --- partial manifest ---\n  " + text.replace("\n", "\n  "))
             continue
         os.makedirs(dst_dir, exist_ok=True)
-        # Stage pre-cutover boards straight into the out dir (+ their .kicad_pro
-        # siblings, so tail steps see the recorded DRC floors / edge rule). Done
-        # here rather than as remapped cp lines so a fallback board sourced from
-        # run_dir isn't rewritten in both src and dest by --remap (self-copy).
+        # Stage pre-cutover boards straight into the out dir (+ every
+        # copy_board.SIBLING_EXTS sibling, so tail steps see the recorded DRC
+        # floors / edge rule, the .kicad_dru custom rules and the brief, #1721).
+        # Done here rather than as remapped cp lines so a fallback board sourced
+        # from run_dir isn't rewritten in both src and dest by --remap (self-copy).
         for src, bb, _origin in stage:
             shutil.copy2(src, os.path.join(dst_dir, bb))
-            pro = src[:-len('.kicad_pcb')] + '.kicad_pro'
-            if os.path.isfile(pro):
-                shutil.copy2(pro, os.path.join(dst_dir, bb[:-len('.kicad_pcb')] + '.kicad_pro'))
+            copy_siblings(src, os.path.join(dst_dir, bb))
         with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False, dir=dst_dir) as tf:
             tf.write(text)
             pm = tf.name

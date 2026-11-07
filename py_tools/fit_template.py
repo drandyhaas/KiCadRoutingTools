@@ -29,9 +29,11 @@ quarter turn (`rot`, relative to the chip):
        {"ref": "L1", "pads": {"L1": ["1"], "U2": ["12"]}, "side": "-x"},
        {"ref": "C7", "pads": {"C7": ["2"], "L1": ["2"]}}]}
 
-Each member is seated as close to its partner pads as the courtyards already
-seated allow -- kept the board's clearance apart, the seat gate's courtyard
-rule (`gap_mm` in the sketch for another) -- within `--reach` mm (4, or the
+Each member is seated as close to its partner pads as the parts already
+seated allow -- courtyards kept the board's clearance apart (`gap_mm` in the
+sketch for another) and each pad pair its own clearance apart (a net class
+above the board's, a `.kicad_dru` rule, a pad override), as the seat gate
+holds them -- within `--reach` mm (4, or the
 member's own `reach`) of them, at the quarter turn that brings its pads
 closest (`placement.templates.fit`). A LOCKED chip's locked neighbours are
 where the board has them: obstacles, and partners a member may name. Each

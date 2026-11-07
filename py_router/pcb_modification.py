@@ -12,7 +12,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via, is_immutable_copper
 from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
-from geometry_utils import point_to_segment_distance
+from geometry_utils import point_to_segment_distance, segments_intersect
 
 # Read once at import: both are checked inside per-segment cleanup loops (hot).
 _COLLAPSE_DEBUG = os.environ.get('KICAD_COLLAPSE_DEBUG')
@@ -1207,6 +1207,31 @@ def _board_min_track_width(pcb_data, scope_net_ids, config) -> float:
         shipped=True) or 0.1
 
 
+def _x_crossing(s: Segment, o: Segment, tol: float = None) -> Optional[float]:
+    """Where `o`'s centreline CROSSES `s`'s, as a fraction along `s`, or None
+    (#1732). An X only: the crossing lies more than `tol` (COINCIDENCE_TOL)
+    from every end of both, so two segments that share an end, or a tee
+    (one ending on the other), are not crossings -- `segments_intersect`
+    alone reads a shared end as one."""
+    if tol is None:
+        tol = COINCIDENCE_TOL
+    if not segments_intersect(s.start_x, s.start_y, s.end_x, s.end_y,
+                              o.start_x, o.start_y, o.end_x, o.end_y):
+        return None
+    dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+    odx, ody = o.end_x - o.start_x, o.end_y - o.start_y
+    den = dx * ody - dy * odx
+    if abs(den) < 1e-15:
+        return None
+    t = ((o.start_x - s.start_x) * ody - (o.start_y - s.start_y) * odx) / den
+    x, y = s.start_x + t * dx, s.start_y + t * dy
+    for seg in (s, o):
+        for ex, ey in ((seg.start_x, seg.start_y), (seg.end_x, seg.end_y)):
+            if math.hypot(x - ex, y - ey) <= tol:
+                return None
+    return t
+
+
 def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                    max_gap_factor: float = 1.5) -> int:
     """Close small gaps where a routed dead end stopped just short of same-net
@@ -1284,6 +1309,16 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                         t = max(0.0, min(1.0, ((px - o.start_x) * dx + (py - o.start_y) * dy) / L2))
                         fx, fy = o.start_x + t * dx, o.start_y + t * dy
                         g = math.hypot(px - fx, py - fy)
+                        # #1732: a trace this stub's own segment already
+                        # CROSSES is joined to it at the crossing; the end is
+                        # a tail past that joint, not a stub short of it, and
+                        # a connector back to the trace only stacks copper
+                        # on the tail. (An end already ON the trace -- a tee,
+                        # g ~ 0 -- stays the target: it is what says "already
+                        # touching", and skipping it would send the end to the
+                        # next copper over.)
+                        if g > 1e-4 and _x_crossing(s, o) is not None:
+                            continue
                         if best is None or g < best[0]:
                             best = (g, (fx, fy))
                     # nearest same-net pad on this layer (land on its copper)
@@ -1473,8 +1508,8 @@ class PlaneCleanupDelta(NamedTuple):
         return not (self.connectors or self.segments_to_remove or self.vias_to_remove)
 
 
-def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
-                                 grid_step: float = 0.05,
+def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float,
+                                 grid_step: float, board_edge_clearance: float,
                                  progress_callback=None) -> "PlaneCleanupDelta":
     """Board-level core of the plane-copper cleanup (issues #84, #308, #319).
 
@@ -1492,6 +1527,11 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
     (not grid_step/2) because a plane-repair quantization graze can be a full
     grid cell (#308: on-grid track vs off-grid hole); each shift is still
     verified to clear all foreign copper and keep the net connected.
+
+    ``board_edge_clearance`` is the copper-to-edge floor the board is graded at,
+    which every pass that lays or moves copper here honours. It is required, not
+    defaulted: a run that left it out graded its connectors at the track
+    clearance alone and shipped them inside the edge clearance.
     """
     from types import SimpleNamespace
     from cleanup_pipeline import run_post_route_cleanup
@@ -1502,7 +1542,8 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
         return PlaneCleanupDelta([], [], [], 0)
 
     plane_results: list = []
-    _cfg = SimpleNamespace(clearance=clearance, grid_step=grid_step)
+    _cfg = SimpleNamespace(clearance=clearance, grid_step=grid_step,
+                           board_edge_clearance=board_edge_clearance)
     _outcome = run_post_route_cleanup(
         plane_results, pcb, scope, _cfg,
         label='Plane ', phantom=False, via_nudge=False, neck=False,
@@ -1515,8 +1556,8 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
         snapped=_outcome.counts.get('stub_gaps_snapped', 0))
 
 
-def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1,
-                       grid_step: float = 0.05) -> Tuple[int, int]:
+def clean_plane_copper(output_file: str, plane_net_names, clearance: float,
+                       grid_step: float, board_edge_clearance: float) -> Tuple[int, int]:
     """FILE front for the plane-copper cleanup: parse the plane tool's OUTPUT
     FILE, compute the cleanup delta via compute_plane_copper_cleanup (the shared
     board-level core), and rewrite the file (stripping removed segments/vias,
@@ -1533,7 +1574,8 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     pcb = parse_kicad_pcb(output_file)
     with open(output_file, 'r', encoding='utf-8') as f:
         content = f.read()
-    delta = compute_plane_copper_cleanup(pcb, plane_net_names, clearance, grid_step)
+    delta = compute_plane_copper_cleanup(pcb, plane_net_names, clearance, grid_step,
+                                         board_edge_clearance)
     if delta.is_empty:
         return 0, 0
 
@@ -1721,14 +1763,18 @@ def _rk3(x, y):
     return (round(x, 3), round(y, 3))
 
 
-def _soft_joint_pairs(segs, vias, pads):
+def _soft_joint_pairs(segs, vias, pads, min_gap=None):
     """Canonical set of SOFT-JOINT pairs among ``segs``: same-layer degree-1
     free ends (not anchored on a same-net via/pad) whose round end caps overlap
     without the endpoints being coincident. Each pair is a frozenset of two
     (layer, rounded-point) keys, so pair sets from different segment subsets of
-    the same net are directly comparable."""
+    the same net are directly comparable. ``min_gap`` raises the smallest gap
+    that counts (default SOFT_JOINT_MIN_GAP); COINCIDENCE_TOL asks for the
+    joints check_drc COUNTS, a smaller gap being only its warning."""
     from collections import defaultdict
     from routing_constants import SOFT_JOINT_MIN_GAP
+    if min_gap is None:
+        min_gap = SOFT_JOINT_MIN_GAP
     from check_drc import point_to_pad_distance
 
     def anchored(x, y, layer, width):
@@ -1783,7 +1829,7 @@ def _soft_joint_pairs(segs, vias, pads):
                     # pair. A MIXED pair is kept -- the track end is real.
                     continue
                 gap = math.hypot(xi - xj, yi - yj)
-                if SOFT_JOINT_MIN_GAP < gap < (wi + wj) / 2.0 - 1e-6:
+                if min_gap < gap < (wi + wj) / 2.0 - 1e-6:
                     pairs.add(frozenset((ki, kj)))
     return pairs
 
@@ -3703,6 +3749,12 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                         cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                         if math.hypot(ox - cx_, oy - cy_) < (o.width + s.width) / 2 - 1e-6:
                             cands.append(t)
+                    # #1732: and where another same-net track of the layer
+                    # CROSSES the body (an X, neither end on the other):
+                    # joined there, as check_connected and KiCad have it
+                    t = _x_crossing(s, o)
+                    if t is not None and lo_d < t * seg_len < seg_len - lo_d:
+                        cands.append(t)
                 if not cands:
                     continue
                 t_anchor = min(cands) if free_is_start else max(cands)
@@ -6765,7 +6817,9 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              keep_input_copper: bool = False,
                              net_clearances=None,
                              board_edge_clearance: float = 0.0,
-                             config=None) -> Tuple[int, int, List[Segment], List[Segment]]:
+                             config=None,
+                             unresolved_net_ids=None
+                             ) -> Tuple[int, int, List[Segment], List[Segment]]:
     """Micro-shift copper that still grazes after prune / re-bend / neck (#276).
 
     Complements nudge_grazing_octolinear, which keeps a jog's anchor endpoints
@@ -6790,8 +6844,12 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     Every candidate is verified to clear ALL foreign copper (pad/track/via)
     and the board edge at its own width, and to not worsen the net's
     connectivity, before it replaces the original geometry -- the pass can only
-    remove a graze, never introduce one or disconnect a net. A graze that no
-    candidate clears is left for the DRC report.
+    remove a graze, never introduce one or disconnect a net. Nor may it add a
+    soft joint check_drc counts: sliding an end away from another free end it
+    all but met turns a coincident joint into a SEGMENT-ENDPOINT-GAP, and the
+    bridge's clearance gate then refuses the repair through the graze the
+    neighbour still has. A graze that no candidate clears is left for the DRC
+    report.
 
     ``max_shift`` HARD-caps how far any copper may move (callers pass half the
     routing grid step): this pass is strictly a micrometre-scale touch-up, so a
@@ -6806,9 +6864,14 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     is read off `pcb_data.source_path` either way), and the scoped .kicad_dru
     rules and the rules binding a diff pair's P against its N (#1561, #1630),
     which the graze test, the offender and the acceptance gate all read: a
-    pair the router built at its rule's gap is not a graze."""
+    pair the router built at its rule's gap is not a graze.
+
+    `unresolved_net_ids`, a set when given, collects the nets left with a graze
+    no candidate cleared, so a later pass that moved their neighbours can retry
+    them (#1688)."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
+    from connectivity import COINCIDENCE_TOL
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                       _seg_foreign_via_dist, _seg_foreign_hole_dist)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
@@ -6993,6 +7056,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                 before = check_net_connectivity(net_id, net_segs, net_vias,
                                                 net_pads, net_zones,
                                                 pcb_data=pcb_data)
+                soft_before = len(_soft_joint_pairs(net_segs, net_vias, net_pads,
+                                                    COINCIDENCE_TOL))
             round_changed = False
 
             for s, (shortfall, t, awx, awy) in offenders:
@@ -7097,6 +7162,9 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                                       g.layer, net_id, g.width) for g in new):
                         continue
                     trial = [g for g in net_segs if g not in old] + new
+                    if len(_soft_joint_pairs(trial, net_vias, net_pads,
+                                             COINCIDENCE_TOL)) > soft_before:
+                        continue
                     if worse(before, check_net_connectivity(net_id, trial, net_vias,
                                                             net_pads, net_zones,
                                                             pcb_data=pcb_data)):
@@ -7142,6 +7210,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                     break
 
             if not round_changed:
+                if unresolved_net_ids is not None:
+                    unresolved_net_ids.add(net_id)
                 break
         if net_changed:
             nets_changed += 1
@@ -8401,9 +8471,115 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         pcb_data.vias.append(via)
     # Update result so output file also gets cleaned segments
     result['new_segments'] = cleaned_segments
+    adopt_restored_stubs(pcb_data, result)
     if getattr(pcb_data, '_route_trace', None) is not None:     # the movie's record
         from route_trace import record
         record(pcb_data, cleaned_segments, result['new_vias'], result, trace_event)
+
+
+def adopt_restored_stubs(pcb_data: PCBData, result: dict) -> None:
+    """Give the escape stubs a terminal restore put back (#468's 'stub'
+    verdict, `rip_restore.try_terminal_restore`) to the result committed for
+    their net.
+
+    Those stubs are copper this run laid, put back on the board alone, so the
+    net's later route can start from them. No result owns them, and the board
+    keeps only copper a result owns: the copper sync
+    (`routing_common.sync_pcb_data_segments`) drops them, and the writer
+    never writes them. So a net re-routed from its stub shipped open
+    at the stub, after every in-run check had graded it connected.
+
+    A stub joins the result whose commit makes the net NEED it: the net's
+    copper on the board joins its pads into fewer pieces with the stub than
+    without it, so a pad is reached only through the stub. A stub the net
+    does not need yet stays on record for a later commit: a result's copper
+    is read as one connected tree (Phase 3 seeds its taps from it), so a stub
+    at a pad the route has not reached yet, in its result, would make that
+    pad read as reached and its tap would never be laid. A stub at a pad the
+    route reaches by itself is redundant copper, and is not shipped, as
+    before. A stub the result already carries (a restore of the saved route
+    the stub came from) is only released."""
+    ledger = getattr(pcb_data, '_stub_restores', None)
+    if not ledger:
+        return
+    nets = ({s.net_id for s in result.get('new_segments') or ()}
+            | {v.net_id for v in result.get('new_vias') or ()})
+    have = {id(o) for k in ('new_segments', 'new_vias')
+            for o in result.get(k) or ()}
+    on_board = {id(o) for o in pcb_data.segments} | {id(o) for o in pcb_data.vias}
+    for net_id in sorted(nets):
+        held = [o for o in ledger.pop(net_id, ())
+                if id(o) not in have and id(o) in on_board]
+        if not held:
+            continue
+        needed = _stubs_net_needs(pcb_data, net_id, held)
+        for o in needed:
+            have.add(id(o))
+            key = 'new_segments' if hasattr(o, 'start_x') else 'new_vias'
+            result[key] = list(result.get(key) or []) + [o]
+        rest = [o for o in held if id(o) not in have]
+        if rest:
+            ledger[net_id] = rest
+
+
+def _stub_chains(held: list) -> list:
+    """`held` split into chains: segments and vias that meet end to end (a
+    stub as the restore cut it from one route: pad, track, via, track)."""
+    def ends(o):
+        if hasattr(o, 'start_x'):
+            return ((o.start_x, o.start_y), (o.end_x, o.end_y))
+        return ((o.x, o.y),)
+    parent = list(range(len(held)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, a in enumerate(held):
+        for j in range(i):
+            if any(abs(p[0] - q[0]) < 1e-3 and abs(p[1] - q[1]) < 1e-3
+                   for p in ends(a) for q in ends(held[j])):
+                parent[root(i)] = root(j)
+    chains = {}
+    for i, o in enumerate(held):
+        chains.setdefault(root(i), []).append(o)
+    return list(chains.values())
+
+
+def _stubs_net_needs(pcb_data: PCBData, net_id: int, held: list) -> list:
+    """The stub chains of `held` (copper of `net_id` on the board) without
+    which the net's copper joins its pads into more pieces; [] when the net
+    does not need them. A chain is taken or left whole, so a stub ships as
+    the restore put it back."""
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    if len(pads) < 2:
+        return []
+    from check_connected import check_net_connectivity
+    held_ids = {id(o) for o in held}
+    segs = [s for s in pcb_data.segments
+            if s.net_id == net_id and id(s) not in held_ids]
+    vias = [v for v in pcb_data.vias
+            if v.net_id == net_id and id(v) not in held_ids]
+    zones = [z for z in getattr(pcb_data, 'zones', None) or ()
+             if z.net_id == net_id]
+
+    def pieces(extra):
+        r = check_net_connectivity(
+            net_id, segs + [o for o in extra if hasattr(o, 'start_x')],
+            vias + [o for o in extra if not hasattr(o, 'start_x')],
+            pads, zones, tolerance=0.02, pcb_data=pcb_data)
+        return r.get('num_components') or 0
+
+    with_all = pieces(held)
+    if pieces([]) <= with_all:
+        return []
+    keep = _stub_chains(held)
+    for chain in list(keep):
+        trial = [c for c in keep if c is not chain]
+        if pieces([o for c in trial for o in c]) <= with_all:
+            keep = trial
+    return [o for c in keep for o in c]
 
 
 def drop_phantom_copper(results, pcb_data: PCBData,

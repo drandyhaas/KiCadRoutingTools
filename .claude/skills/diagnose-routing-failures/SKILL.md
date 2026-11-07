@@ -148,16 +148,34 @@ And across the buckets:
   resolve by a swap (#279); `polarity_swapped_pairs` lists the swaps it made.
 - `casualty_reconcile`: nets this step ripped whose reroute failed
   (`restored`, `rerouted`, `partial`, `unrecovered`).
-- `intra_pair_matching` (a step that matches P to N): one record per matched
-  pair, its `status` and `delta_mm` read off the shipped copper as KiCad's skew
-  DRC measures it, against `tolerance_mm`. An `unmatched` pair's `reason`:
-  `no-room-for-meanders` (no bump fits beside the shorter leg),
-  `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),
-  `copper-skew-over-tolerance` (the matcher reached the tolerance and the
-  copper that ships does not), `not-measured` (a member's pads are not joined
-  by track copper). A pair the post-route cleanup moved out of its tolerance
-  has been matched once more on the shipped copper (#1622); `rematch`
-  (`skew_before_mm`, `skew_after_mm`, `kept`) says whether that helped.
+- `intra_pair_matching` (a step that matches P to N): one record per pair it
+  set out to match, its `status` and `delta_mm` read off the shipped copper as
+  KiCad's skew DRC measures it, against `tolerance_mm`. The `status`:
+  - `matched`, `within-tolerance`: inside the tolerance.
+  - `not-matchable`: no single coupled result to meander. `reason` is
+    `members-routed-separately` or `pair-not-routed-this-run`, and `delta_mm` is
+    still measured when both members have copper. The pair's `failure_reason`
+    says what it means: an `electrically-short` pair has nothing to fix and
+    records no tolerance, so `check_drc` grades it only under a `.kicad_dru`
+    rule the board declares; on any other pair, fix that failure.
+  - `skipped`: `reason` `ac-coupled-xnet`, matched end to end by the AC-coupled
+    pass (`--ac-couple-match`). The number to read is
+    `ac_coupled_xnets[].skew_mm` (the record there also names its `nets` and
+    `bridges`), not the per-side `delta_mm`. It records no tolerance, so nothing
+    grades it: compare it with `tolerance_mm`. Not the `pair_reports` `outcome`
+    of the same name, a different field.
+  - `unmatched`: over the tolerance, or not measurable yet. `reason`:
+    `no-room-for-meanders` (no bump fits beside the shorter leg),
+    `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),
+    `copper-skew-over-tolerance` (the matcher reached the tolerance and the
+    copper that ships does not), `not-measured` (a member's pads are not joined
+    by track copper). On a peeled pair (members in `single_ended_followup_nets`)
+    `not-measured` is expected: `check_drc` grades it after the all-nets step.
+    Past that, an `unmatched` pair is a shipped blocker and nothing more: it
+    has no retry here, so report it. A pair the post-route cleanup moved out of
+    its tolerance has been matched once more on the shipped copper (#1622);
+    `rematch` (`skew_before_mm`, `skew_after_mm`, `kept`) says whether that
+    helped.
 
 `pair_reports[]` has one record per pair: `pair`, `p_net`, `n_net`, `outcome`
 (`coupled`, `partial`, `deferred`, `failed`, `skipped`, `uncoupled`,
@@ -197,17 +215,18 @@ Work through the failure modes most-targeted-first. Do not jump straight to glob
 
 | Evidence | Failure mode | Fix |
 |----------|--------------|-----|
+| `pad_contacts` / `pad_grazes` name a pad (JSON_SUMMARY_MIN pads, `--json-out` rows; the console prints "SHORTED on the board this run ships" / "NOT CLEAR ...") | Copper still on, or inside the clearance of, another net's pad. A route step rips such copper of a net in its `--nets`, so a short here is on a net outside the step, locked or protected: name that net in `--nets` (exactly, if protected), or re-fan holding the part. A graze is usually a part the clearance step could not clear (its `Unresolved` line) |
 | `unroutable_as_designed` names the net (JSON_SUMMARY rows, JSON_SUMMARY_MIN names; the console prints "Unroutable as designed") | A pad is already shorted to another net as drawn: another net's pad on it, or another part's copper (stacked or swapped net-tie footprints) | Stop retrying: no routing reaches that pad without the short, and KiCad grades it `shorting_items` before any routing. Report the pad and the foreign copper named in the row; the fix is the board's (re-pose the part), not a router flag |
 | "no rippable blockers found" near a BGA/PGA | Blocked by the BGA exclusion zone or pre-existing copper | `--no-bga-zone <ref>` for that component |
 | Stuck positions cluster in one corridor; blockers are routed nets that themselves had few alternatives | Corridor congestion | Suggest the user **draw a guide corridor**: a polyline on `User.1` through a less congested region, then re-route the failed nets with `--guide-corridor`. Describe in words where the corridor should go (e.g. "south of J3, between the mounting hole and C14"). **Do not draw the geometry yourself** — guide drawing is the user's decision |
 | Failed nets have source and target stubs on conflicting layers; rip-up histories show repeated mutual ripping | Same-layer crossing conflicts | `--mps-layer-swap`, or revisit `--layer-costs` |
 | "Re-route FAILED: no path found" for ripped nets | Search space exhausted | NOT a budget problem: the router self-budgets (#529, default on — auto-extends to 1e7 iterations while progressing), so do not suggest raising `--max-iterations`. A "dynamic iterations (#529): search extended to N" line followed by failure means genuine progress ran out — escalate capacity: `--max-ripup`, clearance/track toward fab floor, or layers. (`KICAD_DYNAMIC_ITERATIONS=0` restores legacy static caps for A/B only) |
 | Many multipoint pads failed on the same fine-pitch component; `boxed_in` entries for them | Grid too coarse for the pad geometry | `--grid-step 0.05`, and check `--track-width`/`--clearance` against the pad pitch |
-| `fanout_dropped` names the net's ball | The fanout never escaped that ball — no rip or retry can reach it | Re-run the fanout for that net: `bga_fanout.py`, or for a QFN/QFP pad `qfn_fanout.py --escape-method underpad` (the default stub escape skips interior pads; a `--nets` pattern that selected only such pads is in its summary's `unmatched`), with a smaller `--via-size` if the via did not fit; when `plane_like`, re-create the plane instead |
+| `fanout_dropped` names the net's ball | The fanout never escaped that ball — no rip or retry can reach it | Re-run the fanout for that net: `bga_fanout.py`, or for a QFN/QFP pad `qfn_fanout.py --escape-method underpad` (a stub run with `--nets` via-drops the interior pads its filter selects; one it could not place is in its summary's `skipped_interior`, so retry it with a smaller via or `--allow-via-in-pad`), with a smaller `--via-size` if the via did not fit; when `plane_like`, re-create the plane instead. A power or ground pad whose escape stub the fanout drew at `--width` is named in its summary's `power_stubs_at_width` (#1743): a narrow stub is a width question, not an open |
 | `sealed_by_snpc` names the pad | This run's own `--same-net-pad-clearance` closed the last via site | Retry with `--same-net-pad-clearance 0`, or widen the channel in placement |
 | Failures cluster on one part's pads or escape face; `py_tools/check_reachability.py <board> --pad REF.PAD` says CAGED (its verdict grades the placement, with the board's routed copper set aside); or `boxed_in[].geometry` is already at the board/fab floor | Placement-shaped: geometry, not the router | First, if the part is a fine-pitch perimeter part (QFN/QFP, or a 2-row SMD connector or socket, at <=0.65 mm) and the chain fanned nothing out for it, route that arm (`plan-pcb-routing` Step 3, rule 3): it costs one route, and re-placing costs a whole pass. Otherwise stop retrying: no router flag fixes it. Hand the board back to `/plan-pcb-placement full` (or `place`) to re-place, then re-route |
 | `check_reachability` says PASSABLE, and its `routed` line says ROUTED COPPER cages the pad (#1347) | Congestion: the copper already laid walls the pad in | A routing finding, NOT a placement one: rip up and reroute the nets named at that throat (`--rip-existing-nets`), or reorder; do not re-place |
-| Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: reduce `--clearance`/`--track-width` toward fab minimums → add routing layers. Do NOT raise `--max-ripup` past ~5 (measured worse: deep rip chains strand their victims) |
+| Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: reduce `--clearance-ceiling`/`--track-width` toward fab minimums, re-routing the whole step rather than retrying (Step 4) → add routing layers. Do NOT raise `--max-ripup` past ~5 (measured worse: deep rip chains strand their victims) |
 
 **Pair failures** (a `route_diff.py` step), by `pair_reports[].failure_reason`.
 The shrink below means `--track-width`, `--diff-pair-gap` and
@@ -218,7 +237,7 @@ and for none of the polarity or graze codes.
 
 | `failure_reason` | What it means | Fix |
 |------------------|---------------|-----|
-| `electrically-short` | Every leg is shorter than the coupled floor | None: single-ended by design. Check that its members closed (`se_fallback`, or the next `route.py`) |
+| `electrically-short` | Every leg is shorter than the coupled floor | None: single-ended by design. Check that its members closed (`se_fallback`, or the next `route.py`). Its `intra_pair_matching` status is `not-matchable` and it records no tolerance; a `.kicad_dru` skew rule the board declares still grades it, which is the rule's question to report, not a retry |
 | `congestion` | Copper of nets this run routed walls the coupled route (`blocking_nets` names them), and the step's own rip ladder did not clear it | The shrink; or route the pair in an earlier step, before the nets that wall it |
 | `no-escape-path` | An endpoint's escape is blocked: the search never launched | The shrink, or a shorter `--diff-pair-centerline-setback` / wider `--max-setback-angle`; on a BGA or QFN the escape is the fanout's |
 | `needs-fanout` (#764) | A single track launches at the terminal, the coupled pair does not; the step skips its rip ladder, since no freed copper helps | A coupled fanout before the pair step (`bga_fanout.py ... --diff-pairs P N`); for a terminal on a pad array the step's log prints that command with the run's own numbers |
@@ -234,11 +253,11 @@ and for none of the polarity or graze codes.
 
 ## Step 4: Output the Retry Command
 
-Produce one command that retries **only the failed nets** with the targeted fixes, and explain each parameter change in one line:
+Produce one command that retries with **the failing step's own `--nets` selection** (`--nets "*"`, with any `!` exclusions it carried) and the targeted fixes, and explain each parameter change in one line:
 
 ```bash
 python3 -X utf8 py_router/route.py board_routed.kicad_pcb board_retry.kicad_pcb \
-    --nets "SDA" "Net-(U1-Pad8)" \
+    --nets "*" \
     --no-bga-zone U9 \
     --max-ripup 5 \
     2>&1 | tee /tmp/route_retry.txt
@@ -253,7 +272,11 @@ carries the failing step's `--escalation board` (or `off`) and
 shrink below them as a decision for the user rather than proposing it as the
 fix.
 
-Routing only the failed nets preserves the successful routes (already in the input file) and is much faster than a full re-run. **On a board with pours, add the poured nets to `--nets` too** (#1032): the retry's copper can cut a pour, and its in-run plane finalize repairs only the poured nets inside its scope. A broken poured net is retried the same way, with `route.py`, never a standalone `repair_planes.py` (#1112). After the retry, re-check with `check_connected.py`, and if nets still fail, repeat the diagnosis on the new log — the failure mode often changes after the first fix.
+`route.py` skips nets that are already connected, so a wildcard attempts exactly the nets still broken and preserves the successful routes (already in the input file). **Naming the failed nets instead attempts the same nets with less rip authority.** The run's end-of-run reconciliation grants itself the blockers the failed nets' searches named (#103): one inside `--nets` at any size, one outside only if it has no pour and at most 30 segments and 6 vias. So a named retry cannot clear a long net that walls the failure in, and a wildcard has nothing outside. Measured on a four-layer board with one net failed, at the same geometry: the named retry stayed open, the wildcard closed it. Name nets only when naming is the point: a pair retry (below, for #1399's reason), or a failed-first split that changes the order (`/plan-pcb-routing`), and say what it gives up. A wildcard also covers the rule for a board with pours (#1032): the retry's copper can cut a pour, and its in-run plane finalize repairs only the poured nets inside its scope, so **a retry that names nets adds the poured nets too**. A broken poured net is retried the same way, with `route.py`, never a standalone `repair_planes.py` (#1112).
+
+**When the fix thins the geometry, re-route the whole step from that step's input instead of retrying on its output.** A retry skips connected nets, so the successful wide tracks stay in the channel the failed net needs, and thinning only the failures leaves the channel full (`/plan-pcb-routing`, "Route signals at the FAB floor by default"). Measured on the same board and geometry: the wildcard retry closed at 190 vias and 1879 mm, the whole step at 154 vias and 1744 mm.
+
+After the retry, re-check with `check_connected.py`, and if nets still fail, repeat the diagnosis on the new log — the failure mode often changes after the first fix.
 
 **For a pair step, the retry is a `route_diff.py` call** on the failing pairs'
 members only, from that step's output, with the step's own flags verbatim

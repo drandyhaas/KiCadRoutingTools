@@ -183,7 +183,8 @@ def main():
               any(s == 'warn' and 'declared mating_face -y outranks' in m for s, m in said),
               str(said))
         check('...and the evidence line names both faces',
-              'facing north [declared, strong] pass (declared -y over the body\'s weak +y)' in line,
+              'facing north [declared, unverified] pass (declared -y over the body\'s weak +y)'
+              in line,
               line)
 
         # 4. a STRONG reading still decides

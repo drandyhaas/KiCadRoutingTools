@@ -178,7 +178,8 @@ def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
 
 def clamp_via_to_pad(via_size: float, via_drill: float, pad,
                      floors, via_x: float = None,
-                     via_y: float = None) -> Tuple[float, float, str, int]:
+                     via_y: float = None,
+                     rule_floors=None) -> Tuple[float, float, str, int]:
     """Issue #202: shrink a via-in-pad so it never bulges past the pad edge.
 
     A via dropped at a pad centre whose diameter exceeds the pad's smallest
@@ -213,6 +214,11 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
     clamps any via whose BARREL overlaps its pad, not only a centred one, and
     a centred clamp does not stop those bulging.
 
+    ``rule_floors`` is the ``extra_floors`` the caller built ``floors`` with
+    (``GridRouteConfig.rule_floors`` for a net), so a clamped via is held to
+    the same `.kicad_dru` via rules as the ladder's first rung
+    (``fab_tiers.rule_via_floors``, #1727); omitted, the board's own.
+
     Returns (size, drill, status, rung): status 'fits' (unchanged), 'clamped'
     (shrunk to fit), or 'floor' (the pad -- or the reach left at this offset --
     is smaller than the deepest fab floor, so the via is held there and STILL
@@ -246,7 +252,7 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
         # --escalation off: no rung may be descended, so the via keeps the
         # caller's size (it bulges; the caller's 'floor' disclosure says so).
         return via_size, via_drill, 'floor', 0
-    from fab_tiers import note_narrowing
+    from fab_tiers import note_narrowing, rule_via_floors, drill_meeting_rules
 
     # First rung whose smallest manufacturable via fits this pad.
     for rung, fab in enumerate(floors):
@@ -263,6 +269,18 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
         # Keep the configured drill, only thinning it as far as the ring needs, and
         # never below this rung's drill floor.
         new_drill = max(min(via_drill, new_size - 2 * min_annular), floor_drill)
+        # #1727: where the board's .kicad_dru via rules bind the via and a via
+        # of this size meets them at some drill, take that drill (the ring and
+        # the hole the rules ask), not the rung's own ring: the ladder's first
+        # rung meets them, and fitting the pad is no reason to drop one. Where
+        # no drill does (the pad is under the diameter minimum, or too small to
+        # hold the ring round the hole minimum) every via in it breaks a rule,
+        # and the clamp is left as it was: it is never worse than its rung on
+        # any rule, and not clamping would bulge past the pad (#202).
+        held = drill_meeting_rules(new_size, via_drill, floor_drill, min_annular,
+                                   rule_via_floors(rule_floors))
+        if held is not None:
+            new_drill = held
         note_narrowing(getattr(pad, 'net_id', None), 'via_diameter', via_size, new_size,
                        'via-in-pad clamp')
         return new_size, round(new_drill, 4), 'clamped', rung

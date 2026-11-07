@@ -161,7 +161,10 @@ def main():
     zoned = {z.net_id for z in pour_zones(getattr(pcb, 'zones', None))}
     segs_by_net = defaultdict(list)
     for s in pcb.segments:
-        segs_by_net[s.net_id].append(s)
+        # A part's drawn copper parses as segments (#908): a closed shape's
+        # perimeter is a ring by construction, not a loop anything routed.
+        if not getattr(s, 'graphic', False):
+            segs_by_net[s.net_id].append(s)
 
     rows = []
     for net_id, segs in segs_by_net.items():

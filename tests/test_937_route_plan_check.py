@@ -59,6 +59,8 @@ python3 -u -X utf8 py_router/route.py s3.kicad_pcb final.kicad_pcb \
 #: would be recorded as "the checker missed it".
 BREAKS = [
     ('R01', 'no cd line', ('cd /repo\n', '')),
+    # #1735: without `set -e` the file exits with its last line's code.
+    ('R01', 'no set -e line', ('set -e\n', '')),
     ('R02', 'a pipe on the route step',
      ('--clearance 0.09\n# Verification',
       "--clearance 0.09 2>&1 | tee route.log\n# Verification")),
@@ -110,9 +112,13 @@ BREAKS = [
      ('# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py',
       '# cwd=/repo\ncp s2.kicad_pcb copy.kicad_pcb\n'
       '# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py')),
+    # The pour then reads the fanned board: dropping the step and leaving the
+    # pour on s2 would also read a board nothing writes (R18).
     ('R12', 'no cap pass after fanout',
      ('# cwd=/repo\npython3 -u -X utf8 py_placer/place_fanout_clearance.py '
-      's1.kicad_pcb s2.kicad_pcb --clearance 0.09\n', '')),
+      's1.kicad_pcb s2.kicad_pcb --clearance 0.09\n'
+      '# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py s2.kicad_pcb',
+      '# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py s1.kicad_pcb')),
     ('R13', 'the first pour carries a via tail',
      ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu',
       '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias')),
@@ -159,15 +165,20 @@ BREAKS = [
     # that would redden R13 as well, and a break that reddens two rules names
     # neither. Not the route.py step: `route.py` has no `--add-gnd-vias` in
     # its argparse, so putting it there would encode a command that dies at
-    # argparse as if it were a plan.
-    ('R15', 'a gnd-via pass under the floor, with the size set upstream',
+    # argparse as if it were a plan. Its CLEARANCE is set upstream: the
+    # fanout and the cap pass write --clearance 0.09 back into the project
+    # this pass inherits (#1735). Its via is its own -- the writeback never
+    # writes a class's via, so an upstream --via-size never reaches it, and a
+    # via resting on routing_defaults with no --board is NOTED, not refused
+    # (#1709); this harness passes no board.
+    ('R15', 'a gnd-via pass under the floor, with the clearance set upstream',
      ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n',
       '--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n'
       '# cwd=/repo\n'
       'python3 -u -X utf8 py_router/route_planes.py s3.kicad_pcb '
       's3b.kicad_pcb \\\n'
       '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias '
-      '--gnd-via-distance 0.5\n')),
+      '--via-size 0.45 --gnd-via-distance 0.5\n')),
     # R17 had NO row here, and the rule additionally carried '[needs --board]'
     # while reading only the plan's own argv -- so `check()` skipped it on the
     # bare invocation THIS HARNESS uses (the skill's own command line passes
@@ -179,6 +190,10 @@ BREAKS = [
      ('--component U1 --nets \'*\' --clearance 0.09 --layers F.Cu B.Cu',
       '--component U1 --nets \'*\' --clearance 0.09 '
       '--layers F.Cu In1.Cu B.Cu')),
+    # #1708: the route step reads a board no earlier step writes.
+    ('R18', 'a step reads a board no earlier step writes',
+     ('py_router/route.py s3.kicad_pcb final.kicad_pcb',
+      'py_router/route.py s3x.kicad_pcb final.kicad_pcb')),
 ]
 
 #: Rows that must NOT be refused -- a rule demanding something the engine
@@ -354,6 +369,39 @@ def t_a_rule_does_not_refuse_what_the_engine_prescribes():
               f'refused by the rule that could have')
 
 
+def t_the_gnd_via_floor_reads_a_clearance_ceiling():
+    """A chain spells its floor `--clearance-ceiling`, so the rule reads it,
+    on the step itself and upstream of it (a step whose ceiling is written
+    back into the project the GND pass inherits, #1735). It used to fall
+    through to the default clearance, which refuses a correct distance and
+    can pass a short one. Both directions, so neither arm is a default's
+    accident."""
+    step = ('# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py a.kicad_pcb '
+            'b.kicad_pcb --nets GND +3V3 --plane-layers In1.Cu In2.Cu ')
+    after = ('# cwd=/repo\npython3 -u -X utf8 py_router/route_planes.py b.kicad_pcb '
+             'c.kicad_pcb --nets GND +3V3 --plane-layers In1.Cu In2.Cu --via-size 0.45 ')
+    gnd = '--add-gnd-vias --gnd-via-distance %s'
+
+    def verdict(tmp, name, text):
+        r = _run(_write(tmp, name, text))
+        return [ln for ln in r.stdout.splitlines() if 'gnd-via-distance' in ln]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, spelled in (
+                ('same_step', step + '--via-size 0.45 --clearance-ceiling 0.09 '
+                 + gnd + '\n'),
+                ('upstream', step + '--clearance-ceiling 0.09\n'
+                 + after + gnd + '\n')):
+            # 3 x (0.45 + 0.09) = 1.62: the default 0.25 would ask for 2.1
+            ok = verdict(tmp, name + '_ok.sh', spelled % '2.0')
+            assert not ok, f'{name}: 2.0 is above the 1.62 floor, refused: {ok}'
+            low = verdict(tmp, name + '_low.sh', spelled % '1.5')
+            assert any('clearance 0.09' in ln and '1.620' in ln for ln in low), (
+                f'{name}: 1.5 is under the 1.62 floor, and the reason must '
+                f'read the ceiling: {low}')
+    print('  PASS: the floor reads --clearance-ceiling, on the step and upstream')
+
+
 def t_a_board_less_rule_is_not_gated_behind_the_board_flag():
     """`check()` SKIPS every rule whose text says '[needs --board]'. A rule
     that reads only the plan's argv and carries the marker anyway never runs
@@ -463,6 +511,7 @@ def t_the_skill_states_the_hand_join_exception():
 TESTS = (t_the_compliant_plan_passes,
          t_each_break_is_refused_by_its_own_rule,
          t_a_rule_does_not_refuse_what_the_engine_prescribes,
+         t_the_gnd_via_floor_reads_a_clearance_ceiling,
          t_a_board_less_rule_is_not_gated_behind_the_board_flag,
          t_a_break_does_not_redden_unrelated_rules,
          t_the_checker_writes_nothing,

@@ -123,9 +123,7 @@ _GUI_CEILING = (
 # five-line quote matched ZERO times and the row reported BROKEN. Quote
 # the guard as it now stands; deleting it is still the mutation.
 _PLAN_UNTICK = """            _p = step.get("params") or {}
-            _runs_caps = (step["action"] == "optimize_caps"
-                          or (step["action"] == "fanout"
-                              and _p.get("optimize_caps")))
+            _runs_caps = _runs_cap_pass(step)
             if _runs_caps and not _p.get("clearance"):
                 _cc = getattr(self.dialog, 'clearance_check', None)
                 if _cc is not None and _cc.GetValue():
@@ -302,14 +300,10 @@ ROWS = [
      "'clearance_ceiling')),\n",
      '',
      (TDLG,), 'KILLED'),
-    # Two lines since #1492: the signal and diff tabs now export the raw
-    # ceiling too, so the first line alone matched three sites; the fanout
-    # tab's is the one whose condition stands on its own line.
+    # The tabs share one helper since #1691, so this is the value they all read.
     ('fanout-tab-exports-the-RESOLVED-clearance-as-the-ceiling', 'swig',
-     "                'clearance_ceiling': (self.clearance.GetValue()\n"
-     "                                      if self._ceiling_on()\n",
-     "                'clearance_ceiling': (self._effective_clearance()\n"
-     "                                      if self._ceiling_on()\n",
+     "        val = self.clearance.GetValue()\n",
+     "        val = self._effective_clearance()\n",
      (T768, TDLG), 'KILLED'),
     # Anchored on the #768 comment above the row, not the row itself:
     # `clamp_netclasses` is exported by the signal, planes and now fanout

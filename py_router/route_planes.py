@@ -3209,6 +3209,9 @@ def create_plane(
     plane_layers: List[str],
     via_size: float = defaults.VIA_SIZE,
     via_drill: float = defaults.VIA_DRILL,
+    # #1676: no explicit via was asked for (the CLI's omitted --via-size, the
+    # GUI's unticked override): the via starts at the board's .kicad_dru rules.
+    via_from_class: bool = False,
     track_width: float = defaults.TRACK_WIDTH,
     clearance: float = defaults.CLEARANCE,
     zone_clearance: float = None,
@@ -3350,6 +3353,10 @@ def create_plane(
     # copper in different ORDER, and list position leaks into decisions.
     from kicad_parser import canonicalize_pcb_data_order
     canonicalize_pcb_data_order(pcb_data)
+    # #1676: a via this run sizes itself starts at the board's own via rules
+    if via_from_class:
+        from design_rules import run_via_for_rules
+        via_size, via_drill = run_via_for_rules(input_file, pcb_data, via_size, via_drill)
     # #962: the input's vias as values, for the Type VII stamp (only vias this
     # run ADDS are stamped; see fab_notes.via_protection_stamps)
     from fab_notes import via_snapshot as _via_snapshot962
@@ -4522,7 +4529,8 @@ Examples:
 
     # GND return vias
     parser.add_argument("--add-gnd-vias", action="store_true",
-        help="Add GND vias near signal vias for return current path")
+        help="Add GND vias near signal vias for return current path. A return via needs "
+             "its ground net poured on two layers: on fewer it warns and places none")
     parser.add_argument("--gnd-via-net", type=str, default=defaults.GND_VIA_NET,
         help="Pin GND return vias to this net (default: auto -- match each "
              "signal's own ground domain, which is plain GND on a board with "
@@ -4545,6 +4553,7 @@ Examples:
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            resolve_cli_floor)
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
@@ -4598,6 +4607,7 @@ Examples:
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
+        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
@@ -4605,6 +4615,7 @@ Examples:
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)
+    args._clearance_ceiling = getattr(args, 'clearance_ceiling', None)
 
     # #381 D9: --output FILE overrides the positional (matches route.py/route_diff).
     if getattr(args, 'output', None) is not None:
@@ -4694,6 +4705,7 @@ Examples:
         ripup_blocker_select=args.ripup_blocker_select,
         via_size=args.via_size,
         via_drill=args.via_drill,
+        via_from_class=not _vs_explicit,
         track_width=args.track_width,
         clearance=args.clearance,
         zone_clearance=args.zone_clearance,
@@ -4866,9 +4878,11 @@ Examples:
     # writes outside route.py's write-list, so its dead-end stubs are not cleaned
     # otherwise. Gated against connectivity + pours, so it never breaks a net.
     if not args.dry_run and _wrote_output:
+        from fix_kicad_drc_settings import effective_board_edge_clearance
         from pcb_modification import clean_plane_copper
-        _snapped, _removed = clean_plane_copper(args.output_file, net_names,
-                                                args.clearance, args.grid_step)
+        _snapped, _removed = clean_plane_copper(
+            args.output_file, net_names, args.clearance, args.grid_step,
+            effective_board_edge_clearance(args.input_file, 0.0))
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
         # Castellated landings (run-6 fix 1.7): tap/join copper that landed in

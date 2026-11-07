@@ -8,9 +8,14 @@ pcbnew subprocess, and it must run on KiCad's system python for pcbnew to
 import. Linux, that python and that KiCad all differ from a desktop: compare
 Modal routes only with Modal routes.
 
+The KiCad image carries no 3D models, and without them check_assembly's body
+gate reads as unmeasured rather than failing, so the models are copied from that
+release's -full image (KRT_PAB_KICAD_IMAGE must have a -full tag) and
+prove_models.py refuses the build unless the gate reads them.
+
 Staged layout (KRT_PAB_STAGE): tree/ (the shipped source tree), corpus/ (the
-boards' recorded runs and inputs), route_placed.py (the CLIENT's copy, so a
-tree older than this tool still routes).
+boards' recorded runs and inputs), route_placed.py and prove_models.py (the
+CLIENT's copies, so a tree older than this tool still routes).
 """
 import os
 import sys
@@ -27,6 +32,9 @@ TREE = os.path.join(STAGE, 'tree')
 
 image = (
     modal.Image.from_registry(KICAD, setup_dockerfile_commands=['USER root'])
+    # the stock 3D models, from the same release's -full image and nothing else
+    # of it: check_assembly's body gate and the seat read them (prove_models.py)
+    .dockerfile_commands(f'COPY --from={KICAD}-full /usr/share/kicad/3dmodels /usr/share/kicad/3dmodels')
     # python-is-python3: Modal's builder runs `python -m pip`; PEP 668 needs
     # --break-system-packages on the distro python (the sweep app's recipe)
     .apt_install('curl', 'procps', 'build-essential', 'python3-pip', 'python-is-python3')
@@ -44,8 +52,10 @@ image = (
     .add_local_dir(TREE, REPO, copy=True, ignore=['rust_router/**', 'build_router.py', 'VERSION', 'metadata.json'])
     .add_local_dir(os.path.join(STAGE, 'corpus'), CORPUS, copy=True)
     .add_local_file(os.path.join(STAGE, 'route_placed.py'), '/opt/route_placed.py', copy=True)
+    .add_local_file(os.path.join(STAGE, 'prove_models.py'), '/opt/prove_models.py', copy=True)
     .run_commands(f"cd {REPO} && python3 -c \"import sys; sys.path.insert(0, 'rust_router'); "
-                  f"import grid_router; print('grid_router', grid_router.__version__)\"")
+                  f"import grid_router; print('grid_router', grid_router.__version__)\"",
+                  f'python3 /opt/prove_models.py {REPO}')
     .env({'KRT_PAB_PROV': PROV, 'PYTHONUNBUFFERED': '1'})
 )
 

@@ -260,7 +260,7 @@ def resolve_pair_clearance(pcb_file, clearance=None):
 
 def fab_pair_clearance_floor(pcb_data):
     """``(mm, copper_layer_count)`` -- the fab copper-clearance floor for this
-    board's LAYER BUCKET. For DISCLOSURE ONLY; never applied.
+    board's LAYER BUCKET. For DISCLOSURE ONLY; this ENGINE never applies it.
 
     Unlike the drill floors, this one MOVES with the layer count: `fab_floor_min`
     buckets at 2 (0.10mm) vs 4 (0.09mm), and 3 copper layers already rounds into
@@ -284,16 +284,12 @@ def fab_pair_clearance_floor(pcb_data):
     too-small ``--clearance`` by raising the pair back up to the class, and a
     ceiling deliberately removes that rescue.
 
-    THE GUI DOES NOT AGREE WITH THIS, and the divergence is named rather than
-    papered over. Its ``_effective_geometry_floor`` ends in ``_fab_floored``,
-    so a dialog clearance below the bucket floor is PINNED UP before it ever
-    reaches this engine: the CLI prices 0.09 on a 2-layer board and says so,
-    the GUI prices 0.10. That pin predates #768 and applies to every geometry
-    knob the dialog owns, not just this one, so moving it is a change to the
-    GUI's floor policy rather than to this pass -- filed, not fixed here. What
-    #768 does change is that the CLI's value now reaches the pricing instead of
-    being raised back up by the netclass tier, which is what makes the two
-    fronts visibly differ where before they only differed in principle.
+    THE PIN IS THE FRONTS' (#1699): `place_fanout_clearance.py` and the dialog
+    each hold a REQUESTED ceiling at the physical floor before it reaches this
+    engine, as every routing front does, because that value also goes into the
+    project the later steps read. So what this discloses on a front's run is a
+    Default class the BOARD declares below the floor: min(declared, ceiling)
+    stays the declared number, and the grader grades it there.
     """
     from fab_tiers import fab_floor_min
     # The SAME `.Cu` filter `resolve_drill_floors` and `_Repair.__init__` apply
@@ -3253,9 +3249,14 @@ class _Repair:
             total += min(nearest, self.capture_radius)
         return total
 
-    def _blocked_geom(self, ref, cap, x, y, rot):
+    def _blocked_geom(self, ref, cap, x, y, rot, blockers=None):
         """The cheap, purely geometric hard constraints: board edge and
-        introduced/worsened same-side courtyard or mover-pad overlaps."""
+        introduced/worsened same-side courtyard or mover-pad overlaps.
+
+        `blockers`, a list, collects the other MOVERS blocking this pose
+        instead of stopping at the first (#1681): True then means something
+        that cannot move blocks it, and False with a non-empty list that only
+        those movers do."""
         rect = cap.rect(x, y, rot)
         if (rect[0] < self.usable[0] or rect[1] < self.usable[1]
                 or rect[2] > self.usable[2] or rect[3] > self.usable[3]):
@@ -3277,7 +3278,10 @@ class _Repair:
             other = self.caps[other_ref]
             if self._overlap(rect, other.rect()) > \
                     self.base_cap.get(pair, 0.0) + EPS:
-                return True
+                if blockers is None:
+                    return True
+                blockers.append(other_ref)
+                continue
             # no new/worse different-net pad encroachment against another
             # MOVER at its current pose (#275); each accepted move preserves
             # the pairwise seed baseline, so the invariant holds inductively
@@ -3305,7 +3309,9 @@ class _Repair:
                                    _frames_of(cap, x, y, rot),
                                    _frames_of(other, None, None, None)) > \
                     self.base_cap_pad.get(pair, 0.0) + EPS:
-                return True
+                if blockers is None:
+                    return True
+                blockers.append(other_ref)
         return False
 
     def _tether_refuses(self, ref, x, y, rot) -> bool:
@@ -3487,6 +3493,12 @@ def _on_cap_lattice(cap, rot) -> bool:
     return abs((rot - cap.seed_rot + 45.0) % 90.0 - 45.0) <= 1e-6
 
 
+def _soft_cost(st, cap, x, y, rot):
+    """What cost() weighs a graze-free pose by: attraction and displacement."""
+    return (ATTRACT_WEIGHT * st.attraction(cap, x, y, rot)
+            + DISPLACEMENT_WEIGHT * math.hypot(x - cap.seed_x, y - cap.seed_y))
+
+
 def _best_apart(st, ref, cap, rots, max_disp, step, grid_step):
     """#1563: the pose within `max_disp` whose pads touch no foreign copper
     (contact_depth 0), least graze first, then attraction and displacement as
@@ -3506,9 +3518,7 @@ def _best_apart(st, ref, cap, rots, max_disp, step, grid_step):
             fails = ()
             if tg is not None and ref in tg._tethers_of:
                 fails = tg.tether_failures({ref: (cx, cy, rot)}) or ()
-            soft = (ATTRACT_WEIGHT * st.attraction(cap, cx, cy, rot)
-                    + DISPLACEMENT_WEIGHT * math.hypot(cx - cap.seed_x,
-                                                       cy - cap.seed_y))
+            soft = _soft_cost(st, cap, cx, cy, rot)
             key = (len(fails), round(sum(f[2] - f[3] for f in fails), 4),
                    st.graze_penalty(ref, cap, cx, cy, rot), soft)
             if key0 is None or key < key0:
@@ -3517,6 +3527,87 @@ def _best_apart(st, ref, cap, rots, max_disp, step, grid_step):
         return None, None
     broke = (tg.tether_failures({ref: found[1:]}) if key0[0] else None)
     return found, broke
+
+
+def _clear_by_moving_one(st, ref, cap, rots_of, max_disp, step, grid_step,
+                         clear_of):
+    """#1681: a pose clear of all foreign copper that only ONE other mover
+    stands in the way of, and a clear pose for that mover -- the search a cap
+    with no clear pose at the others' current poses still has. The sweep moves
+    each cap with every other held, so a part that gets to its room last finds
+    it taken: every graze-free pose one 0603 had within its cap was blocked by
+    movers alone, and it stopped 0.07 mm inside a via's clearance.
+
+    Returns (x, y, rot, other_ref, ox, oy, orot), its own soft cost first and
+    then the other's, or None. Both poses pass the whole of cost() as they
+    will stand (the per-net gates, the decap gate); the other is never moved
+    onto a graze of its own. On return the board is as it was: the caller
+    applies the two poses. `clear_of` memoises each mover's graze-free poses,
+    which no other mover's pose changes."""
+    poses = []
+    for cx, cy in _candidate_positions(cap, max_disp, step, grid_step):
+        for rot in rots_of(ref):
+            if not cap.stays_beneath(cx, cy, rot) or \
+                    st.graze_penalty(ref, cap, cx, cy, rot) > EPS:
+                continue
+            movers = []
+            if not st._blocked_geom(ref, cap, cx, cy, rot, movers) \
+                    and len(movers) == 1:
+                poses.append((_soft_cost(st, cap, cx, cy, rot), cx, cy, rot,
+                              movers[0]))
+    poses.sort(key=lambda p: p[:4])
+    seat = (cap.x, cap.y, cap.rot)
+    try:
+        for _soft, cx, cy, rot, oref in poses:
+            other = st.caps[oref]
+            if oref not in clear_of:
+                clear_of[oref] = sorted(
+                    (_soft_cost(st, other, ox, oy, orot), ox, oy, orot)
+                    for ox, oy in _candidate_positions(
+                        other, st._max_disp_cap, step, grid_step)
+                    for orot in rots_of(oref)
+                    if other.stays_beneath(ox, oy, orot)
+                    and st.graze_penalty(oref, other, ox, oy, orot) <= EPS)
+            st.apply_pose(ref, cx, cy, rot)
+            oseat = (other.x, other.y, other.rot)
+            for _osoft, ox, oy, orot in clear_of[oref]:
+                if st.cost(oref, other, ox, oy, orot) == float('inf'):
+                    continue
+                st.apply_pose(oref, ox, oy, orot)
+                held = st.cost(ref, cap, cx, cy, rot) != float('inf')
+                st.apply_pose(oref, *oseat)
+                if held:
+                    return cx, cy, rot, oref, ox, oy, orot
+    finally:
+        st.apply_pose(ref, *seat)
+    return None
+
+
+def _remeasure_broken_claims(st, refs):
+    """A decap claim the fallback broke was measured at the pose it took then;
+    a part #1681's search moves again ends elsewhere. Re-measure each broken
+    claim on the board as it now stands, and drop one back within its limit,
+    so the report describes the pose that ships."""
+    tg = st._tethers
+    if tg is None:
+        return
+    for r in refs:
+        fails = st.tether_broken.get(r)
+        if not fails:
+            continue
+        kept = []
+        for f in fails:
+            for i in tg._tethers_of.get(r, ()):
+                t = tg._tether_terms[i]
+                if (t.rule, t.name) == (f[0], f[1]):
+                    c = tg._tether_value(i)
+                    if c > t.threshold + EPS:
+                        kept.append((f[0], f[1], round(c, 4), f[3]))
+                    break
+        if kept:
+            st.tether_broken[r] = kept
+        else:
+            st.tether_broken.pop(r, None)
 
 
 def _cap_rotations(cap, claim, allow_rotations, rotate) -> List[float]:
@@ -3989,8 +4080,11 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
 
     budget = {r: max_displacement for r in st.caps}
     rotate = {r: False for r in st.caps}
-    # #1563: caps the fallback moved off a short to a pose that only grazes
-    parted: List[str] = []
+    # #1563: caps in contact with foreign copper at the seed
+    seed_shorted = {r for r, c in st.caps.items()
+                    if st.contact_depth(r, c, c.x, c.y, c.rot) > EPS}
+    # #1681: {cap: the other mover the fallback moved to make room for it}
+    made_room: Dict[str, str] = {}
     # process worst violators first
     order = sorted(st.caps, key=lambda r: st.graze_penalty(
         r, st.caps[r], st.caps[r].x, st.caps[r].y, st.caps[r].rot),
@@ -4167,10 +4261,8 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                     best, broke = _best_apart(st, ref, cap, rots,
                                               max_displacement_cap, _fb_step,
                                               grid_step)
-                    if best is not None:
-                        parted.append(ref)
-                        if broke:
-                            st.tether_broken[ref] = broke
+                    if best is not None and broke:
+                        st.tether_broken[ref] = broke
                 if best is not None:
                     st.apply_pose(ref, best[1], best[2], best[3])
                     disp = math.hypot(cap.x - cap.seed_x, cap.y - cap.seed_y)
@@ -4178,6 +4270,33 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                         print(f"  fallback: {ref} relocated to clear foreign "
                               f"copper at disp {disp:.2f}mm -> "
                               f"({cap.x:.3f},{cap.y:.3f}) rot {cap.rot:g}")
+            # #1681: no clear pose with every other part where it stands, so a
+            # clear pose one other mover could vacate. After EVERY stuck cap
+            # has had its own search, and the ones in contact first: run inside
+            # that loop, one such move took the only pose a later cap had apart
+            # from a via and left that cap shorted where it had grazed.
+            _clear_of: Dict[str, list] = {}
+            for ref in sorted(
+                    (r for r in stuck
+                     if st.graze_penalty(r, st.caps[r], st.caps[r].x,
+                                         st.caps[r].y, st.caps[r].rot) > EPS),
+                    key=lambda r: st.contact_depth(
+                        r, st.caps[r], st.caps[r].x, st.caps[r].y,
+                        st.caps[r].rot) <= EPS):
+                _pair = _clear_by_moving_one(
+                    st, ref, st.caps[ref],
+                    lambda r: _cap_rotations(st.caps[r], claims1122.get(r),
+                                             allow_rotations, True),
+                    max_displacement_cap, _fb_step, grid_step, _clear_of)
+                if _pair is not None:
+                    st.apply_pose(_pair[3], *_pair[4:])
+                    st.apply_pose(ref, *_pair[:3])
+                    made_room[ref] = _pair[3]
+                    _remeasure_broken_claims(st, (ref, _pair[3]))
+                    if verbose:
+                        print(f"  fallback: {_pair[3]} moved to "
+                              f"({_pair[4]:.3f},{_pair[5]:.3f}) rot "
+                              f"{_pair[6]:g} to make room for {ref}")
     finally:
         if _gc_was_enabled:
             gc.enable()
@@ -4205,15 +4324,20 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
     def _grade():
         res, unres = [], []
         for ref, cap in st.caps.items():
-            if st.graze_penalty(ref, cap, cap.x, cap.y, cap.rot) > EPS:
+            if (st.graze_penalty(ref, cap, cap.x, cap.y, cap.rot) > EPS
+                    or ref in below_parts):
                 unres.append(ref)
             elif ref in violators0:
                 res.append(ref)
         return res, unres
 
+    # #1686: the parts cleared only by a via landing below the board's own
+    # min_hole_to_hole. KiCad fails the pair, so they are not resolved.
+    below_parts = set()
     resolved, unresolved = _grade()
     via_resolved: List[str] = []
     regrazed: List[str] = []
+    below_hole_floor: List[dict] = []
 
     # Last resort (#313): a cap still grazing at the displacement cap is
     # usually BOXED (no clear cap position exists) -- move the offending
@@ -4222,6 +4346,14 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
     if unresolved:
         via_moves, new_segs = nudge_vias_for_unresolved(st, pcb_data, clearance)
         if via_moves:
+            for _ox, _oy, _vd in via_moves:
+                if _vd.get('below_hole_floor'):
+                    below_hole_floor.append(dict(
+                        _vd['below_hole_floor'], at=[_vd['x'], _vd['y']],
+                        net=(pcb_data.nets[_vd['net_id']].name
+                             if _vd['net_id'] in pcb_data.nets
+                             else str(_vd['net_id']))))
+            below_parts.update(r['part'] for r in below_hole_floor)
             # #736: absorb the connector tracks the nudger just DREW. They went
             # into pcb_data.segments, but st.segments / st.cap_segs /
             # st._seg_floor_by_id were snapshotted in _Repair.__init__ before
@@ -4328,10 +4460,24 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
         print(f"  Re-grazed by this pass's own connector copper: "
               f"{', '.join(sorted(regrazed))}")
     # #1563: of the unresolved, the ones whose copper still TOUCHES a foreign
-    # net's (a short, not a graze), and the ones moved off a short to graze.
+    # net's (a short, not a graze), and the ones moved off a short to graze,
+    # whichever search moved them (#1681: the descent named none of its own).
     shorted = [r for r in unresolved
                if st.contact_depth(r, st.caps[r], st.caps[r].x, st.caps[r].y,
                                    st.caps[r].rot) > EPS]
+    parted = [r for r in unresolved
+              if r in seed_shorted and r not in shorted
+              and r not in below_parts]
+    for _b in below_hole_floor:
+        print(f"  BELOW min_hole_to_hole, KiCad fails this hole pair: "
+              f"{_b['net']} via moved to ({_b['at'][0]:.3f}, {_b['at'][1]:.3f}) "
+              f"to free {_b['part']}, drill gap {_b['gap_mm']:g}mm against the "
+              f"board's {_b['board_mm']:g}mm (left where it stood, the via "
+              f"stays on or inside the clearance of {_b['part']})")
+    if made_room:
+        print(f"  Moved to make room for a part with no other clear pose: "
+              + ', '.join(f"{o} (for {r})"
+                          for r, o in sorted(made_room.items())))
     if parted:
         print(f"  Moved off a short to a pose that only grazes (none clears "
               f"within the displacement cap): {', '.join(sorted(parted))}")
@@ -4353,6 +4499,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
            'via_moves': via_moves, 'new_segments': new_segs,
            'via_resolved': via_resolved, 'regrazed': regrazed,
            'parted': parted, 'shorted': shorted,
+           'made_room': dict(made_room), 'below_hole_floor': below_hole_floor,
            'required': required, 'clearance_notes': list(st.clearance_notes)}
     if claims1122:
         out['declared_rotations'] = {
@@ -5349,7 +5496,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             # repair" order as the rungs above, and it means this can never
             # place copper worse than the pre-#735 pass did.
             trk_ladder = [True, False] if _trk_on else [True]
-            found, trk_relaxed = None, False
+            found, trk_relaxed, below_floor = None, False, None
             for TRK_STRICT in trk_ladder:
                 for H2H_VIA, H2H_PAD in drill_ladder:
                     r = 0.05
@@ -5376,6 +5523,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                                   f"{_h2h_decl:g}mm min_hole_to_hole for {ref}'s "
                                   f"via at ({v.x:.2f}, {v.y:.2f}); fell back to "
                                   f"the {H2H_VIA:g}mm fab floor")
+                            # #1686: KiCad fails this pair, so the part is
+                            # not done: reported with the move, and the caller
+                            # counts it unresolved. Measured on a board at
+                            # 0.45: the via left where it stood was a SHORT
+                            # (KiCad shorting_items), the landing a 0.327 mm
+                            # hole pair above the fab floor, so the landing
+                            # stands and is named.
+                            below_floor = {
+                                'part': ref, 'board_mm': _h2h_decl,
+                                'gap_mm': round(_drill_gap_at(
+                                    pcb_data, v, *found), 4)}
                         break
                 if found is not None:
                     trk_relaxed = not TRK_STRICT
@@ -5457,12 +5615,32 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                                    getattr(v, 'tenting_attrs', {}) or {}),
                                # ...and its blind/micro type word, which the
                                # writer and the plugin's twin re-emit too.
-                               'via_type': getattr(v, 'via_type', 'through')}))
+                               'via_type': getattr(v, 'via_type', 'through'),
+                               **({'below_hole_floor': below_floor}
+                                  if below_floor else {})}))
             nm = pcb_data.nets[v.net_id].name if v.net_id in pcb_data.nets else v.net_id
             print(f"  via-nudge: moved {nm} via ({old[0]:.3f},{old[1]:.3f}) -> "
                   f"({nx:.3f},{ny:.3f}) to free {ref}; {len(conn_layers)} "
                   f"connector segment(s) back to the stub start")
     return via_moves, new_segments
+
+
+def _drill_gap_at(pcb_data, via, x, y) -> float:
+    """#1686: the drill-to-drill gap from `via` placed at (x, y) to the nearest
+    other hole on the board (a via's, or a plated pad's drill capsule): what a
+    landing the nudge reports below the board's own floor actually leaves.
+    NaN on a board with no other hole."""
+    from kicad_parser import pad_drill_capsule
+    dr = _via_drill_radius(via)
+    gaps = [math.hypot(x - o.x, y - o.y) - dr - _via_drill_radius(o)
+            for o in pcb_data.vias if o is not via]
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            if p.drill and p.drill > 0:
+                (c1x, c1y), (c2x, c2y), prad = pad_drill_capsule(p)
+                gaps.append(_point_to_seg_dist(x, y, c1x, c1y, c2x, c2y)
+                            - dr - prad)
+    return min(gaps, default=float('nan'))
 
 
 def _pad_on_layer(pad, layer):

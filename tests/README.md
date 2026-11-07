@@ -322,7 +322,7 @@ python3 tests/test_sonde_u.py -u
 
 **Pipeline stages:**
 1. Route all nets at the defaults (`sonde_u_routed.kicad_pcb`)
-2. GND plane on B.Cu with `route_planes.py --add-gnd-vias` (its default output, `sonde_u_routed_routed.kicad_pcb`)
+2. GND planes on F.Cu and B.Cu with `route_planes.py --add-gnd-vias` (its default output, `sonde_u_routed_routed.kicad_pcb`)
 3. DRC (at 0.2 mm) and connectivity on `sonde_u_routed.kicad_pcb`, the board from step 1
 
 ### test_guide_corridor.py - Guide-Corridor (Waypoint) Routing Test

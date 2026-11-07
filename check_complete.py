@@ -642,6 +642,19 @@ def _grade(a, doc):
             extra[name] = {'ran': True, 'exit': c, 'clean': c == 0}
     doc['components'] = extra
 
+    # ---- 2b. copper on another net's pad (#1680) ---------------------------
+    # `blocking` counts these with every other DRC item, as a number. A short
+    # is the one a reader must not have to go and find, so it is named.
+    contacts, contacts_err = [], None
+    if layers and not lyr_err:
+        try:
+            from kicad_parser import parse_kicad_pcb
+            from pad_contact import shipped_report
+            contacts = shipped_report(parse_kicad_pcb(a.board))
+        except Exception as exc:                                # noqa: BLE001
+            contacts_err = f'{type(exc).__name__}: {exc}'
+    doc['pad_contacts'] = contacts
+
     # ---- 3. the fab floors this board grades itself against ----------------
     try:
         floors = fab_floor_integrity(a.board, a.authored_from,
@@ -685,9 +698,10 @@ def _grade(a, doc):
             continue
         if _name == 'drc.dru_rules':
             # #1490: a .kicad_dru clearance rule check_drc does not model;
-            # #1527: or a `disallow` rule (token) it does not grade.
+            # #1527: or a `disallow` rule (token) it does not grade; #1707:
+            # or a `via_count` rule whose condition it does not read.
             reasons.append(
-                '.kicad_dru clearance or disallow rule(s) nothing grades: '
+                '.kicad_dru clearance, via_count or disallow rule(s) nothing grades: '
                 + ', '.join(repr(r) for r in
                             (_comps.get('drc') or {}).get('ungraded_rules', ()))
                 + ' -- the copper they bind is not graded at the rule here and '
@@ -719,9 +733,15 @@ def _grade(a, doc):
     if _drc_c.get('library_pad_gaps'):
         # #1628: library geometry, not graded (#1306) -- but KiCad's DRC of
         # this board will show them, so a DONE says so
-        notes.append(f"KiCad will report {_drc_c['library_pad_gaps']} clearance "
-                     f"finding(s) on library pads (pairs of one footprint's "
-                     f"pads closer than their clearance; no route can clear "
+        _unv = _drc_c.get('library_pad_gaps_unverified')
+        notes.append(f"KiCad will report "
+                     + (f"up to {_drc_c['library_pad_gaps']} pair(s) ({_unv} may be "
+                        f"cleared by a .kicad_dru rule check_drc cannot fully read)"
+                        if _unv else f"{_drc_c['library_pad_gaps']} pair(s)")
+                     + f" of "
+                     f"library pads as clearance errors, once per copper layer "
+                     f"they share (one footprint's pads closer than their "
+                     f"clearance; no route can clear "
                      f"them -- a .kicad_dru rule, a pad/footprint clearance "
                      f"override or a net tie can; check_drc's WARNINGS name "
                      f"the pairs)")
@@ -740,6 +760,12 @@ def _grade(a, doc):
                        'null is not a zero')
     elif blocking:
         reasons.append(f'blocking = {blocking}')
+    if contacts_err:
+        reasons.append(f'pad contacts: did not run ({contacts_err})')
+    elif contacts:
+        from pad_contact import format_rows
+        reasons.append(f"{len(contacts)} via(s)/track(s) on another net's pad, "
+                       f"a short: " + '; '.join(format_rows(contacts, limit=5)))
     for name, r in sorted(extra.items()):
         if r.get('error'):
             reasons.append(f'{name}: did not run ({r["error"]})')

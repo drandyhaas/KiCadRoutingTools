@@ -172,7 +172,7 @@ python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS
 | `--coplanar-nets` | (every net) | `route.py` only: limit `--coplanar-gap` to the nets these patterns match; the rest stay microstrip |
 | `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance of the **Default net class** for this run, in mm; nets in other classes route at their own class clearance (pairwise `max`, as KiCad's DRC does). **Omitted** → the board's own Default class from the sibling `.kicad_pro`. Given below the board's Default class, the DRC writeback lowers the output project's Default class to it (it never raises a class). Since #530 this no longer caps the other classes; use `--net-clearances <json>` for explicit per-net values |
 | `--net-clearances JSON` | (auto-read) | A JSON object mapping net name → that net's class clearance (mm), used as given instead of the map auto-read from the sibling `.kicad_pro`'s non-Default classes. `route.py`, `route_diff.py`, `route_planes.py`. See [cross-class clearance](api-routing-config.md#cross-class-clearance-kicad-maxclassa-classb) |
-| `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). **This is the flag for a chained run**: on a project an earlier step already lowered, the run stays at that lower floor instead of routing wider, which is what the recorded corpus chains and the routing skills use. GUI: the **Clearance ceiling** checkbox next to Min Clearance. A non-Default class the ceiling lowers by more than 2x (a 0.6 mm high-voltage class under 0.1) is named with a WARNING on the console and in `JSON_SUMMARY.design_rules.ceiling_lowered_classes` (class, clearance, capped value, nets); a clearance that must hold belongs in a `.kicad_dru` rule, which the ceiling never lowers (#1561) |
+| `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). **This is the flag for a chained run**: on a project an earlier step already lowered, the run stays at that lower floor instead of routing wider, which is what the recorded corpus chains and the routing skills use. GUI: the **Clearance ceiling** checkbox next to Min Clearance. A ceiling below the physical fab floor is pinned up to it with a WARNING, as `--clearance` is, so no class is lowered below that floor (#1691); a class the board itself declares below it stays as declared. A non-Default class the ceiling lowers by more than 2x (a 0.6 mm high-voltage class under 0.1) is named with a WARNING on the console and in `JSON_SUMMARY.design_rules.ceiling_lowered_classes` (class, clearance, capped value, nets); a clearance that must hold belongs in a `.kicad_dru` rule, which the ceiling never lowers (#1561) |
 | `--via-size` | Default net-class via (else 0.5) | Via outer diameter in mm. **Given** → every net's vias are this size. **Omitted** → each net's vias are drawn at its **own** net class / `.kicad_dru` `via_diameter` (#530 decision 4): the router carries one via-legality map per distinct via geometry on the board (`grid_router` 0.22.0+; an older binary routes every net at the Default class size and says so) |
 | `--via-drill` | Default net-class drill (else 0.3) | Via drill diameter in mm; per-net exactly like `--via-size` |
 | `--grid-step` | 0.1 | Grid resolution in mm |
@@ -196,7 +196,7 @@ the Route tab). The defaults (`auto`, `fab`) live in `routing_defaults.py`
 | `--fab-tier` | `auto` | `auto` (the standard floor, escalating to advanced when a fine-pitch fan-out, plane tap or last-resort via cannot fit; warned and counted), `standard` (no extra fab cost, **hard**) or `advanced` (tighter, "more costly", **hard**) |
 | `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
 | `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums; an unset key falls back to the fab tier floor, except clearance, which falls back to the Default net class's clearance, #1160; a `min_clearance` the writeback lowered to a pad clearance override is not read as the board's own minimum: the value it replaced is recorded in `kicad_routing_tools.pad_override_min_clearance` and read instead while the rule still holds the capped value, #1369; with `--no-fix-drc-settings` descents stop at what KiCad grades the unchanged project at: a rule it leaves out at KiCad's factory value, #1287, and clearance at the Default class floored at `min_clearance`, #1262), `off` (never; the net fails and is reported -- except a wide power/impedance net's pad-entry neck of at most 2 mm of path, `routing_defaults.PAD_ENTRY_NECK_MM`) |
-| `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired -- on every routing CLI that takes it (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`); an exit code the run already had for its own reason wins. For a net with its own width -- `--power-nets`, an impedance width, a wider net class -- this means copper that SHIPS under width (one `design_rules` row per net), not every narrower routing attempt: a power net on `route.py` is measured over the whole net (#1033); an impedance- or class-width net, and `repair_planes.py`'s `--power-nets` taps, over the copper the run laid, so a fanout stub an earlier step drew at its own width is not counted |
+| `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired -- on every routing CLI that takes it (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`); an exit code the run already had for its own reason wins. For a net with its own width -- `--power-nets`, an impedance width, a wider net class -- this means copper that SHIPS under width (one `design_rules` row per net), not every narrower routing attempt: a power net on `route.py` is measured over the whole net (#1033); an impedance- or class-width net, `repair_planes.py`'s `--power-nets` taps, and on `route_diff.py` every pair member -- one routed single-ended by the member fallback (a `pair member fallback copper shipped under width` row, #1679) and one routed coupled (a `coupled pair copper shipped under width` row in place of its per-attempt `terminal neck` and `pair partner neck` rows, graded against the layer's width with the connectors the pair router draws at the pair's track width counted as delivered, #1725), and one coupled narrowed to fit where its layer width found no coupled route (a `coupled pair narrowed to fit, both members` row, #1742) -- over the copper the run laid, so a fanout stub an earlier step drew at its own width is not counted. A row is a request not met, not a KiCad DRC flag: KiCad grades a track only against the board's minimum track width and `.kicad_dru` track_width rules, never a net class width |
 
 The tier is a **floor ladder**:
 
@@ -313,17 +313,95 @@ other token (`pad`, `zone`, `hole`, ...); a `micro_via`, `blind_via` or
 `buried_via` ban asks nothing of the router, which lays through vias only.
 check_drc grades every track and via token (`items-not-allowed`).
 
-**Annular rings.** No routing step sizes a via by an `annular_width` rule (a
-via's ring follows from its diameter and drill), so such a rule is listed NOT
-honoured at the start of every step that reads the rules, whatever the vias
-are (#1490). Whether the step's vias meet it is said when route.py or
-route_diff.py ends (#1649): `.kicad_dru rule 'rf ring' (annular_width min 0.07
-mm): this step's 7 via(s) it binds meet it (smallest ring 0.075 mm)`, or
-`... 7 BELOW it`, and `design_rules.annular_rules` in `JSON_SUMMARY` carries
-each rule's `min`, `vias`, `below` and `smallest_ring`. A via counts for the
-rule that sets its ring (the last matching rule, as KiCad resolves it), over
-the vias the step laid. `list_nets.py --design-rules` lists the rules that set
-a minimum below the Board Setup one, with the condition each binds.
+**Via rules (#1676).** A step given no explicit via (`--via-size` omitted, the
+GUI's Via Size override unticked) starts from a via that meets the
+`via_diameter`, `hole_size` and `annular_width` rules binding it: the drill is
+raised to the hole minimum, and the diameter to the diameter minimum and to the
+drill plus the ring each side. Which vias a rule binds is its condition, read as
+KiCad reads it, and a kind the project's `rule_severities` ignore raises nothing.
+The working via `list_nets.py --design-rules` and `autoplan.py` hand a step is
+sized the same way, and a rule's minimum replaces the Board Setup minimum of its
+kind there, as it does in KiCad. An explicit via is drawn as asked.
+
+Descents read the same rules. Under `--escalation fab` (the default) the
+ladder's first rung is raised to meet them and the tier's own rungs follow it,
+so going below a rule is the last thing a net tries, and completion first still
+stands: a via below a rule ships when nothing else connected the net. Under
+`--escalation board` no rung is below them. The fanouts, plane taps and rescue
+paths walk the same ladder. A via-in-pad the clamp shrinks to fit its pad is
+held to the same rules (#1727): where a via of the pad's size can meet them, it
+takes the drill that leaves the rule's ring and meets the hole minimum, rather
+than keeping the requested drill round the rung's own ring. Where none can (the
+pad is under the diameter minimum, or too small for the ring round the hole
+minimum) every via there breaks a rule, and the clamp sizes it as before.
+
+Every such rule is graded when route.py or route_diff.py ends, over the vias the
+step laid: `.kicad_dru rule 'rf ring' (annular_width min 0.07 mm): this step's 7
+via(s) it binds meet it (smallest ring 0.075 mm)`, or `... 7 BELOW it`, and
+likewise for `via_diameter` and `hole_size`. `design_rules.annular_rules` in
+`JSON_SUMMARY` carries each ring rule's `min`, `vias`, `below` and
+`smallest_ring` (#1649), and `design_rules.via_rules` each size rule's `kind`,
+`min`, `vias`, `below` and `smallest`. A via counts for the rule that sets its
+minimum (the last matching rule, as KiCad resolves it). An `annular_width` rule
+is also listed NOT honoured at the start of every step that reads the rules,
+whatever the vias are (#1490), since an explicit via and a descent need not hold
+it. `list_nets.py --design-rules` lists the rules that set a minimum below the
+Board Setup one, with the condition each binds.
+
+**Via count rules (#1707).** A `(constraint via_count (min N) (max M))` rule is
+not honoured by any routing step: a net is routed with the vias it needs
+(completion first), so every step that reads the rules lists it NOT honoured on
+the console, and route.py in `design_rules.unsupported_rules`. `check_drc.py`
+grades it (`via-count-out-of-range`, KiCad's `too_many_vias`), and board_score
+counts it in `drc`.
+
+**Edge clearance rules (#1678).** A `.kicad_dru` `edge_clearance` rule holds the
+tracks and vias of every routing step, on both fronts, with no flag or control,
+and `check_drc.py` grades them at it. It replaces `--board-edge-clearance` and the
+Board Setup minimum for what it binds, tightening or relaxing, and only the fab
+floor pins it up on what is routed; check_drc grades KiCad's value. It is read as
+kicad-cli 10.0.6 reads it:
+
+- A `(layer ...)` clause scopes a zone's gap (#1643) and nothing else: `(layer
+  inner)` also binds an F.Cu track, an F.Cu pad and a through via.
+- The condition is read for the item: `A.Type`, `A.NetName`, `A.NetClass`,
+  `A.Layer` (a track's own layer; a via has none) and `A.existsOnLayer`. KiCad
+  tries it both ways with the Edge.Cuts shape as the other item, so `A.Type !=
+  'Via'` binds a via too.
+- A condition the tools cannot decide for a track or via (a courtyard or area
+  term) is a range: a step holds the larger value, and check_drc fails copper only
+  short of the smaller, publishing what lies between as `edge-rule-undecided`.
+
+The board's shared edge band is each kind's lowest floor over the nets, and a net
+above it gets the rest while it routes. A step or pass that keeps one number (a
+plane tap, a meander, the oracle, `qfn_fanout.py`) holds the strictest floor of any
+net, so it cannot break a rule, and can hold a net further from the edge than its
+own rule asks. `bga_fanout.py` has no edge clearance of its own: its obstacle map's band,
+once the copper clearance, is now each kind's lowest floor, so on a board whose rule
+binds some nets harder than others an escape is held by the route step that follows
+and graded by check_drc. The start of
+the step prints `.kicad_dru rule 'x': edge_clearance min 1 mm: the tracks and vias
+it binds are held to 1 mm from Edge.Cuts`, and its end grades the step's copper:
+`... this step's 256 track(s), 36 via(s) it binds: 1 closer to Edge.Cuts`, with
+`design_rules.edge_rules` in `JSON_SUMMARY` (`min`, `tracks`, `vias`, `closer`,
+`closest`). A track may stay inside the rule only where it lands on a pad that is
+itself inside it (check_drc accepts it as `edge-exempt-pad`; KiCad flags both). The
+rule stays in the rule file: the output project's `min_copper_edge_clearance`
+records what the step resolved before it.
+
+**A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
+it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on
+kicad-cli 10.0.6). A condition does it with a function or property KiCad does not
+know (`A.onLayer('F.Cu')`, `A.Foo`), a plain number against anything but a number
+(`A.NetName == 1`, `A.Pad_Number < 2`, `A.Width > 1`), a call short of an argument
+(`A.hasNetclass()`), or a syntax error (`A.Type = 'Via'`, an unbalanced
+parenthesis); so does an unknown constraint, severity or clause, a length with no
+unit (`(min 1)`), a copper layer KiCad has no such name for (`Foo.Cu`), and a file
+with no `(version ...)` line. Each step that reads the rules, and check_drc, says so
+first, naming the rule: `.kicad_dru: KiCad ENFORCES NO RULE OF THIS FILE: rule 'x':
+...`, and `kicad_refuses_file` (rule, reason) is in `JSON_SUMMARY.design_rules` and
+in check_drc's `--json`. The tools still read the file's other rules, so such a board
+is routed and graded by rules KiCad's DRC is not applying until the file is fixed.
 
 **Disclosure.** Every descent is recorded and reported three ways: the
 `JSON_SUMMARY` block `design_rules` (policy, tier, the board floors read, every

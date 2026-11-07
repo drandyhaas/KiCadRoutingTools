@@ -39,7 +39,8 @@ the same way.
    its inferred one) the intent declares on an edge
    (`edge_connectors[]` with an `edge`) is held to that edge
    (`placement/edge_seat.py`): its mating face out, flush with the low
-   end of its overhang band, and the anneal only slides it along the edge
+   end of its overhang band (and, where an armed setback reads its drawn
+   body, that body flush), and the anneal only slides it along the edge
    (and turns it, when it has no mating face). Parts declared on one edge
    that cannot all stand there together keep the most that fit, the
    earlier declared on a tie; the rest are placed as any other part, and
@@ -529,7 +530,8 @@ def illegal_reason(st, model, r):
         if not legal_on_edge(st, r, pose):
             return 'no legal seat on its declared edge'
     elif not legal(st, r, *pose):
-        if st.edge_gate.rect_outside_amount(rects[0]) > BOARD_TOL:
+        if st.edge_gate.rect_outside_amount(
+                rects[0], skip_rings=st._owned_rings(r)) > BOARD_TOL:
             return 'its courtyard is off the board'
         ko = st.keepout_blockers(r, rects)
         if ko:

@@ -72,7 +72,8 @@ class Parser(unittest.TestCase):
         self.assertEqual(c['length'], {'min': 42.5, 'max': 43.5, 'opt': 43.0})
         self.assertEqual(c['disallow'], {'disallow': {'buried_via', 'micro_via'}})
         self.assertEqual(r.layer_clause, 'outer')
-        # via_count / length are parsed but nobody consumes them yet: SAID.
+        # length is parsed and routed to by nothing: SAID (via_count is named
+        # NOT honoured by `unsupported()` instead, #1707).
         self.assertEqual(r.unconsumed_kinds, ['length'])
         self.assertEqual(notes, [])
 
