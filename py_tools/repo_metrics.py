@@ -513,9 +513,11 @@ def _line_chart(series, width=880, height=200, mark=None):
                    f'class="grid" vector-effect="non-scaling-stroke"/>')
     for s in series:
         pts = ' '.join(xy(i, s['points'].get(d, 0)) for i, d in enumerate(days))
-        out.append(f'<polyline points="{pts}" fill="none" stroke="{s["color"]}" '
+        color = s['color']
+        dash = 'stroke-dasharray="6 4" ' if s.get('dash') else ''
+        out.append(f'<polyline points="{pts}" fill="none" stroke="{color}" '
                    f'stroke-width="2" stroke-linejoin="round" '
-                   f'{"stroke-dasharray=\"6 4\" " if s.get("dash") else ""}'
+                   f'{dash}'
                    f'vector-effect="non-scaling-stroke"/>')
     if mark and mark[0] in days:
         x = xy(days.index(mark[0]), 0).split(',')[0]
