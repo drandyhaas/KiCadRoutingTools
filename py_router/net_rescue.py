@@ -1575,6 +1575,24 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                  f" stay where they are" if _capmv666
                                  else ""))
                         continue
+                    # ...and against the net-filtered keep-outs binding the
+                    # net (net_keepouts): the fanout ladder places on maps
+                    # the per-route region stamp never reaches. The dogbone
+                    # tap above (tap_pad_with_escalation) checks the same.
+                    if getattr(pcb_data, '_net_keepouts', None):
+                        from net_keepouts import audit as _nk_audit
+                        _ko666 = _nk_audit(pcb_data, _gsegs, _gvias)
+                        if _ko666:
+                            print(f"    bare-ball escape: "
+                                  f"{_pad.component_ref}.{_pad.pad_number} "
+                                  f"declined (escape inside net keep-out(s) "
+                                  + ', '.join(f"{r['region']}" for r in _ko666)
+                                  + ")"
+                                  + (f"; cap(s) "
+                                     f"{', '.join(m['reference'] for m in _capmv666)}"
+                                     f" stay where they are" if _capmv666
+                                     else ""))
+                            continue
                     pcb_data.segments.extend(_gsegs)
                     pcb_data.vias.extend(_gvias)
                     # #803: bump the copper epoch -- _blockid_geom_memo and
