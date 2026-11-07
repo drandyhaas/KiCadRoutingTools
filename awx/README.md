@@ -1200,7 +1200,11 @@ with no plan names, in its rules core, the lanes and rules it could not hold
 together; a tooth's fixed layer is its own rule there (`toothlay`, a berth's
 `berthlay`). Each such lane alone is escaped again off that layer
 (`whole_route.repair_layers`, `ends_reescape.py --avoid`) and the round's
-solve asked again on the repaired bench. Where no escape of the ball clears,
+solve asked again on the repaired bench. An escape clears when its first
+stretch past the exit is clear on its layer and its via, where it has one, on
+every layer; one the engine lays back on the layer to avoid (its ladder falls
+to a surface stub when the asked via cannot stand) is refused and the next
+tried. Where no escape of the ball clears,
 its menu is read again without the escapes of other nets near the ball --
 unlocked, fanned, not yet routed -- and an escape only those stand in is laid
 with them escaped again in the same call (`source_realize.realize`'s

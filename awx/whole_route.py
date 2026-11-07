@@ -2321,9 +2321,13 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         # the round lays it; the loop's own re-solves still take only a proved one)
         # (and one with NO plan names, in the round's log, the lanes whose crossings the ends leave no room for --
         # whole_solve SOLVE_CROWD, its CROWD diagnosis)
+        # (...and none of an earlier run's in the round's directory: a run into an output routed before reuses its run
+        # directory, and a solve with no plan writes no plan -- the plan left there was read as this solve's, on another
+        # bench)
         crowded_f = os.path.join(d, 'solve.crowded.json')
-        if os.path.exists(crowded_f):
-            os.remove(crowded_f)
+        for f_ in (solve, crowded_f):
+            if os.path.exists(f_):
+                os.remove(f_)
         jfin = {}
         if env.get('JOINT_DIR'):
             # (the buses ended now: this solve's and the coupled solve's model both read their lanes, and no other's)
@@ -2357,7 +2361,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 say(ln[:200])
             if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
                 jcuts = joint_sync({**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin}, r, solve, say)
-            crowded = json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []
+            # (a re-solve with no diagnosis of its own -- its setup refused the repaired bench -- keeps the first's)
+            crowded = (json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []) or crowded
             no_plan = not os.path.isfile(solve)
         if no_plan:
             say("  no plan from the solve -- nothing for this round to lay"

@@ -67,11 +67,19 @@ def foreign_d(q, layer, nid):
 
 def clears(m, nid):
     """(ok, its worst clearance): the escape's first REACH past its exit clear of every other net's copper on its
-    layer by the bar"""
+    layer by the bar, and its via, where it has one, clear of it on every copper layer by a via's own bar (a via in
+    a memory bus's edge-ball pad, its exit run clear on B.Cu, stood on a neighbour's In2.Cu escape under the ball:
+    the engine laid the ball's surface stub on the very layer it was asked off)"""
     dx, dy = em.DIRS[m.direction]
     worst = min(foreign_d((m.exit_pt[0] + dx * k * REACH / 4, m.exit_pt[1] + dy * k * REACH / 4), m.layer, nid)
                 for k in range(5))
-    return worst >= bar, worst
+    ok = worst >= bar
+    if m.vias and m.site is not None:
+        need_ = te.VIA_SIZE / 2 + te.CLEAR + MARGIN
+        via_ = min(foreign_d(m.site, L_, nid) for L_ in pcb.board_info.copper_layers)
+        ok = ok and via_ >= need_
+        worst = min(worst, via_ - need_ + bar)
+    return ok, worst
 
 
 # (the SOURCE end -- the bench is fanned at both arrays: the two ends told apart by the destination, plan_state's)
@@ -223,7 +231,14 @@ for _k, m, d in cands[:TRIES]:
     res = sr.realize(bench, {lane: m}, pads_, byname, sref, out, log=lambda s: print('  ' + s), guard_names=(),
                      free=[n_ for n_ in free.get(id(m), ()) if pads_.get(n_) is not None])
     if lane in (res.get('ok') or []) and not res.get('rejected'):
-        break
+        # (off LAYER: an escape the engine laid back on it -- its ladder falls to the surface when the asked via
+        # cannot stand -- is no escape off it, and the next is tried)
+        got_ = sr.measure_tooth(parse_kicad_pcb(out), lane, src_pad[lane], byname, dest_ref=st['dref'], which='src') \
+            if AVOID else None
+        if got_ is None or got_['layer'] != AVOID:
+            break
+        print(f'  realize laid {m!r} back on {AVOID}: refused')
+        continue
     print(f'  realize refused {m!r}: {res.get("rejected") or res.get("restored")}')
 else:
     print('ends_reescape: no escape laid')
