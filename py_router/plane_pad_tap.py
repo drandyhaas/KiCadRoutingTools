@@ -1292,6 +1292,19 @@ def try_tap_pad(
         def zone_filter(x, y):
             return any(point_in_polygon(x, y, poly) for poly in _net_zone_polys)
 
+    # A net-filtered keep-out that forbids the net's vias (net_keepouts): this
+    # search places on maps of its own, which the per-route region stamp never
+    # reaches, so skip the sites inside such a region and go on to the next
+    # one. tap_pad_with_escalation still audits the result, which also covers
+    # the via -> pad trace and the edge clamp's move.
+    from net_keepouts import via_site_filter
+    _ko_ok = via_site_filter(pcb_data, net_id, via_size)
+    if _ko_ok is not None:
+        _zone_ok = zone_filter
+
+        def zone_filter(x, y):
+            return _ko_ok(x, y) and (_zone_ok is None or _zone_ok(x, y))
+
     ghost_pref = None
     if corridor_ghosts is not None:
         # #517 arm 2: soft preference for via sites OUTSIDE vacated ripped
@@ -1389,10 +1402,11 @@ def try_tap_pad(
     return _gate(TapResult(success=True, via=via, segments=segments))
 
 
-def _tap_in_net_keepout(pcb_data: PCBData, net_id: int, result: TapResult) -> bool:
-    """Does a tap's new copper (its via and traces) put `net_id` inside a
-    net-filtered keep-out that binds it (net_keepouts)? Judged by
-    net_keepouts.audit, the geometry KiCad's DRC grades.
+def _tap_in_net_keepout(pcb_data: PCBData, net_id: int, result: TapResult) -> List[Dict]:
+    """The net-filtered keep-outs (net_keepouts) that a tap's new copper (its
+    via and traces) puts `net_id` inside, as `net_keepouts.audit` rows; []
+    when it is clean. Judged by net_keepouts.audit, the geometry KiCad's DRC
+    grades.
 
     The tap places on maps of its own, which the per-route region stamp
     (net_keepouts.stamp) never reaches, and its callers lay the copper
@@ -1401,9 +1415,12 @@ def _tap_in_net_keepout(pcb_data: PCBData, net_id: int, result: TapResult) -> bo
     A boxed power pad beside a mask opening only GND may cross got such an
     escape via 0.13 mm inside the region; a bottom-side pad under it got an
     in-pad dogbone whose barrel reached the region's top-side copper. KiCad
-    grades both items_not_allowed (and, there, solder_mask_bridge)."""
+    grades both items_not_allowed (and, there, solder_mask_bridge).
+    try_tap_pad's via search already skips sites inside such a region
+    (net_keepouts.via_site_filter); this also judges the via -> pad trace and
+    a via the edge clamp moved."""
     if not getattr(pcb_data, '_net_keepouts', None):
-        return False
+        return []
     from net_keepouts import audit
     vias = []
     if result.via is not None:
@@ -1414,11 +1431,7 @@ def _tap_in_net_keepout(pcb_data: PCBData, net_id: int, result: TapResult) -> bo
                     end_x=sd['end'][0], end_y=sd['end'][1],
                     width=sd['width'], layer=sd['layer'], net_id=net_id)
             for sd in (result.segments or [])]
-    found = audit(pcb_data, segs, vias)
-    if found:
-        name = getattr(pcb_data.nets.get(net_id), "name", net_id)
-        print(f"    tap of {name} refused: its copper is inside net keep-out(s) {found}")
-    return bool(found)
+    return audit(pcb_data, segs, vias) or []
 
 
 def tap_pad_with_escalation(
@@ -1459,6 +1472,7 @@ def tap_pad_with_escalation(
     fine-pitch neighborhoods also benefit from the fine parameters).
     """
     last_failure = TapResult(success=False)
+    ko_refused: List[Dict] = []     # the last rung a net keep-out refused
     if try_default:
         result = try_tap_pad(
             pad, pad_layer, net_id, pcb_data, config, max_search_radius,
@@ -1468,8 +1482,10 @@ def tap_pad_with_escalation(
             shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
             plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
             ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap)
-        if result.success and _tap_in_net_keepout(pcb_data, net_id, result):
-            result = TapResult(success=False)
+        if result.success:
+            _ko = _tap_in_net_keepout(pcb_data, net_id, result)
+            if _ko:
+                ko_refused, result = _ko, TapResult(success=False)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1531,8 +1547,10 @@ def tap_pad_with_escalation(
                 shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
                 plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
                 ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap)
-            if result.success and _tap_in_net_keepout(pcb_data, net_id, result):
-                result = TapResult(success=False)
+            if result.success:
+                _ko = _tap_in_net_keepout(pcb_data, net_id, result)
+                if _ko:
+                    ko_refused, result = _ko, TapResult(success=False)
             if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
@@ -1543,6 +1561,11 @@ def tap_pad_with_escalation(
                 return result
             last_failure = result
 
+    if ko_refused:
+        print(f"    tap of {pad.component_ref}.{pad.pad_number} refused: its copper "
+              f"is inside net keep-out(s) " + '; '.join(
+                  f"{r['region']}: {r['net']} ({r['tracks']} track(s), {r['vias']} via(s))"
+                  for r in ko_refused))
     # Return the last failure so a rip-up caller sees its via_blocked /
     # blocked_cells diagnostics.
     return last_failure

@@ -667,6 +667,42 @@ def audit_items(pcb_data, segments, vias, keepouts):
                     yield ko, 'via', v
 
 
+def via_site_filter(pcb_data, net_id: int, via_size: float, layers=None):
+    """An (x, y) -> bool predicate: may a via of `net_id` (diameter
+    `via_size`, spanning `layers`; None = a through via) sit at (x, y)
+    without entering a region that forbids it the net's vias? None when no
+    region does, so a caller adds nothing to its search.
+
+    For a via search that places on maps of its own, which `stamp()` never
+    reaches (the pad taps): skipping the sites `audit` would refuse lets the
+    search go on to the next site rather than fail. It judges each site by
+    `audit_items`, so the two cannot disagree; a bounding-box test keeps the
+    far sites cheap."""
+    net = pcb_data.nets.get(net_id)
+    name = getattr(net, 'name', None)
+    kos = [ko for ko in getattr(pcb_data, '_net_keepouts', None) or ()
+           if not ko.get('edge_band') and not ko.get('layer_ban')
+           and not ko.get('vias_allowed', True) and name and binds(ko, name)]
+    if not kos:
+        return None
+    view = SimpleNamespace(nets={net_id: net}, board_info=pcb_data.board_info)
+    r = via_size / 2
+    boxes = [(min(p[0] for p in ko['polygon']) - r, min(p[1] for p in ko['polygon']) - r,
+              max(p[0] for p in ko['polygon']) + r, max(p[1] for p in ko['polygon']) + r)
+             for ko in kos]
+    vlayers = list(layers or ())
+
+    def allowed(x, y):
+        near = [ko for ko, (x0, y0, x1, y1) in zip(kos, boxes)
+                if x0 <= x <= x1 and y0 <= y <= y1]
+        if not near:
+            return True
+        via = SimpleNamespace(x=x, y=y, size=via_size, layers=vlayers, net_id=net_id)
+        return next(audit_items(view, (), (via,), near), None) is None
+
+    return allowed
+
+
 def audit(pcb_data, segments, vias,
           keepouts: Optional[List[dict]] = None) -> Optional[List[dict]]:
     """The copper of `segments` / `vias` that a net-filtered keep-out forbids

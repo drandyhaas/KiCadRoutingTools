@@ -47,6 +47,14 @@ def _pcb(region_nets, pad_layer='F.Cu'):
     return pcb, pad
 
 
+def _seg(sd):
+    """A tap's segment dict as a Segment of net PWR."""
+    from kicad_parser import Segment
+    return Segment(start_x=sd['start'][0], start_y=sd['start'][1],
+                   end_x=sd['end'][0], end_y=sd['end'][1],
+                   width=sd['width'], layer=sd['layer'], net_id=5)
+
+
 def _config():
     return GridRouteConfig(grid_step=0.05, clearance=0.1, track_width=0.12,
                            via_size=0.45, via_drill=0.2, layers=list(LAYERS))
@@ -96,6 +104,24 @@ def run():
                   t.success and bool(vias))
         else:
             check("bottom pad, bound net: no tap via inside the region", found == [])
+            # The search skips the region's sites and goes on to the next one
+            # (net_keepouts.via_site_filter) rather than failing: there is
+            # room outside the region well within the 1.5 mm search.
+            check("bottom pad, bound net: the tap relocates its via outside the region",
+                  t.success and bool(vias) and found == []
+                  and nk.audit(pcb, [_seg(sd) for sd in t.segments], []) == [])
+
+    # The site predicate itself: None when nothing binds the net's vias, and
+    # it agrees with the audit on both sides of the region's edge.
+    pcb, _ = _pcb({'GND'})
+    check("via_site_filter: None for a net no region binds",
+          nk.via_site_filter(pcb, 5, 0.45) is None)
+    pcb, _ = _pcb({'PWR'})
+    ok = nk.via_site_filter(pcb, 5, 0.45)
+    check("via_site_filter: refuses the region's centre", ok is not None and not ok(10.0, 10.0))
+    check("via_site_filter: refuses a ring that grazes the edge", not ok(10.7, 10.0))
+    check("via_site_filter: allows a ring clear of the edge", ok(10.75, 10.0))
+    check("via_site_filter: allows a far site", ok(15.0, 15.0))
 
     print()
     if fails:
