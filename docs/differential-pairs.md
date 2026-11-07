@@ -332,7 +332,11 @@ For each angle:
 1. Check if the position is blocked in the obstacle map
 2. Check if the connector path from stub center is clear
 
+A long bare pad launches from its edge rather than its centre, and the setback is then pulled in by the same distance so the setback point stands where a centre launch would put it.
+
 The first distance with a clear angle wins (0° is preferred unless it sits too close to a neighbouring stub). If no distance works, the ladder is re-run with the launch direction rotated 90°, −90° and 180°, so a terminal buried in a dense row can launch sideways or backwards; such a launch routes like a flipped end (it must wrap around its endpoint).
+
+A pulled-in launch has two far rungs as well, tried straight and then rotated, only once the whole ladder has failed in every direction (#1736). They stand where a centre launch's 1.5× and 2× rungs stand: half and one configured setback past the pulled-in setback. 1.5× and 2× of the pulled-in setback leave even the outermost rung within a third of a millimetre of a long pad's edge, short of where a pair priced at its layer width clears the pads beside its own. They come last because a far launch, tried with the ladder, wins over the rotated launch that routes such a pair better.
 
 ### Extra Clearance
 
