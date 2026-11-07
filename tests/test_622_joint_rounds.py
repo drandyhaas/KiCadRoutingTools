@@ -28,12 +28,26 @@ in
    checked against other nets' copper only -- so a piece the board already had read clear and was laid again on itself
    (sdi_mipi_conv's DDR3 bus after the SDI bus on the shared U11: 168 vias stacked on their own copies). Pinned on the
    generated bus with three balls dog-boned: carried onto the bare board each piece is laid once, onto the fanned board
-   none again.
+   none again;
+5. a round's blocked teeth (whole_route.put_blocked: no escape of their ball's clears) are carried to every later round,
+   whose ends model prices them where it chooses the teeth -- but the source realize re-plans the whole bus, and its
+   whole-array plan moved the nets the ends model did not ask for wherever it liked: a memory bus's address line was
+   put back on its blocked tooth in each of the three rounds after the one that found it, and left open in all four;
+   kept off it alone, its neighbour took the place and was blocked there in its stead. Pinned on the generated bus,
+   the plan stubbed: the realize asks it to keep every net it places off each blocked tooth at the source, on its
+   layer -- a single's, both of a pair's, one a net it does not plan found -- and off no crowded tooth that is not
+   blocked, no destination's end;
+6. ...and the whole-array plan reads such a place on its layer alone. Priced, a run there was paid for by whichever
+   ball took the exit, on whichever layer the colouring gave it, so the plan took the same exit as unpriced and its run
+   was coloured onto the blocked layer again. On a generated four-copper bus: a run's exit avoided on its layer, the
+   run leaves there on another, every bus ball served; a surface exit avoided on its layer, no ball leaves there on it;
+   avoided on the other outer layer alone, the ball keeps its exit.
 """
 import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import subprocess
 import sys
@@ -136,9 +150,10 @@ def synth_board(tmp):
     return raw
 
 
-def realize_asks(board, tmp, route_layers, tag):
+def realize_asks(board, tmp, route_layers, tag, env=None, seen=None):
     """realize() of ONE asked net under the whole-array fanout, the whole-array plan and the engine stubbed: (the bus
-    the plan was asked for, its preferences, the realize's result) -- the plan None when the realize never asked one"""
+    the plan was asked for, its preferences, the realize's result) -- the plan None when the realize never asked one.
+    `env`: settings over the run's; `seen`: filled with what the plan was asked, its `avoid` among it"""
     with contextlib.redirect_stdout(io.StringIO()):
         pcb = parse_kicad_pcb(board)
     byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
@@ -157,10 +172,10 @@ def realize_asks(board, tmp, route_layers, tag):
     spec = os.path.join(tmp, f'joint_{tag}.json')
     json.dump({'arrays': [{'ref': 'SU1', 'others': [], 'drops': []}, {'ref': 'SD1', 'others': [], 'drops': []}],
                'layers': ['F.Cu', 'B.Cu']}, open(spec, 'w'))
-    seen = {}
+    seen = {} if seen is None else seen
 
     def plan_array(pcb_, ref, bus, others, layers, **kw):
-        seen['bus'], seen['prefer'] = list(bus), dict(kw.get('prefer') or {})
+        seen['bus'], seen['prefer'], seen['avoid'] = list(bus), dict(kw.get('prefer') or {}), kw.get('avoid')
         return {}, {'status': 'STUB', 'pairs_escaped': 0, 'pairs': 0, 'others_escaped': 0, 'others_strapped': 0,
                     'others_balls': 0, 'dropped': 0, 'plane_balls': 0, 'hands_held': [], 'hands_free': []}
 
@@ -175,7 +190,8 @@ def realize_asks(board, tmp, route_layers, tag):
     # (the drift guard's reading of the unasked teeth: the generated board has no copper to walk)
     sr.te.endpoints = lambda pcb_, nms, byname_, **_k: {nm: ((0.0, 0.0), (0.0, 0.0)) for nm in nms}
     try:
-        with awx_settings.given({**awx_settings.environ(), 'FANOUT_JOINT': spec, 'ROUTE_LAYERS': route_layers}), \
+        with awx_settings.given({**awx_settings.environ(), 'FANOUT_JOINT': spec, 'ROUTE_LAYERS': route_layers,
+                                 **(env or {})}), \
                 contextlib.redirect_stdout(io.StringIO()):
             res = sr.realize(board, {asked: move}, src_pad, byname, 'SU1', os.path.join(tmp, f'out_{tag}.kicad_pcb'),
                              log=lambda *_a: None, guard_names=names)
@@ -274,6 +290,91 @@ def check_carry_once(tmp):
           f'vs {counts(fanned)}')
 
 
+def check_blocked_avoided(tmp):
+    print('5. a source realize under the whole-array fanout keeps its plan off the run\'s blocked teeth')
+    import pairs as _pairs
+    board = synth_board(tmp)
+    seen0 = {}
+    _a, names, bus, _p, _r = realize_asks(board, tmp, 'F.Cu,B.Cu,In1.Cu,In2.Cu', 'free', env={'ENDS_BLOCKED': ''},
+                                          seen=seen0)
+    prs = _pairs.pair_names(names)
+    legs = {leg for pr in prs.values() for leg in pr}
+    singles = [nm for nm in names if nm not in legs]
+    # (the case reaches what it pins: the plan asked, a pair and three singles among the realize's nets)
+    if bus is None or not prs or len(singles) < 3:
+        raise SystemExit(f'BROKEN TEST: the generated bus gives {len(prs)} pair(s) and {len(singles)} single(s), the '
+                         f'plan {"asked" if bus is not None else "never asked"}')
+    check(seen0.get('avoid') is None, f'nothing blocked: the plan avoids nothing ({seen0.get("avoid")})')
+    base, (leg_p, leg_n) = sorted(prs.items())[0]
+    s1, s2, s3 = singles[-3:]
+    path = os.path.join(tmp, 'blocked_ends.json')
+    json.dump({'avoid': [
+        {'lane': s1, 'end': 0, 'points': [[1.0, 2.0]], 'layer': 'In1.Cu', 'blocked': True},
+        {'lane': base, 'end': 0, 'points': [[3.0, 4.0], [3.0, 4.8]], 'layer': 'In1.Cu', 'blocked': True},
+        # (a feedback round's crowded tooth, not blocked: the ends model's to price, as before)
+        {'lane': s2, 'end': 0, 'points': [[5.0, 6.0]], 'layer': 'F.Cu'},
+        # (a blocked end at the DESTINATION; and one a net this realize does not plan found, its place dead all the
+        # same)
+        {'lane': s3, 'end': 1, 'points': [[7.0, 8.0]], 'layer': 'F.Cu', 'blocked': True},
+        {'lane': 'NOT_A_BUS_NET', 'end': 0, 'points': [[9.0, 9.0]], 'layer': 'F.Cu', 'blocked': True}]},
+        open(path, 'w'))
+    seen = {}
+    realize_asks(board, tmp, 'F.Cu,B.Cu,In1.Cu,In2.Cu', 'blocked', env={'ENDS_BLOCKED': path, 'FEEDBACK': ''},
+                 seen=seen)
+    got = {k: sorted(tuple(p_) for p_ in v) for k, v in (seen.get('avoid') or {}).items()}
+    places = sorted([(1.0, 2.0, 'In1.Cu'), (3.0, 4.0, 'In1.Cu'), (3.0, 4.8, 'In1.Cu'), (9.0, 9.0, 'F.Cu')])
+    check(sorted(got) == sorted(names), f'every net the plan places avoids them ({len(got)} of {len(names)})')
+    check(all(v == places for v in got.values()),
+          f'each avoids every blocked tooth at the source on its layer -- a single\'s, both of a pair\'s, one found '
+          f'by a net it does not plan -- and no other: {sorted(set(map(tuple, got.values())))}')
+
+
+def check_avoid_layer(tmp):
+    print('6. the whole-array plan keeps every bus net off an avoided place on its layer, and only on its layer')
+    raw = os.path.join(tmp, 'bus6.kicad_pcb')
+    # (balls 0.5 mm across: no track between two, so the deeper balls leave by a via and a run)
+    r = subprocess.run([sys.executable, 'synth_bus.py', raw, '--copper', '4', '--k', '16', '--depth', '4', '--pad',
+                        '0.5', '--pattern', 'shuffle', '--seed', '1'], cwd=AWX, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.isfile(raw):
+        raise SystemExit(f'BROKEN TEST: synth_bus wrote no four-copper board -- {(r.stderr or r.stdout)[-300:]}')
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = parse_kicad_pcb(raw)
+    bus = sorted(n.name for n in pcb.nets.values() if any(p.component_ref == 'SU1' for p in n.pads)
+                 and any(p.component_ref == 'SD1' for p in n.pads))
+    short = [nm.split('/')[-1] for nm in bus]
+
+    def plan(avoid=None):
+        with awx_settings.given({**awx_settings.environ(), 'ROUTE_LAYERS': 'F.Cu,B.Cu,In1.Cu,In2.Cu'}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            import route_layers as rl
+            hints, rep = je.plan_array(pcb, 'SU1', bus, [], ['F.Cu', 'B.Cu'], far=je.far_face(pcb, 'SU1', 'SD1'),
+                                       log=lambda *_a: None, vias_only=rl.escape_vias('src'), avoid=avoid)
+        return hints, rep
+    at_ = lambda hints, ex, layer: [k for k, v in hints.items() if v.get('layer') == layer       # noqa: E731
+                                    and math.hypot(v['exit'][0] - ex[0], v['exit'][1] - ex[1]) < 1e-6]
+    h0, rep0 = plan()
+    runs = sorted((k, v) for k, v in h0.items() if v.get('layer') == 'B.Cu' and v.get('kind') != 'surface')
+    surf = sorted((k, v) for k, v in h0.items() if v.get('layer') == 'F.Cu' and v.get('kind') == 'surface')
+    # (the case reaches what it pins: every bus ball served, one by a via and its run on B.Cu, one on the surface)
+    if rep0.get('bus_escaped') != len(bus) or not runs or not surf:
+        raise SystemExit(f'BROKEN TEST: the free plan served {rep0.get("bus_escaped")} of {len(bus)} bus balls, '
+                         f'{len(runs)} by a run on B.Cu, {len(surf)} on the surface')
+    ball, mv = runs[0]
+    h1, rep1 = plan({nm: [(mv['exit'][0], mv['exit'][1], 'B.Cu')] for nm in short})
+    got = h1.get(ball) or {}
+    check(rep1.get('bus_escaped') == len(bus) and not at_(h1, mv['exit'], 'B.Cu') and got.get('exit') == mv['exit']
+          and got.get('layer') not in (None, 'B.Cu'),
+          f'a run\'s exit avoided on B.Cu: every bus ball served ({rep1.get("bus_escaped")} of {len(bus)}), the run '
+          f'leaving there on another layer ({got.get("exit")} on {got.get("layer")})')
+    ball, mv = surf[0]
+    h2, rep2 = plan({nm: [(mv['exit'][0], mv['exit'][1], 'F.Cu')] for nm in short})
+    check(rep2.get('bus_escaped') == len(bus) and not at_(h2, mv['exit'], 'F.Cu'),
+          f'a surface exit avoided on F.Cu: every bus ball served ({rep2.get("bus_escaped")} of {len(bus)}), none '
+          f'leaving there on F.Cu ({at_(h2, mv["exit"], "F.Cu")})')
+    h3, _rep3 = plan({nm: [(mv['exit'][0], mv['exit'][1], 'B.Cu')] for nm in short})
+    check((h3.get(ball) or {}).get('exit') == mv['exit'] and (h3.get(ball) or {}).get('layer') == 'F.Cu',
+          f'the surface exit avoided on B.Cu alone: the ball keeps it on F.Cu ({h3.get(ball)})')
+
 def _pad_xy(board, names):
     with contextlib.redirect_stdout(io.StringIO()):
         pcb = parse_kicad_pcb(board)
@@ -294,6 +395,7 @@ def main():
         check_source_board_named(tmp)
         check_bus_replanned(tmp)
         check_carry_once(tmp)
+        check_blocked_avoided(tmp)
         try:
             import ortools  # noqa: F401  (check 3's whole-array plan is a CP-SAT solve)
         except ImportError as exc:
@@ -301,15 +403,17 @@ def main():
                 for f in BAD:
                     print(f'  FAIL: {f}')
                 sys.exit(1)
-            print('SKIP: check 3 needs ortools (%s); checks 1, 2 and 4 passed' % exc)
+            print('SKIP: checks 3 and 6 need ortools (%s); checks 1, 2, 4 and 5 passed' % exc)
             sys.exit(77)
         check_plan_reproducible(tmp)
+        check_avoid_layer(tmp)
     if BAD:
         for f in BAD:
             print(f'  FAIL: {f}')
         sys.exit(1)
     print('PASS: the next round starts from the source the round realized; a source re-fan plans every pair whole; '
-          'the whole-array plan is the same in every process; a carried piece is laid once')
+          'the whole-array plan is the same in every process; a carried piece is laid once; the plan keeps off the '
+          'blocked teeth, on their layers')
 
 
 if __name__ == '__main__':

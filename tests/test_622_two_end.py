@@ -10,7 +10,9 @@ On boards stood in for, this pins:
 2. whole_frame.Group: the parts' copper boxes joined into one outline by the narrowest strips that join them (the
    longest gap of the tree of nearest gaps, and a lane pitch), its front the hull's face toward the source;
 3. a lane's ways in: on the outline; out of either mouth of a pocket, or straight under the part in front of it where
-   that part leaves the berth's layer open; under its own part from its far face, with a via;
+   that part leaves the berth's layer open; under its own part from its far face, with a via; Group.landings: the
+   lanes leaving one mouth land on it in their order, a lane's room apart from the end at their own part's wall,
+   spread evenly over a mouth too short for that;
 4. Group.arrange: the ways and the cut that cross the fewest -- the best of every valid split of each pocket's lanes
    (in their order along it), Group.score's every-cut count the count cut by cut, the cut off the front;
 5. braid.net_dest: a net's end at the part it reaches, the first named when it reaches none;
@@ -103,6 +105,14 @@ w_back = G.options((22.5, 0.0), (1.0, 0.0), 'J', 'B.Cu', True)
 check(sorted(w[0] for w in w_back) == ['on', 'under'], f'3: a far-face berth with a via -- on, or under J: {w_back}')
 check(not any(w[0] == 'under' for w in G.options((22.5, 0.0), (1.0, 0.0), 'J', 'B.Cu', False)),
       '3: no way under J on B.Cu, its own layer, without a via')
+# ...the landings on a mouth from (0, 0) to (0, 10): three lanes placed at its a end, one at its b end
+ld = wf.Group.landings((0.0, 0.0), (0.0, 10.0), [('a1', (0, 0.1)), ('a2', (0, 0.2)), ('a3', (0, 0.3)),
+                                                  ('b1', (0, 9.9))], 0.4)
+check({n: round(p[1], 6) for n, p in ld.items()} == {'a1': 0.4, 'a2': 0.8, 'a3': 1.2, 'b1': 9.6},
+      f'3: a wide mouth -- its lanes a lane\'s room apart from their own wall: {ld}')
+ld = wf.Group.landings((0.0, 0.0), (0.0, 1.0), [('a1', (0, 0.1)), ('a2', (0, 0.2)), ('b1', (0, 0.9))], 0.4)
+check({n: round(p[1], 6) for n, p in ld.items()} == {'a1': 0.25, 'a2': 0.5, 'b1': 0.75},
+      f'3: a mouth too short for them -- spread evenly: {ld}')
 # 4. the arrangement: every lane's ways and the cut, the fewest crossings -- equal to the best of every valid split
 # (each pocket's lanes in their order along it), and Group.score's crossings at every cut one by one
 import itertools  # noqa: E402

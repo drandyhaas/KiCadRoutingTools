@@ -581,12 +581,14 @@ def plan_state(pcb, names, banned=frozenset()):
             if m_ is not None and math.hypot(m_.exit_pt[0] - bx_, m_.exit_pt[1] - by_) <= _we.DUP_TOL:
                 fixed_b[nm] = sr.move_sig(m_)
         incr = {'free_teeth': free_t, 'fixed': fixed_b}
+    import whole_ends as _we_fb
     return _hold_berths({
             'banned': banned,          # the feasibility ledger, for a proposal
                                        # that enumerates its own moves
             'byname': byname, 'dmenu': dmenu, 'smenu': smenu, 'sblock': sblock, 'launch': launch,
-            # the whole route's feedback (whole_feedback.py): ends its audits found crowded, priced by whole_ends
-            'feedback': json.load(open(awx_settings.req('FEEDBACK'))) if awx_settings.get('FEEDBACK') else None,
+            # the whole route's feedback (whole_feedback.py): ends its audits found crowded, and the run's blocked
+            # teeth (ENDS_BLOCKED), priced by whole_ends
+            'feedback': _we_fb.round_feedback(),
             'incr': incr,
             'tooth0': tooth0, 'tooth_vias': tooth_vias, 'src_pad': src_pad,
             'dst_pad': dst_pad, 'sref': sref, 'dref': dref, 'sgrid': sgrid,

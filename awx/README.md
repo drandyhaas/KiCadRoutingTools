@@ -257,12 +257,14 @@ as the chain hands it on and two arrays, and writes the board back with the
 bus laid, in the board's own frame:
 
 - the bus is every net between the two arrays that the ladder admits, and
-  their copper, if any, is stripped. Refused and named, for the rest of the
-  chain: a pair through a termination part between the arrays (the zynq's CK
-  through R20: the whole route lays no waypoint yet); and a pair leg whose
-  partner is refused or is no lane between the arrays (the zynq's `FB_CLK_P`,
-  its `FB_CLK_N` pulled to RFGND by RX22) -- a pair is laid whole or not at
-  all. The whole route names a net by its name's last path part where no
+  their copper, if any, is stripped. A pair through a termination part
+  between the arrays -- a two-pad part with a pad on each leg -- is laid as
+  every other termination is (`waypoint_pairs`, then `pulled_nets` below):
+  the part's pads off the pair's nets for the step, each leg's stub to it left
+  to the rest of the chain. Refused, a memory bus's clock pair was left to
+  the chain whole. Refused and named, for the rest of the chain: a pair leg
+  whose partner is refused or is no lane between the arrays (a leg pulled to
+  another rail by a part of its own) -- a pair is laid whole or not at all. The whole route names a net by its name's last path part where no
   other net's name ends in it, else by its full name (`ENABLE` and
   `TEST/ENABLE` are two lanes): `coherent_nets.net_keys`, and every pattern
   the step hands a checker or the fanout engine selects that net alone;
@@ -522,7 +524,12 @@ ground plane's (`colour_runs`, `route_layers.plane_kinds`). A via escape's run
   of the model's memory.
 - **The layers after**: each chosen run gets its layer from a small exact solve
   (`colour_runs`): the outer layer first, the inner ones kept for the bus, and
-  a bus lane on the layer its preferred tooth leaves by.
+  a bus lane on the layer its preferred tooth leaves by. A bus ball's run no
+  colouring holds has the plan asked again without that option, and of the two
+  plans the one that leaves fewer balls without an option is kept -- a bus
+  ball first -- once each one's uncoloured balls have taken an option that
+  stands. Judged by its uncoloured runs alone, the plan that coloured more was
+  kept and could leave a bus ball with no escape.
 
 Phase 2 runs the quick-restart worker alone there; the LP worker held a
 quarter of the plan's memory for half a percent of its cost. On the zynq at
@@ -723,6 +730,18 @@ bus was handed on through. A step run on its own takes it as settings:
 `ESCAPE_JOINT=REF` (the shared array) and `ESCAPE_JOINT_ENDS=BOARD` (the board
 before the earlier step), with `--escape`.
 
+The buses routed AFTER the escape bus off the same array keep the escapes its
+field lays their nets as their teeth there (`keeps_source_escapes`), so the
+field STEERS those nets toward their own parts (`route_bus.later_nets`,
+`ESCAPE_JOINT_LATER`, the spec's `later`; `joint_escape.escape_field`): each
+escape is paid for every lane of the escape bus it would sweep across round the
+array on its way to its part (`plan_array`'s `sweep` with `steer`, the price
+the shared field puts on its other nets), and is otherwise planned as the
+array's other balls are -- every layer, a strap, any face, asked after the
+escape bus's own balls. Escaped by whatever face had room, a later bus's two
+teeth came out of the face the escape bus's lanes leave by, on their exit line,
+and had no escape that cleared them in any of its rounds.
+
 On the zynq, both buses in one step (the recipe below): the DDR bus by
 `--whole-array` first, 45 of its 46 nets (74 vias; DDR3_DQ3 left out of a
 partial round), then the LVDS bus with U1 shared, 48 of its 52 nets (107
@@ -824,16 +843,21 @@ bus on connected and clean, no plane it crosses in more pieces than it came.
 **A group bus: one source, two ends.** Those two buses overlap: their balls interleave on
 U1's east face, and routed one after the other the second meets the first's
 lanes across its way. `--bus U1:U4+U3:plain:LAYERS` routes them as ONE whole
-route in one frame, its DEST naming both parts, the trunk's first. The trunk runs to U4;
-U3's lanes are a BRANCH, a class of their own stacked outside U4's ring on
-their side, leaving the trunk along it to a corner and then straight on to U3,
-landing off it in their order round U3 (`whole_frame._branches`). The final
-order is the parts' ranks across the trunk, each part's lanes in their order
-round it, so lanes to different parts cross on the trunk alone, as a ring's
-lanes do; the solve places those crossings and the ends model prices them in
-the same order (`whole_frame.dest_ranks`). A branch's berths are the faces of
-its part turned toward the source. It is a plain bus: no whole-array or
-escape fanout. On the six-rail board, after its DDR3 and LVDS buses as above:
+route in one frame, its DEST naming both parts (`whole_frame.Group`). The
+parts' copper boxes are joined into one outline -- the strips between them
+closed into POCKETS, wider gaps left open as notches -- and walked round in one
+order, each lane placed where it enters the outline. The lanes entering on the
+FRONT, the walk under the hull's edges facing the source, end from the trunk;
+the rest ride the rings round the hull. A berth in a pocket leaves it by
+either of its mouths, or straight under the part in front of it on a layer
+that part leaves open. The lanes leaving one mouth land on it in their order
+along the walk, a lane's room apart from the mouth's end at their own part's
+wall (spread evenly over it where it is too short for that): spread over a
+wide pocket's whole mouth, a part's lanes landed a pocket's depth from it,
+and their legs cut back across the strip on the berths' layer, through parts
+standing there that no solve sees -- five lanes through a row of passives
+whose gaps take one lane each, two or three left open in every round. It is a plain bus: no
+whole-array or escape fanout. On the six-rail board, after its DDR3 and LVDS buses as above:
 
 ```bash
 python3 route_bus.py tmp/zynq/zr6_both.kicad_pcb tmp/zynq/zr6_usb_eth.kicad_pcb \
@@ -919,7 +943,11 @@ buses one after another only.
    it, until it refuses none it can hold (`hold_board_escapes`): fanned again
    whole, a memory bus's comb took the dog-bone sites of six deep balls the
    field had escaped, and their nets never reached its ladder; held, all 48
-   did, and the bus routed 0 open. Each round's first plan is a **coupled
+   did, and the bus routed 0 open. A pair's leg holds only with its partner,
+   the two together or neither: held alone, a strobe leg kept the field's
+   inner-layer escape while its partner was fanned again on the surface onto
+   its tip, and the pair, its tips one above the other, had no end connector
+   in any round. Each round's first plan is a **coupled
    solve**: each bus solves its own plan, lays it out (geometry and polish)
    and asks. The last to ask builds every bus's model into one CP-SAT model
    (`whole_solve.solve(joint=)`, `whole_joint.py`), each hinted with its own
@@ -2123,6 +2151,18 @@ for some of the lanes exists:
   last resort); fed that lane, its second round laid every net clean. The
   feedback round's fanout takes about a draw's time, so the rounds take no
   longer;
+- a tooth no escape of its ball clears -- the loop stopped at crowded ends
+  and `repair_ends` found none (`ends_reescape`: `NO escape clears`), another
+  net's copper on its way out that nothing moves -- is an end **every later
+  round avoids**, a draw under the next seed as much as a feedback round
+  (`whole_route.put_blocked`, the run's `blocked_ends.json`, each round's
+  `ENDS_BLOCKED`; `whole_ends.round_feedback`), priced as a front blocked with
+  no room (`FRONT_BLOCKED`). Drawn again with nothing of the round before, a
+  later bus's tooth beside an earlier bus's locked lane on its own exit line
+  was chosen in each of four rounds, and its lane left open in each; carried,
+  the second round took a tooth on another face and routed it. Only such
+  proven-blocked teeth carry: the rest of a round's findings go to a feedback
+  round alone;
 - when no round laid anything, the **last resort** is a partial plan on the
   last ends laid: the lanes the rounds named left out (else the three most
   crossed), then more, to a quarter and to half of the lanes -- never every
@@ -2567,10 +2607,8 @@ channels first, and the other escapes leave round it.
    audit.
 4. **The router's rules:** a bus net class that differs from the Default
    class, `.kicad_dru` layer rules, and `--fab-tier` / `--escalation`.
-5. **Termination parts as waypoints.** A pair through a termination part
-   between the arrays (the zynq's CK through R20) is refused, and so are the
-   nets `find_buses` leaves that no pull or termination explains
-   (multi-drop); a pair could be laid through its part.
+5. **Multi-drop nets.** The nets `find_buses` leaves that no pull or
+   termination explains are refused; one could be laid through its parts.
 6. **The handoff.** The laid nets go into the project's `protected_nets`;
    a refused lane is left with no partial copper, unprotected, and listed in
    a JSON summary for `route.py`; the bus's own pairs stop going to

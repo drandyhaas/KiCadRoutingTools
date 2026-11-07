@@ -270,6 +270,17 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
             settings.update(ESCAPE_JOINT=','.join(shared), ESCAPE_JOINT_ENDS=inputs[min(through[r_] for r_ in shared)])
             log(f'route_bus: {s} -> {d}: {", ".join(shared)} routed through by an earlier bus -- planned whole with this '
                 f'one, its ends on {os.path.basename(settings["ESCAPE_JOINT_ENDS"])}')
+            # (the buses after this one off its source: their nets, which the array's whole plan escapes as its other
+            # balls and which those buses keep as their teeth there, escape toward their own parts -- planned as the
+            # shared field plans every bus's -- not by whatever face has room: a later bus's two teeth out of the face
+            # this bus's lanes leave by, on their exit line, had no escape that cleared them in any of its rounds)
+            later_ = later_nets(cur, bus, resolved)
+            if later_:
+                lp_ = os.path.join(work, f'{s}-{d}.later.json')
+                with open(lp_, 'w', encoding='utf-8') as f_:
+                    json.dump(later_, f_, indent=0, sort_keys=True)
+                settings['ESCAPE_JOINT_LATER'] = lp_
+                log(f'  the {len(later_)} net(s) of the buses after it off {s} escaped toward their own parts there')
         step_out = os.path.join(work, f'{s}-{d}.kicad_pcb')
         step_json = os.path.join(work, f'{s}-{d}.summary.json')
         inputs.append(cur)
@@ -456,15 +467,22 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         log(f'  {len(pulled)} more with other pads beside their two ends (a pull, a termination, a test point, another '
             f'part\'s), laid as lanes, each stub left to the rest of the chain: ' + ', '.join(f'{short(n)} ({", ".join(p.component_ref for p in v)})'
                                                for n, v in sorted(pulled.items())))
-    wps = {leg: part for d in dests for leg, part in waypoint_pairs(pcb, names, src, d).items()}
-    refused = {leg: f'passes through {part}, a termination part between the arrays: the whole route lays no waypoint'
-               for leg, part in wps.items()}
+    # a pair through a termination ACROSS it between the arrays (waypoint_pairs: a two-pad part, a pad on each leg -- a
+    # clock pair's termination) laid as a lane as every other termination is: the part's pads off the pair's nets for
+    # the step, a stub each left to the rest of the chain (pulled). Refused -- the whole route lays no waypoint --, a
+    # DDR3 bus's clock pair was left to the chain whole
+    wps = {}
+    for d in dests:
+        for leg, pads_ in waypoint_pairs(pcb, names, src, d).items():
+            wps.setdefault(leg, []).extend(pads_)
     if wps:
-        names = [n for n in names if short(n) not in wps]
-        log('  refused, left to the rest of the chain with their copper as it is: '
-            + ', '.join(f'{leg} (through {part})' for leg, part in sorted(wps.items()))
-            + ' -- a pair that passes through a termination part between the arrays; the whole route lays no '
-              'waypoint')
+        for n in names:
+            if short(n) in wps:
+                pulled.setdefault(n, []).extend(wps[short(n)])
+        log(f'  {len(wps)} more through a termination part between the arrays, across the pair, laid as lanes, each '
+            f'stub to the part left to the rest of the chain: '
+            + ', '.join(f'{leg} ({", ".join(sorted({p.component_ref for p in v}))})' for leg, v in sorted(wps.items())))
+    refused = {}
     halves = half_pairs(pcb, names)
     if halves:
         refused.update(halves)
@@ -591,6 +609,10 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                                 'others': sorted(n for i, n in nets_.items()
                                                  if i not in zone_ and short(n) not in bus_s_),
                                 'drops': sorted(n for i, n in nets_.items() if i in zone_)})
+                # (ESCAPE_JOINT_LATER, route_buses: the later buses' nets among the others, each toward its own part)
+                lp_ = awx_settings.get('ESCAPE_JOINT_LATER')
+                later_ = json.load(open(lp_)) if lp_ and os.path.isfile(lp_) else {}
+                arrays_[-1]['later'] = {n: later_[short(n)] for n in arrays_[-1]['others'] if short(n) in later_}
                 log(f'  {r_}: planned whole with the bus each round -- {len(arrays_[-1]["others"])} other net(s) and '
                     f'the plane balls of {len(arrays_[-1]["drops"])} net(s) planned with it, their fanout here taken '
                     f'off; '
@@ -695,14 +717,17 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             with contextlib.redirect_stdout(sys.stderr):
                 n_t, n_v, failed = mb.fanout_source(base_c, fanned, src, [n for n in names if n not in held_e],
                                                     reserve=spec)
-            more = hold_board_escapes(board, base_c, os.path.join(work, 'base_held.kicad_pcb'), pcb, src, failed) \
-                if failed else []
+            more = hold_board_escapes(board, base_c, os.path.join(work, 'base_held.kicad_pcb'), pcb, src, failed,
+                                      names, short) if failed else []
             if not more:
                 break
             held_e += more
             base_c = os.path.join(work, 'base_held.kicad_pcb')
+            mates_ = [short(n) for n in more if n not in set(failed)]
             log(f'  {src}: the comb\'s refused ball(s) holding the escape the board came with: '
-                + ', '.join(short(n) for n in more) + ' -- the rest fanned again round them')
+                + ', '.join(short(n) for n in more if n in set(failed))
+                + (f' (and their pair partners {", ".join(mates_)})' if mates_ else '')
+                + ' -- the rest fanned again round them')
         with contextlib.redirect_stdout(sys.stderr):
             fix_project_for_output(fanned, clearance=te.SPEC_CLEARANCE, track_width=sr.FAN_TRACK,
                                    via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL, verbose=False)
@@ -1662,6 +1687,30 @@ def half_pairs(pcb, names):
     return out
 
 
+def later_nets(board, bus, buses):
+    """{net (short name): its part}: the nets of the buses after `bus` in `buses` off its source, on `board` -- each
+    bus's nets as its own step takes them (make_bench.pair_nets and pulled_nets, toward each of its parts)"""
+    with step_policy():                 # (make_bench imports the chain's modules: under its policy, step_policy)
+        import make_bench as mb
+    from coherent_nets import namer
+    from flow_frame import dest_refs
+    from kicad_parser import parse_kicad_pcb
+    i = next((k for k, b in enumerate(buses) if b[0] == bus[0] and b[1] == bus[1]), None)
+    rest = [b for b in buses[i + 1:] if b[0] == bus[0]] if i is not None else []
+    if not rest:
+        return {}
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = parse_kicad_pcb(board)
+    sn = namer(pcb)
+    out = {}
+    for b in rest:
+        for P in dest_refs(b[1]):
+            pn = mb.pair_nets(pcb, b[0], P)
+            for n in list(pn) + list(pulled_nets(pcb, b[0], P, sorted(pn))):
+                out.setdefault(sn(n), P)
+    return out
+
+
 def keeps_source_escapes(src, escape, whole_array, setting):
     """Whether a bus keeps the escapes an earlier step laid its nets at its source `src` (escape_blocks) as its teeth,
     the balls without one fanned out: a PLAIN bus by default (`setting`, SOURCE_SHARED, unset) -- where no earlier step
@@ -1796,12 +1845,21 @@ def pair_gate_cuts(base, fanned, pcb, src, names, short=lambda n: n):
     return out
 
 
-def hold_board_escapes(board, base, out, pcb, src, failed):
+def hold_board_escapes(board, base, out, pcb, src, failed, names=(), short=lambda n: n):
     """The refused balls `failed` (full names) of `src` that can HOLD the escape `board` has them at `src`
     (escape_blocks): a net's whole escape where every piece of it stands clear of the copper `base` holds
-    (_clear_blocks), none of it otherwise. `out`: `base` with those escapes laid (its project `base`'s). Returns the
-    nets that hold one"""
-    blocks = escape_blocks(open(board, encoding='utf-8').read(), pcb, src, failed)
+    (_clear_blocks), none of it otherwise. A refused leg of a pair of `names` holds its escape only with its
+    partner's, the two together or neither: held alone, a memory bus's strobe leg kept the field's escape on an inner
+    layer while the comb fanned its partner again on the surface, onto the held leg's tip, and the pair, its two tips
+    one above the other, had no end connector in any round. `out`: `base` with those escapes laid (its project
+    `base`'s). Returns the nets that hold one"""
+    import pairs as _pairs
+    full = {short(n): n for n in list(names) + list(failed)}
+    mate = {}
+    for _b, (pn, nn) in _pairs.pair_names(sorted(full)).items():
+        mate[full[pn]], mate[full[nn]] = full[nn], full[pn]
+    want = list(dict.fromkeys(list(failed) + [mate[n] for n in failed if n in mate]))
+    blocks = escape_blocks(open(board, encoding='utf-8').read(), pcb, src, want)
     if not blocks:
         return []
     name_of = {i: n.name for i, n in pcb.nets.items() if n.name}
@@ -1814,7 +1872,8 @@ def hold_board_escapes(board, base, out, pcb, src, failed):
     for b in blocks:
         by_net[net_of(b)].append(('via' if b.lstrip().startswith('(via') else 'segment', b))
     txt = open(base, encoding='utf-8').read()
-    held = [n for n in failed if by_net.get(n) and len(_clear_blocks(base, txt, by_net[n])) == len(by_net[n])]
+    ok = {n for n in want if by_net.get(n) and len(_clear_blocks(base, txt, by_net[n])) == len(by_net[n])}
+    held = [n for n in want if n in ok and (n not in mate or mate[n] in ok)]
     if held:
         end = txt.rstrip().rfind(')')
         with open(out, 'w', encoding='utf-8') as f:
@@ -2092,7 +2151,7 @@ def lock_lanes(txt, net_ids, net_names=()):
 
 
 def waypoint_pairs(pcb, names, src, dest):
-    """{leg: part} for the pairs among `names` that pass through a termination part between the arrays
+    """{leg: [its pads on them]} for the pairs among `names` that pass through a termination part between the arrays
     (pairs.pair_waypoints: a two-pad part with one pad on each leg, neither array, not under a ball)"""
     import pairs as _pairs
     from coherent_nets import by_key, net_keys
@@ -2102,8 +2161,9 @@ def waypoint_pairs(pcb, names, src, dest):
     out = {}
     for _b, (pn, nn) in _pairs.pair_names(short, admit_all=True).items():
         if pn in by and nn in by:
-            for pp, _qn in _pairs.pair_waypoints(pcb, by[pn], by[nn], src, dest):
-                out[pn] = out[nn] = pp.component_ref
+            for pp, qn in _pairs.pair_waypoints(pcb, by[pn], by[nn], src, dest):
+                out.setdefault(pn, []).append(pp)
+                out.setdefault(nn, []).append(qn)
     return out
 
 

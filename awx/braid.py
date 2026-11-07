@@ -1410,11 +1410,16 @@ def _layer_at(pcb, nid, pt, default):
 def _end_dir(pcb, nid, pt, pads):
     """The direction the net's stub ESCAPES in at its free end `pt`:
     walk the copper from the free end to the pad it reaches, and take
-    the longest segment of that stub, pointed toward the free end. The
-    stub's last segment is the wrong thing to read (the fanout ends
-    many escapes with a 45-degree jog), and pad-to-end is too (the
-    escape runs half a pitch off its pad's row); the run is the escape
-    itself, at whatever angle the array sits."""
+    the longest segment of the free end's RUN -- the stub from its free
+    end back while each turn stays under 60 degrees -- pointed toward
+    the free end. The stub's last segment is the wrong thing to read
+    (the fanout ends many escapes with a 45-degree jog, which the run
+    takes in), and pad-to-end is too (the escape runs half a pitch off
+    its pad's row); the run is the escape itself, at whatever angle the
+    array sits. The longest segment of the whole stub is wrong too: an
+    escape down a channel and out of the array's face at a corner read
+    as the channel's way where the channel was the longer, and a pair
+    whose leg read so had no end connector ahead of its teeth."""
     key = _snapper()
     segs = [s for s in pcb.segments if s.net_id == nid]
     adj = {}
@@ -1443,7 +1448,24 @@ def _end_dir(pcb, nid, pt, pads):
         frontier = nxt
     if not order:
         return (1.0, 0.0)
-    s, near, far = max(order, key=lambda t: math.hypot(
+
+    def way(t):
+        v_ = (t[1][0] - t[2][0], t[1][1] - t[2][1])
+        h_ = math.hypot(*v_)
+        return (v_[0] / h_, v_[1] / h_) if h_ > 1e-6 else None
+    after = {}
+    for t in order:
+        after.setdefault(t[1], []).append(t)
+    run = [order[0]]
+    while True:
+        nx = after.get(run[-1][2], ())
+        if len(nx) != 1:
+            break
+        a, b = way(run[-1]), way(nx[0])
+        if a is None or b is None or a[0] * b[0] + a[1] * b[1] < 0.5:
+            break
+        run.append(nx[0])
+    s, near, far = max(run, key=lambda t: math.hypot(
         t[0].end_x - t[0].start_x, t[0].end_y - t[0].start_y))
     v = (near[0] - far[0], near[1] - far[1])
     h = math.hypot(*v)

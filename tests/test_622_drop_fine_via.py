@@ -4,7 +4,8 @@
   python3 tests/test_622_drop_fine_via.py
 
 The joint escape drops a plane ball by a via in a gap beside it (or off the array's edge, or in its pad), held off the
-bus's laid lanes by the bar the whole route's audit holds a lane to (_lanes_clear). Between two of the zynq DDR's U2
+bus's laid lanes by the bar the whole route's audit holds a lane to (_lanes_clear), from the via's ring (_ring: the
+router's reach round the grid point it rounds to), where every lane below stands. Between two of a memory bus's
 berths a 0.45 mm via missed that bar by 0.032 mm, a 0.30 mm one cleared it, and three plane balls had no other way
 down. On kicad_files/ulx3s.kicad_pcb U1 (four copper layers: the fab ladder's vias 0.45, 0.30 and 0.25), at the
 bench's rules (via 0.45/0.3), a GND ball's drops with a laid lane passing one of its gap sites at a chosen distance:
@@ -18,7 +19,7 @@ rung's -- a berth the
    same plan lays has no lane yet; without `fine`, the rung's alone;
 6. exit_ray_conflicts: a drop's via short of a BUS escape's bar along its way out (its exit ray, LANE_REACH straight
    out) conflicts with that escape; a finer via clearing the bar, a via behind the exit or past the ray's reach, and
-   another net's escape do not (the zynq LVDS bus's U5: RFGND dropped between RX_FRAME's berths, 0.400 for 0.4025).
+   another net's escape do not (an LVDS bus's array: RFGND dropped between RX_FRAME's berths, 0.400 for 0.4025).
 """
 import contextlib
 import io
@@ -107,16 +108,17 @@ def at_site(D):
 
 
 (r1, dr1), (r2, dr2) = ladder[0], ladder[1]
+g0, g1, g2 = (je._ring(site, r_) for r_ in (sz['vr'], r1, r2))      # (each via's ring at the site)
 # 2. the rung's via misses the bar, the next rung's clears it
-d = at_site(bar + (sz['vr'] + r1) / 2)
+d = at_site(bar + (g0 + g1) / 2)
 check(d is not None and abs(d.r - r1) < 1e-9 and abs(d.dr - dr1) < 1e-9,
       f'a lane the rung\'s via misses and the next rung\'s clears: the site takes that via ({d})')
 # 3. only the finest clears it
-d = at_site(bar + (r1 + r2) / 2)
+d = at_site(bar + (g1 + g2) / 2)
 check(d is not None and abs(d.r - r2) < 1e-9 and abs(d.dr - dr2) < 1e-9,
       f'a lane only the finest rung\'s via clears: the site takes that one ({d})')
 # 4. none does
-d = at_site(bar + r2 / 2)
+d = at_site(bar + g2 / 2)
 check(d is None, f'a lane no via of the ladder clears: the site is not offered ({d})')
 # 5. with no lane and `fine` (the destination's whole-array plan) the site offers the rung's via AND the next rung's: a
 # berth the same plan lays has no lane yet; without it, the rung's alone
@@ -128,14 +130,16 @@ check(here == sorted([round(sz['vr'], 4), round(r1, 4)]) and plain == [round(sz[
       f'alone ({plain})')
 
 # 6. exit_ray_conflicts: a drop's via in a bus escape's way out (its exit ray, LANE_REACH straight out) conflicts with
-# that escape; a finer via that leaves the lane its bar, a via behind the exit, and another net's escape do not
+# that escape; a finer via that leaves the lane its bar, a via behind the exit, and another net's escape do not. The
+# vias stand on a grid point, the lane off one, so the ring each is measured by is the one it has there
 from types import SimpleNamespace as NS
-esc = NS(direction='left', exit_pt=(0.0, 0.0))
-off = bar + sz['vr'] - 0.0025                  # the rung's via 0.0025 short of the bar beside the lane
+y0 = 0.5
+off = bar + je._ring((-0.5, y0), sz['vr']) - 0.0025     # the rung's via's ring 0.0025 short of the bar beside the lane
+esc = NS(direction='left', exit_pt=(0.0, y0 - off))
 opts = {'BUS#A1': [('escape', esc, None)], 'OTH#A2': [('escape', esc, None)],
-        'GND#A3': [('drop', NS(site=(-0.5, off), r=sz['vr']), None), ('drop', NS(site=(-0.5, off), r=r1), None),
-                   ('drop', NS(site=(0.5, off), r=sz['vr']), None),
-                   ('drop', NS(site=(-(je.LANE_REACH + 0.5), 0.0), r=sz['vr']), None)]}
+        'GND#A3': [('drop', NS(site=(-0.5, y0), r=sz['vr']), None), ('drop', NS(site=(-0.5, y0), r=r1), None),
+                   ('drop', NS(site=(0.5, y0), r=sz['vr']), None),
+                   ('drop', NS(site=(-(je.LANE_REACH + 0.5), y0 - off), r=sz['vr']), None)]}
 got = sorted(je.exit_ray_conflicts(opts, {'BUS#A1': 'BUS', 'OTH#A2': 'OTH', 'GND#A3': 'GND'}, {'BUS'}, sz['vr']))
 check(got == [('GND#A3', 0, 'BUS#A1', 0)],
       f'a drop\'s rung via 0.0025 inside a bus lane\'s bar conflicts with that escape alone; its finer via, a via '

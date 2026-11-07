@@ -410,8 +410,9 @@ def plan_state(pcb, names, sref, dref, banned=frozenset(), log=print, hold_teeth
         if key not in cache:
             cache[key] = te.build_obstacles(pcb, nid, {nid}, layer)
         return cache[key]
+    import whole_ends as _we_fb
     return {'banned': banned, 'byname': byname, 'dmenu': dmenu, 'smenu': smenu, 'sblock': {}, 'launch': launch,
-            'feedback': json.load(open(awx_settings.req('FEEDBACK'))) if awx_settings.get('FEEDBACK') else None,
+            'feedback': _we_fb.round_feedback(),
             'incr': None, 'tooth0': {nm: 'F.Cu' for nm in launch}, 'tooth_vias': {nm: 1 for nm in launch},
             'src_pad': src_pad, 'dst_pad': dst_pad, 'sref': sref, 'dref': dref, 'sgrid': sgrid,
             'bundle_layer': 'F.Cu', 'chi': chi, 'dgrid': dgrid, 'dboxes': dgrid.bbox, 'buses': [list(launch)],
@@ -691,7 +692,7 @@ def run(out_path, K, base, log=print):
         # (the passives movable to the plan, as the engine lays it -- planned as fixed, the engine refused 23 of zynq
         # U1's planned drops the plan held clear; they are nudged off the round's copper once it is laid, below)
         rep_ = je.escape_field(board_ or base0, field_, sref, dref, list(names), others_, arr_['drops'], hold_, log=log,
-                               passives_fixed=False)
+                               passives_fixed=False, later=arr_.get('later'))
         field_free[0] = rep_.get('bus_free') or {}
         log(f'  whole-array field of {sref}{"" if with_site else " (teeth held, sites free)"}: {rep_.get("status")} '
             f'-- bus {rep_.get("bus_escaped")}/{rep_.get("bus_balls")}, others {rep_.get("others_escaped")} escaped + '

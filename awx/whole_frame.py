@@ -534,6 +534,25 @@ class Group:
         """s unrolled at the cut c"""
         return (s - c) % self.L
 
+    @staticmethod
+    def landings(a, b, mem, room):
+        """{lane: its landing}: the lanes `mem` [(lane, its place's point)], in their order along the walk, leaving a
+        pocket by its mouth a-b land on it in that order, `room` apart, each from the mouth's end at its own part's
+        wall -- the end its place stands nearer. Spread evenly over the whole mouth, the lanes of a wide pocket (two
+        parts far apart) landed a pocket's depth from their own part, and their legs cut back across the strip on the
+        berths' layer through whatever parts stand in it, which no solve sees. A mouth too short for its lanes `room`
+        apart spreads them evenly over it"""
+        k_ = len(mem)
+        lm_ = math.hypot(b[0] - a[0], b[1] - a[1])
+        at = lambda t: (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        if (k_ + 1) * room > lm_:
+            return {n: at((i + 1) / (k_ + 1)) for i, (n, _p) in enumerate(mem)}
+        at_a = [n for n, p in mem if math.dist(p, a) <= math.dist(p, b)]
+        at_b = [n for n, p in mem if math.dist(p, a) > math.dist(p, b)]
+        out = {n: at((i + 1) * room / lm_) for i, n in enumerate(at_a)}
+        out.update({n: at(1.0 - (i + 1) * room / lm_) for i, n in enumerate(at_b[::-1])})
+        return out
+
     def side(self, s, c):
         """the class of a lane entering at s with the cut at c: 'W' on the front (the trunk's), 'N' before it (round
         the north), 'S' after it"""
@@ -901,17 +920,14 @@ def build(ctx, dest, _trunk=frozenset()):
             if f_ in ('N', 'S') and n not in _trunk:
                 F.cls[n] = f_
         F.P = {n: G.unroll(F.way[n][1], dcut) for n in F.M}
-        # (the lanes leaving one mouth land across it in their order along the walk, a lane's room apart at most)
+        # (the lanes leaving one mouth land across it in their order along the walk: Group.landings)
         by_m = collections.defaultdict(list)
         for n in F.M:
             if F.way[n][0] == 'mouth':
                 by_m[F.way[n][2]].append(n)
         for (a, b), mem in by_m.items():
             mem.sort(key=lambda n: (F.P[n], F.M.index(n)))
-            k_ = len(mem)
-            for i, n in enumerate(mem):
-                t = (i + 1) / (k_ + 1)
-                F.gland[n] = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+            F.gland.update(G.landings(a, b, [(n, G.pt(F.way[n][1])) for n in mem], bd.LPITCH))
         F.pcut = {r: cut([F.bend[n][1] for n in F.M if F.dest_of[n] == r and face(F.bend[n], F.DBs[r]) == 'E'],
                          F.DBs[r][1], F.DBs[r][3]) for r in dests}
     else:

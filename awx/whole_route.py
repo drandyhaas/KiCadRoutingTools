@@ -1299,7 +1299,7 @@ def repair_ends(d, loopd, env, nets, say):
         L2 = (b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2
         t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * (b[0] - a[0]) + (p[1] - a[1]) * (b[1] - a[1])) / L2))
         return math.hypot(a[0] + t * (b[0] - a[0]) - p[0], a[1] + t * (b[1] - a[1]) - p[1])
-    cur, k, moved = bench0, 0, []
+    cur, k, moved, blocked = bench0, 0, [], []
     for lane, where in dict.fromkeys(named):
         mine = sorted(r_ for r_ in rows if r_[1] == lane)
         if not mine:
@@ -1343,10 +1343,41 @@ def repair_ends(d, loopd, env, nets, say):
         if rc_ == 0 and os.path.isfile(out_):
             cur = out_
             moved.append(lane)
+        elif tool == 'ends_reescape.py' and any('NO escape clears' in g_ for g_ in got):
+            blocked.append(lane)
         k += 1
+    if blocked:
+        put_blocked(os.path.join(os.path.dirname(d), BLOCKED_ENDS), side, blocked, say)
     if not moved:
         return None
     return cur, os.path.join(d, 'loop_ends')
+
+
+BLOCKED_ENDS = 'blocked_ends.json'      # (the run's directory: the teeth no escape cleared -- put_blocked)
+
+
+def put_blocked(path, side, lanes, say=print):
+    """the teeth of `lanes` on the round's plan sidecar `side` -- teeth repair_ends found no escape of their ball's
+    clears (another net's copper on the tooth's way out it cannot move: an earlier bus's locked lane) -- added to the
+    run's BLOCKED_ENDS, every later round's ENDS_BLOCKED (whole_ends.round_feedback): each an end to avoid, priced as a
+    front with no room, for the rounds under another seed as for a feedback round"""
+    import pairs as _pairs
+    fb = json.load(open(path)) if os.path.isfile(path) else {'avoid': []}
+    have = {(it['lane'], json.dumps(it['points'])) for it in fb['avoid']}
+    prs = _pairs.pair_names(list(side.get('ends') or {}))
+    new = []
+    for lane in lanes:
+        legs = [l_ for l_ in (prs.get(lane) or (lane,)) if l_ in (side.get('ends') or {})]
+        if not legs:
+            continue
+        it = {'lane': lane, 'end': 0, 'points': [list(side['ends'][l_][0]) for l_ in legs],
+              'layer': (side.get('tooth_layer') or {}).get(legs[0]), 'blocked': True}
+        if (lane, json.dumps(it['points'])) not in have:
+            fb['avoid'].append(it)
+            new.append(lane)
+    if new:
+        json.dump(fb, open(path, 'w'), indent=1)
+        say(f"  blocked teeth, avoided by every later round: {', '.join(new)}")
 
 
 def plan_bench(loopd, plan, default):
@@ -1925,6 +1956,11 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     HELD = os.path.join(o, 'held_parts.json')
     if os.path.exists(HELD):
         os.remove(HELD)
+    # (the teeth a round found no escape of their ball's clears -- repair_ends, put_blocked: the one thing a draw is
+    # handed of the rounds before it, every round's ENDS_BLOCKED)
+    BLOCKED = os.path.join(o, BLOCKED_ENDS)
+    if os.path.exists(BLOCKED):
+        os.remove(BLOCKED)
     say = Log()
     r = 0
     # THE ROUNDS ARE DRAWS: the d-th draw searches under the step's seed plus d - 1 (cp_seed: every solve -- the
@@ -2117,6 +2153,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         # (the run's nets, every round: a fanout never re-picks them off a later round's board -- K51's second round,
         # re-picked, dropped its three pairs while their teeth stood on the board, and the solve found them split)
         fenv['FANOUT_NETS'] = NETS
+        if os.path.isfile(BLOCKED):
+            fenv['ENDS_BLOCKED'] = BLOCKED
         if fed:
             if os.path.isfile(HELD):
                 fenv['FANOUT_PASSIVES_FIXED'] = '1'         # (joint_escape.passives_fixed: the cap step has moved them)

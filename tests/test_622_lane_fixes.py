@@ -12,17 +12,19 @@
 2. A crossed pair's span between two poses that nearly coincide -- the plan put its crossover AT its berth, the
    crossover's exit pose 0.075 mm from the berth's -- went to the pair router, which refuses two poses that close
    ("no pair corridor exists"): the pair was refused in its band, and laid free of the plan or not at all (generated
-   c4p16g25, SYP1). Such a span is joined leg to leg now (connect._connect_pair_crossover). Pinned: every crossed pair
-   of the plan the round laid with its crossover's entry or exit within a pair's width of the end's handover is laid IN
-   ITS BAND; and there is one, or the bench does not exercise the defect (BROKEN TEST).
+   c4p16g25, SYP1). Such a span is joined leg to leg now (connect._connect_pair_crossover). The plan seldom crosses a
+   generated bench's pairs any more (that bench none; of 40 generated benches one, its crossover 0.3 mm from an end),
+   while a bus whose berths are a connector's pads has crossovers 0.1 mm from an end; so the span is built: a
+   crossover (pairs.crossover) in the channel of case 1's generated board, given an end connector 0.075 mm past each
+   of its poses, laid by connect.connect_pair. Pinned: both spans laid, each joined P to P and N to N on its pose's
+   layer; and the crossover fits there, or the check tests nothing (BROKEN TEST).
 
-Each case generated, its bench made, and one round of whole_route.py run (four routing layers), about a minute each.
-The round's grade line is printed, not asserted: another machine may lay other copper.
+Case 1 generated, its bench made, and one round of whole_route.py run (four routing layers), about a minute; case 2
+laid on that board in seconds. The round's grade line is printed, not asserted: another machine may lay other copper.
 """
 import json
 import math
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -65,6 +67,66 @@ if os.environ.get('_LANE_FIXES_CHILD') == 'frame':
     nets = [n.split('/')[-1] for n in os.environ['NETS'].split(',') if n]
     print(json.dumps({'missing': sorted(n for n in nets if n not in lanes and n not in legs),
                       'near_dest': sorted(near_dest), 'src': {n: ctx.src_ref[n] for n in ctx.src_ref}}))
+    sys.exit(0)
+
+if os.environ.get('_LANE_FIXES_CHILD') == 'cross':
+    # (check 2's child: a crossover in the channel of BOARD, an end connector given AT each of its poses, laid by
+    # connect_pair as the pair step lays a plan's crossed pair)
+    sys.path.insert(0, AWX)
+    sys.path.insert(1, os.path.join(ROOT, 'py_router'))
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        import braid as bd
+        import connect as cn
+        import pairs as pr
+        from kicad_parser import Segment, parse_kicad_pcb
+        pcb = parse_kicad_pcb(os.environ['BOARD'])
+    cfg = bd.run_config(pcb, os.environ['BOARD'])
+    su, sd, g = pcb.footprints['SU1'], pcb.footprints['SD1'], cfg.grid_step
+    V = (round((su.x + sd.x) / 2 / g) * g, round((su.y + sd.y) / 2 / g) * g)          # the channel's middle
+    u = (0.0, 1.0) if abs(sd.x - su.x) > abs(sd.y - su.y) else (1.0, 0.0)            # along it
+    p_id = max(pcb.nets) + 1
+    n_id = p_id + 1
+    half = pr.pitch(cfg.track_width) / 2
+    c = pr.crossover(V, u, 1, half, cfg.via_size, pr.dive_offset(cfg, half), cfg.track_width, cfg.clearance, g,
+                     'F.Cu', 'B.Cu', p_id, n_id, first='P', floor=pr.handover_setback(cfg))
+    if c is None:
+        print(json.dumps({'crossover': None}))
+        sys.exit(0)
+    c.update(first='P', at=list(V), heading=list(u), layers=['F.Cu', 'B.Cu'])     # (as whole_snap records it)
+    GAP_MM = 0.075
+    joins = []
+
+    def given(pose, d, L):
+        """an end connector whose handover stands d along u from the crossover's pose (its P, N), its legs on 0.5 mm
+        to the end's tips: (given, tip P, tip N)"""
+        hp, hn = [(q[0] + u[0] * d, q[1] + u[1] * d) for q in (pose['P'], pose['N'])]
+        s = 0.5 if d > 0 else -0.5
+        tp, tn = [(q[0] + u[0] * s, q[1] + u[1] * s) for q in (hp, hn)]
+        joins.extend([(tuple(pose['P']), hp, L, p_id), (tuple(pose['N']), hn, L, n_id)])
+        legs = [Segment(hp[0], hp[1], tp[0], tp[1], cfg.track_width, L, p_id),
+                Segment(hn[0], hn[1], tn[0], tn[1], cfg.track_width, L, n_id)]
+        return (legs, [], hp, hn, u if d < 0 else (-u[0], -u[1]), L), tp, tn
+    ag, ap, an = given(c['entry'], -GAP_MM, 'F.Cu')
+    bg, bp, bn = given(c['exit'], GAP_MM, 'B.Cu')
+    rep = {}
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        res = cn.connect_pair(pcb, p_id, n_id, ap, an, 'F.Cu', bp, bn, 'B.Cu', cfg, report=rep, gap=pr.GAP,
+                              a_dir=(-u[0], -u[1]), b_dir=u, a_given=ag, b_given=bg, x_given=c)
+    near = lambda a_, b_: math.hypot(a_[0] - b_[0], a_[1] - b_[1]) < 1e-6
+
+    def has(a_, b_, L, nid):
+        """a segment of net nid on L from a_ to b_ (either way) among the laid copper"""
+        for s in res[0]:
+            p_, q_ = (s.start_x, s.start_y), (s.end_x, s.end_y)
+            if s.net_id == nid and s.layer == L and (near(p_, a_) and near(q_, b_) or near(p_, b_) and near(q_, a_)):
+                return True
+        return False
+    found = [res is not None and has(*j) for j in joins]
+    why = [ln.strip() for ln in buf.getvalue().splitlines() if 'corridor' in ln or 'stuck' in ln][:2]
+    print(json.dumps({'crossover': [round(x, 3) for x in c['span']], 'laid': res is not None, 'joined': found,
+                      'cross_span': rep.get('cross_span'), 'why': why}))
     sys.exit(0)
 
 
@@ -115,35 +177,21 @@ def main():
             fails.append(f"c4s14g25: nets left out of the frame: {got['missing']} (source read as "
                          f"{[got['src'].get(n) for n in got['missing']]})")
         # 2
-        r2 = case(td, 'c4p16g25', 16, ['--gap', '2.5', '--pattern', 'shuffle', '--seed', '3', '--pairs', '6',
-                                       '--copper', '4'])
-        loopd = os.path.join(r2, 'loop')
-        plan_f = next((os.path.join(loopd, f) for f in ('plan.json', 'held_plan.json')
-                       if os.path.isfile(os.path.join(loopd, f))), None)
-        if plan_f is None:
-            raise SystemExit('BROKEN TEST: c4p16g25: the round laid no plan')
-        plan = json.load(open(plan_f))
-        close = []
-        for n, L in plan['lanes'].items():
-            x_, ends_ = L.get('cross'), L.get('ends')
-            if not x_ or not ends_ or len(ends_) != 2:
-                continue
-            mid = lambda pn: ((pn['P'][0] + pn['N'][0]) / 2, (pn['P'][1] + pn['N'][1]) / 2)
-            hand = lambda e_: ((e_['handover'][0][0] + e_['handover'][1][0]) / 2,
-                               (e_['handover'][0][1] + e_['handover'][1][1]) / 2)
-            width = math.hypot(x_['entry']['P'][0] - x_['entry']['N'][0], x_['entry']['P'][1] - x_['entry']['N'][1])
-            for pose, e_ in ((mid(x_['entry']), ends_[0]), (mid(x_['exit']), ends_[1])):
-                if math.hypot(pose[0] - hand(e_)[0], pose[1] - hand(e_)[1]) < width:
-                    close.append(n)
-        if not close:
-            raise SystemExit('BROKEN TEST: c4p16g25: no crossed pair of the plan has its crossover at an end -- the '
-                             'bench does not exercise the short span')
-        print(f'  crossed pairs with their crossover at an end: {sorted(set(close))}')
-        seq_log = open(os.path.join(r2, 'route_seq.log')).read()
-        how = {m.group(1): m.group(2) for m in re.finditer(r'^(\S+)\s+pair (IN BAND|FREE|REFUSED)', seq_log, re.M)}
-        off = {n: how.get(n, 'not laid') for n in sorted(set(close)) if how.get(n) != 'IN BAND'}
-        if off:
-            fails.append(f'c4p16g25: crossed pairs with their crossover at an end not laid in their bands: {off}')
+        board = os.path.join(td, 'c4s14g25', 'raw.kicad_pcb')
+        e2 = {k_: v_ for k_, v_ in os.environ.items() if not k_.startswith('_LANE')}
+        e2.update(_LANE_FIXES_CHILD='cross', BOARD=board, ROUTE_LAYERS=LAYERS)
+        r = subprocess.run([sys.executable, os.path.abspath(__file__)], env=e2, capture_output=True, text=True,
+                           timeout=600)
+        if r.returncode != 0:
+            raise SystemExit(f'BROKEN TEST: the crossover child died:\n{r.stderr[-2000:]}')
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+        if got['crossover'] is None:
+            raise SystemExit('BROKEN TEST: no crossover fits in the channel of c4s14g25 -- the check tests nothing')
+        print(f"  a crossover in the channel (span {got['crossover']}), each end's handover 0.075 mm past its pose: "
+              f"laid {got['laid']}, joined {got['joined']}")
+        if not got['laid'] or not all(got['joined']):
+            fails.append(f"a crossover at both its ends: laid {got['laid']}, joined P/N at entry and exit "
+                         f"{got['joined']}, refused in span {got['cross_span']} {got['why']}")
     for f in fails:
         print('  FAIL', f)
     print('PASS' if not fails else f'{len(fails)} FAILURE(S)')

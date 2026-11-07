@@ -472,10 +472,27 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
     for nm, g in (kept or {}).items():
         prefer.setdefault(sn(nm), {k: g[k] for k in ('tooth', 'direction', 'layer', 'kind')})
     far = _je.far_face(pcb, sref, dref) if dref and dref in pcb.footprints else None
+    # (the run's BLOCKED teeth -- whole_ends.round_feedback's: those an earlier round found no escape of their ball's
+    # clears, whole_route.put_blocked -- each a PLACE on its layer every bus net's exit leaving there within a pitch of
+    # is paid as a crowded tooth (plan_array's `avoid`): another net's copper the run cannot move stands across the
+    # way out there, whichever lane takes it. The ends model prices them where it chooses the teeth, but this plan moves
+    # the nets it did not ask for wherever it likes: a memory bus's address line, its tooth found blocked by another
+    # bus's lanes in the first round and carried, was put back on it by this plan in each of the three rounds after,
+    # and left open in all four; kept off it alone, its neighbour took the place, and was blocked there in its stead)
+    import whole_ends as _we
+    places, by_ = [], []
+    for it in ((_we.round_feedback() or {}).get('avoid') or ()):
+        if it.get('blocked') and it.get('end', 0) == 0:
+            places += [tuple(p_[:2]) + ((it['layer'],) if it.get('layer') else ()) for p_ in it.get('points') or ()]
+            by_.append(it['lane'])
+    avoid = {sn(nm): places for nm in names} if places else None
+    if places:
+        log(f'  source realize (whole-array plan of {sref}): the {len(places)} blocked teeth of '
+            f'{", ".join(sorted(set(by_)))} avoided by every net it plans')
     import route_layers
     hints, rep = _je.plan_array(pcb, sref, full, a['others'], jspec['layers'], far=far, prefer=prefer,
                                 drops=a['drops'], log=log, hands=hands, vias_only=route_layers.escape_vias('src'),
-                                exit_rays=True)
+                                exit_rays=True, avoid=avoid)
     at_names = {(round(src_pad[nm].global_x, 3), round(src_pad[nm].global_y, 3)) for nm in names}
     hints = {at: h for at, h in hints.items() if at in at_names}
     unplanned = sorted(nm for nm in names

@@ -3109,6 +3109,21 @@ def fb_tables(fb, T, B):
     return avoid, pairs
 
 
+def round_feedback():
+    """the whole route's feedback a fanout's ends are priced by: FEEDBACK's (whole_feedback: a feedback round's
+    findings), and ENDS_BLOCKED's ends -- the teeth an earlier round of the run found no escape of their ball's could
+    clear (whole_route.repair_ends), each `blocked`, avoided by every later round whether it is a feedback round or a
+    draw under another seed: drawn again with nothing of the round before, a later bus's tooth beside an earlier bus's
+    locked lane on its own exit line was chosen again in each of four rounds, and the lane left open in each. None
+    with neither"""
+    fb = json.load(open(awx_settings.req('FEEDBACK'))) if awx_settings.get('FEEDBACK') else None
+    bl = awx_settings.get('ENDS_BLOCKED')
+    if bl and os.path.isfile(bl):
+        fb = dict(fb or {})
+        fb['avoid'] = list(fb.get('avoid') or []) + list(json.load(open(bl)).get('avoid') or [])
+    return fb
+
+
 def fb_weights(opts, item):
     """{option: weight}: what a feedback ITEM (whole_feedback: {'layer', 'points', 'times'}) prices each of a lane's
     options at one end (`opts`: (moves per leg, point, layer, ...)) at, by PLACE -- in full where ANY leg's exit stands
@@ -3117,8 +3132,11 @@ def fb_weights(opts, item):
     moving away a better one, the nearest other exit included (zynq K44: with the fall alone, a tooth one exit over,
     0.4 mm, paid more than the other layer at the place, and round 2 moved nothing); a pair cannot leave the price by
     moving one leg and keeping the other where it was found crowded -- and by ESCALATION: FB_ESCALATE times more for
-    each later round it was named again"""
+    each later round it was named again. A BLOCKED end (round_feedback: one no escape of its lane's ball cleared) is
+    priced as a front blocked with no room, FRONT_BLOCKED"""
     esc = FB_ESCALATE ** (int(item.get('times', 1)) - 1)
+    if item.get('blocked'):
+        esc = FRONT_BLOCKED / FB_AVOID
     _FB_NL = _fb_nl()
     out = {}
     for i, o in enumerate(opts):

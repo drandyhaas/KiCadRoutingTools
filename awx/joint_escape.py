@@ -1368,7 +1368,7 @@ def _solved_key(mdl, ref, keys, served, items, bus_s, oth_s, drop_s, bm, rank, w
 def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops=(), climb=CLIMB, street=2,
                batches=None, workers=None, time_limit=None, log=print, debug=False, only=None, hands=None,
                vias_only=False, exit_rays=False, escape_to=None, hold=None, executor=None, stack_bus=False,
-               sweep=None, avoid=None, ban=frozenset(), colour_tries=None):
+               sweep=None, avoid=None, ban=frozenset(), colour_tries=None, steer=None):
     """(hints, report): one planned move for every signal ball of `ref` on `pcb` -- the bus's nets (`bus`, full or
     short names) escaping on F.Cu/B.Cu, never by the `far` face; `others` escaping on `other_layers`, or a multi-ball
     net's ball strapped to a neighbour of its net; and every ball of the plane nets `drops` dropped to its plane --
@@ -1394,9 +1394,12 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     chose it -- HOW it gets there the plan's; the other nets' runs give up the layers a held run would meet them on.
     `sweep` (several buses' `escape_to`, {net: destination}): each bus escape paid C_SWEEP for every lane of another
     bus its own crosses round the array (sweep_crossings) -- against the teeth `sweep` names ({net: (x, y)}), or
-    True: the preferred ones. `avoid` {bus net: [(x, y), ..]}: the teeth its rounds found crowded, each exit within a
-    pitch of one paid C_AVOID. `ban` {(ball, _opt_sig)}: options the menus leave out -- a bus ball's run no colouring
-    held, planned again without it (`colour_tries`: the runs the plan before left uncoloured)"""
+    True: the preferred ones; the other nets' escapes paid C_SWEEP_OTHER for each lane theirs crosses on its way to
+    their far end -- every other net's, or `steer`'s alone. `avoid` {bus net: [(x, y), ..]}: the teeth its rounds
+    found crowded, each exit within a pitch of one paid C_AVOID -- of one given as (x, y, layer), each such exit
+    leaving on that layer. `ban` {(ball, _opt_sig)}: options the menus leave
+    out -- a bus ball's run no colouring held, planned again without it, and the plan that leaves fewer balls without
+    an option kept (`colour_tries`: the runs the plan before left uncoloured)"""
     args_ = dict(locals())
     import conflict_groups as cg
     import select_moves as sm
@@ -1420,13 +1423,39 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
         far_ang = {}
         for net_ in pcb.nets.values():
             nm_ = sn_(net_.name or '')
-            ps_ = [q for q in net_.pads if q.component_ref != ref] if nm_ in oth_s else []
+            ps_ = [q for q in net_.pads if q.component_ref != ref] \
+                if nm_ in oth_s and (steer is None or nm_ in steer) else []
             if ps_:
                 far_ang[nm_] = math.degrees(math.atan2(-(sum(q.global_y for q in ps_) / len(ps_) - cy_),
                                                        sum(q.global_x for q in ps_) / len(ps_) - cx_)) % 360.0
         sweep_n = sweep_crossings(pcb, bm.grid, escape_to, sweep if isinstance(sweep, dict) else
                                   {n: tuple(g['tooth']) for n, g in (prefer or {}).items()}, far_ang=far_ang)
     avoid_r = max(bm.grid.pitch_x, bm.grid.pitch_y)          # (an exit this near a crowded tooth: C_AVOID)
+    # a crowded tooth ON ITS LAYER (`avoid`'s (x, y, layer)): a bus ball's run on RUN leaving within a pitch of it gives
+    # that layer up -- its other layers still the colouring's, as a held run's are (below) -- where the price alone
+    # (cost) is paid by whichever run takes the exit at all, on any of its layers: a whole-array plan priced so took the
+    # same exit as unpriced, and its run was coloured onto the blocked layer again
+    narrowed = 0
+    if avoid and any(len(a_) > 2 for v_ in avoid.values() for a_ in v_):
+        for k_ in list(bm.opts):
+            places_ = [a_ for a_ in avoid.get(bm.items[k_][0], ()) if len(a_) > 2]
+            if not places_ or bm.items[k_][0] not in bus_s:
+                continue
+            keep_ = []
+            for kind_, o_, pc_ in bm.opts[k_]:
+                if kind_ == 'escape' and o_.layer == RUN and getattr(o_, 'runs_on', None):
+                    bad_ = {a_[2] for a_ in places_ if a_[2] in o_.runs_on
+                            and math.hypot(o_.exit_pt[0] - a_[0], o_.exit_pt[1] - a_[1]) < avoid_r}
+                    if bad_:
+                        narrowed += 1
+                        o_.runs_on = tuple(L_ for L_ in o_.runs_on if L_ not in bad_)
+                        if not o_.runs_on:
+                            continue
+                keep_.append((kind_, o_, pc_))
+            bm.opts[k_] = keep_
+            bm.menu[k_] = [o_ for kind_, o_, _pc in keep_ if kind_ == 'escape']
+        if narrowed:
+            log(f'  whole-array escape of {ref}: {narrowed} bus run option(s) gave up a crowded tooth\'s layer')
     if hold:
         log(f'  whole-array escape of {ref}: teeth held -- {sum(1 for k in bm.items if bm.items[k][0] in hold)} '
             f'bus ball(s) asked, {len(bm.unheld)} with no escape at their tooth'
@@ -1599,6 +1628,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
             c += C_DEV_KIND * ((o.direction != g.get('direction')) + _off_layer(o, g.get('layer'))
                                + (o.kind != g.get('kind')))
         if avoid and nm in bus_s and any(math.hypot(o.exit_pt[0] - a_[0], o.exit_pt[1] - a_[1]) < avoid_r
+                                         and (len(a_) < 3 or not _off_layer(o, a_[2]))
                                          for a_ in avoid.get(nm, ())):
             c += C_AVOID
         if sweep_n is not None and nm in bus_s:
@@ -1805,9 +1835,10 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                     # (with the escape field or held teeth, a run on RUN keyed by its layers too: the colouring lays a
                     # pair's two runs on ONE layer, so two legs' slots mate only where their layers meet -- zynq U1 with
                     # the LVDS teeth held, TX_FRAME's legs left with no layer in common, both runs uncoloured and the
-                    # pair unplanned. Not on the other paths, whose plans stand as measured)
-                    ro_ = tuple(sorted(getattr(o, 'runs_on', None) or ())) if (escape_to or hold) and o.layer == RUN \
-                        else ()
+                    # pair unplanned. Not on the other paths, whose plans stand as measured -- unless a crowded tooth
+                    # took a layer from a run here, `narrowed`)
+                    ro_ = tuple(sorted(getattr(o, 'runs_on', None) or ())) \
+                        if (escape_to or hold or narrowed) and o.layer == RUN else ()
                     sl[(o.direction, pin_(o), round(o.exit_pt[0], 6), round(o.exit_pt[1], 6), ro_)].append(i)
                 elif kind != 'stub':
                     mdl.Add(v[k_][i] == 0)          # (a pair leaves by its legs' escapes: a strap leaves no pair)
@@ -2191,6 +2222,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                 {key: _opt_sig(*opts[key][i]) for key, i in ci.items()})
         piece = {key: opts[key][ci[key]][2] for key in chosen}
         uncoloured = []
+        again = None
         if rls:
             # each chosen run on RUN its layer: the plan let K runs share a lane, an exit cluster, a crossing; those of
             # one such group must stand on as many layers (colour_runs), a pair's two legs on one, a bus lane's on the
@@ -2215,15 +2247,12 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                 # while it colours more. The solve's capacity rows let the runs through and the colouring then had no
                 # layer for them -- a shared array left an LVDS pair and the ball behind it with none, and the repair,
                 # the engine and the bus's own comb after it laid that ball between the pair's legs; asked again, the
-                # neighbours' choices make the room
+                # neighbours' choices make the room. The better of the two kept, once this one's uncoloured balls have
+                # been given their options too (below)
                 ban2 = frozenset(ban) | {(k_, _opt_sig(chosen[k_][0], chosen[k_][1], piece[k_])) for k_ in uncoloured}
                 log(f'  whole-array escape of {ref}: {len(uncoloured)} run(s) no colouring held {sorted(uncoloured)} -- '
                     f'planned again without them')
-                h2_, r2_ = plan_array(**{**args_, 'ban': ban2, 'colour_tries': len(uncoloured), 'executor': None})
-                if len(r2_.get('uncoloured') or ()) < len(uncoloured):
-                    return h2_, r2_
-                log(f'  whole-array escape of {ref}: planned again, {len(r2_.get("uncoloured") or ())} uncoloured -- '
-                    f'the plan before stands')
+                again = plan_array(**{**args_, 'ban': ban2, 'colour_tries': len(uncoloured), 'executor': None})
             for key, L in colour.items():
                 kind, o = chosen[key]
                 o2 = dataclasses.replace(o, layer=L, legs=[(a, b, L if l_ == RUN else l_) for a, b, l_ in o.legs])
@@ -2448,6 +2477,21 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
             + (f'; pairs held to the other end\'s hand {len(rep["hands_held"])}'
                + (f', NO exit pair of it {rep["hands_free"]}' if rep['hands_free'] else '') if hands else '')
             + f'; {rep["secs"]} s')
+        if again is not None:
+            # (the plan asked again against this one by what each leaves without an option once its uncoloured balls
+            # have theirs -- a bus ball first, then any ball, then the runs no colouring held. Judged by its uncoloured
+            # runs alone, a shared array's plan colouring two fewer runs was kept and left a bus ball with no escape,
+            # over the plan asked after it, whose four uncoloured balls each took an option that stood)
+            def left_(r_):
+                un_ = r_.get('unplanned') or ()
+                return (sum(1 for k_ in un_ if k_ in items and items[k_][0] in bus_s), len(un_),
+                        len(r_.get('uncoloured') or ()))
+            a_, b_ = left_(again[1]), left_(rep)
+            log(f'  whole-array escape of {ref}: planned again, {a_[2]} uncoloured, {a_[0]} bus ball(s) of {a_[1]} '
+                f'left without an option (this plan {b_[2]}, {b_[0]} of {b_[1]}) -- '
+                + ('the plan asked again kept' if a_ < b_ else 'the plan before stands'))
+            if a_ < b_:
+                return again
         return hints, rep
 
     if executor is not None:
@@ -2555,7 +2599,7 @@ def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane
     return len(tracks), len(vias_add), sorted(set(failed))
 
 
-def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, passives_fixed=True):
+def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, passives_fixed=True, later=None):
     """(route_bus --escape, ESCAPE_JOINT) ONE fanout of a shared array for an ESCAPE bus, its other nets and its plane
     balls, laid as the escape step's FIELD. BOARD is the field the step's ends chose the bus's teeth on (`hold`, plan_array's
     shape): every unprotected ball of the array dog-boned. Its copper of `bus`, `others` and `drops` inside the array's
@@ -2564,7 +2608,11 @@ def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, pas
     escape: the step's own lay runs the teeth from there), the other nets' escapes, straps and dog-bones alone and the
     plane drops as planned (lay). The passives stand where they are (the step's cap nudge ran on the field). OUT is the
     field; returns the plan's report, with `laid_sites` the bus vias laid and `bus_free` {net: tooth, as `hold`'s} the
-    escapes it chose for bus balls `hold` holds no tooth for"""
+    escapes it chose for bus balls `hold` holds no tooth for. `later` {net: part}: the nets among `others` of the buses
+    routed after this one off the array (route_buses), which keep these escapes as their teeth -- each STEERED toward
+    its own part, paid for every lane of this bus its escape would sweep across round the array to get there (sweep:
+    C_SWEEP_OTHER, as the shared field prices its other nets), and otherwise planned as the array's other balls: every
+    layer, a strap, any face, asked after the bus's own"""
     import make_bench as mb
     import rules as _rules
     import fanout_from_plan as fp
@@ -2588,8 +2636,16 @@ def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, pas
     layers = list(pcb.board_info.copper_layers)
     prefer = {nm: dict(g) for nm, g in hold.items()}
     with awx_settings.given({**awx_settings.environ(), 'FANOUT_PASSIVES_FIXED': '1' if passives_fixed else '0'}):
-        hints, rep = plan_array(pcb, ref, list(bus), list(others), layers, far=far_face(pcb, ref, dest), drops=drops,
-                                prefer=prefer, log=log, debug=True, escape_to=dest, hold=hold)
+        later_s = {sn(n): d for n, d in (later or {}).items()}
+        if later_s:
+            log(f'  whole-array field of {ref}: {sum(1 for n in others if sn(n) in later_s)} net(s) of the buses after '
+                f'this one steered toward their own parts')
+            hints, rep = plan_array(pcb, ref, list(bus), list(others), layers, far=far_face(pcb, ref, dest),
+                                    drops=drops, prefer=prefer, log=log, debug=True,
+                                    escape_to={sn(n): dest for n in bus}, hold=hold, sweep=True, steer=set(later_s))
+        else:
+            hints, rep = plan_array(pcb, ref, list(bus), list(others), layers, far=far_face(pcb, ref, dest),
+                                    drops=drops, prefer=prefer, log=log, debug=True, escape_to=dest, hold=hold)
         chosen = (rep.pop('debug', None) or {}).get('chosen') or {}
         bus_s = {sn(n) for n in bus}
         # (a bus ball the plan escaped with no tooth held -- its lane the step's ends gave none, or one whose held tooth
