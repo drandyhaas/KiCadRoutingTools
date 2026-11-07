@@ -1137,24 +1137,36 @@ def build(ctx, dest, _trunk=frozenset()):
     # along the face with the ring's berths between it and the face sent the ring outside it and its lanes back in
     # (synth_handoff pth_corner); stacked through always, a cap at the corner had the ring's start on its pad
     # (s4_pathF)
-    in_hull, packed = set(), {}
-    for _pass in range(2 * len(pcb.footprints) + 2):
-        hits, room = _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, in_hull, packed)
-        acted = False
-        for k in sorted(hits):
-            ref_, inner = min(hits[k], key=lambda h: (h[1], h[0]))      # the nearest part on the stack
-            edge_in = room_inside(*room[k], inner, bd.TRACK, bd.CLEAR, bd.LANE_MIN)
-            if edge_in is not None and packed.get(k) != edge_in:
-                packed[k] = edge_in                     # inside: the lanes packed between the destination and it
-                acted = True
-            elif edge_in is None:
-                in_hull.add(ref_)                       # no room: round it
-                for p_ in pcb.footprints[ref_].pads:
-                    hx, hy = (p_.size_x or 0.0) / 2, (p_.size_y or 0.0) / 2
-                    tails += [(p_.global_x + sx * hx, p_.global_y + sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
-                acted = True
-        if not acted:
+    # (a ring whose spine FOLDS BACK along the trunk from its start -- started past the corner it wraps -- is stacked
+    # again from the destination's near corner: near_k, _stack_rings)
+    tails0, near_k = list(tails), frozenset()
+    td_ = tuple(float(v) for v in F.spine.d[-1])
+    while True:
+        tails, in_hull, packed = list(tails0), set(), {}
+        for _pass in range(2 * len(pcb.footprints) + 2):
+            hits, room = _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, in_hull, packed,
+                                      near_k)
+            acted = False
+            for k in sorted(hits):
+                ref_, inner = min(hits[k], key=lambda h: (h[1], h[0]))      # the nearest part on the stack
+                edge_in = room_inside(*room[k], inner, bd.TRACK, bd.CLEAR, bd.LANE_MIN)
+                if edge_in is not None and packed.get(k) != edge_in:
+                    packed[k] = edge_in                     # inside: the lanes packed between the destination and it
+                    acted = True
+                elif edge_in is None:
+                    in_hull.add(ref_)                       # no room: round it
+                    for p_ in pcb.footprints[ref_].pads:
+                        hx, hy = (p_.size_x or 0.0) / 2, (p_.size_y or 0.0) / 2
+                        tails += [(p_.global_x + sx * hx, p_.global_y + sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
+                    acted = True
+            if not acted:
+                break
+        folds = {k for k, rg_ in F.rings.items() if k not in near_k and min(
+            (float(p_[0]) - float(rg_.pts[0][0])) * td_[0] + (float(p_[1]) - float(rg_.pts[0][1])) * td_[1]
+            for p_ in rg_.pts) < -bd.LPITCH}
+        if not folds:
             break
+        near_k = near_k | folds
     short = set()
     for k, ring in F.rings.items():
         mem = [n for n in F.M if F.cls.get(n) == k]
@@ -1252,9 +1264,10 @@ def _rings_round(p_):
     return bool((p_.drill or 0) > 0 or '*.Cu' in p_.layers or set(RL) <= set(p_.layers))
 
 
-def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, in_hull, packed):
+def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, in_hull, packed, near_k=frozenset()):
     """each ring's lanes stacked on the handoff line outside the hull (F.o_h) -- or, a ring in `packed`, from that
-    edge, between the destination and a part on its stack -- its start and spine (F.Hk, F.rings). Returns (hits,
+    edge, between the destination and a part on its stack; a ring in `near_k` from the hull's near corner (build: its
+    spine folded back from the whole hull's) -- its start and spine (F.Hk, F.rings). Returns (hits,
     room): hits {ring: [(part, its copper's nearest offset toward the destination, along the ring's side)]} for the
     parts (none in the hull) whose copper lies on a ring's stack -- within a clearance of its outermost lane's copper,
     on the handoff line from the ring's start out; room {ring: (the destination's copper's farthest offset on that
@@ -1273,9 +1286,28 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         sg = north if k == 'N' else -north
         # (the outermost near-face lane's own room outside its centre: a pair's is half its pitch more)
         near_edge = max((sg * F.se[n][1] + (width(n) - bd.LANE_MIN) / 2 for n in near), default=-bd.LANE_MIN / 2)
-        hull_edge = max(sg * F.spine.project_pt(p_)[1] for p_ in hull) + 2 * bd.LPITCH - bd.LANE_MIN
-        edge[k] = max(near_edge, hull_edge) if k not in packed else min(max(near_edge, hull_edge), packed[k])
+        pts_ = [F.spine.project_pt(p_) for p_ in hull]
+        e_all = max(sg * o_ for _u, o_ in pts_) + 2 * bd.LPITCH - bd.LANE_MIN
         mem = [n for n in F.final if F.cls.get(n) == k]
+        e_ = max(near_edge, e_all)
+        if k in near_k and mem:
+            # (a ring whose spine FOLDED BACK from the whole hull's edge: the hull WHERE ITS LANES CROSS the handoff
+            # line -- its copper up to two lane pitches past the arrival, the destination's near corner on that side --
+            # out only as far as the ring's start on the arrival line then clears the hull (a lane pitch inside its
+            # innermost lane, two lane pitches off it: the start below). A trunk slanted to a wide destination stacked
+            # its ring from the FAR corner's offset: a memory bus's south ring began 4.7 mm out where its near corner
+            # stood 1.4 mm out, its spine ran back 1.9 mm along the trunk round the corner, and the clock pair's planned
+            # path folded back on itself there and was not laid. Read off the near corner on every ring, the rings of
+            # a bus whose destination's face leans out only a little lost the corner lanes to the trunk -- one met the
+            # ring's next lane at pitch 0, and an escape bus's ends were chosen again, 4 nets open)
+            loc_ = [sg * o_ for u_, o_ in pts_ if u_ <= F.H0 + 2 * bd.LPITCH] or [sg * o_ for _u, o_ in pts_]
+            e_ = max(near_edge, max(loc_) + 2 * bd.LPITCH - bd.LANE_MIN)
+            w_in = width(mem[-1] if k == 'N' else mem[0])
+            hk_hull = dpads + [F.gland.get(n, F.bend[n]) for n in mem] + tails
+            o_st = lambda e: sg * (e + w_in / 2 + bd.LANE_MIN / 2) - sg * bd.LPITCH
+            while e_ < e_all and _inside(F.spine.xy(F.H0, o_st(e_)), hk_hull, 2 * bd.LPITCH):
+                e_ = min(e_ + bd.LANE_MIN / 5, e_all)
+        edge[k] = e_ if k not in packed else min(e_, packed[k])
         at = edge[k]
         for n in (mem[::-1] if k == 'N' else mem):
             F.o_h[n] = sg * (at + width(n) / 2 + bd.LANE_MIN / 2)

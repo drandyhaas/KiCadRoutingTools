@@ -113,6 +113,41 @@ def pad_distance(dx, dy, hx, hy, cr):
     return (_np.hypot(_np.maximum(qx, 0.0), _np.maximum(qy, 0.0)) + _np.minimum(_np.maximum(qx, qy), 0.0)) - cr
 
 
+def pad_tilt(pad) -> float:
+    """a pad's residual tilt (the parser's rect_rotation, degrees): its copper is the axis-aligned rounded rectangle
+    pad_distance measures, turned by it -- 0 for a pad on the board's axes"""
+    return float(getattr(pad, 'rect_rotation', 0.0) or 0.0)
+
+
+def into_pad(dx, dy, tilt):
+    """offsets (dx, dy) from a pad's centre (arrays or numbers) in the pad's own frame, where its copper is the
+    axis-aligned rectangle pad_distance measures: turned by -tilt, as check_drc and the router turn a point into it.
+    Measured on the board's axes, a pad tilted 45 degrees was its (hx x hy) box: a via planned beside a 0402 turned 45
+    degrees stood 0.111 mm off it where check_drc measures 0.063 (0.09 asked), and the snap refused it"""
+    if not tilt:
+        return dx, dy
+    c, s = math.cos(math.radians(tilt)), math.sin(math.radians(tilt))
+    return dx * c + dy * s, -dx * s + dy * c
+
+
+def out_of_pad(dx, dy, tilt):
+    """into_pad undone: offsets in a pad's own frame back on the board's axes"""
+    if not tilt:
+        return dx, dy
+    c, s = math.cos(math.radians(tilt)), math.sin(math.radians(tilt))
+    return dx * c - dy * s, dx * s + dy * c
+
+
+def pad_extent(hx, hy, tilt, cr=0.0):
+    """the half sizes, on the board's axes, of the box round a pad's (hx x hy) copper, its corners rounded to cr,
+    turned by tilt"""
+    if not tilt:
+        return hx, hy
+    c, s = abs(math.cos(math.radians(tilt))), abs(math.sin(math.radians(tilt)))
+    ix, iy = hx - cr, hy - cr
+    return ix * c + iy * s + cr, ix * s + iy * c + cr
+
+
 def corner_buffer(grid):
     """The router's corner buffer round a pad's corners for a single's track or via (routing_utils.
     pad_blocked_cells_array): half a grid step"""

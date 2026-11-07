@@ -275,7 +275,9 @@ for ref, fp in ctx.pcb.footprints.items():
         if p.pad_type == 'np_thru_hole':
             hx = hy = (p.drill or 0) / 2; Ls = ALL()
         else:
-            hx, hy = p.size_x / 2, p.size_y / 2
+            # (a tilted pad by the box round its copper turned -- pairs.pad_extent: its own (hx x hy) on the board's
+            # axes left a 0402 turned 45 degrees up to 0.09 mm short of its copper)
+            hx, hy = _pairs.pad_extent(p.size_x / 2, p.size_y / 2, _pairs.pad_tilt(p), _pairs.pad_corner_radius(p))
             Ls = ALL() if drilled else {F(L) for L in LNAME if L in p.layers}
         if Ls and BX0 < p.global_x < BX1 and BY0 < p.global_y < BY1:
             # (a round pad or hole: the cross that covers it, not its box's square -- corridor.round_cover)

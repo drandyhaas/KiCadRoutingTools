@@ -490,9 +490,12 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
         log(f'  source realize (whole-array plan of {sref}): the {len(places)} blocked teeth of '
             f'{", ".join(sorted(set(by_)))} avoided by every net it plans')
     import route_layers
-    hints, rep = _je.plan_array(pcb, sref, full, a['others'], jspec['layers'], far=far, prefer=prefer,
-                                drops=a['drops'], log=log, hands=hands, vias_only=route_layers.escape_vias('src'),
-                                exit_rays=True, avoid=avoid)
+    # (a stripped net the spec lists among the array's OTHER nets -- a blocker freed by a re-escape, ends_reescape --
+    # is planned as one of them, not as the bus's: escaped again wherever the plan puts it, and laid with the rest)
+    oth_ = {sn(n_) for n_ in a['others']}
+    hints, rep = _je.plan_array(pcb, sref, [n_ for n_ in full if sn(n_) not in oth_], a['others'], jspec['layers'],
+                                far=far, prefer=prefer, drops=a['drops'], log=log, hands=hands,
+                                vias_only=route_layers.escape_vias('src'), exit_rays=True, avoid=avoid)
     at_names = {(round(src_pad[nm].global_x, 3), round(src_pad[nm].global_y, 3)) for nm in names}
     hints = {at: h for at, h in hints.items() if at in at_names}
     unplanned = sorted(nm for nm in names
@@ -563,7 +566,10 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     # used to parse the board a second time for an untouched copy)
     others = [nm for nm in guard_names if nm not in names]
     before = te.endpoints(pcb, others, byname) if others else {}
-    original = {nm: measure_tooth(pcb, nm, src_pad[nm], byname) for nm in names}
+    # (each net's SOURCE end, told from the destination's by DEST: a bench fanned at both arrays has a free end at each,
+    # and the first found was measured as the tooth -- the destination's not yet fanned, the source's alone stands)
+    dest_ = awx_settings.get('DEST') or None
+    original = {nm: measure_tooth(pcb, nm, src_pad[nm], byname, dest_ref=dest_, which='src') for nm in names}
 
     removed = {}
     for nm in names:
@@ -649,7 +655,7 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     copy_siblings(board, out_path)      # (the project and the .kicad_dru's per-layer rules with it)
 
     pcb2 = parse_kicad_pcb(out_path)
-    achieved = {nm: measure_tooth(pcb2, nm, src_pad[nm], byname) for nm in names}
+    achieved = {nm: measure_tooth(pcb2, nm, src_pad[nm], byname, dest_ref=dest_, which='src') for nm in names}
     log(f'  source realize: {len(src_choice)} tooth/teeth asked to move, engine laid '
         f'{len([n for n in ok if n in src_choice])}, refused '
         f'{len([n for n in restored if n in src_choice])}'

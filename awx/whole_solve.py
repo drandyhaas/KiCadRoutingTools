@@ -1019,7 +1019,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                     for L_b in sorted(VBAN.get((n, k_e), ())):
                         m.Add(y_e != LAYN.index(L_b)).OnlyEnforceIf(kept(n, fam='vban'))
                 else:
-                    m.Add(y_e == L_e).OnlyEnforceIf(kept(n, fam='endlay'))
+                    # (the rule's family names the END whose layer is fixed: a rules core then says which of a lane's
+                    # ends cannot hold its layer -- the tooth's, or the berth's)
+                    m.Add(y_e == L_e).OnlyEnforceIf(kept(n, fam=('toothlay', 'berthlay')[k_e]))
             for k in range(KMAX):
                 m.Add(y_[k + 1] != y_[k]).OnlyEnforceIf(act[k])
                 m.Add(y_[k + 1] == y_[k]).OnlyEnforceIf(act[k].Not())
@@ -2651,8 +2653,17 @@ def main():
             ctx, _cs = whole_ctx.plan()
             Jc = solve(ctx, awx_settings.req('DEST'), files('CUTS'), files('HIST'), None,
                        soft_cuts=files('SOFT_CUTS'), crowd=True, relax=2 if relax_on else 0)
-            if Jc is not None and Jc.get('crowded'):
-                json.dump({'crowded': Jc['crowded']}, open(out[:-len('.json')] + '.crowded.json', 'w'), indent=0)
+            # ...and its RULES core (solve's check, rules=True): each lane with the rule families it could not hold --
+            # a tooth's fixed layer ('toothlay') the round repairs there and then (whole_route.repair_layers)
+            ctx, _cs = whole_ctx.plan()
+            Jr = solve(ctx, awx_settings.req('DEST'), files('CUTS'), files('HIST'), None,
+                       soft_cuts=files('SOFT_CUTS'), relax=2 if relax_on else 0, check=True, core=True, rules=True)
+            rules_ = [list(r_) for r_ in (Jr or {}).get('rules') or []]
+            if rules_:
+                print(f'   rules core: {rules_}')
+            if (Jc is not None and Jc.get('crowded')) or rules_:
+                json.dump({'crowded': (Jc or {}).get('crowded') or [], 'rules': rules_},
+                          open(out[:-len('.json')] + '.crowded.json', 'w'), indent=0)
         if J is None:
             sys.exit(1)
     json.dump(J, open(out, 'w'), indent=0)

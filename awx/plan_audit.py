@@ -480,7 +480,7 @@ def _pad_edge(x, y, pd, g=0.0):
     """signed distance to a pad's copper as KiCad draws it: rounded corners, a stadium for an oval -- less, in its
     corner zone, the router's corner buffer for a grid of step g (pairs.pad_corner_buffer; g 0: none)"""
     cr = _pairs.pad_corner_radius(pd)
-    dx, dy = x - pd.global_x, y - pd.global_y
+    dx, dy = _pairs.into_pad(x - pd.global_x, y - pd.global_y, _pairs.pad_tilt(pd))
     return float(_pairs.pad_distance(dx, dy, pd.size_x / 2, pd.size_y / 2, cr)
                  - _pairs.pad_corner_buffer(dx, dy, pd.size_x / 2, pd.size_y / 2, cr, g))
 
@@ -920,7 +920,7 @@ def check_static(ctx, corridors, only=None):
                     else:       # the copper as KiCad draws it: rounded corners, a stadium for an oval -- and, a
                         # single's, in its corner zone as far again as the router's corner buffer
                         cr_ = _pairs.pad_corner_radius(pd)
-                        dx_, dy_ = P[:, 0] - pd.global_x, P[:, 1] - pd.global_y
+                        dx_, dy_ = _pairs.into_pad(P[:, 0] - pd.global_x, P[:, 1] - pd.global_y, _pairs.pad_tilt(pd))
                         d = _pairs.pad_distance(dx_, dy_, pd.size_x / 2, pd.size_y / 2, cr_)
                         if nm not in pairs:
                             d = d - _pairs.pad_corner_buffer(dx_, dy_, pd.size_x / 2, pd.size_y / 2, cr_, g)

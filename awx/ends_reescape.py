@@ -28,6 +28,7 @@ MARGIN = 0.05                # past the lane's clearance, as ends_nudge
 REACH = 0.6                  # the stretch past a tooth's exit that must stand clear (mm)
 NEAR = 1.0                   # the farthest a tooth moves along its face (mm)
 TRIES = 4                    # the escapes realize is asked to lay, best first
+STRIP = 0.6                  # mm round the ball: the movable copper taken off for its menu where none clears
 
 args = [a for a in sys.argv[1:] if not a.startswith('--')]
 AVOID = next((a.split('=', 1)[1] for a in sys.argv[1:] if a.startswith('--avoid=')), None)
@@ -73,7 +74,8 @@ def clears(m, nid):
     return worst >= bar, worst
 
 
-old = sr.measure_tooth(pcb, lane, src_pad[lane], byname)
+# (the SOURCE end -- the bench is fanned at both arrays: the two ends told apart by the destination, plan_state's)
+old = sr.measure_tooth(pcb, lane, src_pad[lane], byname, dest_ref=st['dref'], which='src')
 if old is None:
     print(f'ends_reescape: {lane} has no tooth on the bench')
     sys.exit(2)
@@ -96,6 +98,88 @@ for m in menu:
 cands.sort(key=lambda c: c[0])
 for k, m, d in cands[:TRIES + 1]:
     print(f'  candidate {m!r} clear {d:.3f} key {k}')
+free = {}                             # (escape -> the nets outside the run whose escapes it frees, re-laid with it)
+if not cands:
+    # NONE CLEARS: an escape whose way only another net's ESCAPE stands in -- a net outside the run, its track or via
+    # unlocked, fanned and not yet routed -- is laid with that net's ball escaped again in the same call
+    # (source_realize.realize's `free`: stripped and re-laid with no hint, wherever the engine puts it). A pad, the
+    # run's own copper, or anything locked is no blocker to move. Its menu is the ball's own on the bench without those
+    # nets' copper near the ball: an escape they stand in is no move of the bench's menu at all. A memory bus's edge
+    # data line, its surface tooth's layer unable to hold: a command line's B.Cu escape ran under its ball to the face,
+    # and its menu held no via -- its two escapes both surface ones on F.Cu
+    import copy
+    # (the bench as parsed: plan_state stood a locked via in for each ball site it reserves, on the board it read)
+    pcb0 = parse_kicad_pcb(bench)
+    run_ids = {byname[n_][0] for n_ in names if n_ in byname}
+    short = {v_[0]: k_ for k_, v_ in byname.items()}
+    bx_, by_ = src_pad[lane].global_x, src_pad[lane].global_y
+    near_ = lambda x_, y_: math.hypot(x_ - bx_, y_ - by_) <= STRIP   # noqa: E731
+    movable_ = {s_.net_id for s_ in pcb0.segments if s_.net_id not in run_ids and s_.net_id != nid and not s_.locked
+                and (near_(s_.start_x, s_.start_y) or near_(s_.end_x, s_.end_y)
+                     or seg_d((bx_, by_), (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)) <= STRIP)}
+    movable_ |= {v_.net_id for v_ in pcb0.vias if v_.net_id not in run_ids and v_.net_id != nid and not v_.locked
+                 and near_(v_.x, v_.y)}
+    movable_ -= {s_.net_id for s_ in pcb0.segments if s_.locked} | {v_.net_id for v_ in pcb0.vias if v_.locked}
+    pcb2 = copy.copy(pcb0)
+    pcb2.segments = [s_ for s_ in pcb0.segments if s_.net_id not in movable_]
+    pcb2.vias = [v_ for v_ in pcb0.vias if v_.net_id not in movable_]
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        menu2 = ffp.plan_state(pcb2, names)['smenu'].get(lane) or []
+    print(f'  none clears: {len(menu2)} escapes with the copper of {sorted(short.get(i_, i_) for i_ in movable_)} '
+          f'near the ball taken off')
+
+    def blockers(m):
+        """the other copper in the escape's way -- its via at its site (every layer), its legs (their layers), its
+        first REACH past the exit (its layer) -- by the bar: {net id: movable}"""
+        out_ = {}
+        dx, dy = em.DIRS[m.direction]
+        ray = [(m.exit_pt[0] + dx * k * REACH / 4, m.exit_pt[1] + dy * k * REACH / 4) for k in range(5)]
+        legs = [(a_, b_, L_) for a_, b_, L_ in (m.legs or ())]
+        site = m.site if m.vias and m.site is not None else None
+
+        def hit(nid_, ok_):
+            out_[nid_] = out_.get(nid_, True) and ok_
+        for s in pcb0.segments:
+            if s.net_id == nid:
+                continue
+            p_, q_ = (s.start_x, s.start_y), (s.end_x, s.end_y)
+            w_ = s.width / 2 + bar
+            ok_ = not s.locked and s.net_id not in run_ids
+            if site is not None and seg_d(site, p_, q_) < w_ + te.VIA_SIZE / 2 - te.TRACK / 2:
+                hit(s.net_id, ok_)
+            elif s.layer == m.layer and min(seg_d(r_, p_, q_) for r_ in ray) < w_:
+                hit(s.net_id, ok_)
+            elif any(L_ == s.layer and min(seg_d(r_, p_, q_) for r_ in (a_, b_)) < w_ for a_, b_, L_ in legs):
+                hit(s.net_id, ok_)
+        for v in pcb0.vias:
+            if v.net_id == nid:
+                continue
+            pts_ = ray + [a_ for a_, _b, _L in legs] + [b_ for _a, b_, _L in legs] + ([site] if site else [])
+            if min(math.hypot(v.x - r_[0], v.y - r_[1]) for r_ in pts_) - v.size / 2 < bar + \
+                    (te.VIA_SIZE / 2 if site else 0.0):
+                hit(v.net_id, not v.locked and v.net_id not in run_ids)
+        for fp in pcb0.footprints.values():
+            for p in fp.pads:
+                if p.net_id != nid and (m.layer in p.layers or '*.Cu' in p.layers or (p.drill or 0) > 0) and \
+                        min(math.hypot(p.global_x - r_[0], p.global_y - r_[1]) for r_ in ray) \
+                        - max(p.size_x, p.size_y) / 2 < bar:
+                    out_[p.net_id] = False
+        return out_
+    for m in menu2:
+        if AVOID and m.layer == AVOID:
+            continue
+        far = math.hypot(m.exit_pt[0] - old['tooth'][0], m.exit_pt[1] - old['tooth'][1])
+        if m.direction != old['direction'] or far > NEAR or (m.layer == old['layer'] and far < 0.1):
+            continue
+        b_ = blockers(m)
+        print(f'  {m!r}: in its way ' + (', '.join(f'{short.get(i_, i_)}{"" if v_ else " (fixed)"}'
+                                                  for i_, v_ in sorted(b_.items(), key=str)) or 'nothing'))
+        if all(b_.values()) and all(i_ in short for i_ in b_):
+            free[id(m)] = sorted(short[i_] for i_ in b_)
+            cands.append(((m.layer != old['layer'], round(far, 2), m.vias, len(b_)), m, 0.0))
+    cands.sort(key=lambda c: c[0])
 if not cands:
     print('ends_reescape: NO escape clears the tooth')
     sys.exit(2)
@@ -132,7 +216,12 @@ keep_s = [o_ for i, (k_, o_) in enumerate(_items) if k_ == 's' and _f(i) != _roo
 keep_v = [o_ for i, (k_, o_) in enumerate(_items) if k_ == 'v' and _f(i) != _root]
 print(f'  the lane\'s other copper put back after: {len(keep_s)} track(s), {len(keep_v)} via(s)')
 for _k, m, d in cands[:TRIES]:
-    res = sr.realize(bench, {lane: m}, src_pad, byname, sref, out, log=lambda s: print('  ' + s), guard_names=())
+    # (a freed net's own ball at the source array: the realize measures each stripped net there, before and after)
+    pads_ = dict(src_pad)
+    for n_ in free.get(id(m), ()):
+        pads_[n_] = next((p_ for p_ in pcb.footprints[sref].pads if p_.net_id == byname[n_][0]), None)
+    res = sr.realize(bench, {lane: m}, pads_, byname, sref, out, log=lambda s: print('  ' + s), guard_names=(),
+                     free=[n_ for n_ in free.get(id(m), ()) if pads_.get(n_) is not None])
     if lane in (res.get('ok') or []) and not res.get('rejected'):
         break
     print(f'  realize refused {m!r}: {res.get("rejected") or res.get("restored")}')
@@ -149,7 +238,7 @@ if keep_s or keep_v:
         [{'x': v_.x, 'y': v_.y, 'size': v_.size, 'drill': v_.drill, 'layers': list(v_.layers), 'net_id': nid,
           'tenting_attrs': getattr(v_, 'tenting_attrs', {}), 'inherit_when_unspecified': True} for v_ in keep_v],
         net_id_to_name=_n2n)
-new = sr.measure_tooth(parse_kicad_pcb(out), lane, src_pad[lane], byname)
+new = sr.measure_tooth(parse_kicad_pcb(out), lane, src_pad[lane], byname, dest_ref=st['dref'], which='src')
 side = json.load(open(os.path.splitext(bench)[0] + '.plan.json'))
 side['ends'][lane][0] = list(new['tooth'])
 side['tooth_layer'][lane] = new['layer']

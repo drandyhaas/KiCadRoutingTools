@@ -17,8 +17,16 @@
            through them and its centre; each leg from its entry point to its exit point, on the one layer then the
            other, changing layer at its own barrel, every piece on a router direction; the entry and exit points on
            their poses' two legs, P and N on opposite sides and SWAPPED between entry and exit"""
-import sys, json, math, collections
+import sys, json, math, collections, os
+import awx_settings
 geo = json.load(open(sys.argv[1]))
+# the ENDS' layers (the bench's plan sidecar, as the relayer left it: each tooth's and berth's point and the layer its
+# stub stands on), for a via standing AT a lane's end: there it changes from the lane's layer to the stub's -- read
+# between the lane's pieces alone, a lane on In4 into a berth's B.Cu stub had its via there "with no layer change", and
+# the loop sent a clean snapped plan back to the solve
+_bench = awx_settings.get('BENCH') or ''
+_side = (_bench[:-len('.kicad_pcb')] if _bench.endswith('.kicad_pcb') else _bench) + '.plan.json'
+SIDE = json.load(open(_side)) if _bench and os.path.isfile(_side) else {}
 RU = geo['rules']; g = RU['grid']; TW = RU['track']
 EPS = 1e-6
 bad = collections.defaultdict(list)
@@ -80,6 +88,12 @@ for n, L in geo['lanes'].items():
             if q[4] != p[4] and not any(math.hypot(vx - p[0], vy - p[1]) < 1e-4 for vx, vy in vias[n]):
                 bad['via'].append((n, 'layer change with no via', (round(p[0], 3), round(p[1], 3))))
     chg = [(p[0], p[1]) for q, p in zip(pcs, pcs[1:]) if q[4] != p[4]]
+    # (...and at an end whose stub stands on another layer than the lane's piece there: a change, at the end)
+    ends_ = (SIDE.get('ends') or {}).get(n)
+    for k_, (px_, py_, L_) in enumerate(((pcs[0][0], pcs[0][1], pcs[0][4]), (pcs[-1][2], pcs[-1][3], pcs[-1][4]))):
+        sl_ = (SIDE.get(('tooth_layer', 'dest_layer')[k_]) or {}).get(n)
+        if ends_ and sl_ and sl_ != L_ and math.hypot(ends_[k_][0] - px_, ends_[k_][1] - py_) < 1e-3:
+            chg.append((px_, py_))
     for vx, vy in vias[n]:
         if not any(math.hypot(vx - x, vy - y) < 1e-4 for x, y in chg):
             bad['via'].append((n, 'via with no layer change', (round(vx, 3), round(vy, 3))))

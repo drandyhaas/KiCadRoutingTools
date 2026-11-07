@@ -268,7 +268,11 @@ def plan_state(pcb, names, banned=frozenset()):
     _je.reserve_ball_vias(pcb)
     from coherent_nets import by_key
     byname = by_key(pcb)
-    ends = te.endpoints(pcb, names, byname)
+    # (each net's two ends told apart by the run's destination, DEST: on a board both arrays are fanned on -- a round's
+    # bench, its crowded ends escaped again -- the source's free end is no longer the only one, and the first found was
+    # taken for the tooth: a memory bus's data line re-escaped at its berth, its tooth asked off F.Cu searched among the
+    # destination's escapes and none found. Not yet fanned, the destination has no free end and the source's stand)
+    ends = te.endpoints(pcb, names, byname, dest_ref=awx_settings.get('DEST') or None)
     kids = {byname[n][0] for n in names}
     # a pair's exit room is checked against copper OUTSIDE the run under the ends model, whose search moves the run's
     # stubs and tests their options against the pair's (whole_ends); the other judges read the laid stubs as fixed

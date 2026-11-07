@@ -2627,7 +2627,7 @@ def checked(E, state, parts, log=print):
                 E.x_learned[key] = 2.0 * E.x_learned[key] if key in E.x_learned else X_LEARN
             for l_ in sorted({l_ for l_, f_ in v['rules'] if f_ == 'hands'}):
                 E.opp_learned[l_] = 2.0 * E.opp_learned[l_] if l_ in E.opp_learned else X_LEARN
-            for l_ in sorted({l_ for l_, f_ in v['rules'] if f_ == 'endlay'}):
+            for l_ in sorted({l_ for l_, f_ in v['rules'] if f_ in ('toothlay', 'berthlay')}):
                 E.end_learned[l_] = 2.0 * E.end_learned[l_] if l_ in E.end_learned else X_LEARN
         learned_ = bool(v['core'] or v.get('rules'))
         E._memo.clear(); E._parts.clear(); E.pool.clear()

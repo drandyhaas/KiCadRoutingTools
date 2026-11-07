@@ -658,11 +658,14 @@ the summary's `walled`.
 The lay asks the same of its own lanes first (`route_lanes.lift_walls`,
 `WALL_LIFT=0` off): a ball of the bus's parts the lay walled in has the laid
 lanes walling it lifted and routed again, in their order, round its way out --
-the via site its layer reaches with their lanes gone and their fanout standing
-(`route_bus.ball_way`), reserved as a line from the ball and a via -- kept
-where every one of them routes and the ball is reached, else all as it was.
-Asked with the walling nets' whole copper gone, the site lay under one lane's
-own escape on an inner layer, which no lane routed again could clear.
+the via site nearest along the way its layer reaches with their lanes gone
+and their fanout standing (`route_bus.ball_way`), the way itself and the via
+reserved -- kept where every one of them routes and the ball is reached, else
+all as it was. Asked with the walling nets' whole copper gone, the site lay
+under one lane's own escape on an inner layer, which no lane routed again
+could clear; reserved as a straight line from the ball, the way round the end
+of the walling lane's own fanout run was left open, and the lane routed again
+took that end and walled the ball once more.
 
 It exits 0 when every bus net it hands on is connected and clean (those it put
 back are in `refused`), and 1 when it hands on none. A bus net it does not hand
@@ -1192,6 +1195,20 @@ could not place are priced, and the ends searched again, up to `CHECK_TRIES`
 bus's escapes the round's first solve had no plan in 21 of 29 rounds where the
 ends model's own route found one.
 
+**A tooth whose layer cannot hold** (any bus, in the round). A round's solve
+with no plan names, in its rules core, the lanes and rules it could not hold
+together; a tooth's fixed layer is its own rule there (`toothlay`, a berth's
+`berthlay`). Each such lane alone is escaped again off that layer
+(`whole_route.repair_layers`, `ends_reescape.py --avoid`) and the round's
+solve asked again on the repaired bench. Where no escape of the ball clears,
+its menu is read again without the escapes of other nets near the ball --
+unlocked, fanned, not yet routed -- and an escape only those stand in is laid
+with them escaped again in the same call (`source_realize.realize`'s
+`free`). A memory bus's edge data line, a surface tooth with four crossers in
+a 3.2 mm channel, had no room to change layer before its first crossing:
+another net's escape ran under its ball, its menu held no via; with that
+escape laid again it took a via in its pad and the solve proved a plan.
+
 **The joint ends** (an escape base; `ENDS_JOINT=0` leaves the search alone).
 Before any search, every lane's tooth and berth are chosen together by CP-SAT
 over the same menus: one choice per lane and end, the conflicts the search
@@ -1421,7 +1438,12 @@ corridor, branch or path:
   32 crossings and 36 -- 8 vias against 12. It goes round the destination's **hull** -- its pads, the
   berths, and other parts' pads within a lane pitch and two lanes' room of
   them -- its lanes stacked across the trunk's handoff line outside it, the
-  ring starting a lane pitch inside the first. A part on that **stack** is
+  ring starting a lane pitch inside the first. A ring whose spine folds back
+  along the trunk from that start (a slanted trunk to a wide destination: the
+  hull's far corner sets the stack, its start past the near corner) is
+  stacked again from the near corner -- the hull up to two lane pitches past
+  the arrival -- out only as far as its start on the arrival line clears the
+  hull. A part on that **stack** is
   passed **inside** when the ring's lanes fit between it and the
   destination's copper -- the stack packed into the gap, never inside the
   facing face's lanes -- and is one more thing the ring goes round when they
@@ -1957,7 +1979,11 @@ lane's points (`connect.connect`): at 0.6 a via at the lane's outermost point
 had no cell (sdi_mipi_conv's SDI_D2 on four layers, its change 1.4 mm short
 of its berth, refused every round).
 
-**The audit** runs every `plan_audit.py` check: pads as KiCad draws them; a
+**The audit** runs every `plan_audit.py` check: pads as KiCad draws them --
+a tilted pad measured in its own frame (`pairs.into_pad`, as `check_drc`
+turns a point into it), as the geometry, the polish and the snap stamp it: on
+the board's axes a 0402 turned 45 degrees read 0.111 mm clear of a via the
+router and `check_drc` measure 0.063 from it, and the snap refused the via; a
 single's terminal join as the router lays it; each piece's off-grid allowance;
 a pair's end connectors and crossover as exact copper; a pair's dive for its
 straight runs, its room from both ends and the three cells the pair router
@@ -1972,8 +1998,12 @@ check is clean, and every lane's band joins its tooth to its berth.
 
 **The lint:** grid points, 0/45/90 pieces, continuity, no reversal; no fold
 where a lane meets its stub (named with its place, which the loop sends on);
-a via at every layer change; a pair's turns, dives, end connectors and
-crossover as the pair router makes them.
+a via at every layer change, and a layer change at every via -- at a lane's
+end, the change from its last piece's layer to the layer its stub stands on
+(the bench's plan sidecar): read between the lane's pieces alone, a lane on
+an inner layer into a berth's B.Cu stub had its via there "with no layer
+change", and the loop sent a clean snapped plan back to the solve; a pair's
+turns, dives, end connectors and crossover as the pair router makes them.
 
 </details>
 
@@ -2291,20 +2321,25 @@ via.
   only where no plan holds them all, at a hundred vias each (`CUTS_FIRM`): one
   solve, where two layers solve with the cuts hard and again with them soft.
 - **The round's repair first** (`LOOP_HOLD`, on). Before that re-solve, the
-  lanes the round's cuts, audit and lint name -- with those of its snapped
-  plan where that did not pass, and every lane an end of which the relayer
-  kept off the solve's layer -- are solved again with every other lane held
-  as the plan before laid it: its changes, its layers and its crossings with
-  another held lane (`whole_solve` `SOLVE_HOLD`). Taken when it has a plan
-  breaking no firm cut. A lane whose cut it breaks frees the lanes crossing
-  it, and the repair runs again, `REPAIR_WIDEN` (3) times at most; with no
-  plan, or still breaking one, the whole re-solve follows. A held model is
-  never relaxed: built without the hint the hold is read from, the relaxed
-  model is the whole solve's. Given the whole model each round, a group
-  bus's re-solves (387 to 456 s each, none proved) moved lanes no finding
-  named, each with findings of its own, and the loop stopped not converging
-  on its first round's plan; the repair re-solved 10 to 28 lanes in under
-  210 s.
+  lanes the round's audit and lint name -- with those of its snapped plan
+  where that did not pass, and every lane an end of which the relayer kept
+  off the solve's layer -- are solved again with every other lane held as the
+  plan before laid it: its changes, its layers and its crossings with another
+  held lane (`whole_solve` `SOLVE_HOLD`), and only the free lanes' cuts asked
+  of it. A lane the audit passes is one whose cuts the smooth plan answered
+  (a round whose audit names nothing goes to its passes whatever cuts it
+  has), so it is held with them; only a round whose audits name no lane frees
+  the lanes its cuts name. Taken when it has a plan breaking no firm cut. A
+  lane whose cut it breaks frees the lanes crossing it, and the repair runs
+  again, `REPAIR_WIDEN` (3) times at most; with no plan, or still breaking
+  one, the whole re-solve follows. A held model is never relaxed: built
+  without the hint the hold is read from, the relaxed model is the whole
+  solve's. Given the whole model each round, a group bus's re-solves (387 to
+  456 s each, none proved) moved lanes no finding named, each with findings
+  of its own, and the loop stopped not converging on its first round's plan.
+  Freeing every lane the round's cuts named, one with a single finding freed
+  14, broke the held lanes' cuts and widened to 37 (209 s); freed by its
+  audit, it re-solved that one lane in under a second.
 - **The whole re-solve in windows** (`whole_solve` `SOLVE_WINDOWS`, which the
   loop sets on that re-solve). From the plan before, laid out whole, eight
   neighbouring lanes in their order along the trunk are searched again with

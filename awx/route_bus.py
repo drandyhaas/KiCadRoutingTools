@@ -1365,10 +1365,11 @@ def _caged(pcb, pad, track, via, clearance):
     return not any(ffind(int(i)) == root for lab, t in zip(flabs, tgt) for i in np.unique(lab[t & (lab > 0)]))
 
 
-def ball_way(pcb, pad, fixed, rung):
+def ball_way(pcb, pad, fixed, rung, with_path=False):
     """((x, y), layer): the via site `pad` escapes by on `pcb`, `fixed`'s copper the walls -- the nearest point its own
     layer reaches with a track of `rung` where a via of `rung` fits on every layer, one off the pad's copper first (a
-    site in the pad by a millimetre's handicap); None when there is none in the cage's view. _caged's raster."""
+    site in the pad by a millimetre's handicap); None when there is none in the cage's view. _caged's raster.
+    `with_path`: ((x, y), layer, [points]) -- and the way there on its layer, from the ball to the site, its turns"""
     import numpy as np
     from scipy import ndimage
     from kicad_parser import is_immutable_copper
@@ -1396,8 +1397,43 @@ def ball_way(pcb, pad, fixed, rung):
     px, py = view[0] + (xs + 0.5) * step, view[1] + (ys + 0.5) * step
     hw, hh = pad.size_x / 2, pad.size_y / 2
     in_pad = (np.abs(px - pad.global_x) <= hw) & (np.abs(py - pad.global_y) <= hh)
-    i = int(np.argmin(np.hypot(px - pad.global_x, py - pad.global_y) + in_pad * 1.0))
-    return (float(px[i]), float(py[i])), home
+    # (the nearest site along the WAY there -- the free cells' walk from the ball, an 8-way breadth-first search --
+    # not across: the nearest across lay back inside the array round the end of a fanout's run, 1.2 mm from the ball
+    # and a 3 mm walk, where one outside the array's face stood along the way)
+    import collections as _col
+    reg = lab == lab[sy, sx]
+    H_, W_ = reg.shape
+    prev = {(sy, sx): None}
+    dist = {(sy, sx): 0}
+    q = _col.deque([(sy, sx)])
+    while q:
+        c_ = q.popleft()
+        for dy_, dx_ in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            n_ = (c_[0] + dy_, c_[1] + dx_)
+            if 0 <= n_[0] < H_ and 0 <= n_[1] < W_ and reg[n_] and n_ not in prev:
+                prev[n_] = c_
+                dist[n_] = dist[c_] + 1
+                q.append(n_)
+    walk = np.array([dist.get((int(y_), int(x_)), 10 ** 9) for y_, x_ in zip(ys, xs)], float) * step
+    i = int(np.argmin(walk + in_pad * 1.0))
+    if not with_path:
+        return (float(px[i]), float(py[i])), home
+    # (the way itself, kept at its turns -- the site may lie round the end of a fanout's run the straight line from
+    # the ball crosses)
+    goal = (int(ys[i]), int(xs[i]))
+    cells, c_ = [], goal
+    while c_ is not None and c_ in prev:
+        cells.append(c_)
+        c_ = prev[c_]
+    cells.reverse()
+    pts = [(pad.global_x, pad.global_y)]
+    for k_ in range(1, len(cells) - 1):
+        d0 = (cells[k_][0] - cells[k_ - 1][0], cells[k_][1] - cells[k_ - 1][1])
+        d1 = (cells[k_ + 1][0] - cells[k_][0], cells[k_ + 1][1] - cells[k_][1])
+        if d0 != d1:
+            pts.append((float(view[0] + (cells[k_][1] + 0.5) * step), float(view[1] + (cells[k_][0] + 0.5) * step)))
+    pts.append((float(px[i]), float(py[i])))
+    return (float(px[i]), float(py[i])), home, pts
 
 
 def array_others(pcb, ref, names):

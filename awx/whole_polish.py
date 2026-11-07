@@ -268,7 +268,7 @@ def drop_faults():
 
 
 # ------------------------------------------------------------------ static copper of other nets, per layer
-STATIC = []          # (kind, layers, net, data): pads ('rect' cx cy hx hy cr), holes and vias ('circ' cx cy r), segs (x0 y0 x1 y1 hw)
+STATIC = []          # (kind, layers, net, data): pads ('rect' cx cy hx hy cr tilt), holes and vias ('circ' cx cy r), segs (x0 y0 x1 y1 hw)
 RL = set(cfg.layers)  # the routing layers (connect.make_config): a hole's, a drilled pad's and a via's copper on every one
 for ref_, fp in ctx.pcb.footprints.items():            # (labelled by the board's key: a repeated reference has its own)
     for pd in fp.pads:
@@ -280,9 +280,11 @@ for ref_, fp in ctx.pcb.footprints.items():            # (labelled by the board'
         if not Ls:
             continue
         # a pad as KiCad draws its copper: a rectangle with its corners rounded (a circle's and an oval's by half its
-        # width), where the router's corner buffer takes over from the flat bar (pad_dist)
+        # width), where the router's corner buffer takes over from the flat bar (pad_dist) -- turned by its tilt
+        # (pairs.into_pad: each measure is taken in the pad's own frame)
         STATIC.append(('rect', Ls, pd.net_id, (pd.global_x, pd.global_y, pd.size_x / 2, pd.size_y / 2,
-                                               _pairs.pad_corner_radius(pd)), f'pad {ref_}.{pd.pad_number}'))
+                                               _pairs.pad_corner_radius(pd), _pairs.pad_tilt(pd)),
+                       f'pad {ref_}.{pd.pad_number}'))
 for s in ctx.base_segments:
     STATIC.append(('seg', {s.layer}, s.net_id, (s.start_x, s.start_y, s.end_x, s.end_y, s.width / 2), 'copper'))
 for v in ctx.base_vias:
@@ -321,7 +323,8 @@ for k_, (kind, Ls, net, d, lab) in enumerate(STATIC):
     if kind == 'circ':
         lo, hi = (d[0] - d[2], d[1] - d[2]), (d[0] + d[2], d[1] + d[2])
     elif kind == 'rect':
-        lo, hi = (d[0] - d[2], d[1] - d[3]), (d[0] + d[2], d[1] + d[3])
+        ex_, ey_ = _pairs.pad_extent(d[2], d[3], d[5])
+        lo, hi = (d[0] - ex_, d[1] - ey_), (d[0] + ex_, d[1] + ey_)
     else:
         lo, hi = (min(d[0], d[2]) - d[4], min(d[1], d[3]) - d[4]), (max(d[0], d[2]) + d[4], max(d[1], d[3]) + d[4])
     for cx in range(int(math.floor(lo[0] / SCELL)), int(math.floor(hi[0] / SCELL)) + 1):
@@ -378,7 +381,8 @@ for k_, (kind_, Ls_, _net, d_, _lab) in enumerate(STATIC):
     elif kind_ == 'seg':
         _SBOX[k_] = (min(d_[0], d_[2]), min(d_[1], d_[3]), max(d_[0], d_[2]), max(d_[1], d_[3]), d_[4])
     else:
-        _SBOX[k_] = (d_[0] - d_[2], d_[1] - d_[3], d_[0] + d_[2], d_[1] + d_[3], _pairs.corner_buffer(cfg.grid_step))
+        ex_, ey_ = _pairs.pad_extent(d_[2], d_[3], d_[5])
+        _SBOX[k_] = (d_[0] - ex_, d_[1] - ey_, d_[0] + ex_, d_[1] + ey_, _pairs.corner_buffer(cfg.grid_step))
     g_ = _SBOX[k_, 4] + _GROW
     c0_ = np.floor((_SBOX[k_, :2] - g_) / SCELL).astype(np.int64)
     c1_ = np.floor((_SBOX[k_, 2:4] + g_) / SCELL).astype(np.int64)
@@ -405,11 +409,14 @@ def way_out(P, nv, L, lab, need):
     t = 0.0
     for _ in range(len(pads) + 1):
         Q = P + nv * t
-        for cx, cy, hx, hy, _cr in pads:
-            x0, x1, y0, y1 = cx - hx - need, cx + hx + need, cy - hy - need, cy + hy + need
-            if x0 < Q[0] < x1 and y0 < Q[1] < y1:
-                tx = (x1 - Q[0]) / nv[0] if nv[0] > 1e-12 else (x0 - Q[0]) / nv[0] if nv[0] < -1e-12 else math.inf
-                ty = (y1 - Q[1]) / nv[1] if nv[1] > 1e-12 else (y0 - Q[1]) / nv[1] if nv[1] < -1e-12 else math.inf
+        for cx, cy, hx, hy, _cr, tl_ in pads:
+            # (in the pad's own frame: its box, grown, is axis-aligned there -- pairs.into_pad)
+            qx, qy = _pairs.into_pad(Q[0] - cx, Q[1] - cy, tl_)
+            ux, uy = _pairs.into_pad(nv[0], nv[1], tl_)
+            x0, x1, y0, y1 = -hx - need, hx + need, -hy - need, hy + need
+            if x0 < qx < x1 and y0 < qy < y1:
+                tx = (x1 - qx) / ux if ux > 1e-12 else (x0 - qx) / ux if ux < -1e-12 else math.inf
+                ty = (y1 - qy) / uy if uy > 1e-12 else (y0 - qy) / uy if uy < -1e-12 else math.inf
                 t += min(tx, ty) + 1e-6
                 break
         else:
@@ -420,15 +427,18 @@ def way_out(P, nv, L, lab, need):
 def pad_dist(P, d, pair):
     """(distance from P to a pad's copper, less -- a single's (not `pair`) -- the router's corner buffer where P stands
     in its corner zone (pairs.pad_corner_buffer), the pad's nearest point -- None inside), for a pad d = (cx, cy, hx, hy,
-    cr): the rounded rectangle is its inner rectangle grown by cr"""
-    cx, cy, hx, hy, cr = d
+    cr, tilt): the rounded rectangle is its inner rectangle grown by cr, measured in the pad's own frame (pairs.into_pad)
+    and its nearest point turned back"""
+    cx, cy, hx, hy, cr, tl_ = d
     ix, iy = hx - cr, hy - cr
-    q = np.array([min(max(P[0], cx - ix), cx + ix), min(max(P[1], cy - iy), cy + iy)])
-    v = P - q; dd = float(np.linalg.norm(v))
-    cb = 0.0 if pair else float(_pairs.pad_corner_buffer(P[0] - cx, P[1] - cy, hx, hy, cr, cfg.grid_step))
+    lx, ly = _pairs.into_pad(P[0] - cx, P[1] - cy, tl_)
+    q = np.array([min(max(lx, -ix), ix), min(max(ly, -iy), iy)])
+    v = np.array([lx, ly]) - q; dd = float(np.linalg.norm(v))
+    cb = 0.0 if pair else float(_pairs.pad_corner_buffer(lx, ly, hx, hy, cr, cfg.grid_step))
     if dd <= 1e-9:                      # inside the inner rectangle: no normal
-        return -min(hx - abs(P[0] - cx), hy - abs(P[1] - cy)) - cb, None
-    return dd - cr - cb, q + v / dd * cr    # (within the rounding, inside or out: its signed distance and its normal)
+        return -min(hx - abs(lx), hy - abs(ly)) - cb, None
+    q = q + v / dd * cr                 # (within the rounding, inside or out: its signed distance and its normal)
+    return dd - cr - cb, np.array([cx, cy]) + np.array(_pairs.out_of_pad(q[0], q[1], tl_))
 
 
 def static_near(P, L, own, pair=False):
@@ -518,28 +528,36 @@ def static_seg(p0, p1, L, own, cut=math.inf, pair=False):
             v = P - C; nv_ = np.linalg.norm(v)
             out.append((dd - d[4], s, (C + v / nv_ * d[4]) if nv_ > 1e-9 else None, lab))
         else:
-            cx, cy, hx, hy, cr = d
-            if far(cx - hx, cy - hy, cx + hx, cy + hy, _pairs.corner_buffer(cfg.grid_step)):
+            cx, cy, hx, hy, cr, tl_ = d
+            ex_, ey_ = _pairs.pad_extent(hx, hy, tl_)
+            if far(cx - ex_, cy - ey_, cx + ex_, cy + ey_, _pairs.corner_buffer(cfg.grid_step)):
                 continue
+            # (measured in the pad's own frame, the pad at its origin -- pairs.into_pad: a parameter along the segment
+            # is the same in either frame, the nearest point turned back)
+            q0 = np.array(_pairs.into_pad(p0[0] - cx, p0[1] - cy, tl_))
+            q1 = np.array(_pairs.into_pad(p1[0] - cx, p1[1] - cy, tl_))
+            dl_ = (0.0, 0.0, hx, hy, cr)
             inside = [s for s in (0.0, 0.5, 1.0)       # (in the copper, its corners rounded: not the box)
-                      if _pairs.pad_distance(*(p0 + (p1 - p0) * s - np.array([cx, cy])), hx, hy, cr) <= 0.0]
+                      if _pairs.pad_distance(*(q0 + (q1 - q0) * s), hx, hy, cr) <= 0.0]
             if inside:
                 out.append((-1.0, inside[0], None, lab)); continue
             # the rounded rectangle's distance, and within each corner's zone (the router's corner buffer: pad_dist)
             # the part of the segment there, less the buffer -- the worst of them
-            best = seg_rrect(p0, p1, d)
+            best = seg_rrect(q0, q1, dl_)
             ax_, ay_ = _pairs.corner_zone(hx, hy, cr, cfg.grid_step)
             cb = 0.0 if pair else _pairs.corner_buffer(cfg.grid_step)
             for sx in ((-1.0, 1.0) if cb > 0 else ()):
                 for sy in (-1.0, 1.0):
-                    t = clip_quadrant(p0, p1, cx + sx * ax_, cy + sy * ay_, sx, sy)
+                    t = clip_quadrant(q0, q1, sx * ax_, sy * ay_, sx, sy)
                     if t is None:
                         continue
-                    a_, b_ = p0 + (p1 - p0) * t[0], p0 + (p1 - p0) * t[1]
-                    dd, s_, q = seg_rrect(a_, b_, d)
+                    a_, b_ = q0 + (q1 - q0) * t[0], q0 + (q1 - q0) * t[1]
+                    dd, s_, q = seg_rrect(a_, b_, dl_)
                     if dd - cb < best[0]:
                         best = (dd - cb, t[0] + s_ * (t[1] - t[0]), q)
-            out.append((best[0], best[1], best[2], lab))
+            qb_ = None if best[2] is None else \
+                np.array([cx, cy]) + np.array(_pairs.out_of_pad(best[2][0], best[2][1], tl_))
+            out.append((best[0], best[1], qb_, lab))
     return out
 
 

@@ -323,8 +323,8 @@ def leg_static_clear(pts, L, net, near):
         if kind == 'hole':
             d = np.hypot(S_[:, 0] - pd.global_x, S_[:, 1] - pd.global_y) - (pd.drill or 0) / 2
         else:
-            d = _pairs.pad_distance(S_[:, 0] - pd.global_x, S_[:, 1] - pd.global_y, pd.size_x / 2, pd.size_y / 2,
-                                    _pairs.pad_corner_radius(pd))
+            d = _pairs.pad_distance(*_pairs.into_pad(S_[:, 0] - pd.global_x, S_[:, 1] - pd.global_y, _pairs.pad_tilt(pd)),
+                                    pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd))
         if float(np.min(d)) < bar + step / 2:
             return False
     for s_ in segs:
@@ -375,8 +375,8 @@ def via_clear(x, y, net, n, near, placed=None):
             if math.hypot(x - pd.global_x, y - pd.global_y) < cfg.via_drill / 2 + (pd.drill or 0) / 2 + h2h - 1e-9:
                 return False
             continue
-        d = float(_pairs.pad_distance(x - pd.global_x, y - pd.global_y, pd.size_x / 2, pd.size_y / 2,
-                                      _pairs.pad_corner_radius(pd)))
+        d = float(_pairs.pad_distance(*_pairs.into_pad(x - pd.global_x, y - pd.global_y, _pairs.pad_tilt(pd)),
+                                      pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd)))
         if d < VR + CL - 1e-9:
             return False
     for s_ in segs:
@@ -671,10 +671,11 @@ def build(n, neck=False):
                 if kind == 'hole':
                     mark(bad[L], (gx, gy, gx, gy), leg_bar + (pd.drill or 0) / 2, pt_d(gx, gy))
                     continue
-                hx, hy, cr = pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd)
-                mark(bad[L], (gx - hx, gy - hy, gx + hx, gy + hy), leg_bar,
-                     (lambda gx, gy, hx, hy, cr: lambda Xs, Ys: _pairs.pad_distance(Xs - gx, Ys - gy, hx, hy, cr))(
-                         gx, gy, hx, hy, cr))
+                hx, hy, cr, tl_ = pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd), _pairs.pad_tilt(pd)
+                ex_, ey_ = _pairs.pad_extent(hx, hy, tl_, cr)
+                mark(bad[L], (gx - ex_, gy - ey_, gx + ex_, gy + ey_), leg_bar,
+                     (lambda gx, gy, hx, hy, cr, tl_: lambda Xs, Ys: _pairs.pad_distance(
+                         *_pairs.into_pad(Xs - gx, Ys - gy, tl_), hx, hy, cr))(gx, gy, hx, hy, cr, tl_))
             for s_ in segs_:
                 if s_.net_id in own_n or s_.layer != L:
                     continue
@@ -813,10 +814,11 @@ def build(n, neck=False):
                 if kind == 'hole':
                     mark(sb, (gx, gy, gx, gy), cfg.via_drill / 2 + (pd.drill or 0) / 2 + h2h, pt_d(gx, gy), ox, oy)
                     continue
-                hx, hy, cr = pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd)
-                mark(sb, (gx - hx, gy - hy, gx + hx, gy + hy), need_s,
-                     (lambda gx, gy, hx, hy, cr: lambda Xs, Ys: _pairs.pad_distance(Xs - gx, Ys - gy, hx, hy, cr))(
-                         gx, gy, hx, hy, cr), ox, oy)
+                hx, hy, cr, tl_ = pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd), _pairs.pad_tilt(pd)
+                ex_, ey_ = _pairs.pad_extent(hx, hy, tl_, cr)
+                mark(sb, (gx - ex_, gy - ey_, gx + ex_, gy + ey_), need_s,
+                     (lambda gx, gy, hx, hy, cr, tl_: lambda Xs, Ys: _pairs.pad_distance(
+                         *_pairs.into_pad(Xs - gx, Ys - gy, tl_), hx, hy, cr))(gx, gy, hx, hy, cr, tl_), ox, oy)
             for s_ in segs_:
                 if s_.net_id in own_n:
                     continue

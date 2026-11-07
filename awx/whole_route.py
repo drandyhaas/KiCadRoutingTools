@@ -545,7 +545,7 @@ def round_lanes(cuts, audit):
     LINT row's)"""
     out = set()
     try:
-        c = json.load(open(cuts))
+        c = json.load(open(cuts)) if cuts else {}
         for k_ in ('cuts', 'vcuts', 'lcuts', 'ccuts'):
             for x in c.get(k_) or ():
                 for f_ in ('lane', 'a', 'b'):
@@ -679,15 +679,21 @@ def loop(solve, out, rounds, env, log):
                 f_[:-len('.finished')] for f_ in os.listdir(env['JOINT_DIR']) if f_.endswith('.finished')))}
         import route_layers
         if len(route_layers.layers()) > 2 and (awx_settings.get('LOOP_HOLD') or '1') == '1':
-            # (more routing layers than two: FIRST the round's REPAIR -- the re-solve with every lane the round's cuts
-            # and audit do not name held as the plan before laid it (whole_solve SOLVE_HOLD), the cuts firm; taken when
-            # it has a plan breaking none of them, else the whole re-solve below. Given the whole model, a group bus's
-            # re-solves -- 387 to 456 s each, proving nothing -- moved lanes no finding named, each round new findings
-            # of its own, and the loop stopped not converging on its first round's plan)
-            free_ = round_lanes(O(f'c{i}.json'), O(f'p{i}.audit'))
+            # (more routing layers than two: FIRST the round's REPAIR -- the re-solve with every lane the round's AUDIT
+            # does not name held as the plan before laid it (whole_solve SOLVE_HOLD), the free lanes' cuts firm; taken
+            # when it has a plan breaking none of them, else the whole re-solve below. Given the whole model, a group
+            # bus's re-solves -- 387 to 456 s each, proving nothing -- moved lanes no finding named, each round new
+            # findings of its own, and the loop stopped not converging on its first round's plan. A lane the audit
+            # passes is one whose cuts the smooth plan answered -- an audit with no finding sends the round to its
+            # passes whatever cuts it has -- so it is held, its cuts with it: freed for its cuts, a group bus's round
+            # with ONE finding freed 14 lanes, holding the rest broke their cuts, and it widened to 37, 209 s. Only a
+            # round whose audits name no lane frees the lanes the cuts name, as before)
+            free_ = round_lanes(None, O(f'p{i}.audit'))
             if os.path.isfile(O(f'hs{i}.json')):
                 # (the round's SNAPPED plan did not pass: what its audit, its lint and the snap's layer cuts name)
                 free_ |= round_lanes(O(f'lc{i}.json'), O('plan.found'))
+            if not free_:
+                free_ = round_lanes(O(f'c{i}.json'), O(f'p{i}.audit'))
             if env.get('VBAN_WALLS') and os.path.isfile(env['VBAN_WALLS']):
                 # (...and every lane an end of which the relayer kept off the solve's layer, for walling a ball in)
                 free_ |= {r_[0] for r_ in json.load(open(env['VBAN_WALLS']))}
@@ -702,8 +708,16 @@ def loop(solve, out, rounds, env, log):
                     break
                 hold_ = O(f'hold{i + 1}.json')
                 json.dump({'free': sorted(free_)}, open(hold_, 'w'))
+                # (the cuts of the FREE lanes alone: a held lane stands as the plan laid it, and a cut of its own there
+                # could only read broken)
+                hcuts_ = ''
+                if os.path.isfile(cuts_out):
+                    hcuts_ = O(f'cuts{i + 1}.hold.json')
+                    json.dump({k_: ([x for x in v_ if not isinstance(x, dict) or x.get('lane') in free_]
+                                    if k_ in ('cuts', 'vcuts', 'lcuts') else v_)
+                               for k_, v_ in json.load(open(cuts_out)).items()}, open(hcuts_, 'w'))
                 rc_h = stage([s2], 'whole_solve.py', [s2], s2[:-5] + '.held.log', BENCH=env.get('BENCH0') or env['BENCH'],
-                             HINT=st['solve'], CUTS=cuts_out if os.path.isfile(cuts_out) else '', HIST=st['hist'],
+                             HINT=st['solve'], CUTS=hcuts_, HIST=st['hist'],
                              CUTS_FIRM='1', SOLVE_UNPROVED='1', SOLVE_HOLD=hold_, **soft)
                 bl_ = grep(s2[:-5] + '.held.log', r'firm cuts broken')
                 broke_ = [int(m_.group(1)) for ln in bl_ for m_ in [re.search(r'broken: (\d+)', ln)] if m_]
@@ -1351,6 +1365,42 @@ def repair_ends(d, loopd, env, nets, say):
     if not moved:
         return None
     return cur, os.path.join(d, 'loop_ends')
+
+
+def repair_layers(d, crowded_f, env, nets, say):
+    """A round whose solve has NO PLAN, the lanes its RULES core names for a TOOTH's fixed layer (whole_solve's no-plan
+    diagnosis, OUT.crowded.json's 'rules': 'toothlay') -- a surface tooth whose lane must leave its layer before a
+    crossing, with no room for the change between them -- each such lane's ball escaped again OFF that layer
+    (ends_reescape --avoid: its own menu's escape nearest the old tooth on its face, clear past its exit), so the change
+    is its tooth's via: the fanout bench repaired before the round gives up on its ends. A memory bus's edge-ball data
+    line, its surface tooth on F.Cu crossing four lanes within 0.3 mm of route and another with its berth on F.Cu: no
+    plan; the 4-round run laid it only in its fourth round, its tooth a via in its pad. A pair, or a lane whose berth's
+    layer is the one that cannot hold, is left to the rounds after. The repaired bench, or None when nothing moved"""
+    try:
+        rules = json.load(open(crowded_f)).get('rules') or []
+    except (OSError, ValueError):
+        return None
+    lanes = sorted({l_ for l_, f_ in rules if f_ == 'toothlay'})
+    if not lanes:
+        return None
+    cur = env.get('BENCH0') or env['BENCH']
+    side = json.load(open(os.path.splitext(cur)[0] + '.plan.json'))
+    tl = side.get('tooth_layer') or {}
+    moved = []
+    for k, lane in enumerate(lanes):
+        if lane not in tl or lane not in nets:
+            say(f"  no plan: {lane}'s tooth layer cannot hold -- not a single lane's tooth here, left to the next round")
+            continue
+        out_ = os.path.join(d, f'fo_layer{k}.kicad_pcb')
+        rc_ = run(['ends_reescape.py', out_, lane, f'--avoid={tl[lane]}'], {**env, 'BENCH0': cur},
+                  log_path=os.path.join(d, f'layer{k}.log'), own_process=True)[0]
+        got = grep(os.path.join(d, f'layer{k}.log'), r'^ends_reescape: .*(re-escaped|no escape|NO |laid)')
+        say(f"  no plan: {lane}'s tooth on {tl[lane]} cannot hold its layer -- "
+            + (got[-1].split(': ', 1)[1][:160] if got else f'exit {rc_}'))
+        if rc_ == 0 and os.path.isfile(out_):
+            cur = out_
+            moved.append(lane)
+    return cur if moved else None
 
 
 BLOCKED_ENDS = 'blocked_ends.json'      # (the run's directory: the teeth no escape cleared -- put_blocked)
@@ -2281,7 +2331,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 f_[:-len('.finished')] for f_ in os.listdir(env['JOINT_DIR']) if f_.endswith('.finished')))}
         run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin},
             log_path=os.path.join(d, 'solve.log'))
-        for ln in grep(os.path.join(d, 'solve.log'), r'whole_solve:|workers:|crowded:'):
+        for ln in grep(os.path.join(d, 'solve.log'), r'whole_solve:|workers:|crowded:|rules core:'):
             say(ln[:200])
         jcuts = None
         if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
@@ -2293,6 +2343,22 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         crowded = json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []
         J, proved, rc, res, loopd = {}, False, None, None, os.path.join(d, 'loop')
         no_plan = not os.path.isfile(solve)
+        # ...NO PLAN, its rules core naming teeth whose fixed layer cannot hold: those teeth escaped again off their
+        # layer (repair_layers), and the solve asked again on the repaired bench
+        rep_ = repair_layers(d, crowded_f, env, sub, say) if no_plan and os.path.isfile(crowded_f) else None
+        if rep_ is not None:
+            bench = rep_
+            env['BENCH'] = bench
+            env.pop('BENCH0', None)
+            os.replace(crowded_f, crowded_f[:-len('.json')] + '0.json')
+            run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin},
+                log_path=os.path.join(d, 'solve_layers.log'))
+            for ln in grep(os.path.join(d, 'solve_layers.log'), r'whole_solve:|workers:|crowded:|rules core:'):
+                say(ln[:200])
+            if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
+                jcuts = joint_sync({**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin}, r, solve, say)
+            crowded = json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []
+            no_plan = not os.path.isfile(solve)
         if no_plan:
             say("  no plan from the solve -- nothing for this round to lay"
                 + (f" (no room for the crossings of {', '.join(crowded)})" if crowded else ''))

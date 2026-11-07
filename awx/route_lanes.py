@@ -99,13 +99,15 @@ def lift_walls(ctx, laid, routed, board, names, dest, base_s, base_v):
         gone = copy.copy(ctx.pcb)
         gone.segments = [s for s in ctx.pcb.segments if id(s) not in drop_]
         gone.vias = [v for v in ctx.pcb.vias if id(v) not in drop_]
-        way = rb.ball_way(gone, pad, fixed, rung)
+        way = rb.ball_way(gone, pad, fixed, rung, with_path=True)
         if way is None:
             print(f'{k} WALLED IN by {", ".join(lanes)}: no via site reached with them gone either')
             continue
-        (sx, sy), home = way
-        vline = [((pad.global_x, pad.global_y), (sx, sy), home)] if math.hypot(sx - pad.global_x,
-                                                                              sy - pad.global_y) > 1e-6 else []
+        (sx, sy), home, wpts = way
+        # (the WAY reserved, as the ball reaches the site: a straight line from the ball crossed the walling lane's
+        # own fanout run where the way went round its end, and the lane routed again took that end and walled the
+        # ball once more -- a source ball beside an Ethernet lane's tooth run)
+        vline = [(a_, b_, home) for a_, b_ in zip(wpts, wpts[1:]) if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > 1e-6]
         keep_s, keep_v = list(ctx.pcb.segments), list(ctx.pcb.vias)
         ctx.pcb.segments = [s for s in keep_s if id(s) not in drop_]
         ctx.pcb.vias = [v for v in keep_v if id(v) not in drop_]
