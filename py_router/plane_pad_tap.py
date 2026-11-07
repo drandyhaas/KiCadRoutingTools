@@ -1389,6 +1389,38 @@ def try_tap_pad(
     return _gate(TapResult(success=True, via=via, segments=segments))
 
 
+def _tap_in_net_keepout(pcb_data: PCBData, net_id: int, result: TapResult) -> bool:
+    """Does a tap's new copper (its via and traces) put `net_id` inside a
+    net-filtered keep-out that binds it (net_keepouts)? Judged by
+    net_keepouts.audit, the geometry KiCad's DRC grades.
+
+    The tap places on maps of its own, which the per-route region stamp
+    (net_keepouts.stamp) never reaches, and its callers lay the copper
+    outside any stamped route: the #189 via-in-pad unblock (a free via in an
+    allowed block), the #666 bare-ball escape of the net rescue, plane taps.
+    A boxed power pad beside a mask opening only GND may cross got such an
+    escape via 0.13 mm inside the region; a bottom-side pad under it got an
+    in-pad dogbone whose barrel reached the region's top-side copper. KiCad
+    grades both items_not_allowed (and, there, solder_mask_bridge)."""
+    if not getattr(pcb_data, '_net_keepouts', None):
+        return False
+    from net_keepouts import audit
+    vias = []
+    if result.via is not None:
+        v = result.via
+        vias.append(Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                        layers=v.get('layers', ['F.Cu', 'B.Cu']), net_id=net_id))
+    segs = [Segment(start_x=sd['start'][0], start_y=sd['start'][1],
+                    end_x=sd['end'][0], end_y=sd['end'][1],
+                    width=sd['width'], layer=sd['layer'], net_id=net_id)
+            for sd in (result.segments or [])]
+    found = audit(pcb_data, segs, vias)
+    if found:
+        name = getattr(pcb_data.nets.get(net_id), "name", net_id)
+        print(f"    tap of {name} refused: its copper is inside net keep-out(s) {found}")
+    return bool(found)
+
+
 def tap_pad_with_escalation(
     pad: Pad,
     pad_layer: Optional[str],
@@ -1436,6 +1468,8 @@ def tap_pad_with_escalation(
             shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
             plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
             ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap)
+        if result.success and _tap_in_net_keepout(pcb_data, net_id, result):
+            result = TapResult(success=False)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1497,6 +1531,8 @@ def tap_pad_with_escalation(
                 shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
                 plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
                 ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap)
+            if result.success and _tap_in_net_keepout(pcb_data, net_id, result):
+                result = TapResult(success=False)
             if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
