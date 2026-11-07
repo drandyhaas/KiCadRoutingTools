@@ -1942,6 +1942,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # (vias span all layers, so connector regions must be blocked before routing).
         print(f"Blocking connector regions for {len(diff_pair_ids_to_route)} diff pair(s)...")
 
+        # Each pair's connector regions, kept for the hybrid escape's leg map
+        # (`build_diff_pair_leg_obstacles`): a hybrid pair's terminal legs
+        # drop their own escape vias, and a via there seals a pair not yet
+        # routed off its pads.
+        _launch_via_cells = {}
+
         def _block_connector_regions(only_geom=None, dp_map=None):
             for pair_name, pair in diff_pair_ids_to_route:
                 geom = pair_diff_geom.get(pair.p_net_id, _global_geom)
@@ -1950,6 +1956,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 _dp_map = dp_map if dp_map is not None else diff_pair_base_obstacles_by_geom[geom]
                 _pcfg = config if geom == _global_geom else replace(
                     config, track_width=geom[0], diff_pair_gap=geom[1])
+                _cells = (_launch_via_cells.setdefault((pair.p_net_id, pair.n_net_id), [])
+                          if dp_map is None else None)
                 connector_info = get_diff_pair_connector_regions(pcb_data, pair, _pcfg)
                 if connector_info:
                     for end in ('src', 'tgt'):
@@ -1962,9 +1970,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                                 _dp_map,
                                 connector_info[f'{end}_center'][0], connector_info[f'{end}_center'][1],
                                 dir_x * sign, dir_y * sign,
-                                connector_info[f'{end}_setback'], connector_info['spacing_mm'], _pcfg
+                                connector_info[f'{end}_setback'], connector_info['spacing_mm'], _pcfg,
+                                cells_out=_cells
                             )
         _block_connector_regions()
+        pcb_data._pair_launch_via_cells = {k: v for k, v in _launch_via_cells.items() if v}
 
         def _pair_map_builder(narrow_config, geom):
             """#1742: the base centreline map of a pair narrowed to fit, built

@@ -659,7 +659,10 @@ from the terminal escapes (`_route_direct_coupled_middle`):
    the partner's **original fanout stub** (excluded from the diff-pair obstacle
    map, so re-added here) — is added as an obstacle, so a side-swap leg routes
    *around* it. That is where polarity is resolved: at the pads, by independent A*,
-   with no coupled crossing.
+   with no coupled crossing. A leg's escape via keeps out of the connector region
+   of every pair not yet routed, as the centreline map's vias always have (#1736):
+   in a row of bare connector pads, a via dropped in front of the next pair's pads
+   sealed its launch.
 
    **Boxed-endpoint handling.** A bare-pad stub tip can sit in a foreign keep-out
    tight enough that the leg can't get a via in *at the tip* — but a via still

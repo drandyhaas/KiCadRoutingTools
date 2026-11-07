@@ -4944,7 +4944,8 @@ def add_connector_region_via_blocking(obstacles: GridObstacleMap,
                                        setback_distance: float,
                                        spacing_mm: float,
                                        config: GridRouteConfig,
-                                       debug: bool = False):
+                                       debug: bool = False,
+                                       cells_out: Optional[list] = None):
     """Block vias in the connector region between stub center and setback position.
 
     The connector region extends from the stub center in the stub direction
@@ -4960,6 +4961,9 @@ def add_connector_region_via_blocking(obstacles: GridObstacleMap,
         spacing_mm: Half-spacing between P and N tracks (in mm)
         config: Routing configuration
         debug: If True, print debug info about blocked region
+        cells_out: Optional list the blocked (gx, gy) cells are appended to,
+            for a map built later that keeps the same region clear (a hybrid
+            pair's leg map, `routing_context.build_diff_pair_leg_obstacles`)
     """
     coord = GridCoord(config.grid_step)
 
@@ -5002,6 +5006,8 @@ def add_connector_region_via_blocking(obstacles: GridObstacleMap,
             if (gx, gy) not in blocked_set:
                 blocked_set.add((gx, gy))
                 obstacles.add_blocked_via(gx, gy)
+                if cells_out is not None:
+                    cells_out.append((gx, gy))
 
         dist += step
 

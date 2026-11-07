@@ -347,6 +347,13 @@ def build_diff_pair_leg_obstacles(base_obstacles, pcb_data, config, routed_net_i
       not block it, and the partner net's copper is re-added per-leg inside
       ``_route_hybrid_leg``.
 
+    - no via in another pair's connector region while that pair is not routed
+      (``pcb_data._pair_launch_via_cells``, recorded where route_diff blocks
+      those regions on the centreline map): a leg drops its own escape via,
+      and one in front of a neighbouring pair's pads seals that pair's launch.
+      The centreline map has always kept vias out of these regions; the leg
+      map is built from the other base and did not.
+
     Every hybrid call site (``_maybe_swap_to_hybrid``, the main-loop and reroute-loop
     last-resort hybrids, and the multipoint leg hybrid) builds the leg map through this
     one helper so it means the SAME thing regardless of entry path.
@@ -355,6 +362,11 @@ def build_diff_pair_leg_obstacles(base_obstacles, pcb_data, config, routed_net_i
         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
         all_unrouted_net_ids, p_net_id, n_net_id, gnd_net_id,
         track_proximity_cache, layer_map, 0.0)
+    regions = getattr(pcb_data, '_pair_launch_via_cells', None) or {}
+    unrouted = set(remaining_net_ids)
+    for (rp, rn), cells in regions.items():
+        if (rp, rn) != (p_net_id, n_net_id) and (rp in unrouted or rn in unrouted):
+            obstacles.add_blocked_vias_batch(np.asarray(cells, dtype=np.int32))
     return obstacles
 
 
