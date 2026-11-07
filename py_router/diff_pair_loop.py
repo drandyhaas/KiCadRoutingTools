@@ -203,12 +203,41 @@ def _width_runs(segs):
     return runs
 
 
-def narrowed_pair_config(config, width):
+def narrowed_pair_config(config, width, gaps=None):
     """`config` with every layer's pair width capped at `width` (#1742); the
-    call's track width (the connectors') too where it is wider."""
+    call's track width (the connectors') too where it is wider. `gaps`
+    ({layer: gap}, #1747) sets the P/N gap of a narrowed layer."""
     return replace(config,
                    layer_widths={l: min(w, width) for l, w in config.layer_widths.items()},
-                   track_width=min(config.track_width, width))
+                   track_width=min(config.track_width, width),
+                   pair_layer_gaps=dict(gaps or {}))
+
+
+def narrowed_pair_gaps(config, pcb_data, width, target, gap_floor):
+    """#1747: {layer: (gap, zdiff)} for each layer whose pair width `width`
+    narrows: the P/N gap that holds the differential impedance `target`
+    (ohms, coplanar gap) at `width` there, no wider than the pair's gap
+    (`config.diff_pair_gap`) and no narrower than `gap_floor`, the gap the
+    clearance between P and N allows (None: the pair's gap). A narrower
+    trace raises Zdiff and a narrower gap lowers it, so the stretch that does
+    not fit at the layer width keeps as much of the target as the floor
+    allows; `zdiff` is what it reaches. Empty without a target."""
+    if not target:
+        return {}
+    from impedance import differential_gap_for_impedance
+    ohms, coplanar = target
+    gap = config.diff_pair_gap
+    floor = min(gap_floor, gap) if gap_floor else gap
+    routable = set(config.routable_layers()) or set(config.layers)
+    out = {}
+    for layer, lw in config.layer_widths.items():
+        if lw <= width + 1e-9 or layer not in routable:
+            continue
+        got = differential_gap_for_impedance(pcb_data, layer, width, ohms, floor, gap,
+                                             coplanar_gap=coplanar)
+        if got is not None:
+            out[layer] = (got[0], round(got[1], 1))
+    return out
 
 
 def _route_narrowed_to_fit(state, pair, pair_name, config):
@@ -243,10 +272,16 @@ def _route_narrowed_to_fit(state, pair, pair_name, config):
             ripped_route_via_positions=state.ripped_route_via_positions)
 
     full_map, _ = pair_map(dp_base, config)
+    # #1747: the impedance target the layer widths were solved for, and the
+    # narrowest P/N gap this pair's clearance allows
+    target = getattr(state, 'pair_narrow_target', None)
+    gap_floor = (getattr(state, 'pair_gap_floors', None) or {}).get(pair.p_net_id)
 
     def attempt(width):
-        ncfg = narrowed_pair_config(config, width)
-        key = (geom, width)
+        gz = narrowed_pair_gaps(config, state.pcb_data, width, target, gap_floor)
+        gaps = {l: g for l, (g, _z) in gz.items()}
+        ncfg = narrowed_pair_config(config, width, gaps)
+        key = (geom, width, tuple(sorted(gaps.items())))
         if key not in cache:
             cache[key] = builder(ncfg, geom)
         nobs, stubs = pair_map(cache[key], ncfg)
@@ -264,6 +299,8 @@ def _route_narrowed_to_fit(state, pair, pair_name, config):
             print(f"    at {width:.4f}mm the members do not change width together "
                   f"-- narrower")
             return None
+        if gz:
+            res['pair_narrowed_gaps'] = gz
         return res
 
     print(f"  Narrowing {pair_name} to fit: both members from "
@@ -360,6 +397,10 @@ def couple_fallback_pairs_narrowed(state, diff_pair_ids_to_route, se_summary) ->
         coupled += 1
         print(f"  {GREEN}COUPLED NARROWED: {pair_name} at {nar['pair_narrowed_to']:.4f}mm "
               f"where the full width does not fit, both members together{RESET}")
+        for layer, (g, z) in sorted((nar.get('pair_narrowed_gaps') or {}).items()):
+            print(f"    {layer}: gap {g:.4f}mm (pair gap {config.diff_pair_gap:.4f}mm), "
+                  f"Zdiff {z:.1f} ohm against the {state.pair_narrow_target[0]:g} ohm "
+                  f"target")
     return coupled
 
 

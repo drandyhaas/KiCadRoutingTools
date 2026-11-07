@@ -255,10 +255,20 @@ narrow width, so P and N change width at the same point. The edges beside a via 
 narrow (the narrowed pitch places the vias). Where a graze neck narrows one member, the
 partner beside it is drawn at that width too, and a width at which the two members
 still do not change width in the same order along their path is skipped for the next
-narrower one, so a narrowed pair ships matched. The declared gap is kept, so a narrowed
-stretch runs above the target impedance (a 100 ohm pair on a 0.41 mm microstrip is
-about 112 ohm at 0.31 mm and 120 ohm at 0.26 mm). The pair is reported coupled, with
-`narrowed_to_mm` in its `pair_reports[]` record, and each member's narrowed copper is
+narrower one, so a narrowed pair ships matched. A narrower trace raises the
+differential impedance, so each narrowed layer also narrows the P/N gap (#1747): to
+the gap that holds the impedance target the layer widths were solved for at the
+narrowed width (`impedance.differential_gap_for_impedance`), never below the gap
+KiCad grades clean between P and N (the pair's net class, a rule binding P against N,
+the run's clearance and the fab floor). The narrower pitch also lets a wider narrowed
+width fit. A narrow trace's own impedance can hold the pair above the target even at
+that floor (on one 4-layer stackup a 100 ohm microstrip pair narrowed from 0.41 mm to
+0.21 mm is about 130 ohm at its 0.19 mm gap and still about 116 ohm at 0.09 mm), and a
+pair whose gap is already its floor keeps it. Without an impedance target (widths from
+a layer-scoped rule) the gap is kept. The pair is reported coupled, with
+`narrowed_to_mm` in its `pair_reports[]` record -- and, per narrowed layer, the gap it
+was built at (`narrowed_gap_mm`) and the impedance that reaches
+(`narrowed_zdiff_ohm`) -- and each member's narrowed copper is
 a `coupled pair narrowed to fit, both members` row in `design_rules` (measured on the
 shipped copper, as the #1725 rows are), which `--strict-sizes` counts. A pair left
 single-ended because it is electrically short, a multi-point pair and a pair with a

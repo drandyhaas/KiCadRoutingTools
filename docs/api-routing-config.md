@@ -568,6 +568,7 @@ on the corpus.
 |-------|---------|---------|
 | `impedance_target` | `None` | Target Z0 in Ω; when set, per-layer widths come from `layer_widths` |
 | `layer_widths` | `{}` | Layer name → width (filled by `impedance.calculate_layer_widths_for_impedance`) |
+| `pair_layer_gaps` | `{}` | #1747: layer name → P/N gap where it differs from `diff_pair_gap`. Set only on the config of a diff pair narrowed to fit (#1742): a narrowed layer takes the gap that holds the impedance target at the narrowed width (`impedance.differential_gap_for_impedance`), floored at the pair's own clearance floor. `layer_pair_spacing` reads it |
 | `coplanar_gap` | `0.0` | #486 **declaration**: design gap (mm) from a controlled-impedance trace's edge to the same-layer ground pour. `> 0` means outer-layer widths came from the coplanar-waveguide-over-ground model rather than microstrip. Set from `route.py --coplanar-gap` / `route_diff.py --coplanar-gap` |
 | `coplanar_net_ids` | `set()` | #486: net ids the coplanar declaration applies to. **Empty with a non-zero `coplanar_gap` means the whole call is coplanar**, and `layer_widths` already holds the CPW widths. Non-empty means only these nets are, and their widths live in `coplanar_layer_widths` |
 | `coplanar_layer_widths` | `{}` | #486: layer name → CPW-derived width, used only for `coplanar_net_ids`. Lets one call mix coplanar and microstrip nets |

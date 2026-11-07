@@ -2183,14 +2183,16 @@ def layer_pair_spacing(config):
     With per-layer widths (impedance solve or a layer-scoped design rule) a pair
     on a stripline layer is narrower than on the outer microstrip; keeping the
     outer pitch there widens the edge gap and misses the declared impedance.
-    Returns a float when every layer shares one width."""
+    A layer in `config.pair_layer_gaps` (a pair narrowed to fit, #1747) takes
+    its own gap. Returns a float when every layer shares one width."""
     if not getattr(config, 'layer_widths', None):
         return (config.track_width + config.diff_pair_gap) / 2
     names = list(config.layers)
+    gaps = getattr(config, 'pair_layer_gaps', None) or {}
 
     def spacing(layer):
         name = names[layer] if isinstance(layer, int) and 0 <= layer < len(names) else layer
-        return (config.get_track_width(name) + config.diff_pair_gap) / 2
+        return (config.get_track_width(name) + gaps.get(name, config.diff_pair_gap)) / 2
     return spacing
 
 

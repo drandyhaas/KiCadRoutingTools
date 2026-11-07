@@ -995,15 +995,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # a width, a stored 0 put every pair at the fab floor.
         return class_diff_pair_geometry(_c, _classes.get('Default'))
 
-    def _pair_build_gap(_pair, _pn, call_gap, run_clr, announce=True):
+    def _pair_build_gap(_pair, _pn, call_gap, run_clr, announce=True,
+                        floor_only=False):
         """The gap the pair is built at, from the call's gap `call_gap` and
         clearance `run_clr`: its class gap when the flag was omitted, floored
         at the rule binding P against N where one does (#1293/#1526/#1542),
         else at the clearance, its net class and a .kicad_dru rule (#441,
-        #530, #1145). `announce` prints each raise."""
+        #530, #1145). `announce` prints each raise. `floor_only` (#1747)
+        answers the floor alone: the narrowest gap KiCad grades clean
+        between P and N, whatever gap was asked."""
         ctx = _pair_geometry_inputs()
         _cg = _pair_class_geometry(_pair)[1]
-        _g = _cg if diff_pair_gap_from_class else None
+        _g = _cg if diff_pair_gap_from_class and not floor_only else None
+        if floor_only:
+            call_gap = 0.0
         _cf = _coupled_floor.get(_pair.p_net_id)
         if _cf is not None:
             # #1293 / #1526 / #1542: KiCad grades this pair's P<->N at
@@ -1011,7 +1016,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # clearance, the class or another rule: build the gap
             # asked for, floored at that rule alone.
             _ask = _g if _g is not None else (
-                _requested_gap if _requested_gap is not None else call_gap)
+                _requested_gap if _requested_gap is not None and not floor_only
+                else call_gap)
             _eg = max(_ask, ctx['rgfloor'])
             _clr = max([run_clr or 0.0] + [
                 (net_clearances or {}).get(_n) or 0.0
@@ -1085,6 +1091,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     impedance_width_clamped = {}
     layer_widths = {}
     _imp_unsolved = []          # #906: layers the model could not solve
+    # #1747: (ohms, coplanar gap) the layer widths are solved for -- a pair
+    # narrowed to fit holds it on its narrowed stretch with a narrower gap
+    _narrow_target = None
     if impedance is None and coplanar_gap and _declared_impedance is None:
         # See route.py: the gap only selects the impedance model (#486).
         print("WARNING: --coplanar-gap given without --impedance; it only "
@@ -1128,6 +1137,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 clamp_report=impedance_width_clamped,
                 unsolved_report=_imp_unsolved
             )
+            _narrow_target = (impedance, coplanar_gap or 0.0)
             print_impedance_routing_plan(pcb_data, layers, impedance,
                                         spacing=diff_pair_gap, is_differential=True,
                                         min_width=imp_width_floor,
@@ -1218,6 +1228,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                     coplanar_gap=_cgap,
                     floor_desc=imp_floor_desc,
                     clamp_report=impedance_width_clamped)
+                _narrow_target = (_ohms, _cgap or 0.0)
         elif _specs:
             print(f"  WARNING: targeted nets carry {len(_specs)} different stored "
                   f"impedance spec(s){' (plus unspecified nets)' if _uncovered else ''} "
@@ -2054,6 +2065,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     state.diff_pair_base_obstacles_by_geom = diff_pair_base_obstacles_by_geom
     state.pair_map_builder = _pair_map_builder
     state.global_pair_geom = (round(config.track_width, 4), round(config.diff_pair_gap, 4))
+    # #1747: a pair narrowed to fit narrows its gap toward the impedance
+    # target, down to the gap its own clearance allows
+    state.pair_narrow_target = _narrow_target if layer_widths else None
+    state.pair_gap_floors = {}
+    if state.pair_narrow_target:
+        for _pn, _pair in diff_pair_ids_to_route:
+            state.pair_gap_floors[_pair.p_net_id] = _pair_build_gap(
+                _pair, _pn, config.diff_pair_gap, config.clearance, announce=False,
+                floor_only=True)
 
     # Create local aliases for frequently-used state fields
     routed_net_ids = state.routed_net_ids

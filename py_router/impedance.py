@@ -1207,6 +1207,44 @@ def calculate_width_for_impedance(pcb: PCBData, layer_name: str, target_z0: floa
     return result
 
 
+def differential_gap_for_impedance(pcb: PCBData, layer_name: str, trace_width: float,
+                                   target_zdiff: float, min_gap: float, max_gap: float,
+                                   coplanar_gap: float = 0.0) -> Optional[Tuple[float, float]]:
+    """The P/N gap in [min_gap, max_gap] that holds `target_zdiff` at
+    `trace_width` on a layer (#1747), with the differential impedance there:
+    (gap, zdiff). The inverse of :func:`calculate_width_for_impedance` for a
+    fixed width, by bisection on :func:`calculate_impedance_for_layer` (Zdiff
+    rises with the gap on every model here).
+
+    Where no gap in the range reaches the target the nearest end is returned
+    with its own Zdiff: `min_gap` when even it leaves the pair above the target
+    (a narrow trace's own Z0 holds Zdiff up), `max_gap` when the pair is below
+    it there. The gap is rounded UP to 0.1 um, so it never drops under
+    `min_gap`. None when the layer has no impedance model."""
+    def zdiff(gap):
+        r = calculate_impedance_for_layer(pcb, layer_name, trace_width, gap,
+                                          coplanar_gap=coplanar_gap)
+        return r.get('zdiff')
+    if min_gap <= 0 or max_gap < min_gap or trace_width <= 0:
+        return None
+    z_lo, z_hi = zdiff(min_gap), zdiff(max_gap)
+    if z_lo is None or z_hi is None:
+        return None
+    if z_lo >= target_zdiff:
+        return min_gap, z_lo
+    if z_hi <= target_zdiff:
+        return max_gap, z_hi
+    lo, hi = min_gap, max_gap
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if zdiff(mid) < target_zdiff:
+            lo = mid
+        else:
+            hi = mid
+    gap = min(max_gap, math.ceil(hi * 1e4 - 1e-6) / 1e4)
+    return gap, zdiff(gap)
+
+
 def print_stackup_impedance_table(pcb: PCBData, trace_width: float = 0.15, spacing: float = 0.15):
     """
     Print a table showing impedance for each copper layer.

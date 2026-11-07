@@ -356,6 +356,11 @@ class GridRouteConfig:
     # Impedance-controlled routing
     impedance_target: Optional[float] = None  # Target impedance in ohms (None = use fixed track_width)
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
+    # #1747: a diff pair's P/N gap per layer, where it differs from
+    # diff_pair_gap. Set only on the config of a pair narrowed to fit (#1742):
+    # a layer whose width was narrowed takes the gap that holds the impedance
+    # target at the narrowed width. Empty = diff_pair_gap on every layer.
+    pair_layer_gaps: Dict[str, float] = field(default_factory=dict)
     # Coplanar-waveguide-over-ground declaration (#486). A trace running through
     # a ground pour on its OWN layer is a CPW, not a microstrip: the side ground
     # pulls Z0 down, so hitting the target needs a NARROWER trace. The pour does

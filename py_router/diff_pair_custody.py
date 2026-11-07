@@ -451,6 +451,14 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
                      if rr and rr.get('pair_narrowed_to')), None)
         if _nar is not None and outcome != 'deferred':
             rep['narrowed_to_mm'] = _nar
+            # #1747: per narrowed layer, the P/N gap it was built at (the gap
+            # holding the impedance target at that width, floored at the
+            # clearance) and the differential impedance it reaches there
+            _gz = next((rr.get('pair_narrowed_gaps') for rr in (_rr_p, _rr_n)
+                        if rr and rr.get('pair_narrowed_gaps')), None)
+            if _gz:
+                rep['narrowed_gap_mm'] = {l: g for l, (g, _z) in sorted(_gz.items())}
+                rep['narrowed_zdiff_ohm'] = {l: z for l, (_g, z) in sorted(_gz.items())}
         if diag.get('blocking_nets'):
             rep['blocking_nets'] = diag['blocking_nets']
         if diag.get('casualty'):
