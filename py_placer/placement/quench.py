@@ -1155,18 +1155,26 @@ class _Part(_NearWatched):
         return list(out)
 
 
-def courtyard_check(gap: float) -> str:
+def courtyard_check(gap: float, undrawn: bool = False) -> str:
     """#1724: the label of a courtyard refusal at `gap` (mm, the rects'
     `rect_gap`; negative when they overlap). 'courtyard' when the rects
     overlap -- the seat's reading of KiCad's courtyards_overlap, on the
-    courtyards' bounding rects (a `_ShapedPart`'s boxes, or a part's
-    estimated rect), which can overlap where KiCad's drawn outlines do
-    not; 'courtyard_gap' when they are apart but closer than the seat's
-    spacing, the copper clearance the placer keeps between courtyards
-    (routed A/Bs kept it over a gap of 0), which KiCad does not ask for at
-    all. One rule refuses both; the label says which, so a refusal at a
-    placement KiCad accepts does not read as a courtyard overlap."""
-    return 'courtyard' if gap < 0.0 else 'courtyard_gap'
+    courtyards' bounding rects (a `_ShapedPart`'s boxes), which can
+    overlap where KiCad's drawn outlines do not; 'courtyard_gap' when they
+    are apart but closer than the seat's spacing, the copper clearance the
+    placer keeps between courtyards (routed A/Bs kept it over a gap of 0),
+    which KiCad does not ask for at all. One rule refuses both; the label
+    says which, so a refusal at a placement KiCad accepts does not read as
+    a courtyard overlap.
+
+    #1744: 'estimated_courtyard' for an overlap where a part of the pair
+    draws no courtyard (`undrawn`): the seat reads a stand-in for it (its
+    #1300 estimate, else its pad box), the occupancy check_assembly's
+    courtyard channel grades it on, and KiCad, having no courtyard to
+    test, reports no courtyards_overlap there."""
+    if gap >= 0.0:
+        return 'courtyard_gap'
+    return 'estimated_courtyard' if undrawn else 'courtyard'
 
 
 class _ShapedPart(_Part):
@@ -2313,6 +2321,15 @@ class QuenchState:
         if self._why is not None and 'check' not in self._why:
             self._why.update(detail, check=check, blocker=blocker)
 
+    def _court_veto(self, gap, ref, other_ref, **detail):
+        """`_veto` for a courtyard refusal at `gap`, labelled by
+        `courtyard_check`: an overlap is KiCad's courtyards_overlap only
+        when both parts draw a courtyard (#1744)."""
+        drawn = self._drawn_courtyards
+        self._veto(courtyard_check(gap, ref not in drawn
+                                   or other_ref not in drawn),
+                   other_ref, gap=gap, **detail)
+
     def candidate_veto(self, ref, x, y, rot,
                        exclude: Optional[Set[str]] = None):
         """`None` when `candidate_valid` admits the pose, else `(check,
@@ -2503,9 +2520,11 @@ class QuenchState:
                             bad = gap is not None and gap < clr
                         if bad:
                             legal = False
-                            if self._why is not None:
-                                self._veto('height' if hv[1] > 0.0 else 'courtyard',
-                                           other_ref, path='height')
+                            if self._why is not None and hv[1] > 0.0:
+                                self._veto('height', other_ref, path='height')
+                            elif self._why is not None:
+                                self._court_veto(gap, ref, other_ref,
+                                                 path='height')
                             break
                         continue
                 if tht or other.has_tht:
@@ -2515,8 +2534,7 @@ class QuenchState:
                     if gap is not None and gap < clr:
                         legal = False
                         if self._why is not None:
-                            self._veto(courtyard_check(gap), other_ref,
-                                       path='tht', gap=gap)
+                            self._court_veto(gap, ref, other_ref, path='tht')
                         break
                     continue
                 # Fast path: two plain SMD parts, same side. The per-axis test is
@@ -2544,8 +2562,7 @@ class QuenchState:
                 if gap < clr:
                     legal = False
                     if self._why is not None:
-                        self._veto(courtyard_check(gap), other_ref,
-                                   path='smd', gap=gap)
+                        self._court_veto(gap, ref, other_ref, path='smd')
                     break
         if legal and self.frame_refs:
             # #1212: a pin frame's PINS. Its rect is skipped above (a frame,

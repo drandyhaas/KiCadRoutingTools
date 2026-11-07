@@ -312,7 +312,9 @@ class SilkContainmentIsNamed(unittest.TestCase):
         # the pad box gates the courtyard channel, as before the guard
         self.assertTrue([q for q in g['courtyard_blocking_pairs']
                          if {q.a, q.b} == {'BAT1', 'DC1'}])
-        self.assertEqual((veto or (None,))[0], 'courtyard', veto)
+        # BAT1 draws no courtyard, so the seat's refusal is not KiCad's
+        # courtyards_overlap (#1744)
+        self.assertEqual((veto or (None,))[0], 'estimated_courtyard', veto)
         # one pair, one label, wherever it is listed
         for lst in ('pairs', 'advisory_pairs'):
             for q in g[lst]:
