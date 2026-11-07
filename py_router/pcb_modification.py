@@ -8471,9 +8471,115 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         pcb_data.vias.append(via)
     # Update result so output file also gets cleaned segments
     result['new_segments'] = cleaned_segments
+    adopt_restored_stubs(pcb_data, result)
     if getattr(pcb_data, '_route_trace', None) is not None:     # the movie's record
         from route_trace import record
         record(pcb_data, cleaned_segments, result['new_vias'], result, trace_event)
+
+
+def adopt_restored_stubs(pcb_data: PCBData, result: dict) -> None:
+    """Give the escape stubs a terminal restore put back (#468's 'stub'
+    verdict, `rip_restore.try_terminal_restore`) to the result committed for
+    their net.
+
+    Those stubs are copper this run laid, put back on the board alone, so the
+    net's later route can start from them. No result owns them, and the board
+    keeps only copper a result owns: the copper sync
+    (`routing_common.sync_pcb_data_segments`) drops them, and the writer
+    never writes them. So a net re-routed from its stub shipped open
+    at the stub, after every in-run check had graded it connected.
+
+    A stub joins the result whose commit makes the net NEED it: the net's
+    copper on the board joins its pads into fewer pieces with the stub than
+    without it, so a pad is reached only through the stub. A stub the net
+    does not need yet stays on record for a later commit: a result's copper
+    is read as one connected tree (Phase 3 seeds its taps from it), so a stub
+    at a pad the route has not reached yet, in its result, would make that
+    pad read as reached and its tap would never be laid. A stub at a pad the
+    route reaches by itself is redundant copper, and is not shipped, as
+    before. A stub the result already carries (a restore of the saved route
+    the stub came from) is only released."""
+    ledger = getattr(pcb_data, '_stub_restores', None)
+    if not ledger:
+        return
+    nets = ({s.net_id for s in result.get('new_segments') or ()}
+            | {v.net_id for v in result.get('new_vias') or ()})
+    have = {id(o) for k in ('new_segments', 'new_vias')
+            for o in result.get(k) or ()}
+    on_board = {id(o) for o in pcb_data.segments} | {id(o) for o in pcb_data.vias}
+    for net_id in sorted(nets):
+        held = [o for o in ledger.pop(net_id, ())
+                if id(o) not in have and id(o) in on_board]
+        if not held:
+            continue
+        needed = _stubs_net_needs(pcb_data, net_id, held)
+        for o in needed:
+            have.add(id(o))
+            key = 'new_segments' if hasattr(o, 'start_x') else 'new_vias'
+            result[key] = list(result.get(key) or []) + [o]
+        rest = [o for o in held if id(o) not in have]
+        if rest:
+            ledger[net_id] = rest
+
+
+def _stub_chains(held: list) -> list:
+    """`held` split into chains: segments and vias that meet end to end (a
+    stub as the restore cut it from one route: pad, track, via, track)."""
+    def ends(o):
+        if hasattr(o, 'start_x'):
+            return ((o.start_x, o.start_y), (o.end_x, o.end_y))
+        return ((o.x, o.y),)
+    parent = list(range(len(held)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, a in enumerate(held):
+        for j in range(i):
+            if any(abs(p[0] - q[0]) < 1e-3 and abs(p[1] - q[1]) < 1e-3
+                   for p in ends(a) for q in ends(held[j])):
+                parent[root(i)] = root(j)
+    chains = {}
+    for i, o in enumerate(held):
+        chains.setdefault(root(i), []).append(o)
+    return list(chains.values())
+
+
+def _stubs_net_needs(pcb_data: PCBData, net_id: int, held: list) -> list:
+    """The stub chains of `held` (copper of `net_id` on the board) without
+    which the net's copper joins its pads into more pieces; [] when the net
+    does not need them. A chain is taken or left whole, so a stub ships as
+    the restore put it back."""
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    if len(pads) < 2:
+        return []
+    from check_connected import check_net_connectivity
+    held_ids = {id(o) for o in held}
+    segs = [s for s in pcb_data.segments
+            if s.net_id == net_id and id(s) not in held_ids]
+    vias = [v for v in pcb_data.vias
+            if v.net_id == net_id and id(v) not in held_ids]
+    zones = [z for z in getattr(pcb_data, 'zones', None) or ()
+             if z.net_id == net_id]
+
+    def pieces(extra):
+        r = check_net_connectivity(
+            net_id, segs + [o for o in extra if hasattr(o, 'start_x')],
+            vias + [o for o in extra if not hasattr(o, 'start_x')],
+            pads, zones, tolerance=0.02, pcb_data=pcb_data)
+        return r.get('num_components') or 0
+
+    with_all = pieces(held)
+    if pieces([]) <= with_all:
+        return []
+    keep = _stub_chains(held)
+    for chain in list(keep):
+        trial = [c for c in keep if c is not chain]
+        if pieces([o for c in trial for o in c]) <= with_all:
+            keep = trial
+    return [o for c in keep for o in c]
 
 
 def drop_phantom_copper(results, pcb_data: PCBData,

@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 RUN_LEDGERS = ('_preexisting_rips', '_rip_saved', '_refused_saved_134',
                '_pending_cap_moves', '_rip_override_names', '_hands_off_names',
                '_via_unblock_blame', '_unblock_via_sizes', '_unblock_via_sites',
-               '_rip_authority_ids')
+               '_rip_authority_ids', '_stub_restores')
 
 
 def reset_run_ledgers(pcb_data) -> None:
