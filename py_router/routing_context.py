@@ -1053,6 +1053,21 @@ def release_own_pad_lift(obstacles, net_id, token):
         obstacles.add_blocked_via_spans_batch(vias)
 
 
+def record_pair_paths(routed_net_paths: Dict, pair, result: Dict) -> None:
+    """Record a routed pair's members in `routed_net_paths`, the set of routed
+    nets the blocking analysis can name (`analyze_frontier_blocking`, which
+    reads each member's copper off the board). A hybrid escape (#766) has no
+    grid path, but its middle, legs and vias are copper a later pair can be
+    blocked by, so its members are recorded with an empty path (#1736):
+    unrecorded, a pair it sealed was told no routed net blocked it."""
+    for nid, key in ((pair.p_net_id, 'p_path'), (pair.n_net_id, 'n_path')):
+        path = result.get(key)
+        if path:
+            routed_net_paths[nid] = path
+        elif result.get('hybrid_escape'):
+            routed_net_paths[nid] = []
+
+
 def record_diff_pair_success(
     pcb_data,
     result: Dict,
@@ -1110,10 +1125,7 @@ def record_diff_pair_success(
         pcb_data, pair.n_net_id, config, layer_map)
 
     # Track paths for blocking analysis
-    if result.get('p_path'):
-        routed_net_paths[pair.p_net_id] = result['p_path']
-    if result.get('n_path'):
-        routed_net_paths[pair.n_net_id] = result['n_path']
+    record_pair_paths(routed_net_paths, pair, result)
 
     # Track result for rip-up
     routed_results[pair.p_net_id] = result

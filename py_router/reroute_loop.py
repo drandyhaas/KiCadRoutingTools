@@ -31,7 +31,7 @@ from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstac
 from routing_context import (
     build_single_ended_obstacles, build_diff_pair_obstacles,
     build_diff_pair_leg_obstacles,
-    record_single_ended_success, record_diff_pair_success,
+    record_single_ended_success, record_diff_pair_success, record_pair_paths,
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
 from obstacle_cache import update_net_obstacles_after_routing, refresh_net_obstacles
@@ -1131,10 +1131,7 @@ def run_reroute_loop(
                                     remaining_net_ids.remove(ripped_pair.n_net_id)
                                 routed_net_ids.append(ripped_pair.p_net_id)
                                 routed_net_ids.append(ripped_pair.n_net_id)
-                                if retry_result.get('p_path'):
-                                    routed_net_paths[ripped_pair.p_net_id] = retry_result['p_path']
-                                if retry_result.get('n_path'):
-                                    routed_net_paths[ripped_pair.n_net_id] = retry_result['n_path']
+                                record_pair_paths(routed_net_paths, ripped_pair, retry_result)
                                 routed_results[ripped_pair.p_net_id] = retry_result
                                 routed_results[ripped_pair.n_net_id] = retry_result
                                 diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
@@ -1256,10 +1253,7 @@ def run_reroute_loop(
                             routed_net_ids.append(ripped_pair.n_net_id)
                             track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
                             track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
-                            if swap_result.get('p_path'):
-                                routed_net_paths[ripped_pair.p_net_id] = swap_result['p_path']
-                            if swap_result.get('n_path'):
-                                routed_net_paths[ripped_pair.n_net_id] = swap_result['n_path']
+                            record_pair_paths(routed_net_paths, ripped_pair, swap_result)
                             routed_results[ripped_pair.p_net_id] = swap_result
                             routed_results[ripped_pair.n_net_id] = swap_result
                             diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)

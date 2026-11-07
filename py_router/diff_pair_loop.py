@@ -30,7 +30,8 @@ from diff_pair_multipoint import (
     leg_electrically_short, pair_leg_electrically_short,
     diff_pair_min_coupled_length,
 )
-from routing_context import build_diff_pair_obstacles, build_diff_pair_leg_obstacles
+from routing_context import (build_diff_pair_obstacles, build_diff_pair_leg_obstacles,
+                             record_pair_paths)
 from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
                                record_pair_diag,
                                blocker_names as custody_blocker_names)
@@ -603,10 +604,7 @@ def route_diff_pairs(
                 routed_net_ids.append(pair.n_net_id)
                 track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
                 track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-                if merged.get('p_path'):
-                    routed_net_paths[pair.p_net_id] = merged['p_path']
-                if merged.get('n_path'):
-                    routed_net_paths[pair.n_net_id] = merged['n_path']
+                record_pair_paths(routed_net_paths, pair, merged)
                 routed_results[pair.p_net_id] = merged
                 routed_results[pair.n_net_id] = merged
                 diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
@@ -966,10 +964,7 @@ def route_diff_pairs(
             routed_net_ids.append(pair.n_net_id)
             track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
             track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-            if result.get('p_path'):
-                routed_net_paths[pair.p_net_id] = result['p_path']
-            if result.get('n_path'):
-                routed_net_paths[pair.n_net_id] = result['n_path']
+            record_pair_paths(routed_net_paths, pair, result)
             routed_results[pair.p_net_id] = result
             routed_results[pair.n_net_id] = result
             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
@@ -1273,10 +1268,7 @@ def route_diff_pairs(
                             routed_net_ids.append(pair.n_net_id)
                             track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
                             track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-                            if retry_result.get('p_path'):
-                                routed_net_paths[pair.p_net_id] = retry_result['p_path']
-                            if retry_result.get('n_path'):
-                                routed_net_paths[pair.n_net_id] = retry_result['n_path']
+                            record_pair_paths(routed_net_paths, pair, retry_result)
                             routed_results[pair.p_net_id] = retry_result
                             routed_results[pair.n_net_id] = retry_result
                             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
@@ -1419,10 +1411,7 @@ def route_diff_pairs(
                         routed_net_ids.append(pair.n_net_id)
                         track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
                         track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-                        if swap_result.get('p_path'):
-                            routed_net_paths[pair.p_net_id] = swap_result['p_path']
-                        if swap_result.get('n_path'):
-                            routed_net_paths[pair.n_net_id] = swap_result['n_path']
+                        record_pair_paths(routed_net_paths, pair, swap_result)
                         routed_results[pair.p_net_id] = swap_result
                         routed_results[pair.n_net_id] = swap_result
                         diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
@@ -1468,6 +1457,7 @@ def route_diff_pairs(
                         routed_net_ids.append(pair.n_net_id)
                         routed_results[pair.p_net_id] = hyb
                         routed_results[pair.n_net_id] = hyb
+                        record_pair_paths(routed_net_paths, pair, hyb)
                         diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
                         diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
                         track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)

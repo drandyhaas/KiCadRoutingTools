@@ -735,6 +735,11 @@ not boxed, or open the obstruction in placement. The hybrid is gated by
 path (single-ended follow-up) when it can't lay a clean route, so it never makes a
 pair worse.
 
+A hybrid-routed pair is a blocker a later pair can name, as any routed pair is
+(#1736): its middle, legs and vias are read off the board by the blocking
+analysis, so a pair whose launch they seal can rip it and route, rather than
+being told no routed net blocks it.
+
 **How it is reported (#766).** A hybrid-routed pair is genuinely routed — its pads
 connect and its copper is DRC-clean — so it keeps its place in `routed_diff_pairs`
 and in `successful`, as long as the copper it ships still carries its coupled
