@@ -214,7 +214,10 @@ answered nothing.
 
 For a quick look, `modal_app.py --limit N` keeps the N *cheapest* boards — the
 default order is longest-first, which is right for throughput but would hand you
-the 50-minute board first.
+the 50-minute board first. A negative N drops the |N| *slowest* instead
+(`cloud_replay_sets.py` passes `-3` by default). Both rank by
+`sweep_lib.load_cost_table`: each board's newest harvested cloud replay time,
+else its original stress run's agent-session time.
 
 Output: a per-arm table (boards, chain-complete, mean completion %, total real
 DRC, CPU-hours) plus every raw row, written to `--out` or to
@@ -252,7 +255,7 @@ disclose the rescue cell, never trust a two-board result) are
 |---|---|
 | `--sets` | comma-separated set names (default `set1`..`set10`) |
 | `--boards a,b` | only these boards |
-| `--limit N` | only the N cheapest boards |
+| `--limit N` | only the N cheapest boards; a negative N drops the \|N\| slowest (not with `--boards`) |
 | `--exclude a,b` | skip these boards this run |
 | `--ignore-excludes` | do not drop `board_value.json`'s `exclude` list (a new knob family's first sweep should not inherit it) |
 | `--stage screened` | successive halving: the `screen` boards first, then the full set for surviving arms (see "Screen before you sweep") |
