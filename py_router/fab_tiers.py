@@ -1480,10 +1480,7 @@ def parse_fab_overrides(path):
     return overrides
 
 
-def add_fab_tier_args(parser, *, include_escalation=True):
-    """Add ``--fab-tier`` / ``--fab-overrides`` (and, for the routing CLIs,
-    ``--escalation`` / ``--strict-sizes``) to an argparse parser. Shared by
-    every routing/DRC CLI so the flags are identical everywhere."""
+def _fab_tier_arg():
     # Replay knobs (#530 corpus A/B): KICAD_FAB_TIER_DEFAULT / KICAD_ESCALATION_DEFAULT
     # set the DEFAULT of the two flags when a command omits them, so a
     # cloud_replay_sets --env arm can replay pre-#857 manifests under the old
@@ -1493,42 +1490,56 @@ def add_fab_tier_args(parser, *, include_escalation=True):
     _tier_dflt = os.environ.get('KICAD_FAB_TIER_DEFAULT', DEFAULT_TIER)
     if _tier_dflt not in TIERS:
         _tier_dflt = DEFAULT_TIER
-    _esc_dflt = os.environ.get('KICAD_ESCALATION_DEFAULT', DEFAULT_ESCALATION)
-    if _esc_dflt not in ESCALATION_POLICIES:
-        _esc_dflt = DEFAULT_ESCALATION
-    parser.add_argument(
-        '--fab-tier', choices=list(TIERS), default=_tier_dflt,
+    return dict(
+        choices=list(TIERS), default=_tier_dflt,
         help=f"JLC fab capability floor (default {DEFAULT_TIER}). 'auto' = the cheap standard "
              "floor, escalating to advanced (0.25/0.15 via etc., more costly; warned "
              "and counted in the run summary) when a fine-pitch fan-out, plane tap or "
              "last-resort via cannot fit at the standard floor; 'standard' and "
              "'advanced' are HARD floors that never escalate.")
-    parser.add_argument(
-        '--fab-overrides', metavar='FILE', default=None,
-        help="Path to a fab-floor override file (key=value lines, e.g. "
-             "'via_drill = 0.15') overlaying the selected --fab-tier; only the "
-             "listed values are replaced. Supplying it disables escalation (the "
-             "floor becomes exactly the file + base tier). See the template "
-             "fab_overrides.example.txt for the format and every key.")
+
+
+_FAB_OVERRIDES_ARG = dict(
+    metavar='FILE', default=None,
+    help="Path to a fab-floor override file (key=value lines, e.g. "
+         "'via_drill = 0.15') overlaying the selected --fab-tier; only the "
+         "listed values are replaced. Supplying it disables escalation (the "
+         "floor becomes exactly the file + base tier). See the template "
+         "fab_overrides.example.txt for the format and every key.")
+
+
+def _escalation_arg():
+    _esc_dflt = os.environ.get('KICAD_ESCALATION_DEFAULT', DEFAULT_ESCALATION)
+    if _esc_dflt not in ESCALATION_POLICIES:
+        _esc_dflt = DEFAULT_ESCALATION
+    return dict(
+        choices=list(ESCALATION_POLICIES), default=_esc_dflt,
+        help=f"How far below a REQUESTED size a failing net may be retried "
+             f"(default {DEFAULT_ESCALATION}). 'off': never -- sizes and clearances are exact, "
+             "a net that cannot complete at them fails and is reported (a wide "
+             "power/impedance net may still neck for at most "
+             f"{defaults.PAD_ENTRY_NECK_MM:g} mm of path at a pad entry). 'board': "
+             "down to the board's own declared floors (Board Setup rules.min_*; "
+             "an unset key falls back to the fab tier floor, an unset "
+             "min_clearance to the Default class). That is what KiCad's DRC "
+             "accepts once the output project's Default class is lowered to "
+             "the clearance used, which the DRC-settings writeback does; with "
+             "--no-fix-drc-settings the project is left as it was, so "
+             "descents stop at what KiCad grades it at: a rule it leaves "
+             "out at KiCad's factory value (#1287), clearance at the "
+             "Default class floored at min_clearance (#1262). 'fab': down to "
+             "the fab tier floor, below the board's own minimums. Every "
+             "descent is counted in JSON_SUMMARY design_rules.")
+
+
+def add_fab_tier_args(parser, *, include_escalation=True):
+    """Add ``--fab-tier`` / ``--fab-overrides`` (and, for the routing CLIs,
+    ``--escalation`` / ``--strict-sizes``) to an argparse parser. Shared by
+    every routing/DRC CLI so the flags are identical everywhere."""
+    parser.add_argument('--fab-tier', **_fab_tier_arg())
+    parser.add_argument('--fab-overrides', **_FAB_OVERRIDES_ARG)
     if include_escalation:
-        parser.add_argument(
-            '--escalation', choices=list(ESCALATION_POLICIES), default=_esc_dflt,
-            help=f"How far below a REQUESTED size a failing net may be retried "
-                 f"(default {DEFAULT_ESCALATION}). 'off': never -- sizes and clearances are exact, "
-                 "a net that cannot complete at them fails and is reported (a wide "
-                 "power/impedance net may still neck for at most "
-                 f"{defaults.PAD_ENTRY_NECK_MM:g} mm of path at a pad entry). 'board': "
-                 "down to the board's own declared floors (Board Setup rules.min_*; "
-                 "an unset key falls back to the fab tier floor, an unset "
-                 "min_clearance to the Default class). That is what KiCad's DRC "
-                 "accepts once the output project's Default class is lowered to "
-                 "the clearance used, which the DRC-settings writeback does; with "
-                 "--no-fix-drc-settings the project is left as it was, so "
-                 "descents stop at what KiCad grades it at: a rule it leaves "
-                 "out at KiCad's factory value (#1287), clearance at the "
-                 "Default class floored at min_clearance (#1262). 'fab': down to "
-                 "the fab tier floor, below the board's own minimums. Every "
-                 "descent is counted in JSON_SUMMARY design_rules.")
+        parser.add_argument('--escalation', **_escalation_arg())
         parser.add_argument(
             '--clearance-ceiling', type=float, default=None, metavar='MM',
             help="Cap EVERY net class (Default included) at this copper clearance for "
@@ -1541,6 +1552,16 @@ def add_fab_tier_args(parser, *, include_escalation=True):
             '--strict-sizes', action='store_true',
             help="Exit non-zero (3) when any feature was delivered below its requested "
                  "size or a fab-tier escalation fired, so a harness needs no grep.")
+    return parser
+
+
+def add_fab_floor_args(parser):
+    """``--fab-tier`` / ``--fab-overrides`` / ``--escalation`` alone, exactly as
+    ``add_fab_tier_args`` adds them, for a front that sets its steps'
+    clearance ceiling itself and reads their exit codes (autoplan)."""
+    parser.add_argument('--fab-tier', **_fab_tier_arg())
+    parser.add_argument('--fab-overrides', **_FAB_OVERRIDES_ARG)
+    parser.add_argument('--escalation', **_escalation_arg())
     return parser
 
 
