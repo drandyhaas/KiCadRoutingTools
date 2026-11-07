@@ -1464,12 +1464,17 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # min_track_width, wider than config.track_width, and routes the narrowest
     # connection with track_margin=0; a config.track_width band lets that wider copper
     # graze the outline sub-fab (crkbd/dilemma). Callers pass the stamped width here.
-    _edge_tw = track_width if track_width is not None else config.track_width
     # The track band per layer group: one band on every layer unless the
     # map's extra clearance differs by layer (a pair centreline's member
-    # half-pitch, #1729). The via band spans the stack at the scalar.
-    track_groups = [(edge_clearance + _edge_tw / 2 + _ex, _idxs)
-                    for _ex, _idxs in extra_layer_groups(extra_clearance, layer_list).items()]
+    # half-pitch, #1729) or the width it is stamped at does (the diff
+    # engine's layer width, `stamp_track_width`, #1736). The via band spans
+    # the stack at the scalar.
+    _bands = {}
+    for _i, _l in enumerate(layer_list):
+        _tw = track_width if track_width is not None else config.stamp_track_width(_l)
+        _bands.setdefault(edge_clearance + _tw / 2 + extra_on_layer(extra_clearance, _l),
+                          []).append(_i)
+    track_groups = list(_bands.items())
     via_edge_clearance = via_edge + config.via_size / 2 + extra_clearance
 
     # Convert to grid coordinates. Use to_grid_dist_safe (ceil) for the via
@@ -4707,13 +4712,16 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
             config.layer_clearance(layer_name, clearance, pad=pad), pad)
 
     def _clr_groups(expanded):
-        # keyed by the track keep-out's two per-layer terms: the clearance and
-        # the map's extra clearance on that layer (a pair centreline's member
-        # half-pitch, #1729)
+        # keyed by the track keep-out's two per-layer terms: its reach past
+        # the pad copper (the stamped track's half-width plus the clearance;
+        # the layer's width on the diff engine's maps, `stamp_track_width`,
+        # #1736) and the map's extra clearance on that layer (a pair
+        # centreline's member half-pitch, #1729)
         groups = {}
         for l in expanded:
             if l in layer_map:
-                groups.setdefault((_layer_clr(l), extra_on_layer(extra_clearance, l)),
+                groups.setdefault((config.stamp_track_width(l) / 2 + _layer_clr(l),
+                                   extra_on_layer(extra_clearance, l)),
                                   []).append(layer_map[l])
         return groups
 
@@ -4764,7 +4772,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         for poly in pad_polys:
             for (g_clr, g_ex), g_idxs in (() if isinstance(obstacles, _RungViaSink)   # #1226
                                           else clr_groups.items()):
-                _emit(poly, config.track_width / 2 + g_clr + g_ex,
+                _emit(poly, g_clr + g_ex,
                       via_pass=False, layer_idxs=g_idxs)
             if on_copper:
                 _emit(poly, via_margin, via_pass=True)
@@ -4797,7 +4805,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     for (g_clr, g_ex), g_idxs in (() if isinstance(obstacles, _RungViaSink)   # #1226: vias only
                                   else _clr_groups(expanded_layers).items()):
         cells = pad_blocked_cells_array(gx, gy, half_width, half_height,
-                                        config.track_width / 2 + g_clr + g_ex,
+                                        g_clr + g_ex,
                                         config.grid_step, corner_radius, corner_buffer,
                                         off_x, off_y, rotation_deg=pad.rect_rotation)
         if skip_cell is not None and len(cells):

@@ -1182,13 +1182,15 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
             config.layer_clearance(layer_name, clearance, pad=pad), pad)
 
     def _clr_groups(expanded):
-        # keyed by clearance and the extra clearance on the layer (#1729),
+        # keyed by reach past the pad (the stamped track's half-width plus
+        # the clearance, #1736) and the extra clearance on the layer (#1729),
         # as _add_pad_obstacle's
         groups = {}
         for l in expanded:
             li = layer_map.get(l)
             if li is not None:
-                groups.setdefault((_layer_clr(l), extra_on_layer(extra_clearance, l)),
+                groups.setdefault((config.stamp_track_width(l) / 2 + _layer_clr(l),
+                                   extra_on_layer(extra_clearance, l)),
                                   []).append(li)
         return groups
 
@@ -1211,7 +1213,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         via_margin = config.via_size / 2 + _via_clr(expanded_layers) + config.grid_step / 2
         for poly in pad_polys:
             for (g_clr, g_ex), g_idxs in clr_groups.items():
-                margin = config.track_width / 2 + g_clr + g_ex
+                margin = g_clr + g_ex
                 gx_lo, gy_lo, nx, ny, inside, edist = _rasterize_polygon_box(
                     poly, coord, margin)
                 if inside is not None:
@@ -1248,7 +1250,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # (pad_blocked_cells_array is bit-identical to iter_pad_blocked_cells)
     for (g_clr, g_ex), g_idxs in _clr_groups(expanded_layers).items():
         cells = pad_blocked_cells_array(gx, gy, half_width, half_height,
-                                        config.track_width / 2 + g_clr + g_ex,
+                                        g_clr + g_ex,
                                         config.grid_step, corner_radius,
                                         off_x=off_x, off_y=off_y,
                                         rotation_deg=pad.rect_rotation)

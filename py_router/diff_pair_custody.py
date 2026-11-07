@@ -502,13 +502,10 @@ def _single_ended_engine(state, nets_to_route, net_clearances):
     """What a member fallback routes single-ended with.
 
     The diff engine bakes each layer's impedance width into its maps
-    (`reserve_layer_widths`), for the pose router, which has no track margin
-    to carry a width on. So on those maps a wide member's margin is 0 -- but
-    only track and via stamps reserve the width. Pads and the board edge stamp
-    the call's nominal `track_width`, because in the single-ended engine the
-    margin covers what they do not. A member routed there at its layer width
-    therefore comes (layer width - track width) / 2 closer to each of them
-    than its clearance allows.
+    (`reserve_layer_widths`; pads and the board edge too since #1736), for the
+    pose router, which has no track margin to carry a width on. So on those
+    maps a wide member's margin is 0, and a member that does not fit at its
+    full width has no narrower route to fall back to there.
 
     Take the single-ended engine whole instead: the nominal reserve and a map
     stamped at it, so the margin prices every obstacle class and a route that

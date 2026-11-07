@@ -950,6 +950,17 @@ class GridRouteConfig:
             return lw
         return lw if lw < self.track_width else self.track_width
 
+    def stamp_track_width(self, layer: str) -> float:
+        """Track width (mm) a PAD or BOARD-EDGE stamp reserves on `layer` for
+        the future routed track (#1736): the call's `track_width`, or on a map
+        that bakes each layer's width (`reserve_layer_widths`, the diff
+        engine) that layer's where it is wider -- as its track and via stamps
+        do (`route_reserve_width`). The single-ended engine keeps the call's:
+        a wider net's extra rides its own track margin there."""
+        if self.reserve_layer_widths:
+            return max(self.track_width, self.route_reserve_width(layer))
+        return self.track_width
+
     def _phase_exact_margin(self, layer: str, net_width: float) -> float:
         """Fractional A* track margin (grid cells) on `layer` for a track of
         `net_width` (#156).

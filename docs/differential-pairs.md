@@ -357,8 +357,11 @@ member on a layer wider than `--track-width` (an `--impedance` outer layer) come
 (layer width - track width) / 2 inside a neighbour's clearance, where it was necked
 alone, shipping the pair with one member narrow beside a full-width partner; the widest
 layer's offset on every layer reserved a narrow stripline layer room no member there
-needs (#1729). A segment that still grazes (pads stamp the call's track width, not the
-layer's) is necked where it is emitted, the same fab-floored neck the terminal legs get.
+needs (#1729). Pads and the board edge reserve the layer's width too, as track and via
+stamps do (`GridRouteConfig.stamp_track_width`, #1736): at the call's track width a
+member at its layer width came (layer width - track width) / 2 inside a foreign pad's
+clearance, and was necked there. A segment that still grazes is necked where it is
+emitted, the same fab-floored neck the terminal legs get.
 
 ## P/N Path Generation
 
