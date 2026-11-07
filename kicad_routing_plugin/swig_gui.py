@@ -4038,9 +4038,12 @@ class RoutingDialog(wx.Dialog):
     def _update_progress(self, current, total, step_name):
         """Update progress bar and status."""
         if total > 0:
-            percent = int(100 * current / total)
-            self.progress_bar.SetValue(percent)
+            # Range first, then a clamped value (#1751): wx asserts on a
+            # position past the range, and this bar's range is the net count
+            # after a cache pass.
             self.progress_bar.SetRange(100)
+            self.progress_bar.SetValue(
+                max(0, min(100, int(100 * current / total))))
             self.status_text.SetLabel(f"{step_name} ({current}/{total})")
         else:
             # Setup phase - no count, just show the step name

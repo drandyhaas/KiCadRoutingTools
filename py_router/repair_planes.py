@@ -1722,7 +1722,12 @@ def repair_planes(
                 _phase2_immediate = False
                 _phase_rip_ids: List[int] = []  # #540: phase rip history,
                 #   kept even after a successful immediate reconnect
+                # Progress counts each PHASE on its own (#1751): a deferred
+                # pad is tried again in phase 2, so one count over
+                # `unconnected` reached 3/2.
                 _pr_idx = -1
+                _pr_total = len(unconnected)
+                _pr_phase = ""
                 while _pad_queue or _deferred_rip:
                     if not _pad_queue:
                         _phase2_immediate = _PLANE_IMMEDIATE_RECONNECT or (
@@ -1739,6 +1744,9 @@ def repair_planes(
                               f"{_mode_note})")
                         _pad_queue = [(p, l, True) for (p, l) in _deferred_rip]
                         _deferred_rip = []
+                        _pr_idx = -1
+                        _pr_total = len(_pad_queue)
+                        _pr_phase = " (rip pass)"
                     pad, pad_layer, _allow_rip = _pad_queue.pop(0)
                     _pr_idx += 1
                     if cancel_check and cancel_check():
@@ -1746,8 +1754,8 @@ def repair_planes(
                         break
                     _tapped_pads.append(pad)
                     if progress_callback:
-                        progress_callback(_pr_idx + 1, len(unconnected),
-                                          f"{net_name}: pad repair "
+                        progress_callback(_pr_idx + 1, _pr_total,
+                                          f"{net_name}: pad repair{_pr_phase} "
                                           f"{pad.component_ref}.{pad.pad_number}")
                     print(f"    Pad {pad.component_ref}.{pad.pad_number} ({pad_layer})...", end=" ", flush=True)
                     result = tap_pad_with_escalation(
