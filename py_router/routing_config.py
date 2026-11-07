@@ -387,6 +387,12 @@ class GridRouteConfig:
     # (the pose router has no track_margin channel), margins then compute 0
     # for impedance-width nets -- today's mm-exact behaviour, unchanged.
     reserve_layer_widths: bool = False
+    # #1736: on a reserve_layer_widths map, stamp pads and the board edge at
+    # the call's track_width anyway (stamp_track_width). Only the hybrid
+    # escape's leg FALLBACK map sets it, for a leg that cannot attach on the
+    # layer-width stamps; the assembled route's foreign-copper gate then
+    # rejects any leg that grazes at its real width.
+    stamp_pads_at_call_width: bool = False
     # Power net routing - per-net width overrides
     power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
     # Per-net netclass track width (auto-read from the .kicad_pro when --track-width
@@ -956,8 +962,11 @@ class GridRouteConfig:
         that bakes each layer's width (`reserve_layer_widths`, the diff
         engine) that layer's where it is wider -- as its track and via stamps
         do (`route_reserve_width`). The single-ended engine keeps the call's:
-        a wider net's extra rides its own track margin there."""
-        if self.reserve_layer_widths:
+        a wider net's extra rides its own track margin there. A map built with
+        `stamp_pads_at_call_width` (the hybrid leg fallback) keeps the call's
+        too; the assembled route's foreign-copper gate grades its legs at
+        their real width."""
+        if self.reserve_layer_widths and not self.stamp_pads_at_call_width:
             return max(self.track_width, self.route_reserve_width(layer))
         return self.track_width
 

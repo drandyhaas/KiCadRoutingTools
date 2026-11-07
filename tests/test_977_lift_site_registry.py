@@ -115,6 +115,10 @@ REGISTRY = {
                  '(#908 wired it into the single-ended paths only)'),
     ('py_router/route_diff.py', 'batch_route_diff_pairs'): (
         NO_LIFT, 'diff-pair base maps; see build_diff_pair_obstacles'),
+    ('py_router/routing_context.py', 'build_leg_base'): (
+        NO_LIFT, "the hybrid legs' fallback base map (#1736), stamped at the "
+                 "call's track width; the legs route on a clone from "
+                 'build_diff_pair_leg_obstacles; see build_diff_pair_obstacles'),
     ('py_router/route_diff.py', '_pair_map_builder'): (
         NO_LIFT, 'the base map of a pair narrowed to fit (#1742), built as its '
                  "geometry's diff-pair base map is; see build_diff_pair_obstacles"),

@@ -1819,6 +1819,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                                              progress_callback=progress_callback)
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
+    # The hybrid legs' fallback base map, built only if a hybrid asks (#1736)
+    from routing_context import call_width_leg_base
+    pcb_data._call_width_leg_base = call_width_leg_base(
+        pcb_data, config, all_net_ids_to_route, net_clearances)
     if debug_memory:
         mem_after_base = get_process_memory_mb()
         print(format_memory_stats("After base obstacle map", mem_after_base, mem_after_base - mem_start))

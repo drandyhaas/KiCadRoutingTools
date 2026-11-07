@@ -665,7 +665,14 @@ from the terminal escapes (`_route_direct_coupled_middle`):
    with no coupled crossing. A leg's escape via keeps out of the connector region
    of every pair not yet routed, as the centreline map's vias always have (#1736):
    in a row of bare connector pads, a via dropped in front of the next pair's pads
-   sealed its launch.
+   sealed its launch. When no leg attaches on the run's maps, whose pads and board
+   edge reserve the layer's width, the legs are routed once more on a map that
+   stamps them at the call's track width (`routing_context.hybrid_leg_maps`,
+   #1736), built the first time a hybrid needs it. On a fine-pitch part whose
+   layer width is wider than its pads, a leg at that width fits only along its
+   own pad's centreline, and the pad stamp's half-cell corner keep-out can close
+   that line. The assembled route is still graded at the legs' real width against
+   foreign pads, vias and tracks, so a leg that grazes is rejected, not shipped.
 
    **Boxed-endpoint handling.** A bare-pad stub tip can sit in a foreign keep-out
    tight enough that the leg can't get a via in *at the tip* — but a via still

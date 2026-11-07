@@ -3497,10 +3497,14 @@ LAUNCH_RETRIES_PARTNER_PAD = 4
 # Net-filtered keep-outs: the hybrid's coupled middle is laid for BOTH members,
 # so a region binding either is stamped into its map at the centreline
 # geometry, as for the standard route (its legs stamp their own net, above).
+_LEGS_UNATTACHED = "terminal legs could not attach to the coupled middle"
+
+
 @_nk_stamping(lambda a: (a['diff_pair'].p_net_id, a['diff_pair'].n_net_id),
               lambda a: (a['obstacles'],), centerline=True)
 def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names,
-                                 leg_obstacles=None, endpoints=None, terminal_pads=None):
+                                 leg_obstacles=None, endpoints=None, terminal_pads=None,
+                                 leg_fallback=None):
     """Hybrid coupled middle (last resort): route a clean parallel P/N pair
     straight from the source via-midpoint to the target via-midpoint on the
     open layer -- no escape-direction setback, no connectors, no polarity stage.
@@ -4098,7 +4102,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 if bypassed:
                     return None, (f"{bypassed} leg plan(s) joined the terminals "
                                   f"without the coupled middle")
-                return None, "terminal legs could not attach to the coupled middle"
+                return None, _LEGS_UNATTACHED
             all_segs = mid_segs + leg_segs
             all_vias = p_vias + n_vias + leg_vias
             # The legs are single-ended grid routes attracted to each other:
@@ -4355,6 +4359,17 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         print(f"  HYBRID failed ({_hyb_label}): {len(_hyb_rej)} layer-combo(s) rejected -- "
               + "; ".join(f"{r} (x{n})" if n > 1 else r
                           for r, n in counts.most_common(4)))
+    # #1736: legs that could not attach on the layer-width pad stamps get one
+    # more try on the call-width ones (routing_context.hybrid_leg_maps); the
+    # assembled-route gate above still rejects a leg that grazes.
+    if leg_fallback is not None and _LEGS_UNATTACHED in _hyb_rej:
+        fallback_legs = leg_fallback()
+        if fallback_legs is not None:
+            print(f"  HYBRID ({_hyb_label}): retrying the legs on call-width pad stamps")
+            return _route_direct_coupled_middle(
+                pcb_data, diff_pair, config, obstacles, layer_names,
+                leg_obstacles=fallback_legs, endpoints=endpoints,
+                terminal_pads=terminal_pads)
     return None
 
 

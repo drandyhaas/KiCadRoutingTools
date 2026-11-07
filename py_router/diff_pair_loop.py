@@ -30,7 +30,7 @@ from diff_pair_multipoint import (
     leg_electrically_short, pair_leg_electrically_short,
     diff_pair_min_coupled_length,
 )
-from routing_context import (build_diff_pair_obstacles, build_diff_pair_leg_obstacles,
+from routing_context import (build_diff_pair_obstacles, hybrid_leg_maps,
                              record_pair_paths)
 from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
                                record_pair_diag,
@@ -122,12 +122,13 @@ def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstac
     finally:
         config.diff_pair_centerline_setback = saved_sb
         config.diff_pair_setback_no_ladder = saved_no_ladder
-    leg_obstacles = build_diff_pair_leg_obstacles(
+    leg_obstacles, leg_fallback = hybrid_leg_maps(
         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
         all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
         track_proximity_cache, layer_map)
     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles,
-                                       config.layers, leg_obstacles=leg_obstacles)
+                                       config.layers, leg_obstacles=leg_obstacles,
+                                       leg_fallback=leg_fallback)
     if not hyb or hyb.get('failed'):
         return result
     hns = hyb.get('new_segments', [])
@@ -1434,12 +1435,13 @@ def route_diff_pairs(
                 if config.diff_pair_hybrid_escape and result:
                     # Single-ended leg clearance map (built lazily, only now). See
                     # build_diff_pair_leg_obstacles for why base_obstacles + 0 clearance.
-                    leg_obstacles = build_diff_pair_leg_obstacles(
+                    leg_obstacles, leg_fallback = hybrid_leg_maps(
                         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
                         track_proximity_cache, layer_map)
                     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles,
-                                                       config.layers, leg_obstacles=leg_obstacles)
+                                                       config.layers, leg_obstacles=leg_obstacles,
+                                                       leg_fallback=leg_fallback)
                     if hyb and not hyb.get('failed'):
                         print(f"  HYBRID ESCAPE: direct coupled middle + point-to-point "
                               f"terminal legs")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from typing import List, Set, Dict, Optional, Tuple, TYPE_CHECKING
+import contextlib
 import math
 import numpy as np
 from routing_config import GridCoord, GridRouteConfig
@@ -368,6 +369,88 @@ def build_diff_pair_leg_obstacles(base_obstacles, pcb_data, config, routed_net_i
         if (rp, rn) != (p_net_id, n_net_id) and (rp in unrouted or rn in unrouted):
             obstacles.add_blocked_vias_batch(np.asarray(cells, dtype=np.int32))
     return obstacles
+
+
+def hybrid_leg_maps(base_obstacles, pcb_data, config, routed_net_ids,
+                    remaining_net_ids, all_unrouted_net_ids,
+                    p_net_id, n_net_id, gnd_net_id,
+                    track_proximity_cache, layer_map):
+    """A hybrid pair's leg map, and a callable for its FALLBACK leg map (#1736).
+
+    The run's maps stamp pads and the board edge at each layer's width
+    (`stamp_track_width`), so a leg at that width clears them exactly. On a
+    fine-pitch part whose layer width is wider than its pads, the one legal
+    leg runs along its own pad's centreline, and the pad stamp's corner
+    keep-out (half a cell at a rectangular corner) can close it. The fallback
+    map stamps pads and the edge at the call's track width, as before #1736;
+    `_route_direct_coupled_middle` routes the legs on it only when none
+    attached on the first, and its assembled-route gate grades every leg at
+    its real width against foreign pads, vias and tracks, so a leg that
+    grazes is rejected, not shipped.
+
+    The fallback's base map is built at most once per run, the first time it
+    is asked for (`pcb_data._call_width_leg_base`, set where the run builds
+    its base map). The callable is None on a run whose stamps are the call's
+    width on every layer: there both maps are the same."""
+    legs = build_diff_pair_leg_obstacles(
+        base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+        all_unrouted_net_ids, p_net_id, n_net_id, gnd_net_id,
+        track_proximity_cache, layer_map)
+    build = getattr(pcb_data, '_call_width_leg_base', None)
+    if build is None:
+        return legs, None
+
+    def fallback():
+        base = build()
+        if base is None:
+            return None
+        from dataclasses import replace
+        return build_diff_pair_leg_obstacles(
+            base, pcb_data, replace(config, stamp_pads_at_call_width=True),
+            routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
+            p_net_id, n_net_id, gnd_net_id, track_proximity_cache, layer_map)
+    return legs, fallback
+
+
+@contextlib.contextmanager
+def _run_lift_records_kept(pcb_data):
+    """Put the board's per-build lift records back after a nested base build.
+    A base build rebinds them on the board it is given, and the run's own maps
+    are the ones they are read against later."""
+    keys = ('_net_tie_lift', '_graphic_own_pad_lift', '_graphic_own_pad_via_lift')
+    records = {k: getattr(pcb_data, k, None) for k in keys}
+    try:
+        yield
+    finally:
+        for k, v in records.items():
+            setattr(pcb_data, k, v)
+
+
+def call_width_leg_base(pcb_data, config, nets_to_route, net_clearances):
+    """The builder `hybrid_leg_maps` reads off `pcb_data._call_width_leg_base`:
+    the run's base map rebuilt with pads and the board edge stamped at the
+    call's track width, built on first call and kept. None when no layer's
+    stamp is wider than the call's width (the maps would be identical).
+
+    The build leaves the run's lift records on the board
+    (`_run_lift_records_kept`); the leg map is built through
+    `build_diff_pair_obstacles`, which reads none."""
+    if not any(config.stamp_track_width(layer) > config.track_width + 1e-9
+               for layer in config.layers):
+        return None
+    held = {}
+
+    def build_leg_base():
+        if 'map' not in held:
+            from dataclasses import replace
+            from obstacle_map import build_base_obstacle_map
+            print("Building call-width leg map for the hybrid leg fallback...")
+            with _run_lift_records_kept(pcb_data):
+                held['map'] = build_base_obstacle_map(
+                    pcb_data, replace(config, stamp_pads_at_call_width=True),
+                    nets_to_route, net_clearances=net_clearances)
+        return held['map']
+    return build_leg_base
 
 
 def build_single_ended_obstacles(
