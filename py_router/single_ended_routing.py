@@ -2154,6 +2154,19 @@ def _free_on_pad_cells(pad, layer_idx, config, obstacles, coord,
     return cells
 
 
+def _keepout_clear_cells(cells, gate, net_id, config, layer, coord):
+    """The (gx, gy) of `cells` whose grid point takes a track end of the net
+    on `layer` without reaching into a keep-out forbidding it (#1777)."""
+    if gate is None:
+        return list(cells)
+    out = []
+    for cgx, cgy in cells:
+        pt = coord.to_float(cgx, cgy)
+        if not _track_refused(gate, net_id, config, layer, pt, pt):
+            out.append((cgx, cgy))
+    return out
+
+
 def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
                                    obstacles):
     """#479 (kbic65 stabilizer NPTH): when a PAD endpoint's grid cell is
@@ -2161,8 +2174,13 @@ def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
     add the pad's FREE on-copper cells as extra endpoint cells, so the route
     can terminate on copper it is allowed to touch instead of failing at an
     unsteppable start. No-op for the overwhelmingly common case of a free
-    endpoint cell. Endpoint rows are (gx, gy, layer_idx, orig_x, orig_y)."""
+    endpoint cell. Endpoint rows are (gx, gy, layer_idx, orig_x, orig_y).
+    A seeded cell welds to its own grid point, and is offered only where a
+    track end there stays out of every keep-out forbidding tracks on the
+    layer (#1777): the map's stamps can leave a cell free whose disc still
+    reaches into the area."""
     coord = GridCoord(config.grid_step)
+    gate = _keepout_gate(pcb_data)
     out = list(endpoints)
     seen = set()
     for ep in endpoints:
@@ -2180,6 +2198,8 @@ def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
                 seen.add(key)
                 free = _free_on_pad_cells(pad, layer_idx, config, obstacles,
                                           coord, skip_cell=(gx, gy))
+                free = _keepout_clear_cells(free, gate, net_id, config,
+                                            config.layers[layer_idx], coord)
                 if free:
                     print(f"    endpoint cell blocked for {pad.component_ref}."
                           f"{pad.pad_number} -- seeded {len(free)} free "
@@ -2191,11 +2211,14 @@ def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
     return out
 
 
-def _augment_all_blocked_pad_side(cells, pad, config, obstacles):
+def _augment_all_blocked_pad_side(cells, pad, config, obstacles,
+                                  pcb_data=None, net_id=None):
     """Multipoint-edge variant of the #479 blocked-terminal seeding: `cells`
     is one side's (gx, gy, layer_idx) set for a pad (possibly island-widened).
     Only when EVERY cell is blocked -- the route cannot start anywhere -- seed
-    the pad's free on-copper cells on each candidate layer."""
+    the pad's free on-copper cells on each candidate layer, each one clear of
+    the keep-outs forbidding tracks there (#1777; the route welds to the
+    seeded cell itself, see route_multipoint_main)."""
     if pad is None or not cells:
         return cells
     try:
@@ -2204,10 +2227,14 @@ def _augment_all_blocked_pad_side(cells, pad, config, obstacles):
     except Exception:
         return cells
     coord = GridCoord(config.grid_step)
+    gate = _keepout_gate(pcb_data)
+    if net_id is None:
+        net_id = getattr(pad, 'net_id', None)
     extra = []
     for li in sorted({li for _, _, li in cells}):
-        extra.extend((cgx, cgy, li) for cgx, cgy in
-                     _free_on_pad_cells(pad, li, config, obstacles, coord))
+        extra.extend((cgx, cgy, li) for cgx, cgy in _keepout_clear_cells(
+            _free_on_pad_cells(pad, li, config, obstacles, coord),
+            gate, net_id, config, config.layers[li], coord))
     if extra:
         print(f"    endpoint cell blocked for {pad.component_ref}."
               f"{pad.pad_number} -- seeded {len(extra)} free on-pad cell(s)")
@@ -2888,6 +2915,7 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     new_segments = []
     new_vias = []
 
+    start_bridge = None
     if start_original:
         first_grid_x, first_grid_y = coord.to_float(path_start[0], path_start[1])
         orig_x, orig_y, orig_layer = start_original
@@ -2899,6 +2927,9 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                 layer=orig_layer,
                 net_id=net_id
             )
+            # judged again once the path's own vias exist (the keep-out
+            # drop below counts a via this path drills at its start)
+            start_bridge = seg
             new_segments.append(seg)
 
     for i in range(len(path) - 1):
@@ -2937,10 +2968,24 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                 )
                 new_segments.append(seg)
 
+    # #1777: a terminal bridge reaching into a keep-out that forbids it,
+    # from a grid end already on the terminal's own copper, adds nothing.
+    _gate = _keepout_gate(pcb_data)
+    if start_bridge is not None and _bridge_adds_nothing_in_keepout(
+            pcb_data, net_id, config, start_bridge.layer,
+            (start_bridge.end_x, start_bridge.end_y),
+            (start_bridge.start_x, start_bridge.start_y),
+            path_vias=new_vias, gate=_gate):
+        new_segments = [sg for sg in new_segments if sg is not start_bridge]
+
     if end_original:
         last_grid_x, last_grid_y = coord.to_float(path_end[0], path_end[1])
         orig_x, orig_y, orig_layer = end_original
-        if abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001:
+        if (abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001) \
+                and not _bridge_adds_nothing_in_keepout(
+                    pcb_data, net_id, config, orig_layer,
+                    (last_grid_x, last_grid_y), (orig_x, orig_y),
+                    path_vias=new_vias, gate=_gate):
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
@@ -2973,8 +3018,14 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     # #589: a plan probe's result is a hint, never shipped copper -- its
     # terminals legitimately overlap future nets' stubs (the probe map
     # excluded them), so the short gate must not veto the prediction.
-    if _hard157 and not config.plan_probe:
-        _why, _ships = _hard_terminal_why(_hard157[0])
+    # Keep-outs are the board's own and stand for a probe too (#1777).
+    _hard157 = _hard157 if not config.plan_probe else []
+    _ko157 = None if _hard157 else _route_keepout_refusal(
+        pcb_data, list(new_segments) + list(unblock_segments),
+        list(new_vias) + list(unblock_vias))
+    if _hard157 or _ko157:
+        _why, _ships = (_hard_terminal_why(_hard157[0]) if _hard157
+                        else _ko157)
         print(f"  {YELLOW}{_why} -- rejecting the route rather than shipping "
               f"{_ships}{RESET}")
         # The rejected route's #189 unblock copper goes with it: it is already
@@ -4507,6 +4558,28 @@ def _track_forbidden_layers(config, layer_names):
                      if name in config.layers and name not in routable)
 
 
+def _keepout_gate(pcb_data):
+    """`check_drc.copper_keepout_gate` for this board (#1777), or None when
+    nothing on it forbids copper (or there is no board): the one "may this
+    copper be laid" keep-out test, so a terminal the router lays is refused
+    exactly where check_drc and KiCad's items_not_allowed would flag it."""
+    if pcb_data is None:
+        return None
+    from check_drc import copper_keepout_gate
+    return copper_keepout_gate(pcb_data)
+
+
+def _track_refused(gate, net_id, config, layer, a, b) -> str:
+    """Why a track a->b on `layer` at the net's width may not be laid ('' when
+    it may; a == b is the disc a track end puts at a point)."""
+    if gate is None:
+        return ''
+    return gate(segments=[Segment(
+        start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
+        width=config.get_net_track_width(net_id, layer),
+        layer=layer, net_id=net_id)])
+
+
 def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
     """Whether a fill launch cell's TERMINAL copper clears foreign copper.
 
@@ -4523,6 +4596,12 @@ def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
     fill model is a raster at the zone clearance, so a weld point at its rim
     puts half a track width past it.
 
+    The same terminal copper -- the grid point and the bridge, at the width
+    the converter lays -- must also stay out of every keep-out that forbids
+    tracks on the layer (#1777, `copper_keepout_gate`): the override exempts
+    the cell from the map's keep-out stamps too, and a launch cell inside a
+    rule area laid a GND stub KiCad grades items_not_allowed.
+
     Returns ok(fx, fy, layer_idx) -> bool, memoised per weld point. A layer
     the config forbids track on draws no bridge (#1292), so it always passes.
     """
@@ -4531,6 +4610,7 @@ def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
     nc = getattr(config, 'net_clearances', None) or None
     own = (config.obstacle_clearance(net_id)
            if hasattr(config, 'obstacle_clearance') else config.clearance)
+    gate = _keepout_gate(pcb_data)
     memo = {}
 
     def ok(fx, fy, li):
@@ -4550,7 +4630,11 @@ def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
                 _seg_foreign_seg_dist(pcb_data, net_id, gx, gy, fx, fy, layer,
                                       net_clearances=nc, base_clearance=own_l,
                                       exact=True, config=config))
-        memo[key] = res = own_l - (d - floor / 2.0) <= NECK_GRAZE_TOL
+        res = own_l - (d - floor / 2.0) <= NECK_GRAZE_TOL
+        if res and gate is not None:
+            res = not _track_refused(gate, net_id, config, layer, (gx, gy),
+                                     (fx, fy))
+        memo[key] = res
         return res
     return ok
 
@@ -5482,10 +5566,13 @@ def _route_multipoint_main_impl(
         # #479: a pad centre hard-blocked on every candidate layer (foreign
         # stabilizer-NPTH keep-out over the pad) cannot take the first step;
         # seed the pad's free on-copper cells as extra terminals.
+        _pre = set(sources) | set(targets)
         sources = _augment_all_blocked_pad_side(sources, pad_a_obj, config,
-                                                obstacles)
+                                                obstacles, pcb_data, net_id)
         targets = _augment_all_blocked_pad_side(targets, pad_b_obj, config,
-                                                obstacles)
+                                                obstacles, pcb_data, net_id)
+        # the seeded cells weld to their own grid point (below, #1777)
+        _seeded = (set(sources) | set(targets)) - _pre
 
         # Mark source/target cells -- THIS attempt's only. An override lets
         # the A* enter a cell another net's clearance blocks, so it belongs to
@@ -5673,9 +5760,18 @@ def _route_multipoint_main_impl(
         _own = _island_cells.get(pad_components.get(idx_a, idx_a), {}).get(tuple(path[0]))
         if _own is not None:
             _start_orig = (_own[0], _own[1], layer_names[path[0][2]])
+        elif tuple(path[0]) in _seeded:
+            # a #479 seeded on-pad cell: its grid point is on the pad's
+            # copper, so it welds there -- the bridge back to the pad centre
+            # crossed the keep-out that blocked the centre (#1777)
+            _start_orig = (*coord.to_float(path[0][0], path[0][1]),
+                           layer_names[path[0][2]])
         _own = _island_cells.get(pad_components.get(idx_b, idx_b), {}).get(tuple(path[-1]))
         if _own is not None:
             _end_orig = (_own[0], _own[1], layer_names[path[-1][2]])
+        elif tuple(path[-1]) in _seeded:
+            _end_orig = (*coord.to_float(path[-1][0], path[-1][1]),
+                         layer_names[path[-1][2]])
     # Barrel-in-fill completion (#562), Phase-1 parity with the tap edges.
     path, _fill_end = _trim_after_fill_via(path, coord, layer_names,
                                            pcb_data, net_id)
@@ -5698,11 +5794,17 @@ def _route_multipoint_main_impl(
     _hard_p1 = _neck_route_terminal_grazes(segments, path, coord,
                                            _start_orig[:2], _end_orig[:2],
                                            pcb_data, net_id, config)
-    if _hard_p1:
+    # ...and the keep-out backstop (#1777): copper inside a keep-out that
+    # forbids it fails the edge the same way.
+    _ko_p1 = None if _hard_p1 else _route_keepout_refusal(
+        pcb_data, list(segments) + list(main_unblock_segments),
+        list(vias) + list(main_unblock_vias))
+    if _hard_p1 or _ko_p1:
         # Terminal-bridge SHORT gate (ux pf9): the main edge's terminal copper
         # overlaps a foreign track/via at any width -- fail the edge so the
         # rip/retry ladder finds another approach instead of shipping a short.
-        _why, _ships = _hard_terminal_why(_hard_p1[0])
+        _why, _ships = (_hard_terminal_why(_hard_p1[0]) if _hard_p1
+                        else _ko_p1)
         print(f"  {YELLOW}Phase 1 {_why} -- failing the edge rather than "
               f"shipping {_ships}{RESET}")
         # The discarded attempt's #189 unblock copper goes with it: it was
@@ -6688,7 +6790,11 @@ def _route_multipoint_taps_impl(
         _hard_tap = _neck_route_terminal_grazes(segments, path, coord,
                                                 (tap_x, tap_y), (tgt_x, tgt_y),
                                                 pcb_data, net_id, config)
-        if _hard_tap:
+        # ...and the keep-out backstop (#1777), failed the same way.
+        _ko_tap = None if _hard_tap else _route_keepout_refusal(
+            pcb_data, list(segments) + list(unblock_segments),
+            list(vias) + list(unblock_vias))
+        if _hard_tap or _ko_tap:
             # Terminal-bridge SHORT gate (ux pf9: GND's tap edge into C61 --
             # the anchor cell was blocked, the A* ended a cell short, and the
             # bridge slashed across SDRAM_A2's In1.Cu trunk; the #157 neck
@@ -6696,7 +6802,8 @@ def _route_multipoint_taps_impl(
             # copper overlapping a foreign track/via at any width is a short
             # no neck can fix: fail the edge like an unroutable one so the
             # rip/retry ladder finds another approach.
-            _why, _ships = _hard_terminal_why(_hard_tap[0])
+            _why, _ships = (_hard_terminal_why(_hard_tap[0]) if _hard_tap
+                            else _ko_tap)
             print(f"      {YELLOW}{_why} -- failing the MST edge rather than "
                   f"shipping {_ships}{RESET}")
             # The edge's #189 unblock copper (and a pad-via rescue's) goes
@@ -6892,6 +6999,94 @@ def _tap_target_layer(tgt_pad, layer_names, path_end_layer) -> str:
     if 0 <= li < len(layer_names):
         return layer_names[li]
     return path_end_layer
+
+
+def _on_terminal_copper(pcb_data, net_id, layer, grid_pt, orig_pt,
+                        path_vias=()) -> bool:
+    """Whether `grid_pt` already lies on the copper that holds the terminal
+    point `orig_pt` on `layer`: one pad, via (on the board or drilled by the
+    same path), track or fill region of the net holding both. A terminal
+    bridge between the two then joins nothing that copper does not."""
+    from geometry_utils import point_to_segment_distance, via_on_layer
+    from net_queries import expand_pad_layers
+    tol = 1e-6
+    pts = (grid_pt, orig_pt)
+    for v in list(pcb_data.vias) + list(path_vias):
+        if v.net_id == net_id and via_on_layer(v, layer):
+            r = (getattr(v, 'size', 0) or 0) / 2.0 + tol
+            if all(math.hypot(x - v.x, y - v.y) <= r for x, y in pts):
+                return True
+    cu = list(getattr(pcb_data.board_info, 'copper_layers', None) or [layer])
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        if (getattr(p, 'rect_rotation', 0.0) or 0.0) or \
+                layer not in expand_pad_layers(p.layers, cu) or \
+                getattr(p, 'pad_type', '') == 'np_thru_hole':
+            continue    # a tilted pad is not measured here: under-claim
+        hx, hy = p.size_x / 2.0, p.size_y / 2.0
+        if getattr(p, 'shape', '') == 'rect':
+            inside = all(abs(x - p.global_x) <= hx + tol
+                         and abs(y - p.global_y) <= hy + tol for x, y in pts)
+        else:
+            # the capsule inscribed in the pad: exact for a circle or an
+            # oval, inside a rounded rectangle's corners
+            r = min(hx, hy)
+            ax, ay = hx - r, hy - r
+            inside = all(point_to_segment_distance(
+                x, y, p.global_x - ax, p.global_y - ay,
+                p.global_x + ax, p.global_y + ay) <= r + tol for x, y in pts)
+        if inside:
+            return True
+    for sg in pcb_data.segments:
+        if sg.net_id == net_id and sg.layer == layer and all(
+                point_to_segment_distance(x, y, sg.start_x, sg.start_y,
+                                          sg.end_x, sg.end_y) <= sg.width / 2.0 + tol
+                for x, y in pts):
+            return True
+    try:
+        from plane_fill_model import get_fill_models
+        models = get_fill_models(pcb_data, net_id).get(layer, [])
+    except Exception:
+        models = []
+    for m in models:
+        c = m.query_component(*orig_pt) or 0
+        if c > 0 and (m.query_component(*grid_pt) or 0) == c:
+            return True
+    return False
+
+
+def _bridge_adds_nothing_in_keepout(pcb_data, net_id, config, layer, grid_pt,
+                                    orig_pt, path_vias=(), gate=None) -> bool:
+    """True when a terminal bridge grid_pt->orig_pt on `layer` would reach
+    into a keep-out forbidding tracks there (`copper_keepout_gate`) while its
+    grid end already sits on the terminal's own copper (#1777): the bridge
+    adds nothing, so it is dropped rather than shipped as items_not_allowed.
+    A refused bridge that DOES join something is kept, and the route's
+    keep-out backstop (`_route_keepout_refusal`) fails the edge instead."""
+    if pcb_data is None or layer not in config.routable_layers():
+        return False
+    if gate is None:
+        gate = _keepout_gate(pcb_data)
+    if gate is None or not _track_refused(gate, net_id, config, layer,
+                                          grid_pt, orig_pt):
+        return False
+    return _on_terminal_copper(pcb_data, net_id, layer, grid_pt, orig_pt,
+                               path_vias)
+
+
+def _route_keepout_refusal(pcb_data, segments, vias):
+    """The keep-out backstop of a converted route (#1777): why its copper
+    (`copper_keepout_gate`) may not be laid, as ``(why, ships)`` for the
+    refusal message, or None when it may. The launch and seeded cells are
+    gated before the search, but the A* may still step between two endpoint
+    overrides inside an area (a 0.1 mm grid step on the issue's board), so
+    the edge FAILS here and the caller's rip/retry ladder runs."""
+    gate = _keepout_gate(pcb_data)
+    if gate is None:
+        return None
+    why = gate(segments=list(segments), vias=list(vias))
+    if not why:
+        return None
+    return (f"route copper: {why}", "items_not_allowed")
 
 
 def _bridge_inside_own_through_via(pcb_data, net_id, config, layer, a, b,
@@ -7189,9 +7384,13 @@ def _path_to_segments_vias(
                 )
                 segments.append(seg)
 
+    _gate = _keepout_gate(pcb_data)
     if start_bridge is not None and not _bridge_inside_own_through_via(
             pcb_data, net_id, config, start_bridge[1], start_bridge[2],
-            start_bridge[3], path_vias=vias):
+            start_bridge[3], path_vias=vias) and \
+            not _bridge_adds_nothing_in_keepout(
+                pcb_data, net_id, config, start_bridge[1], start_bridge[3],
+                start_bridge[2], path_vias=vias, gate=_gate):
         segments.insert(0, start_bridge[0])
 
     # Add connecting segment from last path point to original end if needed
@@ -7210,7 +7409,11 @@ def _path_to_segments_vias(
                 and not _bridge_inside_own_through_via(
                     pcb_data, net_id, config, path_end_layer,
                     (last_grid_x, last_grid_y), (orig_x, orig_y),
-                    path_vias=vias)):
+                    path_vias=vias)
+                and not _bridge_adds_nothing_in_keepout(
+                    pcb_data, net_id, config, path_end_layer,
+                    (last_grid_x, last_grid_y), (orig_x, orig_y),
+                    path_vias=vias, gate=_gate)):
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,

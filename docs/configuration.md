@@ -666,7 +666,11 @@ Notes:
   That includes the copper laid after the search: the soft-joint and stub-gap bridges and the
   length-matching meander bumps refuse to enter a forbidding rule area or a net-filtered
   keep-out (`check_drc.copper_keepout_gate`, the copper grown by half its width, #1760/#1761),
-  and route.py / route_diff.py report what the routed board still has inside a forbidding rule
+  and so does a single-ended route's terminal copper (#1777): a pour-launch cell or a seeded
+  on-pad cell is offered as an endpoint only where its grid point and weld bridge clear the
+  area, a terminal bridge reaching in from the terminal's own copper is dropped, and a route
+  whose copper still enters an area fails that edge so the rip/retry ladder runs. route.py /
+  route_diff.py report what the routed board still has inside a forbidding rule
   area as `rule_area_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (rows of
   area, net, tracks, vias; `[]` = clean; absent when the board has no such area).
 - It's a non-copper User layer, so the polygon never affects manufacturing — it only steers the
