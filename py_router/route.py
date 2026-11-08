@@ -32,6 +32,7 @@ from startup_checks import exit_on_error_if_main
 exit_on_error_if_main(__name__)
 
 import time
+_RUN_T0 = time.monotonic()  # "Wall time" counts from here, ahead of the heavy imports
 import json
 from typing import List, Optional, Tuple, Dict, Set
 
@@ -6192,7 +6193,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         swap_pairs = summarize_target_swaps(single_ended_target_swaps)
         print(f"  Target swaps:  {len(swap_pairs)}")
     print(f"  Total vias:    {total_vias}")
-    print(f"  Total time:    {total_time:.2f}s")
+    print(f"  Search time:   {total_time:.2f}s (net search only, not the whole run)")
     print(f"  Iterations:    {total_iterations:,}")
     _frag = getattr(config, '_fragility_field', None)
     if _frag is not None and _frag.refreshes:
@@ -9924,7 +9925,7 @@ if __name__ == "__main__":
     # argparse runs -- the banner has to be decided before then too.
     if '--capabilities' not in sys.argv[1:]:
         import cli_banner
-        cli_banner.install()
+        cli_banner.install(run_started=_RUN_T0)
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 

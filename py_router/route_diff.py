@@ -35,6 +35,7 @@ from startup_checks import exit_on_error_if_main
 exit_on_error_if_main(__name__)
 
 import time
+_RUN_T0 = time.monotonic()  # "Wall time" counts from here, ahead of the heavy imports
 import fnmatch
 from typing import List, Optional, Tuple, Dict, Set
 
@@ -2681,7 +2682,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(f"  {RED}Skipped:       {len(skipped_bad_fanout)} (fanout stubs self-overlap - "
               f"fix the fanout, #242){RESET}")
     print(f"  Total vias:    {total_vias}")
-    print(f"  Total time:    {total_time:.2f}s")
+    print(f"  Search time:   {total_time:.2f}s (net search only, not the whole run)")
     print(f"  Iterations:    {total_iterations:,}")
     from target_swap import summarize_target_swaps  # cycle-safe swap list (#380)
     summary = {
@@ -3074,7 +3075,7 @@ if __name__ == "__main__":
     # CMD/EXIT self-echo (run-3 B1); see route.py for the external-kill caveat.
     # CLI-`__main__`-only: the GUI imports the engine function.
     import cli_banner
-    cli_banner.install()
+    cli_banner.install(run_started=_RUN_T0)
     import argparse
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
