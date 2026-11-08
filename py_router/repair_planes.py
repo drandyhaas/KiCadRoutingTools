@@ -717,25 +717,6 @@ def _report_unrouted_ripped_nets(pcb_data, ripped_net_ids):
           f"{', '.join(ripped_names)}")
 
 
-def _pad_label(pads, ref, x, y):
-    """The pad number(s) of `ref` at a graded point, or None.
-
-    Pads whose copper centre IS the point first, every one of them: stacked
-    pads (a multi-number thermal pad) share the copper, so the grade cannot
-    tell them apart and the label names them all, `33/34`. Failing that, the
-    pads whose copper box holds the point, so a point off the exact centre is
-    still named rather than left `?`."""
-    mine = [p for p in pads if p.component_ref == ref]
-    hits = [p for p in mine
-            if abs(p.global_x - x) < 1e-3 and abs(p.global_y - y) < 1e-3]
-    if not hits:
-        hits = [p for p in mine
-                if abs(p.global_x - x) <= p.size_x / 2 + 1e-3
-                and abs(p.global_y - y) <= p.size_y / 2 + 1e-3]
-    nums = list(dict.fromkeys(str(p.pad_number) for p in hits))
-    return '/'.join(nums) if nums else None
-
-
 def grade_plane_completion(board_file: str, net_names) -> Dict:
     """The plane nets this run was asked to connect, graded on the board it
     SHIPS.
@@ -759,11 +740,6 @@ def grade_plane_completion(board_file: str, net_names) -> Dict:
     grades: Dict[str, Dict] = {}
     for nid, g in grade_nets(pcb, sorted(i for i, n in pcb.nets.items()
                                          if n.name in wanted)).items():
-        pads = pcb.pads_by_net.get(nid) or []
-        for fp in g['failed_pads']:
-            label = _pad_label(pads, fp['component_ref'], fp['x'], fp['y'])
-            if label is not None:
-                fp['pad_number'] = label
         grades[pcb.nets[nid].name] = g
     rec = regrade_record([], grades, sorted(grades), board='file')
     out = {k: rec[k] for k in (
