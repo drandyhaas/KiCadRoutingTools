@@ -22,7 +22,8 @@ Usage — two lines at the top of the ``__main__`` block, no re-indentation::
 - arranges for ``EXIT=<rc>`` to be printed as the process ends, whatever
   the path out: a ``sys.exit(n)`` (argparse errors included), falling off
   the end of the script (rc 0), or an unhandled exception (rc 1, the
-  traceback still prints).
+  traceback still prints). Given ``run_started`` (a ``time.monotonic()``
+  reading), ``Wall time: Ns (whole run)`` is printed just before it.
 
 Both lines go to stdout so a single ``> log 2>&1`` redirect captures the
 whole evidence unit. Set ``KRT_NO_BANNER=1`` to suppress (for consumers
@@ -33,6 +34,7 @@ from __future__ import annotations
 import atexit
 import os
 import sys
+import time
 
 _installed = False
 
@@ -105,7 +107,7 @@ def install_dash_hint() -> None:
     argparse.ArgumentParser.error = error
 
 
-def install() -> None:
+def install(run_started: float | None = None) -> None:
     """Print the CMD banner now; print EXIT=<rc> when the process ends."""
     global _installed
     if _installed or os.environ.get('KRT_NO_BANNER'):
@@ -169,6 +171,9 @@ def install() -> None:
     @atexit.register
     def _print_exit():  # pragma: no cover - exercised via subprocess tests
         try:
+            if run_started is not None:
+                print(f"Wall time: {time.monotonic() - run_started:.1f}s "
+                      f"(whole run)", flush=True)
             print(f"EXIT={state['rc']}", flush=True)
         except Exception:
             pass
