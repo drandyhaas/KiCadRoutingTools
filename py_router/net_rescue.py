@@ -1228,6 +1228,16 @@ def cap_move_reweld_spec(config, pcb_data, moves) -> dict:
     }
 
 
+def escape_keepout_refusal(pcb_data, segments, vias):
+    """Why the bare-ball escape's copper may not ship ('' when it may) (#1778):
+    `check_drc.copper_keepout_gate`, which judges a board rule area that
+    forbids tracks or vias and a net-filtered keep-out binding the net, as
+    KiCad's items_not_allowed does. Free on a board with neither."""
+    from check_drc import copper_keepout_gate
+    gate = copper_keepout_gate(pcb_data)
+    return gate(segments, vias) if gate else ''
+
+
 def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                        progress_callback=None, cancel_check=None):
     """Scoped fine-parameter rescue for every still-failed/partial net.
@@ -1575,24 +1585,23 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                  f" stay where they are" if _capmv666
                                  else ""))
                         continue
-                    # ...and against the net-filtered keep-outs binding the
-                    # net (net_keepouts): the fanout ladder places on maps
-                    # the per-route region stamp never reaches. The dogbone
-                    # tap above (tap_pad_with_escalation) checks the same.
-                    if getattr(pcb_data, '_net_keepouts', None):
-                        from net_keepouts import audit as _nk_audit
-                        _ko666 = _nk_audit(pcb_data, _gsegs, _gvias)
-                        if _ko666:
-                            print(f"    bare-ball escape: "
-                                  f"{_pad.component_ref}.{_pad.pad_number} "
-                                  f"declined (escape inside net keep-out(s) "
-                                  + ', '.join(f"{r['region']}" for r in _ko666)
-                                  + ")"
-                                  + (f"; cap(s) "
-                                     f"{', '.join(m['reference'] for m in _capmv666)}"
-                                     f" stay where they are" if _capmv666
-                                     else ""))
-                            continue
+                    # ...and against the keep-outs (#1778): the board's rule
+                    # areas forbidding tracks or vias and the net-filtered
+                    # keep-outs binding the net (net_keepouts). The fanout
+                    # ladder places on maps of its own that neither the
+                    # rule-area stamp nor the per-route region stamp reaches;
+                    # copper_keepout_gate judges both, as KiCad's
+                    # items_not_allowed does.
+                    _ko666 = escape_keepout_refusal(pcb_data, _gsegs, _gvias)
+                    if _ko666:
+                        print(f"    bare-ball escape: "
+                              f"{_pad.component_ref}.{_pad.pad_number} "
+                              f"declined ({_ko666})"
+                              + (f"; cap(s) "
+                                 f"{', '.join(m['reference'] for m in _capmv666)}"
+                                 f" stay where they are" if _capmv666
+                                 else ""))
+                        continue
                     pcb_data.segments.extend(_gsegs)
                     pcb_data.vias.extend(_gvias)
                     # #803: bump the copper epoch -- _blockid_geom_memo and
