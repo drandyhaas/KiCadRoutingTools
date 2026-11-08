@@ -1875,9 +1875,17 @@ it writes OUT (#1738): the bus handed on routed, connected and clean, or OUT
 the board as it came, when the rest of the chain routes the whole bus with A*.
 Carry on from OUT either way -- it is not a chain failure, so the plan file's
 `set -e` (Step 9) does not stop there. Read which it was from the summary's
-`exit` (0 routed, 1 as it came) and the log's last line. It exits 2 on a usage
-error (a part the board does not have) and non-zero when it wrote no OUT. Its
-routed nets are **protected**
+`exit` and the log's last line. That `exit` is the WORST bus's status (the
+max over every bus the step routed, each on the board the one before handed
+on): 0 every bus handed on routed; 1 one or more came through as they came,
+while OUT may still carry the others routed (protected and locked); 2 the
+step's own check refused a bus (the turn back failed, its pull pads were not
+found again) and handed it on as it came. So read each bus's own status in
+the summary's `buses[].exit` (with `--bus` or the buses it finds; each
+`buses[].summary` is that bus's record) before deciding what the rest of the
+chain must route. The process exits non-zero only when it wrote no OUT: 2 for
+a usage error (a part the board does not have) or a `--src`/`--dest` bus whose turn into the
+flow frame failed, any other code otherwise. Its routed nets are **protected**
 in OUT's `.kicad_pro` (#521): later steps route round them and will not rip
 them. So:
 
