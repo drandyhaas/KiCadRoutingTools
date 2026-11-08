@@ -1377,14 +1377,18 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    show a mouth. A whole-board render cannot either: it frames the board, so
    a ~155 mm board renders at ~5.6 px/mm, where a 1.00 mm side-entry
    header's contacts are 1 px specks and its mouth out and mouth in look the
-   same. Render each listed part close up, a few seconds each:
+   same. Render each listed part close up, a few seconds each, NAMING the
+   edge its facing clause reads (`facing south` -> `J7:south`), so the camera
+   stands on the edge the part is declared to face:
    ```bash
-   python3 py_tools/edge_closeup.py wk/<run>/final.kicad_pcb J7 J3 --out-dir wk/<run>/edges
+   python3 py_tools/edge_closeup.py wk/<run>/final.kicad_pcb J7:south J3:north --out-dir wk/<run>/edges
    ```
-   Each part is centred, seen from outside the edge its pads are nearest
-   (`J3:north` names the edge), at 40 px/mm (`--px-per-mm`), and the line
-   it prints names the image, the edge and the scale. In each image you
-   stand outside that edge (from the north, west is on the right), so the
+   A bare `REF` is seen from the edge its pads are nearest, which for a part
+   in a corner is not always the one it faces: the tool then prints
+   `corner: also N mm from <edge>`, and that render is side-on, not the
+   mouth. Each part is centred, at 40 px/mm (`--px-per-mm`), and the line it
+   prints names the image, the edge and the scale. In each image you stand
+   outside the edge you named (from the north, west is on the right), so the
    part is nearest the camera: a jack's or USB socket's mouth must face
    you; its back wall means it opens into the board. Fix the declaration
    (`mating_face`, and the source you read it off) and place again. A part
@@ -1502,8 +1506,14 @@ Routing Completes): run them once, here, not again inside the routing.
     board/fab floor: parameters (grid, ripup budget, width).
   - Geometry already at the floor, failures clustered at one part's escape
     face, or `py_tools/check_reachability.py --pad REF.PAD` says CAGED:
-    placement. Itemise it in the report with that measurement (§6). A finer
-    grid alone never widens a gap. First, if that part is a fine-pitch
+    placement. Itemise it in the report with that measurement (§6). Before
+    that, at the floor, run ONE grid A/B (plan-pcb-routing, "A boxed-in net"):
+    the default `--grid-step 0.1` against `0.05` (`0.025` at ≤0.4 mm pitch),
+    sizes unchanged, keeping the better-graded result. A finer grid never
+    widens a gap, but 0.1 can miss one that exists (a 0.4 mm-pitch QFN: 0.05 routed
+    9 of 11 nets boxed in at 0.1, #1765); below 0.05 the gain shrinks (0.025
+    routed one more net there, and none on run 20's board). Only what stays
+    boxed in after that is placement. First, if that part is a fine-pitch
     perimeter part and the chain fanned nothing out for it, route that arm
     (plan-pcb-routing Step 3, rule 3): it costs one route, and re-placing
     costs a whole pass.
@@ -1561,11 +1571,19 @@ Routing Completes): run them once, here, not again inside the routing.
    placement, the first routed board, the first DONE, the
    final board, and tried-and-worse boards with `--rejected`.
    ```bash
-   python3 -X utf8 py_tools/board_score.py <board> --intent <i> --baseline <input> --json <board>.score.json --quiet
+   python3 -X utf8 py_tools/board_score.py <board> --intent <i> <spec flags> --baseline <input> --json <board>.score.json --quiet
    python3 -X utf8 py_placer/converge.py record --ledger wk/<run>/ledger.jsonl \
        --board <board> --kind placement --parent <the board it was made from> \
        --lever "<what you changed, one line>" --score-file <board>.score.json
    ```
+   `<spec flags>` are the ones DONE is measured with (§1: `--net-min-widths`,
+   `--impedance-nets`, `--length-groups`, `--min-track-width` /
+   `--min-via-diameter` / `--min-via-drill`), the same on every row and the
+   same the verifier passes (`references/verifier.md`). A row scored without
+   them leaves those specs `ungraded`: its `blocking` is not DONE's, the
+   plateau rule compares the wrong number, and converge calls the first
+   flagged row INCOMMENSURABLE with it. On a board that declares no spec they
+   are empty.
    Use `--kind completion` for a routed board, and close the ledger with one
    `record --final --stop-condition <1|2|3|4>` row, passing the verifier's
    per-lens files as `--lens-file`. The stop conditions: 1 done, 2 budget

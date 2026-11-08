@@ -165,7 +165,8 @@ def cited_pair_keys(text):
     """Backticked summary-looking keys: `*_pairs`, `*_followup_nets`, and the
     two route_diff record names."""
     return set(re.findall(
-        r'`((?:[a-z_]+_pairs)|single_ended_followup_nets|single_ended_fallback|'
+        r'`((?:[a-z_]+_pairs)|single_ended_followup_nets|single_ended_followup_reasons|'
+        r'single_ended_fallback|'
         r'casualty_reconcile)`', text))
 
 

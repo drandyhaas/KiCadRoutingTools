@@ -76,8 +76,15 @@ because its nets cannot be routed at all.
 ```bash
 mkdir -p wk        # neither tool creates it, and both write into it
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --json wk/assembly0.json
-python3 -X utf8 py_tools/board_score.py board.kicad_pcb --json wk/score0.json --quiet
+python3 -X utf8 py_tools/board_score.py board.kicad_pcb <spec flags> --json wk/score0.json --quiet
 ```
+
+`<spec flags>` are every spec the board declares (`--net-min-widths`,
+`--impedance-nets`, `--length-groups`, `--min-track-width` /
+`--min-via-diameter` / `--min-via-drill`), the same flags the final grade
+passes, so the baseline grades the same components the routed board is
+compared on; without them those specs read `ungraded`. Empty on a board that
+declares none.
 
 When placement left a floorplan intent, add `--intent <intent.json>` to
 `check_assembly`: only then does it read the overlaps that run waived
@@ -1017,13 +1024,21 @@ sometimes has pads that aren't a coupled connection — e.g. a P and an N test p
 several mm apart, or a logical pair daisy-chained through spread-out parts. If the
 coupled chain can't be routed, `route_diff.py` peels those far-apart pads off the
 chain (routing the genuinely-coupled terminals as a pair) and lists the affected
-nets under `single_ended_followup_nets` in its `JSON_SUMMARY` (and a "route them
-single-ended next" block on stdout). Those pads are **not** dropped — the **Signal
-Routing** step (`route.py --nets "*"`) connects them P→P / N→N along with
-every other unrouted net, since they remain unrouted after the diff-pair step. So:
-**do not exclude the diff-pair nets from the signal-routing step's net selection** —
-that step is what finishes the peeled pads. If you scope the signal step to specific
-nets instead of `"*"`, add any `single_ended_followup_nets` to it explicitly.
+nets under `single_ended_followup_nets` in its `JSON_SUMMARY`. That field holds
+**every** net the step left single-ended, so read why in
+`single_ended_followup_reasons` ({net: reason}, #1764) before acting on it:
+`peeled-terminals` (these peeled pads) and `electrically-short` are left
+single-ended **by design**; any other reason (`coupled-route-failed`,
+`no-escape-path`, ...) is a pair whose coupled route FAILED, which the pair gate
+below sends back to `route_diff`, never to `route.py` (that de-pairs it, #1399).
+The log's "left single-ended by this pair step" block, printed after the step's
+own single-ended fallback, groups the nets the same way and says which are still
+open. The by-design pads are **not** dropped — the **Signal Routing** step
+(`route.py --nets "*"`) connects them P→P / N→N along with every other unrouted
+net, since they remain unrouted after the diff-pair step. So: **do not exclude
+the diff-pair nets from the signal-routing step's net selection** — that step is
+what finishes the peeled pads. If you scope the signal step to specific nets
+instead of `"*"`, add the by-design `single_ended_followup_nets` to it explicitly.
 
 ### Check for DDR/High-Speed Memory Signals
 
@@ -1860,9 +1875,17 @@ it writes OUT (#1738): the bus handed on routed, connected and clean, or OUT
 the board as it came, when the rest of the chain routes the whole bus with A*.
 Carry on from OUT either way -- it is not a chain failure, so the plan file's
 `set -e` (Step 9) does not stop there. Read which it was from the summary's
-`exit` (0 routed, 1 as it came) and the log's last line. It exits 2 on a usage
-error (a part the board does not have) and non-zero when it wrote no OUT. Its
-routed nets are **protected**
+`exit` and the log's last line. That `exit` is the WORST bus's status (the
+max over every bus the step routed, each on the board the one before handed
+on): 0 every bus handed on routed; 1 one or more came through as they came,
+while OUT may still carry the others routed (protected and locked); 2 the
+step's own check refused a bus (the turn back failed, its pull pads were not
+found again) and handed it on as it came. So read each bus's own status in
+the summary's `buses[].exit` (with `--bus` or the buses it finds; each
+`buses[].summary` is that bus's record) before deciding what the rest of the
+chain must route. The process exits non-zero only when it wrote no OUT: 2 for
+a usage error (a part the board does not have) or a `--src`/`--dest` bus whose turn into the
+flow frame failed, any other code otherwise. Its routed nets are **protected**
 in OUT's `.kicad_pro` (#521): later steps route round them and will not rip
 them. So:
 
@@ -3574,8 +3597,8 @@ retry's `--nets` carries the poured nets too (#1032).
 `(current: ...)` tail.** The box-in hint suggests a clearance or track only when
 it is narrower than the run's own (`0.15` against a run above it), so on a board
 already routing at or below 0.15 the only novel token in the whole sentence is
-the grid. The tail tells you that, and the grid alone is not a lever (see
-below). A failure printed as `ROUTE FAILED - ripping N blocker net(s) (...) did
+the grid. The tail tells you that. Whether the grid helps is not guessed from
+the hint: it is settled by the one grid A/B below. A failure printed as `ROUTE FAILED - ripping N blocker net(s) (...) did
 not free a path` is not a box-in at all: the ladder found blockers, ripped and
 restored them.
 
@@ -3854,13 +3877,24 @@ you.
 
 - **Geometry still above the floor:** the parameters reading holds. Shrink it, and pair a
   finer grid **with** the shrink rather than spending the grid alone.
-- **Geometry already at the floor:** the parameters reading is exhausted, and this is
-  a placement question after all. A finer grid resolves the same obstacles more
-  precisely; it does not make a gap wider, and there is nothing left to pair it
-  with. Measured (run 20): `0.05 -> 0.025 -> 0.0125`, about 40 minutes, left
-  `unrouted` at exactly BUSY / Net-(U4-XTAL_P) / SCK at every resolution. Note
-  also that "ripup budget" is not a lever here at all — "no rippable blockers
-  found" means the blockers are not rippable copper.
+- **Geometry already at the floor:** shrinking is exhausted, but the grid is
+  not until it has been tried once. **Before calling the box-in a placement
+  question, run ONE grid A/B**: the same step at the default `--grid-step 0.1`
+  against `0.05` (`0.025` when the boxed-in part's pitch is ≤0.4 mm), sizes
+  unchanged, and **keep whichever grades better** (`check_connected`, then
+  `check_drc` at the routed clearance). Routing is deterministic, so the
+  comparison costs one route. A finer grid does not make a gap wider, but at
+  0.1 the router can miss a corridor that exists: on a QFN-56 at 0.4 mm
+  pitch (track 0.2, clearance 0.15, `--escalation off`) 0.05 alone
+  routed 9 of the 11 nets boxed in at 0.1 (#1765). The sign varies: on the
+  same nets at other sizes 0.05 did worse, which is why it is an A/B and not a
+  default. Only what is still boxed in on the better arm is a placement
+  question. Below 0.05 the gain shrinks, which is why the finer arm is 0.025
+  only at ≤0.4 mm pitch: on that QFN-56, 0.025 routed one more net than 0.05,
+  and on run 20's board `0.05 -> 0.025 -> 0.0125`, about 40 minutes,
+  left `unrouted` at exactly BUSY / Net-(U4-XTAL_P) / SCK at every
+  resolution. Note also that "ripup budget" is not a lever here at all — "no
+  rippable blockers found" means the blockers are not rippable copper.
 
 ## Step 9: Emit the plan as an executable artifact (always)
 
@@ -3978,9 +4012,12 @@ board), and every `route_diff.py` step runs before it. So run the chain
 A pair is ready for the all-nets step when it is in `routed_diff_pairs`, or
 in `single_ended_diff_pairs` with `failure_reason` `electrically-short` (too
 short for coupling to buy anything). A `member_incomplete_pairs` entry is expected
-only when the pair's members are in `single_ended_followup_nets` (a `partial`
-pair's peeled far terminals, or an `electrically-short` pair's members): the
-all-nets step closes them, and `check_connected` after it says whether it did.
+only when the pair's members are in `single_ended_followup_nets` **by design**,
+i.e. `single_ended_followup_reasons` gives them `peeled-terminals` (a `partial`
+pair's peeled far terminals) or `electrically-short`: the all-nets step closes
+them, and `check_connected` after it says whether it did. The same field also
+holds the members of a pair whose coupled route failed (any other reason): that
+pair is not ready, whatever the field says.
 
 On a matching step, a ready pair's `intra_pair_matching` status says what to do
 next; none of these stops the chain (`/diagnose-routing-failures`, "route_diff
@@ -3996,7 +4033,8 @@ runs", defines them and each `reason`):
   tolerance and nothing grades it, so compare it with `tolerance_mm` yourself
   and report it if it is over.
 - `unmatched` with `reason` `not-measured`, on a pair whose members are in
-  `single_ended_followup_nets` (a peeled pair): nothing yet. It has no length
+  `single_ended_followup_nets` with reason `peeled-terminals` (a peeled
+  pair): nothing yet. It has no length
   until the all-nets step joins its far terminals, and `check_drc` grades it
   after that step at its recorded tolerance.
 - Any other `unmatched`, and a peeled pair `check_drc` then finds out of range:
