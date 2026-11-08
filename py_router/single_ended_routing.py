@@ -4555,6 +4555,36 @@ def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
     return ok
 
 
+def _terminal_layer_test(pcb_data, net_id, layer_names):
+    """`on(row, layer)`: whether a terminal row `(gx, gy, layer_idx, x, y
+    [, obj])` has copper on `layer`, the layer a pour-coverage probe reads
+    (#1777).
+
+    A fill model is one zone on ONE layer, and query_component answers for
+    the point alone: probed at an F.Cu pad's centre, the B.Cu pour under it
+    credited that pad's component with a region the pad does not touch. The
+    launch cells keyed to it then sat next to the pad on its own layer, and
+    Phase 1 "routed" a 0.03 mm stub that joined nothing, reporting success.
+    A terminal is on `layer` when its row is, when its pad's (or stub's)
+    copper layers include it, or when a plated barrel of the net -- a
+    through-hole pad or a via spanning `layer` -- stands at its point."""
+    from net_queries import expand_pad_layers
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None)
+                  or layer_names)
+    own_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+
+    def on(row, layer):
+        if layer_names[row[2]] == layer:
+            return True
+        obj = row[5] if len(row) > 5 else None
+        if obj is not None and getattr(obj, 'layers', None) and \
+                layer in expand_pad_layers(obj.layers, copper):
+            return True
+        return _terminal_copper_on_layer(pcb_data, net_id, row[3], row[4],
+                                         layer, vias=own_vias)
+    return on
+
+
 def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
                               layer_names, coord, island_cells, config):
     """#544/#562 POUR-LAUNCH ladder v3: per-REGION fill launch cells.
@@ -4647,14 +4677,18 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     _DEEP_MM = 0.5
     out = {}
     _bare_kept = 0
+    _on_layer = _terminal_layer_test(pcb_data, net_id, layer_names)
     try:
         for _z, _m in zip(_zones, _models):
             if _m is None:
                 continue
             _li = layer_names.index(_z.layer)
-            # region -> covered terminal indices
+            # region -> covered terminal indices; a terminal covers a region
+            # only on a layer it has copper on (#1777)
             _cov = {}
             for _idx, _info in enumerate(pad_info):
+                if not _on_layer(_info, _z.layer):
+                    continue
                 _c = _m.query_component(_info[3], _info[4])
                 if _c and _c > 0:
                     _cov.setdefault(_c, []).append(_idx)
@@ -4808,12 +4842,17 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
                 return max(_p.size_x, _p.size_y)
         return config.track_width
 
+    _on_layer = _terminal_layer_test(pcb_data, net_id, layer_names)
+
     def _regions(rows):
         got = set()
         for _zi, _m in enumerate(_models):
             if _m is None:
                 continue
             for _row in rows:
+                # only on a layer the terminal has copper on (#1777)
+                if not _on_layer(_row, _zones[_zi].layer):
+                    continue
                 _c = _m.query_component(_row[3], _row[4],
                                         size=_probe_size(_row[3], _row[4]))
                 if _c and _c > 0:
@@ -6785,7 +6824,8 @@ def _drop_segments_already_present(segments: List[Segment],
     return [s for s in segments if _key(s) not in existing_keys]
 
 
-def _terminal_copper_on_layer(pcb_data, net_id, x, y, layer) -> bool:
+def _terminal_copper_on_layer(pcb_data, net_id, x, y, layer,
+                              vias=None) -> bool:
     """True if this net already has copper at (x, y) on `layer`.
 
     The terminal connectors below project the ORIGINAL endpoint XY onto the
@@ -6809,7 +6849,7 @@ def _terminal_copper_on_layer(pcb_data, net_id, x, y, layer) -> bool:
         if abs(x - p.global_x) <= hw + tol and abs(y - p.global_y) <= hh + tol:
             return True
     copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
-    for v in pcb_data.vias:
+    for v in (pcb_data.vias if vias is None else vias):
         if v.net_id != net_id or len(v.layers or ()) < 2:
             continue
         radius = max((getattr(v, 'size', 0) or 0) / 2.0, tol)
