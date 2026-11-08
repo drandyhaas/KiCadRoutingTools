@@ -773,6 +773,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     from rip_up_reroute import reset_run_ledgers, mark_input_copper
     reset_run_ledgers(pcb_data)
     mark_input_copper(pcb_data)  # #980
+    # #1763: and which nets it was handed copper on, for the failure hints
+    from routing_diagnostics import note_invocation_input
+    note_invocation_input(pcb_data)
     # #962: the input's vias as values, for the ship-time Type VII stamp
     from fab_notes import via_snapshot as _via_snapshot962
     _input_vias962 = _via_snapshot962(pcb_data.vias, pcb_data)  # #1171: + sites

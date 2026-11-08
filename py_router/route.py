@@ -2595,6 +2595,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     stash_hands_off(pcb_data, negated_net_names(
         net_name_patterns if net_name_patterns is not None else net_names,
         [n.name for n in pcb_data.nets.values()]))
+    if final_reconcile:
+        # #1763: which nets the INVOCATION was handed copper on, for the
+        # failure hints of the sub-runs that re-read the outer pass's board.
+        from routing_diagnostics import note_invocation_input
+        note_invocation_input(pcb_data)
     if final_reconcile or not _pcb_in_memory:
         # #980: the copper this run was handed. A nested in-memory sub-run
         # keeps its parent's mark, as it keeps the parent's ledgers.

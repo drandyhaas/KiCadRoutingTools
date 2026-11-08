@@ -49,6 +49,10 @@ Key fields:
   {grid_step, clearance, track_width, via_diameter}}`. Static obstacles
   (neighbouring pads + clearance), not congestion: the lever is a finer grid
   or smaller clearance/track, unless `geometry` is already at the floor.
+  When the net's pads sit off the run grid the entry also carries
+  `pads_off_grid`, `pads`, `on_grid_step` and `on_grid_axes` (#1763): re-route
+  those nets scoped (`--nets`) at `--grid-step <on_grid_step>`, which puts
+  their pads on grid on those axes; a rip at the run's grid does not move them.
 - `fanout_dropped`: per failed net with a ball its fanout never escaped —
   `{net, pad, component, plane_like, pads}` (#652). The fix is upstream of
   this step: re-run the fanout for that net, or, when `plane_like`, the plane.

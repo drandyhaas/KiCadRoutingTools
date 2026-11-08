@@ -1714,7 +1714,8 @@ def route_single_ended_nets(
                     })
                     print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                     hint, _boxin = static_boxin_hint(result, config, pcb_data,
-                                                     return_verdict=True)
+                                                     return_verdict=True,
+                                                     net_id=net_id)
                 if hint:
                     hint = condense_hint(hint)
                     if hint:
