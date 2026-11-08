@@ -363,6 +363,20 @@ def relocate_moved_scripts(argv):
     return out
 
 
+_DRIVE = re.compile(r"[A-Za-z]:[\\/]")
+
+
+def split_remap(rule):
+    """`--remap OLD:NEW` -> (old, new), or None when it has no separating
+    colon or an empty side. The split is at the first colon that is not a
+    Windows drive letter's: `C:/a:C:/b` is ('C:/a', 'C:/b'), where a plain
+    `split(":", 1)` read old = 'C' and rewrote every C in the manifest."""
+    i = rule.find(":", 2 if _DRIVE.match(rule) else 0)
+    if i <= 0 or i == len(rule) - 1:
+        return None
+    return rule[:i], rule[i + 1:]
+
+
 def apply_remaps(argv, remaps):
     out = []
     for a in argv:
@@ -933,9 +947,10 @@ def main():
 
     remaps = []
     for r in args.remap:
-        if ":" not in r:
+        rule = split_remap(r)
+        if rule is None:
             ap.error(f"--remap needs OLD:NEW, got {r!r}")
-        old, new = r.split(":", 1)
+        old, new = rule
         remaps.append((old, new))
         os.makedirs(new, exist_ok=True)
     dest_dirs = [args.workdir] if args.workdir else [n for _o, n in remaps]
