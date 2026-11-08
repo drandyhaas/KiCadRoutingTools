@@ -3903,6 +3903,109 @@ def _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
     return summary
 
 
+def skew_rule_groups(path, pcb_data, skew_rules=None, *, names=None,
+                     member=None):
+    """The groups the board's skew rules grade, as KiCad forms them (#1303):
+    `([(rule, members)], undecided)`. The nets a rule binds form one group;
+    with `(within_diff_pairs)` every P/N pair is its own. `members` is a tuple
+    of net ids; `undecided` is {rule name: (why, [net names])} for nets whose
+    binding rule is not modelled. `skew_rules` defaults to the board's own
+    (kicad_dru.board_skew_rules: the recorded intra-pair tolerances, then the
+    .kicad_dru). One definition for check_drc's grade and route.py's
+    before/after-cleanup disclosure (#1759)."""
+    from kicad_dru import (board_skew_rules, binding_length_rule,
+                           coupled_net_pairs)
+    if skew_rules is None:
+        _rules, _notes = board_skew_rules(path, kinds=('skew',))
+        skew_rules = [r for r in _rules if r.kind == 'skew']
+    undecided: Dict[str, tuple] = {}
+    if not skew_rules:
+        return [], undecided
+    if names is None:
+        names = {nid: n.name for nid, n in pcb_data.nets.items()
+                 if nid and n.name}
+    if member is None:
+        from list_nets import net_class_memberships
+        member = net_class_memberships(path, names)
+    board_names = set(names.values())
+    pads_by = getattr(pcb_data, 'pads_by_net', None) or {}
+    groups: Dict[int, tuple] = {}
+    for nid, name in sorted(names.items(), key=lambda kv: kv[1]):
+        if len(pads_by.get(nid) or ()) < 2:
+            continue
+        rule, blocker = binding_length_rule(skew_rules, name, member.get(nid), board_names)
+        if blocker is not None:
+            undecided.setdefault(blocker.name, (blocker.unsupported, []))[1].append(name)
+            continue
+        if rule is None or (rule.min_mm is None and rule.max_mm is None):
+            continue
+        groups.setdefault(id(rule), (rule, []))[1].append(nid)
+    out = []
+    for rule, nids in groups.values():
+        if rule.within_diff_pairs:
+            sets = coupled_net_pairs({i: names[i] for i in nids})
+        else:
+            sets = [tuple(nids)] if len(nids) >= 2 else []
+        out.extend((rule, tuple(m)) for m in sets)
+    return out, undecided
+
+
+def skew_group_snapshot(pcb_data, path, scope_ids=None):
+    """{(rule name, members): row} for every group a skew rule grades
+    (skew_rule_groups) with a member in `scope_ids` (all when None), measured
+    as check_drc grades it (`net_match_length(mode 'total')`). A row carries
+    the group's spread (`skew_mm`, longest minus shortest), its bounds and
+    `excess_mm`, how far the worst member is out of them (0 within); None for
+    a group a member of which cannot be measured. {} when no rule binds."""
+    groups, _undecided = skew_rule_groups(path, pcb_data)
+    if not groups:
+        return {}
+    from net_queries import net_match_length
+    out = {}
+    for rule, members in groups:
+        if scope_ids is not None and not any(m in scope_ids for m in members):
+            continue
+        key = (rule.name, members)
+        lens = {m: net_match_length(pcb_data, m, 'total') for m in members}
+        if any(v is None for v in lens.values()):
+            out[key] = None
+            continue
+        top = max(lens.values())
+        excess = 0.0
+        for m in members:
+            sk = top - lens[m]
+            if rule.max_mm is not None:
+                excess = max(excess, sk - rule.max_mm)
+            if rule.min_mm is not None:
+                excess = max(excess, rule.min_mm - sk)
+        names = [pcb_data.nets[m].name for m in members if m in pcb_data.nets]
+        out[key] = {'nets': names, 'rule': rule.name,
+                    'skew_mm': round(top - min(lens.values()), 4),
+                    'min_mm': rule.min_mm, 'max_mm': rule.max_mm,
+                    'excess_mm': round(max(excess, 0.0), 4)}
+    return out
+
+
+def skew_moved_out_of_range(before, after, tol=1e-4):
+    """The groups `after` grades out of range that `before` graded within,
+    or graded out by less: [{nets, rule, skew_before_mm, skew_after_mm,
+    min_mm, max_mm, was_within}]. Both are skew_group_snapshot results; a
+    group either side could not measure is not compared."""
+    rows = []
+    for key, a in sorted(after.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        b = before.get(key)
+        if not a or not b or a['excess_mm'] <= b['excess_mm'] + tol:
+            continue
+        if a['excess_mm'] <= tol:
+            continue
+        rows.append({'nets': a['nets'], 'rule': a['rule'],
+                     'skew_before_mm': b['skew_mm'],
+                     'skew_after_mm': a['skew_mm'],
+                     'min_mm': a['min_mm'], 'max_mm': a['max_mm'],
+                     'was_within': b['excess_mm'] <= tol})
+    return rows
+
+
 def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     """Grade every `.kicad_dru` skew and diff_pair_uncoupled rule (#1303).
 
@@ -3955,56 +4058,41 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     def in_scope(nid):
         return matching_net_ids is None or nid in matching_net_ids
 
-    undecided: Dict[str, tuple] = {}
     unmeasured: List[str] = []
     n_skew = n_unc = 0
 
     # ---- skew ----------------------------------------------------------
     skew_rules = [r for r in rules if r.kind == 'skew']
-    groups: Dict[int, tuple] = {}
-    for nid, name in sorted(names.items(), key=lambda kv: kv[1]):
-        if not skew_rules or len(pads_by.get(nid) or ()) < 2:
+    _sets, undecided = skew_rule_groups(path, pcb_data, skew_rules,
+                                        names=names, member=member)
+    for rule, members in _sets:
+        if not any(in_scope(m) for m in members):
             continue
-        rule, blocker = binding_length_rule(skew_rules, name, member.get(nid), board_names)
-        if blocker is not None:
-            undecided.setdefault(blocker.name, (blocker.unsupported, []))[1].append(name)
+        lens = {m: net_match_length(pcb_data, m, 'total') for m in members}
+        if any(v is None for v in lens.values()):
+            unmeasured.append(' / '.join(names[m] for m in members))
             continue
-        if rule is None or (rule.min_mm is None and rule.max_mm is None):
-            continue
-        groups.setdefault(id(rule), (rule, []))[1].append(nid)
-    for rule, nids in groups.values():
-        if rule.within_diff_pairs:
-            sets = coupled_net_pairs({i: names[i] for i in nids})
-        else:
-            sets = [tuple(nids)] if len(nids) >= 2 else []
-        for members in sets:
-            if not any(in_scope(m) for m in members):
+        n_skew += 1
+        top = max(members, key=lambda m: (lens[m], names[m]))
+        for m in members:
+            if not in_scope(m):
                 continue
-            lens = {m: net_match_length(pcb_data, m, 'total') for m in members}
-            if any(v is None for v in lens.values()):
-                unmeasured.append(' / '.join(names[m] for m in members))
-                continue
-            n_skew += 1
-            top = max(members, key=lambda m: (lens[m], names[m]))
-            for m in members:
-                if not in_scope(m):
-                    continue
-                skew = lens[top] - lens[m]
-                bound = limit = None
-                if rule.max_mm is not None and skew > rule.max_mm + 1e-6:
-                    bound, limit = 'max', rule.max_mm
-                elif rule.min_mm is not None and skew < rule.min_mm - 1e-6:
-                    bound, limit = 'min', rule.min_mm
-                if bound:
-                    violations.append({
-                        'type': 'skew-out-of-range', 'net1': names[m],
-                        'net2': names[top], 'rule': rule.name,
-                        'severity': rule.severity,
-                        'within_diff_pairs': rule.within_diff_pairs,
-                        'skew_mm': round(skew, 4), 'length_mm': round(lens[m], 4),
-                        'target_mm': round(lens[top], 4), 'bound': bound,
-                        'limit_mm': limit, 'min_mm': rule.min_mm,
-                        'max_mm': rule.max_mm})
+            skew = lens[top] - lens[m]
+            bound = limit = None
+            if rule.max_mm is not None and skew > rule.max_mm + 1e-6:
+                bound, limit = 'max', rule.max_mm
+            elif rule.min_mm is not None and skew < rule.min_mm - 1e-6:
+                bound, limit = 'min', rule.min_mm
+            if bound:
+                violations.append({
+                    'type': 'skew-out-of-range', 'net1': names[m],
+                    'net2': names[top], 'rule': rule.name,
+                    'severity': rule.severity,
+                    'within_diff_pairs': rule.within_diff_pairs,
+                    'skew_mm': round(skew, 4), 'length_mm': round(lens[m], 4),
+                    'target_mm': round(lens[top], 4), 'bound': bound,
+                    'limit_mm': limit, 'min_mm': rule.min_mm,
+                    'max_mm': rule.max_mm})
 
     # ---- diff_pair_uncoupled ------------------------------------------
     unc_rules = [r for r in rules if r.kind == 'diff_pair_uncoupled']
