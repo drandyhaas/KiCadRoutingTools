@@ -229,6 +229,14 @@ the working via is sized (#1349), so no descended via rings below it (#1579;
 on a board declaring ring 0.12, via 0.25 and hole 0.15 the 0.30/0.15 and
 0.25/0.15 rungs both become 0.39/0.15). Where every rung is then larger than
 the request, a via-in-pad that cannot fit its pad keeps the requested via.
+A via a step sizes itself (no `--via-size` / `--via-drill`, or the GUI's via
+override unticked) is raised under `board` to `min_through_hole_diameter`,
+`min_via_diameter` and that ring round its drill (#1775; on a board declaring
+ring 0.13, qfn_fanout's built-in 0.45/0.25 becomes 0.51/0.25). Under any other
+policy it keeps its size; when the writeback is off (below), a via laid under a
+Board Setup minimum is named after the step, as a WARNING line and the
+`board_setup_vias` rows of `JSON_SUMMARY` (the fanouts' top level, `route.py` /
+`route_diff.py`'s `design_rules`), because KiCad grades it against that minimum.
 Whether KiCad then accepts the copper depends on the DRC-settings writeback:
 
 - **With it** (the default), a clearance descent below the Default class lowers

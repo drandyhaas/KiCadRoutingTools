@@ -1730,6 +1730,7 @@ class FanoutTab(wx.Panel):
                     misses = list(bga_fanout.LAST_FILTER_MISSES)
                     interior = []
                     power_stubs = []
+                    setup_vias = list(bga_fanout.LAST_BOARD_SETUP_VIAS)
                 else:
                     import qfn_fanout
                     tracks, vias, failed = qfn_fanout.generate_qfn_fanout(
@@ -1739,6 +1740,7 @@ class FanoutTab(wx.Panel):
                     misses = list(qfn_fanout.LAST_FILTER_MISSES)
                     interior = list(qfn_fanout.LAST_SKIPPED_INTERIOR)
                     power_stubs = list(qfn_fanout.LAST_POWER_STUBS_AT_WIDTH)
+                    setup_vias = list(qfn_fanout.LAST_BOARD_SETUP_VIAS)
                 # #857: the Design rules line bga_fanout.py / qfn_fanout.py
                 # print (the exit code is the CLI's alone).
                 from fab_tiers import finish_design_rules
@@ -1747,7 +1749,8 @@ class FanoutTab(wx.Panel):
                     'tracks': tracks, 'vias': vias, 'failed': failed,
                     'vias_to_remove': vias_to_remove, 'skipped': skipped,
                     'filter_misses': misses, 'skipped_interior': interior,
-                    'power_stubs_at_width': power_stubs}
+                    'power_stubs_at_width': power_stubs,
+                    'board_setup_vias': setup_vias}
         except Exception as exc:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -1791,6 +1794,7 @@ class FanoutTab(wx.Panel):
                     filter_misses=res.get('filter_misses'),
                     skipped_interior=res.get('skipped_interior'),
                     power_stubs_at_width=res.get('power_stubs_at_width'),
+                    board_setup_vias=res.get('board_setup_vias'),
                     **apply_kw)
             # The plan executor's "this step produced its result" (gui_utils);
             # the error and cancel returns above produce none.
@@ -2223,7 +2227,7 @@ class FanoutTab(wx.Panel):
                               fanout_config=None, fanout_kind='bga',
                               optimize_caps=False, vias_to_remove=None,
                               filter_misses=None, skipped_interior=None,
-                              power_stubs_at_width=None):
+                              power_stubs_at_width=None, board_setup_vias=None):
         """Apply fanout results to the pcbnew board.
 
         Args:
@@ -2253,6 +2257,10 @@ class FanoutTab(wx.Panel):
                 (#1743) -- each escape stub drawn at the track width on a net
                 that reads as power or ground, listed as the CLI lists them
                 in `power_stubs_at_width`, with what widens them.
+            board_setup_vias: the engine's LAST_BOARD_SETUP_VIAS (#1775) --
+                the vias laid below the board's own Board Setup via minimums
+                with "Fix DRC settings" off, listed as the CLI lists them in
+                `board_setup_vias`.
         """
         import pcbnew
         from .swig_gui import _build_layer_mappings
@@ -2492,6 +2500,14 @@ class FanoutTab(wx.Panel):
                  for r in power_stubs_at_width])
             msg += "".join(f"{line.strip()}\n"
                            for line in power_stubs_lines(power_stubs_at_width)[1:])
+        if board_setup_vias:
+            from design_rules import annular_grade_lines, via_size_grade_lines
+            msg += self._net_list(
+                "Vias below the board's Board Setup minimums (Fix DRC settings "
+                "is off; Escalation 'board' sizes the via to them)",
+                annular_grade_lines([r for r in board_setup_vias if 'smallest_ring' in r])
+                + via_size_grade_lines([r for r in board_setup_vias
+                                        if 'smallest_ring' not in r]))
         if failed_nets:
             if fanout_kind == 'qfn':
                 unescaped, flagged = self._qfn_failure_split(failed_nets, tracks,
