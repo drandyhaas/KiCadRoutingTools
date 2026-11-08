@@ -3245,11 +3245,14 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
     copper -- callers reject it on any conflict and keep the narrow route.
     Checks (same geometry as check_drc): foreign vias (all layers), foreign
     same-layer segments, pads (exact rotated-rect distance + local
-    override), Edge.Cuts rings incl. cutouts, NPTH drill floors."""
+    override), Edge.Cuts rings incl. cutouts, NPTH drill floors, and (#1782)
+    the keep-outs `check_drc.copper_keepout_gate` judges: a board rule area
+    forbidding tracks and a net-filtered keep-out binding `net_id`. Every
+    leg is measured, the ones anchored on a seed cell included."""
     import math
     from check_drc import (segment_to_rect_distance, _into_pad_frame,
                            board_edge_geometry,
-                           _segment_to_rings_distance)
+                           _segment_to_rings_distance, copper_keepout_gate)
     from kicad_parser import pad_drill_circles
     half = width / 2.0
     EPS = 1e-4
@@ -3276,6 +3279,18 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         legs.append((x1, y1, x2, y2, l1))
     if not legs:
         return True
+
+    # #1782: the keep-outs. The map stamps them, but a seed cell is exempt
+    # from the stamp and a widened leg's corner can cut past a stamped cell
+    # on a diagonal; the copper as it would be written is what KiCad grades.
+    _ko_refuses = copper_keepout_gate(pcb_data)
+    if _ko_refuses is not None:
+        from kicad_parser import Segment
+        if _ko_refuses(segments=[
+                Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
+                        width=width, layer=l1, net_id=net_id)
+                for (x1, y1, x2, y2, l1) in legs]):
+            return False
 
     # rect_ring: a plain rectangle has no outline ring, and without one this
     # gate measured no edge at all (an oracle strap widened into the edge band)

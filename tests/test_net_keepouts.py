@@ -678,6 +678,58 @@ def test_plane_repair_copper_stays_out():
     assert _gnd_in_sw(board) == [], (_gnd_in_sw(board), brief)
 
 
+def test_plane_widening_and_via_nudge_stay_out():
+    """Copper the plane step lays or moves after its search is held to the
+    keep-outs too (check_drc.copper_keepout_gate, both kinds): a width upgrade
+    (wide_route_clear) that would reach into a region is refused, so the join
+    keeps its narrower width, and the sub-grid via nudge never moves a via
+    into one."""
+    from kicad_parser import Via
+    from plane_region_connector import wide_route_clear
+    from pcb_modification import nudge_grazing_vias
+    board = _split_pour(39, "widen")
+    cfg = GridRouteConfig(track_width=0.2, clearance=0.2, via_size=0.6, via_drill=0.3,
+                          layers=["F.Cu", "B.Cu"])
+    # a B.Cu leg along y = 4.5, 0.5 mm off sw's lower edge (y = 5): 0.2 wide it
+    # clears, 1.2 wide it reaches 0.1 into the region
+    leg = [(15.0, 4.5, "B.Cu"), (25.0, 4.5, "B.Cu")]
+    pcb = _quiet(parse_kicad_pcb, board)
+    gnd = next(i for i, n in pcb.nets.items() if n.name == "GND")
+    assert wide_route_clear(leg, 1.2, pcb, gnd, cfg), "control: no keep-out, widening is clear"
+    nk.attach(pcb, [_region(SW_BOX, {"GND"}, name="sw")])
+    assert wide_route_clear(leg, 0.2, pcb, gnd, cfg), "the narrow leg clears sw"
+    assert not wide_route_clear(leg, 1.2, pcb, gnd, cfg), "net-filtered sw refuses the widening"
+    sig = next(i for i, n in pcb.nets.items() if n.name == "SIG")
+    assert wide_route_clear(leg, 1.2, pcb, sig, cfg), "...and binds GND only"
+    nk.attach(pcb, None)
+    ko = next(k for k in pcb.board_info.keepouts if k.get("name") == "sw")
+    ko["tracks_allowed"] = False
+    assert not wide_route_clear(leg, 1.2, pcb, gnd, cfg), "a plain rule area refuses it too"
+    assert wide_route_clear(leg, 0.2, pcb, gnd, cfg), "...and lets the narrow leg pass"
+
+    # the nudge: a new GND via 0.01 mm inside its clearance to SIG's track at
+    # x = 20 moves away from it (+x), towards a region binding GND whose edge
+    # is 0.01 mm beyond the via's copper
+    def nudged(region):
+        p = _quiet(parse_kicad_pcb, board)
+        g = next(i for i, n in p.nets.items() if n.name == "GND")
+        v = Via(x=20.64, y=15.0, size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_id=g)
+        p.vias.append(v)
+        if region:
+            nk.attach(p, [_region(region, {"GND"}, name="near")])
+        moved, _, _ = _quiet(nudge_grazing_vias, [], p, scope_net_ids={g},
+                             clearance=0.2, max_shift=0.05,
+                             allowed_via_ids={id(v)})
+        return moved, v, p
+
+    near = box(20.95, 10, 23, 20)
+    moved, v, _ = nudged(None)
+    assert moved == 1 and v.x > 20.645, f"control: with no region the via moves +x ({v.x})"
+    moved, v, p = nudged(near)
+    rows = nk.audit(p, [], [v], [_region(near, {"GND"}, name="near")])
+    assert rows == [], f"the nudge carried the via into the region: {rows} ({v.x:.4f})"
+
+
 TESTS = [
     test_rule_area_names_are_parsed,
     test_corridor_rule_is_honoured,
@@ -698,6 +750,7 @@ TESTS = [
     test_gui_shaped_call_and_forwarded_regions,
     test_shipped_board_audit_reports_input_copper,
     test_plane_repair_copper_stays_out,
+    test_plane_widening_and_via_nudge_stay_out,
 ]
 
 
