@@ -15,6 +15,11 @@ the anneal's repair, shoves only.
    J2 and one of the overlapping pair moved, each by a short step.
 3. The mode is deterministic: two runs give the same poses.
 4. The combinations that make no sense are refused, with the reason.
+5. A part that was legal is never broken to mend another: C2 left half in
+   a keep-out beside C1, in a pocket with room for one of them, is left
+   illegal and named (exit 4) while C1 stays exactly where it stood -- the
+   repair may shove a legal part only to another legal pose, and never
+   further than LEGALISE_REACH from where the board put it.
 
     python3 tests/test_1756_legalise_only.py
 """
@@ -37,6 +42,9 @@ BOARD = os.path.join(REPO, 'kicad_files', 'cap_chain.kicad_pcb')
 PLACE = os.path.join(REPO, 'py_placer', 'place_simple.py')
 # C2 onto C1 (a courtyard overlap), J2's pads 0.45 mm past the east edge (x = 31)
 NUDGES = {'C2': (18.3, 13.4, 0.0), 'J2': (30.6, 15.0, 0.0)}
+# the one column the case-5 keep-outs leave open (x0, y0, x1, y1): room for
+# one 0402 (C1, rows 12.54-13.46), not for two
+POCKET = [16.8, 12.4, 19.2, 14.2]
 #: mm the nudged parts may travel back: a nearest legal pose, not a re-placement
 SHORT_MM = 3.0
 failures = []
@@ -160,6 +168,39 @@ def main():
                               '--groups', groups, '--intent', intent, '--legalise-only'],
                         refuse='OUT carries {seed} with no --seed', code=2)
         ok('OUT with {seed} and no --seed: refused, naming why', True)
+
+        print('5. a legal neighbour is never broken to mend a part')
+        # keep-outs leave one column, room for C1 (legal, where it stands)
+        # and not for C2 too: C2 half in the south keep-out can only be
+        # mended by pushing C1 into the north one
+        pocket = os.path.join(td, 'pocket_intent.json')
+        doc = json.load(open(intent))
+        x0, y0, x1, y1 = POCKET
+        doc['keepouts'] = [{'name': 'west', 'rect': [0, 0, x0, 30], 'allow': ['J1']},
+                           {'name': 'east', 'rect': [x1, 0, 40, 30], 'allow': ['J2']},
+                           {'name': 'north', 'rect': [x0, 0, x1, y0]},
+                           {'name': 'south', 'rect': [x0, y1, x1, 30]}]
+        json.dump(doc, open(pocket, 'w'))
+        jam = os.path.join(td, 'jam.kicad_pcb')
+        write_placed_output(board, jam, [{'reference': 'C2', 'new_x': 18.0, 'new_y': 14.3,
+                                          'new_rotation': 0.0}])
+        copy_siblings(board, jam)
+        out = os.path.join(td, 'jam_out.kicad_pcb')
+        r = run_utils.check(PY + [PLACE, jam, out, '--groups', groups, '--intent', pocket,
+                                  '--legalise-only', '--json', out[:-10] + '.json'],
+                            refuse='C2 is left illegal', code=4)
+        rep = json.load(open(run_utils.evidence(out[:-10] + '.json', 'the pocket report')))
+        lz = rep['legalised']
+        ok('C1 was legal, C2 was not', lz['illegal_before'] == ['C2'], lz['illegal_before'])
+        ok('C2 is left illegal and named, inside the keep-out',
+           rep['illegal'] == ['C2'] and 'south' in rep['illegal_why'].get('C2', ''),
+           (rep['illegal'], rep['illegal_why']))
+        ok('no part that was legal is broken', lz['broken'] == [], lz['broken'])
+        before, after = poses(jam), poses(out)
+        ok('C1 exactly where it stood', before['C1'] == after['C1'], (before['C1'], after['C1']))
+        ok('every part that was legal unmoved',
+           all(before[q] == after[q] for q in before if q not in lz['illegal_before']))
+        ok('the log names it', 'C2 is left illegal' in r.stdout, r.stdout[-600:])
     print(f"\n{'FAILED: ' + ', '.join(failures) if failures else 'all passed'}")
     return 1 if failures else 0
 

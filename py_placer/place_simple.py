@@ -85,8 +85,16 @@ most of the others legal first (the part that overlaps several, not each of
 those it overlaps), each to its nearest legal pose -- an edge-seated part
 slid along its edge, any other walked out to 6 mm at its own turn, then at
 its others -- and a part no such pose frees mended by the anneal's repair,
-shoves only, never a jump across the board. A legal part is not written at
-all, so a legal board comes back with every pose as it was. Locks, declared
+shoves only, first with every legal part held as a wall, then letting it
+shove a legal part only to another legal pose. Three rules bind every move:
+a part that was legal never ends illegal, no intent decap limit or claim
+`max_mm` ends further past its limit (a floorplan ERROR no route clears),
+and no part ends more than 6 mm (`simple_anneal.LEGALISE_REACH`) from where
+the board put it; an edge-seated
+part is never shoved, only slid along its edge. A part those rules leave no
+legal pose is left where it is and named (exit 4), never flung across the
+board or mended by breaking a neighbour. A legal part not shoved is not
+written at all, so a legal board comes back with every pose as it was. Locks, declared
 poses and faces, and the #1300 courtyard fallback apply as in an anneal; no
 part is flipped to a face of our choosing. It places ONE board: `--seeds`,
 an OUT carrying {seed} with no `--seed`, the start lists and counts,
@@ -1018,6 +1026,7 @@ def legalised_summary(rec):
     return {'moved': rec['moved'], 'count': len(mm),
             'max_mm': round(max(mm), 4) if mm else 0.0,
             'illegal_before': rec['illegal_before'], 'repaired': rec['repaired'],
+            'broken': rec.get('broken', []),
             'seconds': rec['seconds']}
 
 
@@ -1583,7 +1592,7 @@ def main(argv=None):
         k, kept = -1, ([], {}, {'moves': 0, 'reseated': [], 'stats': {}})
         if a.legalise_only:
             kept[2]['legalised'] = {'moved': {}, 'reseated': [], 'repaired': [],
-                                    'illegal_before': [], 'seconds': 0.0}
+                                    'illegal_before': [], 'broken': [], 'seconds': 0.0}
     else:
         est = set(state.courtyard_estimates)
         worst = (RESTARTS + 1) * (1 + (2 if est else 0)
@@ -1731,6 +1740,8 @@ def main(argv=None):
             print(f"  moved {r} {m['mm']:.3f} mm: ({m['from'][0]:g}, {m['from'][1]:g}, "
                   f"{m['from'][2]:g}) -> ({m['to'][0]:g}, {m['to'][1]:g}, {m['to'][2]:g})"
                   + (" (repair)" if r in legalised['repaired'] else ""))
+        for r in legalised.get('broken') or ():
+            print(f"  WARNING: {r} was legal before legalising and is not now")
     else:
         print(f"place_simple: annealed {res['moves']} moves in {t2 - t1:.1f} s "
               f"({len(passes)} anneal(s), {sum(p['moves'] for p in passes)} moves in all"

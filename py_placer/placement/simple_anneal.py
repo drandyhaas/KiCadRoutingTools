@@ -1145,7 +1145,7 @@ class Annealer:
         ds.sort()
         return ds[len(ds) // 2] / -math.log(ACCEPT)
 
-    def repair(self, T: float, refs=None, local: bool = False) -> float:
+    def repair(self, T: float, refs=None, local: bool = False, guard=None) -> float:
         """A run that never came clean, mended where it stands: up to
         REPAIR_ROUNDS passes over the parts still overlapping, each one's
         escape -- with the SHOVE -- kept by the trial at the run's last
@@ -1165,8 +1165,10 @@ class Annealer:
         that are not legal, so a part the overlap measure flags but the
         legality admits is left where it stands. `local` makes each escape a
         shove alone, never the jump to a random pose over the board, so a
-        part is mended where it stands or not at all. Returns the overlap
-        left."""
+        part is mended where it stands or not at all. `guard({ref: pose})`,
+        when given, must accept an escape before it is tried: `legalise`
+        refuses one that breaks a part that was legal or carries a part too
+        far. Returns the overlap left."""
         self.shoving, self.local = True, local
         pick = self.mov if refs is None else sorted(set(refs) & self.movset)
         try:
@@ -1176,7 +1178,7 @@ class Annealer:
                     break
                 for r in stuck:
                     new = self._escape(r)
-                    if new:
+                    if new and (guard is None or guard(new)):
                         self.trial(new, T)
             return self.overlap()
         finally:
@@ -1502,8 +1504,14 @@ def anneal(model, movable: List[str], *, moves: int = 11000,
 
 
 #: mm the legaliser's nearest-legal walk reaches from where a part stands,
-#: the post-anneal step's own reach
+#: the post-anneal step's own reach -- and the most any part may end from
+#: where the board put it, by every step of `legalise` together: a part
+#: that cannot be made legal within it is left where it is and named, never
+#: flung across the board
 LEGALISE_REACH = 6.0
+#: mm round a moved part within which `legalise` re-checks the parts that
+#: were legal: a move can only break a part it comes this close to
+LEGALISE_NEAR = 3.0
 
 
 def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
@@ -1511,56 +1519,153 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
     """The board's own poses, made legal where they are not (#1756): no
     scatter and no anneal, only the anneal's two last steps on the parts
     that need them. Every movable part `fits` admits stays exactly where it
-    is. Each one it does not goes to its nearest legal pose -- a part
+    is unless a repair must shove it, and a part that was legal never ends
+    illegal. Each part that is not goes to its nearest legal pose -- a part
     seated on an edge (`seats`) slid along it (`edge_seat.reseat`), any
-    other walked out in square rings to LEGALISE_REACH mm at its own turn,
-    then at its others (`simple.nearest_legal`, held to `fits_at` too) --
-    one part at a time, the move that frees the most other parts first,
-    then the shortest step (`walk`), so of two parts that overlap only one
-    moves and the other is then legal where it stands. A part that no
-    such walk frees is mended with `Annealer.repair`, its escapes shoves
-    alone (`local`: the part and the movable parts in its way pushed the
-    shortest straight steps that clear them, never a jump across the
-    board), at the run's last temperature and overlap weight, then walked
-    again; a part that is still not legal is left where it ends, for the
-    caller to name. The random stream (`seed`) is
-    only the repair's, so the same board and seed give the same answer.
+    other walked out in square rings at its own turn, then at its others
+    (`simple.nearest_legal`, held to `fits_at` too) -- one part at a time,
+    the move that frees the most other parts first, then the shortest step
+    (`walk`), so of two parts that overlap only one moves and the other is
+    then legal where it stands. A part that no such walk frees is mended
+    with `Annealer.repair`, its escapes shoves alone (`local`), in two
+    passes: first with every part that was legal held as a wall, then, for
+    a part still stuck, with them free to be shoved -- an escape kept only
+    when each part it shoves that was legal stays legal. A seated part is
+    never shoved: it only slides along its edge. Then the parts still not
+    legal are walked again.
+
+    Every move, of the walk or the repair, is refused when it would break a
+    part that was legal (`fits` re-asked of those within LEGALISE_NEAR mm
+    of the parts it moves), take one of the intent's decap limit terms or
+    a claim's `max_mm` further past its limit (`limits_hold`: the grade's
+    ERROR, which no route clears), or leave a part more than LEGALISE_REACH mm from where
+    the board put it. A part that cannot be made legal under those rules
+    is left where it ends and named (the caller's `illegal`):
+    better a part left illegal and said than a legal neighbour broken or a
+    part flung across the board. The random stream (`seed`) is only the
+    repair's, so the same board and seed give the same answer.
 
     `fits(r)` is the caller's whole legality of r where it stands (default
     `simple.legal`), `fits_at(r, x, y, rot)` the part of it the walk's
     `legal` does not ask (the intent's claims). Returns {'moved': {ref:
     {'from', 'to', 'mm'}}, 'reseated', 'repaired', 'illegal_before',
-    'seconds'}."""
+    'broken' (parts that were legal and are not: empty, as the two rules
+    refuse every move that would make one), 'seconds'}."""
     t_start = time.time()
-    a = Annealer(model, movable, seed=seed, seats=seats)
+    seats = dict(seats or {})
     st = model.state
+    mov = sorted(r for r in movable if r in st.parts)
     if fits is None:
         def fits(r):
             p = st.parts[r]
-            if r in a.seats:
+            if r in seats:
                 return legal_on_edge(st, r, (p.x, p.y, p.rot))
             return legal(st, r, p.x, p.y, p.rot)
     model.reprice_all()
     model.total()
-    was = {r: a.pose(r) for r in a.mov}
-    before = [r for r in a.mov if not fits(r)]
+
+    def pose(r):
+        p = st.parts[r]
+        return (p.x, p.y, p.rot)
+    was = {r: pose(r) for r in mov}
+    before = [r for r in mov if not fits(r)]
+    was_legal = frozenset(mov) - set(before)
     reseated: List[str] = []
 
+    def far(r, at):
+        return math.hypot(at[0] - was[r][0], at[1] - was[r][1]) > LEGALISE_REACH + 1e-9
+
+    def breaks(new):
+        """Whether putting the parts of `new` ({ref: pose}) where it says
+        breaks a part that was legal -- one of them, or one within
+        LEGALISE_NEAR mm of where they go -- the state left as it was."""
+        old = {r: pose(r) for r in new}
+        for r, q in new.items():
+            st.parts[r].ensure_rotation(q[2])
+            _place(st, r, *q)
+        boxes = [st.parts[r].rect() for r in new]
+        h = LEGALISE_NEAR
+        near = []
+        for o in sorted(was_legal):
+            if o in new:
+                near.append(o)
+                continue
+            b = st.parts[o].rect()
+            if any(c[0] - h < b[2] and b[0] < c[2] + h and c[1] - h < b[3] and b[1] < c[3] + h
+                   for c in boxes):
+                near.append(o)
+        bad = any(not fits(o) for o in near)
+        for r, q in old.items():
+            st.parts[r].ensure_rotation(q[2])
+            _place(st, r, *q)
+        return bad
+
+    def lim_over(refs):
+        """{term: mm past its limit} for the limits the parts of `refs` take
+        part in, at the live poses: the intent's decap limit terms --
+        measured raw, so a cap carried out past the grade's radius
+        (`decap_ungraded`) reads as far as it is, not as ungraded -- and
+        every claim with a `max_mm` (`Model.claim_over`)."""
+        refs = set(refs)
+        out = {}
+        if getattr(model, '_lim', None) is not None:
+            for i in sorted({i for r in refs for i in model._lof.get(r, ())}):
+                ds = [d for d in (model._lim_pair(i, m) for m in model._lmem[i])
+                      if d is not None]
+                out[('decap', i)] = max(0.0, (min(ds) if ds else 0.0) - model._lthr[i])
+        for k, c in enumerate(model.claims):
+            if (c[0] in refs or c[1] in refs) and model._cmax.get(id(c)) is not None:
+                out[('claim', k)] = model.claim_over(c)
+        return out
+
+    def limits_hold(new):
+        """Whether putting the parts of `new` where it says takes no decap
+        limit or claim further past its limit than it is, the state left as
+        it was: legalising never trades a courtyard gap for a limit the
+        floorplan grade reads -- an ERROR there no route clears."""
+        base = lim_over(new)
+        if not base:
+            return True
+        old = {r: pose(r) for r in new}
+        for r, q in new.items():
+            st.parts[r].ensure_rotation(q[2])
+            _place(st, r, *q)
+        now = lim_over(new)
+        for r, q in old.items():
+            st.parts[r].ensure_rotation(q[2])
+            _place(st, r, *q)
+        return all(now[i] <= base[i] + 1e-9 for i in now)
+
+    def guard(new):
+        """A repair's escape is kept only when it shoves no seated part,
+        carries no part past LEGALISE_REACH, breaks no part that was legal
+        and takes no limit further past it (`limits_hold`)."""
+        if any(r in seats for r in new) or any(far(r, q) for r, q in new.items()):
+            return False
+        return not breaks(new) and limits_hold(new)
+
     def candidate(r):
-        """((turned, mm), pose): r's nearest legal pose, whether it turns r
-        and how far it is, or None; r left as it stands. A seated part
-        slides along its edge; any other walks out at its own turn, then at
-        its others."""
+        """((turned, mm), pose): r's nearest legal pose within reach of where
+        the board put it that takes no limit further past it (`limits_hold`),
+        whether it turns r and how far it is, or None; r left as it stands.
+        A seated part slides along its edge; any other walks out at its own
+        turn, then at its others."""
         p = st.parts[r]
         x0, y0, rot0 = p.x, p.y, p.rot
         got = None
-        if r in a.seats:
-            got = reseat(st, a.seats[r])
+        if r in seats:
+            got = reseat(st, seats[r])
+            if got and (far(r, got) or not limits_hold({r: got})):
+                got = None
         else:
-            acc = None if fits_at is None else (lambda x, y, rot: fits_at(r, x, y, rot))
+            def acc(x, y, rot):
+                return ((fits_at is None or fits_at(r, x, y, rot))
+                        and limits_hold({r: (x, y, rot)}))
             for rot in (rot0,) + tuple(q for q in ROTS if q != rot0):
                 got = nearest_legal(st, r, x0, y0, rot, frozenset(),
                                     reach=LEGALISE_REACH, accept=acc)
+                if got and far(r, got):
+                    got = None
                 if got:
                     break
         p.ensure_rotation(rot0)
@@ -1569,79 +1674,96 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
         return None if got is None else ((rot_key(got[2]) != rot_key(rot0),
                                           math.hypot(got[0] - x0, got[1] - y0)), got)
 
-    def still_legal(r, pose):
-        """Whether r's cached `pose` is still legal, r left as it stands."""
+    def still_legal(r, at):
+        """Whether r's cached pose `at` is still legal, r left as it stands."""
         p = st.parts[r]
-        if r in a.seats:
-            fine = legal_on_edge(st, r, pose)
+        if r in seats:
+            fine = legal_on_edge(st, r, at)
         else:
-            p.ensure_rotation(pose[2])
-            fine = legal(st, r, *pose) and (fits_at is None or fits_at(r, *pose))
+            p.ensure_rotation(at[2])
+            fine = legal(st, r, *at) and (fits_at is None or fits_at(r, *at))
         p.ensure_rotation(p.rot)
         return fine
 
-    def frees(r, pose, todo):
-        """How many of the other parts in `todo` r's move to `pose` makes
+    def frees(r, at, todo):
+        """How many of the other parts in `todo` r's move to `at` makes
         legal, r put back after."""
         p = st.parts[r]
-        here = (p.x, p.y, p.rot)
-        p.ensure_rotation(pose[2])
-        st.apply_move(r, *pose)
+        here = pose(r)
+        p.ensure_rotation(at[2])
+        _place(st, r, *at)
         n = sum(1 for q in todo if q != r and fits(q))
         p.ensure_rotation(here[2])
-        st.apply_move(r, *here)
+        _place(st, r, *here)
         return n
 
     def walk(refs):
         """The parts of `refs` that are not legal, one at a time, until each
-        is legal or has no legal pose in reach: first the move that makes
-        the most of the others legal too -- the part that overlaps several,
+        is legal or has no legal pose in reach (`candidate`): first the move
+        that makes the most of the others legal too -- the part that overlaps several,
         moved once, rather than each of those it overlaps -- then a move
         that keeps the part's turn before one that turns it, then the
         shortest step, then input order. Of two parts that only overlap
         each other, the one that frees the other the shorter way moves,
-        and the other stays."""
+        and the other stays. A move that would break a part that was legal
+        is not made."""
         todo = [r for r in refs if not fits(r)]
         cache = {}
         while todo:
             for r in todo:
                 if r not in cache or (cache[r] is not None and not still_legal(r, cache[r][1])):
                     cache[r] = candidate(r)
+                    if cache[r] is not None and breaks({r: cache[r][1]}):
+                        cache[r] = None
             live = [((-frees(r, cache[r][1], todo),) + cache[r][0], i, r)
                     for i, r in enumerate(todo) if cache[r] is not None]
             if not live:
                 return
             r = min(live)[2]
-            pose = cache.pop(r)[1]
-            st.parts[r].ensure_rotation(pose[2])
-            st.apply_move(r, *pose)
+            at = cache.pop(r)[1]
+            st.parts[r].ensure_rotation(at[2])
+            st.apply_move(r, *at)
             if r not in reseated:
                 reseated.append(r)
             todo = [q for q in todo if q != r and not fits(q)]
+            # a pose cached before this move may now break a legal part
+            for q in todo:
+                if cache.get(q) is not None and breaks({q: cache[q][1]}):
+                    cache[q] = None
     walk(before)
     model.reprice_all()
     model.total()
-    still = [r for r in a.mov if not fits(r)]
-    repaired = []
-    if still:
+    repaired: List[str] = []
+    stuck = [r for r in mov if not fits(r) and r not in seats]
+    # the repair, twice: the parts that were legal held as walls, then free
+    # to be shoved where each stays legal (`guard`)
+    for free in (sorted(set(mov) - was_legal - set(seats)), sorted(set(mov) - set(seats))):
+        if not stuck:
+            break
+        a = Annealer(model, free, seed=seed)
         a.lam = LAM_END
-        prior = {r: a.pose(r) for r in a.mov}
-        a.repair(T_END, refs=still, local=True)
-        for r in a.mov:
-            if a.pose(r) != prior[r]:
-                pose = a.pose(r)
-                st.parts[r].ensure_rotation(pose[2])
-                st.apply_move(r, *pose)
-                repaired.append(r)
-        walk([r for r in a.mov if not fits(r)])
-    model.reprice_all()
-    model.total()
+        prior = {r: pose(r) for r in mov}
+        a.repair(T_END, refs=stuck, local=True, guard=guard)
+        for r in mov:
+            if pose(r) != prior[r]:
+                st.parts[r].ensure_rotation(pose(r)[2])
+                st.apply_move(r, *pose(r))
+                if r not in repaired:
+                    repaired.append(r)
+        model.reprice_all()
+        model.total()
+        walk([r for r in mov if not fits(r)])
+        model.reprice_all()
+        model.total()
+        stuck = [r for r in mov if not fits(r) and r not in seats]
     moved = {}
-    for r in a.mov:
-        now = a.pose(r)
+    for r in mov:
+        now = pose(r)
         if now != was[r]:
             moved[r] = {'from': [round(v, 4) for v in was[r]],
                         'to': [round(v, 4) for v in now],
                         'mm': round(math.hypot(now[0] - was[r][0], now[1] - was[r][1]), 4)}
     return {'moved': moved, 'reseated': reseated, 'repaired': repaired,
-            'illegal_before': before, 'seconds': round(time.time() - t_start, 2)}
+            'illegal_before': before,
+            'broken': sorted(r for r in was_legal if not fits(r)),
+            'seconds': round(time.time() - t_start, 2)}
