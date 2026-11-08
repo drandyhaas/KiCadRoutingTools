@@ -2006,6 +2006,27 @@ def _stitch_via_clear(pcb_data, net_id, x, y, config, h2h) -> bool:
     return True
 
 
+STITCH_SITE_RADII = (0.0, 0.3, 0.6, 1.0, 1.5, 2.0, 3.0)
+
+
+def stitch_via_site(vx, vy, bounds, edge_reach, covered, admissible):
+    """#649b: the first spot of the stitching-via search around (vx, vy) --
+    rings of STITCH_SITE_RADII, every 30 degrees -- that lies inside `bounds`
+    (min_x, min_y, max_x, max_y; None = anywhere) by `edge_reach`, that both
+    fills cover (`covered(x, y)`) and that `admissible(x, y)` accepts (#1778:
+    no keep-out forbids a via there). None when no spot qualifies."""
+    for r in STITCH_SITE_RADII:
+        for th in range(0, 360, 30):
+            px = vx + r * math.cos(math.radians(th))
+            py = vy + r * math.sin(math.radians(th))
+            if bounds and not (bounds[0] + edge_reach <= px <= bounds[2] - edge_reach
+                               and bounds[1] + edge_reach <= py <= bounds[3] - edge_reach):
+                continue
+            if covered(px, py) and admissible(px, py):
+                return (px, py)
+    return None
+
+
 def oracle_via_rungs(config, pcb_data, net_id):
     """The via sizes an oracle link tries, largest first (#1170): its own,
     then the first rung ``fab_tiers.escalation_rungs`` allows when that is
@@ -2203,6 +2224,19 @@ def oracle_reconnect(board_file: str, net_names, config,
         _cu = list(getattr(pcb.board_info, 'copper_layers', None) or [])
         if _cu:
             config.board_copper_layers = _cu
+
+    # #1778: the board's keep-out rule areas and the run's net-filtered
+    # keep-outs, judged on the CURRENT parse. The weld routers stamp the rule
+    # areas into their maps, but the stitching via, the sliver weld and the
+    # rescue escalation lay copper outside any map, so every emission site
+    # asks this before it ships: a refused item falls to the next tier or
+    # leaves the link honestly open, never inside an area that forbids it.
+    _nk_rules = getattr(getattr(config, 'rules', None), 'net_keepouts', None) or None
+
+    def _keepout_why(segs=(), vias=()):
+        from check_drc import copper_keepout_gate
+        gate = copper_keepout_gate(pcb_data, net_keepouts=_nk_rules)
+        return gate(segments=list(segs), vias=list(vias)) if gate else ''
 
     names = set(net_names)
     routed = failed = rounds = cross_board = 0
@@ -2832,6 +2866,13 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"on their layers -- #570/#648 false-claim guard)")
                     _esc2 = None
                 if _esc2 and not _esc2.get('failed'):
+                    _ko2 = _keepout_why(_esc2.get('new_segments') or [],
+                                        _esc2.get('new_vias') or [])
+                    if _ko2:
+                        print(f"    {net_name}: exact-fill strap REJECTED "
+                              f"({_ko2}, #1778)")
+                        _esc2 = None
+                if _esc2 and not _esc2.get('failed'):
                     _e2segs = _esc2.get('new_segments') or []
                     _e2vias = _esc2.get('new_vias') or []
                     from plane_pad_tap import note_clearance_used
@@ -3214,6 +3255,13 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"via -- same-layer copper cannot join them, "
                           f"#649)")
                     _esc = None
+                if _esc and not _esc.get('failed'):
+                    _ko_esc = _keepout_why(_esc.get('new_segments') or [],
+                                           _esc.get('new_vias') or [])
+                    if _ko_esc:
+                        print(f"    {net_name}: weld escalation REJECTED "
+                              f"({_ko_esc}, #1778)")
+                        _esc = None
                 # #649b: an xy-coincident cross-layer ZONE link is the
                 # stitching-via case -- both fills cover this point, so
                 # ONE legal through-via joins them (measured: the last
@@ -3224,6 +3272,13 @@ def oracle_reconnect(board_file: str, net_names, config,
                         and al != bl and abs(ax - bx) < 0.2
                         and abs(ay - by) < 0.2):
                     _vx, _vy = (ax + bx) / 2.0, (ay + by) / 2.0
+                    from kicad_parser import Via as _Via649
+
+                    def _via649(x, y):
+                        return _Via649(x=x, y=y, size=config.via_size,
+                                       drill=config.via_drill,
+                                       layers=['F.Cu', 'B.Cu'],
+                                       net_id=net_id)
                     # The coincident endpoint is the islands' NEAREST-
                     # APPROACH anchor (often the board corner) -- neither
                     # fill necessarily covers it (measured: a via there is
@@ -3273,24 +3328,19 @@ def oracle_reconnect(board_file: str, net_names, config,
                         _bb = pcb_data.board_info.board_bounds
                         _bec = getattr(config, 'board_edge_clearance', 0.3) \
                             + config.via_size / 2.0
-                        _found = None
-                        for _r in [0.0, 0.3, 0.6, 1.0, 1.5, 2.0, 3.0]:
-                            for _th in range(0, 360, 30):
-                                _px = _vx + _r * math.cos(math.radians(_th))
-                                _py = _vy + _r * math.sin(math.radians(_th))
-                                if _bb and not (_bb[0] + _bec <= _px <= _bb[2] - _bec
-                                                and _bb[1] + _bec <= _py <= _bb[3] - _bec):
-                                    continue
-                                if any((m.query_component(_px, _py,
-                                                          size=config.via_size) or 0) > 0
-                                       for m in _ma) and \
-                                   any((m.query_component(_px, _py,
-                                                          size=config.via_size) or 0) > 0
-                                       for m in _mb):
-                                    _found = (_px, _py)
-                                    break
-                            if _found:
-                                break
+                        _found = stitch_via_site(
+                            _vx, _vy, _bb, _bec,
+                            lambda _px, _py: any(
+                                (m.query_component(_px, _py,
+                                                   size=config.via_size) or 0) > 0
+                                for m in _ma) and any(
+                                (m.query_component(_px, _py,
+                                                   size=config.via_size) or 0) > 0
+                                for m in _mb),
+                            # #1778: a spot inside a keep-out that forbids
+                            # vias is no spot; the search tries the next
+                            lambda _px, _py: not _keepout_why(
+                                vias=[_via649(_px, _py)]))
                         if _found:
                             _vx, _vy = _found
                     except Exception:
@@ -3299,13 +3349,16 @@ def oracle_reconnect(board_file: str, net_names, config,
                     _ok649 = _stitch_via_clear(pcb_data, net_id, _vx, _vy,
                                                config, _h2h)
                     if _ok649:
-                        from kicad_parser import Via as _Via649
+                        # the spot the search fell back to (none found, or
+                        # the search failed) is judged the same way
+                        _why = _keepout_why(vias=[_via649(_vx, _vy)])
+                        if _why:
+                            _ok649 = False
+                            print(f"    {net_name}: stitching via REFUSED at "
+                                  f"({_vx:.2f},{_vy:.2f}) ({_why}, #1778)")
+                    if _ok649:
                         _esc = {'failed': False, 'new_segments': [],
-                                'new_vias': [_Via649(
-                                    x=_vx, y=_vy, size=config.via_size,
-                                    drill=config.via_drill,
-                                    layers=['F.Cu', 'B.Cu'],
-                                    net_id=net_id)]}
+                                'new_vias': [_via649(_vx, _vy)]}
                         _esc_cfg = config
                         print(f"    {net_name}: stitching via placed at "
                               f"({_vx:.2f},{_vy:.2f}) joining "
@@ -3331,6 +3384,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                         if verbose:
                             print(f"    (sliver weld error: {_we})")
                         _ws = None
+                    if _ws is not None:
+                        _why = _keepout_why(segs=[_ws])
+                        if _why:
+                            print(f"    {net_name}: sliver weld REFUSED "
+                                  f"({_why}, #1778)")
+                            _ws = None
                     if _ws is not None:
                         _esc = {'failed': False, 'new_segments': [_ws],
                                 'new_vias': []}
@@ -3603,6 +3662,32 @@ def oracle_reconnect(board_file: str, net_names, config,
             # #1169: wide where the net's own width fits, narrow at the pinch.
             _legs = widen_link_legs(route_points, used_width, pcb_data,
                                     net_id, config)
+            # #1778: the copper about to be written, against the keep-outs.
+            # The weld maps stamp the rule areas, but the widened legs, the
+            # barrel bridges and a seed's first cell are not the A*'s path;
+            # a widened leg that reaches in ships at the link's own width.
+            _ko_vias = [_Via(x=vx, y=vy, size=used_via_size,
+                             drill=used_via_drill, layers=['F.Cu', 'B.Cu'],
+                             net_id=net_id) for vx, vy in via_positions]
+            _ko_extra = [_Seg(start_x=p1[0], start_y=p1[1], end_x=p2[0],
+                              end_y=p2[1], width=used_width, layer=_l,
+                              net_id=net_id) for (p1, p2, _l) in _extra_conn]
+
+            def _ko_legs(legs):
+                return [_Seg(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
+                             width=_lw, layer=l1, net_id=net_id)
+                        for x1, y1, x2, y2, l1, _lw in legs]
+            _why = _keepout_why(_ko_legs(_legs) + _ko_extra, _ko_vias)
+            if _why and any(_l[5] > used_width + 1e-9 for _l in _legs):
+                _narrow = [(x1, y1, x2, y2, l1, used_width)
+                           for x1, y1, x2, y2, l1, _lw in _legs]
+                if not _keepout_why(_ko_legs(_narrow) + _ko_extra, _ko_vias):
+                    _legs, _why = _narrow, ''
+            if _why:
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},{by:.2f})"
+                      f"  DECLINED ({_why}; left unconnected, #1778)")
+                failed += 1
+                continue
             if not (_legs or _extra_conn or via_positions):
                 # Nothing to write: the path only changed layer at an existing
                 # barrel, or its points coincide (the exact tier's nearest

@@ -21,7 +21,8 @@ no KiCad):
     written board has no via and no copper on B.Cu;
   * control: a keep-out across BOTH layers with `--layers F.Cu B.Cu`. SIG
     still fails, and the rescue still lays its escape vias, because both
-    layers are routable;
+    layers are routable (and, #1778, withdraws them, since they bought
+    nothing);
   * the predicate itself, in process: forbidden other layers, a pad on a
     forbidden layer, two routable layers, and a 4-layer run whose through
     via spans forbidden inner layers.
@@ -117,8 +118,11 @@ def test_end_to_end(tmp):
     check("control: with both layers routable and both blocked, SIG fails",
           mins.get('failed_single') == ['SIG'], str(mins))
     check("control: and the rescue still lays its escape vias",
-          len(vias) >= 1 and 'dogbone' in log
-          and 'skipped (no routable layer' not in log, str(vias))
+          'dogbone' in log and 'skipped (no routable layer' not in log)
+    # #1778: the escapes bought nothing (SIG is as open as before), so the
+    # rescue takes them back out rather than ship vias that join nothing
+    check("control: and withdraws them when they bought nothing",
+          not vias and 'bare-ball escape via withdrawn' in log, str(vias))
 
 
 def test_predicate():

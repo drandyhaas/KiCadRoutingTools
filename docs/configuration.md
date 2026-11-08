@@ -663,8 +663,10 @@ Notes:
   routing (`route_diff.py --keepout`), and across plane via-stitching and plane repair. KiCad
   native keep-out rule areas (`(zone … (keepout …))`) are honoured automatically everywhere too,
   with no flag. (Guide corridors, by contrast, steer single-ended/multipoint routing only.)
-  That includes the copper laid after the search: the soft-joint and stub-gap bridges and the
-  length-matching meander bumps refuse to enter a forbidding rule area or a net-filtered
+  That includes the copper laid after the search: the soft-joint and stub-gap bridges, the
+  length-matching meander bumps, the KiCad-oracle recheck's welds (its stitching via, sliver
+  weld, rescue escalation and exact-fill strap, #1778), the net rescue's bare-ball escape and the
+  GND return vias (`--add-gnd-vias`) refuse to enter a forbidding rule area or a net-filtered
   keep-out (`check_drc.copper_keepout_gate`, the copper grown by half its width, #1760/#1761),
   and so does a single-ended route's terminal copper (#1777): a pour-launch cell or a seeded
   on-pad cell is offered as an endpoint only where its grid point and weld bridge clear the

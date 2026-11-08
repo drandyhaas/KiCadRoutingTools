@@ -274,8 +274,9 @@ def add_gnd_vias_to_existing_board(
     _pad_rad = np.array([math.hypot(p.size_x, p.size_y) / 2.0 for p in _cu_pads],
                         dtype=np.float64)
 
-    from check_drc import FilledCopperGate
+    from check_drc import FilledCopperGate, copper_keepout_gate
     _filled_gate = FilledCopperGate(pcb_data)
+    _ko_gate = copper_keepout_gate(pcb_data)
 
     def _exact_copper_clear(x_mm, y_mm, own_net):
         vr = config.via_size / 2.0
@@ -382,6 +383,16 @@ def add_gnd_vias_to_existing_board(
             dist = math.sqrt((x_mm - px)**2 + (y_mm - py)**2)
             if dist < via_via_min_dist:
                 return (False, f"too_close_to_batch_gnd_via({dist:.2f}mm)")
+
+        # A keep-out rule area forbidding vias (#1778). The grid check above
+        # reads TRACK cells only, so an area that forbids vias and allows
+        # tracks -- stamped into the via cells alone -- was never asked;
+        # the gate judges the via's copper disk as KiCad's items_not_allowed
+        # does (and a net-filtered keep-out binding the return net).
+        if _ko_gate is not None and _ko_gate(vias=[Via(
+                x=x_mm, y=y_mm, size=config.via_size, drill=config.via_drill,
+                layers=["F.Cu", "B.Cu"], net_id=own_net)]):
+            return (False, "keepout_area")
 
         return _exact_copper_clear(x_mm, y_mm, own_net)
 

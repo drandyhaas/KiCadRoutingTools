@@ -4464,7 +4464,7 @@ def _ring_box(ring):
             max(p[0] for p in ring), max(p[1] for p in ring))
 
 
-def copper_keepout_gate(pcb_data):
+def copper_keepout_gate(pcb_data, net_keepouts=None):
     """The one "may this new copper be laid" keep-out test for the passes
     that lay copper outside the router's stamped maps (#1760, #1761): the
     soft-joint bridges, the stub-gap connectors and the meander bumps.
@@ -4473,8 +4473,10 @@ def copper_keepout_gate(pcb_data):
     - a board RULE AREA with `(tracks not_allowed)` / `(vias not_allowed)`,
       judged by `keepout_refusal` (so a generator refuses exactly what this
       checker's `keepout` class reports);
-    - a NET-FILTERED keep-out of the run (`pcb_data._net_keepouts`), judged
-      by `net_keepouts.audit_items`, the geometry the end-of-run audit and
+    - a NET-FILTERED keep-out of the run (`pcb_data._net_keepouts`, or
+      `net_keepouts` when given: a pass working on its own parse, as the
+      oracle does, hands the run's list in), judged by
+      `net_keepouts.audit_items`, the geometry the end-of-run audit and
       KiCad's items_not_allowed read.
     Copper is the centreline grown by half its width (a via: its disk), as
     KiCad grades a rule area; no clearance is added.
@@ -4488,7 +4490,9 @@ def copper_keepout_gate(pcb_data):
              if len(ko.get('polygon') or ()) >= 3
              and (not ko.get('tracks_allowed', True)
                   or not ko.get('vias_allowed', True))]
-    netko = [ko for ko in (getattr(pcb_data, '_net_keepouts', None) or ())
+    if net_keepouts is None:
+        net_keepouts = getattr(pcb_data, '_net_keepouts', None)
+    netko = [ko for ko in (net_keepouts or ())
              if not ko.get('edge_band')
              and (ko.get('layer_ban') or len(ko.get('polygon') or ()) >= 3)]
     if not plain and not netko:
