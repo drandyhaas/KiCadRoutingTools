@@ -3582,8 +3582,8 @@ retry's `--nets` carries the poured nets too (#1032).
 `(current: ...)` tail.** The box-in hint suggests a clearance or track only when
 it is narrower than the run's own (`0.15` against a run above it), so on a board
 already routing at or below 0.15 the only novel token in the whole sentence is
-the grid. The tail tells you that, and the grid alone is not a lever (see
-below). A failure printed as `ROUTE FAILED - ripping N blocker net(s) (...) did
+the grid. The tail tells you that. Whether the grid helps is not guessed from
+the hint: it is settled by the one grid A/B below. A failure printed as `ROUTE FAILED - ripping N blocker net(s) (...) did
 not free a path` is not a box-in at all: the ladder found blockers, ripped and
 restored them.
 
@@ -3862,13 +3862,23 @@ you.
 
 - **Geometry still above the floor:** the parameters reading holds. Shrink it, and pair a
   finer grid **with** the shrink rather than spending the grid alone.
-- **Geometry already at the floor:** the parameters reading is exhausted, and this is
-  a placement question after all. A finer grid resolves the same obstacles more
-  precisely; it does not make a gap wider, and there is nothing left to pair it
-  with. Measured (run 20): `0.05 -> 0.025 -> 0.0125`, about 40 minutes, left
-  `unrouted` at exactly BUSY / Net-(U4-XTAL_P) / SCK at every resolution. Note
-  also that "ripup budget" is not a lever here at all — "no rippable blockers
-  found" means the blockers are not rippable copper.
+- **Geometry already at the floor:** shrinking is exhausted, but the grid is
+  not until it has been tried once. **Before calling the box-in a placement
+  question, run ONE grid A/B**: the same step at the default `--grid-step 0.1`
+  against `0.05` (`0.025` when the boxed-in part's pitch is ≤0.4 mm), sizes
+  unchanged, and **keep whichever grades better** (`check_connected`, then
+  `check_drc` at the routed clearance). Routing is deterministic, so the
+  comparison costs one route. A finer grid does not make a gap wider, but at
+  0.1 the router can miss a corridor that exists: on a QFN-56 at 0.4 mm
+  pitch (track 0.2, clearance 0.15, `--escalation off`) 0.05 alone
+  routed 9 of the 11 nets boxed in at 0.1 (#1765). The sign varies: on the
+  same nets at other sizes 0.05 did worse, which is why it is an A/B and not a
+  default. Only what is still boxed in on the better arm is a placement
+  question. The "not a lever" claim holds below 0.05 only, as far as it was
+  measured (run 20, one board): `0.05 -> 0.025 -> 0.0125`, about 40 minutes,
+  left `unrouted` at exactly BUSY / Net-(U4-XTAL_P) / SCK at every
+  resolution. Note also that "ripup budget" is not a lever here at all — "no
+  rippable blockers found" means the blockers are not rippable copper.
 
 ## Step 9: Emit the plan as an executable artifact (always)
 
