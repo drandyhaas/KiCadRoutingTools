@@ -190,6 +190,23 @@ def board_sigs(pcb):
     return {_sig(x) for x in list(pcb.segments) + list(pcb.vias)}
 
 
+def oracle_sense_held():
+    """Copper a `sense:` group holds (#1279) is immutable too, though it is
+    never written `(locked yes)`: the oracle's deleter must ask
+    is_immutable_copper, not `locked` alone. The unlocked control above
+    already showed the deleter acts on this fixture."""
+    print("oracle_delete_stranded_fragment, sense-held:")
+    segs, vias, pads, nets, watched = fx_orphan(False)
+    for x in watched:
+        x.held_by = 'sense:U0.1'
+    pcb = _board(segs, vias, pads, nets)
+    before = {_sig(x) for x in watched}
+    run_pass('oracle_delete_stranded_fragment', pcb)
+    lost = sorted(before - board_sigs(pcb))
+    check("oracle_delete_stranded_fragment leaves sense-held copper in place",
+          not lost, f"changed or removed: {lost[:3]}")
+
+
 def cleanup_board(lock):
     b = RoutingBoard(w=40, h=36)
     b.pad('D1', 5, 5, 'NET_D')
@@ -271,6 +288,7 @@ def main():
         lost = sorted(before - after)
         check(f"{name} leaves locked copper exactly in place", not lost,
               f"changed or removed: {lost[:3]}")
+    oracle_sense_held()
     whole_board()
 
     if broken:
