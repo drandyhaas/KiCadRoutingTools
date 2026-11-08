@@ -1566,11 +1566,19 @@ Routing Completes): run them once, here, not again inside the routing.
    placement, the first routed board, the first DONE, the
    final board, and tried-and-worse boards with `--rejected`.
    ```bash
-   python3 -X utf8 py_tools/board_score.py <board> --intent <i> --baseline <input> --json <board>.score.json --quiet
+   python3 -X utf8 py_tools/board_score.py <board> --intent <i> <spec flags> --baseline <input> --json <board>.score.json --quiet
    python3 -X utf8 py_placer/converge.py record --ledger wk/<run>/ledger.jsonl \
        --board <board> --kind placement --parent <the board it was made from> \
        --lever "<what you changed, one line>" --score-file <board>.score.json
    ```
+   `<spec flags>` are the ones DONE is measured with (§1: `--net-min-widths`,
+   `--impedance-nets`, `--length-groups`, `--min-track-width` /
+   `--min-via-diameter` / `--min-via-drill`), the same on every row and the
+   same the verifier passes (`references/verifier.md`). A row scored without
+   them leaves those specs `ungraded`: its `blocking` is not DONE's, the
+   plateau rule compares the wrong number, and converge calls the first
+   flagged row INCOMMENSURABLE with it. On a board that declares no spec they
+   are empty.
    Use `--kind completion` for a routed board, and close the ledger with one
    `record --final --stop-condition <1|2|3|4>` row, passing the verifier's
    per-lens files as `--lens-file`. The stop conditions: 1 done, 2 budget

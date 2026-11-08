@@ -76,8 +76,15 @@ because its nets cannot be routed at all.
 ```bash
 mkdir -p wk        # neither tool creates it, and both write into it
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --json wk/assembly0.json
-python3 -X utf8 py_tools/board_score.py board.kicad_pcb --json wk/score0.json --quiet
+python3 -X utf8 py_tools/board_score.py board.kicad_pcb <spec flags> --json wk/score0.json --quiet
 ```
+
+`<spec flags>` are every spec the board declares (`--net-min-widths`,
+`--impedance-nets`, `--length-groups`, `--min-track-width` /
+`--min-via-diameter` / `--min-via-drill`), the same flags the final grade
+passes, so the baseline grades the same components the routed board is
+compared on; without them those specs read `ungraded`. Empty on a board that
+declares none.
 
 When placement left a floorplan intent, add `--intent <intent.json>` to
 `check_assembly`: only then does it read the overlaps that run waived
