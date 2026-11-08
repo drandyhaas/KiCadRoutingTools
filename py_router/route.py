@@ -3453,6 +3453,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"--rip-existing-nets only rips nets that block another "
                   f"route; pass --force-reroute to rip and re-route them "
                   f"from scratch (#515).")
+    # #1762: a --length-match-group member dropped here never routes, so the
+    # matcher can only grade it as board copper -- it cannot meander it. Say
+    # so here, with the flag that does put it back in the route set.
+    if length_match_groups and _already_routed and not force_reroute:
+        from net_queries import matches_net_filter as _mnf1762
+        from length_matching import force_reroute_hint as _frh1762
+        _conn1762 = [n for n, _reason in _already_routed
+                     if not _reason.startswith('Only')]
+        for _g1762 in length_match_groups:
+            if not _g1762 or (len(_g1762) == 1 and _g1762[0].lower() == 'auto'):
+                continue
+            _hit1762 = [n for n in _conn1762 if _mnf1762(n, _g1762)]
+            if _hit1762:
+                print(f"NOTE: {len(_hit1762)} --length-match-group member(s) "
+                      f"are already fully connected and will NOT be re-routed "
+                      f"({', '.join(_hit1762[:6])}"
+                      f"{', ...' if len(_hit1762) > 6 else ''}): the group "
+                      f"grades them as existing board copper and cannot "
+                      f"meander them -- {_frh1762(_hit1762)} (#1762)")
     # #1112: with pours in this step's scope, "nothing to route" is the FILL
     # MODEL's verdict, and the plane finalize at the end of the run is the pass
     # that checks it against KiCad's exact fill (its oracle leg is ungated on
