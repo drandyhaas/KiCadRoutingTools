@@ -2765,6 +2765,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         summary['net_keepouts'] = _nk_found
         print(f"{RED}{_nk_format(_nk_found, 'the routed board')}{RESET}"
               if _nk_found else _nk_format(_nk_found, 'the routed board'))
+    # #1760/#1761: likewise the copper inside a board keep-out RULE AREA that
+    # forbids it (absent on a board with none; route.py reports the same key).
+    from check_drc import rule_area_audit, format_rule_area_audit
+    _ra_found = rule_area_audit(pcb_data, pcb_data.segments, pcb_data.vias)
+    if _ra_found is not None:
+        summary['rule_area_keepouts'] = _ra_found
+        print(f"{RED}{format_rule_area_audit(_ra_found, 'the routed board')}{RESET}"
+              if _ra_found else format_rule_area_audit(_ra_found, 'the routed board'))
     try:                       # #653: env knobs into the machine-readable
         import env_knobs as _ek653   # summary, so a harness can detect a
         summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
@@ -2872,6 +2880,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # Net-filtered keep-outs: JSON_SUMMARY['net_keepouts'] (None
             # without a keep-out, [] when the copper is clean).
             'net_keepouts': summary.get('net_keepouts'),
+            # #1760/#1761: JSON_SUMMARY['rule_area_keepouts'] (None without
+            # a forbidding rule area, [] when the copper is clean).
+            'rule_area_keepouts': summary.get('rule_area_keepouts'),
             # successful/failed only count pairs that were coupled-routed or
             # outright failed -- pairs deferred to the single-ended pass
             # (electrically short, or coupled route failed), and pairs

@@ -4371,6 +4371,108 @@ def keepout_refusal(pcb_data, segments=(), vias=()):
             f"keep-out rule area {r['area'] or '(unnamed)'} ({r['forbids']} not allowed)")
 
 
+def _ring_box(ring):
+    return (min(p[0] for p in ring), min(p[1] for p in ring),
+            max(p[0] for p in ring), max(p[1] for p in ring))
+
+
+def copper_keepout_gate(pcb_data):
+    """The one "may this new copper be laid" keep-out test for the passes
+    that lay copper outside the router's stamped maps (#1760, #1761): the
+    soft-joint bridges, the stub-gap connectors and the meander bumps.
+
+    Covers both kinds of forbidding region:
+    - a board RULE AREA with `(tracks not_allowed)` / `(vias not_allowed)`,
+      judged by `keepout_refusal` (so a generator refuses exactly what this
+      checker's `keepout` class reports);
+    - a NET-FILTERED keep-out of the run (`pcb_data._net_keepouts`), judged
+      by `net_keepouts.audit_items`, the geometry the end-of-run audit and
+      KiCad's items_not_allowed read.
+    Copper is the centreline grown by half its width (a via: its disk), as
+    KiCad grades a rule area; no clearance is added.
+
+    Returns None when nothing on the board forbids copper (the caller adds no
+    test), else `refuses(segments=(), vias=())` -> the reason the first
+    offending item may not be laid, '' when they all may. A bounding-box test
+    against each region keeps far copper free."""
+    bi = getattr(pcb_data, 'board_info', None)
+    plain = [ko for ko in (getattr(bi, 'keepouts', None) or ())
+             if len(ko.get('polygon') or ()) >= 3
+             and (not ko.get('tracks_allowed', True)
+                  or not ko.get('vias_allowed', True))]
+    netko = [ko for ko in (getattr(pcb_data, '_net_keepouts', None) or ())
+             if not ko.get('edge_band')
+             and (ko.get('layer_ban') or len(ko.get('polygon') or ()) >= 3)]
+    if not plain and not netko:
+        return None
+    plain_boxes = [_ring_box(ko['polygon']) for ko in plain]
+    net_boxes = [None if ko.get('layer_ban') else _ring_box(ko['polygon'])
+                 for ko in netko]
+
+    def refuses(segments=(), vias=()):
+        segs = [s for s in segments if not getattr(s, 'graphic', False)]
+        vias = list(vias)
+        if not segs and not vias:
+            return ''
+        items = [(min(s.start_x, s.end_x) - s.width / 2, min(s.start_y, s.end_y) - s.width / 2,
+                  max(s.start_x, s.end_x) + s.width / 2, max(s.start_y, s.end_y) + s.width / 2)
+                 for s in segs]
+        items += [(v.x - v.size / 2, v.y - v.size / 2, v.x + v.size / 2, v.y + v.size / 2)
+                  for v in vias]
+
+        def touches(box):
+            x0, y0, x1, y1 = box
+            return any(a0 <= x1 and a1 >= x0 and b0 <= y1 and b1 >= y0
+                       for a0, b0, a1, b1 in items)
+
+        if any(touches(b) for b in plain_boxes):
+            why = keepout_refusal(pcb_data, segs, vias)
+            if why:
+                return why
+        near = [ko for ko, b in zip(netko, net_boxes) if b is None or touches(b)]
+        if near:
+            from net_keepouts import audit_items
+            for ko, kind, item in audit_items(pcb_data, segs, vias, near):
+                net = getattr(pcb_data.nets.get(item.net_id), 'name', item.net_id)
+                return (f"{kind} of {net} would enter net-filtered keep-out "
+                        f"{ko.get('name') or '(unnamed)'}")
+        return ''
+
+    return refuses
+
+
+def rule_area_audit(pcb_data, segments, vias):
+    """The copper of `segments` / `vias` inside a board keep-out RULE AREA
+    that forbids it (`keepout_census`), one row per (area, net):
+    {'area', 'net', 'tracks', 'vias'}, sorted; [] when the copper is clean,
+    None when the board has no forbidding area. The plain-area counterpart of
+    `net_keepouts.audit` (JSON_SUMMARY['rule_area_keepouts'] beside
+    ['net_keepouts'])."""
+    bi = getattr(pcb_data, 'board_info', None)
+    if not any(len(ko.get('polygon') or ()) >= 3
+               and (not ko.get('tracks_allowed', True) or not ko.get('vias_allowed', True))
+               for ko in (getattr(bi, 'keepouts', None) or ())):
+        return None
+    rows = {}
+    for r in keepout_census(pcb_data, list(getattr(bi, 'copper_layers', None) or ()),
+                            segments=list(segments), vias=list(vias)):
+        c = rows.setdefault((r['area'], r['net1']), [0, 0])
+        c[0 if r['item'] == 'track' else 1] += 1
+    return [{'area': k[0], 'net': k[1], 'tracks': t, 'vias': n}
+            for k, (t, n) in sorted(rows.items())]
+
+
+def format_rule_area_audit(found, where):
+    """One console line for what `rule_area_audit` found on `where`."""
+    if not found:
+        return f"Keep-out rule areas: no forbidden copper inside an area on {where}"
+    items = sum(r['tracks'] + r['vias'] for r in found)
+    parts = '; '.join(f"{r['area'] or '(unnamed)'}: {r['net']} "
+                      f"({r['tracks']} track(s), {r['vias']} via(s))" for r in found)
+    return (f"WARNING: keep-out rule areas: {items} item(s) inside an area that "
+            f"forbids them on {where} (KiCad reports them as items_not_allowed): {parts}")
+
+
 def _keepout_key(row):
     """What makes a keep-out row "the same" on two boards: the area, the item
     kind, the net NAME (ids differ between dialects), the layer and the item's

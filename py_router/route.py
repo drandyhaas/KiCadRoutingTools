@@ -6586,6 +6586,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _nk_first = _nk_audit(pcb_data, pcb_data.segments, pcb_data.vias)
         if _nk_first is not None:
             summary['net_keepouts'] = _nk_first
+        # #1760/#1761: copper inside a forbidding board rule area, likewise
+        # (re-measured on the shipped board at the end).
+        from check_drc import rule_area_audit as _ra_audit
+        _ra_first = _ra_audit(pcb_data, pcb_data.segments, pcb_data.vias)
+        if _ra_first is not None:
+            summary['rule_area_keepouts'] = _ra_first
     # WHICH SUMMARY IS THIS? A run that fires the reconciliation sub-pass emits
     # a SECOND JSON_SUMMARY, scoped to that subset, and the only thing saying so
     # was a prose "Note:" printed after it. Anything that scrapes the last
@@ -9271,6 +9277,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _nke:                               # noqa: BLE001
             print(f"  WARNING: net keep-out audit skipped "
                   f"({type(_nke).__name__}: {_nke})")
+    # #1760/#1761: likewise the copper inside a board keep-out RULE AREA that
+    # forbids it (check_drc's `keepout` class), absent on a board with none.
+    _ra_shipped = None
+    if (final_reconcile and not _ckpt_stop
+            and getattr(pcb_data.board_info, 'keepouts', None)):
+        try:
+            from check_drc import rule_area_audit, format_rule_area_audit
+            _rd_ra = locals().get('results_data')
+            _ra_board = _ra_copper = None
+            if return_results and _rd_ra is not None:
+                _ra_s, _ra_v = _gui_write_model(_rd_ra)
+                _ra_board = pcb_data
+                _ra_copper = ([s for _l in _ra_s.values() for s in _l],
+                              [v for _l in _ra_v.values() for v in _l])
+            elif output_file and os.path.isfile(output_file):
+                from kicad_parser import parse_kicad_pcb as _pk_ra
+                _ra_board = _pk_ra(output_file)
+                _ra_copper = (_ra_board.segments, _ra_board.vias)
+            if _ra_board is not None:
+                _ra_shipped = rule_area_audit(_ra_board, *_ra_copper)
+                if _ra_shipped is not None:
+                    _ra_line = format_rule_area_audit(_ra_shipped, 'the shipped board')
+                    print(f"\n{RED}  {_ra_line}{RESET}" if _ra_shipped else f"  {_ra_line}")
+                    if return_results and _rd_ra is not None:
+                        _rd_ra['rule_area_keepouts'] = _ra_shipped
+        except Exception as _rae:                               # noqa: BLE001
+            print(f"  WARNING: rule-area keep-out audit skipped "
+                  f"({type(_rae).__name__}: {_rae})")
 
     # #1680/#1681: copper on or inside the clearance of another net's pad, on
     # the board this run ships: a short whose net was outside this step or
@@ -9322,6 +9356,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Likewise the net-filtered keep-out audit of the shipped board.
             if _merged is not None and _nk_shipped is not None:
                 _merged['net_keepouts'] = _nk_shipped
+            if _merged is not None and _ra_shipped is not None:
+                _merged['rule_area_keepouts'] = _ra_shipped
             # ALL-OR-NOTHING (#830). This was `open(json_out,'w')` +
             # `json.dump`, which truncates the destination before the first
             # chunk is encoded and then STREAMS into it -- so a failure partway
