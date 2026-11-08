@@ -18,6 +18,9 @@ Rows:
   3. the chain: route.py's console and JSON_SUMMARY name a pair whose skew the
      cleanup moved out of range, or the pair ships within its tolerance --
      never out of range and unnamed.
+  4. ...and it ships within: the length-changing graze passes keep the input
+     copper of a net a skew rule grades read-only (the second #1759 change),
+     and the via nudge clears the graze instead.
 
     python3 tests/test_1759_cleanup_skew_disclosed.py
 """
@@ -125,7 +128,14 @@ def main():
         check("an out-of-range pair is named in JSON_SUMMARY",
               named or not out_of_range,
               f"out of range {out_of_range}, named {bool(named)}")
-        check("...and on the console",
+        print("4. the cleanup keeps the graded pair's input copper")
+        check("the graze passes name the pair read-only",
+              re.search(r"Graze passes: \d+ skew-graded net\(s\) keep their input "
+                        r"copper \(#1759\): .*/D_N, /D_P", log) is not None)
+        check("the pair ships within its recorded tolerance", not out_of_range)
+        check("the board ships DRC-clean (the via nudge clears the graze)",
+              r.returncode == 0, f"check_drc exit {r.returncode}")
+        check("...and a named pair is on the console",
               not named or 'the post-route cleanup moved /D_P / /D_N out of its '
               'skew rule' in log)
     finally:
