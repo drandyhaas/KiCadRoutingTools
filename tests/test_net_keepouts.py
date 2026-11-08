@@ -630,8 +630,9 @@ def _gnd_in_sw(board):
 
 def test_plane_repair_copper_stays_out():
     """The plane step's copper keeps GND out of 'sw': repair_planes' region
-    join across the pour SIG splits, and the KiCad oracle's weld from the
-    pour to a pad beyond the region. Both ran straight through it: their
+    join across the pour SIG splits (standalone, and as route.py's in-run
+    finalize, which forwards its regions), and the KiCad oracle's weld from
+    the pour to a pad beyond the region. All ran straight through it: their
     maps never carried the region."""
     out = os.path.join(tempfile.mkdtemp(prefix="nko_out_"), "o.kicad_pcb")
     r = subprocess.run([sys.executable, "-X", "utf8", "py_router/repair_planes.py",
@@ -644,6 +645,21 @@ def test_plane_repair_copper_stays_out():
     assert "rule 'sw': honoured" in r.stdout, r.stdout[-3000:]
     assert _kicad_items_not_allowed(out, SW_RULE) in (None, 0)
 
+    # route.py's in-run finalize (#562): the same engine, called by the
+    # route step on the board it is writing
+    fin = os.path.join(tempfile.mkdtemp(prefix="nko_fin_"), "f.kicad_pcb")
+    r = subprocess.run([sys.executable, "-X", "utf8", "py_router/route.py",
+                        _split_pour(39, "split"), "--output", fin, "--skip-routing",
+                        "--nets", "*", "--escalation", "off"],
+                       cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=dict(ENV, KICAD_FINALIZE_ONLY="1"),
+                       timeout=900)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "Plane finalize" in r.stdout, r.stdout[-3000:]
+    assert _connected(fin, ["GND"]) and _gnd_in_sw(fin) == [], _gnd_in_sw(fin)
+    assert "no bound-net copper inside a region" in r.stdout, r.stdout[-3000:]
+    assert _kicad_items_not_allowed(fin, SW_RULE) in (None, 0)
+
     from kicad_oracle import find_kicad_cli, oracle_reconnect
     cli = find_kicad_cli(warn=False)
     if not cli:
@@ -655,8 +671,11 @@ def test_plane_repair_copper_stays_out():
                           layers=["F.Cu", "B.Cu"])
     res = _quiet(oracle_reconnect, board, ["GND"], cfg, track_via_clearance=0.8,
                  hole_to_hole_clearance=0.25)
-    assert res["links_routed"] == 1, res
-    assert _gnd_in_sw(board) == [], _gnd_in_sw(board)
+    # how many links the exact fill finds depends on the KiCad version (one on
+    # 10.99, two on 10.0); what may not vary is where their copper goes
+    brief = {k: res.get(k) for k in ("reason", "links_routed", "links_failed", "remaining")}
+    assert res["links_routed"] >= 1 and _connected(board, ["GND"]), brief
+    assert _gnd_in_sw(board) == [], (_gnd_in_sw(board), brief)
 
 
 TESTS = [
