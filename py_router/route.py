@@ -1615,7 +1615,7 @@ def _late_dangling_via_sweep1166(pcb_data, output_file, return_results,
             return 0, 0
         gone = {id(x) for x in removed + dropped}
         # #1372: a via that was the only thing joining two track ends is
-        # removed with one end moved onto the other; the moved copy is new copper.
+        # removed with a connector track joining the ends; it is new copper.
         welded = list(_stats.get('added') or [])
         if return_results:
             for r in rd.get('results') or []:
