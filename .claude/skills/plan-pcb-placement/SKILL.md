@@ -792,6 +792,13 @@ in the vocabulary of `docs/floorplan-intent.md`:
   ... --preview` places one seed and draws each group's box over it (with
   `--draft-zones` written as draft `blocks[]`, never applied). It is a
   review, not a step: the groups place the board.
+- **To fix a mostly-good placement without re-annealing** (a placed board
+  with a few overlaps or a part off the outline, a seed after a hand edit):
+  `place_simple.py ... --legalise-only [--seed S]` keeps every legal part
+  exactly where it stands and moves only the illegal ones to their nearest
+  legal pose; its log names each move and its distance. It is not a
+  placement: it never improves an arrangement, so a board that needs one is
+  placed with the seeds (§3.6).
 
 ### 3.5 Datasheet layouts (your judgement)
 

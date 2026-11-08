@@ -294,6 +294,8 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
 python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
     --groups groups.json --intent intent.json --seeds 0-3 [--clustered-seeds 2-3] \
     [--jobs 4] --json 's{seed}.json'
+# keep the board's poses, move only the parts that are not legal (#1756)
+python3 -X utf8 py_placer/place_simple.py board.kicad_pcb fixed.kicad_pcb     --groups groups.json --intent intent.json --legalise-only [--json report.json]
 # where each group would go, non-binding (#1481): one anchored seed, nothing written
 python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
     --groups groups.json --intent intent.json --preview [--seed 0] [--draft-zones draft.json]
@@ -309,6 +311,18 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
   changed. (The anchored start's own solve, unannealed, is no preview: on a
   pile with nothing fixed it puts every group on the board's centre.)
 
+- **Legalise only** (`--legalise-only`, #1756). No scatter and no anneal:
+  the board's poses are kept and only the parts that are not legal where
+  they stand move, one at a time -- the move that makes the most others
+  legal first, then the shortest step at the part's own turn -- each to its
+  nearest legal pose (6 mm reach; an edge-seated part slides along its
+  edge), with the anneal's repair, shoves only, for a part no such pose
+  frees. A legal board comes back with every pose as it was. Use it to fix a
+  mostly-good placement (a human layout, a seed after hand edits) without
+  re-placing it. It places one board, so `--seeds`, `{seed}` without
+  `--seed`, the start lists and counts, `--moves` and `--preview` are
+  refused; the log names each part moved and how far, and the report's
+  `mode`, `start` (`board`) and `legalised` keys say what it did.
 - **Inputs.** `--groups` is the groups file (`py_tools/check_groups.py`
   checks it): each group a set of parts kept together, with optional `near`,
   `apart` and `edge` hints and a `side`. `--intent` is the emitted intent

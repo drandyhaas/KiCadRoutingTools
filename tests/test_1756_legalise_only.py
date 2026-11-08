@@ -1,0 +1,168 @@
+"""#1756: `place_simple --legalise-only` keeps the board's legal poses.
+
+place_simple started every anneal from a random scatter, so a board whose
+parts were already placed could not be given to it as a start: the
+arrangement was discarded. `--legalise-only` skips the scatter and the
+anneal and moves only the parts that are not legal, each to its nearest
+legal pose (the anneal's own post step), mending one no such pose frees with
+the anneal's repair, shoves only.
+
+1. A legal board comes back with ZERO moves, its poses as they were: the
+   in-repo cap_chain as drawn, and a seed place_simple annealed on it.
+2. The same board with two parts made illegal -- C2 dropped onto C1, J2's
+   pads pushed past the outline -- comes back legal (check_assembly
+   buildable with no baseline, place_simple's own `illegal` empty), only
+   J2 and one of the overlapping pair moved, each by a short step.
+3. The mode is deterministic: two runs give the same poses.
+4. The combinations that make no sense are refused, with the reason.
+
+    python3 tests/test_1756_legalise_only.py
+"""
+import json
+import math
+import os
+import subprocess
+import sys
+import tempfile
+
+TESTS = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(TESTS)
+sys.path.insert(0, TESTS)
+sys.path.insert(0, os.path.join(REPO, 'py_router'))
+sys.path.insert(0, os.path.join(REPO, 'py_placer'))
+import run_utils  # noqa: E402
+
+PY = [sys.executable, '-X', 'utf8']
+BOARD = os.path.join(REPO, 'kicad_files', 'cap_chain.kicad_pcb')
+PLACE = os.path.join(REPO, 'py_placer', 'place_simple.py')
+# C2 onto C1 (a courtyard overlap), J2's pads 0.45 mm past the east edge (x = 31)
+NUDGES = {'C2': (18.3, 13.4, 0.0), 'J2': (30.6, 15.0, 0.0)}
+#: mm the nudged parts may travel back: a nearest legal pose, not a re-placement
+SHORT_MM = 3.0
+failures = []
+
+
+def ok(label, cond, detail=''):
+    print(f"  [{'ok' if cond else 'FAIL'}] {label}"
+          f"{(': ' + str(detail)[-900:]) if detail and not cond else ''}")
+    if not cond:
+        failures.append(label)
+
+
+def run(*args):
+    return subprocess.run(PY + list(args), capture_output=True, text=True, cwd=REPO,
+                          encoding='utf-8', errors='replace')
+
+
+def poses(path):
+    from kicad_parser import parse_kicad_pcb
+    return {r: (f.x, f.y, f.rotation % 360.0)
+            for r, f in parse_kicad_pcb(run_utils.evidence(path)).footprints.items()}
+
+
+def legalise(board, out, groups, intent, *extra):
+    rep = out[:-len('.kicad_pcb')] + '.json'
+    r = run_utils.check(PY + [PLACE, board, out, '--groups', groups, '--intent', intent,
+                              '--legalise-only', '--json', rep, *extra], accept=True)
+    return json.load(open(run_utils.evidence(rep, 'the legalise report'))), r.stdout
+
+
+def assembly(board, td, tag):
+    """check_assembly with NO baseline: a pair the input already had is not
+    excused, so buildable means legal."""
+    js = os.path.join(td, f'asm_{tag}.json')
+    run(run_utils.tool('check_assembly.py'), board, '--json', js)
+    return json.load(open(run_utils.evidence(js, f'the {tag} assembly grade')))
+
+
+def main():
+    from placement.writer import write_placed_output
+    from placement.portfolio import copy_siblings
+    with tempfile.TemporaryDirectory(prefix='krt1756_') as td:
+        board = os.path.join(td, 'b.kicad_pcb')
+        run(os.path.join(REPO, 'py_router', 'copy_board.py'), BOARD, board)
+        run_utils.evidence(board, 'the fixture board')
+        intent = os.path.join(td, 'intent.json')
+        run(os.path.join(REPO, 'py_tools', 'check_floorplan.py'), board,
+            '--emit-intent', intent)
+        run_utils.evidence(intent, 'the emitted intent')
+        groups = os.path.join(td, 'groups.json')
+        json.dump({'schema': 1, 'groups': [{'name': 'caps', 'refs': ['C1', 'C2']}]},
+                  open(groups, 'w'))
+
+        print('1. a legal board comes back with zero moves')
+        seeded = os.path.join(td, 'seed0.kicad_pcb')
+        run_utils.check(PY + [PLACE, board, seeded, '--groups', groups, '--intent', intent,
+                              '--seed', '0'], accept=True)
+        for tag, src in (('as drawn', board), ('annealed seed 0', seeded)):
+            out = os.path.join(td, f"legal_{tag.replace(' ', '_')}.kicad_pcb")
+            rep, _log = legalise(src, out, groups, intent)
+            ok(f'{tag}: the report names the mode', rep.get('mode') == 'legalise-only'
+               and rep.get('start') == 'board', (rep.get('mode'), rep.get('start')))
+            lz = rep.get('legalised') or {}
+            ok(f'{tag}: nothing illegal, nothing moved',
+               lz.get('count') == 0 and not lz.get('illegal_before') and not rep['illegal'], lz)
+            before, after = poses(src), poses(out)
+            ok(f'{tag}: every pose identical', before == after,
+               {r: (before[r], after.get(r)) for r in before if before[r] != after.get(r)})
+
+        print('2. a board with illegal parts comes back legal, only they moved, a short way')
+        nudged = os.path.join(td, 'nudged.kicad_pcb')
+        write_placed_output(board, nudged, [
+            {'reference': r, 'new_x': x, 'new_y': y, 'new_rotation': rot}
+            for r, (x, y, rot) in NUDGES.items()])
+        copy_siblings(board, nudged)
+        asm0 = assembly(nudged, td, 'nudged')
+        ok('the nudged board is NOT buildable (the case is real)',
+           asm0.get('buildable') is False, asm0.get('verdict'))
+        fixed = os.path.join(td, 'fixed.kicad_pcb')
+        rep, log = legalise(nudged, fixed, groups, intent)
+        lz = rep['legalised']
+        ok('the nudged parts were illegal as the board had them',
+           set(NUDGES) <= set(lz['illegal_before']), lz['illegal_before'])
+        moved = set(lz['moved'])
+        ok('J2 moved, and of the overlapping C1/C2 exactly one, nothing else',
+           'J2' in moved and len(moved & {'C1', 'C2'}) == 1 and moved <= {'C1', 'C2', 'J2'},
+           sorted(moved))
+        ok(f'each moved under {SHORT_MM:g} mm', 0 < lz['max_mm'] < SHORT_MM, lz['max_mm'])
+        ok('the log says what it moved', 'legalise only' in log and
+           f"{lz['count']} moved" in log and 'moved J2' in log, log[-800:])
+        ok("place_simple's own grade: nothing left illegal", rep['illegal'] == [],
+           rep['illegal'])
+        asm = assembly(fixed, td, 'fixed')
+        ok('check_assembly (no baseline): buildable',
+           asm.get('buildable') is True, asm.get('verdict'))
+        before, after = poses(nudged), poses(fixed)
+        ok('every other part exactly where it stood',
+           all(before[r] == after[r] for r in before if r not in moved))
+        for r in sorted(moved):
+            d = math.hypot(after[r][0] - before[r][0], after[r][1] - before[r][1])
+            ok(f'{r} written where the report says ({d:.3f} mm)',
+               abs(d - lz['moved'][r]['mm']) < 1e-3, (d, lz['moved'][r]))
+
+        print('3. deterministic')
+        again = os.path.join(td, 'fixed_again.kicad_pcb')
+        rep2, _log = legalise(nudged, again, groups, intent)
+        ok('the same moves', rep2['legalised']['moved'] == lz['moved'],
+           (rep2['legalised']['moved'], lz['moved']))
+        ok('the same poses', poses(again) == after)
+
+        print('4. the combinations that make no sense are refused')
+        base = [PLACE, nudged, os.path.join(td, 'x.kicad_pcb'), '--groups', groups,
+                '--intent', intent, '--legalise-only']
+        for extra, why in ((['--seeds', '0,1'], 'name one --seed, not --seeds'),
+                           (['--moves', '100'], '--moves does not apply'),
+                           (['--clustered-seeds', '0'], '--clustered-seeds (a start)'),
+                           (['--preview'], '--preview draws an annealed seed')):
+            run_utils.check(PY + base + extra, refuse=why, code=2)
+            ok(f"{' '.join(extra)}: refused, naming why", True)
+        run_utils.check(PY + [PLACE, nudged, os.path.join(td, 's{seed}.kicad_pcb'),
+                              '--groups', groups, '--intent', intent, '--legalise-only'],
+                        refuse='OUT carries {seed} with no --seed', code=2)
+        ok('OUT with {seed} and no --seed: refused, naming why', True)
+    print(f"\n{'FAILED: ' + ', '.join(failures) if failures else 'all passed'}")
+    return 1 if failures else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
