@@ -3,7 +3,8 @@
 place_simple started every anneal from a random scatter, so a board whose
 parts were already placed could not be given to it as a start: the
 arrangement was discarded. `--legalise-only` skips the scatter and the
-anneal and moves only the parts that are not legal, each to its nearest
+anneal and moves only the parts that are not legal by KiCad's standard
+(the checkers', not place_simple's spacing), each to its nearest
 legal pose (the anneal's own post step), mending one no such pose frees with
 the anneal's repair, shoves only.
 
@@ -20,6 +21,10 @@ the anneal's repair, shoves only.
    illegal and named (exit 4) while C1 stays exactly where it stood -- the
    repair may shove a legal part only to another legal pose, and never
    further than LEGALISE_REACH from where the board put it.
+6. The standard is KiCad's, not place_simple's spacing: C2 set 0.1 mm from
+   C1's courtyard -- closer than the clearance place_simple keeps between
+   courtyards, so its own seat test calls it illegal, while check_assembly
+   and the pad clearance accept it -- is NOT moved.
 
     python3 tests/test_1756_legalise_only.py
 """
@@ -45,6 +50,8 @@ NUDGES = {'C2': (18.3, 13.4, 0.0), 'J2': (30.6, 15.0, 0.0)}
 # the one column the case-5 keep-outs leave open (x0, y0, x1, y1): room for
 # one 0402 (C1, rows 12.54-13.46), not for two
 POCKET = [16.8, 12.4, 19.2, 14.2]
+#: case 6: C2's centre 0.1 mm past where its courtyard would touch C1's
+SNUG_Y = 13.46 + 0.1 + 0.46
 #: mm the nudged parts may travel back: a nearest legal pose, not a re-placement
 SHORT_MM = 3.0
 failures = []
@@ -201,6 +208,28 @@ def main():
         ok('every part that was legal unmoved',
            all(before[q] == after[q] for q in before if q not in lz['illegal_before']))
         ok('the log names it', 'C2 is left illegal' in r.stdout, r.stdout[-600:])
+
+        print("6. closer than place_simple's spacing, legal to KiCad: not moved")
+        import pose_score
+        from kicad_parser import parse_kicad_pcb
+        from placement.simple import legal
+        snug = os.path.join(td, 'snug.kicad_pcb')
+        # C1's courtyard ends at y 13.46; C2's (0.46 half height) starts 0.1 mm on
+        write_placed_output(board, snug, [{'reference': 'C2', 'new_x': 18.0,
+                                           'new_y': SNUG_Y, 'new_rotation': 0.0}])
+        copy_siblings(board, snug)
+        stt = pose_score.make_state(parse_kicad_pcb(snug), snug)
+        p2 = stt.parts['C2']
+        ok("place_simple's own seat test calls C2 illegal (the case is real)",
+           not legal(stt, 'C2', p2.x, p2.y, p2.rot))
+        ok('check_assembly (no baseline) calls the board buildable',
+           assembly(snug, td, 'snug').get('buildable') is True)
+        out = os.path.join(td, 'snug_out.kicad_pcb')
+        rep, _log = legalise(snug, out, groups, intent)
+        lz = rep['legalised']
+        ok('nothing illegal by the standard, nothing moved',
+           lz['illegal_before'] == [] and lz['count'] == 0 and rep['illegal'] == [], lz)
+        ok('every pose identical', poses(snug) == poses(out))
     print(f"\n{'FAILED: ' + ', '.join(failures) if failures else 'all passed'}")
     return 1 if failures else 0
 

@@ -1512,55 +1512,74 @@ LEGALISE_REACH = 6.0
 #: mm round a moved part within which `legalise` re-checks the parts that
 #: were legal: a move can only break a part it comes this close to
 LEGALISE_NEAR = 3.0
+#: mm further than the nearest pose KiCad's standard admits that `legalise`
+#: still prefers a pose place_simple's own spacing admits too (the courtyard
+#: clearance it keeps between parts): a preference, never a requirement
+SPACING_PREFERENCE_MM = 0.5
 
 
-def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
-             fits_at=None) -> Dict:
-    """The board's own poses, made legal where they are not (#1756): no
-    scatter and no anneal, only the anneal's two last steps on the parts
-    that need them. Every movable part `fits` admits stays exactly where it
-    is unless a repair must shove it, and a part that was legal never ends
-    illegal. Each part that is not goes to its nearest legal pose -- a part
-    seated on an edge (`seats`) slid along it (`edge_seat.reseat`), any
-    other walked out in square rings at its own turn, then at its others
-    (`simple.nearest_legal`, held to `fits_at` too) -- one part at a time,
-    the move that frees the most other parts first, then the shortest step
-    (`walk`), so of two parts that overlap only one moves and the other is
-    then legal where it stands. A part that no such walk frees is mended
+def legalise(model, movable: List[str], *, seed: int = 0, seats=None,
+             census=None, baseline=None, premoved=()) -> Dict:
+    """The board's own poses, made legal to KiCad's standard where they are
+    not (#1756): no scatter and no anneal, only the anneal's two last steps
+    on the parts that need them.
+
+    THE STANDARD is the authoritative checkers', not place_simple's own
+    spacing, and each part of it is the checker's function (`kicad_why`):
+    pad copper past the outline by check_assembly's gate
+    (`seeder._pad_copper_off_board`) and drawn copper past it
+    (`seeder.graphic_copper_past`, check_drc's census); pad, hole and
+    graphic-copper clearance to every other part at check_drc's own
+    clearance model (`LegalityContext.pair_shortfall`); a drawn body inside
+    another (`_body_contained_at`) and a frame pin under a courtyard
+    (`_pin_conflict_at`, the grader's pin hits), as check_assembly gates
+    them; the board's rule-area keep-outs (`keepout_excess`) and the
+    intent's keep-outs and zones (`intent_clear`), which the floorplan grade
+    errors on; and courtyard overlap as check_assembly grades a move against
+    the board it started from (`census`, a `legality.CourtyardCensus` of the
+    board as handed in; `baseline`, the same channel's grade of the board
+    the run started from; `premoved`, the parts already moved off it -- a
+    declared pose, a cover's seat: a pair one of whose parts moved gates,
+    under the project's own courtyards_overlap severity, so an `ignore`
+    project waives them, and a part a declared pose now overlaps must move).
+    A courtyard pair the board already had is not ours to fix, and closer
+    than place_simple's spacing is not illegal.
+
+    Every part that standard admits stays exactly where it is. Each part it
+    does not goes to its nearest pose that meets it -- a part seated on an
+    edge (`seats`) slid along it (`edge_seat.reseat`), any other walked out
+    in square rings at its own turn, then at its others
+    (`simple.nearest_legal`), preferring a pose that keeps place_simple's
+    spacing too when one is within SPACING_PREFERENCE_MM of the nearest --
+    one part at a time, the move that frees the most other parts first,
+    then the shortest step (`walk`). A part no such walk frees is mended
     with `Annealer.repair`, its escapes shoves alone (`local`), in two
-    passes: first with every part that was legal held as a wall, then, for
-    a part still stuck, with them free to be shoved -- an escape kept only
-    when each part it shoves that was legal stays legal. A seated part is
-    never shoved: it only slides along its edge. Then the parts still not
-    legal are walked again.
+    passes: the parts that were legal held as walls, then free to be shoved
+    -- an escape kept only when each part it shoves stays legal. A seated
+    part is never shoved. Then the parts still illegal are walked again.
 
-    Every move, of the walk or the repair, is refused when it would break a
-    part that was legal (`fits` re-asked of those within LEGALISE_NEAR mm
-    of the parts it moves), take one of the intent's decap limit terms or
-    a claim's `max_mm` further past its limit (`limits_hold`: the grade's
-    ERROR, which no route clears), or leave a part more than LEGALISE_REACH mm from where
-    the board put it. A part that cannot be made legal under those rules
-    is left where it ends and named (the caller's `illegal`):
-    better a part left illegal and said than a legal neighbour broken or a
-    part flung across the board. The random stream (`seed`) is only the
-    repair's, so the same board and seed give the same answer.
+    Every move is refused when it would break a part that was legal (the
+    standard re-asked of those within LEGALISE_NEAR mm of the parts it
+    moves, and the census of every part moved so far), take an intent decap
+    limit or claim further past its limit (`limits_hold`), or leave a part
+    more than LEGALISE_REACH mm from where the board put it. A part those
+    rules leave no pose is left where it ends and named. The random stream
+    (`seed`) is only the repair's.
 
-    `fits(r)` is the caller's whole legality of r where it stands (default
-    `simple.legal`), `fits_at(r, x, y, rot)` the part of it the walk's
-    `legal` does not ask (the intent's claims). Returns {'moved': {ref:
-    {'from', 'to', 'mm'}}, 'reseated', 'repaired', 'illegal_before',
-    'broken' (parts that were legal and are not: empty, as the two rules
-    refuse every move that would make one), 'seconds'}."""
+    Returns {'moved': {ref: {'from', 'to', 'mm'}}, 'reseated', 'repaired',
+    'illegal_before', 'illegal_after', 'why' ({ref: the first part of the
+    standard it fails, for the illegal ones}), 'broken' (parts that were
+    legal and are not: empty, as the rules refuse every move that would make
+    one), 'seconds'}."""
+    from placement import seeder as sd
+    from placement.legality import EPS, courtyard_error_gating
     t_start = time.time()
     seats = dict(seats or {})
     st = model.state
+    ctx = st.legality_ctx
+    bands = (ctx.keepouts if ctx is not None and ctx.keepouts is not None
+             and ctx.keepouts.active else None)
     mov = sorted(r for r in movable if r in st.parts)
-    if fits is None:
-        def fits(r):
-            p = st.parts[r]
-            if r in seats:
-                return legal_on_edge(st, r, (p.x, p.y, p.rot))
-            return legal(st, r, p.x, p.y, p.rot)
     model.reprice_all()
     model.total()
 
@@ -1568,6 +1587,99 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
         p = st.parts[r]
         return (p.x, p.y, p.rot)
     was = {r: pose(r) for r in mov}
+
+    def kicad_why(r, at=None):
+        """The first part of the standard `r` fails at `at` (default where it
+        stands), the courtyard aside (`census_pairs`), or None."""
+        p = st.parts[r]
+        at = pose(r) if at is None else at
+        p.ensure_rotation(at[2])
+        try:
+            if sd._pad_copper_off_board(st, r, *at) > EPS:
+                return 'pad copper past the outline'
+            if sd.graphic_copper_past(st, r, *at) > EPS:
+                return 'drawn copper past the outline'
+            rects = p.grade_rects(*at)
+            if not st.intent_clear(r, rects):
+                ko = st.keepout_blockers(r, rects)
+                ex = st.exclusive_blockers(r, rects)
+                return ('inside keep-out ' + ', '.join(repr(k) for k in ko) if ko else
+                        'inside the exclusive zone of block(s) '
+                        + ', '.join(repr(z) for z in ex) if ex else
+                        "outside its block's zone")
+            if bands is not None and ctx.keepout_excess(r, *at) > 0.0:
+                return 'inside a rule-area keep-out'
+            if st._body_contained_at(r, *at):
+                return 'its body inside another part'
+            if st.frame_refs and st._pin_conflict_at(r, *at) is not None:
+                return "a frame pin under a courtyard"
+            if ctx is not None:
+                g = p.grade_rect(*at)
+                reach = sd._pad_copper_overhang(st, r) + 1.0
+                for o, q in st.parts.items():
+                    if o == r or not (p.sides & q.sides):
+                        continue
+                    b = q.grade_rect()
+                    m = reach + sd._pad_copper_overhang(st, o)
+                    if (b[0] - m > g[2] or g[0] - m > b[2]
+                            or b[1] - m > g[3] or g[1] - m > b[3]):
+                        continue
+                    sf = ctx.pair_shortfall(r, o, pose_a=at)
+                    if (sf.pad > EPS or sf.pad_overlap or sf.stack
+                            or sf.hole > EPS):
+                        return f'pad clearance to {o}'
+            return None
+        finally:
+            p.ensure_rotation(p.rot)
+
+    # the courtyard as check_assembly --baseline <the run's board> grades it
+    base_court = ({(q.a, q.b) for q in baseline.pairs if q.kind == 'courtyard'}
+                  if baseline is not None else set())
+    base_pins = ({(q.a, q.b) for q in baseline.pin_blocking}
+                 if baseline is not None else set())
+    premoved = frozenset(premoved)
+
+    def census_pairs(extra=None):
+        """{(a, b)}: the courtyard pairs check_assembly would gate with every
+        part moved so far, and `extra` ({ref: pose}) on top, where they are."""
+        if census is None:
+            return set()
+        poses = {r: pose(r) for r in mov if pose(r) != was[r]}
+        poses.update(extra or {})
+        moved = set(poses) | premoved
+        if not moved:
+            return set()
+        g = census.grade(poses, moved=moved)
+        out = {(q.a, q.b) for q in g.gating or ()}
+        out |= {(q.a, q.b) for q in courtyard_error_gating(g.error_pairs, moved, base_court)}
+        out |= {(q.a, q.b) for q in g.pin_blocking
+                if (q.a in moved or q.b in moved) and (q.a, q.b) not in base_pins}
+        return out
+    movset = frozenset(mov)
+    gate = {'now': census_pairs()}
+
+    def court_bad():
+        """{ref: the part it overlaps}: the movable parts in a gating pair."""
+        out = {}
+        for a_, b_ in sorted(gate['now']):
+            if a_ in movset:
+                out.setdefault(a_, b_)
+            if b_ in movset:
+                out.setdefault(b_, a_)
+        return out
+    gate['bad'] = court_bad()
+
+    def fits(r):
+        return r not in gate['bad'] and kicad_why(r) is None
+
+    def census_ok(new):
+        """A move gates no courtyard pair that does not gate now, and leaves
+        none on a part it moves."""
+        if census is None:
+            return True
+        got = census_pairs(new)
+        return got <= gate['now'] and not any(a_ in new or b_ in new for a_, b_ in got)
+
     before = [r for r in mov if not fits(r)]
     was_legal = frozenset(mov) - set(before)
     reseated: List[str] = []
@@ -1621,10 +1733,10 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
     def limits_hold(new):
         """Whether putting the parts of `new` where it says takes no decap
         limit or claim further past its limit than it is, the state left as
-        it was: legalising never trades a courtyard gap for a limit the
+        it was: legalising never trades a clearance for a limit the
         floorplan grade reads -- an ERROR there no route clears."""
-        base = lim_over(new)
-        if not base:
+        base_over = lim_over(new)
+        if not base_over:
             return True
         old = {r: pose(r) for r in new}
         for r, q in new.items():
@@ -1634,56 +1746,67 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
         for r, q in old.items():
             st.parts[r].ensure_rotation(q[2])
             _place(st, r, *q)
-        return all(now[i] <= base[i] + 1e-9 for i in now)
+        return all(now[i] <= base_over[i] + 1e-9 for i in now)
+
+    def admits(new):
+        """Whether the move `new` ({ref: pose}) keeps every rule: no seated
+        part shoved, none past LEGALISE_REACH, no legal part broken, no
+        limit worse, no courtyard pair check_assembly would gate."""
+        if any(far(r, q) for r, q in new.items()):
+            return False
+        return not breaks(new) and limits_hold(new) and census_ok(new)
 
     def guard(new):
-        """A repair's escape is kept only when it shoves no seated part,
-        carries no part past LEGALISE_REACH, breaks no part that was legal
-        and takes no limit further past it (`limits_hold`)."""
-        if any(r in seats for r in new) or any(far(r, q) for r, q in new.items()):
-            return False
-        return not breaks(new) and limits_hold(new)
+        """A repair's escape: `admits`, and it shoves no seated part."""
+        return not any(r in seats for r in new) and admits(new)
 
-    def candidate(r):
-        """((turned, mm), pose): r's nearest legal pose within reach of where
-        the board put it that takes no limit further past it (`limits_hold`),
-        whether it turns r and how far it is, or None; r left as it stands.
-        A seated part slides along its edge; any other walks out at its own
-        turn, then at its others."""
+    def search(r, spacing):
+        """r's nearest pose within reach that meets the standard -- and,
+        with `spacing`, place_simple's own spacing too -- or None."""
         p = st.parts[r]
         x0, y0, rot0 = p.x, p.y, p.rot
-        got = None
-        if r in seats:
-            got = reseat(st, seats[r])
-            if got and (far(r, got) or not limits_hold({r: got})):
-                got = None
-        else:
-            def acc(x, y, rot):
-                return ((fits_at is None or fits_at(r, x, y, rot))
-                        and limits_hold({r: (x, y, rot)}))
+
+        def acc(x, y, rot):
+            return kicad_why(r, (x, y, rot)) is None and limits_hold({r: (x, y, rot)})
+        was_clr = st.clearance
+        if not spacing:
+            st.clearance = 0.0      # courtyards may meet: KiCad asks no gap
+        try:
+            if r in seats:
+                got = reseat(st, seats[r])
+                if got and not acc(*got):
+                    got = None
+                return got
             for rot in (rot0,) + tuple(q for q in ROTS if q != rot0):
                 got = nearest_legal(st, r, x0, y0, rot, frozenset(),
                                     reach=LEGALISE_REACH, accept=acc)
-                if got and far(r, got):
-                    got = None
-                if got:
-                    break
-        p.ensure_rotation(rot0)
-        # a turn is the bigger change, whatever the distance: ranked after
-        # every step at the part's own turn
-        return None if got is None else ((rot_key(got[2]) != rot_key(rot0),
-                                          math.hypot(got[0] - x0, got[1] - y0)), got)
+                if got and not far(r, got):
+                    return got
+            return None
+        finally:
+            st.clearance = was_clr
+            p.ensure_rotation(rot0)
 
-    def still_legal(r, at):
-        """Whether r's cached pose `at` is still legal, r left as it stands."""
-        p = st.parts[r]
-        if r in seats:
-            fine = legal_on_edge(st, r, at)
-        else:
-            p.ensure_rotation(at[2])
-            fine = legal(st, r, *at) and (fits_at is None or fits_at(r, *at))
-        p.ensure_rotation(p.rot)
-        return fine
+    def candidate(r):
+        """((turned, mm), pose): r's nearest pose that meets the standard,
+        breaks no rule (`admits`) and is within reach -- one that keeps
+        place_simple's spacing too when that is within
+        SPACING_PREFERENCE_MM further -- whether it turns r and how far it
+        is, or None; r left as it stands."""
+        x0, y0, rot0 = pose(r)
+        best = None
+        for spacing in (False, True):
+            got = search(r, spacing)
+            if got is None or not admits({r: got}):
+                continue
+            d = math.hypot(got[0] - x0, got[1] - y0)
+            if best is None or (spacing and d <= best[0] + SPACING_PREFERENCE_MM):
+                best = (d, got)
+        if best is None:
+            return None
+        d, got = best
+        # a turn is the bigger change, whatever the distance
+        return ((rot_key(got[2]) != rot_key(rot0), d), got)
 
     def frees(r, at, todo):
         """How many of the other parts in `todo` r's move to `at` makes
@@ -1699,22 +1822,17 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
 
     def walk(refs):
         """The parts of `refs` that are not legal, one at a time, until each
-        is legal or has no legal pose in reach (`candidate`): first the move
-        that makes the most of the others legal too -- the part that overlaps several,
-        moved once, rather than each of those it overlaps -- then a move
-        that keeps the part's turn before one that turns it, then the
-        shortest step, then input order. Of two parts that only overlap
-        each other, the one that frees the other the shorter way moves,
-        and the other stays. A move that would break a part that was legal
-        is not made."""
+        is legal or has no pose in reach (`candidate`): first the move that
+        makes the most of the others legal too -- the part that overlaps
+        several, moved once, rather than each of those it overlaps -- then
+        a move that keeps the part's turn before one that turns it, then
+        the shortest step, then input order."""
         todo = [r for r in refs if not fits(r)]
         cache = {}
         while todo:
             for r in todo:
-                if r not in cache or (cache[r] is not None and not still_legal(r, cache[r][1])):
+                if r not in cache or (cache[r] is not None and not admits({r: cache[r][1]})):
                     cache[r] = candidate(r)
-                    if cache[r] is not None and breaks({r: cache[r][1]}):
-                        cache[r] = None
             live = [((-frees(r, cache[r][1], todo),) + cache[r][0], i, r)
                     for i, r in enumerate(todo) if cache[r] is not None]
             if not live:
@@ -1725,11 +1843,9 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
             st.apply_move(r, *at)
             if r not in reseated:
                 reseated.append(r)
+            gate['now'] = census_pairs()
+            gate['bad'] = court_bad()
             todo = [q for q in todo if q != r and not fits(q)]
-            # a pose cached before this move may now break a legal part
-            for q in todo:
-                if cache.get(q) is not None and breaks({q: cache[q][1]}):
-                    cache[q] = None
     walk(before)
     model.reprice_all()
     model.total()
@@ -1750,6 +1866,8 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
                 st.apply_move(r, *pose(r))
                 if r not in repaired:
                     repaired.append(r)
+        gate['now'] = census_pairs()
+        gate['bad'] = court_bad()
         model.reprice_all()
         model.total()
         walk([r for r in mov if not fits(r)])
@@ -1763,7 +1881,14 @@ def legalise(model, movable: List[str], *, seed: int = 0, seats=None, fits=None,
             moved[r] = {'from': [round(v, 4) for v in was[r]],
                         'to': [round(v, 4) for v in now],
                         'mm': round(math.hypot(now[0] - was[r][0], now[1] - was[r][1]), 4)}
+    gate['now'] = census_pairs()
+    gate['bad'] = court_bad()
+    why = {r: kicad_why(r) for r in mov}
+    for r, o in gate['bad'].items():
+        why[r] = why[r] or f'courtyard overlap with {o}, which check_assembly gates'
+    after = [r for r in mov if why[r] is not None]
     return {'moved': moved, 'reseated': reseated, 'repaired': repaired,
-            'illegal_before': before,
-            'broken': sorted(r for r in was_legal if not fits(r)),
+            'illegal_before': before, 'illegal_after': sorted(after),
+            'why': {r: why[r] for r in sorted(after)},
+            'broken': sorted(r for r in was_legal if r in after),
             'seconds': round(time.time() - t_start, 2)}

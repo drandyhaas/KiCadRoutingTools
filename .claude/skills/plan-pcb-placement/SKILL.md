@@ -779,9 +779,11 @@ in the vocabulary of `docs/floorplan-intent.md`:
   review, not a step: the groups place the board.
 - **To fix a mostly-good placement without re-annealing** (a placed board
   with a few overlaps or a part off the outline, a seed after a hand edit):
-  `place_simple.py ... --legalise-only [--seed S]` keeps every legal part
-  exactly where it stands and moves only the illegal ones to their nearest
-  legal pose; its log names each move and its distance. It is not a
+  `place_simple.py ... --legalise-only [--seed S]` keeps every part that is
+  legal by KiCad's standard (check_assembly, check_drc's pad clearance, the
+  intent's keep-outs and zones -- not place_simple's own spacing) exactly
+  where it stands and moves only the illegal ones to their nearest legal
+  pose; its log names each move and its distance. It is not a
   placement: it never improves an arrangement, so a board that needs one is
   placed with the seeds (§3.6).
 

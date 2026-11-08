@@ -313,7 +313,17 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
 
 - **Legalise only** (`--legalise-only`, #1756). No scatter and no anneal:
   the board's poses are kept and only the parts that are not legal where
-  they stand move, one at a time -- the move that makes the most others
+  they stand move. Legal means **KiCad's standard**, read with the
+  checkers' own functions, not place_simple's spacing: pad or drawn copper
+  past the outline (check_assembly, check_drc), pad / hole clearance at
+  check_drc's clearance model, a body inside another or a frame pin under a
+  courtyard, the board's rule-area keep-outs and the intent's keep-outs and
+  zones, and courtyard overlap as `check_assembly --baseline <the input>`
+  grades it (the project's courtyards_overlap severity honoured): a
+  courtyard pair the board already had is left alone, and a part closer to
+  a neighbour than place_simple's spacing is not moved -- that spacing is
+  only preferred for a pose a part moves to, within 0.5 mm of the nearest.
+  The illegal parts move one at a time -- the move that makes the most others
   legal first, then the shortest step at the part's own turn -- each to its
   nearest legal pose (6 mm reach; an edge-seated part slides along its
   edge), with the anneal's repair, shoves only, for a part no such pose
