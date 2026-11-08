@@ -13,7 +13,8 @@ import numpy as np
 from collections import OrderedDict
 import math
 
-from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles, pad_drill_capsule
+from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles, pad_drill_capsule, \
+    plated_drill_exposed, flush_drill_peg
 from routing_config import GridRouteConfig, GridCoord, extra_on_layer, extra_layer_groups
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
@@ -2540,6 +2541,7 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     drill_holes = []   # every drill -> via (hole-to-hole) keep-out
     npth_holes = []    # no-copper holes only -> track keep-out
     npth_slot_holes = []  # milled SLOT subset: board-edge clearance applies (#448)
+    peg_holes = []     # #1753 net-less pads whose copper equals the drill
 
     # Via drills. The hole-to-hole keep-out is NET-INDEPENDENT (#335): a drill
     # does not care about net membership, and the old own-net exemption let the
@@ -2574,7 +2576,7 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                     (_c1, _c2, _r) = pad_drill_capsule(pad)
                     if abs(_c2[0] - _c1[0]) > 1e-9 or abs(_c2[1] - _c1[1]) > 1e-9:
                         npth_slot_holes.extend(circles)
-                elif (max(pad.size_x, pad.size_y) <= pad.drill
+                elif (plated_drill_exposed(pad)
                       and net_id not in nets_to_route_set):
                     # #441: a PLATED pad whose copper ring does NOT span its drill
                     # (a near-zero annular mounting hole -- vfo_ctrl's U4 "MH":
@@ -2585,6 +2587,11 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                     # FOREIGN to the nets being routed so a genuinely reachable (if
                     # degenerate) signal pad is never made unroutable.
                     npth_holes.extend(circles)
+                elif flush_drill_peg(pad):
+                    # #1753: copper EQUAL to the drill on a net-less pad. Its
+                    # copper obstacle already holds tracks `clearance` off the
+                    # wall; the board's copper-to-hole floor is stamped below.
+                    peg_holes.extend(circles)
 
     _hole_widths = _hole_stamp_widths(config, extra_clearance)
 
@@ -2602,6 +2609,18 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                             _hole_clr) + _stamp_ex)
             block_track_cells_near_drills(obstacles, npth_holes, _stamp_w,
                                           npth_clr, config.grid_step, _stamp_layers)
+
+    # #1753: a net-less pad whose copper EQUALS its drill has no ring, so its
+    # copper clearance is the whole distance to the hole and KiCad's
+    # copper-to-hole rule binds whenever the board declares more. Held at
+    # max(clearance, that floor) -- KiCad's rule, not the NPTH 0.20 track fab
+    # floor -- and only when it reaches past the copper obstacle, so a board
+    # declaring no more than its clearance builds the same map.
+    if peg_holes and _hole_clr > config.clearance + 1e-9:
+        for (_stamp_w, _stamp_ex), _stamp_layers in _hole_widths.items():
+            block_track_cells_near_drills(obstacles, peg_holes, _stamp_w,
+                                          _hole_clr + _stamp_ex,
+                                          config.grid_step, _stamp_layers)
 
     # Milled NPTH SLOTS are board edge to KiCad (#448): its DRC grades copper
     # proximity to the slot wall at copper_edge_clearance (sofle_pico SW25),
@@ -2667,14 +2686,15 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # chain, step 1 of such a board -- keeps its pre-#1038 via map
     # byte-identical (test_505's no-override case pins that). `npth_holes`
     # also carries #441's ring-uncovered plated holes, which check_drc's via
-    # arm does not grade.
+    # arm does not grade, and the #1753 pegs join it here: this arm's floor,
+    # max(clearance, _hole_clr), is already the one they are held to.
     #
     # Both via arms (this one and the #505 override arm) live in
     # block_via_cells_near_npth_floors, which the plane engines' map
     # (plane_region_connector.build_base_obstacles) calls too.
     block_via_cells_near_npth_floors(
-        obstacles, pcb_data, npth_holes, config.via_size, config.via_drill,
-        config.clearance, config.hole_to_hole_clearance, _hole_clr,
+        obstacles, pcb_data, npth_holes + peg_holes, config.via_size,
+        config.via_drill, config.clearance, config.hole_to_hole_clearance, _hole_clr,
         config.grid_step)
 
 
@@ -2745,8 +2765,9 @@ def block_via_cells_near_npth_floors(obstacles: GridObstacleMap,
 def via_floor_npth_holes(pcb_data: PCBData, routed_net_ids) -> list:
     """The ``npth_holes`` a via map hands :func:`block_via_cells_near_npth_floors`:
     every NPTH hole of every net (a drill does not care whose net it is), plus
-    #441's ring-uncovered plated holes FOREIGN to ``routed_net_ids`` -- the
-    population ``add_drill_hole_obstacles`` collects for the signal map, so
+    #441's ring-uncovered plated holes FOREIGN to ``routed_net_ids`` and
+    #1753's net-less pegs -- the population ``add_drill_hole_obstacles`` hands
+    its own via arm, so
     the plane maps that place vias (``plane_region_connector``'s base map and
     ``plane_obstacle_builder``'s via map, #1514) hold the same holes."""
     holes = []
@@ -2756,8 +2777,8 @@ def via_floor_npth_holes(pcb_data: PCBData, routed_net_ids) -> list:
                 continue
             if not _pad_has_copper(_pad):
                 holes.extend(pad_drill_circles(_pad))
-            elif (max(_pad.size_x, _pad.size_y) <= _pad.drill
-                  and _nid not in routed_net_ids):
+            elif ((plated_drill_exposed(_pad) and _nid not in routed_net_ids)
+                  or flush_drill_peg(_pad)):
                 holes.extend(pad_drill_circles(_pad))
     return holes
 

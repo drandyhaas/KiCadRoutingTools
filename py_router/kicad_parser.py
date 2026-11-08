@@ -2084,6 +2084,49 @@ def pad_is_plated_through(pad) -> bool:
             and getattr(pad, 'pad_type', '') != 'np_thru_hole')
 
 
+def plated_drill_exposed(pad) -> bool:
+    """True when a drilled pad WITH copper has copper SMALLER than its drill
+    (#441, vfo_ctrl's U4 "MH": 0.001mm over 2.5mm). The pad-copper obstacle is
+    then a speck inside the hole, so only a hole keep-out stops a track
+    crossing the drill: the map, the grader and the copper-movers treat it as
+    an NPTH hole, and all ask this so they cannot drift apart.
+
+    The caller has already decided the pad carries copper (an NPTH pad, or one
+    with no copper layer, is a hole by that test, not this one).
+    """
+    drill = getattr(pad, 'drill', 0.0) or 0.0
+    return drill > 0 and max(pad.size_x, pad.size_y) < drill
+
+
+def flush_drill_peg(pad) -> bool:
+    """True for a PLATED pad whose copper EQUALS its drill and which has NO
+    net (#1753): an unnamed locating peg, such as a connector's 0.6mm pad over
+    a 0.6mm drill.
+
+    Its copper outlines the hole exactly, so the copper clearance already holds
+    every track off the wall; what it does not hold is the board's
+    copper-to-hole clearance, which KiCad grades on every hole and which binds
+    here because there is no ring to stand behind. So such a hole is held at
+    ``max(copper clearance, board hole clearance)`` -- KiCad's rule, NOT the
+    NPTH track fab floor, which KiCad does not apply.
+
+    Net-less only: the router waives a hole keep-out for a net it routes
+    (``add_drill_hole_obstacles``), and net 0 is never routed, so these are
+    the holes every route step keeps clear and the grade asks no more than the
+    route was held to.
+
+    Decides the copper itself: an NPTH pad (whose size is its mask opening,
+    commonly equal to its drill) or a pad on no copper layer is a bare hole
+    with its own keep-outs, never this.
+    """
+    drill = getattr(pad, 'drill', 0.0) or 0.0
+    if drill <= 0 or max(pad.size_x, pad.size_y) != drill:
+        return False
+    if getattr(pad, 'net_id', 0) or getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return False
+    return any(l == '*.Cu' or l.endswith('.Cu') for l in (pad.layers or ()))
+
+
 def pad_is_aperture_only(pad) -> bool:
     """True for a pad that is ONLY an aperture: not NPTH, no drill, and no
     copper layer -- a paste or mask window, e.g. a thermal pad's split paste
