@@ -242,7 +242,8 @@ REGISTRY = {
 
     # --- an event-loop yield ------------------------------------------------
     'kicad_routing_plugin/differential_gui.py': (
-        'throttle', 'time.sleep(0.01) yielding to the wx event loop'),
+        'reporting', "the run's wall_time shown after a routing run (#1780), "
+        'and time.sleep(0.01) yielding to the wx event loop'),
     'kicad_routing_plugin/planes_gui.py': (
         'throttle', '_time.sleep(0.01) yielding to the wx event loop'),
 
