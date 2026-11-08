@@ -1693,7 +1693,11 @@ python3 py_tools/edge_closeup.py placed.kicad_pcb J7 J3:north --out-dir edges [-
 Each part is read on the outline edge its pads are nearest unless
 `REF:north|south|east|west` names it, and rendered from the side standing
 outside that edge (`back` for north, `front` south, `left` west, `right`
-east). The scale defaults to 40 px/mm. kicad-cli's scale at zoom 1 is
+east). Name the edge the part is declared to face (its intent row, or
+check_floorplan's `facing` clause): a part read on its nearest edge whose
+next-nearest edge is within 1 mm as near (a corner part, or one as long as
+the board's side) may face the other one, and its line then ends `corner:
+also N mm from <edge>` (`corner` in the JSON rows, #1771). The scale defaults to 40 px/mm. kicad-cli's scale at zoom 1 is
 measured per side (two renders a 1 cm pivot apart), not assumed, and the
 zoom follows from it. One line per part names the image, the edge, the scale
 and whether the part's 3D model is declared and resolves; a part without one

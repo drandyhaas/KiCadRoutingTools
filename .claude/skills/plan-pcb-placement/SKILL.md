@@ -1377,14 +1377,18 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    show a mouth. A whole-board render cannot either: it frames the board, so
    a ~155 mm board renders at ~5.6 px/mm, where a 1.00 mm side-entry
    header's contacts are 1 px specks and its mouth out and mouth in look the
-   same. Render each listed part close up, a few seconds each:
+   same. Render each listed part close up, a few seconds each, NAMING the
+   edge its facing clause reads (`facing south` -> `J7:south`), so the camera
+   stands on the edge the part is declared to face:
    ```bash
-   python3 py_tools/edge_closeup.py wk/<run>/final.kicad_pcb J7 J3 --out-dir wk/<run>/edges
+   python3 py_tools/edge_closeup.py wk/<run>/final.kicad_pcb J7:south J3:north --out-dir wk/<run>/edges
    ```
-   Each part is centred, seen from outside the edge its pads are nearest
-   (`J3:north` names the edge), at 40 px/mm (`--px-per-mm`), and the line
-   it prints names the image, the edge and the scale. In each image you
-   stand outside that edge (from the north, west is on the right), so the
+   A bare `REF` is seen from the edge its pads are nearest, which for a part
+   in a corner is not always the one it faces: the tool then prints
+   `corner: also N mm from <edge>`, and that render is side-on, not the
+   mouth. Each part is centred, at 40 px/mm (`--px-per-mm`), and the line it
+   prints names the image, the edge and the scale. In each image you stand
+   outside the edge you named (from the north, west is on the right), so the
    part is nearest the camera: a jack's or USB socket's mouth must face
    you; its back wall means it opens into the board. Fix the declaration
    (`mating_face`, and the source you read it off) and place again. A part
