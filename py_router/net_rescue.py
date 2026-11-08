@@ -265,8 +265,9 @@ def escape_has_routable_layer(pad, config) -> bool:
     return bool(own & routable) and bool(routable - own)
 
 
-def _withdraw_unused_escapes(pcb_data, net_id, tap_results, config):
-    """The #666 escape vias a now-connected net did not use, taken back out.
+def _withdraw_unused_escapes(pcb_data, net_id, tap_results, config,
+                             with_traces=False):
+    """The #666 escape vias a net did not use, taken back out.
 
     An escape is laid BEFORE the gap routes, so they can start from a via
     with every layer; when the route that closed the net reached the pad on
@@ -278,11 +279,17 @@ def _withdraw_unused_escapes(pcb_data, net_id, tap_results, config):
     here; a dogbone trace it leaves dead-ended is an ordinary dead end, which
     the post-route sweep prunes on a complete net. While the net is still
     open every escape is kept on purpose (the terrain later passes start
-    from), so this runs only once the net is whole, and a via whose removal
-    would split the net again stays."""
+    from), so this runs once the net is whole -- or, #1778, once the rescue
+    has ended with the net no better than it found it: terrain that bought
+    nothing ships as a dangling via, and the next rescue of the net finds the
+    pad bare again and lays the escape anew if it is wanted. A via whose
+    removal would split the net further stays. `with_traces` also takes out
+    the escape's own dogbone trace (the open-net case: no sweep prunes a
+    dead end on a net that is not whole)."""
     from pcb_modification import _via_support_layers, bump_copper_epoch
     kept = []
     for r in tap_results:
+        parts = _net_component_info(pcb_data, net_id)[0]
         segs = [x for x in pcb_data.segments if x.net_id == net_id]
         pads = pcb_data.pads_by_net.get(net_id, [])
         zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
@@ -294,17 +301,26 @@ def _withdraw_unused_escapes(pcb_data, net_id, tap_results, config):
             kept.append(r)
             continue
         before = pcb_data.vias
+        before_segs = pcb_data.segments
         pcb_data.vias = [v for v in pcb_data.vias if id(v) not in dangling]
+        traces = ({id(x) for x in r.get('new_segments', [])}
+                  if with_traces else set())
+        if traces:
+            pcb_data.segments = [x for x in pcb_data.segments
+                                 if id(x) not in traces]
         bump_copper_epoch(pcb_data)
-        if _net_component_info(pcb_data, net_id)[0] > 1:
+        if _net_component_info(pcb_data, net_id)[0] > parts:
             pcb_data.vias = before                     # it was needed
+            pcb_data.segments = before_segs
             bump_copper_epoch(pcb_data)
             kept.append(r)
             continue
         print(f"    bare-ball escape via withdrawn: it joins nothing across "
               f"layers ({len(dangling)} via(s)) (#666)")
         r = dict(r, new_vias=[v for v in r.get('new_vias', [])
-                              if id(v) not in dangling])
+                              if id(v) not in dangling],
+                 new_segments=[x for x in r.get('new_segments', [])
+                               if id(x) not in traces])
         if r['new_segments'] or r['new_vias']:
             kept.append(r)
     return kept
@@ -1317,6 +1333,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         # cap-clearance step is deliberately NOT rerun (pre-route only,
         # #666: post-route it strands moved caps' joints, measured 6->13).
         tap_results = []
+        num_start = num0
         if env_knobs.BARE_PAD_ESCAPE:
             from plane_pad_tap import tap_pad_with_escalation
             from kicad_parser import Segment as _Seg, Via as _Via
@@ -1738,6 +1755,14 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         if tap_results and num <= 1:
             tap_results = _withdraw_unused_escapes(pcb_data, net_id,
                                                    tap_results, config)
+        elif tap_results and not edge_results and num >= num_start:
+            # #1778: terrain only -- the net is as open as the rescue found
+            # it, and an escape via that joins nothing across layers would
+            # ship dangling (KiCad's via_dangling, a via-in-pad stamp for
+            # nothing). A later rescue lays it again: the pad is bare.
+            tap_results = _withdraw_unused_escapes(pcb_data, net_id,
+                                                   tap_results, config,
+                                                   with_traces=True)
         # #666: queue the cap moves of the escapes that SHIP. A move is made
         # for its escape's vias (they are what land on the cap), so an escape
         # whose vias were withdrawn above makes room for nothing. The run's
