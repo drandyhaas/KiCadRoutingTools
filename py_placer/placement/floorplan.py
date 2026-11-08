@@ -5102,10 +5102,15 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
         if mk is not None and mk.face and mk.face != face:
             # Only on an abstaining body: a weak face the marker contradicts
             # abstains, one it confirms is strong and outranks the
-            # declaration (`mating_face_local`).
+            # declaration (`mating_face_local`). #1770: a marker whose line
+            # the text's stored angle chose is said as that, and a recorded
+            # source silences it (`_mating_face_warning`).
             disagreement = (f"its declared mating_face {face} is against its "
                             f"PCB-edge marker, which puts the board edge on "
-                            f"its {mk.face} side")
+                            f"its {mk.face} side"
+                            + (" as its text's stored angle reads it (the text "
+                               "sits between lines along both axes)"
+                               if mk.by_angle else ''))
     rot = (fp.rotation or 0.0) if rotation is None else rotation
     # #1769: the side graded at the edge -- the opening's, or its back for a
     # part that opens into the board
@@ -5125,6 +5130,7 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
             'declared_face': declared, 'declared_source': recorded,
             'body_face': body.face,
             'body_strong': bool(body.strong), 'disagreement': disagreement,
+            'marker_by_angle': bool(body.marker is not None and body.marker.by_angle),
             'opens': opens, 'edge_face': side}
 
 
@@ -6772,10 +6778,14 @@ def _mating_face_warning(c, ref, _ef) -> Iterator[Violation]:
     declaration that records what it was read off (`mating_face_source`,
     #1652) silences the WARN over a weak reading. Never over a strong one, nor
     against the PCB-edge marker: those are evidence, a recorded source is the
-    author's word. Reads the footprint's own frame, so no pose decides it."""
+    author's word -- except a marker whose line only its text's stored angle
+    chose (#1770), which is no more evidence than the source. Reads the footprint's own frame, so no pose decides it."""
     from .mating import EVIDENCE_SOURCED, EVIDENCE_UNVERIFIED
     said = _ef['disagreement']
-    if said and _ef['evidence'] == EVIDENCE_SOURCED and _ef['body_face']:
+    if said and _ef['evidence'] == EVIDENCE_SOURCED and (
+            _ef['body_face'] or _ef.get('marker_by_angle')):
+        # #1770: nor against a marker whose line only its text's stored
+        # angle chose: that reading is no more evidence than the source
         said = ''
     if _ef['evidence'] == EVIDENCE_UNVERIFIED and c.get('edge'):
         # #1652: a declared face nothing independent confirms, whichever

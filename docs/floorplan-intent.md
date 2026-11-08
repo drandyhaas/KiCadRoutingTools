@@ -591,10 +591,17 @@ points west, not out of the east edge
   pads) -- not the text's position, which sits at an end of the line. The
   text's stored angle, which any tool or hand can turn, breaks only a tie
   between the nearest lines along the two axes, a text sitting where the
-  edge line meets the body's side (#1715). A marker that agrees with the body's face makes it STRONG
+  edge line meets the body's side (#1715). The axes are compared on the
+  text's gap off each line's run where it sits within 1.5 mm past the line's
+  end, so a text on the edge line's extension reads that line, not a body
+  line across it (#1770). A marker that agrees with the body's face makes it STRONG
   (`basis` gains `+marker`, so esp_prog's USB1 and orangecrab's J3, at 1.05
   and 0.63 mm, fail at ERROR when turned away); one that contradicts it makes
-  the face abstain, never fail; with no marker, the body's reading stands. It
+  the face abstain, never fail -- unless only the text's angle chose its
+  line, which may confirm any face but vetoes only a weak one, never a
+  strong reading, and against which a recorded `mating_face_source` silences
+  the WARN (#1770); with no marker,
+  the body's reading stands. It
   never names a face the body does not. Calibrated on KiCad 10's 154 marked
   stock footprints, it agrees with all 73 strong body faces, at every
   quarter turn.
