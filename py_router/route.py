@@ -9302,6 +9302,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     print(f"\n{RED}  {_ra_line}{RESET}" if _ra_shipped else f"  {_ra_line}")
                     if return_results and _rd_ra is not None:
                         _rd_ra['rule_area_keepouts'] = _ra_shipped
+                    # the --json-out document carries the shipped reading;
+                    # a reader of the log alone takes it from this line
+                    print('JSON_SHIPPED_AUDIT: '
+                          + json.dumps({'rule_area_keepouts': _ra_shipped}))
         except Exception as _rae:                               # noqa: BLE001
             print(f"  WARNING: rule-area keep-out audit skipped "
                   f"({type(_rae).__name__}: {_rae})")
