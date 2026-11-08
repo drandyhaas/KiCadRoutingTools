@@ -1614,6 +1614,24 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     if _short666 is None and _drills_too_close(
                             _gvias, config.hole_to_hole_clearance):
                         _short666 = 'via'
+                    # ...and against the pour islands this run must not cut
+                    # (#1260, #1783): the fanout ladder's maps never get them,
+                    # and it runs exactly when the dogbone tap above refused
+                    # copper that entered one.
+                    if _short666 is None:
+                        from pour_guard import barrier_entered
+                        _cut666 = barrier_entered(config, pcb_data, _gsegs, _gvias,
+                                                  own_pads=(_pad,))
+                        if _cut666:
+                            print(f"    bare-ball escape: "
+                                  f"{_pad.component_ref}.{_pad.pad_number} "
+                                  f"declined (escape would cut the {_cut666} "
+                                  f"pour, #1260)"
+                                  + (f"; cap(s) "
+                                     f"{', '.join(m['reference'] for m in _capmv666)}"
+                                     f" stay where they are" if _capmv666
+                                     else ""))
+                            continue
                     if _short666 is not None:
                         print(f"    bare-ball escape: "
                               f"{_pad.component_ref}.{_pad.pad_number} "
