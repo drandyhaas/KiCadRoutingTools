@@ -4882,24 +4882,18 @@ def _pads_short_of_floor(geometry, rules, pcb_data, ref, base, floor, reach, fac
     """The pads (`connector_geometry.pad_boxes`, the seat's own) of `ref` the
     seat would hold further in than `floor` allows, with `face` to a straight
     edge and overhanging by `floor` on a shape reaching `reach` along that
-    face: `(pad number, mm it would stand inside the edge, the clearance
-    binding it, the rule setting that clearance or '')` each."""
-    from .connector_geometry import pad_boxes
-    from .edge_seat import COPPER_SLACK_MM
-    fp = pcb_data.footprints[ref]
-    short = []
-    for index, lx, ly, hx, hy, tilt in pad_boxes(geometry, ref):
+    face: the `edge_seat.PadRead` of each, read by the seat's own per-pad
+    reading (`edge_seat.pad_edge_reads`, #1773)."""
+    from .edge_seat import COPPER_SLACK_MM, pad_edge_reads
+
+    def inside(lx, ly, hx, hy, tilt):
         a = math.radians(tilt)
         ca, sa = abs(math.cos(a)), abs(math.sin(a))
         ex, ey = hx * ca + hy * sa, hx * sa + hy * ca
-        inside = reach - floor - {'+x': lx + ex, '-x': ex - lx,
-                                  '+y': ly + ey, '-y': ey - ly}[face]
-        clearance, rule = base, ''
-        if rules is not None:
-            _lo, clearance, rule = rules.for_pad(fp.pads[index], base)
-        if inside < clearance + COPPER_SLACK_MM - legality.EPS:
-            short.append((str(fp.pads[index].pad_number), inside, clearance, rule))
-    return short
+        return reach - floor - {'+x': lx + ex, '-x': ex - lx,
+                                '+y': ly + ey, '-y': ey - ly}[face]
+    return [r for r in pad_edge_reads(geometry, rules, pcb_data, ref, base, inside)
+            if r.inside < r.clearance + COPPER_SLACK_MM - legality.EPS]
 
 
 def pad_floor_owed(intent, pcb_data, pcb_file, heights, edge_clearance=None) -> List[str]:
@@ -4921,7 +4915,8 @@ def pad_floor_owed(intent, pcb_data, pcb_file, heights, edge_clearance=None) -> 
     from design_rules import PadEdgeRules
     from .body import board_bodies
     from .connector_geometry import ConnectorGeometry, pad_boxes
-    from .edge_seat import COPPER_SLACK_MM, PAD_FLOOR_WAY_OUT, edge_floor_source
+    from .edge_seat import (COPPER_SLACK_MM, PAD_FLOOR_WAY_OUT, PAD_ON_OUTLINE,
+                            binding_pads, pad_rule_source, pad_stands, pads_named)
     from .mating import face_with_declaration, mating_face_local
     locked = set(extract_locked_refs_safe(pcb_file))
     posed = {str(f.get('ref')) for f in (intent.fixed_poses or ())}
@@ -4953,27 +4948,21 @@ def pad_floor_owed(intent, pcb_data, pcb_file, heights, edge_clearance=None) -> 
         if not all(read[f][0] > legality.EPS and asked[f] for f in sides):
             continue
         # a part the plan may turn: the side nearest to seating
-        side = face or max(sides, key=lambda f: min(p[1] - p[2] for p in asked[f]))
-        short = sorted(asked[side], key=lambda p: p[1] - p[2])
-        worst = short[0]
-        every = len(short) == len(pad_boxes(geometry, ref))
-        numbers = sorted({p[0] for p in short})
-        some = 'its pads' if every else 'pad' + ('s ' if len(numbers) > 1 else ' ') + ', '.join(numbers)
+        side = face or max(sides, key=lambda f: min(p.inside - p.clearance for p in asked[f]))
+        short = asked[side]
+        worst = binding_pads(short)[0]
+        some = pads_named(short, len(pad_boxes(geometry, ref)))
         how = (f"with its mating face ({side}) to the edge" if face else
                f"no mating face reads in the board's plane and no side of it can seat: "
                f"with its {side} side to the edge, the nearest to seating")
-        where = (f"would stand {worst[1]:.3f}mm from the edge" if worst[1] >= 0.0
-                 else f"would leave the board by {-worst[1]:.3f}mm")
-        source = (f"the .kicad_dru rule {worst[3]!r}" if worst[3]
-                  else edge_floor_source(pcb_file, base))
         lead = (f"{ref} ({fp.footprint_name}): {how}, the overhang of "
-                f"{read[side][0]:.3f}mm its body needs means {some} {where}, and the "
-                f"clearance binding them is {worst[2]:.2f}mm, from {source}. So it "
-                f"gets no seat, and place_simple places it as any other part. ")
-        if min(p[1] for p in short) <= COPPER_SLACK_MM:
-            out.append(lead + "No edge_clearance rule frees a pad on or past the "
-                              "outline: if the board is cut away under that body, "
-                              "write a `why`; otherwise this footprint cannot seat "
+                f"{read[side][0]:.3f}mm its body needs means "
+                f"{pad_stands(some, worst.inside)}, and the clearance binding them is "
+                f"{worst.clearance:.2f}mm, from {pad_rule_source(pcb_file, base, worst.rule)}. "
+                f"So it gets no seat, and place_simple places it as any other part. ")
+        if min(p.inside for p in short) <= COPPER_SLACK_MM:
+            out.append(lead + PAD_ON_OUTLINE + ": if the board is cut away under that "
+                              "body, write a `why`; otherwise this footprint cannot seat "
                               "on an edge")
             continue
         out.append(lead + f"{PAD_FLOOR_WAY_OUT}: `(rule edge_launch (condition "

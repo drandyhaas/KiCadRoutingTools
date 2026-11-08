@@ -587,6 +587,10 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   Its figures can be copied into the band as printed: a reach it falls short
   of is rounded down, a least reading rounded up, and the pads are placed to
   0.001 mm, beside the seat's own 0.005 mm copper slack (#1772).
+  It names the pads that stop the seat, each at its own clearance and the
+  rule that sets it, and where they would stand at the minimum; when that is
+  on or past the outline it says no rule can free them, as the roster does
+  (#1773).
 - **Where the part's own model ends.** Where a 3D model resolves,
   check_floorplan's line says `model end -2.07mm` beside the overhang (from
   the edge's line, negative short of it) and warns when the courtyard reads
