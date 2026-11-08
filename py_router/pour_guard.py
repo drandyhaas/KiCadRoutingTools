@@ -57,6 +57,7 @@ the plane-fragility field), else the zone outlines, which over-cover.
 """
 from __future__ import annotations
 
+import math
 import os
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -445,19 +446,88 @@ def barrier_via_site_filter(config, pcb_data, via_size: float):
     return lambda x, y: not any(_via_enters(r, x, y, via_size) for r in rows)
 
 
-def barrier_entered(config, pcb_data, segments, vias) -> Optional[str]:
+#: sample pitch (mm) along a trace when its part on its own pad is set aside
+OWN_PAD_SAMPLE_MM = 0.01
+
+
+def _pad_on_layer(pad, layer) -> bool:
+    if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return False
+    layers = getattr(pad, 'layers', None) or ()
+    return layer in layers or '*.Cu' in layers
+
+
+def _disk_on_pad(x, y, h, pad) -> bool:
+    """True when the disk of radius `h` at (x, y) lies wholly on `pad`'s
+    copper: that much of a trace adds nothing a pour has to clear, since the
+    pour already keeps its clearance from the pad there."""
+    from check_drc import (pad_corner_radius, point_to_rect_distance,
+                           _into_pad_frame, _point_in_poly,
+                           point_to_segment_distance)
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        for poly in polys:
+            n = len(poly)
+            if n >= 3 and _point_in_poly(x, y, poly) and min(
+                    point_to_segment_distance(x, y, *poly[i], *poly[(i + 1) % n])
+                    for i in range(n)) >= h - 1e-9:
+                return True
+        return False
+    # the pad eroded by h: a rounded rect h smaller each side, its corner
+    # radius h smaller too
+    hx, hy = pad.size_x / 2 - h, pad.size_y / 2 - h
+    if hx < 0 or hy < 0:
+        return False
+    r = max(min(pad_corner_radius(pad), pad.size_x / 2, pad.size_y / 2) - h, 0.0)
+    rot = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rot:
+        rad = math.radians(rot)
+        x, y = _into_pad_frame(x, y, pad, math.cos(rad), math.sin(rad))
+    return point_to_rect_distance(x, y, pad.global_x, pad.global_y, hx, hy, r) <= 1e-9
+
+
+def _off_pad_clear(s, polys, need, pads) -> bool:
+    """True when every part of trace `s` that is not on one of `pads` keeps
+    `need` (clearance + half width) from `polys`, sampled along the trace."""
+    from check_drc import _point_to_polys_distance
+    h = s.width / 2
+    n = max(1, int(math.ceil(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                             / OWN_PAD_SAMPLE_MM)))
+    for i in range(n + 1):
+        t = i / n
+        x = s.start_x + t * (s.end_x - s.start_x)
+        y = s.start_y + t * (s.end_y - s.start_y)
+        if any(_disk_on_pad(x, y, h, p) for p in pads):
+            continue
+        if _point_to_polys_distance(x, y, polys) < need - 1e-6:
+            return False
+    return True
+
+
+def barrier_entered(config, pcb_data, segments, vias, own_pads=()) -> Optional[str]:
     """The net of the first pour barrier whose keep-out one of `segments` or
-    `vias` (through vias) enters, else None."""
+    `vias` (through vias) enters, else None.
+
+    `own_pads`: the pad(s) the copper taps. The part of a trace lying on its
+    own pad's copper is not measured -- the pour already keeps its clearance
+    from the pad there, so that copper cannot cut it further. Only the trace
+    copper off the pad is held to the keep-out."""
     from check_drc import _segment_to_polys_distance
     for row in _barrier_keepouts(config, pcb_data):
         net, layer, polys, _bbox, clear = row
         if any(_via_enters(row, v.x, v.y, v.size) for v in vias):
             return net
+        pads = [p for p in own_pads or () if _pad_on_layer(p, layer)]
         for s in segments:
-            if s.layer == layer and _segment_to_polys_distance(
-                    s.start_x, s.start_y, s.end_x, s.end_y,
-                    polys)[0] < clear + s.width / 2 - 1e-6:
-                return net
+            if s.layer != layer:
+                continue
+            need = clear + s.width / 2
+            if _segment_to_polys_distance(s.start_x, s.start_y, s.end_x, s.end_y,
+                                          polys)[0] >= need - 1e-6:
+                continue
+            if pads and _off_pad_clear(s, polys, need, pads):
+                continue
+            return net
     return None
 
 

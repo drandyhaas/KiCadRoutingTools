@@ -1571,7 +1571,8 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     # copper that entered one.
                     if _short666 is None:
                         from pour_guard import barrier_entered
-                        _cut666 = barrier_entered(config, pcb_data, _gsegs, _gvias)
+                        _cut666 = barrier_entered(config, pcb_data, _gsegs, _gvias,
+                                                  own_pads=(_pad,))
                         if _cut666:
                             print(f"    bare-ball escape: "
                                   f"{_pad.component_ref}.{_pad.pad_number} "

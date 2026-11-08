@@ -1442,12 +1442,15 @@ def _tap_copper(net_id: int, result: TapResult) -> Tuple[List[Segment], List[Via
 
 
 def _tap_cuts_barrier(config: GridRouteConfig, pcb_data: PCBData, net_id: int,
-                      result: TapResult) -> Optional[str]:
-    """The net of a pour barrier (#1260) a tap's new copper enters, else None."""
+                      result: TapResult, pad: Optional[Pad] = None) -> Optional[str]:
+    """The net of a pour barrier (#1260) a tap's new copper enters, else None.
+    The part of the via -> pad trace lying on `pad`'s own copper is not
+    measured: the pour already clears the pad there."""
     if not getattr(config, 'pour_barriers', None):
         return None
     from pour_guard import barrier_entered
-    return barrier_entered(config, pcb_data, *_tap_copper(net_id, result))
+    return barrier_entered(config, pcb_data, *_tap_copper(net_id, result),
+                           own_pads=(pad,) if pad is not None else ())
 
 
 def tap_pad_with_escalation(
@@ -1504,7 +1507,7 @@ def tap_pad_with_escalation(
             if _ko:
                 ko_refused, result = _ko, TapResult(success=False)
         if result.success:
-            _cut = _tap_cuts_barrier(config, pcb_data, net_id, result)
+            _cut = _tap_cuts_barrier(config, pcb_data, net_id, result, pad)
             if _cut:
                 barrier_refused, result = _cut, TapResult(success=False)
         if result.success:
@@ -1573,7 +1576,8 @@ def tap_pad_with_escalation(
                 if _ko:
                     ko_refused, result = _ko, TapResult(success=False)
             if result.success:
-                _cut = _tap_cuts_barrier(fine_config, pcb_data, net_id, result)
+                _cut = _tap_cuts_barrier(fine_config, pcb_data, net_id, result,
+                                         pad)
                 if _cut:
                     barrier_refused, result = _cut, TapResult(success=False)
             if result.success:

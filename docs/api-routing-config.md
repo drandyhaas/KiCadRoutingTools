@@ -386,7 +386,9 @@ them as track and via keep-outs at the larger of the pair clearance and the
 zone's own clearance. Copper placed off those maps is held to the same keep-out
 (#1783): the pad taps' via search skips a site inside it
 (`pour_guard.barrier_via_site_filter`) and a tap whose via or trace still
-enters it is refused (`pour_guard.barrier_entered`), which covers the #189
+enters it is refused (`pour_guard.barrier_entered`; the part of a trace lying
+on its own pad's copper is not measured, since the fill already clears the
+pad there), which covers the #189
 via-in-pad unblock and its #535 off-pad escape and the net rescue's #666
 bare-ball escape, whose fanout-rescue rung asks the same; a pad no clear site
 reaches stays open, as the A* would leave it. Islands that hold a routed terminal stay crossable, so

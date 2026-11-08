@@ -418,10 +418,92 @@ def test_rescue_escape_wiring():
     fn = next(n for n in ast.walk(ast.parse(src))
               if isinstance(n, ast.FunctionDef) and n.name == 'rescue_failed_nets')
     body = ast.get_source_segment(src, fn)
-    ask = body.find('barrier_entered(config, pcb_data, _gsegs, _gvias)')
+    ask = body.find('barrier_entered(config, pcb_data, _gsegs, _gvias,')
     ship = body.find('pcb_data.vias.extend(_gvias)')
     check("the fanout-rescue escape asks barrier_entered", ask >= 0)
     check("...before its copper is added to the board", 0 <= ask < ship, f"{ask} vs {ship}")
+    check("...setting aside the copper on its own ball",
+          'own_pads=(_pad,)' in body[ask:ask + 120], body[ask:ask + 120])
+
+
+#: the reporter's U401.10 / R404.2 shape: a GND pad 0.075 mm outside a
+#: guarded pour island, so every tap trace ends inside the barrier keep-out
+OWN_PAD_BOARD = '''(kicad_pcb (version 20240108) (generator test)
+ (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "GND") (net 2 "ZONE_NET")
+ (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts") (width 0.1))
+ (footprint "t:d" (layer "F.Cu") (at 10 10)
+  (property "Reference" "R404" (at 0 0) (layer "F.SilkS"))
+  (pad "2" smd roundrect (at 0 0) (size 0.5 0.55) (roundrect_rratio 0.25)
+   (layers "F.Cu" "F.Mask") (net 1 "GND")))
+)
+'''
+OWN_PAD_ISLAND = [(5, 7), (9.675, 7), (9.675, 13), (5, 13)]
+
+
+def test_own_pad_trace(tmp):
+    """The part of a tap trace lying on its own pad cannot cut the pour (the
+    fill already clears the pad there), so only the copper off the pad is
+    held to the barrier keep-out."""
+    import contextlib
+    import io
+    import pour_guard
+    import single_ended_routing as ser
+    from check_drc import _point_to_polys_distance, _segment_to_polys_distance
+    from kicad_parser import Segment, parse_kicad_pcb
+    from routing_config import GridCoord, GridRouteConfig
+    path = os.path.join(tmp, 'own_pad.kicad_pcb')
+    with open(path, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(OWN_PAD_BOARD)
+    pcb = parse_kicad_pcb(path)
+    pad = pcb.footprints['R404'].pads[0]
+    cfg = GridRouteConfig(layers=['F.Cu', 'B.Cu'], grid_step=0.05, clearance=0.2,
+                          track_width=0.3, via_size=0.45, via_drill=0.2)
+    cfg.pour_barriers = [{'net': 'ZONE_NET', 'layer': 'F.Cu',
+                          'polygons': [OWN_PAD_ISLAND], 'clearance': 0.2}]
+
+    def seg(x1, y1, x2, y2):
+        return Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=0.3,
+                       layer='F.Cu', net_id=1)
+
+    # keep-out of a 0.3 trace: 0.2 + 0.15; the pad centre is 0.325 off
+    away = seg(10, 10, 11, 10)
+    check("a trace leaving its pad away from the island enters only on the pad",
+          pour_guard.barrier_entered(cfg, pcb, [away], []) == 'ZONE_NET')
+    check("...so with its own pad set aside it is clear",
+          pour_guard.barrier_entered(cfg, pcb, [away], [], own_pads=(pad,)) is None)
+    along = seg(10, 10, 10, 12)
+    check("a trace whose OFF-pad part runs inside the keep-out (0.325 off) is "
+          "still refused", pour_guard.barrier_entered(
+              cfg, pcb, [along], [], own_pads=(pad,)) == 'ZONE_NET')
+    check("...and the exemption is the pad's own copper only: on a B.Cu trace "
+          "the F.Cu pad sets nothing aside", pour_guard.barrier_entered(
+              replace_layer(cfg, 'B.Cu'), pcb,
+              [Segment(start_x=10, start_y=10, end_x=11, end_y=10, width=0.3,
+                       layer='B.Cu', net_id=1)], [], own_pads=(pad,)) == 'ZONE_NET')
+
+    cfg.same_net_pad_clearance = 0.1          # no in-pad via: the off-pad escape runs
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = ser._place_shrunk_via_in_pad_impl(pad, None, cfg, pcb, 1, GridCoord(0.05),
+                                              cfg.layers)
+    check("the pad is now tapped (it was refused whatever the via site)",
+          r is not None)
+    if r is not None:
+        via, stub = r[0], r[3]
+        vgap = _point_to_polys_distance(via.x, via.y, [OWN_PAD_ISLAND]) - via.size / 2
+        check("...its via keeps the clearance", vgap >= 0.2 - 1e-6, f"{vgap:.3f} mm")
+        check("...and its trace off the pad does too",
+              bool(stub) and all(pour_guard._off_pad_clear(
+                  s, [OWN_PAD_ISLAND], 0.2 + s.width / 2, [pad]) for s in stub),
+              str([round(_segment_to_polys_distance(s.start_x, s.start_y, s.end_x,
+                                                    s.end_y, [OWN_PAD_ISLAND])[0], 3)
+                   for s in stub]))
+
+
+def replace_layer(cfg, layer):
+    """`cfg` with its barrier moved to `layer`."""
+    from dataclasses import replace
+    return replace(cfg, pour_barriers=[dict(b, layer=layer) for b in cfg.pour_barriers])
 
 
 def main():
@@ -442,6 +524,8 @@ def main():
             test_tap(tmp)
             print("in process: barrier keep-out geometry")
             test_barrier_geometry()
+            print("in process: a tap trace's part on its own pad")
+            test_own_pad_trace(tmp)
             print("source: the net rescue's fanout escape")
             test_rescue_escape_wiring()
     finally:
