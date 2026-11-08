@@ -8241,10 +8241,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # dropped later by the sub-run's own filter_rippable_names.
                 # (Shared by the initial #103 escalation and the #572
                 # lap-authority harvest below.)
+                # #1757: the nets this step's --nets NEGATES are read from
+                # the run's hands-off set (#1621, stashed from the RAW
+                # patterns -- `net_names` is already expanded, so a '!'
+                # read off it found nothing and the excluded net was
+                # ripped here). An operator --rip-existing-nets naming it
+                # still rides _rk's own list, unfiltered.
+                from protected_nets import hands_off_names as _ho103
+                _off103 = _ho103(pcb_data)
+                _names = [n for n in (_names or []) if n not in _off103]
                 if not (_names and net_names):
                     return list(_names or [])
-                from net_queries import (matches_net_filter as _mnf,
-                                         split_net_patterns as _snp)
+                from net_queries import matches_net_filter as _mnf
                 # PROTECTED names are dropped here UNCONDITIONALLY: the
                 # #521 override door ("an exact name overrides") exists for
                 # DELIBERATE operator naming, and #103 hints are machine-
@@ -8255,9 +8263,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # anywhere.
                 from protected_nets import protection_map as _pm103
                 _prot103 = _pm103(pcb_data, input_file)
-                _all_names103 = {n.name for n in pcb_data.nets.values()}
-                _, _neg103 = _snp(net_names, _all_names103)
-                from net_queries import net_pattern_matches as _npm103
                 _zone_ids103 = {z.net_id
                                 for z in (getattr(pcb_data, 'zones', None)
                                           or [])}
@@ -8268,8 +8273,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if _mnf(_bn, net_names):
                         _keep103.append(_bn)          # in scope: as before
                         continue
-                    if any(_npm103(_bn, _p) for _p in _neg103):
-                        continue                       # negated BY PLAN
                     _bid = next((i for i, nn in pcb_data.nets.items()
                                  if nn.name == _bn), None)
                     if _bid is None or _bid in _zone_ids103:
