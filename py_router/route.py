@@ -2459,6 +2459,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     batch_route._forced_link_landed = []
     # #1554 lap-victim channel, cleared at ENTRY for the same reason.
     batch_route._victims_left_open = []
+    # #1763 open-target channel, cleared at ENTRY for the same reason.
+    batch_route._targets_left_open = {}
     # Per-run reset of the failure-hint rationale latch: each run reprints the
     # full explanations once, rather than inheriting "already said that" from a
     # previous board in the same (GUI) process.
@@ -8479,6 +8481,92 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _preserve_widths5({nid for nid, net in pcb_data.nets.items()
                                    if net.name in set(_new)})
                 return True
+
+            # #1763 finer-grid rung: after the ordinary laps, the targets
+            # still open on the static box-in verdict get ONE more lap at
+            # half the run's grid, with rip authority over the blockers the
+            # last lap named for them (guard-filtered like #103), under a
+            # whole-board cell budget. One SHARED state for both legs below,
+            # so the CLI and the GUI run the same rung.
+            import finer_grid_rung as _fgr1763
+            _rung1763 = {'active': False, 'laps': 0,
+                         'grid': _rk.get('grid_step', config.grid_step)}
+            _lap_names = _rec_names
+            _outer_boxed1763 = set()
+            for _nid in _rec_ids:
+                for _ev in (state.net_history.get(_nid) or []):
+                    if (_ev.get('event') == 'boxed_in_static'
+                            and (_ev.get('details') or {}).get('verdict')
+                            == 'boxed_in_static'):
+                        _outer_boxed1763.add(pcb_data.nets[_nid].name)
+
+            def _start_rung1763():
+                """Arm the rung for one more lap. Returns the names it
+                routes, or False when it does not run."""
+                if _rung1763['active']:
+                    return False
+                _tlo = dict(getattr(batch_route, '_targets_left_open',
+                                    None) or {})
+                _names, _fine, _cells, _why = _fgr1763.plan(
+                    _tlo, _outer_boxed1763, _rung1763['grid'],
+                    getattr(pcb_data.board_info, 'board_bounds', None),
+                    len(config.layers or []) or 2)
+                if _why:
+                    print(f"  Finer-grid rung (#1763) skipped: {_why}")
+                if not _names:
+                    return False
+                _blk = _fgr1763.rung_blockers(_tlo, _names)
+                if _blk and _esc_on and '*' not in (
+                        _rk.get('rip_existing_nets') or []):
+                    _have = list(_rk.get('rip_existing_nets') or [])
+                    _fresh = [b for b in _filter_rip_hints103(_blk)
+                              if b not in _have][:_RIP_ESCALATION_CAP]
+                    if _fresh:
+                        _rk['rip_existing_nets'] = list(dict.fromkeys(
+                            _have + _fresh))
+                else:
+                    _fresh = []
+                _rk['grid_step'] = _fine
+                _rung1763['active'] = True
+                print(f"  Finer-grid rung (#1763): {len(_names)} net(s) still "
+                      f"boxed in at grid {_rung1763['grid']:g} -- one more "
+                      f"lap at grid {_fine:g} ({_cells / 1e6:.1f}M cells)"
+                      + (f" with rip authority over {', '.join(_fresh)}"
+                         if _fresh else "")
+                      + f": {', '.join(_names)}")
+                return _names
+
+            def _next_lap1763(_lrok, _lrfail, _lap):
+                """The lap loop's continue decision. Returns the names the
+                next lap routes, or None to stop."""
+                _granted = bool(_lrfail) and _harvest_lap_authority572()
+                if _rung1763['active']:
+                    # The rung's own follow-on: one more half-grid lap when
+                    # its rips left victims open (#1554 rule) or a fresh
+                    # forced-link authority opened (#572 rule).
+                    _rung1763['laps'] += 1
+                    if _rung1763['laps'] >= 2:
+                        return None
+                    _vic = _enrol_lap_victims1554()
+                    if not (_vic or (_lrfail and _granted)):
+                        return None
+                    _tlo = dict(getattr(batch_route, '_targets_left_open',
+                                        None) or {})
+                    return list(dict.fromkeys(list(_tlo) + list(
+                        getattr(batch_route, '_victims_left_open', None)
+                        or [])))
+                _vic = _lap < 2 and _enrol_lap_victims1554()
+                _more = bool((_lrfail and (_lrok or _granted)) or _vic)
+                if _more:
+                    print(f"  Reconciliation progress-loop: lap "
+                          f"{_lap + 1} recovered {_lrok} with "
+                          f"{_lrfail} still failed -- one more lap on "
+                          f"the updated board")
+                if _more and _lap < 2:
+                    return _rec_names
+                _rn = _start_rung1763() if _lrfail else False
+                return _rn or None
+
             if return_results:
                 # Bounded PROGRESS-LOOP -- GUI leg (2026-08-06): SAME laps
                 # as the CLI branch below, entirely in-memory (no temp
@@ -8490,7 +8578,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _rok = 0
                 _rfail = 0
                 _rt = 0.0
-                for _lap10 in range(3):
+                for _lap10 in range(5):
                     # GUI-parity reconciliation (gap-closure): re-invoke against
                     # the SAME in-memory board (the copper this run just
                     # committed lives in pcb_data, not in any file) and merge
@@ -8522,7 +8610,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                               f"coordinate(s) onto the nm grid (CLI-file parity).")
                     _rk.update(return_results=True, pcb_data=pcb_data)
                     _lrok, _lrfail, _lrt, _rdata = batch_route(
-                        input_file, "", _rec_names, **_rk)
+                        input_file, "", _lap_names, **_rk)
                     _rok += _lrok
                     _rfail = _lrfail
                     _rt += _lrt
@@ -8593,17 +8681,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # next lap re-parses; here the next lap routes on this
                     # model, so apply them now.
                     _cap_moves_in_run666('reconciliation lap')
-                    # #572: same lap-authority rule as the CLI leg below.
-                    _granted572 = bool(_lrfail) and _harvest_lap_authority572()
-                    # #1554: same lap-victim rule as the CLI leg below.
-                    _victims1554 = _lap10 < 2 and _enrol_lap_victims1554()
-                    if not ((_lrfail and (_lrok or _granted572))
-                            or _victims1554):
+                    # #572 lap authority, #1554 lap victims and the #1763
+                    # finer-grid rung: the same decision as the CLI leg.
+                    _lap_names = _next_lap1763(_lrok, _lrfail, _lap10)
+                    if not _lap_names:
                         break
-                    print(f"  Reconciliation progress-loop: lap "
-                          f"{_lap10 + 1} recovered {_lrok} with "
-                          f"{_lrfail} still failed -- one more lap on "
-                          f"the updated board")
             else:
                 _rk.update(return_results=False)
                 # Bounded PROGRESS-LOOP (2026-08-06, Andy's step7-vs-step8
@@ -8617,26 +8699,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # grading, no snapshots, no temp board files.
                 _rok = 0
                 _rfail, _rt = 0, 0.0
-                for _lap10 in range(3):
+                for _lap10 in range(5):
                     _lrok, _lrfail, _lrt = batch_route(
-                        output_file, output_file, _rec_names, **_rk)
+                        output_file, output_file, _lap_names, **_rk)
                     _rok += _lrok
                     _rfail = _lrfail
                     _rt += _lrt
                     # #572: fresh forced-link blocker hints justify a lap
                     # even without recoveries -- lap N failed against a
                     # named pre-existing wall this authority now opens.
-                    _granted572 = bool(_lrfail) and _harvest_lap_authority572()
                     # #1554: a victim the lap ripped and left open is
                     # retried by the next lap, before the board ships.
-                    _victims1554 = _lap10 < 2 and _enrol_lap_victims1554()
-                    if not ((_lrfail and (_lrok or _granted572))
-                            or _victims1554):
+                    # #1763: the finer-grid rung follows the ordinary laps.
+                    _lap_names = _next_lap1763(_lrok, _lrfail, _lap10)
+                    if not _lap_names:
                         break
-                    print(f"  Reconciliation progress-loop: lap "
-                          f"{_lap10 + 1} recovered {_lrok} with {_lrfail} "
-                          f"still failed -- one more lap on the updated "
-                          f"board")
+            _rk['grid_step'] = _rung1763['grid']
             # #1339: the forced links no lap landed (a lap that ended the
             # loop without failures was never harvested, so drop its landed
             # nets here too) -- the nets whose exact-fill verdict is still
@@ -9500,6 +9578,31 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # pass the reconciliation does -- but a reconciliation LAP is the last
     # pass, so its own victims are handed back for the caller's next lap.
     batch_route._victims_left_open = list(_victim_retry_names)
+    # #1763 open-target channel: this run's targets still open at its end,
+    # each with the blockers its history named and whether it died on the
+    # static box-in verdict -- what the caller's finer-grid rung reads.
+    try:
+        _tlo = {}
+        _open1763 = (list(zip(failed_single, failed_single_ids))
+                     + list(zip(open_single, open_single_ids))
+                     + [(m['net_name'], m.get('net_id', -1))
+                        for m in failed_multipoint])
+        for _tn, _tid in _open1763:
+            _tb, _tbox = [], False
+            for _ev in (state.net_history.get(_tid) or []):
+                _e = _ev.get('event')
+                _d = _ev.get('details') or {}
+                if _e == 'preexisting_blockers':
+                    for _bn in _d.get('blockers') or []:
+                        if _bn not in _tb:
+                            _tb.append(_bn)
+                elif (_e == 'boxed_in_static'
+                      and _d.get('verdict') == 'boxed_in_static'):
+                    _tbox = True
+            _tlo[_tn] = {'boxed_in': _tbox, 'blockers': _tb}
+        batch_route._targets_left_open = _tlo
+    except Exception:
+        batch_route._targets_left_open = {}
 
     # #666 scoped cap move, GUI front: hand the applier every move this run
     # applied -- the main pass's and every in-memory sub-run's, which share
