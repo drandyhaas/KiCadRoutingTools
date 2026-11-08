@@ -30,7 +30,10 @@ image has no KiCad). Rows:
     (a routed terminal inside) / minor (one anchor, below the minimum island
     area) / no anchor, an in-scope zone net, and no net filter at all;
   * the obstacle stamp: the island's layer only, tracks and vias, at the
-    zone's own clearance when it is wider than the pair clearance.
+    zone's own clearance when it is wider than the pair clearance;
+  * the pad taps, which place on maps of their own: the #535 off-pad escape
+    via of the #189 via-in-pad unblock moves to a site clear of a barrier
+    rather than land in it.
 
     python3 tests/test_1260_pour_guard.py
 """
@@ -309,6 +312,46 @@ def test_stamp(tmp):
           not obs2.is_blocked(near[0], near[1], 0))
 
 
+def test_tap(tmp):
+    import contextlib
+    import io
+    import single_ended_routing as ser
+    from check_drc import _point_to_polys_distance, _segment_to_polys_distance
+    from routing_config import GridCoord, GridRouteConfig
+    # just above J1, where the escape via lands with no barrier
+    poly = [(3, 12), (7, 12), (7, 13.7), (3, 13.7)]
+
+    def escape(barriers):
+        pcb = _parsed(tmp, 'full')
+        sig = _ids(pcb)['SIG']
+        pad = pcb.footprints['J1'].pads[0]
+        cfg = GridRouteConfig(track_width=0.2, clearance=0.2, via_size=0.6,
+                              via_drill=0.3, grid_step=0.05,
+                              layers=['F.Cu', 'B.Cu'])
+        cfg.same_net_pad_clearance = 0.1    # no in-pad via: the escape runs
+        cfg.pour_barriers = barriers
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = ser._place_shrunk_via_in_pad_impl(pad, None, cfg, pcb, sig,
+                                                  GridCoord(0.05), cfg.layers)
+        if r is None:
+            return None, float('inf')
+        via, stub = r[0], r[3]
+        gap = min([_point_to_polys_distance(via.x, via.y, [poly]) - via.size / 2]
+                  + [_segment_to_polys_distance(s.start_x, s.start_y, s.end_x,
+                                                s.end_y, [poly])[0] - s.width / 2
+                     for s in stub])
+        return via, gap
+
+    via, gap = escape([])
+    check("control: with no barrier the escape via lands next to the island",
+          via is not None and gap < 0.2, f"{gap:.3f} mm")
+    via, gap = escape([{'net': 'ZONE_NET', 'layer': 'F.Cu', 'polygons': [poly],
+                        'clearance': None}])
+    check("with the barrier the escape via and its stub keep the clearance "
+          "from the island", via is not None and gap >= 0.2 - 1e-6,
+          f"via {via and (via.x, via.y)}, {gap:.3f} mm")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='t1260_')
     try:
@@ -323,6 +366,8 @@ def main():
             test_classification(tmp)
             print("in process: obstacle stamp")
             test_stamp(tmp)
+            print("in process: pad taps")
+            test_tap(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:

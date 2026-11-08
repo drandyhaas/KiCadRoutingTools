@@ -407,6 +407,60 @@ def install_pour_barriers(config, pcb_data, routed_ids, net_names,
     return report
 
 
+def _barrier_keepouts(config, pcb_data):
+    """[(net, layer, polygons, bbox, clearance)] of the `config.pour_barriers`
+    islands, at the clearance `add_pour_barrier_obstacles` stamps."""
+    name_to_id = {n.name: nid for nid, n in (pcb_data.nets or {}).items()}
+    rows = []
+    for b in getattr(config, 'pour_barriers', None) or ():
+        polys = [p for p in b.get('polygons') or () if p]
+        if not polys:
+            continue
+        nid = name_to_id.get(b.get('net'))
+        pair = (config.obstacle_clearance(nid) if nid is not None
+                else config.clearance)
+        bbox = (min(x for p in polys for x, _ in p), min(y for p in polys for _, y in p),
+                max(x for p in polys for x, _ in p), max(y for p in polys for _, y in p))
+        rows.append((b.get('net'), b.get('layer'), polys, bbox,
+                     max(pair, b.get('clearance') or 0.0)))
+    return rows
+
+
+def _via_enters(row, x, y, size) -> bool:
+    from check_drc import _point_to_polys_distance
+    _net, _layer, polys, (x0, y0, x1, y1), clear = row
+    reach = clear + size / 2
+    if not (x0 - reach <= x <= x1 + reach and y0 - reach <= y <= y1 + reach):
+        return False
+    return _point_to_polys_distance(x, y, polys) < reach - 1e-6
+
+
+def barrier_via_site_filter(config, pcb_data, via_size: float):
+    """An (x, y) -> bool predicate: may a through via sit at (x, y) outside
+    every pour barrier's keep-out? None when the run has no barrier. For the
+    pad taps' via search, which `add_pour_barrier_obstacles` never reaches."""
+    rows = _barrier_keepouts(config, pcb_data)
+    if not rows:
+        return None
+    return lambda x, y: not any(_via_enters(r, x, y, via_size) for r in rows)
+
+
+def barrier_entered(config, pcb_data, segments, vias) -> Optional[str]:
+    """The net of the first pour barrier whose keep-out one of `segments` or
+    `vias` (through vias) enters, else None."""
+    from check_drc import _segment_to_polys_distance
+    for row in _barrier_keepouts(config, pcb_data):
+        net, layer, polys, _bbox, clear = row
+        if any(_via_enters(row, v.x, v.y, v.size) for v in vias):
+            return net
+        for s in segments:
+            if s.layer == layer and _segment_to_polys_distance(
+                    s.start_x, s.start_y, s.end_x, s.end_y,
+                    polys)[0] < clear + s.width / 2 - 1e-6:
+                return net
+    return None
+
+
 # ------------------------------------------------------------------ the audit
 def snapshot_copper(pcb_data):
     """Value copies of the board's tracks and vias, taken before the run

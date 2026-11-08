@@ -1295,15 +1295,17 @@ def try_tap_pad(
     # A net-filtered keep-out that forbids the net's vias (net_keepouts): this
     # search places on maps of its own, which the per-route region stamp never
     # reaches, so skip the sites inside such a region and go on to the next
-    # one. tap_pad_with_escalation still audits the result, which also covers
+    # one. The pour islands this run must not cut (#1260) likewise.
+    # tap_pad_with_escalation still audits the result, which also covers
     # the via -> pad trace and the edge clamp's move.
     from net_keepouts import via_site_filter
-    _ko_ok = via_site_filter(pcb_data, net_id, via_size)
-    if _ko_ok is not None:
-        _zone_ok = zone_filter
-
+    from pour_guard import barrier_via_site_filter
+    _site_oks = [f for f in (via_site_filter(pcb_data, net_id, via_size),
+                             barrier_via_site_filter(config, pcb_data, via_size),
+                             zone_filter) if f is not None]
+    if _site_oks:
         def zone_filter(x, y):
-            return _ko_ok(x, y) and (_zone_ok is None or _zone_ok(x, y))
+            return all(ok(x, y) for ok in _site_oks)
 
     ghost_pref = None
     if corridor_ghosts is not None:
@@ -1422,6 +1424,11 @@ def _tap_in_net_keepout(pcb_data: PCBData, net_id: int, result: TapResult) -> Li
     if not getattr(pcb_data, '_net_keepouts', None):
         return []
     from net_keepouts import audit
+    segs, vias = _tap_copper(net_id, result)
+    return audit(pcb_data, segs, vias) or []
+
+
+def _tap_copper(net_id: int, result: TapResult) -> Tuple[List[Segment], List[Via]]:
     vias = []
     if result.via is not None:
         v = result.via
@@ -1431,7 +1438,16 @@ def _tap_in_net_keepout(pcb_data: PCBData, net_id: int, result: TapResult) -> Li
                     end_x=sd['end'][0], end_y=sd['end'][1],
                     width=sd['width'], layer=sd['layer'], net_id=net_id)
             for sd in (result.segments or [])]
-    return audit(pcb_data, segs, vias) or []
+    return segs, vias
+
+
+def _tap_cuts_barrier(config: GridRouteConfig, pcb_data: PCBData, net_id: int,
+                      result: TapResult) -> Optional[str]:
+    """The net of a pour barrier (#1260) a tap's new copper enters, else None."""
+    if not getattr(config, 'pour_barriers', None):
+        return None
+    from pour_guard import barrier_entered
+    return barrier_entered(config, pcb_data, *_tap_copper(net_id, result))
 
 
 def tap_pad_with_escalation(
@@ -1473,6 +1489,7 @@ def tap_pad_with_escalation(
     """
     last_failure = TapResult(success=False)
     ko_refused: List[Dict] = []     # the last rung a net keep-out refused
+    barrier_refused: Optional[str] = None
     if try_default:
         result = try_tap_pad(
             pad, pad_layer, net_id, pcb_data, config, max_search_radius,
@@ -1486,6 +1503,10 @@ def tap_pad_with_escalation(
             _ko = _tap_in_net_keepout(pcb_data, net_id, result)
             if _ko:
                 ko_refused, result = _ko, TapResult(success=False)
+        if result.success:
+            _cut = _tap_cuts_barrier(config, pcb_data, net_id, result)
+            if _cut:
+                barrier_refused, result = _cut, TapResult(success=False)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1552,6 +1573,10 @@ def tap_pad_with_escalation(
                 if _ko:
                     ko_refused, result = _ko, TapResult(success=False)
             if result.success:
+                _cut = _tap_cuts_barrier(fine_config, pcb_data, net_id, result)
+                if _cut:
+                    barrier_refused, result = _cut, TapResult(success=False)
+            if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
                 note_clearance_used(pcb_data, fine_config.clearance,
@@ -1566,6 +1591,9 @@ def tap_pad_with_escalation(
               f"is inside net keep-out(s) " + '; '.join(
                   f"{r['region']}: {r['net']} ({r['tracks']} track(s), {r['vias']} via(s))"
                   for r in ko_refused))
+    if barrier_refused:
+        print(f"    tap of {pad.component_ref}.{pad.pad_number} refused: its copper "
+              f"would cut the {barrier_refused} pour (#1260)")
     # Return the last failure so a rip-up caller sees its via_blocked /
     # blocked_cells diagnostics.
     return last_failure
