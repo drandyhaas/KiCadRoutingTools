@@ -702,7 +702,8 @@ def filter_already_routed(
             # ...but ROUTING only helps when there is live copper to join
             # (#659). Dead copper -- a cluster tied to no pad and no pour --
             # cannot improve connectivity no matter what the router welds to
-            # it, and the late orphan sweep deletes it at the end of the run.
+            # it, and the late orphan sweep deletes it at the end of the run
+            # (unless it holds locked or sense-held copper, which is kept).
             # Measured on spartan6_4layer, three such nets cost 448s, 2.0M A*
             # iterations on one link and 28 neighbours pulled in by the rip
             # escalation, fixed NONE of them, and bred three more debris nets.
@@ -727,7 +728,7 @@ def filter_already_routed(
                       f"are pinned copper, not a route to finish (#1261)")
                 n = 1
             if n > 1:
-                from check_connected import net_dead_copper
+                from check_connected import net_dead_copper, dead_copper_fate
                 _dead_s, _dead_v = net_dead_copper(
                     pcb_data, net_id, net_segments, net_vias, net_pads,
                     net_zones)
@@ -746,7 +747,8 @@ def filter_already_routed(
                               f"extra fragment is DEAD copper "
                               f"({len(_dead_s)} segment(s), {len(_dead_v)} "
                               f"via(s) tied to no pad or pour) -- not a route "
-                              f"(#659); the late orphan sweep removes it")
+                              f"(#659); "
+                              f"{dead_copper_fate(_dead_s, _dead_v)}")
                         n = _n2
             if n > 1:
                 print(f"  {net_name}: pads grade connected, but its copper "

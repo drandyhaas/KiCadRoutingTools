@@ -5898,12 +5898,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             except Exception:
                 _nf2_659 = _nf
             if _nf2_659 <= 1:
+                from check_connected import dead_copper_fate
                 print(f"  Fragment sweep: {_net_name} grades pad-connected "
                       f"and every extra fragment is DEAD copper "
                       f"({len(_dead_s659)} segment(s), {len(_dead_v659)} "
                       f"via(s) tied to no pad or pour) -- not a route (#659); "
-                      f"left to the late orphan sweep instead of the "
-                      f"reconciliation")
+                      f"not queued for the reconciliation: "
+                      f"{dead_copper_fate(_dead_s659, _dead_v659)}")
                 continue
         print(f"{RED}FRAGMENT SWEEP: {_net_name} grades pad-connected but its "
               f"copper is {_nf} separate fragment(s) "
@@ -6061,7 +6062,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if _debris659:
                                 _why659.append(
                                     f"{_debris659} to pad-less debris (the "
-                                    f"late orphan sweep removes it)")
+                                    f"late orphan sweep removes it, but "
+                                    f"keeps locked or sense-held copper)")
                             if _art659:
                                 _why659.append(
                                     f"{_art659} to net-tagged copper GRAPHICS "
@@ -7975,7 +7977,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                   f"{len(_custody_links9)} remaining link(s) "
                                   f"point at PAD-LESS copper (#659) -- not "
                                   f"weld targets; the late orphan sweep "
-                                  f"removes them")
+                                  f"removes them, but keeps locked or "
+                                  f"sense-held copper")
                             _custody_links9 = _live9
                             # A net left with no live link has nothing for
                             # the reconcile to route. Drop it from custody --

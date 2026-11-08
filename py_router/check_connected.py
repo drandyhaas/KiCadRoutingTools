@@ -636,6 +636,23 @@ def raster_unconnected(pcb_data, net_names=None, tolerance: float = 0.02):
     return out
 
 
+def dead_copper_fate(dead_segments, dead_vias) -> str:
+    """What the late orphan sweep does with copper net_dead_copper reported
+    dead, as a clause for a log line (#1781). remove_orphan_islands keeps
+    every island holding locked or sense-held copper whole (#1261), so a
+    lone locked port via is NOT removed and the message must not say so."""
+    from kicad_parser import is_immutable_copper
+    items = list(dead_segments) + list(dead_vias)
+    held = sum(1 for x in items if is_immutable_copper(x))
+    if not held:
+        return "the late orphan sweep removes it"
+    if held == len(items):
+        return ("it is locked or sense-held copper, which the late orphan "
+                "sweep keeps")
+    return (f"{held} item(s) of it are locked or sense-held, and the late "
+            f"orphan sweep keeps every cluster holding one whole")
+
+
 def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
     """The net's copper that reaches NO pad and NO zone of its own net (#659).
 
@@ -654,6 +671,12 @@ def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
 
     Graphics clusters (#337 immutable art) are never reported: they are not
     ours to delete, so they are not "dead copper" for a caller's purposes.
+
+    Locked and sense-held copper (#1261, #1279) IS reported when it is dead:
+    it is no route either, so a caller deciding whether routing helps must
+    see it. But the late sweep KEEPS any cluster holding such copper, so a
+    caller saying what becomes of dead copper words it with
+    dead_copper_fate, never "the sweep removes it" (#1781).
 
     Returns (dead_segments, dead_vias) as object lists.
     """
