@@ -6740,7 +6740,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         print("Checking copper-to-hole (track <-> NPTH drill) clearances...")
     # Each hole is its drill CAPSULE ((x1,y1),(x2,y2),r): a slot drill's real
     # shape. Round drills degenerate to a zero-length capsule (the old circle).
-    from kicad_parser import pad_drill_capsule
+    from kicad_parser import pad_drill_capsule, plated_drill_exposed, flush_drill_peg
     # JLC "NPTH to Track" fab floor (never below the graded clearance), raised
     # to the board's own `min_hole_clearance` when it declares a tighter-than-
     # -default requirement. Without that third term this check graded every
@@ -6770,7 +6770,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               f"{pad.component_ref}.{pad.pad_number}",
                               npth_track_clearance(lc, clearance, hole_clearance),
                               None))
-            elif max(pad.size_x, pad.size_y) < pad.drill:
+            elif plated_drill_exposed(pad):
                 # #441: a PLATED pad whose copper ring does NOT span its drill
                 # (vfo_ctrl's U4 "MH": 0.001mm copper over a 2.5mm drill) leaves
                 # the hole exposed -- a track that crosses it is cut by the drill,
@@ -6784,6 +6784,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               max(npth_clr, lc),
                               (pad.global_x, pad.global_y,
                                max(pad.size_x, pad.size_y) / 2.0)))
+            elif flush_drill_peg(pad) and hole_clearance > clearance + 1e-9:
+                # #1753: a net-less pad whose copper EQUALS its drill. The
+                # pad-copper checks already grade `clearance` to its edge,
+                # which IS the hole wall; KiCad's copper-to-hole rule adds
+                # the board's declared floor, so grade that, and only when it
+                # asks for more (else this would re-grade the same distance).
+                # Not the NPTH fab floor: KiCad does not apply it, and the
+                # router holds these holes at exactly this value.
+                hp1, hp2, hr = pad_drill_capsule(pad)
+                holes.append((hp1, hp2, hr, pad_net,
+                              f"{pad.component_ref}.{pad.pad_number}",
+                              max(clearance, hole_clearance), None))
             elif lc > 0:
                 hp1, hp2, hr = pad_drill_capsule(pad)
                 holes.append((hp1, hp2, hr, pad_net,
@@ -8409,9 +8421,11 @@ if __name__ == "__main__":
         print(f"  (copper-to-hole scope: tracks at "
               f"{max(args.clearance or 0.0, defaults.NPTH_TO_TRACK_CLEARANCE, args.hole_clearance):.4g} mm "
               f"to NPTH holes and to plated holes whose copper ring does not "
-              f"cover the drill (#441); vias at "
+              f"cover the drill (#441), and at "
               f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to "
-              f"NPTH holes only. Via drills and ordinary plated holes are "
+              f"net-less pads whose copper equals the drill (#1753); vias at "
+              f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to "
+              f"NPTH holes and those pads only. Via drills and ordinary plated holes are "
               f"not graded against it, unlike KiCad's hole_clearance)")
     if not args.quiet:
         # #1594: say which tolerance the clearance grades use, always.
@@ -8500,7 +8514,9 @@ if __name__ == "__main__":
                 # routing policy and stays out of the via arm (#505). WHICH
                 # holes: the track arm grades NPTH holes plus plated holes
                 # whose copper ring does not cover the drill (#441, graded
-                # like NPTH); the via arm grades NPTH holes only. Via drills
+                # like NPTH); both arms also grade #1753's net-less pegs (copper
+                # equal to the drill) at max(clearance, this floor) when that is
+                # above the clearance; the via arm grades no other hole. Via drills
                 # and ordinary plated holes are NOT graded against this
                 # floor, which KiCad's own hole_clearance rule does (run 32
                 # routed_c3: kicad-cli reports 199 items at 0.25). Pad
@@ -8509,8 +8525,8 @@ if __name__ == "__main__":
                 'hole_clearance_via': max(args.clearance or 0.0,
                                           args.hole_clearance),
                 'hole_clearance_scope': {
-                    'tracks': 'npth+uncovered_plated',
-                    'vias': 'npth'},
+                    'tracks': 'npth+uncovered_plated+flush_pegs',
+                    'vias': 'npth+flush_pegs'},
                 'hole_clearance_source': (
                     _hole_clr_source
                     if args.hole_clearance >= max(
