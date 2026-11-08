@@ -5516,7 +5516,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # pad-group split wrongly splits genuinely-connected power/bus nets.
     from check_connected import (check_net_connectivity,
                                  net_break_within_outlines,
-                                 net_pad_pairs_within_outlines)
+                                 net_pad_pairs_within_outlines, failed_pad)
     # Per-net copper as it will be WRITTEN: the input board's original copper
     # MINUS everything the writer strips (cleanup strip lists + the #220/#284
     # stale strips of ripped/re-routed nets) plus the write-list's new copper.
@@ -5732,11 +5732,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # failures (no copper can join them); keep within-outline breaks.
         _broken, _dp = net_break_within_outlines(pcb_data, _r)
         if _dp:
-            _res['failed_pads_info'] = [
-                {'x': _p[0], 'y': _p[1],
-                 'component_ref': _p[3] if len(_p) > 3 else '?',
-                 'pad_number': '?'}
-                for _p in _dp]
+            _res['failed_pads_info'] = [failed_pad(_pads, _p) for _p in _dp]
         elif _res.get('failed_pads_info'):
             # Authoritatively connected now: drop a stale (stricter-model or
             # pre-rip) failure flag so the net is not reported as a phantom fail.
@@ -5829,11 +5825,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         failed_multipoint.append({
             'net_name': _net_name,
             'net_id': _nid,
-            'failed_pads': [
-                {'x': _p[0], 'y': _p[1],
-                 'component_ref': _p[3] if len(_p) > 3 else '?',
-                 'pad_number': '?'}
-                for _p in _dp],
+            'failed_pads': [failed_pad(_pads, _p) for _p in _dp],
         })
 
     # ---- FRAGMENT SWEEP -----------------------------------------------------

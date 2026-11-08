@@ -934,6 +934,32 @@ def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25,
     return validate
 
 
+def pad_label(pads, ref, x, y):
+    """The pad number(s) of `ref` at a graded point, or None.
+
+    Pads whose copper centre IS the point first, every one of them: stacked
+    pads (a multi-number thermal pad) share the copper, so the grade cannot
+    tell them apart and the label names them all, `33/34`. Failing that, the
+    pads whose copper box holds the point, so a point off the exact centre is
+    still named rather than left `?`."""
+    mine = [p for p in pads if p.component_ref == ref]
+    hits = [p for p in mine
+            if abs(p.global_x - x) < 1e-3 and abs(p.global_y - y) < 1e-3]
+    if not hits:
+        hits = [p for p in mine
+                if abs(p.global_x - x) <= p.size_x / 2 + 1e-3
+                and abs(p.global_y - y) <= p.size_y / 2 + 1e-3]
+    nums = list(dict.fromkeys(str(p.pad_number) for p in hits))
+    return '/'.join(nums) if nums else None
+
+
+def failed_pad(pads, point):
+    """A `disconnected_pads` point as a failed_pads entry."""
+    ref = point[3] if len(point) > 3 else '?'
+    return {'x': point[0], 'y': point[1], 'component_ref': ref,
+            'pad_number': pad_label(pads, ref, point[0], point[1]) or '?'}
+
+
 def net_break_within_outlines(pcb_data, result):
     """Multi-board files (#479, len42_filter2): with >=2 outer Edge.Cuts
     outlines, a net is BROKEN only when some single outline's pads span more

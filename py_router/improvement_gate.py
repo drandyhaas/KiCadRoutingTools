@@ -176,6 +176,7 @@ def grade_nets(pcb_data, net_ids, tolerance: float = 0.02,
     pads are skipped (trivially connected). route.py's final re-grade (#1069)
     uses it because it must grade the nets the run OWNS, never the whole
     board: a scoped step would otherwise report other steps' nets."""
+    from check_connected import failed_pad
     segs_by_net, vias_by_net, zones_by_net = _copper_by_net(
         pcb_data, segs_by_net, vias_by_net, zones_by_net)
     out: Dict[int, Dict] = {}
@@ -193,9 +194,9 @@ def grade_nets(pcb_data, net_ids, tolerance: float = 0.02,
             'copper': bool(segs or vias),
             'pad_pairs': list(pairs),
             'failed_pads': [
-                {'x': round(float(p[0]), 4), 'y': round(float(p[1]), 4),
-                 'component_ref': p[3] if len(p) > 3 else '?',
-                 'pad_number': '?'} for p in dis],
+                {**failed_pad(pads, p),
+                 'x': round(float(p[0]), 4), 'y': round(float(p[1]), 4)}
+                for p in dis],
         }
     return out
 
