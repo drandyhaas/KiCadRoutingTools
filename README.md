@@ -940,6 +940,7 @@ Key functions in `py_tools/analyze_power_paths.py` (used by `/analyze-power-nets
 | Module | Purpose |
 |--------|---------|
 | `net_rescue.py` | Last-chance scoped retry of failed nets at finer parameters, then the terminal geometry escalation |
+| `finer_grid_rung.py` | The final reconciliation's last lap: nets still boxed in re-routed at half the run's grid, with rip authority over their blockers, under a cell budget (#1763) |
 | `plane_pad_tap.py` / `plane_region_connector.py` | Plane pad taps and region joins: the engine of route.py's in-run plane finalize and of `repair_planes.py` |
 | `kicad_oracle.py` | KiCad-oracle reconnect: routes the exact links KiCad's own connectivity reports open |
 | `cleanup_pipeline.py` | The one ordered post-route cleanup pipeline both routing fronts run |
